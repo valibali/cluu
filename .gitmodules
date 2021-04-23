@@ -1,4 +1,0 @@
-[submodule "bootboot_images"]
-	path = bootboot_images
-	url = git@gitlab.com:pinkfloydhun/bootboot.git
-	branch = binaries
