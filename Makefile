@@ -2,12 +2,12 @@
 
 all:
 	@make -C ./kernel all
-	@make -C ./bootboot_images all
+	@make -C ./bootboot_image all
 
 clean:
 	@make -C ./kernel clean
 	@make -C ./mkbootimg clean
-	@make -C ./bootboot_images clean
+	@make -C ./bootboot_image clean
 
 qemu: all
-	@make -C ./bootboot_images uefi
+	@make -C ./bootboot_image uefi
