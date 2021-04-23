@@ -1,0 +1,8 @@
+[package]
+name = "cluu-kernel-rust"
+version = "0.0.1"
+authors = ["Balazs Valkony"]
+
+[dependencies]
+rlibc = "1.0"
+

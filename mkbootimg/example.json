@@ -1,0 +1,12 @@
+{
+    "diskguid": "00000000-0000-0000-0000-000000000000",
+    "disksize": 128,
+    "config": "boot/sys/config",
+    "initrd": { "type": "tar", "gzip": true, "directory": [ "boot", "boot" ] },
+    "iso9660": 1,
+    "partitions": [
+        { "type": "fat32", "size": 16 },
+        { "type": "00000000-0000-0000-0000-000000000000", "size": 32, "name": "MyOS usr", "file": "usrpart.bin" },
+        { "type": "00000000-0000-0000-0000-000000000000", "size": 32, "name": "MyOS var", "file": "varpart.bin" }
+    ]
+}
