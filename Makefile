@@ -6,7 +6,7 @@ all:
 
 clean:
 	@make -C ./kernel clean
-	@make -C ./mkbootimg clean
+	@make -C ./utilies/mkbootimg clean
 	@make -C ./bootboot_image clean
 
 qemu: all
