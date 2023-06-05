@@ -42,6 +42,8 @@ use core::panic::PanicInfo;
 use arch::x86_64::peripheral::*;
 use peripherals::*;
 use syscall::*;
+use utils::*;
+
 
 #[allow(dead_code)]
 #[allow(non_snake_case)]
@@ -50,6 +52,7 @@ mod bootboot;
 mod arch;
 mod peripherals;
 mod syscall;
+mod utils;
 
 // Required for -Z build-std flag.
 extern crate rlibc;
@@ -57,7 +60,6 @@ extern crate lazy_static;
 extern crate x86;
 extern crate spin;
 extern crate bitflags;
-
 
 
 
@@ -123,10 +125,13 @@ fn _start() -> ! {
 
     unsafe {init_noncpu_perif();}
 
-    let mut serial2: spin::MutexGuard<SerialPort<Pio<u8>>> = COM2.lock();
+    serial_clearcls!();
+    println!("COM debug port works!");
 
-    serial2.write("\u{001B}[2J\u{001B}[H".as_bytes()); //clear screen and move cursor to home
-    serial2.write("COM debug port works!".as_bytes()); //hello world
+    // let mut serial2: spin::MutexGuard<SerialPort<Pio<u8>>> = COM2.lock();
+
+    // serial2.write("\u{001B}[2J\u{001B}[H".as_bytes()); //clear screen and move cursor to home
+    // serial2.write("COM debug port works!".as_bytes()); //hello world
 
     // hang for now
     puts("Ha latod a crosshair-t akkor a bootloader jol lotte be a GOP felbontast ;)");
