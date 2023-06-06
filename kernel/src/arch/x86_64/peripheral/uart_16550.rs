@@ -29,7 +29,6 @@ bitflags! {
 }
 
 #[allow(dead_code)]
-#[repr(packed)]
 pub struct SerialPort<T: Io> {
     /// Data register, read to receive, write to send
     data: T,
@@ -68,23 +67,19 @@ where
     T::Value: From<u8> + TryInto<u8>,
 {
     pub fn init(&mut self) {
-        unsafe {
-            //TODO: Cleanup
-            // FIXME: Fix UB if unaligned
-            (&mut addr_of_mut!(self.int_en).read_unaligned()).write(0x00.into());
-            (&mut addr_of_mut!(self.line_ctrl).read_unaligned()).write(0x80.into());
-            (&mut addr_of_mut!(self.data).read_unaligned()).write(0x01.into());
-            (&mut addr_of_mut!(self.int_en).read_unaligned()).write(0x00.into());
-            (&mut addr_of_mut!(self.line_ctrl).read_unaligned()).write(0x03.into());
-            (&mut addr_of_mut!(self.fifo_ctrl).read_unaligned()).write(0xC7.into());
-            (&mut addr_of_mut!(self.modem_ctrl).read_unaligned()).write(0x0B.into());
-            (&mut addr_of_mut!(self.int_en).read_unaligned()).write(0x01.into());
-        }
+            self.int_en.write(0x00.into());
+            self.line_ctrl.write(0x80.into());
+            self.data.write(0x01.into());
+            self.int_en.write(0x00.into());
+            self.line_ctrl.write(0x03.into());
+            self.fifo_ctrl.write(0xC7.into());
+            self.modem_ctrl.write(0x0B.into());
+            self.int_en.write(0x01.into());
     }
 
     fn line_sts(&self) -> LineStsFlags {
         LineStsFlags::from_bits_truncate(
-            (unsafe { &addr_of!(self.line_sts).read_unaligned() }.read() & 0xFF.into())
+            (self.line_sts.read() & 0xFF.into())
                 .try_into()
                 .unwrap_or(0),
         )
@@ -93,7 +88,7 @@ where
     pub fn receive(&mut self) -> Option<u8> {
         if self.line_sts().contains(LineStsFlags::INPUT_FULL) {
             Some(
-                (unsafe { &addr_of!(self.data).read_unaligned() }.read() & 0xFF.into())
+                (self.data.read() & 0xFF.into())
                     .try_into()
                     .unwrap_or(0),
             )
@@ -104,11 +99,10 @@ where
 
     pub fn send(&mut self, data: u8) {
         while !self.line_sts().contains(LineStsFlags::OUTPUT_EMPTY) {}
-        unsafe { &mut addr_of_mut!(self.data).read_unaligned() }.write(data.into())
+        self.data.write(data.into())
     }
 
-    pub fn write(&mut self, buf: &[u8]) {
-        for &b in buf {
+    pub fn write(&mut self, b: u8) {
             match b {
                 8 | 0x7F => {
                     self.send(8);
@@ -123,6 +117,5 @@ where
                     self.send(b);
                 }
             }
-        }
     }
 }

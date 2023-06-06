@@ -15,16 +15,18 @@ impl<'a> Writer<'a> {
         }
     }
 
-    pub fn write(&mut self, buf: &[u8]) {
+    pub fn write(&mut self, byte: u8) {
         {
-            self.serial.write(buf);
+            self.serial.write(byte);
         }
     }
 }
 
 impl<'a> fmt::Write for Writer<'a> {
     fn write_str(&mut self, s: &str) -> Result<(), fmt::Error> {
-        self.write(s.as_bytes());
+        for byte in s.bytes() {
+            self.write(byte);
+        }
         Ok(())
     }
 }
