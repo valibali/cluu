@@ -1,8 +1,10 @@
+use core::fmt::Write;
+
 use log::{Record, Level, Metadata, SetLoggerError, LevelFilter};
 
-struct SimpleLogger;
+struct CluuLogger;
 
-impl log::Log for SimpleLogger {
+impl log::Log for CluuLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         metadata.level() <= Level::Info
     }
@@ -18,11 +20,11 @@ impl log::Log for SimpleLogger {
 
 
 
-static LOGGER: SimpleLogger = SimpleLogger;
+static LOGGER: CluuLogger = CluuLogger;
 
 pub fn init(clearscr: bool) -> Result<(), SetLoggerError> {
     if clearscr {
-        crate::utils::writer::Writer::new().write("\u{001B}[2J\u{001B}[H".as_bytes()); //clear screen
+        _ = crate::utils::writer::Writer::new().write_str("\u{001B}[2J\u{001B}[H"); //clear screen
     };
 
     log::set_logger(&LOGGER)
