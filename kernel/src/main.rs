@@ -92,12 +92,12 @@ fn _start() -> ! {
             let addr = fb
                 + bootboot_r.fb_scanline as u64 * y as u64
                 + bootboot_r.fb_width as u64 * 2;
-            unsafe { *(addr as *mut u64) = 0x00FFFFFF };
+            unsafe { *(addr as *mut u32) = 0x00FFFFFF };
         }
         for x in 0..bootboot_r.fb_width {
             let addr = fb
                 + bootboot_r.fb_scanline as u64 * (bootboot_r.fb_height / 2) as u64 + (x * 4) as u64;
-            unsafe { *(addr as *mut u64) = 0x00FFFFFF };
+            unsafe { *(addr as *mut u32) = 0x00FFFFFF };
         }
 
         //ed, green, blue boxes in order
