@@ -40,15 +40,18 @@
 
 // Required for -Z build-std flag.
 extern crate rlibc;
-extern crate x86;
+extern crate x86_64;
 extern crate spin;
 extern crate bitflags;
 extern crate log;
+//extern crate alloc;
 
 
 use core::panic::PanicInfo;
+//use alloc::string::String;
 use peripherals::*;
 use utils::logger;
+use x86_64::instructions::*;
 
 #[allow(dead_code)]
 #[allow(non_snake_case)]
@@ -186,5 +189,30 @@ fn puts(string: &str) {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {}
+    
+    let payload = match _info.payload().downcast_ref::<&str>() {
+        Some(s) => *s,
+        None => "Panic occured - no further info available",
+        // until heap allocator is not available, this stays commented 
+        // None => match info.payload().downcast_ref::<String>() {
+        //     Some(s) => &s[..],
+        //     None => "Box<Any>",
+        // },
+    };
+    println!("{}", payload);
+
+    match _info.message() {
+        Some(arg) => println!("Panic message: {}", arg),
+        None => println!("No panic message available"),
+    };
+
+    match _info.location() {
+        Some(loc) => println!("Panic occured in file '{}' at line {}:{}", loc.file(), loc.line(), loc.column()),
+        None => println!("No location info available"),    
+    };
+  
+    loop {
+        hlt();
+    }
+    
 }
