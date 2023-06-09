@@ -31,7 +31,7 @@
 // configure Rust compiler
 #![no_std]
 #![no_main]
-
+#![feature(pointer_byte_offsets)]
 
 // Required for -Z build-std flag.
 extern crate rlibc;
@@ -81,44 +81,33 @@ fn _start() -> ! {
     let w = unsafe { bootboot::bootboot.fb_width } as u32;
     let h = unsafe { bootboot::bootboot.fb_height } as u32;
 
-    //there is no pointer arithmetic in rust, so extract the framebuffer pointer as an integer
-    let fb = unsafe {addr_of_mut!(bootboot::fb)} as u64; 
+    // Extract the framebuffer pointer as a mutable pointer
+    let fb = unsafe { addr_of_mut!(bootboot::fb) } as *mut u32;
 
     if s > 0 {
-        // cross-hair to see screen dimension detected correctly
-        for y in 0..h { unsafe { write((fb + (s * y + w * 2) as u64) as *mut u32, 0x00FFFFFF) };}
-        for x in 0..w { unsafe { write((fb + (s * (h >> 1) + x * 4) as u64) as *mut u32, 0x00FFFFFF) };}
+        // Cross-hair to see screen dimension detected correctly
+        for y in 0..h {
+            unsafe { write(fb.byte_offset((s * y + w * 2) as isize), 0x00FFFFFF) };
+        }
+        for x in 0..w {
+            unsafe { write(fb.byte_offset((s * (h >> 1) + x * 4) as isize), 0x00FFFFFF) };
+        }
 
-        //red, green, blue boxes in order
-        for y in 0..20 {
-            for x in 0..20 {
-                    unsafe { write((fb + (s * (y + 20) + (x + 20) * 4) as u64) as *mut u32, 0x000000FF) };
-            }
-        }
-        for y in 0..20 {
-            for x in 0..20 {
-                    unsafe { write((fb + (s * (y + 20) + (x + 50) * 4) as u64) as *mut u32, 0x0000FF00) };
-            }
-        }
-        for y in 0..20 {
-            for x in 0..20 {
-                    unsafe { write((fb + (s * (y + 20) + (x + 80) * 4) as u64) as *mut u32, 0x00FF0000) };
-            }
-        }
+        // Red, green, blue boxes in order
+        for y in 0..20 { for x in 0..20 { 
+            unsafe { write(fb.byte_offset((s * (y + 20) + (x + 20) * 4) as isize), 0x00FF0000) };}}
+
+        for y in 0..20 { for x in 0..20 {
+            unsafe { write(fb.byte_offset((s * (y + 20) + (x + 50) * 4) as isize), 0x0000FF00) };}}
+
+        for y in 0..20 { for x in 0..20 {
+                unsafe { write(fb.byte_offset((s * (y + 20) + (x + 80) * 4) as isize), 0x000000FF) };}}
     }
 
-        // say hello
-        //puts("Hello from a simple BOOTBOOT kernel");
+    // say hello
+    puts("Hello from a simple BOOTBOOT kernel\n");
     
-    for i in 0..20 {
-        info!("Test {}", i);
-        warn!("Test {}", i);
-        debug!("Test {}", i);
-        error!("Test {}", i);
-    }
-    
-    panic!("paniic");
-
+   
     loop {
         hlt();
     }
@@ -128,47 +117,53 @@ fn _start() -> ! {
 /**************************
  * Display text on screen *
  **************************/
-// fn puts(string: &str) {
-//     use bootboot::*;
-//     unsafe {
-//         let font: *mut bootboot::psf2_t = &_binary_font_psf_start as *const u64 as *mut psf2_t;
-//         let (mut kx, mut line, mut mask, mut offs): (u32, u64, u64, u32);
-//         kx = 0;
-//         let bpl = ((*font).width + 7) / 8;
+ fn puts(string: &'static str) {
+    use bootboot::*;
 
-//         for s in string.bytes() {
-//             let glyph_a: *mut u8 = (font as u64 + (*font).headersize as u64) as *mut u8;
-//             let mut glyph: *mut u8 = glyph_a.offset(
-//                 (if s > 0 && (s as u32) < (*font).numglyph {
-//                     s as u32
-//                 } else {
-//                     0
-//                 } * ((*font).bytesperglyph)) as isize,
-//             );
-//             offs = kx * ((*font).width + 1) * 4;
-//             for _y in 0..(*font).height {
-//                 line = offs as u64;
-//                 mask = 1 << ((*font).width - 1);
-//                 for _x in 0..(*font).width {
-//                     let target_location = (&bootboot::fb as *const u8 as u64 + line) as *mut u32;
-//                     let mut target_value: u32 = 0;
-//                     if (*glyph as u64) & (mask) > 0 {
-//                         target_value = 0xFFFFFF;
-//                     }
-//                     *target_location = target_value;
-//                     mask >>= 1;
-//                     line += 4;
-//                 }
-//                 let target_location = (&bootboot::fb as *const u8 as u64 + line) as *mut u32;
-//                 *target_location = 0;
-//                 glyph = glyph.offset(bpl as isize);
-//                 offs += bootboot.fb_scanline;
-//             }
-//             kx += 1;
-//         }
-//     }
+    let fb_ptr = unsafe { addr_of_mut!(bootboot::fb) } as u64;
+    let font: *mut psf2_t = unsafe { addr_of!(_binary_font_psf_start)} as *const u64 as *mut psf2_t;
 
-// }
+    let psf = unsafe { *font };
+    let headersize = psf.headersize;
+    let numglyph = psf.numglyph;
+    let bytesperglyph = psf.bytesperglyph;
+    let height = psf.height;
+    let width = psf.width;
+    let bpl = (width + 7) / 8;
+    let fb_scanline = unsafe { bootboot.fb_scanline };
+
+    let mut kx = 0;
+    let glyph_start_addr = (font as u64 + headersize as u64) as *mut u8;
+
+    for s in string.bytes() {
+        let glyph_offset = (s as u32).min(numglyph - 1) * bytesperglyph;
+        let mut glyph = unsafe { glyph_start_addr.offset(glyph_offset as isize) };
+        let mut offs = kx * (width + 1) * 4;
+
+        for _ in 0..height {
+            let mut line = offs as u64;
+            let mut mask = 1 << (width - 1);
+
+            for _ in 0..width {
+                let target_pixel = (fb_ptr + line) as *mut u32;
+                let pixel_value = if unsafe { *glyph } & mask > 0 { 0xFFFFFF } else { 0 };
+                unsafe { target_pixel.write(pixel_value) };
+                mask >>= 1;
+                line += 4;
+            }
+
+            let target_pixel = (fb_ptr + line) as *mut u32;
+            unsafe { target_pixel.write(0) };
+            glyph = unsafe { glyph.offset(bpl as isize) };
+            offs += fb_scanline;
+        }
+
+        kx += 1;
+    }
+}
+
+
+
 
 
 /*************************************
