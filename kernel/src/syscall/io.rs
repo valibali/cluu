@@ -40,32 +40,32 @@ impl<I: Io> ReadOnly<I> {
         self.inner.read()
     }
 
-    #[inline(always)]
-    pub fn readf(&self, flags: I::Value) -> bool {
-        self.inner.readf(flags)
-    }
+    // #[inline(always)]
+    // pub fn readf(&self, flags: I::Value) -> bool {
+    //     self.inner.readf(flags)
+    // }
 }
 
-pub struct WriteOnly<I> {
-    inner: I
-}
+// pub struct WriteOnly<I> {
+//     inner: I
+// }
 
-impl<I> WriteOnly<I> {
-    pub const fn new(inner: I) -> WriteOnly<I> {
-        WriteOnly {
-            inner: inner
-        }
-    }
-}
+// impl<I> WriteOnly<I> {
+//     pub const fn new(inner: I) -> WriteOnly<I> {
+//         WriteOnly {
+//             inner: inner
+//         }
+//     }
+// }
 
-impl<I: Io> WriteOnly<I> {
-    #[inline(always)]
-    pub fn write(&mut self, value: I::Value) {
-        self.inner.write(value)
-    }
+// impl<I: Io> WriteOnly<I> {
+//     #[inline(always)]
+//     pub fn write(&mut self, value: I::Value) {
+//         self.inner.write(value)
+//     }
 
-    #[inline(always)]
-    pub fn writef(&mut self, flags: I::Value, value: bool) {
-        self.inner.writef(flags, value)
-    }
-}
+//     #[inline(always)]
+//     pub fn writef(&mut self, flags: I::Value, value: bool) {
+//         self.inner.writef(flags, value)
+//     }
+// }
