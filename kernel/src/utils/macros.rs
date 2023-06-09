@@ -1,15 +1,14 @@
-/// Print to console
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ({
         use core::fmt::Write;
-        let _ = write!($crate::utils::writer::Writer::new(), $($arg)*);
+        let _ = $crate::utils::writer::Writer::new().write_fmt(format_args!($($arg)*)).expect("Printing fmt failed");
     });
 }
 
 /// Print with new line to console
 #[macro_export]
-macro_rules! println {
+macro_rules! serial_println {
     () => (print!("\n"));
     ($fmt:expr) => (print!(concat!($fmt, "\n")));
     ($fmt:expr, $($arg:tt)*) => (print!(concat!($fmt, "\n"), $($arg)*));

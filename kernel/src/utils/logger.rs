@@ -11,7 +11,7 @@ impl log::Log for CluuLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            println!("{} - {}", record.level(), record.args());
+            serial_println!("[{}] {}", record.level(), record.args());
         }
     }
 
