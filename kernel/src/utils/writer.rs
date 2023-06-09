@@ -2,7 +2,7 @@ use core::fmt;
 use spin::MutexGuard;
 use syscall::pio::Pio;
 use arch::x86_64::peripheral::uart_16550::SerialPort;
-use peripherals::COM2;
+use devices::COM2;
 
 pub struct Writer<'a> {
     serial: MutexGuard<'a, SerialPort<Pio<u8>>>,
@@ -23,7 +23,7 @@ impl<'a> Writer<'a> {
 }
 
 impl<'a> fmt::Write for Writer<'a> {
-    fn write_str(&mut self, s: &str) -> Result<(), fmt::Error> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
         for byte in s.bytes() {
             self.write(byte);
         }
