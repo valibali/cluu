@@ -11,7 +11,15 @@ pub struct Pio<T> {
 }
 
 impl<T> Pio<T> {
-    /// Create a PIO from a given port
+    /// Create a new PIO instance with the specified port.
+    ///
+    /// # Arguments
+    ///
+    /// * `port` - The port number.
+    ///
+    /// # Returns
+    ///
+    /// A new `Pio` instance.
     pub const fn new(port: u16) -> Self {
         Pio::<T> {
             port,
@@ -24,7 +32,11 @@ impl<T> Pio<T> {
 impl Io for Pio<u8> {
     type Value = u8;
 
-    /// Read
+    /// Read a byte from the port.
+    ///
+    /// # Returns
+    ///
+    /// The read byte value.
     #[inline(always)]
     fn read(&self) -> u8 {
         let value: u8;
@@ -34,7 +46,11 @@ impl Io for Pio<u8> {
         value
     }
 
-    /// Write
+    /// Write a byte to the port.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The byte value to write.
     #[inline(always)]
     fn write(&mut self, value: u8) {
         unsafe {
@@ -47,7 +63,11 @@ impl Io for Pio<u8> {
 impl Io for Pio<u16> {
     type Value = u16;
 
-    /// Read
+    /// Read a word from the port.
+    ///
+    /// # Returns
+    ///
+    /// The read word value.
     #[inline(always)]
     fn read(&self) -> u16 {
         let value: u16;
@@ -57,7 +77,11 @@ impl Io for Pio<u16> {
         value
     }
 
-    /// Write
+    /// Write a word to the port.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The word value to write.
     #[inline(always)]
     fn write(&mut self, value: u16) {
         unsafe {
@@ -70,7 +94,11 @@ impl Io for Pio<u16> {
 impl Io for Pio<u32> {
     type Value = u32;
 
-    /// Read
+    /// Read a doubleword from the port.
+    ///
+    /// # Returns
+    ///
+    /// The read doubleword value.
     #[inline(always)]
     fn read(&self) -> u32 {
         let value: u32;
@@ -80,7 +108,11 @@ impl Io for Pio<u32> {
         value
     }
 
-    /// Write
+    /// Write a doubleword to the port.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The doubleword value to write.
     #[inline(always)]
     fn write(&mut self, value: u32) {
         unsafe {
