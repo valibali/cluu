@@ -28,7 +28,7 @@
 #
 #
 
-all: cluu.x86_64.elf
+all: clean cluu.x86_64.elf
 
 # Kernel build
 cluu.x86_64.elf: src/**
