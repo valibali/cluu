@@ -108,3 +108,13 @@ pub struct psf2_t {
 extern "C" {
     pub static mut _binary_font_psf_start: u64;
 }
+
+extern "C" {
+    pub static mut bootboot: BOOTBOOT;
+}
+extern "C" {
+    pub static mut environment: *mut u64;
+}
+extern "C" {
+    pub static mut fb: u64;
+}
