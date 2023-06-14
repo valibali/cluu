@@ -1,9 +1,7 @@
 use core::convert::TryInto;
-
 use syscall::io::{Io, ReadOnly};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use syscall::pio::Pio;
-
 use bitflags::bitflags;
 
 bitflags! {
@@ -27,26 +25,29 @@ bitflags! {
     }
 }
 
-#[allow(dead_code)]
+/// Serial port representation.
 pub struct SerialPort<T: Io> {
-    /// Data register, read to receive, write to send
-    data: T,
-    /// Interrupt enable
-    int_en: T,
-    /// FIFO control
-    fifo_ctrl: T,
-    /// Line control
-    line_ctrl: T,
-    /// Modem control
-    modem_ctrl: T,
-    /// Line status
-    line_sts: ReadOnly<T>,
-    /// Modem status
-    modem_sts: ReadOnly<T>,
+    data: T,            // Data register, read to receive, write to send
+    int_en: T,          // Interrupt enable
+    fifo_ctrl: T,       // FIFO control
+    line_ctrl: T,       // Line control
+    modem_ctrl: T,      // Modem control
+    line_sts: ReadOnly<T>,  // Line status
+    #[allow(dead_code)]
+    modem_sts: ReadOnly<T>, // Modem status, not used right now
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 impl SerialPort<Pio<u8>> {
+    /// Creates a new serial port instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The base port address of the serial port.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `SerialPort` instance.
     pub const fn new(base: u16) -> SerialPort<Pio<u8>> {
         SerialPort {
             data: Pio::new(base),
@@ -60,22 +61,27 @@ impl SerialPort<Pio<u8>> {
     }
 }
 
-
 impl<T: Io> SerialPort<T>
 where
     T::Value: From<u8> + TryInto<u8>,
 {
+    /// Initializes the serial port.
     pub fn init(&mut self) {
-            self.int_en.write(0x00.into());
-            self.line_ctrl.write(0x80.into());
-            self.data.write(0x01.into());
-            self.int_en.write(0x00.into());
-            self.line_ctrl.write(0x03.into());
-            self.fifo_ctrl.write(0xC7.into());
-            self.modem_ctrl.write(0x0B.into());
-            self.int_en.write(0x01.into());
+        self.int_en.write(0x00.into());
+        self.line_ctrl.write(0x80.into());
+        self.data.write(0x01.into());
+        self.int_en.write(0x00.into());
+        self.line_ctrl.write(0x03.into());
+        self.fifo_ctrl.write(0xC7.into());
+        self.modem_ctrl.write(0x0B.into());
+        self.int_en.write(0x01.into());
     }
 
+    /// Retrieves the line status flags.
+    ///
+    /// # Returns
+    ///
+    /// Returns the line status flags indicating the current status of the serial port.
     fn line_sts(&self) -> LineStsFlags {
         LineStsFlags::from_bits_truncate(
             (self.line_sts.read() & 0xFF.into())
@@ -96,25 +102,35 @@ where
     //     }
     // }
 
+    /// Sends a byte of data through the serial port.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The data byte to send.
     pub fn send(&mut self, data: u8) {
         while !self.line_sts().contains(LineStsFlags::OUTPUT_EMPTY) {}
         self.data.write(data.into())
     }
 
+    /// Writes a byte of data to the serial port.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - The byte of data to write.
     pub fn write(&mut self, b: u8) {
-            match b {
-                8 | 0x7F => {
-                    self.send(8);
-                    self.send(b' ');
-                    self.send(8);
-                }
-                b'\n' => {
-                    self.send(b'\r');
-                    self.send(b'\n');
-                }
-                _ => {
-                    self.send(b);
-                }
+        match b {
+            8 | 0x7F => {
+                self.send(8);
+                self.send(b' ');
+                self.send(8);
             }
+            b'\n' => {
+                self.send(b'\r');
+                self.send(b'\n');
+            }
+            _ => {
+                self.send(b);
+            }
+        }
     }
 }

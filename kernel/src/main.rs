@@ -60,29 +60,27 @@ mod utils;
 pub use log::{debug, error, info, set_max_level, warn};
 
 
-/******************************************
- * Entry point, called by BOOTBOOT Loader *
- ******************************************/
+
+///Entry point, called by BOOTBOOT Loader *
 #[no_mangle] // don't mangle the name of this function
 fn _start() -> ! {
    
+    //start kernel
     kstart();
     
 }
 
 
 
-/*************************************
- * This function is called on panic. *
- *************************************/
 
+/// Custom panic handler that prints the error message and enters an infinite loop.
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    
-    serial_println!("Error: {}", _info);
-  
+fn panic(info: &PanicInfo) -> ! {
+    serial_println!("Error: {}", info);
+
+    // Enter an infinite loop to halt the execution
     loop {
         hlt();
     }
-    
 }
+
