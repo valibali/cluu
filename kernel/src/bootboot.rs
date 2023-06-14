@@ -17,45 +17,15 @@ pub const MMAP_FREE: u32 = 1;
 pub const MMAP_ACPI: u32 = 2;
 pub const MMAP_MMIO: u32 = 3;
 pub const INITRD_MAXSIZE: u32 = 16;
+
+
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
 pub struct MMapEnt {
     pub ptr: u64,
     pub size: u64,
 }
-#[test]
-fn bindgen_test_layout_MMapEnt() {
-    assert_eq!(
-        ::core::mem::size_of::<MMapEnt>(),
-        16usize,
-        concat!("Size of: ", stringify!(MMapEnt))
-    );
-    assert_eq!(
-        ::core::mem::align_of::<MMapEnt>(),
-        1usize,
-        concat!("Alignment of ", stringify!(MMapEnt))
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<MMapEnt>())).ptr as *const _ as usize },
-        0usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(MMapEnt),
-            "::",
-            stringify!(ptr)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<MMapEnt>())).size as *const _ as usize },
-        8usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(MMapEnt),
-            "::",
-            stringify!(size)
-        )
-    );
-}
+
 #[repr(C, packed)]
 #[derive(Copy, Clone)]
 pub struct BOOTBOOT {
@@ -74,19 +44,22 @@ pub struct BOOTBOOT {
     pub fb_width: u32,
     pub fb_height: u32,
     pub fb_scanline: u32,
-    pub arch: BOOTBOOT__bindgen_ty_1,
+    pub arch: arch_union,
     pub mmap: MMapEnt,
 }
+
+
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub union BOOTBOOT__bindgen_ty_1 {
-    pub x86_64: BOOTBOOT__bindgen_ty_1__bindgen_ty_1,
-    pub aarch64: BOOTBOOT__bindgen_ty_1__bindgen_ty_2,
+pub union arch_union {
+    pub x86_64: arch_x86,
+    pub aarch64: arch_aarch64,
     _bindgen_union_align: [u64; 8usize],
 }
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct BOOTBOOT__bindgen_ty_1__bindgen_ty_1 {
+pub struct arch_x86 {
     pub acpi_ptr: u64,
     pub smbi_ptr: u64,
     pub efi_ptr: u64,
@@ -96,132 +69,11 @@ pub struct BOOTBOOT__bindgen_ty_1__bindgen_ty_1 {
     pub unused2: u64,
     pub unused3: u64,
 }
-#[test]
-fn bindgen_test_layout_BOOTBOOT__bindgen_ty_1__bindgen_ty_1() {
-    assert_eq!(
-        ::core::mem::size_of::<BOOTBOOT__bindgen_ty_1__bindgen_ty_1>(),
-        64usize,
-        concat!(
-            "Size of: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_1)
-        )
-    );
-    assert_eq!(
-        ::core::mem::align_of::<BOOTBOOT__bindgen_ty_1__bindgen_ty_1>(),
-        8usize,
-        concat!(
-            "Alignment of ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_1)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_1>())).acpi_ptr as *const _
-                as usize
-        },
-        0usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_1),
-            "::",
-            stringify!(acpi_ptr)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_1>())).smbi_ptr as *const _
-                as usize
-        },
-        8usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_1),
-            "::",
-            stringify!(smbi_ptr)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_1>())).efi_ptr as *const _
-                as usize
-        },
-        16usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_1),
-            "::",
-            stringify!(efi_ptr)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_1>())).mp_ptr as *const _
-                as usize
-        },
-        24usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_1),
-            "::",
-            stringify!(mp_ptr)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_1>())).unused0 as *const _
-                as usize
-        },
-        32usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_1),
-            "::",
-            stringify!(unused0)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_1>())).unused1 as *const _
-                as usize
-        },
-        40usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_1),
-            "::",
-            stringify!(unused1)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_1>())).unused2 as *const _
-                as usize
-        },
-        48usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_1),
-            "::",
-            stringify!(unused2)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_1>())).unused3 as *const _
-                as usize
-        },
-        56usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_1),
-            "::",
-            stringify!(unused3)
-        )
-    );
-}
+
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct BOOTBOOT__bindgen_ty_1__bindgen_ty_2 {
+pub struct arch_aarch64 {
     pub acpi_ptr: u64,
     pub mmio_ptr: u64,
     pub efi_ptr: u64,
@@ -231,354 +83,19 @@ pub struct BOOTBOOT__bindgen_ty_1__bindgen_ty_2 {
     pub unused3: u64,
     pub unused4: u64,
 }
-#[test]
-fn bindgen_test_layout_BOOTBOOT__bindgen_ty_1__bindgen_ty_2() {
-    assert_eq!(
-        ::core::mem::size_of::<BOOTBOOT__bindgen_ty_1__bindgen_ty_2>(),
-        64usize,
-        concat!(
-            "Size of: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_2)
-        )
-    );
-    assert_eq!(
-        ::core::mem::align_of::<BOOTBOOT__bindgen_ty_1__bindgen_ty_2>(),
-        8usize,
-        concat!(
-            "Alignment of ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_2)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_2>())).acpi_ptr as *const _
-                as usize
-        },
-        0usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_2),
-            "::",
-            stringify!(acpi_ptr)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_2>())).mmio_ptr as *const _
-                as usize
-        },
-        8usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_2),
-            "::",
-            stringify!(mmio_ptr)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_2>())).efi_ptr as *const _
-                as usize
-        },
-        16usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_2),
-            "::",
-            stringify!(efi_ptr)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_2>())).unused0 as *const _
-                as usize
-        },
-        24usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_2),
-            "::",
-            stringify!(unused0)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_2>())).unused1 as *const _
-                as usize
-        },
-        32usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_2),
-            "::",
-            stringify!(unused1)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_2>())).unused2 as *const _
-                as usize
-        },
-        40usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_2),
-            "::",
-            stringify!(unused2)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_2>())).unused3 as *const _
-                as usize
-        },
-        48usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_2),
-            "::",
-            stringify!(unused3)
-        )
-    );
-    assert_eq!(
-        unsafe {
-            &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1__bindgen_ty_2>())).unused4 as *const _
-                as usize
-        },
-        56usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1__bindgen_ty_2),
-            "::",
-            stringify!(unused4)
-        )
-    );
-}
-#[test]
-fn bindgen_test_layout_BOOTBOOT__bindgen_ty_1() {
-    assert_eq!(
-        ::core::mem::size_of::<BOOTBOOT__bindgen_ty_1>(),
-        64usize,
-        concat!("Size of: ", stringify!(BOOTBOOT__bindgen_ty_1))
-    );
-    assert_eq!(
-        ::core::mem::align_of::<BOOTBOOT__bindgen_ty_1>(),
-        8usize,
-        concat!("Alignment of ", stringify!(BOOTBOOT__bindgen_ty_1))
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1>())).x86_64 as *const _ as usize },
-        0usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1),
-            "::",
-            stringify!(x86_64)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT__bindgen_ty_1>())).aarch64 as *const _ as usize },
-        0usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT__bindgen_ty_1),
-            "::",
-            stringify!(aarch64)
-        )
-    );
-}
-#[test]
-fn bindgen_test_layout_BOOTBOOT() {
-    assert_eq!(
-        ::core::mem::size_of::<BOOTBOOT>(),
-        144usize,
-        concat!("Size of: ", stringify!(BOOTBOOT))
-    );
-    assert_eq!(
-        ::core::mem::align_of::<BOOTBOOT>(),
-        1usize,
-        concat!("Alignment of ", stringify!(BOOTBOOT))
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).magic as *const _ as usize },
-        0usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(magic)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).size as *const _ as usize },
-        4usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(size)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).protocol as *const _ as usize },
-        8usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(protocol)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).fb_type as *const _ as usize },
-        9usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(fb_type)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).numcores as *const _ as usize },
-        10usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(numcores)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).bspid as *const _ as usize },
-        12usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(bspid)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).timezone as *const _ as usize },
-        14usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(timezone)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).datetime as *const _ as usize },
-        16usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(datetime)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).initrd_ptr as *const _ as usize },
-        24usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(initrd_ptr)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).initrd_size as *const _ as usize },
-        32usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(initrd_size)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).fb_ptr as *const _ as usize },
-        40usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(fb_ptr)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).fb_size as *const _ as usize },
-        48usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(fb_size)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).fb_width as *const _ as usize },
-        52usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(fb_width)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).fb_height as *const _ as usize },
-        56usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(fb_height)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).fb_scanline as *const _ as usize },
-        60usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(fb_scanline)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).arch as *const _ as usize },
-        64usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(arch)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<BOOTBOOT>())).mmap as *const _ as usize },
-        128usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(BOOTBOOT),
-            "::",
-            stringify!(mmap)
-        )
-    );
-}
+
+
 extern "C" {
     pub static mut bootboot: BOOTBOOT;
 }
 extern "C" {
-    pub static mut environment: *mut custom_ctypes::c_uchar;
+    pub static mut environment: *mut u64;
 }
 extern "C" {
     pub static mut fb: u8;
 }
+
+
 #[doc = " Display text on screen *"]
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
@@ -593,110 +110,8 @@ pub struct psf2_t {
     pub width: u32,
     pub glyphs: u8,
 }
-#[test]
-fn bindgen_test_layout_psf2_t() {
-    assert_eq!(
-        ::core::mem::size_of::<psf2_t>(),
-        33usize,
-        concat!("Size of: ", stringify!(psf2_t))
-    );
-    assert_eq!(
-        ::core::mem::align_of::<psf2_t>(),
-        1usize,
-        concat!("Alignment of ", stringify!(psf2_t))
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<psf2_t>())).magic as *const _ as usize },
-        0usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(psf2_t),
-            "::",
-            stringify!(magic)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<psf2_t>())).version as *const _ as usize },
-        4usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(psf2_t),
-            "::",
-            stringify!(version)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<psf2_t>())).headersize as *const _ as usize },
-        8usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(psf2_t),
-            "::",
-            stringify!(headersize)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<psf2_t>())).flags as *const _ as usize },
-        12usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(psf2_t),
-            "::",
-            stringify!(flags)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<psf2_t>())).numglyph as *const _ as usize },
-        16usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(psf2_t),
-            "::",
-            stringify!(numglyph)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<psf2_t>())).bytesperglyph as *const _ as usize },
-        20usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(psf2_t),
-            "::",
-            stringify!(bytesperglyph)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<psf2_t>())).height as *const _ as usize },
-        24usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(psf2_t),
-            "::",
-            stringify!(height)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<psf2_t>())).width as *const _ as usize },
-        28usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(psf2_t),
-            "::",
-            stringify!(width)
-        )
-    );
-    assert_eq!(
-        unsafe { &(*(::core::ptr::null::<psf2_t>())).glyphs as *const _ as usize },
-        32usize,
-        concat!(
-            "Offset of field: ",
-            stringify!(psf2_t),
-            "::",
-            stringify!(glyphs)
-        )
-    );
-}
+
+
 extern "C" {
-    pub static mut _binary_font_psf_start: custom_ctypes::c_uchar;
+    pub static mut _binary_font_psf_start: u64;
 }
-pub mod custom_ctypes { pub type c_int = i64; pub type c_uchar = u64; }
