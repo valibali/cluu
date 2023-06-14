@@ -36,5 +36,8 @@ cluu.x86_64.elf: src/**
 	cargo build 
 	cp ./target/cluu-x86-64/debug/cluu-kernel-rust cluu-kernel-rust.x86_64.elf
 
+doc:
+	cargo doc --target-dir ../docs
+
 clean:
 	rm -rf ./target

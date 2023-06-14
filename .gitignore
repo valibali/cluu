@@ -1,6 +1,5 @@
 *.o
 kernel/target/*
-!kernel/target/doc
 bootboot_image/disk-x86.img
 *.elf
 rust-os-gdb
