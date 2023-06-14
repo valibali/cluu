@@ -12,16 +12,6 @@
   "panic-strategy": "abort",
   "disable-redzone": true,
   "features": "-mmx,-sse,+soft-float",
-  "dynamic-linking": false,
-  "relocation-model": "pic",
-  "code-model": "kernel",
-  "eliminate-frame-pointer": false,
-  "exe-suffix": "",
-  "has-rpath": false,
-  "no-compiler-rt": true,
-  "no-default-libraries": true,
-  "position-independent-executables": false,
-  "has-elf-tls": true,
   "pre-link-args": {
     "ld.lld": ["--script=./link.ld", "./font.o"]
   }

@@ -33,10 +33,8 @@ all: cluu.x86_64.elf
 # Kernel build
 cluu.x86_64.elf: src/**
 	objcopy -O elf64-x86-64 -B i386 -I binary font.psf font.o
-	# cargo xbuild --target ./triplets/mykernel-x86.json
-	# Using this causes the kernel to exceed the 2 MB limit
 	cargo build 
-	cp ./target/cluu-x86/debug/cluu-kernel-rust cluu-kernel-rust.x86_64.elf
+	cp ./target/cluu-x86-64/debug/cluu-kernel-rust cluu-kernel-rust.x86_64.elf
 
 clean:
 	rm -rf ./target

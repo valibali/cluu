@@ -2,4 +2,4 @@
 build-std = ["core", "alloc"]
 
 [build]
-target = "triplets/cluu-x86.json"
+target = "triplets/cluu-x86-64.json"
