@@ -2,7 +2,7 @@ use core::fmt;
 use spin::MutexGuard;
 use syscall::pio::Pio;
 use arch::x86_64::peripheral::uart_16550::SerialPort;
-use devices::COM2;
+use arch::x86_64::peripheral::COM2;
 
 pub struct Writer<'a> {
     serial: MutexGuard<'a, SerialPort<Pio<u8>>>,

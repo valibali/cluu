@@ -1,6 +1,6 @@
 use core::fmt::Write;
 
-use log::{Record, Level, Metadata, SetLoggerError, LevelFilter};
+use log::{Record, Level, Metadata, LevelFilter};
 
 struct CluuLogger;
 
@@ -18,15 +18,19 @@ impl log::Log for CluuLogger {
     fn flush(&self) {}
 }
 
-
-
 static LOGGER: CluuLogger = CluuLogger;
 
-pub fn init(clearscr: bool) -> Result<(), SetLoggerError> {
+pub fn init(clearscr: bool) {
     if clearscr {
         _ = crate::utils::writer::Writer::new().write_str("\u{001B}[2J\u{001B}[H"); //clear screen
     };
 
-    log::set_logger(&LOGGER)
-        .map(|()| log::set_max_level(LevelFilter::Info))
+    let logger_init_result = 
+        log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info)); //clearscr: true
+
+    match logger_init_result {
+        Ok(_) => serial_println!("Logger initialized correctly"),
+        Err(err) => panic!("Error with initializing logger: {}", err),
+    }
+
 }
