@@ -49,54 +49,56 @@ extern crate rlibc;
 #[no_mangle] // don't mangle the name of this function
 fn _start() -> ! {
     /*** NOTE: this code runs on all cores in parallel ***/
-    unsafe {
-        if bootboot::bootboot.fb_scanline > 0 {
-        
-            let fb = &bootboot::fb as *const u8 as u64;
+    use bootboot::*;
+    let bootboot_r = unsafe { & (*(BOOTBOOT_INFO as *const BOOTBOOT)) };
 
-            // cross-hair to see screen dimension detected correctly
-            for y in 0..bootboot::bootboot.fb_height {
-                let addr = fb
-                    + bootboot::bootboot.fb_scanline as u64 * y as u64
-                    + bootboot::bootboot.fb_width as u64 * 2;
-                *(addr as *mut u64) = 0x00FFFFFF;
-            }
-            for x in 0..bootboot::bootboot.fb_width {
-                let addr = fb
-                    + bootboot::bootboot.fb_scanline as u64 * (bootboot::bootboot.fb_height / 2) as u64 + (x * 4) as u64;
-                *(addr as *mut u64) = 0x00FFFFFF;
-            }
+    if bootboot_r.fb_scanline > 0 {
+    
+        let fb = BOOTBOOT_FB as u64;
 
-            // red, green, blue boxes in order
-            for y in 0..20 {
-                for x in 0..20 {
-                    let addr = fb
-                        + bootboot::bootboot.fb_scanline as u64 * (y + 20) as u64
-                        + (x + 20) * 4;
-                    *(addr as *mut u64) = 0x00FF0000;
-                }
-            }
-            for y in 0..20 {
-                for x in 0..20 {
-                    let addr = fb
-                        + bootboot::bootboot.fb_scanline as u64 * (y + 20) as u64
-                        + (x + 50) * 4;
-                    *(addr as *mut u64) = 0x0000FF00;
-                }
-            }
-            for y in 0..20 {
-                for x in 0..20 {
-                    let addr = fb
-                        + bootboot::bootboot.fb_scanline as u64 * (y + 20) as u64
-                        + (x + 80) * 4;
-                    *(addr as *mut u64) = 0x000000FF;
-                }
-            }
+        // cross-hair to see screen dimension detected correctly
+        for y in 0..bootboot_r.fb_height {
+            let addr = fb
+                + bootboot_r.fb_scanline as u64 * y as u64
+                + bootboot_r.fb_width as u64 * 2;
+            unsafe { *(addr as *mut u64) = 0x00FFFFFF };
+        }
+        for x in 0..bootboot_r.fb_width {
+            let addr = fb
+                + bootboot_r.fb_scanline as u64 * (bootboot_r.fb_height / 2) as u64 + (x * 4) as u64;
+            unsafe { *(addr as *mut u64) = 0x00FFFFFF };
         }
 
-        // say hello
-        puts("Hobby kernel Rust-ban x86_64 -re :)");
+        // red, green, blue boxes in order
+        for y in 0..20 {
+            for x in 0..20 {
+                let addr = fb
+                    + bootboot_r.fb_scanline as u64 * (y + 20) as u64
+                    + (x + 20) * 4;
+                unsafe { *(addr as *mut u64) = 0x00FF0000 };
+            }
+        }
+        for y in 0..20 {
+            for x in 0..20 {
+                let addr = fb
+                    + bootboot_r.fb_scanline as u64 * (y + 20) as u64
+                    + (x + 50) * 4;
+                unsafe { *(addr as *mut u64) = 0x0000FF00 };
+            }
+        }
+        for y in 0..20 {
+            for x in 0..20 {
+                let addr = fb
+                    + bootboot_r.fb_scanline as u64 * (y + 20) as u64
+                    + (x + 80) * 4;
+                unsafe { *(addr as *mut u64) = 0x000000FF };
+            }
+        }
     }
+
+    // say hello
+    puts("Hello Rust Hobby Kernel");
+    
     // hang for now
     loop {}
 }
@@ -104,10 +106,16 @@ fn _start() -> ! {
 /**************************
  * Display text on screen *
  **************************/
-fn puts(string: &'static str) {
+ //TODO: REFACTOR 
+ 
+ fn puts(string: &'static str) {
     use bootboot::*;
+
+    let fb = BOOTBOOT_FB as u64;
+    let bootboot_r = unsafe { & (*(BOOTBOOT_INFO as *const BOOTBOOT)) };
+
     unsafe {
-        let font: *mut bootboot::psf2_t = &_binary_font_psf_start as *const u64 as *mut psf2_t;
+        let font: *mut psf2_t = &_binary_font_psf_start as *const u64 as *mut psf2_t;
         let (mut kx, mut line, mut mask, mut offs): (u32, u64, u64, u32);
         kx = 0;
         let bpl = ((*font).width + 7) / 8;
@@ -126,7 +134,7 @@ fn puts(string: &'static str) {
                 line = offs as u64;
                 mask = 1 << ((*font).width - 1);
                 for _x in 0..(*font).width {
-                    let target_location = (&bootboot::fb as *const u8 as u64 + line) as *mut u32;
+                    let target_location = (fb as *const u8 as u64 + line) as *mut u32;
                     let mut target_value: u32 = 0;
                     if (*glyph as u64) & (mask) > 0 {
                         target_value = 0xFFFFFF;
@@ -135,15 +143,16 @@ fn puts(string: &'static str) {
                     mask >>= 1;
                     line += 4;
                 }
-                let target_location = (&bootboot::fb as *const u8 as u64 + line) as *mut u32;
+                let target_location = (fb as *const u8 as u64 + line) as *mut u32;
                 *target_location = 0;
                 glyph = glyph.offset(bpl as isize);
-                offs += bootboot.fb_scanline;
+                offs += bootboot_r.fb_scanline;
             }
             kx += 1;
         }
     }
 }
+
 
 /*************************************
  * This function is called on panic. *
