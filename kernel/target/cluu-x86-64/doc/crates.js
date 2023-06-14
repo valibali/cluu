@@ -1,0 +1,1 @@
+window.ALL_CRATES = ["cluu_kernel_rust"];

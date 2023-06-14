@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["kstart"],"mod":["x86_64"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["init_peripherals"],"mod":["framebuffer","uart_16550"],"static":["COM2","FB"]};
