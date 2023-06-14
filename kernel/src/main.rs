@@ -39,11 +39,7 @@
 
 #[cfg(not(test))]
 use core::panic::PanicInfo;
-use arch::x86_64::peripheral::*;
 use peripherals::*;
-use syscall::*;
-use utils::*;
-
 
 #[allow(dead_code)]
 #[allow(non_snake_case)]
@@ -56,7 +52,6 @@ mod utils;
 
 // Required for -Z build-std flag.
 extern crate rlibc;
-extern crate lazy_static;
 extern crate x86;
 extern crate spin;
 extern crate bitflags;
