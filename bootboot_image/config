@@ -1,0 +1,3 @@
+// BOOTBOOT loader configuration
+
+kernel=sys/core

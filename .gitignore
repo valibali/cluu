@@ -1,3 +1,4 @@
 *.o
 kernel/target
 mkbootimg/mkbootimg
+bootboot_image/disk-x86.img
