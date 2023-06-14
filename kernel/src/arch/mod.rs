@@ -21,6 +21,7 @@ pub fn kstart() -> ! {
     // Check if framebuffer is available and print "hello"
     if let Some(ref mut fb) = *peripheral::FB.lock() {
         fb.puts("hello");
+        fb.draw_screen_test();
     }
     
     loop {}
