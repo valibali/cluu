@@ -1,6 +1,6 @@
 # CLUU (Compact Lightweight Unix Utopia)
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Documentation](https://img.shields.io/badge/documentation-RUSTDOCS-blue.svg)](DOCS)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Documentation](https://img.shields.io/badge/documentation-RUSTDOCS-blue.svg)](https://valibali.github.io/cluu/)
 
 CLUU is a hobby operating system written in Rust, targeting x86_64 and with plans to support aarch64 in the future.
 The project draws inspiration from the following Operating Systems:
