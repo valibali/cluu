@@ -6,3 +6,4 @@ bootboot_image/disk-x86.img
 .vscode
 rust-os-gdb
 *.lock
+utilies/mkbootimg/mkbootimg
