@@ -95,7 +95,7 @@ fn _start() -> ! {
         }
 
         // say hello
-        puts("Hello from a simple BOOTBOOT kernel");
+        puts("Hobby kernel Rust-ban x86_64 -re :)");
     }
     // hang for now
     loop {}
