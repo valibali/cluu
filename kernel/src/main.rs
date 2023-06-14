@@ -44,7 +44,7 @@ extern crate log;
 
 use core::panic::PanicInfo;
 //use alloc::string::String;
-use peripherals::*;
+use devices::*;
 use utils::logger;
 use x86_64::instructions::*;
 
@@ -53,7 +53,7 @@ use x86_64::instructions::*;
 #[allow(non_camel_case_types)]
 mod bootboot;
 mod arch;
-mod peripherals;
+mod devices;
 mod syscall;
 mod utils;
 
@@ -65,16 +65,13 @@ pub use log::{debug, error, info, set_max_level, warn};
  ******************************************/
 #[no_mangle] // don't mangle the name of this function
 fn _start() -> ! {
-    /*** NOTE: this code runs on all cores in parallel ***/
-    use bootboot::*;
-
-    unsafe {init_noncpu_perif();}
+    init_noncpu_perif();
     
     let logger_init_result = logger::init(true); //clearscr: true
 
     match logger_init_result {
         Ok(_) => info!("Logger initialized correctly"),
-        Err(err) => println!("Error with initializing logger: {}", err),
+        Err(err) => serial_println!("Error with initializing logger: {}", err),
     }
 
     //Lets use the BOOTBOOT_INFO as a pointer, dereference it and immediately borrow it.
@@ -185,26 +182,7 @@ fn puts(string: &str) {
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     
-    let payload = match _info.payload().downcast_ref::<&str>() {
-        Some(s) => *s,
-        None => "Panic occured - no further info available",
-        // until heap allocator is not available, this stays commented 
-        // None => match info.payload().downcast_ref::<String>() {
-        //     Some(s) => &s[..],
-        //     None => "Box<Any>",
-        // },
-    };
-    println!("{}", payload);
-
-    match _info.message() {
-        Some(arg) => println!("Panic message: {}", arg),
-        None => println!("No panic message available"),
-    };
-
-    match _info.location() {
-        Some(loc) => println!("Panic occured in file '{}' at line {}:{}", loc.file(), loc.line(), loc.column()),
-        None => println!("No location info available"),    
-    };
+    serial_println!("Error: {}", _info);
   
     loop {
         hlt();

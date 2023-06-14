@@ -1,5 +1,4 @@
 use core::convert::TryInto;
-use core::ptr::{addr_of, addr_of_mut};
 
 use syscall::io::{Io, ReadOnly};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -85,17 +84,17 @@ where
         )
     }
 
-    pub fn receive(&mut self) -> Option<u8> {
-        if self.line_sts().contains(LineStsFlags::INPUT_FULL) {
-            Some(
-                (self.data.read() & 0xFF.into())
-                    .try_into()
-                    .unwrap_or(0),
-            )
-        } else {
-            None
-        }
-    }
+    // pub fn receive(&mut self) -> Option<u8> {
+    //     if self.line_sts().contains(LineStsFlags::INPUT_FULL) {
+    //         Some(
+    //             (self.data.read() & 0xFF.into())
+    //                 .try_into()
+    //                 .unwrap_or(0),
+    //         )
+    //     } else {
+    //         None
+    //     }
+    // }
 
     pub fn send(&mut self, data: u8) {
         while !self.line_sts().contains(LineStsFlags::OUTPUT_EMPTY) {}
