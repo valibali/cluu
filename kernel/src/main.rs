@@ -34,14 +34,27 @@
 
 #[cfg(not(test))]
 use core::panic::PanicInfo;
+use arch::x86_64::peripheral::*;
+
 
 #[allow(dead_code)]
 #[allow(non_snake_case)]
 #[allow(non_camel_case_types)]
 mod bootboot;
+mod arch;
+mod peripherals;
+mod syscall;
 
 // Required for -Z build-std flag.
 extern crate rlibc;
+extern crate lazy_static;
+extern crate x86;
+extern crate spin;
+extern crate bitflags;
+
+
+
+
 
 /******************************************
  * Entry point, called by BOOTBOOT Loader *
@@ -98,7 +111,9 @@ fn _start() -> ! {
     }
 
         // say hello
-    puts("Hello Rust Hobby Kernel");
+    puts("Ha latod a crosshair-t akkor a bootloader jol lotte be a GOP felbontast ;)");
+
+    unsafe {init_noncpu_perif();}
 
     // hang for now
     loop {}
