@@ -31,11 +31,6 @@
 // configure Rust compiler
 #![no_std]
 #![no_main]
-#![feature(
-    pointer_is_aligned,
-    panic_info_message,
-    raw_ref_op
-)]
 
 
 // Required for -Z build-std flag.

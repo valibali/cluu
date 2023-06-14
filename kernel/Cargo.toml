@@ -3,6 +3,8 @@ name = "cluu-kernel-rust"
 version = "0.0.1"
 authors = ["Balazs Valkony"]
 
+[profile.dev]
+panic = "abort" # disable stack unwinding on panic
 
 [dependencies]
 rlibc = "1.0.0"
