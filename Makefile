@@ -11,3 +11,6 @@ clean:
 
 qemu: all
 	@make -C ./bootboot_image uefi
+
+qemu_nodebug: all
+	@make -C ./bootboot_image uefi_nodebug
