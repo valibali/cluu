@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["_start","panic","set_max_level"],"macro":["debug","error","info","print","serial_clearcls","serial_println","warn"],"mod":["arch","bootboot","syscall","utils"]};

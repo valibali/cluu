@@ -37,7 +37,11 @@ cluu.x86_64.elf: src/**
 	cp ./target/cluu-x86-64/debug/cluu-kernel-rust cluu-kernel-rust.x86_64.elf
 
 doc:
-	cargo doc --target-dir ../docs
+	cargo doc --no-deps --document-private-items
+	rm -rf ../docs
+	echo "<meta http-equiv=\"refresh\" content=\"0; url=build_wheel\">" > target/cluu-x86-64/doc/index.html
+	mkdir ../docs
+	cp -r target/cluu-x86-64/doc/* ../docs
 
 clean:
 	rm -rf ./target
