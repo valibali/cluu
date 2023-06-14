@@ -37,9 +37,18 @@
     raw_ref_op
 )]
 
-#[cfg(not(test))]
+
+// Required for -Z build-std flag.
+extern crate rlibc;
+extern crate x86;
+extern crate spin;
+extern crate bitflags;
+extern crate log;
+
+
 use core::panic::PanicInfo;
 use peripherals::*;
+use utils::logger;
 
 #[allow(dead_code)]
 #[allow(non_snake_case)]
@@ -50,13 +59,7 @@ mod peripherals;
 mod syscall;
 mod utils;
 
-// Required for -Z build-std flag.
-extern crate rlibc;
-extern crate x86;
-extern crate spin;
-extern crate bitflags;
-
-
+pub use log::{debug, error, info, set_max_level, warn};
 
 
 /******************************************
@@ -66,6 +69,15 @@ extern crate bitflags;
 fn _start() -> ! {
     /*** NOTE: this code runs on all cores in parallel ***/
     use bootboot::*;
+
+    unsafe {init_noncpu_perif();}
+    
+    let logger_init_result = logger::init(true); //clearscr: true
+
+    match logger_init_result {
+        Ok(_) => info!("Logger initialized correctly"),
+        Err(err) => println!("Error with initializing logger: {}", err),
+    }
 
     //Lets use the BOOTBOOT_INFO as a pointer, dereference it and immediately borrow it.
     let bootboot_r = unsafe { & (*(BOOTBOOT_INFO as *const BOOTBOOT)) };
@@ -80,12 +92,12 @@ fn _start() -> ! {
             let addr = fb
                 + bootboot_r.fb_scanline as u64 * y as u64
                 + bootboot_r.fb_width as u64 * 2;
-            unsafe { *(addr as *mut u32) = 0x00FFFFFF };
+            unsafe { *(addr as *mut u64) = 0x00FFFFFF };
         }
         for x in 0..bootboot_r.fb_width {
             let addr = fb
                 + bootboot_r.fb_scanline as u64 * (bootboot_r.fb_height / 2) as u64 + (x * 4) as u64;
-            unsafe { *(addr as *mut u32) = 0x00FFFFFF };
+            unsafe { *(addr as *mut u64) = 0x00FFFFFF };
         }
 
         //ed, green, blue boxes in order
@@ -115,20 +127,6 @@ fn _start() -> ! {
         }
     }
 
-        // say hello
-    
-
-    unsafe {init_noncpu_perif();}
-
-    serial_clearcls!();
-    println!("COM debug port works!");
-
-    // let mut serial2: spin::MutexGuard<SerialPort<Pio<u8>>> = COM2.lock();
-
-    // serial2.write("\u{001B}[2J\u{001B}[H".as_bytes()); //clear screen and move cursor to home
-    // serial2.write("COM debug port works!".as_bytes()); //hello world
-
-    // hang for now
     puts("Ha latod a crosshair-t akkor a bootloader jol lotte be a GOP felbontast ;)");
     loop {}
 }
@@ -185,7 +183,7 @@ fn puts(string: &str) {
 /*************************************
  * This function is called on panic. *
  *************************************/
-#[cfg(not(test))]
+
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
