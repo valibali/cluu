@@ -31,11 +31,17 @@
 // configure Rust compiler
 #![no_std]
 #![no_main]
+#![feature(
+    pointer_is_aligned,
+    panic_info_message,
+    raw_ref_op
+)]
 
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 use arch::x86_64::peripheral::*;
-
+use peripherals::*;
+use syscall::*;
 
 #[allow(dead_code)]
 #[allow(non_snake_case)]
@@ -67,6 +73,8 @@ fn _start() -> ! {
     //Lets use the BOOTBOOT_INFO as a pointer, dereference it and immediately borrow it.
     let bootboot_r = unsafe { & (*(BOOTBOOT_INFO as *const BOOTBOOT)) };
     let fb = BOOTBOOT_FB as u64;
+
+    
 
     if bootboot_r.fb_scanline > 0 {
 
@@ -111,18 +119,24 @@ fn _start() -> ! {
     }
 
         // say hello
-    puts("Ha latod a crosshair-t akkor a bootloader jol lotte be a GOP felbontast ;)");
+    
 
     unsafe {init_noncpu_perif();}
 
+    let mut serial2: spin::MutexGuard<SerialPort<Pio<u8>>> = COM2.lock();
+
+    serial2.write("\u{001B}[2J\u{001B}[H".as_bytes()); //clear screen and move cursor to home
+    serial2.write("COM debug port works!".as_bytes()); //hello world
+
     // hang for now
+    puts("Ha latod a crosshair-t akkor a bootloader jol lotte be a GOP felbontast ;)");
     loop {}
 }
 
 /**************************
  * Display text on screen *
  **************************/
-fn puts(string: &'static str) {
+fn puts(string: &str) {
     use bootboot::*;
 
     let fb: u64 = BOOTBOOT_FB as u64;
