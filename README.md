@@ -2,24 +2,27 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Documentation](https://img.shields.io/badge/documentation-RUSTDOCS-blue.svg)](https://valibali.github.io/cluu/)
 
-CLUU is a hobby operating system written in Rust, targeting x86_64 and with plans to support aarch64 in the future.
+CLUU is a hobby operating system being written in Rust - in active development phase - targeting x86_64 and with plans to support aarch64 in the future.
+It's really at the starting phase, but it'll get there in time. No rush or whatsoever.
+
 The project draws inspiration from the following Operating Systems:
 
 - [Plan 9](https://github.com/plan9foundation/plan9): Plan 9 from Bell Labs is a distributed operating system developed at Bell Labs in the late 1980s.
 - [BSD](https://github.com/freebsd/freebsd): FreeBSD is a modern, advanced operating system for x86 and ARM architectures.
 
-As well as heavily influenced by the folling projects:
+As well as heavily influenced by the following projects:
 
-- [RedoxOS](https://github.com/redox-os/redox): RedoxOS is an operating system written in Rust, aiming to bring the innovations of Rust to a modern microkernel and full set of applications.
-- [k4dos](https://github.com/bztsrc/k4dirstat): k4dirstat is a disk usage analyzer for Linux, inspired by KDirStat, with a user interface written in Rust.
-- [blog_os](https://os.phil-opp.com/): blog_os is a project by Philipp Oppermann that provides a detailed tutorial on building an operating system in Rust. It covers various aspects, including the bootloader, memory management, and device drivers.
-- [XV6](https://pdos.csail.mit.edu/6.828/2020/xv6.html): XV6 is a simple Unix-like operating system developed for educational purposes at MIT. It serves as a teaching tool for operating systems concepts.
+- [RedoxOS](https://github.com/redox-os/redox): RedoxOS is an operating system written in Rust, aiming to bring the innovations of Rust to a modern microkernel and full set of applications. It's fair to say it is the most advanced of all Rust OS-es.
+- [k4dos](https://github.com/clstatham/k4dos): k4dos is another hobby-os of that sort, it's fairly cool, with userspace, that can run FreeDoom for example. It has a nice shell implementation: kash
+- [blog_os](https://os.phil-opp.com/): blog_os is a cutting-edge project by Philipp Oppermann that provides a detailed tutorial on building an operating system in Rust. It covers various aspects, including the bootloader, memory management, and device drivers.
+
 
 ## Project Information
 
 CLUU (Compact Lightweight Unix Utopia) is a hobby operating system written in Rust. The project aims to achieve a microkernel design, emphasizing portability and memory safety. It draws inspiration from various operating systems and projects, combining the best practices and ideas to create a unique and efficient system.
 
-One of the key elements in CLUU's design is the BOOTBOOT bootloader. BOOTBOOT provides a Level 2 bootloader implementation that facilitates the booting process and sets up the initial environment for the operating system. By leveraging BOOTBOOT, CLUU benefits from its features, such as memory initialization, processor mode setup, and parameter passing.
+### Bootloader: [BOOTBOOT](https://gitlab.com/bztsrc/bootboot)
+One of the key elements in CLUU's design is the BOOTBOOT bootloader. BOOTBOOT provides a Level 2 bootloader implementation that facilitates the booting process and sets up the initial environment for the operating system. By leveraging BOOTBOOT, CLUU benefits from its features, such as high-half kernel, memory initialization, processor mode setup, init-ramdrive, early-uart-debug, a framebuffer, and parameter passing.
 
 The main goals of CLUU include:
 
@@ -31,7 +34,7 @@ The main goals of CLUU include:
 
 The project is open-source and welcomes contributions from the community. If you're interested in exploring the code, contributing enhancements, or reporting issues, please visit the GitHub repository.
 
-- Bootloader: [BOOTBOOT](https://gitlab.com/bztsrc/bootboot)
+
 
 ## Prerequisites
 
