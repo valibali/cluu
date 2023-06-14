@@ -1,0 +1,29 @@
+PLATFORM=x86
+
+# the path to OVMF.fd (for testing with EFI)
+OVMF=/usr/share/ovmf/OVMF.fd
+
+all: ../mkbootimg/mkbootimg initdir disk
+
+# compile the image creator
+../mkbootimg/mkbootimg:
+	@make -C ../mkbootimg all
+
+# create an initial ram disk image with the kernel inside
+initdir:
+	@mkdir initrd initrd/sys 2>/dev/null | true
+	cp ../kernel/cluu-kernel-rust.x86_64.elf initrd/sys/core
+
+# create hybrid disk / cdrom image or ROM image
+disk: ../mkbootimg/mkbootimg initdir mkbootimg.json
+	../mkbootimg/mkbootimg mkbootimg.json disk-$(PLATFORM).img
+	@rm -rf initrd
+
+uefi:
+	qemu-system-x86_64 -bios $(OVMF) -m 64 -drive file=disk-x86.img,format=raw -serial stdio
+	@printf '\033[0m'
+
+
+# clean up
+clean:
+	rm -rf initrd *.bin *.img *.rom *.iso 2>/dev/null || true
