@@ -38,7 +38,6 @@ zlib.o: zlib.c zlib.h
 
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $(TARGET) $(LIBDIRS) $(LIBS)
-	@zip $(ZIPNAME) $(TARGET)* DESCRIPT.ION
 
 clean:
 	@rm $(TARGET)* *.o 2>/dev/null || true
