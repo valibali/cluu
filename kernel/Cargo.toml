@@ -10,7 +10,3 @@ x86 = "0.52.0"
 x86_64 = "0.14.10"
 bitflags = "2.3.1"
 
-[dependencies.lazy_static]
-varsion = "1.4.0"
-features = ["spin_no_std"]  
-
