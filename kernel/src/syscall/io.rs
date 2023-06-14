@@ -55,7 +55,7 @@ impl<I> ReadOnly<I> {
     /// * `inner` - The inner I/O interface.
     pub const fn new(inner: I) -> ReadOnly<I> {
         ReadOnly {
-            inner: inner
+            inner
         }
     }
 }
@@ -97,7 +97,7 @@ impl<I> WriteOnly<I> {
     #[allow(dead_code)]
     pub const fn new(inner: I) -> WriteOnly<I> {
         WriteOnly {
-            inner: inner
+            inner
         }
     }
 }
