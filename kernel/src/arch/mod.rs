@@ -7,18 +7,21 @@ use self::x86_64::*;
 
 use utils::logger;
 
-pub fn kstart() -> !
-{
-    //Init devices
+/// Starts the kernel.
+///
+/// # Returns
+///
+/// This function does not return.
+pub fn kstart() -> ! {
+    // Initialize devices
     peripheral::init_peripherals();
 
-    logger::init(true); //clearscr: true
+    logger::init(true); // Init the logger engine, with clearing the screen
 
-
-    if let Some(ref mut fb) = *peripheral::FB.lock(){
-        fb.puts("hello")
+    // Check if framebuffer is available and print "hello"
+    if let Some(ref mut fb) = *peripheral::FB.lock() {
+        fb.puts("hello");
     }
     
-
     loop {}
 }
