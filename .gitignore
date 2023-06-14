@@ -2,7 +2,6 @@
 kernel/target
 bootboot_image/disk-x86.img
 *.elf
-.vscode
 rust-os-gdb
 *.lock
 utilies/mkbootimg/mkbootimg

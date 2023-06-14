@@ -50,9 +50,12 @@ To build and run the CLUU operating system, you need to install the following pr
      brew install qemu
      ```
 
-3. **Rust Programming Language**: CLUU is written in Rust. Install Rust by following the instructions at [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
+3. **Terminal for COM port**
+   This could be simply `telnet` - or any other tool that can communicate with UART_16550.
+4. **Rust Programming Language**: CLUU is written in Rust. Install Rust by following the instructions at [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
 
-4. **Make Build System**: The build process for CLUU uses the Make build system. Make is commonly pre-installed on Linux and macOS. For Windows, you can install Make using the [GNUWin32 project](http://gnuwin32.sourceforge.net/packages/make.htm) or other alternatives.
+5. **Make Build System**: The build process for CLUU uses the Make build system. Make is commonly pre-installed on Linux and macOS. For Windows, you can install Make using the [GNUWin32 project](http://gnuwin32.sourceforge.net/packages/make.htm) or other alternatives.
+6. VSCode for editing, and CodeLLDB plugin installed for Debugging.
 
 ## Building and Running
 
@@ -62,7 +65,6 @@ To build and run CLUU, follow these steps:
 
    ```shell
    git clone https://github.com/your-username/cluu.git
-
    ```
 
 2. Build the kernel and bootboot image:
@@ -70,22 +72,29 @@ To build and run CLUU, follow these steps:
    ```shell
    cd cluu
    make all
-
    ```
 
 3. Clean the build artifact:
 
    ```shell
    make clean
-
    ```
 
 4. Run CLUU in QEMU (with UEFI):
 
    ```shell
    make qemu
-
    ```
+
+   This will start QEMU, but will pause before boot. It also maps COM2 to the `localhost:4321`
+
+   In another shell you can start the COM-terminal for debug messages:
+
+   ```shell
+   telnet localhost 4321
+   ```
+
+   If you are into debugging, hit F5 in VSCode (`launch.json` included), this will start the debugging session and attach to QEMU. The debugging session will start paused, just hit F5 again to continue.
 
 5. Run CLUU in QEMU (without debugging symbols):
    ```shell
