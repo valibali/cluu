@@ -1,2 +1,3 @@
 *.o
 kernel/target
+mkbootimg/mkbootimg
