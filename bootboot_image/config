@@ -1,3 +1,3 @@
 // BOOTBOOT loader configuration
-screen=1920x1080
+screen=1024x768
 kernel=sys/core
