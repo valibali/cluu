@@ -1,3 +1,6 @@
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
 *.o
 kernel/target/*
 bootboot_image/disk-x86.img
