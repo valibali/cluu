@@ -12,23 +12,46 @@ impl FrameBuffer {
         Self {
             screen: unsafe {
                 let size = (scanline * height) as usize; //get the size of the framebuffer
-                write_bytes(screen, 0, size); //init screen
+                write_bytes(screen, 0, size); //init self.screen
                 slice::from_raw_parts_mut(screen, size) 
             }, 
             scanline, width, height } }
 
 
-    /// Display text on the screen using the PC Screen Font.
+    pub fn draw_screen_test(&mut self) {
+        let s = self.scanline;
+        let w = self.width;
+        let h = self.height;
+    
+        if s > 0 {
+            // Cross-hair to see self.screen dimension detected correctly
+            for y in 0..h {
+                self.screen[((s * y + w * 2) >> 2) as usize] = 0x00FFFFFF;
+            }
+            for x in 0..w {
+                self.screen[(((s * (h >> 1) + x * 4)) >> 2) as usize] = 0x00FFFFFF;
+            }
+
+            
+        }
+
+
+    }
+
+    
+    
+    
+    /// Display text on the self.screen using the PC self.screen Font.
     ///
     /// # Arguments
     ///
-    /// * `string` - The string to be displayed on the screen.
+    /// * `string` - The string to be displayed on the self.screen.
     ///
     /// # Example
     ///
     /// ```rust
-    /// let mut screen = Screen::new();
-    /// screen.puts("Hello, World!");
+    /// let mut self.screen = self.screen::new();
+    /// self.screen.puts("Hello, World!");
     /// ```
     pub fn puts(&mut self, string: &'static str) {
         use bootboot::*;
