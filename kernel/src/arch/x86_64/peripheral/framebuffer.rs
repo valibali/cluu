@@ -29,7 +29,7 @@ impl FrameBuffer {
                 self.screen[((s * y + w * 2) >> 2) as usize] = 0x00FFFFFF;
             }
             for x in 0..w {
-                self.screen[(((s * (h >> 1) + x * 4)) >> 2) as usize] = 0x00FFFFFF;
+                self.screen[((s * (h >> 1) + x * 4) >> 2) as usize] = 0x00FFFFFF;
             }
 
             
@@ -37,10 +37,7 @@ impl FrameBuffer {
 
 
     }
-
-    
-    
-    
+   
     /// Display text on the self.screen using the PC self.screen Font.
     ///
     /// # Arguments
@@ -69,13 +66,13 @@ impl FrameBuffer {
         let bpl = (width + 7) / 8;                 // Bytes per line (scanline) of each glyph
         let fb_scanline = unsafe { bootboot.fb_scanline };  // Scanline length of the framebuffer
     
-        let mut kx = 0;  // Current horizontal position of the glyph
+        
     
         // Calculate the starting address of the glyph data
         let glyph_start_addr = (font as u64 + headersize as u64) as *mut u8;
     
         // Iterate over each character in the string
-        for s in string.bytes() {
+        for (kx,s) in string.bytes().enumerate() {
             // Calculate the offset of the glyph in the font data
             let glyph_offset = (s as u32).min(numglyph - 1) * bytesperglyph;
     
@@ -83,7 +80,7 @@ impl FrameBuffer {
             let mut glyph = unsafe { glyph_start_addr.offset(glyph_offset as isize) };
     
             // Calculate the starting offset in the framebuffer
-            let mut offs = kx * (width + 1) * 4;
+            let mut offs = kx as u32 * (width + 1) * 4;
     
             // Iterate over each line of the glyph
             for _ in 0..height {
@@ -103,8 +100,6 @@ impl FrameBuffer {
                 glyph = unsafe { glyph.offset(bpl as isize) };  // Move to the next line of the glyph data
                 offs += fb_scanline;  // Move to the corresponding line in the framebuffer
             }
-    
-            kx += 1;  // Move to the next horizontal position for the next glyph
         }
     }
 }

@@ -6,7 +6,7 @@ pub mod x86_64;
 use self::x86_64::*;
 
 use utils::logger;
-
+use x86_64::instructions::*;
 /// Starts the kernel.
 ///
 /// # Returns
@@ -24,5 +24,7 @@ pub fn kstart() -> ! {
         fb.draw_screen_test();
     }
     
-    loop {}
+    loop {
+        hlt();
+    }
 }
