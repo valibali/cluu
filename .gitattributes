@@ -1,2 +1,2 @@
   utilies/mkbootimg/* linguist-vendored
-  *.rb linguist-language=Rust
+  *.rs linguist-language=Rust
