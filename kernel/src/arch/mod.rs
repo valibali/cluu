@@ -5,8 +5,9 @@ pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 use self::x86_64::*;
 
-use utils::logger;
 use x86_64::instructions::*;
+
+
 /// Starts the kernel.
 ///
 /// # Returns
@@ -16,11 +17,9 @@ pub fn kstart() -> ! {
     // Initialize devices
     peripheral::init_peripherals();
 
-    logger::init(true); // Init the logger engine, with clearing the screen
-
     // Check if framebuffer is available and print "hello"
     if let Some(ref mut fb) = *peripheral::FB.lock() {
-        fb.puts("hello");
+        fb.puts("Visible: The framebuffer is correctly mapped.");
         fb.draw_screen_test();
     }
     

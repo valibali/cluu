@@ -1,10 +1,12 @@
 use core::ptr::addr_of_mut;
+use log::info;
 use syscall::pio::Pio;
 use spin::Mutex;
 
 use self::uart_16550::SerialPort;
 use self::framebuffer::*;
 use crate::bootboot::*;
+use crate::utils::logger;
 
 pub mod uart_16550;
 pub mod framebuffer;
@@ -20,10 +22,28 @@ pub static FB: Mutex<Option<FrameBuffer>> = Mutex::new(None);
 /// This function initializes the COM2 serial port and the framebuffer.
 pub fn init_peripherals() {
     COM2.lock().init();
-    *FB.lock() = Some(FrameBuffer::new(
+    logger::init(true); // Init the logger engine, with clearing the screen
+
+    // Now we can emit log messages
+
+    match FrameBuffer::new(
         unsafe { addr_of_mut!(fb) } as *mut u32,
         unsafe { bootboot.fb_scanline },
         unsafe { bootboot.fb_width },
         unsafe { bootboot.fb_height },
-    ));
+    )
+    {
+        Ok(instace) => {
+            info!("Framebuffer mapped.");
+            *FB.lock() = Some(instace)
+        },
+        Err(err) => panic!("{}", err),
+    }
+
+    // *FB.lock() = Some(FrameBuffer::new(
+    //     unsafe { addr_of_mut!(fb) } as *mut u32,
+    //     unsafe { bootboot.fb_scanline },
+    //     unsafe { bootboot.fb_width },
+    //     unsafe { bootboot.fb_height },
+    // ));
 }
