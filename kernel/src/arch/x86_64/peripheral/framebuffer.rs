@@ -1,5 +1,7 @@
 use core::{ptr::{addr_of, write_bytes}, slice};
 
+use log::info;
+
 pub struct FrameBuffer {
     pub screen: &'static mut [u32], 
     pub scanline: u32, 
@@ -8,14 +10,16 @@ pub struct FrameBuffer {
 }
 
 impl FrameBuffer {
-    pub fn new(screen: *mut u32, scanline: u32, width: u32, height: u32) -> Self {
-        Self {
+    pub fn new(screen: *mut u32, scanline: u32, width: u32, height: u32) -> Result<FrameBuffer, &'static str> {
+        //TODO: Initialization error logic, now just emit Result
+        Ok(FrameBuffer {
             screen: unsafe {
                 let size = (scanline * height) as usize; //get the size of the framebuffer
                 write_bytes(screen, 0, size); //init self.screen
                 slice::from_raw_parts_mut(screen, size) 
             }, 
-            scanline, width, height } }
+            scanline, width, height }).map_err(|_:&'static str| "Error with Framebuffer mapping!")
+        }
 
 
     pub fn draw_screen_test(&mut self) {
@@ -26,16 +30,35 @@ impl FrameBuffer {
         if s > 0 {
             // Cross-hair to see self.screen dimension detected correctly
             for y in 0..h {
-                self.screen[((s * y + w * 2) >> 2) as usize] = 0x00FFFFFF;
+                self.put_pixel(w / 2, y, 0x00FFFFFF)
             }
             for x in 0..w {
-                self.screen[((s * (h >> 1) + x * 4) >> 2) as usize] = 0x00FFFFFF;
+                //self.screen[((s * (h >> 1) + x * 4) >> 2) as usize] = 0x00FFFFFF;
+                self.put_pixel(x, h / 2, 0x00FFFFFF)
             }
 
             
         }
 
+        info!("Screentest was drawn.");
+    }
 
+    /// Puts a pixel of the specified color at the given coordinates (x, y) on the screen.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - The x-coordinate of the pixel.
+    /// * `y` - The y-coordinate of the pixel.
+    /// * `color` - The color value of the pixel.
+    ///
+    /// # Safety
+    ///
+    /// This function assumes that the pixel coordinates are within the screen dimensions and
+    /// that the framebuffer is properly initialized.
+    #[inline]
+    fn put_pixel(&mut self, x: u32, y: u32, color: u32) {
+        // Write the color value to the framebuffer
+        *unsafe { self.screen.get_unchecked_mut(((self.height - 1 - y) * self.scanline / 4 + x) as usize) } = color;
     }
    
     /// Display text on the self.screen using the PC self.screen Font.
