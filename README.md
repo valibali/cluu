@@ -34,7 +34,9 @@ The main goals of CLUU include:
 
 The project is open-source and welcomes contributions from the community. If you're interested in exploring the code, contributing enhancements, or reporting issues, please visit the GitHub repository.
 
-
+## Screenshots
+Framebuffer:
+![screen](https://github.com/valibali/cluu/assets/22941355/b5eae565-61e7-4137-bb40-46f66b731cb1)
 
 ## Prerequisites
 
