@@ -31,17 +31,14 @@
 // configure Rust compiler
 #![no_std]
 #![no_main]
-#![feature(pointer_byte_offsets, const_mut_refs)]
-
 
 // Required for -Z build-std flag.
-extern crate rlibc;
-extern crate x86_64;
-extern crate spin;
 extern crate bitflags;
 extern crate log;
+extern crate rlibc;
+extern crate spin;
+extern crate x86_64;
 //extern crate alloc;
-
 
 use core::panic::PanicInfo;
 //use alloc::string::String;
@@ -49,29 +46,22 @@ use core::panic::PanicInfo;
 use arch::kstart;
 use x86_64::instructions::*;
 
+mod arch;
 #[allow(dead_code)]
 #[allow(non_snake_case)]
 #[allow(non_camel_case_types)]
 mod bootboot;
-mod arch;
 mod syscall;
 mod utils;
 
 pub use log::{debug, error, info, set_max_level, warn};
 
-
-
 ///Entry point, called by BOOTBOOT Loader *
-#[no_mangle] // don't mangle the name of this function
+#[unsafe(no_mangle)] // don't mangle the name of this function
 fn _start() -> ! {
-   
     //start kernel
     kstart();
-    
 }
-
-
-
 
 /// Custom panic handler that prints the error message and enters an infinite loop.
 #[panic_handler]
@@ -83,4 +73,3 @@ fn panic(info: &PanicInfo) -> ! {
         hlt();
     }
 }
-

@@ -5,8 +5,7 @@ pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 use self::x86_64::*;
 
-use x86_64::instructions::*;
-
+use crate::x86_64::instructions::*;
 
 /// Starts the kernel.
 ///
@@ -22,7 +21,7 @@ pub fn kstart() -> ! {
         fb.puts("Visible: The framebuffer is correctly mapped.");
         fb.draw_screen_test();
     }
-    
+
     loop {
         hlt();
     }

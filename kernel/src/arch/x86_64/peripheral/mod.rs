@@ -1,15 +1,15 @@
+use crate::syscall::pio::Pio;
 use core::ptr::addr_of_mut;
 use log::info;
-use syscall::pio::Pio;
 use spin::Mutex;
 
-use self::uart_16550::SerialPort;
 use self::framebuffer::*;
+use self::uart_16550::SerialPort;
 use crate::bootboot::*;
 use crate::utils::logger;
 
-pub mod uart_16550;
 pub mod framebuffer;
+pub mod uart_16550;
 
 /// Mutex-protected static instance of COM2 serial port.
 pub static COM2: Mutex<SerialPort<Pio<u8>>> = Mutex::new(SerialPort::<Pio<u8>>::new(0x2F8));
@@ -27,16 +27,15 @@ pub fn init_peripherals() {
     // Now we can emit log messages
 
     match FrameBuffer::new(
-        unsafe { addr_of_mut!(fb) } as *mut u32,
+        { addr_of_mut!(fb) } as *mut u32,
         unsafe { bootboot.fb_scanline },
         unsafe { bootboot.fb_width },
         unsafe { bootboot.fb_height },
-    )
-    {
+    ) {
         Ok(instace) => {
             info!("Framebuffer mapped.");
             *FB.lock() = Some(instace)
-        },
+        }
         Err(err) => panic!("{}", err),
     }
 
