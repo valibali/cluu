@@ -1,8 +1,8 @@
-use core::convert::TryInto;
-use syscall::io::{Io, ReadOnly};
+use crate::syscall::io::{Io, ReadOnly};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use syscall::pio::Pio;
+use crate::syscall::pio::Pio;
 use bitflags::bitflags;
+use core::convert::TryInto;
 
 bitflags! {
     /// Interrupt enable flags
@@ -27,12 +27,12 @@ bitflags! {
 
 /// Serial port representation.
 pub struct SerialPort<T: Io> {
-    data: T,            // Data register, read to receive, write to send
-    int_en: T,          // Interrupt enable
-    fifo_ctrl: T,       // FIFO control
-    line_ctrl: T,       // Line control
-    modem_ctrl: T,      // Modem control
-    line_sts: ReadOnly<T>,  // Line status
+    data: T,               // Data register, read to receive, write to send
+    int_en: T,             // Interrupt enable
+    fifo_ctrl: T,          // FIFO control
+    line_ctrl: T,          // Line control
+    modem_ctrl: T,         // Modem control
+    line_sts: ReadOnly<T>, // Line status
     #[allow(dead_code)]
     modem_sts: ReadOnly<T>, // Modem status, not used right now
 }
@@ -84,9 +84,7 @@ where
     /// Returns the line status flags indicating the current status of the serial port.
     fn line_sts(&self) -> LineStsFlags {
         LineStsFlags::from_bits_truncate(
-            (self.line_sts.read() & 0xFF.into())
-                .try_into()
-                .unwrap_or(0),
+            (self.line_sts.read() & 0xFF.into()).try_into().unwrap_or(0),
         )
     }
 

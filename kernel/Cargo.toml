@@ -2,15 +2,16 @@
 name = "cluu-kernel-rust"
 version = "0.0.1"
 authors = ["Balazs Valkony"]
+edition = "2024"
 
 [profile.dev]
 panic = "abort" # disable stack unwinding on panic
 
 [dependencies]
 rlibc = "1.0.0"
-spin = "0.9.8"
+spin = "0.10.0"
 x86 = "0.52.0"
-x86_64 = "0.14.10"
-bitflags = "2.3.1"
-log = "0.4.18"
+x86_64 = "0.15.4"
+bitflags = "2.10.0"
+log = "0.4.29"
 

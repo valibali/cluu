@@ -1,8 +1,8 @@
+use crate::arch::x86_64::peripheral::COM2;
+use crate::arch::x86_64::peripheral::uart_16550::SerialPort;
+use crate::syscall::pio::Pio;
 use core::fmt;
 use spin::MutexGuard;
-use syscall::pio::Pio;
-use arch::x86_64::peripheral::uart_16550::SerialPort;
-use arch::x86_64::peripheral::COM2;
 
 /// A simple writer that writes to the serial port.
 pub struct Writer<'a> {

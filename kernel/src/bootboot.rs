@@ -18,12 +18,11 @@ pub const MMAP_ACPI: u32 = 2;
 pub const MMAP_MMIO: u32 = 3;
 pub const INITRD_MAXSIZE: u32 = 16;
 
-pub const BOOTBOOT_MMIO: u64 = 0xfffffffff8000000;  /* memory mapped IO virtual address */
-pub const BOOTBOOT_FB: u64 = 0xfffffffffc000000;  /* frame buffer virtual address */
-pub const BOOTBOOT_INFO: u64 = 0xffffffffffe00000;  /* bootboot struct virtual address */
-pub const BOOTBOOT_ENV: u64 = 0xffffffffffe01000;  /* environment string virtual address */
-pub const BOOTBOOT_CORE: u64 = 0xffffffffffe02000;  /* core loadable segment start */
-
+pub const BOOTBOOT_MMIO: u64 = 0xfffffffff8000000; /* memory mapped IO virtual address */
+pub const BOOTBOOT_FB: u64 = 0xfffffffffc000000; /* frame buffer virtual address */
+pub const BOOTBOOT_INFO: u64 = 0xffffffffffe00000; /* bootboot struct virtual address */
+pub const BOOTBOOT_ENV: u64 = 0xffffffffffe01000; /* environment string virtual address */
+pub const BOOTBOOT_CORE: u64 = 0xffffffffffe02000; /* core loadable segment start */
 
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
@@ -54,7 +53,6 @@ pub struct BOOTBOOT {
     pub mmap: MMapEnt,
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union arch_union {
@@ -75,7 +73,6 @@ pub struct arch_x86 {
     pub unused2: u64,
     pub unused3: u64,
 }
-
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -105,16 +102,16 @@ pub struct psf2_t {
     pub glyphs: u8,
 }
 
-extern "C" {
+unsafe extern "C" {
     pub static mut _binary_font_psf_start: u64;
 }
 
-extern "C" {
+unsafe extern "C" {
     pub static mut bootboot: BOOTBOOT;
 }
-extern "C" {
+unsafe extern "C" {
     pub static mut environment: *mut u64;
 }
-extern "C" {
+unsafe extern "C" {
     pub static mut fb: u64;
 }
