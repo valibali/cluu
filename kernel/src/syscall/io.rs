@@ -1,3 +1,21 @@
+/*
+ * I/O Interface Abstraction
+ *
+ * This module provides a generic abstraction for I/O operations in the kernel.
+ * It defines traits and wrapper types that allow uniform access to different
+ * types of I/O interfaces (port I/O, memory-mapped I/O, etc.).
+ *
+ * Why this is important:
+ * - Provides type safety for I/O operations
+ * - Allows generic code to work with different I/O backends
+ * - Enables compile-time enforcement of read-only/write-only access
+ * - Simplifies bit manipulation operations on I/O registers
+ * - Forms the foundation for all hardware interaction in the kernel
+ *
+ * The Io trait is implemented by specific I/O types (like PIO) and provides
+ * a consistent interface for reading/writing values and manipulating flags.
+ */
+
 use core::cmp::PartialEq;
 use core::ops::{BitAnd, BitOr, Not};
 

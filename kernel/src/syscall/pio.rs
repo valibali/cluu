@@ -1,5 +1,22 @@
-use core::arch::asm;
-use core::marker::PhantomData;
+/*
+ * Port I/O (PIO) Implementation
+ *
+ * This module provides a safe Rust interface to x86 port I/O operations.
+ * Port I/O is the traditional method for communicating with hardware devices
+ * on x86 systems, using special CPU instructions (IN/OUT).
+ *
+ * Why this is important:
+ * - Enables communication with legacy hardware devices
+ * - Provides type-safe access to I/O ports
+ * - Implements the foundation for serial ports, keyboard, etc.
+ * - Essential for low-level hardware control
+ * - Forms the basis for many device drivers in the kernel
+ *
+ * The Pio struct provides generic access to I/O ports with compile-time
+ * type safety for different data sizes (u8, u16, u32).
+ */
+
+use core::{arch::asm, marker::PhantomData};
 
 use super::io::Io;
 

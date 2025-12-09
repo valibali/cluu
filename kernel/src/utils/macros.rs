@@ -1,3 +1,23 @@
+/*
+ * Kernel Utility Macros
+ *
+ * This module provides essential macros for kernel development, including
+ * printing, logging, and console manipulation. These macros are kernel-specific
+ * versions of standard library functionality adapted for bare-metal environment.
+ *
+ * Why this is important:
+ * - Provides familiar print!/println! style macros for kernel development
+ * - Enables formatted output to serial console for debugging
+ * - Implements console control functions (clear screen, etc.)
+ * - Essential for kernel debugging and development workflow
+ * - Replaces standard library macros that aren't available in no_std
+ *
+ * Key macros:
+ * - print!: Basic formatted output to serial console
+ * - serial_println!: Print with newline to serial console
+ * - serial_clearcls!: Clear console screen
+ */
+
 /// Prints formatted text to the console using the `Writer` struct.
 ///
 /// This macro is similar to the standard `println!` macro, but it uses the `Writer` struct

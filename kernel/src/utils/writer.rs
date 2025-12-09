@@ -1,8 +1,27 @@
-use crate::arch::x86_64::peripheral::COM2;
-use crate::arch::x86_64::peripheral::uart_16550::SerialPort;
-use crate::syscall::pio::Pio;
+/*
+ * Serial Console Writer
+ *
+ * This module provides a writer interface for outputting text to the
+ * serial console. It implements the core::fmt::Write trait to enable
+ * formatted output through the serial port.
+ *
+ * Why this is important:
+ * - Provides the foundation for all kernel text output
+ * - Enables early debugging before graphics are available
+ * - Implements thread-safe access to the serial port
+ * - Forms the basis for the logging and print macro systems
+ * - Essential for kernel development and debugging
+ *
+ * The writer uses the COM2 serial port and provides formatted output
+ * capabilities compatible with Rust's formatting system.
+ */
+
 use core::fmt;
+
 use spin::MutexGuard;
+
+use crate::arch::x86_64::peripheral::{uart_16550::SerialPort, COM2};
+use crate::syscall::pio::Pio;
 
 /// A simple writer that writes to the serial port.
 pub struct Writer<'a> {

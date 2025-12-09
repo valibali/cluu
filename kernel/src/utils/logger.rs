@@ -1,6 +1,24 @@
+/*
+ * Kernel Logging System
+ *
+ * This module implements a custom logging system for the CLUU kernel.
+ * It provides structured logging capabilities with different log levels
+ * and outputs to the serial console for debugging purposes.
+ *
+ * Why this is important:
+ * - Enables systematic debugging and monitoring of kernel operations
+ * - Provides different log levels for filtering messages
+ * - Integrates with Rust's standard logging framework
+ * - Essential for kernel development and troubleshooting
+ * - Allows tracking of kernel initialization and runtime behavior
+ *
+ * The logger outputs to COM2 serial port, allowing external monitoring
+ * of kernel messages during development and debugging.
+ */
+
 use core::fmt::Write;
 
-use log::{Record, Level, Metadata, LevelFilter};
+use log::{Level, LevelFilter, Metadata, Record};
 
 /// Custom logger implementation for CluuLogger.
 struct CluuLogger;
@@ -34,6 +52,10 @@ static LOGGER: CluuLogger = CluuLogger;
 /// # Panics
 ///
 /// If there is an error initializing the logger, a panic will occur with the corresponding error message.
+///
+/// # Note
+///
+/// This function assumes that the debug infrastructure (COM2 port) has already been initialized.
 pub fn init(clearscr: bool) {
     if clearscr {
         _ = crate::utils::writer::Writer::new().write_str("\u{001B}[2J\u{001B}[H"); // Clear screen

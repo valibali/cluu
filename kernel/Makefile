@@ -1,7 +1,24 @@
 #
-# mykernel/rust/Makefile
+# CLUU Kernel Build System
+#
+# This Makefile orchestrates the build process for the CLUU microkernel.
+# It handles font embedding, Rust compilation, and final ELF generation
+# for the x86_64 target architecture.
+#
+# Why this is important:
+# - Automates the complex kernel build process
+# - Integrates font resources into the kernel binary
+# - Coordinates Rust compilation with custom target
+# - Produces bootable ELF binary compatible with BOOTBOOT
+# - Provides documentation generation and cleanup targets
+#
+# Build process:
+# 1. Convert PSF font to object file for embedding
+# 2. Compile Rust kernel with custom target specification
+# 3. Generate final ELF binary ready for bootloader
 #
 # Copyright (C) 2017 - 2021 Vinay Chandra
+# Modified for CLUU kernel
 #
 # Permission is hereby granted, free of charge, to any person
 # obtaining a copy of this software and associated documentation
@@ -24,8 +41,6 @@
 # DEALINGS IN THE SOFTWARE.
 #
 # This file is part of the BOOTBOOT Protocol package.
-# @brief An example Makefile for sample kernel
-#
 #
 
 all: cluu.x86_64.elf

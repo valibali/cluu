@@ -1,8 +1,29 @@
+/*
+ * UART 16550 Serial Port Driver
+ *
+ * This module implements a driver for the 16550 UART (Universal Asynchronous
+ * Receiver/Transmitter) serial controller, which is the standard serial port
+ * interface on x86 systems.
+ *
+ * Why this is important:
+ * - Provides early debug output before graphics are initialized
+ * - Essential for kernel debugging and logging
+ * - Allows communication with host system during development
+ * - Implements a reliable, simple communication channel
+ * - Forms the backbone of our logging infrastructure
+ *
+ * The 16550 UART is accessed through port I/O and provides buffered serial
+ * communication. This driver handles initialization, status checking, and
+ * data transmission through the serial interface.
+ */
+
+use core::convert::TryInto;
+
+use bitflags::bitflags;
+
 use crate::syscall::io::{Io, ReadOnly};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::syscall::pio::Pio;
-use bitflags::bitflags;
-use core::convert::TryInto;
 
 bitflags! {
     /// Interrupt enable flags

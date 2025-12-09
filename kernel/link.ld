@@ -1,7 +1,25 @@
 /*
- * mykernel/rust/link.ld
+ * CLUU Kernel Linker Script
+ *
+ * This linker script defines how the kernel binary should be laid out in memory.
+ * It specifies the memory layout, section placement, and symbol definitions
+ * required for proper kernel loading and execution under BOOTBOOT.
+ *
+ * Why this is important:
+ * - Defines the kernel's memory layout and virtual address space
+ * - Ensures proper alignment and placement of code and data sections
+ * - Provides symbols for runtime memory management
+ * - Integrates with BOOTBOOT's memory mapping expectations
+ * - Critical for proper kernel loading and execution
+ *
+ * Key features:
+ * - Maps kernel to high virtual addresses (0xffffffffffe02000+)
+ * - Defines separate sections for code, data, and BSS
+ * - Provides alignment for optimal performance
+ * - Integrates font data and other embedded resources
  *
  * Copyright (C) 2017 - 2021 Vinay Chandra
+ * Modified for CLUU kernel
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
@@ -24,8 +42,6 @@
  * DEALINGS IN THE SOFTWARE.
  *
  * This file is part of the BOOTBOOT Protocol package.
- * @brief An example linker script for sample kernel
- *
  */
 
 ENTRY(_start)

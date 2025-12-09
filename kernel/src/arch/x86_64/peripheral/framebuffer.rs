@@ -1,9 +1,25 @@
+/*
+ * Framebuffer Graphics Driver
+ *
+ * This module implements a basic framebuffer driver for graphics output.
+ * It provides pixel-level access to the display and text rendering
+ * capabilities using a PSF2 font.
+ *
+ * Why this is important:
+ * - Enables visual output from the kernel
+ * - Provides debugging capabilities through on-screen text
+ * - Implements basic graphics primitives for kernel UI
+ * - Supports early boot diagnostics and status display
+ * - Forms the foundation for any future graphical interfaces
+ *
+ * The framebuffer is memory-mapped and allows direct pixel manipulation.
+ * Text rendering is implemented using bitmap fonts embedded in the kernel.
+ */
+
 use core::{
     ptr::{addr_of, write_bytes},
     slice,
 };
-
-use log::info;
 
 pub struct FrameBuffer {
     pub screen: &'static mut [u32],
@@ -49,7 +65,7 @@ impl FrameBuffer {
             }
         }
 
-        info!("Screentest was drawn.");
+        log::info!("Screentest was drawn.");
     }
 
     /// Puts a pixel of the specified color at the given coordinates (x, y) on the screen.
@@ -89,7 +105,7 @@ impl FrameBuffer {
         use crate::bootboot::*;
 
         // Get the font structure pointer
-        let font: *mut psf2_t = { addr_of!(_binary_font_psf_start) } as *const u64 as *mut psf2_t;
+        let font: *mut Psf2T = { addr_of!(_binary_font_psf_start) } as *const u64 as *mut Psf2T;
         let psf = unsafe { *font };
 
         // Extract font properties

@@ -1,3 +1,16 @@
+# Cargo Build Configuration for CLUU Kernel
+#
+# This configuration file tells Cargo how to build the CLUU kernel for a
+# bare-metal environment. It enables unstable features necessary for
+# kernel development and specifies our custom target.
+#
+# Why this is important:
+# - Enables building Rust's core library from source for our custom target
+# - Provides compiler built-ins needed for bare-metal environment
+# - Includes memory management functions (memcpy, memset, etc.)
+# - Points to our custom target specification
+# - Essential for no_std kernel development
+
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]
 build-std-features = ["compiler-builtins-mem"]

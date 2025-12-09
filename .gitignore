@@ -8,3 +8,4 @@ bootboot_image/disk-x86.img
 rust-os-gdb
 *.lock
 utilies/mkbootimg/*
+.aider*

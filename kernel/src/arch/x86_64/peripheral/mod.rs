@@ -1,14 +1,34 @@
-use crate::syscall::pio::Pio;
+/*
+ * Peripheral Device Management
+ *
+ * This module manages all peripheral devices and hardware interfaces
+ * available to the kernel. It provides initialization and access to
+ * various hardware components like serial ports and framebuffers.
+ *
+ * Why this is important:
+ * - Centralizes all hardware device management
+ * - Provides safe, synchronized access to hardware resources
+ * - Implements proper initialization sequences for devices
+ * - Enables early debug output and graphics capabilities
+ * - Forms the foundation for all hardware interaction in the kernel
+ *
+ * Key peripherals managed:
+ * - COM2 serial port for debug logging
+ * - Framebuffer for graphics output
+ * - Future expansion for other hardware devices
+ */
+
 use core::ptr::addr_of_mut;
-use log::info;
 use spin::Mutex;
 
-use self::framebuffer::*;
+use crate::bootboot::{bootboot, fb};
+use crate::syscall::pio::Pio;
+
+use self::framebuffer::FrameBuffer;
 use self::uart_16550::SerialPort;
-use crate::bootboot::*;
-use crate::utils::logger;
 
 pub mod framebuffer;
+pub mod pic;
 pub mod uart_16550;
 
 /// Mutex-protected static instance of COM2 serial port.
@@ -17,15 +37,26 @@ pub static COM2: Mutex<SerialPort<Pio<u8>>> = Mutex::new(SerialPort::<Pio<u8>>::
 /// Mutex-protected static instance of the framebuffer.
 pub static FB: Mutex<Option<FrameBuffer>> = Mutex::new(None);
 
-/// Initializes the peripherals.
+/// Initializes the debug port (COM2) for logging.
 ///
-/// This function initializes the COM2 serial port and the framebuffer.
-pub fn init_peripherals() {
+/// This function should be called early in the boot process before any logging occurs.
+pub fn init_debug_port() {
     COM2.lock().init();
-    logger::init(true); // Init the logger engine, with clearing the screen
+}
 
-    // Now we can emit log messages
+/// Initializes the peripherals (excluding debug ports).
+///
+/// This function initializes the framebuffer and other peripherals,
+/// but excludes debug infrastructure which should be initialized earlier.
+pub fn init_peripherals() {
+    // Initialize framebuffer
+    init_framebuffer();
+    log::info!("Framebuffer initialization complete");
+    pic::init_pic();
+    log::info!("PIC initialization complete");
+}
 
+fn init_framebuffer() {
     match FrameBuffer::new(
         { addr_of_mut!(fb) } as *mut u32,
         unsafe { bootboot.fb_scanline },
@@ -33,16 +64,9 @@ pub fn init_peripherals() {
         unsafe { bootboot.fb_height },
     ) {
         Ok(instace) => {
-            info!("Framebuffer mapped.");
+            log::info!("Framebuffer mapped.");
             *FB.lock() = Some(instace)
         }
         Err(err) => panic!("{}", err),
     }
-
-    // *FB.lock() = Some(FrameBuffer::new(
-    //     unsafe { addr_of_mut!(fb) } as *mut u32,
-    //     unsafe { bootboot.fb_scanline },
-    //     unsafe { bootboot.fb_width },
-    //     unsafe { bootboot.fb_height },
-    // ));
 }
