@@ -5,7 +5,7 @@
  * It handles character rendering, cursor management, scrolling, and ANSI colors.
  */
 
-use crate::arch::x86_64::peripheral::FB;
+use crate::drivers::display::FB;
 use crate::bootboot::*;
 use core::ptr::addr_of;
 use spin::Mutex;
@@ -88,7 +88,11 @@ impl Console {
     pub fn init(&mut self) {
         log::info!("Console init: Acquiring framebuffer lock...");
         if let Some(ref framebuffer) = *FB.lock() {
-            log::info!("Console init: Framebuffer found, dimensions: {}x{}", framebuffer.width, framebuffer.height);
+            log::info!(
+                "Console init: Framebuffer found, dimensions: {}x{}",
+                framebuffer.width,
+                framebuffer.height
+            );
             self.cols = framebuffer.width / self.char_width;
             self.rows = framebuffer.height / self.char_height;
             log::info!("Console init: Character grid: {}x{}", self.cols, self.rows);
@@ -103,19 +107,23 @@ impl Console {
     pub fn clear_screen(&mut self) {
         log::info!("Console clear_screen: Starting...");
         if let Some(ref mut framebuffer) = *FB.lock() {
-            log::info!("Console clear_screen: Got framebuffer {}x{}", framebuffer.width, framebuffer.height);
-            
+            log::info!(
+                "Console clear_screen: Got framebuffer {}x{}",
+                framebuffer.width,
+                framebuffer.height
+            );
+
             // Use memset-like approach for better performance
             let bg_color = self.bg_color.to_u32();
             let total_pixels = (framebuffer.width * framebuffer.height) as usize;
-            
+
             log::info!("Console clear_screen: Clearing {} pixels...", total_pixels);
-            
+
             // Clear screen more efficiently
             for i in 0..total_pixels.min(framebuffer.screen.len()) {
                 framebuffer.screen[i] = bg_color;
             }
-            
+
             log::info!("Console clear_screen: Screen cleared");
         } else {
             log::error!("Console clear_screen: No framebuffer!");
@@ -310,36 +318,34 @@ pub fn backspace() {
     CONSOLE.lock().backspace();
 }
 
-// Macro for easy console printing (without heap allocation)
+// Macro for easy console printing (with heap allocation)
 #[macro_export]
 macro_rules! console_print {
     ($fmt:expr) => {
-        $crate::utils::console::write_str($fmt)
+        $crate::utils::io::console::write_str($fmt)
     };
-    ($fmt:expr, $($arg:expr),*) => {{
-        use heapless::String;
-        let mut s: String<256> = String::new();
+    ($fmt:expr, $($arg:tt)*) => {{
+        let mut s = alloc::string::String::new();
         use core::fmt::Write;
-        let _ = write!(s, $fmt, $($arg),*);
-        $crate::utils::console::write_str(&s);
+        let _ = write!(s, $fmt, $($arg)*);
+        $crate::utils::io::console::write_str(&s);
     }};
 }
 
 #[macro_export]
 macro_rules! console_println {
     () => {
-        $crate::utils::console::write_str("\n")
+        $crate::utils::io::console::write_str("\n")
     };
     ($fmt:expr) => {{
-        $crate::utils::console::write_str($fmt);
-        $crate::utils::console::write_str("\n");
+        $crate::utils::io::console::write_str($fmt);
+        $crate::utils::io::console::write_str("\n");
     }};
-    ($fmt:expr, $($arg:expr),*) => {{
-        use heapless::String;
-        let mut s: String<256> = String::new();
+    ($fmt:expr, $($arg:tt)*) => {{
+        let mut s = alloc::string::String::new();
         use core::fmt::Write;
-        let _ = write!(s, $fmt, $($arg),*);
-        $crate::utils::console::write_str(&s);
-        $crate::utils::console::write_str("\n");
+        let _ = write!(s, $fmt, $($arg)*);
+        $crate::utils::io::console::write_str(&s);
+        $crate::utils::io::console::write_str("\n");
     }};
 }

@@ -21,9 +21,7 @@ use core::convert::TryInto;
 
 use bitflags::bitflags;
 
-use crate::syscall::io::{Io, ReadOnly};
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use crate::syscall::pio::Pio;
+use crate::io::{Io, ReadOnly, Pio};
 
 bitflags! {
     /// Interrupt enable flags

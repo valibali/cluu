@@ -18,7 +18,58 @@
 
 use core::{arch::asm, marker::PhantomData};
 
-use super::io::Io;
+/// I/O interface trait
+pub trait Io {
+    /// The value type used for I/O operations.
+    type Value: Copy + PartialEq + core::ops::BitAnd<Output = Self::Value> + core::ops::BitOr<Output = Self::Value> + core::ops::Not<Output = Self::Value>;
+
+    /// Reads the value from the I/O interface.
+    fn read(&self) -> Self::Value;
+
+    /// Writes the value to the I/O interface.
+    fn write(&mut self, value: Self::Value);
+
+    /// Reads the value from the I/O interface and checks if the specified flags are set.
+    fn readf(&self, flags: Self::Value) -> bool  {
+        (self.read() & flags) == flags
+    }
+
+    /// Writes the value to the I/O interface with the specified flags.
+    fn writef(&mut self, flags: Self::Value, value: bool) {
+        let tmp: Self::Value = match value {
+            true => self.read() | flags,
+            false => self.read() & !flags,
+        };
+        self.write(tmp);
+    }
+}
+
+/// Wrapper for an I/O interface providing read-only access.
+pub struct ReadOnly<I> {
+    inner: I
+}
+
+impl<I> ReadOnly<I> {
+    /// Creates a new `ReadOnly` wrapper instance.
+    pub const fn new(inner: I) -> ReadOnly<I> {
+        ReadOnly {
+            inner
+        }
+    }
+}
+
+impl<I: Io> ReadOnly<I> {
+    /// Reads the value from the I/O interface.
+    #[inline(always)]
+    pub fn read(&self) -> I::Value {
+        self.inner.read()
+    }
+
+    /// Reads the value from the I/O interface and checks if the specified flags are set.
+    pub fn readf(&self, flags: I::Value) -> bool {
+        self.inner.readf(flags)
+    }
+}
 
 /// Generic PIO
 #[derive(Copy, Clone)]

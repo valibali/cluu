@@ -3,7 +3,7 @@
  *
  * This module contains various utility functions, macros, and support
  * code used throughout the kernel. It provides common functionality
- * like logging, text output, and debugging macros.
+ * organized into logical groups for better maintainability.
  *
  * Why this is important:
  * - Provides essential debugging and logging infrastructure
@@ -12,18 +12,18 @@
  * - Provides macros for simplified kernel development
  * - Forms the support infrastructure for kernel debugging
  *
- * Key components:
- * - writer: Serial port text output functionality
- * - macros: Kernel-specific print and debug macros
- * - logger: Structured logging system for kernel messages
+ * Utility categories:
+ * - io: Input/output utilities (console, writer, macros)
+ * - system: System management utilities (timer, reboot)
+ * - ui: User interface utilities (shell, line editor)
+ * - debug: Debugging and logging utilities
  */
 
-pub mod writer;
-#[macro_use]
-pub mod macros;
-pub mod logger;
-pub mod timer;
-pub mod console;
-pub mod line_editor;
-pub mod shell;
-pub mod reboot;
+pub mod debug;
+pub mod io;
+pub mod system;
+pub mod ui;
+
+// Re-export commonly used items for convenience
+pub use io::{console, writer};
+pub use system::{reboot, timer};

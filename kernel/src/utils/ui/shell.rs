@@ -1,43 +1,44 @@
 /*
- * CLUU Shell
+ * CLUU Shell - GRID
  *
  * A simple shell implementation with basic commands.
- * Provides a command-line interface for the kernel.
+ * Uses the TTY layer for line editing and console I/O.
  */
 
+use crate::components::tty::{self};
 use crate::utils::{
-    console::{self, Color},
-    line_editor::LineEditor,
-    timer,
+    io::console::{self, Color},
+    system::timer,
 };
+use alloc::string::String;
 use core::fmt::Write;
 use core::str::SplitWhitespace;
-use heapless::String;
 
-pub struct Shell {
-    editor: LineEditor,
-}
+pub struct Shell;
 
 impl Shell {
     pub fn new() -> Self {
-        Self {
-            editor: LineEditor::new(),
-        }
+        Shell
     }
 
     pub fn init(&mut self) {
         log::info!("Shell init: Starting...");
-        log::info!("Shell init: Clearing screen...");
-        console::clear_screen();
-        log::info!("Shell init: Screen cleared, printing banner...");
+
+        // Clear screen via TTY/console and print banner
+        tty::with_tty0(|tty0| {
+            tty0.clear();
+        });
+
         self.print_banner();
-        log::info!("Shell init: Banner printed, printing prompt...");
         self.print_prompt();
+
         log::info!("Shell init: Complete");
     }
 
+    /// Handle a single character from keyboard.
+    /// Delegates to TTY0 for editing; executes full lines.
     pub fn handle_char(&mut self, ch: char) {
-        if let Some(line) = self.editor.handle_char(ch) {
+        if let Some(line) = tty::tty0_handle_char(ch) {
             self.execute_command(&line);
             self.print_prompt();
         }
@@ -186,7 +187,7 @@ impl Shell {
             "history" => self.cmd_history(),
             "test" => self.cmd_test(),
             "colors" => self.cmd_colors(),
-            "" => {} // Empty command
+            "" => {}
             _ => {
                 console::write_colored("Unknown command: ", Color::RED, Color::BLACK);
                 console::write_colored(command, Color::WHITE, Color::BLACK);
@@ -238,11 +239,11 @@ impl Shell {
 
         console::write_colored("System uptime: ", Color::CYAN, Color::BLACK);
 
-        let mut time_str: String<64> = String::new();
+        let mut time_str = String::new();
         let _ = write!(time_str, "{}h {}m {}s", hours, minutes % 60, seconds % 60);
         console::write_colored(&time_str, Color::WHITE, Color::BLACK);
 
-        let mut ms_str: String<32> = String::new();
+        let mut ms_str = String::new();
         let _ = write!(ms_str, " ({} ms)\n", uptime);
         console::write_colored(&ms_str, Color::GRAY, Color::BLACK);
     }
@@ -261,36 +262,6 @@ impl Shell {
         );
     }
 
-    fn cmd_reboot(&self) {
-        console::write_colored(
-            "Rebooting system in 3 seconds...\n",
-            Color::RED,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Press Ctrl+C to cancel (not implemented yet)\n",
-            Color::YELLOW,
-            Color::BLACK,
-        );
-
-        // Simple countdown
-        for i in (1..=3).rev() {
-            let mut countdown: String<32> = String::new();
-            let _ = write!(countdown, "Rebooting in {}...\n", i);
-            console::write_colored(&countdown, Color::RED, Color::BLACK);
-
-            // Simple delay loop (not precise, but works for demo)
-            for _ in 0..10000000 {
-                unsafe { core::arch::asm!("nop") };
-            }
-        }
-
-        console::write_colored("Rebooting now!\n", Color::RED, Color::BLACK);
-
-        // Perform the actual reboot
-        crate::utils::reboot::reboot();
-    }
-
     fn cmd_echo(&self, args: SplitWhitespace) {
         let mut first = true;
         for arg in args {
@@ -304,19 +275,21 @@ impl Shell {
     }
 
     fn cmd_history(&self) {
-        let history = self.editor.get_history();
-        if history.is_empty() {
-            console::write_colored("No command history.\n", Color::LIGHT_GRAY, Color::BLACK);
-        } else {
-            console::write_colored("Command history:\n", Color::CYAN, Color::BLACK);
-            for (i, cmd) in history.iter().enumerate() {
-                let mut line: String<32> = String::new();
-                let _ = write!(line, "  {}: ", i + 1);
-                console::write_colored(&line, Color::GRAY, Color::BLACK);
-                console::write_colored(cmd, Color::WHITE, Color::BLACK);
-                console::write_str("\n");
+        tty::with_tty0(|tty0| {
+            let history = tty0.history();
+            if history.is_empty() {
+                console::write_colored("No command history.\n", Color::LIGHT_GRAY, Color::BLACK);
+            } else {
+                console::write_colored("Command history:\n", Color::CYAN, Color::BLACK);
+                for (i, cmd) in history.iter().enumerate() {
+                    let mut line = String::new();
+                    let _ = write!(line, "  {}: ", i + 1);
+                    console::write_colored(&line, Color::GRAY, Color::BLACK);
+                    console::write_colored(cmd, Color::WHITE, Color::BLACK);
+                    console::write_str("\n");
+                }
             }
-        }
+        });
     }
 
     fn cmd_test(&self) {
@@ -344,6 +317,33 @@ impl Shell {
         console::write_colored("PASS\n", Color::GREEN, Color::BLACK);
 
         console::write_colored("All tests completed!\n", Color::GREEN, Color::BLACK);
+    }
+
+    fn cmd_reboot(&self) {
+        console::write_colored(
+            "Rebooting system in 3 seconds...\n",
+            Color::RED,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Press Ctrl+C to cancel (not implemented yet)\n",
+            Color::YELLOW,
+            Color::BLACK,
+        );
+
+        // Simple countdown (busy loop)
+        for i in (1..=3).rev() {
+            let mut countdown = String::new();
+            let _ = write!(countdown, "Rebooting in {}...\n", i);
+            console::write_colored(&countdown, Color::RED, Color::BLACK);
+
+            for _ in 0..10_000_000 {
+                unsafe { core::arch::asm!("nop") };
+            }
+        }
+
+        console::write_colored("Rebooting now!\n", Color::RED, Color::BLACK);
+        crate::utils::system::reboot::reboot();
     }
 
     fn cmd_colors(&self) {

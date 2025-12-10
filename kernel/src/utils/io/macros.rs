@@ -56,7 +56,7 @@
 macro_rules! print {
     ($($arg:tt)*) => ({
         use core::fmt::Write;
-        let _ = $crate::utils::writer::Writer::new().write_fmt(format_args!($($arg)*)).expect("Printing fmt failed");
+        let _ = $crate::utils::io::writer::Writer::new().write_fmt(format_args!($($arg)*)).expect("Printing fmt failed");
     });
 }
 
@@ -72,9 +72,9 @@ macro_rules! print {
 /// ```
 #[macro_export]
 macro_rules! serial_println {
-    () => (print!("\n"));
-    ($fmt:expr) => (print!(concat!($fmt, "\n")));
-    ($fmt:expr, $($arg:tt)*) => (print!(concat!($fmt, "\n"), $($arg)*));
+    () => ($crate::print!("\n"));
+    ($fmt:expr) => ($crate::print!(concat!($fmt, "\n")));
+    ($fmt:expr, $($arg:tt)*) => ($crate::print!(concat!($fmt, "\n"), $($arg)*));
 }
 
 /// Clears the console screen.
@@ -89,5 +89,7 @@ macro_rules! serial_println {
 /// ```
 #[macro_export]
 macro_rules! serial_clearcls {
-    () => (print!("\u{001B}[2J\u{001B}[H"));
+    () => {
+        $crate::print!("\u{001B}[2J\u{001B}[H")
+    };
 }

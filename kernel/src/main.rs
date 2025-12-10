@@ -32,8 +32,10 @@ use core::panic::PanicInfo;
 
 mod arch;
 mod bootboot;
+mod components;
+mod drivers;
+mod io;
 mod memory;
-mod syscall;
 mod utils;
 
 #[repr(C, align(16))]
@@ -105,9 +107,70 @@ pub unsafe extern "C" fn _start() -> ! {
 ///
 #[unsafe(no_mangle)]
 pub extern "C" fn kstart() -> ! {
-    arch::kstart()
-}
+    // Step 1: Initialize debug infrastructure first
+    utils::debug::init_debug_infrastructure();
 
+    // Step 2: Initialize logging system
+    utils::debug::logger::init(true);
+    log::info!("CLUU Kernel starting...");
+
+    // Step 3: Initialize GDT (Global Descriptor Table)
+    arch::x86_64::gdt::init();
+
+    // Step 4: Initialize memory management
+    log::info!("Initializing memory management...");
+    memory::init(core::ptr::addr_of!(bootboot::bootboot));
+
+    // Test heap allocation
+    {
+        use alloc::vec::Vec;
+        let mut test_vec = Vec::new();
+        test_vec.push(42);
+        test_vec.push(1337);
+        log::info!("Heap test successful: {:?}", test_vec);
+    }
+
+    log::info!("Memory management initialized successfully");
+
+    // Step 5: Initialize IDT (Interrupt Descriptor Table)
+    arch::x86_64::idt::init();
+
+    // Step 6: Initialize system drivers
+    drivers::system::init();
+
+    // Step 7: Initialize display driver
+    drivers::display::init();
+
+    // Step 8: Initialize input drivers
+    drivers::input::init();
+
+    // Step 9: Initialize console
+    utils::io::console::init();
+
+    // Step 10: Enable interrupts
+    x86_64::instructions::interrupts::enable();
+    log::info!("Interrupts enabled");
+
+    // Step 11: Initialize TTY system
+    components::tty::init_tty0();
+    log::info!("TTY system initialized");
+
+    // Step 12: Initialize and start shell
+    let mut shell = utils::ui::shell::Shell::new();
+    shell.init();
+    log::info!("Shell initialized");
+
+    log::info!("Kernel initialization complete!");
+
+    // Main interactive loop - handle keyboard input for shell
+    loop {
+        if let Some(ch) = drivers::input::keyboard::read_char() {
+            shell.handle_char(ch);
+        } else {
+            x86_64::instructions::hlt();
+        }
+    }
+}
 
 /// ===============================
 ///  PANIC HANDLER

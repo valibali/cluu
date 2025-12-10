@@ -20,8 +20,8 @@ use core::fmt;
 
 use spin::MutexGuard;
 
-use crate::arch::x86_64::peripheral::{uart_16550::SerialPort, COM2};
-use crate::syscall::pio::Pio;
+use crate::drivers::serial::{SerialPort, COM2};
+use crate::io::Pio;
 
 /// A simple writer that writes to the serial port.
 pub struct Writer<'a> {

@@ -266,7 +266,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     // Handle keyboard interrupt using our keyboard driver
-    crate::arch::x86_64::peripheral::keyboard::handle_keyboard_interrupt();
+    crate::drivers::input::keyboard::handle_keyboard_interrupt();
 
     // Send EOI to PIC
     unsafe {

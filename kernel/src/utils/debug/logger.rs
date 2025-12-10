@@ -20,6 +20,8 @@ use core::fmt::Write;
 
 use log::{Level, LevelFilter, Metadata, Record};
 
+use crate::serial_println;
+
 /// Custom logger implementation for CluuLogger.
 struct CluuLogger;
 
@@ -61,7 +63,7 @@ pub fn init(clearscr: bool) {
         _ = crate::utils::writer::Writer::new().write_str("\u{001B}[2J\u{001B}[H"); // Clear screen
     }
 
-    let logger_init_result = 
+    let logger_init_result =
         log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info));
 
     match logger_init_result {
