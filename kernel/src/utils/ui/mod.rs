@@ -6,4 +6,4 @@
  */
 
 pub mod line_editor;
-pub mod shell;
+pub mod kshell;

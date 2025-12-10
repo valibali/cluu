@@ -14,9 +14,9 @@ use alloc::string::String;
 use core::fmt::Write;
 use core::str::SplitWhitespace;
 
-pub struct Shell;
+pub struct KShell;
 
-impl Shell {
+impl KShell {
     pub fn new() -> Self {
         Shell
     }

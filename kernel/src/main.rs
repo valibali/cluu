@@ -156,7 +156,7 @@ pub extern "C" fn kstart() -> ! {
     log::info!("TTY system initialized");
 
     // Step 12: Initialize and start shell
-    let mut shell = utils::ui::shell::Shell::new();
+    let mut shell = utils::ui::kshell::KShell::new();
     shell.init();
     log::info!("Shell initialized");
 
