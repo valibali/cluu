@@ -22,3 +22,4 @@ pub mod writer;
 #[macro_use]
 pub mod macros;
 pub mod logger;
+pub mod timer;

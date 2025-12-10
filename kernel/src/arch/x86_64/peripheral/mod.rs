@@ -28,6 +28,7 @@ use self::framebuffer::FrameBuffer;
 use self::uart_16550::SerialPort;
 
 pub mod framebuffer;
+pub mod keyboard;
 pub mod pic;
 pub mod uart_16550;
 
@@ -57,6 +58,7 @@ pub fn init_peripherals() {
     log::info!("Initializing PIT (100 Hz)...");
     pic::init_pit(100);
     log::info!("PIT initialization complete");
+    log::info!("Keyboard driver ready");
 }
 
 fn init_framebuffer() {

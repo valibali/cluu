@@ -72,10 +72,24 @@ pub fn kstart() -> ! {
     interrupts::enable();
 
     log::info!("Kernel initialization complete - entering main loop");
+    log::info!("Type characters to test keyboard input (they will be echoed):");
 
-    // NOTE: Interrupts remain disabled until we're ready to handle them
-    // This ensures no asynchronous interrupts occur during initialization
+    // Simple keyboard demo loop
     loop {
+        // Check for keyboard input
+        if crate::arch::x86_64::peripheral::keyboard::has_char() {
+            if let Some(ch) = crate::arch::x86_64::peripheral::keyboard::read_char() {
+                // Echo the character back
+                crate::print!("{}", ch);
+                
+                // Special handling for Enter key
+                if ch == '\n' {
+                    log::info!("Enter key pressed!");
+                }
+            }
+        }
+        
+        // Yield CPU when no input is available
         hlt();
     }
 }

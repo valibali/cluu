@@ -32,8 +32,10 @@ pub fn init_pic() {
 }
 
 pub fn init_pit(frequency_hz: u32) {
-    let pit_frequency: u32 = 1_193_182; // Hz
+    let pit_frequency: u32 = 1_193_182; // Hz - PIT base frequency
     let divisor: u16 = (pit_frequency / frequency_hz) as u16;
+
+    log::info!("Initializing PIT with {}Hz (divisor: {})", frequency_hz, divisor);
 
     unsafe {
         let mut command = Port::<u8>::new(0x43);
@@ -42,7 +44,10 @@ pub fn init_pit(frequency_hz: u32) {
         // Channel 0, access mode lo/hi, mode 3 (square wave), binary
         command.write(0x36);
 
+        // Write divisor in two parts: low byte first, then high byte
         channel0.write((divisor & 0xFF) as u8); // low byte
         channel0.write((divisor >> 8) as u8); // high byte
     }
+
+    log::info!("PIT configured for {}Hz timer interrupts", frequency_hz);
 }
