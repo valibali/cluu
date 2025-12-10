@@ -1,15 +1,18 @@
 /*
  * CLUU Shell - GRID
  *
- * A simple shell implementation with basic commands.
- * Uses the TTY layer for line editing and console I/O.
+ * A simple kernel shell (GRID) with basic commands.
+ * Uses:
+ *  - TTY layer for line editing and history
+ *  - framebuffer console for output
  */
 
-use crate::components::tty::{self};
+use crate::components::tty;
 use crate::utils::{
-    io::console::{self, Color},
-    system::timer,
+    console::{self, Color},
+    timer,
 };
+
 use alloc::string::String;
 use core::fmt::Write;
 use core::str::SplitWhitespace;
@@ -17,34 +20,31 @@ use core::str::SplitWhitespace;
 pub struct KShell;
 
 impl KShell {
-    pub fn new() -> Self {
-        Shell
-    }
-
-    pub fn init(&mut self) {
+    /// Initialize the shell: clear screen, print banner + prompt.
+    pub fn init() {
         log::info!("Shell init: Starting...");
 
-        // Clear screen via TTY/console and print banner
+        // Clear via TTY/console
         tty::with_tty0(|tty0| {
             tty0.clear();
         });
 
-        self.print_banner();
-        self.print_prompt();
+        Self::print_banner();
+        Self::print_prompt();
 
         log::info!("Shell init: Complete");
     }
 
-    /// Handle a single character from keyboard.
-    /// Delegates to TTY0 for editing; executes full lines.
-    pub fn handle_char(&mut self, ch: char) {
+    /// Handle one character from keyboard.
+    /// Delegates to TTY0 for line editing; executes full lines.
+    pub fn handle_char(ch: char) {
         if let Some(line) = tty::tty0_handle_char(ch) {
-            self.execute_command(&line);
-            self.print_prompt();
+            Self::execute_command(&line);
+            Self::print_prompt();
         }
     }
 
-    fn print_banner(&self) {
+    fn print_banner() {
         console::write_str(
             "                                                                                       \n",
         );
@@ -161,14 +161,14 @@ impl KShell {
         console::write_str("\n");
     }
 
-    fn print_prompt(&self) {
+    fn print_prompt() {
         console::write_colored("[", Color::GRAY, Color::BLACK);
         console::write_colored("CLUU GRID", Color::YELLOW, Color::BLACK);
         console::write_colored("] ", Color::GRAY, Color::BLACK);
         console::write_colored("› ", Color::GREEN, Color::BLACK);
     }
 
-    fn execute_command(&mut self, line: &str) {
+    fn execute_command(line: &str) {
         let line = line.trim();
         if line.is_empty() {
             return;
@@ -178,15 +178,15 @@ impl KShell {
         let command = parts.next().unwrap_or("");
 
         match command {
-            "help" => self.cmd_help(),
-            "cls" | "clear" => self.cmd_clear(),
-            "time" | "uptime" => self.cmd_time(),
-            "mem" | "memory" => self.cmd_memory(),
-            "reboot" => self.cmd_reboot(),
-            "echo" => self.cmd_echo(parts),
-            "history" => self.cmd_history(),
-            "test" => self.cmd_test(),
-            "colors" => self.cmd_colors(),
+            "help" => Self::cmd_help(),
+            "cls" | "clear" => Self::cmd_clear(),
+            "time" | "uptime" => Self::cmd_time(),
+            "mem" | "memory" => Self::cmd_memory(),
+            "reboot" => Self::cmd_reboot(),
+            "echo" => Self::cmd_echo(parts),
+            "history" => Self::cmd_history(),
+            "test" => Self::cmd_test(),
+            "colors" => Self::cmd_colors(),
             "" => {}
             _ => {
                 console::write_colored("Unknown command: ", Color::RED, Color::BLACK);
@@ -201,7 +201,7 @@ impl KShell {
         }
     }
 
-    fn cmd_help(&self) {
+    fn cmd_help() {
         console::write_colored("Available commands:\n", Color::CYAN, Color::BLACK);
         console::write_str("\n");
 
@@ -227,11 +227,11 @@ impl KShell {
         console::write_str("\n");
     }
 
-    fn cmd_clear(&self) {
+    fn cmd_clear() {
         console::clear_screen();
     }
 
-    fn cmd_time(&self) {
+    fn cmd_time() {
         let uptime = timer::uptime_ms();
         let seconds = uptime / 1000;
         let minutes = seconds / 60;
@@ -248,7 +248,7 @@ impl KShell {
         console::write_colored(&ms_str, Color::GRAY, Color::BLACK);
     }
 
-    fn cmd_memory(&self) {
+    fn cmd_memory() {
         console::write_colored("Memory Information:\n", Color::CYAN, Color::BLACK);
         console::write_colored("  Kernel heap: ", Color::WHITE, Color::BLACK);
         console::write_colored("Available\n", Color::GREEN, Color::BLACK);
@@ -262,7 +262,35 @@ impl KShell {
         );
     }
 
-    fn cmd_echo(&self, args: SplitWhitespace) {
+    fn cmd_reboot() {
+        console::write_colored(
+            "Rebooting system in 3 seconds...\n",
+            Color::RED,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Press Ctrl+C to cancel (not implemented yet)\n",
+            Color::YELLOW,
+            Color::BLACK,
+        );
+
+        for i in (1..=3).rev() {
+            let mut countdown = String::new();
+            let _ = write!(countdown, "Rebooting in {}...\n", i);
+            console::write_colored(&countdown, Color::RED, Color::BLACK);
+
+            // Simple busy-wait delay
+            for _ in 0..10_000_000 {
+                unsafe { core::arch::asm!("nop") };
+            }
+        }
+
+        console::write_colored("Rebooting now!\n", Color::RED, Color::BLACK);
+
+        crate::utils::reboot::reboot();
+    }
+
+    fn cmd_echo(args: SplitWhitespace) {
         let mut first = true;
         for arg in args {
             if !first {
@@ -274,7 +302,7 @@ impl KShell {
         console::write_str("\n");
     }
 
-    fn cmd_history(&self) {
+    fn cmd_history() {
         tty::with_tty0(|tty0| {
             let history = tty0.history();
             if history.is_empty() {
@@ -292,7 +320,7 @@ impl KShell {
         });
     }
 
-    fn cmd_test(&self) {
+    fn cmd_test() {
         console::write_colored("Running system tests...\n", Color::CYAN, Color::BLACK);
 
         // Test 1: Interrupt test
@@ -319,34 +347,7 @@ impl KShell {
         console::write_colored("All tests completed!\n", Color::GREEN, Color::BLACK);
     }
 
-    fn cmd_reboot(&self) {
-        console::write_colored(
-            "Rebooting system in 3 seconds...\n",
-            Color::RED,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Press Ctrl+C to cancel (not implemented yet)\n",
-            Color::YELLOW,
-            Color::BLACK,
-        );
-
-        // Simple countdown (busy loop)
-        for i in (1..=3).rev() {
-            let mut countdown = String::new();
-            let _ = write!(countdown, "Rebooting in {}...\n", i);
-            console::write_colored(&countdown, Color::RED, Color::BLACK);
-
-            for _ in 0..10_000_000 {
-                unsafe { core::arch::asm!("nop") };
-            }
-        }
-
-        console::write_colored("Rebooting now!\n", Color::RED, Color::BLACK);
-        crate::utils::system::reboot::reboot();
-    }
-
-    fn cmd_colors(&self) {
+    fn cmd_colors() {
         console::write_colored("Color Test:\n", Color::WHITE, Color::BLACK);
         console::write_str("\n");
 

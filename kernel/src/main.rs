@@ -156,19 +156,21 @@ pub extern "C" fn kstart() -> ! {
     log::info!("TTY system initialized");
 
     // Step 12: Initialize and start shell
-    let mut shell = utils::ui::kshell::KShell::new();
-    shell.init();
-    log::info!("Shell initialized");
+    log::info!("Initializing shell...");
+    utils::ui::kshell::KShell::init();
+    log::info!("Shell initialized - ready for user input");
 
     log::info!("Kernel initialization complete!");
 
     // Main interactive loop - handle keyboard input for shell
     loop {
-        if let Some(ch) = drivers::input::keyboard::read_char() {
-            shell.handle_char(ch);
-        } else {
-            x86_64::instructions::hlt();
+        if drivers::input::keyboard::has_char() {
+            if let Some(ch) = drivers::input::keyboard::read_char() {
+                utils::ui::kshell::KShell::handle_char(ch);
+            }
         }
+
+        x86_64::instructions::hlt();
     }
 }
 
