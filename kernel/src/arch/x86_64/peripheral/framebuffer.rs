@@ -81,11 +81,11 @@ impl FrameBuffer {
     /// This function assumes that the pixel coordinates are within the screen dimensions and
     /// that the framebuffer is properly initialized.
     #[inline]
-    fn put_pixel(&mut self, x: u32, y: u32, color: u32) {
+    pub fn put_pixel(&mut self, x: u32, y: u32, color: u32) {
         // Write the color value to the framebuffer
         *unsafe {
             self.screen
-                .get_unchecked_mut(((self.height - 1 - y) * self.scanline / 4 + x) as usize)
+                .get_unchecked_mut((y * self.scanline / 4 + x) as usize)
         } = color;
     }
 

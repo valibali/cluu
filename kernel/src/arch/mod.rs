@@ -62,33 +62,38 @@ pub fn kstart() -> ! {
         fb.draw_screen_test();
     }
 
-    // ===== TEST: trigger a breakpoint exception to verify IDT/GDT/TSS =====
-    log::info!("Triggering breakpoint exception (int3) test...");
-    interrupts::int3();
-    log::info!("Returned from breakpoint handler successfully.");
+    // // ===== TEST: trigger a breakpoint exception to verify IDT/GDT/TSS =====
+    // log::info!("Triggering breakpoint exception (int3) test...");
+    // interrupts::int3();
+    // log::info!("Returned from breakpoint handler successfully.");
 
     // ===== NOW enable interrupts =====
     log::info!("Enabling interrupts...");
     interrupts::enable();
 
-    log::info!("Kernel initialization complete - entering main loop");
-    log::info!("Type characters to test keyboard input (they will be echoed):");
+    log::info!("Kernel initialization complete - starting shell");
 
-    // Simple keyboard demo loop
+    // Initialize console and shell
+    log::info!("Initializing console...");
+    crate::utils::console::init();
+    log::info!("Console initialized");
+    
+    log::info!("Creating shell...");
+    let mut shell = crate::utils::shell::Shell::new();
+    log::info!("Shell created, initializing...");
+    shell.init();
+
+    log::info!("Shell initialized - ready for user input");
+
+    // Main shell loop
     loop {
         // Check for keyboard input
         if crate::arch::x86_64::peripheral::keyboard::has_char() {
             if let Some(ch) = crate::arch::x86_64::peripheral::keyboard::read_char() {
-                // Echo the character back
-                crate::print!("{}", ch);
-                
-                // Special handling for Enter key
-                if ch == '\n' {
-                    log::info!("Enter key pressed!");
-                }
+                shell.handle_char(ch);
             }
         }
-        
+
         // Yield CPU when no input is available
         hlt();
     }

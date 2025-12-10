@@ -75,15 +75,6 @@ pub fn on_timer_interrupt() {
         let mut scheduler_ticks = SCHEDULER_TICKS.lock();
         *scheduler_ticks += 1;
 
-        // Log every 100 scheduler ticks (1 second with current settings)
-        if *scheduler_ticks % 100 == 0 {
-            log::info!(
-                "Scheduler tick: {}, Uptime: {}ms",
-                *scheduler_ticks,
-                *uptime
-            );
-        }
-
         // Future: call scheduler here
         // scheduler::tick();
     }

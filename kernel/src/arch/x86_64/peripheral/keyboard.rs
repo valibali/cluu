@@ -13,10 +13,9 @@
  * - Full modifier key support (Shift, Ctrl, Alt)
  */
 
-use crate::syscall::io::Io;
-use crate::syscall::pio::Pio;
 use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
 use spin::Mutex;
+use x86_64::instructions::port::Port;
 
 /// PS/2 keyboard data port
 const KEYBOARD_DATA_PORT: u16 = 0x60;
@@ -75,8 +74,8 @@ static KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> = Mutex::new(K
 
 /// Handle keyboard interrupt
 pub fn handle_keyboard_interrupt() {
-    let keyboard_port = Pio::<u8>::new(KEYBOARD_DATA_PORT);
-    let scancode = keyboard_port.read();
+    let mut keyboard_port = Port::new(KEYBOARD_DATA_PORT);
+    let scancode = unsafe { keyboard_port.read() };
 
     let mut keyboard = KEYBOARD.lock();
 
@@ -88,11 +87,11 @@ pub fn handle_keyboard_interrupt() {
                     buffer.push(character);
 
                     // Echo character to serial for debugging
-                    log::debug!("Key pressed: '{}'", character);
+                    log::info!("Key pressed: '{}'", character);
                 }
                 DecodedKey::RawKey(key) => {
                     // Handle special keys that don't have Unicode representation
-                    log::debug!("Special key pressed: {:?}", key);
+                    log::info!("Special key pressed: {:?}", key);
                 }
             }
         }

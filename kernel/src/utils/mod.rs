@@ -23,3 +23,7 @@ pub mod writer;
 pub mod macros;
 pub mod logger;
 pub mod timer;
+pub mod console;
+pub mod line_editor;
+pub mod shell;
+pub mod reboot;
