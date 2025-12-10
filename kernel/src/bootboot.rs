@@ -52,6 +52,15 @@ pub struct MMapEnt {
     pub size: u64,
 }
 
+/// Actual memory map entry structure
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
+pub struct MMapEntry {
+    pub ptr: u64,
+    pub size: u64,
+    pub entry_type: u32,
+}
+
 #[repr(C, packed)]
 #[derive(Copy, Clone)]
 pub struct BOOTBOOT {

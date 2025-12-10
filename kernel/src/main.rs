@@ -23,12 +23,16 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
 #![allow(dead_code)]
+
+extern crate alloc;
 
 use core::panic::PanicInfo;
 
 mod arch;
 mod bootboot;
+mod memory;
 mod syscall;
 mod utils;
 

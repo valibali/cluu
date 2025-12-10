@@ -23,3 +23,30 @@ pub mod gdt;
 pub mod idt;
 pub mod interrupts;
 pub mod peripheral;
+
+/// Initialize debug infrastructure (COM2 port for logging)
+pub fn init_debug_infrastructure() {
+    // Initialize COM2 port for debug/logging output
+    peripheral::init_debug_port();
+}
+
+/// Initialize memory management subsystems
+pub fn init_memory() -> () {
+    log::info!("Initializing memory management...");
+
+    unsafe extern "C" {
+        static mut bootboot: crate::bootboot::BOOTBOOT;
+    }
+    crate::memory::init(&raw const bootboot as *const _);
+
+    // Test heap allocation
+    {
+        use alloc::vec::Vec;
+        let mut test_vec = Vec::new();
+        test_vec.push(42);
+        test_vec.push(1337);
+        log::info!("Heap test successful: {:?}", test_vec);
+    }
+
+    log::info!("Memory management initialized successfully");
+}

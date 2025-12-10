@@ -34,12 +34,13 @@ use self::x86_64::*;
 /// This function does not return.
 pub fn kstart() -> ! {
     // Initialize debug/logging infrastructure first (before any logging)
-    init_debug_infrastructure();
+    x86_64::init_debug_infrastructure();
 
     // Initialize logger after debug infrastructure is ready
     crate::utils::logger::init(true);
 
     log::info!("CLUU Kernel Starting...");
+    log::info!("Architecture: x86_64");
 
     // Initialize GDT first - critical for proper memory segmentation
     log::info!("Initializing GDT...");
@@ -55,6 +56,9 @@ pub fn kstart() -> ! {
     log::info!("Initializing peripherals...");
     peripheral::init_peripherals();
     log::info!("Peripherals initialization complete");
+
+    // Initialize memory management subsystems
+    x86_64::init_memory();
 
     // Check if framebuffer is available and print test message
     if let Some(ref mut fb) = *peripheral::FB.lock() {
@@ -97,10 +101,4 @@ pub fn kstart() -> ! {
         // Yield CPU when no input is available
         hlt();
     }
-}
-
-/// Initialize debug infrastructure (COM2 port for logging)
-fn init_debug_infrastructure() {
-    // Initialize COM2 port for debug/logging output
-    peripheral::init_debug_port();
 }
