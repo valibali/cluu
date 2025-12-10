@@ -34,7 +34,9 @@
  */
 
 use lazy_static::lazy_static;
+use spin::Mutex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+static TICKS: Mutex<u64> = Mutex::new(0);
 
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
@@ -253,9 +255,17 @@ extern "x86-interrupt" fn security_exception_handler(
 // Hardware interrupt handlers
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    // Timer interrupt - just acknowledge and return
-    // Send End of Interrupt (EOI) to PIC
     unsafe {
+        {
+            let mut ticks = TICKS.lock();
+            *ticks += 1;
+            if *ticks % 100 == 0 {
+                // Every 100 ticks, write something small.
+                // Be careful: heavy logging from an IRQ handler can flood output.
+                log::info!("Timer tick: {}", *ticks);
+            }
+        }
+
         use x86_64::instructions::port::Port;
         let mut port = Port::new(0x20);
         port.write(0x20u8);

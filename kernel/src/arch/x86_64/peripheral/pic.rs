@@ -30,3 +30,19 @@ pub fn init_pic() {
     unsafe { master_data.write(0xFCu8) }; // Enable IRQ0 (timer) and IRQ1 (keyboard)
     unsafe { slave_data.write(0xFFu8) }; // Mask all slave interrupts
 }
+
+pub fn init_pit(frequency_hz: u32) {
+    let pit_frequency: u32 = 1_193_182; // Hz
+    let divisor: u16 = (pit_frequency / frequency_hz) as u16;
+
+    unsafe {
+        let mut command = Port::<u8>::new(0x43);
+        let mut channel0 = Port::<u8>::new(0x40);
+
+        // Channel 0, access mode lo/hi, mode 3 (square wave), binary
+        command.write(0x36);
+
+        channel0.write((divisor & 0xFF) as u8); // low byte
+        channel0.write((divisor >> 8) as u8); // high byte
+    }
+}

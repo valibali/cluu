@@ -21,6 +21,7 @@
 #[macro_use]
 pub mod x86_64;
 
+use ::x86_64::instructions::interrupts;
 use ::x86_64::instructions::*;
 
 #[cfg(target_arch = "x86_64")]
@@ -60,6 +61,15 @@ pub fn kstart() -> ! {
         fb.puts("Kernel initialized successfully!");
         fb.draw_screen_test();
     }
+
+    // ===== TEST: trigger a breakpoint exception to verify IDT/GDT/TSS =====
+    log::info!("Triggering breakpoint exception (int3) test...");
+    interrupts::int3();
+    log::info!("Returned from breakpoint handler successfully.");
+
+    // ===== NOW enable interrupts =====
+    log::info!("Enabling interrupts...");
+    interrupts::enable();
 
     log::info!("Kernel initialization complete - entering main loop");
 

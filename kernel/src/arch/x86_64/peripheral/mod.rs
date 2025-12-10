@@ -54,6 +54,9 @@ pub fn init_peripherals() {
     log::info!("Framebuffer initialization complete");
     pic::init_pic();
     log::info!("PIC initialization complete");
+    log::info!("Initializing PIT (100 Hz)...");
+    pic::init_pit(100);
+    log::info!("PIT initialization complete");
 }
 
 fn init_framebuffer() {
