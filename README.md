@@ -27,8 +27,11 @@ CLUU is a hobby operating system written in Rust, currently in active developmen
 - ✅ **System Utilities**: Reboot functionality, timers, and I/O operations
 - ✅ **Console Output**: Text rendering with PSF2 font support
 
-## 🏗️ Architecture Overview
+## 🎨 Screenshots
 
+![screenshot](assets/image.png)
+
+## 🏗️ Architecture Overview
 ### Kernel Components
 ```
 kernel/
@@ -140,10 +143,6 @@ make image
 - **Memory**: Minimum 64MB RAM
 - **Storage**: Bootable from any UEFI-compatible media
 - **Emulation**: QEMU 4.0+ recommended for development
-
-## 🎨 Screenshots
-
-![CLUU Framebuffer Output](https://github.com/valibali/cluu/assets/22941355/b5eae565-61e7-4137-bb40-46f66b731cb1)
 
 ## 🤝 Contributing
 
