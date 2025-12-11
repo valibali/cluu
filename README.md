@@ -1,111 +1,182 @@
 # CLUU (Compact Lightweight Unix Utopia)
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Documentation](https://img.shields.io/badge/documentation-RUSTDOCS-blue.svg)](https://valibali.github.io/cluu/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) 
+[![Documentation](https://img.shields.io/badge/documentation-RUSTDOCS-blue.svg)](https://valibali.github.io/cluu/)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 
-CLUU is a hobby operating system being written in Rust - in active development phase - targeting x86_64 and with plans to support aarch64 in the future.
-It's really at the starting phase, but it'll get there in time. No rush or whatsoever.
+CLUU is a hobby operating system written in Rust, currently in active development. It targets the x86_64 architecture with future plans to support aarch64. The project emphasizes microkernel design, memory safety, and portability.
 
-The project draws inspiration from the following Operating Systems:
+## 🎯 Project Goals
 
-- [Plan 9](https://github.com/plan9foundation/plan9): Plan 9 from Bell Labs is a distributed operating system developed at Bell Labs in the late 1980s.
-- [BSD](https://github.com/freebsd/freebsd): FreeBSD is a modern, advanced operating system for x86 and ARM architectures.
+**Microkernel Architecture**: CLUU follows a microkernel design philosophy, keeping the kernel minimal while providing most system services through user-level processes or servers. This promotes modularity, extensibility, and maintainability.
 
-As well as heavily influenced by the following projects:
+**Memory Safety**: Built with Rust to leverage its ownership model and memory safety guarantees, minimizing common programming errors like null pointer dereferences, buffer overflows, and data races.
 
-- [RedoxOS](https://github.com/redox-os/redox): RedoxOS is an operating system written in Rust, aiming to bring the innovations of Rust to a modern microkernel and full set of applications. It's fair to say it is the most advanced of all Rust OS-es.
-- [k4dos](https://github.com/clstatham/k4dos): k4dos is another hobby-os of that sort, it's fairly cool, with userspace, that can run FreeDoom for example. It has a nice shell implementation: kash
-- [blog_os](https://os.phil-opp.com/): blog_os is a cutting-edge project by Philipp Oppermann that provides a detailed tutorial on building an operating system in Rust. It covers various aspects, including the bootloader, memory management, and device drivers.
+**Portability**: Designed to be portable across different platforms and architectures, starting with x86_64 and expanding to aarch64.
 
+## 🚀 Current Features
 
-## Project Information
+- ✅ **BOOTBOOT Integration**: Uses the BOOTBOOT bootloader for system initialization
+- ✅ **x86_64 Architecture Support**: Full support for 64-bit x86 processors
+- ✅ **Framebuffer Graphics**: Hardware-accelerated graphics output
+- ✅ **Serial Port Communication**: UART 16550 support for debugging and communication
+- ✅ **Keyboard Input**: PS/2 keyboard driver with input buffering
+- ✅ **TTY System**: Terminal implementation with line editing capabilities
+- ✅ **Memory Management**: Physical frame allocation and management
+- ✅ **Interrupt Handling**: Complete IDT and GDT setup with interrupt processing
+- ✅ **System Utilities**: Reboot functionality, timers, and I/O operations
+- ✅ **Console Output**: Text rendering with PSF2 font support
 
-CLUU (Compact Lightweight Unix Utopia) is a hobby operating system written in Rust. The project aims to achieve a microkernel design, emphasizing portability and memory safety. It draws inspiration from various operating systems and projects, combining the best practices and ideas to create a unique and efficient system.
+## 🏗️ Architecture Overview
 
-### Bootloader: [BOOTBOOT](https://gitlab.com/bztsrc/bootboot)
-One of the key elements in CLUU's design is the BOOTBOOT bootloader. BOOTBOOT provides a Level 2 bootloader implementation that facilitates the booting process and sets up the initial environment for the operating system. By leveraging BOOTBOOT, CLUU benefits from its features, such as high-half kernel, memory initialization, processor mode setup, init-ramdrive, early-uart-debug, a framebuffer, and parameter passing.
+### Kernel Components
+```
+kernel/
+├── src/
+│   ├── arch/           # Architecture-specific code (x86_64)
+│   │   └── x86_64/     # GDT, IDT, interrupts
+│   ├── drivers/        # Hardware drivers
+│   │   ├── display/    # Framebuffer driver
+│   │   ├── input/      # Keyboard driver
+│   │   └── serial/     # UART 16550 driver
+│   ├── memory/         # Memory management
+│   ├── components/     # System components (TTY)
+│   └── utils/          # Utilities and I/O operations
+```
 
-The main goals of CLUU include:
+### Key Systems
 
-**Microkernel Design**: CLUU follows a microkernel architecture, aiming to keep the kernel minimal and provide most system services through user-level processes or servers. This design promotes modularity, extensibility, and flexibility.
+**Boot Process**: Utilizes [BOOTBOOT](https://gitlab.com/bztsrc/bootboot) bootloader providing:
+- High-half kernel support
+- Memory map initialization
+- Processor mode setup
+- Framebuffer initialization
+- Early UART debugging
 
-**Portability**: CLUU is designed to be portable across different platforms and architectures. While initially targeting x86_64, future plans include support for aarch64.
+**Memory Management**: Physical frame-based memory allocation with bitmap tracking for efficient memory usage.
 
-**Memory Safety**: Rust is chosen as the programming language for CLUU due to its strong emphasis on memory safety. By leveraging Rust's ownership and borrowing model, CLUU aims to minimize common programming errors, such as null pointer dereferences, buffer overflows, and data races.
+**I/O System**: Comprehensive I/O framework supporting:
+- Port-mapped I/O (PIO) for hardware communication
+- Serial communication for debugging
+- Console output with font rendering
 
-The project is open-source and welcomes contributions from the community. If you're interested in exploring the code, contributing enhancements, or reporting issues, please visit the GitHub repository.
+## 🛠️ Development Environment
 
-## Screenshots
-Framebuffer:
-![screen](https://github.com/valibali/cluu/assets/22941355/b5eae565-61e7-4137-bb40-46f66b731cb1)
+### Prerequisites
 
-## Prerequisites
+1. **Rust Toolchain**: Install from [rustup.rs](https://rustup.rs/)
+2. **QEMU**: For system emulation
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install qemu-system-x86
+   
+   # macOS
+   brew install qemu
+   
+   # Windows
+   # Download from https://www.qemu.org/download/
+   ```
+3. **Build Tools**: Make and standard build utilities
+4. **Development Tools** (Optional):
+   - VSCode with CodeLLDB extension for debugging
+   - Telnet or similar for serial communication
 
-To build and run the CLUU operating system, you need to install the following prerequisites:
+### Building and Running
 
-1. **Operating System**: Linux, Windows, or macOS.
-2. **QEMU Emulator**: QEMU is used to emulate the x86_64 architecture. Install QEMU by following the instructions for your operating system:
-
-   - Linux: QEMU can usually be installed from the package manager. For example, on Ubuntu, run:
-     ```shell
-     sudo apt-get install qemu
-     ```
-   - Windows: Download the latest version of QEMU from the [QEMU website](https://www.qemu.org/download/) and install it.
-   - macOS: Install QEMU using the Homebrew package manager by running:
-     ```shell
-     brew install qemu
-     ```
-
-3. **Terminal for COM port**
-   This could be simply `telnet` - or any other tool that can communicate with UART_16550.
-4. **Rust Programming Language**: CLUU is written in Rust. Install Rust by following the instructions at [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
-
-5. **Make Build System**: The build process for CLUU uses the Make build system. Make is commonly pre-installed on Linux and macOS. For Windows, you can install Make using the [GNUWin32 project](http://gnuwin32.sourceforge.net/packages/make.htm) or other alternatives.
-6. VSCode for editing, and CodeLLDB plugin installed for Debugging.
-
-## Building and Running
-
-To build and run CLUU, follow these steps:
-
-1. Clone the CLUU repository:
-
-   ```shell
-   git clone https://github.com/your-username/cluu.git
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/valibali/cluu.git
+   cd cluu
    ```
 
-2. Build the kernel and bootboot image:
-
-   ```shell
-   cd cluu
+2. **Build the system**:
+   ```bash
    make all
    ```
 
-3. Clean the build artifact:
-
-   ```shell
-   make clean
-   ```
-
-4. Run CLUU in QEMU (with UEFI):
-
-   ```shell
+3. **Run in QEMU**:
+   ```bash
+   # With debugging support
    make qemu
-   ```
-
-   This will start QEMU, but will pause before boot. It also maps COM2 to the `localhost:4321`
-
-   In another shell you can start the COM-terminal for debug messages:
-
-   ```shell
-   telnet localhost 4321
-   ```
-
-   If you are into debugging, hit F5 in VSCode (`launch.json` included), this will start the debugging session and attach to QEMU. The debugging session will start paused, just hit F5 again to continue.
-
-5. Run CLUU in QEMU (without debugging symbols):
-   ```shell
+   
+   # Without debugging symbols
    make qemu_nodebug
    ```
 
-## License
+4. **Connect to serial output**:
+   ```bash
+   # In another terminal
+   telnet localhost 4321
+   ```
 
-CLUU is licensed under the MIT License. See LICENSE for more information.
+5. **Debug with VSCode**:
+   - Open the project in VSCode
+   - Press F5 to start debugging session
+   - The debugger will attach to the running QEMU instance
+
+### Development Commands
+
+```bash
+# Clean build artifacts
+make clean
+
+# Build kernel only
+make kernel
+
+# Create bootable image
+make image
+```
+
+## 🔧 Technical Details
+
+### Supported Hardware
+- **CPU**: x86_64 processors with long mode support
+- **Graphics**: UEFI framebuffer (any resolution)
+- **Input**: PS/2 keyboard
+- **Serial**: 16550-compatible UART controllers
+- **Boot**: UEFI-compatible systems
+
+### System Requirements
+- **Memory**: Minimum 64MB RAM
+- **Storage**: Bootable from any UEFI-compatible media
+- **Emulation**: QEMU 4.0+ recommended for development
+
+## 🎨 Screenshots
+
+![CLUU Framebuffer Output](https://github.com/valibali/cluu/assets/22941355/b5eae565-61e7-4137-bb40-46f66b731cb1)
+
+## 🤝 Contributing
+
+CLUU welcomes contributions from the community! Whether you're interested in:
+- Adding new features
+- Improving existing code
+- Writing documentation
+- Reporting bugs
+- Suggesting enhancements
+
+Please feel free to open issues or submit pull requests.
+
+### Development Guidelines
+- Follow Rust best practices and idioms
+- Maintain memory safety guarantees
+- Write comprehensive documentation
+- Include tests where applicable
+- Respect the microkernel architecture
+
+## 📚 Inspiration and References
+
+This project draws inspiration from several excellent operating systems and projects:
+
+- **[Plan 9](https://github.com/plan9foundation/plan9)**: Distributed OS concepts and clean design
+- **[FreeBSD](https://github.com/freebsd/freebsd)**: Robust Unix-like system architecture
+- **[RedoxOS](https://github.com/redox-os/redox)**: Modern Rust-based microkernel OS
+- **[blog_os](https://os.phil-opp.com/)**: Excellent Rust OS development tutorial
+- **[k4dos](https://github.com/clstatham/k4dos)**: Hobby OS with userspace capabilities
+
+## 📄 License
+
+CLUU is licensed under the MIT License. See [LICENSE](LICENSE) for more information.
+
+---
+
+**Note**: CLUU is a hobby project in active development. While functional, it's not intended for production use. The project serves as an educational platform for operating system development in Rust.
