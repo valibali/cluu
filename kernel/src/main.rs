@@ -36,6 +36,7 @@ mod components;
 mod drivers;
 mod io;
 mod memory;
+mod scheduler;
 mod utils;
 
 #[repr(C, align(16))]
@@ -144,25 +145,58 @@ pub extern "C" fn kstart() -> ! {
     // Step 8: Initialize input drivers
     drivers::input::init();
 
+    // Initialize keyboard decoder
+    drivers::input::keyboard::init_keyboard();
+
     // Step 9: Initialize console
     utils::io::console::init();
 
-    // Step 10: Enable interrupts
+    // Step 10: Initialize scheduler
+    scheduler::init();
+
+    // Step 11: Enable interrupts
     x86_64::instructions::interrupts::enable();
     log::info!("Interrupts enabled");
 
-    // Step 11: Initialize TTY system
+    // Step 12: Initialize TTY system
     components::tty::init_tty0();
     log::info!("TTY system initialized");
 
-    // Step 12: Initialize and start shell
-    log::info!("Initializing shell...");
+    // Step 13: Create shell thread
+    log::info!("Creating shell thread...");
+    scheduler::spawn_thread(shell_thread_main, "kshell");
+
+    // Step 14: Enable scheduler
+    scheduler::enable();
+    log::info!("Kernel initialization complete!");
+
+    // Main kernel idle loop
+    let mut idle_counter = 0u64;
+    loop {
+        // Yield to other threads
+        if idle_counter % 1000 == 0 {
+            log::info!("Idle thread is running ({})", idle_counter);
+        }
+        idle_counter = idle_counter.wrapping_add(1);
+
+        scheduler::yield_now();
+
+        // Halt until next interrupt
+        x86_64::instructions::hlt();
+    }
+}
+
+fn idle_thread() {}
+
+/// Shell thread main function
+fn shell_thread_main() {
+    log::info!("Shell thread starting...");
+
+    // Initialize shell
     utils::ui::kshell::KShell::init();
     log::info!("Shell initialized - ready for user input");
 
-    log::info!("Kernel initialization complete!");
-
-    // Main interactive loop - handle keyboard input for shell
+    // Main shell loop - handle keyboard input
     loop {
         if drivers::input::keyboard::has_char() {
             if let Some(ch) = drivers::input::keyboard::read_char() {
@@ -170,7 +204,8 @@ pub extern "C" fn kstart() -> ! {
             }
         }
 
-        x86_64::instructions::hlt();
+        // Yield to other threads cooperatively
+        scheduler::yield_now();
     }
 }
 

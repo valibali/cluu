@@ -107,26 +107,22 @@ impl Console {
     pub fn clear_screen(&mut self) {
         log::info!("Console clear_screen: Starting...");
         if let Some(ref mut framebuffer) = *FB.lock() {
-            log::info!(
-                "Console clear_screen: Got framebuffer {}x{}",
-                framebuffer.width,
-                framebuffer.height
-            );
-
+            log::info!("Console clear_screen: Got framebuffer {}x{}", framebuffer.width, framebuffer.height);
+            
             // Use memset-like approach for better performance
             let bg_color = self.bg_color.to_u32();
             let total_pixels = (framebuffer.width * framebuffer.height) as usize;
 
-            log::info!("Console clear_screen: Clearing {} pixels...", total_pixels);
+            log::info!("Console clear_screen: Clearing {} pixels with color 0x{:x}", total_pixels, bg_color);
 
-            // Clear screen more efficiently
+            // Clear screen efficiently without yielding to avoid deadlock
             for i in 0..total_pixels.min(framebuffer.screen.len()) {
                 framebuffer.screen[i] = bg_color;
             }
-
+            
             log::info!("Console clear_screen: Screen cleared");
         } else {
-            log::error!("Console clear_screen: No framebuffer!");
+            log::error!("Console clear_screen: No framebuffer available!");
         }
         self.cursor_x = 0;
         self.cursor_y = 0;

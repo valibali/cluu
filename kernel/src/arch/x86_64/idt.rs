@@ -36,6 +36,21 @@
 use lazy_static::lazy_static;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
+/// Send End of Interrupt (EOI) signal to PIC
+///
+/// This function properly handles EOI for both master and slave PIC.
+/// For IRQs 0-7 (master PIC), only master EOI is needed.
+/// For IRQs 8-15 (slave PIC), both slave and master EOI are needed.
+unsafe fn pic_eoi(irq: u8) {
+    use x86_64::instructions::port::Port;
+
+    // If the IRQ came from the slave (>=8), EOI slave first
+    if irq >= 8 {
+        unsafe { Port::<u8>::new(0xA0).write(0x20) };
+    }
+    unsafe { Port::<u8>::new(0x20).write(0x20) };
+}
+
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
         let mut idt = InterruptDescriptorTable::new();
@@ -95,28 +110,31 @@ pub fn init() {
 // Exception handlers - these functions are called when CPU exceptions occur
 
 extern "x86-interrupt" fn divide_error_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("DIVIDE_ERROR");
     // Simple error message without panic for debugging
     loop {
         x86_64::instructions::hlt();
     }
 }
 
-extern "x86-interrupt" fn debug_handler(stack_frame: InterruptStackFrame) {
-    log::debug!("EXCEPTION: DEBUG\n{:#?}", stack_frame);
+extern "x86-interrupt" fn debug_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("DEBUG_EXCEPTION");
 }
 
 extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("NMI");
     // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
     }
 }
 
-extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
-    log::info!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
+extern "x86-interrupt" fn breakpoint_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("BREAKPOINT");
 }
 
 extern "x86-interrupt" fn overflow_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("OVERFLOW");
     // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
@@ -124,6 +142,7 @@ extern "x86-interrupt" fn overflow_handler(_stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn bound_range_exceeded_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("BOUND_RANGE_EXCEEDED");
     // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
@@ -131,6 +150,7 @@ extern "x86-interrupt" fn bound_range_exceeded_handler(_stack_frame: InterruptSt
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("INVALID_OPCODE");
     // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
@@ -138,6 +158,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(_stack_frame: InterruptStackFra
 }
 
 extern "x86-interrupt" fn device_not_available_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("DEVICE_NOT_AVAILABLE");
     // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
@@ -148,6 +169,7 @@ extern "x86-interrupt" fn double_fault_handler(
     _stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
+    crate::utils::debug::irq_log::irq_log_simple("DOUBLE_FAULT");
     // Critical error - halt immediately without panic
     loop {
         x86_64::instructions::hlt();
@@ -158,6 +180,7 @@ extern "x86-interrupt" fn invalid_tss_handler(
     _stack_frame: InterruptStackFrame,
     _error_codee: u64,
 ) {
+    crate::utils::debug::irq_log::irq_log_simple("INVALID_TSS");
     // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
@@ -168,6 +191,7 @@ extern "x86-interrupt" fn segment_not_present_handler(
     _stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) {
+    crate::utils::debug::irq_log::irq_log_simple("SEGMENT_NOT_PRESENT");
     // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
@@ -178,6 +202,7 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
     _stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) {
+    crate::utils::debug::irq_log::irq_log_simple("STACK_SEGMENT_FAULT");
     // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
@@ -188,6 +213,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     _stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) {
+    crate::utils::debug::irq_log::irq_log_simple("GENERAL_PROTECTION_FAULT");
     // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
@@ -198,106 +224,95 @@ extern "x86-interrupt" fn page_fault_handler(
     _stack_frame: InterruptStackFrame,
     _error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
+    crate::utils::debug::irq_log::irq_log_simple("PAGE_FAULT");
     // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
     }
 }
 
-extern "x86-interrupt" fn x87_floating_point_handler(stack_frame: InterruptStackFrame) {
-    log::error!("EXCEPTION: x87 FLOATING POINT\n{:#?}", stack_frame);
+extern "x86-interrupt" fn x87_floating_point_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("X87_FP_EXCEPTION");
     panic!("x87 floating point exception");
 }
 
 extern "x86-interrupt" fn alignment_check_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: u64,
+    _stack_frame: InterruptStackFrame,
+    _error_code: u64,
 ) {
-    log::error!(
-        "EXCEPTION: ALIGNMENT CHECK (Error Code: {})\n{:#?}",
-        error_code,
-        stack_frame
-    );
+    crate::utils::debug::irq_log::irq_log_simple("ALIGNMENT_CHECK");
     panic!("Alignment check exception");
 }
 
 extern "x86-interrupt" fn machine_check_handler(_stack_frame: InterruptStackFrame) -> ! {
+    crate::utils::debug::irq_log::irq_log_simple("MACHINE_CHECK");
     // Critical hardware error - halt immediately
     loop {
         x86_64::instructions::hlt();
     }
 }
 
-extern "x86-interrupt" fn simd_floating_point_handler(stack_frame: InterruptStackFrame) {
-    log::error!("EXCEPTION: SIMD FLOATING POINT\n{:#?}", stack_frame);
+extern "x86-interrupt" fn simd_floating_point_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("SIMD_FP_EXCEPTION");
     panic!("SIMD floating point exception");
 }
 
-extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFrame) {
-    log::error!("EXCEPTION: VIRTUALIZATION\n{:#?}", stack_frame);
+extern "x86-interrupt" fn virtualization_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("VIRTUALIZATION_EXCEPTION");
     panic!("Virtualization exception");
 }
 
 extern "x86-interrupt" fn security_exception_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: u64,
+    _stack_frame: InterruptStackFrame,
+    _error_code: u64,
 ) {
-    log::error!(
-        "EXCEPTION: SECURITY EXCEPTION (Error Code: {})\n{:#?}",
-        error_code,
-        stack_frame
-    );
+    crate::utils::debug::irq_log::irq_log_simple("SECURITY_EXCEPTION");
     panic!("Security exception");
 }
 
 // Hardware interrupt handlers
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Only for debug
+    //crate::utils::debug::irq_log::irq_log_simple("TIMER_IRQ");
+
     // Call the timer module to handle uptime and scheduler ticks
     crate::utils::timer::on_timer_interrupt();
 
     // Send EOI (End of Interrupt) to PIC
     unsafe {
-        use x86_64::instructions::port::Port;
-        let mut port = Port::new(0x20);
-        port.write(0x20u8);
+        pic_eoi(0); // IRQ 0 - Timer
     }
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     // Handle keyboard interrupt using our keyboard driver
+    // Only for debug
+    //crate::utils::debug::irq_log::irq_log_simple("KEYBOARD_IRQ_IDT");
     crate::drivers::input::keyboard::handle_keyboard_interrupt();
 
     // Send EOI to PIC
     unsafe {
-        use x86_64::instructions::port::Port;
-        let mut pic_port = Port::new(0x20);
-        pic_port.write(0x20u8);
+        pic_eoi(1); // IRQ 1 - Keyboard
     }
 }
 
 extern "x86-interrupt" fn serial_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::utils::debug::irq_log::irq_log_simple("SERIAL_IRQ");
+
     // Serial interrupt - just acknowledge
     unsafe {
-        use x86_64::instructions::port::Port;
-        let mut port = Port::new(0x20);
-        port.write(0x20u8);
+        pic_eoi(4); // IRQ 4 - Serial COM1/COM2
     }
 }
 
-extern "x86-interrupt" fn generic_interrupt_handler(stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn generic_interrupt_handler(_stack_frame: InterruptStackFrame) {
     // Generic handler for unhandled interrupts
-    log::debug!(
-        "INTERRUPT: Generic interrupt handler called\n{:#?}",
-        stack_frame
-    );
+    crate::utils::debug::irq_log::irq_log_simple("GENERIC_IRQ");
 
-    // Send EOI to both PICs (in case it's from slave PIC)
+    // Send EOI to both PICs (conservative approach for unknown IRQ)
+    // Use IRQ 15 to ensure both master and slave PIC get EOI
     unsafe {
-        use x86_64::instructions::port::Port;
-        let mut pic1_port = Port::new(0x20);
-        let mut pic2_port = Port::new(0xA0);
-        pic2_port.write(0x20u8); // EOI to slave PIC
-        pic1_port.write(0x20u8); // EOI to master PIC
+        pic_eoi(15); // IRQ 15 - highest IRQ, ensures both PICs get EOI
     }
 }
