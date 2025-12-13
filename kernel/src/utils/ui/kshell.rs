@@ -187,6 +187,8 @@ impl KShell {
             "history" => Self::cmd_history(),
             "test" => Self::cmd_test(),
             "colors" => Self::cmd_colors(),
+            "threads" | "ps" => Self::cmd_threads(),
+            "yield" => Self::cmd_yield(),
             "" => {}
             _ => {
                 console::write_colored("Unknown command: ", Color::RED, Color::BLACK);
@@ -214,6 +216,8 @@ impl KShell {
             ("history", "Show command history"),
             ("test", "Run system tests"),
             ("colors", "Show color test"),
+            ("threads, ps", "Show thread information"),
+            ("yield", "Yield CPU to other threads"),
             ("reboot", "Reboot the system"),
         ];
 
@@ -279,10 +283,8 @@ impl KShell {
             let _ = write!(countdown, "Rebooting in {}...\n", i);
             console::write_colored(&countdown, Color::RED, Color::BLACK);
 
-            // Simple busy-wait delay
-            for _ in 0..10_000_000 {
-                unsafe { core::arch::asm!("nop") };
-            }
+            // Use scheduler sleep instead of busy-wait
+            crate::scheduler::sleep_ms(1000);
         }
 
         console::write_colored("Rebooting now!\n", Color::RED, Color::BLACK);
@@ -370,5 +372,38 @@ impl KShell {
             console::write_str("\n");
         }
         console::write_str("\n");
+    }
+
+    fn cmd_threads() {
+        console::write_colored("Thread Information:\n", Color::CYAN, Color::BLACK);
+
+        let current_id = crate::scheduler::current_thread_id();
+        let mut info_str = String::new();
+        let _ = write!(info_str, "  Current thread: {}\n", current_id);
+        console::write_colored(&info_str, Color::WHITE, Color::BLACK);
+
+        console::write_colored("  Scheduler: ", Color::WHITE, Color::BLACK);
+        console::write_colored(
+            "Pre-emptive (timer and iretq-based)\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+
+        console::write_colored("  Note: ", Color::YELLOW, Color::BLACK);
+        console::write_colored(
+            "Detailed thread listing not yet implemented\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+    }
+
+    fn cmd_yield() {
+        console::write_colored(
+            "Yielding CPU to other threads...\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        crate::scheduler::yield_now();
+        console::write_colored("Back in shell thread\n", Color::GREEN, Color::BLACK);
     }
 }

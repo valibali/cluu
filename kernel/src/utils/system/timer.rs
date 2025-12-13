@@ -44,55 +44,52 @@
  * groundwork for sophisticated process scheduling.
  */
 
-use spin::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Global uptime counter in milliseconds since boot
-static UPTIME_MS: Mutex<u64> = Mutex::new(0);
+static UPTIME_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Scheduler tick counter - increments every scheduler quantum
-static SCHEDULER_TICKS: Mutex<u64> = Mutex::new(0);
+static SCHEDULER_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// How many timer interrupts equal one scheduler tick
 /// With 100Hz timer, this gives us ~10ms scheduler quantum
 const TIMER_INTERRUPTS_PER_SCHEDULER_TICK: u64 = 1;
 
 /// Internal counter for timer interrupts
-static TIMER_INTERRUPT_COUNT: Mutex<u64> = Mutex::new(0);
+static TIMER_INTERRUPT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Called from the timer interrupt handler (IRQ0)
 /// This should be called exactly once per timer interrupt
 pub fn on_timer_interrupt() {
-    let mut interrupt_count = TIMER_INTERRUPT_COUNT.lock();
-    let mut uptime = UPTIME_MS.lock();
-
-    *interrupt_count += 1;
+    // Atomically increment interrupt count
+    let interrupt_count = TIMER_INTERRUPT_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
 
     // With 100Hz timer, each interrupt represents 10ms
-    *uptime += 10;
+    UPTIME_MS.fetch_add(10, Ordering::SeqCst);
 
     // Check if we should trigger a scheduler tick
-    if *interrupt_count % TIMER_INTERRUPTS_PER_SCHEDULER_TICK == 0 {
-        let mut scheduler_ticks = SCHEDULER_TICKS.lock();
-        *scheduler_ticks += 1;
+    if interrupt_count % TIMER_INTERRUPTS_PER_SCHEDULER_TICK == 0 {
+        SCHEDULER_TICKS.fetch_add(1, Ordering::SeqCst);
 
-        // Future: call scheduler here
-        // scheduler::tick();
+        // Note: We don't call scheduler from IRQ context since it uses mutexes
+        // The scheduler is cooperative and threads yield voluntarily
     }
 }
 
 /// Get current system uptime in milliseconds
 pub fn uptime_ms() -> u64 {
-    *UPTIME_MS.lock()
+    UPTIME_MS.load(Ordering::SeqCst)
 }
 
 /// Get current scheduler tick count
 pub fn scheduler_ticks() -> u64 {
-    *SCHEDULER_TICKS.lock()
+    SCHEDULER_TICKS.load(Ordering::SeqCst)
 }
 
 /// Get total timer interrupt count
 pub fn timer_interrupt_count() -> u64 {
-    *TIMER_INTERRUPT_COUNT.lock()
+    TIMER_INTERRUPT_COUNT.load(Ordering::SeqCst)
 }
 
 /// Sleep for approximately the given number of milliseconds
@@ -101,6 +98,6 @@ pub fn timer_interrupt_count() -> u64 {
 pub fn sleep_ms(ms: u64) {
     let start_time = uptime_ms();
     while uptime_ms() - start_time < ms {
-        x86_64::instructions::hlt();
+        x86_64::instructions::nop();
     }
 }

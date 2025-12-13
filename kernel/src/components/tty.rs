@@ -47,7 +47,9 @@ impl Tty {
     /// Initialize TTY0 console backend.
     /// We keep prompt & banner logic in the shell.
     pub fn init(&mut self) {
+        log::info!("TTY init: Starting console init...");
         console::init();
+        log::info!("TTY init: Console init complete");
         // Don't clear here; Shell will clear & print banner.
     }
 
@@ -102,7 +104,9 @@ impl Tty {
     }
 
     pub fn clear(&mut self) {
+        log::info!("TTY clear: Calling console clear_screen...");
         console::clear_screen();
+        log::info!("TTY clear: Console clear_screen complete");
     }
 }
 

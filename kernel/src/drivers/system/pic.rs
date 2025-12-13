@@ -29,13 +29,27 @@ pub fn init_pic() {
     // Mask all interrupts initially except timer and keyboard
     unsafe { master_data.write(0xFCu8) }; // Enable IRQ0 (timer) and IRQ1 (keyboard)
     unsafe { slave_data.write(0xFFu8) }; // Mask all slave interrupts
+
+    unsafe {
+        let master_mask: u8 = master_data.read();
+        let slave_mask: u8 = slave_data.read();
+        log::info!(
+            "PIC masks after init: master=0x{:02x} slave=0x{:02x}",
+            master_mask,
+            slave_mask
+        );
+    }
 }
 
 pub fn init_pit(frequency_hz: u32) {
     let pit_frequency: u32 = 1_193_182; // Hz - PIT base frequency
     let divisor: u16 = (pit_frequency / frequency_hz) as u16;
 
-    log::info!("Initializing PIT with {}Hz (divisor: {})", frequency_hz, divisor);
+    log::info!(
+        "Initializing PIT with {}Hz (divisor: {})",
+        frequency_hz,
+        divisor
+    );
 
     unsafe {
         let mut command = Port::<u8>::new(0x43);
