@@ -87,11 +87,12 @@ use core::{
 };
 use spin::Mutex;
 
-pub mod thread;
 pub mod io_wait;
+pub mod thread;
 
-pub use thread::{Thread, ThreadId, ThreadState};
+use crate::alloc::string::ToString;
 pub use io_wait::{IoChannel, wait_for_io, wake_io_waiters};
+pub use thread::{Thread, ThreadId, ThreadState};
 
 /// Thread stack size (64 KiB per thread)
 pub const THREAD_STACK_SIZE: usize = 64 * 1024;
@@ -135,7 +136,7 @@ impl Default for InterruptFrame {
             cs: 0x08,      // Kernel code segment (from GDT)
             rflags: 0x202, // IF=1 (interrupts enabled), reserved bit 1 always set
             rsp: 0,
-            ss: 0x10,      // Kernel data segment (from GDT)
+            ss: 0x10, // Kernel data segment (from GDT)
         }
     }
 }
@@ -201,33 +202,32 @@ impl Default for InterruptContext {
     }
 }
 
-
 /// Main scheduler structure
-/// 
+///
 /// This is the core data structure that manages all threads in the system.
 /// It maintains:
-/// 
+///
 /// 1. THREAD STORAGE: All thread objects with their stacks and metadata
 /// 2. READY QUEUE: FIFO queue of threads waiting to be scheduled
 /// 3. ID ALLOCATION: Ensures each thread gets a unique identifier
-/// 
+///
 /// DESIGN DECISIONS:
 /// ================
-/// 
+///
 /// - Vec<Thread>: Stores all threads, indexed by position (not ID)
 /// - VecDeque<ThreadId>: Ready queue for O(1) push/pop operations
 /// - ThreadId counter: Simple incrementing ID assignment
-/// 
+///
 /// THREAD LOOKUP:
 /// ==============
-/// 
+///
 /// Threads are found by linear search through the Vec. This is acceptable
 /// for a microkernel with a small number of threads. For better performance
 /// with many threads, we could use a HashMap<ThreadId, Thread>.
 pub struct Scheduler {
-    threads: Vec<Thread>,           // All threads in the system
+    threads: Vec<Thread>,            // All threads in the system
     ready_queue: VecDeque<ThreadId>, // Queue of threads ready to run
-    next_thread_id: ThreadId,       // Next ID to assign to new thread
+    next_thread_id: ThreadId,        // Next ID to assign to new thread
 }
 
 impl Scheduler {
@@ -304,11 +304,11 @@ impl Scheduler {
         let mut interrupt_context = InterruptContext::default();
 
         // Set up interrupt frame to make it look like this thread was interrupted
-        interrupt_context.iret_frame.rip = entry_point as u64;  // Jump to entry point
-        interrupt_context.iret_frame.cs = 0x08;                 // Kernel code segment
-        interrupt_context.iret_frame.rflags = 0x202;            // IF=1 (interrupts enabled), bit 1 always set
-        interrupt_context.iret_frame.rsp = stack_top;           // Top of thread's stack
-        interrupt_context.iret_frame.ss = 0x10;                 // Kernel data segment
+        interrupt_context.iret_frame.rip = entry_point as u64; // Jump to entry point
+        interrupt_context.iret_frame.cs = 0x08; // Kernel code segment
+        interrupt_context.iret_frame.rflags = 0x202; // IF=1 (interrupts enabled), bit 1 always set
+        interrupt_context.iret_frame.rsp = stack_top; // Top of thread's stack
+        interrupt_context.iret_frame.ss = 0x10; // Kernel data segment
 
         // All general purpose registers initialized to 0 (from default())
 
@@ -341,12 +341,18 @@ impl Scheduler {
             }
         }
 
-        // Find next thread that is not sleeping
+        // Find next thread that is not sleeping or terminated
         loop {
             let thread_id = self.ready_queue.pop_front()?;
 
-            // Check if this thread is sleeping
+            // Check thread state
             if let Some(thread) = self.threads.iter().find(|t| t.id == thread_id) {
+                // Skip terminated threads
+                if thread.state == ThreadState::Terminated {
+                    continue;
+                }
+
+                // Skip sleeping threads
                 if thread.sleep_until_ms > 0 && current_time < thread.sleep_until_ms {
                     // Thread is still sleeping, don't schedule it
                     // Don't put it back in ready queue
@@ -354,7 +360,7 @@ impl Scheduler {
                 }
             }
 
-            // Thread is not sleeping, can be scheduled
+            // Thread is not sleeping or terminated, can be scheduled
             return Some(thread_id);
         }
     }
@@ -372,6 +378,28 @@ impl Scheduler {
     /// Get thread by ID
     fn get_thread_mut(&mut self, thread_id: ThreadId) -> Option<&mut Thread> {
         self.threads.iter_mut().find(|t| t.id == thread_id)
+    }
+
+    /// Clean up terminated threads
+    ///
+    /// Removes all terminated threads from the scheduler, freeing their resources.
+    /// This should be called periodically by the reaper thread.
+    ///
+    /// Returns the number of threads cleaned up.
+    fn cleanup_terminated_threads(&mut self, current_thread_id: ThreadId) -> usize {
+        let initial_count = self.threads.len();
+
+        // Remove terminated threads (but never remove current thread or idle thread)
+        self.threads.retain(|t| {
+            if t.state == ThreadState::Terminated && t.id != current_thread_id && t.id.0 != 0 {
+                log::info!("Reaper: Cleaning up thread {} ({})", t.id.0, t.name);
+                false // Remove this thread
+            } else {
+                true // Keep this thread
+            }
+        });
+
+        initial_count - self.threads.len()
     }
 }
 
@@ -432,6 +460,7 @@ fn idle_thread_main() {
 /// 2. Enables preemptive scheduling
 ///
 /// After calling this, timer interrupts will start performing context switches.
+/// Terminated threads are cleaned up immediately during context switches.
 pub fn enable() {
     // Spawn the idle thread - it will run when no other threads are ready
     spawn_thread(idle_thread_main, "idle");
@@ -440,45 +469,46 @@ pub fn enable() {
     // Enable preemptive scheduling
     SCHEDULER_ENABLED.store(true, Ordering::SeqCst);
     log::info!("Scheduler enabled - preemptive multitasking active");
+    log::info!("Terminated threads will be cleaned up immediately on context switch");
 }
 
 /// Voluntarily yield the CPU to the next ready thread
-/// 
+///
 /// This is the heart of cooperative scheduling. When a thread calls this function,
 /// it gives up the CPU and allows another thread to run. The process involves:
-/// 
+///
 /// YIELD PROCESS:
 /// =============
-/// 
+///
 /// 1. SAFETY CHECKS: Ensure scheduler is enabled and interrupts are on
 /// 2. DISABLE INTERRUPTS: Prevent race conditions during context switch
 /// 3. FIND NEXT THREAD: Get next thread from ready queue
 /// 4. UPDATE QUEUES: Move current thread to back of ready queue
 /// 5. CONTEXT SWITCH: Save current state, load next thread's state
 /// 6. RESUME EXECUTION: Next thread continues from where it last yielded
-/// 
+///
 /// CRITICAL SECTION:
 /// ================
-/// 
+///
 /// The scheduler mutex is held only briefly to:
 /// - Read/modify thread queues
 /// - Get pointers to thread contexts
 /// - Update thread states
-/// 
+///
 /// The mutex is released BEFORE the actual context switch to prevent
 /// deadlocks if the new thread tries to access the scheduler.
-/// 
+///
 /// INTERRUPT HANDLING:
 /// ==================
-/// 
+///
 /// Interrupts are disabled during context switch to prevent:
 /// - Timer interrupts from interfering with register save/restore
 /// - Race conditions in scheduler data structures
 /// - Corruption of thread contexts
-/// 
+///
 /// WHY COOPERATIVE?
 /// ===============
-/// 
+///
 /// Cooperative scheduling is simpler and more predictable than preemptive:
 /// - Threads run until they choose to yield
 /// - No complex timer-based preemption
@@ -526,10 +556,7 @@ pub fn yield_now() {
     // 3. Restores next thread's context
     // 4. Returns via iretq
     unsafe {
-        asm!(
-            "int 0x81",
-            options(nostack)
-        );
+        asm!("int 0x81", options(nostack));
     }
 }
 
@@ -593,6 +620,65 @@ pub fn wake_thread(thread_id: ThreadId) {
                 scheduler.ready_queue.push_back(thread_id);
             }
         }
+    }
+}
+
+/// Terminate the current thread
+///
+/// Marks the current thread as Terminated and yields. The thread will not
+/// be scheduled again. This is the proper way for a thread to exit.
+///
+/// **Important:** The thread's resources (stack, etc.) are not immediately freed.
+/// In a full implementation, you would need a reaper thread to clean up
+/// terminated threads. For now, they remain in the thread list as Terminated.
+///
+/// # Panics
+/// Panics if called from the idle thread (thread 0).
+pub fn exit_thread() -> ! {
+    let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
+
+    if current_id.0 == 0 {
+        panic!("Cannot exit idle thread");
+    }
+
+    log::info!(
+        "Thread {} ({}) terminating",
+        current_id.0,
+        get_thread_name(current_id).unwrap_or_else(|| "unknown".to_string())
+    );
+
+    // Mark thread as terminated
+    {
+        let mut sched_guard = SCHEDULER.lock();
+        if let Some(scheduler) = sched_guard.as_mut() {
+            if let Some(thread) = scheduler.get_thread_mut(current_id) {
+                thread.state = ThreadState::Terminated;
+                // Thread will not be added back to ready queue
+            }
+        }
+    }
+
+    // Yield to switch to another thread
+    // We will never return here
+    yield_now();
+
+    // Should never reach here
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+/// Get thread name by ID (for debugging)
+fn get_thread_name(thread_id: ThreadId) -> Option<alloc::string::String> {
+    let sched_guard = SCHEDULER.lock();
+    if let Some(scheduler) = sched_guard.as_ref() {
+        scheduler
+            .threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .map(|t| t.name.clone())
+    } else {
+        None
     }
 }
 
@@ -829,7 +915,9 @@ pub unsafe extern "C" fn preemptive_timer_interrupt_handler() {
 /// # Returns
 /// Pointer to next thread's InterruptContext (to be loaded into RSP)
 #[unsafe(no_mangle)]
-pub extern "C" fn schedule_from_interrupt(current_ctx_ptr: *const InterruptContext) -> *const InterruptContext {
+pub extern "C" fn schedule_from_interrupt(
+    current_ctx_ptr: *const InterruptContext,
+) -> *const InterruptContext {
     // Early exit if scheduler is not enabled
     if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
         // Scheduler not enabled yet, just return current context
@@ -893,21 +981,26 @@ pub extern "C" fn schedule_from_interrupt(current_ctx_ptr: *const InterruptConte
                 current_thread.cpu_time_ms = current_thread.cpu_time_ms.saturating_add(elapsed);
             }
 
-            // Move current thread to ready queue (unless it's sleeping or blocked)
-            if current_thread.state != ThreadState::Blocked {
+            // Move current thread to ready queue (unless it's sleeping, blocked, or terminated)
+            if current_thread.state != ThreadState::Blocked
+                && current_thread.state != ThreadState::Terminated
+            {
                 current_thread.state = ThreadState::Ready;
             }
 
-            // Only add to ready queue if not sleeping and not blocked
+            // Only add to ready queue if not sleeping, not blocked, and not terminated
             if current_thread.state == ThreadState::Ready {
-                if current_thread.sleep_until_ms == 0 || current_time >= current_thread.sleep_until_ms {
-                    // Thread is not sleeping (or sleep expired) and not blocked
+                if current_thread.sleep_until_ms == 0
+                    || current_time >= current_thread.sleep_until_ms
+                {
+                    // Thread is not sleeping (or sleep expired), not blocked, and not terminated
                     scheduler.ready_queue.push_back(current_id);
                 }
             }
-            // If sleeping or blocked, thread is NOT added to ready queue
+            // If sleeping, blocked, or terminated, thread is NOT added to ready queue
             // Sleeping threads are woken by get_next_thread() when sleep expires
             // Blocked threads are woken by wake_thread() when event occurs
+            // Terminated threads are never scheduled again
         }
     }
 
@@ -924,6 +1017,23 @@ pub extern "C" fn schedule_from_interrupt(current_ctx_ptr: *const InterruptConte
 
     // Update current thread ID
     CURRENT_THREAD_ID.store(next_id.0, Ordering::SeqCst);
+
+    // IMMEDIATE CLEANUP: Now that we've switched to the new thread's stack,
+    // we can safely clean up the old thread if it was terminated.
+    // This provides instant resource reclamation without a periodic reaper.
+    if current_id.0 != 0 {
+        // Check if the old thread was terminated
+        let should_cleanup = scheduler
+            .get_thread_mut(current_id)
+            .map(|t| t.state == ThreadState::Terminated)
+            .unwrap_or(false);
+
+        if should_cleanup {
+            // Clean up the terminated thread immediately
+            // This is safe because we're now on the new thread's stack
+            scheduler.cleanup_terminated_threads(current_id);
+        }
+    }
 
     // Return pointer to next thread's context
     next_ctx_ptr
