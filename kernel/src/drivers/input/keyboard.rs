@@ -79,6 +79,12 @@ fn buffer_is_empty() -> bool {
 }
 
 /// Handle keyboard interrupt (IRQ-safe, no mutex usage)
+///
+/// This is the ISR top-half: minimal work in interrupt context.
+/// - Read scancode from port
+/// - Decode to character
+/// - Push to ring buffer
+/// - Wake any waiting thread
 pub fn handle_keyboard_interrupt() {
     if !KEYBOARD_INIT.load(Ordering::Acquire) {
         crate::utils::debug::irq_log::irq_log("KEYBOARD", "not_initialized");
@@ -96,6 +102,9 @@ pub fn handle_keyboard_interrupt() {
                     match key {
                         DecodedKey::Unicode(character) => {
                             buffer_push(character);
+
+                            // Wake any threads waiting for keyboard input
+                            crate::scheduler::wake_io_waiters(crate::scheduler::IoChannel::Keyboard);
                         }
                         DecodedKey::RawKey(_key) => {}
                     }
@@ -105,7 +114,7 @@ pub fn handle_keyboard_interrupt() {
     }
 }
 
-/// Read a character from the keyboard buffer
+/// Read a character from the keyboard buffer (non-blocking)
 pub fn read_char() -> Option<char> {
     buffer_pop()
 }
@@ -113,6 +122,42 @@ pub fn read_char() -> Option<char> {
 /// Check if there are characters available in the keyboard buffer
 pub fn has_char() -> bool {
     !buffer_is_empty()
+}
+
+/// Read a character from the keyboard buffer (blocking)
+///
+/// This function implements true blocking I/O using the generic I/O wait queue system.
+/// If the buffer is empty, the calling thread will be blocked (removed from ready queue)
+/// until a keyboard interrupt arrives with input.
+///
+/// **How it works:**
+/// 1. Check if buffer has data - if yes, return immediately
+/// 2. If buffer empty:
+///    - Call wait_for_io(IoChannel::Keyboard) to block on keyboard channel
+///    - Thread is removed from scheduler
+/// 3. Keyboard ISR calls wake_io_waiters(IoChannel::Keyboard) when key pressed
+/// 4. Thread wakes up and reads character
+///
+/// This results in **0% CPU usage** while waiting for input.
+pub fn read_char_blocking() -> char {
+    loop {
+        // Try to read from buffer first
+        if let Some(ch) = buffer_pop() {
+            return ch;
+        }
+
+        // Buffer is empty - block until keyboard interrupt arrives
+        // Double-check buffer isn't empty (race condition check)
+        if !buffer_is_empty() {
+            continue; // Loop will read the character
+        }
+
+        // Block on keyboard I/O channel
+        crate::scheduler::wait_for_io(crate::scheduler::IoChannel::Keyboard);
+
+        // When we wake up here, input has arrived (or we were spuriously woken)
+        // Loop again to read it
+    }
 }
 
 /// Read a line from the keyboard (blocking until Enter is pressed)

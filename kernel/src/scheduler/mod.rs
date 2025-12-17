@@ -88,8 +88,10 @@ use core::{
 use spin::Mutex;
 
 pub mod thread;
+pub mod io_wait;
 
 pub use thread::{Thread, ThreadId, ThreadState};
+pub use io_wait::{IoChannel, wait_for_io, wake_io_waiters};
 
 /// Thread stack size (64 KiB per thread)
 pub const THREAD_STACK_SIZE: usize = 64 * 1024;
@@ -375,10 +377,13 @@ impl Scheduler {
 
 /// Initialize the scheduler
 pub fn init() {
-    log::info!("Initializing cooperative scheduler...");
+    log::info!("Initializing preemptive scheduler...");
 
     let scheduler = Scheduler::new();
     *SCHEDULER.lock() = Some(scheduler);
+
+    // Initialize I/O wait queue system
+    io_wait::init();
 
     log::info!("Scheduler initialized");
 }
@@ -531,6 +536,64 @@ pub fn yield_now() {
 /// Get current thread ID
 pub fn current_thread_id() -> ThreadId {
     ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst))
+}
+
+/// Block the current thread
+///
+/// Removes the current thread from the ready queue and sets its state to Blocked.
+/// The thread will not be scheduled again until wake_thread() is called.
+///
+/// This is typically used for blocking I/O operations where a thread needs to
+/// wait for an external event (like keyboard input or timer expiry).
+///
+/// # Safety
+/// The caller must ensure that some mechanism exists to eventually wake this thread,
+/// otherwise it will be blocked forever.
+pub fn block_current_thread() {
+    if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
+    if current_id.0 == 0 {
+        // Cannot block kernel/idle thread
+        return;
+    }
+
+    let mut sched_guard = SCHEDULER.lock();
+    if let Some(scheduler) = sched_guard.as_mut() {
+        if let Some(thread) = scheduler.get_thread_mut(current_id) {
+            thread.state = ThreadState::Blocked;
+            // Thread is already not in ready queue since it's currently running
+            // When it yields, schedule_from_interrupt won't add it back because state is Blocked
+        }
+    }
+}
+
+/// Wake a blocked thread
+///
+/// Moves the specified thread from Blocked state to Ready state and adds it
+/// to the ready queue. If the thread is not blocked, this is a no-op.
+///
+/// This function is IRQ-safe and can be called from interrupt handlers.
+///
+/// # Arguments
+/// * `thread_id` - The ID of the thread to wake up
+pub fn wake_thread(thread_id: ThreadId) {
+    if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let mut sched_guard = SCHEDULER.lock();
+    if let Some(scheduler) = sched_guard.as_mut() {
+        if let Some(thread) = scheduler.get_thread_mut(thread_id) {
+            if thread.state == ThreadState::Blocked {
+                thread.state = ThreadState::Ready;
+                // Add to ready queue
+                scheduler.ready_queue.push_back(thread_id);
+            }
+        }
+    }
 }
 
 /// Thread statistics for display
@@ -830,14 +893,21 @@ pub extern "C" fn schedule_from_interrupt(current_ctx_ptr: *const InterruptConte
                 current_thread.cpu_time_ms = current_thread.cpu_time_ms.saturating_add(elapsed);
             }
 
-            // Move current thread to ready queue (unless it's sleeping)
-            current_thread.state = ThreadState::Ready;
-            if current_thread.sleep_until_ms == 0 || current_time >= current_thread.sleep_until_ms {
-                // Thread is not sleeping (or sleep expired), add to ready queue
-                scheduler.ready_queue.push_back(current_id);
+            // Move current thread to ready queue (unless it's sleeping or blocked)
+            if current_thread.state != ThreadState::Blocked {
+                current_thread.state = ThreadState::Ready;
             }
-            // If sleeping, thread is NOT added to ready queue
-            // It will be woken up by get_next_thread() when sleep expires
+
+            // Only add to ready queue if not sleeping and not blocked
+            if current_thread.state == ThreadState::Ready {
+                if current_thread.sleep_until_ms == 0 || current_time >= current_thread.sleep_until_ms {
+                    // Thread is not sleeping (or sleep expired) and not blocked
+                    scheduler.ready_queue.push_back(current_id);
+                }
+            }
+            // If sleeping or blocked, thread is NOT added to ready queue
+            // Sleeping threads are woken by get_next_thread() when sleep expires
+            // Blocked threads are woken by wake_thread() when event occurs
         }
     }
 

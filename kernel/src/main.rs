@@ -187,18 +187,12 @@ fn shell_thread_main() {
     utils::ui::kshell::KShell::init();
     log::info!("Shell initialized - ready for user input");
 
-    // Main shell loop - handle keyboard input
-    // TODO: Replace with proper blocking I/O once scheduler supports thread wake-up
+    // Main shell loop - handle keyboard input using blocking I/O
+    // The thread blocks (0% CPU) until keyboard interrupt arrives
     loop {
-        if drivers::input::keyboard::has_char() {
-            if let Some(ch) = drivers::input::keyboard::read_char() {
-                utils::ui::kshell::KShell::handle_char(ch);
-            }
-        } else {
-            // No input available - sleep to avoid busy-waiting
-            // This gives CPU time to other threads while waiting for keyboard input
-            scheduler::sleep_ms(10);
-        }
+        // Blocking read: thread sleeps until keystroke arrives
+        let ch = drivers::input::keyboard::read_char_blocking();
+        utils::ui::kshell::KShell::handle_char(ch);
     }
 }
 
