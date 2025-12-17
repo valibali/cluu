@@ -188,15 +188,17 @@ fn shell_thread_main() {
     log::info!("Shell initialized - ready for user input");
 
     // Main shell loop - handle keyboard input
-    // With preemptive scheduling, we don't need to call yield_now()
-    // The timer interrupt will automatically switch threads every 10ms
+    // TODO: Replace with proper blocking I/O once scheduler supports thread wake-up
     loop {
         if drivers::input::keyboard::has_char() {
             if let Some(ch) = drivers::input::keyboard::read_char() {
                 utils::ui::kshell::KShell::handle_char(ch);
             }
+        } else {
+            // No input available - sleep to avoid busy-waiting
+            // This gives CPU time to other threads while waiting for keyboard input
+            scheduler::sleep_ms(10);
         }
-        // Note: No yield_now() needed - preemptive scheduler handles context switching
     }
 }
 

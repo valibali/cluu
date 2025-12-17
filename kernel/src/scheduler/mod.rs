@@ -323,7 +323,38 @@ impl Scheduler {
 
     /// Get the next thread to run
     fn get_next_thread(&mut self) -> Option<ThreadId> {
-        self.ready_queue.pop_front()
+        let current_time = crate::utils::timer::uptime_ms();
+
+        // Wake up any threads whose sleep time has expired
+        for thread in &mut self.threads {
+            if thread.sleep_until_ms > 0 && current_time >= thread.sleep_until_ms {
+                // Sleep expired, wake up thread
+                thread.sleep_until_ms = 0;
+                if thread.state == ThreadState::Ready {
+                    // Add back to ready queue if not already there
+                    if !self.ready_queue.contains(&thread.id) {
+                        self.ready_queue.push_back(thread.id);
+                    }
+                }
+            }
+        }
+
+        // Find next thread that is not sleeping
+        loop {
+            let thread_id = self.ready_queue.pop_front()?;
+
+            // Check if this thread is sleeping
+            if let Some(thread) = self.threads.iter().find(|t| t.id == thread_id) {
+                if thread.sleep_until_ms > 0 && current_time < thread.sleep_until_ms {
+                    // Thread is still sleeping, don't schedule it
+                    // Don't put it back in ready queue
+                    continue;
+                }
+            }
+
+            // Thread is not sleeping, can be scheduled
+            return Some(thread_id);
+        }
     }
 
     /// Add thread back to ready queue
@@ -500,6 +531,64 @@ pub fn yield_now() {
 /// Get current thread ID
 pub fn current_thread_id() -> ThreadId {
     ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst))
+}
+
+/// Thread statistics for display
+#[derive(Debug, Clone)]
+pub struct ThreadStats {
+    pub id: ThreadId,
+    pub name: alloc::string::String,
+    pub state: ThreadState,
+    pub cpu_time_ms: u64,
+    pub cpu_percent: u64,
+}
+
+/// Get statistics for all threads
+///
+/// Returns a vector of ThreadStats with information about each thread
+/// including CPU time and usage percentage.
+pub fn get_thread_stats() -> Vec<ThreadStats> {
+    let sched_guard = SCHEDULER.lock();
+    let scheduler = match sched_guard.as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let total_uptime = crate::utils::timer::uptime_ms();
+    if total_uptime == 0 {
+        return Vec::new();
+    }
+
+    let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
+
+    let mut stats = Vec::new();
+    for thread in &scheduler.threads {
+        let mut cpu_time = thread.cpu_time_ms;
+
+        // If this is the currently running thread, add elapsed time since last scheduled
+        if thread.id == current_id && thread.last_scheduled_time > 0 {
+            let current_time = crate::utils::timer::uptime_ms();
+            let elapsed = current_time.saturating_sub(thread.last_scheduled_time);
+            cpu_time = cpu_time.saturating_add(elapsed);
+        }
+
+        // Calculate CPU percentage
+        let cpu_percent = if total_uptime > 0 {
+            (cpu_time * 100) / total_uptime
+        } else {
+            0
+        };
+
+        stats.push(ThreadStats {
+            id: thread.id,
+            name: thread.name.clone(),
+            state: thread.state,
+            cpu_time_ms: cpu_time,
+            cpu_percent,
+        });
+    }
+
+    stats
 }
 
 /// Software interrupt handler for voluntary yielding (INT 0x81)
@@ -724,6 +813,9 @@ pub extern "C" fn schedule_from_interrupt(current_ctx_ptr: *const InterruptConte
         return current_ctx_ptr;
     }
 
+    // Get current system uptime for CPU time tracking
+    let current_time = crate::utils::timer::uptime_ms();
+
     // Save current thread's context (if we have a current thread)
     if current_id.0 != 0 {
         if let Some(current_thread) = scheduler.get_thread_mut(current_id) {
@@ -731,15 +823,29 @@ pub extern "C" fn schedule_from_interrupt(current_ctx_ptr: *const InterruptConte
             unsafe {
                 current_thread.interrupt_context = *current_ctx_ptr;
             }
-            // Move current thread to ready queue
+
+            // Update CPU time: add time elapsed since last scheduled
+            if current_thread.last_scheduled_time > 0 {
+                let elapsed = current_time.saturating_sub(current_thread.last_scheduled_time);
+                current_thread.cpu_time_ms = current_thread.cpu_time_ms.saturating_add(elapsed);
+            }
+
+            // Move current thread to ready queue (unless it's sleeping)
             current_thread.state = ThreadState::Ready;
-            scheduler.ready_queue.push_back(current_id);
+            if current_thread.sleep_until_ms == 0 || current_time >= current_thread.sleep_until_ms {
+                // Thread is not sleeping (or sleep expired), add to ready queue
+                scheduler.ready_queue.push_back(current_id);
+            }
+            // If sleeping, thread is NOT added to ready queue
+            // It will be woken up by get_next_thread() when sleep expires
         }
     }
 
     // Get next thread and mark it as running
     let next_ctx_ptr = if let Some(next_thread) = scheduler.get_thread_mut(next_id) {
         next_thread.state = ThreadState::Running;
+        // Record when this thread starts executing
+        next_thread.last_scheduled_time = current_time;
         &next_thread.interrupt_context as *const InterruptContext
     } else {
         // Thread not found, return current context
@@ -753,59 +859,72 @@ pub extern "C" fn schedule_from_interrupt(current_ctx_ptr: *const InterruptConte
     next_ctx_ptr
 }
 
-/// Sleep for a number of milliseconds (cooperative)
-/// 
-/// This function implements cooperative sleeping by repeatedly yielding
-/// the CPU until the specified time has elapsed. This is different from
-/// preemptive sleep where the thread would be blocked and automatically
-/// woken up by the scheduler.
-/// 
-/// COOPERATIVE SLEEP PROCESS:
-/// =========================
-/// 
-/// 1. RECORD START TIME: Note current system uptime
-/// 2. YIELD LOOP: Repeatedly call yield_now() to give CPU to other threads
-/// 3. CHECK TIME: After each yield, check if enough time has passed
-/// 4. CONTINUE: Keep yielding until target time is reached
-/// 
-/// WHY COOPERATIVE SLEEP?
-/// =====================
-/// 
-/// In a cooperative scheduler, we can't just block a thread and have the
-/// scheduler wake it up later (that would require preemptive features).
-/// Instead, the thread must actively check if it's time to wake up.
-/// 
+/// Sleep for a number of milliseconds (blocking)
+///
+/// This function implements true blocking sleep by marking the thread
+/// as sleeping and removing it from active scheduling. The sleeping
+/// thread consumes 0% CPU during sleep.
+///
+/// BLOCKING SLEEP PROCESS:
+/// =======================
+///
+/// 1. SET SLEEP TIMER: Mark thread's sleep_until_ms field
+/// 2. YIELD CPU: Call yield_now() to switch to another thread
+/// 3. AUTOMATIC WAKEUP: Scheduler checks sleep timers and reschedules when ready
+/// 4. THREAD RESUMES: Execution continues after sleep time expires
+///
 /// ADVANTAGES:
-/// - Simple implementation
-/// - No need for timer-based wakeup mechanism
-/// - Thread remains responsive to other events
-/// 
+/// - Zero CPU consumption during sleep
+/// - Accurate CPU usage statistics
+/// - Power efficient (idle thread can halt CPU)
+/// - Proper thread blocking semantics
+///
 /// DISADVANTAGES:
-/// - Less precise timing (depends on other threads yielding)
-/// - Thread continues to consume some CPU time
-/// - Not suitable for hard real-time requirements
-/// 
+/// - Slightly more complex scheduler logic
+/// - Resolution limited by timer frequency (10ms)
+///
 /// USAGE EXAMPLE:
 /// =============
-/// 
+///
 /// ```rust
-/// // Sleep for 1 second
+/// // Sleep for 1 second (thread uses 0% CPU during this time)
 /// scheduler::sleep_ms(1000);
-/// 
+///
 /// // Sleep for 100 milliseconds
 /// scheduler::sleep_ms(100);
 /// ```
-/// 
+///
 /// The actual sleep time may be slightly longer than requested due to:
-/// - Other threads running between yields
 /// - Timer resolution (currently 10ms)
 /// - Scheduling overhead
 pub fn sleep_ms(ms: u64) {
-    // Record the time when sleep started
-    let start_time = crate::utils::timer::uptime_ms();
-    
-    // Keep yielding until enough time has passed
-    while crate::utils::timer::uptime_ms() - start_time < ms {
-        yield_now();
+    if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
+        // Scheduler not enabled, fall back to busy-wait with hlt
+        let start = crate::utils::timer::uptime_ms();
+        while crate::utils::timer::uptime_ms() - start < ms {
+            x86_64::instructions::hlt();
+        }
+        return;
     }
+
+    let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
+    if current_id.0 == 0 {
+        // Can't sleep in kernel/idle thread context
+        return;
+    }
+
+    // Set the thread's sleep timer
+    {
+        let mut sched_guard = SCHEDULER.lock();
+        if let Some(scheduler) = sched_guard.as_mut() {
+            if let Some(thread) = scheduler.get_thread_mut(current_id) {
+                let wake_time = crate::utils::timer::uptime_ms() + ms;
+                thread.sleep_until_ms = wake_time;
+            }
+        }
+    }
+
+    // Yield to switch to another thread
+    // The scheduler will not reschedule us until sleep time expires
+    yield_now();
 }

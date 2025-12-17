@@ -42,6 +42,13 @@ pub struct Thread {
 
     // Interrupt-based context for preemptive scheduling
     pub interrupt_context: InterruptContext,
+
+    // CPU time tracking (in milliseconds)
+    pub cpu_time_ms: u64,
+    pub last_scheduled_time: u64,
+
+    // Sleep tracking - if non-zero, thread is sleeping until this time
+    pub sleep_until_ms: u64,
 }
 
 impl Thread {
@@ -52,6 +59,9 @@ impl Thread {
             state: ThreadState::Ready,
             stack,
             interrupt_context,
+            cpu_time_ms: 0,
+            last_scheduled_time: 0,
+            sleep_until_ms: 0,
         }
     }
 }

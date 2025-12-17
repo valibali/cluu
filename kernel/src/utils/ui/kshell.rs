@@ -376,25 +376,106 @@ impl KShell {
 
     fn cmd_threads() {
         console::write_colored("Thread Information:\n", Color::CYAN, Color::BLACK);
+        console::write_str("\n");
+
+        // Get thread statistics
+        let stats = crate::scheduler::get_thread_stats();
+
+        if stats.is_empty() {
+            console::write_colored("  No threads found\n", Color::LIGHT_GRAY, Color::BLACK);
+            return;
+        }
+
+        // Print header
+        console::write_colored("  ", Color::WHITE, Color::BLACK);
+        console::write_colored("ID", Color::CYAN, Color::BLACK);
+        console::write_str("   ");
+        console::write_colored("STATE   ", Color::CYAN, Color::BLACK);
+        console::write_str("  ");
+        console::write_colored("CPU%", Color::CYAN, Color::BLACK);
+        console::write_str("   ");
+        console::write_colored("CPU TIME", Color::CYAN, Color::BLACK);
+        console::write_str("      ");
+        console::write_colored("NAME", Color::CYAN, Color::BLACK);
+        console::write_str("\n");
+
+        console::write_colored("  ", Color::GRAY, Color::BLACK);
+        console::write_str("──────────────────────────────────────────────────────────\n");
 
         let current_id = crate::scheduler::current_thread_id();
-        let mut info_str = String::new();
-        let _ = write!(info_str, "  Current thread: {}\n", current_id);
-        console::write_colored(&info_str, Color::WHITE, Color::BLACK);
 
+        // Print each thread
+        for stat in stats {
+            console::write_str("  ");
+
+            // Thread ID
+            let mut id_str = String::new();
+            let _ = write!(id_str, "{:<4}", stat.id.0);
+            if stat.id == current_id {
+                console::write_colored(&id_str, Color::GREEN, Color::BLACK);
+            } else {
+                console::write_colored(&id_str, Color::WHITE, Color::BLACK);
+            }
+
+            // State
+            let state_str = match stat.state {
+                crate::scheduler::ThreadState::Ready => "READY  ",
+                crate::scheduler::ThreadState::Running => "RUNNING",
+                crate::scheduler::ThreadState::Blocked => "BLOCKED",
+                crate::scheduler::ThreadState::Terminated => "TERM   ",
+            };
+            let state_color = match stat.state {
+                crate::scheduler::ThreadState::Running => Color::GREEN,
+                crate::scheduler::ThreadState::Ready => Color::YELLOW,
+                crate::scheduler::ThreadState::Blocked => Color::RED,
+                crate::scheduler::ThreadState::Terminated => Color::GRAY,
+            };
+            console::write_str("  ");
+            console::write_colored(state_str, state_color, Color::BLACK);
+
+            // CPU percentage
+            let mut cpu_pct_str = String::new();
+            let _ = write!(cpu_pct_str, "  {:>3}%", stat.cpu_percent);
+            console::write_colored(&cpu_pct_str, Color::WHITE, Color::BLACK);
+
+            // CPU time
+            let seconds = stat.cpu_time_ms / 1000;
+            let minutes = seconds / 60;
+            let hours = minutes / 60;
+            let mut time_str = String::new();
+            if hours > 0 {
+                let _ = write!(time_str, "  {:>3}h {:>2}m {:>2}s", hours, minutes % 60, seconds % 60);
+            } else if minutes > 0 {
+                let _ = write!(time_str, "      {:>2}m {:>2}s", minutes, seconds % 60);
+            } else {
+                let _ = write!(time_str, "         {:>2}s", seconds);
+            }
+            console::write_colored(&time_str, Color::LIGHT_GRAY, Color::BLACK);
+
+            // Thread name
+            console::write_str("  ");
+            if stat.id == current_id {
+                console::write_colored(&stat.name, Color::GREEN, Color::BLACK);
+            } else {
+                console::write_colored(&stat.name, Color::WHITE, Color::BLACK);
+            }
+            console::write_str("\n");
+        }
+
+        console::write_str("\n");
         console::write_colored("  Scheduler: ", Color::WHITE, Color::BLACK);
-        console::write_colored(
-            "Pre-emptive (timer and iretq-based)\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
+        console::write_colored("Preemptive round-robin (100Hz)\n", Color::GREEN, Color::BLACK);
 
-        console::write_colored("  Note: ", Color::YELLOW, Color::BLACK);
-        console::write_colored(
-            "Detailed thread listing not yet implemented\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
+        // Show total system info
+        let uptime = timer::uptime_ms();
+        let seconds = uptime / 1000;
+        let minutes = seconds / 60;
+        let hours = minutes / 60;
+
+        console::write_colored("  System uptime: ", Color::WHITE, Color::BLACK);
+        let mut uptime_str = String::new();
+        let _ = write!(uptime_str, "{}h {}m {}s\n", hours, minutes % 60, seconds % 60);
+        console::write_colored(&uptime_str, Color::LIGHT_GRAY, Color::BLACK);
     }
 
     fn cmd_yield() {
