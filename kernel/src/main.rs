@@ -154,6 +154,9 @@ pub extern "C" fn kstart() -> ! {
     // Step 10: Initialize scheduler
     scheduler::init();
 
+    // Step 10.5: Initialize IPC system
+    scheduler::ipc::init();
+
     // Step 11: Enable interrupts
     x86_64::instructions::interrupts::enable();
     log::info!("Interrupts enabled");
@@ -194,6 +197,231 @@ fn shell_thread_main() {
         let ch = drivers::input::keyboard::read_char_blocking();
         utils::ui::kshell::KShell::handle_char(ch);
     }
+}
+
+/// ===============================
+///  IPC TEST FIXTURE
+/// ===============================
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Shared port ID for test threads
+static TEST_PORT_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// Test 1: Basic ping-pong (receiver creates port, sender sends message)
+fn test_ipc_receiver() {
+    log::info!("[IPC Test] Receiver thread starting...");
+
+    // Create port
+    let port_id = scheduler::port_create().expect("Failed to create port");
+    log::info!("[IPC Test] Receiver created port {}", port_id.0);
+
+    // Share port ID with sender
+    TEST_PORT_ID.store(port_id.0, Ordering::SeqCst);
+
+    // Receive 3 messages
+    for i in 1..=3 {
+        log::info!("[IPC Test] Receiver waiting for message {}...", i);
+        let msg = scheduler::port_recv(port_id).expect("Failed to receive");
+        let value = msg.get_u64(0);
+        log::info!("[IPC Test] Receiver got message {}: value={}", i, value);
+
+        // Verify the value
+        if value == 42 + i - 1 {
+            log::info!("[IPC Test] ✓ Message {} value correct!", i);
+        } else {
+            log::error!("[IPC Test] ✗ Message {} value incorrect! Expected {}, got {}",
+                       i, 42 + i - 1, value);
+        }
+    }
+
+    log::info!("[IPC Test] Receiver test complete!");
+    scheduler::exit_thread();
+}
+
+fn test_ipc_sender() {
+    log::info!("[IPC Test] Sender thread starting...");
+
+    // Wait for receiver to create port
+    scheduler::sleep_ms(100);
+
+    let port_id = scheduler::PortId(TEST_PORT_ID.load(Ordering::SeqCst));
+    log::info!("[IPC Test] Sender using port {}", port_id.0);
+
+    // Send 3 messages
+    for i in 0..3 {
+        let mut msg = scheduler::Message::new();
+        msg.set_u64(0, 42 + i);
+
+        log::info!("[IPC Test] Sender sending message with value={}...", 42 + i);
+        scheduler::port_send(port_id, msg).expect("Failed to send");
+        log::info!("[IPC Test] ✓ Message sent!");
+
+        // Small delay between messages
+        scheduler::sleep_ms(50);
+    }
+
+    log::info!("[IPC Test] Sender test complete!");
+    scheduler::exit_thread();
+}
+
+/// Test 2: Blocking behavior - receiver blocks when no messages
+#[inline(never)]
+fn test_ipc_blocking_receiver() {
+    log::info!("[IPC Test Blocking] Receiver starting...");
+
+    let port_id = scheduler::port_create().expect("Failed to create port");
+    log::info!("[IPC Test Blocking] Created port {}", port_id.0);
+    TEST_PORT_ID.store(port_id.0, Ordering::SeqCst);
+
+    log::info!("[IPC Test Blocking] Waiting for message (check 'ps' - should show 0% CPU)...");
+    let msg = scheduler::port_recv(port_id).expect("Failed to receive");
+    log::info!("[IPC Test Blocking] ✓ Received message: {}", msg.get_u64(0));
+
+    log::info!("[IPC Test Blocking] Complete!");
+    scheduler::exit_thread();
+}
+
+#[inline(never)]
+fn test_ipc_delayed_sender() {
+    log::info!("[IPC Test Blocking] Sender waiting 2 seconds...");
+    scheduler::sleep_ms(2000);
+
+    let port_id = scheduler::PortId(TEST_PORT_ID.load(Ordering::SeqCst));
+    let mut msg = scheduler::Message::new();
+    msg.set_u64(0, 99);
+
+    log::info!("[IPC Test Blocking] Sending message now...");
+    scheduler::port_send(port_id, msg).expect("Failed to send");
+    log::info!("[IPC Test Blocking] ✓ Message sent, receiver should wake!");
+
+    scheduler::exit_thread();
+}
+
+/// Test 3: Queue full handling
+fn test_ipc_queue_full() {
+    log::info!("[IPC Test QueueFull] Starting...");
+
+    let port_id = scheduler::port_create().expect("Failed to create port");
+    log::info!("[IPC Test QueueFull] Created port {}", port_id.0);
+
+    // Send 32 messages (capacity limit)
+    for i in 0..32 {
+        let mut msg = scheduler::Message::new();
+        msg.set_u64(0, i);
+        scheduler::port_send(port_id, msg).expect("Failed to send");
+    }
+    log::info!("[IPC Test QueueFull] ✓ Sent 32 messages (at capacity)");
+
+    // 33rd message should fail with QueueFull
+    let mut msg = scheduler::Message::new();
+    msg.set_u64(0, 999);
+    match scheduler::port_send(port_id, msg) {
+        Err(scheduler::IpcError::QueueFull) => {
+            log::info!("[IPC Test QueueFull] ✓ 33rd message correctly rejected (QueueFull)");
+        }
+        Ok(()) => {
+            log::error!("[IPC Test QueueFull] ✗ 33rd message should have failed!");
+        }
+        Err(e) => {
+            log::error!("[IPC Test QueueFull] ✗ Wrong error: {:?}", e);
+        }
+    }
+
+    // Receive one message
+    let msg = scheduler::port_recv(port_id).expect("Failed to receive");
+    log::info!("[IPC Test QueueFull] ✓ Received message: {}", msg.get_u64(0));
+
+    // Now send should succeed
+    let mut msg = scheduler::Message::new();
+    msg.set_u64(0, 1000);
+    scheduler::port_send(port_id, msg).expect("Failed to send after making space");
+    log::info!("[IPC Test QueueFull] ✓ Send succeeded after freeing space!");
+
+    log::info!("[IPC Test QueueFull] Complete!");
+    scheduler::exit_thread();
+}
+
+/// Test 4: Multiple senders, one receiver
+fn test_ipc_multi_sender(sender_id: u64) {
+    log::info!("[IPC Test Multi] Sender {} starting...", sender_id);
+
+    // Wait for receiver to create port
+    scheduler::sleep_ms(100);
+
+    let port_id = scheduler::PortId(TEST_PORT_ID.load(Ordering::SeqCst));
+
+    // Send 5 messages
+    for i in 0..5 {
+        let mut msg = scheduler::Message::new();
+        msg.set_u64(0, sender_id * 100 + i);
+
+        scheduler::port_send(port_id, msg).expect("Failed to send");
+        log::info!("[IPC Test Multi] Sender {} sent message {}", sender_id, i);
+
+        scheduler::sleep_ms(50);
+    }
+
+    log::info!("[IPC Test Multi] Sender {} complete!", sender_id);
+    scheduler::exit_thread();
+}
+
+fn test_ipc_multi_receiver() {
+    log::info!("[IPC Test Multi] Receiver starting...");
+
+    let port_id = scheduler::port_create().expect("Failed to create port");
+    log::info!("[IPC Test Multi] Created port {}", port_id.0);
+    TEST_PORT_ID.store(port_id.0, Ordering::SeqCst);
+
+    // Receive 15 messages (3 senders × 5 messages)
+    for i in 0..15 {
+        let msg = scheduler::port_recv(port_id).expect("Failed to receive");
+        log::info!("[IPC Test Multi] Received message {}: value={}", i, msg.get_u64(0));
+    }
+
+    log::info!("[IPC Test Multi] Receiver complete!");
+    scheduler::exit_thread();
+}
+
+/// Spawn all IPC tests
+pub fn spawn_ipc_tests() {
+    log::info!("=== Starting IPC Test Suite ===");
+
+    // Test 1: Basic ping-pong
+    log::info!("--- Test 1: Basic Send/Receive ---");
+    scheduler::spawn_thread(test_ipc_receiver, "ipc-recv");
+    scheduler::spawn_thread(test_ipc_sender, "ipc-send");
+}
+
+/// Spawn blocking test
+#[inline(never)]
+pub fn spawn_ipc_blocking_test() {
+    log::info!("spawn_ipc_blocking_test: ENTERED");
+    log::info!("=== Test 2: Blocking Receive (check ps for 0% CPU) ===");
+
+    // Try spawning one at a time
+    log::info!("spawn_ipc_blocking_test: Spawning receiver thread...");
+    scheduler::spawn_thread(test_ipc_blocking_receiver, "ipc-block-recv");
+
+    log::info!("spawn_ipc_blocking_test: Spawning sender thread...");
+    scheduler::spawn_thread(test_ipc_delayed_sender, "ipc-delay-send");
+
+    log::info!("spawn_ipc_blocking_test: Both threads spawned successfully");
+}
+
+/// Spawn queue full test
+pub fn spawn_ipc_queue_test() {
+    log::info!("=== Test 3: Queue Full Handling ===");
+    scheduler::spawn_thread(test_ipc_queue_full, "ipc-qfull");
+}
+
+/// Spawn multi-sender test
+pub fn spawn_ipc_multi_test() {
+    log::info!("=== Test 4: Multiple Senders ===");
+    scheduler::spawn_thread(test_ipc_multi_receiver, "ipc-multi-recv");
+    scheduler::spawn_thread(|| test_ipc_multi_sender(1), "ipc-send-1");
+    scheduler::spawn_thread(|| test_ipc_multi_sender(2), "ipc-send-2");
+    scheduler::spawn_thread(|| test_ipc_multi_sender(3), "ipc-send-3");
 }
 
 /// ===============================

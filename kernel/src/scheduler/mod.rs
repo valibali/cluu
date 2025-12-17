@@ -88,10 +88,12 @@ use core::{
 use spin::Mutex;
 
 pub mod io_wait;
+pub mod ipc;
 pub mod thread;
 
 use crate::alloc::string::ToString;
 pub use io_wait::{IoChannel, wait_for_io, wake_io_waiters};
+pub use ipc::{IpcError, Message, PortId, port_create, port_destroy, port_recv, port_send, port_try_recv};
 pub use thread::{Thread, ThreadId, ThreadState};
 
 /// Thread stack size (64 KiB per thread)
@@ -1031,7 +1033,8 @@ pub extern "C" fn schedule_from_interrupt(
         if should_cleanup {
             // Clean up the terminated thread immediately
             // This is safe because we're now on the new thread's stack
-            scheduler.cleanup_terminated_threads(current_id);
+            // Pass next_id as the current thread to protect it from cleanup
+            scheduler.cleanup_terminated_threads(next_id);
         }
     }
 

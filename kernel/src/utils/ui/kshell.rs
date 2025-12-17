@@ -189,6 +189,10 @@ impl KShell {
             "colors" => Self::cmd_colors(),
             "threads" | "ps" => Self::cmd_threads(),
             "yield" => Self::cmd_yield(),
+            "test-ipc" | "ipc-test" => Self::cmd_test_ipc(),
+            "ipcblock" => Self::cmd_test_ipc_blocking(),
+            "test-ipc-queue" => Self::cmd_test_ipc_queue(),
+            "test-ipc-multi" => Self::cmd_test_ipc_multi(),
             "" => {}
             _ => {
                 console::write_colored("Unknown command: ", Color::RED, Color::BLACK);
@@ -444,7 +448,13 @@ impl KShell {
             let hours = minutes / 60;
             let mut time_str = String::new();
             if hours > 0 {
-                let _ = write!(time_str, "  {:>3}h {:>2}m {:>2}s", hours, minutes % 60, seconds % 60);
+                let _ = write!(
+                    time_str,
+                    "  {:>3}h {:>2}m {:>2}s",
+                    hours,
+                    minutes % 60,
+                    seconds % 60
+                );
             } else if minutes > 0 {
                 let _ = write!(time_str, "      {:>2}m {:>2}s", minutes, seconds % 60);
             } else {
@@ -464,7 +474,11 @@ impl KShell {
 
         console::write_str("\n");
         console::write_colored("  Scheduler: ", Color::WHITE, Color::BLACK);
-        console::write_colored("Preemptive round-robin (100Hz)\n", Color::GREEN, Color::BLACK);
+        console::write_colored(
+            "Preemptive round-robin (100Hz)\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
 
         // Show total system info
         let uptime = timer::uptime_ms();
@@ -474,7 +488,13 @@ impl KShell {
 
         console::write_colored("  System uptime: ", Color::WHITE, Color::BLACK);
         let mut uptime_str = String::new();
-        let _ = write!(uptime_str, "{}h {}m {}s\n", hours, minutes % 60, seconds % 60);
+        let _ = write!(
+            uptime_str,
+            "{}h {}m {}s\n",
+            hours,
+            minutes % 60,
+            seconds % 60
+        );
         console::write_colored(&uptime_str, Color::LIGHT_GRAY, Color::BLACK);
     }
 
@@ -486,5 +506,72 @@ impl KShell {
         );
         crate::scheduler::yield_now();
         console::write_colored("Back in shell thread\n", Color::GREEN, Color::BLACK);
+    }
+
+    fn cmd_test_ipc() {
+        console::write_colored(
+            "Starting IPC Test: Basic Send/Receive\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "This test spawns sender and receiver threads.\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Watch the logs for test results.\n\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        crate::spawn_ipc_tests();
+    }
+
+    fn cmd_test_ipc_blocking() {
+        // Minimal test - just log and return
+        log::info!("===== cmd_test_ipc_blocking: START =====");
+        console::write_colored("Test function called!\n", Color::GREEN, Color::BLACK);
+        log::info!("===== cmd_test_ipc_blocking: END =====");
+
+        // Uncomment to run actual test:
+        crate::spawn_ipc_blocking_test();
+    }
+
+    fn cmd_test_ipc_queue() {
+        console::write_colored(
+            "Starting IPC Test: Queue Full Handling\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Tests queue capacity (32 messages) and error handling.\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Watch the logs for test results.\n\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        crate::spawn_ipc_queue_test();
+    }
+
+    fn cmd_test_ipc_multi() {
+        console::write_colored(
+            "Starting IPC Test: Multiple Senders\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "3 senders will send 5 messages each to 1 receiver.\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Watch the logs for message delivery order.\n\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        crate::spawn_ipc_multi_test();
     }
 }
