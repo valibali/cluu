@@ -193,6 +193,7 @@ impl KShell {
             "ipcblock" => Self::cmd_test_ipc_blocking(),
             "test-ipc-queue" => Self::cmd_test_ipc_queue(),
             "test-ipc-multi" => Self::cmd_test_ipc_multi(),
+            "test-fd" => Self::cmd_test_fd(),
             "" => {}
             _ => {
                 console::write_colored("Unknown command: ", Color::RED, Color::BLACK);
@@ -573,5 +574,24 @@ impl KShell {
             Color::BLACK,
         );
         crate::spawn_ipc_multi_test();
+    }
+
+    fn cmd_test_fd() {
+        console::write_colored(
+            "Starting FD Layer Test\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Testing file descriptor abstraction with stdin/stdout/stderr.\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Watch the logs and follow prompts.\n\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        crate::spawn_fd_test();
     }
 }

@@ -9,6 +9,7 @@ use alloc::{boxed::Box, string::String};
 use core::fmt;
 
 use super::InterruptContext;
+use crate::io::FileDescriptorTable;
 
 /// Thread identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -49,6 +50,9 @@ pub struct Thread {
 
     // Sleep tracking - if non-zero, thread is sleeping until this time
     pub sleep_until_ms: u64,
+
+    // File descriptor table (None for kernel threads without I/O)
+    pub fd_table: Option<FileDescriptorTable>,
 }
 
 impl Thread {
@@ -62,6 +66,7 @@ impl Thread {
             cpu_time_ms: 0,
             last_scheduled_time: 0,
             sleep_until_ms: 0,
+            fd_table: None, // Initialize to None (no I/O by default)
         }
     }
 }

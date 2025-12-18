@@ -389,16 +389,26 @@ impl Scheduler {
     ///
     /// Returns the number of threads cleaned up.
     fn cleanup_terminated_threads(&mut self, current_thread_id: ThreadId) -> usize {
-        let initial_count = self.threads.len();
-
-        // Remove terminated threads (but never remove current thread or idle thread)
-        self.threads.retain(|t| {
-            if t.state == ThreadState::Terminated && t.id != current_thread_id && t.id.0 != 0 {
-                log::info!("Reaper: Cleaning up thread {} ({})", t.id.0, t.name);
-                false // Remove this thread
-            } else {
-                true // Keep this thread
+        // First, identify threads to clean up (without logging inside retain closure)
+        let mut to_remove = alloc::vec::Vec::new();
+        for thread in &self.threads {
+            if thread.state == ThreadState::Terminated
+                && thread.id != current_thread_id
+                && thread.id.0 != 0
+            {
+                to_remove.push((thread.id, thread.name.clone()));
             }
+        }
+
+        // Log what we're about to clean up
+        for (id, name) in &to_remove {
+            log::info!("Reaper: Cleaning up thread {} ({})", id.0, name);
+        }
+
+        // Now remove them
+        let initial_count = self.threads.len();
+        self.threads.retain(|t| {
+            !to_remove.iter().any(|(id, _)| t.id == *id)
         });
 
         initial_count - self.threads.len()
@@ -433,6 +443,49 @@ pub fn spawn_thread(entry_point: fn(), name: &str) -> ThreadId {
     PREEMPTION_DISABLED.store(false, Ordering::SeqCst);
 
     thread_id
+}
+
+/// Initialize standard streams (stdin/stdout/stderr) for a thread
+///
+/// This creates a file descriptor table with FDs 0, 1, 2 all pointing
+/// to TTY0 (the console). Should be called after spawning a thread that
+/// needs I/O capabilities.
+///
+/// # Arguments
+/// * `thread_id` - The thread to initialize standard streams for
+pub fn init_std_streams(thread_id: ThreadId) {
+    use crate::io::{FileDescriptorTable, TtyDevice};
+    use alloc::sync::Arc;
+
+    // Disable preemption while modifying thread
+    PREEMPTION_DISABLED.store(true, Ordering::SeqCst);
+
+    {
+        let mut scheduler_guard = SCHEDULER.lock();
+        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
+
+        // Find thread by ID in the Vec
+        if let Some(thread) = scheduler.threads.iter_mut().find(|t| t.id == thread_id) {
+            let mut fd_table = FileDescriptorTable::new();
+
+            // Create TTY device for console (TTY0)
+            let tty = Arc::new(TtyDevice::new(0));
+
+            // Initialize stdin, stdout, stderr (all point to same TTY)
+            fd_table.insert(0, tty.clone()); // stdin
+            fd_table.insert(1, tty.clone()); // stdout
+            fd_table.insert(2, tty);         // stderr
+
+            thread.fd_table = Some(fd_table);
+
+            log::debug!("Initialized standard streams for thread {}", thread_id.0);
+        } else {
+            log::warn!("Cannot init std streams: thread {} not found", thread_id.0);
+        }
+    }
+
+    // Re-enable preemption
+    PREEMPTION_DISABLED.store(false, Ordering::SeqCst);
 }
 
 /// Idle thread function
@@ -565,6 +618,24 @@ pub fn yield_now() {
 /// Get current thread ID
 pub fn current_thread_id() -> ThreadId {
     ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst))
+}
+
+/// Execute a closure with access to the current thread
+///
+/// Provides safe read-only access to the current thread's data.
+/// Returns None if the scheduler is not initialized or thread not found.
+pub fn with_current_thread<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&Thread) -> R,
+{
+    let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
+    let sched_guard = SCHEDULER.lock();
+    if let Some(scheduler) = sched_guard.as_ref() {
+        if let Some(thread) = scheduler.threads.iter().find(|t| t.id == current_id) {
+            return Some(f(thread));
+        }
+    }
+    None
 }
 
 /// Block the current thread
