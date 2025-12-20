@@ -36,7 +36,7 @@
 
 use x86_64::{
     PhysAddr, VirtAddr,
-    structures::paging::{PageTable, PageTableFlags},
+    structures::paging::PageTableFlags,
 };
 
 /// Memory region descriptor

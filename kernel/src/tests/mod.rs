@@ -29,6 +29,7 @@
 
 pub mod comprehensive;
 pub mod syscall_tests;
+pub mod syscall_direct;
 
 use crate::scheduler;
 use core::sync::atomic::{AtomicUsize, Ordering};
