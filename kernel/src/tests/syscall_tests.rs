@@ -34,8 +34,10 @@ pub fn test_sys_write_valid() {
 pub fn test_sys_write_invalid_fd() -> bool {
     log::info!("TEST: sys_write with invalid FD");
 
-    let message = b"This should fail\n";
-    let result = sys_write(999, message.as_ptr(), message.len());
+    // Use a userspace address (not kernel) so pointer validation passes
+    // and we can test FD validation
+    let userspace_ptr = 0x1000 as *const u8;
+    let result = sys_write(999, userspace_ptr, 10);
 
     if result == -EBADF {
         log::info!("  PASS: sys_write returned EBADF for invalid FD");
@@ -139,17 +141,18 @@ pub fn test_sys_fstat_null_pointer() -> bool {
     }
 }
 
-/// Test sys_lseek with TTY (should return ESPIPE)
-pub fn test_sys_lseek_tty() -> bool {
-    log::info!("TEST: sys_lseek on TTY (should fail)");
+/// Test sys_lseek with invalid FD (no process context in kernel mode)
+pub fn test_sys_lseek_invalid_fd() -> bool {
+    log::info!("TEST: sys_lseek with invalid FD");
 
+    // From kernel mode without process context, FD 1 doesn't exist
     let result = sys_lseek(1, 0, 0);
 
-    if result == -ESPIPE {
-        log::info!("  PASS: sys_lseek returned ESPIPE (unseekable)");
+    if result == -EBADF {
+        log::info!("  PASS: sys_lseek returned EBADF (no process context)");
         true
     } else {
-        log::error!("  FAIL: Expected ESPIPE (-{}), got {}", ESPIPE, result);
+        log::error!("  FAIL: Expected EBADF (-{}), got {}", EBADF, result);
         false
     }
 }
@@ -341,7 +344,7 @@ pub fn run_all_syscall_tests() -> (usize, usize) {
     count_result(test_sys_write_kernel_pointer());
     count_result(test_sys_isatty_invalid_fd());
     count_result(test_sys_fstat_null_pointer());
-    count_result(test_sys_lseek_tty());
+    count_result(test_sys_lseek_invalid_fd());
     count_result(test_sys_close_invalid_fd());
 
     // Group B: Heap management tests (should work with fixed heap)
