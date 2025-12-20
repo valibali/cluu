@@ -8,8 +8,7 @@
 use alloc::{boxed::Box, string::String};
 use core::fmt;
 
-use super::InterruptContext;
-use crate::io::FileDescriptorTable;
+use super::{InterruptContext, process::ProcessId};
 
 /// Thread identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -35,6 +34,9 @@ pub enum ThreadState {
 /// Each thread has its own stack and interrupt context for preemptive scheduling.
 /// The interrupt context stores all CPU registers + interrupt frame, allowing
 /// threads to be switched at any time via timer interrupts or voluntary yields.
+///
+/// Threads belong to a Process and share that process's address space and
+/// file descriptor table.
 pub struct Thread {
     pub id: ThreadId,
     pub name: String,
@@ -51,12 +53,18 @@ pub struct Thread {
     // Sleep tracking - if non-zero, thread is sleeping until this time
     pub sleep_until_ms: u64,
 
-    // File descriptor table (None for kernel threads without I/O)
-    pub fd_table: Option<FileDescriptorTable>,
+    // Process this thread belongs to
+    pub process_id: ProcessId,
 }
 
 impl Thread {
-    pub fn new(id: ThreadId, name: String, stack: Box<[u8]>, interrupt_context: InterruptContext) -> Self {
+    pub fn new(
+        id: ThreadId,
+        name: String,
+        stack: Box<[u8]>,
+        interrupt_context: InterruptContext,
+        process_id: ProcessId,
+    ) -> Self {
         Self {
             id,
             name,
@@ -66,7 +74,7 @@ impl Thread {
             cpu_time_ms: 0,
             last_scheduled_time: 0,
             sleep_until_ms: 0,
-            fd_table: None, // Initialize to None (no I/O by default)
+            process_id,
         }
     }
 }

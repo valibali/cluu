@@ -41,9 +41,13 @@
  * to ensure safe concurrent access from multiple kernel threads.
  */
 
+pub mod address_space;
 pub mod heap;
 pub mod paging;
 pub mod phys;
+
+// Re-export commonly used types
+pub use address_space::{AddressSpace, HeapRegion, MemoryRegion};
 
 use crate::bootboot::BOOTBOOT;
 

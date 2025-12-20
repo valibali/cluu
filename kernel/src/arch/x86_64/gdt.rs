@@ -47,12 +47,16 @@ lazy_static! {
         let code_selector = gdt.append(Descriptor::kernel_code_segment());
         let data_selector = gdt.append(Descriptor::kernel_data_segment());
         let tss_selector = gdt.append(Descriptor::tss_segment(&TSS));
+        let user_data_selector = gdt.append(Descriptor::user_data_segment());
+        let user_code_selector = gdt.append(Descriptor::user_code_segment());
         (
             gdt,
             Selectors {
                 code_selector,
                 data_selector,
                 tss_selector,
+                user_data_selector,
+                user_code_selector,
             },
         )
     };
@@ -62,6 +66,8 @@ struct Selectors {
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
+    user_data_selector: SegmentSelector,
+    user_code_selector: SegmentSelector,
 }
 
 /// Initialize the Global Descriptor Table
@@ -96,4 +102,20 @@ pub fn init() {
     }
 
     log::info!("GDT initialized successfully");
+}
+
+/// Get the user code segment selector (Ring 3)
+///
+/// Returns the segment selector for user mode code execution.
+/// The selector has RPL=3 (Ring 3) set by the x86_64 crate.
+pub fn user_code_selector() -> SegmentSelector {
+    GDT.1.user_code_selector
+}
+
+/// Get the user data segment selector (Ring 3)
+///
+/// Returns the segment selector for user mode data access.
+/// The selector has RPL=3 (Ring 3) set by the x86_64 crate.
+pub fn user_data_selector() -> SegmentSelector {
+    GDT.1.user_data_selector
 }

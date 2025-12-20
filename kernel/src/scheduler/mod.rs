@@ -79,7 +79,7 @@
  * - Per-thread 64KB stacks
  */
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{collections::{BTreeMap, VecDeque}, vec::Vec};
 
 use core::{
     arch::asm,
@@ -89,6 +89,7 @@ use spin::Mutex;
 
 pub mod io_wait;
 pub mod ipc;
+pub mod process;
 pub mod thread;
 
 use crate::alloc::string::ToString;
@@ -96,6 +97,7 @@ pub use io_wait::{IoChannel, wait_for_io, wake_io_waiters};
 pub use ipc::{
     IpcError, Message, PortId, port_create, port_destroy, port_recv, port_send,
 };
+pub use process::{Process, ProcessId, ProcessState};
 pub use thread::{Thread, ThreadId, ThreadState};
 
 /// Thread stack size (64 KiB per thread)
@@ -229,9 +231,11 @@ impl Default for InterruptContext {
 /// for a microkernel with a small number of threads. For better performance
 /// with many threads, we could use a HashMap<ThreadId, Thread>.
 pub struct Scheduler {
-    threads: Vec<Thread>,            // All threads in the system
-    ready_queue: VecDeque<ThreadId>, // Queue of threads ready to run
-    next_thread_id: ThreadId,        // Next ID to assign to new thread
+    threads: Vec<Thread>,             // All threads in the system
+    ready_queue: VecDeque<ThreadId>,  // Queue of threads ready to run
+    next_thread_id: ThreadId,         // Next ID to assign to new thread
+    processes: BTreeMap<ProcessId, Process>, // All processes in the system
+    next_process_id: ProcessId,       // Next ID to assign to new process
 }
 
 impl Scheduler {
@@ -240,6 +244,8 @@ impl Scheduler {
             threads: Vec::new(),
             ready_queue: VecDeque::new(),
             next_thread_id: ThreadId(1), // ID 0 reserved for kernel/idle
+            processes: BTreeMap::new(),
+            next_process_id: ProcessId(1), // ID 0 reserved for kernel
         }
     }
 
@@ -295,7 +301,7 @@ impl Scheduler {
     ///
     /// When the thread first runs via iretq, it will jump to the trampoline
     /// which calls the entry point and ensures proper cleanup.
-    fn create_thread(&mut self, entry_point: fn(), name: &str) -> ThreadId {
+    fn create_thread(&mut self, entry_point: fn(), name: &str, process_id: ProcessId) -> ThreadId {
         // Assign unique ID and increment counter for next thread
         let thread_id = self.next_thread_id;
         self.next_thread_id.0 += 1;
@@ -327,13 +333,18 @@ impl Scheduler {
         // All general purpose registers initialized to 0 (from default())
 
         // Create the thread object and add it to our data structures
-        let thread = Thread::new(thread_id, name.into(), stack, interrupt_context);
+        let thread = Thread::new(thread_id, name.into(), stack, interrupt_context, process_id);
         self.threads.push(thread);
+
+        // Add thread to its process
+        if let Some(process) = self.processes.get_mut(&process_id) {
+            process.add_thread(thread_id);
+        }
 
         // New thread starts in Ready state, so add to ready queue
         self.ready_queue.push_back(thread_id);
 
-        log::info!("Created thread '{}' with ID {:?}", name, thread_id);
+        log::info!("Created thread '{}' (ID {:?}) in process {:?}", name, thread_id, process_id);
         thread_id
     }
 
@@ -434,13 +445,44 @@ impl Scheduler {
 
         initial_count - self.threads.len()
     }
+
+    /// Create a new kernel process
+    ///
+    /// Kernel processes run in Ring 0 and use the kernel address space.
+    /// This is used for kernel threads that need isolated resource management.
+    fn create_kernel_process(&mut self, name: &str) -> ProcessId {
+        let process_id = self.next_process_id;
+        self.next_process_id.0 += 1;
+
+        let process = Process::new_kernel(process_id, name.into());
+        self.processes.insert(process_id, process);
+
+        log::info!("Created kernel process '{}' with ID {:?}", name, process_id);
+        process_id
+    }
+
+    /// Get a process by ID (immutable)
+    fn get_process(&self, process_id: ProcessId) -> Option<&Process> {
+        self.processes.get(&process_id)
+    }
+
+    /// Get a process by ID (mutable)
+    fn get_process_mut(&mut self, process_id: ProcessId) -> Option<&mut Process> {
+        self.processes.get_mut(&process_id)
+    }
 }
 
 /// Initialize the scheduler
 pub fn init() {
     log::info!("Initializing preemptive scheduler...");
 
-    let scheduler = Scheduler::new();
+    let mut scheduler = Scheduler::new();
+
+    // Create default kernel process (PID 0) for kernel threads
+    let kernel_process = Process::new_kernel(ProcessId(0), "kernel".into());
+    scheduler.processes.insert(ProcessId(0), kernel_process);
+    log::info!("Created default kernel process (PID 0)");
+
     // CRITICAL: Disable interrupts to prevent timer IRQ from trying to acquire lock
     x86_64::instructions::interrupts::without_interrupts(|| {
         *SCHEDULER.lock() = Some(scheduler);
@@ -452,26 +494,105 @@ pub fn init() {
     log::info!("Scheduler initialized");
 }
 
-/// Create a new thread
+/// Create a new thread in the default kernel process
+///
+/// This is a convenience function for creating kernel threads without
+/// explicitly managing processes. All threads created this way belong
+/// to the default kernel process (PID 0).
 pub fn spawn_thread(entry_point: fn(), name: &str) -> ThreadId {
     // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut scheduler_guard = SCHEDULER.lock();
         let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
-        scheduler.create_thread(entry_point, name)
+        scheduler.create_thread(entry_point, name, ProcessId(0))
     })
 }
 
-/// Initialize standard streams (stdin/stdout/stderr) for a thread
+/// Create a new kernel process
 ///
-/// This creates a file descriptor table with FDs 0, 1, 2 all pointing
-/// to TTY0 (the console). Should be called after spawning a thread that
-/// needs I/O capabilities.
+/// This creates a process with its own file descriptor table and resource
+/// management, but using the kernel address space (Ring 0).
+///
+/// Returns the ProcessId of the newly created process.
+pub fn spawn_kernel_process(name: &str) -> ProcessId {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut scheduler_guard = SCHEDULER.lock();
+        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
+        scheduler.create_kernel_process(name)
+    })
+}
+
+/// Create a thread within a specific process
+///
+/// This is the process-aware version of spawn_thread, allowing you to
+/// specify which process the thread should belong to.
+pub fn spawn_thread_in_process(entry_point: fn(), name: &str, process_id: ProcessId) -> ThreadId {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut scheduler_guard = SCHEDULER.lock();
+        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
+        scheduler.create_thread(entry_point, name, process_id)
+    })
+}
+
+/// Get the process ID for the currently running thread
+///
+/// Returns None if no thread is currently running or scheduler not initialized.
+pub fn current_process_id() -> Option<ProcessId> {
+    let current_tid = ThreadId(CURRENT_THREAD_ID.load(Ordering::Relaxed));
+    if current_tid.0 == 0 {
+        return None;
+    }
+
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let scheduler_guard = SCHEDULER.lock();
+        let scheduler = scheduler_guard.as_ref()?;
+        scheduler.threads.iter()
+            .find(|t| t.id == current_tid)
+            .map(|t| t.process_id)
+    })
+}
+
+/// Execute a closure with access to the current process (immutable)
+///
+/// This is a helper function for syscalls that need to access the current
+/// process's state (e.g., file descriptor table).
+pub fn with_current_process<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&Process) -> R,
+{
+    let pid = current_process_id()?;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let scheduler_guard = SCHEDULER.lock();
+        let scheduler = scheduler_guard.as_ref()?;
+        scheduler.get_process(pid).map(f)
+    })
+}
+
+/// Execute a closure with access to the current process (mutable)
+///
+/// This is a helper function for syscalls that need to modify the current
+/// process's state (e.g., modifying file descriptor table).
+pub fn with_current_process_mut<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut Process) -> R,
+{
+    let pid = current_process_id()?;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut scheduler_guard = SCHEDULER.lock();
+        let scheduler = scheduler_guard.as_mut()?;
+        scheduler.get_process_mut(pid).map(f)
+    })
+}
+
+/// Initialize standard streams (stdin/stdout/stderr) for a process
+///
+/// This sets up the file descriptor table for the process that owns the
+/// given thread, with FDs 0, 1, 2 all pointing to TTY0 (the console).
 ///
 /// # Arguments
-/// * `thread_id` - The thread to initialize standard streams for
+/// * `thread_id` - A thread belonging to the process to initialize
 pub fn init_std_streams(thread_id: ThreadId) {
-    use crate::io::{FileDescriptorTable, TtyDevice};
+    use crate::io::TtyDevice;
     use alloc::sync::Arc;
 
     // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
@@ -479,21 +600,25 @@ pub fn init_std_streams(thread_id: ThreadId) {
         let mut scheduler_guard = SCHEDULER.lock();
         let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
 
-        // Find thread by ID in the Vec
-        if let Some(thread) = scheduler.threads.iter_mut().find(|t| t.id == thread_id) {
-            let mut fd_table = FileDescriptorTable::new();
+        // Find thread by ID to get its process_id
+        let process_id = scheduler.threads.iter()
+            .find(|t| t.id == thread_id)
+            .map(|t| t.process_id);
 
-            // Create TTY device for console (TTY0)
-            let tty = Arc::new(TtyDevice::new(0));
+        if let Some(pid) = process_id {
+            if let Some(process) = scheduler.processes.get_mut(&pid) {
+                // Create TTY device for console (TTY0)
+                let tty = Arc::new(TtyDevice::new(0));
 
-            // Initialize stdin, stdout, stderr (all point to same TTY)
-            fd_table.insert(0, tty.clone()); // stdin
-            fd_table.insert(1, tty.clone()); // stdout
-            fd_table.insert(2, tty); // stderr
+                // Initialize stdin, stdout, stderr (all point to same TTY)
+                process.fd_table.insert(0, tty.clone()); // stdin
+                process.fd_table.insert(1, tty.clone()); // stdout
+                process.fd_table.insert(2, tty); // stderr
 
-            thread.fd_table = Some(fd_table);
-
-            log::debug!("Initialized standard streams for thread {}", thread_id.0);
+                log::debug!("Initialized standard streams for process {:?}", pid);
+            } else {
+                log::warn!("Cannot init std streams: process {:?} not found", pid);
+            }
         } else {
             log::warn!("Cannot init std streams: thread {} not found", thread_id.0);
         }

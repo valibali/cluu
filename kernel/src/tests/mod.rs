@@ -276,17 +276,15 @@ fn test_ipc_multi_sender_3() {
 fn test_fd_thread() {
     log::info!("[FD Test] Thread starting...");
 
-    // Get FD table from current thread
-    let fd_table_result = scheduler::with_current_thread(|thread| {
-        thread.fd_table.as_ref().map(|table| {
-            // We need to clone the Arc references to use them outside the closure
-            (table.get(0), table.get(1), table.get(2))
-        })
+    // Get FD table from current process
+    let fd_table_result = scheduler::with_current_process(|process| {
+        // We need to clone the Arc references to use them outside the closure
+        (process.fd_table.get(0), process.fd_table.get(1), process.fd_table.get(2))
     });
 
     let (stdin_res, stdout_res, _stderr_res) = match fd_table_result {
-        Some(Some((stdin, stdout, stderr))) => (stdin, stdout, stderr),
-        _ => {
+        Some((stdin, stdout, stderr)) => (stdin, stdout, stderr),
+        None => {
             log::error!("[FD Test] FD table not initialized!");
             scheduler::exit_thread();
         }
@@ -854,19 +852,17 @@ fn cont_stress_ipc_send_2_2() { cont_stress_send_to_port(&STRESS_PORT_2, 2); }
 // Continuous stress FD test
 fn cont_stress_fd_test() {
     // Test FD operations
-    scheduler::with_current_thread(|thread| {
-        if let Some(fd_table) = &thread.fd_table {
-            // Test stdout write
-            if let Ok(stdout) = fd_table.get(1) {
-                let test_msg = b"[FD-Stress] stdout test\n";
-                let _ = stdout.write(test_msg);
-            }
+    scheduler::with_current_process(|process| {
+        // Test stdout write
+        if let Ok(stdout) = process.fd_table.get(1) {
+            let test_msg = b"[FD-Stress] stdout test\n";
+            let _ = stdout.write(test_msg);
+        }
 
-            // Test stderr write
-            if let Ok(stderr) = fd_table.get(2) {
-                let test_msg = b"[FD-Stress] stderr test\n";
-                let _ = stderr.write(test_msg);
-            }
+        // Test stderr write
+        if let Ok(stderr) = process.fd_table.get(2) {
+            let test_msg = b"[FD-Stress] stderr test\n";
+            let _ = stderr.write(test_msg);
         }
     });
 
@@ -901,5 +897,5 @@ fn cont_stress_compute() {
     scheduler::exit_thread();
 }
 
-/// ===============================
-///  PANIC HANDLER
+// ===============================
+//  PANIC HANDLER

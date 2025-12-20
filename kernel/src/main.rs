@@ -37,6 +37,7 @@ mod drivers;
 mod io;
 mod memory;
 mod scheduler;
+mod syscall;
 mod tests;
 mod utils;
 
@@ -118,6 +119,9 @@ pub extern "C" fn kstart() -> ! {
 
     // Step 3: Initialize GDT (Global Descriptor Table)
     arch::x86_64::gdt::init();
+
+    // Step 3.5: Initialize SYSCALL/SYSRET mechanism
+    syscall::init();
 
     // Step 4: Initialize memory management
     log::info!("Initializing memory management...");

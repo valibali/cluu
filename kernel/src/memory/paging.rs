@@ -155,6 +155,41 @@ pub fn map_page(
     Ok(())
 }
 
+/// Map a user-accessible page
+///
+/// This is a specialized version of map_page that ensures the USER_ACCESSIBLE
+/// flag is set, allowing Ring 3 (userspace) code to access the page.
+///
+/// This function is used for mapping userspace memory regions (text, data,
+/// heap, stack) and ensures proper privilege separation.
+///
+/// # Arguments
+/// * `virt` - Virtual address to map (will be rounded down to page boundary)
+/// * `phys` - Physical address to map to (will be rounded down to frame boundary)
+/// * `flags` - Base page table flags (USER_ACCESSIBLE will be added automatically)
+///
+/// # Returns
+/// * `Ok(())` - Mapping successful
+/// * `Err(MapToError)` - Mapping failed (page already mapped, etc.)
+///
+/// # Safety
+/// The caller must ensure that:
+/// - The physical frame is not already in use
+/// - The virtual address is in userspace range (< 0x0000_8000_0000_0000)
+/// - The flags are appropriate (typically PRESENT | WRITABLE for data/heap/stack,
+///   or PRESENT without WRITABLE for read-only code)
+pub fn map_user_page(
+    virt: VirtAddr,
+    phys: PhysAddr,
+    flags: PageTableFlags,
+) -> Result<(), MapToError<Size4KiB>> {
+    // Ensure USER_ACCESSIBLE is set for userspace access
+    let user_flags = flags | PageTableFlags::USER_ACCESSIBLE;
+
+    // Use the regular map_page with user flags
+    map_page(virt, phys, user_flags)
+}
+
 /// Unmap a virtual page and free its backing physical frame
 /// 
 /// Removes the page table entry for the given virtual address and returns
