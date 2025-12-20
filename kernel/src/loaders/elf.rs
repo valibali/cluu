@@ -45,6 +45,18 @@ use x86_64::structures::paging::PageTableFlags;
 use crate::memory::{paging, phys, AddressSpace};
 use crate::scheduler::{self, ProcessId, ThreadId};
 
+/// Trampoline function for userspace entry
+///
+/// This function should never actually execute - it's just a placeholder.
+/// The thread's interrupt context will be set up to jump directly to
+/// userspace via IRETQ when the thread is first scheduled.
+fn userspace_entry_trampoline() {
+    log::warn!("userspace_entry_trampoline executed - this should not happen!");
+    loop {
+        crate::scheduler::yield_now();
+    }
+}
+
 /// ELF magic number (0x7F 'E' 'L' 'F')
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
@@ -140,6 +152,7 @@ pub enum ElfLoadError {
     InvalidAlignment,
     MemoryAllocationFailed,
     MappingFailed,
+    ThreadSetupFailed,
 }
 
 impl core::fmt::Display for ElfLoadError {
@@ -157,6 +170,7 @@ impl core::fmt::Display for ElfLoadError {
             ElfLoadError::InvalidAlignment => write!(f, "Invalid segment alignment"),
             ElfLoadError::MemoryAllocationFailed => write!(f, "Failed to allocate memory"),
             ElfLoadError::MappingFailed => write!(f, "Failed to map pages"),
+            ElfLoadError::ThreadSetupFailed => write!(f, "Failed to set up userspace thread"),
         }
     }
 }
@@ -287,8 +301,11 @@ fn elf_flags_to_page_flags(elf_flags: u32) -> PageTableFlags {
 /// The address space must already be initialized and activated.
 pub fn load_elf_binary(
     data: &[u8],
-    _address_space: &mut AddressSpace,
+    address_space: &mut AddressSpace,
 ) -> Result<ElfBinary, ElfLoadError> {
+    use x86_64::registers::control::Cr3;
+    use x86_64::structures::paging::PhysFrame;
+
     log::info!("ELF: Loading binary ({} bytes)", data.len());
 
     // Parse and validate ELF header
@@ -300,6 +317,10 @@ pub fn load_elf_binary(
     // Parse program headers
     let program_headers = parse_program_headers(data, &header)?;
     log::info!("ELF: Found {} program headers", program_headers.len());
+
+    // Get the page table root for mapping
+    let page_table_root = address_space.page_table_root;
+    log::debug!("ELF: Mapping into page table at {:#x}", page_table_root.as_u64());
 
     let mut segments = Vec::new();
     let mut has_loadable = false;
@@ -368,24 +389,53 @@ pub fn load_elf_binary(
                 .ok_or(ElfLoadError::MemoryAllocationFailed)?;
             let phys_addr = PhysAddr::new(frame.start_address());
 
-            // Map page with appropriate flags
-            paging::map_user_page(page_vaddr, phys_addr, flags)
-                .map_err(|_| ElfLoadError::MappingFailed)?;
-
-            // Zero the entire page first (for security and BSS)
+            // Zero the physical frame before mapping (using identity mapping)
+            // This is needed because the virtual address is only mapped in userspace page table
             unsafe {
-                let page_ptr = page_vaddr.as_mut_ptr::<u8>();
-                core::ptr::write_bytes(page_ptr, 0, 4096);
+                let phys_ptr = phys_addr.as_u64() as *mut u8;
+                core::ptr::write_bytes(phys_ptr, 0, 4096);
+            }
+
+            // Map page with appropriate flags (add USER_ACCESSIBLE for userspace)
+            let user_flags = flags | PageTableFlags::USER_ACCESSIBLE;
+            log::debug!(
+                "ELF:   Mapping page: vaddr=0x{:x}, phys=0x{:x}, flags={:?}",
+                page_vaddr.as_u64(),
+                phys_addr.as_u64(),
+                user_flags
+            );
+
+            if let Err(e) = paging::map_page_in_table(page_table_root, page_vaddr, phys_addr, user_flags) {
+                log::error!("ELF:   Mapping failed: {:?}", e);
+                log::error!("ELF:     vaddr: 0x{:x}", page_vaddr.as_u64());
+                log::error!("ELF:     phys:  0x{:x}", phys_addr.as_u64());
+                log::error!("ELF:     flags: {:?}", user_flags);
+                log::error!("ELF:     page_table_root: 0x{:x}", page_table_root.as_u64());
+                return Err(ElfLoadError::MappingFailed);
             }
         }
 
         // Copy segment data from ELF file to mapped memory
+        // Temporarily switch to userspace page table to access the virtual addresses
         if file_size > 0 {
             let src = &data[file_offset..file_offset + file_size];
+
+            // Switch to userspace page table temporarily
+            use x86_64::registers::control::Cr3;
+            use x86_64::structures::paging::PhysFrame;
+            let (old_cr3, flags) = Cr3::read();
+            let new_cr3 = PhysFrame::containing_address(page_table_root);
+            unsafe { Cr3::write(new_cr3, flags); }
+
+            // Now we can access userspace virtual addresses
             unsafe {
                 let dst = vaddr.as_mut_ptr::<u8>();
                 core::ptr::copy_nonoverlapping(src.as_ptr(), dst, file_size);
             }
+
+            // Switch back to kernel page table
+            unsafe { Cr3::write(old_cr3, flags); }
+
             log::debug!("ELF:   Copied {} bytes to 0x{:x}", file_size, vaddr.as_u64());
         }
 
@@ -433,48 +483,94 @@ pub fn spawn_elf_process(
 ) -> Result<(ProcessId, ThreadId), ElfLoadError> {
     log::info!("Spawning ELF process '{}'", name);
 
-    // For Phase 7, we'll use the kernel address space temporarily
-    // In Phase 8+, we'll create proper userspace address spaces
-    //
-    // TODO: Implement new_user() for true userspace address spaces
-    // For now, we load ELF into kernel space for testing
+    // Create a new userspace process with dedicated page tables
+    let process_id = scheduler::spawn_user_process(name)
+        .map_err(|_| ElfLoadError::MemoryAllocationFailed)?;
 
-    // Create a new kernel process (temporary approach)
-    let process_id = scheduler::spawn_kernel_process(name);
+    // Initialize file descriptors (stdin/stdout/stderr → TTY0)
+    scheduler::with_process_mut(process_id, |process| {
+        use crate::io::TtyDevice;
+        use alloc::sync::Arc;
 
-    // Get the process to access its address space
-    let (_entry_point, thread_id) = scheduler::with_process_mut(process_id, |process| {
+        let tty_stdin = Arc::new(TtyDevice::new(0));
+        let tty_stdout = Arc::new(TtyDevice::new(0));
+        let tty_stderr = Arc::new(TtyDevice::new(0));
+
+        process.fd_table.insert(0, tty_stdin);   // stdin
+        process.fd_table.insert(1, tty_stdout);  // stdout
+        process.fd_table.insert(2, tty_stderr);  // stderr
+
+        log::debug!("Initialized FD table: stdin/stdout/stderr → TTY0");
+    })
+    .ok_or(ElfLoadError::MemoryAllocationFailed)?;
+
+    // Load ELF binary and set up user stack
+    // Do this in a scope to release the process lock before creating thread
+    let (entry_point, _page_table_root) = scheduler::with_process_mut(process_id, |process| {
         // Load ELF binary into process address space
         let binary = load_elf_binary(elf_data, &mut process.address_space)?;
 
         log::info!("ELF process '{}' loaded, entry point: 0x{:x}",
                    name, binary.entry_point.as_u64());
 
-        // TODO: Set up user stack with argc/argv
-        // For now, use a simple stack
+        // Set up user stack (16 MB at top of user space)
+        const USER_STACK_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+        const USER_STACK_TOP: u64 = 0x8000_0000; // 2 GB
+        const USER_STACK_BOTTOM: u64 = USER_STACK_TOP - USER_STACK_SIZE as u64;
 
-        // Create initial thread at entry point
-        // We need to spawn a thread in this process
-        // For now, we'll create a trampoline that jumps to the ELF entry point
+        log::debug!("ELF: Setting up user stack ({}KB)", USER_STACK_SIZE / 1024);
+        log::debug!("ELF:   Stack range: 0x{:x} - 0x{:x}", USER_STACK_BOTTOM, USER_STACK_TOP);
 
-        // TEMPORARY: We can't directly jump to the ELF entry point from kernel mode
-        // This requires userspace support which we'll add in later phases
-        // For now, just create a dummy thread
+        // Map user stack pages
+        let page_count = USER_STACK_SIZE / 4096;
+        let page_table_root = process.address_space.page_table_root;
 
-        let thread_id = scheduler::spawn_thread_in_process(
-            || {
-                log::warn!("ELF thread entry - userspace execution not yet implemented");
-                loop {
-                    crate::scheduler::yield_now();
-                }
-            },
-            name,
-            process_id,
-        );
+        for page_idx in 0..page_count {
+            let page_vaddr = VirtAddr::new(USER_STACK_BOTTOM + (page_idx as u64 * 4096));
 
-        Ok((binary.entry_point, thread_id))
+            // Allocate physical frame for stack page
+            let frame = phys::alloc_frame()
+                .ok_or(ElfLoadError::MemoryAllocationFailed)?;
+            let phys_addr = PhysAddr::new(frame.start_address());
+
+            // Zero the frame
+            unsafe {
+                let phys_ptr = phys_addr.as_u64() as *mut u8;
+                core::ptr::write_bytes(phys_ptr, 0, 4096);
+            }
+
+            // Map with USER_ACCESSIBLE | WRITABLE
+            let stack_flags = PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::USER_ACCESSIBLE;
+
+            paging::map_page_in_table(page_table_root, page_vaddr, phys_addr, stack_flags)
+                .map_err(|_| ElfLoadError::MappingFailed)?;
+        }
+
+        log::info!("ELF: User stack mapped ({} pages)", page_count);
+
+        Ok((binary.entry_point, page_table_root))
     })
     .ok_or(ElfLoadError::MemoryAllocationFailed)??;
+
+    // Now create the thread AFTER releasing the process lock to avoid deadlock
+    log::debug!("ELF: Creating userspace thread");
+    let thread_id = scheduler::spawn_thread_in_process(
+        userspace_entry_trampoline,
+        name,
+        process_id,
+    );
+
+    // Set up the thread's interrupt context to enter userspace
+    const USER_STACK_TOP: u64 = 0x8000_0000;
+    scheduler::setup_userspace_thread(
+        thread_id,
+        entry_point,
+        VirtAddr::new(USER_STACK_TOP),
+    ).map_err(|_| ElfLoadError::ThreadSetupFailed)?;
+
+    log::info!("ELF: Thread configured for userspace entry");
 
     log::info!("ELF process '{}' spawned: PID={:?}, TID={:?}",
                name, process_id, thread_id);

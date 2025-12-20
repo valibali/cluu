@@ -201,15 +201,74 @@ impl AddressSpace {
     ///
     /// Steps:
     /// 1. Allocate new PML4 (4KB page)
-    /// 2. Copy kernel mappings (high half)
+    /// 2. Copy kernel mappings (high half) from current page table
     /// 3. Set up user regions (initially unmapped, filled by ELF loader)
-    ///
-    /// Note: This is a placeholder for Phase 3 - actual implementation
-    /// requires integration with ELF loader (Phase 7).
     pub fn new_user() -> Result<Self, &'static str> {
-        // For now, return an error - full implementation in Phase 7
-        // when we have ELF loader
-        Err("Userspace address spaces not yet implemented")
+        use crate::memory::phys;
+
+        // Allocate a new PML4 frame
+        let pml4_frame = phys::alloc_frame()
+            .ok_or("Failed to allocate PML4 frame")?;
+
+        let pml4_phys = PhysAddr::new(pml4_frame.start_address());
+
+        log::debug!("Allocated new PML4 at physical address: {:#x}", pml4_phys.as_u64());
+
+        // Zero out the new PML4
+        unsafe {
+            let pml4_ptr = pml4_phys.as_u64() as *mut u64;
+            for i in 0..512 {
+                core::ptr::write_volatile(pml4_ptr.add(i), 0);
+            }
+        }
+
+        // Copy kernel mappings from current page table
+        // We only need to copy the upper half (entries 256-511) for kernel space.
+        //
+        // DO NOT copy entry 0 (identity-mapped physical memory) because:
+        // 1. Userspace doesn't need identity mapping
+        // 2. The kernel's entry 0 likely uses hugepages (2 MiB pages)
+        // 3. Copying hugepages would cause MapToError::ParentEntryHugePage when
+        //    we try to map 4 KiB pages in userspace (like 0x400000 for text segment)
+        // 4. We access userspace page tables via the KERNEL's identity mapping,
+        //    not via the userspace's own page table
+        unsafe {
+            use x86_64::registers::control::Cr3;
+            let (current_pml4_frame, _) = Cr3::read();
+            let current_pml4_phys = current_pml4_frame.start_address();
+            let current_pml4_ptr = current_pml4_phys.as_u64() as *const u64;
+            let new_pml4_ptr = pml4_phys.as_u64() as *mut u64;
+
+            // Copy upper half entries (256-511) for kernel space only
+            // Leave lower half (0-255) empty for userspace to use
+            for i in 256..512 {
+                let entry = core::ptr::read_volatile(current_pml4_ptr.add(i));
+                core::ptr::write_volatile(new_pml4_ptr.add(i), entry);
+            }
+        }
+
+        log::debug!("Copied kernel mappings to new PML4");
+
+        // Initialize regions (will be filled by ELF loader)
+        let null_region = MemoryRegion::new(
+            VirtAddr::new(0),
+            0,
+            PageTableFlags::empty(),
+        );
+
+        // Set up heap region (initially empty, grows with sys_brk)
+        let heap = HeapRegion::new(
+            VirtAddr::new(layout::USER_HEAP_START),
+            VirtAddr::new(layout::USER_HEAP_MAX),
+        );
+
+        Ok(Self {
+            page_table_root: pml4_phys,
+            text: null_region,
+            data: null_region,
+            heap,
+            stack: null_region,
+        })
     }
 
     /// Switch to this address space
@@ -224,11 +283,14 @@ impl AddressSpace {
             return;
         }
 
-        // Placeholder for Phase 8 - actual CR3 switching
-        // unsafe {
-        //     use x86_64::registers::control::Cr3;
-        //     Cr3::write(self.page_table_root, Cr3Flags::empty());
-        // }
+        // Switch to this process's page table by updating CR3
+        unsafe {
+            use x86_64::registers::control::Cr3;
+            use x86_64::structures::paging::PhysFrame;
+
+            let frame = PhysFrame::containing_address(self.page_table_root);
+            Cr3::write(frame, x86_64::registers::control::Cr3Flags::empty());
+        }
     }
 
     /// Check if an address is within user-accessible regions

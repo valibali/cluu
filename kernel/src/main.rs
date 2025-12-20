@@ -163,6 +163,10 @@ pub extern "C" fn kstart() -> ! {
     // Step 10.5: Initialize IPC system
     scheduler::ipc::init();
 
+    // Step 10.6: Initialize SYSCALL/SYSRET infrastructure
+    syscall::init();
+    log::info!("SYSCALL/SYSRET infrastructure initialized");
+
     // Step 11: Enable interrupts
     x86_64::instructions::interrupts::enable();
     log::info!("Interrupts enabled");

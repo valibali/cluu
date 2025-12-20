@@ -155,6 +155,54 @@ pub fn map_page(
     Ok(())
 }
 
+/// Map a page in a specific page table (by PhysAddr)
+///
+/// This function creates a temporary OffsetPageTable for the given page table root
+/// and maps a page within it. This is used for mapping pages in userspace page tables
+/// that are different from the currently active (kernel) page table.
+///
+/// # Arguments
+/// * `page_table_root` - Physical address of the PML4 (page table root)
+/// * `virt` - Virtual address to map
+/// * `phys` - Physical address to map to
+/// * `flags` - Page table flags
+///
+/// # Returns
+/// * `Ok(())` - Mapping successful
+/// * `Err(MapToError)` - Mapping failed
+pub fn map_page_in_table(
+    page_table_root: PhysAddr,
+    virt: VirtAddr,
+    phys: PhysAddr,
+    flags: PageTableFlags,
+) -> Result<(), MapToError<Size4KiB>> {
+    use x86_64::structures::paging::OffsetPageTable;
+
+    const PHYSICAL_MEMORY_OFFSET: u64 = 0x0;
+    let physical_memory_offset = VirtAddr::new(PHYSICAL_MEMORY_OFFSET);
+
+    // Convert physical address of page table to virtual address
+    let page_table_virt = physical_memory_offset + page_table_root.as_u64();
+    let page_table_ptr: *mut PageTable = page_table_virt.as_mut_ptr();
+
+    // Create temporary mapper for this page table
+    let mut mapper = unsafe { OffsetPageTable::new(&mut *page_table_ptr, physical_memory_offset) };
+    let mut frame_allocator = FrameAllocAdapter;
+
+    // Convert addresses to page/frame objects
+    let page = Page::<Size4KiB>::containing_address(virt);
+    let frame = X86PhysFrame::containing_address(phys);
+
+    // Perform the mapping operation
+    unsafe {
+        mapper
+            .map_to(page, frame, flags, &mut frame_allocator)?
+            .flush();
+    }
+
+    Ok(())
+}
+
 /// Map a user-accessible page
 ///
 /// This is a specialized version of map_page that ensures the USER_ACCESSIBLE

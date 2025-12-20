@@ -347,14 +347,17 @@ pub unsafe extern "C" fn syscall_entry() -> ! {
         // R8  = arg4 (from R10, since RCX used by SYSCALL)
         // R9  = arg5 (from R8)
         // Stack = arg6 (from R9)
+        //
+        // CRITICAL: Move in REVERSE order to avoid overwriting registers before using them!
+        // If we did "mov rdi, rax; mov rsi, rdi", we'd copy RAX to RSI instead of original RDI!
 
-        "mov rdi, rax",    // syscall_num = RAX
-        "mov rsi, rdi",    // arg1 = RDI
-        "mov rdx, rsi",    // arg2 = RSI
-        "mov rcx, rdx",    // arg3 = RDX
-        "mov r8, r10",     // arg4 = R10 (RCX used by SYSCALL)
-        "mov r9, r8",      // arg5 = R8
-        "push r9",         // arg6 = R9 (push to stack for 7th arg)
+        "push r9",         // arg6 = R9 (save first before R9 gets overwritten)
+        "mov r9, r8",      // arg5 = R8 (safe, R9 already saved to stack)
+        "mov r8, r10",     // arg4 = R10 (safe, R8 already copied to R9)
+        "mov rcx, rdx",    // arg3 = RDX (safe, no conflict)
+        "mov rdx, rsi",    // arg2 = RSI (safe, RDX already copied)
+        "mov rsi, rdi",    // arg1 = RDI (safe, RSI already copied)
+        "mov rdi, rax",    // syscall_num = RAX (safe, RDI already copied)
 
         // Align stack to 16 bytes (required by System V ABI)
         "sub rsp, 8",

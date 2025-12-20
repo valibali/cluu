@@ -83,6 +83,21 @@ pub struct Process {
 }
 
 impl Process {
+    /// Create a new process with the specified address space
+    ///
+    /// This is the general constructor used for both kernel and userspace processes.
+    pub fn new(id: ProcessId, name: &str, address_space: AddressSpace) -> Self {
+        Process {
+            id,
+            name: String::from(name),
+            state: ProcessState::Running,
+            fd_table: FileDescriptorTable::new(),
+            threads: Vec::new(),
+            exit_code: None,
+            address_space,
+        }
+    }
+
     /// Create a new kernel process
     ///
     /// Kernel processes:

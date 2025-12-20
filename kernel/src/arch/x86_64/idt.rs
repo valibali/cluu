@@ -227,11 +227,48 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
-    _stack_frame: InterruptStackFrame,
-    _error_code: u64,
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
 ) {
-    crate::utils::debug::irq_log::irq_log_simple("GENERAL_PROTECTION_FAULT");
-    // Simple error handling without panic for debugging
+    use crate::utils::debug::irq_log;
+
+    irq_log::irq_log_simple("GENERAL_PROTECTION_FAULT");
+
+    // Extract values (SegmentSelector.0 to get u16, then convert to u64)
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let cs = stack_frame.code_segment.0 as u64;
+    let rsp = stack_frame.stack_pointer.as_u64();
+    let ss = stack_frame.stack_segment.0 as u64;
+    let is_userspace = (cs & 3) == 3;
+
+    // Use IRQ-safe logging
+    irq_log::irq_log_hex("GPF: error_code=", error_code);
+    irq_log::irq_log_hex("GPF: RIP=", rip);
+    irq_log::irq_log_hex("GPF: CS=", cs);
+    irq_log::irq_log_hex("GPF: RSP=", rsp);
+    irq_log::irq_log_hex("GPF: SS=", ss);
+
+    if is_userspace {
+        irq_log::irq_log_str("GPF: Fault in USERSPACE (Ring 3)\n");
+    } else {
+        irq_log::irq_log_str("GPF: Fault in KERNEL (Ring 0)\n");
+    }
+
+    // Decode error code
+    let selector_index = (error_code >> 3) & 0x1FFF;
+    if selector_index != 0 {
+        irq_log::irq_log_hex("GPF: Selector index=", selector_index);
+    }
+
+    let table = (error_code >> 1) & 0x3;
+    match table {
+        0 => irq_log::irq_log_str("GPF: Descriptor in GDT\n"),
+        1 | 3 => irq_log::irq_log_str("GPF: Descriptor in IDT\n"),
+        2 => irq_log::irq_log_str("GPF: Descriptor in LDT\n"),
+        _ => {}
+    }
+
+    // Halt system
     loop {
         x86_64::instructions::hlt();
     }

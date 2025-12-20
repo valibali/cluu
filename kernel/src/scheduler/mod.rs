@@ -522,6 +522,32 @@ pub fn spawn_kernel_process(name: &str) -> ProcessId {
     })
 }
 
+/// Create a new userspace process with dedicated page tables
+///
+/// This allocates a fresh address space with its own PML4 and copies
+/// kernel mappings for syscall handling.
+pub fn spawn_user_process(name: &str) -> Result<ProcessId, &'static str> {
+    use crate::memory::address_space::AddressSpace;
+
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        // Create new userspace address space
+        let address_space = AddressSpace::new_user()?;
+
+        let mut scheduler_guard = SCHEDULER.lock();
+        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
+
+        // Create process with userspace address space
+        let process_id = scheduler.next_process_id;
+        scheduler.next_process_id.0 += 1;
+
+        let process = Process::new(process_id, name, address_space);
+        scheduler.processes.insert(process_id, process);
+
+        log::info!("Created userspace process '{}' with ID {:?}", name, process_id);
+        Ok(process_id)
+    })
+}
+
 /// Create a thread within a specific process
 ///
 /// This is the process-aware version of spawn_thread, allowing you to
@@ -912,11 +938,21 @@ pub fn exit_thread() -> ! {
         }
     });
 
+    // DEBUG: Log before yielding
+    use crate::utils::debug::irq_log;
+    irq_log::irq_log_str("exit_thread: About to yield_now()...\n");
+
+    // CRITICAL: Enable interrupts before yielding!
+    // If called from syscall context (via sys_exit), interrupts are disabled by SYSCALL instruction.
+    // yield_now() requires interrupts to be enabled to trigger the context switch.
+    x86_64::instructions::interrupts::enable();
+
     // Yield to switch to another thread
     // We will never return here
     yield_now();
 
     // Should never reach here
+    irq_log::irq_log_str("exit_thread: RETURNED FROM yield_now() - THIS IS A BUG!\n");
     loop {
         x86_64::instructions::hlt();
     }
@@ -1178,6 +1214,8 @@ pub unsafe extern "C" fn preemptive_timer_interrupt_handler() {
 pub extern "C" fn schedule_from_interrupt(
     current_ctx_ptr: *const InterruptContext,
 ) -> *const InterruptContext {
+    use crate::utils::debug::irq_log;
+
     // Early exit if scheduler is not enabled
     if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
         // Scheduler not enabled yet, just return current context
@@ -1208,11 +1246,66 @@ pub extern "C" fn schedule_from_interrupt(
     // Get current thread ID
     let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
 
+    // DEBUG: Always log current thread ID in scheduler
+    static mut SCHED_CALL_COUNT: u64 = 0;
+    unsafe {
+        SCHED_CALL_COUNT += 1;
+        // Only log occasionally to avoid spam, but always log thread 14
+        if current_id.0 == 14 || SCHED_CALL_COUNT % 100 == 0 {
+            irq_log::irq_log_str("SCHED: current_id=");
+            irq_log::irq_log_hex("", current_id.0 as u64);
+        }
+    }
+
+    // DEBUG: Log when switching from terminated thread
+    if current_id.0 == 14 {
+        if let Some(thread) = scheduler.get_thread_mut(current_id) {
+            irq_log::irq_log_str("SCHED: Thread 14 state=");
+            irq_log::irq_log_hex("", thread.state as u64);
+
+            if thread.state == ThreadState::Terminated {
+                irq_log::irq_log_str("SCHED: Thread 14 is terminated, switching...\n");
+            }
+        } else {
+            irq_log::irq_log_str("SCHED: Thread 14 NOT FOUND!\n");
+        }
+    }
+
     // Try to get next thread from ready queue
     let next_id = match scheduler.get_next_thread() {
-        Some(id) => id,
+        Some(id) => {
+            // DEBUG: Log next thread selection
+            if current_id.0 == 14 {
+                irq_log::irq_log_str("SCHED: get_next_thread returned ID=");
+                irq_log::irq_log_hex("", id.0 as u64);
+            }
+            id
+        }
         None => {
-            // No threads ready to run, return current context
+            // No threads ready to run
+            // CRITICAL: If current thread is terminated, we can't return to it!
+            // This should never happen (idle thread should always be available)
+            if current_id.0 != 0 {
+                if let Some(current_thread) = scheduler.get_thread_mut(current_id) {
+                    if current_thread.state == ThreadState::Terminated {
+                        // Terminated thread with no other threads available!
+                        // This is a critical error - idle thread should always be ready
+                        log::error!("SCHEDULER PANIC: No ready threads and current is terminated!");
+                        log::error!("  Current thread: {} ({})", current_id.0, current_thread.name);
+                        log::error!("  Ready queue is empty!");
+                        log::error!("  Total threads: {}", scheduler.threads.len());
+
+                        // Try to find idle thread and add it to queue as last resort
+                        if let Some(idle) = scheduler.threads.iter().find(|t| t.id.0 == 0) {
+                            log::error!("  Found idle thread in state: {:?}", idle.state);
+                        }
+
+                        panic!("Scheduler deadlock: no threads available!");
+                    }
+                }
+            }
+
+            // Return current context (safe if not terminated)
             return current_ctx_ptr;
         }
     };
@@ -1412,4 +1505,80 @@ pub fn sleep_ms(ms: u64) {
     // Yield to switch to another thread
     // The scheduler will not reschedule us until sleep time expires
     yield_now();
+}
+
+/// Set up a thread to enter userspace at a specific entry point
+///
+/// This function modifies the thread's interrupt context to transition
+/// from Ring 0 (kernel) to Ring 3 (userspace) when the thread is scheduled.
+///
+/// # Arguments
+/// * `thread_id` - ID of the thread to configure
+/// * `entry_point` - Virtual address to start execution (ELF entry point)
+/// * `user_stack_top` - Top of user stack (RSP value)
+///
+/// # Returns
+/// * `Ok(())` if thread was configured successfully
+/// * `Err(&str)` if thread not found or configuration failed
+pub fn setup_userspace_thread(
+    thread_id: ThreadId,
+    entry_point: x86_64::VirtAddr,
+    user_stack_top: x86_64::VirtAddr,
+) -> Result<(), &'static str> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut scheduler_guard = SCHEDULER.lock();
+        let scheduler = scheduler_guard
+            .as_mut()
+            .ok_or("Scheduler not initialized")?;
+
+        let thread = scheduler
+            .get_thread_mut(thread_id)
+            .ok_or("Thread not found")?;
+
+        // Set up interrupt context for userspace entry
+        // When this thread is scheduled, it will "return" to userspace via IRETQ
+
+        // Set up interrupt frame for Ring 3 entry
+        // Get user segment selectors from GDT and ensure RPL=3 is set
+        let user_cs = crate::arch::x86_64::gdt::user_code_selector();
+        let user_ss = crate::arch::x86_64::gdt::user_data_selector();
+
+        // Ensure RPL (Request Privilege Level) bits are set to 3 for Ring 3
+        // The low 2 bits of the selector are the RPL
+        // Cast to u64 for interrupt frame (which stores segment selectors as 64-bit values)
+        let user_cs_with_rpl = (user_cs.0 | 3) as u64;
+        let user_ss_with_rpl = (user_ss.0 | 3) as u64;
+
+        thread.interrupt_context.iret_frame.rip = entry_point.as_u64();
+        thread.interrupt_context.iret_frame.cs = user_cs_with_rpl;  // User code segment with RPL=3
+        thread.interrupt_context.iret_frame.rflags = 0x202; // IF=1 (interrupts enabled), bit 1 always set
+        thread.interrupt_context.iret_frame.rsp = user_stack_top.as_u64();
+        thread.interrupt_context.iret_frame.ss = user_ss_with_rpl;  // User data segment with RPL=3
+
+        // Clear all general purpose registers for security
+        thread.interrupt_context.rax = 0;
+        thread.interrupt_context.rbx = 0;
+        thread.interrupt_context.rcx = 0;
+        thread.interrupt_context.rdx = 0;
+        thread.interrupt_context.rsi = 0;
+        thread.interrupt_context.rdi = 0;
+        thread.interrupt_context.rbp = 0;
+        thread.interrupt_context.r8 = 0;
+        thread.interrupt_context.r9 = 0;
+        thread.interrupt_context.r10 = 0;
+        thread.interrupt_context.r11 = 0;
+        thread.interrupt_context.r12 = 0;
+        thread.interrupt_context.r13 = 0;
+        thread.interrupt_context.r14 = 0;
+        thread.interrupt_context.r15 = 0;
+
+        log::debug!(
+            "Thread {:?} configured for userspace entry at 0x{:x} (stack: 0x{:x})",
+            thread_id,
+            entry_point.as_u64(),
+            user_stack_top.as_u64()
+        );
+
+        Ok(())
+    })
 }

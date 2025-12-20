@@ -45,3 +45,39 @@ pub fn irq_log_simple(prefix: &str) {
     irq_log_str(prefix);
     irq_log_newline();
 }
+
+/// Convert u64 to hex string (IRQ-safe, no allocation)
+pub fn irq_log_hex(prefix: &str, value: u64) {
+    irq_log_str(prefix);
+    irq_log_str("0x");
+
+    // Convert to hex manually without allocation
+    let mut buf = [0u8; 16];
+    let hex_digits = b"0123456789abcdef";
+
+    for i in 0..16 {
+        let nibble = ((value >> (60 - i * 4)) & 0xF) as usize;
+        buf[i] = hex_digits[nibble];
+    }
+
+    // Skip leading zeros
+    let mut start = 0;
+    while start < 15 && buf[start] == b'0' {
+        start += 1;
+    }
+
+    // Write hex digits
+    let mut data_port: Port<u8> = Port::new(0x2F8);
+    let mut status_port: Port<u8> = Port::new(0x2FD);
+
+    unsafe {
+        for i in start..16 {
+            while (status_port.read() & 0x20u8) == 0 {
+                core::hint::spin_loop();
+            }
+            data_port.write(buf[i]);
+        }
+    }
+
+    irq_log_newline();
+}

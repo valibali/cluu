@@ -31,6 +31,7 @@ pub mod comprehensive;
 pub mod elf_loader;
 pub mod syscall_tests;
 pub mod syscall_direct;
+pub mod userspace_hello;
 
 use crate::scheduler;
 use core::sync::atomic::{AtomicUsize, Ordering};

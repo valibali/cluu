@@ -60,28 +60,51 @@ fn errno_to_code(errno: Errno) -> isize {
 /// Arguments: (fd: i32, buf: *const u8, count: usize)
 /// Returns: number of bytes written, or negative error code
 pub fn sys_write(fd: i32, buf: *const u8, count: usize) -> isize {
+    log::debug!("sys_write: fd={}, buf={:p}, count={}", fd, buf, count);
+
     // 1. Validate user buffer
     if let Err(e) = validate_user_ptr(buf, count) {
+        log::debug!("sys_write: pointer validation failed: {}", e);
         return e;
     }
 
     // 2. Get current process's FD table
     let result = scheduler::with_current_process(|process| {
+        log::debug!("sys_write: got process, looking up fd {}", fd);
+
         // 3. Get device from FD table
         let device = match process.fd_table.get(fd) {
             Ok(dev) => dev,
-            Err(e) => return errno_to_code(e),
+            Err(e) => {
+                log::debug!("sys_write: fd_table.get({}) failed: {:?}", fd, e);
+                return errno_to_code(e);
+            }
         };
 
         // 4. Create safe slice and call device.write()
         let data = unsafe { slice::from_raw_parts(buf, count) };
+        log::debug!("sys_write: writing {} bytes: {:?}", count,
+            core::str::from_utf8(data).unwrap_or("<invalid utf8>"));
+
         match device.write(data) {
-            Ok(written) => written as isize,
-            Err(e) => errno_to_code(e),
+            Ok(written) => {
+                log::debug!("sys_write: wrote {} bytes", written);
+                written as isize
+            }
+            Err(e) => {
+                log::debug!("sys_write: device.write() failed: {:?}", e);
+                errno_to_code(e)
+            }
         }
     });
 
-    result.unwrap_or(-EBADF)
+    let ret = result.unwrap_or_else(|| {
+        log::debug!("sys_write: with_current_process returned None");
+        -EBADF
+    });
+
+    log::debug!("sys_write: returning {}", ret);
+    ret
 }
 
 /// sys_read - Read from file descriptor

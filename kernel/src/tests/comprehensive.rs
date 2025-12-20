@@ -25,6 +25,8 @@ pub struct TestResults {
     pub elf_tests: usize,
     pub ipc_tests: usize,
     pub fd_tests: usize,
+    pub userspace_passed: usize,
+    pub userspace_failed: usize,
     pub stress_completed: bool,
 }
 
@@ -36,12 +38,15 @@ impl TestResults {
             elf_tests: 0,
             ipc_tests: 0,
             fd_tests: 0,
+            userspace_passed: 0,
+            userspace_failed: 0,
             stress_completed: false,
         }
     }
 
     pub fn total_tests(&self) -> usize {
-        self.syscall_passed + self.syscall_failed + self.elf_tests + self.ipc_tests + self.fd_tests
+        self.syscall_passed + self.syscall_failed + self.elf_tests + self.ipc_tests
+        + self.fd_tests + self.userspace_passed + self.userspace_failed
     }
 }
 
@@ -52,7 +57,8 @@ impl TestResults {
 /// 2. ELF loader tests
 /// 3. IPC tests (spawns threads)
 /// 4. FD layer tests (spawns threads)
-/// 5. Light stress test
+/// 5. Userspace execution (hello world)
+/// 6. Light stress test
 ///
 /// Prints colorized results to console and returns test results.
 pub fn run_comprehensive_test_suite() -> TestResults {
@@ -128,8 +134,22 @@ pub fn run_comprehensive_test_suite() -> TestResults {
     results.fd_tests += 1;
     console::write_colored("SPAWNED\n", Color::GREEN, Color::BLACK);
 
-    // Phase 5: Light Stress Test
-    print_section("Phase 5: Light Stress Test");
+    // Phase 5: Userspace Tests
+    print_section("Phase 5: Userspace Execution");
+    console::write_str("  Loading and executing userspace ELF binary...\n");
+    console::write_str("    - Hello World program: ");
+    let userspace_success = tests::userspace_hello::test_userspace_hello();
+    wait_for_threads(100);
+    if userspace_success {
+        results.userspace_passed += 1;
+        console::write_colored("SPAWNED\n", Color::GREEN, Color::BLACK);
+    } else {
+        results.userspace_failed += 1;
+        console::write_colored("FAILED\n", Color::RED, Color::BLACK);
+    }
+
+    // Phase 6: Light Stress Test
+    print_section("Phase 6: Light Stress Test");
     console::write_str("  Running threading + IPC stress (29 threads)...\n");
     console::write_str("  This may take 10-15 seconds...\n");
     tests::spawn_stress_test();
@@ -235,6 +255,20 @@ fn print_summary(results: &TestResults) {
     console::write_str("    ");
     console::write_colored(&alloc::format!("{} test threads spawned\n", results.fd_tests), Color::LIGHT_GRAY, Color::BLACK);
 
+    // Userspace results
+    console::write_str("  Userspace Tests:    ");
+    if results.userspace_failed == 0 && results.userspace_passed > 0 {
+        console::write_colored("✓ PASSED\n", Color::GREEN, Color::BLACK);
+    } else if results.userspace_failed > 0 {
+        console::write_colored("✗ FAILED\n", Color::RED, Color::BLACK);
+    } else {
+        console::write_colored("⚠ NOT RUN\n", Color::YELLOW, Color::BLACK);
+    }
+    console::write_str("    ");
+    console::write_colored(&alloc::format!("{} passed", results.userspace_passed), Color::GREEN, Color::BLACK);
+    console::write_str(", ");
+    console::write_colored(&alloc::format!("{} failed\n", results.userspace_failed), Color::RED, Color::BLACK);
+
     // Stress test
     console::write_str("  Stress Test:        ");
     if results.stress_completed {
@@ -246,7 +280,7 @@ fn print_summary(results: &TestResults) {
     // Overall
     console::write_str("\n");
     console::write_str("  Overall Status:     ");
-    if results.syscall_failed == 0 && results.stress_completed {
+    if results.syscall_failed == 0 && results.userspace_failed == 0 && results.stress_completed {
         console::write_colored("✓ ALL TESTS PASSED\n", Color::GREEN, Color::BLACK);
     } else {
         console::write_colored("⚠ REVIEW RESULTS\n", Color::YELLOW, Color::BLACK);
