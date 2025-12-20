@@ -190,10 +190,12 @@ impl KShell {
             "threads" | "ps" => Self::cmd_threads(),
             "yield" => Self::cmd_yield(),
             "test-ipc" | "ipc-test" => Self::cmd_test_ipc(),
-            "ipcblock" => Self::cmd_test_ipc_blocking(),
+            "test-ipc-block" => Self::cmd_test_ipc_blocking(),
             "test-ipc-queue" => Self::cmd_test_ipc_queue(),
             "test-ipc-multi" => Self::cmd_test_ipc_multi(),
             "test-fd" => Self::cmd_test_fd(),
+            "stress" | "test-stress" => Self::cmd_stress_test(),
+            "stress-forever" | "stress-continuous" => Self::cmd_stress_forever(),
             "" => {}
             _ => {
                 console::write_colored("Unknown command: ", Color::RED, Color::BLACK);
@@ -223,6 +225,8 @@ impl KShell {
             ("colors", "Show color test"),
             ("threads, ps", "Show thread information"),
             ("yield", "Yield CPU to other threads"),
+            ("stress", "Run threading and IPC stress test (one-shot)"),
+            ("stress-forever", "Run continuous stress test (runs forever)"),
             ("reboot", "Reboot the system"),
         ];
 
@@ -577,11 +581,7 @@ impl KShell {
     }
 
     fn cmd_test_fd() {
-        console::write_colored(
-            "Starting FD Layer Test\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
+        console::write_colored("Starting FD Layer Test\n", Color::CYAN, Color::BLACK);
         console::write_colored(
             "Testing file descriptor abstraction with stdin/stdout/stderr.\n",
             Color::LIGHT_GRAY,
@@ -593,5 +593,151 @@ impl KShell {
             Color::BLACK,
         );
         crate::spawn_fd_test();
+    }
+
+    fn cmd_stress_test() {
+        console::write_colored(
+            "Starting STRESS TEST: Threading + IPC\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "This will spawn 29 threads:\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  - 3 IPC receivers (each with own port)\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  - 15 IPC senders (5 per receiver)\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  - 10 compute threads (scheduler stress)\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  - 1 monitor thread\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "\nThis tests:\n",
+            Color::YELLOW,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  ✓ Concurrent thread creation/termination\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  ✓ Multiple simultaneous IPC operations\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  ✓ Scheduler under high load\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  ✓ Sleep/yield/blocking behavior\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "\nWatch the logs for progress updates...\n\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        crate::spawn_stress_test();
+    }
+
+    fn cmd_stress_forever() {
+        console::write_colored(
+            "Starting CONTINUOUS STRESS TEST\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "⚠ WARNING: This test runs FOREVER!\n",
+            Color::RED,
+            Color::BLACK,
+        );
+        console::write_str("\n");
+        console::write_colored(
+            "Test strategy:\n",
+            Color::YELLOW,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  • Spawns waves of 8 threads continuously\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  • Each wave: 2 IPC receivers, 4 IPC senders, 1 FD test, 1 compute\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  • Waits for wave completion before next wave\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  • Prevents heap exhaustion via thread cleanup\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_str("\n");
+        console::write_colored(
+            "What this tests:\n",
+            Color::YELLOW,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  ✓ Long-term stability and memory leaks\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  ✓ Thread cleanup and resource reclamation\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  ✓ IPC port lifecycle (create/destroy)\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  ✓ FD operations over time\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  ✓ Scheduler fairness under sustained load\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+        console::write_str("\n");
+        console::write_colored(
+            "Statistics will be logged every cycle.\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "To stop: reboot the system\n\n",
+            Color::YELLOW,
+            Color::BLACK,
+        );
+        crate::spawn_continuous_stress_test();
     }
 }

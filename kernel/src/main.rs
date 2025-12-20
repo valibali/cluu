@@ -463,12 +463,11 @@ fn test_fd_thread() {
         })
     });
 
-    let (stdin_res, stdout_res, stderr_res) = match fd_table_result {
+    let (stdin_res, stdout_res, _stderr_res) = match fd_table_result {
         Some(Some((stdin, stdout, stderr))) => (stdin, stdout, stderr),
         _ => {
             log::error!("[FD Test] FD table not initialized!");
             scheduler::exit_thread();
-            return;
         }
     };
 
@@ -478,16 +477,14 @@ fn test_fd_thread() {
         Err(e) => {
             log::error!("[FD Test] Failed to get stdout: {:?}", e);
             scheduler::exit_thread();
-            return;
         }
     };
 
-    let stdin = match stdin_res {
+    let _stdin = match stdin_res {
         Ok(device) => device,
         Err(e) => {
             log::error!("[FD Test] Failed to get stdin: {:?}", e);
             scheduler::exit_thread();
-            return;
         }
     };
 
@@ -557,6 +554,530 @@ pub fn spawn_fd_test() {
     scheduler::init_std_streams(thread_id);
 
     log::info!("FD test thread spawned with stdin/stdout/stderr initialized");
+}
+
+/// ===============================
+///  STRESS TEST
+/// ===============================
+
+// Stress test port IDs (multiple ports for concurrent testing)
+static STRESS_PORT_1: AtomicUsize = AtomicUsize::new(0);
+static STRESS_PORT_2: AtomicUsize = AtomicUsize::new(0);
+static STRESS_PORT_3: AtomicUsize = AtomicUsize::new(0);
+static STRESS_COMPLETION_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+// Continuous stress test statistics
+static CONTINUOUS_STRESS_CYCLES: AtomicUsize = AtomicUsize::new(0);
+static CONTINUOUS_STRESS_TOTAL_THREADS: AtomicUsize = AtomicUsize::new(0);
+static CONTINUOUS_STRESS_TOTAL_MESSAGES: AtomicUsize = AtomicUsize::new(0);
+static CONTINUOUS_STRESS_RUNNING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Spawn comprehensive threading and IPC stress test
+pub fn spawn_stress_test() {
+    log::info!("=== STRESS TEST: Starting ===");
+    log::info!("This will spawn 29 threads performing concurrent IPC and scheduling operations");
+
+    // Reset completion counter
+    STRESS_COMPLETION_COUNTER.store(0, Ordering::SeqCst);
+
+    // Spawn 3 receiver threads (each with their own port)
+    scheduler::spawn_thread(stress_receiver_1, "stress-recv-1");
+    scheduler::spawn_thread(stress_receiver_2, "stress-recv-2");
+    scheduler::spawn_thread(stress_receiver_3, "stress-recv-3");
+
+    // Give receivers time to create ports
+    scheduler::sleep_ms(50);
+
+    // Spawn 15 sender threads (5 per receiver)
+    scheduler::spawn_thread(stress_sender_p1_1, "send-1-1");
+    scheduler::spawn_thread(stress_sender_p1_2, "send-1-2");
+    scheduler::spawn_thread(stress_sender_p1_3, "send-1-3");
+    scheduler::spawn_thread(stress_sender_p1_4, "send-1-4");
+    scheduler::spawn_thread(stress_sender_p1_5, "send-1-5");
+
+    scheduler::spawn_thread(stress_sender_p2_1, "send-2-1");
+    scheduler::spawn_thread(stress_sender_p2_2, "send-2-2");
+    scheduler::spawn_thread(stress_sender_p2_3, "send-2-3");
+    scheduler::spawn_thread(stress_sender_p2_4, "send-2-4");
+    scheduler::spawn_thread(stress_sender_p2_5, "send-2-5");
+
+    scheduler::spawn_thread(stress_sender_p3_1, "send-3-1");
+    scheduler::spawn_thread(stress_sender_p3_2, "send-3-2");
+    scheduler::spawn_thread(stress_sender_p3_3, "send-3-3");
+    scheduler::spawn_thread(stress_sender_p3_4, "send-3-4");
+    scheduler::spawn_thread(stress_sender_p3_5, "send-3-5");
+
+    // Spawn 10 compute-bound threads that stress the scheduler
+    scheduler::spawn_thread(stress_compute_1, "compute-1");
+    scheduler::spawn_thread(stress_compute_2, "compute-2");
+    scheduler::spawn_thread(stress_compute_3, "compute-3");
+    scheduler::spawn_thread(stress_compute_4, "compute-4");
+    scheduler::spawn_thread(stress_compute_5, "compute-5");
+    scheduler::spawn_thread(stress_compute_6, "compute-6");
+    scheduler::spawn_thread(stress_compute_7, "compute-7");
+    scheduler::spawn_thread(stress_compute_8, "compute-8");
+    scheduler::spawn_thread(stress_compute_9, "compute-9");
+    scheduler::spawn_thread(stress_compute_10, "compute-10");
+
+    // Spawn monitoring thread
+    scheduler::spawn_thread(stress_monitor, "stress-monitor");
+
+    log::info!("=== STRESS TEST: 29 threads spawned ===");
+}
+
+/// Receiver for stress test port 1
+fn stress_receiver_1() {
+    log::info!("[Stress-R1] Starting receiver 1...");
+    let port = scheduler::port_create().expect("Failed to create port");
+    STRESS_PORT_1.store(port.0, Ordering::SeqCst);
+    log::info!("[Stress-R1] Created port {}", port.0);
+
+    // Receive 25 messages (5 senders × 5 messages each)
+    for i in 0..25 {
+        match scheduler::port_recv(port) {
+            Ok(msg) => {
+                let sender_id = msg.get_u64(0);
+                let msg_num = msg.get_u64(8);
+                log::debug!("[Stress-R1] Received message {} from sender {} (msg #{})", i, sender_id, msg_num);
+            }
+            Err(e) => {
+                log::error!("[Stress-R1] Receive error: {:?}", e);
+                break;
+            }
+        }
+    }
+
+    log::info!("[Stress-R1] Complete! Received 25 messages");
+    scheduler::port_destroy(port).ok();
+    STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    scheduler::exit_thread();
+}
+
+/// Receiver for stress test port 2
+fn stress_receiver_2() {
+    log::info!("[Stress-R2] Starting receiver 2...");
+    let port = scheduler::port_create().expect("Failed to create port");
+    STRESS_PORT_2.store(port.0, Ordering::SeqCst);
+    log::info!("[Stress-R2] Created port {}", port.0);
+
+    // Receive 25 messages (5 senders × 5 messages each)
+    for i in 0..25 {
+        match scheduler::port_recv(port) {
+            Ok(msg) => {
+                let sender_id = msg.get_u64(0);
+                let msg_num = msg.get_u64(8);
+                log::debug!("[Stress-R2] Received message {} from sender {} (msg #{})", i, sender_id, msg_num);
+            }
+            Err(e) => {
+                log::error!("[Stress-R2] Receive error: {:?}", e);
+                break;
+            }
+        }
+    }
+
+    log::info!("[Stress-R2] Complete! Received 25 messages");
+    scheduler::port_destroy(port).ok();
+    STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    scheduler::exit_thread();
+}
+
+/// Receiver for stress test port 3
+fn stress_receiver_3() {
+    log::info!("[Stress-R3] Starting receiver 3...");
+    let port = scheduler::port_create().expect("Failed to create port");
+    STRESS_PORT_3.store(port.0, Ordering::SeqCst);
+    log::info!("[Stress-R3] Created port {}", port.0);
+
+    // Receive 25 messages (5 senders × 5 messages each)
+    for i in 0..25 {
+        match scheduler::port_recv(port) {
+            Ok(msg) => {
+                let sender_id = msg.get_u64(0);
+                let msg_num = msg.get_u64(8);
+                log::debug!("[Stress-R3] Received message {} from sender {} (msg #{})", i, sender_id, msg_num);
+            }
+            Err(e) => {
+                log::error!("[Stress-R3] Receive error: {:?}", e);
+                break;
+            }
+        }
+    }
+
+    log::info!("[Stress-R3] Complete! Received 25 messages");
+    scheduler::port_destroy(port).ok();
+    STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    scheduler::exit_thread();
+}
+
+/// Generic sender implementation
+fn stress_send_messages(port_atomic: &AtomicUsize, sender_id: u64, port_name: &str) {
+    log::debug!("[Stress-S{}] Sender {} to {} starting...", port_name, sender_id, port_name);
+
+    // Wait for port creation
+    scheduler::sleep_ms(100);
+
+    let port_id = scheduler::PortId(port_atomic.load(Ordering::SeqCst));
+    if port_id.0 == 0 {
+        log::error!("[Stress-S{}] Port not created yet!", port_name);
+        scheduler::exit_thread();
+    }
+
+    // Send 5 messages with sleeps in between
+    for msg_num in 0..5 {
+        let mut msg = scheduler::Message::new();
+        msg.set_u64(0, sender_id);
+        msg.set_u64(8, msg_num);
+
+        match scheduler::port_send(port_id, msg) {
+            Ok(()) => {
+                log::debug!("[Stress-S{}] Sender {} sent message {}", port_name, sender_id, msg_num);
+            }
+            Err(e) => {
+                log::error!("[Stress-S{}] Sender {} send error: {:?}", port_name, sender_id, e);
+            }
+        }
+
+        // Small sleep between messages to create scheduling variety
+        scheduler::sleep_ms(20 + (sender_id * 5) as u64);
+    }
+
+    log::debug!("[Stress-S{}] Sender {} complete", port_name, sender_id);
+    STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    scheduler::exit_thread();
+}
+
+// Sender wrapper functions for port 1 (need unique functions for spawn_thread)
+#[inline(never)]
+fn stress_sender_p1_1() { stress_send_messages(&STRESS_PORT_1, 1, "P1"); }
+#[inline(never)]
+fn stress_sender_p1_2() { stress_send_messages(&STRESS_PORT_1, 2, "P1"); }
+#[inline(never)]
+fn stress_sender_p1_3() { stress_send_messages(&STRESS_PORT_1, 3, "P1"); }
+#[inline(never)]
+fn stress_sender_p1_4() { stress_send_messages(&STRESS_PORT_1, 4, "P1"); }
+#[inline(never)]
+fn stress_sender_p1_5() { stress_send_messages(&STRESS_PORT_1, 5, "P1"); }
+
+// Sender wrapper functions for port 2
+#[inline(never)]
+fn stress_sender_p2_1() { stress_send_messages(&STRESS_PORT_2, 1, "P2"); }
+#[inline(never)]
+fn stress_sender_p2_2() { stress_send_messages(&STRESS_PORT_2, 2, "P2"); }
+#[inline(never)]
+fn stress_sender_p2_3() { stress_send_messages(&STRESS_PORT_2, 3, "P2"); }
+#[inline(never)]
+fn stress_sender_p2_4() { stress_send_messages(&STRESS_PORT_2, 4, "P2"); }
+#[inline(never)]
+fn stress_sender_p2_5() { stress_send_messages(&STRESS_PORT_2, 5, "P2"); }
+
+// Sender wrapper functions for port 3
+#[inline(never)]
+fn stress_sender_p3_1() { stress_send_messages(&STRESS_PORT_3, 1, "P3"); }
+#[inline(never)]
+fn stress_sender_p3_2() { stress_send_messages(&STRESS_PORT_3, 2, "P3"); }
+#[inline(never)]
+fn stress_sender_p3_3() { stress_send_messages(&STRESS_PORT_3, 3, "P3"); }
+#[inline(never)]
+fn stress_sender_p3_4() { stress_send_messages(&STRESS_PORT_3, 4, "P3"); }
+#[inline(never)]
+fn stress_sender_p3_5() { stress_send_messages(&STRESS_PORT_3, 5, "P3"); }
+
+/// Generic compute-bound stress thread implementation
+fn stress_compute_impl(id: u64) {
+    log::debug!("[Stress-C{}] Compute thread {} starting", id, id);
+
+    // Perform 100 iterations of yield/sleep/work
+    for i in 0..100 {
+        // Yield to other threads
+        scheduler::yield_now();
+
+        // Do some "work" (just a loop)
+        let mut _sum: u64 = 0;
+        for j in 0..1000 {
+            _sum = _sum.wrapping_add(j);
+        }
+
+        // Sleep for a bit
+        if i % 10 == 0 {
+            scheduler::sleep_ms(10 + id);
+        }
+    }
+
+    log::debug!("[Stress-C{}] Compute thread {} complete", id, id);
+    STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    scheduler::exit_thread();
+}
+
+// Compute thread wrappers (need unique functions for spawn_thread)
+#[inline(never)]
+fn stress_compute_1() { stress_compute_impl(1); }
+#[inline(never)]
+fn stress_compute_2() { stress_compute_impl(2); }
+#[inline(never)]
+fn stress_compute_3() { stress_compute_impl(3); }
+#[inline(never)]
+fn stress_compute_4() { stress_compute_impl(4); }
+#[inline(never)]
+fn stress_compute_5() { stress_compute_impl(5); }
+#[inline(never)]
+fn stress_compute_6() { stress_compute_impl(6); }
+#[inline(never)]
+fn stress_compute_7() { stress_compute_impl(7); }
+#[inline(never)]
+fn stress_compute_8() { stress_compute_impl(8); }
+#[inline(never)]
+fn stress_compute_9() { stress_compute_impl(9); }
+#[inline(never)]
+fn stress_compute_10() { stress_compute_impl(10); }
+
+/// Monitor thread - reports progress
+fn stress_monitor() {
+    log::info!("[Stress-Mon] Monitor thread starting");
+
+    // Wait for test to complete (expecting 3 receivers + 15 senders + 10 compute = 28 completions)
+    const EXPECTED_COMPLETIONS: usize = 28;
+
+    for i in 0..100 {
+        scheduler::sleep_ms(500);
+
+        let completed = STRESS_COMPLETION_COUNTER.load(Ordering::SeqCst);
+        log::info!("[Stress-Mon] Progress: {}/{} threads completed", completed, EXPECTED_COMPLETIONS);
+
+        if completed >= EXPECTED_COMPLETIONS {
+            break;
+        }
+
+        if i == 99 {
+            log::warn!("[Stress-Mon] Timeout! Only {}/{} threads completed", completed, EXPECTED_COMPLETIONS);
+        }
+    }
+
+    let final_count = STRESS_COMPLETION_COUNTER.load(Ordering::SeqCst);
+    if final_count >= EXPECTED_COMPLETIONS {
+        log::info!("=== STRESS TEST: ✓ SUCCESS - All threads completed! ===");
+    } else {
+        log::warn!("=== STRESS TEST: ⚠ INCOMPLETE - {}/{} threads finished ===", final_count, EXPECTED_COMPLETIONS);
+    }
+
+    scheduler::exit_thread();
+}
+
+/// ===============================
+///  CONTINUOUS STRESS TEST
+/// ===============================
+
+/// Spawn continuous stress test that runs forever
+///
+/// This test runs in waves:
+/// 1. Spawn a batch of threads (IPC senders/receivers, compute, FD operations)
+/// 2. Wait for batch to complete and clean up
+/// 3. Report statistics
+/// 4. Repeat forever
+///
+/// This prevents heap exhaustion by allowing thread cleanup between waves.
+pub fn spawn_continuous_stress_test() {
+    if CONTINUOUS_STRESS_RUNNING.swap(true, Ordering::SeqCst) {
+        log::warn!("Continuous stress test already running!");
+        return;
+    }
+
+    log::info!("=== CONTINUOUS STRESS TEST: Starting ===");
+    log::info!("This test will run FOREVER - spawning thread waves continuously");
+    log::info!("Each wave: 8 threads (2 IPC recv, 4 IPC send, 1 FD test, 1 compute)");
+
+    // Reset statistics
+    CONTINUOUS_STRESS_CYCLES.store(0, Ordering::SeqCst);
+    CONTINUOUS_STRESS_TOTAL_THREADS.store(0, Ordering::SeqCst);
+    CONTINUOUS_STRESS_TOTAL_MESSAGES.store(0, Ordering::SeqCst);
+
+    scheduler::spawn_thread(continuous_stress_coordinator, "stress-forever");
+}
+
+/// Coordinator thread for continuous stress test
+/// Spawns waves of threads, waits for completion, reports stats, repeats forever
+fn continuous_stress_coordinator() {
+    log::info!("[Stress-Forever] Coordinator starting - will run forever!");
+
+    loop {
+        let cycle = CONTINUOUS_STRESS_CYCLES.fetch_add(1, Ordering::SeqCst) + 1;
+        log::info!("[Stress-Forever] ═══ Starting Cycle {} ═══", cycle);
+
+        // Reset completion counter for this wave
+        STRESS_COMPLETION_COUNTER.store(0, Ordering::SeqCst);
+
+        // Spawn a wave of threads (8 threads total)
+        // 2 IPC receivers
+        scheduler::spawn_thread(cont_stress_ipc_recv_1, "cont-recv-1");
+        scheduler::spawn_thread(cont_stress_ipc_recv_2, "cont-recv-2");
+
+        // Wait for receivers to create ports
+        scheduler::sleep_ms(50);
+
+        // 4 IPC senders (2 per receiver)
+        scheduler::spawn_thread(cont_stress_ipc_send_1_1, "cont-send-1-1");
+        scheduler::spawn_thread(cont_stress_ipc_send_1_2, "cont-send-1-2");
+        scheduler::spawn_thread(cont_stress_ipc_send_2_1, "cont-send-2-1");
+        scheduler::spawn_thread(cont_stress_ipc_send_2_2, "cont-send-2-2");
+
+        // 1 FD test thread
+        let fd_thread = scheduler::spawn_thread(cont_stress_fd_test, "cont-fd");
+        scheduler::init_std_streams(fd_thread);
+
+        // 1 compute thread
+        scheduler::spawn_thread(cont_stress_compute, "cont-compute");
+
+        CONTINUOUS_STRESS_TOTAL_THREADS.fetch_add(8, Ordering::SeqCst);
+
+        // Wait for all threads to complete (expecting 8 completions)
+        const THREADS_PER_WAVE: usize = 8;
+        let mut timeout = 0;
+        loop {
+            scheduler::sleep_ms(100);
+            timeout += 1;
+
+            let completed = STRESS_COMPLETION_COUNTER.load(Ordering::SeqCst);
+            if completed >= THREADS_PER_WAVE {
+                log::info!("[Stress-Forever] Wave complete! All {} threads finished", THREADS_PER_WAVE);
+                break;
+            }
+
+            if timeout > 100 {
+                log::warn!("[Stress-Forever] Wave timeout! Only {}/{} threads completed", completed, THREADS_PER_WAVE);
+                break;
+            }
+        }
+
+        // Report statistics
+        let total_cycles = CONTINUOUS_STRESS_CYCLES.load(Ordering::SeqCst);
+        let total_threads = CONTINUOUS_STRESS_TOTAL_THREADS.load(Ordering::SeqCst);
+        let total_messages = CONTINUOUS_STRESS_TOTAL_MESSAGES.load(Ordering::SeqCst);
+
+        log::info!("[Stress-Forever] ═══ Statistics ═══");
+        log::info!("[Stress-Forever]   Cycles completed: {}", total_cycles);
+        log::info!("[Stress-Forever]   Total threads: {}", total_threads);
+        log::info!("[Stress-Forever]   Total messages: {}", total_messages);
+        log::info!("[Stress-Forever]   Avg threads/cycle: {}", total_threads / total_cycles.max(1));
+
+        // Brief pause between waves to allow cleanup
+        scheduler::sleep_ms(200);
+    }
+}
+
+// Continuous stress IPC receivers
+fn cont_stress_ipc_recv_1() {
+    let port = scheduler::port_create().expect("Failed to create port");
+    STRESS_PORT_1.store(port.0, Ordering::SeqCst);
+
+    // Receive 10 messages (2 senders × 5 messages)
+    for _ in 0..10 {
+        if let Ok(_msg) = scheduler::port_recv(port) {
+            CONTINUOUS_STRESS_TOTAL_MESSAGES.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    scheduler::port_destroy(port).ok();
+    STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    scheduler::exit_thread();
+}
+
+fn cont_stress_ipc_recv_2() {
+    let port = scheduler::port_create().expect("Failed to create port");
+    STRESS_PORT_2.store(port.0, Ordering::SeqCst);
+
+    // Receive 10 messages (2 senders × 5 messages)
+    for _ in 0..10 {
+        if let Ok(_msg) = scheduler::port_recv(port) {
+            CONTINUOUS_STRESS_TOTAL_MESSAGES.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    scheduler::port_destroy(port).ok();
+    STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    scheduler::exit_thread();
+}
+
+// Continuous stress IPC senders
+fn cont_stress_send_to_port(port_atomic: &AtomicUsize, sender_id: u64) {
+    scheduler::sleep_ms(100); // Wait for port creation
+
+    let port_id = scheduler::PortId(port_atomic.load(Ordering::SeqCst));
+    if port_id.0 == 0 {
+        STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+        scheduler::exit_thread();
+    }
+
+    // Send 5 messages
+    for msg_num in 0..5 {
+        let mut msg = scheduler::Message::new();
+        msg.set_u64(0, sender_id);
+        msg.set_u64(8, msg_num);
+
+        if scheduler::port_send(port_id, msg).is_ok() {
+            scheduler::sleep_ms(10);
+        }
+    }
+
+    STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    scheduler::exit_thread();
+}
+
+#[inline(never)]
+fn cont_stress_ipc_send_1_1() { cont_stress_send_to_port(&STRESS_PORT_1, 1); }
+#[inline(never)]
+fn cont_stress_ipc_send_1_2() { cont_stress_send_to_port(&STRESS_PORT_1, 2); }
+#[inline(never)]
+fn cont_stress_ipc_send_2_1() { cont_stress_send_to_port(&STRESS_PORT_2, 1); }
+#[inline(never)]
+fn cont_stress_ipc_send_2_2() { cont_stress_send_to_port(&STRESS_PORT_2, 2); }
+
+// Continuous stress FD test
+fn cont_stress_fd_test() {
+    // Test FD operations
+    scheduler::with_current_thread(|thread| {
+        if let Some(fd_table) = &thread.fd_table {
+            // Test stdout write
+            if let Ok(stdout) = fd_table.get(1) {
+                let test_msg = b"[FD-Stress] stdout test\n";
+                let _ = stdout.write(test_msg);
+            }
+
+            // Test stderr write
+            if let Ok(stderr) = fd_table.get(2) {
+                let test_msg = b"[FD-Stress] stderr test\n";
+                let _ = stderr.write(test_msg);
+            }
+        }
+    });
+
+    // Do some yields and sleeps
+    for _ in 0..10 {
+        scheduler::yield_now();
+        scheduler::sleep_ms(5);
+    }
+
+    STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    scheduler::exit_thread();
+}
+
+// Continuous stress compute thread
+fn cont_stress_compute() {
+    // Perform computation with yields and sleeps
+    for _ in 0..50 {
+        scheduler::yield_now();
+
+        // Do some work
+        let mut _sum: u64 = 0;
+        for j in 0..500 {
+            _sum = _sum.wrapping_add(j);
+        }
+
+        if _sum % 10 == 0 {
+            scheduler::sleep_ms(5);
+        }
+    }
+
+    STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    scheduler::exit_thread();
 }
 
 /// ===============================

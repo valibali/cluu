@@ -34,10 +34,11 @@ use x86_64::{VirtAddr, structures::paging::PageTableFlags};
 /// Uses high canonical address space to avoid conflicts with user space
 pub const HEAP_START: u64 = 0xffff_ffff_c000_0000;
 
-/// Size of the kernel heap in bytes (1 MiB)
-/// This should be sufficient for most kernel data structures
-/// Can be increased if needed, but requires more physical memory
-pub const HEAP_SIZE: u64 = 1024 * 1024; // 1 MiB
+/// Size of the kernel heap in bytes (8 MiB)
+/// Increased from 1 MiB to support more concurrent threads
+/// Each thread needs 64KB stack, so 8 MiB supports ~128 threads
+/// plus other kernel data structures
+pub const HEAP_SIZE: u64 = 8 * 1024 * 1024; // 8 MiB
 
 /// Global allocator instance used by Rust's allocation APIs
 /// The #[global_allocator] attribute makes this the default allocator

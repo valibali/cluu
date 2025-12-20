@@ -17,6 +17,6 @@ pub mod tty_device;
 pub use pio::{Pio, Io, ReadOnly};
 
 // Re-export device abstraction types
-pub use device::{Device, Errno, Stat, S_IFCHR, S_IFREG, S_IFDIR, S_IFMT};
+pub use device::{Errno, S_IFCHR, S_IFMT};
 pub use fd::FileDescriptorTable;
 pub use tty_device::TtyDevice;

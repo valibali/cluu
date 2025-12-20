@@ -93,7 +93,9 @@ pub mod thread;
 
 use crate::alloc::string::ToString;
 pub use io_wait::{IoChannel, wait_for_io, wake_io_waiters};
-pub use ipc::{IpcError, Message, PortId, port_create, port_destroy, port_recv, port_send, port_try_recv};
+pub use ipc::{
+    IpcError, Message, PortId, port_create, port_destroy, port_recv, port_send,
+};
 pub use thread::{Thread, ThreadId, ThreadState};
 
 /// Thread stack size (64 KiB per thread)
@@ -291,8 +293,8 @@ impl Scheduler {
     ///    - CS/SS set to kernel segments
     /// 4. REGISTRATION: Thread added to scheduler's ready queue
     ///
-    /// When the thread first runs via iretq, it will jump to the entry point
-    /// and begin execution with an empty stack.
+    /// When the thread first runs via iretq, it will jump to the trampoline
+    /// which calls the entry point and ensures proper cleanup.
     fn create_thread(&mut self, entry_point: fn(), name: &str) -> ThreadId {
         // Assign unique ID and increment counter for next thread
         let thread_id = self.next_thread_id;
@@ -300,7 +302,17 @@ impl Scheduler {
 
         // Allocate a 64KB stack for this thread
         let stack = alloc::vec![0u8; THREAD_STACK_SIZE].into_boxed_slice();
-        let stack_top = stack.as_ptr() as u64 + THREAD_STACK_SIZE as u64;
+        let stack_base = stack.as_ptr() as u64;
+        let stack_top = stack_base + THREAD_STACK_SIZE as u64;
+
+        // CRITICAL: Set up return address on stack for thread safety
+        // When thread's entry function returns, it will "return" to thread_exit_trampoline
+        // This prevents INVALID_OPCODE from executing garbage addresses
+        let return_addr = thread_exit_trampoline as *const () as u64;
+        let stack_ptr = (stack_top - 8) as *mut u64;
+        unsafe {
+            *stack_ptr = return_addr;
+        }
 
         // Set up interrupt context for preemptive scheduling
         let mut interrupt_context = InterruptContext::default();
@@ -309,7 +321,7 @@ impl Scheduler {
         interrupt_context.iret_frame.rip = entry_point as u64; // Jump to entry point
         interrupt_context.iret_frame.cs = 0x08; // Kernel code segment
         interrupt_context.iret_frame.rflags = 0x202; // IF=1 (interrupts enabled), bit 1 always set
-        interrupt_context.iret_frame.rsp = stack_top; // Top of thread's stack
+        interrupt_context.iret_frame.rsp = stack_top - 8; // RSP points to return address
         interrupt_context.iret_frame.ss = 0x10; // Kernel data segment
 
         // All general purpose registers initialized to 0 (from default())
@@ -387,9 +399,17 @@ impl Scheduler {
     /// Removes all terminated threads from the scheduler, freeing their resources.
     /// This should be called periodically by the reaper thread.
     ///
+    /// # Arguments
+    /// * `current_thread_id` - The currently running thread (must not be cleaned up)
+    /// * `log_cleanup` - Whether to log cleanup (should be false in IRQ context!)
+    ///
     /// Returns the number of threads cleaned up.
-    fn cleanup_terminated_threads(&mut self, current_thread_id: ThreadId) -> usize {
-        // First, identify threads to clean up (without logging inside retain closure)
+    fn cleanup_terminated_threads(
+        &mut self,
+        current_thread_id: ThreadId,
+        log_cleanup: bool,
+    ) -> usize {
+        // First, identify threads to clean up
         let mut to_remove = alloc::vec::Vec::new();
         for thread in &self.threads {
             if thread.state == ThreadState::Terminated
@@ -400,16 +420,17 @@ impl Scheduler {
             }
         }
 
-        // Log what we're about to clean up
-        for (id, name) in &to_remove {
-            log::info!("Reaper: Cleaning up thread {} ({})", id.0, name);
+        // CRITICAL: Only log if NOT in IRQ context (logging in IRQ can deadlock!)
+        if log_cleanup {
+            for (id, name) in &to_remove {
+                log::info!("Reaper: Cleaning up thread {} ({})", id.0, name);
+            }
         }
 
-        // Now remove them
+        // Now remove them (dropping Thread frees stack)
         let initial_count = self.threads.len();
-        self.threads.retain(|t| {
-            !to_remove.iter().any(|(id, _)| t.id == *id)
-        });
+        self.threads
+            .retain(|t| !to_remove.iter().any(|(id, _)| t.id == *id));
 
         initial_count - self.threads.len()
     }
@@ -420,7 +441,10 @@ pub fn init() {
     log::info!("Initializing preemptive scheduler...");
 
     let scheduler = Scheduler::new();
-    *SCHEDULER.lock() = Some(scheduler);
+    // CRITICAL: Disable interrupts to prevent timer IRQ from trying to acquire lock
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        *SCHEDULER.lock() = Some(scheduler);
+    });
 
     // Initialize I/O wait queue system
     io_wait::init();
@@ -430,19 +454,12 @@ pub fn init() {
 
 /// Create a new thread
 pub fn spawn_thread(entry_point: fn(), name: &str) -> ThreadId {
-    // Disable preemption while accessing scheduler to prevent deadlock
-    PREEMPTION_DISABLED.store(true, Ordering::SeqCst);
-
-    let thread_id = {
+    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
+    x86_64::instructions::interrupts::without_interrupts(|| {
         let mut scheduler_guard = SCHEDULER.lock();
         let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
         scheduler.create_thread(entry_point, name)
-    }; // Lock automatically released here
-
-    // Re-enable preemption
-    PREEMPTION_DISABLED.store(false, Ordering::SeqCst);
-
-    thread_id
+    })
 }
 
 /// Initialize standard streams (stdin/stdout/stderr) for a thread
@@ -457,10 +474,8 @@ pub fn init_std_streams(thread_id: ThreadId) {
     use crate::io::{FileDescriptorTable, TtyDevice};
     use alloc::sync::Arc;
 
-    // Disable preemption while modifying thread
-    PREEMPTION_DISABLED.store(true, Ordering::SeqCst);
-
-    {
+    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
+    x86_64::instructions::interrupts::without_interrupts(|| {
         let mut scheduler_guard = SCHEDULER.lock();
         let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
 
@@ -474,7 +489,7 @@ pub fn init_std_streams(thread_id: ThreadId) {
             // Initialize stdin, stdout, stderr (all point to same TTY)
             fd_table.insert(0, tty.clone()); // stdin
             fd_table.insert(1, tty.clone()); // stdout
-            fd_table.insert(2, tty);         // stderr
+            fd_table.insert(2, tty); // stderr
 
             thread.fd_table = Some(fd_table);
 
@@ -482,10 +497,7 @@ pub fn init_std_streams(thread_id: ThreadId) {
         } else {
             log::warn!("Cannot init std streams: thread {} not found", thread_id.0);
         }
-    }
-
-    // Re-enable preemption
-    PREEMPTION_DISABLED.store(false, Ordering::SeqCst);
+    });
 }
 
 /// Idle thread function
@@ -629,13 +641,16 @@ where
     F: FnOnce(&Thread) -> R,
 {
     let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
-    let sched_guard = SCHEDULER.lock();
-    if let Some(scheduler) = sched_guard.as_ref() {
-        if let Some(thread) = scheduler.threads.iter().find(|t| t.id == current_id) {
-            return Some(f(thread));
+    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let sched_guard = SCHEDULER.lock();
+        if let Some(scheduler) = sched_guard.as_ref() {
+            if let Some(thread) = scheduler.threads.iter().find(|t| t.id == current_id) {
+                return Some(f(thread));
+            }
         }
-    }
-    None
+        None
+    })
 }
 
 /// Block the current thread
@@ -660,14 +675,17 @@ pub fn block_current_thread() {
         return;
     }
 
-    let mut sched_guard = SCHEDULER.lock();
-    if let Some(scheduler) = sched_guard.as_mut() {
-        if let Some(thread) = scheduler.get_thread_mut(current_id) {
-            thread.state = ThreadState::Blocked;
-            // Thread is already not in ready queue since it's currently running
-            // When it yields, schedule_from_interrupt won't add it back because state is Blocked
+    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut sched_guard = SCHEDULER.lock();
+        if let Some(scheduler) = sched_guard.as_mut() {
+            if let Some(thread) = scheduler.get_thread_mut(current_id) {
+                thread.state = ThreadState::Blocked;
+                // Thread is already not in ready queue since it's currently running
+                // When it yields, schedule_from_interrupt won't add it back because state is Blocked
+            }
         }
-    }
+    });
 }
 
 /// Wake a blocked thread
@@ -684,16 +702,32 @@ pub fn wake_thread(thread_id: ThreadId) {
         return;
     }
 
-    let mut sched_guard = SCHEDULER.lock();
-    if let Some(scheduler) = sched_guard.as_mut() {
-        if let Some(thread) = scheduler.get_thread_mut(thread_id) {
-            if thread.state == ThreadState::Blocked {
-                thread.state = ThreadState::Ready;
-                // Add to ready queue
-                scheduler.ready_queue.push_back(thread_id);
+    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut sched_guard = SCHEDULER.lock();
+        if let Some(scheduler) = sched_guard.as_mut() {
+            if let Some(thread) = scheduler.get_thread_mut(thread_id) {
+                if thread.state == ThreadState::Blocked {
+                    thread.state = ThreadState::Ready;
+                    // Add to ready queue
+                    scheduler.ready_queue.push_back(thread_id);
+                }
             }
         }
-    }
+    });
+}
+
+/// Thread exit trampoline
+///
+/// This function is placed as a return address on the thread's initial stack.
+/// If a thread's entry function returns (instead of calling exit_thread),
+/// it will "return" here, and we'll properly clean it up.
+///
+/// This prevents INVALID_OPCODE exceptions from executing garbage addresses.
+extern "C" fn thread_exit_trampoline() -> ! {
+    // Thread returned instead of calling exit_thread() - clean up properly
+    log::info!("!!! Thread returned to trampoline - calling exit_thread()");
+    exit_thread();
 }
 
 /// Terminate the current thread
@@ -721,7 +755,8 @@ pub fn exit_thread() -> ! {
     );
 
     // Mark thread as terminated
-    {
+    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
+    x86_64::instructions::interrupts::without_interrupts(|| {
         let mut sched_guard = SCHEDULER.lock();
         if let Some(scheduler) = sched_guard.as_mut() {
             if let Some(thread) = scheduler.get_thread_mut(current_id) {
@@ -729,7 +764,7 @@ pub fn exit_thread() -> ! {
                 // Thread will not be added back to ready queue
             }
         }
-    }
+    });
 
     // Yield to switch to another thread
     // We will never return here
@@ -743,16 +778,19 @@ pub fn exit_thread() -> ! {
 
 /// Get thread name by ID (for debugging)
 fn get_thread_name(thread_id: ThreadId) -> Option<alloc::string::String> {
-    let sched_guard = SCHEDULER.lock();
-    if let Some(scheduler) = sched_guard.as_ref() {
-        scheduler
-            .threads
-            .iter()
-            .find(|t| t.id == thread_id)
-            .map(|t| t.name.clone())
-    } else {
-        None
-    }
+    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let sched_guard = SCHEDULER.lock();
+        if let Some(scheduler) = sched_guard.as_ref() {
+            scheduler
+                .threads
+                .iter()
+                .find(|t| t.id == thread_id)
+                .map(|t| t.name.clone())
+        } else {
+            None
+        }
+    })
 }
 
 /// Thread statistics for display
@@ -770,47 +808,50 @@ pub struct ThreadStats {
 /// Returns a vector of ThreadStats with information about each thread
 /// including CPU time and usage percentage.
 pub fn get_thread_stats() -> Vec<ThreadStats> {
-    let sched_guard = SCHEDULER.lock();
-    let scheduler = match sched_guard.as_ref() {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-
-    let total_uptime = crate::utils::timer::uptime_ms();
-    if total_uptime == 0 {
-        return Vec::new();
-    }
-
-    let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
-
-    let mut stats = Vec::new();
-    for thread in &scheduler.threads {
-        let mut cpu_time = thread.cpu_time_ms;
-
-        // If this is the currently running thread, add elapsed time since last scheduled
-        if thread.id == current_id && thread.last_scheduled_time > 0 {
-            let current_time = crate::utils::timer::uptime_ms();
-            let elapsed = current_time.saturating_sub(thread.last_scheduled_time);
-            cpu_time = cpu_time.saturating_add(elapsed);
-        }
-
-        // Calculate CPU percentage
-        let cpu_percent = if total_uptime > 0 {
-            (cpu_time * 100) / total_uptime
-        } else {
-            0
+    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let sched_guard = SCHEDULER.lock();
+        let scheduler = match sched_guard.as_ref() {
+            Some(s) => s,
+            None => return Vec::new(),
         };
 
-        stats.push(ThreadStats {
-            id: thread.id,
-            name: thread.name.clone(),
-            state: thread.state,
-            cpu_time_ms: cpu_time,
-            cpu_percent,
-        });
-    }
+        let total_uptime = crate::utils::timer::uptime_ms();
+        if total_uptime == 0 {
+            return Vec::new();
+        }
 
-    stats
+        let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
+
+        let mut stats = Vec::new();
+        for thread in &scheduler.threads {
+            let mut cpu_time = thread.cpu_time_ms;
+
+            // If this is the currently running thread, add elapsed time since last scheduled
+            if thread.id == current_id && thread.last_scheduled_time > 0 {
+                let current_time = crate::utils::timer::uptime_ms();
+                let elapsed = current_time.saturating_sub(thread.last_scheduled_time);
+                cpu_time = cpu_time.saturating_add(elapsed);
+            }
+
+            // Calculate CPU percentage
+            let cpu_percent = if total_uptime > 0 {
+                (cpu_time * 100) / total_uptime
+            } else {
+                0
+            };
+
+            stats.push(ThreadStats {
+                id: thread.id,
+                name: thread.name.clone(),
+                state: thread.state,
+                cpu_time_ms: cpu_time,
+                cpu_percent,
+            });
+        }
+
+        stats
+    })
 }
 
 /// Software interrupt handler for voluntary yielding (INT 0x81)
@@ -1077,10 +1118,29 @@ pub extern "C" fn schedule_from_interrupt(
         }
     }
 
-    // Get next thread and mark it as running
+    // CRITICAL BUG FIX: Cleanup MUST happen BEFORE getting next_ctx_ptr!
+    // If we cleanup after getting the pointer, Vec::retain() can reallocate
+    // the Vec, moving all threads and making next_ctx_ptr DANGLING!
+    // This caused INVALID_OPCODE crashes when returning from IRQ.
+
+    // Check if cleanup needed (before getting pointer!)
+    let should_cleanup = if current_id.0 != 0 {
+        scheduler
+            .get_thread_mut(current_id)
+            .map(|t| t.state == ThreadState::Terminated)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // Do cleanup NOW if needed (before getting next_ctx_ptr)
+    if should_cleanup {
+        scheduler.cleanup_terminated_threads(next_id, false);
+    }
+
+    // NOW get the pointer to next thread (after cleanup, so it won't be invalidated)
     let next_ctx_ptr = if let Some(next_thread) = scheduler.get_thread_mut(next_id) {
         next_thread.state = ThreadState::Running;
-        // Record when this thread starts executing
         next_thread.last_scheduled_time = current_time;
         &next_thread.interrupt_context as *const InterruptContext
     } else {
@@ -1091,25 +1151,7 @@ pub extern "C" fn schedule_from_interrupt(
     // Update current thread ID
     CURRENT_THREAD_ID.store(next_id.0, Ordering::SeqCst);
 
-    // IMMEDIATE CLEANUP: Now that we've switched to the new thread's stack,
-    // we can safely clean up the old thread if it was terminated.
-    // This provides instant resource reclamation without a periodic reaper.
-    if current_id.0 != 0 {
-        // Check if the old thread was terminated
-        let should_cleanup = scheduler
-            .get_thread_mut(current_id)
-            .map(|t| t.state == ThreadState::Terminated)
-            .unwrap_or(false);
-
-        if should_cleanup {
-            // Clean up the terminated thread immediately
-            // This is safe because we're now on the new thread's stack
-            // Pass next_id as the current thread to protect it from cleanup
-            scheduler.cleanup_terminated_threads(next_id);
-        }
-    }
-
-    // Return pointer to next thread's context
+    // Return pointer to next thread's context (guaranteed valid)
     next_ctx_ptr
 }
 
@@ -1168,7 +1210,8 @@ pub fn sleep_ms(ms: u64) {
     }
 
     // Set the thread's sleep timer
-    {
+    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
+    x86_64::instructions::interrupts::without_interrupts(|| {
         let mut sched_guard = SCHEDULER.lock();
         if let Some(scheduler) = sched_guard.as_mut() {
             if let Some(thread) = scheduler.get_thread_mut(current_id) {
@@ -1176,7 +1219,7 @@ pub fn sleep_ms(ms: u64) {
                 thread.sleep_until_ms = wake_time;
             }
         }
-    }
+    });
 
     // Yield to switch to another thread
     // The scheduler will not reschedule us until sleep time expires
