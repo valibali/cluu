@@ -24,16 +24,26 @@
 # 2. Creating BOOTBOOT-compatible disk images
 # 3. Setting up UEFI boot environment for testing
 
-.PHONY: all clean qemu
+.PHONY: all clean qemu userspace
 
-all:
+all: userspace
 	@make -C ./kernel all
 	@make -C ./bootboot_image all
 
+userspace:
+	@echo "Building userspace binaries..."
+	@make -C ./userspace/hello all
+	@echo "Copying userspace binaries to initrd..."
+	@mkdir -p ./bootboot_image/initrd/bin
+	@cp ./userspace/hello/hello ./bootboot_image/initrd/bin/hello
+	@echo "Userspace binaries ready"
+
 clean:
 	@make -C ./kernel clean
+	@make -C ./userspace/hello clean
 	@make -C ./utilies/mkbootimg clean
 	@make -C ./bootboot_image clean
+	@rm -rf ./bootboot_image/initrd/bin
 
 qemu: clean all
 	@make -C ./bootboot_image uefi

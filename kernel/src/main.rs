@@ -34,6 +34,8 @@ mod arch;
 mod bootboot;
 mod components;
 mod drivers;
+mod fs;
+mod initrd;
 mod io;
 mod loaders;
 mod memory;
@@ -138,6 +140,9 @@ pub extern "C" fn kstart() -> ! {
     }
 
     log::info!("Memory management initialized successfully");
+
+    // Step 4.5: Initialize initrd (initial ramdisk)
+    initrd::init();
 
     // Step 5: Initialize IDT (Interrupt Descriptor Table)
     arch::x86_64::idt::init();

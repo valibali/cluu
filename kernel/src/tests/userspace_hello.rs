@@ -1,36 +1,37 @@
 /*
  * Userspace Hello World Test
  *
- * This module embeds the userspace hello world binary and provides
- * a function to spawn it as a process.
+ * This module loads the userspace hello world binary from initrd
+ * and spawns it as a process.
  */
 
+use crate::initrd;
 use crate::loaders::elf;
 use crate::scheduler;
-
-/// Embedded userspace hello world binary (built from userspace/hello/)
-///
-/// To rebuild: cd userspace/hello && make
-/// Then update kernel build to include this binary
-static HELLO_BINARY: &[u8] = include_bytes!("../../../userspace/hello/hello");
 
 /// Spawn the userspace hello world process
 ///
 /// This function:
-/// 1. Creates a new process with fresh address space
-/// 2. Loads the embedded ELF binary
-/// 3. Initializes stdin/stdout/stderr
-/// 4. Creates initial thread at entry point
-/// 5. Returns the process ID
+/// 1. Loads the ELF binary from initrd
+/// 2. Creates a new process with fresh address space
+/// 3. Loads the ELF binary into the address space
+/// 4. Initializes stdin/stdout/stderr
+/// 5. Creates initial thread at entry point
+/// 6. Returns the process ID
 pub fn spawn_hello_world() -> Result<(), &'static str> {
     log::info!("========================================");
     log::info!("SPAWNING USERSPACE HELLO WORLD");
     log::info!("========================================");
-    log::info!("Binary size: {} bytes", HELLO_BINARY.len());
+    log::info!("Loading binary from initrd: bin/hello");
+    log::info!("");
+
+    // Read the ELF binary from initrd
+    let binary = initrd::read_file("bin/hello")?;
+    log::info!("Binary size: {} bytes", binary.len());
     log::info!("");
 
     // Parse and load the ELF binary
-    match elf::spawn_elf_process(HELLO_BINARY, "hello_world", &[]) {
+    match elf::spawn_elf_process(binary, "hello_world", &[]) {
         Ok((process_id, thread_id)) => {
             log::info!("✓ Userspace process spawned successfully!");
             log::info!("  Process ID: {:?}", process_id);
