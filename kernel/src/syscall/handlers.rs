@@ -17,6 +17,9 @@
  */
 
 use super::numbers::*;
+use crate::io::device::{Device, Errno};
+use crate::scheduler;
+use core::slice;
 
 /// Validate a user pointer
 ///
@@ -47,47 +50,179 @@ fn validate_user_ptr<T>(ptr: *const T, count: usize) -> Result<(), isize> {
     Ok(())
 }
 
-// Syscall handlers will be implemented in Phase 5
-// For now, they all return ENOSYS (not implemented)
-
-pub fn sys_read(_fd: i32, _buf: *mut u8, _count: usize) -> isize {
-    -ENOSYS
+/// Helper: Convert Errno to negative error code
+fn errno_to_code(errno: Errno) -> isize {
+    -(errno as isize)
 }
 
-pub fn sys_write(_fd: i32, _buf: *const u8, _count: usize) -> isize {
-    -ENOSYS
-}
-
-pub fn sys_close(_fd: i32) -> isize {
-    -ENOSYS
-}
-
-pub fn sys_fstat(_fd: i32, _statbuf: *mut u8) -> isize {
-    -ENOSYS
-}
-
-pub fn sys_lseek(_fd: i32, _offset: i64, _whence: i32) -> isize {
-    -ENOSYS
-}
-
-pub fn sys_isatty(_fd: i32) -> isize {
-    -ENOSYS
-}
-
-pub fn sys_brk(_addr: *mut u8) -> isize {
-    -ENOSYS
-}
-
-pub fn sys_exit(_status: i32) -> ! {
-    // Exit should terminate the current thread/process
-    // For now, just loop forever
-    loop {
-        x86_64::instructions::hlt();
+/// sys_write - Write to file descriptor
+///
+/// Arguments: (fd: i32, buf: *const u8, count: usize)
+/// Returns: number of bytes written, or negative error code
+pub fn sys_write(fd: i32, buf: *const u8, count: usize) -> isize {
+    // 1. Validate user buffer
+    if let Err(e) = validate_user_ptr(buf, count) {
+        return e;
     }
+
+    // 2. Get current process's FD table
+    let result = scheduler::with_current_process(|process| {
+        // 3. Get device from FD table
+        let device = match process.fd_table.get(fd) {
+            Ok(dev) => dev,
+            Err(e) => return errno_to_code(e),
+        };
+
+        // 4. Create safe slice and call device.write()
+        let data = unsafe { slice::from_raw_parts(buf, count) };
+        match device.write(data) {
+            Ok(written) => written as isize,
+            Err(e) => errno_to_code(e),
+        }
+    });
+
+    result.unwrap_or(-EBADF)
 }
 
+/// sys_read - Read from file descriptor
+///
+/// Arguments: (fd: i32, buf: *mut u8, count: usize)
+/// Returns: number of bytes read, or negative error code
+pub fn sys_read(fd: i32, buf: *mut u8, count: usize) -> isize {
+    // 1. Validate user buffer
+    if let Err(e) = validate_user_ptr(buf, count) {
+        return e;
+    }
+
+    // 2. Get current process's FD table
+    let result = scheduler::with_current_process(|process| {
+        // 3. Get device from FD table
+        let device = match process.fd_table.get(fd) {
+            Ok(dev) => dev,
+            Err(e) => return errno_to_code(e),
+        };
+
+        // 4. Create safe mutable slice and call device.read()
+        let buffer = unsafe { slice::from_raw_parts_mut(buf, count) };
+        match device.read(buffer) {
+            Ok(read) => read as isize,
+            Err(e) => errno_to_code(e),
+        }
+    });
+
+    result.unwrap_or(-EBADF)
+}
+
+/// sys_isatty - Check if file descriptor is a TTY
+///
+/// Arguments: (fd: i32)
+/// Returns: 1 if TTY, 0 if not, or negative error code
+pub fn sys_isatty(fd: i32) -> isize {
+    let result = scheduler::with_current_process(|process| {
+        let device = match process.fd_table.get(fd) {
+            Ok(dev) => dev,
+            Err(e) => return errno_to_code(e),
+        };
+
+        if device.is_tty() { 1 } else { 0 }
+    });
+
+    result.unwrap_or(-EBADF)
+}
+
+/// sys_fstat - Get file status
+///
+/// Arguments: (fd: i32, statbuf: *mut Stat)
+/// Returns: 0 on success, or negative error code
+pub fn sys_fstat(fd: i32, statbuf: *mut u8) -> isize {
+    // Note: statbuf is *mut u8 because we don't have Stat struct exposed yet
+    // For now, just validate and return ENOSYS
+    if let Err(e) = validate_user_ptr(statbuf, 128) {
+        return e;
+    }
+
+    let result = scheduler::with_current_process(|process| {
+        let device = match process.fd_table.get(fd) {
+            Ok(dev) => dev,
+            Err(e) => return errno_to_code(e),
+        };
+
+        // Get stat from device
+        let stat = device.stat();
+
+        // For now, just write a simple structure
+        // In a full implementation, we'd properly serialize Stat
+        unsafe {
+            // Write st_mode at offset 0 (first field typically)
+            *(statbuf as *mut u32) = stat.st_mode;
+        }
+
+        0
+    });
+
+    result.unwrap_or(-EBADF)
+}
+
+/// sys_close - Close file descriptor
+///
+/// Arguments: (fd: i32)
+/// Returns: 0 on success, or negative error code
+pub fn sys_close(fd: i32) -> isize {
+    let result = scheduler::with_current_process_mut(|process| {
+        match process.fd_table.close(fd) {
+            Ok(()) => 0,
+            Err(e) => errno_to_code(e),
+        }
+    });
+
+    result.unwrap_or(-EBADF)
+}
+
+/// sys_lseek - Seek to position in file
+///
+/// Arguments: (fd: i32, offset: i64, whence: i32)
+/// Returns: new file position, or negative error code
+pub fn sys_lseek(fd: i32, offset: i64, whence: i32) -> isize {
+    let result = scheduler::with_current_process(|process| {
+        let device = match process.fd_table.get(fd) {
+            Ok(dev) => dev,
+            Err(e) => return errno_to_code(e),
+        };
+
+        match device.seek(offset, whence) {
+            Ok(pos) => pos as isize,
+            Err(e) => errno_to_code(e),
+        }
+    });
+
+    result.unwrap_or(-EBADF)
+}
+
+/// sys_brk - Set program break (heap boundary)
+///
+/// Arguments: (addr: *mut u8)
+/// Returns: new break on success, or negative error code
+///
+/// Note: This will be fully implemented in Phase 6 with page fault handler
+pub fn sys_brk(_addr: *mut u8) -> isize {
+    // Phase 6: Implement heap growth with lazy allocation
+    -ENOSYS
+}
+
+/// sys_exit - Exit current thread/process
+///
+/// Arguments: (status: i32)
+/// Does not return
+pub fn sys_exit(status: i32) -> ! {
+    log::info!("Thread exiting with status {}", status);
+    scheduler::exit_thread();
+}
+
+/// sys_yield - Yield CPU to scheduler
+///
+/// Arguments: ()
+/// Returns: 0 on success
 pub fn sys_yield() -> isize {
-    // Yield should call the scheduler's yield function
-    // For now, return success
+    scheduler::yield_now();
     0
 }
