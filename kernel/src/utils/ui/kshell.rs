@@ -226,7 +226,10 @@ impl KShell {
             ("threads, ps", "Show thread information"),
             ("yield", "Yield CPU to other threads"),
             ("stress", "Run threading and IPC stress test (one-shot)"),
-            ("stress-forever", "Run continuous stress test (runs forever)"),
+            (
+                "stress-forever",
+                "Run continuous stress test (runs forever)",
+            ),
             ("reboot", "Reboot the system"),
         ];
 
@@ -529,7 +532,7 @@ impl KShell {
             Color::LIGHT_GRAY,
             Color::BLACK,
         );
-        crate::spawn_ipc_tests();
+        crate::tests::spawn_ipc_tests();
     }
 
     fn cmd_test_ipc_blocking() {
@@ -539,7 +542,7 @@ impl KShell {
         log::info!("===== cmd_test_ipc_blocking: END =====");
 
         // Uncomment to run actual test:
-        crate::spawn_ipc_blocking_test();
+        crate::tests::spawn_ipc_blocking_test();
     }
 
     fn cmd_test_ipc_queue() {
@@ -558,7 +561,7 @@ impl KShell {
             Color::LIGHT_GRAY,
             Color::BLACK,
         );
-        crate::spawn_ipc_queue_test();
+        crate::tests::spawn_ipc_queue_test();
     }
 
     fn cmd_test_ipc_multi() {
@@ -577,7 +580,7 @@ impl KShell {
             Color::LIGHT_GRAY,
             Color::BLACK,
         );
-        crate::spawn_ipc_multi_test();
+        crate::tests::spawn_ipc_multi_test();
     }
 
     fn cmd_test_fd() {
@@ -592,7 +595,7 @@ impl KShell {
             Color::LIGHT_GRAY,
             Color::BLACK,
         );
-        crate::spawn_fd_test();
+        crate::tests::spawn_fd_test();
     }
 
     fn cmd_stress_test() {
@@ -621,16 +624,8 @@ impl KShell {
             Color::LIGHT_GRAY,
             Color::BLACK,
         );
-        console::write_colored(
-            "  - 1 monitor thread\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "\nThis tests:\n",
-            Color::YELLOW,
-            Color::BLACK,
-        );
+        console::write_colored("  - 1 monitor thread\n", Color::LIGHT_GRAY, Color::BLACK);
+        console::write_colored("\nThis tests:\n", Color::YELLOW, Color::BLACK);
         console::write_colored(
             "  ✓ Concurrent thread creation/termination\n",
             Color::GREEN,
@@ -656,7 +651,7 @@ impl KShell {
             Color::LIGHT_GRAY,
             Color::BLACK,
         );
-        crate::spawn_stress_test();
+        crate::tests::spawn_stress_test();
     }
 
     fn cmd_stress_forever() {
@@ -671,11 +666,7 @@ impl KShell {
             Color::BLACK,
         );
         console::write_str("\n");
-        console::write_colored(
-            "Test strategy:\n",
-            Color::YELLOW,
-            Color::BLACK,
-        );
+        console::write_colored("Test strategy:\n", Color::YELLOW, Color::BLACK);
         console::write_colored(
             "  • Spawns waves of 8 threads continuously\n",
             Color::LIGHT_GRAY,
@@ -697,11 +688,7 @@ impl KShell {
             Color::BLACK,
         );
         console::write_str("\n");
-        console::write_colored(
-            "What this tests:\n",
-            Color::YELLOW,
-            Color::BLACK,
-        );
+        console::write_colored("What this tests:\n", Color::YELLOW, Color::BLACK);
         console::write_colored(
             "  ✓ Long-term stability and memory leaks\n",
             Color::GREEN,
@@ -717,11 +704,7 @@ impl KShell {
             Color::GREEN,
             Color::BLACK,
         );
-        console::write_colored(
-            "  ✓ FD operations over time\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
+        console::write_colored("  ✓ FD operations over time\n", Color::GREEN, Color::BLACK);
         console::write_colored(
             "  ✓ Scheduler fairness under sustained load\n",
             Color::GREEN,
@@ -738,6 +721,6 @@ impl KShell {
             Color::YELLOW,
             Color::BLACK,
         );
-        crate::spawn_continuous_stress_test();
+        crate::tests::spawn_continuous_stress_test();
     }
 }
