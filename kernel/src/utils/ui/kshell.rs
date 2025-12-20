@@ -194,6 +194,10 @@ impl KShell {
             "test-ipc-queue" => Self::cmd_test_ipc_queue(),
             "test-ipc-multi" => Self::cmd_test_ipc_multi(),
             "test-fd" => Self::cmd_test_fd(),
+            "test-syscall" => Self::cmd_test_syscall(),
+            "syscall-smoke" => Self::cmd_syscall_smoke(),
+            "test-all" | "comprehensive" => Self::cmd_comprehensive_test(),
+            "quick-test" | "smoke" => Self::cmd_quick_smoke(),
             "stress" | "test-stress" => Self::cmd_stress_test(),
             "stress-forever" | "stress-continuous" => Self::cmd_stress_forever(),
             "" => {}
@@ -225,6 +229,10 @@ impl KShell {
             ("colors", "Show color test"),
             ("threads, ps", "Show thread information"),
             ("yield", "Yield CPU to other threads"),
+            ("test-all", "Run ALL tests (syscall, IPC, FD, stress) with summary"),
+            ("quick-test", "Quick smoke test (fast validation)"),
+            ("test-syscall", "Run comprehensive syscall handler tests"),
+            ("syscall-smoke", "Run quick syscall smoke test"),
             ("stress", "Run threading and IPC stress test (one-shot)"),
             (
                 "stress-forever",
@@ -596,6 +604,130 @@ impl KShell {
             Color::BLACK,
         );
         crate::tests::spawn_fd_test();
+    }
+
+    fn cmd_test_syscall() {
+        console::write_colored(
+            "Starting SYSCALL Handler Tests\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Running comprehensive tests for all syscall handlers:\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  - Group A: _write, _read, _isatty, _fstat, _close, _lseek\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  - Group B: _sbrk (heap growth with lazy allocation)\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  - Error handling: EBADF, EFAULT, EINVAL, ENOMEM, ESPIPE\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "\nNote: These tests call handlers directly (kernel mode).\n",
+            Color::YELLOW,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Watch the logs for PASS/FAIL results.\n\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+
+        crate::tests::syscall_tests::run_all_syscall_tests();
+    }
+
+    fn cmd_syscall_smoke() {
+        console::write_colored(
+            "Starting Syscall Smoke Test\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Quick validation of core syscall functionality.\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "Running: sys_write, sys_isatty, sys_brk\n\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+
+        crate::tests::syscall_tests::syscall_smoke_test();
+
+        console::write_colored(
+            "\nSmoke test complete!\n",
+            Color::GREEN,
+            Color::BLACK,
+        );
+    }
+
+    fn cmd_comprehensive_test() {
+        console::write_colored(
+            "═══════════════════════════════════════════════════════════\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  COMPREHENSIVE TEST SUITE\n",
+            Color::WHITE,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "═══════════════════════════════════════════════════════════\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+        console::write_str("\n");
+        console::write_colored(
+            "This will run ALL kernel tests in sequence:\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  1. Syscall handler tests\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  2. IPC tests (spawns test threads)\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  3. FD layer tests\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_colored(
+            "  4. Light stress test (29 threads)\n",
+            Color::LIGHT_GRAY,
+            Color::BLACK,
+        );
+        console::write_str("\n");
+        console::write_colored(
+            "This may take 15-20 seconds. Watch console for progress.\n",
+            Color::YELLOW,
+            Color::BLACK,
+        );
+        console::write_str("\n");
+
+        // Run comprehensive test suite
+        let _results = crate::tests::comprehensive::run_comprehensive_test_suite();
+    }
+
+    fn cmd_quick_smoke() {
+        crate::tests::comprehensive::run_quick_smoke_test();
     }
 
     fn cmd_stress_test() {

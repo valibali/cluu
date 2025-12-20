@@ -5,6 +5,10 @@
  *
  * ## Public Test Functions
  *
+ * ### Comprehensive Test Suite
+ * - `comprehensive::run_comprehensive_test_suite()` - Run all tests with summary
+ * - `comprehensive::run_quick_smoke_test()` - Quick validation of core features
+ *
  * ### IPC Tests
  * - `spawn_ipc_tests()` - Basic send/receive ping-pong test
  * - `spawn_ipc_blocking_test()` - Test blocking receive behavior
@@ -14,10 +18,17 @@
  * ### FD Layer Tests
  * - `spawn_fd_test()` - File descriptor abstraction tests (stdin/stdout/stderr)
  *
+ * ### Syscall Tests
+ * - `syscall_tests::run_all_syscall_tests()` - Comprehensive syscall handler tests
+ * - `syscall_tests::syscall_smoke_test()` - Quick syscall smoke test
+ *
  * ### Stress Tests
  * - `spawn_stress_test()` - One-shot stress test (29 threads: IPC + compute)
  * - `spawn_continuous_stress_test()` - Continuous stress test (runs forever in waves)
  */
+
+pub mod comprehensive;
+pub mod syscall_tests;
 
 use crate::scheduler;
 use core::sync::atomic::{AtomicUsize, Ordering};

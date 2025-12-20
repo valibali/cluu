@@ -163,6 +163,9 @@ impl AddressSpace {
     ///
     /// For now, this returns a placeholder - kernel threads share
     /// the same page tables as the kernel itself.
+    ///
+    /// Note: Even though kernel threads don't normally need a userspace heap,
+    /// we provide one to enable testing of sys_brk from kernel mode.
     pub fn new_kernel() -> Self {
         // For kernel processes, we use the current page table
         // In the future, we'll get this from Cr3::read()
@@ -175,11 +178,18 @@ impl AddressSpace {
             PageTableFlags::empty(),
         );
 
+        // Give kernel process a test heap (for sys_brk testing from kernel mode)
+        // This uses userspace address range even though it's a kernel process
+        let heap = HeapRegion::new(
+            VirtAddr::new(layout::USER_HEAP_START),
+            VirtAddr::new(layout::USER_HEAP_MAX),
+        );
+
         Self {
             page_table_root,
             text: null_region,
             data: null_region,
-            heap: HeapRegion::new(VirtAddr::new(0), VirtAddr::new(0)),
+            heap,
             stack: null_region,
         }
     }
