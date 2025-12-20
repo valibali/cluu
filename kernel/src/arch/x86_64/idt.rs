@@ -238,14 +238,102 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 extern "x86-interrupt" fn page_fault_handler(
-    _stack_frame: InterruptStackFrame,
-    _error_code: x86_64::structures::idt::PageFaultErrorCode,
+    stack_frame: InterruptStackFrame,
+    error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
+    use x86_64::registers::control::Cr2;
+
+    // Read the faulting address from CR2
+    // CR2 always contains the faulting address; if invalid, system is in bad state
+    let fault_addr = match Cr2::read() {
+        Ok(addr) => addr,
+        Err(_) => {
+            log::error!("Failed to read CR2 register (invalid fault address)");
+            panic!("Invalid page fault address in CR2");
+        }
+    };
+
+    // Parse error code flags
+    let is_present = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION);
+    let is_write = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE);
+    let is_user = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
+
+    // Log the fault for debugging
     crate::utils::debug::irq_log::irq_log_simple("PAGE_FAULT");
-    // Simple error handling without panic for debugging
-    loop {
-        x86_64::instructions::hlt();
+
+    // If page is not present and fault is from user mode, try lazy allocation
+    if !is_present && is_user {
+        if let Some(success) = handle_heap_fault(fault_addr) {
+            if success {
+                // Page allocated successfully, resume execution
+                return;
+            }
+        }
     }
+
+    // Unrecoverable page fault - panic with details
+    log::error!("Page fault at address {:?}", fault_addr);
+    log::error!("  Error code: {:?}", error_code);
+    log::error!("  Present: {}, Write: {}, User: {}", is_present, is_write, is_user);
+    log::error!("  Instruction pointer: {:?}", stack_frame.instruction_pointer);
+
+    panic!("Unrecoverable page fault");
+}
+
+/// Handle page fault in heap region (lazy allocation)
+///
+/// Returns Some(true) if page was successfully allocated,
+/// Some(false) if fault is not in heap region,
+/// None if allocation failed.
+fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
+    use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
+
+    // Get current process and check if fault is in heap region
+    let result = crate::scheduler::with_current_process_mut(|process| {
+        let heap = &process.address_space.heap;
+
+        // Check if fault address is in allocated heap region (below current_brk)
+        if fault_addr >= heap.start && fault_addr < heap.current_brk {
+            log::debug!("Lazy heap allocation at {:?} (brk: {:?})", fault_addr, heap.current_brk);
+
+            // Allocate physical frame for this page
+            let frame = match crate::memory::phys::alloc_frame() {
+                Some(f) => f,
+                None => {
+                    log::error!("Out of memory during lazy heap allocation");
+                    return false;
+                }
+            };
+
+            // Map page with USER_ACCESSIBLE | WRITABLE | PRESENT
+            let page: Page<Size4KiB> = Page::containing_address(fault_addr);
+            let phys_addr = x86_64::PhysAddr::new(frame.start_address());
+            let flags = PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::USER_ACCESSIBLE;
+
+            if let Err(e) = crate::memory::paging::map_user_page(page.start_address(), phys_addr, flags) {
+                log::error!("Failed to map heap page: {:?}", e);
+                crate::memory::phys::free_frame(frame);
+                return false;
+            }
+
+            // Zero the page for security (prevent information leakage)
+            unsafe {
+                let ptr = fault_addr.as_u64() as *mut u8;
+                let page_start = (ptr as usize) & !0xfff; // Align to page boundary
+                core::ptr::write_bytes(page_start as *mut u8, 0, 4096);
+            }
+
+            log::debug!("Successfully allocated heap page at {:?}", page.start_address());
+            true
+        } else {
+            // Fault is not in valid heap region
+            false
+        }
+    });
+
+    result
 }
 
 extern "x86-interrupt" fn x87_floating_point_handler(_stack_frame: InterruptStackFrame) {

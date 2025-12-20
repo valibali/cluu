@@ -17,7 +17,7 @@
  */
 
 use super::numbers::*;
-use crate::io::device::{Device, Errno};
+use crate::io::device::Errno;
 use crate::scheduler;
 use core::slice;
 
@@ -203,10 +203,39 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: i32) -> isize {
 /// Arguments: (addr: *mut u8)
 /// Returns: new break on success, or negative error code
 ///
-/// Note: This will be fully implemented in Phase 6 with page fault handler
-pub fn sys_brk(_addr: *mut u8) -> isize {
-    // Phase 6: Implement heap growth with lazy allocation
-    -ENOSYS
+/// This implements the Unix _sbrk syscall with lazy allocation:
+/// - Updates the heap boundary (current_brk)
+/// - Does NOT allocate physical pages immediately
+/// - Physical pages are allocated on first access via page fault handler
+pub fn sys_brk(addr: *mut u8) -> isize {
+    let new_brk = addr as usize;
+
+    let result = scheduler::with_current_process_mut(|process| {
+        let heap = &mut process.address_space.heap;
+
+        // If addr is 0, return current brk (query mode)
+        if new_brk == 0 {
+            return heap.current_brk.as_u64() as isize;
+        }
+
+        // Validate: must be within heap region bounds
+        if new_brk < heap.start.as_u64() as usize {
+            return -EINVAL; // Below heap start
+        }
+        if new_brk > heap.max.as_u64() as usize {
+            return -ENOMEM; // Would exceed heap limit
+        }
+
+        // Update brk (lazy allocation - pages allocated on page fault)
+        heap.current_brk = x86_64::VirtAddr::new(new_brk as u64);
+
+        log::debug!("sys_brk: set brk to {:#x} (heap size: {} bytes)",
+                    new_brk, heap.size());
+
+        new_brk as isize
+    });
+
+    result.unwrap_or(-EFAULT)
 }
 
 /// sys_exit - Exit current thread/process

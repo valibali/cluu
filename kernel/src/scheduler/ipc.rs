@@ -62,7 +62,12 @@ impl Message {
     /// Read a u64 value from the specified byte offset
     pub fn get_u64(&self, offset: usize) -> u64 {
         if offset + 8 <= 256 {
-            u64::from_le_bytes(self.data[offset..offset + 8].try_into().unwrap())
+            // Slice is guaranteed to be 8 bytes due to bounds check above
+            u64::from_le_bytes(
+                self.data[offset..offset + 8]
+                    .try_into()
+                    .expect("slice is exactly 8 bytes")
+            )
         } else {
             0
         }
@@ -78,7 +83,12 @@ impl Message {
     /// Read a u32 value from the specified byte offset
     pub fn get_u32(&self, offset: usize) -> u32 {
         if offset + 4 <= 256 {
-            u32::from_le_bytes(self.data[offset..offset + 4].try_into().unwrap())
+            // Slice is guaranteed to be 4 bytes due to bounds check above
+            u32::from_le_bytes(
+                self.data[offset..offset + 4]
+                    .try_into()
+                    .expect("slice is exactly 4 bytes")
+            )
         } else {
             0
         }
