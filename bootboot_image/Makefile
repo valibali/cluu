@@ -29,4 +29,4 @@ uefi_nodebug:
 
 # clean up
 clean:
-	rm -rf initrd *.bin *.img *.rom *.iso 2>/dev/null || true
+	rm -rf initrd/sys *.bin *.img *.rom *.iso 2>/dev/null || true
