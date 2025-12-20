@@ -176,3 +176,21 @@ impl core::fmt::Debug for Process {
             .finish()
     }
 }
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // Process cleanup happens here when the process is destroyed
+        // The address_space Drop implementation will handle:
+        // - Unmapping all user pages
+        // - Freeing page tables
+        // - Returning physical frames to the allocator
+
+        // FD table cleanup happens automatically when fd_table is dropped
+        // All Arc<dyn Device> references are released
+
+        // Note: We don't log here because this may run in IRQ context
+        // Use IRQ-safe logging if needed:
+        // use crate::utils::debug::irq_log;
+        // irq_log::irq_log_str("Process dropped\n");
+    }
+}

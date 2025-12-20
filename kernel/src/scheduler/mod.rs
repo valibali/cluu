@@ -79,7 +79,10 @@
  * - Per-thread 64KB stacks
  */
 
-use alloc::{collections::{BTreeMap, VecDeque}, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    vec::Vec,
+};
 
 use core::{
     arch::asm,
@@ -94,9 +97,7 @@ pub mod thread;
 
 use crate::alloc::string::ToString;
 pub use io_wait::{IoChannel, wait_for_io, wake_io_waiters};
-pub use ipc::{
-    IpcError, Message, PortId, port_create, port_destroy, port_recv, port_send,
-};
+pub use ipc::{IpcError, Message, PortId, port_create, port_destroy, port_recv, port_send};
 pub use process::{Process, ProcessId, ProcessState};
 pub use thread::{Thread, ThreadId, ThreadState};
 
@@ -231,11 +232,11 @@ impl Default for InterruptContext {
 /// for a microkernel with a small number of threads. For better performance
 /// with many threads, we could use a HashMap<ThreadId, Thread>.
 pub struct Scheduler {
-    threads: Vec<Thread>,             // All threads in the system
-    ready_queue: VecDeque<ThreadId>,  // Queue of threads ready to run
-    next_thread_id: ThreadId,         // Next ID to assign to new thread
+    threads: Vec<Thread>,                    // All threads in the system
+    ready_queue: VecDeque<ThreadId>,         // Queue of threads ready to run
+    next_thread_id: ThreadId,                // Next ID to assign to new thread
     processes: BTreeMap<ProcessId, Process>, // All processes in the system
-    next_process_id: ProcessId,       // Next ID to assign to new process
+    next_process_id: ProcessId,              // Next ID to assign to new process
 }
 
 impl Scheduler {
@@ -344,7 +345,12 @@ impl Scheduler {
         // New thread starts in Ready state, so add to ready queue
         self.ready_queue.push_back(thread_id);
 
-        log::info!("Created thread '{}' (ID {:?}) in process {:?}", name, thread_id, process_id);
+        log::info!(
+            "Created thread '{}' (ID {:?}) in process {:?}",
+            name,
+            thread_id,
+            process_id
+        );
         thread_id
     }
 
@@ -422,18 +428,21 @@ impl Scheduler {
     ) -> usize {
         // First, identify threads to clean up
         let mut to_remove = alloc::vec::Vec::new();
+        let mut processes_to_check = alloc::collections::BTreeSet::new();
+
         for thread in &self.threads {
             if thread.state == ThreadState::Terminated
                 && thread.id != current_thread_id
                 && thread.id.0 != 0
             {
-                to_remove.push((thread.id, thread.name.clone()));
+                to_remove.push((thread.id, thread.name.clone(), thread.process_id));
+                processes_to_check.insert(thread.process_id);
             }
         }
 
         // CRITICAL: Only log if NOT in IRQ context (logging in IRQ can deadlock!)
         if log_cleanup {
-            for (id, name) in &to_remove {
+            for (id, name, _) in &to_remove {
                 log::info!("Reaper: Cleaning up thread {} ({})", id.0, name);
             }
         }
@@ -441,7 +450,36 @@ impl Scheduler {
         // Now remove them (dropping Thread frees stack)
         let initial_count = self.threads.len();
         self.threads
-            .retain(|t| !to_remove.iter().any(|(id, _)| t.id == *id));
+            .retain(|t| !to_remove.iter().any(|(id, _, _)| t.id == *id));
+
+        // Check if any processes have no remaining threads and clean them up
+        for process_id in processes_to_check {
+            // Skip kernel process (PID 0)
+            if process_id.0 == 0 {
+                continue;
+            }
+
+            // Check if this process has any remaining threads
+            let has_threads = self.threads.iter().any(|t| t.process_id == process_id);
+
+            if !has_threads {
+                // No threads left in this process - clean it up
+                if let Some(process) = self.processes.remove(&process_id) {
+                    if log_cleanup {
+                        log::info!(
+                            "Reaper: Cleaning up process {} ({})",
+                            process_id.0,
+                            process.name
+                        );
+                    }
+
+                    // The Process Drop implementation will clean up:
+                    // - Address space (page tables, mapped pages)
+                    // - File descriptors
+                    drop(process);
+                }
+            }
+        }
 
         initial_count - self.threads.len()
     }
@@ -543,7 +581,11 @@ pub fn spawn_user_process(name: &str) -> Result<ProcessId, &'static str> {
         let process = Process::new(process_id, name, address_space);
         scheduler.processes.insert(process_id, process);
 
-        log::info!("Created userspace process '{}' with ID {:?}", name, process_id);
+        log::info!(
+            "Created userspace process '{}' with ID {:?}",
+            name,
+            process_id
+        );
         Ok(process_id)
     })
 }
@@ -572,7 +614,9 @@ pub fn current_process_id() -> Option<ProcessId> {
     x86_64::instructions::interrupts::without_interrupts(|| {
         let scheduler_guard = SCHEDULER.lock();
         let scheduler = scheduler_guard.as_ref()?;
-        scheduler.threads.iter()
+        scheduler
+            .threads
+            .iter()
             .find(|t| t.id == current_tid)
             .map(|t| t.process_id)
     })
@@ -648,7 +692,9 @@ pub fn init_std_streams(thread_id: ThreadId) {
         let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
 
         // Find thread by ID to get its process_id
-        let process_id = scheduler.threads.iter()
+        let process_id = scheduler
+            .threads
+            .iter()
             .find(|t| t.id == thread_id)
             .map(|t| t.process_id);
 
@@ -704,11 +750,14 @@ pub fn enable() {
     // Spawn the idle thread - it will run when no other threads are ready
     spawn_thread(idle_thread_main, "idle");
     log::info!("Idle thread created");
-
-    // Enable preemptive scheduling
-    SCHEDULER_ENABLED.store(true, Ordering::SeqCst);
     log::info!("Scheduler enabled - preemptive multitasking active");
     log::info!("Terminated threads will be cleaned up immediately on context switch");
+
+    // Enable preemptive scheduling
+    // CRITICAL: This MUST be done AFTER all logging above!
+    // Once enabled, timer interrupts can preempt us, and if another thread
+    // tries to log while we're holding the log lock, we'll deadlock.
+    SCHEDULER_ENABLED.store(true, Ordering::SeqCst);
 }
 
 /// Voluntarily yield the CPU to the next ready thread
@@ -938,10 +987,6 @@ pub fn exit_thread() -> ! {
         }
     });
 
-    // DEBUG: Log before yielding
-    use crate::utils::debug::irq_log;
-    irq_log::irq_log_str("exit_thread: About to yield_now()...\n");
-
     // CRITICAL: Enable interrupts before yielding!
     // If called from syscall context (via sys_exit), interrupts are disabled by SYSCALL instruction.
     // yield_now() requires interrupts to be enabled to trigger the context switch.
@@ -952,6 +997,7 @@ pub fn exit_thread() -> ! {
     yield_now();
 
     // Should never reach here
+    use crate::utils::debug::irq_log;
     irq_log::irq_log_str("exit_thread: RETURNED FROM yield_now() - THIS IS A BUG!\n");
     loop {
         x86_64::instructions::hlt();
@@ -1246,41 +1292,9 @@ pub extern "C" fn schedule_from_interrupt(
     // Get current thread ID
     let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
 
-    // DEBUG: Always log current thread ID in scheduler
-    static mut SCHED_CALL_COUNT: u64 = 0;
-    unsafe {
-        SCHED_CALL_COUNT += 1;
-        // Only log occasionally to avoid spam, but always log thread 14
-        if current_id.0 == 14 || SCHED_CALL_COUNT % 100 == 0 {
-            irq_log::irq_log_str("SCHED: current_id=");
-            irq_log::irq_log_hex("", current_id.0 as u64);
-        }
-    }
-
-    // DEBUG: Log when switching from terminated thread
-    if current_id.0 == 14 {
-        if let Some(thread) = scheduler.get_thread_mut(current_id) {
-            irq_log::irq_log_str("SCHED: Thread 14 state=");
-            irq_log::irq_log_hex("", thread.state as u64);
-
-            if thread.state == ThreadState::Terminated {
-                irq_log::irq_log_str("SCHED: Thread 14 is terminated, switching...\n");
-            }
-        } else {
-            irq_log::irq_log_str("SCHED: Thread 14 NOT FOUND!\n");
-        }
-    }
-
     // Try to get next thread from ready queue
     let next_id = match scheduler.get_next_thread() {
-        Some(id) => {
-            // DEBUG: Log next thread selection
-            if current_id.0 == 14 {
-                irq_log::irq_log_str("SCHED: get_next_thread returned ID=");
-                irq_log::irq_log_hex("", id.0 as u64);
-            }
-            id
-        }
+        Some(id) => id,
         None => {
             // No threads ready to run
             // CRITICAL: If current thread is terminated, we can't return to it!
@@ -1291,7 +1305,11 @@ pub extern "C" fn schedule_from_interrupt(
                         // Terminated thread with no other threads available!
                         // This is a critical error - idle thread should always be ready
                         log::error!("SCHEDULER PANIC: No ready threads and current is terminated!");
-                        log::error!("  Current thread: {} ({})", current_id.0, current_thread.name);
+                        log::error!(
+                            "  Current thread: {} ({})",
+                            current_id.0,
+                            current_thread.name
+                        );
                         log::error!("  Ready queue is empty!");
                         log::error!("  Total threads: {}", scheduler.threads.len());
 
@@ -1378,24 +1396,25 @@ pub extern "C" fn schedule_from_interrupt(
     }
 
     // NOW get the pointer to next thread (after cleanup, so it won't be invalidated)
-    let (next_ctx_ptr, next_process_id, next_stack_top) = if let Some(next_thread) = scheduler.get_thread_mut(next_id) {
-        next_thread.state = ThreadState::Running;
-        next_thread.last_scheduled_time = current_time;
+    let (next_ctx_ptr, next_process_id, next_stack_top) =
+        if let Some(next_thread) = scheduler.get_thread_mut(next_id) {
+            next_thread.state = ThreadState::Running;
+            next_thread.last_scheduled_time = current_time;
 
-        // Calculate kernel stack top for syscall entry
-        // Stack top = base + size
-        let stack_base = next_thread.stack.as_ptr() as u64;
-        let stack_top = stack_base + next_thread.stack.len() as u64;
+            // Calculate kernel stack top for syscall entry
+            // Stack top = base + size
+            let stack_base = next_thread.stack.as_ptr() as u64;
+            let stack_top = stack_base + next_thread.stack.len() as u64;
 
-        (
-            &next_thread.interrupt_context as *const InterruptContext,
-            next_thread.process_id,
-            stack_top,
-        )
-    } else {
-        // Thread not found, return current context
-        return current_ctx_ptr;
-    };
+            (
+                &next_thread.interrupt_context as *const InterruptContext,
+                next_thread.process_id,
+                stack_top,
+            )
+        } else {
+            // Thread not found, return current context
+            return current_ctx_ptr;
+        };
 
     // Get current thread's process ID for comparison
     let current_process_id = if current_id.0 != 0 {
@@ -1550,10 +1569,10 @@ pub fn setup_userspace_thread(
         let user_ss_with_rpl = (user_ss.0 | 3) as u64;
 
         thread.interrupt_context.iret_frame.rip = entry_point.as_u64();
-        thread.interrupt_context.iret_frame.cs = user_cs_with_rpl;  // User code segment with RPL=3
+        thread.interrupt_context.iret_frame.cs = user_cs_with_rpl; // User code segment with RPL=3
         thread.interrupt_context.iret_frame.rflags = 0x202; // IF=1 (interrupts enabled), bit 1 always set
         thread.interrupt_context.iret_frame.rsp = user_stack_top.as_u64();
-        thread.interrupt_context.iret_frame.ss = user_ss_with_rpl;  // User data segment with RPL=3
+        thread.interrupt_context.iret_frame.ss = user_ss_with_rpl; // User data segment with RPL=3
 
         // Clear all general purpose registers for security
         thread.interrupt_context.rax = 0;

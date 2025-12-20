@@ -232,31 +232,40 @@ impl Console {
 
     fn scroll_up(&mut self) {
         if let Some(ref mut framebuffer) = *FB.lock() {
-            // Move all lines up by one character height
             let line_height = self.char_height;
             let total_height = framebuffer.height;
+            let scanline = framebuffer.scanline / 4; // Convert bytes to u32 pixels
 
-            // Copy pixels from line 1 to line 0, line 2 to line 1, etc.
-            for y in line_height..total_height {
-                for x in 0..framebuffer.width {
-                    let src_y = y;
-                    let dst_y = y - line_height;
+            // Calculate how many rows of pixels to move
+            let rows_to_copy = total_height - line_height;
 
-                    // Get pixel from source line
-                    let pixel_index = (src_y * framebuffer.scanline / 4 + x) as usize;
-                    let pixel = unsafe { framebuffer.screen.get_unchecked(pixel_index) };
+            // Use bulk memory copy for much better performance
+            // Source: start of line 1 (after first line_height rows)
+            // Destination: start of line 0
+            let src_offset = (line_height * scanline) as usize;
+            let dst_offset = 0;
+            let pixels_to_copy = (rows_to_copy * scanline) as usize;
 
-                    // Set pixel in destination line
-                    let dst_index = (dst_y * framebuffer.scanline / 4 + x) as usize;
-                    unsafe { *framebuffer.screen.get_unchecked_mut(dst_index) = *pixel };
+            // Safety check: ensure we don't go out of bounds
+            let fb_len = framebuffer.screen.len();
+            if src_offset + pixels_to_copy <= fb_len {
+                // Bulk copy using ptr::copy (like memmove)
+                // This is MUCH faster than pixel-by-pixel nested loops
+                unsafe {
+                    let src = framebuffer.screen.as_ptr().add(src_offset);
+                    let dst = framebuffer.screen.as_mut_ptr().add(dst_offset);
+                    core::ptr::copy(src, dst, pixels_to_copy);
                 }
             }
 
-            // Clear the bottom line
+            // Clear the bottom line efficiently
             let bg_color = self.bg_color.to_u32();
-            for y in (total_height - line_height)..total_height {
-                for x in 0..framebuffer.width {
-                    framebuffer.put_pixel(x, y, bg_color);
+            let bottom_line_start = (rows_to_copy * scanline) as usize;
+            let bottom_line_pixels = (line_height * scanline) as usize;
+
+            if bottom_line_start + bottom_line_pixels <= fb_len {
+                for i in 0..bottom_line_pixels {
+                    framebuffer.screen[bottom_line_start + i] = bg_color;
                 }
             }
         }

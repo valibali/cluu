@@ -196,7 +196,6 @@ impl KShell {
             "test-fd" => Self::cmd_test_fd(),
             "test-syscall" => Self::cmd_test_syscall(),
             "syscall-smoke" => Self::cmd_syscall_smoke(),
-            "test-syscall-ring3" | "syscall-ring3" => Self::cmd_test_syscall_ring3(),
             "test-all" | "comprehensive" => Self::cmd_comprehensive_test(),
             "quick-test" | "smoke" => Self::cmd_quick_smoke(),
             "stress" | "test-stress" => Self::cmd_stress_test(),
@@ -234,7 +233,6 @@ impl KShell {
             ("quick-test", "Quick smoke test (fast validation)"),
             ("test-syscall", "Run comprehensive syscall handler tests"),
             ("syscall-smoke", "Run quick syscall smoke test"),
-            ("syscall-ring3", "Test SYSCALL/SYSRET by jumping to Ring 3"),
             ("stress", "Run threading and IPC stress test (one-shot)"),
             (
                 "stress-forever",
@@ -672,74 +670,6 @@ impl KShell {
             Color::GREEN,
             Color::BLACK,
         );
-    }
-
-    fn cmd_test_syscall_ring3() {
-        console::write_colored(
-            "═══════════════════════════════════════════════════════════\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  RING 3 SYSCALL PATH TEST\n",
-            Color::WHITE,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "═══════════════════════════════════════════════════════════\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_str("\n");
-        console::write_colored(
-            "This test validates the SYSCALL/SYSRET mechanism by:\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  1. Allocating userspace pages (code + stack)\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  2. Writing test code (syscall instruction)\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  3. Setting kernel stack for syscall entry\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  4. Using iretq to jump to Ring 3\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  5. Executing syscall from userspace\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  6. Returning to Ring 0 via SYSRET\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_str("\n");
-        console::write_colored(
-            "⚠️  WARNING: This test directly manipulates CPU privilege levels.\n",
-            Color::YELLOW,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "   If it fails, the system may hang or crash.\n",
-            Color::YELLOW,
-            Color::BLACK,
-        );
-        console::write_str("\n");
-
-        crate::tests::syscall_direct::test_syscall_ring3_transition();
     }
 
     fn cmd_comprehensive_test() {

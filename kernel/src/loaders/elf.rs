@@ -303,9 +303,6 @@ pub fn load_elf_binary(
     data: &[u8],
     address_space: &mut AddressSpace,
 ) -> Result<ElfBinary, ElfLoadError> {
-    use x86_64::registers::control::Cr3;
-    use x86_64::structures::paging::PhysFrame;
-
     log::info!("ELF: Loading binary ({} bytes)", data.len());
 
     // Parse and validate ELF header

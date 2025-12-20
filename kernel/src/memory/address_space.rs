@@ -325,6 +325,42 @@ impl core::fmt::Debug for AddressSpace {
     }
 }
 
+impl Drop for AddressSpace {
+    fn drop(&mut self) {
+        // Only clean up userspace address spaces (page_table_root != 0)
+        // Kernel address spaces use the global kernel page table and should not be freed
+        if self.page_table_root.as_u64() == 0 {
+            return;
+        }
+
+        // TODO: Properly free all page tables and mapped frames
+        // This requires:
+        // 1. Walking the page table hierarchy (PML4 -> PDPT -> PD -> PT)
+        // 2. For each mapped page, free the physical frame
+        // 3. Free the page table frames themselves
+        // 4. Free the PML4 frame
+        //
+        // For now, we'll just free the PML4 frame to prevent the immediate leak
+        // This is not a complete cleanup but prevents the most obvious resource leak
+
+        use crate::memory::{phys, PhysFrame};
+
+        let pml4_frame = PhysFrame::containing_address(self.page_table_root.as_u64());
+        phys::free_frame(pml4_frame);
+
+        // Note: This doesn't free child page tables or mapped pages yet
+        // A complete implementation would need to:
+        // - Walk all valid PML4 entries
+        // - For each, walk PDPT entries
+        // - For each, walk PD entries
+        // - For each, walk PT entries
+        // - Free all leaf frames (actual data pages)
+        // - Free all page table frames
+        //
+        // This will be implemented when we add proper page table walking utilities
+    }
+}
+
 /// Default address space layout constants
 ///
 /// These define the standard memory layout for user processes.

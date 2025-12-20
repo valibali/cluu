@@ -21,6 +21,8 @@
  * ### Syscall Tests
  * - `syscall_tests::run_all_syscall_tests()` - Comprehensive syscall handler tests
  * - `syscall_tests::syscall_smoke_test()` - Quick syscall smoke test
+ * - `syscall_stress::run_all_syscall_stress_tests()` - Userspace syscall stress tests
+ * - `syscall_stress::syscall_stress_smoke_test()` - Quick syscall stress smoke test
  *
  * ### Stress Tests
  * - `spawn_stress_test()` - One-shot stress test (29 threads: IPC + compute)
@@ -30,7 +32,7 @@
 pub mod comprehensive;
 pub mod elf_loader;
 pub mod syscall_tests;
-pub mod syscall_direct;
+pub mod syscall_stress;
 pub mod userspace_hello;
 
 use crate::scheduler;

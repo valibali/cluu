@@ -59,6 +59,7 @@ impl TestResults {
 /// 4. FD layer tests (spawns threads)
 /// 5. Userspace execution (hello world)
 /// 6. Light stress test
+/// 7. Syscall stress tests (userspace syscall infrastructure)
 ///
 /// Prints colorized results to console and returns test results.
 pub fn run_comprehensive_test_suite() -> TestResults {
@@ -73,6 +74,11 @@ pub fn run_comprehensive_test_suite() -> TestResults {
     results.syscall_passed = passed;
     results.syscall_failed = failed;
     print_result("Syscall Tests", passed, failed);
+
+    console::write_str("  Testing syscall stress infrastructure...\n");
+    console::write_str("    - Syscall stress framework: ");
+    tests::syscall_stress::syscall_stress_smoke_test();
+    console::write_colored("READY\n", Color::GREEN, Color::BLACK);
 
     // Give system a moment to settle
     scheduler::yield_now();
@@ -158,6 +164,13 @@ pub fn run_comprehensive_test_suite() -> TestResults {
     wait_for_threads(1000);
     results.stress_completed = true;
     console::write_colored("  Stress test completed!\n", Color::GREEN, Color::BLACK);
+
+    // Phase 7: Syscall Stress Tests
+    print_section("Phase 7: Syscall Stress Tests");
+    console::write_str("  Running userspace syscall stress test suite...\n");
+    console::write_str("  Note: Most tests require multiple process support (pending)\n");
+    tests::syscall_stress::run_all_syscall_stress_tests();
+    console::write_colored("  Syscall stress tests complete!\n", Color::GREEN, Color::BLACK);
 
     // Print summary
     print_summary(&results);
@@ -311,6 +324,11 @@ pub fn run_quick_smoke_test() {
     // Syscall smoke test
     console::write_str("  → Syscall handlers: ");
     tests::syscall_tests::syscall_smoke_test();
+    console::write_colored("PASS\n", Color::GREEN, Color::BLACK);
+
+    // Syscall stress infrastructure
+    console::write_str("  → Syscall stress framework: ");
+    tests::syscall_stress::syscall_stress_smoke_test();
     console::write_colored("PASS\n", Color::GREEN, Color::BLACK);
 
     // IPC smoke test
