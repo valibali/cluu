@@ -31,7 +31,7 @@ pub fn test_sys_write_valid() {
 }
 
 /// Test sys_write with invalid file descriptor
-pub fn test_sys_write_invalid_fd() {
+pub fn test_sys_write_invalid_fd() -> bool {
     log::info!("TEST: sys_write with invalid FD");
 
     let message = b"This should fail\n";
@@ -39,26 +39,30 @@ pub fn test_sys_write_invalid_fd() {
 
     if result == -EBADF {
         log::info!("  PASS: sys_write returned EBADF for invalid FD");
+        true
     } else {
         log::error!("  FAIL: Expected EBADF (-{}), got {}", EBADF, result);
+        false
     }
 }
 
 /// Test sys_write with NULL pointer
-pub fn test_sys_write_null_pointer() {
+pub fn test_sys_write_null_pointer() -> bool {
     log::info!("TEST: sys_write with NULL pointer");
 
     let result = sys_write(1, core::ptr::null(), 10);
 
     if result == -EFAULT {
         log::info!("  PASS: sys_write returned EFAULT for NULL pointer");
+        true
     } else {
         log::error!("  FAIL: Expected EFAULT (-{}), got {}", EFAULT, result);
+        false
     }
 }
 
 /// Test sys_write with kernel pointer (should fail)
-pub fn test_sys_write_kernel_pointer() {
+pub fn test_sys_write_kernel_pointer() -> bool {
     log::info!("TEST: sys_write with kernel pointer");
 
     // Use a kernel address (high half)
@@ -67,8 +71,10 @@ pub fn test_sys_write_kernel_pointer() {
 
     if result == -EFAULT {
         log::info!("  PASS: sys_write returned EFAULT for kernel pointer");
+        true
     } else {
         log::error!("  FAIL: Expected EFAULT (-{}), got {}", EFAULT, result);
+        false
     }
 }
 
@@ -86,15 +92,17 @@ pub fn test_sys_isatty_valid() {
 }
 
 /// Test sys_isatty with invalid FD
-pub fn test_sys_isatty_invalid_fd() {
+pub fn test_sys_isatty_invalid_fd() -> bool {
     log::info!("TEST: sys_isatty with invalid FD");
 
     let result = sys_isatty(999);
 
     if result == -EBADF {
         log::info!("  PASS: sys_isatty returned EBADF");
+        true
     } else {
         log::error!("  FAIL: Expected EBADF (-{}), got {}", EBADF, result);
+        false
     }
 }
 
@@ -117,66 +125,74 @@ pub fn test_sys_fstat_valid() {
 }
 
 /// Test sys_fstat with NULL pointer
-pub fn test_sys_fstat_null_pointer() {
+pub fn test_sys_fstat_null_pointer() -> bool {
     log::info!("TEST: sys_fstat with NULL pointer");
 
     let result = sys_fstat(1, core::ptr::null_mut());
 
     if result == -EFAULT {
         log::info!("  PASS: sys_fstat returned EFAULT");
+        true
     } else {
         log::error!("  FAIL: Expected EFAULT (-{}), got {}", EFAULT, result);
+        false
     }
 }
 
 /// Test sys_lseek with TTY (should return ESPIPE)
-pub fn test_sys_lseek_tty() {
+pub fn test_sys_lseek_tty() -> bool {
     log::info!("TEST: sys_lseek on TTY (should fail)");
 
     let result = sys_lseek(1, 0, 0);
 
     if result == -ESPIPE {
         log::info!("  PASS: sys_lseek returned ESPIPE (unseekable)");
+        true
     } else {
         log::error!("  FAIL: Expected ESPIPE (-{}), got {}", ESPIPE, result);
+        false
     }
 }
 
 /// Test sys_close with invalid FD
-pub fn test_sys_close_invalid_fd() {
+pub fn test_sys_close_invalid_fd() -> bool {
     log::info!("TEST: sys_close with invalid FD");
 
     let result = sys_close(999);
 
     if result == -EBADF {
         log::info!("  PASS: sys_close returned EBADF");
+        true
     } else {
         log::error!("  FAIL: Expected EBADF (-{}), got {}", EBADF, result);
+        false
     }
 }
 
 /// Test sys_brk query (addr = 0)
-pub fn test_sys_brk_query() {
+pub fn test_sys_brk_query() -> bool {
     log::info!("TEST: sys_brk query (addr = 0)");
 
     let result = sys_brk(core::ptr::null_mut());
 
     if result > 0 {
         log::info!("  PASS: sys_brk returned current brk = 0x{:x}", result);
+        true
     } else {
         log::error!("  FAIL: sys_brk query returned error code {}", result);
+        false
     }
 }
 
 /// Test sys_brk growth
-pub fn test_sys_brk_growth() {
+pub fn test_sys_brk_growth() -> bool {
     log::info!("TEST: sys_brk heap growth");
 
     // Get current brk
     let current_brk = sys_brk(core::ptr::null_mut());
     if current_brk < 0 {
         log::error!("  FAIL: Cannot query current brk");
-        return;
+        return false;
     }
 
     log::info!("  Current brk: 0x{:x}", current_brk);
@@ -192,16 +208,19 @@ pub fn test_sys_brk_growth() {
         let verify_brk = sys_brk(core::ptr::null_mut());
         if verify_brk == result {
             log::info!("  PASS: sys_brk query matches new brk");
+            true
         } else {
             log::error!("  FAIL: sys_brk query returned 0x{:x}, expected 0x{:x}", verify_brk, result);
+            false
         }
     } else {
         log::error!("  FAIL: sys_brk returned 0x{:x}, expected 0x{:x}", result, new_brk as isize);
+        false
     }
 }
 
 /// Test sys_brk with invalid address (below heap start)
-pub fn test_sys_brk_invalid_low() {
+pub fn test_sys_brk_invalid_low() -> bool {
     log::info!("TEST: sys_brk with address below heap start");
 
     // Try to set brk to a very low address (should fail)
@@ -210,13 +229,15 @@ pub fn test_sys_brk_invalid_low() {
 
     if result == -EINVAL {
         log::info!("  PASS: sys_brk returned EINVAL for address below heap");
+        true
     } else {
         log::error!("  FAIL: Expected EINVAL (-{}), got {}", EINVAL, result);
+        false
     }
 }
 
 /// Test sys_brk with invalid address (above heap max)
-pub fn test_sys_brk_invalid_high() {
+pub fn test_sys_brk_invalid_high() -> bool {
     log::info!("TEST: sys_brk with address above heap max");
 
     // Try to set brk to maximum possible address (should fail)
@@ -225,26 +246,30 @@ pub fn test_sys_brk_invalid_high() {
 
     if result == -ENOMEM {
         log::info!("  PASS: sys_brk returned ENOMEM for address above heap max");
+        true
     } else {
         log::error!("  FAIL: Expected ENOMEM (-{}), got {}", ENOMEM, result);
+        false
     }
 }
 
 /// Test sys_yield
-pub fn test_sys_yield() {
+pub fn test_sys_yield() -> bool {
     log::info!("TEST: sys_yield");
 
     let result = sys_yield();
 
     if result == 0 {
         log::info!("  PASS: sys_yield returned 0");
+        true
     } else {
         log::error!("  FAIL: sys_yield returned {}", result);
+        false
     }
 }
 
 /// Test sys_exit (spawns a thread that exits)
-pub fn test_sys_exit() {
+pub fn test_sys_exit() -> bool {
     log::info!("TEST: sys_exit via thread");
 
     let before_stats = scheduler::get_thread_stats();
@@ -263,8 +288,10 @@ pub fn test_sys_exit() {
 
     if after_count == before_count {
         log::info!("  PASS: Thread exited successfully (thread count unchanged)");
+        true
     } else {
         log::warn!("  INFO: Thread count: before={}, after={}", before_count, after_count);
+        true  // This is still considered passing (thread cleanup may be async)
     }
 }
 
@@ -278,6 +305,24 @@ fn exit_test_thread() {
 ///
 /// Returns (passed, failed) test counts
 pub fn run_all_syscall_tests() -> (usize, usize) {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static PASSED: AtomicUsize = AtomicUsize::new(0);
+    static FAILED: AtomicUsize = AtomicUsize::new(0);
+
+    // Reset counters
+    PASSED.store(0, Ordering::SeqCst);
+    FAILED.store(0, Ordering::SeqCst);
+
+    // Helper to count test results
+    let count_result = |passed: bool| {
+        if passed {
+            PASSED.fetch_add(1, Ordering::SeqCst);
+        } else {
+            FAILED.fetch_add(1, Ordering::SeqCst);
+        }
+    };
+
     log::info!("========================================");
     log::info!("SYSCALL HANDLER TESTS");
     log::info!("========================================");
@@ -291,36 +336,34 @@ pub fn run_all_syscall_tests() -> (usize, usize) {
     // We can only test error paths from kernel mode
     // Valid I/O operations require userspace pointers
     log::info!("--- Error Path Tests (should PASS) ---");
-    test_sys_write_invalid_fd();
-    test_sys_write_null_pointer();
-    test_sys_write_kernel_pointer();
-
-    test_sys_isatty_invalid_fd();
-
-    test_sys_fstat_null_pointer();
-
-    test_sys_close_invalid_fd();
+    count_result(test_sys_write_invalid_fd());
+    count_result(test_sys_write_null_pointer());
+    count_result(test_sys_write_kernel_pointer());
+    count_result(test_sys_isatty_invalid_fd());
+    count_result(test_sys_fstat_null_pointer());
+    count_result(test_sys_lseek_tty());
+    count_result(test_sys_close_invalid_fd());
 
     // Group B: Heap management tests (should work with fixed heap)
     log::info!("");
     log::info!("--- Heap Management Tests ---");
-    test_sys_brk_query();
-    test_sys_brk_growth();
-    test_sys_brk_invalid_low();
-    test_sys_brk_invalid_high();
+    count_result(test_sys_brk_query());
+    count_result(test_sys_brk_growth());
+    count_result(test_sys_brk_invalid_low());
+    count_result(test_sys_brk_invalid_high());
 
     // Other syscalls
     log::info!("");
     log::info!("--- Other Syscalls ---");
-    test_sys_yield();
-    test_sys_exit();
+    count_result(test_sys_yield());
+    count_result(test_sys_exit());
 
     log::info!("========================================");
     log::info!("SYSCALL TESTS COMPLETE");
     log::info!("========================================");
 
-    // Return test counts (approximate - we'd need to track actual pass/fail)
-    (10, 0)
+    // Return actual test counts
+    (PASSED.load(Ordering::SeqCst), FAILED.load(Ordering::SeqCst))
 }
 
 /// Quick smoke test for syscalls

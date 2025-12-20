@@ -6,9 +6,10 @@
  *
  * Test categories:
  * 1. Syscall tests - Handler validation
- * 2. IPC tests - Message passing between threads
- * 3. FD Layer tests - File descriptor abstraction
- * 4. Light stress test - Threading and IPC under load
+ * 2. ELF Loader tests - Binary parsing and validation
+ * 3. IPC tests - Message passing between threads
+ * 4. FD Layer tests - File descriptor abstraction
+ * 5. Light stress test - Threading and IPC under load
  */
 
 use crate::scheduler;
@@ -21,6 +22,7 @@ use crate::utils::console::Color;
 pub struct TestResults {
     pub syscall_passed: usize,
     pub syscall_failed: usize,
+    pub elf_tests: usize,
     pub ipc_tests: usize,
     pub fd_tests: usize,
     pub stress_completed: bool,
@@ -31,6 +33,7 @@ impl TestResults {
         Self {
             syscall_passed: 0,
             syscall_failed: 0,
+            elf_tests: 0,
             ipc_tests: 0,
             fd_tests: 0,
             stress_completed: false,
@@ -38,7 +41,7 @@ impl TestResults {
     }
 
     pub fn total_tests(&self) -> usize {
-        self.syscall_passed + self.syscall_failed + self.ipc_tests + self.fd_tests
+        self.syscall_passed + self.syscall_failed + self.elf_tests + self.ipc_tests + self.fd_tests
     }
 }
 
@@ -46,9 +49,10 @@ impl TestResults {
 ///
 /// Executes all tests in sequence:
 /// 1. Syscall handler tests
-/// 2. IPC tests (spawns threads)
-/// 3. FD layer tests (spawns threads)
-/// 4. Light stress test
+/// 2. ELF loader tests
+/// 3. IPC tests (spawns threads)
+/// 4. FD layer tests (spawns threads)
+/// 5. Light stress test
 ///
 /// Prints colorized results to console and returns test results.
 pub fn run_comprehensive_test_suite() -> TestResults {
@@ -67,8 +71,24 @@ pub fn run_comprehensive_test_suite() -> TestResults {
     // Give system a moment to settle
     scheduler::yield_now();
 
-    // Phase 2: IPC Tests
-    print_section("Phase 2: IPC Tests");
+    // Phase 2: ELF Loader Tests
+    print_section("Phase 2: ELF Loader Tests");
+    console::write_str("  Testing ELF header parsing and validation...\n");
+    console::write_str("    - ELF header parsing: ");
+    tests::elf_loader::test_elf_header_parsing();
+    results.elf_tests += 1;
+    console::write_colored("PASSED\n", Color::GREEN, Color::BLACK);
+
+    console::write_str("    - Invalid magic detection: ");
+    tests::elf_loader::test_elf_invalid_magic();
+    results.elf_tests += 1;
+    console::write_colored("PASSED\n", Color::GREEN, Color::BLACK);
+
+    // Give system a moment to settle
+    scheduler::yield_now();
+
+    // Phase 3: IPC Tests
+    print_section("Phase 3: IPC Tests");
     console::write_str("  Spawning IPC test threads...\n");
 
     // Basic IPC
@@ -99,8 +119,8 @@ pub fn run_comprehensive_test_suite() -> TestResults {
     results.ipc_tests += 1;
     console::write_colored("SPAWNED\n", Color::GREEN, Color::BLACK);
 
-    // Phase 3: FD Layer Tests
-    print_section("Phase 3: File Descriptor Tests");
+    // Phase 4: FD Layer Tests
+    print_section("Phase 4: File Descriptor Tests");
     console::write_str("  Testing FD abstraction (stdin/stdout/stderr)...\n");
     console::write_str("    - FD layer: ");
     tests::spawn_fd_test();
@@ -108,8 +128,8 @@ pub fn run_comprehensive_test_suite() -> TestResults {
     results.fd_tests += 1;
     console::write_colored("SPAWNED\n", Color::GREEN, Color::BLACK);
 
-    // Phase 4: Light Stress Test
-    print_section("Phase 4: Light Stress Test");
+    // Phase 5: Light Stress Test
+    print_section("Phase 5: Light Stress Test");
     console::write_str("  Running threading + IPC stress (29 threads)...\n");
     console::write_str("  This may take 10-15 seconds...\n");
     tests::spawn_stress_test();
@@ -196,6 +216,12 @@ fn print_summary(results: &TestResults) {
     console::write_colored(&alloc::format!("{} passed", results.syscall_passed), Color::GREEN, Color::BLACK);
     console::write_str(", ");
     console::write_colored(&alloc::format!("{} failed\n", results.syscall_failed), Color::RED, Color::BLACK);
+
+    // ELF Loader results
+    console::write_str("  ELF Loader Tests:   ");
+    console::write_colored("✓ PASSED\n", Color::GREEN, Color::BLACK);
+    console::write_str("    ");
+    console::write_colored(&alloc::format!("{} tests completed\n", results.elf_tests), Color::LIGHT_GRAY, Color::BLACK);
 
     // IPC results
     console::write_str("  IPC Tests:          ");

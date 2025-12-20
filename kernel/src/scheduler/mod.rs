@@ -584,6 +584,27 @@ where
     })
 }
 
+/// Execute a closure with access to a specific process (mutable)
+///
+/// This is a helper function for loading binaries or modifying a process's
+/// state by process ID.
+///
+/// # Arguments
+/// * `process_id` - The ID of the process to access
+/// * `f` - Closure that receives mutable access to the process
+///
+/// Returns the result of the closure, or None if the process doesn't exist.
+pub fn with_process_mut<F, R>(process_id: ProcessId, f: F) -> Option<R>
+where
+    F: FnOnce(&mut Process) -> R,
+{
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut scheduler_guard = SCHEDULER.lock();
+        let scheduler = scheduler_guard.as_mut()?;
+        scheduler.get_process_mut(process_id).map(f)
+    })
+}
+
 /// Initialize standard streams (stdin/stdout/stderr) for a process
 ///
 /// This sets up the file descriptor table for the process that owns the

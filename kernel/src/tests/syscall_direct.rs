@@ -23,7 +23,7 @@ use crate::syscall;
 use core::arch::asm;
 use x86_64::{
     VirtAddr,
-    structures::paging::{PageTableFlags, Page, Size4KiB},
+    structures::paging::PageTableFlags,
 };
 
 /// Test the syscall path by manually jumping to Ring 3 and back

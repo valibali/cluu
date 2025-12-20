@@ -60,18 +60,18 @@ fn errno_to_code(errno: Errno) -> isize {
 /// Arguments: (fd: i32, buf: *const u8, count: usize)
 /// Returns: number of bytes written, or negative error code
 pub fn sys_write(fd: i32, buf: *const u8, count: usize) -> isize {
-    // 1. Validate user buffer
-    if let Err(e) = validate_user_ptr(buf, count) {
-        return e;
-    }
-
-    // 2. Get current process's FD table
+    // 1. Get current process's FD table and validate FD first (cheap check)
     let result = scheduler::with_current_process(|process| {
-        // 3. Get device from FD table
+        // 2. Get device from FD table (fails fast if FD invalid)
         let device = match process.fd_table.get(fd) {
             Ok(dev) => dev,
             Err(e) => return errno_to_code(e),
         };
+
+        // 3. Now validate user buffer (only if FD is valid)
+        if let Err(e) = validate_user_ptr(buf, count) {
+            return e;
+        }
 
         // 4. Create safe slice and call device.write()
         let data = unsafe { slice::from_raw_parts(buf, count) };

@@ -35,6 +35,7 @@ mod bootboot;
 mod components;
 mod drivers;
 mod io;
+mod loaders;
 mod memory;
 mod scheduler;
 mod syscall;

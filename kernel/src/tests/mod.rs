@@ -28,6 +28,7 @@
  */
 
 pub mod comprehensive;
+pub mod elf_loader;
 pub mod syscall_tests;
 pub mod syscall_direct;
 
@@ -288,18 +289,30 @@ fn test_ipc_multi_sender_3() {
 fn test_fd_thread() {
     log::info!("[FD Test] Thread starting...");
 
-    // Get FD table from current process
-    let fd_table_result = scheduler::with_current_process(|process| {
-        // We need to clone the Arc references to use them outside the closure
-        (process.fd_table.get(0), process.fd_table.get(1), process.fd_table.get(2))
-    });
+    // Retry a few times if FDs aren't initialized yet (race condition mitigation)
+    let mut retries = 10;
+    let (stdin_res, stdout_res, _stderr_res) = loop {
+        // Get FD table from current process
+        let fd_table_result = scheduler::with_current_process(|process| {
+            // We need to clone the Arc references to use them outside the closure
+            (process.fd_table.get(0), process.fd_table.get(1), process.fd_table.get(2))
+        });
 
-    let (stdin_res, stdout_res, _stderr_res) = match fd_table_result {
-        Some((stdin, stdout, stderr)) => (stdin, stdout, stderr),
-        None => {
-            log::error!("[FD Test] FD table not initialized!");
+        if let Some((stdin, stdout, stderr)) = fd_table_result {
+            // Check if all FDs are actually initialized (not EBADF)
+            if stdout.is_ok() {
+                break (stdin, stdout, stderr);
+            }
+        }
+
+        retries -= 1;
+        if retries == 0 {
+            log::error!("[FD Test] FD table not initialized after retries!");
             scheduler::exit_thread();
         }
+
+        // Wait a bit for initialization to complete
+        scheduler::yield_now();
     };
 
     // Unwrap the Results
@@ -382,7 +395,13 @@ pub fn spawn_fd_test() {
     log::info!("=== Starting FD Layer Test ===");
 
     let thread_id = scheduler::spawn_thread(test_fd_thread, "fd-test");
+
+    // Initialize std streams for the new thread
     scheduler::init_std_streams(thread_id);
+
+    // Give the initialization a moment to complete before the thread runs
+    // This prevents a race where the thread starts before FDs are initialized
+    scheduler::yield_now();
 
     log::info!("FD test thread spawned with stdin/stdout/stderr initialized");
 }
