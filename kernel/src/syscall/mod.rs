@@ -160,7 +160,9 @@ pub fn set_kernel_stack(kernel_stack_ptr: u64) {
         SYSCALL_SCRATCH.kernel_rsp = kernel_stack_ptr;
     }
 
-    log::debug!("Syscall kernel stack set to 0x{:x}", kernel_stack_ptr);
+    // Note: Logging disabled because this is called on every context switch (~10ms)
+    // Would be too spammy. Use irq_log_simple() if debugging needed:
+    // crate::utils::debug::irq_log::irq_log_simple("SYSCALL_STACK_SET");
 }
 
 /// Get the current kernel stack pointer

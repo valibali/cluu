@@ -1264,17 +1264,59 @@ pub extern "C" fn schedule_from_interrupt(
     }
 
     // NOW get the pointer to next thread (after cleanup, so it won't be invalidated)
-    let next_ctx_ptr = if let Some(next_thread) = scheduler.get_thread_mut(next_id) {
+    let (next_ctx_ptr, next_process_id, next_stack_top) = if let Some(next_thread) = scheduler.get_thread_mut(next_id) {
         next_thread.state = ThreadState::Running;
         next_thread.last_scheduled_time = current_time;
-        &next_thread.interrupt_context as *const InterruptContext
+
+        // Calculate kernel stack top for syscall entry
+        // Stack top = base + size
+        let stack_base = next_thread.stack.as_ptr() as u64;
+        let stack_top = stack_base + next_thread.stack.len() as u64;
+
+        (
+            &next_thread.interrupt_context as *const InterruptContext,
+            next_thread.process_id,
+            stack_top,
+        )
     } else {
         // Thread not found, return current context
         return current_ctx_ptr;
     };
 
+    // Get current thread's process ID for comparison
+    let current_process_id = if current_id.0 != 0 {
+        scheduler
+            .get_thread_mut(current_id)
+            .map(|t| t.process_id)
+            .unwrap_or(ProcessId(0))
+    } else {
+        ProcessId(0)
+    };
+
+    // If switching to a different process, update address space (CR3 register)
+    if next_process_id != current_process_id {
+        if let Some(next_process) = scheduler.get_process(next_process_id) {
+            // Switch to next process's address space
+            // This updates CR3 register, which invalidates TLB (~100 cycles to refill)
+            next_process.address_space.switch_to();
+        }
+    }
+
     // Update current thread ID
     CURRENT_THREAD_ID.store(next_id.0, Ordering::SeqCst);
+
+    // CRITICAL: Release scheduler lock BEFORE calling set_kernel_stack()
+    // set_kernel_stack() verifies interrupts are disabled, which they are
+    // (we're in an interrupt handler), but we must not hold the lock
+    drop(sched_guard);
+
+    // Update kernel stack pointer for SYSCALL entry
+    // This MUST be done after releasing the scheduler lock to prevent potential deadlock
+    // if set_kernel_stack() needs to log (though it shouldn't in IRQ context)
+    //
+    // Safety: We're in an interrupt handler, so interrupts are already disabled
+    // The stack pointer is guaranteed valid because we just retrieved it from the thread
+    crate::syscall::set_kernel_stack(next_stack_top);
 
     // Return pointer to next thread's context (guaranteed valid)
     next_ctx_ptr
