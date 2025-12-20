@@ -386,13 +386,6 @@ pub fn load_elf_binary(
                 .ok_or(ElfLoadError::MemoryAllocationFailed)?;
             let phys_addr = PhysAddr::new(frame.start_address());
 
-            // Zero the physical frame before mapping (using identity mapping)
-            // This is needed because the virtual address is only mapped in userspace page table
-            unsafe {
-                let phys_ptr = phys_addr.as_u64() as *mut u8;
-                core::ptr::write_bytes(phys_ptr, 0, 4096);
-            }
-
             // Map page with appropriate flags (add USER_ACCESSIBLE for userspace)
             let user_flags = flags | PageTableFlags::USER_ACCESSIBLE;
             log::debug!(
@@ -412,29 +405,42 @@ pub fn load_elf_binary(
             }
         }
 
-        // Copy segment data from ELF file to mapped memory
-        // Temporarily switch to userspace page table to access the virtual addresses
-        if file_size > 0 {
-            let src = &data[file_offset..file_offset + file_size];
+        // Copy ELF data to kernel buffer BEFORE switching page tables
+        // We do this because initrd is not mapped in userspace page table
+        let kernel_buffer = if file_size > 0 {
+            let mut buf = alloc::vec::Vec::with_capacity(file_size);
+            buf.extend_from_slice(&data[file_offset..file_offset + file_size]);
+            Some(buf)
+        } else {
+            None
+        };
 
-            // Switch to userspace page table temporarily
-            use x86_64::registers::control::Cr3;
-            use x86_64::structures::paging::PhysFrame;
-            let (old_cr3, flags) = Cr3::read();
-            let new_cr3 = PhysFrame::containing_address(page_table_root);
-            unsafe { Cr3::write(new_cr3, flags); }
+        // Switch to userspace page table to zero pages and copy data
+        // We must do this because the pages are only mapped in the userspace page table
+        use x86_64::registers::control::Cr3;
+        use x86_64::structures::paging::PhysFrame;
+        let (old_cr3, cr3_flags) = Cr3::read();
+        let new_cr3 = PhysFrame::containing_address(page_table_root);
+        unsafe { Cr3::write(new_cr3, cr3_flags); }
 
-            // Now we can access userspace virtual addresses
+        // Zero all pages in this segment (needed for BSS and security)
+        unsafe {
+            let segment_ptr = start_page.as_mut_ptr::<u8>();
+            core::ptr::write_bytes(segment_ptr, 0, page_count * 4096);
+        }
+
+        // Copy segment data from kernel buffer to userspace memory
+        if let Some(ref buf) = kernel_buffer {
             unsafe {
                 let dst = vaddr.as_mut_ptr::<u8>();
-                core::ptr::copy_nonoverlapping(src.as_ptr(), dst, file_size);
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, file_size);
             }
-
-            // Switch back to kernel page table
-            unsafe { Cr3::write(old_cr3, flags); }
 
             log::debug!("ELF:   Copied {} bytes to 0x{:x}", file_size, vaddr.as_u64());
         }
+
+        // Switch back to kernel page table
+        unsafe { Cr3::write(old_cr3, cr3_flags); }
 
         // BSS (uninitialized data) is already zeroed since we zero all pages
         if mem_size > file_size {
