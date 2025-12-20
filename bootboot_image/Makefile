@@ -17,7 +17,7 @@ initdir:
 # create hybrid disk / cdrom image or ROM image
 disk: ../utilies/mkbootimg/mkbootimg initdir mkbootimg.json
 	../utilies/mkbootimg/mkbootimg mkbootimg.json disk-$(PLATFORM).img
-	@rm -rf initrd/sys
+	@rm -rf initrd/sys initrd/bin
 
 uefi:
 	qemu-system-x86_64 -s -S -bios $(OVMF) -m 64 -drive file=disk-x86.img,format=raw -serial stdio -serial telnet:localhost:4321,server,nowait
@@ -29,4 +29,4 @@ uefi_nodebug:
 
 # clean up
 clean:
-	rm -rf initrd/sys *.bin *.img *.rom *.iso 2>/dev/null || true
+	rm -rf initrd/sys initrd/bin *.bin *.img *.rom *.iso 2>/dev/null || true
