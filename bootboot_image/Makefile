@@ -23,7 +23,7 @@ disk: ../utilies/mkbootimg/mkbootimg initdir mkbootimg.json
 	@rm -rf initrd/sys initrd/bin
 
 uefi:
-	qemu-system-x86_64 -s -S -bios $(OVMF) -m 64 -drive file=disk-x86.img,format=raw -serial stdio -serial telnet:localhost:4321,server,nowait
+	qemu-system-x86_64 -s -S -bios $(OVMF) -m 256 -drive file=disk-x86.img,format=raw -serial stdio -serial telnet:localhost:4321,server,nowait
 	@printf '\033[0m'
 
 uefi_nodebug:

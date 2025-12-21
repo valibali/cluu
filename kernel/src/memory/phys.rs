@@ -28,7 +28,7 @@
  * - Physical memory starts at address 0x0
  */
 
-use crate::bootboot::{BOOTBOOT, BOOTBOOT_CORE, MMAP_FREE, MMapEnt};
+use crate::bootboot::{BOOTBOOT, BOOTBOOT_CORE, MMAP_FREE, MMAP_USED, MMAP_ACPI, MMAP_MMIO, MMapEnt};
 use crate::memory::PhysFrame;
 use spin::Mutex;
 
@@ -57,6 +57,10 @@ static mut FRAME_BITMAP: [u64; BITMAP_LEN] = [0; BITMAP_LEN];
 /// Mutex protecting concurrent access to the frame bitmap
 /// Ensures atomic allocation/deallocation operations
 static ALLOCATOR_LOCK: Mutex<()> = Mutex::new(());
+
+/// Highest frame number that actually exists (determined from BOOTBOOT memory map)
+/// This is used for accurate memory statistics (not all MAX_FRAMES may exist)
+static mut HIGHEST_FRAME: usize = 0;
 
 /// Physical address where BOOTBOOT loads the kernel (standard location)
 /// This is used to calculate which frames contain kernel code/data
@@ -106,9 +110,14 @@ pub fn init_from_bootboot(bootboot_ptr: *const BOOTBOOT) {
         bb_size,
         mmap_entries
     );
+    log::info!("Memory Map:");
+    log::info!("  Type: 0=USED, 1=FREE, 2=ACPI, 3=MMIO");
 
     // Get pointer to first memory map entry (located after BOOTBOOT header)
     let mmap_base: *const MMapEnt = core::ptr::addr_of!(bootboot_ref.mmap);
+
+    let mut total_ram_bytes = 0u64;
+    let mut free_ram_bytes = 0u64;
 
     // Step 3: Process each memory map entry to identify free regions
     for i in 0..mmap_entries {
@@ -125,22 +134,63 @@ pub fn init_from_bootboot(bootboot_ptr: *const BOOTBOOT) {
             continue;
         }
 
-        log::info!(
-            "MMAP entry {}: ptr=0x{:x}, size=0x{:x}, type={}",
-            i,
-            region_ptr,
-            region_size,
-            entry_type
-        );
+        // Process all memory regions to track highest frame
+        let start_frame = region_ptr / PhysFrame::SIZE;
+        let end_frame = (region_ptr + region_size - 1) / PhysFrame::SIZE;
+        let num_frames = end_frame - start_frame + 1;
+
+        // Track highest frame number for accurate statistics
+        unsafe {
+            if (end_frame as usize) < MAX_FRAMES && (end_frame as usize) > HIGHEST_FRAME {
+                HIGHEST_FRAME = end_frame as usize;
+            }
+        }
+
+        // Calculate size in human-readable format
+        let size_kb = region_size / 1024;
+        let size_mb = size_kb / 1024;
+
+        let type_str = match entry_type {
+            MMAP_FREE => "FREE",
+            MMAP_ACPI => "ACPI",
+            MMAP_MMIO => "MMIO",
+            _ => "USED",
+        };
+
+        if size_mb > 0 {
+            log::info!(
+                "  [{:2}] 0x{:08x}-0x{:08x} {:4} MB  {} frames  type={}({})",
+                i,
+                region_ptr,
+                region_ptr + region_size,
+                size_mb,
+                num_frames,
+                entry_type,
+                type_str
+            );
+        } else {
+            log::info!(
+                "  [{:2}] 0x{:08x}-0x{:08x} {:4} KB  {} frames  type={}({})",
+                i,
+                region_ptr,
+                region_ptr + region_size,
+                size_kb,
+                num_frames,
+                entry_type,
+                type_str
+            );
+        }
+
+        // Track totals
+        if entry_type == MMAP_FREE || entry_type == MMAP_USED {
+            total_ram_bytes += region_size;
+            if entry_type == MMAP_FREE {
+                free_ram_bytes += region_size;
+            }
+        }
 
         // Only process free memory regions (MMAP_FREE = available for OS use)
         if entry_type == MMAP_FREE {
-            // Convert physical address range to frame numbers
-            let start_frame = region_ptr / PhysFrame::SIZE;
-            let end_frame = (region_ptr + region_size - 1) / PhysFrame::SIZE;
-
-            log::info!("  Free region frames: {} - {}", start_frame, end_frame);
-
             // Mark all frames in this region as available for allocation
             for frame_num in start_frame..=end_frame {
                 // Bounds check to prevent bitmap overflow
@@ -151,8 +201,40 @@ pub fn init_from_bootboot(bootboot_ptr: *const BOOTBOOT) {
         }
     }
 
+    log::info!(
+        "Memory Map Summary: {} MB total RAM, {} MB free, {} MB used/reserved",
+        total_ram_bytes / (1024 * 1024),
+        free_ram_bytes / (1024 * 1024),
+        (total_ram_bytes - free_ram_bytes) / (1024 * 1024)
+    );
+
     // Step 4: Reserve frames occupied by kernel code and data
     mark_kernel_frames_used();
+
+    // Step 5: Reserve frames occupied by initrd
+    // BOOTBOOT memory layout (from official spec):
+    //   "The RAM (up to 16G) is identity mapped in the positive address range"
+    // This means ALL RAM is already mapped by BOOTBOOT (using huge pages).
+    // We only need to mark the initrd itself as used.
+    let initrd_ptr = bootboot_ref.initrd_ptr;
+    let initrd_size = bootboot_ref.initrd_size as u64;
+    let initrd_start_frame = initrd_ptr / PhysFrame::SIZE;
+    let initrd_end_frame = (initrd_ptr + initrd_size + PhysFrame::SIZE - 1) / PhysFrame::SIZE;
+
+    log::info!(
+        "Marking initrd as used: frames {}-{} (0x{:x}-0x{:x}, {} KiB)",
+        initrd_start_frame,
+        initrd_end_frame,
+        initrd_ptr,
+        initrd_ptr + initrd_size,
+        initrd_size / 1024
+    );
+
+    for frame_num in initrd_start_frame..initrd_end_frame {
+        if (frame_num as usize) < MAX_FRAMES {
+            mark_frame_used(frame_num as usize);
+        }
+    }
 
     log::info!("Physical frame allocator initialized");
 }
@@ -324,15 +406,32 @@ pub fn get_stats() -> (usize, usize) {
     let _lock = ALLOCATOR_LOCK.lock();
 
     let mut used_frames = 0;
-    let total_frames = MAX_FRAMES;
+    let total_frames = unsafe { HIGHEST_FRAME + 1 }; // +1 because frames are 0-indexed
 
     unsafe {
-        // Scan entire bitmap and count set bits (used frames)
+        // Scan bitmap up to highest frame and count set bits (used frames)
         let base = core::ptr::addr_of!(FRAME_BITMAP) as *const u64;
-        for i in 0..BITMAP_LEN {
+
+        // Calculate how many words to scan (round up to cover highest frame)
+        let words_to_scan = (total_frames + 63) / 64;
+
+        for i in 0..words_to_scan.min(BITMAP_LEN) {
             let word = *base.add(i);
-            // Use hardware population count instruction for efficiency
-            used_frames += word.count_ones() as usize;
+
+            // For the last word, only count bits up to highest frame
+            if i == words_to_scan - 1 {
+                let bits_in_last_word = total_frames % 64;
+                if bits_in_last_word > 0 {
+                    // Mask off bits beyond highest frame
+                    let mask = (1u64 << bits_in_last_word) - 1;
+                    used_frames += (word & mask).count_ones() as usize;
+                } else {
+                    // Last word is completely used
+                    used_frames += word.count_ones() as usize;
+                }
+            } else {
+                used_frames += word.count_ones() as usize;
+            }
         }
     }
 

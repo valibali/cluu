@@ -430,8 +430,10 @@ extern "C" fn syscall_handler_rust(
     _arg5: usize,
     _arg6: usize,
 ) -> isize {
-    log::debug!("Syscall {} called with args: {:#x}, {:#x}, {:#x}",
-                syscall_num, arg1, arg2, arg3);
+    // Temporary: log syscalls at INFO level to debug excessive syscalls
+    if syscall_num != SYS_YIELD {  // Don't spam for yield
+        log::info!("Syscall #{}", syscall_num);
+    }
 
     let ret = match syscall_num {
         SYS_READ => sys_read(arg1 as i32, arg2 as *mut u8, arg3),

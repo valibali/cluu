@@ -225,15 +225,21 @@ impl AddressSpace {
         }
 
         // Copy kernel mappings from current page table
-        // We need to copy entries 1-511 (skip entry 0).
+        // We copy entries 1-511 (skip entry 0 to avoid huge page conflicts).
         //
-        // Entry 0 is identity-mapped physical memory, which userspace doesn't need.
+        // Entry 0 maps the lower half and contains BOOTBOOT's huge pages which
+        // conflict with userspace addresses (0x400000). We skip it so userspace
+        // can use the lower half freely.
+        //
         // Entries 1-255 contain kernel code/data that MUST be accessible for SYSCALL.
         // Entries 256-511 are the high half kernel mappings.
         //
         // CRITICAL: SYSCALL doesn't switch CR3! When SYSCALL executes, we're still
         // using userspace page tables. The syscall_entry code needs to access kernel
         // data (like SYSCALL_SCRATCH), so kernel mappings MUST be present.
+        //
+        // NOTE: Kernel must be in PID 0 (kernel process) page tables when accessing
+        // initrd, since userspace page tables don't have the initrd mapped.
         unsafe {
             use x86_64::registers::control::Cr3;
             let (current_pml4_frame, _) = Cr3::read();
@@ -241,8 +247,7 @@ impl AddressSpace {
             let current_pml4_ptr = current_pml4_phys.as_u64() as *const u64;
             let new_pml4_ptr = pml4_phys.as_u64() as *mut u64;
 
-            // Copy ALL kernel entries (1-511) except entry 0 (identity mapping)
-            // This ensures kernel code/data is accessible during SYSCALL handling
+            // Copy kernel entries (1-511), skip entry 0 to avoid huge page conflicts
             for i in 1..512 {
                 let entry = core::ptr::read_volatile(current_pml4_ptr.add(i));
                 core::ptr::write_volatile(new_pml4_ptr.add(i), entry);
@@ -287,6 +292,14 @@ impl AddressSpace {
         unsafe {
             use x86_64::registers::control::Cr3;
             use x86_64::structures::paging::PhysFrame;
+
+            let (old_frame, _) = Cr3::read();
+            let old_cr3 = old_frame.start_address().as_u64();
+            let new_cr3 = self.page_table_root.as_u64();
+
+            if old_cr3 != new_cr3 {
+                log::info!("CR3 switch: 0x{:x} → 0x{:x}", old_cr3, new_cr3);
+            }
 
             let frame = PhysFrame::containing_address(self.page_table_root);
             Cr3::write(frame, x86_64::registers::control::Cr3Flags::empty());

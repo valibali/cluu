@@ -240,6 +240,10 @@ pub struct Scheduler {
     next_process_id: ProcessId,              // Next ID to assign to new process
 }
 
+/// Maximum PID value before wrapping around
+/// This matches typical Unix systems (32768)
+const MAX_PID: usize = 32768;
+
 impl Scheduler {
     fn new() -> Self {
         Self {
@@ -248,6 +252,38 @@ impl Scheduler {
             next_thread_id: ThreadId(1), // ID 0 reserved for kernel/idle
             processes: BTreeMap::new(),
             next_process_id: ProcessId(1), // ID 0 reserved for kernel
+        }
+    }
+
+    /// Allocate a new process ID
+    ///
+    /// This function allocates PIDs in a continuously increasing manner,
+    /// wrapping around at MAX_PID and skipping PIDs that are still in use.
+    /// This prevents immediate PID reuse and associated bugs.
+    ///
+    /// Returns None if all PIDs are exhausted (extremely unlikely).
+    fn allocate_pid(&mut self) -> Option<ProcessId> {
+        let start_pid = self.next_process_id.0;
+
+        // Try to find an unused PID, starting from next_process_id
+        loop {
+            let candidate = ProcessId(self.next_process_id.0);
+
+            // Increment for next allocation (with wrapping)
+            self.next_process_id.0 += 1;
+            if self.next_process_id.0 >= MAX_PID {
+                self.next_process_id.0 = 1; // Wrap around, skip PID 0 (kernel)
+            }
+
+            // Check if this PID is available
+            if !self.processes.contains_key(&candidate) && candidate.0 != 0 {
+                return Some(candidate);
+            }
+
+            // If we've wrapped all the way around, all PIDs are in use!
+            if self.next_process_id.0 == start_pid {
+                return None;
+            }
         }
     }
 
@@ -496,8 +532,8 @@ impl Scheduler {
     /// Kernel processes run in Ring 0 and use the kernel address space.
     /// This is used for kernel threads that need isolated resource management.
     fn create_kernel_process(&mut self, name: &str) -> ProcessId {
-        let process_id = self.next_process_id;
-        self.next_process_id.0 += 1;
+        let process_id = self.allocate_pid()
+            .expect("Failed to allocate PID for kernel process");
 
         let process = Process::new_kernel(process_id, name.into());
         self.processes.insert(process_id, process);
@@ -582,8 +618,8 @@ pub fn spawn_user_process(name: &str) -> Result<ProcessId, &'static str> {
         let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
 
         // Create process with userspace address space
-        let process_id = scheduler.next_process_id;
-        scheduler.next_process_id.0 += 1;
+        let process_id = scheduler.allocate_pid()
+            .ok_or("Failed to allocate PID - all PIDs in use")?;
 
         let process = Process::new(process_id, name, address_space);
         scheduler.processes.insert(process_id, process);
@@ -1041,7 +1077,13 @@ pub fn exit_thread(exit_code: i32) -> ! {
             if let Some(thread) = scheduler.get_thread_mut(current_id) {
                 thread.state = ThreadState::Terminated;
                 thread.exit_code = Some(exit_code);
-                // Thread will not be added back to ready queue
+
+                // CRITICAL: Remove this thread from ready queue!
+                // The thread may have been added to the ready queue in previous
+                // scheduling cycles. If we don't remove it now, the scheduler
+                // will try to run the terminated thread, causing a page fault
+                // when accessing initrd from the wrong address space.
+                scheduler.ready_queue.retain(|&tid| tid != current_id);
             }
         }
     });
@@ -1486,7 +1528,10 @@ pub extern "C" fn schedule_from_interrupt(
     };
 
     // If switching to a different process, update address space (CR3 register)
-    if next_process_id != current_process_id {
+    // CRITICAL: If we just cleaned up a terminated thread (should_cleanup == true),
+    // we MUST switch CR3 even if process IDs appear equal, because the current CR3
+    // might still point to the terminated process's page tables!
+    if next_process_id != current_process_id || should_cleanup {
         if let Some(next_process) = scheduler.get_process(next_process_id) {
             // Switch to next process's address space
             // This updates CR3 register, which invalidates TLB (~100 cycles to refill)

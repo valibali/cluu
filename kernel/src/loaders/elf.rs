@@ -299,9 +299,13 @@ fn elf_flags_to_page_flags(elf_flags: u32) -> PageTableFlags {
 /// 5. Returns metadata about the loaded binary
 ///
 /// The address space must already be initialized and activated.
+///
+/// # Arguments
+/// * `kernel_cr3` - Optional kernel CR3 to avoid deadlock when called within scheduler lock
 pub fn load_elf_binary(
     data: &[u8],
     address_space: &mut AddressSpace,
+    kernel_cr3: Option<PhysAddr>,
 ) -> Result<ElfBinary, ElfLoadError> {
     log::info!("ELF: Loading binary ({} bytes)", data.len());
 
@@ -377,7 +381,10 @@ pub fn load_elf_binary(
             end_page.as_u64()
         );
 
-        // Allocate and map pages for this segment
+        // Allocate and map pages for this segment using batch operation
+        let user_flags = flags | PageTableFlags::USER_ACCESSIBLE;
+        let mut mappings = alloc::vec::Vec::with_capacity(page_count);
+
         for page_idx in 0..page_count {
             let page_vaddr = start_page + (page_idx as u64 * 4096);
 
@@ -386,23 +393,24 @@ pub fn load_elf_binary(
                 .ok_or(ElfLoadError::MemoryAllocationFailed)?;
             let phys_addr = PhysAddr::new(frame.start_address());
 
-            // Map page with appropriate flags (add USER_ACCESSIBLE for userspace)
-            let user_flags = flags | PageTableFlags::USER_ACCESSIBLE;
             log::debug!(
-                "ELF:   Mapping page: vaddr=0x{:x}, phys=0x{:x}, flags={:?}",
+                "ELF:   Preparing page: vaddr=0x{:x}, phys=0x{:x}, flags={:?}",
                 page_vaddr.as_u64(),
                 phys_addr.as_u64(),
                 user_flags
             );
 
-            if let Err(e) = paging::map_page_in_table(page_table_root, page_vaddr, phys_addr, user_flags) {
-                log::error!("ELF:   Mapping failed: {:?}", e);
-                log::error!("ELF:     vaddr: 0x{:x}", page_vaddr.as_u64());
-                log::error!("ELF:     phys:  0x{:x}", phys_addr.as_u64());
-                log::error!("ELF:     flags: {:?}", user_flags);
-                log::error!("ELF:     page_table_root: 0x{:x}", page_table_root.as_u64());
-                return Err(ElfLoadError::MappingFailed);
-            }
+            // Add to batch
+            mappings.push((page_vaddr, phys_addr, user_flags));
+        }
+
+        // Map all segment pages in a single batch
+        if let Err(e) = paging::map_pages_batch_in_table(page_table_root, &mappings, kernel_cr3) {
+            log::error!("ELF:   Segment mapping failed: {:?}", e);
+            log::error!("ELF:     segment: {}", i);
+            log::error!("ELF:     page_count: {}", page_count);
+            log::error!("ELF:     page_table_root: 0x{:x}", page_table_root.as_u64());
+            return Err(ElfLoadError::MappingFailed);
         }
 
         // Copy ELF data to kernel buffer BEFORE switching page tables
@@ -490,6 +498,10 @@ pub fn spawn_elf_process(
     let process_id = scheduler::spawn_user_process(name)
         .map_err(|_| ElfLoadError::MemoryAllocationFailed)?;
 
+    // Get kernel CR3 now (BEFORE entering with_process_mut) to avoid deadlock
+    // when batch mapping functions need to access page tables
+    let kernel_cr3 = paging::get_kernel_cr3();
+
     // Initialize file descriptors (stdin/stdout/stderr → TTY0)
     scheduler::with_process_mut(process_id, |process| {
         use crate::io::TtyDevice;
@@ -511,7 +523,8 @@ pub fn spawn_elf_process(
     // Do this in a scope to release the process lock before creating thread
     let (entry_point, _page_table_root) = scheduler::with_process_mut(process_id, |process| {
         // Load ELF binary into process address space
-        let binary = load_elf_binary(elf_data, &mut process.address_space)?;
+        // Pass kernel_cr3 to avoid deadlock when mapping pages
+        let binary = load_elf_binary(elf_data, &mut process.address_space, kernel_cr3)?;
 
         log::info!("ELF process '{}' loaded, entry point: 0x{:x}",
                    name, binary.entry_point.as_u64());
@@ -524,10 +537,17 @@ pub fn spawn_elf_process(
         log::debug!("ELF: Setting up user stack ({}KB)", USER_STACK_SIZE / 1024);
         log::debug!("ELF:   Stack range: 0x{:x} - 0x{:x}", USER_STACK_BOTTOM, USER_STACK_TOP);
 
-        // Map user stack pages
+        // Map user stack pages using batch operation for performance
         let page_count = USER_STACK_SIZE / 4096;
         let page_table_root = process.address_space.page_table_root;
 
+        // Stack mapping flags
+        let stack_flags = PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::USER_ACCESSIBLE;
+
+        // Allocate all frames and prepare mappings for batch operation
+        let mut mappings = alloc::vec::Vec::with_capacity(page_count);
         for page_idx in 0..page_count {
             let page_vaddr = VirtAddr::new(USER_STACK_BOTTOM + (page_idx as u64 * 4096));
 
@@ -542,14 +562,13 @@ pub fn spawn_elf_process(
                 core::ptr::write_bytes(phys_ptr, 0, 4096);
             }
 
-            // Map with USER_ACCESSIBLE | WRITABLE
-            let stack_flags = PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::USER_ACCESSIBLE;
-
-            paging::map_page_in_table(page_table_root, page_vaddr, phys_addr, stack_flags)
-                .map_err(|_| ElfLoadError::MappingFailed)?;
+            // Add to batch
+            mappings.push((page_vaddr, phys_addr, stack_flags));
         }
+
+        // Map all pages in a single batch (2 CR3 switches instead of 8192!)
+        paging::map_pages_batch_in_table(page_table_root, &mappings, kernel_cr3)
+            .map_err(|_| ElfLoadError::MappingFailed)?;
 
         log::info!("ELF: User stack mapped ({} pages)", page_count);
 
@@ -575,8 +594,9 @@ pub fn spawn_elf_process(
 
     log::info!("ELF: Thread configured for userspace entry");
 
-    log::info!("ELF process '{}' spawned: PID={:?}, TID={:?}",
-               name, process_id, thread_id);
+    // FIXME: Logging after thread creation causes deadlock
+    // log::info!("ELF process '{}' spawned: PID={:?}, TID={:?}",
+    //            name, process_id, thread_id);
 
     Ok((process_id, thread_id))
 }

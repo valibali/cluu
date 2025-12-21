@@ -84,14 +84,18 @@ int main(int argc, char **argv) {
     }
 
     print("[SHMEM-TEST] SUCCESS: Mapped at address 0x");
-    /* Print address in hex */
+    /* Print address in hex - simplified to avoid loop issues */
     unsigned long addr_val = (unsigned long)addr;
-    for (int i = 60; i >= 0; i -= 4) {
-        int digit = (addr_val >> i) & 0xF;
-        buf[0] = digit < 10 ? '0' + digit : 'a' + (digit - 10);
-        buf[1] = '\0';
-        print(buf);
+    char hex_buf[17];  /* 16 hex digits + null terminator */
+    int idx = 0;
+    /* Fixed iteration count to avoid infinite loop */
+    int shift_amounts[16] = {60, 56, 52, 48, 44, 40, 36, 32, 28, 24, 20, 16, 12, 8, 4, 0};
+    for (int j = 0; j < 16; j++) {
+        int digit = (addr_val >> shift_amounts[j]) & 0xF;
+        hex_buf[idx++] = digit < 10 ? '0' + digit : 'a' + (digit - 10);
     }
+    hex_buf[idx] = '\0';
+    print(hex_buf);
     print("\n");
 
     /* Test 3: Write to shared memory */

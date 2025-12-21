@@ -854,6 +854,8 @@ pub fn sys_shmem_create(size: usize, permissions: u32) -> isize {
 /// Arguments: (shmem_id: usize, hint_addr: usize, permissions: u32)
 /// Returns: virtual address on success, or negative error code
 pub fn sys_shmem_map(shmem_id: usize, hint_addr: usize, permissions: u32) -> isize {
+    log::info!("sys_shmem_map: called with shmem_id={}, hint=0x{:x}", shmem_id, hint_addr);
+
     // Get current process ID
     let process_id = match scheduler::current_process_id() {
         Some(pid) => pid,
@@ -870,8 +872,8 @@ pub fn sys_shmem_map(shmem_id: usize, hint_addr: usize, permissions: u32) -> isi
     // Map shared memory
     match scheduler::shmem::shmem_map(shmem_id, process_id, hint_addr as u64, perms) {
         Ok(virt_addr) => {
-            log::debug!(
-                "sys_shmem_map: mapped shmem {} to 0x{:x} for process {}",
+            log::info!(
+                "sys_shmem_map: SUCCESS mapped shmem {} to 0x{:x} for process {}",
                 shmem_id.0,
                 virt_addr,
                 process_id.0
@@ -879,7 +881,7 @@ pub fn sys_shmem_map(shmem_id: usize, hint_addr: usize, permissions: u32) -> isi
             virt_addr as isize
         }
         Err(e) => {
-            log::error!("sys_shmem_map: failed: {:?}", e);
+            log::error!("sys_shmem_map: FAILED: {:?}", e);
             match e {
                 scheduler::shmem::ShmemError::OutOfMemory => -ENOMEM,
                 scheduler::shmem::ShmemError::InvalidId => -EBADF,

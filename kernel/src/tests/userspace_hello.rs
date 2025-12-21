@@ -33,9 +33,16 @@ pub fn spawn_hello_world() -> Result<(), &'static str> {
     // Parse and load the ELF binary
     match elf::spawn_elf_process(binary, "hello_world", &[]) {
         Ok((process_id, thread_id)) => {
+            // CRITICAL: Yield immediately after thread creation to let scheduler stabilize
+            // Without this, logging or other operations can deadlock
+            for _ in 0..10 {
+                scheduler::yield_now();
+            }
+
             log::info!("✓ Userspace process spawned successfully!");
             log::info!("  Process ID: {:?}", process_id);
-            log::info!("  Thread ID: {:?}", thread_id);
+            // FIXME: Logging ThreadId causes deadlock - investigate scheduler state
+            // log::info!("  Thread ID: {:?}", thread_id);
             log::info!("  Binary: userspace/hello/hello");
             log::info!("");
             log::info!("Expected output:");
@@ -44,6 +51,8 @@ pub fn spawn_hello_world() -> Result<(), &'static str> {
             log::info!("  Exiting gracefully...");
             log::info!("");
             log::info!("========================================");
+            // Suppress unused variable warning
+            let _ = thread_id;
             Ok(())
         }
         Err(e) => {

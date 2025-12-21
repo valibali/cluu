@@ -9,4 +9,4 @@ rust-os-gdb
 *.lock
 utilies/mkbootimg/*
 .aider*
-initrd/bin
+**/*/initrd/bin

@@ -27,6 +27,8 @@ pub struct TestResults {
     pub fd_tests: usize,
     pub userspace_passed: usize,
     pub userspace_failed: usize,
+    pub shmem_passed: usize,
+    pub shmem_failed: usize,
     pub stress_completed: bool,
 }
 
@@ -40,6 +42,8 @@ impl TestResults {
             fd_tests: 0,
             userspace_passed: 0,
             userspace_failed: 0,
+            shmem_passed: 0,
+            shmem_failed: 0,
             stress_completed: false,
         }
     }
@@ -47,6 +51,7 @@ impl TestResults {
     pub fn total_tests(&self) -> usize {
         self.syscall_passed + self.syscall_failed + self.elf_tests + self.ipc_tests
         + self.fd_tests + self.userspace_passed + self.userspace_failed
+        + self.shmem_passed + self.shmem_failed
     }
 }
 
@@ -152,6 +157,43 @@ pub fn run_comprehensive_test_suite() -> TestResults {
     } else {
         results.userspace_failed += 1;
         console::write_colored("FAILED\n", Color::RED, Color::BLACK);
+    }
+
+    // Phase 5.5: Shared Memory Tests
+    print_section("Phase 5.5: Shared Memory Tests");
+    console::write_str("  Testing shared memory syscalls (create/map/unmap/destroy)...\n");
+    console::write_str("    - Shared memory test: ");
+
+    // Read shmem_test binary from initrd
+    let shmem_binary: &[u8] = match crate::initrd::read_file("bin/shmem_test") {
+        Ok(data) => data,
+        Err(e) => {
+            console::write_colored("FAILED (", Color::RED, Color::BLACK);
+            console::write_str(e);
+            console::write_str(")\n");
+            results.shmem_failed += 1;
+            &[] // Empty slice
+        }
+    };
+
+    if !shmem_binary.is_empty() {
+        match crate::loaders::elf::spawn_elf_process(shmem_binary, "shmem_test", &[]) {
+            Ok(_) => {
+                // CRITICAL: Yield after thread creation to stabilize scheduler
+                for _ in 0..10 {
+                    crate::scheduler::yield_now();
+                }
+                wait_for_threads(150);
+                results.shmem_passed += 1;
+                console::write_colored("SPAWNED\n", Color::GREEN, Color::BLACK);
+            }
+            Err(e) => {
+                console::write_colored("FAILED (", Color::RED, Color::BLACK);
+                console::write_str(&alloc::format!("{:?}", e));
+                console::write_str(")\n");
+                results.shmem_failed += 1;
+            }
+        }
     }
 
     // Phase 6: Light Stress Test
@@ -282,6 +324,20 @@ fn print_summary(results: &TestResults) {
     console::write_str(", ");
     console::write_colored(&alloc::format!("{} failed\n", results.userspace_failed), Color::RED, Color::BLACK);
 
+    // Shared memory results
+    console::write_str("  Shared Memory Tests:");
+    if results.shmem_failed == 0 && results.shmem_passed > 0 {
+        console::write_colored("✓ PASSED\n", Color::GREEN, Color::BLACK);
+    } else if results.shmem_failed > 0 {
+        console::write_colored("✗ FAILED\n", Color::RED, Color::BLACK);
+    } else {
+        console::write_colored("⚠ NOT RUN\n", Color::YELLOW, Color::BLACK);
+    }
+    console::write_str("    ");
+    console::write_colored(&alloc::format!("{} passed", results.shmem_passed), Color::GREEN, Color::BLACK);
+    console::write_str(", ");
+    console::write_colored(&alloc::format!("{} failed\n", results.shmem_failed), Color::RED, Color::BLACK);
+
     // Stress test
     console::write_str("  Stress Test:        ");
     if results.stress_completed {
@@ -293,7 +349,7 @@ fn print_summary(results: &TestResults) {
     // Overall
     console::write_str("\n");
     console::write_str("  Overall Status:     ");
-    if results.syscall_failed == 0 && results.userspace_failed == 0 && results.stress_completed {
+    if results.syscall_failed == 0 && results.userspace_failed == 0 && results.shmem_failed == 0 && results.stress_completed {
         console::write_colored("✓ ALL TESTS PASSED\n", Color::GREEN, Color::BLACK);
     } else {
         console::write_colored("⚠ REVIEW RESULTS\n", Color::YELLOW, Color::BLACK);

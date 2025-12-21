@@ -275,26 +275,34 @@ pub fn shmem_map(
         0x400000000 + (shmem_id.0 as u64 * 0x10000000)
     };
 
-    // Map pages into process address space
+    // Get kernel CR3 before entering with_process_mut to avoid deadlock
+    let kernel_cr3 = crate::memory::paging::get_kernel_cr3();
+
+    // Map pages into process address space using batch operation
     crate::scheduler::with_process_mut(process_id, |process| {
         let page_flags = permissions.to_page_flags();
         let page_table_root = process.address_space.page_table_root;
 
-        for (i, frame) in frames.iter().enumerate() {
+        // Prepare batch mappings
+        let mappings: Vec<_> = frames.iter().enumerate().map(|(i, frame)| {
             let page_virt = virt_addr + (i as u64 * 4096);
             let page_phys = frame.start_address();
-
-            // Map page in process's page table
-            if let Err(e) = crate::memory::paging::map_page_in_table(
-                page_table_root,
+            (
                 x86_64::VirtAddr::new(page_virt),
                 x86_64::PhysAddr::new(page_phys),
                 page_flags,
-            ) {
-                log::error!("Failed to map shared memory page: {:?}", e);
-                // TODO: Unmap already-mapped pages on error
-                return Err(ShmemError::OutOfMemory);
-            }
+            )
+        }).collect();
+
+        // Map all pages in a single batch
+        if let Err(e) = crate::memory::paging::map_pages_batch_in_table(
+            page_table_root,
+            &mappings,
+            kernel_cr3,
+        ) {
+            log::error!("Failed to map shared memory pages: {:?}", e);
+            // TODO: Unmap already-mapped pages on error
+            return Err(ShmemError::OutOfMemory);
         }
 
         Ok(virt_addr)
