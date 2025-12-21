@@ -93,6 +93,7 @@ use spin::Mutex;
 pub mod io_wait;
 pub mod ipc;
 pub mod process;
+pub mod shmem;
 pub mod thread;
 
 use crate::alloc::string::ToString;

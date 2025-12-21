@@ -169,6 +169,10 @@ pub extern "C" fn kstart() -> ! {
     // Step 10.5: Initialize IPC system
     scheduler::ipc::init();
 
+    // Step 10.55: Initialize shared memory subsystem
+    scheduler::shmem::init();
+    log::info!("Shared memory subsystem initialized");
+
     // Step 10.6: Initialize VFS subsystem
     vfs::init();
     log::info!("VFS subsystem initialized (waiting for VFS server)");

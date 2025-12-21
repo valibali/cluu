@@ -188,3 +188,47 @@ pub const SYS_REGISTER_PORT_NAME: usize = 1005;
 ///
 /// Looks up a port that was registered with SYS_REGISTER_PORT_NAME.
 pub const SYS_LOOKUP_PORT_NAME: usize = 1006;
+
+/// Group E: Shared Memory syscalls
+///
+/// These syscalls provide shared memory regions for efficient bulk data transfer
+/// between processes. Used by VFS server for file I/O without copying through
+/// kernel buffers.
+
+/// Create a new shared memory region
+///
+/// Arguments: (size: usize, permissions: u32) -> isize
+/// Returns: shared memory ID on success, or negative error code
+///
+/// Allocates physical frames for a shared memory region. The region can then
+/// be mapped into multiple address spaces for zero-copy data transfer.
+/// Maximum size: 16MB. Permissions: 0x1=READ, 0x2=WRITE.
+pub const SYS_SHMEM_CREATE: usize = 1007;
+
+/// Map shared memory into current process
+///
+/// Arguments: (shmem_id: usize, hint_addr: usize, permissions: u32) -> isize
+/// Returns: virtual address on success, or negative error code
+///
+/// Maps shared memory region into the current process's address space.
+/// If hint_addr is 0, kernel chooses address. Permissions must be subset
+/// of region's permissions. Address range: 0x400000000-0x500000000.
+pub const SYS_SHMEM_MAP: usize = 1008;
+
+/// Unmap shared memory from current process
+///
+/// Arguments: (addr: usize) -> isize
+/// Returns: 0 on success, or negative error code
+///
+/// Unmaps shared memory from the current process. Decrements reference count.
+/// If count reaches zero and region is marked for deletion, frees the region.
+pub const SYS_SHMEM_UNMAP: usize = 1009;
+
+/// Destroy shared memory region (mark for deletion)
+///
+/// Arguments: (shmem_id: usize) -> isize
+/// Returns: 0 on success, or negative error code
+///
+/// Marks the shared memory region for deletion. Only the owner can destroy.
+/// Actual deletion occurs when all mappings are removed (ref count reaches zero).
+pub const SYS_SHMEM_DESTROY: usize = 1010;

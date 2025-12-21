@@ -93,6 +93,34 @@ void syscall_exit(int status) __attribute__((noreturn));
  */
 int syscall_yield(void);
 
+/**
+ * Create a shared memory region
+ * Returns: shared memory ID on success, or negative error code
+ */
+long syscall_shmem_create(size_t size, unsigned int permissions);
+
+/**
+ * Map shared memory into current process
+ * Returns: virtual address on success, or negative error code
+ */
+void *syscall_shmem_map(long shmem_id, void *hint_addr, unsigned int permissions);
+
+/**
+ * Unmap shared memory from current process
+ * Returns: 0 on success, or negative error code
+ */
+int syscall_shmem_unmap(void *addr);
+
+/**
+ * Destroy shared memory region (mark for deletion)
+ * Returns: 0 on success, or negative error code
+ */
+int syscall_shmem_destroy(long shmem_id);
+
+/* Shared memory permission flags */
+#define SHMEM_READ  0x1
+#define SHMEM_WRITE 0x2
+
 /* Higher-level helper functions */
 
 /**

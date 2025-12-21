@@ -141,3 +141,58 @@ syscall_yield:
     syscall
     ret
 .size syscall_yield, . - syscall_yield
+
+/*
+ * long syscall_shmem_create(size_t size, unsigned int permissions)
+ * Syscall number: 1007 (SYS_SHMEM_CREATE)
+ */
+.global syscall_shmem_create
+.type syscall_shmem_create, @function
+syscall_shmem_create:
+    mov $1007, %rax     # SYS_SHMEM_CREATE = 1007
+    # RDI = size (already set by caller)
+    # RSI = permissions (already set by caller)
+    syscall
+    ret
+.size syscall_shmem_create, . - syscall_shmem_create
+
+/*
+ * void *syscall_shmem_map(long shmem_id, void *hint_addr, unsigned int permissions)
+ * Syscall number: 1008 (SYS_SHMEM_MAP)
+ */
+.global syscall_shmem_map
+.type syscall_shmem_map, @function
+syscall_shmem_map:
+    mov $1008, %rax     # SYS_SHMEM_MAP = 1008
+    # RDI = shmem_id (already set by caller)
+    # RSI = hint_addr (already set by caller)
+    # RDX = permissions (already set by caller)
+    syscall
+    ret
+.size syscall_shmem_map, . - syscall_shmem_map
+
+/*
+ * int syscall_shmem_unmap(void *addr)
+ * Syscall number: 1009 (SYS_SHMEM_UNMAP)
+ */
+.global syscall_shmem_unmap
+.type syscall_shmem_unmap, @function
+syscall_shmem_unmap:
+    mov $1009, %rax     # SYS_SHMEM_UNMAP = 1009
+    # RDI = addr (already set by caller)
+    syscall
+    ret
+.size syscall_shmem_unmap, . - syscall_shmem_unmap
+
+/*
+ * int syscall_shmem_destroy(long shmem_id)
+ * Syscall number: 1010 (SYS_SHMEM_DESTROY)
+ */
+.global syscall_shmem_destroy
+.type syscall_shmem_destroy, @function
+syscall_shmem_destroy:
+    mov $1010, %rax     # SYS_SHMEM_DESTROY = 1010
+    # RDI = shmem_id (already set by caller)
+    syscall
+    ret
+.size syscall_shmem_destroy, . - syscall_shmem_destroy

@@ -454,6 +454,10 @@ extern "C" fn syscall_handler_rust(
         SYS_PORT_TRY_RECV => sys_port_try_recv(arg1, arg2 as *mut u8, arg3),
         SYS_REGISTER_PORT_NAME => sys_register_port_name(arg1 as *const u8, arg2),
         SYS_LOOKUP_PORT_NAME => sys_lookup_port_name(arg1 as *const u8),
+        SYS_SHMEM_CREATE => sys_shmem_create(arg1, arg2 as u32),
+        SYS_SHMEM_MAP => sys_shmem_map(arg1, arg2, arg3 as u32),
+        SYS_SHMEM_UNMAP => sys_shmem_unmap(arg1),
+        SYS_SHMEM_DESTROY => sys_shmem_destroy(arg1),
         _ => {
             log::warn!("Unknown syscall number: {}", syscall_num);
             -ENOSYS

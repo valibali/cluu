@@ -805,3 +805,160 @@ pub fn sys_lookup_port_name(name: *const u8) -> isize {
         }
     }
 }
+
+// ============================================================================
+// Group E: Shared Memory Syscalls
+// ============================================================================
+
+/// sys_shmem_create - Create a new shared memory region
+///
+/// Arguments: (size: usize, permissions: u32)
+/// Returns: shared memory ID on success, or negative error code
+pub fn sys_shmem_create(size: usize, permissions: u32) -> isize {
+    // Get current process ID
+    let process_id = match scheduler::current_process_id() {
+        Some(pid) => pid,
+        None => {
+            log::error!("sys_shmem_create: no current process");
+            return -EINVAL;
+        }
+    };
+
+    // Convert permissions flags
+    let perms = scheduler::shmem::ShmemPermissions::from_flags(permissions);
+
+    // Create shared memory region
+    match scheduler::shmem::shmem_create(size, process_id, perms) {
+        Ok(shmem_id) => {
+            log::debug!(
+                "sys_shmem_create: created shmem {} ({} bytes) for process {}",
+                shmem_id.0,
+                size,
+                process_id.0
+            );
+            shmem_id.0 as isize
+        }
+        Err(e) => {
+            log::error!("sys_shmem_create: failed: {:?}", e);
+            match e {
+                scheduler::shmem::ShmemError::OutOfMemory => -ENOMEM,
+                scheduler::shmem::ShmemError::InvalidSize => -EINVAL,
+                _ => -EINVAL,
+            }
+        }
+    }
+}
+
+/// sys_shmem_map - Map shared memory into current process
+///
+/// Arguments: (shmem_id: usize, hint_addr: usize, permissions: u32)
+/// Returns: virtual address on success, or negative error code
+pub fn sys_shmem_map(shmem_id: usize, hint_addr: usize, permissions: u32) -> isize {
+    // Get current process ID
+    let process_id = match scheduler::current_process_id() {
+        Some(pid) => pid,
+        None => {
+            log::error!("sys_shmem_map: no current process");
+            return -EINVAL;
+        }
+    };
+
+    // Convert types
+    let shmem_id = scheduler::shmem::ShmemId(shmem_id);
+    let perms = scheduler::shmem::ShmemPermissions::from_flags(permissions);
+
+    // Map shared memory
+    match scheduler::shmem::shmem_map(shmem_id, process_id, hint_addr as u64, perms) {
+        Ok(virt_addr) => {
+            log::debug!(
+                "sys_shmem_map: mapped shmem {} to 0x{:x} for process {}",
+                shmem_id.0,
+                virt_addr,
+                process_id.0
+            );
+            virt_addr as isize
+        }
+        Err(e) => {
+            log::error!("sys_shmem_map: failed: {:?}", e);
+            match e {
+                scheduler::shmem::ShmemError::OutOfMemory => -ENOMEM,
+                scheduler::shmem::ShmemError::InvalidId => -EBADF,
+                scheduler::shmem::ShmemError::InvalidPermissions => -EINVAL,
+                _ => -EINVAL,
+            }
+        }
+    }
+}
+
+/// sys_shmem_unmap - Unmap shared memory from current process
+///
+/// Arguments: (addr: usize)
+/// Returns: 0 on success, or negative error code
+pub fn sys_shmem_unmap(addr: usize) -> isize {
+    // Get current process ID
+    let process_id = match scheduler::current_process_id() {
+        Some(pid) => pid,
+        None => {
+            log::error!("sys_shmem_unmap: no current process");
+            return -EINVAL;
+        }
+    };
+
+    // Unmap shared memory
+    match scheduler::shmem::shmem_unmap(addr as u64, process_id) {
+        Ok(()) => {
+            log::debug!(
+                "sys_shmem_unmap: unmapped shmem at 0x{:x} for process {}",
+                addr,
+                process_id.0
+            );
+            0
+        }
+        Err(e) => {
+            log::error!("sys_shmem_unmap: failed: {:?}", e);
+            match e {
+                scheduler::shmem::ShmemError::NotMapped => -EINVAL,
+                scheduler::shmem::ShmemError::InvalidId => -EBADF,
+                _ => -EINVAL,
+            }
+        }
+    }
+}
+
+/// sys_shmem_destroy - Destroy shared memory region (mark for deletion)
+///
+/// Arguments: (shmem_id: usize)
+/// Returns: 0 on success, or negative error code
+pub fn sys_shmem_destroy(shmem_id: usize) -> isize {
+    // Get current process ID
+    let process_id = match scheduler::current_process_id() {
+        Some(pid) => pid,
+        None => {
+            log::error!("sys_shmem_destroy: no current process");
+            return -EINVAL;
+        }
+    };
+
+    // Convert type
+    let shmem_id = scheduler::shmem::ShmemId(shmem_id);
+
+    // Destroy shared memory
+    match scheduler::shmem::shmem_destroy(shmem_id, process_id) {
+        Ok(()) => {
+            log::debug!(
+                "sys_shmem_destroy: marked shmem {} for deletion by process {}",
+                shmem_id.0,
+                process_id.0
+            );
+            0
+        }
+        Err(e) => {
+            log::error!("sys_shmem_destroy: failed: {:?}", e);
+            match e {
+                scheduler::shmem::ShmemError::InvalidId => -EBADF,
+                scheduler::shmem::ShmemError::NotOwner => -EINVAL,
+                _ => -EINVAL,
+            }
+        }
+    }
+}

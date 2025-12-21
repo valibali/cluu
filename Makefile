@@ -34,16 +34,19 @@ userspace:
 	@echo "Building userspace binaries..."
 	@make -C ./userspace/hello all
 	@make -C ./userspace/spawn_test all
+	@make -C ./userspace/shmem_test all
 	@echo "Copying userspace binaries to initrd..."
 	@mkdir -p ./bootboot_image/initrd/bin
 	@cp ./userspace/hello/hello ./bootboot_image/initrd/bin/hello
 	@cp ./userspace/spawn_test/spawn_test ./bootboot_image/initrd/bin/spawn_test
+	@cp ./userspace/shmem_test/shmem_test ./bootboot_image/initrd/bin/shmem_test
 	@echo "Userspace binaries ready"
 
 clean:
 	@make -C ./kernel clean
 	@make -C ./userspace/hello clean
 	@make -C ./userspace/spawn_test clean
+	@make -C ./userspace/shmem_test clean
 	@make -C ./utilies/mkbootimg clean
 	@make -C ./bootboot_image clean
 	@rm -rf ./bootboot_image/initrd/bin
