@@ -532,3 +532,276 @@ pub fn sys_waitpid(pid: i32, status: *mut i32, _options: i32) -> isize {
         None => -ECHILD,   // Process doesn't exist
     }
 }
+
+// ============================================================================
+// Group D: IPC (Inter-Process Communication) Syscalls
+// ============================================================================
+
+/// sys_port_create - Create a new IPC port
+///
+/// Arguments: ()
+/// Returns: port ID on success, or negative error code
+pub fn sys_port_create() -> isize {
+    match scheduler::ipc::port_create() {
+        Ok(port_id) => {
+            log::debug!("sys_port_create: created port {}", port_id.0);
+            port_id.0 as isize
+        }
+        Err(e) => {
+            log::error!("sys_port_create: failed: {:?}", e);
+            -ENOMEM // Port creation failed (likely out of memory)
+        }
+    }
+}
+
+/// sys_port_destroy - Destroy an IPC port
+///
+/// Arguments: (port_id: usize)
+/// Returns: 0 on success, or negative error code
+pub fn sys_port_destroy(port_id: usize) -> isize {
+    let port_id = scheduler::ipc::PortId(port_id);
+
+    match scheduler::ipc::port_destroy(port_id) {
+        Ok(()) => {
+            log::debug!("sys_port_destroy: destroyed port {}", port_id.0);
+            0
+        }
+        Err(e) => {
+            log::error!("sys_port_destroy: failed for port {}: {:?}", port_id.0, e);
+            match e {
+                scheduler::ipc::IpcError::PortNotFound => -EBADF,
+                scheduler::ipc::IpcError::NotOwner => -EINVAL,
+                _ => -EINVAL,
+            }
+        }
+    }
+}
+
+/// sys_port_send - Send a message to an IPC port (non-blocking)
+///
+/// Arguments: (port_id: usize, message: *const u8, len: usize)
+/// Returns: 0 on success, or negative error code
+///
+/// Message must be exactly 256 bytes.
+pub fn sys_port_send(port_id: usize, message: *const u8, len: usize) -> isize {
+    // 1. Validate message pointer and length
+    if len != 256 {
+        log::error!("sys_port_send: invalid message length {} (must be 256)", len);
+        return -EINVAL;
+    }
+
+    if let Err(e) = validate_user_ptr(message, len) {
+        return e;
+    }
+
+    // 2. Copy message from userspace
+    let user_data = unsafe { slice::from_raw_parts(message, 256) };
+    let mut ipc_msg = scheduler::ipc::Message::new();
+    ipc_msg.as_bytes_mut().copy_from_slice(user_data);
+
+    // 3. Send to port
+    let port_id = scheduler::ipc::PortId(port_id);
+
+    match scheduler::ipc::port_send(port_id, ipc_msg) {
+        Ok(()) => {
+            log::debug!("sys_port_send: sent message to port {}", port_id.0);
+            0
+        }
+        Err(e) => {
+            log::error!("sys_port_send: failed for port {}: {:?}", port_id.0, e);
+            match e {
+                scheduler::ipc::IpcError::PortNotFound => -EBADF,
+                scheduler::ipc::IpcError::QueueFull => -ENOMEM,
+                _ => -EINVAL,
+            }
+        }
+    }
+}
+
+/// sys_port_recv - Receive a message from an IPC port (blocking)
+///
+/// Arguments: (port_id: usize, message: *mut u8, len: usize)
+/// Returns: 0 on success, or negative error code
+///
+/// Message buffer must be at least 256 bytes.
+pub fn sys_port_recv(port_id: usize, message: *mut u8, len: usize) -> isize {
+    // 1. Validate message pointer and length
+    if len < 256 {
+        log::error!("sys_port_recv: buffer too small {} (must be >= 256)", len);
+        return -EINVAL;
+    }
+
+    if let Err(e) = validate_user_ptr(message, 256) {
+        return e;
+    }
+
+    // 2. Receive from port (blocks)
+    let port_id = scheduler::ipc::PortId(port_id);
+
+    let ipc_msg = match scheduler::ipc::port_recv(port_id) {
+        Ok(msg) => msg,
+        Err(e) => {
+            log::error!("sys_port_recv: failed for port {}: {:?}", port_id.0, e);
+            return match e {
+                scheduler::ipc::IpcError::PortNotFound => -EBADF,
+                scheduler::ipc::IpcError::NotOwner => -EINVAL,
+                _ => -EINVAL,
+            };
+        }
+    };
+
+    // 3. Copy message to userspace
+    let user_buffer = unsafe { slice::from_raw_parts_mut(message, 256) };
+    user_buffer.copy_from_slice(ipc_msg.as_bytes());
+
+    log::debug!("sys_port_recv: received message from port {}", port_id.0);
+    0
+}
+
+/// sys_port_try_recv - Try to receive a message from an IPC port (non-blocking)
+///
+/// Arguments: (port_id: usize, message: *mut u8, len: usize)
+/// Returns: 1 if message received, 0 if no message, or negative error code
+pub fn sys_port_try_recv(port_id: usize, message: *mut u8, len: usize) -> isize {
+    // 1. Validate message pointer and length
+    if len < 256 {
+        log::error!("sys_port_try_recv: buffer too small {} (must be >= 256)", len);
+        return -EINVAL;
+    }
+
+    if let Err(e) = validate_user_ptr(message, 256) {
+        return e;
+    }
+
+    // 2. Try to receive from port (non-blocking)
+    let port_id = scheduler::ipc::PortId(port_id);
+
+    match scheduler::ipc::port_try_recv(port_id) {
+        Ok(Some(ipc_msg)) => {
+            // 3. Copy message to userspace
+            let user_buffer = unsafe { slice::from_raw_parts_mut(message, 256) };
+            user_buffer.copy_from_slice(ipc_msg.as_bytes());
+
+            log::debug!("sys_port_try_recv: received message from port {}", port_id.0);
+            1 // Message received
+        }
+        Ok(None) => {
+            log::debug!("sys_port_try_recv: no message available on port {}", port_id.0);
+            0 // No message available
+        }
+        Err(e) => {
+            log::error!("sys_port_try_recv: failed for port {}: {:?}", port_id.0, e);
+            match e {
+                scheduler::ipc::IpcError::PortNotFound => -EBADF,
+                scheduler::ipc::IpcError::NotOwner => -EINVAL,
+                _ => -EINVAL,
+            }
+        }
+    }
+}
+
+/// sys_register_port_name - Register a well-known name for an IPC port
+///
+/// Arguments: (name: *const u8, port_id: usize)
+/// Returns: 0 on success, or negative error code
+pub fn sys_register_port_name(name: *const u8, port_id: usize) -> isize {
+    // 1. Validate name pointer
+    if let Err(e) = validate_user_ptr(name, 1) {
+        return e;
+    }
+
+    // 2. Copy name string from userspace (max 64 bytes)
+    let mut name_buf = [0u8; 64];
+    let mut name_len = 0;
+
+    unsafe {
+        for i in 0..64 {
+            let ch = *name.add(i);
+            if ch == 0 {
+                break;
+            }
+            name_buf[i] = ch;
+            name_len += 1;
+        }
+    }
+
+    if name_len == 0 {
+        return -EINVAL;
+    }
+
+    let name_str = core::str::from_utf8(&name_buf[..name_len])
+        .map_err(|_| -EINVAL)
+        .unwrap();
+
+    // 3. Convert to static str (this is a limitation - we can only register
+    // compile-time string constants. For dynamic strings, we'd need a different approach)
+    // For now, we only support "vfs" as a well-known name
+    let static_name: &'static str = match name_str {
+        "vfs" => "vfs",
+        _ => {
+            log::error!("sys_register_port_name: unsupported port name '{}'", name_str);
+            return -EINVAL;
+        }
+    };
+
+    // 4. Register port name
+    let port_id = scheduler::ipc::PortId(port_id);
+
+    match crate::vfs::register_port_name(static_name, port_id) {
+        Ok(()) => {
+            log::info!("sys_register_port_name: registered '{}' -> port {}", static_name, port_id.0);
+            0
+        }
+        Err(e) => {
+            log::error!("sys_register_port_name: failed: {}", e);
+            -EINVAL
+        }
+    }
+}
+
+/// sys_lookup_port_name - Look up an IPC port by well-known name
+///
+/// Arguments: (name: *const u8)
+/// Returns: port ID on success, or negative error code
+pub fn sys_lookup_port_name(name: *const u8) -> isize {
+    // 1. Validate name pointer
+    if let Err(e) = validate_user_ptr(name, 1) {
+        return e;
+    }
+
+    // 2. Copy name string from userspace (max 64 bytes)
+    let mut name_buf = [0u8; 64];
+    let mut name_len = 0;
+
+    unsafe {
+        for i in 0..64 {
+            let ch = *name.add(i);
+            if ch == 0 {
+                break;
+            }
+            name_buf[i] = ch;
+            name_len += 1;
+        }
+    }
+
+    if name_len == 0 {
+        return -EINVAL;
+    }
+
+    let name_str = match core::str::from_utf8(&name_buf[..name_len]) {
+        Ok(s) => s,
+        Err(_) => return -EINVAL,
+    };
+
+    // 3. Look up port name
+    match crate::vfs::lookup_port_name(name_str) {
+        Some(port_id) => {
+            log::debug!("sys_lookup_port_name: found '{}' -> port {}", name_str, port_id.0);
+            port_id.0 as isize
+        }
+        None => {
+            log::debug!("sys_lookup_port_name: port name '{}' not found", name_str);
+            -ENOENT
+        }
+    }
+}

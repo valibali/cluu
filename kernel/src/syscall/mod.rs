@@ -447,6 +447,13 @@ extern "C" fn syscall_handler_rust(
         SYS_GETPPID => sys_getppid(),
         SYS_SPAWN => sys_spawn(arg1 as *const u8, arg2 as *const *const u8),
         SYS_WAITPID => sys_waitpid(arg1 as i32, arg2 as *mut i32, arg3 as i32),
+        SYS_PORT_CREATE => sys_port_create(),
+        SYS_PORT_DESTROY => sys_port_destroy(arg1),
+        SYS_PORT_SEND => sys_port_send(arg1, arg2 as *const u8, arg3),
+        SYS_PORT_RECV => sys_port_recv(arg1, arg2 as *mut u8, arg3),
+        SYS_PORT_TRY_RECV => sys_port_try_recv(arg1, arg2 as *mut u8, arg3),
+        SYS_REGISTER_PORT_NAME => sys_register_port_name(arg1 as *const u8, arg2),
+        SYS_LOOKUP_PORT_NAME => sys_lookup_port_name(arg1 as *const u8),
         _ => {
             log::warn!("Unknown syscall number: {}", syscall_num);
             -ENOSYS

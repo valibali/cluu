@@ -43,6 +43,7 @@ mod scheduler;
 mod syscall;
 mod tests;
 mod utils;
+mod vfs;
 
 #[repr(C, align(16))]
 pub struct AlignedBspStack([u8; 64 * 1024]);
@@ -168,7 +169,11 @@ pub extern "C" fn kstart() -> ! {
     // Step 10.5: Initialize IPC system
     scheduler::ipc::init();
 
-    // Step 10.6: Initialize SYSCALL/SYSRET infrastructure
+    // Step 10.6: Initialize VFS subsystem
+    vfs::init();
+    log::info!("VFS subsystem initialized (waiting for VFS server)");
+
+    // Step 10.7: Initialize SYSCALL/SYSRET infrastructure
     syscall::init();
     log::info!("SYSCALL/SYSRET infrastructure initialized");
 

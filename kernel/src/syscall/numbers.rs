@@ -122,3 +122,69 @@ pub const SYS_WAITPID: usize = 61;
 /// Arguments: () -> isize
 /// Returns: parent process ID, or 0 if orphaned
 pub const SYS_GETPPID: usize = 110;
+
+/// Group D: IPC (Inter-Process Communication) syscalls
+///
+/// These syscalls provide port-based message passing for microkernel IPC.
+/// Used by userspace servers (VFS, device drivers, etc.) to communicate
+/// with kernel and other processes.
+
+/// Create a new IPC port
+///
+/// Arguments: () -> isize
+/// Returns: port ID on success, or negative error code
+///
+/// The calling thread becomes the owner of the port and is the only
+/// thread that can receive messages from it. Any thread can send to the port.
+pub const SYS_PORT_CREATE: usize = 1000;
+
+/// Destroy an IPC port
+///
+/// Arguments: (port_id: usize) -> isize
+/// Returns: 0 on success, or negative error code
+///
+/// Only the port owner can destroy a port. All waiting threads are woken.
+pub const SYS_PORT_DESTROY: usize = 1001;
+
+/// Send a message to an IPC port (non-blocking)
+///
+/// Arguments: (port_id: usize, message: *const u8, len: usize) -> isize
+/// Returns: 0 on success, or negative error code
+///
+/// The message is copied into the port's queue. If queue is full, returns error.
+/// Message must be exactly 256 bytes.
+pub const SYS_PORT_SEND: usize = 1002;
+
+/// Receive a message from an IPC port (blocking)
+///
+/// Arguments: (port_id: usize, message: *mut u8, len: usize) -> isize
+/// Returns: 0 on success, or negative error code
+///
+/// Only the port owner can receive. Blocks if no messages available.
+/// Message buffer must be at least 256 bytes.
+pub const SYS_PORT_RECV: usize = 1003;
+
+/// Try to receive a message from an IPC port (non-blocking)
+///
+/// Arguments: (port_id: usize, message: *mut u8, len: usize) -> isize
+/// Returns: 1 if message received, 0 if no message, or negative error code
+///
+/// Only the port owner can receive. Returns immediately if no messages available.
+pub const SYS_PORT_TRY_RECV: usize = 1004;
+
+/// Register a well-known name for an IPC port
+///
+/// Arguments: (name: *const u8, port_id: usize) -> isize
+/// Returns: 0 on success, or negative error code
+///
+/// Allows services to register their ports with well-known names (e.g., "vfs")
+/// so clients can find them by name instead of needing to know the port ID.
+pub const SYS_REGISTER_PORT_NAME: usize = 1005;
+
+/// Look up an IPC port by well-known name
+///
+/// Arguments: (name: *const u8) -> isize
+/// Returns: port ID on success, or negative error code
+///
+/// Looks up a port that was registered with SYS_REGISTER_PORT_NAME.
+pub const SYS_LOOKUP_PORT_NAME: usize = 1006;
