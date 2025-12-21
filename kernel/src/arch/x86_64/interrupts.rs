@@ -42,7 +42,7 @@ pub fn are_enabled() -> bool {
 }
 
 /// Execute a closure with interrupts disabled
-/// 
+///
 /// This is useful for creating atomic sections of code that must not
 /// be interrupted by hardware events.
 pub fn without_interrupts<F, R>(f: F) -> R
@@ -50,4 +50,40 @@ where
     F: FnOnce() -> R,
 {
     interrupts::without_interrupts(f)
+}
+
+/// RAII guard that disables interrupts for its lifetime
+///
+/// Interrupts are disabled when this guard is created and automatically
+/// re-enabled when it's dropped. This ensures interrupts are always restored
+/// even if the code panics.
+///
+/// # Example
+/// ```
+/// let _guard = DisableInterrupts::new();
+/// // Critical section - interrupts are disabled
+/// // Interrupts automatically re-enabled when _guard is dropped
+/// ```
+pub struct DisableInterrupts {
+    were_enabled: bool,
+}
+
+impl DisableInterrupts {
+    /// Create a new interrupt guard, disabling interrupts
+    pub fn new() -> Self {
+        let were_enabled = are_enabled();
+        if were_enabled {
+            disable();
+        }
+        Self { were_enabled }
+    }
+}
+
+impl Drop for DisableInterrupts {
+    fn drop(&mut self) {
+        // Only re-enable if they were enabled before
+        if self.were_enabled {
+            enable();
+        }
+    }
 }

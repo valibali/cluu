@@ -34,12 +34,24 @@ impl log::Log for CluuLogger {
     /// Logs the record by printing it to the console.
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            serial_println!("[{}] {}", record.level(), record.args());
+            // During early boot (before scheduler/heap init), write directly to serial
+            // to avoid using format!() which allocates on the heap
+            if !crate::scheduler::is_scheduler_enabled() {
+                serial_println!("[{}] {}", record.level(), record.args());
+            } else {
+                // Normal operation: use ring buffer to prevent deadlocks
+                // Use \r\n for proper serial output (carriage return + line feed)
+                use alloc::format;
+                let message = format!("[{}] {}\r\n", record.level(), record.args());
+                super::log_buffer::write_log(&message);
+            }
         }
     }
 
-    /// Flushes the logger (no-op in this case).
-    fn flush(&self) {}
+    /// Flushes the logger - drains ring buffer to serial
+    fn flush(&self) {
+        super::log_buffer::flush();
+    }
 }
 
 /// The CluuLogger instance used for logging.

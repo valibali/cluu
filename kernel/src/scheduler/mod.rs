@@ -121,6 +121,14 @@ static SCHEDULER_ENABLED: AtomicBool = AtomicBool::new(false);
 /// When true, timer interrupts will not perform context switches
 static PREEMPTION_DISABLED: AtomicBool = AtomicBool::new(false);
 
+/// Check if the scheduler is enabled
+///
+/// Returns true if the scheduler has been initialized and is running.
+/// During early boot (before scheduler initialization), this returns false.
+pub fn is_scheduler_enabled() -> bool {
+    SCHEDULER_ENABLED.load(Ordering::SeqCst)
+}
+
 /// Interrupt frame pushed by CPU during interrupt
 ///
 /// When an interrupt occurs, the x86_64 CPU automatically pushes these registers
@@ -821,6 +829,10 @@ fn idle_thread_main() {
         }
         idle_counter = idle_counter.wrapping_add(1);
 
+        // Flush log buffer to serial port
+        // This ensures buffered log messages are written out
+        crate::utils::debug::log_buffer::flush();
+
         // Halt CPU until next interrupt (power saving)
         x86_64::instructions::hlt();
     }
@@ -923,6 +935,9 @@ pub fn yield_now() {
     if !crate::arch::x86_64::interrupts::are_enabled() {
         return;
     }
+
+    // Flush log buffer before yielding to ensure logs appear promptly
+    crate::utils::debug::log_buffer::flush();
 
     // Trigger software interrupt to perform context switch
     // This uses the same interrupt-based mechanism as timer preemption
