@@ -55,6 +55,10 @@ pub struct Thread {
 
     // Process this thread belongs to
     pub process_id: ProcessId,
+
+    // Exit code (set when thread terminates)
+    // For a process's main/last thread, this becomes the process exit code
+    pub exit_code: Option<i32>,
 }
 
 impl Thread {
@@ -75,6 +79,7 @@ impl Thread {
             last_scheduled_time: 0,
             sleep_until_ms: 0,
             process_id,
+            exit_code: None,
         }
     }
 }

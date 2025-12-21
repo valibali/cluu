@@ -119,3 +119,24 @@ pub fn user_code_selector() -> SegmentSelector {
 pub fn user_data_selector() -> SegmentSelector {
     GDT.1.user_data_selector
 }
+
+/// Update the TSS RSP0 field for userspace thread support
+///
+/// This must be called when switching to a userspace thread to ensure
+/// the CPU knows where to find the kernel stack when handling interrupts/
+/// exceptions while in Ring 3.
+///
+/// # Safety
+/// Must be called with a valid kernel stack pointer. This function uses
+/// unsafe code to mutate the static TSS, but it's safe because:
+/// - Only called from the scheduler with interrupts disabled
+/// - TSS RSP0 is only used by hardware during privilege level transitions
+pub fn set_tss_rsp0(kernel_stack_ptr: u64) {
+    // TSS is static so we can safely get a mutable pointer to it
+    // Safety: We're the only ones modifying RSP0, and this is IRQ-safe
+    unsafe {
+        // Dereference the lazy_static with *TSS, then take reference with &
+        let tss_ptr = &*TSS as *const TaskStateSegment as *mut TaskStateSegment;
+        (*tss_ptr).privilege_stack_table[0] = VirtAddr::new(kernel_stack_ptr);
+    }
+}

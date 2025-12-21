@@ -168,8 +168,10 @@ impl AddressSpace {
     /// we provide one to enable testing of sys_brk from kernel mode.
     pub fn new_kernel() -> Self {
         // For kernel processes, we use the current page table
-        // In the future, we'll get this from Cr3::read()
-        let page_table_root = PhysAddr::new(0); // Placeholder
+        // Read the actual CR3 value so sys_spawn can switch to it
+        use x86_64::registers::control::Cr3;
+        let (current_pml4_frame, _) = Cr3::read();
+        let page_table_root = current_pml4_frame.start_address();
 
         // Kernel doesn't have user segments
         let null_region = MemoryRegion::new(
@@ -223,15 +225,15 @@ impl AddressSpace {
         }
 
         // Copy kernel mappings from current page table
-        // We only need to copy the upper half (entries 256-511) for kernel space.
+        // We need to copy entries 1-511 (skip entry 0).
         //
-        // DO NOT copy entry 0 (identity-mapped physical memory) because:
-        // 1. Userspace doesn't need identity mapping
-        // 2. The kernel's entry 0 likely uses hugepages (2 MiB pages)
-        // 3. Copying hugepages would cause MapToError::ParentEntryHugePage when
-        //    we try to map 4 KiB pages in userspace (like 0x400000 for text segment)
-        // 4. We access userspace page tables via the KERNEL's identity mapping,
-        //    not via the userspace's own page table
+        // Entry 0 is identity-mapped physical memory, which userspace doesn't need.
+        // Entries 1-255 contain kernel code/data that MUST be accessible for SYSCALL.
+        // Entries 256-511 are the high half kernel mappings.
+        //
+        // CRITICAL: SYSCALL doesn't switch CR3! When SYSCALL executes, we're still
+        // using userspace page tables. The syscall_entry code needs to access kernel
+        // data (like SYSCALL_SCRATCH), so kernel mappings MUST be present.
         unsafe {
             use x86_64::registers::control::Cr3;
             let (current_pml4_frame, _) = Cr3::read();
@@ -239,9 +241,9 @@ impl AddressSpace {
             let current_pml4_ptr = current_pml4_phys.as_u64() as *const u64;
             let new_pml4_ptr = pml4_phys.as_u64() as *mut u64;
 
-            // Copy upper half entries (256-511) for kernel space only
-            // Leave lower half (0-255) empty for userspace to use
-            for i in 256..512 {
+            // Copy ALL kernel entries (1-511) except entry 0 (identity mapping)
+            // This ensures kernel code/data is accessible during SYSCALL handling
+            for i in 1..512 {
                 let entry = core::ptr::read_volatile(current_pml4_ptr.add(i));
                 core::ptr::write_volatile(new_pml4_ptr.add(i), entry);
             }
@@ -277,12 +279,10 @@ impl AddressSpace {
     /// This is called during context switches between processes.
     ///
     /// CRITICAL: This invalidates the TLB, costing ~100 cycles to refill.
+    ///
+    /// Note: The scheduler only calls this when switching to a DIFFERENT process,
+    /// so we don't need to check if we're already using this page table.
     pub fn switch_to(&self) {
-        // For kernel processes, don't switch (already using kernel tables)
-        if self.page_table_root.as_u64() == 0 {
-            return;
-        }
-
         // Switch to this process's page table by updating CR3
         unsafe {
             use x86_64::registers::control::Cr3;
@@ -327,9 +327,18 @@ impl core::fmt::Debug for AddressSpace {
 
 impl Drop for AddressSpace {
     fn drop(&mut self) {
-        // Only clean up userspace address spaces (page_table_root != 0)
+        // Only clean up userspace address spaces
         // Kernel address spaces use the global kernel page table and should not be freed
-        if self.page_table_root.as_u64() == 0 {
+        //
+        // We detect kernel address spaces by checking if the page_table_root matches
+        // the current CR3 (kernel page table). If it does, this is a kernel process
+        // and we shouldn't free its page table.
+        use x86_64::registers::control::Cr3;
+        let (current_pml4_frame, _) = Cr3::read();
+        let current_page_table = current_pml4_frame.start_address();
+
+        // If this is the kernel page table, don't free it
+        if self.page_table_root == current_page_table {
             return;
         }
 

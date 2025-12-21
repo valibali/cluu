@@ -63,6 +63,9 @@ pub struct Process {
     /// Unique process identifier
     pub id: ProcessId,
 
+    /// Parent process ID (None for kernel/init process)
+    pub parent_id: Option<ProcessId>,
+
     /// Human-readable process name (for debugging)
     pub name: String,
 
@@ -86,9 +89,11 @@ impl Process {
     /// Create a new process with the specified address space
     ///
     /// This is the general constructor used for both kernel and userspace processes.
+    /// The parent_id should be set separately after creation using set_parent().
     pub fn new(id: ProcessId, name: &str, address_space: AddressSpace) -> Self {
         Process {
             id,
+            parent_id: None,
             name: String::from(name),
             state: ProcessState::Running,
             fd_table: FileDescriptorTable::new(),
@@ -104,12 +109,14 @@ impl Process {
     /// - Run in Ring 0 (kernel mode)
     /// - Use the kernel address space
     /// - Have no user-accessible pages
+    /// - Have no parent (parent_id = None)
     ///
     /// This is used for kernel threads that run during boot
     /// and for kernel services.
     pub fn new_kernel(id: ProcessId, name: String) -> Self {
         Process {
             id,
+            parent_id: None,
             name,
             state: ProcessState::Running,
             fd_table: FileDescriptorTable::new(),
@@ -162,6 +169,21 @@ impl Process {
     /// Get number of threads in this process
     pub fn thread_count(&self) -> usize {
         self.threads.len()
+    }
+
+    /// Set the parent process ID
+    ///
+    /// This is called when spawning a child process to establish the
+    /// parent-child relationship. Used for wait/waitpid semantics.
+    pub fn set_parent(&mut self, parent_id: ProcessId) {
+        self.parent_id = Some(parent_id);
+    }
+
+    /// Get the parent process ID
+    ///
+    /// Returns None if this is a kernel process or orphaned.
+    pub fn parent(&self) -> Option<ProcessId> {
+        self.parent_id
     }
 }
 

@@ -73,7 +73,7 @@ fn test_ipc_receiver() {
     }
 
     log::info!("[IPC Test] Receiver test complete!");
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 fn test_ipc_sender() {
@@ -99,7 +99,7 @@ fn test_ipc_sender() {
     }
 
     log::info!("[IPC Test] Sender test complete!");
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 /// Test 2: Blocking behavior - receiver blocks when no messages
@@ -116,7 +116,7 @@ fn test_ipc_blocking_receiver() {
     log::info!("[IPC Test Blocking] ✓ Received message: {}", msg.get_u64(0));
 
     log::info!("[IPC Test Blocking] Complete!");
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 #[inline(never)]
@@ -132,7 +132,7 @@ fn test_ipc_delayed_sender() {
     scheduler::port_send(port_id, msg).expect("Failed to send");
     log::info!("[IPC Test Blocking] ✓ Message sent, receiver should wake!");
 
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 /// Test 3: Queue full handling
@@ -176,7 +176,7 @@ fn test_ipc_queue_full() {
     log::info!("[IPC Test QueueFull] ✓ Send succeeded after freeing space!");
 
     log::info!("[IPC Test QueueFull] Complete!");
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 /// Test 4: Multiple senders, one receiver
@@ -200,7 +200,7 @@ fn test_ipc_multi_sender(sender_id: u64) {
     }
 
     log::info!("[IPC Test Multi] Sender {} complete!", sender_id);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 fn test_ipc_multi_receiver() {
@@ -217,7 +217,7 @@ fn test_ipc_multi_receiver() {
     }
 
     log::info!("[IPC Test Multi] Receiver complete!");
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 /// Spawn all IPC tests
@@ -311,7 +311,7 @@ fn test_fd_thread() {
         retries -= 1;
         if retries == 0 {
             log::error!("[FD Test] FD table not initialized after retries!");
-            scheduler::exit_thread();
+            scheduler::exit_thread(0);
         }
 
         // Wait a bit for initialization to complete
@@ -323,7 +323,7 @@ fn test_fd_thread() {
         Ok(device) => device,
         Err(e) => {
             log::error!("[FD Test] Failed to get stdout: {:?}", e);
-            scheduler::exit_thread();
+            scheduler::exit_thread(0);
         }
     };
 
@@ -331,7 +331,7 @@ fn test_fd_thread() {
         Ok(device) => device,
         Err(e) => {
             log::error!("[FD Test] Failed to get stdin: {:?}", e);
-            scheduler::exit_thread();
+            scheduler::exit_thread(0);
         }
     };
 
@@ -390,7 +390,7 @@ fn test_fd_thread() {
     log::info!("[FD Test] (Test would block on stdin.read() until Enter is pressed)");
 
     log::info!("[FD Test] All tests complete!");
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 /// Spawn FD layer test
@@ -503,7 +503,7 @@ fn stress_receiver_1() {
     log::info!("[Stress-R1] Complete! Received 25 messages");
     scheduler::port_destroy(port).ok();
     STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 /// Receiver for stress test port 2
@@ -531,7 +531,7 @@ fn stress_receiver_2() {
     log::info!("[Stress-R2] Complete! Received 25 messages");
     scheduler::port_destroy(port).ok();
     STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 /// Receiver for stress test port 3
@@ -559,7 +559,7 @@ fn stress_receiver_3() {
     log::info!("[Stress-R3] Complete! Received 25 messages");
     scheduler::port_destroy(port).ok();
     STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 /// Generic sender implementation
@@ -572,7 +572,7 @@ fn stress_send_messages(port_atomic: &AtomicUsize, sender_id: u64, port_name: &s
     let port_id = scheduler::PortId(port_atomic.load(Ordering::SeqCst));
     if port_id.0 == 0 {
         log::error!("[Stress-S{}] Port not created yet!", port_name);
-        scheduler::exit_thread();
+        scheduler::exit_thread(0);
     }
 
     // Send 5 messages with sleeps in between
@@ -596,7 +596,7 @@ fn stress_send_messages(port_atomic: &AtomicUsize, sender_id: u64, port_name: &s
 
     log::debug!("[Stress-S{}] Sender {} complete", port_name, sender_id);
     STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 // Sender wrapper functions for port 1 (need unique functions for spawn_thread)
@@ -658,7 +658,7 @@ fn stress_compute_impl(id: u64) {
 
     log::debug!("[Stress-C{}] Compute thread {} complete", id, id);
     STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 // Compute thread wrappers (need unique functions for spawn_thread)
@@ -712,7 +712,7 @@ fn stress_monitor() {
         log::warn!("=== STRESS TEST: ⚠ INCOMPLETE - {}/{} threads finished ===", final_count, EXPECTED_COMPLETIONS);
     }
 
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 /// ===============================
@@ -830,7 +830,7 @@ fn cont_stress_ipc_recv_1() {
 
     scheduler::port_destroy(port).ok();
     STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 fn cont_stress_ipc_recv_2() {
@@ -846,7 +846,7 @@ fn cont_stress_ipc_recv_2() {
 
     scheduler::port_destroy(port).ok();
     STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 // Continuous stress IPC senders
@@ -856,7 +856,7 @@ fn cont_stress_send_to_port(port_atomic: &AtomicUsize, sender_id: u64) {
     let port_id = scheduler::PortId(port_atomic.load(Ordering::SeqCst));
     if port_id.0 == 0 {
         STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-        scheduler::exit_thread();
+        scheduler::exit_thread(0);
     }
 
     // Send 5 messages
@@ -871,7 +871,7 @@ fn cont_stress_send_to_port(port_atomic: &AtomicUsize, sender_id: u64) {
     }
 
     STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 #[inline(never)]
@@ -907,7 +907,7 @@ fn cont_stress_fd_test() {
     }
 
     STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 // Continuous stress compute thread
@@ -928,7 +928,7 @@ fn cont_stress_compute() {
     }
 
     STRESS_COMPLETION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    scheduler::exit_thread();
+    scheduler::exit_thread(0);
 }
 
 // ===============================

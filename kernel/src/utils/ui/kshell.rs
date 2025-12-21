@@ -200,6 +200,7 @@ impl KShell {
             "quick-test" | "smoke" => Self::cmd_quick_smoke(),
             "stress" | "test-stress" => Self::cmd_stress_test(),
             "stress-forever" | "stress-continuous" => Self::cmd_stress_forever(),
+            "spawn-test" | "spawn_test" => Self::cmd_spawn_test(),
             "" => {}
             _ => {
                 console::write_colored("Unknown command: ", Color::RED, Color::BLACK);
@@ -238,6 +239,7 @@ impl KShell {
                 "stress-forever",
                 "Run continuous stress test (runs forever)",
             ),
+            ("spawn-test", "Test process spawning (spawn/waitpid syscalls)"),
             ("reboot", "Reboot the system"),
         ];
 
@@ -784,6 +786,46 @@ impl KShell {
             Color::BLACK,
         );
         crate::tests::spawn_stress_test();
+    }
+
+    fn cmd_spawn_test() {
+        console::write_colored(
+            "Starting Spawn Test (userspace)\n",
+            Color::CYAN,
+            Color::BLACK,
+        );
+
+        // Read spawn_test binary from initrd
+        let binary = match crate::initrd::read_file("bin/spawn_test") {
+            Ok(data) => data,
+            Err(e) => {
+                console::write_colored("ERROR: Failed to read bin/spawn_test from initrd: ", Color::RED, Color::BLACK);
+                console::write_str(e);
+                console::write_str("\n");
+                return;
+            }
+        };
+
+        // Spawn the process
+        match crate::loaders::elf::spawn_elf_process(binary, "spawn_test", &[]) {
+            Ok((process_id, thread_id)) => {
+                console::write_colored("✓ Spawn test process started\n", Color::GREEN, Color::BLACK);
+                console::write_colored("  Process ID: ", Color::WHITE, Color::BLACK);
+                console::write_str(&alloc::format!("{:?}\n", process_id));
+                console::write_colored("  Thread ID: ", Color::WHITE, Color::BLACK);
+                console::write_str(&alloc::format!("{:?}\n", thread_id));
+                console::write_str("\n");
+
+                // Yield to let the test run
+                for _ in 0..100 {
+                    crate::scheduler::yield_now();
+                }
+            }
+            Err(e) => {
+                console::write_colored("✗ Failed to spawn test process: ", Color::RED, Color::BLACK);
+                console::write_str(&alloc::format!("{:?}\n", e));
+            }
+        }
     }
 
     fn cmd_stress_forever() {

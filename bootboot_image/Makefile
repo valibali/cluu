@@ -9,10 +9,13 @@ all: ../utilies/mkbootimg/mkbootimg initdir disk
 ../utilies/mkbootimg/mkbootimg:
 	@make -C ../utilies/mkbootimg all
 
-# create an initial ram disk image with the kernel inside
+# create an initial ram disk image with the kernel and userspace binaries inside
 initdir:
-	@mkdir initrd initrd/sys 2>/dev/null | true
+	@mkdir -p initrd/sys initrd/bin 2>/dev/null | true
 	cp ../kernel/cluu-kernel-rust.x86_64.elf initrd/sys/core
+	@# Copy userspace binaries if they exist
+	@cp ../userspace/hello/hello initrd/bin/hello 2>/dev/null || echo "Warning: hello binary not found"
+	@cp ../userspace/spawn_test/spawn_test initrd/bin/spawn_test 2>/dev/null || echo "Warning: spawn_test binary not found"
 
 # create hybrid disk / cdrom image or ROM image
 disk: ../utilies/mkbootimg/mkbootimg initdir mkbootimg.json

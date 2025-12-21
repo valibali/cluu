@@ -414,7 +414,12 @@ impl Scheduler {
     /// Clean up terminated threads
     ///
     /// Removes all terminated threads from the scheduler, freeing their resources.
-    /// This should be called periodically by the reaper thread.
+    /// This is called automatically during context switches (yield_now) when a
+    /// terminated thread is detected.
+    ///
+    /// For processes that have no remaining threads, marks them as zombie processes
+    /// with their exit code. Zombie processes remain in the process table until
+    /// reaped by sys_waitpid.
     ///
     /// # Arguments
     /// * `current_thread_id` - The currently running thread (must not be cleaned up)
@@ -428,7 +433,7 @@ impl Scheduler {
     ) -> usize {
         // First, identify threads to clean up
         let mut to_remove = alloc::vec::Vec::new();
-        let mut processes_to_check = alloc::collections::BTreeSet::new();
+        let mut processes_to_check = alloc::collections::BTreeMap::new();
 
         for thread in &self.threads {
             if thread.state == ThreadState::Terminated
@@ -436,7 +441,8 @@ impl Scheduler {
                 && thread.id.0 != 0
             {
                 to_remove.push((thread.id, thread.name.clone(), thread.process_id));
-                processes_to_check.insert(thread.process_id);
+                // Store exit code for each process (last thread's exit code wins)
+                processes_to_check.insert(thread.process_id, thread.exit_code.unwrap_or(0));
             }
         }
 
@@ -452,8 +458,8 @@ impl Scheduler {
         self.threads
             .retain(|t| !to_remove.iter().any(|(id, _, _)| t.id == *id));
 
-        // Check if any processes have no remaining threads and clean them up
-        for process_id in processes_to_check {
+        // Check if any processes have no remaining threads and mark them as zombies
+        for (process_id, exit_code) in processes_to_check {
             // Skip kernel process (PID 0)
             if process_id.0 == 0 {
                 continue;
@@ -463,20 +469,20 @@ impl Scheduler {
             let has_threads = self.threads.iter().any(|t| t.process_id == process_id);
 
             if !has_threads {
-                // No threads left in this process - clean it up
-                if let Some(process) = self.processes.remove(&process_id) {
-                    if log_cleanup {
-                        log::info!(
-                            "Reaper: Cleaning up process {} ({})",
-                            process_id.0,
-                            process.name
-                        );
+                // No threads left in this process - mark as zombie
+                // The process will remain in the table until reaped by sys_waitpid
+                if let Some(process) = self.processes.get_mut(&process_id) {
+                    if !process.is_zombie() {
+                        if log_cleanup {
+                            log::info!(
+                                "Reaper: Marking process {} ({}) as ZOMBIE with exit code {}",
+                                process_id.0,
+                                process.name,
+                                exit_code
+                            );
+                        }
+                        process.exit(exit_code); // Mark as zombie with thread's exit code
                     }
-
-                    // The Process Drop implementation will clean up:
-                    // - Address space (page tables, mapped pages)
-                    // - File descriptors
-                    drop(process);
                 }
             }
         }
@@ -672,6 +678,51 @@ where
         let mut scheduler_guard = SCHEDULER.lock();
         let scheduler = scheduler_guard.as_mut()?;
         scheduler.get_process_mut(process_id).map(f)
+    })
+}
+
+/// Reap a zombie process (remove it from the process table)
+///
+/// This is called by sys_waitpid after reading the exit code of a zombie process.
+/// The process and all its resources (address space, file descriptors) are freed.
+///
+/// # Arguments
+/// * `process_id` - The PID of the zombie process to reap
+///
+/// # Returns
+/// * `true` if the process was reaped
+/// * `false` if the process doesn't exist or is not a zombie
+pub fn reap_process(process_id: ProcessId) -> bool {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut scheduler_guard = SCHEDULER.lock();
+        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
+
+        // Check if process exists and is a zombie
+        let is_zombie = scheduler
+            .processes
+            .get(&process_id)
+            .map(|p| p.is_zombie())
+            .unwrap_or(false);
+
+        if !is_zombie {
+            return false;
+        }
+
+        // Remove the process from the table
+        // The Process Drop implementation will clean up:
+        // - Address space (page tables, mapped pages)
+        // - File descriptors
+        if let Some(process) = scheduler.processes.remove(&process_id) {
+            log::info!(
+                "Reaped zombie process {} ({})",
+                process_id.0,
+                process.name
+            );
+            drop(process);
+            true
+        } else {
+            false
+        }
     })
 }
 
@@ -948,21 +999,26 @@ pub fn wake_thread(thread_id: ThreadId) {
 extern "C" fn thread_exit_trampoline() -> ! {
     // Thread returned instead of calling exit_thread() - clean up properly
     log::info!("!!! Thread returned to trampoline - calling exit_thread()");
-    exit_thread();
+    exit_thread(0); // Thread returned normally, exit with code 0
 }
 
-/// Terminate the current thread
+/// Terminate the current thread with an exit code
 ///
-/// Marks the current thread as Terminated and yields. The thread will not
-/// be scheduled again. This is the proper way for a thread to exit.
+/// Marks the current thread as Terminated, stores the exit code, and yields.
+/// The thread will not be scheduled again. This is the proper way for a thread
+/// to exit.
 ///
-/// **Important:** The thread's resources (stack, etc.) are not immediately freed.
-/// In a full implementation, you would need a reaper thread to clean up
-/// terminated threads. For now, they remain in the thread list as Terminated.
+/// **Cleanup:** Thread resources (stack, etc.) are freed on the next context
+/// switch when cleanup_terminated_threads() runs. If this is the last thread
+/// in a process, the process is marked as zombie with this thread's exit code.
+/// The zombie process remains in memory until reaped by sys_waitpid.
+///
+/// # Arguments
+/// * `exit_code` - The exit code for the thread (becomes process exit code if last thread)
 ///
 /// # Panics
 /// Panics if called from the idle thread (thread 0).
-pub fn exit_thread() -> ! {
+pub fn exit_thread(exit_code: i32) -> ! {
     let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
 
     if current_id.0 == 0 {
@@ -970,18 +1026,20 @@ pub fn exit_thread() -> ! {
     }
 
     log::info!(
-        "Thread {} ({}) terminating",
+        "Thread {} ({}) terminating with exit code {}",
         current_id.0,
-        get_thread_name(current_id).unwrap_or_else(|| "unknown".to_string())
+        get_thread_name(current_id).unwrap_or_else(|| "unknown".to_string()),
+        exit_code
     );
 
-    // Mark thread as terminated
+    // Mark thread as terminated and store exit code
     // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut sched_guard = SCHEDULER.lock();
         if let Some(scheduler) = sched_guard.as_mut() {
             if let Some(thread) = scheduler.get_thread_mut(current_id) {
                 thread.state = ThreadState::Terminated;
+                thread.exit_code = Some(exit_code);
                 // Thread will not be added back to ready queue
             }
         }
@@ -1450,6 +1508,23 @@ pub extern "C" fn schedule_from_interrupt(
     // Safety: We're in an interrupt handler, so interrupts are already disabled
     // The stack pointer is guaranteed valid because we just retrieved it from the thread
     crate::syscall::set_kernel_stack(next_stack_top);
+
+    // CRITICAL: Also update TSS RSP0 for Ring 3 → Ring 0 transitions
+    // When a userspace thread (Ring 3) gets interrupted or makes a syscall,
+    // the CPU needs to know where the kernel stack is. For SYSCALL, we use
+    // set_kernel_stack() above. For interrupts/exceptions, the CPU uses TSS RSP0.
+    crate::arch::x86_64::gdt::set_tss_rsp0(next_stack_top);
+
+    // DEBUGGING: Log values that will be loaded by IRETQ (DISABLED)
+    // unsafe {
+    //     let frame = &(*next_ctx_ptr).iret_frame;
+    //     irq_log::irq_log_simple("About to IRETQ to next thread:");
+    //     irq_log::irq_log_hex("  RIP=", frame.rip);
+    //     irq_log::irq_log_hex("  CS=", frame.cs);
+    //     irq_log::irq_log_hex("  RFLAGS=", frame.rflags);
+    //     irq_log::irq_log_hex("  RSP=", frame.rsp);
+    //     irq_log::irq_log_hex("  SS=", frame.ss);
+    // }
 
     // Return pointer to next thread's context (guaranteed valid)
     next_ctx_ptr

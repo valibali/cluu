@@ -22,6 +22,8 @@ pub const EFAULT: isize = 14;   // Bad address (invalid pointer from userspace)
 pub const EINVAL: isize = 22;   // Invalid argument
 pub const ENOMEM: isize = 12;   // Out of memory
 pub const ESPIPE: isize = 29;   // Illegal seek (e.g., seek on TTY)
+pub const ENOENT: isize = 2;    // No such file or directory
+pub const ECHILD: isize = 10;   // No child processes
 
 /// Group A: Console I/O syscalls (required for basic userspace)
 ///
@@ -87,3 +89,36 @@ pub const SYS_EXIT: usize = 60;
 /// Arguments: () -> isize
 /// Returns: 0 on success
 pub const SYS_YIELD: usize = 158;  // sched_yield in Linux
+
+/// Group C: Process management syscalls
+
+/// Get current process ID
+///
+/// Arguments: () -> isize
+/// Returns: process ID (always >= 0)
+pub const SYS_GETPID: usize = 39;
+
+/// Spawn new process from ELF binary
+///
+/// Arguments: (path: *const u8, argv: *const *const u8) -> isize
+/// Returns: child PID on success, or negative error code
+///
+/// This syscall loads an ELF binary from initrd, creates a new process
+/// with fresh address space, and returns the child PID to the parent.
+/// Unlike fork/exec, this is a single-step process creation.
+pub const SYS_SPAWN: usize = 57;
+
+/// Wait for process to change state
+///
+/// Arguments: (pid: i32, status: *mut i32, options: i32) -> isize
+/// Returns: PID of child that changed state, or negative error code
+///
+/// If child has exited, writes exit status to *status and reaps zombie.
+/// If child still running, blocks until child exits (if options=0).
+pub const SYS_WAITPID: usize = 61;
+
+/// Get parent process ID
+///
+/// Arguments: () -> isize
+/// Returns: parent process ID, or 0 if orphaned
+pub const SYS_GETPPID: usize = 110;

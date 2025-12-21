@@ -267,7 +267,7 @@ pub fn sys_brk(addr: *mut u8) -> isize {
 /// Does not return
 pub fn sys_exit(status: i32) -> ! {
     log::info!("Thread exiting with status {}", status);
-    scheduler::exit_thread();
+    scheduler::exit_thread(status);
 }
 
 /// sys_yield - Yield CPU to scheduler
@@ -277,4 +277,258 @@ pub fn sys_exit(status: i32) -> ! {
 pub fn sys_yield() -> isize {
     scheduler::yield_now();
     0
+}
+
+/// sys_getpid - Get current process ID
+///
+/// Arguments: ()
+/// Returns: process ID (always >= 0)
+pub fn sys_getpid() -> isize {
+    log::debug!("sys_getpid called");
+    let result = scheduler::with_current_process(|process| {
+        let pid = process.id.as_usize() as isize;
+        log::debug!("sys_getpid: returning PID {}", pid);
+        pid
+    });
+
+    let ret = result.unwrap_or(-EFAULT);
+    log::debug!("sys_getpid: final return value {}", ret);
+    ret
+}
+
+/// sys_getppid - Get parent process ID
+///
+/// Arguments: ()
+/// Returns: parent process ID, or 0 if no parent
+pub fn sys_getppid() -> isize {
+    let result = scheduler::with_current_process(|process| {
+        match process.parent() {
+            Some(parent_id) => parent_id.as_usize() as isize,
+            None => 0, // No parent (kernel process or orphaned)
+        }
+    });
+
+    result.unwrap_or(-EFAULT)
+}
+
+/// sys_spawn - Spawn new process from ELF binary
+///
+/// Arguments: (path: *const u8, argv: *const *const u8)
+/// Returns: child PID on success, or negative error code
+///
+/// This syscall loads an ELF binary from initrd, creates a new process
+/// with fresh address space, and returns the child PID to the parent.
+pub fn sys_spawn(path: *const u8, _argv: *const *const u8) -> isize {
+    // TODO: Parse argv array when we implement proper argv passing
+
+    // 1. Validate path pointer
+    if let Err(e) = validate_user_ptr(path, 1) {
+        return e;
+    }
+
+    // 2. Copy path from userspace to kernel buffer
+    // Read until NULL terminator (max 256 chars)
+    let mut path_buf = [0u8; 256];
+    let mut path_len = 0;
+
+    unsafe {
+        for i in 0..path_buf.len() {
+            let c = *path.add(i);
+            if c == 0 {
+                break;
+            }
+            path_buf[i] = c;
+            path_len = i + 1;
+        }
+    }
+
+    if path_len == 0 {
+        return -EINVAL; // Empty path
+    }
+
+    let path_str = core::str::from_utf8(&path_buf[..path_len])
+        .map_err(|_| -EINVAL)
+        .unwrap();
+
+    log::debug!("sys_spawn: path = '{}'", path_str);
+
+    // 3. Get parent process ID for setting child's parent
+    let parent_id = scheduler::with_current_process(|process| {
+        process.id
+    });
+
+    let parent_id = match parent_id {
+        Some(pid) => pid,
+        None => return -EFAULT,
+    };
+
+    // 4. Switch to kernel page tables for the rest of sys_spawn
+    // IMPORTANT: We need kernel page tables (with identity mapping) for:
+    // - Reading from initrd (physical memory access)
+    // - Spawning process (page table manipulation, memory allocation)
+    // - Setting up child process (data structure access)
+    //
+    // We'll switch back to userspace page tables at the very end, before returning
+    use x86_64::registers::control::Cr3;
+    use crate::scheduler::process::ProcessId;
+
+    // Save current (userspace) page table
+    let (user_cr3, cr3_flags) = unsafe { Cr3::read() };
+
+    // Get kernel process (PID 0) page table
+    let kernel_pt = scheduler::with_process_mut(ProcessId::new(0), |kernel_proc| {
+        use x86_64::structures::paging::PhysFrame;
+        PhysFrame::containing_address(kernel_proc.address_space.page_table_root)
+    });
+
+    let kernel_pt = match kernel_pt {
+        Some(pt) => pt,
+        None => return -EFAULT,
+    };
+
+    // Switch to kernel page table for the rest of sys_spawn
+    unsafe {
+        Cr3::write(kernel_pt, cr3_flags);
+    }
+
+    // Read ELF binary from initrd
+    let elf_data = crate::initrd::read_file(path_str);
+
+    let elf_data = match elf_data {
+        Ok(data) => data,
+        Err(_) => return -super::numbers::ENOENT, // File not found (errno 2)
+    };
+
+    log::debug!("sys_spawn: loaded {} bytes from initrd", elf_data.len());
+
+    // 5. Spawn the process using ELF loader
+    let result = crate::loaders::elf::spawn_elf_process(elf_data, path_str, &[]);
+
+    let (child_pid, _child_tid) = match result {
+        Ok((pid, tid)) => (pid, tid),
+        Err(e) => {
+            log::error!("sys_spawn: failed to spawn process: {:?}", e);
+            return -ENOMEM; // ELF loading failed
+        }
+    };
+
+    // 6. Set parent-child relationship
+    scheduler::with_process_mut(child_pid, |child_process| {
+        child_process.set_parent(parent_id);
+    });
+
+    log::info!("sys_spawn: spawned process {} (parent: {})",
+               child_pid.as_usize(), parent_id.as_usize());
+
+    // 7. Switch back to userspace page tables before returning
+    // This is safe because:
+    // - Kernel code/data is mapped in userspace page tables (entries 1-511)
+    // - We're done with operations that need identity mapping (entry 0)
+    // - syscall_entry will use SYSRET to return to userspace
+    unsafe {
+        Cr3::write(user_cr3, cr3_flags);
+    }
+
+    // 8. Return child PID
+    child_pid.as_usize() as isize
+}
+
+/// sys_waitpid - Wait for process to change state
+///
+/// Arguments: (pid: i32, status: *mut i32, options: i32)
+/// Returns: PID of child that changed state, or negative error code
+///
+/// If child has exited, writes exit status to *status and reaps zombie.
+/// If child still running, this simplified version returns -EINVAL
+/// (blocking support to be added later).
+pub fn sys_waitpid(pid: i32, status: *mut i32, _options: i32) -> isize {
+    use crate::scheduler::process::ProcessId;
+
+    // 1. Validate status pointer if not NULL
+    if !status.is_null() {
+        if let Err(e) = validate_user_ptr(status, 1) {
+            return e;
+        }
+    }
+
+    // 2. Get current process ID
+    let parent_id = scheduler::with_current_process(|process| {
+        process.id
+    });
+
+    let parent_id = match parent_id {
+        Some(pid) => pid,
+        None => return -EFAULT,
+    };
+
+    let child_pid = ProcessId::new(pid as usize);
+
+    // 3. Poll until child becomes zombie (simple blocking implementation)
+    // TODO: Replace with proper wait queues and scheduler blocking
+    loop {
+        let is_child_and_zombie = scheduler::with_process_mut(child_pid, |child_process| {
+            // Verify parent-child relationship
+            if child_process.parent() != Some(parent_id) {
+                return Err(-ECHILD); // Not a child of current process
+            }
+
+            // Check if process is zombie
+            if child_process.is_zombie() {
+                let exit_code = child_process.exit_code.unwrap_or(0);
+
+                // Write exit status to userspace if pointer provided
+                if !status.is_null() {
+                    unsafe {
+                        *status = exit_code;
+                    }
+                }
+
+                Ok(exit_code)
+            } else {
+                // Process still running - yield and try again
+                Err(-1) // Sentinel value to indicate "retry"
+            }
+        });
+
+        match is_child_and_zombie {
+            Some(Ok(_exit_code)) => {
+                // Child is zombie, break out of loop
+                break;
+            }
+            Some(Err(e)) if e == -ECHILD => {
+                // Not a child - return error immediately
+                return -ECHILD;
+            }
+            Some(Err(_)) => {
+                // Child still running - yield CPU and try again
+                scheduler::yield_now();
+                continue;
+            }
+            None => {
+                return -ECHILD; // Process doesn't exist
+            }
+        }
+    }
+
+    let is_child_and_zombie = scheduler::with_process_mut(child_pid, |child_process| {
+        if child_process.is_zombie() {
+            let exit_code = child_process.exit_code.unwrap_or(0);
+            Ok(exit_code)
+        } else {
+            Err(-EINVAL)
+        }
+    });
+
+    match is_child_and_zombie {
+        Some(Ok(_exit_code)) => {
+            // Process was zombie, we read its exit code
+            // Now reap it (remove from process table and free resources)
+            if scheduler::reap_process(child_pid) {
+                log::info!("sys_waitpid: reaped zombie process {}", child_pid.as_usize());
+            }
+            child_pid.as_usize() as isize
+        }
+        Some(Err(e)) => e, // Error (ECHILD or EINVAL)
+        None => -ECHILD,   // Process doesn't exist
+    }
 }

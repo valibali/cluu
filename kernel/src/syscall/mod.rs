@@ -159,10 +159,6 @@ pub fn set_kernel_stack(kernel_stack_ptr: u64) {
     unsafe {
         SYSCALL_SCRATCH.kernel_rsp = kernel_stack_ptr;
     }
-
-    // Note: Logging disabled because this is called on every context switch (~10ms)
-    // Would be too spammy. Use irq_log_simple() if debugging needed:
-    // crate::utils::debug::irq_log::irq_log_simple("SYSCALL_STACK_SET");
 }
 
 /// Get the current kernel stack pointer
@@ -434,7 +430,10 @@ extern "C" fn syscall_handler_rust(
     _arg5: usize,
     _arg6: usize,
 ) -> isize {
-    match syscall_num {
+    log::debug!("Syscall {} called with args: {:#x}, {:#x}, {:#x}",
+                syscall_num, arg1, arg2, arg3);
+
+    let ret = match syscall_num {
         SYS_READ => sys_read(arg1 as i32, arg2 as *mut u8, arg3),
         SYS_WRITE => sys_write(arg1 as i32, arg2 as *const u8, arg3),
         SYS_CLOSE => sys_close(arg1 as i32),
@@ -444,6 +443,16 @@ extern "C" fn syscall_handler_rust(
         SYS_ISATTY => sys_isatty(arg1 as i32),
         SYS_EXIT => sys_exit(arg1 as i32),
         SYS_YIELD => sys_yield(),
-        _ => -ENOSYS,
-    }
+        SYS_GETPID => sys_getpid(),
+        SYS_GETPPID => sys_getppid(),
+        SYS_SPAWN => sys_spawn(arg1 as *const u8, arg2 as *const *const u8),
+        SYS_WAITPID => sys_waitpid(arg1 as i32, arg2 as *mut i32, arg3 as i32),
+        _ => {
+            log::warn!("Unknown syscall number: {}", syscall_num);
+            -ENOSYS
+        }
+    };
+
+    log::debug!("Syscall {} returning: {}", syscall_num, ret);
+    ret
 }
