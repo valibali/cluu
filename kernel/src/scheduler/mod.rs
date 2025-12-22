@@ -927,14 +927,18 @@ pub fn enable() {
 pub fn yield_now() {
     // Early exit if scheduler is not yet enabled (during boot)
     if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
+        crate::utils::debug::irq_log::irq_log_simple("[YIELD] scheduler not enabled");
         return;
     }
 
     // Don't yield if interrupts are disabled - this could indicate we're
     // in a critical section that shouldn't be interrupted
     if !crate::arch::x86_64::interrupts::are_enabled() {
+        crate::utils::debug::irq_log::irq_log_simple("[YIELD] interrupts disabled!");
         return;
     }
+
+    crate::utils::debug::irq_log::irq_log_simple("[YIELD] yielding...");
 
     // Flush log buffer before yielding to ensure logs appear promptly
     crate::utils::debug::log_buffer::flush();
@@ -994,22 +998,21 @@ pub fn block_current_thread() {
     }
 
     let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
+
     if current_id.0 == 0 {
-        // Cannot block kernel/idle thread
-        return;
+        panic!("Cannot block idle thread");
     }
 
-    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
+    // CRITICAL: Use without_interrupts() to prevent timer IRQ deadlock
+    // This is the same pattern as wake_thread() - standard IRQ-safe locking
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut sched_guard = SCHEDULER.lock();
         if let Some(scheduler) = sched_guard.as_mut() {
             if let Some(thread) = scheduler.get_thread_mut(current_id) {
                 thread.state = ThreadState::Blocked;
-                // Thread is already not in ready queue since it's currently running
-                // When it yields, schedule_from_interrupt won't add it back because state is Blocked
             }
         }
-    });
+    }); // Lock automatically released here, interrupts re-enabled
 }
 
 /// Wake a blocked thread

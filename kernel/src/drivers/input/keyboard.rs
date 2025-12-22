@@ -87,14 +87,11 @@ fn buffer_is_empty() -> bool {
 /// - Wake any waiting thread
 pub fn handle_keyboard_interrupt() {
     if !KEYBOARD_INIT.load(Ordering::Acquire) {
-        crate::utils::debug::irq_log::irq_log("KEYBOARD", "not_initialized");
         return; // Keyboard not initialized yet
     }
 
     let mut keyboard_port = Port::new(KEYBOARD_DATA_PORT);
     let scancode = unsafe { keyboard_port.read() };
-
-    crate::utils::debug::irq_log::irq_log_str("[KBD] ");
 
     // Access keyboard decoder without mutex (IRQ context)
     unsafe {
@@ -103,19 +100,13 @@ pub fn handle_keyboard_interrupt() {
                 if let Some(key) = keyboard.process_keyevent(key_event) {
                     match key {
                         DecodedKey::Unicode(character) => {
-                            crate::utils::debug::irq_log::irq_log_str("char=");
-                            // Print character in hex
-                            let ch_val = character as u8;
-                            crate::utils::debug::irq_log::irq_log_hex("", ch_val as u64);
-
                             buffer_push(character);
 
                             // Wake any threads waiting for keyboard input
-                            crate::utils::debug::irq_log::irq_log_str(" waking waiters\r\n");
                             crate::scheduler::wake_io_waiters(crate::scheduler::IoChannel::Keyboard);
                         }
                         DecodedKey::RawKey(_key) => {
-                            crate::utils::debug::irq_log::irq_log_str("rawkey\r\n");
+                            // Non-printable key, ignore for now
                         }
                     }
                 }

@@ -68,40 +68,45 @@ pub fn sys_write(fd: i32, buf: *const u8, count: usize) -> isize {
         return e;
     }
 
-    // 2. Get current process's FD table
-    let result = scheduler::with_current_process(|process| {
+    // 2. Get device from FD table (with interrupts disabled)
+    // CRITICAL: We must NOT call device.write() inside with_current_process()
+    // because device.write() may block, and blocking requires interrupts enabled!
+    let device = scheduler::with_current_process(|process| {
         log::debug!("sys_write: got process, looking up fd {}", fd);
 
-        // 3. Get device from FD table
-        let device = match process.fd_table.get(fd) {
-            Ok(dev) => dev,
+        match process.fd_table.get(fd) {
+            Ok(dev) => Ok(dev.clone()),  // Clone the Arc<dyn Device>
             Err(e) => {
                 log::debug!("sys_write: fd_table.get({}) failed: {:?}", fd, e);
-                return errno_to_code(e);
-            }
-        };
-
-        // 4. Create safe slice and call device.write()
-        let data = unsafe { slice::from_raw_parts(buf, count) };
-        log::debug!("sys_write: writing {} bytes: {:?}", count,
-            core::str::from_utf8(data).unwrap_or("<invalid utf8>"));
-
-        match device.write(data) {
-            Ok(written) => {
-                log::debug!("sys_write: wrote {} bytes", written);
-                written as isize
-            }
-            Err(e) => {
-                log::debug!("sys_write: device.write() failed: {:?}", e);
-                errno_to_code(e)
+                Err(errno_to_code(e))
             }
         }
     });
 
-    let ret = result.unwrap_or_else(|| {
-        log::debug!("sys_write: with_current_process returned None");
-        -EBADF
-    });
+    let device = match device {
+        Some(Ok(dev)) => dev,
+        Some(Err(e)) => return e,
+        None => {
+            log::debug!("sys_write: with_current_process returned None");
+            return -EBADF;
+        }
+    };
+
+    // 3. Call device.write() OUTSIDE with_current_process() so interrupts are enabled
+    let data = unsafe { slice::from_raw_parts(buf, count) };
+    log::debug!("sys_write: writing {} bytes: {:?}", count,
+        core::str::from_utf8(data).unwrap_or("<invalid utf8>"));
+
+    let ret = match device.write(data) {
+        Ok(written) => {
+            log::debug!("sys_write: wrote {} bytes", written);
+            written as isize
+        }
+        Err(e) => {
+            log::debug!("sys_write: device.write() failed: {:?}", e);
+            errno_to_code(e)
+        }
+    };
 
     log::debug!("sys_write: returning {}", ret);
     ret
@@ -157,23 +162,30 @@ pub fn sys_read(fd: i32, buf: *mut u8, count: usize) -> isize {
         return e;
     }
 
-    // 2. Get current process's FD table
-    let result = scheduler::with_current_process(|process| {
-        // 3. Get device from FD table
-        let device = match process.fd_table.get(fd) {
-            Ok(dev) => dev,
-            Err(e) => return errno_to_code(e),
-        };
-
-        // 4. Create safe mutable slice and call device.read()
-        let buffer = unsafe { slice::from_raw_parts_mut(buf, count) };
-        match device.read(buffer) {
-            Ok(read) => read as isize,
-            Err(e) => errno_to_code(e),
+    // 2. Get device from FD table (with interrupts disabled)
+    // CRITICAL: We must NOT call device.read() inside with_current_process()
+    // because device.read() may block (e.g., waiting for keyboard input),
+    // and blocking requires interrupts to be enabled!
+    let device = scheduler::with_current_process(|process| {
+        match process.fd_table.get(fd) {
+            Ok(dev) => Ok(dev.clone()),  // Clone the Arc<dyn Device>
+            Err(e) => Err(errno_to_code(e))
         }
     });
 
-    result.unwrap_or(-EBADF)
+    let device = match device {
+        Some(Ok(dev)) => dev,
+        Some(Err(e)) => return e,
+        None => return -EBADF,
+    };
+
+    // 3. Call device.read() OUTSIDE with_current_process() so interrupts are enabled
+    // This allows blocking operations to work correctly
+    let buffer = unsafe { slice::from_raw_parts_mut(buf, count) };
+    match device.read(buffer) {
+        Ok(read) => read as isize,
+        Err(e) => errno_to_code(e)
+    }
 }
 
 /// sys_isatty - Check if file descriptor is a TTY

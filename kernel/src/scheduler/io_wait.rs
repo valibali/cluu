@@ -173,8 +173,10 @@ pub fn wait_for_io(channel: IoChannel) {
         wait_queue.add_waiter(current_tid);
     }
 
-    // Block and yield
+    // Block the thread (marks as Blocked state)
     block_current_thread();
+
+    // Yield to scheduler - interrupts stay ENABLED so keyboard IRQ can fire
     super::yield_now();
 
     // When we wake up here, the I/O event has occurred
