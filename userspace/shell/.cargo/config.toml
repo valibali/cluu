@@ -1,0 +1,6 @@
+[build]
+target = "cluu-x86-64.json"
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
