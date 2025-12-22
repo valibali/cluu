@@ -354,32 +354,50 @@ static size_t initrd_size = 0;
 
 /* Entry point */
 int main(int argc, char **argv) {
-    print("[VFS] VFS Server starting...\n");
+    /* Reduce debug output to avoid console lock contention with shell */
+    // print("[VFS] VFS Server starting...\n");
 
-    /* Parse command-line arguments for initrd location */
+    /* Parse command-line arguments: shmem_id and size */
     if (argc >= 3) {
-        /* argv[1] = initrd address (hex string like "0x500000000") */
+        /* argv[1] = shmem_id (decimal string) */
         /* argv[2] = initrd size (decimal string) */
-        unsigned long addr = parse_hex(argv[1]);
+        long shmem_id = (long)parse_decimal(argv[1]);
         unsigned long size = parse_decimal(argv[2]);
+
+        /* Map the shared memory region into our address space */
+        /* VFS server decides where to map it (0x500000000 chosen by us) */
+        void *addr = syscall_shmem_map(shmem_id, (void *)0x500000000, SHMEM_READ);
+
+        /* Check for mapping error */
+        if ((long)addr < 0) {
+            print("[VFS] ERROR: Failed to map shmem region ");
+            print_dec(shmem_id);
+            print(" (error ");
+            print_dec((long)addr);
+            print(")\n");
+            syscall_exit(1);
+        }
 
         initrd_base = (const char *)addr;
         initrd_size = (size_t)size;
 
-        print("[VFS] Initrd mapped at 0x");
-        print_hex(addr);
-        print(", size=");
-        print_dec(size);
-        print(" bytes\n");
+        // Commented out to avoid console deadlock during boot
+        // print("[VFS] Mapped shmem ");
+        // print_dec(shmem_id);
+        // print(" at 0x");
+        // print_hex((unsigned long)addr);
+        // print(", size=");
+        // print_dec(size);
+        // print(" bytes\n");
     } else {
         print("[VFS] ERROR: Missing initrd arguments!\n");
-        print("[VFS] Usage: vfs_server <initrd_addr_hex> <initrd_size_dec>\n");
+        print("[VFS] Usage: vfs_server <shmem_id> <size>\n");
         syscall_exit(1);
     }
 
     /* Initialize file descriptor table */
     fd_table_init();
-    print("[VFS] File descriptor table initialized\n");
+    // print("[VFS] File descriptor table initialized\n");
 
     /* Create IPC port for receiving VFS requests */
     port_id_t vfs_port = port_create();
@@ -388,9 +406,10 @@ int main(int argc, char **argv) {
         syscall_exit(1);
     }
 
-    print("[VFS] Created port: ");
-    print_dec(vfs_port);
-    print("\n");
+    // Commented out to avoid console deadlock
+    // print("[VFS] Created port: ");
+    // print_dec(vfs_port);
+    // print("\n");
 
     /* Register with well-known name "vfs" */
     if (register_port_name("vfs", vfs_port) < 0) {
@@ -398,8 +417,9 @@ int main(int argc, char **argv) {
         syscall_exit(1);
     }
 
-    print("[VFS] Registered as 'vfs' port\n");
-    print("[VFS] VFS Server ready - waiting for requests\n");
+    // Commented out to avoid console deadlock during boot
+    // print("[VFS] Registered as 'vfs' port\n");
+    // print("[VFS] VFS Server ready - waiting for requests\n");
 
     /* Main message loop */
     struct ipc_message request;

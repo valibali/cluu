@@ -295,29 +295,8 @@ extern "x86-interrupt" fn page_fault_handler(
     let is_write = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE);
     let is_user = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
 
-    // Log the fault for debugging (IRQ-safe logging)
-    crate::utils::debug::irq_log::irq_log_simple("PAGE_FAULT");
-    crate::utils::debug::irq_log::irq_log_hex("  Fault addr=", fault_addr.as_u64());
-    crate::utils::debug::irq_log::irq_log_hex("  RIP=", stack_frame.instruction_pointer.as_u64());
-    crate::utils::debug::irq_log::irq_log_hex("  RSP=", stack_frame.stack_pointer.as_u64());
-    crate::utils::debug::irq_log::irq_log_hex("  Error code=", error_code.bits());
-
-    // Log error code flags
-    if is_present {
-        crate::utils::debug::irq_log::irq_log_str("  Protection violation (page present)\n");
-    } else {
-        crate::utils::debug::irq_log::irq_log_str("  Page not present\n");
-    }
-    if is_write {
-        crate::utils::debug::irq_log::irq_log_str("  Caused by write\n");
-    } else {
-        crate::utils::debug::irq_log::irq_log_str("  Caused by read\n");
-    }
-    if is_user {
-        crate::utils::debug::irq_log::irq_log_str("  User mode fault\n");
-    } else {
-        crate::utils::debug::irq_log::irq_log_str("  Kernel mode fault\n");
-    }
+    // Removed IRQ logging to avoid deadlocks in normal operation
+    // Use log::error for page faults instead (called after the checks below)
 
     // If page is not present and fault is from user mode, try lazy allocation
     if !is_present && is_user {

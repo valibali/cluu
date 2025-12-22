@@ -22,7 +22,7 @@ pub mod protocol;
 
 use protocol::*;
 use crate::scheduler::ipc::{self, PortId, IpcError};
-use crate::scheduler::{ProcessId, with_current_process};
+use crate::scheduler::ProcessId;
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use spin::Mutex;
 use alloc::collections::BTreeMap;
@@ -52,6 +52,81 @@ pub fn init() {
     *PORT_NAME_REGISTRY.lock() = Some(BTreeMap::new());
     VFS_INIT.store(true, Ordering::SeqCst);
     log::info!("VFS subsystem initialized (waiting for VFS server to register)");
+}
+
+/// Spawn the VFS server userspace process
+///
+/// This function:
+/// 1. Gets initrd location from bootloader
+/// 2. Spawns VFS server ELF binary from initrd
+/// 3. Creates shared memory region for initrd
+/// 4. Maps initrd into VFS server's address space
+///
+/// The VFS server will then:
+/// - Parse the TAR archive in the mapped initrd
+/// - Register its IPC port with name "vfs"
+/// - Wait for file operation requests
+///
+/// Must be called after scheduler::init() and before scheduler::enable()
+pub fn spawn_server() -> Result<(ProcessId, crate::scheduler::ThreadId), &'static str> {
+    use crate::loaders;
+    use crate::initrd;
+    use crate::scheduler;
+    use alloc::format;
+
+    log::info!("Spawning VFS server...");
+
+    // Get initrd info for creating shared memory region
+    let (initrd_phys, initrd_size) = initrd::get_info();
+    log::info!(
+        "Initrd: phys=0x{:x}, size={} bytes ({} MB)",
+        initrd_phys.as_u64(),
+        initrd_size,
+        initrd_size / 1024 / 1024
+    );
+
+    // Create shared memory region from physical initrd
+    // Kernel provides the resource, VFS server decides where to map it
+    let shmem_id = scheduler::shmem::shmem_create_from_phys(
+        initrd_phys,
+        initrd_size,
+        scheduler::ProcessId(0), // Kernel owns the physical memory
+        scheduler::shmem::ShmemPermissions {
+            read: true,
+            write: false, // Read-only
+        },
+    )
+    .map_err(|_| "Failed to create shmem for initrd")?;
+
+    log::info!("Created shmem region {} for initrd", shmem_id.0);
+
+    // Format arguments: shmem_id and size
+    // VFS server will decide where to map this in its own address space
+    let shmem_id_str = format!("{}", shmem_id.0);
+    let initrd_size_str = format!("{}", initrd_size);
+
+    log::info!(
+        "VFS server args: shmem_id={}, size={}",
+        shmem_id_str,
+        initrd_size_str
+    );
+
+    // Spawn VFS server process
+    // Pass shmem_id (not physical address!) - VFS will map it itself
+    let vfs_binary = vfs_read_file("sys/vfs_server")
+        .map_err(|_| "VFS server binary not found")?;
+
+    let (pid, tid) = loaders::elf::spawn_elf_process(
+        &vfs_binary,
+        "vfs_server",
+        &[shmem_id_str.as_str(), initrd_size_str.as_str()],
+    )
+    .map_err(|_| "Failed to spawn VFS server")?;
+
+    log::info!("VFS server spawned: PID={:?}, TID={:?}", pid, tid);
+    log::info!("VFS server will map initrd shmem region into its own address space");
+
+    Ok((pid, tid))
 }
 
 /// Register a port with a well-known name

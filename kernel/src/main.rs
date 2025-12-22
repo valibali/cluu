@@ -190,102 +190,35 @@ pub extern "C" fn kstart() -> ! {
     log::info!("TTY system initialized");
 
     // Step 13: Spawn VFS server (PID 2) - BEFORE enabling scheduler
-    log::info!("Spawning VFS server...");
-
-    // Get initrd info for mapping
-    let (initrd_phys, initrd_size) = initrd::get_info();
-    log::info!(
-        "Initrd: phys=0x{:x}, size={} bytes ({} MB)",
-        initrd_phys.as_u64(),
-        initrd_size,
-        initrd_size / 1024 / 1024
-    );
-
-    // Format arguments for VFS server
-    use alloc::format;
-    let initrd_addr_str = format!("0x{:x}", initrd_phys.as_u64());
-    let initrd_size_str = format!("{}", initrd_size);
-
-    log::info!(
-        "VFS server args: addr={}, size={}",
-        initrd_addr_str,
-        initrd_size_str
-    );
-
-    match loaders::elf::spawn_elf_process(
-        &vfs::vfs_read_file("sys/vfs_server").expect("VFS server binary not found"),
-        "vfs_server",
-        &[initrd_addr_str.as_str(), initrd_size_str.as_str()],
-    ) {
+    // NOTE: Shell will be a userspace process spawned later by init
+    match vfs::spawn_server() {
         Ok((pid, tid)) => {
-            log::info!("VFS server spawned: PID={:?}, TID={:?}", pid, tid);
-
-            // Map initrd into VFS server address space
-            log::info!("Mapping initrd into VFS server...");
-            match scheduler::shmem::shmem_create_from_phys(
-                initrd_phys,
-                initrd_size,
-                scheduler::ProcessId(0), // Kernel owns it
-                scheduler::shmem::ShmemPermissions {
-                    read: true,
-                    write: false, // Read-only
-                },
-            ) {
-                Ok(shmem_id) => {
-                    log::info!("Created shmem region {} for initrd", shmem_id.0);
-
-                    // Map into VFS server at fixed address 0x500000000
-                    match scheduler::shmem::shmem_map(
-                        shmem_id,
-                        pid,         // VFS server PID
-                        0x500000000, // Fixed address (must match VFS server's expectation)
-                        scheduler::shmem::ShmemPermissions {
-                            read: true,
-                            write: false,
-                        },
-                    ) {
-                        Ok(virt_addr) => {
-                            log::info!("Initrd mapped into VFS server at 0x{:x}", virt_addr);
-                        }
-                        Err(e) => {
-                            log::error!("Failed to map initrd into VFS server: {:?}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to create shmem for initrd: {:?}", e);
-                }
-            }
-
-            log::info!("VFS server created successfully");
+            log::info!("VFS server ready: PID={:?}, TID={:?}", pid, tid);
         }
         Err(e) => {
-            log::warn!(
-                "Failed to spawn VFS server: {:?} (continuing without VFS)",
-                e
-            );
+            log::warn!("Failed to spawn VFS server: {} (continuing without VFS)", e);
         }
     }
 
-    // Step 14: Create shell thread
-    log::info!("Creating shell thread...");
-    scheduler::spawn_thread(shell_thread_main, "kshell");
-
-    // Step 15: Enable scheduler (spawns built-in idle thread)
-    scheduler::enable();
     log::info!("Kernel initialization complete!");
+    log::info!("All userspace services spawned and ready");
 
-    log::info!("Entering idle loop - scheduler is now in control");
+    // Step 15: Enable preemptive scheduler
+    // This MUST be the last thing we do - after this point, timer interrupts
+    // will start switching between threads, and kstart() will never run again
+    scheduler::enable();
+    log::info!("Preemptive scheduler enabled - transferring control...");
 
-    // Main kernel trap loop
-    // The scheduler has taken over - threads will be switched by timer interrupts
-    // This loop just halts the CPU to save power between interrupts
+    // Main kernel idle loop
+    // Timer interrupts will preempt us and switch to ready threads
+    // We become the "emergency idle" - only run if no other threads are ready
     loop {
         x86_64::instructions::hlt();
     }
 }
 
-/// Shell thread main function
+/// Shell thread main function (DEPRECATED - will be userspace process)
+#[allow(dead_code)]
 fn shell_thread_main() {
     log::info!("Shell thread starting...");
 

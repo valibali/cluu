@@ -1376,8 +1376,6 @@ pub unsafe extern "C" fn preemptive_timer_interrupt_handler() {
 pub extern "C" fn schedule_from_interrupt(
     current_ctx_ptr: *const InterruptContext,
 ) -> *const InterruptContext {
-    use crate::utils::debug::irq_log;
-
     // Early exit if scheduler is not enabled
     if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
         // Scheduler not enabled yet, just return current context
@@ -1576,28 +1574,7 @@ pub extern "C" fn schedule_from_interrupt(
     // set_kernel_stack() above. For interrupts/exceptions, the CPU uses TSS RSP0.
     crate::arch::x86_64::gdt::set_tss_rsp0(next_stack_top);
 
-    // DEBUGGING: Log values that will be loaded by IRETQ for userspace threads
-    unsafe {
-        let frame = &(*next_ctx_ptr).iret_frame;
-        // Only log for userspace threads (CS with RPL=3)
-        if (frame.cs & 3) == 3 {
-            irq_log::irq_log_simple("IRETQ to userspace:");
-            irq_log::irq_log_hex("  RIP=", frame.rip);
-            irq_log::irq_log_hex("  CS=", frame.cs);
-            irq_log::irq_log_hex("  RFLAGS=", frame.rflags);
-            irq_log::irq_log_hex("  RSP=", frame.rsp);
-            irq_log::irq_log_hex("  SS=", frame.ss);
-
-            // Also dump the actual memory bytes at the interrupt frame location
-            let frame_ptr = frame as *const InterruptFrame as *const u64;
-            irq_log::irq_log_simple("  Frame memory dump:");
-            irq_log::irq_log_hex("    [+0]=", *frame_ptr.add(0));  // RIP
-            irq_log::irq_log_hex("    [+8]=", *frame_ptr.add(1));  // CS
-            irq_log::irq_log_hex("    [+16]=", *frame_ptr.add(2)); // RFLAGS
-            irq_log::irq_log_hex("    [+24]=", *frame_ptr.add(3)); // RSP
-            irq_log::irq_log_hex("    [+32]=", *frame_ptr.add(4)); // SS
-        }
-    }
+    // Removed IRQ logging to avoid deadlocks
 
     // Return pointer to next thread's context (guaranteed valid)
     next_ctx_ptr
