@@ -292,24 +292,29 @@ extern "x86-interrupt" fn page_fault_handler(
 
     // Parse error code flags
     let is_present = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION);
-    let is_write = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE);
+    let _is_write = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE);
     let is_user = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
 
-    // Removed IRQ logging to avoid deadlocks in normal operation
-    // Use log::error for page faults instead (called after the checks below)
+    // Log page fault using IRQ-safe logging
+    crate::utils::debug::irq_log::irq_log_str("[PF] addr=");
+    crate::utils::debug::irq_log::irq_log_hex("", fault_addr.as_u64());
+    crate::utils::debug::irq_log::irq_log_str(if is_user { " user" } else { " kernel" });
+    crate::utils::debug::irq_log::irq_log_str(if is_present { " present" } else { " not-present" });
+    crate::utils::debug::irq_log::irq_log_newline();
 
     // If page is not present and fault is from user mode, try lazy allocation
     if !is_present && is_user {
         if let Some(success) = handle_heap_fault(fault_addr) {
             if success {
                 // Page allocated successfully, resume execution
+                crate::utils::debug::irq_log::irq_log_simple("[PF] Handled (lazy heap alloc)");
                 return;
             }
         }
     }
 
-    // Unrecoverable page fault - already logged details above with irq_log
-    // Just panic here
+    // Unrecoverable page fault
+    crate::utils::debug::irq_log::irq_log_simple("[PF] UNRECOVERABLE - panicking");
     panic!("Unrecoverable page fault");
 }
 

@@ -48,6 +48,21 @@ syscall_write:
 .size syscall_write, . - syscall_write
 
 /*
+ * int syscall_open(const char *path, int flags, int mode)
+ * Syscall number: 2 (SYS_OPEN)
+ */
+.global syscall_open
+.type syscall_open, @function
+syscall_open:
+    mov $2, %rax        # SYS_OPEN = 2
+    # RDI = path (already set by caller)
+    # RSI = flags (already set by caller)
+    # RDX = mode (already set by caller)
+    syscall
+    ret
+.size syscall_open, . - syscall_open
+
+/*
  * int syscall_close(int fd)
  * Syscall number: 3 (SYS_CLOSE)
  */

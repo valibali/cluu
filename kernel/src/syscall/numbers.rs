@@ -42,6 +42,12 @@ pub const SYS_READ: usize = 0;
 /// Returns: number of bytes written, or negative error code
 pub const SYS_WRITE: usize = 1;
 
+/// Open file
+///
+/// Arguments: (path: *const u8, flags: i32, mode: i32) -> isize
+/// Returns: file descriptor on success, or negative error code
+pub const SYS_OPEN: usize = 2;
+
 /// Close file descriptor
 ///
 /// Arguments: (fd: i32) -> isize

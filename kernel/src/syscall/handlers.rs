@@ -60,7 +60,7 @@ fn errno_to_code(errno: Errno) -> isize {
 /// Arguments: (fd: i32, buf: *const u8, count: usize)
 /// Returns: number of bytes written, or negative error code
 pub fn sys_write(fd: i32, buf: *const u8, count: usize) -> isize {
-    log::debug!("sys_write: fd={}, buf={:p}, count={}", fd, buf, count);
+    crate::utils::debug::irq_log::irq_log_simple("sys_write");
 
     // 1. Validate user buffer
     if let Err(e) = validate_user_ptr(buf, count) {
@@ -105,6 +105,46 @@ pub fn sys_write(fd: i32, buf: *const u8, count: usize) -> isize {
 
     log::debug!("sys_write: returning {}", ret);
     ret
+}
+
+/// sys_open - Open file
+///
+/// Arguments: (path: *const u8, flags: i32, mode: i32)
+/// Returns: file descriptor on success, or negative error code
+pub fn sys_open(path: *const u8, flags: i32, _mode: i32) -> isize {
+    // 1. Validate path pointer
+    if let Err(e) = validate_user_ptr(path, 1) {
+        return e;
+    }
+
+    // 2. Copy path string from userspace (max 256 bytes)
+    let mut path_buf = [0u8; 256];
+    let mut path_len = 0;
+
+    unsafe {
+        for i in 0..256 {
+            let ch = *path.add(i);
+            if ch == 0 {
+                break;
+            }
+            path_buf[i] = ch;
+            path_len += 1;
+        }
+    }
+
+    if path_len == 0 {
+        return -EINVAL;
+    }
+
+    let path_str = match core::str::from_utf8(&path_buf[..path_len]) {
+        Ok(s) => s,
+        Err(_) => return -EINVAL,
+    };
+
+    log::debug!("sys_open: path='{}', flags=0x{:x}", path_str, flags);
+
+    // 3. Call VFS to open file
+    crate::vfs::vfs_open(path_str, flags)
 }
 
 /// sys_read - Read from file descriptor

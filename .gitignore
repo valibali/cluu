@@ -10,3 +10,5 @@ rust-os-gdb
 utilies/mkbootimg/*
 .aider*
 **/*/initrd/bin
+**/*/initrd/sys
+**/*/target/*

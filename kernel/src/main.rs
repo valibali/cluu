@@ -190,13 +190,30 @@ pub extern "C" fn kstart() -> ! {
     log::info!("TTY system initialized");
 
     // Step 13: Spawn VFS server (PID 2) - BEFORE enabling scheduler
-    // NOTE: Shell will be a userspace process spawned later by init
     match vfs::spawn_server() {
         Ok((pid, tid)) => {
             log::info!("VFS server ready: PID={:?}, TID={:?}", pid, tid);
         }
         Err(e) => {
             log::warn!("Failed to spawn VFS server: {} (continuing without VFS)", e);
+        }
+    }
+
+    // Step 14: Spawn userspace shell
+    log::info!("Spawning userspace shell...");
+    let shell_binary = vfs::vfs_read_file("bin/shell").unwrap_or_else(|e| {
+        log::warn!("Shell binary not found in initrd: {}", e);
+        alloc::vec::Vec::new()
+    });
+
+    if !shell_binary.is_empty() {
+        match loaders::elf::spawn_elf_process(&shell_binary, "shell", &[]) {
+            Ok((pid, tid)) => {
+                log::info!("Shell spawned: PID={:?}, TID={:?}", pid, tid);
+            }
+            Err(e) => {
+                log::warn!("Failed to spawn shell: {:?}", e);
+            }
         }
     }
 

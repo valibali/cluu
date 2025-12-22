@@ -358,6 +358,11 @@ pub unsafe extern "C" fn syscall_entry() -> ! {
         // Align stack to 16 bytes (required by System V ABI)
         "sub rsp, 8",
 
+        // Re-enable interrupts now that we're safely on kernel stack
+        // SYSCALL disabled interrupts for the stack switch, but now it's safe
+        // This allows blocking syscalls (like port_recv) to yield properly
+        "sti",
+
         // Call Rust handler
         "call {handler}",
 
@@ -398,9 +403,13 @@ pub unsafe extern "C" fn syscall_entry() -> ! {
         // PHASE 5: RETURN TO USERSPACE
         // ========================================
 
+        // Disable interrupts before returning to userspace
+        // This prevents interrupts during the SYSRET instruction
+        "cli",
+
         // SYSRET will:
         // - Set RIP = RCX (user RIP)
-        // - Set RFLAGS = R11 (user RFLAGS)
+        // - Set RFLAGS = R11 (user RFLAGS) - will re-enable interrupts in userspace
         // - Set CS/SS to user segments (from STAR MSR)
         "sysretq",
 
@@ -430,14 +439,34 @@ extern "C" fn syscall_handler_rust(
     _arg5: usize,
     _arg6: usize,
 ) -> isize {
-    // Temporary: log syscalls at INFO level to debug excessive syscalls
+    // Log syscalls using IRQ-safe logging (syscalls run in interrupt context)
     if syscall_num != SYS_YIELD {  // Don't spam for yield
-        log::info!("Syscall #{}", syscall_num);
+        crate::utils::debug::irq_log::irq_log_str("[SYSCALL] #");
+        // Convert syscall number to string manually
+        let mut buf = [0u8; 20];
+        let mut num = syscall_num;
+        let mut i = 0;
+        if num == 0 {
+            buf[0] = b'0';
+            i = 1;
+        } else {
+            while num > 0 {
+                buf[i] = b'0' + (num % 10) as u8;
+                num /= 10;
+                i += 1;
+            }
+            // Reverse
+            buf[..i].reverse();
+        }
+        let s = core::str::from_utf8(&buf[..i]).unwrap();
+        crate::utils::debug::irq_log::irq_log_str(s);
+        crate::utils::debug::irq_log::irq_log_newline();
     }
 
     let ret = match syscall_num {
         SYS_READ => sys_read(arg1 as i32, arg2 as *mut u8, arg3),
         SYS_WRITE => sys_write(arg1 as i32, arg2 as *const u8, arg3),
+        SYS_OPEN => sys_open(arg1 as *const u8, arg2 as i32, arg3 as i32),
         SYS_CLOSE => sys_close(arg1 as i32),
         SYS_FSTAT => sys_fstat(arg1 as i32, arg2 as *mut u8),
         SYS_LSEEK => sys_lseek(arg1 as i32, arg2 as i64, arg3 as i32),

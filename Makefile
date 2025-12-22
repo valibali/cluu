@@ -36,6 +36,7 @@ userspace:
 	@make -C ./userspace/spawn_test all
 	@make -C ./userspace/shmem_test all
 	@make -C ./userspace/vfs_server all
+	@make -C ./userspace/shell all
 	@echo "Copying userspace binaries to initrd..."
 	@mkdir -p ./bootboot_image/initrd/bin
 	@mkdir -p ./bootboot_image/initrd/sys
@@ -43,6 +44,7 @@ userspace:
 	@cp ./userspace/spawn_test/spawn_test ./bootboot_image/initrd/bin/spawn_test
 	@cp ./userspace/shmem_test/shmem_test ./bootboot_image/initrd/bin/shmem_test
 	@cp ./userspace/vfs_server/vfs_server ./bootboot_image/initrd/sys/vfs_server
+	@cp ./userspace/shell/shell ./bootboot_image/initrd/bin/shell
 	@echo "Userspace binaries ready"
 
 clean:
@@ -51,6 +53,7 @@ clean:
 	@make -C ./userspace/spawn_test clean
 	@make -C ./userspace/shmem_test clean
 	@make -C ./userspace/vfs_server clean
+	@make -C ./userspace/shell clean
 	@make -C ./utilies/mkbootimg clean
 	@make -C ./bootboot_image clean
 	@rm -rf ./bootboot_image/initrd/bin
