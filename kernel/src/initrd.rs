@@ -11,6 +11,7 @@
 
 use crate::bootboot::bootboot;
 use crate::fs::TarReader;
+use x86_64::PhysAddr;
 use spin::Mutex;
 
 /// Global initrd instance
@@ -91,4 +92,20 @@ pub fn list() -> Result<(), &'static str> {
     let initrd = INITRD.lock();
     let tar = initrd.as_ref().ok_or("Initrd not initialized")?;
     tar.list()
+}
+
+/// Get initrd location and size
+///
+/// Returns the physical address and size of the initrd in memory.
+/// This is useful for mapping the initrd into userspace processes
+/// (e.g., the VFS server).
+///
+/// # Returns
+/// (physical_address, size_in_bytes)
+pub fn get_info() -> (PhysAddr, usize) {
+    unsafe {
+        let phys_addr = PhysAddr::new(bootboot.initrd_ptr);
+        let size = bootboot.initrd_size as usize;
+        (phys_addr, size)
+    }
 }

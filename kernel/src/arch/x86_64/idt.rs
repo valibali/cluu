@@ -285,7 +285,7 @@ extern "x86-interrupt" fn page_fault_handler(
     let fault_addr = match Cr2::read() {
         Ok(addr) => addr,
         Err(_) => {
-            log::error!("Failed to read CR2 register (invalid fault address)");
+            crate::utils::debug::irq_log::irq_log_simple("Failed to read CR2 register (invalid fault address)");
             panic!("Invalid page fault address in CR2");
         }
     };
@@ -295,8 +295,29 @@ extern "x86-interrupt" fn page_fault_handler(
     let is_write = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE);
     let is_user = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
 
-    // Log the fault for debugging
+    // Log the fault for debugging (IRQ-safe logging)
     crate::utils::debug::irq_log::irq_log_simple("PAGE_FAULT");
+    crate::utils::debug::irq_log::irq_log_hex("  Fault addr=", fault_addr.as_u64());
+    crate::utils::debug::irq_log::irq_log_hex("  RIP=", stack_frame.instruction_pointer.as_u64());
+    crate::utils::debug::irq_log::irq_log_hex("  RSP=", stack_frame.stack_pointer.as_u64());
+    crate::utils::debug::irq_log::irq_log_hex("  Error code=", error_code.bits());
+
+    // Log error code flags
+    if is_present {
+        crate::utils::debug::irq_log::irq_log_str("  Protection violation (page present)\n");
+    } else {
+        crate::utils::debug::irq_log::irq_log_str("  Page not present\n");
+    }
+    if is_write {
+        crate::utils::debug::irq_log::irq_log_str("  Caused by write\n");
+    } else {
+        crate::utils::debug::irq_log::irq_log_str("  Caused by read\n");
+    }
+    if is_user {
+        crate::utils::debug::irq_log::irq_log_str("  User mode fault\n");
+    } else {
+        crate::utils::debug::irq_log::irq_log_str("  Kernel mode fault\n");
+    }
 
     // If page is not present and fault is from user mode, try lazy allocation
     if !is_present && is_user {
@@ -308,12 +329,8 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
-    // Unrecoverable page fault - panic with details
-    log::error!("Page fault at address {:?}", fault_addr);
-    log::error!("  Error code: {:?}", error_code);
-    log::error!("  Present: {}, Write: {}, User: {}", is_present, is_write, is_user);
-    log::error!("  Instruction pointer: {:?}", stack_frame.instruction_pointer);
-
+    // Unrecoverable page fault - already logged details above with irq_log
+    // Just panic here
     panic!("Unrecoverable page fault");
 }
 
@@ -331,13 +348,14 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
 
         // Check if fault address is in allocated heap region (below current_brk)
         if fault_addr >= heap.start && fault_addr < heap.current_brk {
-            log::debug!("Lazy heap allocation at {:?} (brk: {:?})", fault_addr, heap.current_brk);
+            crate::utils::debug::irq_log::irq_log_simple("Lazy heap allocation");
+            crate::utils::debug::irq_log::irq_log_hex("  Addr=", fault_addr.as_u64());
 
             // Allocate physical frame for this page
             let frame = match crate::memory::phys::alloc_frame() {
                 Some(f) => f,
                 None => {
-                    log::error!("Out of memory during lazy heap allocation");
+                    crate::utils::debug::irq_log::irq_log_simple("Out of memory during lazy heap allocation");
                     return false;
                 }
             };
@@ -349,8 +367,8 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
                 | PageTableFlags::WRITABLE
                 | PageTableFlags::USER_ACCESSIBLE;
 
-            if let Err(e) = crate::memory::paging::map_user_page(page.start_address(), phys_addr, flags) {
-                log::error!("Failed to map heap page: {:?}", e);
+            if let Err(_e) = crate::memory::paging::map_user_page(page.start_address(), phys_addr, flags) {
+                crate::utils::debug::irq_log::irq_log_simple("Failed to map heap page");
                 crate::memory::phys::free_frame(frame);
                 return false;
             }
@@ -362,7 +380,7 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
                 core::ptr::write_bytes(page_start as *mut u8, 0, 4096);
             }
 
-            log::debug!("Successfully allocated heap page at {:?}", page.start_address());
+            crate::utils::debug::irq_log::irq_log_simple("Successfully allocated heap page");
             true
         } else {
             // Fault is not in valid heap region

@@ -413,6 +413,19 @@ pub fn load_elf_binary(
             return Err(ElfLoadError::MappingFailed);
         }
 
+        // CRITICAL DEBUG: Verify code segment mapping for _start
+        if vaddr.as_u64() <= 0x400b40 && (vaddr.as_u64() + mem_size as u64) > 0x400b40 {
+            let entry_offset = 0x400b40 - vaddr.as_u64();
+            let entry_page_idx = (entry_offset / 4096) as usize;
+            if entry_page_idx < mappings.len() {
+                log::info!("ELF:   _start (0x400b40) is in segment {} at offset 0x{:x}",
+                           i, entry_offset);
+                log::info!("ELF:   _start page: virt=0x{:x} -> phys=0x{:x}",
+                           mappings[entry_page_idx].0.as_u64(),
+                           mappings[entry_page_idx].1.as_u64());
+            }
+        }
+
         // Copy ELF data to kernel buffer BEFORE switching page tables
         // We do this because initrd is not mapped in userspace page table
         let kernel_buffer = if file_size > 0 {
@@ -490,9 +503,9 @@ pub fn load_elf_binary(
 pub fn spawn_elf_process(
     elf_data: &[u8],
     name: &str,
-    _args: &[&str], // TODO: Implement argc/argv
+    args: &[&str],
 ) -> Result<(ProcessId, ThreadId), ElfLoadError> {
-    log::info!("Spawning ELF process '{}'", name);
+    log::info!("Spawning ELF process '{}' with {} args", name, args.len());
 
     // Create a new userspace process with dedicated page tables
     let process_id = scheduler::spawn_user_process(name)
@@ -521,7 +534,7 @@ pub fn spawn_elf_process(
 
     // Load ELF binary and set up user stack
     // Do this in a scope to release the process lock before creating thread
-    let (entry_point, _page_table_root) = scheduler::with_process_mut(process_id, |process| {
+    let (entry_point, _page_table_root, stack_ptr) = scheduler::with_process_mut(process_id, |process| {
         // Load ELF binary into process address space
         // Pass kernel_cr3 to avoid deadlock when mapping pages
         let binary = load_elf_binary(elf_data, &mut process.address_space, kernel_cr3)?;
@@ -572,7 +585,91 @@ pub fn spawn_elf_process(
 
         log::info!("ELF: User stack mapped ({} pages)", page_count);
 
-        Ok((binary.entry_point, page_table_root))
+        // Set up argc/argv on the stack
+        // We need to write to physical addresses since userspace virtual addresses
+        // aren't accessible from kernel page tables
+
+        // Helper to convert virtual stack address to physical
+        let virt_to_phys = |vaddr: u64| -> u64 {
+            let offset = vaddr - USER_STACK_BOTTOM;
+            let page_idx = (offset / 4096) as usize;
+            let page_offset = offset % 4096;
+            mappings[page_idx].1.as_u64() + page_offset
+        };
+
+        let mut stack_ptr = USER_STACK_TOP;
+
+        // Build full argv: [program_name, ...args]
+        let mut full_args = alloc::vec![name];
+        full_args.extend_from_slice(args);
+        let argc = full_args.len();
+
+        // Reserve space and write argument strings
+        let mut arg_pointers = alloc::vec::Vec::new();
+        for arg in full_args.iter().rev() {
+            let arg_len = arg.len() + 1; // Include null terminator
+            stack_ptr -= arg_len as u64;
+
+            // Write string to stack via physical address
+            let phys_addr = virt_to_phys(stack_ptr);
+            unsafe {
+                let dest = phys_addr as *mut u8;
+                core::ptr::copy_nonoverlapping(arg.as_ptr(), dest, arg.len());
+                core::ptr::write(dest.add(arg.len()), 0); // Null terminator
+            }
+
+            arg_pointers.push(stack_ptr);
+        }
+        arg_pointers.reverse();
+
+        // Align stack to 8 bytes
+        stack_ptr &= !7;
+
+        // Push NULL (end of argv)
+        stack_ptr -= 8;
+        unsafe {
+            let phys_addr = virt_to_phys(stack_ptr);
+            core::ptr::write(phys_addr as *mut u64, 0);
+        }
+
+        // Push argv pointers
+        for &arg_ptr in arg_pointers.iter().rev() {
+            stack_ptr -= 8;
+            unsafe {
+                let phys_addr = virt_to_phys(stack_ptr);
+                core::ptr::write(phys_addr as *mut u64, arg_ptr);
+            }
+        }
+
+        // Push argc
+        stack_ptr -= 8;
+        unsafe {
+            let phys_addr = virt_to_phys(stack_ptr);
+            core::ptr::write(phys_addr as *mut u64, argc as u64);
+        }
+
+        log::info!("ELF: Set up argc={} argv on stack, RSP=0x{:x}", argc, stack_ptr);
+        for (i, &ptr) in arg_pointers.iter().enumerate() {
+            log::info!("ELF:   argv[{}] = 0x{:x}", i, ptr);
+        }
+
+        // Verify the write by reading back argc from physical memory
+        unsafe {
+            let phys_addr = virt_to_phys(stack_ptr);
+            let written_argc = core::ptr::read(phys_addr as *const u64);
+            log::info!("ELF: VERIFY: Read back argc={} from phys 0x{:x}", written_argc, phys_addr);
+
+            // CRITICAL: Verify this physical address is mapped to the stack virtual address
+            let offset = stack_ptr - USER_STACK_BOTTOM;
+            let page_idx = (offset / 4096) as usize;
+            let page_offset = offset % 4096;
+            log::info!("ELF: Stack virt=0x{:x} -> page_idx={}, page_offset=0x{:x}",
+                       stack_ptr, page_idx, page_offset);
+            log::info!("ELF: mappings[{}] = virt:0x{:x} -> phys:0x{:x}",
+                       page_idx, mappings[page_idx].0.as_u64(), mappings[page_idx].1.as_u64());
+        }
+
+        Ok((binary.entry_point, page_table_root, VirtAddr::new(stack_ptr)))
     })
     .ok_or(ElfLoadError::MemoryAllocationFailed)??;
 
@@ -585,11 +682,11 @@ pub fn spawn_elf_process(
     );
 
     // Set up the thread's interrupt context to enter userspace
-    const USER_STACK_TOP: u64 = 0x8000_0000;
+    // Use the stack pointer that has argc/argv pushed on it
     scheduler::setup_userspace_thread(
         thread_id,
         entry_point,
-        VirtAddr::new(USER_STACK_TOP),
+        stack_ptr,
     ).map_err(|_| ElfLoadError::ThreadSetupFailed)?;
 
     log::info!("ELF: Thread configured for userspace entry");

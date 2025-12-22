@@ -24,7 +24,7 @@ CFLAGS := -std=c11 \
           -fno-pie \
           -m64 \
           -mno-red-zone \
-          -O2 \
+          -O0 \
           -Wall \
           -Wextra
 

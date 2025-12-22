@@ -1,4 +1,4 @@
-# Userspace Program Build System for CLUU
+# VFS Server Build System for CLUU
 
 # Toolchain configuration
 CC := x86_64-elf-gcc
@@ -38,8 +38,8 @@ LDFLAGS := -T linker.ld \
            -no-pie
 
 # Source files
-C_SOURCES := shmem_test.c
-ASM_SOURCES := ../lib/syscall.S
+C_SOURCES := vfs_server.c
+ASM_SOURCES := ../lib/syscall.S ../lib/ipc.S
 
 # Object files
 C_OBJECTS := $(C_SOURCES:.c=.o)
@@ -47,7 +47,7 @@ ASM_OBJECTS := $(ASM_SOURCES:.S=.o)
 ALL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS)
 
 # Output binary
-TARGET := shmem_test
+TARGET := vfs_server
 
 .PHONY: all clean
 
@@ -57,7 +57,7 @@ all: $(TARGET)
 $(TARGET): $(ALL_OBJECTS) linker.ld
 	@echo "Linking $@..."
 	$(LD) $(LDFLAGS) $(ALL_OBJECTS) -o $@
-	@echo "Built userspace binary: $(TARGET)"
+	@echo "Built VFS server binary: $(TARGET)"
 	@file $(TARGET)
 	@size $(TARGET)
 
@@ -72,7 +72,7 @@ $(TARGET): $(ALL_OBJECTS) linker.ld
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(ALL_OBJECTS) $(TARGET)
+	rm -f $(C_OBJECTS) $(TARGET)
 	@echo "Cleaned build artifacts"
 
 # Display info about the built binary

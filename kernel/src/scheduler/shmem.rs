@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 use spin::Mutex;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use x86_64::PhysAddr;
 
 /// Shared memory region identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -75,6 +76,7 @@ pub struct SharedMemoryRegion {
     pub permissions: ShmemPermissions,
     pub ref_count: usize,
     pub marked_for_deletion: bool,
+    pub owned: bool,  // If true, free frames on drop; if false, don't free (e.g., for initrd)
 }
 
 impl SharedMemoryRegion {
@@ -123,6 +125,7 @@ impl SharedMemoryRegion {
             permissions,
             ref_count: 0,
             marked_for_deletion: false,
+            owned: true,  // Frames allocated by us, we own them
         })
     }
 
@@ -144,12 +147,17 @@ impl SharedMemoryRegion {
 
 impl Drop for SharedMemoryRegion {
     fn drop(&mut self) {
-        // Free all physical frames when region is destroyed
-        for frame in &self.physical_frames {
-            phys::free_frame(*frame);
+        // Only free frames if we own them (not for wrapped existing memory like initrd)
+        if self.owned {
+            for frame in &self.physical_frames {
+                phys::free_frame(*frame);
+            }
+            log::debug!("Freed {} frames for shared memory region {}",
+                       self.physical_frames.len(), self.id.0);
+        } else {
+            log::debug!("Dropped non-owned shared memory region {} ({} frames)",
+                       self.id.0, self.physical_frames.len());
         }
-        log::debug!("Freed {} frames for shared memory region {}",
-                   self.physical_frames.len(), self.id.0);
     }
 }
 
@@ -225,6 +233,75 @@ pub fn shmem_create(
 
     log::debug!("Created shared memory region {} ({} bytes, {} pages)",
                id.0, region.size, region.physical_frames.len());
+
+    map.insert(id, region);
+
+    Ok(id)
+}
+
+/// Create shared memory region from existing physical memory
+///
+/// This wraps an existing physical memory range (like initrd) as a shared memory region
+/// without allocating new frames. Used to give userspace servers access to kernel-provided data.
+///
+/// The frames will NOT be freed when the region is destroyed (owned=false).
+///
+/// # Arguments
+/// * `phys_addr` - Starting physical address (must be page-aligned)
+/// * `size` - Size in bytes (will be rounded up to page boundary)
+/// * `owner` - Process that will own this region (usually kernel PID 0)
+/// * `permissions` - Default permissions for the region
+///
+/// # Returns
+/// Shared memory ID on success, or error
+pub fn shmem_create_from_phys(
+    phys_addr: PhysAddr,
+    size: usize,
+    owner: ProcessId,
+    permissions: ShmemPermissions,
+) -> Result<ShmemId, ShmemError> {
+    if size == 0 {
+        return Err(ShmemError::InvalidSize);
+    }
+
+    // Check that physical address is page-aligned
+    if phys_addr.as_u64() % 4096 != 0 {
+        return Err(ShmemError::InvalidSize);
+    }
+
+    // Round size up to page boundary
+    let size_pages = (size + 4095) / 4096;
+    let actual_size = size_pages * 4096;
+
+    // Create frame list from physical address range
+    let mut physical_frames = Vec::new();
+    for i in 0..size_pages {
+        let frame_phys_addr = phys_addr.as_u64() + (i * 4096) as u64;
+        let frame = PhysFrame::containing_address(frame_phys_addr);
+        physical_frames.push(frame);
+    }
+
+    // Allocate ID
+    let id = ShmemId(NEXT_SHMEM_ID.fetch_add(1, Ordering::SeqCst));
+
+    // Create region (non-owned, won't free frames on drop)
+    let region = SharedMemoryRegion {
+        id,
+        size: actual_size,
+        physical_frames,
+        owner,
+        permissions,
+        ref_count: 0,
+        marked_for_deletion: false,
+        owned: false,  // Don't free these frames!
+    };
+
+    // Store in registry
+    let mut registry = SHMEM_REGISTRY.lock();
+    let map = registry.as_mut().ok_or(ShmemError::NotInitialized)?;
+
+    log::info!("Created non-owned shared memory region {} from phys 0x{:x} ({} bytes, {} pages)",
+               id.0, phys_addr.as_u64(), region.size, region.physical_frames.len());
 
     map.insert(id, region);
 

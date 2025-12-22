@@ -189,13 +189,92 @@ pub extern "C" fn kstart() -> ! {
     components::tty::init_tty0();
     log::info!("TTY system initialized");
 
-    // Step 13: Create shell thread
+    // Step 13: Spawn VFS server (PID 2) - BEFORE enabling scheduler
+    log::info!("Spawning VFS server...");
+
+    // Get initrd info for mapping
+    let (initrd_phys, initrd_size) = initrd::get_info();
+    log::info!(
+        "Initrd: phys=0x{:x}, size={} bytes ({} MB)",
+        initrd_phys.as_u64(),
+        initrd_size,
+        initrd_size / 1024 / 1024
+    );
+
+    // Format arguments for VFS server
+    use alloc::format;
+    let initrd_addr_str = format!("0x{:x}", initrd_phys.as_u64());
+    let initrd_size_str = format!("{}", initrd_size);
+
+    log::info!(
+        "VFS server args: addr={}, size={}",
+        initrd_addr_str,
+        initrd_size_str
+    );
+
+    match loaders::elf::spawn_elf_process(
+        &vfs::vfs_read_file("sys/vfs_server").expect("VFS server binary not found"),
+        "vfs_server",
+        &[initrd_addr_str.as_str(), initrd_size_str.as_str()],
+    ) {
+        Ok((pid, tid)) => {
+            log::info!("VFS server spawned: PID={:?}, TID={:?}", pid, tid);
+
+            // Map initrd into VFS server address space
+            log::info!("Mapping initrd into VFS server...");
+            match scheduler::shmem::shmem_create_from_phys(
+                initrd_phys,
+                initrd_size,
+                scheduler::ProcessId(0), // Kernel owns it
+                scheduler::shmem::ShmemPermissions {
+                    read: true,
+                    write: false, // Read-only
+                },
+            ) {
+                Ok(shmem_id) => {
+                    log::info!("Created shmem region {} for initrd", shmem_id.0);
+
+                    // Map into VFS server at fixed address 0x500000000
+                    match scheduler::shmem::shmem_map(
+                        shmem_id,
+                        pid,         // VFS server PID
+                        0x500000000, // Fixed address (must match VFS server's expectation)
+                        scheduler::shmem::ShmemPermissions {
+                            read: true,
+                            write: false,
+                        },
+                    ) {
+                        Ok(virt_addr) => {
+                            log::info!("Initrd mapped into VFS server at 0x{:x}", virt_addr);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to map initrd into VFS server: {:?}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to create shmem for initrd: {:?}", e);
+                }
+            }
+
+            log::info!("VFS server created successfully");
+        }
+        Err(e) => {
+            log::warn!(
+                "Failed to spawn VFS server: {:?} (continuing without VFS)",
+                e
+            );
+        }
+    }
+
+    // Step 14: Create shell thread
     log::info!("Creating shell thread...");
     scheduler::spawn_thread(shell_thread_main, "kshell");
 
-    // Step 14: Enable scheduler (spawns built-in idle thread)
+    // Step 15: Enable scheduler (spawns built-in idle thread)
     scheduler::enable();
     log::info!("Kernel initialization complete!");
+
     log::info!("Entering idle loop - scheduler is now in control");
 
     // Main kernel trap loop
