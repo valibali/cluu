@@ -38,6 +38,7 @@ port_destroy:
 .type port_send, @function
 port_send:
     /* port in %rdi, msg in %rsi */
+    mov $256, %rdx              /* len = 256 bytes (IPC_MSG_SIZE) */
     mov $SYS_PORT_SEND, %rax
     syscall
     ret
@@ -47,6 +48,7 @@ port_send:
 .type port_recv, @function
 port_recv:
     /* port in %rdi, msg in %rsi */
+    mov $256, %rdx              /* len = 256 bytes (IPC_MSG_SIZE) */
     mov $SYS_PORT_RECV, %rax
     syscall
     ret
@@ -56,6 +58,7 @@ port_recv:
 .type port_try_recv, @function
 port_try_recv:
     /* port in %rdi, msg in %rsi */
+    mov $256, %rdx              /* len = 256 bytes (IPC_MSG_SIZE) */
     mov $SYS_PORT_TRY_RECV, %rax
     syscall
     ret

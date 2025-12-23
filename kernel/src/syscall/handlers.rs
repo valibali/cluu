@@ -149,7 +149,42 @@ pub fn sys_open(path: *const u8, flags: i32, _mode: i32) -> isize {
     log::debug!("sys_open: path='{}', flags=0x{:x}", path_str, flags);
 
     // 3. Call VFS to open file
-    crate::vfs::vfs_open(path_str, flags)
+    let file_info = match crate::vfs::vfs_open(path_str, flags) {
+        Ok(info) => info,
+        Err(e) => return e,
+    };
+
+    // 4. Create VFS file device if fsitem is mapped
+    if let Some(fsitem_addr) = file_info.fsitem_addr {
+        use crate::io::VfsFile;
+        use crate::scheduler::shmem::ShmemId;
+        use alloc::sync::Arc;
+
+        let vfs_file = Arc::new(VfsFile::new(
+            file_info.vfs_fd,
+            ShmemId(file_info.shmem_id as usize),
+            fsitem_addr,
+        ));
+
+        // 5. Insert into current process FD table
+        match scheduler::with_current_process_mut(|process| {
+            let kernel_fd = process.fd_table.alloc(vfs_file);
+            kernel_fd
+        }) {
+            Some(kernel_fd) => {
+                log::info!("sys_open: VFS FD {} mapped to kernel FD {}", file_info.vfs_fd, kernel_fd);
+                return kernel_fd as isize;
+            }
+            None => {
+                log::error!("sys_open: No current process");
+                return -EBADF;
+            }
+        }
+    }
+
+    // Fallback: No fsitem mapping, return VFS FD directly (IPC-based reads)
+    log::warn!("sys_open: No fsitem mapping, returning VFS FD directly (IPC reads)");
+    file_info.vfs_fd as isize
 }
 
 /// sys_read - Read from file descriptor
@@ -799,7 +834,14 @@ pub fn sys_register_port_name(name: *const u8, port_id: usize) -> isize {
     // 4. Register port name
     let port_id = scheduler::ipc::PortId(port_id);
 
-    match crate::vfs::register_port_name(static_name, port_id) {
+    // Special handling for "vfs" - also register with VFS module
+    let result = if static_name == "vfs" {
+        crate::vfs::register_vfs_server(port_id)
+    } else {
+        crate::vfs::register_port_name(static_name, port_id)
+    };
+
+    match result {
         Ok(()) => {
             log::info!("sys_register_port_name: registered '{}' -> port {}", static_name, port_id.0);
             0

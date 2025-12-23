@@ -36,7 +36,21 @@ struct stat {
     /* Other fields would go here in a full implementation */
 };
 
+/* Open flags (match kernel VFS protocol) */
+#define O_RDONLY 0x0000
+#define O_WRONLY 0x0001
+#define O_RDWR   0x0002
+#define O_CREAT  0x0040
+#define O_TRUNC  0x0200
+#define O_APPEND 0x0400
+
 /* Syscall function prototypes */
+
+/**
+ * Open file
+ * Returns: file descriptor on success, or negative error code
+ */
+int syscall_open(const char *path, int flags, int mode);
 
 /**
  * Read from file descriptor

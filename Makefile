@@ -40,6 +40,7 @@ userspace:
 	@echo "Copying userspace binaries to initrd..."
 	@mkdir -p ./bootboot_image/initrd/bin
 	@mkdir -p ./bootboot_image/initrd/sys
+	@mkdir -p ./bootboot_image/initrd/utils
 	@cp ./userspace/hello/hello ./bootboot_image/initrd/bin/hello
 	@cp ./userspace/spawn_test/spawn_test ./bootboot_image/initrd/bin/spawn_test
 	@cp ./userspace/shmem_test/shmem_test ./bootboot_image/initrd/bin/shmem_test

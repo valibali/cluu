@@ -189,36 +189,22 @@ pub extern "C" fn kstart() -> ! {
     components::tty::init_tty0();
     log::info!("TTY system initialized");
 
-    // Step 13: Spawn VFS server (PID 2) - BEFORE enabling scheduler
+    // Step 13: Spawn VFS server (PID 1)
     match vfs::spawn_server() {
         Ok((pid, tid)) => {
             log::info!("VFS server spawned: PID={:?}, TID={:?}", pid, tid);
-
-            // Wait for VFS server to initialize and register its port
-            // VFS server needs to run to call syscall_register_port_name("vfs")
-            log::info!("Waiting for VFS server to register...");
-            let max_attempts = 100;
-            for i in 0..max_attempts {
-                if vfs::is_vfs_ready() {
-                    log::info!("VFS server registered after {} checks", i + 1);
-                    break;
-                }
-                // Yield to allow VFS server thread to run
-                scheduler::yield_now();
-            }
-
-            if !vfs::is_vfs_ready() {
-                log::warn!("VFS server did not register within timeout");
-            } else {
-                log::info!("VFS server ready and registered");
-            }
         }
         Err(e) => {
-            log::warn!("Failed to spawn VFS server: {} (continuing without VFS)", e);
+            log::error!("Failed to spawn VFS server: {}", e);
+            log::error!("Cannot continue without VFS server!");
+            loop { x86_64::instructions::hlt(); }
         }
     }
 
+    log::info!("Kernel initialization complete!");
+
     // Step 14: Spawn userspace shell
+    // Note: VFS server will be the first process to run and register before shell needs it
     log::info!("Spawning userspace shell...");
     let shell_binary = vfs::vfs_read_file("/dev/initrd/bin/shell").unwrap_or_else(|e| {
         log::warn!("Shell binary not found in initrd: {}", e);
@@ -236,14 +222,13 @@ pub extern "C" fn kstart() -> ! {
         }
     }
 
-    log::info!("Kernel initialization complete!");
     log::info!("All userspace services spawned and ready");
 
     // Step 15: Enable preemptive scheduler
-    // This MUST be the last thing we do - after this point, timer interrupts
-    // will start switching between threads, and kstart() will never run again
+    // Both VFS and shell will start running
+    // VFS has lower TID so it will be scheduled first and register before shell needs it
     scheduler::enable();
-    log::info!("Preemptive scheduler enabled - transferring control...");
+    log::info!("Preemptive scheduler enabled - transferring control to userspace");
 
     // Main kernel idle loop
     // Timer interrupts will preempt us and switch to ready threads

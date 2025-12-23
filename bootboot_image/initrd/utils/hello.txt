@@ -1,0 +1,16 @@
+Hello from the CLUU filesystem!
+
+This is a test file to demonstrate the VFS mount table
+and fsitem (filesystem item) implementation.
+
+The VFS server mounts the initrd at /dev/initrd/
+so you can access this file via:
+  cat /dev/initrd/utils/hello.txt
+
+Features:
+- Zero-copy file access via shared memory
+- BSD vnode-like abstraction (fsitems)
+- Microkernel architecture with userspace VFS server
+- TAR filesystem support
+
+Enjoy exploring CLUU!

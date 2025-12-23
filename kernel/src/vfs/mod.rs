@@ -259,25 +259,34 @@ fn vfs_request_sync(mut request: VfsRequest) -> Result<VfsRequest, IpcError> {
     Ok(response)
 }
 
+/// VFS file information
+///
+/// Contains information about an opened VFS file
+pub struct VfsFileInfo {
+    pub vfs_fd: i32,           // VFS server's file descriptor
+    pub shmem_id: i64,         // Shared memory ID (-1 if none)
+    pub fsitem_addr: Option<x86_64::VirtAddr>, // Mapped fsitem address
+}
+
 /// VFS open() operation
 ///
-/// Send VFS_OPEN request to userspace VFS server and return file descriptor.
+/// Send VFS_OPEN request to userspace VFS server and return file information.
 ///
 /// # Arguments
 /// * `path` - File path (e.g., "/bin/hello")
 /// * `flags` - Open flags (O_RDONLY, O_WRONLY, O_RDWR, etc.)
 ///
 /// # Returns
-/// File descriptor on success, negative error code on failure
-pub fn vfs_open(path: &str, flags: i32) -> isize {
+/// VfsFileInfo on success, or negative error code
+pub fn vfs_open(path: &str, flags: i32) -> Result<VfsFileInfo, isize> {
     if !VFS_INIT.load(Ordering::SeqCst) {
-        return VFS_ERR_NOSYS as isize;
+        return Err(VFS_ERR_NOSYS as isize);
     }
 
     // Check if VFS server is ready
     if !is_vfs_ready() {
         log::warn!("vfs_open: VFS server not ready");
-        return VFS_ERR_NOSYS as isize;
+        return Err(VFS_ERR_NOSYS as isize);
     }
 
     // Create request
@@ -288,11 +297,12 @@ pub fn vfs_open(path: &str, flags: i32) -> isize {
         Ok(response) => {
             let result = response.result();
             if result < 0 {
-                return result as isize;
+                return Err(result as isize);
             }
 
-            let fd = response.fd();
+            let vfs_fd = response.fd();
             let shmem_id = response.shmem_id();
+            let mut fsitem_addr = None;
 
             // If VFS server provided shmem_id, map it into client address space
             if shmem_id >= 0 {
@@ -308,14 +318,13 @@ pub fn vfs_open(path: &str, flags: i32) -> isize {
                         0x0,  // Let kernel choose address
                         perms
                     ) {
-                        Ok(virt_addr) => {
-                            log::info!("vfs_open: Mapped fsitem for FD {} at {:?}", fd, virt_addr);
-                            // TODO: Store mapping in per-process FD table
-                            // For now, client will need to call syscall to get fsitem address
+                        Ok(virt_addr_u64) => {
+                            let virt_addr = x86_64::VirtAddr::new(virt_addr_u64);
+                            log::info!("vfs_open: Mapped fsitem for FD {} at {:?}", vfs_fd, virt_addr);
+                            fsitem_addr = Some(virt_addr);
                         }
                         Err(e) => {
-                            log::warn!("vfs_open: Failed to map fsitem: {:?}, falling back to IPC reads", e);
-                            // Continue without mapping - client will use IPC-based reads
+                            log::warn!("vfs_open: Failed to map fsitem: {:?}, will use IPC reads", e);
                         }
                     }
                 } else {
@@ -323,11 +332,15 @@ pub fn vfs_open(path: &str, flags: i32) -> isize {
                 }
             }
 
-            fd as isize
+            Ok(VfsFileInfo {
+                vfs_fd,
+                shmem_id,
+                fsitem_addr,
+            })
         }
         Err(e) => {
             log::error!("vfs_open: IPC error: {:?}", e);
-            VFS_ERR_IO as isize
+            Err(VFS_ERR_IO as isize)
         }
     }
 }
@@ -487,20 +500,20 @@ pub fn vfs_read_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
     // If VFS server is ready, use it
     if is_vfs_ready() {
         // Open file via VFS
-        let fd = vfs_open(path, O_RDONLY);
-        if fd < 0 {
-            return Err("Failed to open file via VFS");
-        }
+        let file_info = vfs_open(path, O_RDONLY)
+            .map_err(|_| "Failed to open file via VFS")?;
+
+        let vfs_fd = file_info.vfs_fd;
 
         // Get file size via lseek
-        let file_size = vfs_lseek(fd as i32, 0, SEEK_END);
+        let file_size = vfs_lseek(vfs_fd, 0, SEEK_END);
         if file_size < 0 {
-            vfs_close(fd as i32);
+            vfs_close(vfs_fd);
             return Err("Failed to get file size");
         }
 
         // Seek back to start
-        vfs_lseek(fd as i32, 0, SEEK_SET);
+        vfs_lseek(vfs_fd, 0, SEEK_SET);
 
         // Read entire file
         let mut data = alloc::vec::Vec::with_capacity(file_size as usize);
@@ -509,15 +522,15 @@ pub fn vfs_read_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
         let mut total_read = 0;
         while total_read < file_size as usize {
             let to_read = (file_size as usize - total_read).min(MAX_PATH_LEN);
-            let bytes_read = vfs_read(fd as i32, &mut data[total_read..], to_read);
+            let bytes_read = vfs_read(vfs_fd, &mut data[total_read..], to_read);
             if bytes_read <= 0 {
-                vfs_close(fd as i32);
+                vfs_close(vfs_fd);
                 return Err("Failed to read file via VFS");
             }
             total_read += bytes_read as usize;
         }
 
-        vfs_close(fd as i32);
+        vfs_close(vfs_fd);
         return Ok(data);
     }
 

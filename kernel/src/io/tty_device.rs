@@ -15,11 +15,14 @@ use super::device::{Device, Errno, Stat, S_IFCHR};
 use crate::components::tty;
 use crate::drivers::input::keyboard;
 use alloc::string::String;
+use alloc::vec::Vec;
+use spin::Mutex;
 
 /// TTY device implementation
 pub struct TtyDevice {
     tty_id: u8,   // Which TTY (0 = console)
     mode: TtyMode, // Canonical/raw, echo on/off
+    line_buffer: Mutex<Vec<u8>>, // Buffer for canonical mode line data
 }
 
 /// TTY input/output mode (minimal termios subset)
@@ -41,6 +44,7 @@ impl TtyDevice {
                 canonical: true, // Default: canonical mode (line buffering)
                 echo: true,      // Default: echo on
             },
+            line_buffer: Mutex::new(Vec::new()),
         }
     }
 
@@ -62,12 +66,29 @@ impl Device for TtyDevice {
         }
 
         if self.mode.canonical {
-            // Canonical mode: Read full line (blocks until Enter)
-            // Delegate to existing TTY layer which handles line editing
-            let line = self.read_line_blocking()?;
-            let bytes = line.as_bytes();
-            let copy_len = bytes.len().min(buf.len());
-            buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
+            // Canonical mode: Read from line buffer (blocks until Enter if buffer empty)
+            let mut line_buf = self.line_buffer.lock();
+
+            // If buffer is empty, read a new line
+            if line_buf.is_empty() {
+                drop(line_buf); // Release lock before blocking
+                let line = self.read_line_blocking()?;
+                let mut bytes = line.into_bytes();
+                // Add newline if not present
+                if bytes.last() != Some(&b'\n') {
+                    bytes.push(b'\n');
+                }
+                line_buf = self.line_buffer.lock();
+                *line_buf = bytes;
+            }
+
+            // Copy from buffer to user buf
+            let copy_len = line_buf.len().min(buf.len());
+            buf[..copy_len].copy_from_slice(&line_buf[..copy_len]);
+
+            // Remove consumed bytes from buffer
+            line_buf.drain(..copy_len);
+
             Ok(copy_len)
         } else {
             // Raw mode: Read single character (blocks until key pressed)

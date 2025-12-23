@@ -33,6 +33,31 @@ fn print_byte(c: u8) {
     }
 }
 
+fn print_dec(mut n: i32) {
+    if n < 0 {
+        print_byte(b'-');
+        n = -n;
+    }
+
+    if n == 0 {
+        print_byte(b'0');
+        return;
+    }
+
+    let mut buf = [0u8; 12];
+    let mut i = 0;
+    while n > 0 {
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+
+    while i > 0 {
+        i -= 1;
+        print_byte(buf[i]);
+    }
+}
+
 fn read_char() -> Option<u8> {
     let mut buf = [0u8; 1];
     let n = unsafe {
@@ -57,9 +82,6 @@ fn read_line(buf: &mut [u8]) -> usize {
         }
 
         if let Some(ch) = read_char() {
-            // Echo character
-            print_byte(ch);
-
             if ch == b'\n' || ch == b'\r' {
                 print("\n");
                 break;
@@ -72,6 +94,8 @@ fn read_line(buf: &mut [u8]) -> usize {
                 buf[pos] = ch;
                 pos += 1;
             }
+        } else {
+            break;
         }
     }
 

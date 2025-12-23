@@ -13,6 +13,7 @@ pub mod pio;
 pub mod device;
 pub mod fd;
 pub mod tty_device;
+pub mod vfs_file;
 
 pub use pio::{Pio, Io, ReadOnly};
 
@@ -20,3 +21,4 @@ pub use pio::{Pio, Io, ReadOnly};
 pub use device::{Errno, S_IFCHR, S_IFMT};
 pub use fd::FileDescriptorTable;
 pub use tty_device::TtyDevice;
+pub use vfs_file::VfsFile;
