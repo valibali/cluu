@@ -53,7 +53,7 @@ pub fn write_log(message: &str) {
 
     // During early boot (before scheduler starts), flush immediately to ensure logs appear
     // Once scheduler is running, rely on periodic flushing for better performance
-    let should_flush_immediately = !crate::scheduler::is_scheduler_enabled()
+    let should_flush_immediately = !crate::scheduler::SchedulerManager::is_enabled()
         || buffer.len() > (32 * 1024 * 3 / 4);
 
     if should_flush_immediately {

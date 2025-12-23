@@ -37,11 +37,12 @@ mod drivers;
 mod fs;
 mod initrd;
 mod io;
+mod ipc;
 mod loaders;
 mod memory;
 mod scheduler;
+mod shmem;
 mod syscall;
-mod tests;
 mod utils;
 mod vfs;
 
@@ -164,13 +165,13 @@ pub extern "C" fn kstart() -> ! {
     utils::io::console::init();
 
     // Step 10: Initialize scheduler
-    scheduler::init();
+    scheduler::SchedulerManager::init();
 
     // Step 10.5: Initialize IPC system
-    scheduler::ipc::init();
+    ipc::port::init();
 
     // Step 10.55: Initialize shared memory subsystem
-    scheduler::shmem::init();
+    shmem::init();
     log::info!("Shared memory subsystem initialized");
 
     // Step 10.6: Initialize VFS subsystem
@@ -198,12 +199,14 @@ pub extern "C" fn kstart() -> ! {
         Err(e) => {
             log::error!("Failed to spawn VFS server: {}", e);
             log::error!("Cannot continue without VFS server!");
-            loop { x86_64::instructions::hlt(); }
+            loop {
+                x86_64::instructions::hlt();
+            }
         }
     };
 
     // Register VFS as critical process - scheduler won't enter normal mode until it signals ready
-    scheduler::register_critical_process(vfs_pid);
+    scheduler::SchedulerManager::register_critical(vfs_pid);
 
     log::info!("Kernel initialization complete!");
 
@@ -216,7 +219,12 @@ pub extern "C" fn kstart() -> ! {
     });
 
     if !shell_binary.is_empty() {
-        match loaders::elf::spawn_elf_process(&shell_binary, "shell", &[], scheduler::ProcessType::User) {
+        match loaders::elf::spawn_elf_process(
+            &shell_binary,
+            "shell",
+            &[],
+            scheduler::ProcessType::User,
+        ) {
             Ok((pid, tid)) => {
                 log::info!("Shell spawned: PID={:?}, TID={:?}", pid, tid);
             }
@@ -231,7 +239,7 @@ pub extern "C" fn kstart() -> ! {
     // Step 15: Enable preemptive scheduler
     // Both VFS and shell will start running
     // VFS has lower TID so it will be scheduled first and register before shell needs it
-    scheduler::enable();
+    scheduler::SchedulerManager::enable();
     log::info!("Preemptive scheduler enabled - transferring control to userspace");
 
     // Main kernel idle loop
@@ -259,9 +267,6 @@ fn shell_thread_main() {
         utils::ui::kshell::KShell::handle_char(ch);
     }
 }
-
-// Re-export test functions
-pub use tests::*;
 
 ///  PANIC HANDLER
 /// ===============================

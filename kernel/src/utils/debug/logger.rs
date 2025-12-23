@@ -36,7 +36,7 @@ impl log::Log for CluuLogger {
         if self.enabled(record.metadata()) {
             // During early boot (before scheduler/heap init), write directly to serial
             // to avoid using format!() which allocates on the heap
-            if !crate::scheduler::is_scheduler_enabled() {
+            if !crate::scheduler::SchedulerManager::is_enabled() {
                 serial_println!("[{}] {}", record.level(), record.args());
             } else {
                 // Normal operation: use ring buffer to prevent deadlocks

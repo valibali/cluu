@@ -21,7 +21,8 @@
 pub mod protocol;
 
 use crate::scheduler::ProcessId;
-use crate::scheduler::ipc::{self, IpcError, PortId};
+use crate::ipc::{self, IpcError, PortId};
+use crate::shmem;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use protocol::*;
@@ -87,11 +88,11 @@ pub fn spawn_server() -> Result<(ProcessId, crate::scheduler::ThreadId), &'stati
 
     // Create shared memory region from physical initrd
     // Kernel provides the resource, VFS server decides where to map it
-    let shmem_id = scheduler::shmem::shmem_create_from_phys(
+    let shmem_id = shmem::shmem_create_from_phys(
         initrd_phys,
         initrd_size,
         scheduler::ProcessId(0), // Kernel owns the physical memory
-        scheduler::shmem::ShmemPermissions {
+        shmem::ShmemPermissions {
             read: true,
             write: false, // Read-only
         },
@@ -307,13 +308,13 @@ pub fn vfs_open(path: &str, flags: i32) -> Result<VfsFileInfo, isize> {
 
             // If VFS server provided shmem_id, map it into client address space
             if shmem_id >= 0 {
-                use crate::scheduler::shmem::{ShmemId, ShmemPermissions};
+                use crate::shmem::{ShmemId, ShmemPermissions};
 
-                if let Some(current_pid) = crate::scheduler::current_process_id() {
+                if let Some(current_pid) = crate::scheduler::ProcessManager::current_id() {
                     // Map fsitem into client address space (read-only)
                     let perms = ShmemPermissions::from_flags(ShmemPermissions::READ);
 
-                    match crate::scheduler::shmem::shmem_map(
+                    match crate::shmem::shmem_map(
                         ShmemId(shmem_id as usize),
                         current_pid,
                         0x0,  // Let kernel choose address

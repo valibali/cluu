@@ -16,8 +16,7 @@
  * - Senders return error when queue full
  */
 
-use crate::scheduler::{current_thread_id, block_current_thread, wake_thread, yield_now};
-use crate::scheduler::thread::ThreadId;
+use crate::scheduler::{ThreadManager, SchedulerManager, ThreadId};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -210,7 +209,7 @@ pub fn port_create() -> Result<PortId, IpcError> {
         return Err(IpcError::InvalidPortId);
     }
 
-    let current_tid = current_thread_id();
+    let current_tid = ThreadManager::current_id();
     if current_tid.0 == 0 {
         // Idle thread can't create ports
         return Err(IpcError::InvalidPortId);
@@ -246,7 +245,7 @@ pub fn port_destroy(port_id: PortId) -> Result<(), IpcError> {
         return Err(IpcError::PortNotFound);
     }
 
-    let current_tid = current_thread_id();
+    let current_tid = ThreadManager::current_id();
 
     let waiters = {
         let mut registry = PORT_REGISTRY.lock();
@@ -274,7 +273,7 @@ pub fn port_destroy(port_id: PortId) -> Result<(), IpcError> {
 
     // Wake all waiting threads (they'll get PortNotFound on next iteration)
     for waiter in waiters {
-        wake_thread(waiter);
+        SchedulerManager::wake(waiter);
     }
 
     Ok(())
@@ -294,7 +293,7 @@ pub fn port_send(port_id: PortId, message: Message) -> Result<(), IpcError> {
         return Err(IpcError::PortNotFound);
     }
 
-    let current_tid = current_thread_id();
+    let current_tid = ThreadManager::current_id();
 
     let waiter = {
         let mut registry = PORT_REGISTRY.lock();
@@ -322,7 +321,7 @@ pub fn port_send(port_id: PortId, message: Message) -> Result<(), IpcError> {
 
     // Wake the receiver outside the lock
     if let Some(waiter) = waiter {
-        wake_thread(waiter);
+        SchedulerManager::wake(waiter);
     }
 
     Ok(())
@@ -344,7 +343,7 @@ pub fn port_recv(port_id: PortId) -> Result<Message, IpcError> {
         return Err(IpcError::PortNotFound);
     }
 
-    let current_tid = current_thread_id();
+    let current_tid = ThreadManager::current_id();
 
     loop {
         // Try to receive message
@@ -374,9 +373,9 @@ pub fn port_recv(port_id: PortId) -> Result<Message, IpcError> {
 
         // Block and wait for message
         log::debug!("port_recv: blocking thread {} on port {}", current_tid.0, port_id.0);
-        block_current_thread();
+        SchedulerManager::block_current();
         log::debug!("port_recv: yielding thread {}", current_tid.0);
-        yield_now();
+        SchedulerManager::yield_now();
         log::debug!("port_recv: thread {} woke up, retrying", current_tid.0);
 
         // When woken, loop back to try receiving
@@ -400,7 +399,7 @@ pub fn port_try_recv(port_id: PortId) -> Result<Option<Message>, IpcError> {
         return Err(IpcError::PortNotFound);
     }
 
-    let current_tid = current_thread_id();
+    let current_tid = ThreadManager::current_id();
 
     let mut registry = PORT_REGISTRY.lock();
     if let Some(ref mut map) = *registry {

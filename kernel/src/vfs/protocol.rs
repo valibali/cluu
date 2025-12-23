@@ -16,7 +16,7 @@
  * - Offset 56-255: data (200 bytes) - Path string or buffer data
  */
 
-use crate::scheduler::ipc::Message;
+use crate::ipc::Message;
 
 /// VFS request types
 pub const VFS_OPEN: u32 = 1;

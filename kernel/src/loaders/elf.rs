@@ -53,7 +53,7 @@ use crate::scheduler::{self, ProcessId, ThreadId};
 fn userspace_entry_trampoline() {
     log::warn!("userspace_entry_trampoline executed - this should not happen!");
     loop {
-        crate::scheduler::yield_now();
+        crate::scheduler::SchedulerManager::yield_now();
     }
 }
 
@@ -509,7 +509,7 @@ pub fn spawn_elf_process(
     log::info!("Spawning ELF process '{}' (type: {:?}) with {} args", name, process_type, args.len());
 
     // Create a new userspace process with dedicated page tables
-    let process_id = scheduler::spawn_user_process(name, process_type)
+    let process_id = scheduler::ProcessManager::spawn_user(name, process_type)
         .map_err(|_| ElfLoadError::MemoryAllocationFailed)?;
 
     // Get kernel CR3 now (BEFORE entering with_process_mut) to avoid deadlock
@@ -517,7 +517,7 @@ pub fn spawn_elf_process(
     let kernel_cr3 = paging::get_kernel_cr3();
 
     // Initialize file descriptors (stdin/stdout/stderr → TTY0)
-    scheduler::with_process_mut(process_id, |process| {
+    scheduler::ProcessManager::with_mut(process_id, |process| {
         use crate::io::TtyDevice;
         use alloc::sync::Arc;
 
@@ -535,7 +535,7 @@ pub fn spawn_elf_process(
 
     // Load ELF binary and set up user stack
     // Do this in a scope to release the process lock before creating thread
-    let (entry_point, _page_table_root, stack_ptr) = scheduler::with_process_mut(process_id, |process| {
+    let (entry_point, _page_table_root, stack_ptr) = scheduler::ProcessManager::with_mut(process_id, |process| {
         // Load ELF binary into process address space
         // Pass kernel_cr3 to avoid deadlock when mapping pages
         let binary = load_elf_binary(elf_data, &mut process.address_space, kernel_cr3)?;
@@ -676,7 +676,7 @@ pub fn spawn_elf_process(
 
     // Now create the thread AFTER releasing the process lock to avoid deadlock
     log::debug!("ELF: Creating userspace thread");
-    let thread_id = scheduler::spawn_thread_in_process(
+    let thread_id = scheduler::ThreadManager::spawn_in_process(
         userspace_entry_trampoline,
         name,
         process_id,
@@ -684,7 +684,7 @@ pub fn spawn_elf_process(
 
     // Set up the thread's interrupt context to enter userspace
     // Use the stack pointer that has argc/argv pushed on it
-    scheduler::setup_userspace_thread(
+    scheduler::ThreadManager::setup_userspace(
         thread_id,
         entry_point,
         stack_ptr,

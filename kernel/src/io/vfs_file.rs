@@ -6,7 +6,7 @@
  */
 
 use super::device::{Device, Errno, Stat, S_IFREG};
-use crate::scheduler::shmem::ShmemId;
+use crate::shmem::ShmemId;
 use x86_64::VirtAddr;
 
 /// VFS file device

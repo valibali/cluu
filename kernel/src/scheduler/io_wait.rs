@@ -60,7 +60,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-use super::{ThreadId, block_current_thread, wake_thread, current_thread_id};
+use super::{ThreadId, ThreadManager, SchedulerManager};
 
 /// I/O channel identifier
 ///
@@ -161,7 +161,7 @@ pub fn wait_for_io(channel: IoChannel) {
         return;
     }
 
-    let current_tid = current_thread_id();
+    let current_tid = ThreadManager::current_id();
     if current_tid.0 == 0 {
         panic!("Cannot wait for I/O in idle/kernel thread");
     }
@@ -174,10 +174,10 @@ pub fn wait_for_io(channel: IoChannel) {
     }
 
     // Block the thread (marks as Blocked state)
-    block_current_thread();
+    SchedulerManager::block_current();
 
     // Yield to scheduler - interrupts stay ENABLED so keyboard IRQ can fire
-    super::yield_now();
+    SchedulerManager::yield_now();
 
     // When we wake up here, the I/O event has occurred
 }
@@ -209,7 +209,7 @@ pub fn wake_io_waiters(channel: IoChannel) {
 
     // Wake each thread
     for thread_id in threads_to_wake {
-        wake_thread(thread_id);
+        SchedulerManager::wake(thread_id);
     }
 }
 

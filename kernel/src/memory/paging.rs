@@ -287,7 +287,7 @@ pub fn map_page_in_table(
     // Get kernel CR3 (PID 0's page tables - the one BOOTBOOT set up)
     // We assume the kernel's CR3 is the one that has entry 0 for identity mapping
     // For now, only switch if we're NOT already in kernel CR3
-    let kernel_cr3 = crate::scheduler::with_process_mut(
+    let kernel_cr3 = crate::scheduler::ProcessManager::with_mut(
         crate::scheduler::ProcessId(0),
         |process| process.address_space.page_table_root
     ).unwrap_or(old_cr3);
@@ -336,7 +336,7 @@ pub fn map_page_in_table(
 /// This is safe to call from any context. Returns None if kernel process
 /// doesn't exist (shouldn't happen after boot).
 pub fn get_kernel_cr3() -> Option<PhysAddr> {
-    crate::scheduler::with_process_mut(
+    crate::scheduler::ProcessManager::with_mut(
         crate::scheduler::ProcessId(0),
         |process| process.address_space.page_table_root
     )
@@ -381,7 +381,7 @@ pub fn map_pages_batch_in_table(
 
     // Get kernel CR3 - use provided value or look it up
     let kernel_cr3 = kernel_cr3.unwrap_or_else(|| {
-        crate::scheduler::with_process_mut(
+        crate::scheduler::ProcessManager::with_mut(
             crate::scheduler::ProcessId(0),
             |process| process.address_space.page_table_root
         ).unwrap_or(old_cr3)

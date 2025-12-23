@@ -327,7 +327,7 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
     use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
 
     // Get current process and check if fault is in heap region
-    let result = crate::scheduler::with_current_process_mut(|process| {
+    let result = crate::scheduler::ProcessManager::with_current_mut(|process| {
         let heap = &process.address_space.heap;
 
         // Check if fault address is in allocated heap region (below current_brk)

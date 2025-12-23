@@ -188,20 +188,6 @@ impl KShell {
             "test" => Self::cmd_test(),
             "colors" => Self::cmd_colors(),
             "threads" | "ps" => Self::cmd_threads(),
-            "yield" => Self::cmd_yield(),
-            "test-ipc" | "ipc-test" => Self::cmd_test_ipc(),
-            "test-ipc-block" => Self::cmd_test_ipc_blocking(),
-            "test-ipc-queue" => Self::cmd_test_ipc_queue(),
-            "test-ipc-multi" => Self::cmd_test_ipc_multi(),
-            "test-fd" => Self::cmd_test_fd(),
-            "test-syscall" => Self::cmd_test_syscall(),
-            "syscall-smoke" => Self::cmd_syscall_smoke(),
-            "test-all" | "comprehensive" => Self::cmd_comprehensive_test(),
-            "quick-test" | "smoke" => Self::cmd_quick_smoke(),
-            "stress" | "test-stress" => Self::cmd_stress_test(),
-            "stress-forever" | "stress-continuous" => Self::cmd_stress_forever(),
-            "spawn-test" | "spawn_test" => Self::cmd_spawn_test(),
-            "shmem-test" | "shmem_test" => Self::cmd_shmem_test(),
             "" => {}
             _ => {
                 console::write_colored("Unknown command: ", Color::RED, Color::BLACK);
@@ -231,7 +217,10 @@ impl KShell {
             ("colors", "Show color test"),
             ("threads, ps", "Show thread information"),
             ("yield", "Yield CPU to other threads"),
-            ("test-all", "Run ALL tests (syscall, IPC, FD, stress) with summary"),
+            (
+                "test-all",
+                "Run ALL tests (syscall, IPC, FD, stress) with summary",
+            ),
             ("quick-test", "Quick smoke test (fast validation)"),
             ("test-syscall", "Run comprehensive syscall handler tests"),
             ("syscall-smoke", "Run quick syscall smoke test"),
@@ -240,8 +229,14 @@ impl KShell {
                 "stress-forever",
                 "Run continuous stress test (runs forever)",
             ),
-            ("spawn-test", "Test process spawning (spawn/waitpid syscalls)"),
-            ("shmem-test", "Test shared memory (create/map/unmap/destroy)"),
+            (
+                "spawn-test",
+                "Test process spawning (spawn/waitpid syscalls)",
+            ),
+            (
+                "shmem-test",
+                "Test shared memory (create/map/unmap/destroy)",
+            ),
             ("reboot", "Reboot the system"),
         ];
 
@@ -308,7 +303,7 @@ impl KShell {
             console::write_colored(&countdown, Color::RED, Color::BLACK);
 
             // Use scheduler sleep instead of busy-wait
-            crate::scheduler::sleep_ms(1000);
+            crate::scheduler::SchedulerManager::sleep_ms(1000);
         }
 
         console::write_colored("Rebooting now!\n", Color::RED, Color::BLACK);
@@ -403,7 +398,7 @@ impl KShell {
         console::write_str("\n");
 
         // Get thread statistics
-        let stats = crate::scheduler::get_thread_stats();
+        let stats = crate::scheduler::ThreadManager::stats();
 
         if stats.is_empty() {
             console::write_colored("  No threads found\n", Color::LIGHT_GRAY, Color::BLACK);
@@ -426,7 +421,7 @@ impl KShell {
         console::write_colored("  ", Color::GRAY, Color::BLACK);
         console::write_str("──────────────────────────────────────────────────────────\n");
 
-        let current_id = crate::scheduler::current_thread_id();
+        let current_id = crate::scheduler::ThreadManager::current_id();
 
         // Print each thread
         for stat in stats {
@@ -516,427 +511,5 @@ impl KShell {
             seconds % 60
         );
         console::write_colored(&uptime_str, Color::LIGHT_GRAY, Color::BLACK);
-    }
-
-    fn cmd_yield() {
-        console::write_colored(
-            "Yielding CPU to other threads...\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        crate::scheduler::yield_now();
-        console::write_colored("Back in shell thread\n", Color::GREEN, Color::BLACK);
-    }
-
-    fn cmd_test_ipc() {
-        console::write_colored(
-            "Starting IPC Test: Basic Send/Receive\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "This test spawns sender and receiver threads.\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Watch the logs for test results.\n\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        crate::tests::spawn_ipc_tests();
-    }
-
-    fn cmd_test_ipc_blocking() {
-        // Minimal test - just log and return
-        log::info!("===== cmd_test_ipc_blocking: START =====");
-        console::write_colored("Test function called!\n", Color::GREEN, Color::BLACK);
-        log::info!("===== cmd_test_ipc_blocking: END =====");
-
-        // Uncomment to run actual test:
-        crate::tests::spawn_ipc_blocking_test();
-    }
-
-    fn cmd_test_ipc_queue() {
-        console::write_colored(
-            "Starting IPC Test: Queue Full Handling\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Tests queue capacity (32 messages) and error handling.\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Watch the logs for test results.\n\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        crate::tests::spawn_ipc_queue_test();
-    }
-
-    fn cmd_test_ipc_multi() {
-        console::write_colored(
-            "Starting IPC Test: Multiple Senders\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "3 senders will send 5 messages each to 1 receiver.\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Watch the logs for message delivery order.\n\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        crate::tests::spawn_ipc_multi_test();
-    }
-
-    fn cmd_test_fd() {
-        console::write_colored("Starting FD Layer Test\n", Color::CYAN, Color::BLACK);
-        console::write_colored(
-            "Testing file descriptor abstraction with stdin/stdout/stderr.\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Watch the logs and follow prompts.\n\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        crate::tests::spawn_fd_test();
-    }
-
-    fn cmd_test_syscall() {
-        console::write_colored(
-            "Starting SYSCALL Handler Tests\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Running comprehensive tests for all syscall handlers:\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  - Group A: _write, _read, _isatty, _fstat, _close, _lseek\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  - Group B: _sbrk (heap growth with lazy allocation)\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  - Error handling: EBADF, EFAULT, EINVAL, ENOMEM, ESPIPE\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "\nNote: These tests call handlers directly (kernel mode).\n",
-            Color::YELLOW,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Watch the logs for PASS/FAIL results.\n\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-
-        crate::tests::syscall_tests::run_all_syscall_tests();
-    }
-
-    fn cmd_syscall_smoke() {
-        console::write_colored(
-            "Starting Syscall Smoke Test\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Quick validation of core syscall functionality.\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "Running: sys_write, sys_isatty, sys_brk\n\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-
-        crate::tests::syscall_tests::syscall_smoke_test();
-
-        console::write_colored(
-            "\nSmoke test complete!\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
-    }
-
-    fn cmd_comprehensive_test() {
-        console::write_colored(
-            "═══════════════════════════════════════════════════════════\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  COMPREHENSIVE TEST SUITE\n",
-            Color::WHITE,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "═══════════════════════════════════════════════════════════\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_str("\n");
-        console::write_colored(
-            "This will run ALL kernel tests in sequence:\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  1. Syscall handler tests\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  2. IPC tests (spawns test threads)\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  3. FD layer tests\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  4. Light stress test (29 threads)\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_str("\n");
-        console::write_colored(
-            "This may take 15-20 seconds. Watch console for progress.\n",
-            Color::YELLOW,
-            Color::BLACK,
-        );
-        console::write_str("\n");
-
-        // Run comprehensive test suite
-        let _results = crate::tests::comprehensive::run_comprehensive_test_suite();
-    }
-
-    fn cmd_quick_smoke() {
-        crate::tests::comprehensive::run_quick_smoke_test();
-    }
-
-    fn cmd_stress_test() {
-        console::write_colored(
-            "Starting STRESS TEST: Threading + IPC\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "This will spawn 29 threads:\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  - 3 IPC receivers (each with own port)\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  - 15 IPC senders (5 per receiver)\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  - 10 compute threads (scheduler stress)\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored("  - 1 monitor thread\n", Color::LIGHT_GRAY, Color::BLACK);
-        console::write_colored("\nThis tests:\n", Color::YELLOW, Color::BLACK);
-        console::write_colored(
-            "  ✓ Concurrent thread creation/termination\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  ✓ Multiple simultaneous IPC operations\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  ✓ Scheduler under high load\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  ✓ Sleep/yield/blocking behavior\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "\nWatch the logs for progress updates...\n\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        crate::tests::spawn_stress_test();
-    }
-
-    fn cmd_spawn_test() {
-        console::write_colored(
-            "Starting Spawn Test (userspace)\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-
-        // Read spawn_test binary from initrd
-        let binary = match crate::initrd::read_file("bin/spawn_test") {
-            Ok(data) => data,
-            Err(e) => {
-                console::write_colored("ERROR: Failed to read bin/spawn_test from initrd: ", Color::RED, Color::BLACK);
-                console::write_str(e);
-                console::write_str("\n");
-                return;
-            }
-        };
-
-        // Spawn the process
-        match crate::loaders::elf::spawn_elf_process(binary, "spawn_test", &[], crate::scheduler::ProcessType::User) {
-            Ok((process_id, thread_id)) => {
-                console::write_colored("✓ Spawn test process started\n", Color::GREEN, Color::BLACK);
-                console::write_colored("  Process ID: ", Color::WHITE, Color::BLACK);
-                console::write_str(&alloc::format!("{:?}\n", process_id));
-                console::write_colored("  Thread ID: ", Color::WHITE, Color::BLACK);
-                console::write_str(&alloc::format!("{:?}\n", thread_id));
-                console::write_str("\n");
-
-                // Yield to let the test run
-                for _ in 0..100 {
-                    crate::scheduler::yield_now();
-                }
-            }
-            Err(e) => {
-                console::write_colored("✗ Failed to spawn test process: ", Color::RED, Color::BLACK);
-                console::write_str(&alloc::format!("{:?}\n", e));
-            }
-        }
-    }
-
-    fn cmd_shmem_test() {
-        console::write_colored(
-            "Starting Shared Memory Test (userspace)\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-
-        // Read shmem_test binary from initrd
-        let binary = match crate::initrd::read_file("bin/shmem_test") {
-            Ok(data) => data,
-            Err(e) => {
-                console::write_colored("ERROR: Failed to read bin/shmem_test from initrd: ", Color::RED, Color::BLACK);
-                console::write_str(e);
-                console::write_str("\n");
-                return;
-            }
-        };
-
-        // Spawn the process
-        match crate::loaders::elf::spawn_elf_process(binary, "shmem_test", &[], crate::scheduler::ProcessType::User) {
-            Ok((process_id, thread_id)) => {
-                console::write_colored("✓ Shared memory test process started\n", Color::GREEN, Color::BLACK);
-                console::write_colored("  Process ID: ", Color::WHITE, Color::BLACK);
-                console::write_str(&alloc::format!("{:?}\n", process_id));
-                console::write_colored("  Thread ID: ", Color::WHITE, Color::BLACK);
-                console::write_str(&alloc::format!("{:?}\n", thread_id));
-                console::write_str("\n");
-
-                // Yield to let the test run
-                for _ in 0..100 {
-                    crate::scheduler::yield_now();
-                }
-            }
-            Err(e) => {
-                console::write_colored("✗ Failed to spawn shmem test process: ", Color::RED, Color::BLACK);
-                console::write_str(&alloc::format!("{:?}\n", e));
-            }
-        }
-    }
-
-    fn cmd_stress_forever() {
-        console::write_colored(
-            "Starting CONTINUOUS STRESS TEST\n",
-            Color::CYAN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "⚠ WARNING: This test runs FOREVER!\n",
-            Color::RED,
-            Color::BLACK,
-        );
-        console::write_str("\n");
-        console::write_colored("Test strategy:\n", Color::YELLOW, Color::BLACK);
-        console::write_colored(
-            "  • Spawns waves of 8 threads continuously\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  • Each wave: 2 IPC receivers, 4 IPC senders, 1 FD test, 1 compute\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  • Waits for wave completion before next wave\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  • Prevents heap exhaustion via thread cleanup\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_str("\n");
-        console::write_colored("What this tests:\n", Color::YELLOW, Color::BLACK);
-        console::write_colored(
-            "  ✓ Long-term stability and memory leaks\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  ✓ Thread cleanup and resource reclamation\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "  ✓ IPC port lifecycle (create/destroy)\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
-        console::write_colored("  ✓ FD operations over time\n", Color::GREEN, Color::BLACK);
-        console::write_colored(
-            "  ✓ Scheduler fairness under sustained load\n",
-            Color::GREEN,
-            Color::BLACK,
-        );
-        console::write_str("\n");
-        console::write_colored(
-            "Statistics will be logged every cycle.\n",
-            Color::LIGHT_GRAY,
-            Color::BLACK,
-        );
-        console::write_colored(
-            "To stop: reboot the system\n\n",
-            Color::YELLOW,
-            Color::BLACK,
-        );
-        crate::tests::spawn_continuous_stress_test();
     }
 }

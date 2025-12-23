@@ -356,7 +356,7 @@ pub fn shmem_map(
     let kernel_cr3 = crate::memory::paging::get_kernel_cr3();
 
     // Map pages into process address space using batch operation
-    crate::scheduler::with_process_mut(process_id, |process| {
+    crate::scheduler::ProcessManager::with_mut(process_id, |process| {
         let page_flags = permissions.to_page_flags();
         let page_table_root = process.address_space.page_table_root;
 

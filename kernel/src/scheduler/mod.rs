@@ -79,28 +79,24 @@
  * - Per-thread 64KB stacks
  */
 
-use alloc::{
-    collections::{BTreeMap, VecDeque},
-    vec::Vec,
-};
-
 use core::{
     arch::asm,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use spin::Mutex;
 
+mod scheduler;
+
 pub mod io_wait;
-pub mod ipc;
 pub mod process;
-pub mod shmem;
+pub mod scheduler_manager;
 pub mod thread;
 
-use crate::alloc::string::ToString;
 pub use io_wait::{IoChannel, wait_for_io, wake_io_waiters};
-pub use ipc::{IpcError, Message, PortId, port_create, port_destroy, port_recv, port_send};
-pub use process::{Process, ProcessId};
-pub use thread::{Thread, ThreadId, ThreadState};
+pub use process::{Process, ProcessId, ProcessManager};
+pub use scheduler::InterruptContext;
+pub use scheduler_manager::SchedulerManager;
+pub use thread::{Thread, ThreadId, ThreadManager, ThreadState};
 
 /// Scheduler operating mode
 ///
@@ -173,14 +169,8 @@ pub enum ProcessInitState {
     Failed,
 }
 
-/// Thread stack size (64 KiB per thread)
-pub const THREAD_STACK_SIZE: usize = 64 * 1024;
-
-/// Maximum number of threads
-pub const MAX_THREADS: usize = 64;
-
 /// Global scheduler instance
-static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
+static SCHEDULER: Mutex<Option<scheduler::Scheduler>> = Mutex::new(None);
 
 /// Current running thread ID (atomic for IRQ safety)
 static CURRENT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
@@ -192,810 +182,95 @@ static SCHEDULER_ENABLED: AtomicBool = AtomicBool::new(false);
 /// When true, timer interrupts will not perform context switches
 static PREEMPTION_DISABLED: AtomicBool = AtomicBool::new(false);
 
-/// Scheduler operating mode (Boot or Normal)
-static SCHEDULER_MODE: Mutex<SchedulerMode> = Mutex::new(SchedulerMode::Boot {
-    critical_count: 0,
-    ready_count: 0,
-});
+// ================================================================================================
+// INTERNAL HELPER FUNCTIONS
+// ================================================================================================
 
-/// Check if the scheduler is enabled
+/// Execute a closure with immutable access to the scheduler
 ///
-/// Returns true if the scheduler has been initialized and is running.
-/// During early boot (before scheduler initialization), this returns false.
-pub fn is_scheduler_enabled() -> bool {
-    SCHEDULER_ENABLED.load(Ordering::SeqCst)
-}
-
-/// Get the current scheduler operating mode
+/// This helper provides interrupt-safe access to the global scheduler singleton.
+/// Interrupts are disabled during the closure execution to prevent timer IRQ deadlocks.
 ///
-/// Returns the current mode (Boot or Normal).
-pub fn get_scheduler_mode() -> SchedulerMode {
-    *SCHEDULER_MODE.lock()
-}
-
-/// Register a critical process that must initialize before normal mode
-///
-/// Critical processes are the only ones scheduled during boot mode.
-/// Once all critical processes signal ready, the scheduler transitions to normal mode.
-///
-/// This should be called immediately after spawning a critical process.
-///
-/// # Arguments
-/// * `pid` - Process ID of the critical process
-pub fn register_critical_process(pid: ProcessId) {
-    let mut mode = SCHEDULER_MODE.lock();
-    if let SchedulerMode::Boot { ref mut critical_count, .. } = *mode {
-        *critical_count += 1;
-        log::info!("Registered critical process {} '{}' (total: {})",
-                   pid.0,
-                   with_process_mut(pid, |p| p.name.clone()).unwrap_or_else(|| "?".to_string()),
-                   critical_count);
-    } else {
-        log::warn!("Cannot register critical process {} - scheduler already in normal mode", pid.0);
-    }
-}
-
-/// Process signals it has completed initialization
-///
-/// Called by critical processes via sys_process_ready() when they have finished
-/// initialization and are ready to serve requests.
-///
-/// When all critical processes have signaled ready, the scheduler automatically
-/// transitions from Boot mode to Normal mode, allowing user processes to run.
-///
-/// # Arguments
-/// * `pid` - Process ID signaling ready
-///
-/// # Returns
-/// Ok if signaled successfully, Err if process is not critical or already signaled
-pub fn signal_process_ready(pid: ProcessId) -> Result<(), &'static str> {
-    // Update process state
-    with_process_mut(pid, |process| {
-        if process.process_type != ProcessType::Critical {
-            return Err("Only critical processes can signal ready during boot");
-        }
-
-        if process.init_state == ProcessInitState::Ready {
-            return Err("Process already signaled ready");
-        }
-
-        process.init_state = ProcessInitState::Ready;
-        log::info!("Critical process {} '{}' signaled ready", pid.0, process.name);
-        Ok(())
-    }).ok_or("Process not found")??;
-
-    // Check if we should transition to normal mode
-    let mut mode = SCHEDULER_MODE.lock();
-    if let SchedulerMode::Boot { critical_count, ref mut ready_count } = *mode {
-        *ready_count += 1;
-        log::info!("Critical processes ready: {}/{}", ready_count, critical_count);
-
-        if *ready_count == critical_count {
-            log::info!("========================================");
-            log::info!("All critical processes ready!");
-            log::info!("Transitioning to NORMAL MODE");
-            log::info!("========================================");
-            *mode = SchedulerMode::Normal;
-        }
-    }
-
-    Ok(())
-}
-
-/// Interrupt frame pushed by CPU during interrupt
-///
-/// When an interrupt occurs, the x86_64 CPU automatically pushes these registers
-/// onto the stack in this exact order. This is the hardware-defined structure.
-///
-/// The #[repr(C)] ensures the struct layout matches what the CPU pushes.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct InterruptFrame {
-    pub rip: u64,    // Instruction pointer - where to resume execution
-    pub cs: u64,     // Code segment selector
-    pub rflags: u64, // CPU flags register
-    pub rsp: u64,    // Stack pointer before interrupt
-    pub ss: u64,     // Stack segment selector
-}
-
-impl Default for InterruptFrame {
-    fn default() -> Self {
-        Self {
-            rip: 0,
-            cs: 0x08,      // Kernel code segment (from GDT)
-            rflags: 0x202, // IF=1 (interrupts enabled), reserved bit 1 always set
-            rsp: 0,
-            ss: 0x10, // Kernel data segment (from GDT)
-        }
-    }
-}
-
-/// Complete CPU context for interrupt-based context switching
-///
-/// This structure holds ALL registers that need to be saved during a
-/// preemptive context switch triggered by a timer interrupt. It includes:
-///
-/// 1. INTERRUPT FRAME: CPU automatically pushes RIP, CS, RFLAGS, RSP, SS
-/// 2. ALL GENERAL PURPOSE REGISTERS: We must manually save RAX-R15
-///
-/// The layout is designed to match what our assembly code expects when
-/// performing context switches via iretq.
-///
-/// Memory layout (from high to low addresses on stack):
-/// - Interrupt frame (pushed by CPU)
-/// - General purpose registers (pushed by our code)
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct InterruptContext {
-    // General purpose registers (pushed by our interrupt handler)
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub r11: u64,
-    pub r10: u64,
-    pub r9: u64,
-    pub r8: u64,
-    pub rbp: u64,
-    pub rdi: u64,
-    pub rsi: u64,
-    pub rdx: u64,
-    pub rcx: u64,
-    pub rbx: u64,
-    pub rax: u64,
-
-    // Interrupt frame (pushed automatically by CPU)
-    pub iret_frame: InterruptFrame,
-}
-
-impl Default for InterruptContext {
-    fn default() -> Self {
-        Self {
-            r15: 0,
-            r14: 0,
-            r13: 0,
-            r12: 0,
-            r11: 0,
-            r10: 0,
-            r9: 0,
-            r8: 0,
-            rbp: 0,
-            rdi: 0,
-            rsi: 0,
-            rdx: 0,
-            rcx: 0,
-            rbx: 0,
-            rax: 0,
-            iret_frame: InterruptFrame::default(),
-        }
-    }
-}
-
-/// Main scheduler structure
-///
-/// This is the core data structure that manages all threads in the system.
-/// It maintains:
-///
-/// 1. THREAD STORAGE: All thread objects with their stacks and metadata
-/// 2. READY QUEUE: FIFO queue of threads waiting to be scheduled
-/// 3. ID ALLOCATION: Ensures each thread gets a unique identifier
-///
-/// DESIGN DECISIONS:
-/// ================
-///
-/// - Vec<Thread>: Stores all threads, indexed by position (not ID)
-/// - VecDeque<ThreadId>: Ready queue for O(1) push/pop operations
-/// - ThreadId counter: Simple incrementing ID assignment
-///
-/// THREAD LOOKUP:
-/// ==============
-///
-/// Threads are found by linear search through the Vec. This is acceptable
-/// for a microkernel with a small number of threads. For better performance
-/// with many threads, we could use a HashMap<ThreadId, Thread>.
-pub struct Scheduler {
-    threads: Vec<Thread>,                    // All threads in the system
-    ready_queue: VecDeque<ThreadId>,         // Queue of threads ready to run
-    next_thread_id: ThreadId,                // Next ID to assign to new thread
-    processes: BTreeMap<ProcessId, Process>, // All processes in the system
-    next_process_id: ProcessId,              // Next ID to assign to new process
-}
-
-/// Maximum PID value before wrapping around
-/// This matches typical Unix systems (32768)
-const MAX_PID: usize = 32768;
-
-impl Scheduler {
-    fn new() -> Self {
-        Self {
-            threads: Vec::new(),
-            ready_queue: VecDeque::new(),
-            next_thread_id: ThreadId(1), // ID 0 reserved for kernel/idle
-            processes: BTreeMap::new(),
-            next_process_id: ProcessId(1), // ID 0 reserved for kernel
-        }
-    }
-
-    /// Allocate a new process ID
-    ///
-    /// This function allocates PIDs in a continuously increasing manner,
-    /// wrapping around at MAX_PID and skipping PIDs that are still in use.
-    /// This prevents immediate PID reuse and associated bugs.
-    ///
-    /// Returns None if all PIDs are exhausted (extremely unlikely).
-    fn allocate_pid(&mut self) -> Option<ProcessId> {
-        let start_pid = self.next_process_id.0;
-
-        // Try to find an unused PID, starting from next_process_id
-        loop {
-            let candidate = ProcessId(self.next_process_id.0);
-
-            // Increment for next allocation (with wrapping)
-            self.next_process_id.0 += 1;
-            if self.next_process_id.0 >= MAX_PID {
-                self.next_process_id.0 = 1; // Wrap around, skip PID 0 (kernel)
-            }
-
-            // Check if this PID is available
-            if !self.processes.contains_key(&candidate) && candidate.0 != 0 {
-                return Some(candidate);
-            }
-
-            // If we've wrapped all the way around, all PIDs are in use!
-            if self.next_process_id.0 == start_pid {
-                return None;
-            }
-        }
-    }
-
-    /// Create a new thread
-    ///
-    /// This function sets up a new thread with its own stack and initial CPU context.
-    /// The process involves several critical steps:
-    ///
-    /// THREAD CREATION PROCESS:
-    /// =======================
-    ///
-    /// 1. ID ASSIGNMENT: Each thread gets a unique, incrementing ID
-    /// 2. STACK ALLOCATION: 64KB stack allocated on the heap
-    /// 3. CONTEXT SETUP: CPU registers initialized for first execution (both old and new style)
-    /// 4. ENTRY POINT: Function pointer set in context
-    /// 5. REGISTRATION: Thread added to scheduler's data structures
-    ///
-    /// STACK LAYOUT FOR COOPERATIVE:
-    /// =============================
-    ///
-    /// High Address  [Stack Top]
-    ///               [Entry Point Address] <- RSP points here initially
-    ///               [Available Stack Space]
-    ///               [...]
-    /// Low Address   [Stack Bottom]
-    ///
-    /// INTERRUPT CONTEXT FOR PREEMPTIVE:
-    /// =================================
-    ///
-    /// The interrupt context is set up as if the thread was interrupted:
-    /// - RIP points to entry point function
-    /// - RSP points to top of thread's stack
-    /// - RFLAGS has interrupts enabled (IF=1)
-    /// - CS/SS set to kernel segments
-    ///
-    /// When the thread first runs via iretq, it will jump to the entry point.
-    /// Create a new thread
-    ///
-    /// This function sets up a new thread with its own stack and initial interrupt context.
-    /// The thread will be ready to run via preemptive scheduling.
-    ///
-    /// THREAD CREATION PROCESS:
-    /// =======================
-    ///
-    /// 1. ID ASSIGNMENT: Each thread gets a unique, incrementing ID
-    /// 2. STACK ALLOCATION: 64KB stack allocated on the heap
-    /// 3. INTERRUPT CONTEXT SETUP: Set up as if thread was interrupted
-    ///    - RIP points to entry point function
-    ///    - RSP points to top of thread's stack
-    ///    - RFLAGS has interrupts enabled (IF=1)
-    ///    - CS/SS set to kernel segments
-    /// 4. REGISTRATION: Thread added to scheduler's ready queue
-    ///
-    /// When the thread first runs via iretq, it will jump to the trampoline
-    /// which calls the entry point and ensures proper cleanup.
-    fn create_thread(&mut self, entry_point: fn(), name: &str, process_id: ProcessId) -> ThreadId {
-        // Assign unique ID and increment counter for next thread
-        let thread_id = self.next_thread_id;
-        self.next_thread_id.0 += 1;
-
-        // Allocate a 64KB stack for this thread
-        let stack = alloc::vec![0u8; THREAD_STACK_SIZE].into_boxed_slice();
-        let stack_base = stack.as_ptr() as u64;
-        let stack_top = stack_base + THREAD_STACK_SIZE as u64;
-
-        // CRITICAL: Set up return address on stack for thread safety
-        // When thread's entry function returns, it will "return" to thread_exit_trampoline
-        // This prevents INVALID_OPCODE from executing garbage addresses
-        let return_addr = thread_exit_trampoline as *const () as u64;
-        let stack_ptr = (stack_top - 8) as *mut u64;
-        unsafe {
-            *stack_ptr = return_addr;
-        }
-
-        // Set up interrupt context for preemptive scheduling
-        let mut interrupt_context = InterruptContext::default();
-
-        // Set up interrupt frame to make it look like this thread was interrupted
-        interrupt_context.iret_frame.rip = entry_point as u64; // Jump to entry point
-        interrupt_context.iret_frame.cs = 0x08; // Kernel code segment
-        interrupt_context.iret_frame.rflags = 0x202; // IF=1 (interrupts enabled), bit 1 always set
-        interrupt_context.iret_frame.rsp = stack_top - 8; // RSP points to return address
-        interrupt_context.iret_frame.ss = 0x10; // Kernel data segment
-
-        // All general purpose registers initialized to 0 (from default())
-
-        // Create the thread object and add it to our data structures
-        let thread = Thread::new(thread_id, name.into(), stack, interrupt_context, process_id);
-        self.threads.push(thread);
-
-        // Add thread to its process
-        if let Some(process) = self.processes.get_mut(&process_id) {
-            process.add_thread(thread_id);
-        }
-
-        // New thread starts in Ready state, so add to ready queue
-        self.ready_queue.push_back(thread_id);
-
-        log::info!(
-            "Created thread '{}' (ID {:?}) in process {:?}",
-            name,
-            thread_id,
-            process_id
-        );
-        thread_id
-    }
-
-    /// Get the next thread to run
-    ///
-    /// Respects scheduler mode:
-    /// - Boot mode: Only schedules threads from Critical processes
-    /// - Normal mode: Schedules all threads by priority (RT > Critical > System > User)
-    fn get_next_thread(&mut self) -> Option<ThreadId> {
-        let current_time = crate::utils::timer::uptime_ms();
-        let mode = get_scheduler_mode();
-
-        // Wake up any threads whose sleep time has expired
-        for thread in &mut self.threads {
-            if thread.sleep_until_ms > 0 && current_time >= thread.sleep_until_ms {
-                // Sleep expired, wake up thread
-                thread.sleep_until_ms = 0;
-                if thread.state == ThreadState::Ready {
-                    // Add back to ready queue if not already there
-                    if !self.ready_queue.contains(&thread.id) {
-                        self.ready_queue.push_back(thread.id);
-                    }
-                }
-            }
-        }
-
-        // Find next thread that is not sleeping or terminated
-        // and respects scheduler mode restrictions
-        loop {
-            let thread_id = self.ready_queue.pop_front()?;
-
-            // Check thread state
-            if let Some(thread) = self.threads.iter().find(|t| t.id == thread_id) {
-                // Skip terminated threads
-                if thread.state == ThreadState::Terminated {
-                    continue;
-                }
-
-                // Skip sleeping threads
-                if thread.sleep_until_ms > 0 && current_time < thread.sleep_until_ms {
-                    // Thread is still sleeping, don't schedule it
-                    // Don't put it back in ready queue
-                    continue;
-                }
-
-                // BOOT MODE FILTER: Only schedule critical processes (+ kernel threads)
-                if let SchedulerMode::Boot { .. } = mode {
-                    // Get process type for this thread
-                    if let Some(process) = self.processes.get(&thread.process_id) {
-                        // EXCEPTION: Always allow kernel process (PID 0) threads (includes idle)
-                        if process.id.0 != 0 && process.process_type != ProcessType::Critical {
-                            // Non-critical, non-kernel process in boot mode - put back at end of queue
-                            self.ready_queue.push_back(thread_id);
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            // Thread is valid and allowed to run in current mode
-            return Some(thread_id);
-        }
-    }
-
-    /// Add thread back to ready queue
-    fn make_ready(&mut self, thread_id: ThreadId) {
-        if let Some(thread) = self.threads.iter_mut().find(|t| t.id == thread_id) {
-            if thread.state == ThreadState::Running {
-                thread.state = ThreadState::Ready;
-                self.ready_queue.push_back(thread_id);
-            }
-        }
-    }
-
-    /// Get thread by ID
-    fn get_thread_mut(&mut self, thread_id: ThreadId) -> Option<&mut Thread> {
-        self.threads.iter_mut().find(|t| t.id == thread_id)
-    }
-
-    /// Clean up terminated threads
-    ///
-    /// Removes all terminated threads from the scheduler, freeing their resources.
-    /// This is called automatically during context switches (yield_now) when a
-    /// terminated thread is detected.
-    ///
-    /// For processes that have no remaining threads, marks them as zombie processes
-    /// with their exit code. Zombie processes remain in the process table until
-    /// reaped by sys_waitpid.
-    ///
-    /// # Arguments
-    /// * `current_thread_id` - The currently running thread (must not be cleaned up)
-    /// * `log_cleanup` - Whether to log cleanup (should be false in IRQ context!)
-    ///
-    /// Returns the number of threads cleaned up.
-    fn cleanup_terminated_threads(
-        &mut self,
-        current_thread_id: ThreadId,
-        log_cleanup: bool,
-    ) -> usize {
-        // First, identify threads to clean up
-        let mut to_remove = alloc::vec::Vec::new();
-        let mut processes_to_check = alloc::collections::BTreeMap::new();
-
-        for thread in &self.threads {
-            if thread.state == ThreadState::Terminated
-                && thread.id != current_thread_id
-                && thread.id.0 != 0
-            {
-                to_remove.push((thread.id, thread.name.clone(), thread.process_id));
-                // Store exit code for each process (last thread's exit code wins)
-                processes_to_check.insert(thread.process_id, thread.exit_code.unwrap_or(0));
-            }
-        }
-
-        // CRITICAL: Only log if NOT in IRQ context (logging in IRQ can deadlock!)
-        if log_cleanup {
-            for (id, name, _) in &to_remove {
-                log::info!("Reaper: Cleaning up thread {} ({})", id.0, name);
-            }
-        }
-
-        // Now remove them (dropping Thread frees stack)
-        let initial_count = self.threads.len();
-        self.threads
-            .retain(|t| !to_remove.iter().any(|(id, _, _)| t.id == *id));
-
-        // Check if any processes have no remaining threads and mark them as zombies
-        for (process_id, exit_code) in processes_to_check {
-            // Skip kernel process (PID 0)
-            if process_id.0 == 0 {
-                continue;
-            }
-
-            // Check if this process has any remaining threads
-            let has_threads = self.threads.iter().any(|t| t.process_id == process_id);
-
-            if !has_threads {
-                // No threads left in this process - mark as zombie
-                // The process will remain in the table until reaped by sys_waitpid
-                if let Some(process) = self.processes.get_mut(&process_id) {
-                    if !process.is_zombie() {
-                        if log_cleanup {
-                            log::info!(
-                                "Reaper: Marking process {} ({}) as ZOMBIE with exit code {}",
-                                process_id.0,
-                                process.name,
-                                exit_code
-                            );
-                        }
-                        process.exit(exit_code); // Mark as zombie with thread's exit code
-                    }
-                }
-            }
-        }
-
-        initial_count - self.threads.len()
-    }
-
-    /// Create a new kernel process
-    ///
-    /// Kernel processes run in Ring 0 and use the kernel address space.
-    /// This is used for kernel threads that need isolated resource management.
-    fn create_kernel_process(&mut self, name: &str, process_type: ProcessType) -> ProcessId {
-        let process_id = self.allocate_pid()
-            .expect("Failed to allocate PID for kernel process");
-
-        let process = Process::new_kernel(process_id, name.into(), process_type);
-        self.processes.insert(process_id, process);
-
-        log::info!("Created kernel process '{}' (type: {:?}) with ID {:?}", name, process_type, process_id);
-        process_id
-    }
-
-    /// Get a process by ID (immutable)
-    fn get_process(&self, process_id: ProcessId) -> Option<&Process> {
-        self.processes.get(&process_id)
-    }
-
-    /// Get a process by ID (mutable)
-    fn get_process_mut(&mut self, process_id: ProcessId) -> Option<&mut Process> {
-        self.processes.get_mut(&process_id)
-    }
-}
-
-/// Initialize the scheduler
-pub fn init() {
-    log::info!("Initializing preemptive scheduler...");
-
-    let mut scheduler = Scheduler::new();
-
-    // Create default kernel process (PID 0) for kernel threads
-    // Kernel process is System type and always ready
-    let mut kernel_process = Process::new_kernel(ProcessId(0), "kernel".into(), ProcessType::System);
-    kernel_process.init_state = ProcessInitState::Ready; // Kernel is always ready
-    scheduler.processes.insert(ProcessId(0), kernel_process);
-    log::info!("Created default kernel process (PID 0, System type)");
-
-    // CRITICAL: Disable interrupts to prevent timer IRQ from trying to acquire lock
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        *SCHEDULER.lock() = Some(scheduler);
-    });
-
-    // Initialize I/O wait queue system
-    io_wait::init();
-
-    log::info!("Scheduler initialized in BOOT MODE");
-}
-
-/// Create a new thread in the default kernel process
-///
-/// This is a convenience function for creating kernel threads without
-/// explicitly managing processes. All threads created this way belong
-/// to the default kernel process (PID 0).
-pub fn spawn_thread(entry_point: fn(), name: &str) -> ThreadId {
-    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
-        scheduler.create_thread(entry_point, name, ProcessId(0))
-    })
-}
-
-/// Create a new kernel process
-///
-/// This creates a process with its own file descriptor table and resource
-/// management, but using the kernel address space (Ring 0).
-///
-/// # Arguments
-/// * `name` - Human-readable process name
-/// * `process_type` - Process classification (Critical, System, User, RealTime)
-///
-/// Returns the ProcessId of the newly created process.
-pub fn spawn_kernel_process(name: &str, process_type: ProcessType) -> ProcessId {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
-        scheduler.create_kernel_process(name, process_type)
-    })
-}
-
-/// Create a new userspace process with dedicated page tables
-///
-/// This allocates a fresh address space with its own PML4 and copies
-/// kernel mappings for syscall handling.
-///
-/// # Arguments
-/// * `name` - Human-readable process name
-/// * `process_type` - Process classification (Critical, System, User, RealTime)
-pub fn spawn_user_process(name: &str, process_type: ProcessType) -> Result<ProcessId, &'static str> {
-    use crate::memory::address_space::AddressSpace;
-
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        // Create new userspace address space
-        let address_space = AddressSpace::new_user()?;
-
-        let mut scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
-
-        // Create process with userspace address space
-        let process_id = scheduler.allocate_pid()
-            .ok_or("Failed to allocate PID - all PIDs in use")?;
-
-        let process = Process::new(process_id, name, address_space, process_type);
-        scheduler.processes.insert(process_id, process);
-
-        log::info!(
-            "Created userspace process '{}' (type: {:?}) with ID {:?}",
-            name,
-            process_type,
-            process_id
-        );
-        Ok(process_id)
-    })
-}
-
-/// Create a thread within a specific process
-///
-/// This is the process-aware version of spawn_thread, allowing you to
-/// specify which process the thread should belong to.
-pub fn spawn_thread_in_process(entry_point: fn(), name: &str, process_id: ProcessId) -> ThreadId {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
-        scheduler.create_thread(entry_point, name, process_id)
-    })
-}
-
-/// Get the process ID for the currently running thread
-///
-/// Returns None if no thread is currently running or scheduler not initialized.
-pub fn current_process_id() -> Option<ProcessId> {
-    let current_tid = ThreadId(CURRENT_THREAD_ID.load(Ordering::Relaxed));
-    if current_tid.0 == 0 {
-        return None;
-    }
-
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard.as_ref()?;
-        scheduler
-            .threads
-            .iter()
-            .find(|t| t.id == current_tid)
-            .map(|t| t.process_id)
-    })
-}
-
-/// Execute a closure with access to the current process (immutable)
-///
-/// This is a helper function for syscalls that need to access the current
-/// process's state (e.g., file descriptor table).
-pub fn with_current_process<F, R>(f: F) -> Option<R>
+/// # Panics
+/// Panics if the scheduler has not been initialized.
+fn with_scheduler<F, R>(f: F) -> R
 where
-    F: FnOnce(&Process) -> R,
-{
-    let pid = current_process_id()?;
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard.as_ref()?;
-        scheduler.get_process(pid).map(f)
-    })
-}
-
-/// Execute a closure with access to the current process (mutable)
-///
-/// This is a helper function for syscalls that need to modify the current
-/// process's state (e.g., modifying file descriptor table).
-pub fn with_current_process_mut<F, R>(f: F) -> Option<R>
-where
-    F: FnOnce(&mut Process) -> R,
-{
-    let pid = current_process_id()?;
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard.as_mut()?;
-        scheduler.get_process_mut(pid).map(f)
-    })
-}
-
-/// Execute a closure with access to a specific process (mutable)
-///
-/// This is a helper function for loading binaries or modifying a process's
-/// state by process ID.
-///
-/// # Arguments
-/// * `process_id` - The ID of the process to access
-/// * `f` - Closure that receives mutable access to the process
-///
-/// Returns the result of the closure, or None if the process doesn't exist.
-pub fn with_process_mut<F, R>(process_id: ProcessId, f: F) -> Option<R>
-where
-    F: FnOnce(&mut Process) -> R,
+    F: FnOnce(&scheduler::Scheduler) -> R,
 {
     x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard.as_mut()?;
-        scheduler.get_process_mut(process_id).map(f)
+        let sched_guard = SCHEDULER.lock();
+        let scheduler = sched_guard.as_ref().expect("Scheduler not initialized");
+        f(scheduler)
     })
 }
 
-/// Reap a zombie process (remove it from the process table)
+/// Execute a closure with mutable access to the scheduler
 ///
-/// This is called by sys_waitpid after reading the exit code of a zombie process.
-/// The process and all its resources (address space, file descriptors) are freed.
+/// This helper provides interrupt-safe mutable access to the global scheduler singleton.
+/// Interrupts are disabled during the closure execution to prevent timer IRQ deadlocks.
 ///
-/// # Arguments
-/// * `process_id` - The PID of the zombie process to reap
-///
-/// # Returns
-/// * `true` if the process was reaped
-/// * `false` if the process doesn't exist or is not a zombie
-pub fn reap_process(process_id: ProcessId) -> bool {
+/// # Panics
+/// Panics if the scheduler has not been initialized.
+fn with_scheduler_mut<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut scheduler::Scheduler) -> R,
+{
     x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
-
-        // Check if process exists and is a zombie
-        let is_zombie = scheduler
-            .processes
-            .get(&process_id)
-            .map(|p| p.is_zombie())
-            .unwrap_or(false);
-
-        if !is_zombie {
-            return false;
-        }
-
-        // Remove the process from the table
-        // The Process Drop implementation will clean up:
-        // - Address space (page tables, mapped pages)
-        // - File descriptors
-        if let Some(process) = scheduler.processes.remove(&process_id) {
-            log::info!(
-                "Reaped zombie process {} ({})",
-                process_id.0,
-                process.name
-            );
-            drop(process);
-            true
-        } else {
-            false
-        }
+        let mut sched_guard = SCHEDULER.lock();
+        let scheduler = sched_guard.as_mut().expect("Scheduler not initialized");
+        f(scheduler)
     })
 }
 
-/// Initialize standard streams (stdin/stdout/stderr) for a process
+// ================================================================================================
+// KERNEL COMPONENT TRAIT
+// ================================================================================================
+
+/// Trait for kernel components that require initialization
 ///
-/// This sets up the file descriptor table for the process that owns the
-/// given thread, with FDs 0, 1, 2 all pointing to TTY0 (the console).
+/// This trait enforces that critical kernel components must implement an `init()` function
+/// to perform their initialization sequence during system boot.
 ///
-/// # Arguments
-/// * `thread_id` - A thread belonging to the process to initialize
-pub fn init_std_streams(thread_id: ThreadId) {
-    use crate::io::TtyDevice;
-    use alloc::sync::Arc;
-
-    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
-
-        // Find thread by ID to get its process_id
-        let process_id = scheduler
-            .threads
-            .iter()
-            .find(|t| t.id == thread_id)
-            .map(|t| t.process_id);
-
-        if let Some(pid) = process_id {
-            if let Some(process) = scheduler.processes.get_mut(&pid) {
-                // Create TTY device for console (TTY0)
-                let tty = Arc::new(TtyDevice::new(0));
-
-                // Initialize stdin, stdout, stderr (all point to same TTY)
-                process.fd_table.insert(0, tty.clone()); // stdin
-                process.fd_table.insert(1, tty.clone()); // stdout
-                process.fd_table.insert(2, tty); // stderr
-
-                log::debug!("Initialized standard streams for process {:?}", pid);
-            } else {
-                log::warn!("Cannot init std streams: process {:?} not found", pid);
-            }
-        } else {
-            log::warn!("Cannot init std streams: thread {} not found", thread_id.0);
-        }
-    });
+/// Components implementing this trait typically:
+/// - Set up internal state and data structures
+/// - Initialize hardware or subsystems
+/// - Register with other components
+/// - Allocate resources needed for operation
+///
+/// # Example
+///
+/// ```rust
+/// impl KernelComponent for MyComponent {
+///     fn init() {
+///         // Initialization logic here
+///         log::info!("MyComponent initialized");
+///     }
+/// }
+///
+/// // Called during boot sequence
+/// MyComponent::init();
+/// ```
+pub trait KernelComponent {
+    /// Initialize the kernel component
+    ///
+    /// This function is called once during system boot to set up the component.
+    /// It should perform all necessary initialization and leave the component
+    /// in a ready-to-use state.
+    ///
+    /// # Panics
+    ///
+    /// Implementations may panic if initialization fails, as kernel components
+    /// are critical to system operation and failure is typically unrecoverable.
+    fn init();
 }
+
+// ================================================================================================
+// MANAGER STRUCTS (Zero-Sized Types)
+// ================================================================================================
+
+// ================================================================================================
+// INTERNAL HELPER FUNCTIONS
+// ================================================================================================
 
 /// Idle thread function
 ///
@@ -1021,212 +296,6 @@ fn idle_thread_main() {
     }
 }
 
-/// Enable the scheduler
-///
-/// This function:
-/// 1. Spawns the built-in idle thread
-/// 2. Enables preemptive scheduling
-///
-/// After calling this, timer interrupts will start performing context switches.
-/// Terminated threads are cleaned up immediately during context switches.
-pub fn enable() {
-    // Spawn the idle thread - it will run when no other threads are ready
-    spawn_thread(idle_thread_main, "idle");
-    log::info!("Idle thread created");
-    log::info!("Scheduler enabled - preemptive multitasking active");
-    log::info!("Terminated threads will be cleaned up immediately on context switch");
-
-    // Enable preemptive scheduling
-    // CRITICAL: This MUST be done AFTER all logging above!
-    // Once enabled, timer interrupts can preempt us, and if another thread
-    // tries to log while we're holding the log lock, we'll deadlock.
-    SCHEDULER_ENABLED.store(true, Ordering::SeqCst);
-}
-
-/// Voluntarily yield the CPU to the next ready thread
-///
-/// This is the heart of cooperative scheduling. When a thread calls this function,
-/// it gives up the CPU and allows another thread to run. The process involves:
-///
-/// YIELD PROCESS:
-/// =============
-///
-/// 1. SAFETY CHECKS: Ensure scheduler is enabled and interrupts are on
-/// 2. DISABLE INTERRUPTS: Prevent race conditions during context switch
-/// 3. FIND NEXT THREAD: Get next thread from ready queue
-/// 4. UPDATE QUEUES: Move current thread to back of ready queue
-/// 5. CONTEXT SWITCH: Save current state, load next thread's state
-/// 6. RESUME EXECUTION: Next thread continues from where it last yielded
-///
-/// CRITICAL SECTION:
-/// ================
-///
-/// The scheduler mutex is held only briefly to:
-/// - Read/modify thread queues
-/// - Get pointers to thread contexts
-/// - Update thread states
-///
-/// The mutex is released BEFORE the actual context switch to prevent
-/// deadlocks if the new thread tries to access the scheduler.
-///
-/// INTERRUPT HANDLING:
-/// ==================
-///
-/// Interrupts are disabled during context switch to prevent:
-/// - Timer interrupts from interfering with register save/restore
-/// - Race conditions in scheduler data structures
-/// - Corruption of thread contexts
-///
-/// WHY COOPERATIVE?
-/// ===============
-///
-/// Cooperative scheduling is simpler and more predictable than preemptive:
-/// - Threads run until they choose to yield
-/// - No complex timer-based preemption
-/// - Easier to reason about thread interactions
-/// - Better for kernel-level code that needs atomicity
-/// Voluntarily yield the CPU to the next ready thread
-///
-/// With preemptive scheduling, this function triggers a software interrupt (INT 0x81)
-/// that performs the same context switch as the timer interrupt, but voluntarily.
-/// This provides backward compatibility while using the interrupt-based mechanism.
-///
-/// INTERRUPT-BASED YIELDING:
-/// ========================
-///
-/// yield_now() now uses INT 0x81 to trigger a context switch. This:
-/// - Uses the same InterruptContext mechanism as timer preemption
-/// - Saves/restores all registers via the interrupt handler
-/// - Works seamlessly with preemptive scheduling
-/// - Provides true backward compatibility
-///
-/// WHEN TO USE:
-/// ===========
-///
-/// - Threads can call yield_now() to voluntarily give up CPU
-/// - Useful in busy-wait loops to let other threads run
-/// - Will be preempted anyway if they don't yield
-/// - Kernel idle loop can use this before enabling preemption
-pub fn yield_now() {
-    // Early exit if scheduler is not yet enabled (during boot)
-    if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
-        crate::utils::debug::irq_log::irq_log_simple("[YIELD] scheduler not enabled");
-        return;
-    }
-
-    // Don't yield if interrupts are disabled - this could indicate we're
-    // in a critical section that shouldn't be interrupted
-    if !crate::arch::x86_64::interrupts::are_enabled() {
-        crate::utils::debug::irq_log::irq_log_simple("[YIELD] interrupts disabled!");
-        return;
-    }
-
-    crate::utils::debug::irq_log::irq_log_simple("[YIELD] yielding...");
-
-    // Flush log buffer before yielding to ensure logs appear promptly
-    crate::utils::debug::log_buffer::flush();
-
-    // Trigger software interrupt to perform context switch
-    // This uses the same interrupt-based mechanism as timer preemption
-    // INT 0x81 is handled by yield_interrupt_handler() which:
-    // 1. Saves all registers + interrupt frame
-    // 2. Calls schedule_from_interrupt()
-    // 3. Restores next thread's context
-    // 4. Returns via iretq
-    unsafe {
-        asm!("int 0x81", options(nostack));
-    }
-}
-
-/// Get current thread ID
-pub fn current_thread_id() -> ThreadId {
-    ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst))
-}
-
-/// Execute a closure with access to the current thread
-///
-/// Provides safe read-only access to the current thread's data.
-/// Returns None if the scheduler is not initialized or thread not found.
-pub fn with_current_thread<F, R>(f: F) -> Option<R>
-where
-    F: FnOnce(&Thread) -> R,
-{
-    let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
-    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let sched_guard = SCHEDULER.lock();
-        if let Some(scheduler) = sched_guard.as_ref() {
-            if let Some(thread) = scheduler.threads.iter().find(|t| t.id == current_id) {
-                return Some(f(thread));
-            }
-        }
-        None
-    })
-}
-
-/// Block the current thread
-///
-/// Removes the current thread from the ready queue and sets its state to Blocked.
-/// The thread will not be scheduled again until wake_thread() is called.
-///
-/// This is typically used for blocking I/O operations where a thread needs to
-/// wait for an external event (like keyboard input or timer expiry).
-///
-/// # Safety
-/// The caller must ensure that some mechanism exists to eventually wake this thread,
-/// otherwise it will be blocked forever.
-pub fn block_current_thread() {
-    if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
-        return;
-    }
-
-    let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
-
-    if current_id.0 == 0 {
-        panic!("Cannot block idle thread");
-    }
-
-    // CRITICAL: Use without_interrupts() to prevent timer IRQ deadlock
-    // This is the same pattern as wake_thread() - standard IRQ-safe locking
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut sched_guard = SCHEDULER.lock();
-        if let Some(scheduler) = sched_guard.as_mut() {
-            if let Some(thread) = scheduler.get_thread_mut(current_id) {
-                thread.state = ThreadState::Blocked;
-            }
-        }
-    }); // Lock automatically released here, interrupts re-enabled
-}
-
-/// Wake a blocked thread
-///
-/// Moves the specified thread from Blocked state to Ready state and adds it
-/// to the ready queue. If the thread is not blocked, this is a no-op.
-///
-/// This function is IRQ-safe and can be called from interrupt handlers.
-///
-/// # Arguments
-/// * `thread_id` - The ID of the thread to wake up
-pub fn wake_thread(thread_id: ThreadId) {
-    if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
-        return;
-    }
-
-    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut sched_guard = SCHEDULER.lock();
-        if let Some(scheduler) = sched_guard.as_mut() {
-            if let Some(thread) = scheduler.get_thread_mut(thread_id) {
-                if thread.state == ThreadState::Blocked {
-                    thread.state = ThreadState::Ready;
-                    // Add to ready queue
-                    scheduler.ready_queue.push_back(thread_id);
-                }
-            }
-        }
-    });
-}
-
 /// Thread exit trampoline
 ///
 /// This function is placed as a return address on the thread's initial stack.
@@ -1236,74 +305,8 @@ pub fn wake_thread(thread_id: ThreadId) {
 /// This prevents INVALID_OPCODE exceptions from executing garbage addresses.
 extern "C" fn thread_exit_trampoline() -> ! {
     // Thread returned instead of calling exit_thread() - clean up properly
-    log::info!("!!! Thread returned to trampoline - calling exit_thread()");
-    exit_thread(0); // Thread returned normally, exit with code 0
-}
-
-/// Terminate the current thread with an exit code
-///
-/// Marks the current thread as Terminated, stores the exit code, and yields.
-/// The thread will not be scheduled again. This is the proper way for a thread
-/// to exit.
-///
-/// **Cleanup:** Thread resources (stack, etc.) are freed on the next context
-/// switch when cleanup_terminated_threads() runs. If this is the last thread
-/// in a process, the process is marked as zombie with this thread's exit code.
-/// The zombie process remains in memory until reaped by sys_waitpid.
-///
-/// # Arguments
-/// * `exit_code` - The exit code for the thread (becomes process exit code if last thread)
-///
-/// # Panics
-/// Panics if called from the idle thread (thread 0).
-pub fn exit_thread(exit_code: i32) -> ! {
-    let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
-
-    if current_id.0 == 0 {
-        panic!("Cannot exit idle thread");
-    }
-
-    log::info!(
-        "Thread {} ({}) terminating with exit code {}",
-        current_id.0,
-        get_thread_name(current_id).unwrap_or_else(|| "unknown".to_string()),
-        exit_code
-    );
-
-    // Mark thread as terminated and store exit code
-    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut sched_guard = SCHEDULER.lock();
-        if let Some(scheduler) = sched_guard.as_mut() {
-            if let Some(thread) = scheduler.get_thread_mut(current_id) {
-                thread.state = ThreadState::Terminated;
-                thread.exit_code = Some(exit_code);
-
-                // CRITICAL: Remove this thread from ready queue!
-                // The thread may have been added to the ready queue in previous
-                // scheduling cycles. If we don't remove it now, the scheduler
-                // will try to run the terminated thread, causing a page fault
-                // when accessing initrd from the wrong address space.
-                scheduler.ready_queue.retain(|&tid| tid != current_id);
-            }
-        }
-    });
-
-    // CRITICAL: Enable interrupts before yielding!
-    // If called from syscall context (via sys_exit), interrupts are disabled by SYSCALL instruction.
-    // yield_now() requires interrupts to be enabled to trigger the context switch.
-    x86_64::instructions::interrupts::enable();
-
-    // Yield to switch to another thread
-    // We will never return here
-    yield_now();
-
-    // Should never reach here
-    use crate::utils::debug::irq_log;
-    irq_log::irq_log_str("exit_thread: RETURNED FROM yield_now() - THIS IS A BUG!\n");
-    loop {
-        x86_64::instructions::hlt();
-    }
+    log::info!("!!! Thread returned to trampoline - calling ThreadManager::exit()");
+    ThreadManager::exit(0); // Thread returned normally, exit with code 0
 }
 
 /// Get thread name by ID (for debugging)
@@ -1333,56 +336,9 @@ pub struct ThreadStats {
     pub cpu_percent: u64,
 }
 
-/// Get statistics for all threads
-///
-/// Returns a vector of ThreadStats with information about each thread
-/// including CPU time and usage percentage.
-pub fn get_thread_stats() -> Vec<ThreadStats> {
-    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let sched_guard = SCHEDULER.lock();
-        let scheduler = match sched_guard.as_ref() {
-            Some(s) => s,
-            None => return Vec::new(),
-        };
-
-        let total_uptime = crate::utils::timer::uptime_ms();
-        if total_uptime == 0 {
-            return Vec::new();
-        }
-
-        let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
-
-        let mut stats = Vec::new();
-        for thread in &scheduler.threads {
-            let mut cpu_time = thread.cpu_time_ms;
-
-            // If this is the currently running thread, add elapsed time since last scheduled
-            if thread.id == current_id && thread.last_scheduled_time > 0 {
-                let current_time = crate::utils::timer::uptime_ms();
-                let elapsed = current_time.saturating_sub(thread.last_scheduled_time);
-                cpu_time = cpu_time.saturating_add(elapsed);
-            }
-
-            // Calculate CPU percentage
-            let cpu_percent = if total_uptime > 0 {
-                (cpu_time * 100) / total_uptime
-            } else {
-                0
-            };
-
-            stats.push(ThreadStats {
-                id: thread.id,
-                name: thread.name.clone(),
-                state: thread.state,
-                cpu_time_ms: cpu_time,
-                cpu_percent,
-            });
-        }
-
-        stats
-    })
-}
+// ================================================================================================
+// INTERRUPT HANDLERS (MUST remain module-level for IDT registration)
+// ================================================================================================
 
 /// Software interrupt handler for voluntary yielding (INT 0x81)
 ///
@@ -1764,154 +720,4 @@ pub extern "C" fn schedule_from_interrupt(
 
     // Return pointer to next thread's context (guaranteed valid)
     next_ctx_ptr
-}
-
-/// Sleep for a number of milliseconds (blocking)
-///
-/// This function implements true blocking sleep by marking the thread
-/// as sleeping and removing it from active scheduling. The sleeping
-/// thread consumes 0% CPU during sleep.
-///
-/// BLOCKING SLEEP PROCESS:
-/// =======================
-///
-/// 1. SET SLEEP TIMER: Mark thread's sleep_until_ms field
-/// 2. YIELD CPU: Call yield_now() to switch to another thread
-/// 3. AUTOMATIC WAKEUP: Scheduler checks sleep timers and reschedules when ready
-/// 4. THREAD RESUMES: Execution continues after sleep time expires
-///
-/// ADVANTAGES:
-/// - Zero CPU consumption during sleep
-/// - Accurate CPU usage statistics
-/// - Power efficient (idle thread can halt CPU)
-/// - Proper thread blocking semantics
-///
-/// DISADVANTAGES:
-/// - Slightly more complex scheduler logic
-/// - Resolution limited by timer frequency (10ms)
-///
-/// USAGE EXAMPLE:
-/// =============
-///
-/// ```rust
-/// // Sleep for 1 second (thread uses 0% CPU during this time)
-/// scheduler::sleep_ms(1000);
-///
-/// // Sleep for 100 milliseconds
-/// scheduler::sleep_ms(100);
-/// ```
-///
-/// The actual sleep time may be slightly longer than requested due to:
-/// - Timer resolution (currently 10ms)
-/// - Scheduling overhead
-pub fn sleep_ms(ms: u64) {
-    if !SCHEDULER_ENABLED.load(Ordering::SeqCst) {
-        // Scheduler not enabled, fall back to busy-wait with hlt
-        let start = crate::utils::timer::uptime_ms();
-        while crate::utils::timer::uptime_ms() - start < ms {
-            x86_64::instructions::hlt();
-        }
-        return;
-    }
-
-    let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
-    if current_id.0 == 0 {
-        // Can't sleep in kernel/idle thread context
-        return;
-    }
-
-    // Set the thread's sleep timer
-    // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut sched_guard = SCHEDULER.lock();
-        if let Some(scheduler) = sched_guard.as_mut() {
-            if let Some(thread) = scheduler.get_thread_mut(current_id) {
-                let wake_time = crate::utils::timer::uptime_ms() + ms;
-                thread.sleep_until_ms = wake_time;
-            }
-        }
-    });
-
-    // Yield to switch to another thread
-    // The scheduler will not reschedule us until sleep time expires
-    yield_now();
-}
-
-/// Set up a thread to enter userspace at a specific entry point
-///
-/// This function modifies the thread's interrupt context to transition
-/// from Ring 0 (kernel) to Ring 3 (userspace) when the thread is scheduled.
-///
-/// # Arguments
-/// * `thread_id` - ID of the thread to configure
-/// * `entry_point` - Virtual address to start execution (ELF entry point)
-/// * `user_stack_top` - Top of user stack (RSP value)
-///
-/// # Returns
-/// * `Ok(())` if thread was configured successfully
-/// * `Err(&str)` if thread not found or configuration failed
-pub fn setup_userspace_thread(
-    thread_id: ThreadId,
-    entry_point: x86_64::VirtAddr,
-    user_stack_top: x86_64::VirtAddr,
-) -> Result<(), &'static str> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut scheduler_guard = SCHEDULER.lock();
-        let scheduler = scheduler_guard
-            .as_mut()
-            .ok_or("Scheduler not initialized")?;
-
-        let thread = scheduler
-            .get_thread_mut(thread_id)
-            .ok_or("Thread not found")?;
-
-        // Set up interrupt context for userspace entry
-        // When this thread is scheduled, it will "return" to userspace via IRETQ
-
-        // Set up interrupt frame for Ring 3 entry
-        // Get user segment selectors from GDT and ensure RPL=3 is set
-        let user_cs = crate::arch::x86_64::gdt::user_code_selector();
-        let user_ss = crate::arch::x86_64::gdt::user_data_selector();
-
-        // Ensure RPL (Request Privilege Level) bits are set to 3 for Ring 3
-        // The low 2 bits of the selector are the RPL
-        // Cast to u64 for interrupt frame (which stores segment selectors as 64-bit values)
-        let user_cs_with_rpl = (user_cs.0 | 3) as u64;
-        let user_ss_with_rpl = (user_ss.0 | 3) as u64;
-
-        thread.interrupt_context.iret_frame.rip = entry_point.as_u64();
-        thread.interrupt_context.iret_frame.cs = user_cs_with_rpl; // User code segment with RPL=3
-        thread.interrupt_context.iret_frame.rflags = 0x202; // IF=1 (interrupts enabled), bit 1 always set
-        thread.interrupt_context.iret_frame.rsp = user_stack_top.as_u64();
-        thread.interrupt_context.iret_frame.ss = user_ss_with_rpl; // User data segment with RPL=3
-
-        log::info!("setup_userspace_thread: Set RSP=0x{:x}, RIP=0x{:x}",
-                   user_stack_top.as_u64(), entry_point.as_u64());
-
-        // Clear all general purpose registers for security
-        thread.interrupt_context.rax = 0;
-        thread.interrupt_context.rbx = 0;
-        thread.interrupt_context.rcx = 0;
-        thread.interrupt_context.rdx = 0;
-        thread.interrupt_context.rsi = 0;
-        thread.interrupt_context.rdi = 0;
-        thread.interrupt_context.rbp = 0;
-        thread.interrupt_context.r8 = 0;
-        thread.interrupt_context.r9 = 0;
-        thread.interrupt_context.r10 = 0;
-        thread.interrupt_context.r11 = 0;
-        thread.interrupt_context.r12 = 0;
-        thread.interrupt_context.r13 = 0;
-        thread.interrupt_context.r14 = 0;
-        thread.interrupt_context.r15 = 0;
-
-        log::debug!(
-            "Thread {:?} configured for userspace entry at 0x{:x} (stack: 0x{:x})",
-            thread_id,
-            entry_point.as_u64(),
-            user_stack_top.as_u64()
-        );
-
-        Ok(())
-    })
 }

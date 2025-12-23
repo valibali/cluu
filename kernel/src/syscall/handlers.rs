@@ -18,7 +18,9 @@
 
 use super::numbers::*;
 use crate::io::device::Errno;
+use crate::ipc;
 use crate::scheduler;
+use crate::shmem;
 use core::slice;
 
 /// Validate a user pointer
@@ -71,7 +73,7 @@ pub fn sys_write(fd: i32, buf: *const u8, count: usize) -> isize {
     // 2. Get device from FD table (with interrupts disabled)
     // CRITICAL: We must NOT call device.write() inside with_current_process()
     // because device.write() may block, and blocking requires interrupts enabled!
-    let device = scheduler::with_current_process(|process| {
+    let device = scheduler::ProcessManager::with_current(|process| {
         log::debug!("sys_write: got process, looking up fd {}", fd);
 
         match process.fd_table.get(fd) {
@@ -157,7 +159,7 @@ pub fn sys_open(path: *const u8, flags: i32, _mode: i32) -> isize {
     // 4. Create VFS file device if fsitem is mapped
     if let Some(fsitem_addr) = file_info.fsitem_addr {
         use crate::io::VfsFile;
-        use crate::scheduler::shmem::ShmemId;
+        use crate::shmem::ShmemId;
         use alloc::sync::Arc;
 
         let vfs_file = Arc::new(VfsFile::new(
@@ -167,7 +169,7 @@ pub fn sys_open(path: *const u8, flags: i32, _mode: i32) -> isize {
         ));
 
         // 5. Insert into current process FD table
-        match scheduler::with_current_process_mut(|process| {
+        match scheduler::ProcessManager::with_current_mut(|process| {
             let kernel_fd = process.fd_table.alloc(vfs_file);
             kernel_fd
         }) {
@@ -201,7 +203,7 @@ pub fn sys_read(fd: i32, buf: *mut u8, count: usize) -> isize {
     // CRITICAL: We must NOT call device.read() inside with_current_process()
     // because device.read() may block (e.g., waiting for keyboard input),
     // and blocking requires interrupts to be enabled!
-    let device = scheduler::with_current_process(|process| {
+    let device = scheduler::ProcessManager::with_current(|process| {
         match process.fd_table.get(fd) {
             Ok(dev) => Ok(dev.clone()),  // Clone the Arc<dyn Device>
             Err(e) => Err(errno_to_code(e))
@@ -228,7 +230,7 @@ pub fn sys_read(fd: i32, buf: *mut u8, count: usize) -> isize {
 /// Arguments: (fd: i32)
 /// Returns: 1 if TTY, 0 if not, or negative error code
 pub fn sys_isatty(fd: i32) -> isize {
-    let result = scheduler::with_current_process(|process| {
+    let result = scheduler::ProcessManager::with_current(|process| {
         let device = match process.fd_table.get(fd) {
             Ok(dev) => dev,
             Err(e) => return errno_to_code(e),
@@ -251,7 +253,7 @@ pub fn sys_fstat(fd: i32, statbuf: *mut u8) -> isize {
         return e;
     }
 
-    let result = scheduler::with_current_process(|process| {
+    let result = scheduler::ProcessManager::with_current(|process| {
         let device = match process.fd_table.get(fd) {
             Ok(dev) => dev,
             Err(e) => return errno_to_code(e),
@@ -278,7 +280,7 @@ pub fn sys_fstat(fd: i32, statbuf: *mut u8) -> isize {
 /// Arguments: (fd: i32)
 /// Returns: 0 on success, or negative error code
 pub fn sys_close(fd: i32) -> isize {
-    let result = scheduler::with_current_process_mut(|process| {
+    let result = scheduler::ProcessManager::with_current_mut(|process| {
         match process.fd_table.close(fd) {
             Ok(()) => 0,
             Err(e) => errno_to_code(e),
@@ -293,7 +295,7 @@ pub fn sys_close(fd: i32) -> isize {
 /// Arguments: (fd: i32, offset: i64, whence: i32)
 /// Returns: new file position, or negative error code
 pub fn sys_lseek(fd: i32, offset: i64, whence: i32) -> isize {
-    let result = scheduler::with_current_process(|process| {
+    let result = scheduler::ProcessManager::with_current(|process| {
         let device = match process.fd_table.get(fd) {
             Ok(dev) => dev,
             Err(e) => return errno_to_code(e),
@@ -320,7 +322,7 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: i32) -> isize {
 pub fn sys_brk(addr: *mut u8) -> isize {
     let new_brk = addr as usize;
 
-    let result = scheduler::with_current_process_mut(|process| {
+    let result = scheduler::ProcessManager::with_current_mut(|process| {
         let heap = &mut process.address_space.heap;
 
         // If addr is 0, return current brk (query mode)
@@ -354,7 +356,7 @@ pub fn sys_brk(addr: *mut u8) -> isize {
 /// Does not return
 pub fn sys_exit(status: i32) -> ! {
     log::info!("Thread exiting with status {}", status);
-    scheduler::exit_thread(status);
+    scheduler::ThreadManager::exit(status);
 }
 
 /// sys_yield - Yield CPU to scheduler
@@ -362,7 +364,7 @@ pub fn sys_exit(status: i32) -> ! {
 /// Arguments: ()
 /// Returns: 0 on success
 pub fn sys_yield() -> isize {
-    scheduler::yield_now();
+    scheduler::SchedulerManager::yield_now();
     0
 }
 
@@ -372,7 +374,7 @@ pub fn sys_yield() -> isize {
 /// Returns: process ID (always >= 0)
 pub fn sys_getpid() -> isize {
     log::debug!("sys_getpid called");
-    let result = scheduler::with_current_process(|process| {
+    let result = scheduler::ProcessManager::with_current(|process| {
         let pid = process.id.as_usize() as isize;
         log::debug!("sys_getpid: returning PID {}", pid);
         pid
@@ -388,7 +390,7 @@ pub fn sys_getpid() -> isize {
 /// Arguments: ()
 /// Returns: parent process ID, or 0 if no parent
 pub fn sys_getppid() -> isize {
-    let result = scheduler::with_current_process(|process| {
+    let result = scheduler::ProcessManager::with_current(|process| {
         match process.parent() {
             Some(parent_id) => parent_id.as_usize() as isize,
             None => 0, // No parent (kernel process or orphaned)
@@ -413,7 +415,7 @@ pub fn sys_getppid() -> isize {
 pub fn sys_process_ready() -> isize {
     log::debug!("sys_process_ready called");
 
-    let pid = match scheduler::current_process_id() {
+    let pid = match scheduler::ProcessManager::current_id() {
         Some(pid) => pid,
         None => {
             log::error!("sys_process_ready: no current process");
@@ -421,7 +423,7 @@ pub fn sys_process_ready() -> isize {
         }
     };
 
-    match scheduler::signal_process_ready(pid) {
+    match scheduler::SchedulerManager::signal_ready(pid) {
         Ok(()) => {
             log::info!("sys_process_ready: process {} signaled ready successfully", pid.0);
             0
@@ -475,7 +477,7 @@ pub fn sys_spawn(path: *const u8, _argv: *const *const u8) -> isize {
     log::debug!("sys_spawn: path = '{}'", path_str);
 
     // 3. Get parent process ID for setting child's parent
-    let parent_id = scheduler::with_current_process(|process| {
+    let parent_id = scheduler::ProcessManager::with_current(|process| {
         process.id
     });
 
@@ -498,7 +500,7 @@ pub fn sys_spawn(path: *const u8, _argv: *const *const u8) -> isize {
     let (user_cr3, cr3_flags) = Cr3::read();
 
     // Get kernel process (PID 0) page table
-    let kernel_pt = scheduler::with_process_mut(ProcessId::new(0), |kernel_proc| {
+    let kernel_pt = scheduler::ProcessManager::with_mut(ProcessId::new(0), |kernel_proc| {
         use x86_64::structures::paging::PhysFrame;
         PhysFrame::containing_address(kernel_proc.address_space.page_table_root)
     });
@@ -540,7 +542,7 @@ pub fn sys_spawn(path: *const u8, _argv: *const *const u8) -> isize {
     };
 
     // 6. Set parent-child relationship
-    scheduler::with_process_mut(child_pid, |child_process| {
+    scheduler::ProcessManager::with_mut(child_pid, |child_process| {
         child_process.set_parent(parent_id);
     });
 
@@ -579,7 +581,7 @@ pub fn sys_waitpid(pid: i32, status: *mut i32, _options: i32) -> isize {
     }
 
     // 2. Get current process ID
-    let parent_id = scheduler::with_current_process(|process| {
+    let parent_id = scheduler::ProcessManager::with_current(|process| {
         process.id
     });
 
@@ -593,7 +595,7 @@ pub fn sys_waitpid(pid: i32, status: *mut i32, _options: i32) -> isize {
     // 3. Poll until child becomes zombie (simple blocking implementation)
     // TODO: Replace with proper wait queues and scheduler blocking
     loop {
-        let is_child_and_zombie = scheduler::with_process_mut(child_pid, |child_process| {
+        let is_child_and_zombie = scheduler::ProcessManager::with_mut(child_pid, |child_process| {
             // Verify parent-child relationship
             if child_process.parent() != Some(parent_id) {
                 return Err(-ECHILD); // Not a child of current process
@@ -628,7 +630,7 @@ pub fn sys_waitpid(pid: i32, status: *mut i32, _options: i32) -> isize {
             }
             Some(Err(_)) => {
                 // Child still running - yield CPU and try again
-                scheduler::yield_now();
+                scheduler::SchedulerManager::yield_now();
                 continue;
             }
             None => {
@@ -637,7 +639,7 @@ pub fn sys_waitpid(pid: i32, status: *mut i32, _options: i32) -> isize {
         }
     }
 
-    let is_child_and_zombie = scheduler::with_process_mut(child_pid, |child_process| {
+    let is_child_and_zombie = scheduler::ProcessManager::with_mut(child_pid, |child_process| {
         if child_process.is_zombie() {
             let exit_code = child_process.exit_code.unwrap_or(0);
             Ok(exit_code)
@@ -650,7 +652,7 @@ pub fn sys_waitpid(pid: i32, status: *mut i32, _options: i32) -> isize {
         Some(Ok(_exit_code)) => {
             // Process was zombie, we read its exit code
             // Now reap it (remove from process table and free resources)
-            if scheduler::reap_process(child_pid) {
+            if scheduler::ProcessManager::reap(child_pid).is_ok() {
                 log::info!("sys_waitpid: reaped zombie process {}", child_pid.as_usize());
             }
             child_pid.as_usize() as isize
@@ -669,7 +671,7 @@ pub fn sys_waitpid(pid: i32, status: *mut i32, _options: i32) -> isize {
 /// Arguments: ()
 /// Returns: port ID on success, or negative error code
 pub fn sys_port_create() -> isize {
-    match scheduler::ipc::port_create() {
+    match ipc::port_create() {
         Ok(port_id) => {
             log::debug!("sys_port_create: created port {}", port_id.0);
             port_id.0 as isize
@@ -686,9 +688,9 @@ pub fn sys_port_create() -> isize {
 /// Arguments: (port_id: usize)
 /// Returns: 0 on success, or negative error code
 pub fn sys_port_destroy(port_id: usize) -> isize {
-    let port_id = scheduler::ipc::PortId(port_id);
+    let port_id = ipc::PortId(port_id);
 
-    match scheduler::ipc::port_destroy(port_id) {
+    match ipc::port_destroy(port_id) {
         Ok(()) => {
             log::debug!("sys_port_destroy: destroyed port {}", port_id.0);
             0
@@ -696,8 +698,8 @@ pub fn sys_port_destroy(port_id: usize) -> isize {
         Err(e) => {
             log::error!("sys_port_destroy: failed for port {}: {:?}", port_id.0, e);
             match e {
-                scheduler::ipc::IpcError::PortNotFound => -EBADF,
-                scheduler::ipc::IpcError::NotOwner => -EINVAL,
+                ipc::IpcError::PortNotFound => -EBADF,
+                ipc::IpcError::NotOwner => -EINVAL,
                 _ => -EINVAL,
             }
         }
@@ -723,13 +725,13 @@ pub fn sys_port_send(port_id: usize, message: *const u8, len: usize) -> isize {
 
     // 2. Copy message from userspace
     let user_data = unsafe { slice::from_raw_parts(message, 256) };
-    let mut ipc_msg = scheduler::ipc::Message::new();
+    let mut ipc_msg = ipc::Message::new();
     ipc_msg.as_bytes_mut().copy_from_slice(user_data);
 
     // 3. Send to port
-    let port_id = scheduler::ipc::PortId(port_id);
+    let port_id = ipc::PortId(port_id);
 
-    match scheduler::ipc::port_send(port_id, ipc_msg) {
+    match ipc::port_send(port_id, ipc_msg) {
         Ok(()) => {
             log::debug!("sys_port_send: sent message to port {}", port_id.0);
             0
@@ -737,8 +739,8 @@ pub fn sys_port_send(port_id: usize, message: *const u8, len: usize) -> isize {
         Err(e) => {
             log::error!("sys_port_send: failed for port {}: {:?}", port_id.0, e);
             match e {
-                scheduler::ipc::IpcError::PortNotFound => -EBADF,
-                scheduler::ipc::IpcError::QueueFull => -ENOMEM,
+                ipc::IpcError::PortNotFound => -EBADF,
+                ipc::IpcError::QueueFull => -ENOMEM,
                 _ => -EINVAL,
             }
         }
@@ -763,15 +765,15 @@ pub fn sys_port_recv(port_id: usize, message: *mut u8, len: usize) -> isize {
     }
 
     // 2. Receive from port (blocks)
-    let port_id = scheduler::ipc::PortId(port_id);
+    let port_id = ipc::PortId(port_id);
 
-    let ipc_msg = match scheduler::ipc::port_recv(port_id) {
+    let ipc_msg = match ipc::port_recv(port_id) {
         Ok(msg) => msg,
         Err(e) => {
             log::error!("sys_port_recv: failed for port {}: {:?}", port_id.0, e);
             return match e {
-                scheduler::ipc::IpcError::PortNotFound => -EBADF,
-                scheduler::ipc::IpcError::NotOwner => -EINVAL,
+                ipc::IpcError::PortNotFound => -EBADF,
+                ipc::IpcError::NotOwner => -EINVAL,
                 _ => -EINVAL,
             };
         }
@@ -801,9 +803,9 @@ pub fn sys_port_try_recv(port_id: usize, message: *mut u8, len: usize) -> isize 
     }
 
     // 2. Try to receive from port (non-blocking)
-    let port_id = scheduler::ipc::PortId(port_id);
+    let port_id = ipc::PortId(port_id);
 
-    match scheduler::ipc::port_try_recv(port_id) {
+    match ipc::port_try_recv(port_id) {
         Ok(Some(ipc_msg)) => {
             // 3. Copy message to userspace
             let user_buffer = unsafe { slice::from_raw_parts_mut(message, 256) };
@@ -819,8 +821,8 @@ pub fn sys_port_try_recv(port_id: usize, message: *mut u8, len: usize) -> isize 
         Err(e) => {
             log::error!("sys_port_try_recv: failed for port {}: {:?}", port_id.0, e);
             match e {
-                scheduler::ipc::IpcError::PortNotFound => -EBADF,
-                scheduler::ipc::IpcError::NotOwner => -EINVAL,
+                ipc::IpcError::PortNotFound => -EBADF,
+                ipc::IpcError::NotOwner => -EINVAL,
                 _ => -EINVAL,
             }
         }
@@ -872,7 +874,7 @@ pub fn sys_register_port_name(name: *const u8, port_id: usize) -> isize {
     };
 
     // 4. Register port name
-    let port_id = scheduler::ipc::PortId(port_id);
+    let port_id = ipc::PortId(port_id);
 
     // Special handling for "vfs" - also register with VFS module
     let result = if static_name == "vfs" {
@@ -950,7 +952,7 @@ pub fn sys_lookup_port_name(name: *const u8) -> isize {
 /// Returns: shared memory ID on success, or negative error code
 pub fn sys_shmem_create(size: usize, permissions: u32) -> isize {
     // Get current process ID
-    let process_id = match scheduler::current_process_id() {
+    let process_id = match scheduler::ProcessManager::current_id() {
         Some(pid) => pid,
         None => {
             log::error!("sys_shmem_create: no current process");
@@ -959,10 +961,10 @@ pub fn sys_shmem_create(size: usize, permissions: u32) -> isize {
     };
 
     // Convert permissions flags
-    let perms = scheduler::shmem::ShmemPermissions::from_flags(permissions);
+    let perms = shmem::ShmemPermissions::from_flags(permissions);
 
     // Create shared memory region
-    match scheduler::shmem::shmem_create(size, process_id, perms) {
+    match shmem::shmem_create(size, process_id, perms) {
         Ok(shmem_id) => {
             log::debug!(
                 "sys_shmem_create: created shmem {} ({} bytes) for process {}",
@@ -975,8 +977,8 @@ pub fn sys_shmem_create(size: usize, permissions: u32) -> isize {
         Err(e) => {
             log::error!("sys_shmem_create: failed: {:?}", e);
             match e {
-                scheduler::shmem::ShmemError::OutOfMemory => -ENOMEM,
-                scheduler::shmem::ShmemError::InvalidSize => -EINVAL,
+                shmem::ShmemError::OutOfMemory => -ENOMEM,
+                shmem::ShmemError::InvalidSize => -EINVAL,
                 _ => -EINVAL,
             }
         }
@@ -991,7 +993,7 @@ pub fn sys_shmem_map(shmem_id: usize, hint_addr: usize, permissions: u32) -> isi
     log::info!("sys_shmem_map: called with shmem_id={}, hint=0x{:x}", shmem_id, hint_addr);
 
     // Get current process ID
-    let process_id = match scheduler::current_process_id() {
+    let process_id = match scheduler::ProcessManager::current_id() {
         Some(pid) => pid,
         None => {
             log::error!("sys_shmem_map: no current process");
@@ -1000,11 +1002,11 @@ pub fn sys_shmem_map(shmem_id: usize, hint_addr: usize, permissions: u32) -> isi
     };
 
     // Convert types
-    let shmem_id = scheduler::shmem::ShmemId(shmem_id);
-    let perms = scheduler::shmem::ShmemPermissions::from_flags(permissions);
+    let shmem_id = shmem::ShmemId(shmem_id);
+    let perms = shmem::ShmemPermissions::from_flags(permissions);
 
     // Map shared memory
-    match scheduler::shmem::shmem_map(shmem_id, process_id, hint_addr as u64, perms) {
+    match shmem::shmem_map(shmem_id, process_id, hint_addr as u64, perms) {
         Ok(virt_addr) => {
             log::info!(
                 "sys_shmem_map: SUCCESS mapped shmem {} to 0x{:x} for process {}",
@@ -1017,9 +1019,9 @@ pub fn sys_shmem_map(shmem_id: usize, hint_addr: usize, permissions: u32) -> isi
         Err(e) => {
             log::error!("sys_shmem_map: FAILED: {:?}", e);
             match e {
-                scheduler::shmem::ShmemError::OutOfMemory => -ENOMEM,
-                scheduler::shmem::ShmemError::InvalidId => -EBADF,
-                scheduler::shmem::ShmemError::InvalidPermissions => -EINVAL,
+                shmem::ShmemError::OutOfMemory => -ENOMEM,
+                shmem::ShmemError::InvalidId => -EBADF,
+                shmem::ShmemError::InvalidPermissions => -EINVAL,
                 _ => -EINVAL,
             }
         }
@@ -1032,7 +1034,7 @@ pub fn sys_shmem_map(shmem_id: usize, hint_addr: usize, permissions: u32) -> isi
 /// Returns: 0 on success, or negative error code
 pub fn sys_shmem_unmap(addr: usize) -> isize {
     // Get current process ID
-    let process_id = match scheduler::current_process_id() {
+    let process_id = match scheduler::ProcessManager::current_id() {
         Some(pid) => pid,
         None => {
             log::error!("sys_shmem_unmap: no current process");
@@ -1041,7 +1043,7 @@ pub fn sys_shmem_unmap(addr: usize) -> isize {
     };
 
     // Unmap shared memory
-    match scheduler::shmem::shmem_unmap(addr as u64, process_id) {
+    match shmem::shmem_unmap(addr as u64, process_id) {
         Ok(()) => {
             log::debug!(
                 "sys_shmem_unmap: unmapped shmem at 0x{:x} for process {}",
@@ -1053,8 +1055,8 @@ pub fn sys_shmem_unmap(addr: usize) -> isize {
         Err(e) => {
             log::error!("sys_shmem_unmap: failed: {:?}", e);
             match e {
-                scheduler::shmem::ShmemError::NotMapped => -EINVAL,
-                scheduler::shmem::ShmemError::InvalidId => -EBADF,
+                shmem::ShmemError::NotMapped => -EINVAL,
+                shmem::ShmemError::InvalidId => -EBADF,
                 _ => -EINVAL,
             }
         }
@@ -1067,7 +1069,7 @@ pub fn sys_shmem_unmap(addr: usize) -> isize {
 /// Returns: 0 on success, or negative error code
 pub fn sys_shmem_destroy(shmem_id: usize) -> isize {
     // Get current process ID
-    let process_id = match scheduler::current_process_id() {
+    let process_id = match scheduler::ProcessManager::current_id() {
         Some(pid) => pid,
         None => {
             log::error!("sys_shmem_destroy: no current process");
@@ -1076,10 +1078,10 @@ pub fn sys_shmem_destroy(shmem_id: usize) -> isize {
     };
 
     // Convert type
-    let shmem_id = scheduler::shmem::ShmemId(shmem_id);
+    let shmem_id = shmem::ShmemId(shmem_id);
 
     // Destroy shared memory
-    match scheduler::shmem::shmem_destroy(shmem_id, process_id) {
+    match shmem::shmem_destroy(shmem_id, process_id) {
         Ok(()) => {
             log::debug!(
                 "sys_shmem_destroy: marked shmem {} for deletion by process {}",
@@ -1091,8 +1093,8 @@ pub fn sys_shmem_destroy(shmem_id: usize) -> isize {
         Err(e) => {
             log::error!("sys_shmem_destroy: failed: {:?}", e);
             match e {
-                scheduler::shmem::ShmemError::InvalidId => -EBADF,
-                scheduler::shmem::ShmemError::NotOwner => -EINVAL,
+                shmem::ShmemError::InvalidId => -EBADF,
+                shmem::ShmemError::NotOwner => -EINVAL,
                 _ => -EINVAL,
             }
         }
