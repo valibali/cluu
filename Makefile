@@ -41,11 +41,11 @@ userspace:
 	@mkdir -p ./bootboot_image/initrd/bin
 	@mkdir -p ./bootboot_image/initrd/sys
 	@mkdir -p ./bootboot_image/initrd/utils
-	@cp ./userspace/hello/hello ./bootboot_image/initrd/bin/hello
-	@cp ./userspace/spawn_test/spawn_test ./bootboot_image/initrd/bin/spawn_test
-	@cp ./userspace/shmem_test/shmem_test ./bootboot_image/initrd/bin/shmem_test
-	@cp ./userspace/vfs_server/vfs_server ./bootboot_image/initrd/sys/vfs_server
-	@cp ./userspace/shell/shell ./bootboot_image/initrd/bin/shell
+	@cp ./userspace/hello/target/hello ./bootboot_image/initrd/bin/hello
+	@cp ./userspace/spawn_test/target/spawn_test ./bootboot_image/initrd/bin/spawn_test
+	@cp ./userspace/shmem_test/target/shmem_test ./bootboot_image/initrd/bin/shmem_test
+	@cp ./userspace/vfs_server/target/vfs_server ./bootboot_image/initrd/sys/vfs_server
+	@cp ./userspace/shell/target/shell ./bootboot_image/initrd/bin/shell
 	@echo "Userspace binaries ready"
 
 clean:

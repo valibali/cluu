@@ -17,11 +17,13 @@ RUSTFLAGS := -C link-arg=-T$(CURDIR)/linker.ld \
 
 # Output binary
 TARGET := shell
+TARGET_DIR := target
+TARGET_PATH := $(TARGET_DIR)/$(TARGET)
 RUST_BINARY := target/$(RUST_TARGET)/debug/cluu-shell
 
 .PHONY: all clean syscall_lib
 
-all: $(TARGET)
+all: $(TARGET_PATH)
 
 # Build C syscall library if needed
 syscall_lib:
@@ -32,27 +34,31 @@ syscall_lib:
 
 # Build Rust code and link with C syscall library
 # Cargo will handle everything including linking
-$(TARGET): src/main.rs Cargo.toml cluu-x86-64.json linker.ld syscall_lib
+$(TARGET_PATH): src/main.rs Cargo.toml cluu-x86-64.json linker.ld syscall_lib | $(TARGET_DIR)
 	@echo "Building Rust shell with C syscall library..."
 	RUSTFLAGS="$(RUSTFLAGS)" $(CARGO) build
-	@echo "Copying binary to $(TARGET)..."
-	@cp $(RUST_BINARY) $(TARGET)
+	@echo "Copying binary to $@..."
+	@cp $(RUST_BINARY) $@
 	@echo "Built shell binary: $(TARGET)"
-	@file $(TARGET)
-	@size $(TARGET)
+	@file $@
+	@size $@
+
+# Create target directory
+$(TARGET_DIR):
+	@mkdir -p $(TARGET_DIR)
 
 clean:
 	$(CARGO) clean
-	rm -f $(TARGET)
+	rm -rf $(TARGET_DIR)
 	@echo "Cleaned shell build artifacts"
 
 # Display info about the built binary
-info: $(TARGET)
+info: $(TARGET_PATH)
 	@echo "=== ELF Header ==="
-	@readelf -h $(TARGET)
+	@readelf -h $(TARGET_PATH)
 	@echo ""
 	@echo "=== Program Headers ==="
-	@readelf -l $(TARGET)
+	@readelf -l $(TARGET_PATH)
 	@echo ""
 	@echo "=== Section Headers ==="
-	@readelf -S $(TARGET)
+	@readelf -S $(TARGET_PATH)

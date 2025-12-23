@@ -48,18 +48,24 @@ ALL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS)
 
 # Output binary
 TARGET := shmem_test
+TARGET_DIR := target
+TARGET_PATH := $(TARGET_DIR)/$(TARGET)
 
 .PHONY: all clean
 
-all: $(TARGET)
+all: $(TARGET_PATH)
 
 # Link all object files
-$(TARGET): $(ALL_OBJECTS) linker.ld
+$(TARGET_PATH): $(ALL_OBJECTS) linker.ld | $(TARGET_DIR)
 	@echo "Linking $@..."
 	$(LD) $(LDFLAGS) $(ALL_OBJECTS) -o $@
 	@echo "Built userspace binary: $(TARGET)"
-	@file $(TARGET)
-	@size $(TARGET)
+	@file $@
+	@size $@
+
+# Create target directory
+$(TARGET_DIR):
+	@mkdir -p $(TARGET_DIR)
 
 # Compile C sources
 %.o: %.c
@@ -72,16 +78,17 @@ $(TARGET): $(ALL_OBJECTS) linker.ld
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(ALL_OBJECTS) $(TARGET)
+	rm -f $(ALL_OBJECTS)
+	rm -rf $(TARGET_DIR)
 	@echo "Cleaned build artifacts"
 
 # Display info about the built binary
-info: $(TARGET)
+info: $(TARGET_PATH)
 	@echo "=== ELF Header ==="
-	@readelf -h $(TARGET)
+	@readelf -h $(TARGET_PATH)
 	@echo ""
 	@echo "=== Program Headers ==="
-	@readelf -l $(TARGET)
+	@readelf -l $(TARGET_PATH)
 	@echo ""
 	@echo "=== Section Headers ==="
-	@readelf -S $(TARGET)
+	@readelf -S $(TARGET_PATH)
