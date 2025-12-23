@@ -325,7 +325,7 @@ pub fn shmem_map(
     permissions: ShmemPermissions,
 ) -> Result<u64, ShmemError> {
     // Get region from registry
-    let (frames, size, region_perms) = {
+    let (frames, _size, _region_perms) = {
         let mut registry = SHMEM_REGISTRY.lock();
         let map = registry.as_mut().ok_or(ShmemError::NotInitialized)?;
         let region = map.get_mut(&shmem_id).ok_or(ShmemError::InvalidId)?;
@@ -394,14 +394,14 @@ pub fn shmem_map(
 ///
 /// # Returns
 /// Ok if unmapped successfully
-pub fn shmem_unmap(addr: u64, process_id: ProcessId) -> Result<(), ShmemError> {
+pub fn shmem_unmap(addr: u64, _process_id: ProcessId) -> Result<(), ShmemError> {
     // TODO: Track which shmem regions are mapped at which addresses
     // For now, this is a simplified implementation
 
     // Find the shmem region that is mapped at this address
     let shmem_id = {
         let registry = SHMEM_REGISTRY.lock();
-        let map = registry.as_ref().ok_or(ShmemError::NotInitialized)?;
+        let _map = registry.as_ref().ok_or(ShmemError::NotInitialized)?;
 
         // For now, deduce shmem_id from address
         // addr = 0x400000000 + (shmem_id * 0x10000000)

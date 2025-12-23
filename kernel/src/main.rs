@@ -192,7 +192,26 @@ pub extern "C" fn kstart() -> ! {
     // Step 13: Spawn VFS server (PID 2) - BEFORE enabling scheduler
     match vfs::spawn_server() {
         Ok((pid, tid)) => {
-            log::info!("VFS server ready: PID={:?}, TID={:?}", pid, tid);
+            log::info!("VFS server spawned: PID={:?}, TID={:?}", pid, tid);
+
+            // Wait for VFS server to initialize and register its port
+            // VFS server needs to run to call syscall_register_port_name("vfs")
+            log::info!("Waiting for VFS server to register...");
+            let max_attempts = 100;
+            for i in 0..max_attempts {
+                if vfs::is_vfs_ready() {
+                    log::info!("VFS server registered after {} checks", i + 1);
+                    break;
+                }
+                // Yield to allow VFS server thread to run
+                scheduler::yield_now();
+            }
+
+            if !vfs::is_vfs_ready() {
+                log::warn!("VFS server did not register within timeout");
+            } else {
+                log::info!("VFS server ready and registered");
+            }
         }
         Err(e) => {
             log::warn!("Failed to spawn VFS server: {} (continuing without VFS)", e);
@@ -201,7 +220,7 @@ pub extern "C" fn kstart() -> ! {
 
     // Step 14: Spawn userspace shell
     log::info!("Spawning userspace shell...");
-    let shell_binary = vfs::vfs_read_file("bin/shell").unwrap_or_else(|e| {
+    let shell_binary = vfs::vfs_read_file("/dev/initrd/bin/shell").unwrap_or_else(|e| {
         log::warn!("Shell binary not found in initrd: {}", e);
         alloc::vec::Vec::new()
     });

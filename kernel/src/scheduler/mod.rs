@@ -99,7 +99,7 @@ pub mod thread;
 use crate::alloc::string::ToString;
 pub use io_wait::{IoChannel, wait_for_io, wake_io_waiters};
 pub use ipc::{IpcError, Message, PortId, port_create, port_destroy, port_recv, port_send};
-pub use process::{Process, ProcessId, ProcessState};
+pub use process::{Process, ProcessId};
 pub use thread::{Thread, ThreadId, ThreadState};
 
 /// Thread stack size (64 KiB per thread)

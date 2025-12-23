@@ -12,7 +12,8 @@
  * - Offset 24-31: fd (i32) + flags (i32) - File descriptor and open flags
  * - Offset 32-39: offset (u64) - File offset for read/write/seek
  * - Offset 40-47: count (u64) - Byte count for read/write
- * - Offset 48-255: data (208 bytes) - Path string or buffer data
+ * - Offset 48-55: shmem_id (i64) - Shared memory ID for fsitem (or -1 if none)
+ * - Offset 56-255: data (200 bytes) - Path string or buffer data
  */
 
 use crate::scheduler::ipc::Message;
@@ -52,7 +53,7 @@ pub const SEEK_CUR: i32 = 1;
 pub const SEEK_END: i32 = 2;
 
 /// Maximum path length in VFS message
-pub const MAX_PATH_LEN: usize = 208;
+pub const MAX_PATH_LEN: usize = 200;
 
 /// VFS request structure
 ///
@@ -162,13 +163,22 @@ impl VfsRequest {
         self.msg.set_u64(40, value);
     }
 
-    // Data buffer (bytes 48-255, total 208 bytes)
+    // Shared memory ID (i64 at offset 48) - NEW for fsitem support
+    pub fn shmem_id(&self) -> i64 {
+        self.msg.get_u64(48) as i64
+    }
+
+    pub fn set_shmem_id(&mut self, value: i64) {
+        self.msg.set_u64(48, value as u64);
+    }
+
+    // Data buffer (bytes 56-255, total 200 bytes)
     pub fn data(&self) -> &[u8] {
-        &self.msg.as_bytes()[48..256]
+        &self.msg.as_bytes()[56..256]
     }
 
     pub fn data_mut(&mut self) -> &mut [u8] {
-        &mut self.msg.as_bytes_mut()[48..256]
+        &mut self.msg.as_bytes_mut()[56..256]
     }
 
     /// Copy path string into data field

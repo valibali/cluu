@@ -425,7 +425,7 @@ pub fn sys_spawn(path: *const u8, _argv: *const *const u8) -> isize {
     use crate::scheduler::process::ProcessId;
 
     // Save current (userspace) page table
-    let (user_cr3, cr3_flags) = unsafe { Cr3::read() };
+    let (user_cr3, cr3_flags) = Cr3::read();
 
     // Get kernel process (PID 0) page table
     let kernel_pt = scheduler::with_process_mut(ProcessId::new(0), |kernel_proc| {

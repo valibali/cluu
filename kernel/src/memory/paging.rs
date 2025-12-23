@@ -113,7 +113,7 @@ pub fn init() {
     // Create the page table mapper
     // SAFETY: We're using the current page table from CR3, which is valid
     // The physical memory offset allows us to access page table entries
-    let mut mapper = unsafe { OffsetPageTable::new(&mut *page_table_ptr, physical_memory_offset) };
+    let mapper = unsafe { OffsetPageTable::new(&mut *page_table_ptr, physical_memory_offset) };
 
     // Store the mapper in our global static for later use
     let mut guard = MAPPER.lock();

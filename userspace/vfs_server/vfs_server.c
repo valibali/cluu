@@ -13,6 +13,7 @@
 
 #include "../lib/syscall.h"
 #include "../lib/ipc.h"
+#include "../lib/fsitem.h"
 
 /* VFS Protocol Constants (from kernel/src/vfs/protocol.rs) */
 #define VFS_OPEN    1
@@ -50,8 +51,8 @@
 #define OFFSET_FLAGS         28
 #define OFFSET_OFFSET        32
 #define OFFSET_COUNT         40
-#define OFFSET_SHMEM_ID      48   /* NEW: Shared memory ID */
-#define OFFSET_DATA          56
+#define OFFSET_SHMEM_ID      48   /* NEW: Shared memory ID for fsitem */
+#define OFFSET_DATA          56   /* Path string or buffer data (200 bytes) */
 
 /* Helper functions to access message fields */
 static inline unsigned int msg_get_u32(const struct ipc_message *msg, int offset) {
@@ -185,6 +186,122 @@ static const char* tar_find_file(const char *tar_base, size_t tar_size,
     }
 
     return (const char *)0;  /* Not found */
+}
+
+/* ========== Mount Table ========== */
+
+#define MAX_MOUNTS 16
+
+/* Filesystem types */
+#define FS_TYPE_TAR     1    /* TAR archive (read-only) */
+#define FS_TYPE_TMPFS   2    /* Temporary filesystem (in-memory, read-write) */
+#define FS_TYPE_PROC    3    /* Process information filesystem */
+#define FS_TYPE_DEV     4    /* Device filesystem */
+
+/* Mount point entry */
+struct mount_point {
+    int in_use;
+    char path[256];              /* Mount path, e.g., "/dev/initrd/" */
+    int fs_type;                 /* Filesystem type */
+    const char *data;            /* FS-specific data (e.g., TAR base address) */
+    size_t data_size;            /* FS-specific data size */
+};
+
+static struct mount_point mount_table[MAX_MOUNTS];
+
+/* Initialize mount table */
+static void mount_table_init(void) {
+    for (int i = 0; i < MAX_MOUNTS; i++) {
+        mount_table[i].in_use = 0;
+        mount_table[i].path[0] = '\0';
+        mount_table[i].fs_type = 0;
+        mount_table[i].data = (const char *)0;
+        mount_table[i].data_size = 0;
+    }
+}
+
+/* String length helper */
+static size_t str_len(const char *s) {
+    size_t len = 0;
+    while (*s++) len++;
+    return len;
+}
+
+/* Check if path starts with prefix */
+static int str_starts_with(const char *path, const char *prefix) {
+    while (*prefix) {
+        if (*path != *prefix) return 0;
+        path++;
+        prefix++;
+    }
+    return 1;
+}
+
+/* Mount a filesystem at a path */
+static int vfs_mount(const char *path, int fs_type, const char *data, size_t data_size) {
+    /* Find free mount slot */
+    for (int i = 0; i < MAX_MOUNTS; i++) {
+        if (!mount_table[i].in_use) {
+            mount_table[i].in_use = 1;
+
+            /* Copy mount path */
+            const char *src = path;
+            char *dst = mount_table[i].path;
+            int j = 0;
+            while (*src && j < 255) {
+                dst[j++] = *src++;
+            }
+            dst[j] = '\0';
+
+            mount_table[i].fs_type = fs_type;
+            mount_table[i].data = data;
+            mount_table[i].data_size = data_size;
+
+            return 0;  /* Success */
+        }
+    }
+    return -1;  /* No free mount slots */
+}
+
+/* Resolve path to mount point
+ *
+ * Returns:
+ *   - Pointer to mount_point if found
+ *   - Sets *relative_path to the path within the mounted filesystem
+ *
+ * Example:
+ *   vfs_resolve_mount("/dev/initrd/bin/shell", &rel)
+ *   -> Returns mount for "/dev/initrd/"
+ *   -> Sets *rel = "bin/shell"
+ */
+static struct mount_point* vfs_resolve_mount(const char *path, const char **relative_path) {
+    struct mount_point *best_match = (struct mount_point *)0;
+    size_t best_match_len = 0;
+
+    /* Special case: root mount "/" must be checked last */
+    /* Find longest matching mount point */
+    for (int i = 0; i < MAX_MOUNTS; i++) {
+        if (!mount_table[i].in_use) continue;
+
+        size_t mount_len = str_len(mount_table[i].path);
+
+        /* Check if path starts with this mount point */
+        if (str_starts_with(path, mount_table[i].path)) {
+            /* Prefer longer (more specific) mount points */
+            if (mount_len > best_match_len) {
+                best_match = &mount_table[i];
+                best_match_len = mount_len;
+            }
+        }
+    }
+
+    if (best_match) {
+        /* Calculate relative path by skipping mount prefix */
+        *relative_path = path + best_match_len;
+        return best_match;
+    }
+
+    return (struct mount_point *)0;  /* No mount found */
 }
 
 /* ========== File Descriptor Table ========== */
@@ -395,9 +512,19 @@ int main(int argc, char **argv) {
         syscall_exit(1);
     }
 
+    /* Initialize mount table */
+    mount_table_init();
+
     /* Initialize file descriptor table */
     fd_table_init();
     // print("[VFS] File descriptor table initialized\n");
+
+    /* Mount initrd at /dev/initrd/ */
+    if (vfs_mount("/dev/initrd/", FS_TYPE_TAR, initrd_base, initrd_size) < 0) {
+        print("[VFS] ERROR: Failed to mount initrd at /dev/initrd/\n");
+        syscall_exit(1);
+    }
+    print("[VFS] Mounted initrd at /dev/initrd/\n");
 
     /* Create IPC port for receiving VFS requests */
     port_id_t vfs_port = port_create();
@@ -478,14 +605,43 @@ int main(int argc, char **argv) {
                     break;
                 }
 
-                /* Search for file in initrd TAR */
+                /* Resolve mount point */
+                const char *relative_path = (const char *)0;
+                struct mount_point *mount = vfs_resolve_mount(path, &relative_path);
+
+                if (mount == (struct mount_point *)0) {
+                    /* No mount found for this path */
+                    print("[VFS] No mount for path: ");
+                    print(path);
+                    print("\n");
+                    msg_set_i32(&response, OFFSET_RESULT, VFS_ERR_NOT_FOUND);
+                    msg_set_i32(&response, OFFSET_FD, -1);
+                    break;
+                }
+
+                print("[VFS] Resolved to mount, relative path: ");
+                print(relative_path);
+                print("\n");
+
+                /* Handle based on filesystem type */
                 size_t file_size = 0;
-                const char *file_data = tar_find_file(initrd_base, initrd_size, path, &file_size);
+                const char *file_data = (const char *)0;
+
+                if (mount->fs_type == FS_TYPE_TAR) {
+                    /* Search for file in TAR archive */
+                    file_data = tar_find_file(mount->data, mount->data_size, relative_path, &file_size);
+                } else {
+                    /* Unsupported filesystem type */
+                    print("[VFS] Unsupported FS type\n");
+                    msg_set_i32(&response, OFFSET_RESULT, VFS_ERR_INVALID);
+                    msg_set_i32(&response, OFFSET_FD, -1);
+                    break;
+                }
 
                 if (file_data == (const char *)0) {
                     /* File not found */
                     print("[VFS] File not found: ");
-                    print(path);
+                    print(relative_path);
                     print("\n");
                     msg_set_i32(&response, OFFSET_RESULT, VFS_ERR_NOT_FOUND);
                     msg_set_i32(&response, OFFSET_FD, -1);
@@ -500,8 +656,9 @@ int main(int argc, char **argv) {
                     break;
                 }
 
-                /* Create shared memory region for file data */
-                long shmem_id = syscall_shmem_create(file_size, SHMEM_READ | SHMEM_WRITE);
+                /* Create shared memory region: fsitem (512B) + padding (to 4KB) + file data */
+                size_t shmem_size = 4096 + file_size;
+                long shmem_id = syscall_shmem_create(shmem_size, SHMEM_READ | SHMEM_WRITE);
                 if (shmem_id < 0) {
                     /* Failed to create shmem */
                     fd_free(fd);
@@ -511,7 +668,7 @@ int main(int argc, char **argv) {
                     break;
                 }
 
-                /* Map shmem into our address space temporarily to copy data */
+                /* Map shmem into our address space temporarily to initialize fsitem */
                 void *shmem_ptr = syscall_shmem_map(shmem_id, (void *)0, SHMEM_READ | SHMEM_WRITE);
                 if ((long)shmem_ptr < 0) {
                     /* Failed to map shmem */
@@ -523,11 +680,34 @@ int main(int argc, char **argv) {
                     break;
                 }
 
-                /* Copy file data from TAR into shmem */
-                char *dst = (char *)shmem_ptr;
-                const char *src = file_data;
+                /* Initialize fsitem structure at start of shmem */
+                struct fsitem *item = (struct fsitem *)shmem_ptr;
+                item->magic = FSITEM_MAGIC;
+                item->version = 1;
+                item->type = FSITEM_TYPE_FILE;
+                item->flags = flags;
+                item->size = file_size;
+                item->fs_type = mount->fs_type;
+                item->mode = 0644;  /* Default read-only */
+                item->data_offset = 4096;
+                item->offset = 0;
+                item->ref_count = 1;
+                item->lock = 0;
+
+                /* Copy path into fsitem */
+                const char *path_src = path;
+                char *path_dst = item->path;
+                int path_idx = 0;
+                while (*path_src && path_idx < 255) {
+                    path_dst[path_idx++] = *path_src++;
+                }
+                path_dst[path_idx] = '\0';
+
+                /* Copy file data from TAR into shmem at offset 4096 */
+                char *data_dst = (char *)shmem_ptr + 4096;
+                const char *data_src = file_data;
                 for (size_t i = 0; i < file_size; i++) {
-                    dst[i] = src[i];
+                    data_dst[i] = data_src[i];
                 }
 
                 /* Unmap from our address space (client will map it) */

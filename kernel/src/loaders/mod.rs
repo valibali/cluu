@@ -6,5 +6,3 @@
  */
 
 pub mod elf;
-
-pub use elf::{load_elf_binary, spawn_elf_process, ElfBinary, ElfLoadError};

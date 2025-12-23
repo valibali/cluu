@@ -20,12 +20,12 @@
 
 pub mod protocol;
 
-use protocol::*;
-use crate::scheduler::ipc::{self, PortId, IpcError};
 use crate::scheduler::ProcessId;
-use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use spin::Mutex;
+use crate::scheduler::ipc::{self, IpcError, PortId};
 use alloc::collections::BTreeMap;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use protocol::*;
+use spin::Mutex;
 
 /// Well-known port name for VFS server
 pub const VFS_PORT_NAME: &str = "vfs";
@@ -69,8 +69,8 @@ pub fn init() {
 ///
 /// Must be called after scheduler::init() and before scheduler::enable()
 pub fn spawn_server() -> Result<(ProcessId, crate::scheduler::ThreadId), &'static str> {
-    use crate::loaders;
     use crate::initrd;
+    use crate::loaders;
     use crate::scheduler;
     use alloc::format;
 
@@ -113,8 +113,7 @@ pub fn spawn_server() -> Result<(ProcessId, crate::scheduler::ThreadId), &'stati
 
     // Spawn VFS server process
     // Pass shmem_id (not physical address!) - VFS will map it itself
-    let vfs_binary = vfs_read_file("sys/vfs_server")
-        .map_err(|_| "VFS server binary not found")?;
+    let vfs_binary = vfs_read_file("sys/vfs_server").map_err(|_| "VFS server binary not found")?;
 
     let (pid, tid) = loaders::elf::spawn_elf_process(
         &vfs_binary,
@@ -289,10 +288,42 @@ pub fn vfs_open(path: &str, flags: i32) -> isize {
         Ok(response) => {
             let result = response.result();
             if result < 0 {
-                result as isize
-            } else {
-                response.fd() as isize
+                return result as isize;
             }
+
+            let fd = response.fd();
+            let shmem_id = response.shmem_id();
+
+            // If VFS server provided shmem_id, map it into client address space
+            if shmem_id >= 0 {
+                use crate::scheduler::shmem::{ShmemId, ShmemPermissions};
+
+                if let Some(current_pid) = crate::scheduler::current_process_id() {
+                    // Map fsitem into client address space (read-only)
+                    let perms = ShmemPermissions::from_flags(ShmemPermissions::READ);
+
+                    match crate::scheduler::shmem::shmem_map(
+                        ShmemId(shmem_id as usize),
+                        current_pid,
+                        0x0,  // Let kernel choose address
+                        perms
+                    ) {
+                        Ok(virt_addr) => {
+                            log::info!("vfs_open: Mapped fsitem for FD {} at {:?}", fd, virt_addr);
+                            // TODO: Store mapping in per-process FD table
+                            // For now, client will need to call syscall to get fsitem address
+                        }
+                        Err(e) => {
+                            log::warn!("vfs_open: Failed to map fsitem: {:?}, falling back to IPC reads", e);
+                            // Continue without mapping - client will use IPC-based reads
+                        }
+                    }
+                } else {
+                    log::warn!("vfs_open: No current process, cannot map fsitem");
+                }
+            }
+
+            fd as isize
         }
         Err(e) => {
             log::error!("vfs_open: IPC error: {:?}", e);
@@ -453,12 +484,65 @@ pub fn vfs_lseek(fd: i32, offset: i64, whence: i32) -> isize {
 /// # Returns
 /// File data on success, or error message
 pub fn vfs_read_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
-    // TODO: Implement this properly once VFS server is working
-    // For now, fall back to direct initrd access
+    // If VFS server is ready, use it
+    if is_vfs_ready() {
+        // Open file via VFS
+        let fd = vfs_open(path, O_RDONLY);
+        if fd < 0 {
+            return Err("Failed to open file via VFS");
+        }
+
+        // Get file size via lseek
+        let file_size = vfs_lseek(fd as i32, 0, SEEK_END);
+        if file_size < 0 {
+            vfs_close(fd as i32);
+            return Err("Failed to get file size");
+        }
+
+        // Seek back to start
+        vfs_lseek(fd as i32, 0, SEEK_SET);
+
+        // Read entire file
+        let mut data = alloc::vec::Vec::with_capacity(file_size as usize);
+        data.resize(file_size as usize, 0);
+
+        let mut total_read = 0;
+        while total_read < file_size as usize {
+            let to_read = (file_size as usize - total_read).min(MAX_PATH_LEN);
+            let bytes_read = vfs_read(fd as i32, &mut data[total_read..], to_read);
+            if bytes_read <= 0 {
+                vfs_close(fd as i32);
+                return Err("Failed to read file via VFS");
+            }
+            total_read += bytes_read as usize;
+        }
+
+        vfs_close(fd as i32);
+        return Ok(data);
+    }
+
+    // Fall back to direct initrd access
     log::warn!("vfs_read_file: VFS not ready, falling back to initrd");
 
-    let data = crate::initrd::read_file(path)
-        .map_err(|_| "Failed to read file from initrd")?;
+    // Try multiple path variations since initrd doesn't understand mount points
+    // Common mount prefixes to try stripping
+    let mount_prefixes = ["/dev/initrd/", "/mnt/", "/"];
 
-    Ok(data.to_vec())
+    // First, try the path as-is (in case it's already simple like "sys/vfs_server")
+    if let Ok(data) = crate::initrd::read_file(path) {
+        return Ok(data.to_vec());
+    }
+
+    // Try stripping common mount prefixes
+    for prefix in &mount_prefixes {
+        if path.starts_with(prefix) {
+            let stripped = &path[prefix.len()..];
+            if let Ok(data) = crate::initrd::read_file(stripped) {
+                return Ok(data.to_vec());
+            }
+        }
+    }
+
+    // Nothing worked
+    Err("Failed to read file from initrd")
 }

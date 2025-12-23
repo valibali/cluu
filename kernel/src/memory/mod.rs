@@ -47,7 +47,7 @@ pub mod paging;
 pub mod phys;
 
 // Re-export commonly used types
-pub use address_space::{AddressSpace, HeapRegion, MemoryRegion};
+pub use address_space::AddressSpace;
 
 use crate::bootboot::BOOTBOOT;
 
