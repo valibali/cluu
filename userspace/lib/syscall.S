@@ -158,6 +158,19 @@ syscall_yield:
 .size syscall_yield, . - syscall_yield
 
 /*
+ * int syscall_process_ready(void)
+ * Syscall number: 1011 (SYS_PROCESS_READY)
+ * Signal that critical process has completed initialization
+ */
+.global syscall_process_ready
+.type syscall_process_ready, @function
+syscall_process_ready:
+    mov $1011, %rax     # SYS_PROCESS_READY = 1011
+    syscall
+    ret
+.size syscall_process_ready, . - syscall_process_ready
+
+/*
  * long syscall_shmem_create(size_t size, unsigned int permissions)
  * Syscall number: 1007 (SYS_SHMEM_CREATE)
  */

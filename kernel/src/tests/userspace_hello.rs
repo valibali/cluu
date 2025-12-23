@@ -31,7 +31,7 @@ pub fn spawn_hello_world() -> Result<(), &'static str> {
     log::info!("");
 
     // Parse and load the ELF binary
-    match elf::spawn_elf_process(binary, "hello_world", &[]) {
+    match elf::spawn_elf_process(binary, "hello_world", &[], scheduler::ProcessType::User) {
         Ok((process_id, thread_id)) => {
             // CRITICAL: Yield immediately after thread creation to let scheduler stabilize
             // Without this, logging or other operations can deadlock

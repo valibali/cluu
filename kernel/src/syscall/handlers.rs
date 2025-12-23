@@ -398,6 +398,41 @@ pub fn sys_getppid() -> isize {
     result.unwrap_or(-EFAULT)
 }
 
+/// sys_process_ready - Signal that critical process has completed initialization
+///
+/// Arguments: ()
+/// Returns: 0 on success, negative error code on failure
+///
+/// This syscall is used by critical system services (VFS, memory server, etc.)
+/// to signal that they have completed initialization and are ready to serve requests.
+///
+/// Once all critical processes have signaled ready, the scheduler transitions
+/// from Boot mode to Normal mode, allowing user processes to run.
+///
+/// Only processes marked as Critical can call this successfully.
+pub fn sys_process_ready() -> isize {
+    log::debug!("sys_process_ready called");
+
+    let pid = match scheduler::current_process_id() {
+        Some(pid) => pid,
+        None => {
+            log::error!("sys_process_ready: no current process");
+            return -ESRCH;
+        }
+    };
+
+    match scheduler::signal_process_ready(pid) {
+        Ok(()) => {
+            log::info!("sys_process_ready: process {} signaled ready successfully", pid.0);
+            0
+        }
+        Err(e) => {
+            log::error!("sys_process_ready: failed for process {}: {}", pid.0, e);
+            -EINVAL
+        }
+    }
+}
+
 /// sys_spawn - Spawn new process from ELF binary
 ///
 /// Arguments: (path: *const u8, argv: *const *const u8)
@@ -488,8 +523,13 @@ pub fn sys_spawn(path: *const u8, _argv: *const *const u8) -> isize {
 
     log::debug!("sys_spawn: loaded {} bytes from initrd", elf_data.len());
 
-    // 5. Spawn the process using ELF loader
-    let result = crate::loaders::elf::spawn_elf_process(elf_data, path_str, &[]);
+    // 5. Spawn the process using ELF loader (spawned via syscall = user process)
+    let result = crate::loaders::elf::spawn_elf_process(
+        elf_data,
+        path_str,
+        &[],
+        scheduler::ProcessType::User
+    );
 
     let (child_pid, _child_tid) = match result {
         Ok((pid, tid)) => (pid, tid),

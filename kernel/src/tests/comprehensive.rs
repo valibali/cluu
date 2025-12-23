@@ -177,7 +177,7 @@ pub fn run_comprehensive_test_suite() -> TestResults {
     };
 
     if !shmem_binary.is_empty() {
-        match crate::loaders::elf::spawn_elf_process(shmem_binary, "shmem_test", &[]) {
+        match crate::loaders::elf::spawn_elf_process(shmem_binary, "shmem_test", &[], crate::scheduler::ProcessType::User) {
             Ok(_) => {
                 // CRITICAL: Yield after thread creation to stabilize scheduler
                 for _ in 0..10 {

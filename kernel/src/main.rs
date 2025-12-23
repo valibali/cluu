@@ -189,17 +189,21 @@ pub extern "C" fn kstart() -> ! {
     components::tty::init_tty0();
     log::info!("TTY system initialized");
 
-    // Step 13: Spawn VFS server (PID 1)
-    match vfs::spawn_server() {
+    // Step 13: Spawn VFS server (PID 1) - CRITICAL process
+    let vfs_pid = match vfs::spawn_server() {
         Ok((pid, tid)) => {
             log::info!("VFS server spawned: PID={:?}, TID={:?}", pid, tid);
+            pid
         }
         Err(e) => {
             log::error!("Failed to spawn VFS server: {}", e);
             log::error!("Cannot continue without VFS server!");
             loop { x86_64::instructions::hlt(); }
         }
-    }
+    };
+
+    // Register VFS as critical process - scheduler won't enter normal mode until it signals ready
+    scheduler::register_critical_process(vfs_pid);
 
     log::info!("Kernel initialization complete!");
 
@@ -212,7 +216,7 @@ pub extern "C" fn kstart() -> ! {
     });
 
     if !shell_binary.is_empty() {
-        match loaders::elf::spawn_elf_process(&shell_binary, "shell", &[]) {
+        match loaders::elf::spawn_elf_process(&shell_binary, "shell", &[], scheduler::ProcessType::User) {
             Ok((pid, tid)) => {
                 log::info!("Shell spawned: PID={:?}, TID={:?}", pid, tid);
             }

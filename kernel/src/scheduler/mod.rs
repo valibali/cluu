@@ -102,6 +102,77 @@ pub use ipc::{IpcError, Message, PortId, port_create, port_destroy, port_recv, p
 pub use process::{Process, ProcessId};
 pub use thread::{Thread, ThreadId, ThreadState};
 
+/// Scheduler operating mode
+///
+/// The scheduler operates in different modes during system lifecycle:
+/// - Boot: Only critical system services run (VFS, memory server, etc.)
+/// - Normal: All processes are scheduled according to their type/priority
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerMode {
+    /// Boot mode: Only critical system services run
+    /// Transitions to Normal once all critical services signal ready
+    Boot {
+        /// Total number of critical processes that must initialize
+        critical_count: usize,
+        /// Number of critical processes that have signaled ready
+        ready_count: usize,
+    },
+
+    /// Normal mode: All processes scheduled according to priority
+    Normal,
+}
+
+/// Process type classification
+///
+/// Determines scheduling priority and whether the process runs during boot mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessType {
+    /// Critical system service (VFS, memory_server, etc.)
+    /// Only these run during boot mode
+    /// High priority in normal mode
+    Critical,
+
+    /// Non-critical system service
+    /// Medium priority in normal mode
+    System,
+
+    /// User process
+    /// Low priority in normal mode
+    User,
+
+    /// Real-time process (future feature)
+    /// Highest priority in normal mode
+    RealTime { priority: u8 },
+}
+
+impl ProcessType {
+    /// Get scheduling priority for this process type
+    /// Higher value = higher priority
+    pub fn priority(&self) -> usize {
+        match self {
+            ProcessType::RealTime { priority } => 1000 + (*priority as usize),
+            ProcessType::Critical => 500,
+            ProcessType::System => 100,
+            ProcessType::User => 1,
+        }
+    }
+}
+
+/// Process initialization state
+///
+/// Tracks whether a process has completed its initialization phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessInitState {
+    /// Process created but not yet initialized
+    Initializing,
+
+    /// Process has signaled it's ready via sys_process_ready()
+    Ready,
+
+    /// Process failed initialization (future feature)
+    Failed,
+}
+
 /// Thread stack size (64 KiB per thread)
 pub const THREAD_STACK_SIZE: usize = 64 * 1024;
 
@@ -121,12 +192,94 @@ static SCHEDULER_ENABLED: AtomicBool = AtomicBool::new(false);
 /// When true, timer interrupts will not perform context switches
 static PREEMPTION_DISABLED: AtomicBool = AtomicBool::new(false);
 
+/// Scheduler operating mode (Boot or Normal)
+static SCHEDULER_MODE: Mutex<SchedulerMode> = Mutex::new(SchedulerMode::Boot {
+    critical_count: 0,
+    ready_count: 0,
+});
+
 /// Check if the scheduler is enabled
 ///
 /// Returns true if the scheduler has been initialized and is running.
 /// During early boot (before scheduler initialization), this returns false.
 pub fn is_scheduler_enabled() -> bool {
     SCHEDULER_ENABLED.load(Ordering::SeqCst)
+}
+
+/// Get the current scheduler operating mode
+///
+/// Returns the current mode (Boot or Normal).
+pub fn get_scheduler_mode() -> SchedulerMode {
+    *SCHEDULER_MODE.lock()
+}
+
+/// Register a critical process that must initialize before normal mode
+///
+/// Critical processes are the only ones scheduled during boot mode.
+/// Once all critical processes signal ready, the scheduler transitions to normal mode.
+///
+/// This should be called immediately after spawning a critical process.
+///
+/// # Arguments
+/// * `pid` - Process ID of the critical process
+pub fn register_critical_process(pid: ProcessId) {
+    let mut mode = SCHEDULER_MODE.lock();
+    if let SchedulerMode::Boot { ref mut critical_count, .. } = *mode {
+        *critical_count += 1;
+        log::info!("Registered critical process {} '{}' (total: {})",
+                   pid.0,
+                   with_process_mut(pid, |p| p.name.clone()).unwrap_or_else(|| "?".to_string()),
+                   critical_count);
+    } else {
+        log::warn!("Cannot register critical process {} - scheduler already in normal mode", pid.0);
+    }
+}
+
+/// Process signals it has completed initialization
+///
+/// Called by critical processes via sys_process_ready() when they have finished
+/// initialization and are ready to serve requests.
+///
+/// When all critical processes have signaled ready, the scheduler automatically
+/// transitions from Boot mode to Normal mode, allowing user processes to run.
+///
+/// # Arguments
+/// * `pid` - Process ID signaling ready
+///
+/// # Returns
+/// Ok if signaled successfully, Err if process is not critical or already signaled
+pub fn signal_process_ready(pid: ProcessId) -> Result<(), &'static str> {
+    // Update process state
+    with_process_mut(pid, |process| {
+        if process.process_type != ProcessType::Critical {
+            return Err("Only critical processes can signal ready during boot");
+        }
+
+        if process.init_state == ProcessInitState::Ready {
+            return Err("Process already signaled ready");
+        }
+
+        process.init_state = ProcessInitState::Ready;
+        log::info!("Critical process {} '{}' signaled ready", pid.0, process.name);
+        Ok(())
+    }).ok_or("Process not found")??;
+
+    // Check if we should transition to normal mode
+    let mut mode = SCHEDULER_MODE.lock();
+    if let SchedulerMode::Boot { critical_count, ref mut ready_count } = *mode {
+        *ready_count += 1;
+        log::info!("Critical processes ready: {}/{}", ready_count, critical_count);
+
+        if *ready_count == critical_count {
+            log::info!("========================================");
+            log::info!("All critical processes ready!");
+            log::info!("Transitioning to NORMAL MODE");
+            log::info!("========================================");
+            *mode = SchedulerMode::Normal;
+        }
+    }
+
+    Ok(())
 }
 
 /// Interrupt frame pushed by CPU during interrupt
@@ -400,8 +553,13 @@ impl Scheduler {
     }
 
     /// Get the next thread to run
+    ///
+    /// Respects scheduler mode:
+    /// - Boot mode: Only schedules threads from Critical processes
+    /// - Normal mode: Schedules all threads by priority (RT > Critical > System > User)
     fn get_next_thread(&mut self) -> Option<ThreadId> {
         let current_time = crate::utils::timer::uptime_ms();
+        let mode = get_scheduler_mode();
 
         // Wake up any threads whose sleep time has expired
         for thread in &mut self.threads {
@@ -418,6 +576,7 @@ impl Scheduler {
         }
 
         // Find next thread that is not sleeping or terminated
+        // and respects scheduler mode restrictions
         loop {
             let thread_id = self.ready_queue.pop_front()?;
 
@@ -434,9 +593,22 @@ impl Scheduler {
                     // Don't put it back in ready queue
                     continue;
                 }
+
+                // BOOT MODE FILTER: Only schedule critical processes (+ kernel threads)
+                if let SchedulerMode::Boot { .. } = mode {
+                    // Get process type for this thread
+                    if let Some(process) = self.processes.get(&thread.process_id) {
+                        // EXCEPTION: Always allow kernel process (PID 0) threads (includes idle)
+                        if process.id.0 != 0 && process.process_type != ProcessType::Critical {
+                            // Non-critical, non-kernel process in boot mode - put back at end of queue
+                            self.ready_queue.push_back(thread_id);
+                            continue;
+                        }
+                    }
+                }
             }
 
-            // Thread is not sleeping or terminated, can be scheduled
+            // Thread is valid and allowed to run in current mode
             return Some(thread_id);
         }
     }
@@ -539,14 +711,14 @@ impl Scheduler {
     ///
     /// Kernel processes run in Ring 0 and use the kernel address space.
     /// This is used for kernel threads that need isolated resource management.
-    fn create_kernel_process(&mut self, name: &str) -> ProcessId {
+    fn create_kernel_process(&mut self, name: &str, process_type: ProcessType) -> ProcessId {
         let process_id = self.allocate_pid()
             .expect("Failed to allocate PID for kernel process");
 
-        let process = Process::new_kernel(process_id, name.into());
+        let process = Process::new_kernel(process_id, name.into(), process_type);
         self.processes.insert(process_id, process);
 
-        log::info!("Created kernel process '{}' with ID {:?}", name, process_id);
+        log::info!("Created kernel process '{}' (type: {:?}) with ID {:?}", name, process_type, process_id);
         process_id
     }
 
@@ -568,9 +740,11 @@ pub fn init() {
     let mut scheduler = Scheduler::new();
 
     // Create default kernel process (PID 0) for kernel threads
-    let kernel_process = Process::new_kernel(ProcessId(0), "kernel".into());
+    // Kernel process is System type and always ready
+    let mut kernel_process = Process::new_kernel(ProcessId(0), "kernel".into(), ProcessType::System);
+    kernel_process.init_state = ProcessInitState::Ready; // Kernel is always ready
     scheduler.processes.insert(ProcessId(0), kernel_process);
-    log::info!("Created default kernel process (PID 0)");
+    log::info!("Created default kernel process (PID 0, System type)");
 
     // CRITICAL: Disable interrupts to prevent timer IRQ from trying to acquire lock
     x86_64::instructions::interrupts::without_interrupts(|| {
@@ -580,7 +754,7 @@ pub fn init() {
     // Initialize I/O wait queue system
     io_wait::init();
 
-    log::info!("Scheduler initialized");
+    log::info!("Scheduler initialized in BOOT MODE");
 }
 
 /// Create a new thread in the default kernel process
@@ -602,12 +776,16 @@ pub fn spawn_thread(entry_point: fn(), name: &str) -> ThreadId {
 /// This creates a process with its own file descriptor table and resource
 /// management, but using the kernel address space (Ring 0).
 ///
+/// # Arguments
+/// * `name` - Human-readable process name
+/// * `process_type` - Process classification (Critical, System, User, RealTime)
+///
 /// Returns the ProcessId of the newly created process.
-pub fn spawn_kernel_process(name: &str) -> ProcessId {
+pub fn spawn_kernel_process(name: &str, process_type: ProcessType) -> ProcessId {
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut scheduler_guard = SCHEDULER.lock();
         let scheduler = scheduler_guard.as_mut().expect("Scheduler not initialized");
-        scheduler.create_kernel_process(name)
+        scheduler.create_kernel_process(name, process_type)
     })
 }
 
@@ -615,7 +793,11 @@ pub fn spawn_kernel_process(name: &str) -> ProcessId {
 ///
 /// This allocates a fresh address space with its own PML4 and copies
 /// kernel mappings for syscall handling.
-pub fn spawn_user_process(name: &str) -> Result<ProcessId, &'static str> {
+///
+/// # Arguments
+/// * `name` - Human-readable process name
+/// * `process_type` - Process classification (Critical, System, User, RealTime)
+pub fn spawn_user_process(name: &str, process_type: ProcessType) -> Result<ProcessId, &'static str> {
     use crate::memory::address_space::AddressSpace;
 
     x86_64::instructions::interrupts::without_interrupts(|| {
@@ -629,12 +811,13 @@ pub fn spawn_user_process(name: &str) -> Result<ProcessId, &'static str> {
         let process_id = scheduler.allocate_pid()
             .ok_or("Failed to allocate PID - all PIDs in use")?;
 
-        let process = Process::new(process_id, name, address_space);
+        let process = Process::new(process_id, name, address_space, process_type);
         scheduler.processes.insert(process_id, process);
 
         log::info!(
-            "Created userspace process '{}' with ID {:?}",
+            "Created userspace process '{}' (type: {:?}) with ID {:?}",
             name,
+            process_type,
             process_id
         );
         Ok(process_id)

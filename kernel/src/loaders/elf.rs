@@ -504,11 +504,12 @@ pub fn spawn_elf_process(
     elf_data: &[u8],
     name: &str,
     args: &[&str],
+    process_type: scheduler::ProcessType,
 ) -> Result<(ProcessId, ThreadId), ElfLoadError> {
-    log::info!("Spawning ELF process '{}' with {} args", name, args.len());
+    log::info!("Spawning ELF process '{}' (type: {:?}) with {} args", name, process_type, args.len());
 
     // Create a new userspace process with dedicated page tables
-    let process_id = scheduler::spawn_user_process(name)
+    let process_id = scheduler::spawn_user_process(name, process_type)
         .map_err(|_| ElfLoadError::MemoryAllocationFailed)?;
 
     // Get kernel CR3 now (BEFORE entering with_process_mut) to avoid deadlock

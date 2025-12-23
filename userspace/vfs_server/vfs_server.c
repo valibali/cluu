@@ -548,6 +548,17 @@ int main(int argc, char **argv) {
     // print("[VFS] Registered as 'vfs' port\n");
     // print("[VFS] VFS Server ready - waiting for requests\n");
 
+    /* Signal kernel that VFS server is initialized and ready */
+    print("[VFS] Signaling ready to kernel...\n");
+    int result = syscall_process_ready();
+    if (result < 0) {
+        print("[VFS] ERROR: Failed to signal ready (error ");
+        print_dec(result);
+        print(")\n");
+        syscall_exit(1);
+    }
+    print("[VFS] VFS Server ready - entering service loop\n");
+
     /* Main message loop */
     struct ipc_message request;
     while (1) {

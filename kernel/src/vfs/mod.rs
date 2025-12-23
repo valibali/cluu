@@ -111,7 +111,7 @@ pub fn spawn_server() -> Result<(ProcessId, crate::scheduler::ThreadId), &'stati
         initrd_size_str
     );
 
-    // Spawn VFS server process
+    // Spawn VFS server process (CRITICAL - must initialize before normal mode)
     // Pass shmem_id (not physical address!) - VFS will map it itself
     let vfs_binary = vfs_read_file("sys/vfs_server").map_err(|_| "VFS server binary not found")?;
 
@@ -119,10 +119,11 @@ pub fn spawn_server() -> Result<(ProcessId, crate::scheduler::ThreadId), &'stati
         &vfs_binary,
         "vfs_server",
         &[shmem_id_str.as_str(), initrd_size_str.as_str()],
+        scheduler::ProcessType::Critical,
     )
     .map_err(|_| "Failed to spawn VFS server")?;
 
-    log::info!("VFS server spawned: PID={:?}, TID={:?}", pid, tid);
+    log::info!("VFS server spawned: PID={:?}, TID={:?} (CRITICAL process)", pid, tid);
     log::info!("VFS server will map initrd shmem region into its own address space");
 
     Ok((pid, tid))

@@ -83,6 +83,14 @@ pub struct Process {
 
     /// Address space (page tables and memory regions)
     pub address_space: AddressSpace,
+
+    /// Process type (Critical, System, User, RealTime)
+    /// Determines scheduling priority and boot-time behavior
+    pub process_type: super::ProcessType,
+
+    /// Initialization state
+    /// Tracks whether the process has completed initialization
+    pub init_state: super::ProcessInitState,
 }
 
 impl Process {
@@ -90,7 +98,7 @@ impl Process {
     ///
     /// This is the general constructor used for both kernel and userspace processes.
     /// The parent_id should be set separately after creation using set_parent().
-    pub fn new(id: ProcessId, name: &str, address_space: AddressSpace) -> Self {
+    pub fn new(id: ProcessId, name: &str, address_space: AddressSpace, process_type: super::ProcessType) -> Self {
         Process {
             id,
             parent_id: None,
@@ -100,6 +108,8 @@ impl Process {
             threads: Vec::new(),
             exit_code: None,
             address_space,
+            process_type,
+            init_state: super::ProcessInitState::Initializing,
         }
     }
 
@@ -113,7 +123,7 @@ impl Process {
     ///
     /// This is used for kernel threads that run during boot
     /// and for kernel services.
-    pub fn new_kernel(id: ProcessId, name: String) -> Self {
+    pub fn new_kernel(id: ProcessId, name: String, process_type: super::ProcessType) -> Self {
         Process {
             id,
             parent_id: None,
@@ -123,6 +133,8 @@ impl Process {
             threads: Vec::new(),
             exit_code: None,
             address_space: AddressSpace::new_kernel(),
+            process_type,
+            init_state: super::ProcessInitState::Initializing,
         }
     }
 

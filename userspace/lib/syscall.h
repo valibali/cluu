@@ -108,6 +108,16 @@ void syscall_exit(int status) __attribute__((noreturn));
 int syscall_yield(void);
 
 /**
+ * Signal that critical process has completed initialization
+ * Returns: 0 on success, or negative error code
+ *
+ * Used by critical system services (VFS, memory server) to signal they are
+ * ready to serve requests. Once all critical processes signal ready, the
+ * scheduler transitions from Boot mode to Normal mode.
+ */
+int syscall_process_ready(void);
+
+/**
  * Create a shared memory region
  * Returns: shared memory ID on success, or negative error code
  */

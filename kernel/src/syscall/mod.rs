@@ -476,6 +476,7 @@ extern "C" fn syscall_handler_rust(
         SYS_YIELD => sys_yield(),
         SYS_GETPID => sys_getpid(),
         SYS_GETPPID => sys_getppid(),
+        SYS_PROCESS_READY => sys_process_ready(),
         SYS_SPAWN => sys_spawn(arg1 as *const u8, arg2 as *const *const u8),
         SYS_WAITPID => sys_waitpid(arg1 as i32, arg2 as *mut i32, arg3 as i32),
         SYS_PORT_CREATE => sys_port_create(),

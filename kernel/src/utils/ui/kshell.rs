@@ -809,7 +809,7 @@ impl KShell {
         };
 
         // Spawn the process
-        match crate::loaders::elf::spawn_elf_process(binary, "spawn_test", &[]) {
+        match crate::loaders::elf::spawn_elf_process(binary, "spawn_test", &[], crate::scheduler::ProcessType::User) {
             Ok((process_id, thread_id)) => {
                 console::write_colored("✓ Spawn test process started\n", Color::GREEN, Color::BLACK);
                 console::write_colored("  Process ID: ", Color::WHITE, Color::BLACK);
@@ -849,7 +849,7 @@ impl KShell {
         };
 
         // Spawn the process
-        match crate::loaders::elf::spawn_elf_process(binary, "shmem_test", &[]) {
+        match crate::loaders::elf::spawn_elf_process(binary, "shmem_test", &[], crate::scheduler::ProcessType::User) {
             Ok((process_id, thread_id)) => {
                 console::write_colored("✓ Shared memory test process started\n", Color::GREEN, Color::BLACK);
                 console::write_colored("  Process ID: ", Color::WHITE, Color::BLACK);

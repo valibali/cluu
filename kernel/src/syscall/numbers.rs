@@ -24,6 +24,7 @@ pub const ENOMEM: isize = 12;   // Out of memory
 pub const ESPIPE: isize = 29;   // Illegal seek (e.g., seek on TTY)
 pub const ENOENT: isize = 2;    // No such file or directory
 pub const ECHILD: isize = 10;   // No child processes
+pub const ESRCH: isize = 3;     // No such process
 
 /// Group A: Console I/O syscalls (required for basic userspace)
 ///
@@ -128,6 +129,16 @@ pub const SYS_WAITPID: usize = 61;
 /// Arguments: () -> isize
 /// Returns: parent process ID, or 0 if orphaned
 pub const SYS_GETPPID: usize = 110;
+
+/// Signal that critical process has completed initialization
+///
+/// Arguments: () -> isize
+/// Returns: 0 on success, or negative error code
+///
+/// Used by critical system services (VFS, memory server) to signal they are
+/// ready to serve requests. Once all critical processes signal ready, the
+/// scheduler transitions from Boot mode to Normal mode.
+pub const SYS_PROCESS_READY: usize = 1011;
 
 /// Group D: IPC (Inter-Process Communication) syscalls
 ///
