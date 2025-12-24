@@ -32,28 +32,22 @@ all: userspace
 
 userspace:
 	@echo "Building userspace binaries..."
-	@make -C ./userspace/hello all
-	@make -C ./userspace/spawn_test all
-	@make -C ./userspace/shmem_test all
 	@make -C ./userspace/vfs_server all
+	@make -C ./userspace/shmem_server all
 	@make -C ./userspace/shell all
 	@echo "Copying userspace binaries to initrd..."
 	@mkdir -p ./bootboot_image/initrd/bin
 	@mkdir -p ./bootboot_image/initrd/sys
 	@mkdir -p ./bootboot_image/initrd/utils
-	@cp ./userspace/hello/target/hello ./bootboot_image/initrd/bin/hello
-	@cp ./userspace/spawn_test/target/spawn_test ./bootboot_image/initrd/bin/spawn_test
-	@cp ./userspace/shmem_test/target/shmem_test ./bootboot_image/initrd/bin/shmem_test
 	@cp ./userspace/vfs_server/target/vfs_server ./bootboot_image/initrd/sys/vfs_server
+	@cp ./userspace/shmem_server/target/shmem_server ./bootboot_image/initrd/sys/shmem_server
 	@cp ./userspace/shell/target/shell ./bootboot_image/initrd/bin/shell
 	@echo "Userspace binaries ready"
 
 clean:
 	@make -C ./kernel clean
-	@make -C ./userspace/hello clean
-	@make -C ./userspace/spawn_test clean
-	@make -C ./userspace/shmem_test clean
 	@make -C ./userspace/vfs_server clean
+	@make -C ./userspace/shmem_server clean
 	@make -C ./userspace/shell clean
 	@make -C ./utilies/mkbootimg clean
 	@make -C ./bootboot_image clean

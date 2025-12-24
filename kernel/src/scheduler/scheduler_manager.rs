@@ -8,9 +8,12 @@
 use core::arch::asm;
 use core::sync::atomic::Ordering;
 
+use alloc::boxed::Box;
+
 use super::{
     KernelComponent, Process, ProcessId, ProcessInitState, ProcessType, SchedulerMode, ThreadId,
-    ThreadManager, ThreadState, CURRENT_THREAD_ID, SCHEDULER, SCHEDULER_ENABLED,
+    ThreadManager, ThreadState, CURRENT_THREAD_ID, SCHEDULER, SCHEDULER_CORE, SCHEDULER_ENABLED,
+    SchedulerCore, RoundRobinPolicy, CpuId,
 };
 
 /// Scheduling control and system state
@@ -45,10 +48,11 @@ pub struct SchedulerManager;
 impl KernelComponent for SchedulerManager {
     /// Initialize the scheduler
     ///
-    /// Creates the scheduler instance with boot mode enabled and initializes
-    /// the default kernel process (PID 0).
+    /// Creates the scheduler instance with boot mode enabled, creates the
+    /// SchedulerCore with RoundRobinPolicy, and initializes the default
+    /// kernel process (PID 0).
     fn init() {
-        log::info!("Initializing preemptive scheduler...");
+        log::info!("Initializing preemptive scheduler with plugin architecture...");
 
         let mut scheduler = super::scheduler::Scheduler::new();
 
@@ -60,9 +64,18 @@ impl KernelComponent for SchedulerManager {
         scheduler.processes.insert(ProcessId(0), kernel_process);
         log::info!("Created default kernel process (PID 0, System type)");
 
+        // Create the scheduling policy (Round-Robin)
+        let policy: Box<dyn super::Scheduler> = Box::new(RoundRobinPolicy::new());
+        let policy_name = policy.name();
+        log::info!("Created scheduling policy: {}", policy_name);
+
+        // Create the SchedulerCore with the policy
+        let core = SchedulerCore::new(policy, 1); // 1 CPU for now
+
         // CRITICAL: Disable interrupts to prevent timer IRQ from trying to acquire lock
         x86_64::instructions::interrupts::without_interrupts(|| {
             *SCHEDULER.lock() = Some(scheduler);
+            *SCHEDULER_CORE.lock() = Some(core);
         });
 
         // Initialize I/O wait queue system
@@ -207,7 +220,7 @@ impl SchedulerManager {
 
     /// Block the current thread
     ///
-    /// Removes the current thread from the ready queue and sets its state to Blocked.
+    /// Sets the current thread's state to Blocked and notifies the scheduling policy.
     /// The thread will not be scheduled again until wake() is called.
     ///
     /// This is typically used for blocking I/O operations where a thread needs to
@@ -227,26 +240,22 @@ impl SchedulerManager {
             panic!("Cannot block idle thread");
         }
 
-        // CRITICAL: Use without_interrupts() to prevent timer IRQ deadlock
-        // This is the same pattern as wake_thread() - standard IRQ-safe locking
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            let mut sched_guard = SCHEDULER.lock();
-            if let Some(scheduler) = sched_guard.as_mut() {
-                if let Some(thread) = scheduler
-                    .threads
-                    .iter_mut()
-                    .find(|t| t.id == current_id)
-                {
-                    thread.state = ThreadState::Blocked;
-                }
+        super::with_scheduler_and_core(|scheduler, core| {
+            // Mark as blocked
+            if let Some(thread) = scheduler.threads.iter_mut().find(|t| t.id == current_id) {
+                thread.state = ThreadState::Blocked;
             }
-        }); // Lock automatically released here, interrupts re-enabled
+
+            // Notify policy
+            let mut ctx = super::SchedContext::new(scheduler, CpuId::BSP);
+            core.thread_blocked(&mut ctx, current_id, super::BlockReason::Other);
+        });
     }
 
     /// Wake a blocked thread
     ///
-    /// Moves the specified thread from Blocked state to Ready state and adds it
-    /// to the ready queue. If the thread is not blocked, this is a no-op.
+    /// Moves the specified thread from Blocked state to Ready state and notifies
+    /// the scheduling policy. If the thread is not blocked, this is a no-op.
     ///
     /// This function is IRQ-safe and can be called from interrupt handlers.
     ///
@@ -257,21 +266,27 @@ impl SchedulerManager {
             return;
         }
 
-        // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            let mut sched_guard = SCHEDULER.lock();
-            if let Some(scheduler) = sched_guard.as_mut() {
-                if let Some(thread) = scheduler
-                    .threads
-                    .iter_mut()
-                    .find(|t| t.id == thread_id)
-                {
-                    if thread.state == ThreadState::Blocked {
-                        thread.state = ThreadState::Ready;
-                        // Add to ready queue
-                        scheduler.ready_queue.push_back(thread_id);
-                    }
+        super::with_scheduler_and_core(|scheduler, core| {
+            // Check if thread is blocked and mark as ready if so
+            let was_blocked = if let Some(thread) = scheduler.threads.iter_mut().find(|t| t.id == thread_id) {
+                if thread.state == ThreadState::Blocked {
+                    log::debug!("wake: Waking thread {} ({})", thread_id.0, thread.name);
+                    thread.state = ThreadState::Ready;
+                    true
+                } else {
+                    log::debug!("wake: Thread {} already in state {:?}", thread_id.0, thread.state);
+                    false
                 }
+            } else {
+                log::warn!("wake: Thread {} not found", thread_id.0);
+                false
+            };
+
+            // Notify policy if thread was woken
+            if was_blocked {
+                let mut ctx = super::SchedContext::new(scheduler, CpuId::BSP);
+                core.thread_woke(&mut ctx, thread_id, super::BlockReason::Other);
+                log::debug!("wake: Notified policy about thread {}", thread_id.0);
             }
         });
     }
@@ -324,11 +339,36 @@ impl SchedulerManager {
     /// Ok if signaled successfully, Err if process is not critical or already signaled
     pub fn signal_ready(process_id: ProcessId) -> Result<(), &'static str> {
         x86_64::instructions::interrupts::without_interrupts(|| {
+            // Get old mode before signaling
+            let old_mode = SCHEDULER
+                .lock()
+                .as_ref()
+                .map(|s| s.mode())
+                .ok_or("Scheduler not initialized")?;
+
+            // Signal process ready (may trigger mode transition)
             SCHEDULER
                 .lock()
                 .as_mut()
                 .ok_or("Scheduler not initialized")?
-                .signal_process_ready(process_id)
+                .signal_process_ready(process_id)?;
+
+            // Get new mode after signaling
+            let new_mode = SCHEDULER
+                .lock()
+                .as_ref()
+                .map(|s| s.mode())
+                .ok_or("Scheduler not initialized")?;
+
+            // If mode changed, notify SchedulerCore
+            if old_mode != new_mode {
+                super::with_scheduler_and_core(|scheduler, core| {
+                    let mut ctx = super::SchedContext::new(scheduler, CpuId::BSP);
+                    core.mode_changed(&mut ctx, old_mode, new_mode);
+                });
+            }
+
+            Ok(())
         })
     }
 }

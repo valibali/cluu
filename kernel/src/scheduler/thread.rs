@@ -127,7 +127,7 @@ impl ThreadManager {
     /// # Returns
     /// The ThreadId of the newly created thread
     pub fn spawn(entry_point: fn(), name: &str) -> ThreadId {
-        super::with_scheduler_mut(|s| s.create_thread(entry_point, name, ProcessId(0)))
+        Self::spawn_in_process(entry_point, name, ProcessId(0))
     }
 
     /// Create a thread within a specific process
@@ -147,7 +147,24 @@ impl ThreadManager {
         name: &str,
         process_id: ProcessId,
     ) -> ThreadId {
-        super::with_scheduler_mut(|s| s.create_thread(entry_point, name, process_id))
+        // Create the thread and notify SchedulerCore
+        super::with_scheduler_and_core(|scheduler, core| {
+            // Create the thread
+            let thread_id = scheduler.create_thread(entry_point, name, process_id);
+
+            // Get priority from process type
+            let priority = if let Some(process) = scheduler.processes.get(&process_id) {
+                super::Priority(process.process_type.priority() as i32)
+            } else {
+                super::Priority::NORMAL
+            };
+
+            // Notify policy
+            let mut ctx = super::SchedContext::new(scheduler, super::CpuId::BSP);
+            core.thread_created(&mut ctx, thread_id, priority);
+
+            thread_id
+        })
     }
 
     /// Terminate the current thread with an exit code
@@ -180,23 +197,17 @@ impl ThreadManager {
             exit_code
         );
 
-        // Mark thread as terminated and store exit code
-        // CRITICAL: Disable interrupts to prevent timer IRQ deadlock
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            let mut sched_guard = super::SCHEDULER.lock();
-            if let Some(scheduler) = sched_guard.as_mut() {
-                if let Some(thread) = scheduler.threads.iter_mut().find(|t| t.id == current_id) {
-                    thread.state = ThreadState::Terminated;
-                    thread.exit_code = Some(exit_code);
-
-                    // CRITICAL: Remove this thread from ready queue!
-                    // The thread may have been added to the ready queue in previous
-                    // scheduling cycles. If we don't remove it now, the scheduler
-                    // will try to run the terminated thread, causing a page fault
-                    // when accessing initrd from the wrong address space.
-                    scheduler.ready_queue.retain(|&tid| tid != current_id);
-                }
+        // Mark thread as terminated and notify SchedulerCore
+        super::with_scheduler_and_core(|scheduler, core| {
+            // Mark as terminated
+            if let Some(thread) = scheduler.threads.iter_mut().find(|t| t.id == current_id) {
+                thread.state = ThreadState::Terminated;
+                thread.exit_code = Some(exit_code);
             }
+
+            // Create context and notify policy
+            let mut ctx = super::SchedContext::new(scheduler, super::CpuId::BSP);
+            core.thread_exited(&mut ctx, current_id, exit_code);
         });
 
         // CRITICAL: Enable interrupts before yielding!

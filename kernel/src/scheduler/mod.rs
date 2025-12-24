@@ -79,10 +79,7 @@
  * - Per-thread 64KB stacks
  */
 
-use core::{
-    arch::asm,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 mod scheduler;
@@ -92,11 +89,26 @@ pub mod process;
 pub mod scheduler_manager;
 pub mod thread;
 
+// New plugin architecture modules
+pub mod context;
+pub mod events;
+pub mod policies;
+pub mod sched_core;
+pub mod traits;
+pub mod types;
+
 pub use io_wait::{IoChannel, wait_for_io, wake_io_waiters};
 pub use process::{Process, ProcessId, ProcessManager};
 pub use scheduler::InterruptContext;
 pub use scheduler_manager::SchedulerManager;
 pub use thread::{Thread, ThreadId, ThreadManager, ThreadState};
+
+// Re-export plugin architecture types
+pub use context::SchedContext;
+pub use policies::RoundRobinPolicy;
+pub use sched_core::SchedulerCore;
+pub use traits::Scheduler;
+pub use types::{BlockReason, CpuId, Priority};
 
 /// Scheduler operating mode
 ///
@@ -169,8 +181,11 @@ pub enum ProcessInitState {
     Failed,
 }
 
-/// Global scheduler instance
+/// Global scheduler instance (internal data: threads, processes)
 static SCHEDULER: Mutex<Option<scheduler::Scheduler>> = Mutex::new(None);
+
+/// Global scheduler core (mechanism/driver with pluggable policy)
+static SCHEDULER_CORE: Mutex<Option<SchedulerCore>> = Mutex::new(None);
 
 /// Current running thread ID (atomic for IRQ safety)
 static CURRENT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
@@ -219,6 +234,29 @@ where
         let mut sched_guard = SCHEDULER.lock();
         let scheduler = sched_guard.as_mut().expect("Scheduler not initialized");
         f(scheduler)
+    })
+}
+
+/// Execute a closure with access to both scheduler and core
+///
+/// This helper provides interrupt-safe access to both the scheduler data
+/// and the scheduler core. This is needed when policies need to interact
+/// with kernel state through the SchedContext bridge.
+///
+/// # Panics
+/// Panics if the scheduler or core has not been initialized.
+fn with_scheduler_and_core<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut scheduler::Scheduler, &mut SchedulerCore) -> R,
+{
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut sched_guard = SCHEDULER.lock();
+        let mut core_guard = SCHEDULER_CORE.lock();
+
+        let scheduler = sched_guard.as_mut().expect("Scheduler not initialized");
+        let core = core_guard.as_mut().expect("SchedulerCore not initialized");
+
+        f(scheduler, core)
     })
 }
 
@@ -535,8 +573,10 @@ pub extern "C" fn schedule_from_interrupt(
     // Update uptime and scheduler ticks (timer interrupt functionality)
     crate::utils::timer::on_timer_interrupt();
 
-    // Access scheduler to pick next thread
+    // Access both scheduler and core
     let mut sched_guard = SCHEDULER.lock();
+    let mut core_guard = SCHEDULER_CORE.lock();
+
     let scheduler = match sched_guard.as_mut() {
         Some(s) => s,
         None => {
@@ -545,36 +585,36 @@ pub extern "C" fn schedule_from_interrupt(
         }
     };
 
+    let core = match core_guard.as_mut() {
+        Some(c) => c,
+        None => {
+            // SchedulerCore not initialized, return current context
+            return current_ctx_ptr;
+        }
+    };
+
     // Get current thread ID
     let current_id = ThreadId(CURRENT_THREAD_ID.load(Ordering::SeqCst));
 
-    // Try to get next thread from ready queue
-    let next_id = match scheduler.get_next_thread() {
+    // Notify policy about tick and check if we should reschedule
+    let mut ctx = SchedContext::new(scheduler, CpuId::BSP);
+    let should_reschedule = core.on_tick(&mut ctx, CpuId::BSP);
+
+    if !should_reschedule {
+        // Policy says don't reschedule yet
+        return current_ctx_ptr;
+    }
+
+    // Ask policy which thread to run next
+    let next_id = match core.reschedule(&mut ctx, CpuId::BSP) {
         Some(id) => id,
         None => {
-            // No threads ready to run
+            // No threads ready to run - policy returned None (idle)
             // CRITICAL: If current thread is terminated, we can't return to it!
-            // This should never happen (idle thread should always be available)
             if current_id.0 != 0 {
                 if let Some(current_thread) = scheduler.get_thread_mut(current_id) {
                     if current_thread.state == ThreadState::Terminated {
-                        // Terminated thread with no other threads available!
-                        // This is a critical error - idle thread should always be ready
-                        log::error!("SCHEDULER PANIC: No ready threads and current is terminated!");
-                        log::error!(
-                            "  Current thread: {} ({})",
-                            current_id.0,
-                            current_thread.name
-                        );
-                        log::error!("  Ready queue is empty!");
-                        log::error!("  Total threads: {}", scheduler.threads.len());
-
-                        // Try to find idle thread and add it to queue as last resort
-                        if let Some(idle) = scheduler.threads.iter().find(|t| t.id.0 == 0) {
-                            log::error!("  Found idle thread in state: {:?}", idle.state);
-                        }
-
-                        panic!("Scheduler deadlock: no threads available!");
+                        panic!("Scheduler panic: No ready threads and current is terminated!");
                     }
                 }
             }
@@ -586,16 +626,15 @@ pub extern "C" fn schedule_from_interrupt(
 
     // If current thread is the same as next, just return
     if current_id == next_id && current_id.0 != 0 {
-        // Put thread back in ready queue
-        scheduler.ready_queue.push_back(current_id);
+        // No context switch needed
         return current_ctx_ptr;
     }
 
     // Get current system uptime for CPU time tracking
     let current_time = crate::utils::timer::uptime_ms();
 
-    // Save current thread's context (if we have a current thread)
-    if current_id.0 != 0 {
+    // Save current thread's context and check if we need to notify policy
+    let should_notify_yielded = if current_id.0 != 0 {
         if let Some(current_thread) = scheduler.get_thread_mut(current_id) {
             // Copy context from stack to thread's storage
             unsafe {
@@ -608,27 +647,26 @@ pub extern "C" fn schedule_from_interrupt(
                 current_thread.cpu_time_ms = current_thread.cpu_time_ms.saturating_add(elapsed);
             }
 
-            // Move current thread to ready queue (unless it's sleeping, blocked, or terminated)
+            // Move current thread to ready queue (unless it's blocked or terminated)
             if current_thread.state != ThreadState::Blocked
                 && current_thread.state != ThreadState::Terminated
             {
                 current_thread.state = ThreadState::Ready;
+                true // Need to notify policy
+            } else {
+                false
             }
-
-            // Only add to ready queue if not sleeping, not blocked, and not terminated
-            if current_thread.state == ThreadState::Ready {
-                if current_thread.sleep_until_ms == 0
-                    || current_time >= current_thread.sleep_until_ms
-                {
-                    // Thread is not sleeping (or sleep expired), not blocked, and not terminated
-                    scheduler.ready_queue.push_back(current_id);
-                }
-            }
-            // If sleeping, blocked, or terminated, thread is NOT added to ready queue
-            // Sleeping threads are woken by get_next_thread() when sleep expires
-            // Blocked threads are woken by wake_thread() when event occurs
-            // Terminated threads are never scheduled again
+        } else {
+            false
         }
+    } else {
+        false
+    };
+
+    // Notify policy that thread was preempted (outside the mutable borrow)
+    if should_notify_yielded {
+        let mut ctx = SchedContext::new(scheduler, CpuId::BSP);
+        core.thread_yielded(&mut ctx, current_id);
     }
 
     // CRITICAL BUG FIX: Cleanup MUST happen BEFORE getting next_ctx_ptr!

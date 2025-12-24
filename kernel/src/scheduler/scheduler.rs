@@ -11,7 +11,7 @@
  */
 
 use alloc::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     vec::Vec,
 };
 
@@ -144,7 +144,7 @@ impl Default for InterruptContext {
 /// with many threads, we could use a HashMap<ThreadId, Thread>.
 pub struct Scheduler {
     pub(super) threads: Vec<Thread>,                    // All threads in the system
-    pub(super) ready_queue: VecDeque<ThreadId>,         // Queue of threads ready to run
+    // NOTE: ready_queue removed - SchedulerCore/policy now manages scheduling
     next_thread_id: ThreadId,                            // Next ID to assign to new thread
     pub(super) processes: BTreeMap<ProcessId, Process>, // All processes in the system
     next_process_id: ProcessId,                          // Next ID to assign to new process
@@ -157,7 +157,6 @@ impl Scheduler {
     pub fn new() -> Self {
         Self {
             threads: Vec::new(),
-            ready_queue: VecDeque::new(),
             next_thread_id: ThreadId(1), // ID 0 reserved for kernel/idle
             processes: BTreeMap::new(),
             next_process_id: ProcessId(1), // ID 0 reserved for kernel
@@ -367,8 +366,8 @@ impl Scheduler {
             process.add_thread(thread_id);
         }
 
-        // New thread starts in Ready state, so add to ready queue
-        self.ready_queue.push_back(thread_id);
+        // New thread starts in Ready state
+        // NOTE: No longer adding to ready_queue here - SchedulerCore/policy manages scheduling
 
         log::info!(
             "Created thread '{}' (ID {:?}) in process {:?}",
@@ -379,76 +378,8 @@ impl Scheduler {
         thread_id
     }
 
-    /// Get the next thread to run
-    ///
-    /// Respects scheduler mode:
-    /// - Boot mode: Only schedules threads from Critical processes (+ kernel threads)
-    /// - Normal mode: Schedules all threads by priority (RT > Critical > System > User)
-    pub(super) fn get_next_thread(&mut self) -> Option<ThreadId> {
-        let current_time = crate::utils::timer::uptime_ms();
-
-        // Wake up any threads whose sleep time has expired
-        for thread in &mut self.threads {
-            if thread.sleep_until_ms > 0 && current_time >= thread.sleep_until_ms {
-                // Sleep expired, wake up thread
-                thread.sleep_until_ms = 0;
-                if thread.state == ThreadState::Ready {
-                    // Add back to ready queue if not already there
-                    if !self.ready_queue.contains(&thread.id) {
-                        self.ready_queue.push_back(thread.id);
-                    }
-                }
-            }
-        }
-
-        // Find next thread that is not sleeping or terminated
-        // and respects scheduler mode restrictions
-        loop {
-            let thread_id = self.ready_queue.pop_front()?;
-
-            // Check thread state
-            if let Some(thread) = self.threads.iter().find(|t| t.id == thread_id) {
-                // Skip terminated threads
-                if thread.state == ThreadState::Terminated {
-                    continue;
-                }
-
-                // Skip sleeping threads
-                if thread.sleep_until_ms > 0 && current_time < thread.sleep_until_ms {
-                    // Thread is still sleeping, don't schedule it
-                    // Don't put it back in ready queue
-                    continue;
-                }
-
-                // BOOT MODE FILTER: Only schedule critical processes (+ kernel threads)
-                // Use self.mode instead of global SCHEDULER_MODE
-                if let SchedulerMode::Boot { .. } = self.mode {
-                    // Get process type for this thread
-                    if let Some(process) = self.processes.get(&thread.process_id) {
-                        // EXCEPTION: Always allow kernel process (PID 0) threads (includes idle)
-                        if process.id.0 != 0 && process.process_type != ProcessType::Critical {
-                            // Non-critical, non-kernel process in boot mode - put back at end of queue
-                            self.ready_queue.push_back(thread_id);
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            // Thread is valid and allowed to run in current mode
-            return Some(thread_id);
-        }
-    }
-
-    /// Add thread back to ready queue
-    pub(super) fn make_ready(&mut self, thread_id: ThreadId) {
-        if let Some(thread) = self.threads.iter_mut().find(|t| t.id == thread_id) {
-            if thread.state == ThreadState::Running {
-                thread.state = ThreadState::Ready;
-                self.ready_queue.push_back(thread_id);
-            }
-        }
-    }
+    // NOTE: get_next_thread() and make_ready() methods removed
+    // SchedulerCore/policy now handles thread selection and ready queue management
 
     /// Get thread by ID
     pub(super) fn get_thread_mut(&mut self, thread_id: ThreadId) -> Option<&mut Thread> {

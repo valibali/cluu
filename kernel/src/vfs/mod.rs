@@ -20,8 +20,8 @@
 
 pub mod protocol;
 
-use crate::scheduler::ProcessId;
 use crate::ipc::{self, IpcError, PortId};
+use crate::scheduler::ProcessId;
 use crate::shmem;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -124,7 +124,11 @@ pub fn spawn_server() -> Result<(ProcessId, crate::scheduler::ThreadId), &'stati
     )
     .map_err(|_| "Failed to spawn VFS server")?;
 
-    log::info!("VFS server spawned: PID={:?}, TID={:?} (CRITICAL process)", pid, tid);
+    log::info!(
+        "VFS server spawned: PID={:?}, TID={:?} (CRITICAL process)",
+        pid,
+        tid
+    );
     log::info!("VFS server will map initrd shmem region into its own address space");
 
     Ok((pid, tid))
@@ -265,8 +269,8 @@ fn vfs_request_sync(mut request: VfsRequest) -> Result<VfsRequest, IpcError> {
 ///
 /// Contains information about an opened VFS file
 pub struct VfsFileInfo {
-    pub vfs_fd: i32,           // VFS server's file descriptor
-    pub shmem_id: i64,         // Shared memory ID (-1 if none)
+    pub vfs_fd: i32,                           // VFS server's file descriptor
+    pub shmem_id: i64,                         // Shared memory ID (-1 if none)
     pub fsitem_addr: Option<x86_64::VirtAddr>, // Mapped fsitem address
 }
 
@@ -317,16 +321,23 @@ pub fn vfs_open(path: &str, flags: i32) -> Result<VfsFileInfo, isize> {
                     match crate::shmem::shmem_map(
                         ShmemId(shmem_id as usize),
                         current_pid,
-                        0x0,  // Let kernel choose address
-                        perms
+                        0x0, // Let kernel choose address
+                        perms,
                     ) {
                         Ok(virt_addr_u64) => {
                             let virt_addr = x86_64::VirtAddr::new(virt_addr_u64);
-                            log::info!("vfs_open: Mapped fsitem for FD {} at {:?}", vfs_fd, virt_addr);
+                            log::info!(
+                                "vfs_open: Mapped fsitem for FD {} at {:?}",
+                                vfs_fd,
+                                virt_addr
+                            );
                             fsitem_addr = Some(virt_addr);
                         }
                         Err(e) => {
-                            log::warn!("vfs_open: Failed to map fsitem: {:?}, will use IPC reads", e);
+                            log::warn!(
+                                "vfs_open: Failed to map fsitem: {:?}, will use IPC reads",
+                                e
+                            );
                         }
                     }
                 } else {
@@ -502,8 +513,7 @@ pub fn vfs_read_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
     // If VFS server is ready, use it
     if is_vfs_ready() {
         // Open file via VFS
-        let file_info = vfs_open(path, O_RDONLY)
-            .map_err(|_| "Failed to open file via VFS")?;
+        let file_info = vfs_open(path, O_RDONLY).map_err(|_| "Failed to open file via VFS")?;
 
         let vfs_fd = file_info.vfs_fd;
 
