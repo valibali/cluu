@@ -38,9 +38,15 @@ impl FrameBuffer {
         //TODO: Initialization error logic, now just emit Result
         Ok(FrameBuffer {
             screen: unsafe {
-                let size = (scanline * height) as usize; //get the size of the framebuffer
-                write_bytes(screen, 0, size); //init self.screen
-                slice::from_raw_parts_mut(screen, size)
+                // scanline is in bytes, height is number of lines
+                let size_bytes = (scanline * height) as usize;
+                let size_u32s = size_bytes / 4; // Convert bytes to number of u32 elements
+
+                // Zero out the framebuffer (write_bytes expects byte count)
+                write_bytes(screen as *mut u8, 0, size_bytes);
+
+                // Create slice with u32 count (not byte count!)
+                slice::from_raw_parts_mut(screen, size_u32s)
             },
             scanline,
             width,

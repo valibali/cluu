@@ -52,7 +52,6 @@ static PORT_NAME_REGISTRY: Mutex<Option<BTreeMap<&'static str, PortId>>> = Mutex
 pub fn init() {
     *PORT_NAME_REGISTRY.lock() = Some(BTreeMap::new());
     VFS_INIT.store(true, Ordering::SeqCst);
-    log::info!("VFS subsystem initialized (waiting for VFS server to register)");
 }
 
 /// Spawn the VFS server userspace process

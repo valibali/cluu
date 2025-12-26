@@ -247,7 +247,10 @@ impl AddressSpace {
         // Map framebuffer if present
         let fb_ptr_addr = bootboot.fb_ptr as u64;
         if fb_ptr_addr != 0 {
-            let fb_size = (bootboot.fb_scanline * bootboot.fb_height) as u64;
+            // Use BOOTBOOT's fb_size (actual hardware framebuffer size)
+            // This accounts for padding and hardware buffering
+            let fb_size_bytes = bootboot.fb_size as u64;
+            let fb_size = (fb_size_bytes + 0xfff) & !0xfff;  // Round up to 4KB page
 
             // Detect framebuffer physical address by translating BOOTBOOT's virtual address
             let current_cr3 = paging::get_current_cr3();
@@ -265,9 +268,11 @@ impl AddressSpace {
             // Map at the linker script's expected address (from 'fb' symbol)
             // not BOOTBOOT's fb_ptr which might be a different mapping
             log::info!(
-                "Mapping framebuffer: virt {:#x}, size {:#x}, phys {:#x}",
+                "Mapping framebuffer: virt {:#x}, size {:#x} ({} KB, rounded from {} bytes), phys {:#x}",
                 fb_virt_from_linker,
                 fb_size,
+                fb_size / 1024,
+                fb_size_bytes,
                 fb_phys
             );
 

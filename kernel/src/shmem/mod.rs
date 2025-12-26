@@ -18,10 +18,10 @@
 
 use crate::memory::{PhysFrame, phys};
 use crate::scheduler::process::ProcessId;
-use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
-use spin::Mutex;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Mutex;
 use x86_64::PhysAddr;
 
 /// Shared memory region identifier
@@ -76,7 +76,7 @@ pub struct SharedMemoryRegion {
     pub permissions: ShmemPermissions,
     pub ref_count: usize,
     pub marked_for_deletion: bool,
-    pub owned: bool,  // If true, free frames on drop; if false, don't free (e.g., for initrd)
+    pub owned: bool, // If true, free frames on drop; if false, don't free (e.g., for initrd)
 }
 
 impl SharedMemoryRegion {
@@ -125,7 +125,7 @@ impl SharedMemoryRegion {
             permissions,
             ref_count: 0,
             marked_for_deletion: false,
-            owned: true,  // Frames allocated by us, we own them
+            owned: true, // Frames allocated by us, we own them
         })
     }
 
@@ -152,11 +152,17 @@ impl Drop for SharedMemoryRegion {
             for frame in &self.physical_frames {
                 phys::free_frame(*frame);
             }
-            log::debug!("Freed {} frames for shared memory region {}",
-                       self.physical_frames.len(), self.id.0);
+            log::debug!(
+                "Freed {} frames for shared memory region {}",
+                self.physical_frames.len(),
+                self.id.0
+            );
         } else {
-            log::debug!("Dropped non-owned shared memory region {} ({} frames)",
-                       self.id.0, self.physical_frames.len());
+            log::debug!(
+                "Dropped non-owned shared memory region {} ({} frames)",
+                self.id.0,
+                self.physical_frames.len()
+            );
         }
     }
 }
@@ -198,7 +204,6 @@ impl core::fmt::Display for ShmemError {
 /// Initialize shared memory subsystem
 pub fn init() {
     *SHMEM_REGISTRY.lock() = Some(BTreeMap::new());
-    log::info!("Shared memory subsystem initialized");
 }
 
 /// Create a new shared memory region
@@ -231,8 +236,12 @@ pub fn shmem_create(
     let mut registry = SHMEM_REGISTRY.lock();
     let map = registry.as_mut().ok_or(ShmemError::NotInitialized)?;
 
-    log::debug!("Created shared memory region {} ({} bytes, {} pages)",
-               id.0, region.size, region.physical_frames.len());
+    log::debug!(
+        "Created shared memory region {} ({} bytes, {} pages)",
+        id.0,
+        region.size,
+        region.physical_frames.len()
+    );
 
     map.insert(id, region);
 
@@ -293,15 +302,20 @@ pub fn shmem_create_from_phys(
         permissions,
         ref_count: 0,
         marked_for_deletion: false,
-        owned: false,  // Don't free these frames!
+        owned: false, // Don't free these frames!
     };
 
     // Store in registry
     let mut registry = SHMEM_REGISTRY.lock();
     let map = registry.as_mut().ok_or(ShmemError::NotInitialized)?;
 
-    log::info!("Created non-owned shared memory region {} from phys 0x{:x} ({} bytes, {} pages)",
-               id.0, phys_addr.as_u64(), region.size, region.physical_frames.len());
+    log::info!(
+        "Created non-owned shared memory region {} from phys 0x{:x} ({} bytes, {} pages)",
+        id.0,
+        phys_addr.as_u64(),
+        region.size,
+        region.physical_frames.len()
+    );
 
     map.insert(id, region);
 
@@ -331,15 +345,20 @@ pub fn shmem_map(
         let region = map.get_mut(&shmem_id).ok_or(ShmemError::InvalidId)?;
 
         // Check permissions are subset of region permissions
-        if (permissions.read && !region.permissions.read) ||
-           (permissions.write && !region.permissions.write) {
+        if (permissions.read && !region.permissions.read)
+            || (permissions.write && !region.permissions.write)
+        {
             return Err(ShmemError::InvalidPermissions);
         }
 
         // Increment reference count
         region.add_ref();
 
-        (region.physical_frames.clone(), region.size, region.permissions)
+        (
+            region.physical_frames.clone(),
+            region.size,
+            region.permissions,
+        )
     };
 
     // Choose virtual address
@@ -361,15 +380,19 @@ pub fn shmem_map(
         let page_table_root = process.address_space.page_table_root;
 
         // Prepare batch mappings
-        let mappings: Vec<_> = frames.iter().enumerate().map(|(i, frame)| {
-            let page_virt = virt_addr + (i as u64 * 4096);
-            let page_phys = frame.start_address();
-            (
-                x86_64::VirtAddr::new(page_virt),
-                x86_64::PhysAddr::new(page_phys),
-                page_flags,
-            )
-        }).collect();
+        let mappings: Vec<_> = frames
+            .iter()
+            .enumerate()
+            .map(|(i, frame)| {
+                let page_virt = virt_addr + (i as u64 * 4096);
+                let page_phys = frame.start_address();
+                (
+                    x86_64::VirtAddr::new(page_virt),
+                    x86_64::PhysAddr::new(page_phys),
+                    page_flags,
+                )
+            })
+            .collect();
 
         // Map all pages in a single batch
         if let Err(e) = crate::memory::paging::map_pages_batch_in_table(
@@ -383,7 +406,8 @@ pub fn shmem_map(
         }
 
         Ok(virt_addr)
-    }).ok_or(ShmemError::InvalidId)?
+    })
+    .ok_or(ShmemError::InvalidId)?
 }
 
 /// Unmap shared memory from a process's address space
@@ -435,7 +459,10 @@ pub fn shmem_unmap(addr: u64, _process_id: ProcessId) -> Result<(), ShmemError> 
         let mut registry = SHMEM_REGISTRY.lock();
         let map = registry.as_mut().ok_or(ShmemError::NotInitialized)?;
         map.remove(&shmem_id);
-        log::debug!("Deleted shared memory region {} (ref count reached zero)", shmem_id.0);
+        log::debug!(
+            "Deleted shared memory region {} (ref count reached zero)",
+            shmem_id.0
+        );
     }
 
     Ok(())

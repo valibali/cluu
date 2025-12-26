@@ -570,9 +570,10 @@ pub fn spawn_elf_process(
                 .ok_or(ElfLoadError::MemoryAllocationFailed)?;
             let phys_addr = PhysAddr::new(frame.start_address());
 
-            // Zero the frame
+            // Zero the frame via physmap
             unsafe {
-                let phys_ptr = phys_addr.as_u64() as *mut u8;
+                let virt_addr = crate::memory::physmap::phys_to_virt(phys_addr);
+                let phys_ptr = virt_addr.as_u64() as *mut u8;
                 core::ptr::write_bytes(phys_ptr, 0, 4096);
             }
 
@@ -587,15 +588,17 @@ pub fn spawn_elf_process(
         log::info!("ELF: User stack mapped ({} pages)", page_count);
 
         // Set up argc/argv on the stack
-        // We need to write to physical addresses since userspace virtual addresses
-        // aren't accessible from kernel page tables
+        // We need to write to physical addresses via physmap since userspace virtual
+        // addresses aren't accessible from kernel page tables
 
-        // Helper to convert virtual stack address to physical
-        let virt_to_phys = |vaddr: u64| -> u64 {
+        // Helper to convert virtual stack address to physmap virtual address
+        let virt_to_physmap = |vaddr: u64| -> u64 {
             let offset = vaddr - USER_STACK_BOTTOM;
             let page_idx = (offset / 4096) as usize;
             let page_offset = offset % 4096;
-            mappings[page_idx].1.as_u64() + page_offset
+            let phys_addr = mappings[page_idx].1;
+            let physmap_virt = crate::memory::physmap::phys_to_virt(phys_addr);
+            physmap_virt.as_u64() + page_offset
         };
 
         let mut stack_ptr = USER_STACK_TOP;
@@ -611,10 +614,10 @@ pub fn spawn_elf_process(
             let arg_len = arg.len() + 1; // Include null terminator
             stack_ptr -= arg_len as u64;
 
-            // Write string to stack via physical address
-            let phys_addr = virt_to_phys(stack_ptr);
+            // Write string to stack via physmap
+            let physmap_addr = virt_to_physmap(stack_ptr);
             unsafe {
-                let dest = phys_addr as *mut u8;
+                let dest = physmap_addr as *mut u8;
                 core::ptr::copy_nonoverlapping(arg.as_ptr(), dest, arg.len());
                 core::ptr::write(dest.add(arg.len()), 0); // Null terminator
             }
@@ -629,24 +632,24 @@ pub fn spawn_elf_process(
         // Push NULL (end of argv)
         stack_ptr -= 8;
         unsafe {
-            let phys_addr = virt_to_phys(stack_ptr);
-            core::ptr::write(phys_addr as *mut u64, 0);
+            let physmap_addr = virt_to_physmap(stack_ptr);
+            core::ptr::write(physmap_addr as *mut u64, 0);
         }
 
         // Push argv pointers
         for &arg_ptr in arg_pointers.iter().rev() {
             stack_ptr -= 8;
             unsafe {
-                let phys_addr = virt_to_phys(stack_ptr);
-                core::ptr::write(phys_addr as *mut u64, arg_ptr);
+                let physmap_addr = virt_to_physmap(stack_ptr);
+                core::ptr::write(physmap_addr as *mut u64, arg_ptr);
             }
         }
 
         // Push argc
         stack_ptr -= 8;
         unsafe {
-            let phys_addr = virt_to_phys(stack_ptr);
-            core::ptr::write(phys_addr as *mut u64, argc as u64);
+            let physmap_addr = virt_to_physmap(stack_ptr);
+            core::ptr::write(physmap_addr as *mut u64, argc as u64);
         }
 
         log::info!("ELF: Set up argc={} argv on stack, RSP=0x{:x}", argc, stack_ptr);
@@ -654,11 +657,11 @@ pub fn spawn_elf_process(
             log::info!("ELF:   argv[{}] = 0x{:x}", i, ptr);
         }
 
-        // Verify the write by reading back argc from physical memory
+        // Verify the write by reading back argc via physmap
         unsafe {
-            let phys_addr = virt_to_phys(stack_ptr);
-            let written_argc = core::ptr::read(phys_addr as *const u64);
-            log::info!("ELF: VERIFY: Read back argc={} from phys 0x{:x}", written_argc, phys_addr);
+            let physmap_addr = virt_to_physmap(stack_ptr);
+            let written_argc = core::ptr::read(physmap_addr as *const u64);
+            log::info!("ELF: VERIFY: Read back argc={} from physmap 0x{:x}", written_argc, physmap_addr);
 
             // CRITICAL: Verify this physical address is mapped to the stack virtual address
             let offset = stack_ptr - USER_STACK_BOTTOM;
