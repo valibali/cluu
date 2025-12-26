@@ -375,7 +375,7 @@ pub fn shmem_map(
         if let Err(e) = crate::memory::paging::map_pages_batch_in_table(
             page_table_root,
             &mappings,
-            kernel_cr3,
+            Some(kernel_cr3),
         ) {
             log::error!("Failed to map shared memory pages: {:?}", e);
             // TODO: Unmap already-mapped pages on error

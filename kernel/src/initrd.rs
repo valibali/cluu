@@ -36,10 +36,11 @@ pub fn init() {
         log::info!("Initrd at physical address: 0x{:x}", initrd_ptr);
         log::info!("Initrd size: {} bytes ({} KiB)", initrd_size, initrd_size / 1024);
 
-        // Create slice from physical address
-        // BOOTBOOT maps the entire physical memory to the higher half
-        // So we can access it directly
-        let initrd_data = core::slice::from_raw_parts(initrd_ptr as *const u8, initrd_size);
+        // Convert physical address to virtual address via physmap
+        // After CR3 switch, BOOTBOOT's identity mapping is gone, so we must use physmap
+        let initrd_phys = PhysAddr::new(initrd_ptr);
+        let initrd_virt = crate::memory::physmap::phys_to_virt(initrd_phys);
+        let initrd_data = core::slice::from_raw_parts(initrd_virt.as_u64() as *const u8, initrd_size);
 
         // Create TAR reader
         let tar = TarReader::new(initrd_data);

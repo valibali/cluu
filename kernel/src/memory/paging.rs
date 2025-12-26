@@ -1,588 +1,783 @@
 /*
- * Paging and Virtual Memory Manager
+ * Paging and Virtual Memory Management (New Implementation)
  *
- * This module manages virtual memory through the x86_64 paging system.
- * It provides high-level interfaces for mapping virtual addresses to
- * physical frames and managing page table operations.
+ * This module provides page table manipulation using physmap for all access.
+ * No CR3 switching hacks needed - we can manipulate any page table directly.
  *
- * DESIGN OVERVIEW:
- * - Uses x86_64 crate's OffsetPageTable for page table management
- * - Integrates with our physical frame allocator for backing storage
- * - Supports 4 KiB pages (standard x86_64 page size)
- * - Thread-safe operations via mutex protection
+ * KEY IMPROVEMENTS:
+ * - All page table access via physmap (no CR3 switching)
+ * - Works on any root PhysAddr (not just current CR3)
+ * - Clean separation of page table walking and mapping
+ * - Support for building new address spaces from scratch
  *
- * MEMORY MODEL:
- * - Currently assumes identity mapping for low physical memory access
- * - Page tables themselves are accessed via physical memory offset
- * - Virtual addresses can be mapped to any available physical frame
- *
- * KEY OPERATIONS:
- * - map_page: Map single virtual page to specific physical frame
- * - map_range: Map contiguous virtual range to newly allocated frames
- * - unmap_page/unmap_range: Remove mappings and free backing frames
- *
- * INTEGRATION POINTS:
- * - Uses PhysFrame allocator for obtaining backing physical memory
- * - Provides memory for heap allocator initialization
- * - Supports future user space memory management
- *
- * SAFETY CONSIDERATIONS:
- * - All page table access is protected by mutex
- * - Physical frame allocation/deallocation is atomic
- * - TLB flushes are performed after mapping changes
+ * ARCHITECTURE:
+ * - x86_64 4-level paging: PML4 → PDPT → PD → PT → 4K page
+ * - Each level is 512 entries (9 bits)
+ * - Entry format: [physical address (12-51)] | [flags (0-11, 52-63)]
  */
 
-use crate::memory::{PhysFrame, phys};
-use spin::Mutex;
-use x86_64::{
-    PhysAddr, VirtAddr,
-    registers::control::Cr3,
-    structures::paging::{
-        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
-        PhysFrame as X86PhysFrame, Size4KiB, mapper::MapToError,
-    },
+use crate::memory::{
+    phys as pmm, physmap,
+    types::{PageTableFlags, PhysAddr, PhysFrame, VirtAddr},
 };
 
-/// Physical memory offset for accessing page tables
+/// Get a pointer to physical memory
 ///
-/// BOOTBOOT provides identity mapping for physical RAM access:
-/// - Physical address X is accessible at virtual address X
-/// - This is set up by BOOTBOOT in the lower half (0x0 - 0x400000000)
+/// During bootstrap (before physmap is mapped), uses BOOTBOOT's identity mapping.
+/// After switching to our own page tables, uses physmap.
 ///
-/// We use offset = 0 to work with BOOTBOOT's existing identity mapping.
-/// We supplement it by ensuring all allocatable memory regions are mapped.
-const PHYSICAL_MEMORY_OFFSET: u64 = 0x0;
-
-/// Global page table mapper instance
-/// Wrapped in Mutex to ensure thread-safe access to page table operations
-/// The Option allows for lazy initialization during kernel boot
-static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
-
-/// Adapter that bridges our frame allocator with the x86_64 crate's interface
-///
-/// The x86_64 crate expects a FrameAllocator trait implementation, but our
-/// allocator has a different interface. This adapter converts between them.
-///
-/// IMPORTANT: Physical memory must be identity-mapped during init so that
-/// page table frames can be accessed during manipulation. We cannot map
-/// on-demand here because that would cause mutex deadlock (map_page locks
-/// MAPPER, which then calls this allocator, which would try to lock MAPPER again).
-struct FrameAllocAdapter;
-
-/// Implementation of x86_64 crate's FrameAllocator trait
-///
-/// SAFETY: This implementation is safe because:
-/// - It delegates to our thread-safe physical frame allocator
-/// - Frame allocation is atomic and properly synchronized
-/// - Returned frames are guaranteed to be unused
-/// - Physical memory is identity-mapped during paging init
-unsafe impl FrameAllocator<Size4KiB> for FrameAllocAdapter {
-    fn allocate_frame(&mut self) -> Option<X86PhysFrame> {
-        // Allocate physical frame
-        let frame = phys::alloc_frame()?;
-        let phys_addr = frame.start_address();
-
-        // Convert to x86_64 crate's type
-        // NOTE: We assume this frame is already identity-mapped from init()
-        Some(X86PhysFrame::containing_address(PhysAddr::new(phys_addr)))
+/// # Safety
+/// - During bootstrap: BOOTBOOT must have identity mapped the physical address
+/// - After bootstrap: Physmap must be properly set up
+#[inline]
+unsafe fn phys_ptr<T>(phys: PhysAddr) -> *mut T {
+    if physmap::is_active() {
+        unsafe { physmap::phys_ptr(phys) }  // Fixed: was calling itself recursively!
+    } else {
+        // BOOTBOOT identity maps all RAM - access physical address directly
+        phys.as_u64() as *mut T
     }
 }
 
-/// Initialize the paging system
-///
-/// Sets up the page table mapper by reading the current page table from CR3
-/// and creating an OffsetPageTable instance for managing virtual memory.
-///
-/// This function must be called during kernel initialization, after the
-/// physical frame allocator is set up but before any virtual memory operations.
-pub fn init() {
-    log::info!("Initializing paging system...");
+/// Page table entry
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct PageTableEntry(u64);
 
-    // Calculate virtual address offset for accessing physical memory
-    let physical_memory_offset = VirtAddr::new(PHYSICAL_MEMORY_OFFSET);
+impl PageTableEntry {
+    /// Create empty entry
+    fn new() -> Self {
+        Self(0)
+    }
 
-    // Read the current page table address from CR3 register
-    // CR3 contains the physical address of the top-level page table (PML4)
-    let (frame, _) = Cr3::read();
-    let phys = frame.start_address();
+    /// Get physical address from entry
+    fn addr(&self) -> PhysAddr {
+        PhysAddr::new(self.0 & 0x000f_ffff_ffff_f000)
+    }
 
-    // Convert physical address to virtual address for page table access
-    let virt = physical_memory_offset + phys.as_u64();
-    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
+    /// Set physical address and flags
+    fn set(&mut self, addr: PhysAddr, flags: PageTableFlags) {
+        let addr_u64 = addr.as_u64();
 
-    // Create the page table mapper
-    // SAFETY: We're using the current page table from CR3, which is valid
-    // The physical memory offset allows us to access page table entries
-    let mapper = unsafe { OffsetPageTable::new(&mut *page_table_ptr, physical_memory_offset) };
+        // CRITICAL VALIDATION: Ensure we're storing a physical address, not virtual
+        // This catches the #1 cause of CR3 switch failures
+        assert!(addr_u64 & 0xfff == 0,
+                "Page table entry address must be 4KB aligned, got 0x{:x}", addr_u64);
 
-    // Store the mapper in our global static for later use
-    let mut guard = MAPPER.lock();
-    *guard = Some(mapper);
-
-    log::info!("Paging system initialized");
-}
-
-/// Map unmapped low memory regions reported as free by BOOTBOOT
-///
-/// BOOTBOOT only identity-maps memory from (initrd_end) onwards. Memory below
-/// initrd_ptr is reported as free in the memory map but not mapped. This function
-/// creates identity mappings for those regions so we can use them.
-///
-/// This must be called after both phys::init_from_bootboot() and paging::init().
-pub fn map_low_memory(bootboot_ptr: *const crate::bootboot::BOOTBOOT) {
-    use crate::bootboot::{MMapEnt, MMAP_FREE};
-    use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
-
-    let bootboot_ref = unsafe { &*bootboot_ptr };
-    let initrd_ptr = bootboot_ref.initrd_ptr;
-
-    log::info!("Mapping unmapped low memory regions (below 0x{:x})...", initrd_ptr);
-
-    // Get memory map
-    let bb_size = bootboot_ref.size;
-    let total_bytes = (bb_size as usize).saturating_sub(128);
-    let mmap_entries = total_bytes / core::mem::size_of::<MMapEnt>();
-    let mmap_base: *const MMapEnt = core::ptr::addr_of!(bootboot_ref.mmap);
-
-    let mut guard = MAPPER.lock();
-    let mapper = guard.as_mut().expect("Mapper not initialized");
-    let mut frame_alloc = FrameAllocAdapter;
-
-    let mut mapped_frames = 0;
-
-    // Process each memory map entry
-    for i in 0..mmap_entries {
-        let entry = unsafe { &*mmap_base.add(i) };
-        let region_ptr: u64 = entry.ptr;
-        let raw_size: u64 = entry.size;
-        let entry_type: u32 = (raw_size & 0xF) as u32;
-        let region_size: u64 = raw_size & !0xF;
-
-        if region_size == 0 {
-            continue;
+        // Ensure address is physical (not a physmap virtual address)
+        // Physmap starts at 0xffff_8000_0000_0000, so any address >= that is virtual
+        if addr_u64 >= physmap::PHYS_MAP_BASE {
+            panic!("Attempting to store virtual address 0x{:x} in page table entry! \
+                    Must use physical address.", addr_u64);
         }
 
-        // Only process free regions below initrd
-        if entry_type == MMAP_FREE && region_ptr < initrd_ptr {
-            let start_addr = region_ptr;
-            let end_addr = region_ptr + region_size;
+        // Note: We allow addresses beyond max_phys for MMIO regions (framebuffer, PCI, etc.)
+        // Those are valid physical addresses even if they're not RAM
 
-            // Clamp to initrd boundary
-            let map_end = end_addr.min(initrd_ptr);
+        let addr_bits = addr_u64 & 0x000f_ffff_ffff_f000;
+        let flags_bits = flags.bits();
+        self.0 = addr_bits | flags_bits;
+    }
 
-            // Map each 4KB page in this region
-            let start_page = start_addr / 4096;
-            let end_page = (map_end - 1) / 4096;
+    /// Check if entry is present
+    fn is_present(&self) -> bool {
+        (self.0 & 0x1) != 0
+    }
 
-            log::debug!("  Mapping region 0x{:x}-0x{:x} (frames {}-{})",
-                       start_addr, map_end, start_page, end_page);
+    /// Clear entry
+    fn clear(&mut self) {
+        self.0 = 0;
+    }
 
-            for page_num in start_page..=end_page {
-                let virt_addr = page_num * 4096;
-                let phys_addr = virt_addr; // Identity mapping
+    /// Get flags
+    fn flags(&self) -> PageTableFlags {
+        PageTableFlags::from_bits_truncate(self.0)
+    }
+}
 
-                let page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(virt_addr));
-                let frame = X86PhysFrame::containing_address(PhysAddr::new(phys_addr));
-                let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+/// Page table (512 entries)
+#[repr(align(4096))]
+struct PageTable {
+    entries: [PageTableEntry; 512],
+}
 
-                // Map the page (ignore AlreadyMapped errors)
-                unsafe {
-                    if let Ok(_) = mapper.map_to(page, frame, flags, &mut frame_alloc) {
-                        mapped_frames += 1;
-                    }
-                }
+impl PageTable {
+    /// Get entry at index
+    fn entry(&self, index: usize) -> PageTableEntry {
+        self.entries[index]
+    }
+
+    /// Get mutable entry at index
+    fn entry_mut(&mut self, index: usize) -> &mut PageTableEntry {
+        &mut self.entries[index]
+    }
+
+    /// Zero out all entries
+    fn zero(&mut self) {
+        for entry in &mut self.entries {
+            entry.clear();
+        }
+    }
+}
+
+/// Extract page table indices from virtual address
+fn page_table_indices(virt: VirtAddr) -> (usize, usize, usize, usize) {
+    let addr = virt.as_u64();
+    let pml4_idx = ((addr >> 39) & 0x1ff) as usize;
+    let pdpt_idx = ((addr >> 30) & 0x1ff) as usize;
+    let pd_idx = ((addr >> 21) & 0x1ff) as usize;
+    let pt_idx = ((addr >> 12) & 0x1ff) as usize;
+    (pml4_idx, pdpt_idx, pd_idx, pt_idx)
+}
+
+/// Walk page tables to find mapping for virtual address
+///
+/// Returns the physical address and flags if mapped, None otherwise.
+pub fn translate(root: PhysAddr, virt: VirtAddr) -> Option<(PhysAddr, PageTableFlags)> {
+    let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = page_table_indices(virt);
+
+    // Access PML4 via physmap
+    let pml4_ptr = unsafe { phys_ptr::<PageTable>(root) };
+    let pml4 = unsafe { &*pml4_ptr };
+    let pml4e = pml4.entry(pml4_idx);
+    if !pml4e.is_present() {
+        return None;
+    }
+
+    // Access PDPT via physmap
+    let pdpt_ptr = unsafe { phys_ptr::<PageTable>(pml4e.addr()) };
+    let pdpt = unsafe { &*pdpt_ptr };
+    let pdpte = pdpt.entry(pdpt_idx);
+    if !pdpte.is_present() {
+        return None;
+    }
+
+    // Check for 1GB page
+    if (pdpte.flags().bits() & (1 << 7)) != 0 {
+        // 1GB page
+        let offset = virt.as_u64() & 0x3fff_ffff;
+        let phys = PhysAddr::new((pdpte.addr().as_u64() & !0x3fff_ffff) + offset);
+        return Some((phys, pdpte.flags()));
+    }
+
+    // Access PD via physmap
+    let pd_ptr = unsafe { phys_ptr::<PageTable>(pdpte.addr()) };
+    let pd = unsafe { &*pd_ptr };
+    let pde = pd.entry(pd_idx);
+    if !pde.is_present() {
+        return None;
+    }
+
+    // Check for 2MB page
+    if (pde.flags().bits() & (1 << 7)) != 0 {
+        // 2MB page
+        let offset = virt.as_u64() & 0x1f_ffff;
+        let phys = PhysAddr::new((pde.addr().as_u64() & !0x1f_ffff) + offset);
+        return Some((phys, pde.flags()));
+    }
+
+    // Access PT via physmap
+    let pt_ptr = unsafe { phys_ptr::<PageTable>(pde.addr()) };
+    let pt = unsafe { &*pt_ptr };
+    let pte = pt.entry(pt_idx);
+    if !pte.is_present() {
+        return None;
+    }
+
+    // 4KB page
+    let offset = virt.as_u64() & 0xfff;
+    let phys = PhysAddr::new(pte.addr().as_u64() + offset);
+    Some((phys, pte.flags()))
+}
+
+/// Map a 4K page in the given page table root
+///
+/// Allocates intermediate page tables as needed.
+///
+/// # Arguments
+/// * `root` - Physical address of PML4
+/// * `virt` - Virtual address to map (will be page-aligned)
+/// * `phys` - Physical address to map to (will be page-aligned)
+/// * `flags` - Page table flags
+///
+/// # Returns
+/// * `Ok(())` - Mapping succeeded
+/// * `Err(&str)` - Mapping failed (out of memory, already mapped)
+pub fn map_4k(
+    root: PhysAddr,
+    virt: VirtAddr,
+    phys: PhysAddr,
+    flags: PageTableFlags,
+) -> Result<(), &'static str> {
+    let virt_aligned = VirtAddr::new(virt.as_u64() & !0xfff);
+    let phys_aligned = PhysAddr::new(phys.as_u64() & !0xfff);
+
+    let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = page_table_indices(virt_aligned);
+
+    // Flags for intermediate tables (present + writable + user if needed)
+    let mut table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    if flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+        table_flags |= PageTableFlags::USER_ACCESSIBLE;
+    }
+
+    // Access PML4
+    let pml4_ptr = unsafe { phys_ptr::<PageTable>(root) };
+    let pml4 = unsafe { &mut *pml4_ptr };
+
+    // Ensure PDPT exists
+    let pdpt_addr = if !pml4.entry(pml4_idx).is_present() {
+        let frame = pmm::alloc_frame().ok_or("Out of memory allocating PDPT")?;
+        let pdpt_addr = PhysAddr::new(frame.start_address());
+
+        // Zero out new PDPT
+        let pdpt_ptr = unsafe { phys_ptr::<PageTable>(pdpt_addr) };
+        unsafe { (*pdpt_ptr).zero() };
+
+        pml4.entry_mut(pml4_idx).set(pdpt_addr, table_flags);
+        pdpt_addr
+    } else {
+        pml4.entry(pml4_idx).addr()
+    };
+
+    // Access PDPT
+    let pdpt_ptr = unsafe { phys_ptr::<PageTable>(pdpt_addr) };
+    let pdpt = unsafe { &mut *pdpt_ptr };
+
+    // Ensure PD exists
+    let pd_addr = if !pdpt.entry(pdpt_idx).is_present() {
+        let frame = pmm::alloc_frame().ok_or("Out of memory allocating PD")?;
+        let pd_addr = PhysAddr::new(frame.start_address());
+
+        // Zero out new PD
+        let pd_ptr = unsafe { phys_ptr::<PageTable>(pd_addr) };
+        unsafe { (*pd_ptr).zero() };
+
+        pdpt.entry_mut(pdpt_idx).set(pd_addr, table_flags);
+        pd_addr
+    } else {
+        pdpt.entry(pdpt_idx).addr()
+    };
+
+    // Access PD via physmap
+    let pd_ptr = unsafe { phys_ptr::<PageTable>(pd_addr) };
+    let pd = unsafe { &mut *pd_ptr };
+
+    // Ensure PT exists
+    let pt_addr = if !pd.entry(pd_idx).is_present() {
+        let frame = pmm::alloc_frame().ok_or("Out of memory allocating PT")?;
+        let pt_addr = PhysAddr::new(frame.start_address());
+
+        // Zero out new PT
+        let pt_ptr = unsafe { phys_ptr::<PageTable>(pt_addr) };
+        unsafe { (*pt_ptr).zero() };
+
+        pd.entry_mut(pd_idx).set(pt_addr, table_flags);
+        pt_addr
+    } else {
+        pd.entry(pd_idx).addr()
+    };
+
+    // Access PT via physmap
+    let pt_ptr = unsafe { phys_ptr::<PageTable>(pt_addr) };
+    let pt = unsafe { &mut *pt_ptr };
+
+    // Check if already mapped
+    if pt.entry(pt_idx).is_present() {
+        return Err("Page already mapped");
+    }
+
+    // Map the page
+    pt.entry_mut(pt_idx)
+        .set(phys_aligned, flags | PageTableFlags::PRESENT);
+
+    Ok(())
+}
+
+/// Unmap a 4K page
+///
+/// # Arguments
+/// * `root` - Physical address of PML4
+/// * `virt` - Virtual address to unmap
+///
+/// # Returns
+/// * `Ok(PhysAddr)` - Physical address that was mapped (caller should free the frame)
+/// * `Err(&str)` - Unmapping failed (not mapped)
+pub fn unmap_4k(root: PhysAddr, virt: VirtAddr) -> Result<PhysAddr, &'static str> {
+    let virt_aligned = VirtAddr::new(virt.as_u64() & !0xfff);
+    let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = page_table_indices(virt_aligned);
+
+    // Walk to PT
+    let pml4_ptr = unsafe { phys_ptr::<PageTable>(root) };
+    let pml4 = unsafe { &mut *pml4_ptr };
+    if !pml4.entry(pml4_idx).is_present() {
+        return Err("Page not mapped (PML4)");
+    }
+
+    let pdpt_ptr = unsafe { phys_ptr::<PageTable>(pml4.entry(pml4_idx).addr()) };
+    let pdpt = unsafe { &mut *pdpt_ptr };
+    if !pdpt.entry(pdpt_idx).is_present() {
+        return Err("Page not mapped (PDPT)");
+    }
+
+    let pd_ptr = unsafe { phys_ptr::<PageTable>(pdpt.entry(pdpt_idx).addr()) };
+    let pd = unsafe { &mut *pd_ptr };
+    if !pd.entry(pd_idx).is_present() {
+        return Err("Page not mapped (PD)");
+    }
+
+    let pt_ptr = unsafe { phys_ptr::<PageTable>(pd.entry(pd_idx).addr()) };
+    let pt = unsafe { &mut *pt_ptr };
+    if !pt.entry(pt_idx).is_present() {
+        return Err("Page not mapped (PT)");
+    }
+
+    // Get physical address before clearing
+    let phys = pt.entry(pt_idx).addr();
+
+    // Clear entry
+    pt.entry_mut(pt_idx).clear();
+
+    // TODO: Free empty page tables (optimization)
+
+    Ok(phys)
+}
+
+/// Map a range of virtual addresses to specific physical addresses
+///
+/// Maps virt_start..virt_start+size to phys_start..phys_start+size.
+///
+/// # Arguments
+/// * `root` - Physical address of PML4
+/// * `virt_start` - Starting virtual address
+/// * `phys_start` - Starting physical address
+/// * `size` - Size in bytes (will be rounded up to page boundary)
+/// * `flags` - Page table flags
+///
+/// # Returns
+/// * `Ok(())` - All pages mapped successfully
+/// * `Err(&str)` - Mapping failed partway through
+pub fn map_range_4k_phys(
+    root: PhysAddr,
+    virt_start: VirtAddr,
+    phys_start: PhysAddr,
+    size: u64,
+    flags: PageTableFlags,
+) -> Result<(), &'static str> {
+    let page_count = (size + 0xfff) / 0x1000;
+
+    // Log progress for large mappings (> 10MB)
+    let log_progress = size > 10 * 1024 * 1024;
+    let progress_interval = 16384; // Log every 16K pages (64 MB)
+
+    for i in 0..page_count {
+        let virt = VirtAddr::new(virt_start.as_u64() + i * 0x1000);
+        let phys = PhysAddr::new(phys_start.as_u64() + i * 0x1000);
+
+        map_4k(root, virt, phys, flags)?;
+
+        if log_progress && i > 0 && i % progress_interval == 0 {
+            log::debug!(
+                "  Mapped {} / {} pages ({} MB / {} MB)",
+                i,
+                page_count,
+                (i * 4096) / (1024 * 1024),
+                (page_count * 4096) / (1024 * 1024)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Map a range of virtual addresses to newly allocated physical frames
+///
+/// # Arguments
+/// * `root` - Physical address of PML4
+/// * `virt_start` - Starting virtual address
+/// * `size` - Size in bytes (will be rounded up to page boundary)
+/// * `flags` - Page table flags
+///
+/// # Returns
+/// * `Ok(())` - All pages mapped successfully
+/// * `Err(&str)` - Mapping failed partway through (some pages may be mapped)
+pub fn map_range_4k(
+    root: PhysAddr,
+    virt_start: VirtAddr,
+    size: u64,
+    flags: PageTableFlags,
+) -> Result<(), &'static str> {
+    let page_count = (size + 0xfff) / 0x1000;
+
+    for i in 0..page_count {
+        let virt = VirtAddr::new(virt_start.as_u64() + i * 0x1000);
+        let frame = pmm::alloc_frame().ok_or("Out of physical memory")?;
+        let phys = PhysAddr::new(frame.start_address());
+
+        map_4k(root, virt, phys, flags)?;
+    }
+
+    Ok(())
+}
+
+/// Unmap a range of virtual addresses and free backing frames
+///
+/// # Arguments
+/// * `root` - Physical address of PML4
+/// * `virt_start` - Starting virtual address
+/// * `size` - Size in bytes (will be rounded up to page boundary)
+///
+/// # Returns
+/// * `Ok(())` - All pages unmapped successfully
+/// * `Err(&str)` - Unmapping failed for at least one page
+pub fn unmap_range_4k(root: PhysAddr, virt_start: VirtAddr, size: u64) -> Result<(), &'static str> {
+    let page_count = (size + 0xfff) / 0x1000;
+    let mut any_failed = false;
+
+    for i in 0..page_count {
+        let virt = VirtAddr::new(virt_start.as_u64() + i * 0x1000);
+
+        match unmap_4k(root, virt) {
+            Ok(phys) => {
+                // Free the frame
+                pmm::free_frame(PhysFrame::containing_address(phys.as_u64()));
+            }
+            Err(_) => {
+                any_failed = true;
             }
         }
     }
 
-    drop(guard);
-
-    log::info!("Mapped {} frames ({} MB) of low memory",
-               mapped_frames, (mapped_frames * 4) / 1024);
-}
-
-/// Map a virtual page to a specific physical frame
-/// 
-/// Creates a page table entry that maps the given virtual address to the
-/// specified physical address with the provided access flags.
-/// 
-/// # Arguments
-/// * `virt` - Virtual address to map (will be rounded down to page boundary)
-/// * `phys` - Physical address to map to (will be rounded down to frame boundary)
-/// * `flags` - Page table flags (present, writable, user-accessible, etc.)
-/// 
-/// # Returns
-/// * `Ok(())` - Mapping successful
-/// * `Err(MapToError)` - Mapping failed (page already mapped, etc.)
-/// 
-/// # Safety
-/// The caller must ensure that:
-/// - The physical frame is not already in use for other purposes
-/// - The virtual address is not already mapped
-/// - The flags are appropriate for the intended use
-pub fn map_page(
-    virt: VirtAddr,
-    phys: PhysAddr,
-    flags: PageTableFlags,
-) -> Result<(), MapToError<Size4KiB>> {
-    // Acquire exclusive access to the page table mapper
-    let mut guard = MAPPER.lock();
-    let mapper = guard
-        .as_mut()
-        .expect("MAPPER not initialized in paging::map_page");
-
-    // Create frame allocator for intermediate page table allocation
-    let mut frame_allocator = FrameAllocAdapter;
-
-    // Convert addresses to page/frame objects
-    let page = Page::<Size4KiB>::containing_address(virt);
-    let frame = X86PhysFrame::containing_address(phys);
-
-    // Perform the mapping operation
-    // SAFETY: We have exclusive access via mutex, and caller guarantees safety
-    unsafe {
-        mapper
-            .map_to(page, frame, flags, &mut frame_allocator)?
-            .flush(); // Flush TLB to ensure mapping is active
-    }
-
-    Ok(())
-}
-
-/// Map a page in a specific page table (by PhysAddr)
-///
-/// This function creates a temporary OffsetPageTable for the given page table root
-/// and maps a page within it. This is used for mapping pages in userspace page tables
-/// that are different from the currently active (kernel) page table.
-///
-/// # Arguments
-/// * `page_table_root` - Physical address of the PML4 (page table root)
-/// * `virt` - Virtual address to map
-/// * `phys` - Physical address to map to
-/// * `flags` - Page table flags
-///
-/// # Returns
-/// * `Ok(())` - Mapping successful
-/// * `Err(MapToError)` - Mapping failed
-pub fn map_page_in_table(
-    page_table_root: PhysAddr,
-    virt: VirtAddr,
-    phys: PhysAddr,
-    flags: PageTableFlags,
-) -> Result<(), MapToError<Size4KiB>> {
-    use x86_64::structures::paging::OffsetPageTable;
-    use x86_64::registers::control::Cr3;
-
-    // CRITICAL: When accessing page tables (which may be in low memory),
-    // we need to be in an address space that has entry 0 (identity mapping).
-    // Syscalls run with userspace CR3, which doesn't have entry 0, causing
-    // page faults when trying to access page table structures.
-    //
-    // Solution: Temporarily switch to kernel CR3 (PML4 at 0xd5d6000 or similar),
-    // which has entry 0 and can access all physical memory.
-
-    let (old_cr3_frame, old_cr3_flags) = Cr3::read();
-    let old_cr3 = old_cr3_frame.start_address();
-
-    // Get kernel CR3 (PID 0's page tables - the one BOOTBOOT set up)
-    // We assume the kernel's CR3 is the one that has entry 0 for identity mapping
-    // For now, only switch if we're NOT already in kernel CR3
-    let kernel_cr3 = crate::scheduler::ProcessManager::with_mut(
-        crate::scheduler::ProcessId(0),
-        |process| process.address_space.page_table_root
-    ).unwrap_or(old_cr3);
-
-    // Switch to kernel CR3 if needed
-    let switched = old_cr3 != kernel_cr3;
-    if switched {
-        let kernel_frame = X86PhysFrame::containing_address(kernel_cr3);
-        unsafe { Cr3::write(kernel_frame, old_cr3_flags); }
-    }
-
-    // Use the same high-half offset as the main mapper
-    let physical_memory_offset = VirtAddr::new(PHYSICAL_MEMORY_OFFSET);
-
-    // Convert physical address of page table to virtual address
-    let page_table_virt = physical_memory_offset + page_table_root.as_u64();
-    let page_table_ptr: *mut PageTable = page_table_virt.as_mut_ptr();
-
-    // Create temporary mapper for this page table
-    let mut mapper = unsafe { OffsetPageTable::new(&mut *page_table_ptr, physical_memory_offset) };
-    let mut frame_allocator = FrameAllocAdapter;
-
-    // Convert addresses to page/frame objects
-    let page = Page::<Size4KiB>::containing_address(virt);
-    let frame = X86PhysFrame::containing_address(phys);
-
-    // Perform the mapping operation
-    let result = unsafe {
-        mapper
-            .map_to(page, frame, flags, &mut frame_allocator)?
-            .flush();
+    if any_failed {
+        Err("Failed to unmap one or more pages")
+    } else {
         Ok(())
-    };
-
-    // Switch back to original CR3 if we changed it
-    if switched {
-        let old_frame = X86PhysFrame::containing_address(old_cr3);
-        unsafe { Cr3::write(old_frame, old_cr3_flags); }
     }
-
-    result
 }
 
-/// Get the kernel's CR3 (PID 0's page table root)
+/// Allocate a new PML4 (page table root)
 ///
-/// This is safe to call from any context. Returns None if kernel process
-/// doesn't exist (shouldn't happen after boot).
-pub fn get_kernel_cr3() -> Option<PhysAddr> {
-    crate::scheduler::ProcessManager::with_mut(
-        crate::scheduler::ProcessId(0),
-        |process| process.address_space.page_table_root
-    )
+/// Returns a zeroed PML4 ready for use.
+pub fn alloc_pml4() -> Result<PhysAddr, &'static str> {
+    let frame = pmm::alloc_frame().ok_or("Out of memory allocating PML4")?;
+    let pml4_addr = PhysAddr::new(frame.start_address());
+
+    // Zero out PML4
+    // During bootstrap, use BOOTBOOT's identity mapping (phys addr = virt addr)
+    // After our page tables are active, physmap will work
+    let pml4_ptr = if physmap::is_active() {
+        unsafe { phys_ptr::<PageTable>(pml4_addr) }
+    } else {
+        // BOOTBOOT identity maps all RAM - access physical address directly
+        pml4_addr.as_u64() as *mut PageTable
+    };
+    unsafe { (*pml4_ptr).zero() };
+
+    Ok(pml4_addr)
 }
 
-/// Map multiple pages in a batch operation (optimized for performance)
+/// Copy a PML4 entry from one root to another
 ///
-/// This function maps multiple virtual pages to physical frames in a single CR3 switch,
-/// significantly improving performance when mapping many pages (e.g., user stack).
+/// Used for copying kernel half of address space to new user process.
 ///
 /// # Arguments
-/// * `page_table_root` - Physical address of the target page table root
-/// * `mappings` - Slice of (virtual_addr, physical_addr, flags) tuples to map
-/// * `kernel_cr3` - Optional kernel CR3 to use for accessing page tables (if None, looks it up)
-///
-/// # Performance
-/// Unlike map_page_in_table which switches CR3 for each page, this function:
-/// - Gets kernel CR3 once
-/// - Switches CR3 once before mapping
-/// - Maps all pages
-/// - Switches CR3 once after mapping
-///
-/// For 4096 pages, this reduces from 8192 CR3 switches to just 2!
-///
-/// # Returns
-/// Ok(()) if all mappings succeed, or the first error encountered
-pub fn map_pages_batch_in_table(
-    page_table_root: PhysAddr,
-    mappings: &[(VirtAddr, PhysAddr, PageTableFlags)],
-    kernel_cr3: Option<PhysAddr>,
-) -> Result<(), MapToError<Size4KiB>> {
-    use x86_64::structures::paging::OffsetPageTable;
-    use x86_64::registers::control::Cr3;
+/// * `src_root` - Source PML4 physical address
+/// * `dst_root` - Destination PML4 physical address
+/// * `index` - PML4 entry index (0-511)
+pub fn copy_pml4_entry(src_root: PhysAddr, dst_root: PhysAddr, index: usize) {
+    let src_ptr = unsafe { phys_ptr::<PageTable>(src_root) };
+    let dst_ptr = unsafe { phys_ptr::<PageTable>(dst_root) };
 
-    // Early return if no mappings
-    if mappings.is_empty() {
-        return Ok(());
+    let src = unsafe { &*src_ptr };
+    let dst = unsafe { &mut *dst_ptr };
+
+    *dst.entry_mut(index) = src.entry(index);
+}
+
+/// Copy kernel half of PML4 (entries 256-511) from source to destination
+///
+/// This is used when creating a new user address space.
+pub fn copy_kernel_half(src_root: PhysAddr, dst_root: PhysAddr) {
+    for i in 256..512 {
+        copy_pml4_entry(src_root, dst_root, i);
+    }
+}
+
+/// Map a page with specific permissions (helper)
+pub fn map_page_kernel(
+    root: PhysAddr,
+    virt: VirtAddr,
+    phys: PhysAddr,
+    writable: bool,
+    executable: bool,
+) -> Result<(), &'static str> {
+    let mut flags = PageTableFlags::PRESENT;
+    if writable {
+        flags |= PageTableFlags::WRITABLE;
+    }
+    if !executable {
+        flags |= PageTableFlags::NO_EXECUTE;
     }
 
-    let (old_cr3_frame, old_cr3_flags) = Cr3::read();
-    let old_cr3 = old_cr3_frame.start_address();
+    map_4k(root, virt, phys, flags)
+}
 
-    // Get kernel CR3 - use provided value or look it up
-    let kernel_cr3 = kernel_cr3.unwrap_or_else(|| {
-        crate::scheduler::ProcessManager::with_mut(
-            crate::scheduler::ProcessId(0),
-            |process| process.address_space.page_table_root
-        ).unwrap_or(old_cr3)
-    });
-
-    // Switch to kernel CR3 once before mapping all pages
-    let switched = old_cr3 != kernel_cr3;
-    if switched {
-        let kernel_frame = X86PhysFrame::containing_address(kernel_cr3);
-        unsafe { Cr3::write(kernel_frame, old_cr3_flags); }
+/// Map a page with user-accessible permissions
+pub fn map_page_user(
+    root: PhysAddr,
+    virt: VirtAddr,
+    phys: PhysAddr,
+    writable: bool,
+    executable: bool,
+) -> Result<(), &'static str> {
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if writable {
+        flags |= PageTableFlags::WRITABLE;
+    }
+    if !executable {
+        flags |= PageTableFlags::NO_EXECUTE;
     }
 
-    // Set up mapper once
-    let physical_memory_offset = VirtAddr::new(PHYSICAL_MEMORY_OFFSET);
-    let page_table_virt = physical_memory_offset + page_table_root.as_u64();
-    let page_table_ptr: *mut PageTable = page_table_virt.as_mut_ptr();
-    let mut mapper = unsafe { OffsetPageTable::new(&mut *page_table_ptr, physical_memory_offset) };
-    let mut frame_allocator = FrameAllocAdapter;
+    map_4k(root, virt, phys, flags)
+}
 
-    // Map all pages in the batch
-    let mut result = Ok(());
-    for (virt, phys, flags) in mappings {
-        let page = Page::<Size4KiB>::containing_address(*virt);
-        let frame = X86PhysFrame::containing_address(*phys);
+/// Flush TLB for a specific virtual address
+///
+/// Must be called after modifying currently active page tables.
+#[inline]
+pub fn flush_tlb(virt: VirtAddr) {
+    use x86_64::instructions::tlb;
+    tlb::flush(virt);
+}
 
-        if let Err(e) = unsafe {
-            mapper
-                .map_to(page, frame, *flags, &mut frame_allocator)?
-                .flush();
-            Ok::<(), MapToError<Size4KiB>>(())
-        } {
-            result = Err(e);
-            break;
+/// Flush entire TLB
+///
+/// Should be called after CR3 change (though CR3 write already flushes TLB).
+#[inline]
+pub fn flush_tlb_all() {
+    use x86_64::instructions::tlb;
+    tlb::flush_all();
+}
+
+/// Switch to a different page table root
+///
+/// Updates CR3 register, which automatically flushes TLB.
+pub fn switch_cr3(new_root: PhysAddr) {
+    let cr3_value = new_root.as_u64();
+
+    // CRITICAL VALIDATION: Ensure CR3 value is correct format
+    // Must be physical address, 4KB aligned, not truncated
+    assert!(cr3_value & 0xfff == 0, "CR3 must be 4KB aligned, got 0x{:x}", cr3_value);
+    assert!(cr3_value < physmap::max_phys(), "CR3 0x{:x} beyond max physical 0x{:x}",
+            cr3_value, physmap::max_phys());
+    assert!(cr3_value != 0, "CR3 cannot be NULL");
+
+    // Ensure this is a physical address, not a physmap virtual address
+    if cr3_value >= physmap::PHYS_MAP_BASE {
+        panic!("CR3 appears to be a virtual address (0x{:x}) instead of physical!", cr3_value);
+    }
+
+    log::info!("About to write CR3: 0x{:x} (validated: aligned, physical, in range)", cr3_value);
+
+    unsafe {
+        // CRITICAL: Disable interrupts before CR3 switch
+        // If an interrupt fires during/after CR3 switch and IDT/IST stacks aren't mapped,
+        // we'll triple fault
+        let mut rflags: u64;
+        core::arch::asm!("pushfq; pop {}", out(reg) rflags, options(nomem));
+        let interrupts_enabled = (rflags & 0x200) != 0;
+
+        if interrupts_enabled {
+            log::warn!("Interrupts are ENABLED before CR3 switch - this is dangerous!");
+            log::info!("Disabling interrupts for CR3 switch...");
+            core::arch::asm!("cli", options(nostack, nomem));
+        } else {
+            log::info!("Interrupts already disabled - safe for CR3 switch");
+        }
+
+        // Ensure all page table writes are visible before CR3 switch
+        // Use memory fence instead of cache flush (wbinvd was too aggressive)
+        log::info!("Ensuring memory ordering with mfence...");
+
+        core::arch::asm!(
+            "mfence",
+            options(nostack, nomem)
+        );
+
+        log::info!("Memory fence complete, writing CR3...");
+
+        // Write CR3 - use explicit u64 type to avoid truncation
+        let cr3_u64: u64 = cr3_value;
+
+        // DEBUG: Do minimal operations after CR3 write to isolate the issue
+        // This helps determine if the problem is the write itself or something after
+        core::arch::asm!(
+            "mov cr3, {0}",     // Write CR3
+            "nop",              // Simple instruction that doesn't touch memory
+            "nop",              // Another nop
+            "mov rax, cr3",     // Read CR3 back (register-only operation)
+            in(reg) cr3_u64,
+            out("rax") _,
+            options(nostack, preserves_flags)
+        );
+
+        // If we get here, CR3 write succeeded!
+        // DO NOT log here - logging might access unmapped memory after CR3 switch!
+
+        // Re-enable interrupts if they were enabled before
+        if interrupts_enabled {
+            core::arch::asm!("sti", options(nostack, nomem));
         }
     }
 
-    // Switch back to original CR3 once after mapping all pages
-    if switched {
-        let old_frame = X86PhysFrame::containing_address(old_cr3);
-        unsafe { Cr3::write(old_frame, old_cr3_flags); }
-    }
-
-    result
+    // CR3 switch completed - return without logging to avoid accessing unmapped memory
 }
 
-/// Map a user-accessible page
+/// Get current CR3 value
+pub fn get_current_cr3() -> PhysAddr {
+    use x86_64::registers::control::Cr3;
+
+    let (frame, _flags) = Cr3::read();
+    frame.start_address()
+}
+
+/// Translate virtual address using identity-mapped page tables
 ///
-/// This is a specialized version of map_page that ensures the USER_ACCESSIBLE
-/// flag is set, allowing Ring 3 (userspace) code to access the page.
+/// This is a special version of translate() that works BEFORE physmap is initialized.
+/// It uses BOOTBOOT's identity mapping to access page tables directly.
 ///
-/// This function is used for mapping userspace memory regions (text, data,
-/// heap, stack) and ensures proper privilege separation.
-///
-/// # Arguments
-/// * `virt` - Virtual address to map (will be rounded down to page boundary)
-/// * `phys` - Physical address to map to (will be rounded down to frame boundary)
-/// * `flags` - Base page table flags (USER_ACCESSIBLE will be added automatically)
-///
-/// # Returns
-/// * `Ok(())` - Mapping successful
-/// * `Err(MapToError)` - Mapping failed (page already mapped, etc.)
+/// BOOTBOOT identity maps all RAM in both lower half and higher half, so we can
+/// access page table physical addresses directly as if they were virtual addresses.
 ///
 /// # Safety
-/// The caller must ensure that:
-/// - The physical frame is not already in use
-/// - The virtual address is in userspace range (< 0x0000_8000_0000_0000)
-/// - The flags are appropriate (typically PRESENT | WRITABLE for data/heap/stack,
-///   or PRESENT without WRITABLE for read-only code)
+/// Only safe to use while BOOTBOOT's page tables are active (before we switch CR3).
+/// After switching to our own page tables, use the normal translate() function.
+pub unsafe fn translate_via_identity(root: PhysAddr, virt: VirtAddr) -> Option<PhysAddr> {
+    unsafe {
+        // Extract page table indices from virtual address
+        // 47:39 = PML4 index (9 bits)
+        // 38:30 = PDPT index (9 bits)
+        // 29:21 = PD index (9 bits)
+        // 20:12 = PT index (9 bits)
+        // 11:0  = offset (12 bits)
+        let virt_u64 = virt.as_u64();
+        let pml4_idx = ((virt_u64 >> 39) & 0x1ff) as usize;
+        let pdpt_idx = ((virt_u64 >> 30) & 0x1ff) as usize;
+        let pd_idx = ((virt_u64 >> 21) & 0x1ff) as usize;
+        let pt_idx = ((virt_u64 >> 12) & 0x1ff) as usize;
+        let offset = virt_u64 & 0xfff;
+
+        // Access PML4 via identity mapping
+        let pml4_ptr = root.as_u64() as *const u64;
+        let pml4_entry = core::ptr::read_volatile(pml4_ptr.add(pml4_idx));
+
+        if (pml4_entry & 0x1) == 0 {
+            return None; // Not present
+        }
+
+        // Access PDPT
+        let pdpt_addr = pml4_entry & 0x000f_ffff_ffff_f000;
+        let pdpt_ptr = pdpt_addr as *const u64;
+        let pdpt_entry = core::ptr::read_volatile(pdpt_ptr.add(pdpt_idx));
+
+        if (pdpt_entry & 0x1) == 0 {
+            return None; // Not present
+        }
+
+        // Check for 1GB huge page
+        if (pdpt_entry & 0x80) != 0 {
+            // 1GB huge page
+            let page_base = pdpt_entry & 0x000f_ffff_c000_0000;
+            let page_offset = virt_u64 & 0x3fff_ffff;
+            return Some(PhysAddr::new(page_base + page_offset));
+        }
+
+        // Access PD
+        let pd_addr = pdpt_entry & 0x000f_ffff_ffff_f000;
+        let pd_ptr = pd_addr as *const u64;
+        let pd_entry = core::ptr::read_volatile(pd_ptr.add(pd_idx));
+
+        if (pd_entry & 0x1) == 0 {
+            return None; // Not present
+        }
+
+        // Check for 2MB huge page
+        if (pd_entry & 0x80) != 0 {
+            // 2MB huge page
+            let page_base = pd_entry & 0x000f_ffff_ffe0_0000;
+            let page_offset = virt_u64 & 0x1f_ffff;
+            return Some(PhysAddr::new(page_base + page_offset));
+        }
+
+        // Access PT
+        let pt_addr = pd_entry & 0x000f_ffff_ffff_f000;
+        let pt_ptr = pt_addr as *const u64;
+        let pt_entry = core::ptr::read_volatile(pt_ptr.add(pt_idx));
+
+        if (pt_entry & 0x1) == 0 {
+            return None; // Not present
+        }
+
+        // 4KB page
+        let page_base = pt_entry & 0x000f_ffff_ffff_f000;
+        Some(PhysAddr::new(page_base + offset))
+    }
+}
+
+/// Detect kernel's physical base address by walking BOOTBOOT page tables
+///
+/// This uses the current CR3 (BOOTBOOT's page tables) and translates the
+/// kernel's virtual address to find where it was actually loaded.
+///
+/// # Safety
+/// Must be called before switching away from BOOTBOOT's page tables.
+pub unsafe fn detect_kernel_physical_base() -> Result<u64, &'static str> {
+    unsafe {
+        unsafe extern "C" {
+            static __text_start: u8;
+        }
+
+        let kernel_virt = &__text_start as *const _ as u64;
+        let current_cr3 = get_current_cr3();
+
+        let kernel_phys = translate_via_identity(current_cr3, VirtAddr::new(kernel_virt))
+            .ok_or("Failed to translate kernel virtual address")?;
+
+        log::info!(
+            "Detected kernel physical base: {:#x} (virt: {:#x})",
+            kernel_phys.as_u64(),
+            kernel_virt
+        );
+
+        Ok(kernel_phys.as_u64())
+    }
+}
+
+/// Alias for map_page_user (backward compatibility)
 pub fn map_user_page(
     virt: VirtAddr,
     phys: PhysAddr,
     flags: PageTableFlags,
-) -> Result<(), MapToError<Size4KiB>> {
-    // Ensure USER_ACCESSIBLE is set for userspace access
-    let user_flags = flags | PageTableFlags::USER_ACCESSIBLE;
-
-    // Use the regular map_page with user flags
-    map_page(virt, phys, user_flags)
-}
-
-/// Unmap a virtual page and free its backing physical frame
-/// 
-/// Removes the page table entry for the given virtual address and returns
-/// the backing physical frame to the frame allocator for reuse.
-/// 
-/// # Arguments
-/// * `virt` - Virtual address to unmap (will be rounded down to page boundary)
-/// 
-/// # Returns
-/// * `Ok(())` - Unmapping successful, frame freed
-/// * `Err(&str)` - Unmapping failed (page not mapped, etc.)
-/// 
-/// # Safety
-/// The caller must ensure that:
-/// - No code is currently using the virtual address being unmapped
-/// - All references to data in the page have been dropped
-/// - The page is not part of critical kernel structures
-pub fn unmap_page(virt: VirtAddr) -> Result<(), &'static str> {
-    // Acquire exclusive access to the page table mapper
-    let mut guard = MAPPER.lock();
-    let mapper = guard
-        .as_mut()
-        .expect("MAPPER not initialized in paging::unmap_page");
-
-    // Convert virtual address to page object
-    let page = Page::<Size4KiB>::containing_address(virt);
-
-    // Attempt to unmap the page
-    match mapper.unmap(page) {
-        Ok((frame, flush)) => {
-            // Flush TLB to ensure mapping is removed from CPU caches
-            flush.flush();
-            
-            // Return the physical frame to our allocator for reuse
-            let phys_frame = PhysFrame::containing_address(frame.start_address().as_u64());
-            phys::free_frame(phys_frame);
-            Ok(())
-        }
-        Err(_) => Err("Failed to unmap page - page may not be mapped"),
-    }
-}
-
-/// Map a range of virtual pages to newly allocated physical frames
-/// 
-/// Allocates physical frames and maps them to a contiguous virtual address
-/// range. This is commonly used for setting up heap regions, stacks, etc.
-/// 
-/// # Arguments
-/// * `start_virt` - Starting virtual address of the range
-/// * `size` - Size of the range in bytes (will be rounded up to page boundary)
-/// * `flags` - Page table flags to apply to all pages in the range
-/// 
-/// # Returns
-/// * `Ok(())` - All pages successfully mapped
-/// * `Err(&str)` - Mapping failed (out of memory, mapping conflict, etc.)
-/// 
-/// # Behavior
-/// If mapping fails partway through, already-mapped pages remain mapped.
-/// The caller should call unmap_range to clean up on error.
-pub fn map_range(
-    start_virt: VirtAddr,
-    size: u64,
-    flags: PageTableFlags,
 ) -> Result<(), &'static str> {
-    // Calculate number of pages needed (round up to page boundary)
-    let page_count = (size + 0xfff) / 0x1000;
-
-    // Map each page in the range
-    for i in 0..page_count {
-        // Calculate virtual address for this page
-        let virt = start_virt + (i * 0x1000);
-
-        // Allocate a fresh physical frame for this page
-        let phys_frame = phys::alloc_frame().ok_or("Out of physical memory")?;
-        let phys = PhysAddr::new(phys_frame.start_address());
-
-        // Map the virtual page to the physical frame
-        map_page(virt, phys, flags).map_err(|_| "Failed to map page in range")?;
-    }
-
-    Ok(())
+    let root = get_current_cr3();
+    map_4k(root, virt, phys, flags)
 }
 
-/// Unmap a range of virtual pages and free their backing frames
-/// 
-/// Removes page table entries for a contiguous virtual address range and
-/// returns all backing physical frames to the frame allocator.
-/// 
-/// # Arguments
-/// * `start_virt` - Starting virtual address of the range to unmap
-/// * `size` - Size of the range in bytes (will be rounded up to page boundary)
-/// 
-/// # Returns
-/// * `Ok(())` - All pages successfully unmapped
-/// * `Err(&str)` - Unmapping failed for at least one page
-/// 
-/// # Behavior
-/// Continues unmapping even if individual pages fail, to clean up as much
-/// as possible. Returns error if any page failed to unmap.
-pub fn unmap_range(start_virt: VirtAddr, size: u64) -> Result<(), &'static str> {
-    // Calculate number of pages to unmap (round up to page boundary)
-    let page_count = (size + 0xfff) / 0x1000;
+/// Get kernel CR3 (alias for get_current_cr3)
+pub fn get_kernel_cr3() -> PhysAddr {
+    get_current_cr3()
+}
 
-    // Track if any unmapping operations failed
-    let mut any_failed = false;
-
-    // Unmap each page in the range
-    for i in 0..page_count {
-        // Calculate virtual address for this page
-        let virt = start_virt + (i * 0x1000);
-        
-        // Attempt to unmap this page, but continue even if it fails
-        if unmap_page(virt).is_err() {
-            any_failed = true;
-        }
+/// Map multiple pages in batch (compatibility with old API)
+///
+/// Maps a batch of (VirtAddr, PhysAddr, PageTableFlags) tuples.
+/// The kernel_cr3 parameter is ignored - we use the provided root.
+pub fn map_pages_batch_in_table(
+    root: PhysAddr,
+    mappings: &[(VirtAddr, PhysAddr, PageTableFlags)],
+    _kernel_cr3: Option<PhysAddr>,
+) -> Result<(), &'static str> {
+    for &(virt, phys, flags) in mappings {
+        map_4k(root, virt, phys, flags)?;
     }
-
-    // Return error if any individual unmap failed
-    if any_failed {
-        Err("Failed to unmap one or more pages in range")
-    } else {
-        Ok(())
-    }
+    Ok(())
 }

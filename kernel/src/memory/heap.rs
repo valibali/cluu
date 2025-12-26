@@ -70,13 +70,16 @@ pub fn init() -> Result<(), &'static str> {
 
     // Convert heap start address to VirtAddr type for paging API
     let heap_start = VirtAddr::new(HEAP_START);
-    
+
     // Set page flags: present in memory and writable (heap needs both)
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+
+    // Get current CR3 (kernel page table root)
+    let kernel_cr3 = paging::get_current_cr3();
 
     // Map the entire heap virtual range to physical frames
     // This allocates physical memory and sets up page table entries
-    paging::map_range(heap_start, HEAP_SIZE, flags)?;
+    paging::map_range_4k(kernel_cr3, heap_start, HEAP_SIZE as u64, flags)?;
 
     // Initialize the linked list allocator over the mapped memory region
     // SAFETY: We just mapped this range, so it's valid for the allocator to use

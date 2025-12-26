@@ -83,6 +83,12 @@ SECTIONS
         __bss_start = .;
         *(.bss*)
         . = ALIGN(4096);
+
+        /* GOT and other linker-generated sections */
+        *(.got .got.*)
+        *(.data.rel.ro .data.rel.ro.*)
+
+        . = ALIGN(4096);
         __bss_end = .;
     } :boot
 

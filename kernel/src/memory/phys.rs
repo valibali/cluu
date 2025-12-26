@@ -1,439 +1,697 @@
 /*
- * Physical Frame Allocator
+ * Physical Memory Manager (PMM) - Dynamic Bitmap Allocator
  *
- * This module implements a bitmap-based physical memory allocator for 4 KiB frames.
- * It uses the BOOTBOOT bootloader's memory map to determine available physical memory.
+ * This module implements a bitmap-based physical frame allocator that scales
+ * dynamically based on available RAM, with no hardcoded limits.
  *
- * DESIGN OVERVIEW:
- * - Each 4 KiB physical memory frame is represented by one bit in the bitmap
- * - 0 = frame is free and available for allocation
- * - 1 = frame is used/reserved and cannot be allocated
- * - Maximum manageable memory: 1 GiB (262,144 frames)
- * - Thread-safe access via spin mutex
+ * KEY IMPROVEMENTS over old PMM:
+ * - No MAX_FRAMES limit: scales to arbitrary RAM sizes
+ * - Driven by BOOTBOOT memory map exclusively
+ * - Proper reservation of all system regions
+ * - Bootstrap-safe initialization
  *
- * INITIALIZATION PROCESS:
- * 1. Mark all frames as used initially (conservative approach)
- * 2. Parse BOOTBOOT memory map entries
- * 3. Mark frames in free regions as available
- * 4. Reserve kernel frames based on linker symbols
- *
- * ALLOCATION STRATEGY:
- * - First-fit allocation: scan bitmap from start to find first free frame
- * - Atomic bit manipulation to mark frames as used/free
- * - No fragmentation handling (simple bitmap approach)
- *
- * MEMORY LAYOUT ASSUMPTIONS:
- * - Kernel loaded at 2 MiB physical address (BOOTBOOT standard)
- * - Frame size is fixed at 4 KiB (x86_64 page size)
- * - Physical memory starts at address 0x0
+ * DESIGN:
+ * - Bitmap stored in dynamically allocated frames
+ * - Each bit represents one 4 KiB frame (0=free, 1=used)
+ * - Bootstrap uses small static bitmap, then migrates to dynamic
+ * - Thread-safe via spin mutex
  */
 
-use crate::bootboot::{BOOTBOOT, BOOTBOOT_CORE, MMAP_FREE, MMAP_USED, MMAP_ACPI, MMAP_MMIO, MMapEnt};
-use crate::memory::PhysFrame;
+use crate::bootboot::{BOOTBOOT, MMAP_FREE, MMapEnt};
+use crate::memory::types::PhysFrame;
 use spin::Mutex;
 
-// Import linker symbols that mark kernel boundaries
-// These are defined in the linker script and mark start/end of kernel sections
-unsafe extern "C" {
-    static __text_start: u8; // Start of kernel text section
-    static __bss_end: u8; // End of kernel BSS section (last kernel data)
-}
+/// Bootstrap bitmap for early allocation (covers first 128 MB)
+/// This allows us to allocate frames for the real bitmap and page tables
+const BOOTSTRAP_FRAMES: usize = 32768; // 128 MB / 4 KiB
+const BOOTSTRAP_WORDS: usize = BOOTSTRAP_FRAMES / 64;
+static mut BOOTSTRAP_BITMAP: [u64; BOOTSTRAP_WORDS] = [!0; BOOTSTRAP_WORDS];
 
-/// Maximum number of frames we can manage (1 GiB / 4 KiB = 262,144 frames)
-/// This limit keeps the bitmap size reasonable while supporting most systems
-const MAX_FRAMES: usize = 262_144;
+/// Dynamic bitmap pointer (set after bootstrap)
+static mut DYNAMIC_BITMAP: Option<*mut u64> = None;
+static mut DYNAMIC_BITMAP_WORDS: usize = 0;
 
-/// Number of u64 words needed for the bitmap (each u64 holds 64 frame bits)
-const BITMAP_LEN: usize = MAX_FRAMES / 64;
+/// Total number of frames in the system
+static mut TOTAL_FRAMES: usize = 0;
 
-/// Frame bitmap - each bit represents one 4 KiB frame
-/// Bit value meanings: 0 = free, 1 = used/reserved
-///
-/// SAFETY NOTE: This static is accessed only via raw pointers to avoid
-/// creating intermediate references that could cause undefined behavior
-/// in concurrent scenarios. All access is protected by ALLOCATOR_LOCK.
-static mut FRAME_BITMAP: [u64; BITMAP_LEN] = [0; BITMAP_LEN];
-
-/// Mutex protecting concurrent access to the frame bitmap
-/// Ensures atomic allocation/deallocation operations
+/// Lock for thread-safe access
 static ALLOCATOR_LOCK: Mutex<()> = Mutex::new(());
 
-/// Highest frame number that actually exists (determined from BOOTBOOT memory map)
-/// This is used for accurate memory statistics (not all MAX_FRAMES may exist)
-static mut HIGHEST_FRAME: usize = 0;
+/// Bootstrap mode flag
+static mut BOOTSTRAP_MODE: bool = true;
 
-/// Physical address where BOOTBOOT loads the kernel (standard location)
-/// This is used to calculate which frames contain kernel code/data
-const KERNEL_PHYS_BASE: u64 = 0x0020_0000; // 2 MiB
+unsafe extern "C" {
+    static __text_start: u8;
+    static __bss_end: u8;
+}
 
-/// Initialize the physical frame allocator from BOOTBOOT memory map
+/// Initialize PMM from BOOTBOOT memory map
 ///
-/// This function parses the BOOTBOOT memory map to identify free physical
-/// memory regions and initializes the frame bitmap accordingly.
-///
-/// # Arguments
-/// * `bootboot_ptr` - Pointer to the BOOTBOOT structure containing memory map
+/// This performs a multi-stage initialization:
+/// 1. Parse memory map to find max physical address
+/// 2. Mark all frames as used initially (conservative)
+/// 3. Mark free regions from memory map
+/// 4. Reserve system regions (kernel, initrd, BOOTBOOT structures)
+/// 5. Allocate and set up dynamic bitmap if needed
 ///
 /// # Safety
-/// The caller must ensure bootboot_ptr points to a valid BOOTBOOT structure
-pub fn init_from_bootboot(bootboot_ptr: *const BOOTBOOT) {
-    // Acquire exclusive access to prevent concurrent initialization
-    let _lock = ALLOCATOR_LOCK.lock();
-
-    log::info!("Initializing physical frame allocator...");
-
-    // Step 1: Conservative initialization - mark all frames as used
-    // This prevents accidental allocation of unknown memory regions
+/// Must be called exactly once during boot with valid BOOTBOOT pointer
+pub unsafe fn init(bootboot_ptr: *const BOOTBOOT, kernel_phys_base: u64, bootboot_phys: u64) {
     unsafe {
-        // Use raw pointer arithmetic to avoid creating intermediate references
-        let ptr = core::ptr::addr_of_mut!(FRAME_BITMAP) as *mut u64;
-        for i in 0..BITMAP_LEN {
-            // Set all bits to 1 (used state) - SAFETY: i is bounded by BITMAP_LEN
-            *ptr.add(i) = u64::MAX;
-        }
-    }
+        let _lock = ALLOCATOR_LOCK.lock();
 
-    // Step 2: Parse BOOTBOOT structure to extract memory map information
-    let bootboot_ref = unsafe { &*bootboot_ptr };
+        log::info!("Initializing physical memory manager...");
+        log::info!("Kernel physical base: {:#x}", kernel_phys_base);
+        log::info!("BOOTBOOT physical base: {:#x}", bootboot_phys);
 
-    // Copy packed field to local variable to avoid unaligned memory access
-    // BOOTBOOT structure may not be properly aligned for direct field access
-    let bb_size = bootboot_ref.size;
+        let bootboot = &*bootboot_ptr;
 
-    // Calculate number of memory map entries
-    // Memory map starts after 128-byte BOOTBOOT header, each entry is 16 bytes
-    let total_bytes = (bb_size as usize).saturating_sub(128);
-    let mmap_entries = total_bytes / core::mem::size_of::<MMapEnt>();
+        // Step 1: Parse memory map to find total RAM
+        let max_phys = parse_memory_map_max(bootboot);
+        let total_frames = (max_phys / PhysFrame::SIZE) as usize;
+        TOTAL_FRAMES = total_frames;
 
-    log::info!(
-        "BOOTBOOT: size = {}, memory map entries = {}",
-        bb_size,
-        mmap_entries
-    );
-    log::info!("Memory Map:");
-    log::info!("  Type: 0=USED, 1=FREE, 2=ACPI, 3=MMIO");
+        log::info!(
+            "Detected {} frames ({} MB) of physical memory",
+            total_frames,
+            (total_frames * 4096) / (1024 * 1024)
+        );
 
-    // Get pointer to first memory map entry (located after BOOTBOOT header)
-    let mmap_base: *const MMapEnt = core::ptr::addr_of!(bootboot_ref.mmap);
+        // Step 2: Calculate bitmap size needed
+        let bitmap_words = (total_frames + 63) / 64;
+        let bitmap_bytes = bitmap_words * 8;
+        let bitmap_frames = (bitmap_bytes + 4095) / 4096;
 
-    let mut total_ram_bytes = 0u64;
-    let mut free_ram_bytes = 0u64;
+        log::info!(
+            "Bitmap requires {} frames ({} KB)",
+            bitmap_frames,
+            (bitmap_frames * 4096) / 1024
+        );
 
-    // Step 3: Process each memory map entry to identify free regions
-    for i in 0..mmap_entries {
-        let entry = unsafe { &*mmap_base.add(i) };
-
-        // Extract fields from packed structure to avoid alignment issues
-        let region_ptr: u64 = entry.ptr; // Physical start address
-        let raw_size: u64 = entry.size; // Size with type in lower 4 bits
-        let entry_type: u32 = (raw_size & 0xF) as u32; // Memory region type
-        let region_size: u64 = raw_size & !0xF; // Actual size (clear type bits)
-
-        // Skip zero-sized entries (shouldn't happen but be defensive)
-        if region_size == 0 {
-            continue;
+        // Step 3: Initialize bootstrap bitmap (all used initially)
+        for i in 0..BOOTSTRAP_WORDS {
+            *core::ptr::addr_of_mut!(BOOTSTRAP_BITMAP)
+                .cast::<u64>()
+                .add(i) = u64::MAX;
         }
 
-        // Process all memory regions to track highest frame
-        let start_frame = region_ptr / PhysFrame::SIZE;
-        let end_frame = (region_ptr + region_size - 1) / PhysFrame::SIZE;
-        let num_frames = end_frame - start_frame + 1;
+        // Step 4: Mark free regions in bootstrap bitmap from memory map
+        mark_free_regions_bootstrap(bootboot);
 
-        // Track highest frame number for accurate statistics
-        unsafe {
-            if (end_frame as usize) < MAX_FRAMES && (end_frame as usize) > HIGHEST_FRAME {
-                HIGHEST_FRAME = end_frame as usize;
-            }
-        }
+        // Step 5: Reserve system regions in bootstrap bitmap
+        reserve_system_regions_bootstrap(bootboot, kernel_phys_base, bootboot_phys);
 
-        // Calculate size in human-readable format
-        let size_kb = region_size / 1024;
-        let size_mb = size_kb / 1024;
-
-        let type_str = match entry_type {
-            MMAP_FREE => "FREE",
-            MMAP_ACPI => "ACPI",
-            MMAP_MMIO => "MMIO",
-            _ => "USED",
-        };
-
-        if size_mb > 0 {
+        // Step 6: If we need more than bootstrap covers, allocate dynamic bitmap
+        if total_frames > BOOTSTRAP_FRAMES {
             log::info!(
-                "  [{:2}] 0x{:08x}-0x{:08x} {:4} MB  {} frames  type={}({})",
-                i,
-                region_ptr,
-                region_ptr + region_size,
-                size_mb,
-                num_frames,
-                entry_type,
-                type_str
+                "Allocating dynamic bitmap ({} frames needed)...",
+                bitmap_frames
+            );
+
+            // Allocate contiguous frames for dynamic bitmap
+            // This is critical - the bitmap MUST be contiguous to avoid holes
+            let bitmap_phys_start = alloc_contiguous_bootstrap(bitmap_frames)
+                .expect("Failed to allocate contiguous frames for bitmap");
+
+            let bitmap_ptr = bitmap_phys_start as *mut u64;
+
+            log::info!(
+                "Allocated contiguous bitmap at phys 0x{:x}-0x{:x}",
+                bitmap_phys_start,
+                bitmap_phys_start + (bitmap_frames as u64 * PhysFrame::SIZE)
+            );
+
+            // Initialize dynamic bitmap (all used initially)
+            // Access via identity mapping - BOOTBOOT maps all physical RAM
+            for i in 0..bitmap_words {
+                *bitmap_ptr.add(i) = u64::MAX;
+            }
+
+            // Mark free regions in dynamic bitmap from memory map
+            mark_free_regions_dynamic(bootboot, bitmap_ptr, bitmap_words);
+
+            // Reserve system regions in dynamic bitmap
+            reserve_system_regions_dynamic(
+                bootboot,
+                bitmap_ptr,
+                bitmap_words,
+                kernel_phys_base,
+                bootboot_phys,
+            );
+
+            // Mark bitmap frames themselves as used
+            for i in 0..bitmap_frames {
+                let frame_addr = bitmap_phys_start + (i as u64 * PhysFrame::SIZE);
+                let frame_num = (frame_addr / PhysFrame::SIZE) as usize;
+                mark_frame_used_in_bitmap(bitmap_ptr, bitmap_words, frame_num);
+            }
+
+            // Switch to dynamic mode
+            DYNAMIC_BITMAP = Some(bitmap_ptr);
+            DYNAMIC_BITMAP_WORDS = bitmap_words;
+            BOOTSTRAP_MODE = false;
+
+            log::info!(
+                "Switched to dynamic bitmap ({} words for {} frames)",
+                bitmap_words,
+                total_frames
             );
         } else {
-            log::info!(
-                "  [{:2}] 0x{:08x}-0x{:08x} {:4} KB  {} frames  type={}({})",
-                i,
-                region_ptr,
-                region_ptr + region_size,
-                size_kb,
-                num_frames,
-                entry_type,
-                type_str
-            );
+            log::info!("Using bootstrap bitmap (system has <= 128 MB RAM)");
+            // Stay in bootstrap mode
         }
 
-        // Track totals
-        if entry_type == MMAP_FREE || entry_type == MMAP_USED {
-            total_ram_bytes += region_size;
-            if entry_type == MMAP_FREE {
-                free_ram_bytes += region_size;
+        let (used, total) = get_stats_internal();
+        log::info!(
+            "PMM initialized: {} / {} frames used ({} MB / {} MB)",
+            used,
+            total,
+            (used * 4096) / (1024 * 1024),
+            (total * 4096) / (1024 * 1024)
+        );
+    }
+}
+
+/// Update bitmap pointer to use physmap after CR3 switch
+///
+/// CRITICAL: This must be called after switching to our own page tables!
+/// The bitmap was initially accessed via BOOTBOOT's identity mapping.
+/// After CR3 switch, we need to access it via the physmap instead.
+pub unsafe fn update_bitmap_for_new_pagetables() {
+    use crate::memory::types::PhysAddr;
+
+    unsafe {
+        if let Some(old_ptr) = DYNAMIC_BITMAP {
+            // Convert physical address (old pointer) to physmap virtual address
+            let phys_addr_u64 = old_ptr as u64;
+            let phys_addr = PhysAddr::new(phys_addr_u64);
+            let physmap_virt = crate::memory::physmap::phys_to_virt(phys_addr);
+            let new_ptr = physmap_virt.as_u64() as *mut u64;
+
+            DYNAMIC_BITMAP = Some(new_ptr);
+
+            log::debug!(
+                "Updated bitmap pointer: phys 0x{:x} -> virt 0x{:x}",
+                phys_addr_u64,
+                physmap_virt.as_u64()
+            );
+        }
+    }
+}
+
+/// Parse BOOTBOOT memory map to find maximum physical address
+unsafe fn parse_memory_map_max(bootboot: &BOOTBOOT) -> u64 {
+    unsafe {
+        let mmap_entries = get_mmap_entries(bootboot);
+        let mmap_base: *const MMapEnt = core::ptr::addr_of!(bootboot.mmap);
+
+        let mut max_addr = 0u64;
+
+        for i in 0..mmap_entries {
+            let entry = &*mmap_base.add(i);
+            let region_ptr = entry.ptr;
+            let raw_size = entry.size;
+            let region_size = raw_size & !0xF;
+
+            if region_size > 0 {
+                let end_addr = region_ptr + region_size;
+                if end_addr > max_addr {
+                    max_addr = end_addr;
+                }
             }
         }
 
-        // Only process free memory regions (MMAP_FREE = available for OS use)
-        if entry_type == MMAP_FREE {
-            // Mark all frames in this region as available for allocation
-            for frame_num in start_frame..=end_frame {
-                // Bounds check to prevent bitmap overflow
-                if (frame_num as usize) < MAX_FRAMES {
-                    mark_frame_free(frame_num as usize);
+        // Round up to frame boundary
+        (max_addr + PhysFrame::SIZE - 1) & !(PhysFrame::SIZE - 1)
+    }
+}
+
+/// Get number of memory map entries
+fn get_mmap_entries(bootboot: &BOOTBOOT) -> usize {
+    let bb_size = bootboot.size as usize;
+    let total_bytes = bb_size.saturating_sub(128);
+    total_bytes / core::mem::size_of::<MMapEnt>()
+}
+
+/// Mark free regions from memory map in bootstrap bitmap
+unsafe fn mark_free_regions_bootstrap(bootboot: &BOOTBOOT) {
+    unsafe {
+        let mmap_entries = get_mmap_entries(bootboot);
+        let mmap_base: *const MMapEnt = core::ptr::addr_of!(bootboot.mmap);
+
+        for i in 0..mmap_entries {
+            let entry = &*mmap_base.add(i);
+            let region_ptr = entry.ptr;
+            let raw_size = entry.size;
+            let entry_type = (raw_size & 0xF) as u32;
+            let region_size = raw_size & !0xF;
+
+            if region_size == 0 {
+                continue;
+            }
+
+            // Only mark FREE regions
+            if entry_type == MMAP_FREE {
+                let start_frame = (region_ptr / PhysFrame::SIZE) as usize;
+                let end_frame = ((region_ptr + region_size - 1) / PhysFrame::SIZE) as usize;
+
+                for frame_num in start_frame..=end_frame {
+                    if frame_num < BOOTSTRAP_FRAMES {
+                        mark_frame_free_in_bitmap(
+                            core::ptr::addr_of_mut!(BOOTSTRAP_BITMAP).cast::<u64>(),
+                            BOOTSTRAP_WORDS,
+                            frame_num,
+                        );
+                    }
                 }
             }
         }
     }
-
-    log::info!(
-        "Memory Map Summary: {} MB total RAM, {} MB free, {} MB used/reserved",
-        total_ram_bytes / (1024 * 1024),
-        free_ram_bytes / (1024 * 1024),
-        (total_ram_bytes - free_ram_bytes) / (1024 * 1024)
-    );
-
-    // Step 4: Reserve frames occupied by kernel code and data
-    mark_kernel_frames_used();
-
-    // Step 5: Reserve frames occupied by initrd
-    // BOOTBOOT memory layout (from official spec):
-    //   "The RAM (up to 16G) is identity mapped in the positive address range"
-    // This means ALL RAM is already mapped by BOOTBOOT (using huge pages).
-    // We only need to mark the initrd itself as used.
-    let initrd_ptr = bootboot_ref.initrd_ptr;
-    let initrd_size = bootboot_ref.initrd_size as u64;
-    let initrd_start_frame = initrd_ptr / PhysFrame::SIZE;
-    let initrd_end_frame = (initrd_ptr + initrd_size + PhysFrame::SIZE - 1) / PhysFrame::SIZE;
-
-    log::info!(
-        "Marking initrd as used: frames {}-{} (0x{:x}-0x{:x}, {} KiB)",
-        initrd_start_frame,
-        initrd_end_frame,
-        initrd_ptr,
-        initrd_ptr + initrd_size,
-        initrd_size / 1024
-    );
-
-    for frame_num in initrd_start_frame..initrd_end_frame {
-        if (frame_num as usize) < MAX_FRAMES {
-            mark_frame_used(frame_num as usize);
-        }
-    }
-
-    log::info!("Physical frame allocator initialized");
 }
 
-/// Mark kernel frames as used based on linker symbols
-///
-/// This function uses linker-provided symbols to determine the physical
-/// memory range occupied by the kernel and marks those frames as reserved.
-/// This prevents the allocator from giving out frames that contain kernel code.
-fn mark_kernel_frames_used() {
-    // Get virtual addresses of kernel boundaries from linker symbols
-    let kernel_virt_start = core::ptr::addr_of!(__text_start) as u64;
-    let kernel_virt_end = core::ptr::addr_of!(__bss_end) as u64;
-
-    // Convert virtual addresses to physical addresses
-    // Kernel is linked at BOOTBOOT_CORE virtual address but loaded at 2 MiB physical
-    // Physical = Virtual - Link_Base + Load_Base
-    let kernel_phys_start = kernel_virt_start - (BOOTBOOT_CORE as u64) + KERNEL_PHYS_BASE;
-    let kernel_phys_end = kernel_virt_end - (BOOTBOOT_CORE as u64) + KERNEL_PHYS_BASE;
-
-    // Convert physical address range to frame numbers
-    let start_frame = kernel_phys_start / PhysFrame::SIZE;
-    // Round up end address to include partial frames
-    let end_frame = (kernel_phys_end + PhysFrame::SIZE - 1) / PhysFrame::SIZE;
-
-    log::info!(
-        "Marking kernel frames as used: phys 0x{:x}-0x{:x} (frames {}-{})",
-        kernel_phys_start,
-        kernel_phys_end,
-        start_frame,
-        end_frame
-    );
-
-    // Mark all kernel frames as used to prevent allocation
-    for frame_num in start_frame..end_frame {
-        // Bounds check to prevent bitmap overflow
-        if (frame_num as usize) < MAX_FRAMES {
-            mark_frame_used(frame_num as usize);
-        }
-    }
-}
-
-/// Allocate a physical frame using first-fit strategy
-///
-/// Scans the bitmap from the beginning to find the first available frame.
-/// This is simple but can lead to fragmentation over time.
-///
-/// # Returns
-/// * `Some(PhysFrame)` - Successfully allocated frame
-/// * `None` - No free frames available (out of memory)
-pub fn alloc_frame() -> Option<PhysFrame> {
-    // Acquire lock to ensure atomic allocation
-    let _lock = ALLOCATOR_LOCK.lock();
-
+/// Mark free regions from memory map in dynamic bitmap
+unsafe fn mark_free_regions_dynamic(bootboot: &BOOTBOOT, bitmap: *mut u64, bitmap_words: usize) {
     unsafe {
-        // Get raw pointer to bitmap for direct manipulation
-        let ptr = core::ptr::addr_of_mut!(FRAME_BITMAP) as *mut u64;
+        let mmap_entries = get_mmap_entries(bootboot);
+        let mmap_base: *const MMapEnt = core::ptr::addr_of!(bootboot.mmap);
 
-        // Scan bitmap word by word (64 frames at a time)
-        for word_idx in 0..BITMAP_LEN {
-            // Read current 64-bit word from bitmap
+        for i in 0..mmap_entries {
+            let entry = &*mmap_base.add(i);
+            let region_ptr = entry.ptr;
+            let raw_size = entry.size;
+            let entry_type = (raw_size & 0xF) as u32;
+            let region_size = raw_size & !0xF;
+
+            if region_size == 0 {
+                continue;
+            }
+
+            // Only mark FREE regions
+            if entry_type == MMAP_FREE {
+                let start_frame = (region_ptr / PhysFrame::SIZE) as usize;
+                let end_frame = ((region_ptr + region_size - 1) / PhysFrame::SIZE) as usize;
+
+                for frame_num in start_frame..=end_frame {
+                    mark_frame_free_in_bitmap(bitmap, bitmap_words, frame_num);
+                }
+            }
+        }
+    }
+}
+
+/// Reserve system regions (kernel, initrd, BOOTBOOT structures) in bootstrap bitmap
+unsafe fn reserve_system_regions_bootstrap(
+    bootboot: &BOOTBOOT,
+    kernel_phys_base: u64,
+    bootboot_phys: u64,
+) {
+    unsafe {
+        // Reserve first 1 MB (NULL page, real mode IVT, BIOS data area)
+        // This is critical for NULL pointer safety and legacy compatibility
+        const LOW_MEMORY_RESERVE: u64 = 0x100000; // 1 MB
+        reserve_range_bootstrap(0, LOW_MEMORY_RESERVE);
+        log::info!(
+            "Reserved low memory: phys 0x0-0x{:x} (NULL page, IVT, BIOS)",
+            LOW_MEMORY_RESERVE
+        );
+
+        // Reserve kernel physical range
+        let kernel_virt_start = core::ptr::addr_of!(__text_start) as u64;
+        let kernel_virt_end = core::ptr::addr_of!(__bss_end) as u64;
+        let kernel_phys_start = kernel_virt_start - 0xffffffffffe02000 + kernel_phys_base;
+        let kernel_phys_end = kernel_virt_end - 0xffffffffffe02000 + kernel_phys_base;
+
+        reserve_range_bootstrap(kernel_phys_start, kernel_phys_end);
+        log::info!(
+            "Reserved kernel: phys 0x{:x}-0x{:x}",
+            kernel_phys_start,
+            kernel_phys_end
+        );
+
+        // Reserve initrd
+        let initrd_ptr = bootboot.initrd_ptr;
+        let initrd_size = bootboot.initrd_size as u64;
+        if initrd_size > 0 {
+            reserve_range_bootstrap(initrd_ptr, initrd_ptr + initrd_size);
+            log::info!(
+                "Reserved initrd: phys 0x{:x}-0x{:x} ({} KB)",
+                initrd_ptr,
+                initrd_ptr + initrd_size,
+                initrd_size / 1024
+            );
+        }
+
+        // Reserve BOOTBOOT info structure (includes mmap)
+        let _bootboot_ptr_addr = bootboot as *const BOOTBOOT as u64;
+        let bootboot_size = bootboot.size as u64;
+        reserve_range_bootstrap(bootboot_phys, bootboot_phys + bootboot_size);
+        log::info!(
+            "Reserved BOOTBOOT struct: phys 0x{:x}-0x{:x}",
+            bootboot_phys,
+            bootboot_phys + bootboot_size
+        );
+
+        // Reserve framebuffer (if present)
+        let fb_ptr = bootboot.fb_ptr as u64;
+        let fb_size = bootboot.fb_size as u64;
+        if fb_size > 0 && fb_ptr != 0 {
+            // fb_ptr is virtual, need to find physical address
+            // For now, assume it's identity-mapped by BOOTBOOT or in high memory
+            // We'll handle this more carefully later
+            log::info!(
+                "Framebuffer at virt 0x{:x}, size {} KB",
+                fb_ptr,
+                fb_size / 1024
+            );
+        }
+    }
+}
+
+/// Reserve system regions in dynamic bitmap
+unsafe fn reserve_system_regions_dynamic(
+    bootboot: &BOOTBOOT,
+    bitmap: *mut u64,
+    bitmap_words: usize,
+    kernel_phys_base: u64,
+    bootboot_phys: u64,
+) {
+    unsafe {
+        // Reserve first 1 MB (NULL page, real mode IVT, BIOS data area)
+        const LOW_MEMORY_RESERVE: u64 = 0x100000; // 1 MB
+        reserve_range_dynamic(0, LOW_MEMORY_RESERVE, bitmap, bitmap_words);
+
+        // Reserve kernel
+        let kernel_virt_start = core::ptr::addr_of!(__text_start) as u64;
+        let kernel_virt_end = core::ptr::addr_of!(__bss_end) as u64;
+        let kernel_phys_start = kernel_virt_start - 0xffffffffffe02000 + kernel_phys_base;
+        let kernel_phys_end = kernel_virt_end - 0xffffffffffe02000 + kernel_phys_base;
+
+        reserve_range_dynamic(kernel_phys_start, kernel_phys_end, bitmap, bitmap_words);
+
+        // Reserve initrd
+        let initrd_ptr = bootboot.initrd_ptr;
+        let initrd_size = bootboot.initrd_size as u64;
+        if initrd_size > 0 {
+            reserve_range_dynamic(initrd_ptr, initrd_ptr + initrd_size, bitmap, bitmap_words);
+        }
+
+        // Reserve BOOTBOOT struct
+        let bootboot_size = bootboot.size as u64;
+        reserve_range_dynamic(
+            bootboot_phys,
+            bootboot_phys + bootboot_size,
+            bitmap,
+            bitmap_words,
+        );
+    }
+}
+
+/// Reserve a physical address range in bootstrap bitmap [start, end)
+unsafe fn reserve_range_bootstrap(start: u64, end: u64) {
+    unsafe {
+        let start_frame = (start / PhysFrame::SIZE) as usize;
+        let end_frame = ((end + PhysFrame::SIZE - 1) / PhysFrame::SIZE) as usize;
+
+        for frame_num in start_frame..end_frame {
+            if frame_num < BOOTSTRAP_FRAMES {
+                mark_frame_used_in_bitmap(
+                    core::ptr::addr_of_mut!(BOOTSTRAP_BITMAP).cast::<u64>(),
+                    BOOTSTRAP_WORDS,
+                    frame_num,
+                );
+            }
+        }
+    }
+}
+
+/// Reserve a physical address range in dynamic bitmap [start, end)
+unsafe fn reserve_range_dynamic(start: u64, end: u64, bitmap: *mut u64, bitmap_words: usize) {
+    unsafe {
+        let start_frame = (start / PhysFrame::SIZE) as usize;
+        let end_frame = ((end + PhysFrame::SIZE - 1) / PhysFrame::SIZE) as usize;
+
+        for frame_num in start_frame..end_frame {
+            mark_frame_used_in_bitmap(bitmap, bitmap_words, frame_num);
+        }
+    }
+}
+
+/// Allocate a frame using bootstrap allocator
+unsafe fn alloc_frame_bootstrap() -> Option<PhysFrame> {
+    unsafe {
+        let ptr = core::ptr::addr_of_mut!(BOOTSTRAP_BITMAP).cast::<u64>();
+
+        for word_idx in 0..BOOTSTRAP_WORDS {
             let word_val = *ptr.add(word_idx);
 
-            // Skip words where all frames are used (all bits set)
             if word_val != u64::MAX {
-                // Found a word with at least one free frame - scan individual bits
                 for bit_idx in 0..64 {
                     let mask = 1u64 << bit_idx;
-
-                    // Check if this frame is free (bit is 0)
                     if (word_val & mask) == 0 {
-                        // Mark frame as used by setting the bit
-                        let new_word = word_val | mask;
-                        *ptr.add(word_idx) = new_word;
-
-                        // Calculate frame number and validate bounds
+                        *ptr.add(word_idx) = word_val | mask;
                         let frame_num = word_idx * 64 + bit_idx;
-                        if frame_num >= MAX_FRAMES {
-                            return None; // Frame number exceeds our limit
-                        }
-
-                        // Convert frame number to physical address
                         let frame_addr = (frame_num as u64) * PhysFrame::SIZE;
                         return Some(PhysFrame::containing_address(frame_addr));
                     }
                 }
             }
         }
-    }
 
-    // No free frames found
-    None
-}
-
-/// Free a physical frame and return it to the available pool
-///
-/// # Arguments
-/// * `frame` - The physical frame to free
-///
-/// # Safety
-/// The caller must ensure the frame is no longer in use and contains
-/// no important data, as it may be immediately reallocated.
-pub fn free_frame(frame: PhysFrame) {
-    // Acquire lock to ensure atomic deallocation
-    let _lock = ALLOCATOR_LOCK.lock();
-
-    // Convert physical address back to frame number
-    let frame_num = (frame.start_address() / PhysFrame::SIZE) as usize;
-
-    // Bounds check before modifying bitmap
-    if frame_num < MAX_FRAMES {
-        mark_frame_free(frame_num);
+        None
     }
 }
 
-/// Mark a specific frame as free in the bitmap
-///
-/// # Arguments
-/// * `frame_num` - Frame number to mark as free (0-based index)
-///
-/// # Safety
-/// Caller must ensure frame_num is within valid range and the frame
-/// is safe to reuse (no longer contains important data).
-fn mark_frame_free(frame_num: usize) {
-    // Calculate which 64-bit word and which bit within that word
-    let word_idx = frame_num / 64; // Which u64 in the array
-    let bit_idx = frame_num % 64; // Which bit in that u64
-    let mask = 1u64 << bit_idx; // Bitmask for this specific frame
-
+/// Free a frame using bootstrap allocator
+unsafe fn free_frame_bootstrap(frame: PhysFrame) {
     unsafe {
-        // Get pointer to the specific word containing our frame's bit
-        let base = core::ptr::addr_of_mut!(FRAME_BITMAP) as *mut u64;
-        let ptr = base.add(word_idx);
-        let val = *ptr;
-        // Clear the bit (set to 0 = free) using bitwise AND with inverted mask
-        *ptr = val & !mask;
+        let frame_num = (frame.start_address() / PhysFrame::SIZE) as usize;
+        if frame_num < BOOTSTRAP_FRAMES {
+            mark_frame_free_in_bitmap(
+                core::ptr::addr_of_mut!(BOOTSTRAP_BITMAP).cast::<u64>(),
+                BOOTSTRAP_WORDS,
+                frame_num,
+            );
+        }
     }
 }
 
-/// Mark a specific frame as used in the bitmap
+/// Allocate N contiguous frames using bootstrap allocator
 ///
-/// # Arguments
-/// * `frame_num` - Frame number to mark as used (0-based index)
-fn mark_frame_used(frame_num: usize) {
-    // Calculate bitmap position (same logic as mark_frame_free)
-    let word_idx = frame_num / 64; // Which u64 in the array
-    let bit_idx = frame_num % 64; // Which bit in that u64
-    let mask = 1u64 << bit_idx; // Bitmask for this specific frame
-
+/// Scans the bootstrap bitmap for a contiguous run of N free frames.
+/// This is critical for structures like the dynamic bitmap that must be
+/// contiguous to avoid reading/writing into reserved regions (ACPI, MMIO).
+///
+/// Returns the physical address of the first frame, or None if no contiguous
+/// block of the requested size is available.
+unsafe fn alloc_contiguous_bootstrap(count: usize) -> Option<u64> {
     unsafe {
-        // Get pointer to the specific word containing our frame's bit
-        let base = core::ptr::addr_of_mut!(FRAME_BITMAP) as *mut u64;
-        let ptr = base.add(word_idx);
-        let val = *ptr;
-        // Set the bit (set to 1 = used) using bitwise OR
-        *ptr = val | mask;
-    }
-}
+        if count == 0 || count > BOOTSTRAP_FRAMES {
+            return None;
+        }
 
-/// Get statistics about physical memory usage
-///
-/// # Returns
-/// * `(used_frames, total_frames)` - Tuple containing used and total frame counts
-///
-/// This function scans the entire bitmap to count used frames, so it may
-/// be expensive to call frequently.
-pub fn get_stats() -> (usize, usize) {
-    // Acquire lock to get consistent snapshot of bitmap state
-    let _lock = ALLOCATOR_LOCK.lock();
+        let ptr = core::ptr::addr_of_mut!(BOOTSTRAP_BITMAP).cast::<u64>();
 
-    let mut used_frames = 0;
-    let total_frames = unsafe { HIGHEST_FRAME + 1 }; // +1 because frames are 0-indexed
+        // Search for 'count' consecutive free frames
+        let mut consecutive_free = 0;
+        let mut start_frame = 0;
 
-    unsafe {
-        // Scan bitmap up to highest frame and count set bits (used frames)
-        let base = core::ptr::addr_of!(FRAME_BITMAP) as *const u64;
+        for frame_num in 0..BOOTSTRAP_FRAMES {
+            let word_idx = frame_num / 64;
+            let bit_idx = frame_num % 64;
+            let word = *ptr.add(word_idx);
+            let mask = 1u64 << bit_idx;
 
-        // Calculate how many words to scan (round up to cover highest frame)
-        let words_to_scan = (total_frames + 63) / 64;
+            if (word & mask) == 0 {
+                // Frame is free
+                if consecutive_free == 0 {
+                    start_frame = frame_num;
+                }
+                consecutive_free += 1;
 
-        for i in 0..words_to_scan.min(BITMAP_LEN) {
-            let word = *base.add(i);
+                if consecutive_free == count {
+                    // Found enough consecutive frames!
+                    // Mark them all as used
+                    for i in 0..count {
+                        let f = start_frame + i;
+                        mark_frame_used_in_bitmap(ptr, BOOTSTRAP_WORDS, f);
+                    }
 
-            // For the last word, only count bits up to highest frame
-            if i == words_to_scan - 1 {
-                let bits_in_last_word = total_frames % 64;
-                if bits_in_last_word > 0 {
-                    // Mask off bits beyond highest frame
-                    let mask = (1u64 << bits_in_last_word) - 1;
-                    used_frames += (word & mask).count_ones() as usize;
-                } else {
-                    // Last word is completely used
-                    used_frames += word.count_ones() as usize;
+                    let phys_addr = (start_frame as u64) * PhysFrame::SIZE;
+                    return Some(phys_addr);
                 }
             } else {
-                used_frames += word.count_ones() as usize;
+                // Frame is used, reset counter
+                consecutive_free = 0;
+            }
+        }
+
+        None // Couldn't find contiguous block
+    }
+}
+
+/// Mark a frame as free in bitmap
+unsafe fn mark_frame_free_in_bitmap(bitmap: *mut u64, bitmap_words: usize, frame_num: usize) {
+    unsafe {
+        let word_idx = frame_num / 64;
+        let bit_idx = frame_num % 64;
+
+        if word_idx < bitmap_words {
+            let mask = 1u64 << bit_idx;
+            let ptr = bitmap.add(word_idx);
+            let val = *ptr;
+            *ptr = val & !mask;
+        }
+    }
+}
+
+/// Mark a frame as used in bitmap
+unsafe fn mark_frame_used_in_bitmap(bitmap: *mut u64, bitmap_words: usize, frame_num: usize) {
+    unsafe {
+        let word_idx = frame_num / 64;
+        let bit_idx = frame_num % 64;
+
+        if word_idx < bitmap_words {
+            let mask = 1u64 << bit_idx;
+            let ptr = bitmap.add(word_idx);
+            let val = *ptr;
+            *ptr = val | mask;
+        }
+    }
+}
+
+/// Public API: Allocate a physical frame
+pub fn alloc_frame() -> Option<PhysFrame> {
+    let _lock = ALLOCATOR_LOCK.lock();
+
+    unsafe {
+        if BOOTSTRAP_MODE {
+            alloc_frame_bootstrap()
+        } else {
+            alloc_frame_dynamic()
+        }
+    }
+}
+
+/// Allocate a frame using dynamic bitmap
+unsafe fn alloc_frame_dynamic() -> Option<PhysFrame> {
+    unsafe {
+        let bitmap = DYNAMIC_BITMAP?;
+        let bitmap_words = DYNAMIC_BITMAP_WORDS;
+
+        for word_idx in 0..bitmap_words {
+            let word_val = *bitmap.add(word_idx);
+
+            if word_val != u64::MAX {
+                for bit_idx in 0..64 {
+                    let mask = 1u64 << bit_idx;
+                    if (word_val & mask) == 0 {
+                        *bitmap.add(word_idx) = word_val | mask;
+                        let frame_num = word_idx * 64 + bit_idx;
+                        if frame_num < TOTAL_FRAMES {
+                            let frame_addr = (frame_num as u64) * PhysFrame::SIZE;
+                            return Some(PhysFrame::containing_address(frame_addr));
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// Public API: Free a physical frame
+pub fn free_frame(frame: PhysFrame) {
+    let _lock = ALLOCATOR_LOCK.lock();
+
+    let frame_num = (frame.start_address() / PhysFrame::SIZE) as usize;
+
+    unsafe {
+        if BOOTSTRAP_MODE {
+            free_frame_bootstrap(frame);
+        } else {
+            if let Some(bitmap) = DYNAMIC_BITMAP {
+                mark_frame_free_in_bitmap(bitmap, DYNAMIC_BITMAP_WORDS, frame_num);
+            }
+        }
+    }
+}
+
+/// Public API: Get memory statistics
+pub fn get_stats() -> (usize, usize) {
+    let _lock = ALLOCATOR_LOCK.lock();
+    unsafe { get_stats_internal() }
+}
+
+/// Internal: Get memory statistics (must hold lock)
+unsafe fn get_stats_internal() -> (usize, usize) {
+    unsafe {
+        let total = TOTAL_FRAMES;
+        let mut used = 0;
+
+        if BOOTSTRAP_MODE {
+            let words_to_scan = (total + 63) / 64;
+            let words_to_scan = words_to_scan.min(BOOTSTRAP_WORDS);
+
+            for i in 0..words_to_scan {
+                let word = *core::ptr::addr_of!(BOOTSTRAP_BITMAP).cast::<u64>().add(i);
+                if i == words_to_scan - 1 {
+                    let bits_in_last = total % 64;
+                    if bits_in_last > 0 {
+                        let mask = (1u64 << bits_in_last) - 1;
+                        used += (word & mask).count_ones() as usize;
+                    } else {
+                        used += word.count_ones() as usize;
+                    }
+                } else {
+                    used += word.count_ones() as usize;
+                }
+            }
+        } else {
+            if let Some(bitmap) = DYNAMIC_BITMAP {
+                let words_to_scan = (total + 63) / 64;
+
+                for i in 0..words_to_scan {
+                    let word = *bitmap.add(i);
+                    if i == words_to_scan - 1 {
+                        let bits_in_last = total % 64;
+                        if bits_in_last > 0 {
+                            let mask = (1u64 << bits_in_last) - 1;
+                            used += (word & mask).count_ones() as usize;
+                        } else {
+                            used += word.count_ones() as usize;
+                        }
+                    } else {
+                        used += word.count_ones() as usize;
+                    }
+                }
+            }
+        }
+
+        (used, total)
+    }
+}
+
+/// Public API: Reserve a physical address range [start, end)
+///
+/// This is used to mark regions as used that weren't in the BOOTBOOT mmap
+/// or need additional reservation.
+pub fn reserve_range(start_addr: u64, end_addr: u64) {
+    let _lock = ALLOCATOR_LOCK.lock();
+
+    unsafe {
+        if BOOTSTRAP_MODE {
+            reserve_range_bootstrap(start_addr, end_addr);
+        } else {
+            if let Some(bitmap) = DYNAMIC_BITMAP {
+                reserve_range_dynamic(start_addr, end_addr, bitmap, DYNAMIC_BITMAP_WORDS);
             }
         }
     }
 
-    (used_frames, total_frames)
+    log::debug!(
+        "Reserved physical range 0x{:x}-0x{:x}",
+        start_addr,
+        end_addr
+    );
 }

@@ -538,7 +538,7 @@ pub fn spawn_elf_process(
     let (entry_point, _page_table_root, stack_ptr) = scheduler::ProcessManager::with_mut(process_id, |process| {
         // Load ELF binary into process address space
         // Pass kernel_cr3 to avoid deadlock when mapping pages
-        let binary = load_elf_binary(elf_data, &mut process.address_space, kernel_cr3)?;
+        let binary = load_elf_binary(elf_data, &mut process.address_space, Some(kernel_cr3))?;
 
         log::info!("ELF process '{}' loaded, entry point: 0x{:x}",
                    name, binary.entry_point.as_u64());
@@ -581,7 +581,7 @@ pub fn spawn_elf_process(
         }
 
         // Map all pages in a single batch (2 CR3 switches instead of 8192!)
-        paging::map_pages_batch_in_table(page_table_root, &mappings, kernel_cr3)
+        paging::map_pages_batch_in_table(page_table_root, &mappings, Some(kernel_cr3))
             .map_err(|_| ElfLoadError::MappingFailed)?;
 
         log::info!("ELF: User stack mapped ({} pages)", page_count);

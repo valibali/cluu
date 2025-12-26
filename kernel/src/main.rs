@@ -125,12 +125,20 @@ pub extern "C" fn kstart() -> ! {
     // Step 3: Initialize GDT (Global Descriptor Table)
     arch::x86_64::gdt::init();
 
-    // Step 3.5: Initialize SYSCALL/SYSRET mechanism
+    // Step 3.5: Initialize IDT (Interrupt Descriptor Table)
+    // CRITICAL: Must be initialized BEFORE memory management (CR3 switch)
+    // If any exception/NMI occurs during CR3 switch and IDT isn't set up,
+    // the CPU will triple fault
+    arch::x86_64::idt::init();
+
+    // Step 3.6: Initialize SYSCALL/SYSRET mechanism
     syscall::init();
 
     // Step 4: Initialize memory management
     log::info!("Initializing memory management...");
-    memory::init(core::ptr::addr_of!(bootboot::bootboot));
+    unsafe {
+        memory::init(core::ptr::addr_of!(bootboot::bootboot));
+    }
 
     // Test heap allocation
     {
@@ -145,9 +153,6 @@ pub extern "C" fn kstart() -> ! {
 
     // Step 4.5: Initialize initrd (initial ramdisk)
     initrd::init();
-
-    // Step 5: Initialize IDT (Interrupt Descriptor Table)
-    arch::x86_64::idt::init();
 
     // Step 6: Initialize system drivers
     drivers::system::init();
