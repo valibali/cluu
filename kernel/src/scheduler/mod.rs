@@ -193,6 +193,9 @@ static CURRENT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 /// Scheduler enabled flag
 static SCHEDULER_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Normal mode flag (set when scheduler transitions from Boot to Normal mode)
+static NORMAL_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Preemption disabled flag (set during critical scheduler operations)
 /// When true, timer interrupts will not perform context switches
 static PREEMPTION_DISABLED: AtomicBool = AtomicBool::new(false);

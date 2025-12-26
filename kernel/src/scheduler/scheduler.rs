@@ -150,7 +150,7 @@ pub struct Scheduler {
     next_process_id: ProcessId,                          // Next ID to assign to new process
 
     // Boot mode state (moved from module-level static)
-    mode: SchedulerMode,
+    pub(crate) mode: SchedulerMode,
 }
 
 impl Scheduler {
@@ -236,6 +236,9 @@ impl Scheduler {
                 log::info!("Transitioning to NORMAL MODE");
                 log::info!("========================================");
                 self.mode = SchedulerMode::Normal;
+
+                // Set atomic flag so main loop can detect the transition without holding locks
+                super::NORMAL_MODE_ACTIVE.store(true, core::sync::atomic::Ordering::SeqCst);
             }
         }
 

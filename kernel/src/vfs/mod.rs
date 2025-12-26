@@ -516,6 +516,54 @@ pub fn vfs_read_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
 
         let vfs_fd = file_info.vfs_fd;
 
+        // If fsitem is mapped, read directly from shared memory (fast path!)
+        if let Some(fsitem_addr) = file_info.fsitem_addr {
+            // Define fsitem header structure (matches userspace/lib/fsitem.h)
+            #[repr(C, packed)]
+            #[derive(Copy, Clone)]
+            struct FsItemHeader {
+                magic: u32,         // 0x46534954 ("FSIT")
+                _version: u32,      // 1
+                _type_: u32,        // FSITEM_TYPE_FILE
+                _flags: u32,        // Open flags
+                size: u64,          // File size in bytes
+                _fs_type: u32,      // Filesystem type
+                _mode: u32,         // Unix mode
+                data_offset: u64,   // Offset to file data (4096)
+                _offset: u64,       // Current position (unused)
+                _ref_count: u32,    // Reference count
+                _lock: u32,         // Spinlock
+            }
+
+            // Read fsitem structure from mapped memory
+            let fsitem_ptr = fsitem_addr.as_u64() as *const FsItemHeader;
+            let fsitem = unsafe { core::ptr::read_unaligned(fsitem_ptr) };
+
+            // Validate fsitem magic
+            if fsitem.magic != 0x46534954 {
+                vfs_close(vfs_fd);
+                return Err("Invalid fsitem structure");
+            }
+
+            // File data is at fsitem_addr + data_offset
+            let file_size = fsitem.size as usize;
+            let data_offset = fsitem.data_offset as usize;
+            let data_ptr = (fsitem_addr.as_u64() + data_offset as u64) as *const u8;
+
+            // Copy file data from shared memory
+            let mut data = alloc::vec::Vec::with_capacity(file_size);
+            unsafe {
+                let src_slice = core::slice::from_raw_parts(data_ptr, file_size);
+                data.extend_from_slice(src_slice);
+            }
+
+            vfs_close(vfs_fd);
+            return Ok(data);
+        }
+
+        // Fall back to IPC reads if no fsitem (shouldn't happen for regular files)
+        log::warn!("vfs_read_file: No fsitem mapped, using slow IPC reads");
+
         // Get file size via lseek
         let file_size = vfs_lseek(vfs_fd, 0, SEEK_END);
         if file_size < 0 {
@@ -526,7 +574,7 @@ pub fn vfs_read_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
         // Seek back to start
         vfs_lseek(vfs_fd, 0, SEEK_SET);
 
-        // Read entire file
+        // Read entire file via IPC (slow!)
         let mut data = alloc::vec::Vec::with_capacity(file_size as usize);
         data.resize(file_size as usize, 0);
 

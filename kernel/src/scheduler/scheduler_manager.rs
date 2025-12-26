@@ -126,6 +126,16 @@ impl SchedulerManager {
         SCHEDULER_ENABLED.load(Ordering::SeqCst)
     }
 
+    /// Check if the scheduler is in Normal mode
+    ///
+    /// Returns true if all critical processes have signaled ready and the
+    /// scheduler has transitioned from Boot mode to Normal mode.
+    ///
+    /// This is a lock-free check using an atomic flag, safe to call from any context.
+    pub fn is_normal_mode() -> bool {
+        super::NORMAL_MODE_ACTIVE.load(Ordering::SeqCst)
+    }
+
     /// Voluntarily yield the CPU to the next ready thread
     ///
     /// With preemptive scheduling, this function triggers a software interrupt (INT 0x81)

@@ -215,13 +215,82 @@ pub extern "C" fn kstart() -> ! {
 
     log::info!("Kernel initialization complete!");
 
-    // Step 14: Spawn userspace shell
-    // Note: VFS server will be the first process to run and register before shell needs it
+    // Step 15: Spawn shell launcher thread before enabling scheduler
+    // This thread will wait for Normal mode and then spawn the shell
+    scheduler::ThreadManager::spawn(shell_launcher_thread, "shell_launcher");
+
+    // Enable preemptive scheduler
+    // VFS will start running in Boot mode and register
+    // Once VFS signals ready, scheduler will transition to Normal mode
+    // Then shell_launcher thread will spawn the shell
+    scheduler::SchedulerManager::enable();
+    log::info!("Preemptive scheduler enabled - transferring control to userspace");
+
+    // Main kernel idle loop
+    // Timer interrupts will preempt us and switch to ready threads
+    // We become the "emergency idle" - only run if no other threads are ready
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+/// Shell launcher thread - waits for Normal mode then spawns shell
+///
+/// This thread is created before the scheduler is enabled. It will be
+/// scheduled along with other threads and will wait for the VFS server
+/// to signal ready (transition to Normal mode) before spawning the shell.
+fn shell_launcher_thread() {
+    // Wait for scheduler to transition to Normal mode
+    while !scheduler::SchedulerManager::is_normal_mode() {
+        scheduler::SchedulerManager::yield_now();
+    }
+
+    // VFS is ready, spawn shell now
+    spawn_shell();
+
+    // Thread exits after spawning shell
+}
+
+/// Spawn the userspace shell
+///
+/// This is called by the shell_launcher thread once VFS is ready,
+/// ensuring the VFS server is ready before the shell starts.
+pub fn spawn_shell() {
     log::info!("Spawning userspace shell...");
-    let shell_binary = vfs::vfs_read_file("/dev/initrd/bin/shell").unwrap_or_else(|e| {
-        log::warn!("Shell binary not found in initrd: {}", e);
-        alloc::vec::Vec::new()
-    });
+
+    // Try multiple possible paths for the shell binary
+    let paths = ["/dev/initrd/bin/shell", "bin/shell", "/bin/shell"];
+    let mut shell_binary = alloc::vec::Vec::new();
+
+    for path in &paths {
+        log::info!("Trying to load shell from: {}", path);
+        match vfs::vfs_read_file(path) {
+            Ok(data) => {
+                log::info!("Successfully loaded shell from {} ({} bytes)", path, data.len());
+                shell_binary = data;
+                break;
+            }
+            Err(e) => {
+                log::warn!("Failed to load shell from {}: {}", path, e);
+            }
+        }
+    }
+
+    // If VFS read failed, try direct initrd access as fallback
+    if shell_binary.is_empty() {
+        log::warn!("VFS read failed, trying direct initrd access...");
+        shell_binary = initrd::read_file("bin/shell")
+            .map(|data| data.to_vec())
+            .unwrap_or_else(|e| {
+                log::error!("Failed to read shell from initrd: {}", e);
+                alloc::vec::Vec::new()
+            });
+    }
+
+    if shell_binary.is_empty() {
+        log::error!("Could not find shell binary in any location!");
+        return;
+    }
 
     if !shell_binary.is_empty() {
         match loaders::elf::spawn_elf_process(
@@ -237,21 +306,8 @@ pub extern "C" fn kstart() -> ! {
                 log::warn!("Failed to spawn shell: {:?}", e);
             }
         }
-    }
-
-    log::info!("All userspace services spawned and ready");
-
-    // Step 15: Enable preemptive scheduler
-    // Both VFS and shell will start running
-    // VFS has lower TID so it will be scheduled first and register before shell needs it
-    scheduler::SchedulerManager::enable();
-    log::info!("Preemptive scheduler enabled - transferring control to userspace");
-
-    // Main kernel idle loop
-    // Timer interrupts will preempt us and switch to ready threads
-    // We become the "emergency idle" - only run if no other threads are ready
-    loop {
-        x86_64::instructions::hlt();
+    } else {
+        log::warn!("Shell binary is empty, not spawning");
     }
 }
 
