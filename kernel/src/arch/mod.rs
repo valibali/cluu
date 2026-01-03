@@ -5,24 +5,14 @@ pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 use self::x86_64::*;
 
-use crate::x86_64::instructions::*;
-
-/// Starts the kernel.
-///
-/// # Returns
-///
-/// This function does not return.
-pub fn kstart() -> ! {
-    // Initialize devices
-    peripheral::init_peripherals();
-
-    // Check if framebuffer is available and print "hello"
-    if let Some(ref mut fb) = *peripheral::FB.lock() {
-        fb.puts("Visible: The framebuffer is correctly mapped.");
-        fb.draw_screen_test();
-    }
-
-    loop {
-        hlt();
-    }
-}
+// NOTE: kstart() has been replaced by _start() in main.rs
+// The old kstart() depended on peripheral module (framebuffer)
+// which will be moved to userspace later.
+//
+// New boot sequence in main.rs:
+// 1. UART init (COM2 at 0x2F8)
+// 2. Logger init (IRQ-safe)
+// 3. GDT init
+// 4. IDT init
+// 5. Syscall init
+// 6. Idle loop
