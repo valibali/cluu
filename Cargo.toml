@@ -13,6 +13,8 @@ members = [
 
     # Userspace
     "userspace/libcluu",
+    "userspace/hello",
+    "userspace/cap_demo",
     "userspace/init",
     "userspace/procmgr",
     "userspace/vfs",
@@ -27,6 +29,8 @@ default-members = [
     "kernel",
     "klibcluu",
     "userspace/libcluu",
+    "userspace/hello",
+    "userspace/cap_demo",
     "userspace/init",
     "userspace/procmgr",
     "userspace/vfs",
@@ -47,6 +51,7 @@ license = "MIT"
 bitflags = "2.4"
 spin = "0.9"
 log = "0.4"
+lazy_static = { version = "1.4", features = ["spin_no_std"] }
 
 # x86_64 architecture support
 x86_64 = "0.15"

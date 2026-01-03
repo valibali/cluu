@@ -6,11 +6,11 @@
 //!   cargo xtask test           # Run all tests
 //!   cargo xtask clean          # Clean all build artifacts
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::fs;
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "CLUU build system")]
@@ -96,7 +96,10 @@ fn build_userspace(profile: &str) -> Result<()> {
     println!("▸ Building userspace programs...");
 
     let userspace_crates = [
-        "userspace/init",
+        "userspace/libcluu", // Library must be first
+        "userspace/hello",   // Examples
+        "userspace/cap_demo",
+        "userspace/init", // System programs
         "userspace/procmgr",
         "userspace/vfs",
         "userspace/ramfs",
@@ -105,26 +108,25 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/cat",
     ];
 
-    let target_json = project_root().join("x86_64-cluu-user.json");
+    let target_json = project_root().join("triplets/x86_64-cluu-user.json");
 
     for crate_path in &userspace_crates {
-        let crate_name = Path::new(crate_path)
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap();
+        let crate_name = Path::new(crate_path).file_name().unwrap().to_str().unwrap();
 
         println!("  Building {}...", crate_name);
 
         let mut cmd = Command::new("cargo");
-        cmd.current_dir(project_root())
-            .args([
-                "build",
-                "--manifest-path", &format!("{}/Cargo.toml", crate_path),
-                "--target", target_json.to_str().unwrap(),
-                "-Z", "build-std=core,alloc",
-                "-Z", "build-std-features=compiler-builtins-mem",
-            ]);
+        cmd.current_dir(project_root()).args([
+            "build",
+            "--manifest-path",
+            &format!("{}/Cargo.toml", crate_path),
+            "--target",
+            target_json.to_str().unwrap(),
+            "-Z",
+            "build-std=core,alloc",
+            "-Z",
+            "build-std-features=compiler-builtins-mem",
+        ]);
 
         if profile == "release" {
             cmd.arg("--release");
@@ -143,20 +145,23 @@ fn build_userspace(profile: &str) -> Result<()> {
 fn build_kernel(profile: &str) -> Result<()> {
     println!("▸ Building kernel...");
 
-    let target_json = project_root().join("x86_64-cluu-kernel.json");
+    let target_json = project_root().join("triplets/x86_64-cluu-kernel.json");
 
     // First, assemble NASM files if they exist
     let _ = assemble_nasm();
 
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(project_root())
-        .args([
-            "build",
-            "--manifest-path", "kernel/Cargo.toml",
-            "--target", target_json.to_str().unwrap(),
-            "-Z", "build-std=core,alloc",
-            "-Z", "build-std-features=compiler-builtins-mem",
-        ]);
+    cmd.current_dir(project_root()).args([
+        "build",
+        "--manifest-path",
+        "kernel/Cargo.toml",
+        "--target",
+        target_json.to_str().unwrap(),
+        "-Z",
+        "build-std=core,alloc",
+        "-Z",
+        "build-std-features=compiler-builtins-mem",
+    ]);
 
     if profile == "release" {
         cmd.arg("--release");
@@ -192,10 +197,13 @@ fn assemble_nasm() -> Result<()> {
 
         let status = Command::new("nasm")
             .args([
-                "-f", "elf64",
+                "-f",
+                "elf64",
                 "-g",
-                "-F", "dwarf",
-                "-o", obj.to_str().unwrap(),
+                "-F",
+                "dwarf",
+                "-o",
+                obj.to_str().unwrap(),
                 src.to_str().unwrap(),
             ])
             .status()
@@ -237,7 +245,8 @@ fn create_initrd(profile: &str) -> Result<()> {
         bail!("Kernel deps directory not found at {:?}", deps_dir);
     }
 
-    let kernel_src = deps_dir.read_dir()
+    let kernel_src = deps_dir
+        .read_dir()
         .context("Failed to read kernel deps directory")?
         .filter_map(|e| e.ok())
         .find(|e| {
@@ -248,8 +257,7 @@ fn create_initrd(profile: &str) -> Result<()> {
 
     if let Some(kernel_entry) = kernel_src {
         let dst = initrd_dir.join("sys/core");
-        fs::copy(kernel_entry.path(), &dst)
-            .context("Failed to copy kernel as sys/core")?;
+        fs::copy(kernel_entry.path(), &dst).context("Failed to copy kernel as sys/core")?;
         println!("  Copied kernel as sys/core");
     } else {
         bail!("Kernel binary not found in {:?}", deps_dir);
@@ -261,8 +269,7 @@ fn create_initrd(profile: &str) -> Result<()> {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("sys").join(prog);
         if src.exists() {
-            fs::copy(&src, &dst)
-                .with_context(|| format!("Failed to copy {}", prog))?;
+            fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
             println!("  Copied sys/{}", prog);
         } else {
             println!("  Warning: {} not found, skipping", prog);
@@ -275,8 +282,7 @@ fn create_initrd(profile: &str) -> Result<()> {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("bin").join(prog);
         if src.exists() {
-            fs::copy(&src, &dst)
-                .with_context(|| format!("Failed to copy {}", prog))?;
+            fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
             println!("  Copied bin/{}", prog);
         } else {
             println!("  Warning: {} not found, skipping", prog);
@@ -297,7 +303,7 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     let mkbootimg_json = r#"{
     "disksize": 128,
     "config": "target/bootboot_config",
-    "initrd": { "type": "cpio", "gzip": false, "directory": "target/initrd" },
+    "initrd": { "type": "tar", "gzip": true, "directory": "target/initrd" },
     "iso9660": true,
     "partitions": [
         { "type": "boot", "size": 16 }
@@ -308,8 +314,11 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     fs::write(&config_path, mkbootimg_json)?;
 
     // Create bootboot config file
-    let bootboot_config = "// BOOTBOOT configuration\nscreen=1024x768\n";
-    fs::write(project_root().join("target/bootboot_config"), bootboot_config)?;
+    let bootboot_config = "// BOOTBOOT configuration\nscreen=1024x768\nkernel=sys/core\n";
+    fs::write(
+        project_root().join("target/bootboot_config"),
+        bootboot_config,
+    )?;
 
     let output_img = project_root().join("target/cluu.img");
 
@@ -330,10 +339,7 @@ fn create_disk_image(_profile: &str) -> Result<()> {
 
     let status = Command::new(mkbootimg_path)
         .current_dir(project_root())
-        .args([
-            config_path.to_str().unwrap(),
-            output_img.to_str().unwrap(),
-        ])
+        .args([config_path.to_str().unwrap(), output_img.to_str().unwrap()])
         .status()
         .context("Failed to run mkbootimg")?;
 
@@ -359,16 +365,21 @@ fn run_qemu(debug: bool) -> Result<()> {
         "/usr/share/edk2-ovmf/x64/OVMF.fd",
     ];
 
-    let ovmf = ovmf_paths.iter()
+    let ovmf = ovmf_paths
+        .iter()
         .find(|p| PathBuf::from(p).exists())
         .context("OVMF.fd not found. Install ovmf package.")?;
 
     let mut cmd = Command::new("qemu-system-x86_64");
     cmd.args([
-        "-bios", ovmf,
-        "-m", "256M",
-        "-drive", &format!("file={},format=raw", img_path.display()),
-        "-display", "gtk",
+        "-bios",
+        ovmf,
+        "-m",
+        "256M",
+        "-drive",
+        &format!("file={},format=raw", img_path.display()),
+        "-display",
+        "gtk",
         "-no-reboot",
         "-no-shutdown",
     ]);
@@ -389,23 +400,22 @@ fn run_qemu(debug: bool) -> Result<()> {
         println!("");
 
         cmd.args([
-            "-s",       // GDB server on port 1234
-            "-S",       // Pause CPU at startup
-            "-serial", "stdio",
-            "-serial", "telnet:localhost:4321,server,nowait",
+            "-s", // GDB server on port 1234
+            "-S", // Pause CPU at startup
+            "-serial",
+            "stdio",
+            "-serial",
+            "telnet:localhost:4321,server,nowait",
         ]);
     } else {
         println!("▸ Starting QEMU...");
         println!("  Press Ctrl+C to exit");
         println!("  Serial output will appear in this terminal");
 
-        cmd.args([
-            "-serial", "stdio",
-        ]);
+        cmd.args(["-serial", "stdio"]);
     }
 
-    let status = cmd.status()
-        .context("Failed to run QEMU")?;
+    let status = cmd.status().context("Failed to run QEMU")?;
 
     if !status.success() {
         bail!("QEMU exited with error");
@@ -426,14 +436,22 @@ fn run_tests() -> Result<()> {
         .args([
             "test",
             "--workspace",
-            "--exclude", "cluu-init",
-            "--exclude", "cluu-procmgr",
-            "--exclude", "cluu-vfs",
-            "--exclude", "cluu-ramfs",
-            "--exclude", "cluu-console",
-            "--exclude", "cluu-shell",
-            "--exclude", "cluu-cat",
-            "--features", "test-mock",
+            "--exclude",
+            "cluu-init",
+            "--exclude",
+            "cluu-procmgr",
+            "--exclude",
+            "cluu-vfs",
+            "--exclude",
+            "cluu-ramfs",
+            "--exclude",
+            "cluu-console",
+            "--exclude",
+            "cluu-shell",
+            "--exclude",
+            "cluu-cat",
+            "--features",
+            "test-mock",
         ])
         .status()
         .context("Failed to run tests")?;
