@@ -3,6 +3,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     InvalidArgument,
+    InvalidAddress,
     OutOfMemory,
     NotFound,
     PermissionDenied,
@@ -12,6 +13,10 @@ pub enum Error {
     InvalidState,
     BufferTooSmall,
     Overflow,
+    WouldBlock,
+    NotImplemented,
+    Busy,
+    InvalidParameter,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -21,15 +26,20 @@ impl Error {
     pub fn to_errno(self) -> isize {
         match self {
             Error::InvalidArgument => -1,
-            Error::OutOfMemory => -2,
-            Error::NotFound => -3,
-            Error::PermissionDenied => -4,
-            Error::AlreadyExists => -5,
-            Error::Timeout => -6,
-            Error::InvalidOperation => -7,
-            Error::InvalidState => -8,
-            Error::BufferTooSmall => -9,
-            Error::Overflow => -10,
+            Error::InvalidAddress => -2,
+            Error::OutOfMemory => -3,
+            Error::NotFound => -4,
+            Error::PermissionDenied => -5,
+            Error::AlreadyExists => -6,
+            Error::Timeout => -7,
+            Error::InvalidOperation => -8,
+            Error::InvalidState => -9,
+            Error::BufferTooSmall => -10,
+            Error::Overflow => -11,
+            Error::WouldBlock => -12,
+            Error::NotImplemented => -13,
+            Error::Busy => -14,
+            Error::InvalidParameter => -15,
         }
     }
 }
