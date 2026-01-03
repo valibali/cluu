@@ -10,6 +10,7 @@ license = "MIT"
 bitflags = { workspace = true }
 spin = { workspace = true }
 log = { workspace = true }
+lazy_static = { workspace = true }
 x86_64 = { workspace = true }
 
 # Kernel support library
