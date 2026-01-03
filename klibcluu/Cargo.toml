@@ -1,0 +1,23 @@
+[package]
+name = "klibcluu"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU kernel support library - debug, utils, helpers"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+bitflags = { workspace = true }
+spin = { workspace = true }
+x86_64 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lib]
+name = "klibcluu"
+crate-type = ["rlib"]
+
+[features]
+default = []
+test-mock = []

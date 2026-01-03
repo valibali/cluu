@@ -1,0 +1,21 @@
+[package]
+name = "libcluu"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU userspace library - syscalls, IPC, runtime"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+bitflags = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lib]
+name = "libcluu"
+crate-type = ["rlib"]
+
+[features]
+default = []
+std = []  # For testing on host

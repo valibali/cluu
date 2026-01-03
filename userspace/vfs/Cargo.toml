@@ -1,0 +1,14 @@
+[package]
+name = "cluu-vfs"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU virtual filesystem server"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "vfs"
+path = "src/main.rs"

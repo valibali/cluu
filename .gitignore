@@ -1,10 +1,39 @@
-.vscode/*
-!.vscode/launch.json
-!.vscode/settings.json
+# Rust build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock files (keep for workspace root, ignore in subdirectories)
+**/Cargo.lock
+!Cargo.lock
+
+# Build outputs
 *.o
-kernel/target/*
-bootboot_image/disk-x86.img
+*.a
+*.so
 *.elf
-rust-os-gdb
-*.lock
-utilies/mkbootimg/*
+*.img
+*.tar
+
+# BOOTBOOT artifacts
+/bootboot_image/bootboot.img
+
+# Assembly build artifacts
+/target/asm/
+/target/initrd/
+/target/initrd.tar
+/target/cluu.img
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+*.log

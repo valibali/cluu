@@ -1,0 +1,25 @@
+# Cargo configuration for CLUU microkernel
+
+# Note: build-std is only for our custom targets, not for host testing
+
+# Kernel target configuration
+[target.x86_64-cluu-kernel]
+rustflags = [
+    "-C", "opt-level=0",
+    "-C", "lto=off",
+    "-C", "link-arg=-nostdlib",
+    "-C", "link-arg=-static",
+]
+
+# Userspace target configuration
+[target.x86_64-cluu-user]
+rustflags = [
+    "-C", "opt-level=0",
+    "-C", "lto=off",
+    "-C", "link-arg=-nostdlib",
+    "-C", "link-arg=-static",
+]
+
+# Cargo alias for xtask
+[alias]
+xtask = "run --package xtask --"

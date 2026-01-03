@@ -1,75 +1,36 @@
-/*
- * mykernel/rust/src/main.rs
- *
- * Copyright (C) 2017 - 2022 Vinay Chandra, Valkony Balázs
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
- * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
- * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- *
- * This file is part of the BOOTBOOT Protocol package.
- * @brief A sample BOOTBOOT compatible kernel
- *
- */
+//! CLUU Microkernel
+//!
+//! Minimal kernel entry point for testing the build system.
+//! This will be replaced with proper initialization in Phase 2.
 
-// configure Rust compiler
 #![no_std]
 #![no_main]
 
-// Required for -Z build-std flag.
-extern crate bitflags;
-extern crate log;
-extern crate rlibc;
-extern crate spin;
-extern crate x86_64;
-//extern crate alloc;
+extern crate klibcluu;
 
 use core::panic::PanicInfo;
-//use alloc::string::String;
 
-use arch::kstart;
-use x86_64::instructions::*;
-
-mod arch;
-#[allow(dead_code)]
-#[allow(non_snake_case)]
-#[allow(non_camel_case_types)]
-mod bootboot;
-mod syscall;
-mod utils;
-
-pub use log::{debug, error, info, set_max_level, warn};
-
-///Entry point, called by BOOTBOOT Loader *
-#[unsafe(no_mangle)] // don't mangle the name of this function
+/// Entry point called by BOOTBOOT Loader
+#[no_mangle]
 fn _start() -> ! {
-    //start kernel
-    kstart();
+    // TODO: Initialize kernel subsystems
+    // This is a placeholder for Phase 2 implementation
+
+    loop {
+        // Halt CPU
+        unsafe {
+            core::arch::asm!("hlt");
+        }
+    }
 }
 
-/// Custom panic handler that prints the error message and enters an infinite loop.
+/// Panic handler
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    serial_println!("Error: {}", info);
-
-    // Enter an infinite loop to halt the execution
+fn panic(_info: &PanicInfo) -> ! {
+    // TODO: Use klibcluu debug output when initialized
     loop {
-        hlt();
+        unsafe {
+            core::arch::asm!("hlt");
+        }
     }
 }

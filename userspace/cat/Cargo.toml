@@ -1,0 +1,14 @@
+[package]
+name = "cluu-cat"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU cat utility"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "cat"
+path = "src/main.rs"

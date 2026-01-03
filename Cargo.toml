@@ -1,0 +1,66 @@
+# CLUU Microkernel Workspace
+# Complete workspace structure following SOLID principles
+
+[workspace]
+resolver = "2"
+members = [
+    # Build orchestration
+    "xtask",
+
+    # Kernel
+    "kernel",
+    "klibcluu",
+
+    # Userspace
+    "userspace/libcluu",
+    "userspace/init",
+    "userspace/procmgr",
+    "userspace/vfs",
+    "userspace/ramfs",
+    "userspace/console",
+    "userspace/shell",
+    "userspace/cat",
+]
+
+# Exclude xtask from default members (it uses std)
+default-members = [
+    "kernel",
+    "klibcluu",
+    "userspace/libcluu",
+    "userspace/init",
+    "userspace/procmgr",
+    "userspace/vfs",
+    "userspace/ramfs",
+    "userspace/console",
+    "userspace/shell",
+    "userspace/cat",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[workspace.dependencies]
+# Core dependencies
+bitflags = "2.4"
+spin = "0.9"
+log = "0.4"
+
+# x86_64 architecture support
+x86_64 = "0.15"
+
+# Testing
+proptest = "1.4"
+
+# Profile configuration (applies to entire workspace)
+[profile.dev]
+opt-level = 0
+lto = false
+panic = "abort"
+
+[profile.release]
+opt-level = 2
+lto = true
+panic = "abort"

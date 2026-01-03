@@ -1,0 +1,14 @@
+[package]
+name = "cluu-console"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU console driver (framebuffer + keyboard)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "console"
+path = "src/main.rs"
