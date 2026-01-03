@@ -14,8 +14,8 @@
   "features": "-mmx",
   "pre-link-args": {
     "ld.lld": [
-      "--script=./link.ld",
-      "./font.o"
+      "-nostartfiles",
+      "--script=./link.ld"
     ]
   }
 }
