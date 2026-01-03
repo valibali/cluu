@@ -1,0 +1,8 @@
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2021"
+description = "Simple userspace program demonstrating libcluu syscall wrappers"
+
+[dependencies]
+libcluu = { path = "../libcluu" }

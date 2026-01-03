@@ -1,12 +1,16 @@
 //! Userspace runtime - entry point and panic handler
 
+#[cfg(all(not(feature = "std"), not(test)))]
 use core::panic::PanicInfo;
-use crate::syscall::sys_thread_exit;
+
+#[cfg(all(not(feature = "std"), not(test)))]
+use crate::syscall::thread_exit;
 
 /// Entry point for userspace programs
 ///
 /// This is called by the kernel after loading the program.
 /// It sets up the runtime and calls main().
+#[cfg(all(not(feature = "std"), not(test)))]
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
@@ -15,13 +19,13 @@ pub extern "C" fn _start() -> ! {
     }
 
     let exit_code = unsafe { main() };
-    sys_thread_exit(exit_code);
+    thread_exit(exit_code);
 }
 
 /// Panic handler for userspace
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(feature = "std"), not(test)))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     // TODO: Print panic info via syscall
-    sys_thread_exit(-1);
+    thread_exit(-1);
 }

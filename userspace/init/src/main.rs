@@ -14,6 +14,6 @@ pub extern "C" fn main() -> i32 {
 
     // For now, just loop
     loop {
-        syscall::sys_yield();
+        let _ = syscall::yield_cpu();
     }
 }

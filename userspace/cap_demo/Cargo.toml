@@ -1,0 +1,8 @@
+[package]
+name = "cap-demo"
+version = "0.1.0"
+edition = "2021"
+description = "Demonstrates capability token operations"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
