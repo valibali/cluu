@@ -21,3 +21,5 @@ crate-type = ["rlib"]
 [features]
 default = []
 test-mock = []
+log-debug = []  # Enable DEBUG level logging (debug builds only)
+log-trace = []  # Enable TRACE level logging (debug builds only, very verbose)

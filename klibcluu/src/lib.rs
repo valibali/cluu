@@ -9,11 +9,16 @@
 #![no_std]
 #![cfg_attr(test, allow(unused))]
 
-pub mod debug;
+pub mod logger;
 pub mod sync;
+pub mod uart;
 pub mod util;
 
 // Re-exports
-// Note: kprint! and kprintln! are macros exported at crate root via #[macro_export]
-pub use debug::set_debug_output;
 pub use sync::SpinLock;
+
+// IRQ-safe UART driver (COM2 at 0x2F8)
+pub use uart::{Uart, COM2};
+
+// IRQ-safe logger (zero-cost in release builds)
+pub use logger::{LogLevel, init as logger_init, log, error, warn, info, debug, trace, log_hex, log_dec, should_log};
