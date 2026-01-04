@@ -152,7 +152,7 @@ pub extern "C" fn kstart() -> ! {
     klibcluu::logger::info("  [✓] IDT (exception/interrupt handlers)");
     klibcluu::logger::info("  [✓] Syscall mechanism (SYSCALL/SYSRET)");
     klibcluu::logger::info("  [✓] Memory Management (PMM, VMM, physmap)");
-    klibcluu::logger::info("  [✓] Kernel heap (8 MiB, 2MB pages)");
+    klibcluu::logger::info("  [✓] Kernel heap (2 MiB, huge page)");
 
     // Phase 3: Report syscall status
     klibcluu::logger::info("========================================");

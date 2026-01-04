@@ -20,8 +20,8 @@
 //! - IA32_LSTAR: Address of syscall entry point (syscall_entry)
 //! - IA32_FMASK: RFLAGS mask (clear interrupt flag on syscall)
 
-use crate::syscall::{SyscallArgs, SyscallNumber, SyscallResult};
 use crate::error::Error;
+use crate::syscall::{SyscallArgs, SyscallNumber, SyscallResult};
 use x86_64::registers::model_specific::{LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 use x86_64::VirtAddr;
@@ -162,13 +162,25 @@ pub unsafe fn init() {
 
     // For SYSRET, we need the user data selector value minus 8
     // SYSRET adds +16 for CS and +8 for SS to the base value
-    let user_data_base = user_data_sel.0 & !3;  // Remove RPL (bits 0-1)
+    let user_data_base = user_data_sel.0 & !3; // Remove RPL (bits 0-1)
     let user_base_value = user_data_base - 8;
 
     // Log the values for debugging
-    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  kernel_cs=", kernel_cs.0 as u64);
-    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  user_data_sel=", user_data_sel.0 as u64);
-    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  user_base=", user_base_value as u64);
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "  kernel_cs=",
+        kernel_cs.0 as u64,
+    );
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "  user_data_sel=",
+        user_data_sel.0 as u64,
+    );
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "  user_base=",
+        user_base_value as u64,
+    );
 
     // Write STAR MSR directly (bypasses x86_64 crate validation)
     // Format: [63:48] = user_base, [47:32] = kernel_cs
@@ -187,9 +199,9 @@ pub unsafe fn init() {
     SFMask::write(RFlags::INTERRUPT_FLAG);
 
     klibcluu::info("Syscall support initialized");
-    klibcluu::debug("  STAR: kernel_cs=0x08, user_base=0x20");
-    klibcluu::debug("  LSTAR configured");
-    klibcluu::debug("  FMASK: INTERRUPT_FLAG cleared on syscall entry");
+    klibcluu::trace("  STAR: kernel_cs=0x08, user_base=0x20");
+    klibcluu::trace("  LSTAR configured");
+    klibcluu::trace("  FMASK: INTERRUPT_FLAG cleared on syscall entry");
 }
 
 /// Syscall handler called from assembly

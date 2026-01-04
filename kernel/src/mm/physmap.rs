@@ -23,8 +23,8 @@
 //! 0xffff_ffff_ffe02000   ← Kernel Code/Data
 //! ```
 
-use x86_64::{PhysAddr, VirtAddr};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use x86_64::{PhysAddr, VirtAddr};
 
 /// Base virtual address of the physmap
 ///
@@ -58,12 +58,16 @@ pub unsafe fn init(max_phys: u64) {
     MAX_PHYS_ADDR.store(max_phys, Ordering::Relaxed);
 
     klibcluu::info("Physmap configuration:");
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Max physical: 0x", max_phys);
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Virtual base: 0x", PHYS_MAP_BASE);
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "  Max physical: 0x", max_phys);
     klibcluu::log_hex(
-        klibcluu::LogLevel::Info,
+        klibcluu::LogLevel::Trace,
+        "  Virtual base: 0x",
+        PHYS_MAP_BASE,
+    );
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
         "  Virtual end:  0x",
-        PHYS_MAP_BASE + max_phys
+        PHYS_MAP_BASE + max_phys,
     );
 }
 

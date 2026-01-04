@@ -3,7 +3,7 @@
 //! Manages physical frames using a bitmap allocator.
 //! Returns physical addresses that can be accessed via BOOTBOOT's identity mapping.
 
-use crate::bootboot::{BOOTBOOT, MMapEnt};
+use crate::bootboot::{MMapEnt, BOOTBOOT};
 use crate::mm::boot::info::BootInfoProvider;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -25,10 +25,7 @@ static USED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Parses BOOTBOOT memory map and marks free regions in the bitmap
 /// Reserves all system regions: low memory, kernel, initrd, BOOTBOOT, framebuffer
-pub unsafe fn init(
-    bootboot: &BOOTBOOT,
-    boot_info: &dyn BootInfoProvider,
-) {
+pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
     klibcluu::info("Initializing Physical Memory Manager...");
 
     // Get kernel range from boot info
@@ -83,7 +80,11 @@ pub unsafe fn init(
     for frame in low_mem_start_frame..low_mem_end_frame {
         mark_used(frame);
     }
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Reserved low memory: 0x0-0x", LOW_MEMORY_RESERVE);
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "  Reserved low memory: 0x0-0x",
+        LOW_MEMORY_RESERVE,
+    );
 
     // 2. Reserve kernel physical memory
     let kernel_start_frame = (kernel_phys_start / 4096) as usize;
@@ -91,8 +92,12 @@ pub unsafe fn init(
     for frame in kernel_start_frame..kernel_end_frame {
         mark_used(frame);
     }
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Reserved kernel: 0x", kernel_phys_start);
-    klibcluu::log_hex(klibcluu::LogLevel::Info, " to 0x", kernel_phys_end);
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "  Reserved kernel: 0x",
+        kernel_phys_start,
+    );
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, " to 0x", kernel_phys_end);
 
     // 3. Reserve initrd (initial ramdisk)
     if let Some((initrd_ptr, initrd_size)) = boot_info.initrd_location() {
@@ -101,8 +106,16 @@ pub unsafe fn init(
         for frame in initrd_start_frame..initrd_end_frame {
             mark_used(frame);
         }
-        klibcluu::log_hex(klibcluu::LogLevel::Info, "  Reserved initrd: 0x", initrd_ptr);
-        klibcluu::log_hex(klibcluu::LogLevel::Info, " to 0x", initrd_ptr + initrd_size);
+        klibcluu::log_hex(
+            klibcluu::LogLevel::Trace,
+            "  Reserved initrd: 0x",
+            initrd_ptr,
+        );
+        klibcluu::log_hex(
+            klibcluu::LogLevel::Trace,
+            " to 0x",
+            initrd_ptr + initrd_size,
+        );
     }
 
     // 4. Reserve BOOTBOOT structure (includes memory map)
@@ -114,8 +127,16 @@ pub unsafe fn init(
         for frame in bootboot_start_frame..bootboot_end_frame {
             mark_used(frame);
         }
-        klibcluu::log_hex(klibcluu::LogLevel::Info, "  Reserved BOOTBOOT: 0x", bootboot_phys);
-        klibcluu::log_hex(klibcluu::LogLevel::Info, " to 0x", bootboot_phys + bootboot_size);
+        klibcluu::log_hex(
+            klibcluu::LogLevel::Trace,
+            "  Reserved BOOTBOOT: 0x",
+            bootboot_phys,
+        );
+        klibcluu::log_hex(
+            klibcluu::LogLevel::Trace,
+            " to 0x",
+            bootboot_phys + bootboot_size,
+        );
     }
 
     // 5. Reserve framebuffer
@@ -125,13 +146,21 @@ pub unsafe fn init(
         for frame in fb_start_frame..fb_end_frame {
             mark_used(frame);
         }
-        klibcluu::log_hex(klibcluu::LogLevel::Info, "  Reserved framebuffer: 0x", fb_phys);
-        klibcluu::log_hex(klibcluu::LogLevel::Info, " to 0x", fb_phys + fb_size);
+        klibcluu::log_hex(
+            klibcluu::LogLevel::Trace,
+            "  Reserved framebuffer: 0x",
+            fb_phys,
+        );
+        klibcluu::log_hex(klibcluu::LogLevel::Trace, " to 0x", fb_phys + fb_size);
     }
 
     let used = USED_FRAMES.load(Ordering::SeqCst);
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "  PMM initialized: ", used as u64);
-    klibcluu::log_dec(klibcluu::LogLevel::Info, " / ", total_free_frames as u64);
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Trace,
+        "  PMM initialized: ",
+        used as u64,
+    );
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, " / ", total_free_frames as u64);
     klibcluu::info(" frames");
 }
 

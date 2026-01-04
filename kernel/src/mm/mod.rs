@@ -95,25 +95,16 @@ pub mod mock;
 
 // Re-export key types for convenience
 pub use traits::{
-    PageAllocator,
-    AllocationStats,
+    AddressSpaceManager, AllocationStats, CreateSpaceError, DestroySpaceError, MapError,
+    PageAllocator, PageFaultError, PageFaultErrorCode, PageFaultHandler, PageFlags, UnmapError,
     VirtualMemoryMapper,
-    AddressSpaceManager,
-    PageFaultHandler,
-    PageFlags,
-    PageFaultErrorCode,
-    MapError,
-    UnmapError,
-    CreateSpaceError,
-    DestroySpaceError,
-    PageFaultError,
 };
 
-pub use pmm::{BuddyAllocator, MemoryRegion};
-pub use vmm::PageTableManager;
-pub use space::{AddressSpace, HeapRegion, MemoryRegion as SpaceMemoryRegion, layout};
 pub use fault::FaultHandler;
 pub use mock::MockPageAllocator;
+pub use pmm::{BuddyAllocator, MemoryRegion};
+pub use space::{layout, AddressSpace, HeapRegion, MemoryRegion as SpaceMemoryRegion};
+pub use vmm::PageTableManager;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // High-Level Memory Management Initialization
@@ -149,9 +140,17 @@ pub unsafe fn init(boot_info: &dyn boot::BootInfoProvider) {
     let max_phys = boot_info.max_physical_address();
     let (kernel_phys_start, kernel_phys_end) = boot_info.kernel_physical_range();
 
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Max physical address: 0x", max_phys);
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Kernel range: 0x", kernel_phys_start);
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "    to 0x", kernel_phys_end);
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "  Max physical address: 0x",
+        max_phys,
+    );
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "  Kernel range: 0x",
+        kernel_phys_start,
+    );
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "    to 0x", kernel_phys_end);
 
     // Step 2: Initialize physmap module
     klibcluu::info("Step 2: Initializing physmap...");
@@ -166,7 +165,11 @@ pub unsafe fn init(boot_info: &dyn boot::BootInfoProvider) {
         vmm::create_initial_page_tables(boot_info, max_phys, kernel_phys_start, kernel_phys_end)
     };
 
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "  PML4 at: 0x", pml4_phys.as_u64());
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "  PML4 at: 0x",
+        pml4_phys.as_u64(),
+    );
 
     // Step 4: Switch CR3 to new page tables
     klibcluu::info("Step 4: Switching to new page tables...");

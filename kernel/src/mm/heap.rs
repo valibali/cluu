@@ -59,13 +59,14 @@ use linked_list_allocator::LockedHeap;
 /// - Kernel:     0xffff_ffff_ffe0_0000 - ...
 pub const HEAP_START: u64 = 0xffff_ffff_c000_0000;
 
-/// Size of the kernel heap in bytes (8 MiB)
+/// Size of the kernel heap in bytes (2 MiB)
 ///
 /// Size rationale:
-/// - Each thread needs ~64KB stack (allocated from heap)
-/// - 8 MiB supports ~100 threads + kernel data structures
-/// - Can be increased if needed (just a constant change)
-pub const HEAP_SIZE: u64 = 8 * 1024 * 1024; // 8 MiB
+/// - Limited by BOOTBOOT's kernel virtual address space
+/// - 2 MiB = 1 huge page, efficient mapping
+/// - Enough for scheduler data structures and moderate thread count
+/// - Can be increased when we implement our own address space management
+pub const HEAP_SIZE: u64 = 2 * 1024 * 1024; // 2 MiB
 
 /// Global allocator instance
 ///
@@ -106,10 +107,14 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 /// ```
 pub unsafe fn init() -> Result<(), &'static str> {
     klibcluu::info("Initializing kernel heap...");
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Heap range: 0x", HEAP_START);
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "    to 0x", HEAP_START + HEAP_SIZE - 1);
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "  Size: ", HEAP_SIZE / 1024);
-    klibcluu::info(" KiB");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "  Heap range: 0x", HEAP_START);
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "    to 0x",
+        HEAP_START + HEAP_SIZE - 1,
+    );
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "  Size: ", HEAP_SIZE / 1024);
+    klibcluu::trace(" KiB");
 
     // Map heap region to physical frames using VMM
     // This allocates frames from PMM and sets up page table entries
