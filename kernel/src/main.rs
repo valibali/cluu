@@ -127,7 +127,7 @@ pub extern "C" fn kstart() -> ! {
 
     // Phase 2: Memory Management Setup
     // Create bootloader adapter (abstraction layer)
-    let bootboot_ptr = unsafe { &bootboot::bootboot as *const bootboot::BOOTBOOT };
+    let bootboot_ptr = unsafe { &raw const bootboot::bootboot as *const bootboot::BOOTBOOT };
     let boot_info = unsafe { mm::boot::BootbootAdapter::new(bootboot_ptr) };
 
     // Initialize memory management (bootloader-agnostic)

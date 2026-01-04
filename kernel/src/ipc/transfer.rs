@@ -21,7 +21,7 @@
 use crate::error::Error;
 use crate::ipc::traits::MessageTransfer;
 use crate::mm::traits::{PageAllocator, PageFlags, VirtualMemoryMapper};
-use x86_64::{PhysAddr, VirtAddr};
+use x86_64::VirtAddr;
 
 /// Buffer Transfer Implementation
 ///
@@ -88,9 +88,9 @@ where
 {
     fn copy_buffer(
         &mut self,
-        from_space: usize,
+        _from_space: usize,
         from_addr: VirtAddr,
-        to_space: usize,
+        _to_space: usize,
         to_addr: VirtAddr,
         len: usize,
     ) -> Result<(), Error> {
@@ -135,12 +135,12 @@ where
 
     fn grant_buffer(
         &mut self,
-        from_space: usize,
+        _from_space: usize,
         from_addr: VirtAddr,
-        to_space: usize,
+        _to_space: usize,
         to_addr: VirtAddr,
         len: usize,
-        flags: PageFlags,
+        _flags: PageFlags,
     ) -> Result<(), Error> {
         // Validate page alignment
         if !Self::is_page_aligned(from_addr, len) || !Self::is_page_aligned(to_addr, len) {
@@ -176,12 +176,12 @@ where
 
     fn map_buffer(
         &mut self,
-        from_space: usize,
+        _from_space: usize,
         from_addr: VirtAddr,
-        to_space: usize,
+        _to_space: usize,
         to_addr: VirtAddr,
         len: usize,
-        flags: PageFlags,
+        _flags: PageFlags,
     ) -> Result<(), Error> {
         // Validate page alignment
         if !Self::is_page_aligned(from_addr, len) || !Self::is_page_aligned(to_addr, len) {

@@ -4,8 +4,8 @@
 //! This is the concrete adapter for BOOTBOOT - other bootloaders will
 //! have their own adapters.
 
-use crate::bootboot::{BOOTBOOT, MMapEnt, MMAP_FREE};
-use super::info::{BootInfoProvider, BootMemoryRegion, MemoryRegionType};
+use crate::bootboot::{BOOTBOOT, MMapEnt};
+use super::info::BootInfoProvider;
 
 /// BOOTBOOT adapter
 ///
@@ -87,7 +87,7 @@ impl BootInfoProvider for BootbootAdapter {
         // calculate it from the virtual address and the known mapping.
         //
         // The BOOTBOOT structure itself is at a known location, so we can use that.
-        let bootboot_virt = self.bootboot_ptr as u64;
+        let _bootboot_virt = self.bootboot_ptr as u64;
         const BOOTBOOT_VIRT: u64 = 0xffffffffffe00000; // From linker script
 
         // If bootboot is identity mapped, then we know the offset
@@ -104,7 +104,7 @@ impl BootInfoProvider for BootbootAdapter {
         const KERNEL_VIRT_BASE: u64 = 0xffffffffffe02000; // From linker script
 
         // Calculate offset of text_start from base
-        let text_offset = kernel_virt_start - KERNEL_VIRT_BASE;
+        let _text_offset = kernel_virt_start - KERNEL_VIRT_BASE;
 
         // The kernel physical start needs to be determined from BOOTBOOT
         // BOOTBOOT loads the kernel and sets up page tables
@@ -114,7 +114,7 @@ impl BootInfoProvider for BootbootAdapter {
         // The kernel is loaded at physical address that BOOTBOOT chose
         // We need to read this from the page tables
         use x86_64::registers::control::Cr3;
-        use x86_64::structures::paging::{PageTable, PageTableFlags};
+        use x86_64::structures::paging::PageTable;
 
         let (pml4_frame, _) = Cr3::read();
         let pml4_phys = pml4_frame.start_address().as_u64();
@@ -134,7 +134,7 @@ impl BootInfoProvider for BootbootAdapter {
         let pde = pd[511].addr().as_u64();
 
         // Check if it's a huge page (bit 7 set) or PT pointer
-        let pde_flags = pd[511].flags();
+        let _pde_flags = pd[511].flags();
         let is_huge_page = (pde & 0x80) != 0;
 
         let kernel_phys_base = if is_huge_page {

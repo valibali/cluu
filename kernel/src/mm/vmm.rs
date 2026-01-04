@@ -868,8 +868,8 @@ pub unsafe fn switch_to_page_tables(pml4_phys: PhysAddr) {
 /// - Virtual range must not overlap existing mappings
 /// - Must use current CR3 (kernel page tables)
 pub unsafe fn map_heap_region(virt_start: u64, size: u64) -> Result<(), &'static str> {
-    use core::ptr::write_bytes;
-    use x86_64::registers::control::Cr3;
+    
+    
 
     let page_count = (size + 0xFFF) / 0x1000;
 
@@ -999,8 +999,8 @@ unsafe fn map_4kb_region(
     start_phys: u64,
     end_phys: u64,
     page_count: &mut u64,
-    kernel_virt_base: u64,
-    kernel_phys_start: u64,
+    _kernel_virt_base: u64,
+    _kernel_phys_start: u64,
 ) {
     use core::ptr::write_bytes;
 

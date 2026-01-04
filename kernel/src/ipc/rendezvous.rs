@@ -157,7 +157,7 @@ impl RendezvousPoint {
 impl IpcEndpoint for RendezvousPoint {
     fn send(&mut self, from: ThreadId, msg: &Message) -> Result<(), Error> {
         // Check if a receiver is waiting
-        if let Some(receiver_id) = self.waiting_receivers.pop_front() {
+        if let Some(_receiver_id) = self.waiting_receivers.pop_front() {
             // Rendezvous! Receiver was waiting for a message.
             // In a full implementation, we would:
             // 1. Unblock the receiver thread

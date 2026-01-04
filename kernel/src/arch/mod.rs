@@ -2,8 +2,6 @@
 #[macro_use]
 pub mod x86_64;
 
-#[cfg(target_arch = "x86_64")]
-use self::x86_64::*;
 
 // NOTE: kstart() has been replaced by _start() in main.rs
 // The old kstart() depended on peripheral module (framebuffer)

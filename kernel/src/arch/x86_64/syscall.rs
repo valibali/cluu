@@ -21,12 +21,12 @@
 //! - IA32_FMASK: RFLAGS mask (clear interrupt flag on syscall)
 
 use crate::error::Error;
-use crate::syscall::{SyscallArgs, SyscallNumber, SyscallResult};
-use x86_64::registers::model_specific::{LStar, SFMask, Star};
+use crate::syscall::{SyscallArgs, SyscallNumber};
+use x86_64::registers::model_specific::{LStar, SFMask};
 use x86_64::registers::rflags::RFlags;
 use x86_64::VirtAddr;
 
-/// External assembly symbols
+// External assembly symbols
 extern "C" {
     /// Syscall entry point (defined in syscall.asm)
     fn syscall_entry();
@@ -191,7 +191,7 @@ pub unsafe fn init() {
 
     // Configure IA32_LSTAR MSR (Long mode SYSCALL Target Address)
     // This is where the CPU jumps when SYSCALL is executed
-    LStar::write(VirtAddr::new(syscall_entry as u64));
+    LStar::write(VirtAddr::new(syscall_entry as *const () as u64));
 
     // Configure IA32_FMASK MSR (SYSCALL Flag Mask)
     // These flags will be CLEARED from RFLAGS on syscall entry

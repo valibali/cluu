@@ -218,7 +218,7 @@ impl BuddyAllocator {
     /// Returns the address of the allocated block.
     /// The buddy of each split is added to the appropriate free list.
     fn split_block(&mut self, addr: u64, higher_order: usize, target_order: usize) -> PhysAddr {
-        let mut current_addr = addr;
+        let current_addr = addr;
         let mut current_order = higher_order;
 
         // Split down to target order

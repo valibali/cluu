@@ -177,8 +177,8 @@ where
 {
     fn handle_fault(
         &mut self,
-        addr: VirtAddr,
-        error_code: PageFaultErrorCode,
+        _addr: VirtAddr,
+        _error_code: PageFaultErrorCode,
     ) -> Result<(), PageFaultError> {
         // This trait method doesn't have access to AddressSpace.
         // In practice, the IDT handler would call our handle() method directly.
