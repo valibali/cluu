@@ -379,6 +379,472 @@ impl<'a, A: PageAllocator> VirtualMemoryMapper for PageTableManager<'a, A> {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Initial Page Table Creation
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Create initial kernel page tables with physmap
+///
+/// This function creates new page tables from scratch with:
+/// - Kernel mapped at high address (preserve BOOTBOOT mapping)
+/// - Physmap: All physical RAM at 0xffff_8000_0000_0000
+///
+/// **Hybrid Page Size Strategy:**
+/// - 2MB huge pages for aligned bulk RAM (performance)
+/// - 4KB pages for unaligned regions, edges, and MMIO (correctness)
+///
+/// # Arguments
+///
+/// * `max_phys` - Maximum physical address to map in physmap
+/// * `kernel_phys_start` - Physical address of kernel start
+/// * `kernel_phys_end` - Physical address of kernel end
+///
+/// # Returns
+///
+/// Physical address of PML4 (ready to load into CR3)
+///
+/// # Safety
+///
+/// Must be called during bootstrap before switching page tables.
+/// Uses BOOTBOOT identity mapping to access allocated pages.
+pub unsafe fn create_initial_page_tables(
+    boot_info: &dyn crate::mm::boot::BootInfoProvider,
+    max_phys: u64,
+    kernel_phys_start: u64,
+    kernel_phys_end: u64,
+) -> PhysAddr {
+    use crate::mm::physmap::PHYS_MAP_BASE;
+    use core::ptr::write_bytes;
+
+    // Linker symbols for kernel virtual base
+    extern "C" {
+        static __text_start: u8;
+    }
+
+    // Step 1: Initialize PMM (Physical Memory Manager)
+    // Get BOOTBOOT pointer to parse memory map
+    extern "C" {
+        static bootboot: crate::bootboot::BOOTBOOT;
+    }
+    let bootboot_ptr = unsafe { &bootboot as *const _ };
+    unsafe {
+        crate::mm::pmm_simple::init(&*bootboot_ptr, boot_info);
+    }
+
+    klibcluu::info("Creating initial page tables (4KB pages only)...");
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Max physical address: 0x", max_phys);
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Kernel phys range: 0x", kernel_phys_start);
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "    to 0x", kernel_phys_end);
+
+    // Get kernel virtual base from linker symbol and align to page boundary
+    let kernel_virt_base_unaligned = unsafe { &__text_start as *const u8 as u64 };
+    let kernel_virt_base = kernel_virt_base_unaligned & !0xFFF; // Round down to page
+    let kernel_phys_start_aligned = kernel_phys_start & !0xFFF; // Round down to page
+
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  Kernel virt base (unaligned): 0x", kernel_virt_base_unaligned);
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  Kernel virt base (aligned): 0x", kernel_virt_base);
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  Kernel phys start (aligned): 0x", kernel_phys_start_aligned);
+
+    // Step 2: Allocate PML4 from PMM (returns physical address)
+    let pml4_phys_addr = crate::mm::pmm_simple::alloc_frame()
+        .expect("Failed to allocate PML4");
+    let pml4_phys = PhysAddr::new(pml4_phys_addr);
+
+    // Access PML4 through BOOTBOOT's identity mapping (physical address == virtual address for identity-mapped regions)
+    let pml4 = unsafe { &mut *(pml4_phys_addr as *mut [u64; 512]) };
+    unsafe { write_bytes(pml4.as_mut_ptr(), 0, 4096) };
+
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  PML4 at: 0x", pml4_phys.as_u64());
+
+    // Map physmap region (0xffff_8000_0000_0000)
+    let physmap_pml4_idx = ((PHYS_MAP_BASE >> 39) & 0x1FF) as usize;
+
+    // Allocate PDPT for physmap from PMM
+    let physmap_pdpt_phys = crate::mm::pmm_simple::alloc_frame()
+        .expect("Failed to allocate PDPT for physmap");
+    let physmap_pdpt = unsafe { &mut *(physmap_pdpt_phys as *mut [u64; 512]) };
+    unsafe { write_bytes(physmap_pdpt.as_mut_ptr(), 0, 4096) };
+    pml4[physmap_pml4_idx] = physmap_pdpt_phys | 0x3;
+
+    // Map physmap using hybrid approach
+    // Use 2MB pages for aligned regions, 4KB for edges
+    let mut total_2mb_pages = 0;
+    let mut total_4kb_pages = 0;
+
+    // Calculate aligned 2MB region
+    let aligned_end = max_phys & !(0x1F_FFFF); // Round down to 2MB
+    let partial_start = aligned_end;
+    let partial_size = max_phys - aligned_end;
+
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  Aligned region: 0x0 - 0x", aligned_end);
+    if partial_size > 0 {
+        klibcluu::log_hex(klibcluu::LogLevel::Debug, "  Partial region: 0x", partial_start);
+        klibcluu::log_hex(klibcluu::LogLevel::Debug, "    to 0x", max_phys);
+    }
+
+    // Map aligned region with 2MB pages
+    if aligned_end > 0 {
+        let gb_count = ((aligned_end + 0x3FFF_FFFF) / 0x4000_0000) as usize;
+
+        for gb_idx in 0..gb_count.min(512) {
+            let pd_phys = crate::mm::pmm_simple::alloc_frame()
+                .expect("Failed to allocate PD");
+            let pd = unsafe { &mut *(pd_phys as *mut [u64; 512]) };
+            unsafe { write_bytes(pd.as_mut_ptr(), 0, 4096) };
+            physmap_pdpt[gb_idx] = pd_phys | 0x3;
+            let base_phys = (gb_idx as u64) * 0x4000_0000;
+
+            for pd_idx in 0..512 {
+                let phys_addr = base_phys + (pd_idx as u64) * 0x20_0000;
+                if phys_addr < aligned_end {
+                    // 2MB huge page: Present | Writable | Huge Page (0x80)
+                    pd[pd_idx] = phys_addr | 0x83;
+                    total_2mb_pages += 1;
+                }
+            }
+        }
+    }
+
+    // Map partial region with 4KB pages if needed
+    if partial_size > 0 {
+        unsafe {
+            map_4kb_region(
+                physmap_pdpt,
+                partial_start,
+                max_phys,
+                &mut total_4kb_pages,
+                kernel_virt_base,
+                kernel_phys_start,
+            );
+        }
+    }
+
+    klibcluu::info("  Physmap mapped:");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "    2MB pages: ", total_2mb_pages);
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "    (", (total_2mb_pages * 2) / 1024);
+    klibcluu::info(" GB)");
+    if total_4kb_pages > 0 {
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "    4KB pages: ", total_4kb_pages);
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "    (", (total_4kb_pages * 4) / 1024);
+        klibcluu::info(" MB)");
+    }
+
+    // Map kernel at high address using 4KB pages
+    // We MUST use 4KB pages because the virtual offset != physical offset
+    // (e.g., virtual 0xffffffffffe02078 has offset 0x2078, but physical 0xe000078 has offset 0x78)
+    let kernel_pml4_idx = 511;
+    let kernel_pdpt_phys = crate::mm::pmm_simple::alloc_frame()
+        .expect("Failed to allocate kernel PDPT");
+    let kernel_pdpt = unsafe { &mut *(kernel_pdpt_phys as *mut [u64; 512]) };
+    unsafe { write_bytes(kernel_pdpt.as_mut_ptr(), 0, 4096) };
+    pml4[kernel_pml4_idx] = kernel_pdpt_phys | 0x3;
+
+    let kernel_pd_phys = crate::mm::pmm_simple::alloc_frame()
+        .expect("Failed to allocate kernel PD");
+    let kernel_pd = unsafe { &mut *(kernel_pd_phys as *mut [u64; 512]) };
+    unsafe { write_bytes(kernel_pd.as_mut_ptr(), 0, 4096) };
+    kernel_pdpt[511] = kernel_pd_phys | 0x3;
+
+    // Map kernel using 4KB pages
+    // Kernel virtual range: [kernel_virt_base, kernel_virt_base + size)
+    // Kernel physical range: [kernel_phys_start, kernel_phys_end)
+    // Mapping: virt_page → phys_page where phys_page = kernel_phys_start + (virt_page - kernel_virt_base)
+
+    let kernel_size = kernel_phys_end - kernel_phys_start;
+    let kernel_virt_end = kernel_virt_base.wrapping_add(kernel_size);
+
+    // Calculate how many 2MB blocks we need (avoid wrapping arithmetic in loop condition!)
+    let kernel_size_rounded = (kernel_size + 0x1F_FFFF) & !(0x1F_FFFF); // Round up to 2MB
+    let num_2mb_blocks = (kernel_size_rounded / 0x20_0000) as usize;
+
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  Kernel virt range: 0x", kernel_virt_base);
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "    to 0x", kernel_virt_end);
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  Kernel size: 0x", kernel_size);
+    klibcluu::log_dec(klibcluu::LogLevel::Debug, "  Need ", num_2mb_blocks as u64);
+    klibcluu::info(" 2MB blocks");
+
+    // For each 2MB block (use counter instead of address comparison to avoid wrapping issues)
+    let virt_start_2mb = kernel_virt_base & !(0x1F_FFFF);
+    let mut first_pt_slice: Option<&[u64]> = None;
+    for block_idx in 0..num_2mb_blocks {
+        let virt_2mb = virt_start_2mb.wrapping_add(block_idx as u64 * 0x20_0000);
+        // Calculate PD index from virtual address
+        let pd_idx = ((virt_2mb >> 21) & 0x1FF) as usize;
+
+        if block_idx == 0 {
+            klibcluu::log_hex(klibcluu::LogLevel::Debug, "  First 2MB block at virt: 0x", virt_2mb);
+            klibcluu::log_dec(klibcluu::LogLevel::Debug, "    PD index: ", pd_idx as u64);
+        }
+
+        // Allocate PT for this 2MB block from PMM
+        let pt_phys = crate::mm::pmm_simple::alloc_frame()
+            .expect("Failed to allocate kernel PT");
+        let pt = unsafe { &mut *(pt_phys as *mut [u64; 512]) };
+        unsafe { write_bytes(pt.as_mut_ptr(), 0, 4096) };
+        kernel_pd[pd_idx] = pt_phys | 0x3;
+
+        // Map 4KB pages in this PT
+        let mut mapped_count = 0;
+        for pt_idx in 0..512 {
+            let virt_addr = virt_2mb.wrapping_add(pt_idx as u64 * 0x1000);
+
+            // Only map pages that are within the kernel virtual range
+            if virt_addr >= kernel_virt_base && virt_addr < kernel_virt_end {
+                // Calculate corresponding physical address using aligned base addresses
+                let phys_addr = kernel_phys_start_aligned.wrapping_add(virt_addr.wrapping_sub(kernel_virt_base));
+                pt[pt_idx] = phys_addr | 0x3; // Present | Writable
+                mapped_count += 1;
+
+                // Log critical pages (stack page is around pt_idx 0x3c = 60)
+                if block_idx == 0 && (pt_idx == 0x3c || pt_idx == 0 || pt_idx == 2) {
+                    klibcluu::log_dec(klibcluu::LogLevel::Debug, "    PT[", pt_idx as u64);
+                    klibcluu::log_hex(klibcluu::LogLevel::Debug, "] virt=0x", virt_addr);
+                    klibcluu::log_hex(klibcluu::LogLevel::Debug, " -> phys=0x", phys_addr);
+                }
+            }
+        }
+
+        if block_idx == 0 {
+            klibcluu::log_dec(klibcluu::LogLevel::Debug, "    Mapped ", mapped_count as u64);
+            klibcluu::info(" pages in first block");
+            // Save first PT for verification
+            first_pt_slice = Some(pt);
+        }
+    }
+
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "  Kernel mapped with 4KB pages (", num_2mb_blocks as u64);
+    klibcluu::info(" blocks)");
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "  PML4 ready at: 0x", pml4_phys.as_u64());
+
+    // CRITICAL VERIFICATION: Check that essential mappings are in place
+    // before switching CR3, otherwise we'll triple fault!
+    klibcluu::info("Verifying critical mappings...");
+
+    // Test 1: Verify current stack is mapped
+    let rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nostack, nomem)); }
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Current RSP: 0x", rsp);
+
+    // Calculate which page the stack is on
+    let stack_page = rsp & !0xFFF;
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Stack page: 0x", stack_page);
+
+    // Check if stack_page was actually in the mapped range during loop
+    if stack_page < kernel_virt_base {
+        klibcluu::error("  ERROR: Stack page is BEFORE kernel_virt_base!");
+        panic!("Stack page not mapped - too low");
+    }
+    if stack_page >= kernel_virt_end {
+        klibcluu::error("  ERROR: Stack page is AFTER kernel_virt_end!");
+        klibcluu::log_hex(klibcluu::LogLevel::Error, "    kernel_virt_end: 0x", kernel_virt_end);
+        panic!("Stack page not mapped - too high");
+    }
+
+    // Test 2: Read back the page table entry for the stack page to verify it was written
+    klibcluu::info("  Verifying stack page table entry...");
+    let stack_pml4_idx = ((stack_page >> 39) & 0x1FF) as usize;
+    let stack_pdpt_idx = ((stack_page >> 30) & 0x1FF) as usize;
+    let stack_pd_idx = ((stack_page >> 21) & 0x1FF) as usize;
+    let stack_pt_idx = ((stack_page >> 12) & 0x1FF) as usize;
+
+    klibcluu::log_dec(klibcluu::LogLevel::Debug, "    Stack indices: PML4[", stack_pml4_idx as u64);
+    klibcluu::log_dec(klibcluu::LogLevel::Debug, "] PDPT[", stack_pdpt_idx as u64);
+    klibcluu::log_dec(klibcluu::LogLevel::Debug, "] PD[", stack_pd_idx as u64);
+    klibcluu::log_dec(klibcluu::LogLevel::Debug, "] PT[", stack_pt_idx as u64);
+    klibcluu::info("]");
+
+    // Read the PT entry for the stack
+    // We can use the virtual address slices we already have!
+    // Stack should be at: PML4[511] -> PDPT[511] -> PD[511] -> PT[60]
+    let pml4_entry = pml4[stack_pml4_idx];
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "    PML4[511] entry: 0x", pml4_entry);
+
+    if pml4_entry & 0x1 == 0 {
+        klibcluu::error("  ERROR: PML4[511] entry NOT PRESENT!");
+        panic!("Kernel PML4 entry not present");
+    }
+
+    let pdpt_entry = kernel_pdpt[stack_pdpt_idx];
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "    PDPT[511] entry: 0x", pdpt_entry);
+
+    if pdpt_entry & 0x1 == 0 {
+        klibcluu::error("  ERROR: PDPT[511] entry NOT PRESENT!");
+        panic!("Kernel PDPT entry not present");
+    }
+
+    let pd_entry = kernel_pd[stack_pd_idx];
+    klibcluu::log_hex(klibcluu::LogLevel::Debug, "    PD[511] entry: 0x", pd_entry);
+
+    if pd_entry & 0x1 == 0 {
+        klibcluu::error("  ERROR: PD[511] entry NOT PRESENT!");
+        panic!("Kernel PD entry not present");
+    }
+
+    // Verify the actual stack PTE
+    let pt_phys = pd_entry & !0xFFF;
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "    PT phys: 0x", pt_phys);
+
+    if let Some(first_pt) = first_pt_slice {
+        let stack_pte = first_pt[stack_pt_idx];
+        klibcluu::log_hex(klibcluu::LogLevel::Info, "    Stack PT[60] entry: 0x", stack_pte);
+
+        if stack_pte & 0x1 == 0 {
+            klibcluu::error("  ERROR: Stack PTE NOT PRESENT!");
+            panic!("Stack page table entry not present");
+        }
+
+        let stack_phys_from_pte = stack_pte & !0xFFF;
+        klibcluu::log_hex(klibcluu::LogLevel::Info, "    Stack maps to phys: 0x", stack_phys_from_pte);
+    }
+
+    klibcluu::info("  Page table hierarchy verified");
+
+    // Check if stack is in kernel range
+    if stack_page >= kernel_virt_base && stack_page < kernel_virt_end {
+        klibcluu::info("  Stack is in kernel range - OK");
+
+        // Calculate what physical address the stack should map to
+        let stack_offset = stack_page.wrapping_sub(kernel_virt_base);
+        let expected_stack_phys = kernel_phys_start.wrapping_add(stack_offset);
+        klibcluu::log_hex(klibcluu::LogLevel::Debug, "    Expected stack phys: 0x", expected_stack_phys);
+    } else {
+        klibcluu::error("  ERROR: Stack is NOT in kernel range!");
+        klibcluu::log_hex(klibcluu::LogLevel::Error, "    Stack page: 0x", stack_page);
+        klibcluu::log_hex(klibcluu::LogLevel::Error, "    Kernel start: 0x", kernel_virt_base);
+        klibcluu::log_hex(klibcluu::LogLevel::Error, "    Kernel end: 0x", kernel_virt_end);
+        panic!("Stack not in mapped kernel range!");
+    }
+
+    // Test 3: Verify current instruction pointer is mapped
+    klibcluu::info("  Verifying RIP page table entry...");
+    let rip: u64;
+    unsafe { core::arch::asm!("lea {}, [rip]", out(reg) rip, options(nostack, nomem)); }
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "  Current RIP: 0x", rip);
+
+    let rip_page = rip & !0xFFF;
+    if rip_page >= kernel_virt_base && rip_page < kernel_virt_end {
+        klibcluu::info("  RIP is in kernel range - OK");
+
+        // Verify RIP PTE
+        if let Some(first_pt) = first_pt_slice {
+            let rip_pt_idx = ((rip_page >> 12) & 0x1FF) as usize;
+            let rip_pte = first_pt[rip_pt_idx]; // Same PT as stack (both in kernel)
+            klibcluu::log_hex(klibcluu::LogLevel::Info, "    RIP PT entry: 0x", rip_pte);
+
+            if rip_pte & 0x1 == 0 {
+                klibcluu::error("  ERROR: RIP page table entry NOT PRESENT!");
+                panic!("RIP PTE not present");
+            }
+        }
+    } else {
+        klibcluu::error("  ERROR: RIP is NOT in kernel range!");
+        panic!("Instruction pointer not in mapped kernel range!");
+    }
+
+    klibcluu::info("  All critical mappings verified");
+
+    pml4_phys
+}
+
+/// Switch to new page tables by loading CR3
+///
+/// This is the critical moment where we abandon BOOTBOOT's page tables
+/// and switch to our own with physmap.
+///
+/// # Safety
+///
+/// - New page tables must be properly set up
+/// - Kernel must be mapped in new page tables
+/// - Must be called with interrupts disabled
+pub unsafe fn switch_to_page_tables(pml4_phys: PhysAddr) {
+    use x86_64::registers::control::Cr3;
+    use x86_64::structures::paging::PhysFrame;
+
+    klibcluu::info("Switching CR3 to new page tables...");
+
+    // Ensure all page table writes are visible before CR3 switch
+    core::arch::asm!("mfence", options(nostack, nomem));
+
+    let frame = PhysFrame::containing_address(pml4_phys);
+
+    unsafe {
+        Cr3::write(frame, x86_64::registers::control::Cr3Flags::empty());
+    }
+
+    // DO NOT log here - logging might access unmapped memory!
+    // Success is indicated by not crashing
+}
+
+/// Map a region using 4KB pages
+///
+/// Used for partial regions, MMIO, and other areas requiring fine granularity.
+unsafe fn map_4kb_region(
+    pdpt: &mut [u64],
+    start_phys: u64,
+    end_phys: u64,
+    page_count: &mut u64,
+    kernel_virt_base: u64,
+    kernel_phys_start: u64,
+) {
+    use core::ptr::write_bytes;
+
+    // Calculate which GB this region falls into
+    let start_gb = (start_phys / 0x4000_0000) as usize;
+    let end_gb = ((end_phys - 1) / 0x4000_0000) as usize;
+
+    for gb_idx in start_gb..=end_gb.min(511) {
+        // Allocate or reuse PD for this GB
+        let pd_frame = if pdpt[gb_idx] & 0x1 != 0 {
+            // Already allocated (from 2MB mapping)
+            // Check if it's a huge page or PD
+            if pdpt[gb_idx] & 0x80 != 0 {
+                // It's a 1GB huge page, we need to split it
+                // For now, panic - this shouldn't happen with our allocation strategy
+                panic!("Cannot split 1GB huge page");
+            }
+            (pdpt[gb_idx] & !0xFFF) as *mut u8
+        } else {
+            // Allocate new PD from PMM
+            let pd_phys = crate::mm::pmm_simple::alloc_frame()
+                .expect("Failed to allocate PD for 4KB region");
+            unsafe { write_bytes(pd_phys as *mut u8, 0, 4096) };
+            pdpt[gb_idx] = pd_phys | 0x3;
+            pd_phys as *mut u8
+        };
+
+        let pd = unsafe { core::slice::from_raw_parts_mut(pd_frame as *mut u64, 512) };
+        let gb_base = (gb_idx as u64) * 0x4000_0000;
+
+        // Find which 2MB blocks in this GB need 4KB pages
+        let start_2mb = if start_phys > gb_base {
+            ((start_phys - gb_base) / 0x20_0000) as usize
+        } else {
+            0
+        };
+        let end_2mb = (((end_phys - gb_base).min(0x4000_0000) + 0x1F_FFFF) / 0x20_0000) as usize;
+
+        for block_2mb in start_2mb..end_2mb.min(512) {
+            // Allocate PT for this 2MB block from PMM
+            let pt_phys = crate::mm::pmm_simple::alloc_frame()
+                .expect("Failed to allocate PT for 4KB pages");
+            unsafe { write_bytes(pt_phys as *mut u8, 0, 4096) };
+            pd[block_2mb] = pt_phys | 0x3; // Present | Writable (NOT huge page)
+
+            let pt = unsafe { core::slice::from_raw_parts_mut(pt_phys as *mut u64, 512) };
+            let block_base = gb_base + (block_2mb as u64) * 0x20_0000;
+
+            // Map 4KB pages in this PT
+            for pt_idx in 0..512 {
+                let phys_addr = block_base + (pt_idx as u64) * 0x1000;
+                if phys_addr >= start_phys && phys_addr < end_phys {
+                    pt[pt_idx] = phys_addr | 0x3; // Present | Writable (4KB page)
+                    *page_count += 1;
+                }
+            }
+        }
+    }
+}
+
 /// Frame allocator adapter
 ///
 /// Adapts our `PageAllocator` trait to the x86_64 crate's `FrameAllocator` trait.
@@ -487,6 +953,203 @@ mod tests {
     use crate::mm::{BuddyAllocator, MemoryRegion, MockPageAllocator};
 
     const PAGE_SIZE: u64 = 4096;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Page Table Creation Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Test page table creation with aligned memory (no partial region)
+    #[test]
+    fn test_page_table_creation_aligned() {
+        // Test with 4GB of RAM (2MB aligned)
+        let max_phys = 0x1_0000_0000u64; // 4 GB
+        let kernel_start = 0x100000u64;
+        let kernel_end = 0x200000u64;
+
+        unsafe {
+            let pml4_phys = create_initial_page_tables(max_phys, kernel_start, kernel_end);
+
+            // Verify PML4 address is valid (non-zero, page-aligned)
+            assert_ne!(pml4_phys.as_u64(), 0);
+            assert_eq!(pml4_phys.as_u64() % 4096, 0);
+
+            // Verify PML4 is within reasonable bounds (bump allocator heap)
+            let pml4_addr = pml4_phys.as_u64();
+            assert!(pml4_addr > 0, "PML4 address should be non-zero");
+        }
+    }
+
+    /// Test page table creation with unaligned memory (has partial region)
+    #[test]
+    fn test_page_table_creation_unaligned() {
+        // Test with 4GB + 1MB (not 2MB aligned)
+        let max_phys = 0x1_0010_0000u64; // 4 GB + 1 MB
+        let kernel_start = 0x100000u64;
+        let kernel_end = 0x200000u64;
+
+        unsafe {
+            let pml4_phys = create_initial_page_tables(max_phys, kernel_start, kernel_end);
+
+            // Should succeed and create both 2MB and 4KB pages
+            assert_ne!(pml4_phys.as_u64(), 0);
+            assert_eq!(pml4_phys.as_u64() % 4096, 0);
+        }
+    }
+
+    /// Test page table creation with small memory (< 2MB)
+    #[test]
+    fn test_page_table_creation_small_memory() {
+        // Test with 1MB of RAM (all 4KB pages)
+        let max_phys = 0x10_0000u64; // 1 MB
+        let kernel_start = 0x100000u64;
+        let kernel_end = 0x180000u64;
+
+        unsafe {
+            let pml4_phys = create_initial_page_tables(max_phys, kernel_start, kernel_end);
+
+            // Should succeed using only 4KB pages
+            assert_ne!(pml4_phys.as_u64(), 0);
+            assert_eq!(pml4_phys.as_u64() % 4096, 0);
+        }
+    }
+
+    /// Test page table creation with large memory (16GB)
+    #[test]
+    fn test_page_table_creation_large_memory() {
+        // Test with 16GB of RAM
+        let max_phys = 0x4_0000_0000u64; // 16 GB
+        let kernel_start = 0x100000u64;
+        let kernel_end = 0x200000u64;
+
+        unsafe {
+            let pml4_phys = create_initial_page_tables(max_phys, kernel_start, kernel_end);
+
+            // Should succeed with mostly 2MB pages
+            assert_ne!(pml4_phys.as_u64(), 0);
+            assert_eq!(pml4_phys.as_u64() % 4096, 0);
+        }
+    }
+
+    /// Test that PML4 entries are properly set
+    #[test]
+    fn test_pml4_structure() {
+        let max_phys = 0x8000_0000u64; // 2 GB
+        let kernel_start = 0x100000u64;
+        let kernel_end = 0x200000u64;
+
+        unsafe {
+            let pml4_phys = create_initial_page_tables(max_phys, kernel_start, kernel_end);
+
+            // Access PML4 via identity mapping (during tests, we're still in BOOTBOOT)
+            let pml4_ptr = pml4_phys.as_u64() as *const u64;
+            let pml4 = core::slice::from_raw_parts(pml4_ptr, 512);
+
+            // Check physmap entry (index 256 for 0xffff_8000_0000_0000)
+            let physmap_idx = ((crate::mm::physmap::PHYS_MAP_BASE >> 39) & 0x1FF) as usize;
+            let physmap_entry = pml4[physmap_idx];
+
+            // Should be present
+            assert_ne!(physmap_entry & 0x1, 0, "Physmap PML4 entry should be present");
+            // Should be writable
+            assert_ne!(physmap_entry & 0x2, 0, "Physmap PML4 entry should be writable");
+
+            // Check kernel entry (index 511 for high addresses)
+            let kernel_entry = pml4[511];
+            assert_ne!(kernel_entry & 0x1, 0, "Kernel PML4 entry should be present");
+            assert_ne!(kernel_entry & 0x2, 0, "Kernel PML4 entry should be writable");
+
+            // All other entries should be zero (not present)
+            for (i, &entry) in pml4.iter().enumerate() {
+                if i != physmap_idx && i != 511 {
+                    assert_eq!(
+                        entry & 0x1,
+                        0,
+                        "PML4 entry {} should not be present",
+                        i
+                    );
+                }
+            }
+        }
+    }
+
+    /// Test aligned region calculation
+    #[test]
+    fn test_aligned_region_calculation() {
+        // 4GB exactly (aligned)
+        let max_phys = 0x1_0000_0000u64;
+        let aligned_end = max_phys & !(0x1F_FFFF);
+        assert_eq!(aligned_end, max_phys);
+
+        // 4GB + 1MB (unaligned)
+        let max_phys = 0x1_0010_0000u64;
+        let aligned_end = max_phys & !(0x1F_FFFF);
+        assert_eq!(aligned_end, 0x1_0000_0000u64);
+
+        // 2MB exactly (aligned)
+        let max_phys = 0x20_0000u64;
+        let aligned_end = max_phys & !(0x1F_FFFF);
+        assert_eq!(aligned_end, max_phys);
+
+        // 1MB (unaligned)
+        let max_phys = 0x10_0000u64;
+        let aligned_end = max_phys & !(0x1F_FFFF);
+        assert_eq!(aligned_end, 0);
+    }
+
+    /// Test page count calculations
+    #[test]
+    fn test_page_count_calculations() {
+        // 4GB aligned: should be 2048 2MB pages, 0 4KB pages
+        let max_phys = 0x1_0000_0000u64;
+        let aligned_end = max_phys & !(0x1F_FFFF);
+        let pages_2mb = aligned_end / 0x20_0000;
+        let partial_size = max_phys - aligned_end;
+        let pages_4kb = if partial_size > 0 {
+            (partial_size + 0xFFF) / 0x1000
+        } else {
+            0
+        };
+
+        assert_eq!(pages_2mb, 2048);
+        assert_eq!(pages_4kb, 0);
+
+        // 4GB + 1MB: should be 2048 2MB pages, 256 4KB pages
+        let max_phys = 0x1_0010_0000u64;
+        let aligned_end = max_phys & !(0x1F_FFFF);
+        let pages_2mb = aligned_end / 0x20_0000;
+        let partial_size = max_phys - aligned_end;
+        let pages_4kb = if partial_size > 0 {
+            (partial_size + 0xFFF) / 0x1000
+        } else {
+            0
+        };
+
+        assert_eq!(pages_2mb, 2048);
+        assert_eq!(pages_4kb, 256);
+    }
+
+    /// Test PML4 index calculation for physmap
+    #[test]
+    fn test_physmap_pml4_index() {
+        let physmap_base = crate::mm::physmap::PHYS_MAP_BASE;
+        let pml4_idx = ((physmap_base >> 39) & 0x1FF) as usize;
+
+        // 0xffff_8000_0000_0000 should map to PML4 index 256
+        assert_eq!(pml4_idx, 256);
+    }
+
+    /// Test kernel PML4 index (should be 511 for high addresses)
+    #[test]
+    fn test_kernel_pml4_index() {
+        let kernel_virt = 0xffffffffffe02000u64;
+        let pml4_idx = ((kernel_virt >> 39) & 0x1FF) as usize;
+
+        assert_eq!(pml4_idx, 511);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Existing Tests
+    // ═══════════════════════════════════════════════════════════════════════
 
     /// Test flag conversion: our flags → x86_64 flags
     #[test]

@@ -8,28 +8,14 @@
 
 extern crate alloc;
 
-use core::alloc::{GlobalAlloc, Layout};
-
-// Dummy allocator for Phase 7b (allocations will panic)
-// TODO Phase 8: Replace with proper bump/slab allocator
-struct DummyAllocator;
-
-unsafe impl GlobalAlloc for DummyAllocator {
-    unsafe fn alloc(&self, _layout: Layout) -> *mut u8 {
-        // For now, panic on allocation attempts
-        // This is okay for Phase 7b since we're not using heap yet
-        core::ptr::null_mut()
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Nothing to do for dummy allocator
-    }
-}
-
+// Bootstrap allocator for early kernel initialization
+// This is a simple bump allocator that never frees memory
+// TODO Phase 8: Replace with proper heap allocator after PMM is initialized
 #[global_allocator]
-static ALLOCATOR: DummyAllocator = DummyAllocator;
+static ALLOCATOR: mm::bump::BumpAllocator = mm::bump::BumpAllocator;
 
 // Module structure will be built out incrementally
+pub mod bootboot;
 pub mod error;
 pub mod mm;
 pub mod sched;

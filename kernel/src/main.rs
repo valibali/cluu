@@ -21,6 +21,9 @@ mod arch;
 mod error;
 mod syscall;
 
+// Use kernel lib modules
+use cluu_kernel::{bootboot, mm};
+
 use core::panic::PanicInfo;
 
 /// 64KB aligned stack for BSP
@@ -39,7 +42,7 @@ pub static mut BSP_STACK: AlignedBspStack = AlignedBspStack([0; 64 * 1024]);
 /// For now, we don't handle multi-core (AP parking) - that's Phase 8.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start() -> ! {
+pub unsafe extern "C" fn _start() -> () {
     core::arch::naked_asm!(
         // CPUID leaf 1 → EBX[31:24] = APIC ID
         "mov eax, 1",
@@ -122,7 +125,17 @@ pub extern "C" fn kstart() -> ! {
         arch::x86_64::syscall::init();
     }
 
-    // Phase 2: Log initialization status
+    // Phase 2: Memory Management Setup
+    // Create bootloader adapter (abstraction layer)
+    let bootboot_ptr = unsafe { &bootboot::bootboot as *const bootboot::BOOTBOOT };
+    let boot_info = unsafe { mm::boot::BootbootAdapter::new(bootboot_ptr) };
+
+    // Initialize memory management (bootloader-agnostic)
+    unsafe {
+        mm::init(&boot_info);
+    }
+
+    // Phase 3: Log initialization status
 
     klibcluu::logger::info("CLUU Microkernel v0.1.0");
     klibcluu::logger::info("Phase 7b: IRQ-Safe Logging with SOLID Architecture");
