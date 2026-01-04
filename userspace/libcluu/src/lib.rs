@@ -26,8 +26,18 @@ pub mod runtime;
 // Re-exports
 pub use error::{Error, Result};
 pub use syscall::{
-    yield_cpu, debug_print, token_create, token_delete,
-    irq_attach, irq_ack, CapabilityToken,
+    // Core syscalls
+    yield_cpu, debug_print,
+
+    // IPC
+    ipc_send, ipc_recv, ipc_call, ipc_reply,
+
+    // High-level wrappers
+    thread_create, space_create, space_map, token_derive,
+    irq_attach, irq_ack,
+
+    // Types
+    SyscallNumber, InvokeOp,
 };
 pub use types::*;
 pub use ipc::{send, recv, call, reply};

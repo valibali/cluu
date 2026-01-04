@@ -1,6 +1,10 @@
-//! Raw syscall interface
+//! Raw syscall interface for CLUU microkernel
 //!
-//! This module provides both low-level and high-level syscall interfaces.
+//! This module provides the minimal syscall interface (7 syscalls total):
+//! - IPC: Send, Recv, Call, Reply
+//! - Scheduling: Yield
+//! - Operations: Invoke (token-based)
+//! - Debug: DebugPrint
 
 use crate::error::{Error, Result};
 
@@ -8,20 +12,56 @@ use crate::error::{Error, Result};
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyscallNumber {
-    Ipc = 0,
-    Yield = 1,
-    ThreadCreate = 2,
-    ThreadDestroy = 3,
-    SpaceCreate = 4,
-    SpaceDestroy = 5,
-    Grant = 6,
-    Map = 7,
-    Unmap = 8,
-    TokenCreate = 9,
-    TokenDelete = 10,
-    IrqAttach = 11,
-    IrqAck = 12,
+    /// Send IPC message to endpoint
+    Send = 0,
+
+    /// Receive IPC message from endpoint
+    Recv = 1,
+
+    /// Call (send + receive) - synchronous RPC
+    Call = 2,
+
+    /// Reply to IPC sender
+    Reply = 3,
+
+    /// Yield CPU to scheduler
+    Yield = 4,
+
+    /// Invoke operation on a token
+    Invoke = 5,
+
+    /// Debug print (only in debug builds)
     DebugPrint = 255,
+}
+
+/// Invoke operations for sys_invoke()
+///
+/// These match the kernel's InvokeOp enum and determine what
+/// operation is performed on a token.
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvokeOp {
+    // Thread operations
+    ThreadCreate = 0,
+    ThreadDestroy = 1,
+    ThreadSuspend = 2,
+    ThreadResume = 3,
+    ThreadSetPriority = 4,
+
+    // Space operations
+    SpaceCreate = 10,
+    SpaceDestroy = 11,
+    SpaceMap = 12,
+    SpaceUnmap = 13,
+    SpaceGrant = 14,
+
+    // Token operations
+    TokenDerive = 20,
+    TokenRevoke = 21,
+
+    // IRQ operations
+    IrqAttach = 30,
+    IrqAck = 31,
 }
 
 /// Raw syscall invocation using x86_64 SYSCALL instruction
@@ -93,33 +133,137 @@ unsafe fn syscall2(n: SyscallNumber, arg1: usize, arg2: usize) -> Result<usize> 
 
 /// Helper for syscalls with 3 arguments
 #[inline]
-#[allow(dead_code)]
 unsafe fn syscall3(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize) -> Result<usize> {
     syscall_raw(n as usize, arg1, arg2, arg3, 0, 0, 0)
 }
 
 /// Helper for syscalls with 4 arguments
 #[inline]
-pub unsafe fn syscall4(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize, arg4: usize) -> Result<usize> {
+unsafe fn syscall4(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize, arg4: usize) -> Result<usize> {
     syscall_raw(n as usize, arg1, arg2, arg3, arg4, 0, 0)
 }
 
 /// Helper for syscalls with 5 arguments
 #[inline]
-#[allow(dead_code)]
 unsafe fn syscall5(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> Result<usize> {
     syscall_raw(n as usize, arg1, arg2, arg3, arg4, arg5, 0)
 }
 
 /// Helper for syscalls with 6 arguments
 #[inline]
-#[allow(dead_code)]
 unsafe fn syscall6(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) -> Result<usize> {
     syscall_raw(n as usize, arg1, arg2, arg3, arg4, arg5, arg6)
 }
 
 //
-// Type-Safe Syscall Wrappers
+// ═══════════════════════════════════════════════════════════════════════════
+// IPC Syscalls
+// ═══════════════════════════════════════════════════════════════════════════
+//
+
+/// Send IPC message to endpoint
+///
+/// # Arguments
+///
+/// - `endpoint_token`: Token handle for the endpoint
+/// - `msg`: Message buffer to send
+///
+/// # Returns
+///
+/// - `Ok(())`: Message sent successfully
+/// - `Err(error)`: Send failed (invalid token, endpoint full, etc.)
+#[inline]
+pub fn ipc_send(endpoint_token: usize, msg: &[u8]) -> Result<()> {
+    unsafe {
+        syscall3(
+            SyscallNumber::Send,
+            endpoint_token,
+            msg.as_ptr() as usize,
+            msg.len(),
+        )?
+    };
+    Ok(())
+}
+
+/// Receive IPC message from endpoint
+///
+/// # Arguments
+///
+/// - `endpoint_token`: Token handle for the endpoint
+/// - `buf`: Buffer to receive message into
+///
+/// # Returns
+///
+/// - `Ok(bytes_received)`: Number of bytes received
+/// - `Err(error)`: Receive failed (invalid token, buffer too small, etc.)
+#[inline]
+pub fn ipc_recv(endpoint_token: usize, buf: &mut [u8]) -> Result<usize> {
+    unsafe {
+        syscall3(
+            SyscallNumber::Recv,
+            endpoint_token,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+        )
+    }
+}
+
+/// Call (send + receive) for synchronous RPC
+///
+/// Sends a message and blocks waiting for a reply.
+///
+/// # Arguments
+///
+/// - `endpoint_token`: Token handle for the endpoint
+/// - `msg`: Message to send
+/// - `reply_buf`: Buffer to receive reply into
+///
+/// # Returns
+///
+/// - `Ok(bytes_received)`: Number of bytes in reply
+/// - `Err(error)`: Call failed
+#[inline]
+pub fn ipc_call(endpoint_token: usize, msg: &[u8], reply_buf: &mut [u8]) -> Result<usize> {
+    unsafe {
+        syscall5(
+            SyscallNumber::Call,
+            endpoint_token,
+            msg.as_ptr() as usize,
+            msg.len(),
+            reply_buf.as_mut_ptr() as usize,
+            reply_buf.len(),
+        )
+    }
+}
+
+/// Reply to IPC sender
+///
+/// Sends a reply to a thread that called us via ipc_call().
+///
+/// # Arguments
+///
+/// - `msg`: Reply message to send
+///
+/// # Returns
+///
+/// - `Ok(())`: Reply sent successfully
+/// - `Err(error)`: No pending call or send failed
+#[inline]
+pub fn ipc_reply(msg: &[u8]) -> Result<()> {
+    unsafe {
+        syscall2(
+            SyscallNumber::Reply,
+            msg.as_ptr() as usize,
+            msg.len(),
+        )?
+    };
+    Ok(())
+}
+
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// Scheduling Syscall
+// ═══════════════════════════════════════════════════════════════════════════
 //
 
 /// Voluntarily yield CPU to other threads
@@ -131,7 +275,7 @@ unsafe fn syscall6(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize, arg4
 /// # Examples
 ///
 /// ```no_run
-/// use libcluu::yield_cpu;
+/// use libcluu::syscall::yield_cpu;
 ///
 /// // In a busy-wait loop
 /// loop {
@@ -147,10 +291,175 @@ pub fn yield_cpu() -> Result<()> {
     Ok(())
 }
 
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// Generic Operations (via Invoke)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+
+/// Invoke generic operation on a token
+///
+/// This is the workhorse syscall for all object operations. What happens
+/// depends on the token's scope and rights, plus the operation requested.
+///
+/// # Arguments
+///
+/// - `token_handle`: Token to operate on
+/// - `operation`: Operation to perform (see InvokeOp)
+/// - `arg1-arg4`: Operation-specific arguments
+///
+/// # Returns
+///
+/// - `Ok(value)`: Operation-specific return value (often a new token handle)
+/// - `Err(error)`: Invalid token, insufficient rights, or operation failed
+#[inline]
+pub unsafe fn invoke(
+    token_handle: usize,
+    operation: InvokeOp,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> Result<usize> {
+    syscall6(
+        SyscallNumber::Invoke,
+        token_handle,
+        operation as usize,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+    )
+}
+
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// High-Level Wrappers (using Invoke)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+
+/// Create a new thread
+///
+/// # Arguments
+///
+/// - `space_token`: Address space token with THREAD_CONTROL right
+/// - `entry`: Thread entry point address
+/// - `stack`: Stack top address
+/// - `priority`: Thread priority
+///
+/// # Returns
+///
+/// - `Ok(thread_token)`: New thread token handle
+/// - `Err(error)`: Creation failed
+pub fn thread_create(
+    space_token: usize,
+    entry: usize,
+    stack: usize,
+    priority: usize,
+) -> Result<usize> {
+    unsafe { invoke(space_token, InvokeOp::ThreadCreate, entry, stack, priority, 0) }
+}
+
+/// Create a new address space
+///
+/// # Arguments
+///
+/// - `root_token`: Token with CREATE or SPACE_MAP right
+///
+/// # Returns
+///
+/// - `Ok(space_token)`: New address space token handle
+/// - `Err(error)`: Creation failed
+pub fn space_create(root_token: usize) -> Result<usize> {
+    unsafe { invoke(root_token, InvokeOp::SpaceCreate, 0, 0, 0, 0) }
+}
+
+/// Map page in address space
+///
+/// # Arguments
+///
+/// - `space_token`: Address space token with SPACE_MAP right
+/// - `virt_addr`: Virtual address to map
+/// - `phys_addr`: Physical address to map to
+/// - `flags`: Mapping flags (read/write/execute)
+///
+/// # Returns
+///
+/// - `Ok(())`: Page mapped successfully
+/// - `Err(error)`: Mapping failed
+pub fn space_map(
+    space_token: usize,
+    virt_addr: usize,
+    phys_addr: usize,
+    flags: usize,
+) -> Result<()> {
+    unsafe { invoke(space_token, InvokeOp::SpaceMap, virt_addr, phys_addr, flags, 0)? };
+    Ok(())
+}
+
+/// Derive a new token with reduced rights
+///
+/// # Arguments
+///
+/// - `token_handle`: Token to derive from (must have GRANT right)
+/// - `new_rights`: Rights bitmask for new token (subset of original)
+/// - `expire_at`: Expiration timestamp for new token
+///
+/// # Returns
+///
+/// - `Ok(new_token)`: Derived token handle
+/// - `Err(error)`: Derivation failed
+pub fn token_derive(
+    token_handle: usize,
+    new_rights: usize,
+    expire_at: u64,
+) -> Result<usize> {
+    unsafe { invoke(token_handle, InvokeOp::TokenDerive, new_rights, expire_at as usize, 0, 0) }
+}
+
+/// Attach IRQ handler
+///
+/// # Arguments
+///
+/// - `irq_token`: IRQ token
+/// - `endpoint_token`: Endpoint token to receive notifications
+///
+/// # Returns
+///
+/// - `Ok(())`: IRQ attached successfully
+/// - `Err(error)`: Attach failed
+pub fn irq_attach(irq_token: usize, endpoint_token: usize) -> Result<()> {
+    unsafe { invoke(irq_token, InvokeOp::IrqAttach, endpoint_token, 0, 0, 0)? };
+    Ok(())
+}
+
+/// Acknowledge IRQ and re-enable
+///
+/// # Arguments
+///
+/// - `irq_token`: IRQ token
+///
+/// # Returns
+///
+/// - `Ok(())`: IRQ acknowledged
+/// - `Err(error)`: Ack failed
+pub fn irq_ack(irq_token: usize) -> Result<()> {
+    unsafe { invoke(irq_token, InvokeOp::IrqAck, 0, 0, 0, 0)? };
+    Ok(())
+}
+
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// Debug Syscall
+// ═══════════════════════════════════════════════════════════════════════════
+//
+
 /// Print debug message to kernel log
 ///
 /// Prints a UTF-8 string to the kernel log. The message is prefixed
-/// with "[USERSPACE]" in the kernel log output.
+/// with "[USER]" in the kernel log output.
+///
+/// Only available in debug builds.
 ///
 /// # Arguments
 ///
@@ -164,7 +473,7 @@ pub fn yield_cpu() -> Result<()> {
 /// # Examples
 ///
 /// ```no_run
-/// use libcluu::debug_print;
+/// use libcluu::syscall::debug_print;
 ///
 /// debug_print("Hello from userspace!").expect("debug_print failed");
 /// ```
@@ -176,131 +485,14 @@ pub fn debug_print(message: &str) -> Result<()> {
     Ok(())
 }
 
-/// Capability token (48 bytes: 32-byte payload + 16-byte HMAC)
-#[repr(C, align(8))]
-#[derive(Clone, Copy)]
-pub struct CapabilityToken {
-    data: [u8; 48],
-}
-
-impl CapabilityToken {
-    pub const fn new() -> Self {
-        Self { data: [0u8; 48] }
-    }
-
-    pub fn as_bytes(&self) -> &[u8; 48] {
-        &self.data
-    }
-
-    pub fn as_bytes_mut(&mut self) -> &mut [u8; 48] {
-        &mut self.data
-    }
-}
-
-impl Default for CapabilityToken {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Create HMAC-signed capability token
+/// Exit the current thread
 ///
-/// Converts a capability handle to a cryptographic token that can
-/// be transferred to another process.
-///
-/// # Arguments
-///
-/// - `cap_handle`: Capability handle to convert
-/// - `token`: Output buffer for 48-byte token
-///
-/// # Errors
-///
-/// - `NotImplemented`: Not yet implemented
-/// - `InvalidAddress`: Invalid output buffer
-pub fn token_create(cap_handle: u8, token: &mut CapabilityToken) -> Result<()> {
-    unsafe {
-        syscall2(
-            SyscallNumber::TokenCreate,
-            cap_handle as usize,
-            token as *mut CapabilityToken as usize,
-        )?
-    };
-    Ok(())
-}
-
-/// Validate and consume capability token
-///
-/// Validates a cryptographic token and converts it back to a
-/// capability handle in the current process.
-///
-/// # Arguments
-///
-/// - `token`: 48-byte token to validate
-///
-/// # Returns
-///
-/// Capability handle on success
-///
-/// # Errors
-///
-/// - `NotImplemented`: Not yet implemented
-/// - `InvalidAddress`: Invalid token buffer
-/// - `PermissionDenied`: Token validation failed
-pub fn token_delete(token: &CapabilityToken) -> Result<u8> {
-    let handle = unsafe {
-        syscall1(
-            SyscallNumber::TokenDelete,
-            token as *const CapabilityToken as usize,
-        )?
-    };
-    Ok(handle as u8)
-}
-
-/// Attach thread to receive interrupt notifications
-///
-/// # Arguments
-///
-/// - `irq_cap`: IRQ capability handle
-/// - `endpoint_cap`: Notification endpoint capability
-///
-/// # Errors
-///
-/// - `NotImplemented`: Not yet implemented
-pub fn irq_attach(irq_cap: u8, endpoint_cap: u8) -> Result<()> {
-    unsafe {
-        syscall2(
-            SyscallNumber::IrqAttach,
-            irq_cap as usize,
-            endpoint_cap as usize,
-        )?
-    };
-    Ok(())
-}
-
-/// Acknowledge interrupt and re-enable IRQ line
-///
-/// # Arguments
-///
-/// - `irq_cap`: IRQ capability handle
-///
-/// # Errors
-///
-/// - `NotImplemented`: Not yet implemented
-pub fn irq_ack(irq_cap: u8) -> Result<()> {
-    unsafe { syscall1(SyscallNumber::IrqAck, irq_cap as usize)? };
-    Ok(())
-}
-
-/// Exit the current thread (stub - loops forever)
-///
-/// Note: The kernel doesn't have a ThreadExit syscall yet,
-/// so this just loops forever. In the future, this will call
-/// sys_thread_destroy on the current thread handle.
+/// Note: This currently just yields forever. In the future, this will
+/// call invoke(current_thread, ThreadDestroy) when we have thread handles.
 pub fn thread_exit(_code: i32) -> ! {
-    // TODO: Call sys_thread_destroy(current_thread_handle) when available
     let _ = debug_print("Thread exiting");
     loop {
-        let _ = unsafe { syscall0(SyscallNumber::Yield) };
+        let _ = yield_cpu();
     }
 }
 
@@ -310,15 +502,20 @@ mod tests {
 
     #[test]
     fn test_syscall_numbers() {
-        assert_eq!(SyscallNumber::Yield as usize, 1);
+        assert_eq!(SyscallNumber::Send as usize, 0);
+        assert_eq!(SyscallNumber::Recv as usize, 1);
+        assert_eq!(SyscallNumber::Call as usize, 2);
+        assert_eq!(SyscallNumber::Reply as usize, 3);
+        assert_eq!(SyscallNumber::Yield as usize, 4);
+        assert_eq!(SyscallNumber::Invoke as usize, 5);
         assert_eq!(SyscallNumber::DebugPrint as usize, 255);
-        assert_eq!(SyscallNumber::IrqAttach as usize, 11);
-        assert_eq!(SyscallNumber::IrqAck as usize, 12);
     }
 
     #[test]
-    fn test_capability_token_size() {
-        assert_eq!(core::mem::size_of::<CapabilityToken>(), 48);
-        assert_eq!(core::mem::align_of::<CapabilityToken>(), 8);
+    fn test_invoke_ops() {
+        assert_eq!(InvokeOp::ThreadCreate as usize, 0);
+        assert_eq!(InvokeOp::SpaceMap as usize, 12);
+        assert_eq!(InvokeOp::TokenDerive as usize, 20);
+        assert_eq!(InvokeOp::IrqAttach as usize, 30);
     }
 }

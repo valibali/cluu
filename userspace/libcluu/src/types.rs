@@ -108,4 +108,24 @@ impl Message {
             words,
         }
     }
+
+    /// Get message as byte slice for IPC
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(
+                self as *const Self as *const u8,
+                core::mem::size_of::<Self>(),
+            )
+        }
+    }
+
+    /// Get message as mutable byte slice for IPC
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self as *mut Self as *mut u8,
+                core::mem::size_of::<Self>(),
+            )
+        }
+    }
 }
