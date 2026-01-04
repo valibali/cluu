@@ -9,6 +9,9 @@
 #![no_std]
 #![cfg_attr(test, allow(unused))]
 
+extern crate alloc;
+
+pub mod crypto;
 pub mod logger;
 pub mod sync;
 pub mod uart;

@@ -15,6 +15,7 @@ extern crate alloc;
 // Module structure will be built out incrementally
 pub mod bootboot;
 pub mod error;
+pub mod token;
 pub mod mm;
 pub mod sched;
 pub mod ipc;

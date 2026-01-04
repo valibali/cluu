@@ -53,6 +53,8 @@ pub mod context;
 pub mod repository;
 pub mod scheduler;
 pub mod process;
+pub mod process_manager;
+pub mod spawn;
 
 // Re-export key types
 pub use thread::{Thread, ThreadId, ThreadState, ThreadFlags, Priority};
@@ -60,3 +62,5 @@ pub use context::Context;
 pub use repository::ThreadRepository;
 pub use scheduler::{PriorityBitmapScheduler, SchedulingPolicy};
 pub use process::{Process, ProcessId, ProcessState, ProcessType, ProcessInitState};
+pub use process_manager::ProcessManager;
+pub use spawn::{spawn_elf_process, spawn_kernel_process};
