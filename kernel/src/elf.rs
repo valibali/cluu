@@ -452,7 +452,6 @@ unsafe fn load_segment(
     if !file_data.is_empty() {
         // Calculate which pages and offsets contain the data
         let data_start = vaddr.as_u64();
-        let data_end = data_start + file_data.len() as u64;
 
         let mut copied = 0;
         while copied < file_data.len() {
@@ -629,3 +628,256 @@ fn translate_vaddr(page_table_root: PhysAddr, vaddr: VirtAddr) -> Option<PhysAdd
     let phys = pt[pt_idx] & !0xFFF;
     Some(PhysAddr::new(phys))
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Unit Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a minimal valid ELF64 header for testing
+    fn create_valid_elf_header() -> [u8; 64] {
+        let mut header = [0u8; 64];
+
+        // ELF Magic
+        header[0..4].copy_from_slice(&ELF_MAGIC);
+
+        // Class (64-bit)
+        header[4] = ELFCLASS64;
+
+        // Encoding (little-endian)
+        header[5] = ELFDATA2LSB;
+
+        // Version
+        header[6] = EV_CURRENT;
+
+        // Type (executable) - bytes 16-17 (little-endian)
+        header[16] = (ET_EXEC & 0xFF) as u8;
+        header[17] = ((ET_EXEC >> 8) & 0xFF) as u8;
+
+        // Machine (x86-64) - bytes 18-19 (little-endian)
+        header[18] = (EM_X86_64 & 0xFF) as u8;
+        header[19] = ((EM_X86_64 >> 8) & 0xFF) as u8;
+
+        // Version (again) - bytes 20-23 (little-endian u32)
+        header[20] = 1;
+        header[21] = 0;
+        header[22] = 0;
+        header[23] = 0;
+
+        // Entry point - bytes 24-31 (little-endian u64)
+        let entry = 0x400000u64;
+        header[24..32].copy_from_slice(&entry.to_le_bytes());
+
+        // Program header offset - bytes 32-39
+        let phoff = 64u64;
+        header[32..40].copy_from_slice(&phoff.to_le_bytes());
+
+        // ELF header size - bytes 52-53
+        let ehsize = 64u16;
+        header[52..54].copy_from_slice(&ehsize.to_le_bytes());
+
+        // Program header entry size - bytes 54-55
+        let phentsize = 56u16;
+        header[54..56].copy_from_slice(&phentsize.to_le_bytes());
+
+        // Program header count - bytes 56-57
+        let phnum = 0u16;
+        header[56..58].copy_from_slice(&phnum.to_le_bytes());
+
+        header
+    }
+
+    #[test]
+    fn test_valid_elf_header() {
+        let header_data = create_valid_elf_header();
+        let result = parse_elf_header(&header_data);
+        assert!(result.is_ok(), "Valid ELF header should parse successfully");
+
+        let header = result.unwrap();
+        let entry = unsafe { core::ptr::addr_of!(header.e_entry).read_unaligned() };
+        assert_eq!(entry, 0x400000, "Entry point should be 0x400000");
+    }
+
+    #[test]
+    fn test_invalid_magic() {
+        let mut header_data = create_valid_elf_header();
+        header_data[0] = 0xFF; // Corrupt magic
+
+        let result = parse_elf_header(&header_data);
+        assert!(matches!(result, Err(ElfLoadError::InvalidMagic)));
+    }
+
+    #[test]
+    fn test_invalid_class() {
+        let mut header_data = create_valid_elf_header();
+        header_data[4] = 1; // 32-bit instead of 64-bit
+
+        let result = parse_elf_header(&header_data);
+        assert!(matches!(result, Err(ElfLoadError::InvalidClass)));
+    }
+
+    #[test]
+    fn test_invalid_encoding() {
+        let mut header_data = create_valid_elf_header();
+        header_data[5] = 2; // Big-endian instead of little-endian
+
+        let result = parse_elf_header(&header_data);
+        assert!(matches!(result, Err(ElfLoadError::InvalidEncoding)));
+    }
+
+    #[test]
+    fn test_invalid_version() {
+        let mut header_data = create_valid_elf_header();
+        header_data[6] = 0; // Invalid version
+
+        let result = parse_elf_header(&header_data);
+        assert!(matches!(result, Err(ElfLoadError::InvalidVersion)));
+    }
+
+    #[test]
+    fn test_invalid_type() {
+        let mut header_data = create_valid_elf_header();
+        header_data[16] = 3; // DYN instead of EXEC
+        header_data[17] = 0;
+
+        let result = parse_elf_header(&header_data);
+        assert!(matches!(result, Err(ElfLoadError::InvalidType)));
+    }
+
+    #[test]
+    fn test_invalid_machine() {
+        let mut header_data = create_valid_elf_header();
+        header_data[18] = 3; // x86 (32-bit) instead of x86-64
+        header_data[19] = 0;
+
+        let result = parse_elf_header(&header_data);
+        assert!(matches!(result, Err(ElfLoadError::InvalidMachine)));
+    }
+
+    #[test]
+    fn test_too_small_header() {
+        let header_data = [0u8; 32]; // Only 32 bytes instead of 64
+        let result = parse_elf_header(&header_data);
+        assert!(matches!(result, Err(ElfLoadError::InvalidHeader)));
+    }
+
+    #[test]
+    fn test_parse_program_headers_empty() {
+        let header_data = create_valid_elf_header();
+        let header = parse_elf_header(&header_data).unwrap();
+
+        // Create a minimal ELF file with just the header (no program headers)
+        let elf_data = header_data.to_vec();
+
+        let result = parse_program_headers(&elf_data, &header);
+        assert!(result.is_ok(), "Should parse empty program header table");
+
+        let program_headers = result.unwrap();
+        assert_eq!(program_headers.len(), 0, "Should have 0 program headers");
+    }
+
+    #[test]
+    fn test_parse_program_headers_with_data() {
+        use alloc::vec::Vec;
+
+        let mut header_data = create_valid_elf_header();
+
+        // Set program header count to 1
+        let phnum = 1u16;
+        header_data[56..58].copy_from_slice(&phnum.to_le_bytes());
+
+        let header = parse_elf_header(&header_data).unwrap();
+
+        // Create ELF data with header + one program header
+        let mut elf_data = Vec::from(header_data);
+
+        // Add a PT_LOAD program header (56 bytes)
+        let mut ph = [0u8; 56];
+        ph[0..4].copy_from_slice(&PT_LOAD.to_le_bytes()); // p_type
+        ph[4..8].copy_from_slice(&(PF_R | PF_X).to_le_bytes()); // p_flags (read+execute)
+        ph[8..16].copy_from_slice(&0x1000u64.to_le_bytes()); // p_offset
+        ph[16..24].copy_from_slice(&0x400000u64.to_le_bytes()); // p_vaddr
+        ph[32..40].copy_from_slice(&0x1000u64.to_le_bytes()); // p_filesz
+        ph[40..48].copy_from_slice(&0x1000u64.to_le_bytes()); // p_memsz
+
+        elf_data.extend_from_slice(&ph);
+
+        let result = parse_program_headers(&elf_data, &header);
+        assert!(result.is_ok(), "Should parse program headers");
+
+        let program_headers = result.unwrap();
+        assert_eq!(program_headers.len(), 1, "Should have 1 program header");
+
+        let ph = &program_headers[0];
+        let p_type = unsafe { core::ptr::addr_of!(ph.p_type).read_unaligned() };
+        assert_eq!(p_type, PT_LOAD, "Should be PT_LOAD");
+
+        let p_vaddr = unsafe { core::ptr::addr_of!(ph.p_vaddr).read_unaligned() };
+        assert_eq!(p_vaddr, 0x400000, "Virtual address should be 0x400000");
+    }
+
+    #[test]
+    fn test_program_header_out_of_bounds() {
+        let mut header_data = create_valid_elf_header();
+
+        // Set program header count to 10 (but file is too small)
+        let phnum = 10u16;
+        header_data[56..58].copy_from_slice(&phnum.to_le_bytes());
+
+        let header = parse_elf_header(&header_data).unwrap();
+
+        // ELF data with header only (no room for 10 program headers)
+        let elf_data = header_data.to_vec();
+
+        let result = parse_program_headers(&elf_data, &header);
+        assert!(matches!(result, Err(ElfLoadError::InvalidHeader)));
+    }
+
+    /// Test ELF flag to page flag conversion
+    #[test]
+    fn test_segment_flags() {
+        // Read-only, executable (typical text segment)
+        let text_flags = PF_R | PF_X;
+        assert_eq!(text_flags, 5);
+
+        // Read-write, non-executable (typical data segment)
+        let data_flags = PF_R | PF_W;
+        assert_eq!(data_flags, 6);
+
+        // Read-write-execute (rare but valid)
+        let rwx_flags = PF_R | PF_W | PF_X;
+        assert_eq!(rwx_flags, 7);
+    }
+
+    /// Test that we can create an ElfBinary struct
+    #[test]
+    fn test_elf_binary_creation() {
+        let entry_point = VirtAddr::new(0x400000);
+        let binary = ElfBinary { entry_point };
+
+        assert_eq!(binary.entry_point.as_u64(), 0x400000);
+    }
+
+    /// Test error display formatting
+    #[test]
+    fn test_error_display() {
+        use alloc::format;
+
+        assert_eq!(
+            format!("{}", ElfLoadError::InvalidMagic),
+            "Invalid ELF magic number"
+        );
+        assert_eq!(
+            format!("{}", ElfLoadError::InvalidClass),
+            "Not a 64-bit ELF"
+        );
+        assert_eq!(
+            format!("{}", ElfLoadError::MemoryAllocationFailed),
+            "Failed to allocate memory"
+        );
+    }
+}
+

@@ -26,6 +26,7 @@ proptest = { workspace = true }
 [features]
 default = []
 test-mock = ["klibcluu/test-mock"]
+testing = []  # Enable when building for host tests (disables no_std runtime)
 
 [[bin]]
 name = "kernel"

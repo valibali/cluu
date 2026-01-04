@@ -191,6 +191,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-kernel-tests"
+version = "0.1.0"
+dependencies = [
+ "cluu-kernel",
+ "x86_64",
+]
+
+[[package]]
 name = "cluu-procmgr"
 version = "0.1.0"
 dependencies = [

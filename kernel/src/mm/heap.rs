@@ -72,7 +72,11 @@ pub const HEAP_SIZE: u64 = 2 * 1024 * 1024; // 2 MiB
 ///
 /// The #[global_allocator] attribute makes this the default allocator
 /// for all heap allocations (Box, Vec, String, etc.)
+#[cfg(not(feature = "testing"))]
 #[global_allocator]
+static ALLOCATOR: LockedHeap = LockedHeap::empty();
+
+#[cfg(feature = "testing")]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 /// Initialize the kernel heap
@@ -147,6 +151,7 @@ pub unsafe fn init() -> Result<(), &'static str> {
 /// - Kernel needs its allocations to succeed for correct operation
 ///
 /// Future improvement: Could try to reclaim memory or enter degraded mode
+#[cfg(not(feature = "testing"))]
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
     panic!("Kernel heap allocation failed: {:?}", layout);

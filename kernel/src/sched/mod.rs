@@ -52,9 +52,11 @@ pub mod thread;
 pub mod context;
 pub mod repository;
 pub mod scheduler;
+pub mod process;
 
 // Re-export key types
 pub use thread::{Thread, ThreadId, ThreadState, ThreadFlags, Priority};
 pub use context::Context;
 pub use repository::ThreadRepository;
 pub use scheduler::{PriorityBitmapScheduler, SchedulingPolicy};
+pub use process::{Process, ProcessId, ProcessState, ProcessType, ProcessInitState};

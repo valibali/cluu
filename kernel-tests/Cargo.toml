@@ -1,0 +1,37 @@
+[package]
+name = "cluu-kernel-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Import the kernel as a library for testing
+cluu-kernel = { path = "../kernel", features = ["testing"] }
+
+# Test dependencies
+x86_64 = "0.15"
+
+[dev-dependencies]
+
+[lib]
+name = "kernel_tests"
+path = "src/lib.rs"
+
+[[test]]
+name = "elf_tests"
+path = "tests/elf_tests.rs"
+
+[[test]]
+name = "mm_tests"
+path = "tests/mm_tests.rs"
+
+[[test]]
+name = "cap_tests"
+path = "tests/cap_tests.rs"
+
+[[test]]
+name = "sched_tests"
+path = "tests/sched_tests.rs"
+
+[[test]]
+name = "ipc_tests"
+path = "tests/ipc_tests.rs"
