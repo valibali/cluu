@@ -120,10 +120,7 @@ where
         }
 
         // Check for overflow
-        if from_addr
-            .as_u64()
-            .checked_add(len as u64)
-            .is_none()
+        if from_addr.as_u64().checked_add(len as u64).is_none()
             || to_addr.as_u64().checked_add(len as u64).is_none()
         {
             return Err(Error::InvalidAddress);
@@ -221,6 +218,7 @@ mod tests {
     use crate::mm::pmm::BuddyAllocator;
     use crate::mm::vmm::PageTableManager;
     use x86_64::structures::paging::OffsetPageTable;
+    use x86_64::PhysAddr;
 
     // Mock allocator and mapper for testing
     struct MockAllocator;
@@ -281,23 +279,31 @@ mod tests {
 
     #[test]
     fn test_is_page_aligned() {
-        assert!(BufferTransfer::<MockAllocator, MockMapper>::is_page_aligned(
-            VirtAddr::new(0x1000),
-            0x1000
-        ));
-        assert!(BufferTransfer::<MockAllocator, MockMapper>::is_page_aligned(
-            VirtAddr::new(0x2000),
-            0x2000
-        ));
+        assert!(
+            BufferTransfer::<MockAllocator, MockMapper>::is_page_aligned(
+                VirtAddr::new(0x1000),
+                0x1000
+            )
+        );
+        assert!(
+            BufferTransfer::<MockAllocator, MockMapper>::is_page_aligned(
+                VirtAddr::new(0x2000),
+                0x2000
+            )
+        );
 
-        assert!(!BufferTransfer::<MockAllocator, MockMapper>::is_page_aligned(
-            VirtAddr::new(0x1001),
-            0x1000
-        ));
-        assert!(!BufferTransfer::<MockAllocator, MockMapper>::is_page_aligned(
-            VirtAddr::new(0x1000),
-            0x1001
-        ));
+        assert!(
+            !BufferTransfer::<MockAllocator, MockMapper>::is_page_aligned(
+                VirtAddr::new(0x1001),
+                0x1000
+            )
+        );
+        assert!(
+            !BufferTransfer::<MockAllocator, MockMapper>::is_page_aligned(
+                VirtAddr::new(0x1000),
+                0x1001
+            )
+        );
     }
 
     #[test]
@@ -330,13 +336,8 @@ mod tests {
         let mut mapper = MockMapper;
         let mut transfer = BufferTransfer::new(&mut allocator, &mut mapper);
 
-        let result = transfer.copy_buffer(
-            1,
-            VirtAddr::new(0x400000),
-            2,
-            VirtAddr::new(0x500000),
-            0,
-        );
+        let result =
+            transfer.copy_buffer(1, VirtAddr::new(0x400000), 2, VirtAddr::new(0x500000), 0);
         assert!(result.is_ok());
     }
 
@@ -346,12 +347,10 @@ mod tests {
         let mut mapper = MockMapper;
         let mut transfer = BufferTransfer::new(&mut allocator, &mut mapper);
 
-        let result =
-            transfer.copy_buffer(1, VirtAddr::new(0), 2, VirtAddr::new(0x500000), 0x1000);
+        let result = transfer.copy_buffer(1, VirtAddr::new(0), 2, VirtAddr::new(0x500000), 0x1000);
         assert_eq!(result, Err(Error::InvalidAddress));
 
-        let result =
-            transfer.copy_buffer(1, VirtAddr::new(0x400000), 2, VirtAddr::new(0), 0x1000);
+        let result = transfer.copy_buffer(1, VirtAddr::new(0x400000), 2, VirtAddr::new(0), 0x1000);
         assert_eq!(result, Err(Error::InvalidAddress));
     }
 

@@ -988,6 +988,70 @@ unsafe fn map_single_4k_page(
     Ok(())
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Address Space Management Helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Allocate a new PML4 (page table root)
+///
+/// Returns a zeroed PML4 ready for use as a new address space.
+/// The caller is responsible for populating it with mappings.
+///
+/// # Returns
+///
+/// Physical address of the new PML4, or error if out of memory.
+///
+/// # Safety
+///
+/// Must be called after PMM is initialized.
+pub unsafe fn alloc_pml4() -> Result<PhysAddr, &'static str> {
+    use core::ptr::write_bytes;
+
+    // Allocate one frame for PML4
+    let pml4_phys = crate::mm::pmm_simple::alloc_frame()
+        .ok_or("Out of memory allocating PML4")?;
+
+    // Zero out the PML4
+    let pml4_virt = unsafe { super::physmap::phys_to_virt_u64(pml4_phys) };
+    unsafe {
+        write_bytes(pml4_virt as *mut u8, 0, 4096);
+    }
+
+    Ok(PhysAddr::new(pml4_phys))
+}
+
+/// Copy kernel half of PML4 (entries 256-511) from source to destination
+///
+/// This is used when creating a new user address space. The kernel half
+/// (high canonical addresses) are shared across all processes, while the
+/// user half (low canonical addresses) are per-process.
+///
+/// # Arguments
+///
+/// * `src_pml4` - Source PML4 physical address (usually kernel PML4)
+/// * `dst_pml4` - Destination PML4 physical address (new user space)
+///
+/// # Safety
+///
+/// - Both PML4s must be valid physical addresses
+/// - Physmap must be active
+pub unsafe fn copy_kernel_half(src_pml4: PhysAddr, dst_pml4: PhysAddr) {
+    let src_virt = unsafe { super::physmap::phys_to_virt_u64(src_pml4.as_u64()) };
+    let dst_virt = unsafe { super::physmap::phys_to_virt_u64(dst_pml4.as_u64()) };
+
+    let src_ptr = src_virt as *const u64;
+    let dst_ptr = dst_virt as *mut u64;
+
+    // Copy PML4 entries 256-511 (kernel half)
+    // Each PML4 has 512 entries, entries 256-511 map high canonical addresses
+    unsafe {
+        for i in 256..512 {
+            let entry = core::ptr::read_volatile(src_ptr.add(i));
+            core::ptr::write_volatile(dst_ptr.add(i), entry);
+        }
+    }
+}
+
 /// Map a region using 4KB pages
 ///
 /// Used for partial regions, MMIO, and other areas requiring fine granularity.

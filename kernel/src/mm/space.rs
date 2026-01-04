@@ -257,6 +257,50 @@ impl AddressSpace {
         Self::new(page_table_root)
     }
 
+    /// Create a new kernel address space (alias for current_kernel)
+    ///
+    /// This is for compatibility with old code that expects `new_kernel()`.
+    /// Kernel threads share the same address space, so this returns the current one.
+    pub fn new_kernel() -> Self {
+        Self::current_kernel()
+    }
+
+    /// Create a new userspace address space
+    ///
+    /// This allocates a fresh PML4 and copies the kernel half from the
+    /// current (kernel) page tables. User regions are initially empty
+    /// and will be filled by the ELF loader.
+    ///
+    /// Steps:
+    /// 1. Allocate new PML4
+    /// 2. Copy kernel mappings (high half) from current page tables
+    /// 3. Set up user region descriptors (initially unmapped)
+    ///
+    /// # Returns
+    ///
+    /// A new AddressSpace with its own page tables, or error if out of memory.
+    pub fn new_user() -> Result<Self, &'static str> {
+        use x86_64::registers::control::Cr3;
+
+        // Allocate a new PML4 frame
+        let pml4_phys = unsafe { super::vmm::alloc_pml4()? };
+
+        klibcluu::trace("Allocated new user PML4 at 0x");
+        klibcluu::log_hex(klibcluu::LogLevel::Trace, "", pml4_phys.as_u64());
+
+        // Copy kernel mappings from current page table
+        let (current_pml4_frame, _) = Cr3::read();
+        let current_pml4_phys = current_pml4_frame.start_address();
+
+        unsafe {
+            super::vmm::copy_kernel_half(current_pml4_phys, pml4_phys);
+        }
+
+        klibcluu::trace("Copied kernel mappings to new user PML4");
+
+        Ok(Self::new(pml4_phys))
+    }
+
     /// Switch to this address space
     ///
     /// Updates CR3 register to point to this process's page table.
