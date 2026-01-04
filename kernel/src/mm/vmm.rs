@@ -449,7 +449,7 @@ pub unsafe fn create_initial_page_tables(
         crate::mm::pmm_simple::init(&*bootboot_ptr, boot_info);
     }
 
-    klibcluu::info("Creating initial page tables (4KB pages only)...");
+    klibcluu::trace("Creating initial page tables (4KB pages only)...");
     klibcluu::log_hex(
         klibcluu::LogLevel::Trace,
         "  Max physical address: 0x",
@@ -496,17 +496,17 @@ pub unsafe fn create_initial_page_tables(
     let partial_size = max_phys - aligned_end;
 
     klibcluu::log_hex(
-        klibcluu::LogLevel::Debug,
+        klibcluu::LogLevel::Trace,
         "  Aligned region: 0x0 - 0x",
         aligned_end,
     );
     if partial_size > 0 {
         klibcluu::log_hex(
-            klibcluu::LogLevel::Debug,
+            klibcluu::LogLevel::Trace,
             "  Partial region: 0x",
             partial_start,
         );
-        klibcluu::log_hex(klibcluu::LogLevel::Debug, "    to 0x", max_phys);
+        klibcluu::log_hex(klibcluu::LogLevel::Trace, "    to 0x", max_phys);
     }
 
     // Map aligned region with 2MB pages
@@ -545,7 +545,7 @@ pub unsafe fn create_initial_page_tables(
         }
     }
 
-    klibcluu::info("  Physmap mapped:");
+    klibcluu::trace("  Physmap mapped:");
     klibcluu::log_dec(
         klibcluu::LogLevel::Trace,
         "    2MB pages: ",
@@ -556,7 +556,7 @@ pub unsafe fn create_initial_page_tables(
         "    (",
         (total_2mb_pages * 2) / 1024,
     );
-    klibcluu::info(" GB)");
+    klibcluu::trace(" GB)");
     if total_4kb_pages > 0 {
         klibcluu::log_dec(
             klibcluu::LogLevel::Trace,
@@ -568,7 +568,7 @@ pub unsafe fn create_initial_page_tables(
             "    (",
             (total_4kb_pages * 4) / 1024,
         );
-        klibcluu::info(" MB)");
+        klibcluu::trace(" MB)");
     }
 
     // Map kernel at high address using 4KB pages
@@ -604,7 +604,7 @@ pub unsafe fn create_initial_page_tables(
         "  Mapping kernel (",
         num_2mb_blocks as u64,
     );
-    klibcluu::info(" x 2MB blocks)");
+    klibcluu::trace(" x 2MB blocks)");
 
     // For each 2MB block (use counter instead of address comparison to avoid wrapping issues)
     let virt_start_2mb = kernel_virt_base & !(0x1F_FFFF);
@@ -646,7 +646,7 @@ pub unsafe fn create_initial_page_tables(
         "  Kernel mapped with 4KB pages (",
         num_2mb_blocks as u64,
     );
-    klibcluu::info(" blocks)");
+    klibcluu::trace(" blocks)");
     klibcluu::log_hex(
         klibcluu::LogLevel::Trace,
         "  PML4 ready at: 0x",
@@ -655,7 +655,7 @@ pub unsafe fn create_initial_page_tables(
 
     // CRITICAL VERIFICATION: Check that essential mappings are in place
     // before switching CR3, otherwise we'll triple fault!
-    klibcluu::info("Verifying critical mappings...");
+    klibcluu::trace("Verifying critical mappings...");
 
     // Test 1: Verify current stack is mapped
     let rsp: u64;
@@ -684,28 +684,28 @@ pub unsafe fn create_initial_page_tables(
     }
 
     // Test 2: Read back the page table entry for the stack page to verify it was written
-    klibcluu::info("  Verifying stack page table entry...");
+    klibcluu::trace("  Verifying stack page table entry...");
     let stack_pml4_idx = ((stack_page >> 39) & 0x1FF) as usize;
     let stack_pdpt_idx = ((stack_page >> 30) & 0x1FF) as usize;
     let stack_pd_idx = ((stack_page >> 21) & 0x1FF) as usize;
     let stack_pt_idx = ((stack_page >> 12) & 0x1FF) as usize;
 
     klibcluu::log_dec(
-        klibcluu::LogLevel::Debug,
+        klibcluu::LogLevel::Trace,
         "    Stack indices: PML4[",
         stack_pml4_idx as u64,
     );
-    klibcluu::log_dec(klibcluu::LogLevel::Debug, "] PDPT[", stack_pdpt_idx as u64);
-    klibcluu::log_dec(klibcluu::LogLevel::Debug, "] PD[", stack_pd_idx as u64);
-    klibcluu::log_dec(klibcluu::LogLevel::Debug, "] PT[", stack_pt_idx as u64);
-    klibcluu::info("]");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "] PDPT[", stack_pdpt_idx as u64);
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "] PD[", stack_pd_idx as u64);
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "] PT[", stack_pt_idx as u64);
+    klibcluu::trace("]");
 
     // Read the PT entry for the stack
     // We can use the virtual address slices we already have!
     // Stack should be at: PML4[511] -> PDPT[511] -> PD[511] -> PT[60]
     let pml4_entry = pml4[stack_pml4_idx];
     klibcluu::log_hex(
-        klibcluu::LogLevel::Debug,
+        klibcluu::LogLevel::Trace,
         "    PML4[511] entry: 0x",
         pml4_entry,
     );
@@ -717,7 +717,7 @@ pub unsafe fn create_initial_page_tables(
 
     let pdpt_entry = kernel_pdpt[stack_pdpt_idx];
     klibcluu::log_hex(
-        klibcluu::LogLevel::Debug,
+        klibcluu::LogLevel::Trace,
         "    PDPT[511] entry: 0x",
         pdpt_entry,
     );
@@ -728,7 +728,7 @@ pub unsafe fn create_initial_page_tables(
     }
 
     let pd_entry = kernel_pd[stack_pd_idx];
-    klibcluu::log_hex(klibcluu::LogLevel::Debug, "    PD[511] entry: 0x", pd_entry);
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "    PD[511] entry: 0x", pd_entry);
 
     if pd_entry & 0x1 == 0 {
         klibcluu::error("  ERROR: PD[511] entry NOT PRESENT!");
@@ -760,17 +760,17 @@ pub unsafe fn create_initial_page_tables(
         );
     }
 
-    klibcluu::info("  Page table hierarchy verified");
+    klibcluu::trace("  Page table hierarchy verified");
 
     // Check if stack is in kernel range
     if stack_page >= kernel_virt_base && stack_page < kernel_virt_end {
-        klibcluu::info("  Stack is in kernel range - OK");
+        klibcluu::trace("  Stack is in kernel range - OK");
 
         // Calculate what physical address the stack should map to
         let stack_offset = stack_page.wrapping_sub(kernel_virt_base);
         let expected_stack_phys = kernel_phys_start.wrapping_add(stack_offset);
         klibcluu::log_hex(
-            klibcluu::LogLevel::Debug,
+            klibcluu::LogLevel::Trace,
             "    Expected stack phys: 0x",
             expected_stack_phys,
         );
@@ -791,7 +791,7 @@ pub unsafe fn create_initial_page_tables(
     }
 
     // Test 3: Verify current instruction pointer is mapped
-    klibcluu::info("  Verifying RIP page table entry...");
+    klibcluu::trace("  Verifying RIP page table entry...");
     let rip: u64;
     unsafe {
         core::arch::asm!("lea {}, [rip]", out(reg) rip, options(nostack, nomem));
@@ -800,7 +800,7 @@ pub unsafe fn create_initial_page_tables(
 
     let rip_page = rip & !0xFFF;
     if rip_page >= kernel_virt_base && rip_page < kernel_virt_end {
-        klibcluu::info("  RIP is in kernel range - OK");
+        klibcluu::trace("  RIP is in kernel range - OK");
 
         // Verify RIP PTE
         if let Some(first_pt) = first_pt_slice {
@@ -818,7 +818,7 @@ pub unsafe fn create_initial_page_tables(
         panic!("Instruction pointer not in mapped kernel range!");
     }
 
-    klibcluu::info("  All critical mappings verified");
+    klibcluu::trace("  All critical mappings verified");
 
     pml4_phys
 }
@@ -837,7 +837,7 @@ pub unsafe fn switch_to_page_tables(pml4_phys: PhysAddr) {
     use x86_64::registers::control::Cr3;
     use x86_64::structures::paging::PhysFrame;
 
-    klibcluu::info("Switching CR3 to new page tables...");
+    klibcluu::trace("Switching CR3 to new page tables...");
 
     // Ensure all page table writes are visible before CR3 switch
     core::arch::asm!("mfence", options(nostack, nomem));
@@ -868,13 +868,10 @@ pub unsafe fn switch_to_page_tables(pml4_phys: PhysAddr) {
 /// - Virtual range must not overlap existing mappings
 /// - Must use current CR3 (kernel page tables)
 pub unsafe fn map_heap_region(virt_start: u64, size: u64) -> Result<(), &'static str> {
-    
-    
-
     let page_count = (size + 0xFFF) / 0x1000;
 
     klibcluu::log_dec(klibcluu::LogLevel::Trace, "  Mapping heap: ", page_count);
-    klibcluu::info(" pages");
+    klibcluu::trace(" pages");
 
     for i in 0..page_count {
         let virt_addr = virt_start + (i * 0x1000);
@@ -888,7 +885,7 @@ pub unsafe fn map_heap_region(virt_start: u64, size: u64) -> Result<(), &'static
         }
     }
 
-    klibcluu::info("  Heap mapped successfully");
+    klibcluu::trace("  Heap mapped successfully");
     Ok(())
 }
 

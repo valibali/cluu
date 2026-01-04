@@ -161,7 +161,7 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
         used as u64,
     );
     klibcluu::log_dec(klibcluu::LogLevel::Trace, " / ", total_free_frames as u64);
-    klibcluu::info(" frames");
+    klibcluu::trace(" frames");
 }
 
 /// Allocate a physical frame
