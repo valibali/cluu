@@ -69,7 +69,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/arch/x86_64/boot.asm");
     println!("cargo:rerun-if-changed=src/arch/x86_64/context.asm");
     println!("cargo:rerun-if-changed=src/arch/x86_64/interrupts.asm");
-    println!("cargo:rerun-if-changed=src/arch/x86_64/syscall.asm");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/syscall_entry.asm");
 
     // Rerun if font changes
     println!("cargo:rerun-if-changed=font.psf");

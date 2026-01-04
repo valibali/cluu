@@ -31,7 +31,7 @@ use core::fmt;
 /// - Non-enumerable: Cannot iterate to discover objects
 /// - Unforgeable: Random value, not sequential
 /// - Unlinkable: Same object can have different scopes in different tokens
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpaqueScope([u8; 16]);
 
 impl OpaqueScope {

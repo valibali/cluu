@@ -20,6 +20,6 @@
     "has-thread-local": false,
     "dynamic-linking": false,
     "pre-link-args": {
-        "ld.lld": ["-T", "kernel/link.ld", "target/asm/syscall.o"]
+        "ld.lld": ["-T", "kernel/link.ld", "target/asm/syscall_entry.o"]
     }
 }

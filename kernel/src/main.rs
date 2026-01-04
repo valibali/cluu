@@ -16,13 +16,11 @@
 
 extern crate klibcluu;
 
-// Import kernel modules from lib
+// Binary-specific modules
 mod arch;
-mod error;
-mod syscall;
 
 // Use kernel lib modules
-use cluu_kernel::{bootboot, mm};
+use cluu_kernel::{bootboot, error, mm, syscall, token};
 
 use core::panic::PanicInfo;
 

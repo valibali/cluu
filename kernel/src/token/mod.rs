@@ -44,10 +44,22 @@
 pub mod scope;
 pub mod rights;
 pub mod signature;
+pub mod table;
 
 pub use scope::OpaqueScope;
 pub use rights::Rights;
 pub use signature::Signature;
+pub use table::{
+    init as init_token_table,
+    create_token,
+    lookup_token,
+    resolve_scope,
+    resolve_token_object,
+    revoke_token,
+    count_tokens,
+    count_tokens_for_object,
+    ObjectType,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Core Types
@@ -57,7 +69,7 @@ pub use signature::Signature;
 ///
 /// This is what userspace passes to syscalls. The kernel maintains
 /// a mapping from TokenHandle → Token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct TokenHandle(pub usize);
 
