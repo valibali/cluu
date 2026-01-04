@@ -5,14 +5,12 @@
 #![no_std]
 #![cfg_attr(test, allow(unused))]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
 
 extern crate alloc;
 
-// Bootstrap allocator for early kernel initialization
-// This is a simple bump allocator that never frees memory
-// TODO Phase 8: Replace with proper heap allocator after PMM is initialized
-#[global_allocator]
-static ALLOCATOR: mm::bump::BumpAllocator = mm::bump::BumpAllocator;
+// Global allocator is defined in mm::heap
+// (Previously was bump allocator, now using linked_list_allocator backed by PMM)
 
 // Module structure will be built out incrementally
 pub mod bootboot;

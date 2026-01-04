@@ -153,8 +153,9 @@ pub fn alloc_frame() -> Option<u64> {
                     }
                     mark_used(frame);
                     let phys_addr = (frame * 4096) as u64;
-                    klibcluu::log_hex(klibcluu::LogLevel::Debug, "  PMM: Allocated frame ", frame as u64);
-                    klibcluu::log_hex(klibcluu::LogLevel::Debug, " @ phys 0x", phys_addr);
+                    // Verbose logging disabled for performance
+                    // klibcluu::log_hex(klibcluu::LogLevel::Debug, "  PMM: Allocated frame ", frame as u64);
+                    // klibcluu::log_hex(klibcluu::LogLevel::Debug, " @ phys 0x", phys_addr);
                     return Some(phys_addr);
                 }
             }

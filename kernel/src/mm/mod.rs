@@ -81,6 +81,9 @@ pub mod physmap;
 // Virtual memory manager (Page table operations)
 pub mod vmm;
 
+// Kernel heap allocator (dynamic memory for Vec, BTreeMap, etc.)
+pub mod heap;
+
 // Address space management
 pub mod space;
 

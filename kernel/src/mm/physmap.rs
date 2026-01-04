@@ -160,6 +160,22 @@ pub unsafe fn phys_ptr<T>(phys: PhysAddr) -> *mut T {
     }
 }
 
+/// Convert physical address to virtual (returns u64 for convenience)
+///
+/// # Safety
+///
+/// Same as phys_ptr - physical address must be valid
+#[inline]
+pub unsafe fn phys_to_virt_u64(phys: u64) -> u64 {
+    if is_active() {
+        // Use physmap
+        phys + PHYS_MAP_BASE
+    } else {
+        // Bootstrap: BOOTBOOT identity mapping
+        phys
+    }
+}
+
 /// Read a value from physical memory
 ///
 /// # Safety

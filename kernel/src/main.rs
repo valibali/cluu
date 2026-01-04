@@ -135,6 +135,11 @@ pub extern "C" fn kstart() -> ! {
         mm::init(&boot_info);
     }
 
+    // Initialize kernel heap (for Vec, BTreeMap, etc.)
+    unsafe {
+        mm::heap::init().expect("Failed to initialize heap");
+    }
+
     // Phase 3: Log initialization status
 
     klibcluu::logger::info("CLUU Microkernel v0.1.0");
@@ -146,6 +151,8 @@ pub extern "C" fn kstart() -> ! {
     klibcluu::logger::info("  [✓] GDT (kernel/user segments)");
     klibcluu::logger::info("  [✓] IDT (exception/interrupt handlers)");
     klibcluu::logger::info("  [✓] Syscall mechanism (SYSCALL/SYSRET)");
+    klibcluu::logger::info("  [✓] Memory Management (PMM, VMM, physmap)");
+    klibcluu::logger::info("  [✓] Kernel heap (8 MiB, 2MB pages)");
 
     // Phase 3: Report syscall status
     klibcluu::logger::info("========================================");
