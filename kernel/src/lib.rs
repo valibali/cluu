@@ -20,6 +20,7 @@ pub mod sched;
 pub mod ipc;
 pub mod cap;
 pub mod syscall;
+pub mod elf;
 
 // Re-exports
 pub use error::Error;

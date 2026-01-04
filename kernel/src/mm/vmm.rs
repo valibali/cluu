@@ -52,7 +52,7 @@ use x86_64::{PhysAddr, VirtAddr};
 
 /// Page table entry flag constants
 /// These are bit flags used in page table entries (PML4E, PDPTE, PDE, PTE)
-mod pte_flags {
+pub mod pte_flags {
     /// Page is present in memory (bit 0)
     pub const PRESENT: u64 = 1 << 0;
 
