@@ -1,3 +1,4 @@
+![logo](artwork/logo_v1.png)
 # CLUU (Compact Lightweight Unix Utopia)
 
 CLUU is a hobby operating system written in Rust, pursuing a **clean L4-style microkernel** architecture with strong emphasis on **correctness, minimality, and explicit authority**. The project is deliberately engineered, test-driven, and uncompromising about architectural discipline.
