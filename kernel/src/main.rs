@@ -17,7 +17,7 @@
 extern crate klibcluu;
 
 // Use kernel lib modules
-use cluu_kernel::{architecture, bootboot, bootstrap, error, mm, syscall};
+use cluu_kernel::{architecture, bootboot, bootstrap, mm};
 
 use core::panic::PanicInfo;
 
@@ -168,30 +168,9 @@ pub extern "C" fn kstart() -> ! {
     // Phase 5: Log initialization status
 
     klibcluu::logger::info("CLUU Microkernel v0.1.0");
-    klibcluu::logger::info("Phase 7b: IRQ-Safe Logging with SOLID Architecture");
-    klibcluu::logger::info("========================================");
-    klibcluu::logger::info("Kernel initialization complete:");
-    klibcluu::logger::info("  [✓] UART (COM2 at 0x2F8)");
-    klibcluu::logger::info("  [✓] IRQ-safe logger (zero-cost in release)");
-    klibcluu::logger::info("  [✓] GDT (kernel/user segments)");
-    klibcluu::logger::info("  [✓] IDT (exception/interrupt handlers)");
-    klibcluu::logger::info("  [✓] Syscall mechanism (SYSCALL/SYSRET)");
-    klibcluu::logger::info("  [✓] Memory Management (PMM, VMM, physmap)");
-    klibcluu::logger::info("  [✓] Kernel heap (2 MiB, huge page)");
 
     // Phase 3: Report syscall status
     klibcluu::logger::info("========================================");
-    klibcluu::logger::info("Syscall interface ready:");
-    klibcluu::logger::info("  - 14 syscalls defined");
-    klibcluu::logger::info("  - sys_yield: Implemented");
-    klibcluu::logger::info("  - sys_debug_print: Implemented");
-    klibcluu::logger::info("  - sys_token_create/delete: Validated");
-    klibcluu::logger::info("  - 10 stubs: Return NotImplemented");
-    klibcluu::logger::info("");
-    klibcluu::logger::info("TODO Phase 8:");
-    klibcluu::logger::info("  - Integrate scheduler");
-    klibcluu::logger::info("  - ELF loader for userspace");
-    klibcluu::logger::info("  - Test with userspace programs");
 
     klibcluu::logger::info("========================================");
     klibcluu::logger::info("Starting scheduler and launching init thread");
@@ -201,9 +180,11 @@ pub extern "C" fn kstart() -> ! {
     unsafe {
         cluu_kernel::sched::ThreadManager::start();
     }
+
+    #[allow(unreachable_code)] //temporary until pre-emption is working
+    idle_loop();
 }
 
-/// Idle loop - halt CPU waiting for interrupts
 fn idle_loop() -> ! {
     loop {
         // Use HLT instruction to save power

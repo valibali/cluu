@@ -37,7 +37,7 @@ pub const fn current_log_level() -> LogLevel {
     #[cfg(not(debug_assertions))]
     {
         // Release build: no logging
-        return LogLevel::Error;  // Won't actually log, see should_log()
+        return LogLevel::Error; // Won't actually log, see should_log()
     }
 
     #[cfg(debug_assertions)]
@@ -50,7 +50,7 @@ pub const fn current_log_level() -> LogLevel {
 
         // Default to DEBUG for debug builds (was INFO)
         #[cfg(all(not(feature = "log-debug"), not(feature = "log-trace")))]
-        return LogLevel::Debug;
+        return LogLevel::Info;
     }
 }
 
@@ -209,7 +209,7 @@ fn write_dec(mut value: u64) {
     }
 
     // Convert to decimal (most significant digit first)
-    let mut buf = [0u8; 20];  // u64 max is 20 digits
+    let mut buf = [0u8; 20]; // u64 max is 20 digits
     let mut i = 0;
 
     while value > 0 && i < 20 {

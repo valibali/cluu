@@ -272,14 +272,41 @@ fn invoke_thread_set_priority(_token: &Token, _args: SyscallArgs) -> SyscallResu
 
 // Space operations
 
-fn invoke_space_create(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    // TODO: Implement address space creation
-    // 1. Check token has CREATE or SPACE_MAP right
+fn invoke_space_create(token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::mm::AddressSpace;
+
+    klibcluu::trace("invoke_space_create");
+
+    // 1. Check token has CREATE right
+    if !token.role.contains(crate::token::Rights::CREATE) {
+        klibcluu::warn("invoke_space_create: insufficient rights");
+        return Err(Error::PermissionDenied);
+    }
+
     // 2. Create new address space
-    // 3. Create token for new space
-    // 4. Return token handle
-    klibcluu::warn("invoke_space_create not yet implemented");
-    Err(Error::NotImplemented)
+    let new_space = match AddressSpace::new_user() {
+        Ok(space) => space,
+        Err(e) => {
+            klibcluu::error("invoke_space_create: failed to create address space: ");
+            klibcluu::error(e);
+            return Err(Error::OutOfMemory);
+        }
+    };
+
+    let cr3 = new_space.page_table_root.as_u64();
+
+    klibcluu::trace("Created address space: cr3=0x");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", cr3);
+
+    // 3. Store address space in global repository (use CR3 as ID)
+    // {
+    //     use crate::mm::space_repository;
+    //     space_repository::insert(cr3, new_space)?;
+    // }
+
+    // 4. Return CR3 as space handle (temporary solution)
+    // TODO: Create proper token with SPACE_MAP rights
+    Ok(cr3 as usize)
 }
 
 fn invoke_space_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {

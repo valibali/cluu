@@ -5,20 +5,23 @@
 //! # Scheduler Modes
 //!
 //! - **INITMODE**: Cooperative scheduling for critical processes during boot
-//!   - Threads with COOPERATIVE flag don't preempt each other
-//!   - No timer-based preemption
-//!   - Used until all critical processes signal initialization complete
-//!
 //! - **NORMALMODE**: Preemptive scheduling for normal operation
-//!   - Timer interrupts (APIC 250Hz) trigger preemption
-//!   - All threads can be preempted
-//!   - Activated after all critical processes initialized
 
-use crate::sched::{PriorityBitmapScheduler, SchedulingPolicy, Thread, ThreadId, ThreadRepository};
 use crate::architecture::x86_64::gdt::set_tss_rsp0;
+use crate::sched::{
+    Context, Priority, PriorityBitmapScheduler, SchedulingPolicy, Thread, ThreadId,
+    ThreadRepository,
+};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Configuration
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Enable verbose context switch tracing (for debugging)
+const VERBOSE_CONTEXT_TRACE: bool = false;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Scheduler Mode
@@ -162,8 +165,8 @@ impl ThreadManager {
     }
 
     /// Register a critical process (call during bootstrap)
-    pub fn register_critical_thread(thread_id: ThreadId) {
-        CRITICAL_PROCESS_COUNT.fetch_add(thread_id.as_u64() as usize, Ordering::SeqCst);
+    pub fn register_critical_thread(_thread_id: ThreadId) {
+        CRITICAL_PROCESS_COUNT.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Signal that a critical process has completed initialization
@@ -234,304 +237,181 @@ impl ThreadManager {
         jump_to_thread(&context);
     }
 
-    /// Called from syscall_entry.asm after sys_yield
+    /// Called from syscall_entry.asm to perform context switch
     ///
     /// Saves current thread's context and returns pointer to next thread's context.
-    ///
-    /// # Arguments
-    ///
-    /// * `current_ctx_ptr` - Pointer to Context structure on kernel stack
     ///
     /// # Returns
     ///
     /// Pointer to next thread's Context, or null if no switch needed
-    ///
-    /// # Safety
-    ///
-    /// Must be called from syscall_entry.asm with valid Context pointer.
     #[no_mangle]
     pub unsafe extern "C" fn schedule_and_switch(
-        current_ctx_ptr: *const crate::sched::Context,
-    ) -> *const crate::sched::Context {
-        use crate::sched::{Context, Priority};
-
-        klibcluu::trace("=== schedule_and_switch called ===");
+        current_ctx_ptr: *const Context,
+    ) -> *const Context {
+        if VERBOSE_CONTEXT_TRACE {
+            klibcluu::trace("schedule_and_switch called");
+        }
 
         // Get current thread ID
         let current_id = match Self::current() {
             Some(id) => id,
             None => {
-                // No current thread? This shouldn't happen
                 klibcluu::error("schedule_and_switch: No current thread!");
                 return core::ptr::null();
             }
         };
 
-        klibcluu::trace("Current thread: ");
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", current_id.as_u64());
-
         // Save current thread's context
         if !current_ctx_ptr.is_null() {
-            let ctx = &*current_ctx_ptr;
-
-            klibcluu::trace("Saving current thread context:");
-            klibcluu::trace("  RIP:    0x");
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", ctx.rip);
-            klibcluu::trace("  RSP:    0x");
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", ctx.rsp);
-            klibcluu::trace("  CR3:    0x");
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", ctx.cr3);
-            klibcluu::trace("  RFLAGS: 0x");
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", ctx.rflags);
-
-            Self::with_thread_mut(current_id, |thread| {
-                // Copy context from kernel stack to thread structure
-                thread.context = *current_ctx_ptr;
-                klibcluu::trace("Context saved to thread ");
-                klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread.id.as_u64());
-            });
+            Self::save_context(current_id, &*current_ctx_ptr);
         }
 
-        // Add current thread back to scheduler for next scheduling round
-        let priority = Self::with_thread(current_id, |t| t.priority).unwrap_or(Priority(100));
-        {
-            let mut scheduler = SCHEDULER.lock();
-            scheduler.add(current_id, priority);
-        }
+        // Re-queue current thread for next scheduling round
+        Self::requeue_thread(current_id);
 
         // Pick next thread
         let next_id = match Self::pick_next() {
             Some(id) => id,
             None => {
-                // No threads ready? Go back to current thread (shouldn't happen)
-                klibcluu::warn("schedule_and_switch: No threads ready, returning to current");
-                return Self::with_thread(current_id, |t| &t.context as *const Context)
-                    .unwrap_or(core::ptr::null());
+                klibcluu::warn("No threads ready, returning to current");
+                return Self::get_context_ptr(current_id);
             }
         };
 
-        // If next thread is same as current, no need to switch
+        // No switch needed if same thread
         if next_id == current_id {
-            klibcluu::trace("No context switch needed (same thread)");
-            return core::ptr::null(); // Signal no switch needed
+            return core::ptr::null();
         }
 
-        klibcluu::trace("Context switch: ");
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, " -> ", current_id.as_u64());
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", next_id.as_u64());
+        if VERBOSE_CONTEXT_TRACE {
+            klibcluu::trace("Context switch: thread ");
+            klibcluu::log_dec(klibcluu::LogLevel::Trace, " -> ", current_id.as_u64());
+            klibcluu::log_dec(klibcluu::LogLevel::Trace, "", next_id.as_u64());
+        }
 
         // Set next thread as current
         Self::set_current(next_id);
 
         // Return pointer to next thread's context
-        Self::with_thread(next_id, |thread| {
-            klibcluu::trace("Loading next thread context:");
-            klibcluu::trace("  Thread: ");
-            klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread.id.as_u64());
-            klibcluu::trace("  RIP:    0x");
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", thread.context.rip);
-            klibcluu::trace("  RSP:    0x");
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", thread.context.rsp);
-            klibcluu::trace("  CR3:    0x");
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", thread.context.cr3);
-            klibcluu::trace("  RFLAGS: 0x");
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", thread.context.rflags);
-            klibcluu::trace("  CS:     0x");
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", thread.context.cs);
-            klibcluu::trace("  SS:     0x");
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", thread.context.ss);
-            klibcluu::trace("Returning context pointer, will SYSRET to thread");
-            &thread.context as *const Context
-        })
-        .unwrap_or(core::ptr::null())
+        Self::get_context_ptr(next_id)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Private Helper Functions
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Save context to thread structure
+    fn save_context(thread_id: ThreadId, context: &Context) {
+        if VERBOSE_CONTEXT_TRACE {
+            klibcluu::trace("Saving context for thread ");
+            klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+        }
+
+        Self::with_thread_mut(thread_id, |thread| {
+            thread.context = *context;
+        });
+    }
+
+    /// Re-queue thread back to scheduler
+    fn requeue_thread(thread_id: ThreadId) {
+        let priority = Self::with_thread(thread_id, |t| t.priority).unwrap_or(Priority(100));
+        let mut scheduler = SCHEDULER.lock();
+        scheduler.add(thread_id, priority);
+    }
+
+    /// Get pointer to thread's context
+    fn get_context_ptr(thread_id: ThreadId) -> *const Context {
+        Self::with_thread(thread_id, |thread| &thread.context as *const Context)
+            .unwrap_or(core::ptr::null())
     }
 }
 
-/// Jump to a thread's context (initial userspace entry)
-///
-/// This uses iretq to switch from kernel mode to user mode.
-/// Sets up the stack for iretq and jumps.
+/// Jump to a thread's context (initial userspace entry via iretq)
 ///
 /// # Safety
 ///
-/// - Must be called with interrupts disabled
-/// - Context must be valid
-unsafe fn jump_to_thread(context: &crate::sched::Context) -> ! {
+/// Must be called with interrupts disabled and valid context
+unsafe fn jump_to_thread(context: &Context) -> ! {
+    if VERBOSE_CONTEXT_TRACE {
+        klibcluu::trace("jump_to_thread: entering userspace at RIP 0x");
+        klibcluu::log_hex(klibcluu::LogLevel::Trace, "", context.rip);
+    }
+
+    setup_kernel_stack();
+    load_address_space(context.cr3);
+    klibcluu::info("Entering userspace...");
+    enter_userspace(context);
+}
+
+/// Setup kernel stack for SYSCALL and interrupts
+///
+/// Updates PerCpuData.kernel_rsp (for SYSCALL) and TSS.RSP0 (for interrupts)
+/// to point to the current thread's kernel stack.
+///
+/// # SMP Design
+///
+/// - Each CPU has its own PerCpuData (GS points to it)
+/// - Each thread will have its own kernel stack (TODO: Phase 8)
+/// - Before running a thread: Update PerCpuData.kernel_rsp to thread's stack
+///
+/// # Current Implementation
+///
+/// All threads share BSP_STACK (single-CPU, single kernel stack)
+unsafe fn setup_kernel_stack() {
+    extern "C" {
+        static BSP_STACK: u8;
+    }
+    let kernel_stack_top = (&raw const BSP_STACK as u64) + (64 * 1024);
+
+    // Update PerCpuData.kernel_rsp (for SYSCALL path)
+    crate::architecture::x86_64::syscall::set_current_thread_kernel_stack(kernel_stack_top);
+
+    // Update TSS.RSP0 (for interrupt/exception path)
+    set_tss_rsp0(kernel_stack_top);
+
+    // Verify kernel stack is set correctly
+    let verified = crate::architecture::x86_64::syscall::get_current_kernel_stack();
+    if verified != kernel_stack_top {
+        klibcluu::error("FATAL: Kernel stack setup failed!");
+        loop {
+            x86_64::instructions::hlt();
+        }
+    }
+}
+
+/// Load address space by switching CR3
+///
+/// Switches to the thread's page table. Kernel mappings must be present
+/// in the new address space for continued execution.
+unsafe fn load_address_space(cr3: u64) {
     use x86_64::registers::control::{Cr3, Cr3Flags};
     use x86_64::structures::paging::PhysFrame;
     use x86_64::PhysAddr;
 
-    klibcluu::trace("jump_to_thread: Preparing to jump to userspace");
-    klibcluu::trace("  RIP:    0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", context.rip);
-    klibcluu::trace("  RSP:    0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", context.rsp);
-    klibcluu::trace("  CR3:    0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", context.cr3);
-    klibcluu::trace("  RFLAGS: 0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", context.rflags);
-    klibcluu::trace("  CS:     0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", context.cs);
-    klibcluu::trace("  SS:     0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", context.ss);
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // CRITICAL: Set up per-thread kernel stack (SMP-ready design)
-    // ═══════════════════════════════════════════════════════════════════════
-    //
-    // When userspace executes SYSCALL or triggers an exception, the CPU needs
-    // a kernel stack to handle it:
-    //
-    // 1. SYSCALL path:
-    //    - syscall_entry.asm executes: mov rsp, [gs:0x08]
-    //    - Loads kernel stack from PerCpuData.kernel_rsp
-    //
-    // 2. Exception/Interrupt path:
-    //    - CPU loads TSS.RSP0 automatically
-    //    - Both must point to the same stack
-    //
-    // SMP Design:
-    // - Each CPU has its own PerCpuData (GS points to it)
-    // - Each thread has its own kernel stack
-    // - Before running a thread: Update PerCpuData.kernel_rsp to thread's stack
-    //
-    // Current (Single CPU):
-    // - One global PER_CPU_DATA
-    // - All threads share BSP_STACK (TODO Phase 8: per-thread stacks)
-    // ═══════════════════════════════════════════════════════════════════════
-
-    klibcluu::trace("Setting up per-thread kernel stack...");
-
-    // Get this thread's kernel stack top
-    // TODO Phase 8: Each thread should have thread.kernel_stack_top
-    // For now: Use BSP_STACK for all threads (single-threaded testing)
-    extern "C" {
-        static BSP_STACK: u8;
-    }
-    let thread_kernel_stack_top = (&raw const BSP_STACK as u64) + (64 * 1024);
-
-    // Update PerCpuData.kernel_rsp (used by syscall_entry.asm)
-    unsafe {
-        crate::architecture::x86_64::syscall::set_current_thread_kernel_stack(
-            thread_kernel_stack_top
-        );
-    }
-
-    // Update TSS.RSP0 (used by interrupt/exception handlers)
-    set_tss_rsp0(thread_kernel_stack_top);
-
-    klibcluu::trace("  Thread kernel stack top = 0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", thread_kernel_stack_top);
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Verify PerCpuData.kernel_rsp is set correctly
-    // ═══════════════════════════════════════════════════════════════════════
-
-    klibcluu::trace("Verifying PerCpuData.kernel_rsp via GS:[8]...");
-    let verified_kernel_rsp = unsafe {
-        crate::architecture::x86_64::syscall::get_current_kernel_stack()
-    };
-
-    klibcluu::trace("  PerCpuData.kernel_rsp = 0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", verified_kernel_rsp);
-
-    // CRITICAL: Verify it's not zero (would crash on SYSCALL)
-    if verified_kernel_rsp == 0 {
-        klibcluu::error("FATAL: PerCpuData.kernel_rsp is 0!");
-        klibcluu::error("  SYSCALL will fail - userspace cannot call kernel!");
-        loop {
-            x86_64::instructions::hlt();
-        }
-    }
-
-    // CRITICAL: Verify it matches what we just set
-    if verified_kernel_rsp != thread_kernel_stack_top {
-        klibcluu::error("FATAL: PerCpuData.kernel_rsp mismatch!");
-        klibcluu::error("  Expected: 0x");
-        klibcluu::log_hex(klibcluu::LogLevel::Error, "", thread_kernel_stack_top);
-        klibcluu::error("  Got:      0x");
-        klibcluu::log_hex(klibcluu::LogLevel::Error, "", verified_kernel_rsp);
-        loop {
-            x86_64::instructions::hlt();
-        }
-    }
-
-    klibcluu::trace("Kernel stack verification PASSED");
-
-    // Load thread's page table (CR3)
-    klibcluu::trace("Loading CR3...");
-    let frame = PhysFrame::containing_address(PhysAddr::new(context.cr3));
+    let frame = PhysFrame::containing_address(PhysAddr::new(cr3));
     Cr3::write(frame, Cr3Flags::empty());
-    klibcluu::trace("CR3 loaded successfully");
+}
 
-    // Verify we can still access kernel stack after CR3 switch
-    klibcluu::trace("Verifying kernel stack accessibility after CR3 switch...");
-    let mut stack_test: u64 = 0x12345678;
-    core::ptr::write_volatile(&mut stack_test, 0xABCDEF);
-    let verify = core::ptr::read_volatile(&stack_test);
-    if verify != 0xABCDEF {
-        klibcluu::error("Stack not accessible after CR3 switch!");
-    } else {
-        klibcluu::trace("Stack still accessible - kernel mappings OK");
+/// Enter userspace via iretq
+///
+/// Builds interrupt frame on stack and executes iretq to switch to Ring 3.
+unsafe fn enter_userspace(context: &Context) -> ! {
+    if VERBOSE_CONTEXT_TRACE {
+        klibcluu::trace("Executing iretq to userspace");
     }
-
-    // Verify user code is accessible at entry point
-    klibcluu::trace("Verifying user code accessibility at RIP...");
-    let code_ptr = context.rip as *const u8;
-    let first_byte = core::ptr::read_volatile(code_ptr);
-    klibcluu::trace("First instruction byte at entry: 0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", first_byte as u64);
-
-    // Verify user stack is accessible
-    klibcluu::trace("Verifying user stack accessibility...");
-    let stack_ptr = (context.rsp - 8) as *const u64;
-    let _ = core::ptr::read_volatile(stack_ptr);
-    klibcluu::trace("User stack accessible");
-
-    // Use iretq to jump to userspace
-    // Stack layout for iretq (from top to bottom):
-    // - SS (user data segment)
-    // - RSP (user stack pointer)
-    // - RFLAGS
-    // - CS (user code segment)
-    // - RIP (instruction pointer)
-
-    klibcluu::trace("Executing iretq...");
-
-    // CRITICAL: Must match hardware interrupt frame layout EXACTLY
-    // Values must be 64-bit to match x86_64 interrupt frame
-    let user_ss: u64 = context.ss;
-    let user_rsp: u64 = context.rsp;
-    let user_rflags: u64 = context.rflags;
-    let user_cs: u64 = context.cs;
-    let user_rip: u64 = context.rip;
-
-    // Log all values before iretq
-    klibcluu::trace("IRETQ frame values:");
-    klibcluu::trace("  user_rip:    ");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", user_rip);
-    klibcluu::trace("  user_cs:     ");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", user_cs);
-    klibcluu::trace("  user_rflags: ");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", user_rflags);
-    klibcluu::trace("  user_rsp:    ");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", user_rsp);
-    klibcluu::trace("  user_ss:     ");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", user_ss);
 
     core::arch::asm!(
-        // Push interrupt frame in reverse order (SS, RSP, RFLAGS, CS, RIP)
         "push {0}",      // SS
         "push {1}",      // RSP
         "push {2}",      // RFLAGS
         "push {3}",      // CS
         "push {4}",      // RIP
         "iretq",
-        in(reg) user_ss,
-        in(reg) user_rsp,
-        in(reg) user_rflags,
-        in(reg) user_cs,
-        in(reg) user_rip,
+        in(reg) context.ss,
+        in(reg) context.rsp,
+        in(reg) context.rflags,
+        in(reg) context.cs,
+        in(reg) context.rip,
         options(noreturn)
     );
 }
@@ -539,7 +419,6 @@ unsafe fn jump_to_thread(context: &crate::sched::Context) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use x86_64::{PhysAddr, VirtAddr};
 
     #[test]
     fn test_mode_tracking() {
@@ -550,9 +429,13 @@ mod tests {
 
     #[test]
     fn test_critical_process_counting() {
-        ThreadManager::register_critical_process();
-        ThreadManager::register_critical_process();
-        ThreadManager::register_critical_process();
+        let tid1 = ThreadId::new(1);
+        let tid2 = ThreadId::new(2);
+        let tid3 = ThreadId::new(3);
+
+        ThreadManager::register_critical_thread(tid1);
+        ThreadManager::register_critical_thread(tid2);
+        ThreadManager::register_critical_thread(tid3);
 
         assert!(!ThreadManager::signal_critical_process_ready());
         assert!(!ThreadManager::signal_critical_process_ready());
