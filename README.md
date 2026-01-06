@@ -37,17 +37,19 @@ The goal is not speed of development, but **clarity of design** and **long-term 
 
 ```
 +-------------------------+
-|        Userspace        |
+|        Userspace		  |
+|       (as of now)       |
 |-------------------------|
 | init | procmgr | vfs    |
 | ramfs | console | shell |
 | cat | drivers | servers |
 +----------- IPC ---------+
 |        Microkernel      |
+|        (as of now)      |
 |-------------------------|
 | Scheduler | IPC | VMM   |
-| PMM | Tokens | IRQ     |
-| Syscalls | Timer       |
+| PMM | Tokens | IRQ      |
+| Syscalls | Timer        |
 +-------------------------+
 |        Hardware         |
 +-------------------------+
