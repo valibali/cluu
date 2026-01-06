@@ -112,7 +112,7 @@ impl Context {
             r15: 0,
             rsp: stack,
             rip: entry,
-            rflags: 0x200, // IF (Interrupt Enable) flag
+            rflags: 0x202, // Bit 1 (reserved, always 1) | Bit 9 (IF)
             cs: 0x08,      // Kernel code segment (placeholder until GDT setup)
             ss: 0x10,      // Kernel data segment (placeholder until GDT setup)
             cr3,

@@ -10,7 +10,7 @@ use crate::syscall::thread_exit;
 ///
 /// This is called by the kernel after loading the program.
 /// It sets up the runtime and calls main().
-#[cfg(all(not(feature = "std"), not(test)))]
+#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
@@ -23,6 +23,8 @@ pub extern "C" fn _start() -> ! {
 }
 
 /// Panic handler for userspace
+///
+/// Note: This is only active when building for the target (not during testing)
 #[cfg(all(not(feature = "std"), not(test)))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {

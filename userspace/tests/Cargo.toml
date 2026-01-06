@@ -1,0 +1,14 @@
+[package]
+name = "userspace-tests"
+version = "0.1.0"
+edition = "2021"
+description = "Unit tests for CLUU userspace components"
+
+[dependencies]
+# We'll reference userspace code for testing
+
+[dev-dependencies]
+
+[lib]
+name = "userspace_tests"
+path = "src/lib.rs"

@@ -52,8 +52,8 @@ pub fn spawn_elf_process(
     elf_data: &[u8],
     process_type: ProcessType,
 ) -> Result<ProcessId, &'static str> {
-    klibcluu::info("Spawning ELF process: ");
-    klibcluu::info(name);
+    klibcluu::trace("Spawning ELF process: ");
+    klibcluu::trace(name);
 
     // Step 1: Create userspace process (allocates address space)
     let pid = ProcessManager::spawn_user(name, process_type)?;
@@ -64,21 +64,14 @@ pub fn spawn_elf_process(
         let binary = elf::load_elf(elf_data, &mut process.address_space)
             .map_err(|_| "ELF loading failed")?;
 
-        klibcluu::info("  Entry point: 0x");
-        klibcluu::log_hex(
-            klibcluu::LogLevel::Info,
-            "",
-            binary.entry_point.as_u64(),
-        );
-
         Ok::<_, &'static str>(binary)
     });
 
     // Check if loading succeeded
     match result {
         Some(Ok(_binary)) => {
-            klibcluu::info("Successfully loaded ELF process: ");
-            klibcluu::info(name);
+            klibcluu::trace("Successfully loaded ELF process: ");
+            klibcluu::trace(name);
             Ok(pid)
         }
         Some(Err(e)) => {

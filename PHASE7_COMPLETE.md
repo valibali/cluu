@@ -113,9 +113,9 @@
 
 **Boot Sequence:**
 ```rust
-1. arch::x86_64::gdt::init()        // GDT + TSS
-2. arch::x86_64::idt::init()        // Exception/interrupt handlers
-3. arch::x86_64::syscall::init()    // SYSCALL/SYSRET setup
+1. architecure::x86_64::gdt::init()        // GDT + TSS
+2. architecure::x86_64::idt::init()        // Exception/interrupt handlers
+3. architecure::x86_64::syscall::init()    // SYSCALL/SYSRET setup
 4. utils::logger::init()            // Kernel logging
 5. [TODO] peripherals init          // UART, etc.
 6. idle_loop()                      // HLT until interrupts

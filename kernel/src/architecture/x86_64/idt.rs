@@ -68,7 +68,7 @@ lazy_static! {
         unsafe {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
-                .set_stack_index(crate::arch::x86_64::gdt::DOUBLE_FAULT_IST_INDEX);
+                .set_stack_index(crate::architecture::x86_64::gdt::DOUBLE_FAULT_IST_INDEX);
         }
         idt.invalid_tss.set_handler_fn(invalid_tss_handler);
         idt.segment_not_present.set_handler_fn(segment_not_present_handler);
@@ -230,10 +230,16 @@ extern "x86-interrupt" fn device_not_available_handler(_stack_frame: InterruptSt
 }
 
 extern "x86-interrupt" fn double_fault_handler(
-    _stack_frame: InterruptStackFrame,
-    _error_code: u64,
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
 ) -> ! {
     klibcluu::warn("DOUBLE_FAULT");
+    klibcluu::warn("  RIP: ");
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "", stack_frame.instruction_pointer.as_u64());
+    klibcluu::warn("  RSP: ");
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "", stack_frame.stack_pointer.as_u64());
+    klibcluu::warn("  Error code: ");
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "", error_code);
     // Critical error - halt immediately without panic
     loop {
         x86_64::instructions::hlt();
@@ -324,7 +330,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 extern "x86-interrupt" fn page_fault_handler(
-    _stack_frame: InterruptStackFrame,
+    stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
@@ -339,23 +345,53 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     };
 
+    // Extract stack frame values
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let cs = stack_frame.code_segment.0 as u64;
+    let rsp = stack_frame.stack_pointer.as_u64();
+    let ss = stack_frame.stack_segment.0 as u64;
+    let rflags = stack_frame.cpu_flags.bits();
+
     // Parse error code flags
     let is_present =
         error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION);
-    let _is_write =
+    let is_write =
         error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE);
     let is_user = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
+    let is_instruction_fetch =
+        error_code.contains(x86_64::structures::idt::PageFaultErrorCode::INSTRUCTION_FETCH);
 
-    // Log page fault using IRQ-safe logging
-    klibcluu::warn("[PF] addr=");
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "", fault_addr.as_u64());
-    klibcluu::warn(if is_user { " user" } else { " kernel" });
-    klibcluu::warn(if is_present {
-        " present"
+    // Log page fault with detailed information
+    klibcluu::warn("PAGE_FAULT");
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: Fault address (CR2)=", fault_addr.as_u64());
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: RIP=", rip);
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: CS=", cs);
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: RSP=", rsp);
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: SS=", ss);
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: RFLAGS=", rflags);
+
+    // Log error code details
+    if is_user {
+        klibcluu::warn("PF: Fault in USERSPACE (Ring 3)");
     } else {
-        " not-present"
-    });
-    klibcluu::warn("");
+        klibcluu::warn("PF: Fault in KERNEL (Ring 0)");
+    }
+
+    if is_present {
+        klibcluu::warn("PF: Protection violation (page is present)");
+    } else {
+        klibcluu::warn("PF: Page not present");
+    }
+
+    if is_write {
+        klibcluu::warn("PF: Caused by WRITE");
+    } else {
+        klibcluu::warn("PF: Caused by READ");
+    }
+
+    if is_instruction_fetch {
+        klibcluu::warn("PF: Caused by INSTRUCTION FETCH");
+    }
 
     // If page is not present and fault is from user mode, try lazy allocation
     if !is_present && is_user {
@@ -369,8 +405,10 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 
     // Unrecoverable page fault
-    klibcluu::warn("[PF] UNRECOVERABLE - panicking");
-    panic!("Unrecoverable page fault");
+    klibcluu::warn("[PF] UNRECOVERABLE - halting");
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 /// Handle page fault in heap region (lazy allocation)

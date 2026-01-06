@@ -179,7 +179,7 @@ fn build_kernel(profile: &str) -> Result<()> {
 fn assemble_nasm() -> Result<()> {
     println!("  Assembling NASM files...");
 
-    let asm_dir = project_root().join("kernel/src/arch/x86_64");
+    let asm_dir = project_root().join("kernel/src/architecture/x86_64");
     let out_dir = project_root().join("target/asm");
 
     fs::create_dir_all(&out_dir)?;

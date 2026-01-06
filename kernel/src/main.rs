@@ -16,11 +16,8 @@
 
 extern crate klibcluu;
 
-// Binary-specific modules
-mod arch;
-
 // Use kernel lib modules
-use cluu_kernel::{bootboot, error, mm, syscall, token};
+use cluu_kernel::{architecture, bootboot, bootstrap, error, mm, syscall};
 
 use core::panic::PanicInfo;
 
@@ -105,30 +102,47 @@ pub extern "C" fn kstart() -> ! {
 
     // 1.3: GDT - Global Descriptor Table
     // Sets up memory segmentation and privilege levels (Ring 0/3)
-    arch::x86_64::gdt::init();
+    architecture::x86_64::gdt::init();
 
     // 1.4: PIC - Programmable Interrupt Controller
     // Disable/remap the legacy 8259 PIC to prevent spurious interrupts
     unsafe {
-        arch::x86_64::pic::init(); // Remap to vectors 32-47 and mask all
+        architecture::x86_64::pic::init(); // Remap to vectors 32-47 and mask all
     }
 
     // 1.5: IDT - Interrupt Descriptor Table
     // Handles CPU exceptions and hardware interrupts
-    arch::x86_64::idt::init();
+    architecture::x86_64::idt::init();
 
     // 1.6: Syscall mechanism
     // Configures SYSCALL/SYSRET instructions for fast system calls
     unsafe {
-        arch::x86_64::syscall::init();
+        architecture::x86_64::syscall::init();
+
+        // Set up per-CPU data for syscall handling
+        // For now, use BSP stack as kernel stack
+        // Made pub so thread_manager can access via set_current_thread_kernel_stack()
+        pub static mut PER_CPU_DATA: architecture::x86_64::syscall::PerCpuData =
+            architecture::x86_64::syscall::PerCpuData::new();
+
+        PER_CPU_DATA.set_kernel_stack((&raw const BSP_STACK as *const u8 as u64) + (64 * 1024));
+
+        architecture::x86_64::syscall::set_per_cpu_area(&PER_CPU_DATA);
     }
 
-    // Phase 2: Memory Management Setup
-    // Create bootloader adapter (abstraction layer)
+    // Phase 2: Extract initrd info before MM switches page tables
     let bootboot_ptr = &raw const bootboot::bootboot as *const bootboot::BOOTBOOT;
+    let (initrd_phys, initrd_size) = unsafe {
+        let bb = &*bootboot_ptr;
+        (bb.initrd_ptr, bb.initrd_size)
+    };
+
+    // Phase 3: Memory Management Setup
+    // Create bootloader adapter (abstraction layer)
     let boot_info = unsafe { mm::boot::BootbootAdapter::new(bootboot_ptr) };
 
     // Initialize memory management (bootloader-agnostic)
+    // This switches to our own page tables and discards bootloader mappings
     unsafe {
         mm::init(&boot_info);
     }
@@ -138,7 +152,20 @@ pub extern "C" fn kstart() -> ! {
         mm::heap::init().expect("Failed to initialize heap");
     }
 
-    // Phase 3: Log initialization status
+    // Phase 4: Bootstrap init thread
+    // Pass initrd info directly (BOOTBOOT structure is no longer accessible)
+    let _init_thread_id = unsafe {
+        match bootstrap::init(initrd_phys, initrd_size) {
+            Ok(thread_id) => thread_id,
+            Err(e) => {
+                klibcluu::error("Bootstrap failed: ");
+                klibcluu::log_dec(klibcluu::LogLevel::Error, "", e as u64);
+                panic!("Failed to bootstrap init thread");
+            }
+        }
+    };
+
+    // Phase 5: Log initialization status
 
     klibcluu::logger::info("CLUU Microkernel v0.1.0");
     klibcluu::logger::info("Phase 7b: IRQ-Safe Logging with SOLID Architecture");
@@ -167,12 +194,13 @@ pub extern "C" fn kstart() -> ! {
     klibcluu::logger::info("  - Test with userspace programs");
 
     klibcluu::logger::info("========================================");
-    klibcluu::logger::info("Entering idle loop (scheduler not yet started)");
+    klibcluu::logger::info("Starting scheduler and launching init thread");
     klibcluu::logger::info("");
 
-    // TODO Phase 8: Start scheduler and launch init process
-    // For now, just idle
-    idle_loop()
+    // Phase 8: Start scheduler and jump to init thread
+    unsafe {
+        cluu_kernel::sched::ThreadManager::start();
+    }
 }
 
 /// Idle loop - halt CPU waiting for interrupts

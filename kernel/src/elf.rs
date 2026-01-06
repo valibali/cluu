@@ -296,23 +296,23 @@ pub fn load_elf(
     data: &[u8],
     address_space: &mut crate::mm::AddressSpace,
 ) -> Result<ElfBinary, ElfLoadError> {
-    klibcluu::info("ELF: Loading binary (");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", data.len() as u64);
-    klibcluu::info(" bytes)");
+    klibcluu::trace("ELF: Loading binary (");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", data.len() as u64);
+    klibcluu::trace(" bytes)");
 
     // Parse and validate ELF header
     let header = parse_elf_header(data)?;
     let e_entry = unsafe { core::ptr::addr_of!(header.e_entry).read_unaligned() };
     let entry_point = VirtAddr::new(e_entry);
 
-    klibcluu::info("ELF: Entry point at 0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Info, "", entry_point.as_u64());
+    klibcluu::trace("ELF: Entry point at 0x");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", entry_point.as_u64());
 
     // Parse program headers
     let program_headers = parse_program_headers(data, &header)?;
-    klibcluu::info("ELF: Found ");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", program_headers.len() as u64);
-    klibcluu::info(" program headers");
+    klibcluu::trace("ELF: Found ");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", program_headers.len() as u64);
+    klibcluu::trace(" program headers");
 
     let mut has_loadable = false;
 
@@ -339,14 +339,14 @@ pub fn load_elf(
         let mem_size = p_memsz as usize;
         let file_offset = p_offset as usize;
 
-        klibcluu::info("ELF: Segment ");
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "", i as u64);
-        klibcluu::info(": vaddr=0x");
-        klibcluu::log_hex(klibcluu::LogLevel::Info, "", p_vaddr);
-        klibcluu::info(", filesz=");
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "", file_size as u64);
-        klibcluu::info(", memsz=");
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "", mem_size as u64);
+        klibcluu::trace("ELF: Segment ");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", i as u64);
+        klibcluu::trace(": vaddr=0x");
+        klibcluu::log_hex(klibcluu::LogLevel::Trace, "", p_vaddr);
+        klibcluu::trace(", filesz=");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", file_size as u64);
+        klibcluu::trace(", memsz=");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", mem_size as u64);
 
         // Validate segment bounds
         if file_offset + file_size > data.len() {
@@ -493,7 +493,7 @@ unsafe fn load_segment(
 /// Map a single user page
 ///
 /// Helper function to map a page into user address space with appropriate flags.
-unsafe fn map_user_page(
+pub(crate) unsafe fn map_user_page(
     virt: u64,
     phys: u64,
     writable: bool,
@@ -525,9 +525,12 @@ unsafe fn map_user_page(
     let pml4_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(page_table_root.as_u64()) };
     let pml4 = unsafe { &mut *(pml4_virt as *mut [u64; 512]) };
 
+    // Mask to extract physical address from PTE (bits 12-51 only)
+    const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
     // Get or create PDPT
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
-        pml4[pml4_idx] & !0xFFF
+        pml4[pml4_idx] & PHYS_MASK
     } else {
         let pdpt_phys = crate::mm::pmm_simple::alloc_frame()
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
@@ -542,7 +545,7 @@ unsafe fn map_user_page(
 
     // Get or create PD
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
-        pdpt[pdpt_idx] & !0xFFF
+        pdpt[pdpt_idx] & PHYS_MASK
     } else {
         let pd_phys = crate::mm::pmm_simple::alloc_frame()
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
@@ -557,7 +560,7 @@ unsafe fn map_user_page(
 
     // Get or create PT
     let pt_phys = if pd[pd_idx] & 0x1 != 0 {
-        pd[pd_idx] & !0xFFF
+        pd[pd_idx] & PHYS_MASK
     } else {
         let pt_phys = crate::mm::pmm_simple::alloc_frame()
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
@@ -597,8 +600,13 @@ fn translate_vaddr(page_table_root: PhysAddr, vaddr: VirtAddr) -> Option<PhysAdd
         return None;
     }
 
+    // Mask to extract physical address from page table entry
+    // Clears page offset (bits 0-11) and flags (bits 52-63)
+    // Keeps only physical frame number (bits 12-51)
+    const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
     // Access PDPT
-    let pdpt_phys = pml4[pml4_idx] & !0xFFF;
+    let pdpt_phys = pml4[pml4_idx] & PHYS_MASK;
     let pdpt_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pdpt_phys) };
     let pdpt = unsafe { &*(pdpt_virt as *const [u64; 512]) };
 
@@ -607,7 +615,7 @@ fn translate_vaddr(page_table_root: PhysAddr, vaddr: VirtAddr) -> Option<PhysAdd
     }
 
     // Access PD
-    let pd_phys = pdpt[pdpt_idx] & !0xFFF;
+    let pd_phys = pdpt[pdpt_idx] & PHYS_MASK;
     let pd_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pd_phys) };
     let pd = unsafe { &*(pd_virt as *const [u64; 512]) };
 
@@ -616,7 +624,7 @@ fn translate_vaddr(page_table_root: PhysAddr, vaddr: VirtAddr) -> Option<PhysAdd
     }
 
     // Access PT
-    let pt_phys = pd[pd_idx] & !0xFFF;
+    let pt_phys = pd[pd_idx] & PHYS_MASK;
     let pt_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pt_phys) };
     let pt = unsafe { &*(pt_virt as *const [u64; 512]) };
 
@@ -624,8 +632,8 @@ fn translate_vaddr(page_table_root: PhysAddr, vaddr: VirtAddr) -> Option<PhysAdd
         return None;
     }
 
-    // Get physical address
-    let phys = pt[pt_idx] & !0xFFF;
+    // Get physical address from PTE
+    let phys = pt[pt_idx] & PHYS_MASK;
     Some(PhysAddr::new(phys))
 }
 

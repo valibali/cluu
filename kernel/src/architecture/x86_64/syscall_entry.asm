@@ -42,6 +42,7 @@ section .text
 
 global syscall_entry
 extern syscall_dispatch
+extern schedule_and_switch
 
 ; ═══════════════════════════════════════════════════════════════════════════
 ; Syscall Entry Point
@@ -127,10 +128,136 @@ syscall_entry:
     call syscall_dispatch
 
     ; Return value in RAX (already there from function return)
+    ; Save it - we'll need it after potential context switch
+    push rax
 
     ; ───────────────────────────────────────────────────────────────────────
-    ; Restore user context
+    ; seL4 Fastpath: Context Switch Check
     ; ───────────────────────────────────────────────────────────────────────
+    ;
+    ; Build Context structure on stack for schedule_and_switch:
+    ; Offset  Size  Field
+    ; ------  ----  -----
+    ; 0x00    8     RBX
+    ; 0x08    8     RBP
+    ; 0x10    8     R12
+    ; 0x18    8     R13
+    ; 0x20    8     R14
+    ; 0x28    8     R15
+    ; 0x30    8     RSP (user)
+    ; 0x38    8     RIP (user, from RCX)
+    ; 0x40    8     RFLAGS (user, from R11)
+    ; 0x48    8     CS (user code segment)
+    ; 0x50    8     SS (user data segment)
+    ; 0x58    8     CR3 (page table root)
+    ; Total: 96 bytes (0x60)
+
+    ; Stack currently has (top to bottom):
+    ; [RSP+0]  = syscall return value (RAX, just pushed)
+    ; [RSP+8]  = R15
+    ; [RSP+16] = R14
+    ; [RSP+24] = R13
+    ; [RSP+32] = R12
+    ; [RSP+40] = RBX
+    ; [RSP+48] = RBP
+    ; [RSP+56] = R11 (user RFLAGS)
+    ; [RSP+64] = RCX (user RIP)
+
+    ; Build Context by pushing in reverse order (highest offset first)
+    sub rsp, 96                     ; Reserve space for Context
+
+    ; Get CR3 and store at offset 0x58
+    mov r8, cr3
+    mov [rsp + 0x58], r8
+
+    ; User segments (constants) at offsets 0x50 and 0x48
+    mov qword [rsp + 0x50], 0x2b    ; SS (user data segment, index 5, RPL 3)
+    mov qword [rsp + 0x48], 0x33    ; CS (user code segment, index 6, RPL 3)
+
+    ; RFLAGS (from R11, saved at RSP+96+56)
+    mov r8, [rsp + 152]             ; 96 (context) + 8 (retval) + 48 = 152
+    mov [rsp + 0x40], r8
+
+    ; RIP (from RCX, saved at RSP+96+64)
+    mov r8, [rsp + 160]             ; 96 + 8 + 56 = 160
+    mov [rsp + 0x38], r8
+
+    ; User RSP (from GS:0x00)
+    mov r8, [gs:0x00]
+    mov [rsp + 0x30], r8
+
+    ; Callee-saved registers (from stack)
+    mov r8, [rsp + 104]             ; R15 at RSP+96+8
+    mov [rsp + 0x28], r8
+
+    mov r8, [rsp + 112]             ; R14
+    mov [rsp + 0x20], r8
+
+    mov r8, [rsp + 120]             ; R13
+    mov [rsp + 0x18], r8
+
+    mov r8, [rsp + 128]             ; R12
+    mov [rsp + 0x10], r8
+
+    mov r8, [rsp + 136]             ; RBP
+    mov [rsp + 0x08], r8
+
+    mov r8, [rsp + 144]             ; RBX
+    mov [rsp + 0x00], r8
+
+    ; Now [RSP] points to a complete Context structure
+    ; Call schedule_and_switch(context_ptr)
+    mov rdi, rsp
+    call schedule_and_switch
+
+    ; RAX = pointer to next thread's Context (or NULL if no switch)
+    test rax, rax
+    jz .no_context_switch
+
+    ; ───────────────────────────────────────────────────────────────────────
+    ; Context Switch: Load next thread's context and SYSRET to it
+    ; ───────────────────────────────────────────────────────────────────────
+
+    ; Load callee-saved registers
+    mov rbx, [rax + 0x00]
+    mov rbp, [rax + 0x08]
+    mov r12, [rax + 0x10]
+    mov r13, [rax + 0x18]
+    mov r14, [rax + 0x20]
+    mov r15, [rax + 0x28]
+
+    ; Load RIP and RFLAGS for SYSRET
+    mov rcx, [rax + 0x38]           ; User RIP
+    mov r11, [rax + 0x40]           ; User RFLAGS
+
+    ; Load CR3 (switch page tables)
+    mov r8, [rax + 0x58]
+    mov cr3, r8
+
+    ; Load user RSP
+    mov r8, [rax + 0x30]
+    mov [gs:0x00], r8               ; Save in per-CPU area
+    mov rsp, r8                     ; Load into RSP
+
+    ; SWAPGS and return to userspace
+    swapgs
+    cli                             ; Disable interrupts before SYSRET
+
+    ; Syscall return value for new thread is 0 (successful yield)
+    xor rax, rax
+
+    o64 sysret
+
+.no_context_switch:
+    ; ───────────────────────────────────────────────────────────────────────
+    ; No context switch - restore original thread's context
+    ; ───────────────────────────────────────────────────────────────────────
+
+    ; Clean up Context structure
+    add rsp, 96
+
+    ; Restore syscall return value
+    pop rax
 
     ; Restore callee-saved registers
     pop r15
@@ -166,7 +293,7 @@ syscall_entry:
     ; - CS ← IA32_STAR[63:48] + 16 (user code segment)
     ; - SS ← IA32_STAR[63:48] + 8  (user data segment)
 
-    sysretq                         ; Return to userspace
+    o64 sysret                      ; Return to userspace
 
 ; ═══════════════════════════════════════════════════════════════════════════
 ; Notes

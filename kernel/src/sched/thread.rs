@@ -187,11 +187,13 @@ impl Thread {
         context.cr3 = page_table_root.as_u64();
 
         // Set up initial RFLAGS (interrupts enabled)
-        context.rflags = 0x200; // IF (Interrupt Enable) flag
+        // Bit 1 (reserved, must be 1) | Bit 9 (IF - Interrupt Enable)
+        context.rflags = 0x202;
 
-        // Set up segment selectors (will be set properly when we have GDT)
-        context.cs = 0x08; // Kernel code segment (placeholder)
-        context.ss = 0x10; // Kernel data segment (placeholder)
+        // Set up segment selectors for userspace (Ring 3)
+        // Note: TSS takes 2 GDT entries, so user segments start at index 5
+        context.cs = 0x33; // User code segment (GDT index 6, RPL 3)
+        context.ss = 0x2b; // User data segment (GDT index 5, RPL 3)
 
         Self {
             id,

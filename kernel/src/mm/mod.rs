@@ -90,6 +90,9 @@ pub mod space;
 // Page fault handler
 pub mod fault;
 
+// Userspace physical memory mapping
+pub mod user_map;
+
 // Mock implementations for testing
 pub mod mock;
 
@@ -104,6 +107,7 @@ pub use fault::FaultHandler;
 pub use mock::MockPageAllocator;
 pub use pmm::{BuddyAllocator, MemoryRegion};
 pub use space::{layout, AddressSpace, HeapRegion, MemoryRegion as SpaceMemoryRegion};
+pub use user_map::{map_phys_to_userspace, unmap_phys_from_userspace};
 pub use vmm::PageTableManager;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -189,4 +193,83 @@ pub unsafe fn init(boot_info: &dyn boot::BootInfoProvider) {
     klibcluu::info("  [✓] Physmap accessible");
     klibcluu::info("  [✓] Bootloader mappings discarded");
     klibcluu::info("========================================");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// User Memory Allocation
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Allocate and map a userspace stack
+///
+/// Allocates physical frames and maps them into the user address space
+/// for use as a stack. The stack grows downward from `stack_top`.
+///
+/// # Arguments
+///
+/// * `space` - Address space to map stack into
+/// * `stack_top` - Top of stack (highest address, must be page-aligned)
+/// * `stack_size_bytes` - Size of stack in bytes (will be rounded up to pages)
+///
+/// # Returns
+///
+/// Ok(()) on success, Err on allocation or mapping failure
+///
+/// # Example
+///
+/// ```rust,no_run
+/// let stack_top = 0x7ff00000;  // 16MB below 2GB
+/// let stack_size = 64 * 1024;  // 64KB stack
+/// allocate_user_stack(&mut address_space, stack_top, stack_size)?;
+/// ```
+pub fn allocate_user_stack(
+    space: &mut AddressSpace,
+    stack_top: u64,
+    stack_size_bytes: usize,
+) -> Result<(), crate::error::Error> {
+    use core::ptr::write_bytes;
+
+    const PAGE_SIZE: usize = 4096;
+
+    // Round up to page boundary
+    let stack_pages = (stack_size_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    let page_table_root = space.page_table_root;
+
+    klibcluu::trace("MM: Allocating user stack: ");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", stack_pages as u64);
+    klibcluu::trace(" pages at 0x");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", stack_top);
+
+    // Allocate and map each stack page (from bottom to top)
+    for i in 0..stack_pages {
+        // Calculate virtual address (grow downward from top)
+        let offset = ((stack_pages - i) as u64) * PAGE_SIZE as u64;
+        let virt_addr = stack_top - offset;
+
+        // Allocate physical frame
+        let phys_frame = pmm_simple::alloc_frame()
+            .ok_or(crate::error::Error::OutOfMemory)?;
+
+        // Map page (writable, non-executable, user-accessible)
+        unsafe {
+            crate::elf::map_user_page(virt_addr, phys_frame, true, false, page_table_root)
+                .map_err(|_| crate::error::Error::OutOfMemory)?;
+        }
+
+        // Zero the page via physmap
+        let phys_virt = unsafe { physmap::phys_to_virt_u64(phys_frame) };
+        unsafe {
+            write_bytes(phys_virt as *mut u8, 0, PAGE_SIZE);
+        }
+    }
+
+    klibcluu::trace("MM: Stack mapped: 0x");
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "",
+        stack_top - (stack_pages as u64 * PAGE_SIZE as u64),
+    );
+    klibcluu::trace(" - 0x");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", stack_top);
+
+    Ok(())
 }

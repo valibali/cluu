@@ -9,6 +9,10 @@ license = "MIT"
 [dependencies]
 libcluu = { path = "../libcluu" }
 
+[lib]
+name = "procmgr"
+path = "src/lib.rs"
+
 [[bin]]
 name = "procmgr"
 path = "src/main.rs"

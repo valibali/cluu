@@ -21,8 +21,8 @@
 //! - **IA32_FMASK**: RFLAGS mask (clear interrupt flag on syscall)
 
 use crate::error::Error;
-use crate::syscall::{SyscallArgs, SyscallNumber, dispatch_syscall};
-use x86_64::registers::model_specific::{LStar, Star, SFMask};
+use crate::syscall::{dispatch_syscall, SyscallArgs, SyscallNumber};
+use x86_64::registers::model_specific::{LStar, SFMask};
 use x86_64::registers::rflags::RFlags;
 use x86_64::VirtAddr;
 
@@ -168,14 +168,29 @@ pub unsafe fn init() {
     }
 
     // ─────────────────────────────────────────────────────────────────────
+    // Enable SYSCALL/SYSRET via EFER.SCE
+    // ─────────────────────────────────────────────────────────────────────
+
+    use x86_64::registers::model_specific::Efer;
+    use x86_64::registers::model_specific::EferFlags;
+
+    unsafe {
+        let mut efer = Efer::read();
+        efer.insert(EferFlags::SYSTEM_CALL_EXTENSIONS);
+        Efer::write(efer);
+    }
+
+    klibcluu::info("  EFER.SCE enabled (SYSCALL/SYSRET instructions active)");
+
+    // ─────────────────────────────────────────────────────────────────────
     // Configure IA32_LSTAR - Syscall entry point address
     // ─────────────────────────────────────────────────────────────────────
 
     let entry_addr = VirtAddr::new(syscall_entry as *const () as u64);
     LStar::write(entry_addr);
 
-    klibcluu::debug("  LSTAR (entry point): 0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Debug, "", entry_addr.as_u64());
+    klibcluu::trace("  LSTAR (entry point): 0x");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", entry_addr.as_u64());
 
     // ─────────────────────────────────────────────────────────────────────
     // Configure IA32_STAR - Segment selectors
@@ -190,21 +205,27 @@ pub unsafe fn init() {
     //   0x18: User code   (index=3, RPL=0, but used as 0x1B with RPL=3)
     //   0x20: User data   (index=4, RPL=0, but used as 0x23 with RPL=3)
     //
-    // Star::write() configures segments for SYSCALL/SYSRET transitions:
-    //   - SYSCALL (user→kernel): loads kernel CS/SS
-    //   - SYSRET (kernel→user): loads user CS/SS
+    // STAR layout:
+    // [63:48] = User CS base (0x20 for data/stack segment base)
+    // [47:32] = Kernel CS (0x08 for code)
+    //
+    // SYSCALL loads:  CS = STAR[47:32], SS = STAR[47:32] + 8
+    // SYSRET loads:   CS = STAR[63:48] + 16, SS = STAR[63:48] + 8
 
-    use x86_64::structures::gdt::SegmentSelector;
-    use x86_64::PrivilegeLevel;
+    let star = ((0x20u64) << 48) | ((0x08u64) << 32);
 
-    Star::write(
-        SegmentSelector::new(1, PrivilegeLevel::Ring0), // kernel CS = 0x08
-        SegmentSelector::new(2, PrivilegeLevel::Ring0), // kernel SS = 0x10
-        SegmentSelector::new(3, PrivilegeLevel::Ring3), // user CS = 0x1B
-        SegmentSelector::new(4, PrivilegeLevel::Ring3), // user SS = 0x23
-    ).expect("Failed to write IA32_STAR");
+    // Write directly to STAR MSR (0xC0000081)
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") 0xC0000081u32,  // IA32_STAR
+            in("eax") (star & 0xFFFF_FFFF) as u32,
+            in("edx") (star >> 32) as u32,
+            options(nostack, preserves_flags),
+        );
+    }
 
-    klibcluu::debug("  STAR: kernel_cs=0x08, kernel_ss=0x10, user_cs=0x1B, user_ss=0x23");
+    klibcluu::trace("  STAR: kernel_cs=0x08, kernel_ss=0x10, user_cs=0x2B, user_ss=0x23");
 
     // ─────────────────────────────────────────────────────────────────────
     // Configure IA32_FMASK - RFLAGS mask
@@ -217,8 +238,8 @@ pub unsafe fn init() {
     let flags_mask = RFlags::INTERRUPT_FLAG;
     SFMask::write(flags_mask);
 
-    klibcluu::debug("  FMASK (clear IF): 0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Debug, "", flags_mask.bits());
+    klibcluu::trace("  FMASK (clear IF): 0x");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", flags_mask.bits());
 
     klibcluu::info("Syscall support initialized");
 }
@@ -243,6 +264,58 @@ pub unsafe fn set_per_cpu_area(per_cpu_data: &PerCpuData) {
 
     klibcluu::trace("Per-CPU area set: 0x");
     klibcluu::log_hex(klibcluu::LogLevel::Trace, "", addr);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-Thread Kernel Stack Management (SMP-ready)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Update the kernel stack for the currently running thread
+///
+/// This must be called before entering userspace (jump_to_thread)
+/// and during context switches to ensure SYSCALL uses the correct stack.
+///
+/// # Architecture
+/// - **Single CPU (current)**: Updates global PER_CPU_DATA.kernel_rsp
+/// - **Multi CPU (future)**: Each CPU's GS points to its PerCpuData, updated via GS:[8]
+///
+/// # How It Works
+/// - syscall_entry.asm does: `mov rsp, [gs:0x08]` to load kernel stack
+/// - This function ensures [gs:0x08] points to current thread's kernel stack
+///
+/// # Safety
+/// Must be called with interrupts disabled during thread switch
+pub unsafe fn set_current_thread_kernel_stack(stack_top: u64) {
+    // Write directly to PerCpuData.kernel_rsp via GS-relative addressing
+    // This works for both single-CPU and SMP scenarios
+    // Offset 0x08 is PerCpuData.kernel_rsp
+    unsafe {
+        core::arch::asm!(
+            "mov qword ptr gs:[8], {0}",
+            in(reg) stack_top,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// Get the current kernel stack from PerCpuData
+///
+/// Reads PerCpuData.kernel_rsp via GS-relative addressing.
+/// Useful for debugging and verification.
+///
+/// # Returns
+/// The kernel stack pointer that will be used by syscall_entry
+///
+/// # Safety
+/// Must be called in kernel context where GS points to valid PerCpuData
+pub unsafe fn get_current_kernel_stack() -> u64 {
+    let kernel_rsp: u64;
+    core::arch::asm!(
+        "mov {0}, qword ptr gs:[8]",  // Read kernel_rsp at offset 0x08
+        out(reg) kernel_rsp,
+        options(nostack, preserves_flags)
+    );
+    kernel_rsp
 }
 
 #[cfg(test)]

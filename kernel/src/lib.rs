@@ -13,7 +13,9 @@ extern crate alloc;
 // (Previously was bump allocator, now using linked_list_allocator backed by PMM)
 
 // Module structure will be built out incrementally
+pub mod architecture;
 pub mod bootboot;
+pub mod bootstrap;
 pub mod error;
 pub mod token;
 pub mod mm;

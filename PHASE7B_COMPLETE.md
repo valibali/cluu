@@ -116,9 +116,9 @@ fn _start() -> ! {
     klibcluu::logger::init();
 
     // 2. CPU structures
-    arch::x86_64::gdt::init();
-    arch::x86_64::idt::init();
-    // arch::x86_64::syscall::init(); // TODO Phase 8
+    architecure::x86_64::gdt::init();
+    architecure::x86_64::idt::init();
+    // architecure::x86_64::syscall::init(); // TODO Phase 8
 
     // 3. Log status
     klibcluu::logger::info("CLUU Microkernel v0.1.0");

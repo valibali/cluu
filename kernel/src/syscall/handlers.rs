@@ -21,7 +21,7 @@
 
 use crate::error::Error;
 use crate::syscall::{SyscallArgs, SyscallResult};
-use crate::token::{TokenHandle, lookup_token, InvokeOp};
+use crate::token::{lookup_token, InvokeOp, TokenHandle};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // IPC Syscalls
@@ -150,6 +150,10 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
 
 /// sys_yield - Yield CPU to scheduler
 ///
+/// Voluntarily gives up the CPU and allows another thread to run.
+/// In INITMODE (cooperative), this is the only way to switch threads.
+/// In NORMALMODE (preemptive), threads can also be preempted by timer.
+///
 /// # Arguments
 ///
 /// - all unused
@@ -158,10 +162,15 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
 ///
 /// - Ok(0): Always succeeds
 pub fn sys_yield(_args: SyscallArgs) -> SyscallResult {
-    // TODO: Call scheduler to yield current thread
-    // SCHEDULER.yield_current_thread();
+    klibcluu::trace("sys_yield");
 
-    klibcluu::trace("sys_yield (stub)");
+    // Note: Context switch happens in syscall_entry.asm after this returns
+    // The syscall_entry calls schedule_and_switch() which will:
+    // 1. Get current thread ID (from CURRENT_THREAD)
+    // 2. Save current thread's context
+    // 3. Add current thread back to scheduler
+    // 4. Pick next thread and return its context
+
     Ok(0)
 }
 
@@ -189,12 +198,10 @@ pub fn sys_yield(_args: SyscallArgs) -> SyscallResult {
 /// - Err(Error): Token invalid, insufficient rights, or operation error
 pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
     let token_handle = TokenHandle::from_raw(args.arg1);
-    let operation = InvokeOp::from_usize(args.arg2)
-        .ok_or(Error::InvalidArgument)?;
+    let operation = InvokeOp::from_usize(args.arg2).ok_or(Error::InvalidArgument)?;
 
     // Validate and lookup token
-    let token = lookup_token(token_handle)
-        .map_err(|_| Error::InvalidArgument)?;
+    let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
 
     klibcluu::trace("sys_invoke: operation = ");
     klibcluu::log_dec(klibcluu::LogLevel::Trace, "", args.arg2 as u64);
