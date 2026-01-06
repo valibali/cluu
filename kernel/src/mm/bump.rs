@@ -97,8 +97,12 @@ unsafe impl GlobalAlloc for BumpAllocator {
                     };
 
                     // Log large allocations for debugging
-                    if klibcluu::logger::should_log(klibcluu::LogLevel::Trace) && size > 1024 {
-                        klibcluu::log_dec(klibcluu::LogLevel::Trace, "Bootstrap alloc: ", size as u64);
+                    if size > 1024 {
+                        klibcluu::log_dec(
+                            klibcluu::LogLevel::Trace,
+                            "Bootstrap alloc: ",
+                            size as u64,
+                        );
                         klibcluu::log_hex(klibcluu::LogLevel::Trace, "  bytes at 0x", ptr as u64);
                     }
 

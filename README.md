@@ -1,111 +1,381 @@
 # CLUU (Compact Lightweight Unix Utopia)
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Documentation](https://img.shields.io/badge/documentation-RUSTDOCS-blue.svg)](https://valibali.github.io/cluu/)
+CLUU is a hobby operating system written in Rust, pursuing a **clean L4-style microkernel** architecture with strong emphasis on **correctness, minimality, and explicit authority**. The project is deliberately engineered, test-driven, and uncompromising about architectural discipline.
 
-CLUU is a hobby operating system being written in Rust - in active development phase - targeting x86_64 and with plans to support aarch64 in the future.
-It's really at the starting phase, but it'll get there in time. No rush or whatsoever.
+This README reflects the **current kernel status**. The token system is complete and integrated. Core kernel subsystems are implemented, tested, and internally consistent.
 
-The project draws inspiration from the following Operating Systems:
+---
 
-- [Plan 9](https://github.com/plan9foundation/plan9): Plan 9 from Bell Labs is a distributed operating system developed at Bell Labs in the late 1980s.
-- [BSD](https://github.com/freebsd/freebsd): FreeBSD is a modern, advanced operating system for x86 and ARM architectures.
+## Motivation
 
-As well as heavily influenced by the following projects:
+Modern monolithic kernels are large, implicit, and difficult to reason about. CLUU intentionally moves in the opposite direction:
 
-- [RedoxOS](https://github.com/redox-os/redox): RedoxOS is an operating system written in Rust, aiming to bring the innovations of Rust to a modern microkernel and full set of applications. It's fair to say it is the most advanced of all Rust OS-es.
-- [k4dos](https://github.com/clstatham/k4dos): k4dos is another hobby-os of that sort, it's fairly cool, with userspace, that can run FreeDoom for example. It has a nice shell implementation: kash
-- [blog_os](https://os.phil-opp.com/): blog_os is a cutting-edge project by Philipp Oppermann that provides a detailed tutorial on building an operating system in Rust. It covers various aspects, including the bootloader, memory management, and device drivers.
+* minimal kernel surface
+* explicit authority via capabilities / tokens
+* message-passing as the primary abstraction
+* aggressive separation between mechanism (kernel) and policy (userspace)
 
+The goal is not speed of development, but **clarity of design** and **long-term evolvability**.
 
-## Project Information
+---
 
-CLUU (Compact Lightweight Unix Utopia) is a hobby operating system written in Rust. The project aims to achieve a microkernel design, emphasizing portability and memory safety. It draws inspiration from various operating systems and projects, combining the best practices and ideas to create a unique and efficient system.
+## Design Pillars
 
-### Bootloader: [BOOTBOOT](https://gitlab.com/bztsrc/bootboot)
-One of the key elements in CLUU's design is the BOOTBOOT bootloader. BOOTBOOT provides a Level 2 bootloader implementation that facilitates the booting process and sets up the initial environment for the operating system. By leveraging BOOTBOOT, CLUU benefits from its features, such as high-half kernel, memory initialization, processor mode setup, init-ramdrive, early-uart-debug, a framebuffer, and parameter passing.
+* **Microkernel first** – scheduler, memory, IPC, tokens, interrupts
+* **Everything else in userspace** – filesystems, drivers, services
+* **Explicit authority** – no ambient permissions, no global namespaces
+* **Deterministic control flow** – no hidden work, no implicit magic
+* **SOLID by construction** – traits, composition, strict responsibility
 
-The main goals of CLUU include:
+---
 
-**Microkernel Design**: CLUU follows a microkernel architecture, aiming to keep the kernel minimal and provide most system services through user-level processes or servers. This design promotes modularity, extensibility, and flexibility.
+## High-Level Architecture
 
-**Portability**: CLUU is designed to be portable across different platforms and architectures. While initially targeting x86_64, future plans include support for aarch64.
+```
++-------------------------+
+|        Userspace        |
+|-------------------------|
+| init | procmgr | vfs    |
+| ramfs | console | shell |
+| cat | drivers | servers |
++----------- IPC ---------+
+|        Microkernel      |
+|-------------------------|
+| Scheduler | IPC | VMM   |
+| PMM | Tokens | IRQ     |
+| Syscalls | Timer       |
++-------------------------+
+|        Hardware         |
++-------------------------+
+```
 
-**Memory Safety**: Rust is chosen as the programming language for CLUU due to its strong emphasis on memory safety. By leveraging Rust's ownership and borrowing model, CLUU aims to minimize common programming errors, such as null pointer dereferences, buffer overflows, and data races.
+The kernel provides **mechanisms only**. All policy lives in userspace.
 
-The project is open-source and welcomes contributions from the community. If you're interested in exploring the code, contributing enhancements, or reporting issues, please visit the GitHub repository.
+---
 
-## Screenshots
-Framebuffer:
-![screen](https://github.com/valibali/cluu/assets/22941355/b5eae565-61e7-4137-bb40-46f66b731cb1)
+## Kernel Status Overview
 
-## Prerequisites
+| Subsystem                 | Status     |
+| ------------------------- | ---------- |
+| Physical Memory (PMM)     | ✅ Complete |
+| Virtual Memory (VMM)      | ✅ Complete |
+| Address Spaces            | ✅ Complete |
+| Scheduler                 | ✅ Complete |
+| IPC (rendezvous)          | ✅ Complete |
+| Capability / Token system | ✅ Complete |
+| IRQ handling              | ✅ Complete |
+| Syscall infrastructure    | ✅ Complete |
+| Logging (IRQ-safe)        | ✅ Complete |
+| Userspace ABI             | ✅ Stable   |
 
-To build and run the CLUU operating system, you need to install the following prerequisites:
+**Total kernel tests**: 145/145 passing
 
-1. **Operating System**: Linux, Windows, or macOS.
-2. **QEMU Emulator**: QEMU is used to emulate the x86_64 architecture. Install QEMU by following the instructions for your operating system:
+---
 
-   - Linux: QEMU can usually be installed from the package manager. For example, on Ubuntu, run:
-     ```shell
-     sudo apt-get install qemu
-     ```
-   - Windows: Download the latest version of QEMU from the [QEMU website](https://www.qemu.org/download/) and install it.
-   - macOS: Install QEMU using the Homebrew package manager by running:
-     ```shell
-     brew install qemu
-     ```
+## Memory Model
 
-3. **Terminal for COM port**
-   This could be simply `telnet` - or any other tool that can communicate with UART_16550.
-4. **Rust Programming Language**: CLUU is written in Rust. Install Rust by following the instructions at [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
+### Address Spaces
 
-5. **Make Build System**: The build process for CLUU uses the Make build system. Make is commonly pre-installed on Linux and macOS. For Windows, you can install Make using the [GNUWin32 project](http://gnuwin32.sourceforge.net/packages/make.htm) or other alternatives.
-6. VSCode for editing, and CodeLLDB plugin installed for Debugging.
+Each process owns a strict address space:
 
-## Building and Running
+```
+USERSPACE
+0x00000000  NULL guard
+0x00400000  Text
+0x00600000  Data / BSS
+0x00800000  Heap (lazy)
+0x7ff00000  Stack
 
-To build and run CLUU, follow these steps:
+KERNELSPACE (high half)
+0xffff8000_00000000  physmap
+0xffffffff_c0000000  kernel heap
+```
 
-1. Clone the CLUU repository:
+* Lazy heap allocation via page faults
+* Explicit validation of all user pointers
+* No implicit memory sharing
 
-   ```shell
-   git clone https://github.com/your-username/cluu.git
-   ```
+---
 
-2. Build the kernel and bootboot image:
+## Scheduler
 
-   ```shell
-   cd cluu
-   make all
-   ```
+* O(1) **priority bitmap scheduler**
+* 256 priority levels
+* FIFO fairness within same priority
+* Cooperative + preemptive modes
+* Clean separation between policy and mechanism
 
-3. Clean the build artifact:
+```
+Ready queues: [256]
+Priority bitmap: 256 bits
+pick_next(): O(1)
+```
 
-   ```shell
-   make clean
-   ```
+---
 
-4. Run CLUU in QEMU (with UEFI):
+## IPC Model
 
-   ```shell
-   make qemu
-   ```
+IPC is **synchronous rendezvous**, inspired by L4:
 
-   This will start QEMU, but will pause before boot. It also maps COM2 to the `localhost:4321`
+```
+Sender ----+      +---- Receiver
+           |      |
+           +-- IPC +
+           |      |
+Sender <-- +      + --> Receiver
+```
 
-   In another shell you can start the COM-terminal for debug messages:
+* send / recv / call / reply / replyrecv
+* optional buffer transfer
+* copy / map / grant semantics
+* deterministic blocking behavior
 
-   ```shell
-   telnet localhost 4321
-   ```
+IPC is the **only communication primitive**.
 
-   If you are into debugging, hit F5 in VSCode (`launch.json` included), this will start the debugging session and attach to QEMU. The debugging session will start paused, just hit F5 again to continue.
+---
 
-5. Run CLUU in QEMU (without debugging symbols):
-   ```shell
-   make qemu_nodebug
-   ```
+## Token-Based Authority System
 
-## License
+All authority is represented by **cryptographically signed tokens**.
 
-CLUU is licensed under the MIT License. See LICENSE for more information.
+### Core Properties
+
+* Opaque, non-enumerable object references
+* Explicit rights bitmask
+* Mandatory expiration
+* Delegation via derivation
+* HMAC-SHA256 integrity
+
+Tokens are conceptually similar to JWTs, but **kernel-verified and capability-safe**.
+
+```
+Token = {
+  scope   : OpaqueScope,
+  rights  : RightsMask,
+  issuer  : Kernel | Authority,
+  expires : Timestamp,
+  sig     : HMAC
+}
+```
+
+No token → no authority → no operation.
+
+---
+
+## Syscall Surface (Minimal)
+
+Only **7 syscalls** exist:
+
+```
+Send
+Recv
+Call
+Reply
+Yield
+Invoke   (all privileged operations)
+DebugPrint (debug only)
+```
+
+All resource manipulation flows through `sys_invoke()` using tokens.
+
+---
+
+## Interrupts & Exceptions
+
+* Full x86_64 IDT
+* All CPU exceptions handled
+* Page faults integrated with VMM
+* Timer IRQ drives preemption
+* IRQ-safe logging (no locks, no allocation)
+
+---
+
+## Logging
+
+* Zero-cost in release builds
+* IRQ-safe
+* No allocation
+* Manual formatting
+* UART-backed
+
+Logging is a **diagnostic tool**, not a runtime dependency.
+
+---
+
+## Userspace
+
+Userspace programs are:
+
+* statically linked ELF binaries
+* no_std
+* linked against `libcluu`
+
+`libcluu` provides:
+
+* syscall wrappers
+* IPC helpers
+* error handling
+* runtime entry point
+
+---
+
+## Bootloader
+
+CLUU uses the **BOOTBOOT** bootloader as its stage-2 boot mechanism.
+
+BOOTBOOT provides a clean, modern boot environment and deliberately minimal abstractions, aligning well with CLUU’s microkernel philosophy.
+
+Key BOOTBOOT features used by CLUU:
+
+* High-half kernel loading
+* Identity-mapped physmap
+* Early UART debug support
+* Framebuffer setup
+* Initrd delivery
+* Strict boot-time memory map
+
+The kernel is loaded as `sys/core` from the initrd, following BOOTBOOT conventions. All early platform setup (CPU mode, paging, memory discovery) is delegated to BOOTBOOT, allowing the kernel to remain focused on **core mechanisms only**.
+
+---
+
+## Build System
+
+CLUU uses a **thin build wrapper around Rust’s `xtask` pattern**. The build system is intentionally explicit and scriptable, avoiding hidden magic.
+
+### High-Level Principles
+
+* `cargo xtask` is the **primary interface**
+* `make` is provided only as a convenience wrapper
+* Kernel and userspace are built with **custom Rust targets**
+* Disk images are produced via **mkbootimg + BOOTBOOT**
+
+---
+
+### Makefile Interface (Convenience)
+
+```makefile
+all: build
+
+build:
+	cargo xtask build
+
+run:
+	cargo xtask run
+
+run-debug:
+	cargo xtask run --debug
+
+test:
+	cargo xtask test
+
+clean:
+	cargo xtask clean
+
+userspace:
+	cargo xtask userspace
+
+kernel:
+	cargo xtask kernel
+```
+
+Usage summary:
+
+```
+make build       # Build everything
+make run         # Build and run in QEMU
+make run-debug   # Run with GDB + telnet serial
+make test        # Run all tests
+make clean       # Clean artifacts
+```
+
+---
+
+### Preferred Interface: cargo xtask
+
+For idiomatic Rust development, **prefer using `cargo xtask` directly**:
+
+```
+cargo xtask build [--profile dev|release]
+cargo xtask run [--profile dev|release]
+cargo xtask run --debug
+cargo xtask test
+cargo xtask clean
+cargo xtask userspace [--profile dev|release]
+cargo xtask kernel [--profile dev|release]
+```
+
+---
+
+### Debug Workflow
+
+Debug mode starts QEMU paused with:
+
+* GDB server on `localhost:1234`
+* Telnet serial on `localhost:4321`
+
+```
+Terminal 1: cargo xtask run --debug
+Terminal 2: telnet localhost 4321
+Terminal 3: gdb target/.../kernel-*.elf
+            (gdb) target remote :1234
+            (gdb) continue
+```
+
+---
+
+### xtask Responsibilities
+
+The `xtask` binary orchestrates the full system build:
+
+* Builds userspace programs (no_std ELFs)
+* Builds the kernel (custom target)
+* Assembles NASM sources
+* Constructs initrd layout
+* Invokes `mkbootimg` to generate `cluu.img`
+* Launches QEMU (normal or debug)
+
+`xtask` is intentionally **boring and explicit**: every step is visible, inspectable, and reproducible.
+
+---
+
+## Current Milestone
+
+**Working userspace shell executing:**
+
+```
+$ cat file.txt
+```
+
+Demonstrates:
+
+* scheduling
+* IPC-based VFS
+* zero-copy buffers
+* userspace drivers
+* token-based authority
+
+---
+
+## Non-Goals
+
+* POSIX compatibility (explicitly not a goal)
+* Monolithic drivers
+* Implicit global state
+* Fast iteration at the cost of clarity
+
+---
+
+## Philosophy
+
+> If an operation is possible, the authority must be visible.
+> If authority is visible, it must be explicit.
+> If it is explicit, it must be minimal.
+
+CLUU is intentionally slow, explicit, and strict — by design.
+
+---
+
+## Status
+
+Active development. Architecture considered **stable**.
+Implementation continues in userspace.

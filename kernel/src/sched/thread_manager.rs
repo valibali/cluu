@@ -17,13 +17,6 @@ use lazy_static::lazy_static;
 use spin::Mutex;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Configuration
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Enable verbose context switch tracing (for debugging)
-const VERBOSE_CONTEXT_TRACE: bool = false;
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Scheduler Mode
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -248,9 +241,7 @@ impl ThreadManager {
     pub unsafe extern "C" fn schedule_and_switch(
         current_ctx_ptr: *const Context,
     ) -> *const Context {
-        if VERBOSE_CONTEXT_TRACE {
-            klibcluu::trace("schedule_and_switch called");
-        }
+        klibcluu::trace("schedule_and_switch called");
 
         // Get current thread ID
         let current_id = match Self::current() {
@@ -283,11 +274,9 @@ impl ThreadManager {
             return core::ptr::null();
         }
 
-        if VERBOSE_CONTEXT_TRACE {
-            klibcluu::trace("Context switch: thread ");
-            klibcluu::log_dec(klibcluu::LogLevel::Trace, " -> ", current_id.as_u64());
-            klibcluu::log_dec(klibcluu::LogLevel::Trace, "", next_id.as_u64());
-        }
+        klibcluu::trace("Context switch: thread ");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, " -> ", current_id.as_u64());
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", next_id.as_u64());
 
         // Set next thread as current
         Self::set_current(next_id);
@@ -302,10 +291,8 @@ impl ThreadManager {
 
     /// Save context to thread structure
     fn save_context(thread_id: ThreadId, context: &Context) {
-        if VERBOSE_CONTEXT_TRACE {
-            klibcluu::trace("Saving context for thread ");
-            klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
-        }
+        klibcluu::trace("Saving context for thread ");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
 
         Self::with_thread_mut(thread_id, |thread| {
             thread.context = *context;
@@ -332,10 +319,8 @@ impl ThreadManager {
 ///
 /// Must be called with interrupts disabled and valid context
 unsafe fn jump_to_thread(context: &Context) -> ! {
-    if VERBOSE_CONTEXT_TRACE {
-        klibcluu::trace("jump_to_thread: entering userspace at RIP 0x");
-        klibcluu::log_hex(klibcluu::LogLevel::Trace, "", context.rip);
-    }
+    klibcluu::trace("jump_to_thread: entering userspace at RIP 0x");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", context.rip);
 
     setup_kernel_stack();
     load_address_space(context.cr3);
@@ -396,9 +381,7 @@ unsafe fn load_address_space(cr3: u64) {
 ///
 /// Builds interrupt frame on stack and executes iretq to switch to Ring 3.
 unsafe fn enter_userspace(context: &Context) -> ! {
-    if VERBOSE_CONTEXT_TRACE {
-        klibcluu::trace("Executing iretq to userspace");
-    }
+    klibcluu::trace("Executing iretq to userspace");
 
     core::arch::asm!(
         "push {0}",      // SS
