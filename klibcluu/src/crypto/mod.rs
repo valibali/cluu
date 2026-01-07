@@ -14,7 +14,7 @@ mod hmac;
 mod random;
 mod sha256;
 
-pub use hmac::hmac_sha256;
+pub use hmac::{hmac_sha256, hmac_sha256_fixed};
 pub use random::{fill_random, init_random};
 pub use sha256::hash_sha256;
 

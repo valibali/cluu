@@ -17,7 +17,8 @@
 extern crate klibcluu;
 
 // Use kernel lib modules
-use cluu_kernel::{architecture, bootboot, bootstrap, mm};
+use cluu_kernel::{architecture, bootboot, bootstrap, mm, token};
+use klibcluu::crypto;
 
 use core::panic::PanicInfo;
 
@@ -151,6 +152,10 @@ pub extern "C" fn kstart() -> ! {
     unsafe {
         mm::heap::init().expect("Failed to initialize heap");
     }
+
+    // Initialize crypto/token systems (needed before creating tokens)
+    crypto::init();
+    token::init();
 
     // Phase 4: Bootstrap init thread
     // Pass initrd info directly (BOOTBOOT structure is no longer accessible)

@@ -8,6 +8,7 @@
 //! Uses RDRAND instruction when available, with fallback to
 //! timing-based entropy.
 
+use core::arch::x86_64::__cpuid;
 use spin::Mutex;
 
 /// RNG state (simple for now, can be improved)
@@ -52,6 +53,10 @@ impl RngState {
 
 /// Try to get random u64 from RDRAND instruction
 fn rdrand_u64() -> Option<u64> {
+    if !rdrand_supported() {
+        return None;
+    }
+
     unsafe {
         let mut value: u64;
         let mut success: u8;
@@ -72,6 +77,13 @@ fn rdrand_u64() -> Option<u64> {
         }
 
         None
+    }
+}
+
+fn rdrand_supported() -> bool {
+    unsafe {
+        let cpuid = __cpuid(1);
+        (cpuid.ecx & (1 << 30)) != 0
     }
 }
 

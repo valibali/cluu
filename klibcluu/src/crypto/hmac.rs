@@ -53,6 +53,41 @@ pub fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
     hash_sha256(&outer_data)
 }
 
+/// Compute HMAC-SHA256 without heap allocation for small inputs.
+///
+/// Falls back to the allocating version when input exceeds MAX_DATA bytes.
+pub fn hmac_sha256_fixed(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64; // SHA-256 block size
+    const IPAD: u8 = 0x36;
+    const OPAD: u8 = 0x5C;
+    const MAX_DATA: usize = 128;
+
+    if data.len() > MAX_DATA {
+        return hmac_sha256(key, data);
+    }
+
+    // Prepare key (already 32 bytes, pad to 64)
+    let mut key_block = [0u8; BLOCK_SIZE];
+    key_block[..32].copy_from_slice(key);
+
+    let mut inner_data = [0u8; BLOCK_SIZE + MAX_DATA];
+    for i in 0..BLOCK_SIZE {
+        inner_data[i] = key_block[i] ^ IPAD;
+    }
+
+    inner_data[BLOCK_SIZE..BLOCK_SIZE + data.len()].copy_from_slice(data);
+    let inner_len = BLOCK_SIZE + data.len();
+    let inner_hash = hash_sha256(&inner_data[..inner_len]);
+
+    let mut outer_data = [0u8; BLOCK_SIZE + 32];
+    for i in 0..BLOCK_SIZE {
+        outer_data[i] = key_block[i] ^ OPAD;
+    }
+    outer_data[BLOCK_SIZE..BLOCK_SIZE + 32].copy_from_slice(&inner_hash);
+
+    hash_sha256(&outer_data[..BLOCK_SIZE + 32])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

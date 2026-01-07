@@ -31,7 +31,8 @@ use core::fmt;
 /// - Non-enumerable: Cannot iterate to discover objects
 /// - Unforgeable: Random value, not sequential
 /// - Unlinkable: Same object can have different scopes in different tokens
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(align(16))]
 pub struct OpaqueScope([u8; 16]);
 
 impl OpaqueScope {
@@ -114,6 +115,24 @@ impl fmt::Debug for OpaqueScope {
     }
 }
 
+impl Ord for OpaqueScope {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        for (a, b) in self.0.iter().zip(other.0.iter()) {
+            match a.cmp(b) {
+                core::cmp::Ordering::Equal => continue,
+                non_eq => return non_eq,
+            }
+        }
+        core::cmp::Ordering::Equal
+    }
+}
+
+impl PartialOrd for OpaqueScope {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Object reference (kernel-internal)
 ///
 /// This is what OpaqueScope maps to in the kernel's scope table.
@@ -127,7 +146,7 @@ pub enum ObjectRef {
 }
 
 /// Address space identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AddressSpaceId(pub u64);
 
 impl AddressSpaceId {

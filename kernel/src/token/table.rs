@@ -163,7 +163,7 @@ pub fn init() {
 /// Get kernel secret (for token signing)
 ///
 /// Panics if token system hasn't been initialized.
-fn kernel_secret() -> [u8; 32] {
+pub(super) fn kernel_secret() -> [u8; 32] {
     KERNEL_SECRET.lock().expect("Token system not initialized")
 }
 

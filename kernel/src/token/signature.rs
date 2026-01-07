@@ -11,7 +11,7 @@
 //! This ensures no field can be modified without breaking the signature.
 
 use super::{Issuer, OpaqueScope, Rights, Timestamp};
-use klibcluu::crypto::hmac_sha256;
+use klibcluu::crypto::hmac_sha256_fixed;
 
 /// HMAC-SHA256 signature (32 bytes)
 #[derive(Clone, Copy)]
@@ -40,23 +40,15 @@ impl Signature {
         expire_at: Timestamp,
         secret: &[u8; 32],
     ) -> Self {
-        // Serialize all fields into a single buffer
-        let mut data = alloc::vec::Vec::with_capacity(16 + 4 + 8 + 8);
-
-        // Scope (16 bytes)
-        data.extend_from_slice(scope.as_bytes());
-
-        // Role (4 bytes)
-        data.extend_from_slice(&role.to_bytes());
-
-        // Issuer (8 bytes)
-        data.extend_from_slice(&issuer.to_bytes());
-
-        // Expiration (8 bytes)
-        data.extend_from_slice(&expire_at.as_u64().to_le_bytes());
+        // Serialize all fields into a fixed buffer to avoid heap allocation.
+        let mut data = [0u8; 36];
+        data[0..16].copy_from_slice(scope.as_bytes());
+        data[16..20].copy_from_slice(&role.to_bytes());
+        data[20..28].copy_from_slice(&issuer.to_bytes());
+        data[28..36].copy_from_slice(&expire_at.as_u64().to_le_bytes());
 
         // Compute HMAC
-        let hmac = hmac_sha256(secret, &data);
+        let hmac = hmac_sha256_fixed(secret, &data);
 
         Self(hmac)
     }
