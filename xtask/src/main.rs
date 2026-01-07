@@ -109,6 +109,8 @@ fn build_userspace(profile: &str) -> Result<()> {
     ];
 
     let target_json = project_root().join("triplets/x86_64-cluu-user.json");
+    let tmp_dir = project_root().join("tmp");
+    fs::create_dir_all(&tmp_dir)?;
 
     for crate_path in &userspace_crates {
         let crate_name = Path::new(crate_path).file_name().unwrap().to_str().unwrap();
@@ -127,6 +129,7 @@ fn build_userspace(profile: &str) -> Result<()> {
             "-Z",
             "build-std-features=compiler-builtins-mem",
         ]);
+        cmd.env("TMPDIR", tmp_dir.as_os_str());
 
         if profile == "release" {
             cmd.arg("--release");
@@ -146,6 +149,8 @@ fn build_kernel(profile: &str) -> Result<()> {
     println!("▸ Building kernel...");
 
     let target_json = project_root().join("triplets/x86_64-cluu-kernel.json");
+    let tmp_dir = project_root().join("tmp");
+    fs::create_dir_all(&tmp_dir)?;
 
     // First, assemble NASM files if they exist
     let _ = assemble_nasm();
@@ -162,6 +167,8 @@ fn build_kernel(profile: &str) -> Result<()> {
         "-Z",
         "build-std-features=compiler-builtins-mem",
     ]);
+
+    cmd.env("TMPDIR", tmp_dir.as_os_str());
 
     if profile == "release" {
         cmd.arg("--release");
@@ -269,7 +276,7 @@ fn create_initrd(profile: &str) -> Result<()> {
     }
 
     // Copy system servers to initrd/sys/
-    let sys_programs = ["init", "procmgr", "vfs", "ramfs", "console"];
+    let sys_programs = ["init", "procmgr"];
     for prog in &sys_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("sys").join(prog);
@@ -282,7 +289,7 @@ fn create_initrd(profile: &str) -> Result<()> {
     }
 
     // Copy user programs to initrd/bin/
-    let bin_programs = ["shell", "cat"];
+    let bin_programs = ["shell", "hello"];
     for prog in &bin_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("bin").join(prog);

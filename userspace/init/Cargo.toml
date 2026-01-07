@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 libcluu = { path = "../libcluu" }
+cluu-procmgr = { path = "../procmgr" }
 
 [[bin]]
 name = "init"

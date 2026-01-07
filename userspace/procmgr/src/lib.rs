@@ -5,7 +5,5 @@
 
 #![no_std]
 
-pub mod elf;
-
-// Re-export main types
 pub use elf::{ElfFile, LoadableSegment};
+pub use libcluu::elf;
