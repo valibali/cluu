@@ -1,12 +1,12 @@
 //! Hello World - Simple userspace program for CLUU microkernel
 //!
 //! This program demonstrates basic syscall usage through libcluu.
-//! It prints messages to the kernel log and yields the CPU.
+//! It prints messages to the kernel log and runs without explicit yields.
 
 #![no_std]
 #![no_main]
 
-use libcluu::{debug_print, yield_cpu, Result};
+use libcluu::{debug_print, Result};
 
 /// Main entry point
 ///
@@ -33,29 +33,16 @@ fn run() -> Result<()> {
     debug_print("=========================================")?;
     debug_print("")?;
 
-    // Demonstrate multiple syscalls
+    // Demonstrate syscalls without yielding
     debug_print("Testing syscalls:")?;
-    debug_print("  [1/3] debug_print syscall... OK")?;
-
-    // Yield CPU
-    yield_cpu()?;
-    debug_print("  [2/3] yield_cpu syscall... OK")?;
-
-    // Another yield
-    yield_cpu()?;
-    debug_print("  [3/3] second yield_cpu... OK")?;
-
+    debug_print("  [1/1] debug_print syscall... OK")?;
     debug_print("")?;
     debug_print("All syscalls working correctly!")?;
     debug_print("")?;
 
-    // Demonstrate busy-wait pattern with yield
+    // Demonstrate a busy loop without explicit yields (preemption test)
     debug_print("Running busy-wait loop (10 iterations):")?;
     for i in 0..10 {
-        // In a real program, you'd check some condition here
-        // For demo, we just yield and continue
-        yield_cpu()?;
-
         // Can't format strings without alloc, so use fixed messages
         match i {
             0 => debug_print("  Iteration 0")?,

@@ -5,6 +5,8 @@
 
 /// Physical address where the kernel stores boot information.
 pub const BOOT_INFO_ADDR: usize = 0x7fe0_0000;
+/// Virtual address where per-thread self info is mapped.
+pub const THREAD_SELF_ADDR: usize = 0x7fe0_1000;
 
 /// Boot information structure written by the kernel.
 #[repr(C)]
@@ -27,19 +29,46 @@ pub fn root_token_handle() -> usize {
     boot_info().root_token
 }
 
-/// Additional location where init writes the derived procmgr token.
-pub const PROCMGR_TOKEN_OFFSET: usize = 0x100;
-pub const PROCMGR_TOKEN_ADDR: usize = BOOT_INFO_ADDR + PROCMGR_TOKEN_OFFSET;
+/// Additional location where init writes the derived procmgr info.
+pub const PROCMGR_TOKEN_ADDR: usize = BOOT_INFO_ADDR + 0x100;
 
-/// Write the derived procmgr token handle for the child to pick up.
-pub fn set_procmgr_token(token: usize) {
+/// Procmgr bootstrap payload written by init.
+#[repr(C)]
+pub struct ProcmgrInfo {
+    pub token: usize,
+    pub initrd_size: u64,
+}
+
+/// Per-thread self info payload written by the spawner.
+#[repr(C)]
+pub struct ThreadSelfInfo {
+    pub thread_token: usize,
+}
+
+/// Write the derived procmgr bootstrap info for the child to pick up.
+pub fn set_procmgr_info(token: usize, initrd_size: u64) {
     unsafe {
-        let ptr = PROCMGR_TOKEN_ADDR as *mut usize;
-        ptr.write(token);
+        let ptr = PROCMGR_TOKEN_ADDR as *mut ProcmgrInfo;
+        ptr.write(ProcmgrInfo { token, initrd_size });
     }
+}
+
+/// Read the procmgr bootstrap info stored by init.
+pub fn procmgr_info() -> &'static ProcmgrInfo {
+    unsafe { &*(PROCMGR_TOKEN_ADDR as *const ProcmgrInfo) }
 }
 
 /// Read the procmgr token handle stored by init.
 pub fn procmgr_token_handle() -> usize {
-    unsafe { (PROCMGR_TOKEN_ADDR as *const usize).read() }
+    procmgr_info().token
+}
+
+/// Read the self info stored by the spawner.
+pub fn thread_self_info() -> &'static ThreadSelfInfo {
+    unsafe { &*(THREAD_SELF_ADDR as *const ThreadSelfInfo) }
+}
+
+/// Read the thread token handle for the current thread.
+pub fn thread_self_token_handle() -> usize {
+    thread_self_info().thread_token
 }

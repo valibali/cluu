@@ -173,7 +173,9 @@ pub fn sys_yield(_args: SyscallArgs) -> SyscallResult {
     if crate::sched::ThreadManager::is_init_mode()
         && crate::sched::ThreadManager::critical_processes_remaining() > 0
     {
-        crate::sched::ThreadManager::signal_critical_process_ready();
+        if crate::sched::ThreadManager::signal_critical_process_ready() {
+            crate::sched::ThreadManager::mark_current_dead();
+        }
     }
 
     Ok(0)
@@ -294,9 +296,7 @@ fn invoke_thread_create(token: &Token, args: SyscallArgs) -> SyscallResult {
 
     let thread_id = ThreadManager::add_thread(thread);
 
-    if ThreadManager::is_init_mode() {
-        ThreadManager::register_critical_thread(thread_id);
-    }
+    // Critical thread registration is bootstrapped explicitly by the kernel.
 
     let scope = OpaqueScope::random();
     let thread_token = crate::token::create_token(
@@ -311,8 +311,26 @@ fn invoke_thread_create(token: &Token, args: SyscallArgs) -> SyscallResult {
 }
 
 fn invoke_thread_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    klibcluu::warn("invoke_thread_destroy not yet implemented");
-    Err(Error::NotImplemented)
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !_token.has_right(Rights::DESTROY) {
+        klibcluu::warn("invoke_thread_destroy: missing DESTROY right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let thread_ref =
+        crate::token::resolve_token_object(_token, ObjectType::Thread).map_err(|_| Error::InvalidArgument)?;
+    let thread_id = if let ObjectRef::Thread(id) = thread_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    crate::sched::ThreadManager::with_thread_mut(thread_id, |thread| {
+        thread.make_dead();
+    });
+
+    Ok(0)
 }
 
 fn invoke_thread_suspend(_token: &Token, _args: SyscallArgs) -> SyscallResult {
@@ -385,7 +403,7 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
 
     const PAGE_SIZE: usize = 4096;
 
-    klibcluu::trace("invoke_space_map");
+    //klibcluu::trace("invoke_space_map");
 
     if !token.has_right(Rights::SPACE_MAP) {
         klibcluu::warn("invoke_space_map: missing SPACE_MAP right");

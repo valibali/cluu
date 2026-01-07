@@ -457,6 +457,18 @@ pub fn token_derive(token_handle: usize, new_rights: usize, expire_at: u64) -> R
     }
 }
 
+/// Destroy a thread
+///
+/// # Arguments
+///
+/// - `thread_token`: Token handle for the thread
+pub fn thread_destroy(thread_token: usize) -> Result<()> {
+    unsafe {
+        invoke(thread_token, InvokeOp::ThreadDestroy, 0, 0, 0, 0)?;
+    }
+    Ok(())
+}
+
 /// Attach IRQ handler
 ///
 /// # Arguments
@@ -535,6 +547,15 @@ pub fn debug_print(message: &str) -> Result<()> {
 /// call invoke(current_thread, ThreadDestroy) when we have thread handles.
 pub fn thread_exit(_code: i32) -> ! {
     let _ = debug_print("Thread exiting");
+    loop {
+        let token = crate::boot::thread_self_token_handle();
+        if token != 0 {
+            if thread_destroy(token).is_ok() {
+                break;
+            }
+        }
+        let _ = yield_cpu();
+    }
     loop {
         let _ = yield_cpu();
     }

@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use alloc::format;
-use libcluu::boot::{boot_info, procmgr_token_handle};
+use libcluu::boot::procmgr_info;
 use libcluu::elf::{ElfFile, LoadableSegment};
 use libcluu::tar::find_member;
 use libcluu::*;
@@ -14,40 +14,63 @@ const SERVICE_STACK_BASE: usize = 0x6d000000;
 const SERVICE_STACK_TOP: usize = SERVICE_STACK_BASE + SERVICE_STACK_SIZE;
 const PAGE_SIZE: usize = 4096;
 const STACK_FLAGS: usize = 0x03; // read + write
-const SERVICE_PATH: &str = "bin/shell";
+const SERVICE_PATH: &str = "bin/hello";
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
-    match run() {
+    match main_result() {
         Ok(_) => 0,
         Err(_) => -1,
     }
 }
 
-fn run() -> Result<()> {
-    debug_print("=========================================")?;
-    debug_print("  Process Manager Starting")?;
-    debug_print("=========================================")?;
+fn main_result() -> Result<()> {
+    let manager = ProcessManager::new()?;
+    manager.init()?;
+    manager.run()
+}
 
-    let token = procmgr_token_handle();
-    debug_print("Derived procmgr token handle")?;
-    debug_print(&format!("  Handle: {}", token))?;
+struct ProcessManager {
+    token: usize,
+    initrd_size: usize,
+}
 
-    spawn_service(token, SERVICE_PATH, 180)?;
+impl ProcessManager {
+    fn new() -> Result<Self> {
+        let info = procmgr_info();
+        Ok(Self {
+            token: info.token,
+            initrd_size: info.initrd_size as usize,
+        })
+    }
 
-    debug_print("Service spawned; yielding to scheduler")?;
-    yield_cpu()?;
+    fn init(&self) -> Result<()> {
+        debug_print("=========================================")?;
+        debug_print("  Process Manager Starting")?;
+        debug_print("=========================================")?;
+        debug_print("Derived procmgr token handle")?;
+        debug_print(&format!("  Handle: {}", self.token))?;
 
-    loop {
+        spawn_service(self.token, SERVICE_PATH, 200, self.initrd_size)?;
+        debug_print("Service spawned; yielding to scheduler")?;
         yield_cpu()?;
+        Ok(())
+    }
+
+    fn run(&self) -> Result<()> {
+        debug_print("Process manager entering preemptible loop")?;
+        let mut tick: u64 = 0;
+        loop {
+            tick = tick.wrapping_add(1);
+            if tick % 50_000_000 == 0 {
+                debug_print("procmgr: still running")?;
+            }
+        }
     }
 }
 
-fn spawn_service(token: usize, path: &str, priority: usize) -> Result<()> {
-    let info = boot_info();
-    let initrd = unsafe {
-        core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, info.initrd_size as usize)
-    };
+fn spawn_service(token: usize, path: &str, priority: usize, initrd_size: usize) -> Result<()> {
+    let initrd = unsafe { core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, initrd_size) };
     let service_bytes = find_member(initrd, path).ok_or(Error::NotFound)?;
 
     let elf = ElfFile::parse(service_bytes)?;
@@ -57,12 +80,13 @@ fn spawn_service(token: usize, path: &str, priority: usize) -> Result<()> {
     map_segments(space_token, &elf, service_bytes)?;
     map_stack(space_token)?;
 
-    thread_create(
+    let thread_token = thread_create(
         space_token,
         elf.entry_point as usize,
         SERVICE_STACK_TOP,
         priority,
     )?;
+    map_thread_self(space_token, thread_token)?;
     Ok(())
 }
 
@@ -122,5 +146,34 @@ fn map_stack(space_token: usize) -> Result<()> {
         space_map(space_token, addr, 0, STACK_FLAGS, 0)?;
         addr += PAGE_SIZE;
     }
+    Ok(())
+}
+
+fn map_thread_self(space_token: usize, thread_token: usize) -> Result<()> {
+    const PAGE_SIZE: usize = 4096;
+    const READ_ONLY: usize = 0x01;
+    let page_base = libcluu::boot::THREAD_SELF_ADDR & !(PAGE_SIZE - 1);
+
+    let mut page = [0u8; PAGE_SIZE];
+    let info = libcluu::boot::ThreadSelfInfo { thread_token };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &info as *const libcluu::boot::ThreadSelfInfo as *const u8,
+            core::mem::size_of::<libcluu::boot::ThreadSelfInfo>(),
+        )
+    };
+    let end = bytes.len();
+    if end > PAGE_SIZE {
+        return Err(Error::InvalidArgument);
+    }
+    page[..end].copy_from_slice(bytes);
+
+    space_map(
+        space_token,
+        page_base,
+        page.as_ptr() as usize,
+        READ_ONLY,
+        end,
+    )?;
     Ok(())
 }

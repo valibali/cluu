@@ -4,7 +4,10 @@
 extern crate alloc;
 
 use alloc::format;
-use libcluu::boot::{boot_info, set_procmgr_token, INITRD_USER_BASE};
+use libcluu::boot::{
+    boot_info, ProcmgrInfo, ThreadSelfInfo, INITRD_USER_BASE, PROCMGR_TOKEN_ADDR,
+    THREAD_SELF_ADDR,
+};
 use libcluu::elf::ElfFile;
 use libcluu::tar::find_member;
 use libcluu::*;
@@ -24,6 +27,7 @@ struct ServiceSpec {
 
 const PROCMGR_RIGHTS_BITS: u32 = Rights::READ.bits()
     | Rights::WRITE.bits()
+    | Rights::CREATE.bits()
     | Rights::THREAD_CONTROL.bits()
     | Rights::THREAD_SUSPEND.bits()
     | Rights::DESTROY.bits()
@@ -42,7 +46,7 @@ const PROCMGR_RIGHTS: Rights = Rights::from_bits_truncate(PROCMGR_RIGHTS_BITS);
 const SERVICE_LIST: &[ServiceSpec] = &[ServiceSpec {
     name: "procmgr",
     path: "sys/procmgr",
-    priority: 150,
+    priority: 200,
     rights: Some(PROCMGR_RIGHTS),
 }];
 
@@ -66,16 +70,33 @@ fn run() -> Result<()> {
     for (index, service) in SERVICE_LIST.iter().enumerate() {
         let child_token = if let Some(rights) = service.rights {
             let derived = token_derive(root_token, rights.bits() as usize, u64::MAX)?;
-            if service.name == "procmgr" {
-                set_procmgr_token(derived);
-            }
             derived
         } else {
             root_token
         };
+        if service.name == "procmgr" {
+            debug_print(&format!("init: procmgr token {}", child_token))?;
+        }
 
         debug_print(&format!("init: launching {}", service.name))?;
-        spawn_service(service, root_token, initrd, index)?;
+        let token_share = if service.name == "procmgr" {
+            Some(child_token)
+        } else {
+            None
+        };
+        let initrd_share = if service.name == "procmgr" {
+            Some(info.initrd_size as usize)
+        } else {
+            None
+        };
+        spawn_service(
+            service,
+            root_token,
+            initrd,
+            index,
+            token_share,
+            initrd_share,
+        )?;
         debug_print(&format!("init: {} ready", service.name))?;
 
         let _ = child_token;
@@ -89,7 +110,14 @@ fn run() -> Result<()> {
     }
 }
 
-fn spawn_service(service: &ServiceSpec, token: usize, initrd: &[u8], index: usize) -> Result<()> {
+fn spawn_service(
+    service: &ServiceSpec,
+    token: usize,
+    initrd: &[u8],
+    index: usize,
+    token_share: Option<usize>,
+    initrd_share: Option<usize>,
+) -> Result<()> {
     let service_bytes = find_member(initrd, service.path).ok_or(Error::NotFound)?;
     debug_print(&format!("init: parsed {} entry", service.name))?;
 
@@ -98,12 +126,106 @@ fn spawn_service(service: &ServiceSpec, token: usize, initrd: &[u8], index: usiz
     let space_token = space_create(token)?;
     map_segments(space_token, &elf, service_bytes)?;
     map_stack(space_token, stack_top, PROC_STACK_SIZE, STACK_FLAGS)?;
+    if let Some(shared) = token_share {
+        map_token_share(space_token, shared, initrd_share)?;
+    }
+    if let Some(size) = initrd_share {
+        map_initrd(space_token, initrd, size)?;
+    }
 
-    thread_create(
+    let thread_token = thread_create(
         space_token,
         elf.entry_point as usize,
         stack_top,
         service.priority,
     )?;
+    map_thread_self(space_token, thread_token)?;
+    Ok(())
+}
+
+fn map_token_share(
+    space_token: usize,
+    token: usize,
+    initrd_share: Option<usize>,
+) -> Result<()> {
+    const PAGE_SIZE: usize = 4096;
+    const READ_ONLY: usize = 0x01;
+    let page_base = PROCMGR_TOKEN_ADDR & !(PAGE_SIZE - 1);
+
+    let mut page = [0u8; PAGE_SIZE];
+    let initrd_size = initrd_share.unwrap_or(0) as u64;
+    let info = ProcmgrInfo {
+        token,
+        initrd_size,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &info as *const ProcmgrInfo as *const u8,
+            core::mem::size_of::<ProcmgrInfo>(),
+        )
+    };
+    let offset = PROCMGR_TOKEN_ADDR - page_base;
+    let end = offset + bytes.len();
+    if end > PAGE_SIZE {
+        return Err(Error::InvalidArgument);
+    }
+    page[offset..end].copy_from_slice(bytes);
+
+    space_map(
+        space_token,
+        page_base,
+        page.as_ptr() as usize,
+        READ_ONLY,
+        end,
+    )?;
+    Ok(())
+}
+
+fn map_thread_self(space_token: usize, thread_token: usize) -> Result<()> {
+    const PAGE_SIZE: usize = 4096;
+    const READ_ONLY: usize = 0x01;
+    let page_base = THREAD_SELF_ADDR & !(PAGE_SIZE - 1);
+
+    let mut page = [0u8; PAGE_SIZE];
+    let info = ThreadSelfInfo { thread_token };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &info as *const ThreadSelfInfo as *const u8,
+            core::mem::size_of::<ThreadSelfInfo>(),
+        )
+    };
+    let end = bytes.len();
+    if end > PAGE_SIZE {
+        return Err(Error::InvalidArgument);
+    }
+    page[..end].copy_from_slice(bytes);
+
+    space_map(
+        space_token,
+        page_base,
+        page.as_ptr() as usize,
+        READ_ONLY,
+        end,
+    )?;
+    Ok(())
+}
+
+fn map_initrd(space_token: usize, initrd: &[u8], initrd_size: usize) -> Result<()> {
+    const PAGE_SIZE: usize = 4096;
+    const READ_ONLY: usize = 0x01;
+    let mut offset = 0usize;
+    while offset < initrd_size {
+        let remaining = initrd_size - offset;
+        let copy_len = remaining.min(PAGE_SIZE);
+        let ptr = initrd[offset..offset + copy_len].as_ptr() as usize;
+        space_map(
+            space_token,
+            INITRD_USER_BASE + offset,
+            ptr,
+            READ_ONLY,
+            copy_len,
+        )?;
+        offset += PAGE_SIZE;
+    }
     Ok(())
 }
