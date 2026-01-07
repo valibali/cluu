@@ -16,7 +16,6 @@ extern crate alloc;
 pub mod architecture;
 pub mod bootboot;
 pub mod bootstrap;
-pub mod cap;
 pub mod elf;
 pub mod error;
 pub mod ipc;
