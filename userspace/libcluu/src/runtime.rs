@@ -4,7 +4,7 @@
 use core::panic::PanicInfo;
 
 #[cfg(all(not(feature = "std"), not(test)))]
-use crate::syscall::thread_exit;
+use crate::{allocator, syscall::thread_exit};
 
 /// Entry point for userspace programs
 ///
@@ -17,6 +17,8 @@ pub extern "C" fn _start() -> ! {
     extern "Rust" {
         fn main() -> i32;
     }
+
+    allocator::init();
 
     let exit_code = unsafe { main() };
     thread_exit(exit_code);
