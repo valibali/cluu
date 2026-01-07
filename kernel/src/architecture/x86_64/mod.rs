@@ -21,6 +21,7 @@
  */
 
 pub mod gdt;
+pub mod apic;
 pub mod idt;
 pub mod interrupts;
 pub mod pic;

@@ -50,6 +50,7 @@ static SCHEDULER_MODE: AtomicBool = AtomicBool::new(false); // false = INIT, tru
 
 /// Number of critical processes still initializing
 static CRITICAL_PROCESS_COUNT: AtomicUsize = AtomicUsize::new(0);
+static IDLE_THREAD_CREATED: AtomicBool = AtomicBool::new(false);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Thread Manager API
@@ -149,6 +150,16 @@ impl ThreadManager {
         *current
     }
 
+    pub fn mark_current_dead() {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return,
+        };
+        Self::with_thread_mut(current, |thread| {
+            thread.make_dead();
+        });
+    }
+
     /// Get page table root (CR3) of currently running thread
     pub fn current_page_table_root() -> Option<PhysAddr> {
         let thread_id = Self::current()?;
@@ -195,6 +206,8 @@ impl ThreadManager {
                     klibcluu::info("========================================");
 
                     SCHEDULER_MODE.store(true, Ordering::Release);
+                    Self::demote_current_thread();
+                    Self::ensure_idle_thread();
                     true
                 } else {
                     false
@@ -225,6 +238,26 @@ impl ThreadManager {
             let mut scheduler = SCHEDULER.lock();
             scheduler.tick();
         }
+    }
+
+    pub fn ensure_idle_thread() {
+        if IDLE_THREAD_CREATED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let page_table_root = kernel_page_table_root();
+        let entry = x86_64::VirtAddr::new(idle_thread_entry as u64);
+        let stack = x86_64::VirtAddr::new(kernel_stack_top());
+        let thread = Thread::new_kernel(
+            ThreadId::new(0),
+            page_table_root,
+            entry,
+            stack,
+            Priority::LOWEST,
+            crate::sched::thread::ThreadFlags::empty(),
+        );
+
+        let _ = Self::add_thread(thread);
     }
 
     /// Start the scheduler and jump to the first thread
@@ -319,8 +352,24 @@ impl ThreadManager {
         });
     }
 
+    fn demote_current_thread() {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return,
+        };
+
+        Self::with_thread_mut(current, |thread| {
+            thread.priority = Priority::LOWEST;
+        });
+    }
+
     /// Re-queue thread back to scheduler
     fn requeue_thread(thread_id: ThreadId) {
+        let is_dead = Self::with_thread(thread_id, |t| t.is_dead()).unwrap_or(true);
+        if is_dead {
+            return;
+        }
+
         let priority = Self::with_thread(thread_id, |t| t.priority).unwrap_or(Priority(100));
         let mut scheduler = SCHEDULER.lock();
         scheduler.add(thread_id, priority);
@@ -417,6 +466,26 @@ unsafe fn enter_userspace(context: &Context) -> ! {
         in(reg) context.rip,
         options(noreturn)
     );
+}
+
+fn kernel_stack_top() -> u64 {
+    extern "C" {
+        static BSP_STACK: u8;
+    }
+    (&raw const BSP_STACK as u64) + (64 * 1024)
+}
+
+fn kernel_page_table_root() -> PhysAddr {
+    use x86_64::registers::control::Cr3;
+    let (frame, _) = Cr3::read();
+    frame.start_address()
+}
+
+fn idle_thread_entry() -> ! {
+    loop {
+        x86_64::instructions::interrupts::enable();
+        x86_64::instructions::hlt();
+    }
 }
 
 #[cfg(test)]

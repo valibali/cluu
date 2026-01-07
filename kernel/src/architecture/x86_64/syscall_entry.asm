@@ -2,8 +2,9 @@
 ; CLUU Microkernel - Syscall Entry Point (x86_64)
 ; ═══════════════════════════════════════════════════════════════════════════
 ;
-; This file implements the low-level syscall entry/exit for the SYSCALL/SYSRET
-; instructions on x86_64.
+; This file implements the low-level syscall entry/exit for the SYSCALL
+; instruction on x86_64. It saves a full CPU context so the scheduler can
+; preempt and restore threads safely.
 ;
 ; # Syscall Convention (matches Linux for compatibility)
 ;
@@ -29,20 +30,39 @@
 ;   SS  ← IA32_STAR[47:32] + 8
 ;   RFLAGS ← RFLAGS & ~IA32_FMASK
 ;
-; # SYSRET Instruction Behavior
+; # Return Path
 ;
-; The SYSRETQ instruction does:
-;   RIP ← RCX
-;   RFLAGS ← R11
-;   CS ← IA32_STAR[63:48] + 16
-;   SS ← IA32_STAR[63:48] + 8
-
+; We return to userspace with IRETQ so we can restore the full register state.
+;
 [BITS 64]
 section .text
 
 global syscall_entry
 extern syscall_dispatch
 extern schedule_and_switch
+
+%define CONTEXT_RAX     0x00
+%define CONTEXT_RBX     0x08
+%define CONTEXT_RCX     0x10
+%define CONTEXT_RDX     0x18
+%define CONTEXT_RSI     0x20
+%define CONTEXT_RDI     0x28
+%define CONTEXT_R8      0x30
+%define CONTEXT_R9      0x38
+%define CONTEXT_R10     0x40
+%define CONTEXT_R11     0x48
+%define CONTEXT_R12     0x50
+%define CONTEXT_R13     0x58
+%define CONTEXT_R14     0x60
+%define CONTEXT_R15     0x68
+%define CONTEXT_RBP     0x70
+%define CONTEXT_RSP     0x78
+%define CONTEXT_RIP     0x80
+%define CONTEXT_RFLAGS  0x88
+%define CONTEXT_CS      0x90
+%define CONTEXT_SS      0x98
+%define CONTEXT_CR3     0xA0
+%define CONTEXT_SIZE    0xA8
 
 ; ═══════════════════════════════════════════════════════════════════════════
 ; Syscall Entry Point
@@ -54,34 +74,59 @@ syscall_entry:
     ; - R11 = user RFLAGS
     ; - CS/SS switched to kernel segments
     ; - Still using user stack!
+    ; - RAX = syscall number
 
     ; ───────────────────────────────────────────────────────────────────────
     ; Switch to kernel stack
     ; ───────────────────────────────────────────────────────────────────────
 
     swapgs                          ; Switch to kernel GS base
-                                    ; (GS now points to per-CPU data)
 
     mov [gs:0x00], rsp              ; Save user RSP to per-CPU area
     mov rsp, [gs:0x08]              ; Load kernel RSP from per-CPU area
 
+    ; Preserve syscall number before clobbering RAX
+    mov r13, rax
+
     ; ───────────────────────────────────────────────────────────────────────
-    ; Save user context on kernel stack
+    ; Save full context on kernel stack
     ; ───────────────────────────────────────────────────────────────────────
 
-    ; Save registers that must be preserved across function calls
-    ; and registers modified by SYSCALL instruction
+    sub rsp, CONTEXT_SIZE
 
-    push rcx                        ; User RIP (return address)
-    push r11                        ; User RFLAGS
+    ; General-purpose registers
+    mov [rsp + CONTEXT_RAX], r13
+    mov [rsp + CONTEXT_RBX], rbx
+    mov qword [rsp + CONTEXT_RCX], 0        ; User RCX is clobbered by SYSCALL
+    mov [rsp + CONTEXT_RDX], rdx
+    mov [rsp + CONTEXT_RSI], rsi
+    mov [rsp + CONTEXT_RDI], rdi
+    mov [rsp + CONTEXT_R8], r8
+    mov [rsp + CONTEXT_R9], r9
+    mov [rsp + CONTEXT_R10], r10
+    mov qword [rsp + CONTEXT_R11], 0        ; User R11 is clobbered by SYSCALL
+    mov [rsp + CONTEXT_R12], r12
+    mov [rsp + CONTEXT_R13], r13
+    mov [rsp + CONTEXT_R14], r14
+    mov [rsp + CONTEXT_R15], r15
+    mov [rsp + CONTEXT_RBP], rbp
 
-    ; Save callee-saved registers (System V AMD64 ABI)
-    push rbp
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
+    ; Stack and instruction pointers
+    mov rax, [gs:0x00]
+    mov [rsp + CONTEXT_RSP], rax
+    mov [rsp + CONTEXT_RIP], rcx
+    mov [rsp + CONTEXT_RFLAGS], r11
+
+    ; Segment selectors
+    mov qword [rsp + CONTEXT_CS], 0x33
+    mov qword [rsp + CONTEXT_SS], 0x2b
+
+    ; CR3
+    mov rax, cr3
+    mov [rsp + CONTEXT_CR3], rax
+
+    ; Keep a stable pointer to the context
+    mov r15, rsp
 
     ; ───────────────────────────────────────────────────────────────────────
     ; Prepare arguments for syscall_dispatch
@@ -96,211 +141,84 @@ syscall_entry:
     ; R9  = arg5 (from user R8)
     ; [rsp] = arg6 (from user R9)
 
-    mov r11, r9                    ; Save arg6 for stack
-    mov r9, r8                     ; arg5 (user R8)
-    mov r8, r10                    ; arg4 (user R10)
-    mov rcx, rdx                   ; arg3 (user RDX)
-    mov rdx, rsi                   ; arg2 (user RSI)
-    mov rsi, rdi                   ; arg1 (user RDI)
-    mov rdi, rax                   ; syscall number
-    push r11                       ; arg6 on stack (keeps 16-byte alignment)
+    mov r11, r9                     ; Save arg6 for stack
+    mov r9, r8                      ; arg5 (user R8)
+    mov r8, r10                     ; arg4 (user R10)
+    mov rcx, rdx                    ; arg3 (user RDX)
+    mov rdx, rsi                    ; arg2 (user RSI)
+    mov rsi, rdi                    ; arg1 (user RDI)
+    mov rdi, r13                    ; syscall number
 
-    ; ───────────────────────────────────────────────────────────────────────
-    ; Call Rust dispatcher
-    ; ───────────────────────────────────────────────────────────────────────
-
-    ; extern "C" fn syscall_dispatch(
-    ;     number: usize,  // RDI
-    ;     arg1: usize,    // RSI
-    ;     arg2: usize,    // RDX
-    ;     arg3: usize,    // RCX
-    ;     arg4: usize,    // R8
-    ;     arg5: usize,    // R9
-    ;     arg6: usize,    // [rsp] (7th arg goes on stack)
-    ; ) -> isize;
-
-    ; Note: We have 6 register args, so no stack args needed
-    ; Stack is already aligned (we pushed even number of qwords)
+    sub rsp, 8                      ; Align stack for call
+    mov [rsp], r11                  ; arg6 on stack
 
     ; Re-enable interrupts now that we're safely on kernel stack
-    ; SYSCALL disabled interrupts (via FMASK), but now it's safe
-    ; This allows:
-    ; - Timer interrupts during syscalls
-    ; - Blocking syscalls to yield CPU properly
-    ; - Scheduler to preempt long-running syscalls
     sti
 
     call syscall_dispatch
 
-    add rsp, 8                     ; Drop stack arg (arg6)
+    add rsp, 8                      ; Drop arg6 and restore alignment
 
-    ; Return value in RAX (already there from function return)
-    ; Save it - we'll need it after potential context switch
-    push rax
+    ; Save syscall return value into context
+    mov [r15 + CONTEXT_RAX], rax
 
     ; ───────────────────────────────────────────────────────────────────────
-    ; seL4 Fastpath: Context Switch Check
+    ; Context Switch Check
     ; ───────────────────────────────────────────────────────────────────────
-    ;
-    ; Build Context structure on stack for schedule_and_switch:
-    ; Offset  Size  Field
-    ; ------  ----  -----
-    ; 0x00    8     RBX
-    ; 0x08    8     RBP
-    ; 0x10    8     R12
-    ; 0x18    8     R13
-    ; 0x20    8     R14
-    ; 0x28    8     R15
-    ; 0x30    8     RSP (user)
-    ; 0x38    8     RIP (user, from RCX)
-    ; 0x40    8     RFLAGS (user, from R11)
-    ; 0x48    8     CS (user code segment)
-    ; 0x50    8     SS (user data segment)
-    ; 0x58    8     CR3 (page table root)
-    ; Total: 96 bytes (0x60)
 
-    ; Stack currently has (top to bottom):
-    ; [RSP+0]  = syscall return value (RAX, just pushed)
-    ; [RSP+8]  = R15
-    ; [RSP+16] = R14
-    ; [RSP+24] = R13
-    ; [RSP+32] = R12
-    ; [RSP+40] = RBX
-    ; [RSP+48] = RBP
-    ; [RSP+56] = R11 (user RFLAGS)
-    ; [RSP+64] = RCX (user RIP)
-
-    ; Build Context by pushing in reverse order (highest offset first)
-    sub rsp, 96                     ; Reserve space for Context
-
-    ; Get CR3 and store at offset 0x58
-    mov r8, cr3
-    mov [rsp + 0x58], r8
-
-    ; User segments (constants) at offsets 0x50 and 0x48
-    mov qword [rsp + 0x50], 0x2b    ; SS (user data segment, index 5, RPL 3)
-    mov qword [rsp + 0x48], 0x33    ; CS (user code segment, index 6, RPL 3)
-
-    ; RFLAGS (from R11, saved at RSP+96+56)
-    mov r8, [rsp + 152]             ; 96 (context) + 8 (retval) + 48 = 152
-    mov [rsp + 0x40], r8
-
-    ; RIP (from RCX, saved at RSP+96+64)
-    mov r8, [rsp + 160]             ; 96 + 8 + 56 = 160
-    mov [rsp + 0x38], r8
-
-    ; User RSP (from GS:0x00)
-    mov r8, [gs:0x00]
-    mov [rsp + 0x30], r8
-
-    ; Callee-saved registers (from stack)
-    mov r8, [rsp + 104]             ; R15 at RSP+96+8
-    mov [rsp + 0x28], r8
-
-    mov r8, [rsp + 112]             ; R14
-    mov [rsp + 0x20], r8
-
-    mov r8, [rsp + 120]             ; R13
-    mov [rsp + 0x18], r8
-
-    mov r8, [rsp + 128]             ; R12
-    mov [rsp + 0x10], r8
-
-    mov r8, [rsp + 136]             ; RBP
-    mov [rsp + 0x08], r8
-
-    mov r8, [rsp + 144]             ; RBX
-    mov [rsp + 0x00], r8
-
-    ; Now [RSP] points to a complete Context structure
-    ; Call schedule_and_switch(context_ptr)
-    mov rdi, rsp
+    mov rdi, r15
+    sub rsp, 8                      ; Align stack for call
     call schedule_and_switch
+    add rsp, 8
 
     ; RAX = pointer to next thread's Context (or NULL if no switch)
-    test rax, rax
-    jz .no_context_switch
+    mov r10, rax
+    test r10, r10
+    jnz .have_next_context
+    mov r10, r15                    ; No switch: use current context
 
+.have_next_context:
     ; ───────────────────────────────────────────────────────────────────────
-    ; Context Switch: Load next thread's context and SYSRET to it
+    ; Restore next context and return to userspace
     ; ───────────────────────────────────────────────────────────────────────
 
-    ; Load callee-saved registers
-    mov rbx, [rax + 0x00]
-    mov rbp, [rax + 0x08]
-    mov r12, [rax + 0x10]
-    mov r13, [rax + 0x18]
-    mov r14, [rax + 0x20]
-    mov r15, [rax + 0x28]
+    ; Switch address space first
+    mov rax, [r10 + CONTEXT_CR3]
+    mov cr3, rax
 
-    ; Load RIP and RFLAGS for SYSRET
-    mov rcx, [rax + 0x38]           ; User RIP
-    mov r11, [rax + 0x40]           ; User RFLAGS
+    ; Build user interrupt frame on kernel stack
+    mov rax, [r10 + CONTEXT_SS]
+    mov rbx, [r10 + CONTEXT_RSP]
+    mov rcx, [r10 + CONTEXT_RFLAGS]
+    mov rdx, [r10 + CONTEXT_CS]
+    mov rsi, [r10 + CONTEXT_RIP]
 
-    ; Load CR3 (switch page tables)
-    mov r8, [rax + 0x58]
-    mov cr3, r8
+    push rax                        ; SS
+    push rbx                        ; RSP
+    push rcx                        ; RFLAGS
+    push rdx                        ; CS
+    push rsi                        ; RIP
 
-    ; Load user RSP
-    mov r8, [rax + 0x30]
-    mov [gs:0x00], r8               ; Save in per-CPU area
-    mov rsp, r8                     ; Load into RSP
+    ; Restore general-purpose registers
+    mov rax, [r10 + CONTEXT_RAX]
+    mov rbx, [r10 + CONTEXT_RBX]
+    mov rcx, [r10 + CONTEXT_RCX]
+    mov rdx, [r10 + CONTEXT_RDX]
+    mov rsi, [r10 + CONTEXT_RSI]
+    mov rdi, [r10 + CONTEXT_RDI]
+    mov r8, [r10 + CONTEXT_R8]
+    mov r9, [r10 + CONTEXT_R9]
+    mov r11, [r10 + CONTEXT_R11]
+    mov r12, [r10 + CONTEXT_R12]
+    mov r13, [r10 + CONTEXT_R13]
+    mov r14, [r10 + CONTEXT_R14]
+    mov r15, [r10 + CONTEXT_R15]
+    mov rbp, [r10 + CONTEXT_RBP]
+    mov r10, [r10 + CONTEXT_R10]
 
-    ; SWAPGS and return to userspace
     swapgs
-    cli                             ; Disable interrupts before SYSRET
-
-    ; Syscall return value for new thread is 0 (successful yield)
-    xor rax, rax
-
-    o64 sysret
-
-.no_context_switch:
-    ; ───────────────────────────────────────────────────────────────────────
-    ; No context switch - restore original thread's context
-    ; ───────────────────────────────────────────────────────────────────────
-
-    ; Clean up Context structure
-    add rsp, 96
-
-    ; Restore syscall return value
-    pop rax
-
-    ; Restore callee-saved registers
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    pop rbp
-
-    ; Restore registers for SYSRET
-    pop r11                         ; User RFLAGS
-    pop rcx                         ; User RIP
-
-    ; ───────────────────────────────────────────────────────────────────────
-    ; Switch back to user stack
-    ; ───────────────────────────────────────────────────────────────────────
-
-    mov rsp, [gs:0x00]              ; Restore user RSP
-    swapgs                          ; Switch back to user GS
-
-    ; ───────────────────────────────────────────────────────────────────────
-    ; Return to userspace
-    ; ───────────────────────────────────────────────────────────────────────
-
-    ; Disable interrupts before SYSRET
-    ; This prevents interrupts during the SYSRET instruction itself
-    ; User RFLAGS (in R11) will re-enable interrupts when restored
     cli
-
-    ; SYSRETQ does:
-    ; - RIP ← RCX (user return address)
-    ; - RFLAGS ← R11 (user RFLAGS, will re-enable interrupts)
-    ; - CS ← IA32_STAR[63:48] + 16 (user code segment)
-    ; - SS ← IA32_STAR[63:48] + 8  (user data segment)
-
-    o64 sysret                      ; Return to userspace
+    iretq
 
 ; ═══════════════════════════════════════════════════════════════════════════
 ; Notes
@@ -318,18 +236,5 @@ syscall_entry:
 ; # Stack Alignment
 ;
 ; The System V AMD64 ABI requires RSP to be 16-byte aligned before CALL.
-; We push an even number of qwords (8 qwords = 64 bytes) before calling
-; syscall_dispatch, ensuring alignment.
+; We align before each Rust call by subtracting 8 bytes.
 ;
-; # Security Considerations
-;
-; - User RSP is saved to per-CPU area (not user-accessible)
-; - Kernel stack is separate from user stack
-; - GS base switched atomically with SWAPGS
-; - All user registers validated/sanitized by Rust handlers
-;
-; # Performance
-;
-; - Fast path: ~50 cycles for minimal syscall (yield)
-; - SYSCALL/SYSRET faster than INT/IRET (no privilege check)
-; - Per-CPU data avoids memory barriers

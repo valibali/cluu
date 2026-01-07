@@ -889,6 +889,23 @@ pub unsafe fn map_heap_region(virt_start: u64, size: u64) -> Result<(), &'static
     Ok(())
 }
 
+/// Map a single MMIO page into the kernel address space.
+///
+/// This is used for device registers (e.g. LAPIC) that live outside
+/// the normal physmap range.
+///
+/// # Safety
+///
+/// - `virt` must be a free, page-aligned kernel virtual address
+/// - `phys` must be a page-aligned physical MMIO address
+/// - Caller must ensure no aliasing or overlap with existing mappings
+pub unsafe fn map_kernel_mmio(virt: u64, phys: u64) -> Result<(), &'static str> {
+    if virt % 0x1000 != 0 || phys % 0x1000 != 0 {
+        return Err("MMIO mapping requires page alignment");
+    }
+    map_single_4k_page(virt, phys, true, false)
+}
+
 /// Map a single 4KB page (helper for heap mapping)
 ///
 /// # Arguments

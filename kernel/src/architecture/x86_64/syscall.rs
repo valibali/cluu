@@ -11,7 +11,7 @@
 //! 3. Assembly saves context, switches to kernel stack
 //! 4. Assembly calls syscall_dispatch() (Rust)
 //! 5. Rust dispatcher validates and handles syscall
-//! 6. Assembly restores context and returns with SYSRET
+//! 6. Assembly restores context and returns with IRETQ
 //!
 //! # MSR Setup
 //!

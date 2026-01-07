@@ -65,6 +65,9 @@ pub mod layout {
     // Kernel heap
     pub const KERNEL_HEAP_START: u64 = 0xffff_ffff_c000_0000;
     pub const KERNEL_HEAP_SIZE: usize = 8 * 1024 * 1024;
+
+    // Local APIC MMIO window
+    pub const KERNEL_APIC_BASE: u64 = 0xffff_ffff_fec0_0000;
 }
 
 /// Memory region descriptor

@@ -35,6 +35,11 @@
 
 use lazy_static::lazy_static;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+use x86_64::VirtAddr;
+
+extern "C" {
+    fn timer_interrupt_entry();
+}
 
 /// Send End of Interrupt (EOI) signal to PIC
 ///
@@ -94,7 +99,9 @@ lazy_static! {
 
         // Set up hardware interrupt handlers (IRQ 0-15 map to interrupts 32-47)
         // IRQ 0 - Timer: Use our simple timer handler (scheduler not yet implemented)
-        idt[32].set_handler_fn(timer_interrupt_handler);
+        unsafe {
+            idt[32].set_handler_addr(VirtAddr::new(timer_interrupt_entry as u64));
+        }
         idt[33].set_handler_fn(keyboard_interrupt_handler); // IRQ 1 - Keyboard
         idt[36].set_handler_fn(serial_interrupt_handler);   // IRQ 4 - Serial COM1
         idt[39].set_handler_fn(serial_interrupt_handler);   // IRQ 7 - Serial COM2
@@ -527,16 +534,39 @@ extern "x86-interrupt" fn security_exception_handler(
 
 // Hardware interrupt handlers
 
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    // Only for debug
-    //klibcluu::warn("TIMER_IRQ");
+#[no_mangle]
+extern "C" fn timer_interrupt_dispatch(
+    current_ctx_ptr: *const crate::sched::Context,
+) -> *const crate::sched::Context {
+    if crate::sched::ThreadManager::is_normal_mode() {
+        crate::sched::ThreadManager::tick();
+    }
 
-    // TODO Phase 8: Call the timer module to handle uptime and scheduler ticks
-    // crate::utils::timer::on_timer_interrupt();
+    let next_ctx = if crate::sched::ThreadManager::is_normal_mode() {
+        unsafe { crate::sched::ThreadManager::schedule_and_switch(current_ctx_ptr) }
+    } else {
+        core::ptr::null()
+    };
 
-    // Send EOI (End of Interrupt) to PIC
-    unsafe {
-        pic_eoi(0); // IRQ 0 - Timer
+    if crate::architecture::x86_64::apic::is_enabled() {
+        crate::architecture::x86_64::apic::eoi();
+    } else {
+        unsafe {
+            pic_eoi(0);
+        }
+    }
+
+    next_ctx
+}
+
+#[no_mangle]
+extern "C" fn timer_interrupt_ack() {
+    if crate::architecture::x86_64::apic::is_enabled() {
+        crate::architecture::x86_64::apic::eoi();
+    } else {
+        unsafe {
+            pic_eoi(0);
+        }
     }
 }
 

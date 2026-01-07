@@ -6,21 +6,31 @@
 //! # Layout
 //!
 //! The Context struct matches the layout expected by the NASM context
-//! switching routines in `kernel/src/arch/x86_64/context.asm`:
+//! switching routines in `kernel/src/architecture/x86_64/syscall_entry.asm`
+//! and `kernel/src/architecture/x86_64/interrupts.asm`:
 //!
 //! ```nasm
-//! %define CONTEXT_RBX     0x00
-//! %define CONTEXT_RBP     0x08
-//! %define CONTEXT_R12     0x10
-//! %define CONTEXT_R13     0x18
-//! %define CONTEXT_R14     0x20
-//! %define CONTEXT_R15     0x28
-//! %define CONTEXT_RSP     0x30
-//! %define CONTEXT_RIP     0x38
-//! %define CONTEXT_RFLAGS  0x40
-//! %define CONTEXT_CS      0x48
-//! %define CONTEXT_SS      0x50
-//! %define CONTEXT_CR3     0x58
+//! %define CONTEXT_RAX     0x00
+//! %define CONTEXT_RBX     0x08
+//! %define CONTEXT_RCX     0x10
+//! %define CONTEXT_RDX     0x18
+//! %define CONTEXT_RSI     0x20
+//! %define CONTEXT_RDI     0x28
+//! %define CONTEXT_R8      0x30
+//! %define CONTEXT_R9      0x38
+//! %define CONTEXT_R10     0x40
+//! %define CONTEXT_R11     0x48
+//! %define CONTEXT_R12     0x50
+//! %define CONTEXT_R13     0x58
+//! %define CONTEXT_R14     0x60
+//! %define CONTEXT_R15     0x68
+//! %define CONTEXT_RBP     0x70
+//! %define CONTEXT_RSP     0x78
+//! %define CONTEXT_RIP     0x80
+//! %define CONTEXT_RFLAGS  0x88
+//! %define CONTEXT_CS      0x90
+//! %define CONTEXT_SS      0x98
+//! %define CONTEXT_CR3     0xA0
 //! ```
 //!
 //! # Important
@@ -36,7 +46,7 @@
 ///
 /// # Fields
 ///
-/// - **Callee-saved registers**: RBX, RBP, R12-R15 (preserved across function calls)
+/// - **General-purpose registers**: RAX, RBX, RCX, RDX, RSI, RDI, R8-R15, RBP
 /// - **Execution state**: RSP (stack pointer), RIP (instruction pointer), RFLAGS
 /// - **Memory context**: CR3 (page table root for address space)
 /// - **Segment selectors**: CS (code segment), SS (stack segment)
@@ -48,34 +58,52 @@
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Context {
-    // Callee-saved general-purpose registers
-    pub rbx: u64, // 0x00
-    pub rbp: u64, // 0x08
-    pub r12: u64, // 0x10
-    pub r13: u64, // 0x18
-    pub r14: u64, // 0x20
-    pub r15: u64, // 0x28
+    // General-purpose registers
+    pub rax: u64, // 0x00
+    pub rbx: u64, // 0x08
+    pub rcx: u64, // 0x10
+    pub rdx: u64, // 0x18
+    pub rsi: u64, // 0x20
+    pub rdi: u64, // 0x28
+    pub r8: u64,  // 0x30
+    pub r9: u64,  // 0x38
+    pub r10: u64, // 0x40
+    pub r11: u64, // 0x48
+    pub r12: u64, // 0x50
+    pub r13: u64, // 0x58
+    pub r14: u64, // 0x60
+    pub r15: u64, // 0x68
+    pub rbp: u64, // 0x70
 
     // Stack and instruction pointers
-    pub rsp: u64, // 0x30 - Stack pointer
-    pub rip: u64, // 0x38 - Instruction pointer
+    pub rsp: u64, // 0x78 - Stack pointer
+    pub rip: u64, // 0x80 - Instruction pointer
 
     // Processor flags
-    pub rflags: u64, // 0x40 - RFLAGS register
+    pub rflags: u64, // 0x88 - RFLAGS register
 
     // Segment selectors
-    pub cs: u64, // 0x48 - Code segment
-    pub ss: u64, // 0x50 - Stack segment
+    pub cs: u64, // 0x90 - Code segment
+    pub ss: u64, // 0x98 - Stack segment
 
     // Page table base
-    pub cr3: u64, // 0x58 - Page table root (physical address)
+    pub cr3: u64, // 0xA0 - Page table root (physical address)
 }
 
 impl Context {
     /// Create a new zeroed context
     pub const fn new() -> Self {
         Self {
+            rax: 0,
             rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
             rbp: 0,
             r12: 0,
             r13: 0,
@@ -104,7 +132,16 @@ impl Context {
     /// the given stack and page tables.
     pub fn for_new_thread(entry: u64, stack: u64, cr3: u64) -> Self {
         Self {
+            rax: 0,
             rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
             rbp: 0,
             r12: 0,
             r13: 0,
@@ -134,8 +171,8 @@ impl Default for Context {
 // Verify size and alignment
 #[cfg(test)]
 const _: () = {
-    // Context should be 96 bytes (0x60)
-    assert!(core::mem::size_of::<Context>() == 96);
+    // Context should be 168 bytes (0xA8)
+    assert!(core::mem::size_of::<Context>() == 168);
 
     // Context should be 8-byte aligned
     assert!(core::mem::align_of::<Context>() == 8);
@@ -148,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_context_size() {
-        assert_eq!(mem::size_of::<Context>(), 96);
+        assert_eq!(mem::size_of::<Context>(), 168);
         assert_eq!(mem::align_of::<Context>(), 8);
     }
 
@@ -157,18 +194,27 @@ mod tests {
         // Verify field offsets match NASM definitions
         use core::mem::offset_of;
 
-        assert_eq!(offset_of!(Context, rbx), 0x00);
-        assert_eq!(offset_of!(Context, rbp), 0x08);
-        assert_eq!(offset_of!(Context, r12), 0x10);
-        assert_eq!(offset_of!(Context, r13), 0x18);
-        assert_eq!(offset_of!(Context, r14), 0x20);
-        assert_eq!(offset_of!(Context, r15), 0x28);
-        assert_eq!(offset_of!(Context, rsp), 0x30);
-        assert_eq!(offset_of!(Context, rip), 0x38);
-        assert_eq!(offset_of!(Context, rflags), 0x40);
-        assert_eq!(offset_of!(Context, cs), 0x48);
-        assert_eq!(offset_of!(Context, ss), 0x50);
-        assert_eq!(offset_of!(Context, cr3), 0x58);
+        assert_eq!(offset_of!(Context, rax), 0x00);
+        assert_eq!(offset_of!(Context, rbx), 0x08);
+        assert_eq!(offset_of!(Context, rcx), 0x10);
+        assert_eq!(offset_of!(Context, rdx), 0x18);
+        assert_eq!(offset_of!(Context, rsi), 0x20);
+        assert_eq!(offset_of!(Context, rdi), 0x28);
+        assert_eq!(offset_of!(Context, r8), 0x30);
+        assert_eq!(offset_of!(Context, r9), 0x38);
+        assert_eq!(offset_of!(Context, r10), 0x40);
+        assert_eq!(offset_of!(Context, r11), 0x48);
+        assert_eq!(offset_of!(Context, r12), 0x50);
+        assert_eq!(offset_of!(Context, r13), 0x58);
+        assert_eq!(offset_of!(Context, r14), 0x60);
+        assert_eq!(offset_of!(Context, r15), 0x68);
+        assert_eq!(offset_of!(Context, rbp), 0x70);
+        assert_eq!(offset_of!(Context, rsp), 0x78);
+        assert_eq!(offset_of!(Context, rip), 0x80);
+        assert_eq!(offset_of!(Context, rflags), 0x88);
+        assert_eq!(offset_of!(Context, cs), 0x90);
+        assert_eq!(offset_of!(Context, ss), 0x98);
+        assert_eq!(offset_of!(Context, cr3), 0xA0);
     }
 
     #[test]

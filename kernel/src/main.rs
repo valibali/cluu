@@ -157,7 +157,13 @@ pub extern "C" fn kstart() -> ! {
     crypto::init();
     token::init();
 
-    // Phase 4: Bootstrap init thread
+    // Phase 4: Enable APIC timer (250Hz) before launching userspace
+    if let Err(err) = architecture::x86_64::apic::init_timer(250) {
+        klibcluu::warn("APIC timer init failed: ");
+        klibcluu::warn(err);
+    }
+
+    // Phase 5: Bootstrap init thread
     // Pass initrd info directly (BOOTBOOT structure is no longer accessible)
     let _init_thread_id = unsafe {
         match bootstrap::init(initrd_phys, initrd_size) {
@@ -170,7 +176,7 @@ pub extern "C" fn kstart() -> ! {
         }
     };
 
-    // Phase 5: Log initialization status
+    // Phase 6: Log initialization status
 
     klibcluu::logger::info("CLUU Microkernel v0.1.0");
 

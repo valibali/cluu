@@ -206,6 +206,33 @@ impl Thread {
         }
     }
 
+    /// Create a new kernel thread (Ring 0)
+    ///
+    /// Uses kernel segments and the provided stack pointer.
+    pub fn new_kernel(
+        id: ThreadId,
+        page_table_root: PhysAddr,
+        entry: VirtAddr,
+        stack: VirtAddr,
+        priority: Priority,
+        flags: ThreadFlags,
+    ) -> Self {
+        let mut context = Context::for_new_thread(entry.as_u64(), stack.as_u64(), page_table_root.as_u64());
+
+        // Ensure interrupts are enabled for the idle thread.
+        context.rflags = 0x202;
+
+        Self {
+            id,
+            state: ThreadState::Init,
+            priority,
+            flags,
+            context,
+            page_table_root,
+            time_slice_remaining: 10,
+        }
+    }
+
     /// Create a new thread from an address space
     ///
     /// Convenience method that extracts page_table_root from AddressSpace.
