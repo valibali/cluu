@@ -11,6 +11,8 @@
 
 extern crate alloc;
 
+pub mod boot_elf;
+pub mod boot_tar;
 pub mod crypto;
 pub mod logger;
 pub mod sync;
