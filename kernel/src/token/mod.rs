@@ -363,6 +363,9 @@ pub enum InvokeOp {
     // IRQ operations
     IrqAttach = 30,
     IrqAck = 31,
+
+    // IPC operations
+    EndpointCreate = 40,
 }
 
 impl InvokeOp {
@@ -382,6 +385,7 @@ impl InvokeOp {
             21 => Some(Self::TokenRevoke),
             30 => Some(Self::IrqAttach),
             31 => Some(Self::IrqAck),
+            40 => Some(Self::EndpointCreate),
             _ => None,
         }
     }

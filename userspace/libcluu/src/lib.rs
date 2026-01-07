@@ -41,6 +41,8 @@ pub use rights::Rights;
 pub use syscall::{
     debug_print,
 
+    // High-level wrappers
+    endpoint_create,
     ipc_call,
     ipc_recv,
     ipc_reply,
@@ -52,7 +54,6 @@ pub use syscall::{
     irq_attach,
     space_create,
     space_map,
-    // High-level wrappers
     thread_create,
     token_derive,
     // Core syscalls

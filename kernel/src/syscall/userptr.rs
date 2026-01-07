@@ -175,6 +175,47 @@ pub fn copy_from_user(
     Ok(())
 }
 
+/// Copy bytes from kernel source into a user buffer via physmap.
+pub fn copy_to_user(
+    dst: usize,
+    src: *const u8,
+    len: usize,
+    page_table_root: PhysAddr,
+) -> Result<(), Error> {
+    if len == 0 {
+        return Ok(());
+    }
+
+    let mut offset = 0usize;
+    while offset < len {
+        let addr = dst + offset;
+        let page_offset = addr & 0xFFF;
+        let page_start = VirtAddr::new((addr - page_offset) as u64);
+
+        let (phys, flags) = crate::elf::translate_vaddr_with_flags(page_table_root, page_start)
+            .ok_or_else(|| {
+                klibcluu::warn("userptr: copy_to_user page not present");
+                Error::InvalidAddress
+            })?;
+
+        if (flags & pte_flags::USER) == 0 {
+            klibcluu::warn("userptr: copy_to_user page not user-accessible");
+            return Err(Error::InvalidAddress);
+        }
+
+        let bytes_in_page = core::cmp::min(4096 - page_offset, len - offset);
+        let phys_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(phys.as_u64()) };
+        unsafe {
+            let dst_ptr = (phys_virt + page_offset as u64) as *mut u8;
+            core::ptr::copy_nonoverlapping(src.add(offset), dst_ptr, bytes_in_page);
+        }
+
+        offset += bytes_in_page;
+    }
+
+    Ok(())
+}
+
 /// Read a byte slice from userspace
 ///
 /// # Arguments

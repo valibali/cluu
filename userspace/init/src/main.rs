@@ -4,10 +4,7 @@
 extern crate alloc;
 
 use alloc::format;
-use libcluu::boot::{
-    boot_info, ProcmgrInfo, ThreadSelfInfo, INITRD_USER_BASE, PROCMGR_TOKEN_ADDR,
-    THREAD_SELF_ADDR,
-};
+use libcluu::boot::{boot_info, ParentInfo, ProcmgrInfo, INITRD_USER_BASE, PARENT_INFO_ADDR, PROCMGR_INFO_ADDR};
 use libcluu::elf::ElfFile;
 use libcluu::tar::find_member;
 use libcluu::*;
@@ -65,6 +62,7 @@ fn run() -> Result<()> {
     let initrd = unsafe {
         core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, info.initrd_size as usize)
     };
+    let exit_endpoint = endpoint_create(info.root_token)?;
 
     let root_token = info.root_token;
     for (index, service) in SERVICE_LIST.iter().enumerate() {
@@ -80,12 +78,7 @@ fn run() -> Result<()> {
 
         debug_print(&format!("init: launching {}", service.name))?;
         let token_share = if service.name == "procmgr" {
-            Some(child_token)
-        } else {
-            None
-        };
-        let initrd_share = if service.name == "procmgr" {
-            Some(info.initrd_size as usize)
+            Some((child_token, exit_endpoint, info.initrd_size as usize))
         } else {
             None
         };
@@ -95,7 +88,6 @@ fn run() -> Result<()> {
             initrd,
             index,
             token_share,
-            initrd_share,
         )?;
         debug_print(&format!("init: {} ready", service.name))?;
 
@@ -115,8 +107,7 @@ fn spawn_service(
     token: usize,
     initrd: &[u8],
     index: usize,
-    token_share: Option<usize>,
-    initrd_share: Option<usize>,
+    token_share: Option<(usize, usize, usize)>,
 ) -> Result<()> {
     let service_bytes = find_member(initrd, service.path).ok_or(Error::NotFound)?;
     debug_print(&format!("init: parsed {} entry", service.name))?;
@@ -126,11 +117,10 @@ fn spawn_service(
     let space_token = space_create(token)?;
     map_segments(space_token, &elf, service_bytes)?;
     map_stack(space_token, stack_top, PROC_STACK_SIZE, STACK_FLAGS)?;
-    if let Some(shared) = token_share {
-        map_token_share(space_token, shared, initrd_share)?;
-    }
-    if let Some(size) = initrd_share {
-        map_initrd(space_token, initrd, size)?;
+    if let Some((shared, exit_endpoint, initrd_size)) = token_share {
+        map_procmgr_info(space_token, shared, exit_endpoint, initrd_size)?;
+        map_parent_info(space_token)?;
+        map_initrd(space_token, initrd, initrd_size)?;
     }
 
     let thread_token = thread_create(
@@ -139,24 +129,25 @@ fn spawn_service(
         stack_top,
         service.priority,
     )?;
-    map_thread_self(space_token, thread_token)?;
+    let _ = thread_token;
     Ok(())
 }
 
-fn map_token_share(
+fn map_procmgr_info(
     space_token: usize,
     token: usize,
-    initrd_share: Option<usize>,
+    exit_endpoint: usize,
+    initrd_size: usize,
 ) -> Result<()> {
     const PAGE_SIZE: usize = 4096;
     const READ_ONLY: usize = 0x01;
-    let page_base = PROCMGR_TOKEN_ADDR & !(PAGE_SIZE - 1);
+    let page_base = PROCMGR_INFO_ADDR & !(PAGE_SIZE - 1);
 
     let mut page = [0u8; PAGE_SIZE];
-    let initrd_size = initrd_share.unwrap_or(0) as u64;
     let info = ProcmgrInfo {
         token,
-        initrd_size,
+        exit_endpoint,
+        initrd_size: initrd_size as u64,
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -164,7 +155,7 @@ fn map_token_share(
             core::mem::size_of::<ProcmgrInfo>(),
         )
     };
-    let offset = PROCMGR_TOKEN_ADDR - page_base;
+    let offset = PROCMGR_INFO_ADDR - page_base;
     let end = offset + bytes.len();
     if end > PAGE_SIZE {
         return Err(Error::InvalidArgument);
@@ -181,24 +172,28 @@ fn map_token_share(
     Ok(())
 }
 
-fn map_thread_self(space_token: usize, thread_token: usize) -> Result<()> {
+fn map_parent_info(space_token: usize) -> Result<()> {
     const PAGE_SIZE: usize = 4096;
     const READ_ONLY: usize = 0x01;
-    let page_base = THREAD_SELF_ADDR & !(PAGE_SIZE - 1);
+    let page_base = PARENT_INFO_ADDR & !(PAGE_SIZE - 1);
 
     let mut page = [0u8; PAGE_SIZE];
-    let info = ThreadSelfInfo { thread_token };
+    let info = ParentInfo {
+        exit_endpoint: 0,
+        exit_cookie: 0,
+    };
     let bytes = unsafe {
         core::slice::from_raw_parts(
-            &info as *const ThreadSelfInfo as *const u8,
-            core::mem::size_of::<ThreadSelfInfo>(),
+            &info as *const ParentInfo as *const u8,
+            core::mem::size_of::<ParentInfo>(),
         )
     };
-    let end = bytes.len();
+    let offset = PARENT_INFO_ADDR - page_base;
+    let end = offset + bytes.len();
     if end > PAGE_SIZE {
         return Err(Error::InvalidArgument);
     }
-    page[..end].copy_from_slice(bytes);
+    page[offset..end].copy_from_slice(bytes);
 
     space_map(
         space_token,

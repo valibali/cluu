@@ -5,6 +5,9 @@
 use crate::error::Result;
 use crate::syscall;
 use crate::types::*;
+use crate::boot;
+
+pub const PROC_EXIT_LABEL: u32 = 1;
 
 /// Send a message (one-way)
 pub fn send(endpoint_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()> {
@@ -48,4 +51,20 @@ pub fn reply_recv(endpoint_token: usize, msg: &mut Message, flags: IpcFlags) -> 
     reply(msg, flags)?;
     // Then receive next message
     recv(endpoint_token, msg, flags)
+}
+
+/// Notify the parent process manager that this process is exiting.
+pub fn notify_exit(exit_code: i32) -> Result<()> {
+    let info = boot::parent_info();
+    if info.exit_endpoint == 0 {
+        return Ok(());
+    }
+
+    let msg = Message::new(
+        PROC_EXIT_LABEL,
+        [info.exit_cookie, exit_code as usize, 0, 0, 0, 0],
+        2,
+    );
+    let _ = crate::syscall::debug_print("TRACE: notify_exit");
+    send(info.exit_endpoint, &msg, IpcFlags::empty())
 }

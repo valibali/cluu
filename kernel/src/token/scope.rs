@@ -160,7 +160,7 @@ impl AddressSpaceId {
 }
 
 /// IPC endpoint identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EndpointId(pub u64);
 
 impl EndpointId {

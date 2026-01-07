@@ -43,6 +43,7 @@
 //! - Optional time slice donation to receiver
 
 pub mod message;
+pub mod endpoint;
 pub mod rendezvous;
 pub mod traits;
 pub mod transfer;

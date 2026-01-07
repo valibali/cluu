@@ -62,6 +62,9 @@ pub enum InvokeOp {
     // IRQ operations
     IrqAttach = 30,
     IrqAck = 31,
+
+    // IPC operations
+    EndpointCreate = 40,
 }
 
 /// Raw syscall invocation using x86_64 SYSCALL instruction
@@ -469,6 +472,12 @@ pub fn thread_destroy(thread_token: usize) -> Result<()> {
     Ok(())
 }
 
+/// Create a new IPC endpoint.
+#[inline]
+pub fn endpoint_create(root_token: usize) -> Result<usize> {
+    unsafe { invoke(root_token, InvokeOp::EndpointCreate, 0, 0, 0, 0) }
+}
+
 /// Attach IRQ handler
 ///
 /// # Arguments
@@ -543,19 +552,10 @@ pub fn debug_print(message: &str) -> Result<()> {
 
 /// Exit the current thread
 ///
-/// Note: This currently just yields forever. In the future, this will
-/// call invoke(current_thread, ThreadDestroy) when we have thread handles.
-pub fn thread_exit(_code: i32) -> ! {
+/// Sends an exit notification to the parent manager and yields forever.
+pub fn thread_exit(code: i32) -> ! {
     let _ = debug_print("Thread exiting");
-    loop {
-        let token = crate::boot::thread_self_token_handle();
-        if token != 0 {
-            if thread_destroy(token).is_ok() {
-                break;
-            }
-        }
-        let _ = yield_cpu();
-    }
+    let _ = crate::ipc::notify_exit(code);
     loop {
         let _ = yield_cpu();
     }
@@ -582,5 +582,6 @@ mod tests {
         assert_eq!(InvokeOp::SpaceMap as usize, 12);
         assert_eq!(InvokeOp::TokenDerive as usize, 20);
         assert_eq!(InvokeOp::IrqAttach as usize, 30);
+        assert_eq!(InvokeOp::EndpointCreate as usize, 40);
     }
 }

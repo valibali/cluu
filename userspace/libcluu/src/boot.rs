@@ -5,8 +5,6 @@
 
 /// Physical address where the kernel stores boot information.
 pub const BOOT_INFO_ADDR: usize = 0x7fe0_0000;
-/// Virtual address where per-thread self info is mapped.
-pub const THREAD_SELF_ADDR: usize = 0x7fe0_1000;
 
 /// Boot information structure written by the kernel.
 #[repr(C)]
@@ -30,32 +28,40 @@ pub fn root_token_handle() -> usize {
 }
 
 /// Additional location where init writes the derived procmgr info.
-pub const PROCMGR_TOKEN_ADDR: usize = BOOT_INFO_ADDR + 0x100;
+pub const PROCMGR_INFO_ADDR: usize = BOOT_INFO_ADDR + 0x100;
+/// Location where the parent process manager writes per-process exit info.
+pub const PARENT_INFO_ADDR: usize = BOOT_INFO_ADDR + 0x200;
 
 /// Procmgr bootstrap payload written by init.
 #[repr(C)]
 pub struct ProcmgrInfo {
     pub token: usize,
+    pub exit_endpoint: usize,
     pub initrd_size: u64,
 }
 
-/// Per-thread self info payload written by the spawner.
+/// Parent-managed exit info payload written by the spawner.
 #[repr(C)]
-pub struct ThreadSelfInfo {
-    pub thread_token: usize,
+pub struct ParentInfo {
+    pub exit_endpoint: usize,
+    pub exit_cookie: usize,
 }
 
 /// Write the derived procmgr bootstrap info for the child to pick up.
-pub fn set_procmgr_info(token: usize, initrd_size: u64) {
+pub fn set_procmgr_info(token: usize, exit_endpoint: usize, initrd_size: u64) {
     unsafe {
-        let ptr = PROCMGR_TOKEN_ADDR as *mut ProcmgrInfo;
-        ptr.write(ProcmgrInfo { token, initrd_size });
+        let ptr = PROCMGR_INFO_ADDR as *mut ProcmgrInfo;
+        ptr.write(ProcmgrInfo {
+            token,
+            exit_endpoint,
+            initrd_size,
+        });
     }
 }
 
 /// Read the procmgr bootstrap info stored by init.
 pub fn procmgr_info() -> &'static ProcmgrInfo {
-    unsafe { &*(PROCMGR_TOKEN_ADDR as *const ProcmgrInfo) }
+    unsafe { &*(PROCMGR_INFO_ADDR as *const ProcmgrInfo) }
 }
 
 /// Read the procmgr token handle stored by init.
@@ -63,12 +69,22 @@ pub fn procmgr_token_handle() -> usize {
     procmgr_info().token
 }
 
-/// Read the self info stored by the spawner.
-pub fn thread_self_info() -> &'static ThreadSelfInfo {
-    unsafe { &*(THREAD_SELF_ADDR as *const ThreadSelfInfo) }
+/// Read the exit endpoint token for the process manager.
+pub fn procmgr_exit_endpoint() -> usize {
+    procmgr_info().exit_endpoint
 }
 
-/// Read the thread token handle for the current thread.
-pub fn thread_self_token_handle() -> usize {
-    thread_self_info().thread_token
+/// Read the parent info stored by the spawner.
+pub fn parent_info() -> &'static ParentInfo {
+    unsafe { &*(PARENT_INFO_ADDR as *const ParentInfo) }
+}
+
+/// Read the exit endpoint token for the current process.
+pub fn parent_exit_endpoint() -> usize {
+    parent_info().exit_endpoint
+}
+
+/// Read the parent-provided exit cookie for the current process.
+pub fn parent_exit_cookie() -> usize {
+    parent_info().exit_cookie
 }

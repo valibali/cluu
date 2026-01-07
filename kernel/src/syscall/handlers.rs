@@ -41,18 +41,29 @@ use crate::token::{lookup_token, InvokeOp, TokenHandle};
 /// - Ok(0): Success
 /// - Err(Error): Token invalid, insufficient rights, or IPC error
 pub fn sys_send(args: SyscallArgs) -> SyscallResult {
-    let _token_handle = TokenHandle::from_raw(args.arg1);
-    let _msg_ptr = args.arg2 as *const u8;
-    let _msg_len = args.arg3;
+    use crate::token::{ObjectRef, ObjectType, Rights};
 
-    // TODO: Implement IPC send
-    // 1. Validate token and check IPC_SEND right
-    // 2. Validate user pointer
-    // 3. Copy message from userspace
-    // 4. Send to endpoint
+    let token_handle = TokenHandle::from_raw(args.arg1);
+    let msg_ptr = args.arg2 as usize;
+    let msg_len = args.arg3;
 
-    klibcluu::warn("sys_send not yet implemented");
-    Err(Error::NotImplemented)
+    let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
+    if !token.has_right(Rights::IPC_SEND) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+        .map_err(|_| Error::InvalidArgument)?;
+    let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let page_table_root =
+        crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
+    crate::ipc::endpoint::send_from_user(endpoint_id, msg_ptr, msg_len, page_table_root)?;
+    Ok(0)
 }
 
 /// sys_recv - Receive IPC message from endpoint
@@ -69,19 +80,28 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
 /// - Ok(bytes_received): Number of bytes received
 /// - Err(Error): Token invalid, insufficient rights, or IPC error
 pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
-    let _token_handle = TokenHandle::from_raw(args.arg1);
-    let _buf_ptr = args.arg2 as *mut u8;
-    let _buf_len = args.arg3;
+    use crate::token::{ObjectRef, ObjectType, Rights};
 
-    // TODO: Implement IPC receive
-    // 1. Validate token and check IPC_RECV right
-    // 2. Validate user pointer
-    // 3. Block until message available
-    // 4. Copy message to userspace
-    // 5. Return bytes received
+    let token_handle = TokenHandle::from_raw(args.arg1);
+    let buf_ptr = args.arg2 as usize;
+    let buf_len = args.arg3;
 
-    klibcluu::warn("sys_recv not yet implemented");
-    Err(Error::NotImplemented)
+    let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
+    if !token.has_right(Rights::IPC_RECV) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+        .map_err(|_| Error::InvalidArgument)?;
+    let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let page_table_root =
+        crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
+    crate::ipc::endpoint::recv_to_user(endpoint_id, buf_ptr, buf_len, page_table_root)
 }
 
 /// sys_call - Call (send + receive) for synchronous RPC
@@ -236,6 +256,9 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         // IRQ operations
         InvokeOp::IrqAttach => invoke_irq_attach(&token, args),
         InvokeOp::IrqAck => invoke_irq_ack(&token, args),
+
+        // IPC operations
+        InvokeOp::EndpointCreate => invoke_endpoint_create(&token, args),
     }
 }
 
@@ -318,8 +341,8 @@ fn invoke_thread_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
         return Err(Error::PermissionDenied);
     }
 
-    let thread_ref =
-        crate::token::resolve_token_object(_token, ObjectType::Thread).map_err(|_| Error::InvalidArgument)?;
+    let thread_ref = crate::token::resolve_token_object(_token, ObjectType::Thread)
+        .map_err(|_| Error::InvalidArgument)?;
     let thread_id = if let ObjectRef::Thread(id) = thread_ref {
         id
     } else {
@@ -346,6 +369,27 @@ fn invoke_thread_resume(_token: &Token, _args: SyscallArgs) -> SyscallResult {
 fn invoke_thread_set_priority(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     klibcluu::warn("invoke_thread_set_priority not yet implemented");
     Err(Error::NotImplemented)
+}
+
+fn invoke_endpoint_create(token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::token::{Issuer, ObjectRef, Rights, Timestamp};
+
+    if !token.has_right(Rights::CREATE) {
+        klibcluu::warn("invoke_endpoint_create: missing CREATE right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let endpoint_id = crate::ipc::endpoint::create_endpoint();
+    let scope = crate::token::OpaqueScope::random();
+    let endpoint_token = crate::token::create_token(
+        scope,
+        Rights::ipc_full() | Rights::GRANT,
+        Issuer::Kernel,
+        Timestamp::far_future(),
+        ObjectRef::Endpoint(endpoint_id),
+    );
+
+    Ok(endpoint_token.as_usize())
 }
 
 // Space operations
@@ -550,10 +594,10 @@ pub fn sys_debug_print(args: SyscallArgs) -> SyscallResult {
     let msg_ptr = args.arg1;
     let msg_len = args.arg2;
 
-    klibcluu::trace("sys_debug_print: ptr=0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", msg_ptr as u64);
-    klibcluu::trace(" len=");
-    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", msg_len as u64);
+    // klibcluu::trace("sys_debug_print: ptr=0x");
+    // klibcluu::log_hex(klibcluu::LogLevel::Trace, "", msg_ptr as u64);
+    // klibcluu::trace(" len=");
+    // klibcluu::log_dec(klibcluu::LogLevel::Trace, "", msg_len as u64);
 
     if msg_len == 0 {
         klibcluu::info("[USER] <empty debug print>");
