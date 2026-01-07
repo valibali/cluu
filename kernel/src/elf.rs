@@ -32,6 +32,7 @@
 //! - **Dependency Inversion**: Depends on AddressSpace abstraction, not concrete VMM
 //! - **Open/Closed**: Can extend with new segment types without modifying core
 
+use crate::error::Error;
 use x86_64::{PhysAddr, VirtAddr};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -143,6 +144,16 @@ impl core::fmt::Display for ElfLoadError {
             ElfLoadError::SegmentTooLarge => write!(f, "Segment too large"),
             ElfLoadError::MemoryAllocationFailed => write!(f, "Failed to allocate memory"),
             ElfLoadError::MappingFailed(msg) => write!(f, "Failed to map pages: {}", msg),
+        }
+    }
+}
+
+impl From<ElfLoadError> for Error {
+    fn from(err: ElfLoadError) -> Self {
+        match err {
+            ElfLoadError::MemoryAllocationFailed => Error::OutOfMemory,
+            ElfLoadError::MappingFailed(_) => Error::InvalidAddress,
+            _ => Error::InvalidOperation,
         }
     }
 }
@@ -592,55 +603,57 @@ pub(crate) unsafe fn map_user_page(
 /// Translate virtual address to physical using page tables
 ///
 /// Simplified version that only handles 4KB pages.
-fn translate_vaddr(page_table_root: PhysAddr, vaddr: VirtAddr) -> Option<PhysAddr> {
+pub(crate) fn translate_vaddr(page_table_root: PhysAddr, vaddr: VirtAddr) -> Option<PhysAddr> {
+    translate_vaddr_with_flags(page_table_root, vaddr).map(|(phys, _flags)| phys)
+}
+
+/// Translate virtual address to physical address and return raw page table entry flags.
+pub(crate) fn translate_vaddr_with_flags(
+    page_table_root: PhysAddr,
+    vaddr: VirtAddr,
+) -> Option<(PhysAddr, u64)> {
+    use crate::mm::vmm::pte_flags;
+
     let pml4_idx = ((vaddr.as_u64() >> 39) & 0x1FF) as usize;
     let pdpt_idx = ((vaddr.as_u64() >> 30) & 0x1FF) as usize;
     let pd_idx = ((vaddr.as_u64() >> 21) & 0x1FF) as usize;
     let pt_idx = ((vaddr.as_u64() >> 12) & 0x1FF) as usize;
 
-    // Access PML4
+    const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
     let pml4_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(page_table_root.as_u64()) };
     let pml4 = unsafe { &*(pml4_virt as *const [u64; 512]) };
 
-    if pml4[pml4_idx] & 0x1 == 0 {
+    if pml4[pml4_idx] & pte_flags::PRESENT == 0 {
         return None;
     }
 
-    // Mask to extract physical address from page table entry
-    // Clears page offset (bits 0-11) and flags (bits 52-63)
-    // Keeps only physical frame number (bits 12-51)
-    const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-
-    // Access PDPT
     let pdpt_phys = pml4[pml4_idx] & PHYS_MASK;
     let pdpt_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pdpt_phys) };
     let pdpt = unsafe { &*(pdpt_virt as *const [u64; 512]) };
 
-    if pdpt[pdpt_idx] & 0x1 == 0 {
+    if pdpt[pdpt_idx] & pte_flags::PRESENT == 0 {
         return None;
     }
 
-    // Access PD
     let pd_phys = pdpt[pdpt_idx] & PHYS_MASK;
     let pd_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pd_phys) };
     let pd = unsafe { &*(pd_virt as *const [u64; 512]) };
 
-    if pd[pd_idx] & 0x1 == 0 {
+    if pd[pd_idx] & pte_flags::PRESENT == 0 {
         return None;
     }
 
-    // Access PT
     let pt_phys = pd[pd_idx] & PHYS_MASK;
     let pt_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pt_phys) };
     let pt = unsafe { &*(pt_virt as *const [u64; 512]) };
 
-    if pt[pt_idx] & 0x1 == 0 {
+    if pt[pt_idx] & pte_flags::PRESENT == 0 {
         return None;
     }
 
-    // Get physical address from PTE
-    let phys = pt[pt_idx] & PHYS_MASK;
-    Some(PhysAddr::new(phys))
+    let entry = pt[pt_idx];
+    Some((PhysAddr::new(entry & PHYS_MASK), entry))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

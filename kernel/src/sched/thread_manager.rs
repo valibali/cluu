@@ -15,6 +15,7 @@ use crate::sched::{
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
+use x86_64::PhysAddr;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Scheduler Mode
@@ -148,6 +149,13 @@ impl ThreadManager {
         *current
     }
 
+    /// Get page table root (CR3) of currently running thread
+    pub fn current_page_table_root() -> Option<PhysAddr> {
+        let thread_id = Self::current()?;
+        let repo = THREAD_REPOSITORY.lock();
+        repo.get(thread_id).map(|t| t.page_table_root)
+    }
+
     /// Get current scheduler mode
     pub fn mode() -> SchedulerMode {
         if SCHEDULER_MODE.load(Ordering::Acquire) {
@@ -168,20 +176,37 @@ impl ThreadManager {
     ///
     /// Returns true if this was the last critical process and mode switched.
     pub fn signal_critical_process_ready() -> bool {
-        let remaining = CRITICAL_PROCESS_COUNT.fetch_sub(1, Ordering::SeqCst);
+        let prev =
+            CRITICAL_PROCESS_COUNT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                if count == 0 {
+                    None
+                } else {
+                    Some(count - 1)
+                }
+            });
 
-        if remaining == 1 {
-            // This was the last critical process
-            klibcluu::info("========================================");
-            klibcluu::info("All critical processes initialized");
-            klibcluu::info("Switching to NORMALMODE (preemptive)");
-            klibcluu::info("========================================");
+        match prev {
+            Ok(remaining) => {
+                if remaining == 1 {
+                    // This was the last critical process
+                    klibcluu::info("========================================");
+                    klibcluu::info("All critical processes initialized");
+                    klibcluu::info("Switching to NORMALMODE (preemptive)");
+                    klibcluu::info("========================================");
 
-            SCHEDULER_MODE.store(true, Ordering::Release);
-            true
-        } else {
-            false
+                    SCHEDULER_MODE.store(true, Ordering::Release);
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
         }
+    }
+
+    /// Get number of critical processes still initializing
+    pub fn critical_processes_remaining() -> usize {
+        CRITICAL_PROCESS_COUNT.load(Ordering::SeqCst)
     }
 
     /// Check if running in INITMODE (cooperative)
@@ -241,8 +266,6 @@ impl ThreadManager {
     pub unsafe extern "C" fn schedule_and_switch(
         current_ctx_ptr: *const Context,
     ) -> *const Context {
-        klibcluu::trace("schedule_and_switch called");
-
         // Get current thread ID
         let current_id = match Self::current() {
             Some(id) => id,
@@ -291,9 +314,6 @@ impl ThreadManager {
 
     /// Save context to thread structure
     fn save_context(thread_id: ThreadId, context: &Context) {
-        klibcluu::trace("Saving context for thread ");
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
-
         Self::with_thread_mut(thread_id, |thread| {
             thread.context = *context;
         });

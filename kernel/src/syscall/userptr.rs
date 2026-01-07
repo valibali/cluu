@@ -12,6 +12,9 @@
 //! - Integer overflows in size calculations
 
 use crate::error::Error;
+use crate::mm::vmm::pte_flags;
+use klibcluu;
+use x86_64::{PhysAddr, VirtAddr};
 
 /// Maximum userspace address on x86_64 (canonical address limit)
 ///
@@ -44,11 +47,13 @@ pub const MAX_DEBUG_PRINT_SIZE: usize = 4096;
 pub fn validate_user_ptr(ptr: usize) -> Result<(), Error> {
     // Reject NULL pointers
     if ptr == 0 {
+        klibcluu::warn("userptr: null pointer");
         return Err(Error::InvalidAddress);
     }
 
     // Reject kernel addresses
     if ptr >= USERSPACE_MAX {
+        klibcluu::warn("userptr: pointer in kernel space");
         return Err(Error::InvalidAddress);
     }
 
@@ -77,6 +82,7 @@ pub fn validate_user_ptr(ptr: usize) -> Result<(), Error> {
 pub fn validate_user_buffer(ptr: usize, len: usize) -> Result<(), Error> {
     // Reject zero-length buffers
     if len == 0 {
+        klibcluu::warn("userptr: buffer length zero");
         return Err(Error::InvalidParameter);
     }
 
@@ -89,7 +95,81 @@ pub fn validate_user_buffer(ptr: usize, len: usize) -> Result<(), Error> {
     // Ensure end address is still in userspace
     // Note: end is one past the last byte, so it can equal USERSPACE_MAX
     if end > USERSPACE_MAX {
+        klibcluu::warn("userptr: buffer exceeds userspace boundary");
         return Err(Error::InvalidAddress);
+    }
+
+    Ok(())
+}
+
+/// Ensure every page covered by the buffer is mapped in the provided page table.
+pub fn ensure_pages_mapped(ptr: usize, len: usize, page_table_root: PhysAddr) -> Result<(), Error> {
+    if len == 0 {
+        return Ok(());
+    }
+
+    let mut offset = 0usize;
+    while offset < len {
+        let addr = ptr + offset;
+        let page_offset = addr & 0xFFF;
+        let page_start = VirtAddr::new((addr - page_offset) as u64);
+
+        match crate::elf::translate_vaddr_with_flags(page_table_root, page_start) {
+            Some((_, flags)) => {
+                if (flags & pte_flags::USER) == 0 {
+                    klibcluu::warn("userptr: page not user-accessible");
+                    return Err(Error::InvalidAddress);
+                }
+            }
+            None => {
+                klibcluu::warn("userptr: page not present");
+                return Err(Error::InvalidAddress);
+            }
+        }
+
+        let remaining_in_page = 4096 - page_offset;
+        offset += remaining_in_page.min(len - offset);
+    }
+
+    Ok(())
+}
+
+/// Copy bytes from user buffer into kernel destination via physmap.
+pub fn copy_from_user(
+    dst: *mut u8,
+    src: usize,
+    len: usize,
+    page_table_root: PhysAddr,
+) -> Result<(), Error> {
+    if len == 0 {
+        return Ok(());
+    }
+
+    let mut offset = 0usize;
+    while offset < len {
+        let addr = src + offset;
+        let page_offset = addr & 0xFFF;
+        let page_start = VirtAddr::new((addr - page_offset) as u64);
+
+        let (phys, flags) = crate::elf::translate_vaddr_with_flags(page_table_root, page_start)
+            .ok_or_else(|| {
+                klibcluu::warn("userptr: copy_from_user page not present");
+                Error::InvalidAddress
+            })?;
+
+        if (flags & pte_flags::USER) == 0 {
+            klibcluu::warn("userptr: copy_from_user page not user-accessible");
+            return Err(Error::InvalidAddress);
+        }
+
+        let bytes_in_page = core::cmp::min(4096 - page_offset, len - offset);
+        let phys_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(phys.as_u64()) };
+        unsafe {
+            let src_ptr = (phys_virt + page_offset as u64) as *const u8;
+            core::ptr::copy_nonoverlapping(src_ptr, dst.add(offset), bytes_in_page);
+        }
+
+        offset += bytes_in_page;
     }
 
     Ok(())

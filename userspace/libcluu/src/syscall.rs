@@ -404,8 +404,9 @@ pub fn space_create(root_token: usize) -> Result<usize> {
 ///
 /// - `space_token`: Address space token with SPACE_MAP right
 /// - `virt_addr`: Virtual address to map
-/// - `phys_addr`: Physical address to map to
+/// - `source_ptr`: Pointer to the source bytes (0 to map a zero page)
 /// - `flags`: Mapping flags (read/write/execute)
+/// - `data_len`: Amount of data to copy (<= 4096 bytes)
 ///
 /// # Returns
 ///
@@ -414,17 +415,18 @@ pub fn space_create(root_token: usize) -> Result<usize> {
 pub fn space_map(
     space_token: usize,
     virt_addr: usize,
-    phys_addr: usize,
+    source_ptr: usize,
     flags: usize,
+    data_len: usize,
 ) -> Result<()> {
     unsafe {
         invoke(
             space_token,
             InvokeOp::SpaceMap,
             virt_addr,
-            phys_addr,
+            source_ptr,
             flags,
-            0,
+            data_len,
         )?
     };
     Ok(())
@@ -517,6 +519,10 @@ pub fn irq_ack(irq_token: usize) -> Result<()> {
 /// ```
 #[inline]
 pub fn debug_print(message: &str) -> Result<()> {
+    if message.is_empty() {
+        return Ok(());
+    }
+
     let ptr = message.as_ptr() as usize;
     let len = message.len();
     unsafe { syscall2(SyscallNumber::DebugPrint, ptr, len)? };

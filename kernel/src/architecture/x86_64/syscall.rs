@@ -100,12 +100,12 @@ impl PerCpuData {
 /// # Arguments
 ///
 /// * `number` - Syscall number (from RAX)
-/// * `arg1` - Argument 1 (from RDI, originally RSI in userspace)
-/// * `arg2` - Argument 2 (from RSI, originally RDX in userspace)
-/// * `arg3` - Argument 3 (from RDX, originally RDX in userspace)
-/// * `arg4` - Argument 4 (from RCX, originally R10 in userspace)
-/// * `arg5` - Argument 5 (from R8)
-/// * `arg6` - Argument 6 (from R9)
+/// * `arg1` - Argument 1 (from RDI in userspace)
+/// * `arg2` - Argument 2 (from RSI in userspace)
+/// * `arg3` - Argument 3 (from RDX in userspace)
+/// * `arg4` - Argument 4 (from R10 in userspace)
+/// * `arg5` - Argument 5 (from R8 in userspace)
+/// * `arg6` - Argument 6 (from R9 in userspace)
 ///
 /// # Returns
 ///

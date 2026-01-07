@@ -162,14 +162,19 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
 ///
 /// - Ok(0): Always succeeds
 pub fn sys_yield(_args: SyscallArgs) -> SyscallResult {
-    klibcluu::trace("sys_yield");
-
     // Note: Context switch happens in syscall_entry.asm after this returns
     // The syscall_entry calls schedule_and_switch() which will:
     // 1. Get current thread ID (from CURRENT_THREAD)
     // 2. Save current thread's context
     // 3. Add current thread back to scheduler
     // 4. Pick next thread and return its context
+
+    // In INITMODE, the first yield from each critical thread signals readiness.
+    if crate::sched::ThreadManager::is_init_mode()
+        && crate::sched::ThreadManager::critical_processes_remaining() > 0
+    {
+        crate::sched::ThreadManager::signal_critical_process_ready();
+    }
 
     Ok(0)
 }
@@ -289,6 +294,10 @@ fn invoke_thread_create(token: &Token, args: SyscallArgs) -> SyscallResult {
 
     let thread_id = ThreadManager::add_thread(thread);
 
+    if ThreadManager::is_init_mode() {
+        ThreadManager::register_critical_thread(thread_id);
+    }
+
     let scope = OpaqueScope::random();
     let thread_token = crate::token::create_token(
         scope,
@@ -348,7 +357,12 @@ fn invoke_space_create(token: &Token, _args: SyscallArgs) -> SyscallResult {
     let scope = OpaqueScope::random();
     let space_token = crate::token::create_token(
         scope,
-        Rights::space_full() | Rights::CREATE,
+        Rights::space_full()
+            | Rights::CREATE
+            | Rights::GRANT
+            | Rights::THREAD_CONTROL
+            | Rights::THREAD_SUSPEND
+            | Rights::DESTROY,
         Issuer::Kernel,
         Timestamp::far_future(),
         ObjectRef::Space(space_id),
@@ -364,9 +378,12 @@ fn invoke_space_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
 
 fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     use crate::elf;
-    use crate::mm::space_repository;
+    use crate::mm::{physmap, pmm_simple, space_repository};
+    use crate::syscall::userptr;
     use crate::token::{ObjectRef, ObjectType, Rights};
-    use x86_64::VirtAddr;
+    use core::ptr::{copy_nonoverlapping, write_bytes};
+
+    const PAGE_SIZE: usize = 4096;
 
     klibcluu::trace("invoke_space_map");
 
@@ -376,10 +393,15 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
 
     let virt_addr = args.arg3 as u64;
-    let phys_addr = args.arg4 as u64;
+    let data_ptr = args.arg4 as usize;
     let perms = args.arg5 as u32;
+    let copy_len = args.arg6 as usize;
 
-    if virt_addr & 0xFFF != 0 || phys_addr & 0xFFF != 0 {
+    if copy_len > PAGE_SIZE {
+        return Err(Error::InvalidArgument);
+    }
+
+    if virt_addr & 0xFFF != 0 {
         return Err(Error::InvalidArgument);
     }
 
@@ -395,10 +417,26 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     };
 
+    let frame_phys = pmm_simple::alloc_frame().ok_or(Error::OutOfMemory)?;
+    let frame_virt = unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
+
+    if copy_len > 0 {
+        userptr::validate_user_buffer(data_ptr, copy_len)?;
+        unsafe {
+            copy_nonoverlapping(data_ptr as *const u8, frame_virt, copy_len);
+        }
+    }
+
+    if copy_len < PAGE_SIZE {
+        unsafe {
+            write_bytes(frame_virt.add(copy_len), 0, PAGE_SIZE - copy_len);
+        }
+    }
+
     let result = space_repository::with_space_mut(space_id, |space| unsafe {
         elf::map_user_page(
-            VirtAddr::new(virt_addr),
-            phys_addr,
+            virt_addr,
+            frame_phys,
             writable,
             executable,
             space.page_table_root,
@@ -494,20 +532,36 @@ pub fn sys_debug_print(args: SyscallArgs) -> SyscallResult {
     let msg_ptr = args.arg1;
     let msg_len = args.arg2;
 
+    klibcluu::trace("sys_debug_print: ptr=0x");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", msg_ptr as u64);
+    klibcluu::trace(" len=");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", msg_len as u64);
+
+    if msg_len == 0 {
+        klibcluu::info("[USER] <empty debug print>");
+        return Ok(0);
+    }
+
+    if msg_len > userptr::MAX_DEBUG_PRINT_SIZE {
+        klibcluu::warn("sys_debug_print: message too long");
+        return Err(Error::InvalidParameter);
+    }
+
     // Validate user buffer
     userptr::validate_user_buffer(msg_ptr, msg_len)?;
 
-    let msg_ptr = msg_ptr as *const u8;
+    let page_table_root =
+        crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidArgument)?;
+    userptr::ensure_pages_mapped(msg_ptr, msg_len, page_table_root)?;
 
-    // Safety: Pointer validated above
-    let msg_slice = unsafe { core::slice::from_raw_parts(msg_ptr, msg_len) };
+    let msg_slice = unsafe { core::slice::from_raw_parts(msg_ptr as *const u8, msg_len) };
 
     // Convert to string (best effort)
     if let Ok(msg) = core::str::from_utf8(msg_slice) {
-        klibcluu::debug("[USER] ");
-        klibcluu::debug(msg);
+        klibcluu::info("[USER] ");
+        klibcluu::info(msg);
     } else {
-        klibcluu::debug("[USER] <invalid UTF-8>");
+        klibcluu::info("[USER] <invalid UTF-8>");
     }
 
     Ok(0)

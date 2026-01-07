@@ -87,18 +87,23 @@ syscall_entry:
     ; Prepare arguments for syscall_dispatch
     ; ───────────────────────────────────────────────────────────────────────
 
-    ; Arguments are already in correct registers for System V ABI:
-    ; RDI = syscall number (arg1) - from RAX
-    ; RSI = arg2 (already in RSI)
-    ; RDX = arg3 (already in RDX)
-    ; RCX = arg4 (need to move from R10)
-    ; R8  = arg5 (already in R8)
-    ; R9  = arg6 (already in R9)
+    ; Map syscall register arguments to System V ABI:
+    ; RDI = syscall number (from RAX)
+    ; RSI = arg1 (from user RDI)
+    ; RDX = arg2 (from user RSI)
+    ; RCX = arg3 (from user RDX)
+    ; R8  = arg4 (from user R10)
+    ; R9  = arg5 (from user R8)
+    ; [rsp] = arg6 (from user R9)
 
-    mov rdi, rax                    ; Move syscall number to first arg
-    mov rcx, r10                    ; Move arg4 from R10 to RCX
-                                    ; (R10 used instead of RCX because
-                                    ;  SYSCALL clobbers RCX)
+    mov r11, r9                    ; Save arg6 for stack
+    mov r9, r8                     ; arg5 (user R8)
+    mov r8, r10                    ; arg4 (user R10)
+    mov rcx, rdx                   ; arg3 (user RDX)
+    mov rdx, rsi                   ; arg2 (user RSI)
+    mov rsi, rdi                   ; arg1 (user RDI)
+    mov rdi, rax                   ; syscall number
+    push r11                       ; arg6 on stack (keeps 16-byte alignment)
 
     ; ───────────────────────────────────────────────────────────────────────
     ; Call Rust dispatcher
@@ -126,6 +131,8 @@ syscall_entry:
     sti
 
     call syscall_dispatch
+
+    add rsp, 8                     ; Drop stack arg (arg6)
 
     ; Return value in RAX (already there from function return)
     ; Save it - we'll need it after potential context switch
