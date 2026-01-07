@@ -67,6 +67,6 @@ lto = false
 panic = "abort"
 
 [profile.release]
-opt-level = 2
-lto = true
+opt-level = 0
+lto = false
 panic = "abort"
