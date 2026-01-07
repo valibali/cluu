@@ -2,9 +2,9 @@
 //!
 //! Higher-level IPC wrappers using the Message type.
 
-use crate::types::*;
 use crate::error::Result;
 use crate::syscall;
+use crate::types::*;
 
 /// Send a message (one-way)
 pub fn send(endpoint_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()> {

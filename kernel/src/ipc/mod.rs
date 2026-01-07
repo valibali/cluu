@@ -43,14 +43,12 @@
 //! - Optional time slice donation to receiver
 
 pub mod message;
-pub mod traits;
 pub mod rendezvous;
+pub mod traits;
 pub mod transfer;
 
 // Re-exports
-pub use message::{
-    BufferDesc, IpcFlags, IpcOp, Message, MessageTag,
-};
-pub use traits::{IpcEndpoint, MessageTransfer};
+pub use message::{BufferDesc, IpcFlags, IpcOp, Message, MessageTag};
 pub use rendezvous::RendezvousPoint;
+pub use traits::{IpcEndpoint, MessageTransfer};
 pub use transfer::BufferTransfer;

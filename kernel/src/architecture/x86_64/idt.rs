@@ -235,9 +235,17 @@ extern "x86-interrupt" fn double_fault_handler(
 ) -> ! {
     klibcluu::warn("DOUBLE_FAULT");
     klibcluu::warn("  RIP: ");
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "", stack_frame.instruction_pointer.as_u64());
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Warn,
+        "",
+        stack_frame.instruction_pointer.as_u64(),
+    );
     klibcluu::warn("  RSP: ");
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "", stack_frame.stack_pointer.as_u64());
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Warn,
+        "",
+        stack_frame.stack_pointer.as_u64(),
+    );
     klibcluu::warn("  Error code: ");
     klibcluu::log_hex(klibcluu::LogLevel::Warn, "", error_code);
     // Critical error - halt immediately without panic
@@ -363,7 +371,11 @@ extern "x86-interrupt" fn page_fault_handler(
 
     // Log page fault with detailed information
     klibcluu::warn("PAGE_FAULT");
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: Fault address (CR2)=", fault_addr.as_u64());
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Warn,
+        "PF: Fault address (CR2)=",
+        fault_addr.as_u64(),
+    );
     klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: RIP=", rip);
     klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: CS=", cs);
     klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: RSP=", rsp);

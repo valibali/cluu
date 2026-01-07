@@ -304,10 +304,10 @@ mod tests {
         elf[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
 
         // ELF identification
-        elf[4] = 2;  // ELFCLASS64
-        elf[5] = 1;  // ELFDATA2LSB (little-endian)
-        elf[6] = 1;  // EV_CURRENT (version)
-        elf[7] = 0;  // OSABI (System V)
+        elf[4] = 2; // ELFCLASS64
+        elf[5] = 1; // ELFDATA2LSB (little-endian)
+        elf[6] = 1; // EV_CURRENT (version)
+        elf[7] = 0; // OSABI (System V)
 
         // e_type = ET_EXEC (2)
         elf[16] = 2;
@@ -541,25 +541,32 @@ mod tests {
         elf_data[second_phdr_offset..second_phdr_offset + 4].copy_from_slice(&1u32.to_le_bytes());
 
         // p_flags = PF_R | PF_W (6 = read + write)
-        elf_data[second_phdr_offset + 4..second_phdr_offset + 8].copy_from_slice(&6u32.to_le_bytes());
+        elf_data[second_phdr_offset + 4..second_phdr_offset + 8]
+            .copy_from_slice(&6u32.to_le_bytes());
 
         // p_offset = 0x1000
-        elf_data[second_phdr_offset + 8..second_phdr_offset + 16].copy_from_slice(&0x1000u64.to_le_bytes());
+        elf_data[second_phdr_offset + 8..second_phdr_offset + 16]
+            .copy_from_slice(&0x1000u64.to_le_bytes());
 
         // p_vaddr = 0x600000
-        elf_data[second_phdr_offset + 16..second_phdr_offset + 24].copy_from_slice(&0x600000u64.to_le_bytes());
+        elf_data[second_phdr_offset + 16..second_phdr_offset + 24]
+            .copy_from_slice(&0x600000u64.to_le_bytes());
 
         // p_paddr = 0x600000
-        elf_data[second_phdr_offset + 24..second_phdr_offset + 32].copy_from_slice(&0x600000u64.to_le_bytes());
+        elf_data[second_phdr_offset + 24..second_phdr_offset + 32]
+            .copy_from_slice(&0x600000u64.to_le_bytes());
 
         // p_filesz = 0x500
-        elf_data[second_phdr_offset + 32..second_phdr_offset + 40].copy_from_slice(&0x500u64.to_le_bytes());
+        elf_data[second_phdr_offset + 32..second_phdr_offset + 40]
+            .copy_from_slice(&0x500u64.to_le_bytes());
 
         // p_memsz = 0x1000 (larger for .bss)
-        elf_data[second_phdr_offset + 40..second_phdr_offset + 48].copy_from_slice(&0x1000u64.to_le_bytes());
+        elf_data[second_phdr_offset + 40..second_phdr_offset + 48]
+            .copy_from_slice(&0x1000u64.to_le_bytes());
 
         // p_align = 0x1000
-        elf_data[second_phdr_offset + 48..second_phdr_offset + 56].copy_from_slice(&0x1000u64.to_le_bytes());
+        elf_data[second_phdr_offset + 48..second_phdr_offset + 56]
+            .copy_from_slice(&0x1000u64.to_le_bytes());
 
         let result = ElfFile::parse(&elf_data);
         assert!(result.is_ok());

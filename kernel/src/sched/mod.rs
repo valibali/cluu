@@ -48,21 +48,21 @@
 //! ```
 
 // Core types
-pub mod thread;
 pub mod context;
-pub mod repository;
-pub mod scheduler;
 pub mod process;
 pub mod process_manager;
+pub mod repository;
+pub mod scheduler;
 pub mod spawn;
+pub mod thread;
 pub mod thread_manager;
 
 // Re-export key types
-pub use thread::{Thread, ThreadId, ThreadState, ThreadFlags, Priority};
 pub use context::Context;
+pub use process::{Process, ProcessId, ProcessInitState, ProcessState, ProcessType};
+pub use process_manager::ProcessManager;
 pub use repository::ThreadRepository;
 pub use scheduler::{PriorityBitmapScheduler, SchedulingPolicy};
-pub use process::{Process, ProcessId, ProcessState, ProcessType, ProcessInitState};
-pub use process_manager::ProcessManager;
 pub use spawn::{spawn_elf_process, spawn_kernel_process};
-pub use thread_manager::{ThreadManager, SchedulerMode};
+pub use thread::{Priority, Thread, ThreadFlags, ThreadId, ThreadState};
+pub use thread_manager::{SchedulerMode, ThreadManager};

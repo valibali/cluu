@@ -18,10 +18,10 @@
 //! - **Address Space** - Memory management
 //! - **Thread** (future) - Execution units
 
+use super::process::{ProcessId, ProcessType};
+use super::process_manager::ProcessManager;
 use crate::elf;
 use crate::mm::AddressSpace;
-use super::process_manager::ProcessManager;
-use super::process::{ProcessId, ProcessType};
 
 /// Spawn a userspace process from an ELF binary
 ///

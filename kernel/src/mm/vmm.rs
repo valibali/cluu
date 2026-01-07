@@ -1008,8 +1008,7 @@ pub unsafe fn alloc_pml4() -> Result<PhysAddr, &'static str> {
     use core::ptr::write_bytes;
 
     // Allocate one frame for PML4
-    let pml4_phys = crate::mm::pmm_simple::alloc_frame()
-        .ok_or("Out of memory allocating PML4")?;
+    let pml4_phys = crate::mm::pmm_simple::alloc_frame().ok_or("Out of memory allocating PML4")?;
 
     // Zero out the PML4
     let pml4_virt = unsafe { super::physmap::phys_to_virt_u64(pml4_phys) };

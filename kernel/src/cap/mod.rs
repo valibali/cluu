@@ -52,15 +52,15 @@
 //! ```
 
 pub mod rights;
-pub mod traits;
 pub mod table;
 pub mod token;
+pub mod traits;
 
 // Re-exports
 pub use rights::Rights;
-pub use traits::{AccessControl, CapabilityStore, TokenValidator};
 pub use table::CapabilityTable;
 pub use token::{CryptoToken, TokenHandle, TokenPayload};
+pub use traits::{AccessControl, CapabilityStore, TokenValidator};
 
 use crate::sched::thread::ThreadId;
 

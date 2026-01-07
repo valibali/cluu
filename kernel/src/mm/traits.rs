@@ -71,12 +71,7 @@ pub trait VirtualMemoryMapper: Send {
     /// * `virt` - Virtual address to map (will be page-aligned)
     /// * `phys` - Physical address to map to
     /// * `flags` - Page table flags (present, writable, user, etc.)
-    fn map(
-        &mut self,
-        virt: VirtAddr,
-        phys: PhysAddr,
-        flags: PageFlags,
-    ) -> Result<(), MapError>;
+    fn map(&mut self, virt: VirtAddr, phys: PhysAddr, flags: PageFlags) -> Result<(), MapError>;
 
     /// Unmap a virtual page
     ///

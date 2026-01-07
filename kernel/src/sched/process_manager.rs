@@ -20,11 +20,11 @@
 //! ProcessManager uses a Mutex for interior mutability, allowing
 //! safe concurrent access from interrupts and syscalls.
 
+use super::process::{Process, ProcessId, ProcessState, ProcessType};
+use crate::mm::AddressSpace;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use spin::Mutex;
-use crate::mm::AddressSpace;
-use super::process::{Process, ProcessId, ProcessState, ProcessType};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Process Table
@@ -94,10 +94,7 @@ impl ProcessTable {
 
     /// Count processes by state
     fn count_by_state(&self, state: ProcessState) -> usize {
-        self.processes
-            .values()
-            .filter(|p| p.state == state)
-            .count()
+        self.processes.values().filter(|p| p.state == state).count()
     }
 }
 
@@ -133,9 +130,7 @@ impl ProcessManager {
     pub fn spawn_kernel(name: &str, process_type: ProcessType) -> ProcessId {
         let mut table = PROCESS_MANAGER.lock();
 
-        let pid = table
-            .allocate_pid()
-            .expect("PID exhaustion"); // Should never happen in practice
+        let pid = table.allocate_pid().expect("PID exhaustion"); // Should never happen in practice
 
         let process = Process::new_kernel(pid, String::from(name), process_type);
 
@@ -171,9 +166,7 @@ impl ProcessManager {
 
         let mut table = PROCESS_MANAGER.lock();
 
-        let pid = table
-            .allocate_pid()
-            .ok_or("PID exhaustion")?;
+        let pid = table.allocate_pid().ok_or("PID exhaustion")?;
 
         let process = Process::new(pid, name, address_space, process_type);
 
@@ -244,10 +237,7 @@ impl ProcessManager {
         let mut table = PROCESS_MANAGER.lock();
 
         // Verify process exists and is zombie
-        let is_zombie = table
-            .get(pid)
-            .ok_or("Process not found")?
-            .is_zombie();
+        let is_zombie = table.get(pid).ok_or("Process not found")?.is_zombie();
 
         if !is_zombie {
             return Err("Process is not a zombie");
@@ -377,11 +367,8 @@ mod tests {
             String::from("running"),
             ProcessType::User,
         );
-        let mut p2 = Process::new_kernel(
-            ProcessId::new(2),
-            String::from("zombie"),
-            ProcessType::User,
-        );
+        let mut p2 =
+            Process::new_kernel(ProcessId::new(2), String::from("zombie"), ProcessType::User);
 
         p2.exit(0); // Mark as zombie
 

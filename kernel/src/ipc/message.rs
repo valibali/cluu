@@ -423,10 +423,7 @@ mod tests {
         assert_eq!(msg.tag.words, 2);
         assert!(!msg.has_buffer());
 
-        let msg = Message::with_buffer(
-            MessageTag::new(43, 0, 0),
-            BufferDesc::new(0x400000, 4096),
-        );
+        let msg = Message::with_buffer(MessageTag::new(43, 0, 0), BufferDesc::new(0x400000, 4096));
         assert!(msg.has_buffer());
         assert_eq!(msg.buffer.addr, 0x400000);
         assert_eq!(msg.buffer.len, 4096);

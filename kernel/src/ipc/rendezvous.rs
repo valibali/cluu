@@ -141,11 +141,7 @@ impl RendezvousPoint {
     /// Removes the receiver from the waiting queue if present.
     /// Returns true if receiver was found and removed.
     pub fn cancel_recv(&mut self, thread_id: ThreadId) -> bool {
-        if let Some(pos) = self
-            .waiting_receivers
-            .iter()
-            .position(|&r| r == thread_id)
-        {
+        if let Some(pos) = self.waiting_receivers.iter().position(|&r| r == thread_id) {
             self.waiting_receivers.remove(pos);
             true
         } else {

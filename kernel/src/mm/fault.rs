@@ -21,10 +21,10 @@
 //! - Dependency Inversion: Depends on PageAllocator and VirtualMemoryMapper traits
 //! - Clean error handling with detailed error types
 
+use crate::mm::space::AddressSpace;
 use crate::mm::traits::{
     MapError, PageAllocator, PageFaultError, PageFaultErrorCode, PageFlags, VirtualMemoryMapper,
 };
-use crate::mm::space::AddressSpace;
 use x86_64::VirtAddr;
 
 /// Page Fault Handler
@@ -139,10 +139,7 @@ where
     /// * `Err(PageFaultError)` - Out of memory or mapping failed
     fn handle_lazy_heap(&mut self, addr: VirtAddr) -> Result<(), PageFaultError> {
         // Allocate a physical page
-        let phys_addr = self
-            .allocator
-            .alloc(0)
-            .ok_or(PageFaultError::OutOfMemory)?;
+        let phys_addr = self.allocator.alloc(0).ok_or(PageFaultError::OutOfMemory)?;
 
         // Map it with user heap flags
         let flags = PageFlags {
@@ -190,7 +187,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mm::{BuddyAllocator, HeapRegion, MemoryRegion, MockPageAllocator, PageTableManager};
+    use crate::mm::{
+        BuddyAllocator, HeapRegion, MemoryRegion, MockPageAllocator, PageTableManager,
+    };
     use alloc::vec::Vec;
 
     /// Mock mapper for testing
@@ -232,7 +231,10 @@ mod tests {
             Ok(())
         }
 
-        fn unmap(&mut self, _virt: VirtAddr) -> Result<x86_64::PhysAddr, crate::mm::traits::UnmapError> {
+        fn unmap(
+            &mut self,
+            _virt: VirtAddr,
+        ) -> Result<x86_64::PhysAddr, crate::mm::traits::UnmapError> {
             unimplemented!("MockMapper::unmap not needed for tests")
         }
 

@@ -139,19 +139,40 @@ unsafe fn syscall3(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize) -> R
 
 /// Helper for syscalls with 4 arguments
 #[inline]
-unsafe fn syscall4(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize, arg4: usize) -> Result<usize> {
+unsafe fn syscall4(
+    n: SyscallNumber,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> Result<usize> {
     syscall_raw(n as usize, arg1, arg2, arg3, arg4, 0, 0)
 }
 
 /// Helper for syscalls with 5 arguments
 #[inline]
-unsafe fn syscall5(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> Result<usize> {
+unsafe fn syscall5(
+    n: SyscallNumber,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+) -> Result<usize> {
     syscall_raw(n as usize, arg1, arg2, arg3, arg4, arg5, 0)
 }
 
 /// Helper for syscalls with 6 arguments
 #[inline]
-unsafe fn syscall6(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) -> Result<usize> {
+unsafe fn syscall6(
+    n: SyscallNumber,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> Result<usize> {
     syscall_raw(n as usize, arg1, arg2, arg3, arg4, arg5, arg6)
 }
 
@@ -250,13 +271,7 @@ pub fn ipc_call(endpoint_token: usize, msg: &[u8], reply_buf: &mut [u8]) -> Resu
 /// - `Err(error)`: No pending call or send failed
 #[inline]
 pub fn ipc_reply(msg: &[u8]) -> Result<()> {
-    unsafe {
-        syscall2(
-            SyscallNumber::Reply,
-            msg.as_ptr() as usize,
-            msg.len(),
-        )?
-    };
+    unsafe { syscall2(SyscallNumber::Reply, msg.as_ptr() as usize, msg.len())? };
     Ok(())
 }
 
@@ -357,7 +372,16 @@ pub fn thread_create(
     stack: usize,
     priority: usize,
 ) -> Result<usize> {
-    unsafe { invoke(space_token, InvokeOp::ThreadCreate, entry, stack, priority, 0) }
+    unsafe {
+        invoke(
+            space_token,
+            InvokeOp::ThreadCreate,
+            entry,
+            stack,
+            priority,
+            0,
+        )
+    }
 }
 
 /// Create a new address space
@@ -393,7 +417,16 @@ pub fn space_map(
     phys_addr: usize,
     flags: usize,
 ) -> Result<()> {
-    unsafe { invoke(space_token, InvokeOp::SpaceMap, virt_addr, phys_addr, flags, 0)? };
+    unsafe {
+        invoke(
+            space_token,
+            InvokeOp::SpaceMap,
+            virt_addr,
+            phys_addr,
+            flags,
+            0,
+        )?
+    };
     Ok(())
 }
 
@@ -409,12 +442,17 @@ pub fn space_map(
 ///
 /// - `Ok(new_token)`: Derived token handle
 /// - `Err(error)`: Derivation failed
-pub fn token_derive(
-    token_handle: usize,
-    new_rights: usize,
-    expire_at: u64,
-) -> Result<usize> {
-    unsafe { invoke(token_handle, InvokeOp::TokenDerive, new_rights, expire_at as usize, 0, 0) }
+pub fn token_derive(token_handle: usize, new_rights: usize, expire_at: u64) -> Result<usize> {
+    unsafe {
+        invoke(
+            token_handle,
+            InvokeOp::TokenDerive,
+            new_rights,
+            expire_at as usize,
+            0,
+            0,
+        )
+    }
 }
 
 /// Attach IRQ handler

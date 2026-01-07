@@ -6,9 +6,9 @@
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
+use super::traits::{AllocationStats, PageAllocator};
 use alloc::vec::Vec;
 use x86_64::PhysAddr;
-use super::traits::{PageAllocator, AllocationStats};
 
 /// Mock page allocator for testing
 ///
@@ -89,7 +89,8 @@ impl PageAllocator for MockPageAllocator {
     }
 
     fn free(&mut self, addr: PhysAddr, order: usize) {
-        self.allocations.retain(|(a, o)| !(*a == addr && *o == order));
+        self.allocations
+            .retain(|(a, o)| !(*a == addr && *o == order));
     }
 
     fn stats(&self) -> AllocationStats {

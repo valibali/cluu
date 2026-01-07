@@ -28,10 +28,10 @@
 //!         └─── add_thread() / remove_thread()
 //! ```
 
+use super::thread::ThreadId;
+use crate::mm::AddressSpace;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::mm::AddressSpace;
-use super::thread::ThreadId;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Process Identifier
@@ -391,11 +391,8 @@ mod tests {
 
     #[test]
     fn test_thread_management() {
-        let mut process = Process::new_kernel(
-            ProcessId::new(1),
-            String::from("test"),
-            ProcessType::System,
-        );
+        let mut process =
+            Process::new_kernel(ProcessId::new(1), String::from("test"), ProcessType::System);
 
         // Add threads
         process.add_thread(ThreadId::new(10));
@@ -429,11 +426,8 @@ mod tests {
 
     #[test]
     fn test_parent_child_relationship() {
-        let mut process = Process::new_kernel(
-            ProcessId::new(3),
-            String::from("child"),
-            ProcessType::User,
-        );
+        let mut process =
+            Process::new_kernel(ProcessId::new(3), String::from("child"), ProcessType::User);
 
         assert_eq!(process.parent(), None);
 

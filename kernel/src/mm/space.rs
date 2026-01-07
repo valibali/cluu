@@ -153,9 +153,7 @@ impl HeapRegion {
         let new_brk = if increment >= 0 {
             self.current_brk.as_u64().checked_add(increment as u64)?
         } else {
-            self.current_brk
-                .as_u64()
-                .checked_sub((-increment) as u64)?
+            self.current_brk.as_u64().checked_sub((-increment) as u64)?
         };
 
         let new_brk = VirtAddr::new(new_brk);
@@ -492,10 +490,7 @@ mod tests {
     /// Test heap region containment
     #[test]
     fn test_heap_region_contains() {
-        let mut heap = HeapRegion::new(
-            VirtAddr::new(0x10000),
-            VirtAddr::new(0x20000),
-        );
+        let mut heap = HeapRegion::new(VirtAddr::new(0x10000), VirtAddr::new(0x20000));
 
         // Initially, nothing is allocated
         assert!(!heap.contains_allocated(VirtAddr::new(0x10000)));
@@ -540,8 +535,14 @@ mod tests {
         let mut space = AddressSpace::new(PhysAddr::new(0x1000));
 
         // Set up regions
-        space.set_text(VirtAddr::new(layout::USER_TEXT_START), layout::USER_TEXT_SIZE);
-        space.set_data(VirtAddr::new(layout::USER_DATA_START), layout::USER_DATA_SIZE);
+        space.set_text(
+            VirtAddr::new(layout::USER_TEXT_START),
+            layout::USER_TEXT_SIZE,
+        );
+        space.set_data(
+            VirtAddr::new(layout::USER_DATA_START),
+            layout::USER_DATA_SIZE,
+        );
         space.set_stack(
             VirtAddr::new(layout::USER_STACK_BOTTOM),
             layout::USER_STACK_SIZE,

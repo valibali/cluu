@@ -184,7 +184,12 @@ fn assemble_nasm() -> Result<()> {
 
     fs::create_dir_all(&out_dir)?;
 
-    let asm_files = ["boot.asm", "context.asm", "interrupts.asm", "syscall_entry.asm"];
+    let asm_files = [
+        "boot.asm",
+        "context.asm",
+        "interrupts.asm",
+        "syscall_entry.asm",
+    ];
 
     for asm_file in &asm_files {
         let src = asm_dir.join(asm_file);

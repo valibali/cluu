@@ -10,7 +10,7 @@
 //!
 //! This ensures no field can be modified without breaking the signature.
 
-use super::{OpaqueScope, Rights, Issuer, Timestamp};
+use super::{Issuer, OpaqueScope, Rights, Timestamp};
 use klibcluu::crypto::hmac_sha256;
 
 /// HMAC-SHA256 signature (32 bytes)

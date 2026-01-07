@@ -90,6 +90,8 @@ pub mod space;
 // Page fault handler
 pub mod fault;
 
+pub mod space_repository;
+
 // Userspace physical memory mapping
 pub mod user_map;
 
@@ -246,8 +248,7 @@ pub fn allocate_user_stack(
         let virt_addr = stack_top - offset;
 
         // Allocate physical frame
-        let phys_frame = pmm_simple::alloc_frame()
-            .ok_or(crate::error::Error::OutOfMemory)?;
+        let phys_frame = pmm_simple::alloc_frame().ok_or(crate::error::Error::OutOfMemory)?;
 
         // Map page (writable, non-executable, user-accessible)
         unsafe {

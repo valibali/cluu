@@ -27,8 +27,8 @@
 //! Uses Mutex for interior mutability, allowing safe concurrent access
 //! from multiple threads and interrupt handlers.
 
-use super::{Token, TokenHandle, OpaqueScope};
 use super::scope::ObjectRef;
+use super::{OpaqueScope, Token, TokenHandle};
 use alloc::collections::BTreeMap;
 use spin::Mutex;
 
@@ -164,9 +164,7 @@ pub fn init() {
 ///
 /// Panics if token system hasn't been initialized.
 fn kernel_secret() -> [u8; 32] {
-    KERNEL_SECRET
-        .lock()
-        .expect("Token system not initialized")
+    KERNEL_SECRET.lock().expect("Token system not initialized")
 }
 
 /// Create a new token and return its handle
@@ -259,9 +257,11 @@ pub fn resolve_scope(scope: &OpaqueScope) -> Option<ObjectRef> {
 ///
 /// * `Ok(ObjectRef)` - Matching object reference
 /// * `Err(&str)` - Error (wrong type or not found)
-pub fn resolve_token_object(token: &Token, expected_type: ObjectType) -> Result<ObjectRef, &'static str> {
-    let obj_ref = resolve_scope(&token.scope)
-        .ok_or("Unknown scope")?;
+pub fn resolve_token_object(
+    token: &Token,
+    expected_type: ObjectType,
+) -> Result<ObjectRef, &'static str> {
+    let obj_ref = resolve_scope(&token.scope).ok_or("Unknown scope")?;
 
     // Check type matches
     match (&obj_ref, expected_type) {
@@ -286,10 +286,7 @@ pub fn resolve_token_object(token: &Token, expected_type: ObjectType) -> Result<
 /// * `Ok(())` - Token revoked
 /// * `Err(&str)` - Handle not found
 pub fn revoke_token(handle: TokenHandle) -> Result<(), &'static str> {
-    TOKEN_TABLE
-        .lock()
-        .remove(handle)
-        .ok_or("Token not found")?;
+    TOKEN_TABLE.lock().remove(handle).ok_or("Token not found")?;
 
     Ok(())
 }
@@ -340,8 +337,8 @@ fn current_timestamp() -> super::Timestamp {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Issuer, Rights, Timestamp};
     use super::*;
-    use super::super::{Rights, Issuer, Timestamp};
     use crate::sched::ThreadId;
 
     #[test]

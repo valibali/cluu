@@ -22,5 +22,5 @@ pub mod info;
 pub mod bootboot;
 
 // Re-export commonly used types
-pub use info::{BootInfoProvider, BootMemoryRegion, MemoryRegionType};
 pub use bootboot::BootbootAdapter;
+pub use info::{BootInfoProvider, BootMemoryRegion, MemoryRegionType};

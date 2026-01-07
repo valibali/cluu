@@ -41,25 +41,38 @@
 //! );
 //! ```
 
-pub mod scope;
 pub mod rights;
+pub mod scope;
 pub mod signature;
 pub mod table;
 
-pub use scope::OpaqueScope;
 pub use rights::Rights;
+pub use scope::OpaqueScope;
 pub use signature::Signature;
 pub use table::{
-    init as init_token_table,
-    create_token,
-    lookup_token,
-    resolve_scope,
-    resolve_token_object,
-    revoke_token,
-    count_tokens,
-    count_tokens_for_object,
-    ObjectType,
+    count_tokens, count_tokens_for_object, create_token, init as init_token_table, lookup_token,
+    resolve_scope, resolve_token_object, revoke_token, ObjectType,
 };
+
+/// Derive a new token from an existing one.
+pub fn derive_token(
+    parent: &Token,
+    new_rights: Rights,
+    new_expire: Timestamp,
+    issuer: Issuer,
+    object_ref: scope::ObjectRef,
+) -> Option<TokenHandle> {
+    let secret = table::kernel_secret();
+    let derived = parent.derive(new_rights, new_expire, issuer, &secret)?;
+
+    Some(table::create_token(
+        derived.scope,
+        derived.role,
+        derived.issuer,
+        derived.expire_at,
+        object_ref,
+    ))
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Core Types
@@ -244,13 +257,8 @@ impl Token {
     ///
     /// Returns true if signature is valid (token hasn't been tampered with).
     pub fn verify(&self, secret: &[u8; 32]) -> bool {
-        let expected = Signature::compute(
-            self.scope,
-            self.role,
-            self.issuer,
-            self.expire_at,
-            secret,
-        );
+        let expected =
+            Signature::compute(self.scope, self.role, self.issuer, self.expire_at, secret);
 
         self.signature.constant_time_eq(&expected)
     }
@@ -305,11 +313,7 @@ impl Token {
         // (Note: caller should check this with current time)
 
         Some(Token::new(
-            self.scope,
-            new_rights,
-            new_issuer,
-            new_expiry,
-            secret,
+            self.scope, new_rights, new_issuer, new_expiry, secret,
         ))
     }
 }

@@ -24,4 +24,7 @@ pub use sync::SpinLock;
 pub use uart::{Uart, COM2};
 
 // IRQ-safe logger (zero-cost in release builds)
-pub use logger::{LogLevel, init as logger_init, log, error, warn, info, debug, trace, log_hex, log_dec, should_log};
+pub use logger::{
+    debug, error, info, init as logger_init, log, log_dec, log_hex, should_log, trace, warn,
+    LogLevel,
+};

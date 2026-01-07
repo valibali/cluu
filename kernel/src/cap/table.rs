@@ -306,9 +306,15 @@ mod tests {
         let obj1 = ObjectRef::Thread(ThreadId::new(1));
         let obj2 = ObjectRef::Thread(ThreadId::new(2));
 
-        table.insert(Capability::new(obj1, Rights::READ, 0)).unwrap();
-        table.insert(Capability::new(obj2, Rights::READ, 0)).unwrap();
-        table.insert(Capability::new(obj1, Rights::WRITE, 0)).unwrap();
+        table
+            .insert(Capability::new(obj1, Rights::READ, 0))
+            .unwrap();
+        table
+            .insert(Capability::new(obj2, Rights::READ, 0))
+            .unwrap();
+        table
+            .insert(Capability::new(obj1, Rights::WRITE, 0))
+            .unwrap();
         assert_eq!(table.len(), 3);
 
         // Revoke all capabilities for obj1
@@ -326,21 +332,27 @@ mod tests {
     fn test_table_advance_epoch() {
         let mut table = CapabilityTable::new();
 
-        table.insert(Capability::new(
-            ObjectRef::Thread(ThreadId::new(1)),
-            Rights::READ,
-            0,
-        )).unwrap();
-        table.insert(Capability::new(
-            ObjectRef::Thread(ThreadId::new(2)),
-            Rights::READ,
-            5,
-        )).unwrap();
-        table.insert(Capability::new(
-            ObjectRef::Thread(ThreadId::new(3)),
-            Rights::READ,
-            10,
-        )).unwrap();
+        table
+            .insert(Capability::new(
+                ObjectRef::Thread(ThreadId::new(1)),
+                Rights::READ,
+                0,
+            ))
+            .unwrap();
+        table
+            .insert(Capability::new(
+                ObjectRef::Thread(ThreadId::new(2)),
+                Rights::READ,
+                5,
+            ))
+            .unwrap();
+        table
+            .insert(Capability::new(
+                ObjectRef::Thread(ThreadId::new(3)),
+                Rights::READ,
+                10,
+            ))
+            .unwrap();
         assert_eq!(table.len(), 3);
 
         // Advance epoch to 6 - should invalidate caps with epoch < 6
@@ -358,21 +370,27 @@ mod tests {
     fn test_table_iter() {
         let mut table = CapabilityTable::new();
 
-        let h1 = table.insert(Capability::new(
-            ObjectRef::Thread(ThreadId::new(1)),
-            Rights::READ,
-            0,
-        )).unwrap();
-        let h2 = table.insert(Capability::new(
-            ObjectRef::Thread(ThreadId::new(2)),
-            Rights::WRITE,
-            0,
-        )).unwrap();
-        let h3 = table.insert(Capability::new(
-            ObjectRef::Thread(ThreadId::new(3)),
-            Rights::EXECUTE,
-            0,
-        )).unwrap();
+        let h1 = table
+            .insert(Capability::new(
+                ObjectRef::Thread(ThreadId::new(1)),
+                Rights::READ,
+                0,
+            ))
+            .unwrap();
+        let h2 = table
+            .insert(Capability::new(
+                ObjectRef::Thread(ThreadId::new(2)),
+                Rights::WRITE,
+                0,
+            ))
+            .unwrap();
+        let h3 = table
+            .insert(Capability::new(
+                ObjectRef::Thread(ThreadId::new(3)),
+                Rights::EXECUTE,
+                0,
+            ))
+            .unwrap();
 
         let caps: Vec<_> = table.iter().collect();
         assert_eq!(caps.len(), 3);

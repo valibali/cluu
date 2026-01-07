@@ -64,10 +64,10 @@ fn test_elf_parser() -> Result<()> {
     test_elf[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
 
     // ELF identification
-    test_elf[4] = 2;  // ELFCLASS64
-    test_elf[5] = 1;  // ELFDATA2LSB (little-endian)
-    test_elf[6] = 1;  // EV_CURRENT (version)
-    test_elf[7] = 0;  // OSABI (System V)
+    test_elf[4] = 2; // ELFCLASS64
+    test_elf[5] = 1; // ELFDATA2LSB (little-endian)
+    test_elf[6] = 1; // EV_CURRENT (version)
+    test_elf[7] = 0; // OSABI (System V)
 
     // e_type = ET_EXEC (2)
     test_elf[16] = 2;

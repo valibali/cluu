@@ -19,7 +19,7 @@
 use x86_64::instructions::interrupts;
 
 /// Enable interrupts globally
-/// 
+///
 /// This allows the CPU to respond to hardware interrupts and exceptions.
 /// Should only be called after the IDT has been properly initialized.
 pub fn enable() {
@@ -27,7 +27,7 @@ pub fn enable() {
 }
 
 /// Disable interrupts globally
-/// 
+///
 /// This prevents the CPU from responding to hardware interrupts.
 /// Useful for critical sections where atomicity is required.
 pub fn disable() {
@@ -35,7 +35,7 @@ pub fn disable() {
 }
 
 /// Check if interrupts are enabled
-/// 
+///
 /// Returns true if interrupts are currently enabled, false otherwise.
 pub fn are_enabled() -> bool {
     interrupts::are_enabled()

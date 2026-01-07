@@ -123,7 +123,14 @@ impl SyscallArgs {
         arg5: usize,
         arg6: usize,
     ) -> Self {
-        Self { arg1, arg2, arg3, arg4, arg5, arg6 }
+        Self {
+            arg1,
+            arg2,
+            arg3,
+            arg4,
+            arg5,
+            arg6,
+        }
     }
 
     pub const fn empty() -> Self {
@@ -175,7 +182,10 @@ mod tests {
         assert_eq!(SyscallNumber::from_usize(1), Some(SyscallNumber::Recv));
         assert_eq!(SyscallNumber::from_usize(4), Some(SyscallNumber::Yield));
         assert_eq!(SyscallNumber::from_usize(5), Some(SyscallNumber::Invoke));
-        assert_eq!(SyscallNumber::from_usize(255), Some(SyscallNumber::DebugPrint));
+        assert_eq!(
+            SyscallNumber::from_usize(255),
+            Some(SyscallNumber::DebugPrint)
+        );
         assert_eq!(SyscallNumber::from_usize(256), None);
     }
 

@@ -2,7 +2,6 @@
 #[macro_use]
 pub mod x86_64;
 
-
 // NOTE: kstart() has been replaced by _start() in main.rs
 // The old kstart() depended on peripheral module (framebuffer)
 // which will be moved to userspace later.

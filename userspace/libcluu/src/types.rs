@@ -97,7 +97,11 @@ pub struct MessageTag {
 
 impl MessageTag {
     pub const fn new(label: u32, words: u8) -> Self {
-        Self { label, words, extra: 0 }
+        Self {
+            label,
+            words,
+            extra: 0,
+        }
     }
 }
 

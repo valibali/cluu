@@ -223,8 +223,8 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::SpaceGrant => invoke_space_grant(&token, args),
 
         // Token operations
-        InvokeOp::TokenDerive => invoke_token_derive(&token, args),
-        InvokeOp::TokenRevoke => invoke_token_revoke(&token, args),
+        InvokeOp::TokenDerive => invoke_token_derive(token_handle, &token, args),
+        InvokeOp::TokenRevoke => invoke_token_revoke(token_handle, &token, args),
 
         // IRQ operations
         InvokeOp::IrqAttach => invoke_irq_attach(&token, args),
@@ -240,14 +240,65 @@ use crate::token::Token;
 
 // Thread operations
 
-fn invoke_thread_create(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    // TODO: Implement thread creation
-    // 1. Check token has THREAD_CONTROL or CREATE right
-    // 2. Extract arguments (entry, stack, priority)
-    // 3. Create thread in token's address space
-    // 4. Return new thread token handle
-    klibcluu::warn("invoke_thread_create not yet implemented");
-    Err(Error::NotImplemented)
+fn invoke_thread_create(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::sched::{Priority, Thread, ThreadFlags, ThreadManager};
+    use crate::token::{Issuer, ObjectRef, ObjectType, OpaqueScope, Rights, Timestamp};
+    use x86_64::VirtAddr;
+
+    klibcluu::trace("invoke_thread_create");
+
+    if !token.has_right(Rights::THREAD_CONTROL) {
+        klibcluu::warn("invoke_thread_create: missing THREAD_CONTROL right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let entry = args.arg3 as u64;
+    let stack = args.arg4 as u64;
+    let priority = if args.arg5 > 255 {
+        255
+    } else {
+        args.arg5 as u8
+    };
+
+    if entry == 0 || stack == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let page_table_root =
+        crate::mm::space_repository::with_space(space_id, |space| space.page_table_root)
+            .ok_or(Error::NotFound)?;
+
+    let thread_id = ThreadManager::alloc_thread_id();
+    let thread = Thread::new(
+        thread_id,
+        page_table_root,
+        VirtAddr::new(entry),
+        VirtAddr::new(stack),
+        Priority::new(priority),
+        ThreadFlags::empty(),
+    );
+
+    let thread_id = ThreadManager::add_thread(thread);
+
+    let scope = OpaqueScope::random();
+    let thread_token = crate::token::create_token(
+        scope,
+        Rights::thread_full(),
+        Issuer::Kernel,
+        Timestamp::far_future(),
+        ObjectRef::Thread(thread_id),
+    );
+
+    Ok(thread_token.as_usize())
 }
 
 fn invoke_thread_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
@@ -273,40 +324,37 @@ fn invoke_thread_set_priority(_token: &Token, _args: SyscallArgs) -> SyscallResu
 // Space operations
 
 fn invoke_space_create(token: &Token, _args: SyscallArgs) -> SyscallResult {
-    use crate::mm::AddressSpace;
+    use crate::mm::{space_repository, AddressSpace};
+    use crate::token::{Issuer, ObjectRef, OpaqueScope, Rights, Timestamp};
 
     klibcluu::trace("invoke_space_create");
 
-    // 1. Check token has CREATE right
-    if !token.role.contains(crate::token::Rights::CREATE) {
+    if !token.has_right(Rights::CREATE) {
         klibcluu::warn("invoke_space_create: insufficient rights");
         return Err(Error::PermissionDenied);
     }
 
-    // 2. Create new address space
-    let new_space = match AddressSpace::new_user() {
-        Ok(space) => space,
-        Err(e) => {
-            klibcluu::error("invoke_space_create: failed to create address space: ");
-            klibcluu::error(e);
-            return Err(Error::OutOfMemory);
-        }
-    };
+    let new_space = AddressSpace::new_user().map_err(|e| {
+        klibcluu::error("invoke_space_create: failed to create address space: ");
+        klibcluu::error(e);
+        Error::OutOfMemory
+    })?;
 
-    let cr3 = new_space.page_table_root.as_u64();
+    let space_id = space_repository::insert(new_space);
 
-    klibcluu::trace("Created address space: cr3=0x");
-    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", cr3);
+    klibcluu::trace("Created address space: id=");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", space_id.as_u64());
 
-    // 3. Store address space in global repository (use CR3 as ID)
-    // {
-    //     use crate::mm::space_repository;
-    //     space_repository::insert(cr3, new_space)?;
-    // }
+    let scope = OpaqueScope::random();
+    let space_token = crate::token::create_token(
+        scope,
+        Rights::space_full() | Rights::CREATE,
+        Issuer::Kernel,
+        Timestamp::far_future(),
+        ObjectRef::Space(space_id),
+    );
 
-    // 4. Return CR3 as space handle (temporary solution)
-    // TODO: Create proper token with SPACE_MAP rights
-    Ok(cr3 as usize)
+    Ok(space_token.as_usize())
 }
 
 fn invoke_space_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
@@ -314,14 +362,54 @@ fn invoke_space_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     Err(Error::NotImplemented)
 }
 
-fn invoke_space_map(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    // TODO: Implement page mapping
-    // 1. Check token has SPACE_MAP right
-    // 2. Extract arguments (virt_addr, phys_addr, flags)
-    // 3. Resolve token scope to AddressSpace
-    // 4. Map page
-    klibcluu::warn("invoke_space_map not yet implemented");
-    Err(Error::NotImplemented)
+fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::elf;
+    use crate::mm::space_repository;
+    use crate::token::{ObjectRef, ObjectType, Rights};
+    use x86_64::VirtAddr;
+
+    klibcluu::trace("invoke_space_map");
+
+    if !token.has_right(Rights::SPACE_MAP) {
+        klibcluu::warn("invoke_space_map: missing SPACE_MAP right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let virt_addr = args.arg3 as u64;
+    let phys_addr = args.arg4 as u64;
+    let perms = args.arg5 as u32;
+
+    if virt_addr & 0xFFF != 0 || phys_addr & 0xFFF != 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let writable = (perms & 0x02) != 0;
+    let executable = (perms & 0x04) != 0;
+
+    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let result = space_repository::with_space_mut(space_id, |space| unsafe {
+        elf::map_user_page(
+            VirtAddr::new(virt_addr),
+            phys_addr,
+            writable,
+            executable,
+            space.page_table_root,
+        )
+    });
+
+    match result {
+        Some(Ok(())) => Ok(0),
+        Some(Err(_)) => Err(Error::OutOfMemory),
+        None => Err(Error::NotFound),
+    }
 }
 
 fn invoke_space_unmap(_token: &Token, _args: SyscallArgs) -> SyscallResult {
@@ -336,19 +424,37 @@ fn invoke_space_grant(_token: &Token, _args: SyscallArgs) -> SyscallResult {
 
 // Token operations
 
-fn invoke_token_derive(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    // TODO: Implement token derivation
-    // 1. Check token has GRANT right
-    // 2. Extract arguments (new_rights, expire_at, target_thread)
-    // 3. Create derived token with reduced rights
-    // 4. Return new token handle
-    klibcluu::warn("invoke_token_derive not yet implemented");
-    Err(Error::NotImplemented)
+fn invoke_token_derive(handle: TokenHandle, token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::{AuthorityId, Issuer, Rights, Timestamp};
+
+    klibcluu::trace("invoke_token_derive");
+
+    if !token.has_right(Rights::GRANT) {
+        klibcluu::warn("invoke_token_derive: missing GRANT right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let new_rights = Rights::from_bits((args.arg3 & 0xffffffff) as u32);
+    let expire = Timestamp::new(args.arg4 as u64);
+
+    let issuer = Issuer::Authority(AuthorityId::new(handle.as_raw() as u64));
+    let object_ref = crate::token::resolve_scope(&token.scope).ok_or(Error::InvalidArgument)?;
+
+    let derived = crate::token::derive_token(token, new_rights, expire, issuer, object_ref)
+        .ok_or(Error::InvalidArgument)?;
+
+    Ok(derived.as_usize())
 }
 
-fn invoke_token_revoke(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    klibcluu::warn("invoke_token_revoke not yet implemented");
-    Err(Error::NotImplemented)
+fn invoke_token_revoke(handle: TokenHandle, _token: &Token, _args: SyscallArgs) -> SyscallResult {
+    klibcluu::trace("invoke_token_revoke");
+
+    crate::token::revoke_token(handle).map_err(|_| {
+        klibcluu::warn("invoke_token_revoke: token not found");
+        Error::InvalidArgument
+    })?;
+
+    Ok(0)
 }
 
 // IRQ operations

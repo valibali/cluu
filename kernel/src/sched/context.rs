@@ -49,26 +49,26 @@
 #[derive(Debug, Clone, Copy)]
 pub struct Context {
     // Callee-saved general-purpose registers
-    pub rbx: u64,    // 0x00
-    pub rbp: u64,    // 0x08
-    pub r12: u64,    // 0x10
-    pub r13: u64,    // 0x18
-    pub r14: u64,    // 0x20
-    pub r15: u64,    // 0x28
+    pub rbx: u64, // 0x00
+    pub rbp: u64, // 0x08
+    pub r12: u64, // 0x10
+    pub r13: u64, // 0x18
+    pub r14: u64, // 0x20
+    pub r15: u64, // 0x28
 
     // Stack and instruction pointers
-    pub rsp: u64,    // 0x30 - Stack pointer
-    pub rip: u64,    // 0x38 - Instruction pointer
+    pub rsp: u64, // 0x30 - Stack pointer
+    pub rip: u64, // 0x38 - Instruction pointer
 
     // Processor flags
     pub rflags: u64, // 0x40 - RFLAGS register
 
     // Segment selectors
-    pub cs: u64,     // 0x48 - Code segment
-    pub ss: u64,     // 0x50 - Stack segment
+    pub cs: u64, // 0x48 - Code segment
+    pub ss: u64, // 0x50 - Stack segment
 
     // Page table base
-    pub cr3: u64,    // 0x58 - Page table root (physical address)
+    pub cr3: u64, // 0x58 - Page table root (physical address)
 }
 
 impl Context {

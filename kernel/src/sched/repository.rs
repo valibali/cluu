@@ -35,8 +35,8 @@
 //! repo.remove(thread_id);
 //! ```
 
-use crate::sched::thread::{Thread, ThreadId};
 use crate::error::Error;
+use crate::sched::thread::{Thread, ThreadId};
 use alloc::collections::BTreeMap;
 
 /// Thread Repository
@@ -170,9 +170,9 @@ impl Default for ThreadRepository {
 mod tests {
     use super::*;
     use crate::sched::thread::{Priority, ThreadFlags};
-    use x86_64::{PhysAddr, VirtAddr};
-    use alloc::vec::Vec;
     use alloc::vec;
+    use alloc::vec::Vec;
+    use x86_64::{PhysAddr, VirtAddr};
 
     fn create_test_thread(id: ThreadId) -> Thread {
         Thread::new(
@@ -285,13 +285,16 @@ mod tests {
         }
 
         let ids: Vec<ThreadId> = repo.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, vec![
-            ThreadId::new(1),
-            ThreadId::new(2),
-            ThreadId::new(3),
-            ThreadId::new(4),
-            ThreadId::new(5),
-        ]);
+        assert_eq!(
+            ids,
+            vec![
+                ThreadId::new(1),
+                ThreadId::new(2),
+                ThreadId::new(3),
+                ThreadId::new(4),
+                ThreadId::new(5),
+            ]
+        );
     }
 
     #[test]

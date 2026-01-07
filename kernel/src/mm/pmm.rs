@@ -16,9 +16,9 @@
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
+use super::traits::{AllocationStats, PageAllocator};
 use alloc::vec::Vec;
 use x86_64::PhysAddr;
-use super::traits::{PageAllocator, AllocationStats};
 
 /// Page size constant (4 KiB)
 const PAGE_SIZE: u64 = 0x1000;
@@ -104,9 +104,18 @@ impl BuddyAllocator {
     pub fn new(regions: &[MemoryRegion]) -> Self {
         // Initialize free lists
         let free_lists: [Vec<FreeBlock>; MAX_ORDER + 1] = [
-            Vec::new(), Vec::new(), Vec::new(), Vec::new(),
-            Vec::new(), Vec::new(), Vec::new(), Vec::new(),
-            Vec::new(), Vec::new(), Vec::new(), Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
         ];
 

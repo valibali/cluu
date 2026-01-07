@@ -17,27 +17,38 @@
 #![no_std]
 #![cfg_attr(all(not(feature = "std"), not(test)), no_main)]
 
+pub mod boot;
 pub mod error;
-pub mod syscall;
 pub mod ipc;
-pub mod types;
 pub mod runtime;
+pub mod syscall;
+pub mod types;
 
 // Re-exports
+pub use boot::{boot_info, root_token_handle, BootInfo};
 pub use error::{Error, Result};
+pub use ipc::{call, recv, reply, send};
 pub use syscall::{
-    // Core syscalls
-    yield_cpu, debug_print,
+    debug_print,
+
+    ipc_call,
+    ipc_recv,
+    ipc_reply,
 
     // IPC
-    ipc_send, ipc_recv, ipc_call, ipc_reply,
+    ipc_send,
+    irq_ack,
 
+    irq_attach,
+    space_create,
+    space_map,
     // High-level wrappers
-    thread_create, space_create, space_map, token_derive,
-    irq_attach, irq_ack,
-
+    thread_create,
+    token_derive,
+    // Core syscalls
+    yield_cpu,
+    InvokeOp,
     // Types
-    SyscallNumber, InvokeOp,
+    SyscallNumber,
 };
 pub use types::*;
-pub use ipc::{send, recv, call, reply};

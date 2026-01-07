@@ -4,8 +4,8 @@
 //! This is the concrete adapter for BOOTBOOT - other bootloaders will
 //! have their own adapters.
 
-use crate::bootboot::{BOOTBOOT, MMapEnt};
 use super::info::BootInfoProvider;
+use crate::bootboot::{MMapEnt, BOOTBOOT};
 
 /// BOOTBOOT adapter
 ///

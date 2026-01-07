@@ -11,12 +11,12 @@
 //! Can be replaced with hardware-accelerated versions later.
 
 mod hmac;
-mod sha256;
 mod random;
+mod sha256;
 
 pub use hmac::hmac_sha256;
-pub use sha256::hash_sha256;
 pub use random::{fill_random, init_random};
+pub use sha256::hash_sha256;
 
 /// Initialize crypto subsystem
 ///

@@ -32,6 +32,9 @@ const INIT_STACK_TOP: u64 = 0x7ff00000;
 /// Maps at 2GB mark, well above normal userspace regions
 const INITRD_USER_BASE: u64 = 0x80000000;
 
+/// Userspace boot info page (contains token + initrd metadata)
+const BOOT_INFO_ADDR: u64 = 0x7fe00000;
+
 /// Bootstrap the init thread
 ///
 /// This function:
@@ -121,6 +124,38 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
     klibcluu::trace("Mapping initrd into init's address space...");
     map_initrd_to_userspace(&mut init_space, initrd_phys, initrd_size)?;
 
+    let root_scope = crate::token::OpaqueScope::random();
+    let root_token_handle = crate::token::create_token(
+        root_scope,
+        crate::token::Rights::all(),
+        crate::token::Issuer::Kernel,
+        crate::token::Timestamp::far_future(),
+        crate::token::ObjectRef::Space(crate::token::scope::AddressSpaceId::new(0)),
+    );
+
+    let boot_frame = crate::mm::pmm_simple::alloc_frame().ok_or_else(|| {
+        klibcluu::error("Failed to allocate boot info frame");
+        Error::OutOfMemory
+    })?;
+
+    unsafe {
+        crate::elf::map_user_page(
+            BOOT_INFO_ADDR,
+            boot_frame,
+            true,
+            false,
+            init_space.page_table_root,
+        )?;
+
+        let boot_info = BOOT_INFO_ADDR as *mut BootInfo;
+        core::ptr::write_bytes(boot_info as *mut u8, 0, core::mem::size_of::<BootInfo>());
+
+        let boot_info = &mut *boot_info;
+        boot_info.root_token = root_token_handle.as_usize();
+        boot_info.initrd_phys = initrd_phys;
+        boot_info.initrd_size = initrd_size;
+    }
+
     klibcluu::info("");
     klibcluu::info("Creating init thread...");
 
@@ -186,6 +221,13 @@ fn map_initrd_to_userspace(
     klibcluu::log_hex(klibcluu::LogLevel::Debug, " (read-only)", INITRD_USER_BASE);
 
     Ok(())
+}
+
+#[repr(C)]
+struct BootInfo {
+    root_token: usize,
+    initrd_phys: u64,
+    initrd_size: u64,
 }
 
 /// Minimal ELF64 header parser for bootstrap

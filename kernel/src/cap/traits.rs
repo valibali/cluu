@@ -98,8 +98,7 @@ pub trait CapabilityStore: Send {
     /// * `Err(Error::NotFound)` - If source handle invalid
     /// * `Err(Error::PermissionDenied)` - If rights not subset
     /// * `Err(Error::OutOfMemory)` - If table is full
-    fn derive(&mut self, handle: Self::Handle, rights: Rights)
-        -> Result<Self::Handle, Error>;
+    fn derive(&mut self, handle: Self::Handle, rights: Rights) -> Result<Self::Handle, Error>;
 }
 
 /// Token Validation
@@ -233,11 +232,7 @@ mod tests {
             self.capabilities.get_mut(handle as usize)?.take()
         }
 
-        fn derive(
-            &mut self,
-            handle: Self::Handle,
-            rights: Rights,
-        ) -> Result<Self::Handle, Error> {
+        fn derive(&mut self, handle: Self::Handle, rights: Rights) -> Result<Self::Handle, Error> {
             let cap = self.get(handle).ok_or(Error::NotFound)?;
             let derived = cap.derive(rights).ok_or(Error::PermissionDenied)?;
             self.insert(derived)

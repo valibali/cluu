@@ -76,20 +76,20 @@ const PF_R: u32 = 4; // Read
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 struct Elf64Header {
-    e_ident: [u8; 16],   // ELF identification
-    e_type: u16,         // Object file type
-    e_machine: u16,      // Machine architecture
-    e_version: u32,      // Object file version
-    e_entry: u64,        // Entry point address
-    e_phoff: u64,        // Program header offset
-    e_shoff: u64,        // Section header offset
-    e_flags: u32,        // Processor-specific flags
-    e_ehsize: u16,       // ELF header size
-    e_phentsize: u16,    // Program header entry size
-    e_phnum: u16,        // Number of program headers
-    e_shentsize: u16,    // Section header entry size
-    e_shnum: u16,        // Number of section headers
-    e_shstrndx: u16,     // Section header string table index
+    e_ident: [u8; 16], // ELF identification
+    e_type: u16,       // Object file type
+    e_machine: u16,    // Machine architecture
+    e_version: u32,    // Object file version
+    e_entry: u64,      // Entry point address
+    e_phoff: u64,      // Program header offset
+    e_shoff: u64,      // Section header offset
+    e_flags: u32,      // Processor-specific flags
+    e_ehsize: u16,     // ELF header size
+    e_phentsize: u16,  // Program header entry size
+    e_phnum: u16,      // Number of program headers
+    e_shentsize: u16,  // Section header entry size
+    e_shnum: u16,      // Number of section headers
+    e_shstrndx: u16,   // Section header string table index
 }
 
 /// ELF64 Program Header (56 bytes)
@@ -99,14 +99,14 @@ struct Elf64Header {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 struct Elf64ProgramHeader {
-    p_type: u32,    // Segment type
-    p_flags: u32,   // Segment flags
-    p_offset: u64,  // Segment file offset
-    p_vaddr: u64,   // Segment virtual address
-    p_paddr: u64,   // Segment physical address (ignored)
-    p_filesz: u64,  // Segment size in file
-    p_memsz: u64,   // Segment size in memory
-    p_align: u64,   // Segment alignment
+    p_type: u32,   // Segment type
+    p_flags: u32,  // Segment flags
+    p_offset: u64, // Segment file offset
+    p_vaddr: u64,  // Segment virtual address
+    p_paddr: u64,  // Segment physical address (ignored)
+    p_filesz: u64, // Segment size in file
+    p_memsz: u64,  // Segment size in memory
+    p_align: u64,  // Segment alignment
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -433,12 +433,18 @@ unsafe fn load_segment(
         let page_vaddr = start_page + (page_idx as u64 * 4096);
 
         // Allocate physical frame
-        let phys_frame = crate::mm::pmm_simple::alloc_frame()
-            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let phys_frame =
+            crate::mm::pmm_simple::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
 
         // Map page using VMM helper (similar to heap mapping)
         unsafe {
-            map_user_page(page_vaddr.as_u64(), phys_frame, writable, executable, page_table_root)?;
+            map_user_page(
+                page_vaddr.as_u64(),
+                phys_frame,
+                writable,
+                executable,
+                page_table_root,
+            )?;
         }
 
         // Zero the entire page via physmap
@@ -500,8 +506,8 @@ pub(crate) unsafe fn map_user_page(
     executable: bool,
     page_table_root: PhysAddr,
 ) -> Result<(), ElfLoadError> {
-    use core::ptr::write_bytes;
     use crate::mm::vmm::pte_flags;
+    use core::ptr::write_bytes;
 
     // Calculate page table indices
     let pml4_idx = ((virt >> 39) & 0x1FF) as usize;
@@ -532,8 +538,8 @@ pub(crate) unsafe fn map_user_page(
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
         pml4[pml4_idx] & PHYS_MASK
     } else {
-        let pdpt_phys = crate::mm::pmm_simple::alloc_frame()
-            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pdpt_phys =
+            crate::mm::pmm_simple::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pdpt_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pdpt_phys) };
         unsafe { write_bytes(pdpt_virt as *mut u8, 0, 4096) };
         pml4[pml4_idx] = pdpt_phys | table_flags;
@@ -547,8 +553,8 @@ pub(crate) unsafe fn map_user_page(
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
         pdpt[pdpt_idx] & PHYS_MASK
     } else {
-        let pd_phys = crate::mm::pmm_simple::alloc_frame()
-            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pd_phys =
+            crate::mm::pmm_simple::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pd_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pd_phys) };
         unsafe { write_bytes(pd_virt as *mut u8, 0, 4096) };
         pdpt[pdpt_idx] = pd_phys | table_flags;
@@ -562,8 +568,8 @@ pub(crate) unsafe fn map_user_page(
     let pt_phys = if pd[pd_idx] & 0x1 != 0 {
         pd[pd_idx] & PHYS_MASK
     } else {
-        let pt_phys = crate::mm::pmm_simple::alloc_frame()
-            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pt_phys =
+            crate::mm::pmm_simple::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pt_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pt_phys) };
         unsafe { write_bytes(pt_virt as *mut u8, 0, 4096) };
         pd[pd_idx] = pt_phys | table_flags;
@@ -888,4 +894,3 @@ mod tests {
         );
     }
 }
-

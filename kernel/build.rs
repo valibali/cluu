@@ -46,9 +46,12 @@ fn main() {
         if font_psf.exists() {
             let status = std::process::Command::new("objcopy")
                 .args([
-                    "-O", "elf64-x86-64",
-                    "-B", "i386",
-                    "-I", "binary",
+                    "-O",
+                    "elf64-x86-64",
+                    "-B",
+                    "i386",
+                    "-I",
+                    "binary",
                     font_psf.to_str().unwrap(),
                     font_o.to_str().unwrap(),
                 ])

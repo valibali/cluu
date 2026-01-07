@@ -181,10 +181,7 @@ mod tests {
 
     #[test]
     fn test_validate_user_ptr_kernel() {
-        assert_eq!(
-            validate_user_ptr(USERSPACE_MAX),
-            Err(Error::InvalidAddress)
-        );
+        assert_eq!(validate_user_ptr(USERSPACE_MAX), Err(Error::InvalidAddress));
         assert_eq!(
             validate_user_ptr(0xFFFF_8000_0000_0000),
             Err(Error::InvalidAddress)
@@ -197,7 +194,10 @@ mod tests {
 
     #[test]
     fn test_validate_user_buffer_zero_len() {
-        assert_eq!(validate_user_buffer(0x1000, 0), Err(Error::InvalidParameter));
+        assert_eq!(
+            validate_user_buffer(0x1000, 0),
+            Err(Error::InvalidParameter)
+        );
     }
 
     #[test]

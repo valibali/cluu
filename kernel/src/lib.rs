@@ -16,14 +16,14 @@ extern crate alloc;
 pub mod architecture;
 pub mod bootboot;
 pub mod bootstrap;
+pub mod cap;
+pub mod elf;
 pub mod error;
-pub mod token;
+pub mod ipc;
 pub mod mm;
 pub mod sched;
-pub mod ipc;
-pub mod cap;
 pub mod syscall;
-pub mod elf;
+pub mod token;
 
 // Re-exports
 pub use error::Error;

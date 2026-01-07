@@ -6,7 +6,7 @@
 #![no_std]
 #![no_main]
 
-use libcluu::{debug_print, yield_cpu, token_derive, Result, Error};
+use libcluu::{debug_print, token_derive, yield_cpu, Error, Result};
 
 #[no_mangle]
 fn main() -> i32 {

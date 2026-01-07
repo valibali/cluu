@@ -456,8 +456,8 @@ mod tests {
 
         assert!(!thread.tick()); // 2 remaining
         assert!(!thread.tick()); // 1 remaining
-        assert!(thread.tick());  // 0 remaining, exhausted
-        assert!(thread.tick());  // Still exhausted
+        assert!(thread.tick()); // 0 remaining, exhausted
+        assert!(thread.tick()); // Still exhausted
     }
 
     #[test]
