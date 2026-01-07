@@ -237,5 +237,4 @@ struct BootInfo {
     root_token: usize,
     initrd_phys: u64,
     initrd_size: u64,
-    procmgr_token: usize,
 }
