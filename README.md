@@ -1,4 +1,7 @@
 ![logo](artwork/logo_v1.png)
+![Static Badge](https://img.shields.io/badge/builds-passing-green?style=flat&label=builds&color=green) ![Static Badge](https://img.shields.io/badge/unit--tests-145-blue?style=flat&color=green) ![Static Badge](https://img.shields.io/badge/coverage-~90%25-orange?style=flat&color=green)
+
+
 # CLUU (Compact Lightweight Unix Utopia)
 
 CLUU is a hobby operating system written in Rust, pursuing a **clean L4-style microkernel** architecture with strong emphasis on **correctness, minimality, and explicit authority**. The project is deliberately engineered, test-driven, and uncompromising about architectural discipline.
@@ -34,17 +37,19 @@ The goal is not speed of development, but **clarity of design** and **long-term 
 
 ```
 +-------------------------+
-|        Userspace        |
+|        Userspace		  |
+|       (as of now)       |
 |-------------------------|
 | init | procmgr | vfs    |
 | ramfs | console | shell |
 | cat | drivers | servers |
 +----------- IPC ---------+
 |        Microkernel      |
+|        (as of now)      |
 |-------------------------|
 | Scheduler | IPC | VMM   |
-| PMM | Tokens | IRQ     |
-| Syscalls | Timer       |
+| PMM | Tokens | IRQ      |
+| Syscalls | Timer        |
 +-------------------------+
 |        Hardware         |
 +-------------------------+
