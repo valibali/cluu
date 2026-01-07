@@ -1,38 +1,35 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `kernel/` contains the no_std microkernel (scheduler, IPC, MM, tokens, IRQ routing) and exposes the helpers userspace services need.
-- `userspace/` holds init, procmgr, shell, VFS/console/drivers, and per-binary crates; each binary keeps its own directory (e.g., `userspace/init`, `userspace/shell`).
-- Helpers such as `klibcluu/` (common utilities), `xtask/` (build/boot image orchestration), and `kernel-tests/` (std crate for kernel assertions) coordinate tooling.
-- Assets to edit only when rebuilding images are in `artwork/`, `bootboot_image/`, and `triplets/`; the initrd layout and boot scripts live under `xtask/boot/`.
-- Tests and demonstration data live in `userspace/tests/` and `kernel-tests/tests/`, so keep subsystem-specific test code next to the feature it exercises.
+- `kernel/src/` hosts the microkernel proper: scheduler (`sched/`), VMM (`mm/`), syscall handling (`syscall/`), IPC, and the bootstrap/token setup that init relies on (`kernel/src/bootstrap.rs` and `kernel/src/token/`).
+- `klibcluu/` is the shared runtime for IRQ-safe logging, crypto, and ELF helpers that both the kernel (`klibcluu::logging`) and `xtask` packaging use.
+- `userspace/` contains each service crate (`init`, `procmgr`, `shell`, `hello`, etc.) plus `userspace/libcluu` which exports ELF loaders, rights enums, and syscall wrappers (`userspace/libcluu/src/lib.rs`).
+- `kernel-tests/` keeps regression suites closest to the kernel sources, while `xtask/` takes care of initrd/tar image creation and the `make`/`cargo xtask` wrappers that copy binaries into `initrd/sys/`.
+- Assets (`artwork/`, `bootboot_image/`) and outputs (`target/`, `tmp/`) should not be edited directly; rely on `xtask` so files stay in sync and you avoid manual cross-device tar errors during image generation.
 
 ## Build, Test, and Development Commands
-- `cargo xtask build` compiles kernel, userspace, and the initrd image in dev profile; rerun after touching `kernel/`, `userspace/`, or `xtask/`.
-- `cargo xtask run` boots QEMU with the current image (`--debug` pauses for GDB on `:1234` and enables telnet on `:4321`).
-- `cargo xtask test` runs the full regression suite (kernel + userspace + boot logic); specify `--test` flags to limit scope.
-- `cargo xtask kernel` / `cargo xtask userspace` rebuild only one layer for quicker iteration; the `Makefile` wraps these (`make build`, `make run`, `make test`).
-- `cargo fmt` and `cargo clippy` are required before review-ready changes; they follow the `rust-toolchain.toml` pins so everyone shares the same formatter/linter.
+- `make run` / `cargo xtask run` builds everything and boots QEMU; `make run-debug` adds the GDB server (`:1234`) and telnet console (`:4321`) for interactive inspection.
+- `cargo xtask build`, `cargo xtask kernel`, and `cargo xtask userspace` let you focus on layers without repeating unrelated work; rerun `cargo xtask build` after touching `xtask/src/main.rs` or the initrd manifest.
+- Run `cargo xtask test` (or `make test`) before publishing changes; include the exact command output in your PR to prove the regression suite you exercised.
+- Use `cargo fmt`, `cargo clippy`, and `cargo test` locally before pushing, especially when editing shared code such as `userspace/libcluu/src/syscall.rs` or `kernel/src/syscall/handlers.rs`.
 
 ## Coding Style & Naming Conventions
-- Use four-space indentation, 100-column soft limit, and keep blocks short; prefer descriptive names over terse abbreviations.
-- Follow Rust idioms: `snake_case` modules/functions, `CamelCase` types, and `SCREAMING_SNAKE_CASE` constants (e.g., `PAGE_SIZE`).
-- All subsystems must adhere to SOLID principles (single responsibility, small traits, dependency inversion); traits such as `Scheduler`, `Repository`, and `AllocationStrategy` are good role models.
-- Comment only when the intent is not obvious; prefer short, descriptive helpers inside `kernel/` to limit the trusted surface.
+- Follow SOLID: keep each module focused (`bootstrap`, `token`, `sched`, `ipc`), prefer trait-based boundaries, and inject dependencies via explicit handles rather than global statics.
+- Embrace Rust idioms (snake_case functions, CamelCase types, SCREAMING_SNAKE_CASE consts) and keep helper functions small; document unsafe blocks and verify invariants using `debug_assert!`.
+- For kernel code (`#![no_std]`), limit inline assembly to architecture files (`kernel/src/architecture/x86_64/`), reuse `klibcluu::logging` for IRQ-safe traces, and keep syscall stubs consistent with `userspace/libcluu` wrappers.
+- Userspace binaries should reuse `libcluu` helpers (ELF parsing, rights masks) instead of duplicating logic; declare service lists (e.g., in `userspace/init/src/main.rs`) rather than hard-coding single launches.
 
 ## Testing Guidelines
-- `cargo xtask test` is the master suite (~145 tests); treat it as the final gate before declaring readiness.
-- `kernel-tests/tests/` files are organized by subsystem (e.g., `elf_tests.rs`, `mm_tests.rs`, `ipc_tests.rs`); name new files after the feature under test and import from `kernel_tests::cluu_kernel`.
-- `userspace/tests/` runs its own `cargo test`; use crate-level test files to validate user-facing services without rebuilding the kernel.
-- Always record exactly how you ran the tests (e.g., `cargo test --test mm_tests -- --nocapture`) so reviewers can reproduce the failure path.
+- `cargo xtask test` is the canonical regression command; annotate any new kernel/user tests under `kernel-tests/` or `userspace/tests/` with the subsystem they cover (e.g., `token`, `scheduler`, `ELF`).
+- When touching init/procmgr spawn logic, run `cargo xtask userspace` first so the boot image rebuild (via `xtask`) references the latest binaries; mention which initrd image (`initrd/sys/procmgr`, `initrd/sys/init`, etc.) was refreshed.
+- Snapshot the command you executed and its success/failure in PR descriptions so reviewers see your platform+profile (dev/release).
 
 ## Commit & Pull Request Guidelines
-- Keep commits short and present tense (`Add token derive handler`, `Fix initrd layout`); link related issues when available.
-- PR descriptions should name the targeted domain (kernel/userspace/tooling), list the commands you executed, and highlight follow-up work (e.g., “needs syscall coverage for grants”).
-- Include relevant logs/screenshots for console-focused changes; skip shipping binaries or heavy artifacts.
-- Mention unresolved risks (missing tests, required capability rights) so reviewers know what remains.
+- Keep commits focused and present-tense (`Implement token derivation`, `Add init service list`). Rebase or merge cleanly onto `develop` and avoid bundling unrelated diffs that could complicate review.
+- Mention the layer your change touches (`kernel`, `userspace`, `xtask`) in the PR title/body, list the key commands you ran, and summarize any blockers (missing grant logic, TOKEN derivation, etc.).
+- Include documentation updates (`AGENTS.md`, `README.md`, `DEBUG_GUIDE.md`) when behavior exposed to contributors changes; add log snippets or screenshots if the change alters the boot output or new syscall tracing.
 
-## Token & Authority Notes
-- The kernel mints init’s root token in `kernel/src/bootstrap.rs`; all authority flows through tokens, and every right (READ, WRITE, GRANT, IPC, IRQ, SPACE_MAP, THREAD_CREATE, etc.) is explicit.
-- Use `token::derive` to hand procmgr (and subsequent services) a degraded token that limits them to only the rights they need (full threads + necessary space rights + IPC/IRQ + GRANT for zero-copy transfers).
-- Once the critical processes spawned by init each yield once (via `sys_yield`) the scheduler transitions from CRITICAL to NORMAL mode and APIC preemption begins, so design helpers to yield after setup.
+## Security, Scheduling & Timing Notes
+- Authority is always token-based: `init` starts with the root token emitted from `kernel/src/bootstrap.rs`, derives limited-capability tokens via `kernel/src/token/derive.rs`, and hands them to services so they only get the rights they need (`SPACE_MAP`, `THREAD_CREATE`, `IPC`, `IRQ`, `GRANT`).
+- Critical services must yield once to signal readiness so the scheduler (`kernel/src/sched/scheduler.rs`) can transition from INITMODE to NORMALMODE; once NORMALMODE is active the APIC timer (via `kernel/src/architecture/x86_64/interrupts.rs`/`pic.rs`) keeps firing and cannot be paused, so expect unstoppable ticks even when the CPU seems idle.
+- Regenerate the initrd with `cargo xtask run` (or `make run`) whenever you change a service binary; avoid manual `tar`/`cp` edits across file systems, because `xtask` already handles cross-device streaming and keeps the filesystem layout consistent.
