@@ -538,16 +538,19 @@ extern "x86-interrupt" fn security_exception_handler(
 extern "C" fn timer_interrupt_dispatch(
     current_ctx_ptr: *const crate::sched::Context,
 ) -> *const crate::sched::Context {
+    // Tick the scheduler (handles timeslice expiration in NORMALMODE)
     if crate::sched::ThreadManager::is_normal_mode() {
         crate::sched::ThreadManager::tick();
     }
 
+    // Only preempt in NORMALMODE
     let next_ctx = if crate::sched::ThreadManager::is_normal_mode() {
         unsafe { crate::sched::ThreadManager::schedule_and_switch(current_ctx_ptr) }
     } else {
         core::ptr::null()
     };
 
+    // Send EOI to interrupt controller
     if crate::architecture::x86_64::apic::is_enabled() {
         crate::architecture::x86_64::apic::eoi();
     } else {
@@ -570,15 +573,33 @@ extern "C" fn timer_interrupt_ack() {
     }
 }
 
+#[no_mangle]
+extern "C" fn timer_interrupt_should_schedule() -> u8 {
+    if !crate::sched::ThreadManager::is_normal_mode() {
+        return 0;
+    }
+    if crate::sched::ThreadManager::current_id_raw() == 0 {
+        return 1;
+    }
+    0
+}
+
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    // Handle keyboard interrupt using our keyboard driver
-    // Only for debug
-    //klibcluu::warn("KEYBOARD_IRQ_IDT");
+    use core::sync::atomic::{AtomicU64, Ordering};
 
-    // TODO Phase 8: Handle keyboard interrupt with driver
-    // crate::drivers::input::keyboard::handle_keyboard_interrupt();
+    static KBD_IRQ_COUNT: AtomicU64 = AtomicU64::new(0);
 
-    // Send EOI to PIC
+    let mut port = x86_64::instructions::port::Port::<u8>::new(0x60);
+    let scancode = unsafe { port.read() };
+    if KBD_IRQ_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
+        klibcluu::info("KBD IRQ: first scancode");
+    }
+    crate::devices::irq::dispatch_scancode(1, scancode);
+
+    if crate::architecture::x86_64::apic::is_enabled() {
+        crate::architecture::x86_64::apic::eoi();
+    }
+    // Always ACK the PIC for IRQ1 while we're still using 8259 routing.
     unsafe {
         pic_eoi(1); // IRQ 1 - Keyboard
     }

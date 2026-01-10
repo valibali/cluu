@@ -587,6 +587,10 @@ pub unsafe fn create_initial_page_tables(
     unsafe { write_bytes(kernel_pd.as_mut_ptr(), 0, 4096) };
     kernel_pdpt[511] = kernel_pd_phys | 0x3;
 
+    let bootboot_phys = boot_info.info_structure_location();
+    let bootboot_size = unsafe { (*bootboot_ptr).size as u64 };
+    let bootboot_virt = crate::mm::space::layout::BOOTBOOT_INFO_BASE;
+
     // Map kernel using 4KB pages
     // Kernel virtual range: [kernel_virt_base, kernel_virt_base + size)
     // Kernel physical range: [kernel_phys_start, kernel_phys_end)
@@ -608,7 +612,6 @@ pub unsafe fn create_initial_page_tables(
 
     // For each 2MB block (use counter instead of address comparison to avoid wrapping issues)
     let virt_start_2mb = kernel_virt_base & !(0x1F_FFFF);
-    let mut first_pt_slice: Option<&[u64]> = None;
     for block_idx in 0..num_2mb_blocks {
         let virt_2mb = virt_start_2mb.wrapping_add(block_idx as u64 * 0x20_0000);
         // Calculate PD index from virtual address
@@ -635,9 +638,19 @@ pub unsafe fn create_initial_page_tables(
             }
         }
 
-        if block_idx == 0 {
-            // Save first PT for verification
-            first_pt_slice = Some(pt);
+        if block_idx == 0 && bootboot_size > 0 {
+            // Map BOOTBOOT info structure (needed during early bootstrap).
+            let bootboot_pages = (bootboot_size + 0xfff) / 0x1000;
+            for page_idx in 0..bootboot_pages {
+                let virt_addr = bootboot_virt + (page_idx * 0x1000);
+                let delta = virt_addr.wrapping_sub(virt_2mb);
+                if delta >= 0x20_0000 {
+                    continue;
+                }
+                let pt_idx = (delta / 0x1000) as usize;
+                let phys_addr = bootboot_phys + (page_idx * 0x1000);
+                pt[pt_idx] = phys_addr | PTE_PRESENT_WRITABLE;
+            }
         }
     }
 
@@ -739,8 +752,10 @@ pub unsafe fn create_initial_page_tables(
     let pt_phys = pd_entry & !0xFFF;
     klibcluu::log_hex(klibcluu::LogLevel::Trace, "    PT phys: 0x", pt_phys);
 
-    if let Some(first_pt) = first_pt_slice {
-        let stack_pte = first_pt[stack_pt_idx];
+    {
+        let pt_phys = pd_entry & !0xFFF;
+        let pt = unsafe { &*(pt_phys as *const [u64; 512]) };
+        let stack_pte = pt[stack_pt_idx];
         klibcluu::log_hex(
             klibcluu::LogLevel::Trace,
             "    Stack PT[60] entry: 0x",
@@ -803,15 +818,21 @@ pub unsafe fn create_initial_page_tables(
         klibcluu::trace("  RIP is in kernel range - OK");
 
         // Verify RIP PTE
-        if let Some(first_pt) = first_pt_slice {
-            let rip_pt_idx = ((rip_page >> 12) & 0x1FF) as usize;
-            let rip_pte = first_pt[rip_pt_idx]; // Same PT as stack (both in kernel)
-            klibcluu::log_hex(klibcluu::LogLevel::Trace, "    RIP PT entry: 0x", rip_pte);
+        let rip_pd_idx = ((rip_page >> 21) & 0x1FF) as usize;
+        let rip_pt_idx = ((rip_page >> 12) & 0x1FF) as usize;
+        let rip_pd_entry = kernel_pd[rip_pd_idx];
+        if rip_pd_entry & 0x1 == 0 {
+            klibcluu::error("  ERROR: RIP PD entry NOT PRESENT!");
+            panic!("RIP PD entry not present");
+        }
+        let rip_pt_phys = rip_pd_entry & !0xFFF;
+        let rip_pt = unsafe { &*(rip_pt_phys as *const [u64; 512]) };
+        let rip_pte = rip_pt[rip_pt_idx];
+        klibcluu::log_hex(klibcluu::LogLevel::Trace, "    RIP PT entry: 0x", rip_pte);
 
-            if rip_pte & 0x1 == 0 {
-                klibcluu::error("  ERROR: RIP page table entry NOT PRESENT!");
-                panic!("RIP PTE not present");
-            }
+        if rip_pte & 0x1 == 0 {
+            klibcluu::error("  ERROR: RIP page table entry NOT PRESENT!");
+            panic!("RIP PTE not present");
         }
     } else {
         klibcluu::error("  ERROR: RIP is NOT in kernel range!");

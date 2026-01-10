@@ -11,6 +11,7 @@ section .text
 global timer_interrupt_entry
 extern timer_interrupt_dispatch
 extern timer_interrupt_ack
+extern timer_interrupt_should_schedule
 
 %define CONTEXT_RAX     0x00
 %define CONTEXT_RBX     0x08
@@ -71,23 +72,71 @@ timer_interrupt_entry:
     ; Check CPL (user mode?)
     mov rax, [rsp + CONTEXT_SIZE + 0x08]
     test al, 0x3
-    jz .kernel_path
+    jz .kernel_stack
+    mov r11d, 1
 
     ; User mode interrupt: SS/RSP are on the stack
     mov rax, [rsp + CONTEXT_SIZE + 0x18]   ; RSP
     mov [rsp + CONTEXT_RSP], rax
     mov rax, [rsp + CONTEXT_SIZE + 0x20]   ; SS
     mov [rsp + CONTEXT_SS], rax
+    jmp .have_stack
 
+.kernel_stack:
+    xor r11d, r11d
+    ; Kernel mode interrupt: build SS/RSP from current stack
+    lea rax, [rsp + CONTEXT_SIZE + 0x18]
+    mov [rsp + CONTEXT_RSP], rax
+    mov qword [rsp + CONTEXT_SS], 0x10
+
+.have_stack:
     ; CR3
     mov rax, cr3
     mov [rsp + CONTEXT_CR3], rax
 
-    ; Call scheduler dispatch
+    ; If the interrupt happened in kernel mode, only schedule when idle runs.
+    test r11d, r11d
+    jnz .do_schedule
+    push r11
+    sub rsp, 8
+    call timer_interrupt_should_schedule
+    add rsp, 8
+    pop r11
+    test al, al
+    jnz .do_schedule
+    push r11
+    sub rsp, 8
+    call timer_interrupt_ack
+    add rsp, 8
+    pop r11
+
+    ; Restore general-purpose registers
+    mov rax, [rsp + CONTEXT_RAX]
+    mov rbx, [rsp + CONTEXT_RBX]
+    mov rcx, [rsp + CONTEXT_RCX]
+    mov rdx, [rsp + CONTEXT_RDX]
+    mov rsi, [rsp + CONTEXT_RSI]
+    mov rdi, [rsp + CONTEXT_RDI]
+    mov r8, [rsp + CONTEXT_R8]
+    mov r9, [rsp + CONTEXT_R9]
+    mov r11, [rsp + CONTEXT_R11]
+    mov r12, [rsp + CONTEXT_R12]
+    mov r13, [rsp + CONTEXT_R13]
+    mov r14, [rsp + CONTEXT_R14]
+    mov r15, [rsp + CONTEXT_R15]
+    mov rbp, [rsp + CONTEXT_RBP]
+    mov r10, [rsp + CONTEXT_R10]
+    add rsp, CONTEXT_SIZE
+    iretq
+
+.do_schedule:
+    ; Call scheduler dispatch (preserve r11 flag, keep stack aligned)
     mov rdi, rsp
+    push r11
     sub rsp, 8
     call timer_interrupt_dispatch
     add rsp, 8
+    pop r11
 
     ; RAX = next context (or NULL)
     mov r10, rax
@@ -100,7 +149,23 @@ timer_interrupt_entry:
     mov rax, [r10 + CONTEXT_CR3]
     mov cr3, rax
 
-    ; Build user interrupt frame on kernel stack
+    ; Build interrupt frame based on target CPL
+    mov rax, [r10 + CONTEXT_CS]
+    test al, 0x3
+    jz .build_kernel_frame
+
+.build_user_frame:
+    ; Discard original interrupt frame (user-origin has SS/RSP)
+    lea rbx, [rsp + CONTEXT_SIZE]
+    test r11d, r11d
+    jz .orig_kernel_frame
+    add rbx, 40
+    jmp .orig_frame_ready
+.orig_kernel_frame:
+    add rbx, 24
+.orig_frame_ready:
+    mov rsp, rbx
+
     mov rax, [r10 + CONTEXT_SS]
     mov rbx, [r10 + CONTEXT_RSP]
     mov rcx, [r10 + CONTEXT_RFLAGS]
@@ -112,7 +177,20 @@ timer_interrupt_entry:
     push rcx
     push rdx
     push rsi
+    jmp .restore_regs
 
+.build_kernel_frame:
+    ; Switch to the target kernel stack (saved RSP) before iretq.
+    mov rsp, [r10 + CONTEXT_RSP]
+    mov rcx, [r10 + CONTEXT_RFLAGS]
+    mov rdx, [r10 + CONTEXT_CS]
+    mov rsi, [r10 + CONTEXT_RIP]
+
+    push rcx
+    push rdx
+    push rsi
+
+.restore_regs:
     ; Restore general-purpose registers
     mov rax, [r10 + CONTEXT_RAX]
     mov rbx, [r10 + CONTEXT_RBX]
@@ -131,30 +209,3 @@ timer_interrupt_entry:
     mov r10, [r10 + CONTEXT_R10]
 
     iretq
-
-.kernel_path:
-    ; Kernel mode: acknowledge and return without scheduling
-    sub rsp, 8
-    call timer_interrupt_ack
-    add rsp, 8
-
-    ; Restore registers
-    mov rax, [rsp + CONTEXT_RAX]
-    mov rbx, [rsp + CONTEXT_RBX]
-    mov rcx, [rsp + CONTEXT_RCX]
-    mov rdx, [rsp + CONTEXT_RDX]
-    mov rsi, [rsp + CONTEXT_RSI]
-    mov rdi, [rsp + CONTEXT_RDI]
-    mov r8, [rsp + CONTEXT_R8]
-    mov r9, [rsp + CONTEXT_R9]
-    mov r10, [rsp + CONTEXT_R10]
-    mov r11, [rsp + CONTEXT_R11]
-    mov r12, [rsp + CONTEXT_R12]
-    mov r13, [rsp + CONTEXT_R13]
-    mov r14, [rsp + CONTEXT_R14]
-    mov r15, [rsp + CONTEXT_R15]
-    mov rbp, [rsp + CONTEXT_RBP]
-
-    add rsp, CONTEXT_SIZE
-    iretq
-

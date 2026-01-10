@@ -84,15 +84,19 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
 
     let token_handle = TokenHandle::from_raw(args.arg1);
     let buf_ptr = args.arg2 as usize;
-    let buf_len = args.arg3;
+    const NONBLOCK_FLAG: usize = 1usize << (usize::BITS - 1);
+    let buf_len_arg = args.arg3;
+    let nonblocking = buf_len_arg & NONBLOCK_FLAG != 0;
+    let buf_len = buf_len_arg & !NONBLOCK_FLAG;
 
     let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
     if !token.has_right(Rights::IPC_RECV) {
         return Err(Error::PermissionDenied);
     }
 
-    let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
-        .map_err(|_| Error::InvalidArgument)?;
+    let endpoint_ref =
+        crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+            .map_err(|_| Error::InvalidArgument)?;
     let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
         id
     } else {
@@ -101,7 +105,32 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
 
     let page_table_root =
         crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
-    crate::ipc::endpoint::recv_to_user(endpoint_id, buf_ptr, buf_len, page_table_root)
+    let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
+
+    let recv_result = if nonblocking {
+        crate::ipc::endpoint::recv_to_user_nonblocking(
+            endpoint_id,
+            buf_ptr,
+            buf_len,
+            page_table_root,
+        )
+    } else {
+        crate::ipc::endpoint::recv_to_user(endpoint_id, buf_ptr, buf_len, page_table_root, current)
+    };
+
+    match recv_result {
+        Ok(len) => Ok(len),
+        Err(err @ Error::WouldBlock) => {
+            if nonblocking {
+                Err(err)
+            } else {
+                crate::sched::ThreadManager::block_current();
+                crate::architecture::x86_64::syscall::request_resched();
+                Err(err)
+            }
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// sys_call - Call (send + receive) for synchronous RPC
@@ -190,12 +219,15 @@ pub fn sys_yield(_args: SyscallArgs) -> SyscallResult {
     // 4. Pick next thread and return its context
 
     // In INITMODE, the first yield from each critical thread signals readiness.
+    // When all critical processes have signaled, we switch to NORMALMODE.
+    // Note: We do NOT mark the last signaling thread as dead - all critical
+    // processes should continue running in NORMALMODE.
+    crate::architecture::x86_64::syscall::request_resched();
+
     if crate::sched::ThreadManager::is_init_mode()
         && crate::sched::ThreadManager::critical_processes_remaining() > 0
     {
-        if crate::sched::ThreadManager::signal_critical_process_ready() {
-            crate::sched::ThreadManager::mark_current_dead();
-        }
+        crate::sched::ThreadManager::signal_critical_process_ready();
     }
 
     Ok(0)
@@ -230,8 +262,8 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
     // Validate and lookup token
     let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
 
-    klibcluu::trace("sys_invoke: operation = ");
-    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", args.arg2 as u64);
+    //klibcluu::trace("sys_invoke: operation = ");
+    //klibcluu::log_dec(klibcluu::LogLevel::Trace, "", args.arg2 as u64);
 
     // Dispatch based on operation
     match operation {
@@ -308,18 +340,26 @@ fn invoke_thread_create(token: &Token, args: SyscallArgs) -> SyscallResult {
             .ok_or(Error::NotFound)?;
 
     let thread_id = ThreadManager::alloc_thread_id();
+    let flags = if ThreadManager::is_init_mode() {
+        ThreadFlags::COOPERATIVE
+    } else {
+        ThreadFlags::empty()
+    };
+
     let thread = Thread::new(
         thread_id,
         page_table_root,
         VirtAddr::new(entry),
         VirtAddr::new(stack),
         Priority::new(priority),
-        ThreadFlags::empty(),
+        flags,
     );
 
     let thread_id = ThreadManager::add_thread(thread);
 
-    // Critical thread registration is bootstrapped explicitly by the kernel.
+    if ThreadManager::is_init_mode() {
+        ThreadManager::register_critical_thread(thread_id);
+    }
 
     let scope = OpaqueScope::random();
     let thread_token = crate::token::create_token(
@@ -446,6 +486,7 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     use core::ptr::{copy_nonoverlapping, write_bytes};
 
     const PAGE_SIZE: usize = 4096;
+    const MAP_DEVICE: u32 = 0x100;
 
     //klibcluu::trace("invoke_space_map");
 
@@ -469,6 +510,7 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
 
     let writable = (perms & 0x02) != 0;
     let executable = (perms & 0x04) != 0;
+    let map_device = (perms & MAP_DEVICE) != 0;
 
     let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
@@ -479,19 +521,35 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     };
 
-    let frame_phys = pmm_simple::alloc_frame().ok_or(Error::OutOfMemory)?;
-    let frame_virt = unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
-
-    if copy_len > 0 {
-        userptr::validate_user_buffer(data_ptr, copy_len)?;
-        unsafe {
-            copy_nonoverlapping(data_ptr as *const u8, frame_virt, copy_len);
+    let frame_phys = if map_device {
+        if copy_len != 0 {
+            return Err(Error::InvalidArgument);
         }
-    }
+        if data_ptr == 0 || (data_ptr & 0xFFF) != 0 {
+            return Err(Error::InvalidArgument);
+        }
+        data_ptr as u64
+    } else {
+        pmm_simple::alloc_frame().ok_or(Error::OutOfMemory)?
+    };
+    let frame_virt = if map_device {
+        core::ptr::null_mut()
+    } else {
+        unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 }
+    };
 
-    if copy_len < PAGE_SIZE {
-        unsafe {
-            write_bytes(frame_virt.add(copy_len), 0, PAGE_SIZE - copy_len);
+    if !map_device {
+        if copy_len > 0 {
+            userptr::validate_user_buffer(data_ptr, copy_len)?;
+            unsafe {
+                copy_nonoverlapping(data_ptr as *const u8, frame_virt, copy_len);
+            }
+        }
+
+        if copy_len < PAGE_SIZE {
+            unsafe {
+                write_bytes(frame_virt.add(copy_len), 0, PAGE_SIZE - copy_len);
+            }
         }
     }
 
@@ -560,8 +618,41 @@ fn invoke_token_revoke(handle: TokenHandle, _token: &Token, _args: SyscallArgs) 
 // IRQ operations
 
 fn invoke_irq_attach(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    klibcluu::warn("invoke_irq_attach not yet implemented");
-    Err(Error::NotImplemented)
+    use crate::token::{ObjectRef, ObjectType, Rights, TokenHandle};
+
+    if !_token.has_right(Rights::IRQ_HANDLE) {
+        klibcluu::warn("invoke_irq_attach: missing IRQ_HANDLE right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let endpoint_handle = TokenHandle::from_raw(_args.arg3);
+    let irq_number = _args.arg4 as u8;
+
+    let endpoint_token = lookup_token(endpoint_handle).map_err(|_| {
+        klibcluu::warn("invoke_irq_attach: invalid endpoint token");
+        Error::InvalidArgument
+    })?;
+    let endpoint_ref = crate::token::resolve_token_object(&endpoint_token, ObjectType::Endpoint)
+        .map_err(|_| {
+            klibcluu::warn("invoke_irq_attach: endpoint resolve failed");
+            Error::InvalidArgument
+        })?;
+    let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    klibcluu::trace("invoke_irq_attach: irq=");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", irq_number as u64);
+    klibcluu::trace("invoke_irq_attach: endpoint_id=");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", endpoint_id.as_u64());
+
+    crate::devices::irq::attach(irq_number, endpoint_id)?;
+    unsafe {
+        crate::architecture::x86_64::pic::unmask(irq_number);
+    }
+    Ok(0)
 }
 
 fn invoke_irq_ack(_token: &Token, _args: SyscallArgs) -> SyscallResult {

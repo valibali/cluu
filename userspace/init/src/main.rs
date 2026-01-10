@@ -4,7 +4,11 @@
 extern crate alloc;
 
 use alloc::format;
-use libcluu::boot::{boot_info, ParentInfo, ProcmgrInfo, INITRD_USER_BASE, PARENT_INFO_ADDR, PROCMGR_INFO_ADDR};
+use libcluu::boot::{
+    boot_info, ConsoleInfo, KbdInfo, ParentInfo, ProcmgrInfo, TtyInfo, CONSOLE_FB_BASE,
+    CONSOLE_INFO_ADDR, INITRD_USER_BASE, KBD_INFO_ADDR, PARENT_INFO_ADDR, PROCMGR_INFO_ADDR,
+    TTY_INFO_ADDR,
+};
 use libcluu::elf::ElfFile;
 use libcluu::tar::find_member;
 use libcluu::*;
@@ -20,6 +24,14 @@ struct ServiceSpec {
     path: &'static str,
     priority: usize,
     rights: Option<Rights>,
+    kind: ServiceKind,
+}
+
+enum ServiceKind {
+    Console,
+    Kbd,
+    Tty,
+    Procmgr,
 }
 
 const PROCMGR_RIGHTS_BITS: u32 = Rights::READ.bits()
@@ -40,12 +52,36 @@ const PROCMGR_RIGHTS_BITS: u32 = Rights::READ.bits()
 
 const PROCMGR_RIGHTS: Rights = Rights::from_bits_truncate(PROCMGR_RIGHTS_BITS);
 
-const SERVICE_LIST: &[ServiceSpec] = &[ServiceSpec {
-    name: "procmgr",
-    path: "sys/procmgr",
-    priority: 200,
-    rights: Some(PROCMGR_RIGHTS),
-}];
+const SERVICE_LIST: &[ServiceSpec] = &[
+    ServiceSpec {
+        name: "procmgr",
+        path: "sys/procmgr",
+        priority: 200,
+        rights: Some(PROCMGR_RIGHTS),
+        kind: ServiceKind::Procmgr,
+    },
+    ServiceSpec {
+        name: "kbd",
+        path: "sys/kbd",
+        priority: 230,
+        rights: None,
+        kind: ServiceKind::Kbd,
+    },
+    ServiceSpec {
+        name: "tty",
+        path: "sys/tty",
+        priority: 205,
+        rights: None,
+        kind: ServiceKind::Tty,
+    },
+    ServiceSpec {
+        name: "console",
+        path: "sys/console",
+        priority: 210,
+        rights: None,
+        kind: ServiceKind::Console,
+    },
+];
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -63,6 +99,17 @@ fn run() -> Result<()> {
         core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, info.initrd_size as usize)
     };
     let exit_endpoint = endpoint_create(info.root_token)?;
+    let console_endpoint = endpoint_create(info.root_token)?;
+    let tty_endpoint = endpoint_create(info.root_token)?;
+    let console_send = token_derive(console_endpoint, Rights::IPC_SEND.bits() as usize, u64::MAX)?;
+    let tty_send = token_derive(tty_endpoint, Rights::IPC_SEND.bits() as usize, u64::MAX)?;
+    let kbd_irq_token = token_derive(
+        info.root_token,
+        Rights::IRQ_HANDLE.bits() as usize,
+        u64::MAX,
+    )?;
+    let kbd_endpoint = endpoint_create(info.root_token)?;
+    let kbd_recv = token_derive(kbd_endpoint, Rights::IPC_RECV.bits() as usize, u64::MAX)?;
 
     let root_token = info.root_token;
     for (index, service) in SERVICE_LIST.iter().enumerate() {
@@ -77,10 +124,9 @@ fn run() -> Result<()> {
         }
 
         debug_print(&format!("init: launching {}", service.name))?;
-        let token_share = if service.name == "procmgr" {
-            Some((child_token, exit_endpoint, info.initrd_size as usize))
-        } else {
-            None
+        let token_share = match service.kind {
+            ServiceKind::Procmgr => Some((child_token, exit_endpoint, info.initrd_size as usize)),
+            _ => None,
         };
         spawn_service(
             service,
@@ -88,6 +134,12 @@ fn run() -> Result<()> {
             initrd,
             index,
             token_share,
+            console_endpoint,
+            console_send,
+            tty_endpoint,
+            tty_send,
+            kbd_irq_token,
+            kbd_recv,
         )?;
         debug_print(&format!("init: {} ready", service.name))?;
 
@@ -97,9 +149,7 @@ fn run() -> Result<()> {
     debug_print("init: all critical services created; yielding to scheduler")?;
     yield_cpu()?;
 
-    loop {
-        yield_cpu()?;
-    }
+    Ok(())
 }
 
 fn spawn_service(
@@ -108,6 +158,12 @@ fn spawn_service(
     initrd: &[u8],
     index: usize,
     token_share: Option<(usize, usize, usize)>,
+    console_endpoint: usize,
+    console_send: usize,
+    tty_endpoint: usize,
+    tty_send: usize,
+    kbd_irq_token: usize,
+    kbd_recv: usize,
 ) -> Result<()> {
     let service_bytes = find_member(initrd, service.path).ok_or(Error::NotFound)?;
     debug_print(&format!("init: parsed {} entry", service.name))?;
@@ -117,10 +173,29 @@ fn spawn_service(
     let space_token = space_create(token)?;
     map_segments(space_token, &elf, service_bytes)?;
     map_stack(space_token, stack_top, PROC_STACK_SIZE, STACK_FLAGS)?;
-    if let Some((shared, exit_endpoint, initrd_size)) = token_share {
-        map_procmgr_info(space_token, shared, exit_endpoint, initrd_size)?;
-        map_parent_info(space_token)?;
-        map_initrd(space_token, initrd, initrd_size)?;
+    match service.kind {
+        ServiceKind::Console => {
+            map_console_info(space_token, console_endpoint)?;
+            map_framebuffer(space_token, boot_info().fb_phys, boot_info().fb_size)?;
+        }
+        ServiceKind::Kbd => {
+            map_kbd_info(space_token, kbd_irq_token, kbd_recv, tty_send)?;
+        }
+        ServiceKind::Tty => {
+            map_tty_info(space_token, tty_endpoint, console_send)?;
+        }
+        ServiceKind::Procmgr => {
+            if let Some((shared, exit_endpoint, initrd_size)) = token_share {
+                map_procmgr_bootstrap(
+                    space_token,
+                    shared,
+                    exit_endpoint,
+                    initrd_size,
+                    tty_endpoint,
+                )?;
+                map_initrd(space_token, initrd, initrd_size)?;
+            }
+        }
     }
 
     let thread_token = thread_create(
@@ -133,29 +208,86 @@ fn spawn_service(
     Ok(())
 }
 
-fn map_procmgr_info(
+fn map_procmgr_bootstrap(
     space_token: usize,
     token: usize,
     exit_endpoint: usize,
     initrd_size: usize,
+    tty_endpoint: usize,
 ) -> Result<()> {
     const PAGE_SIZE: usize = 4096;
     const READ_ONLY: usize = 0x01;
     let page_base = PROCMGR_INFO_ADDR & !(PAGE_SIZE - 1);
 
     let mut page = [0u8; PAGE_SIZE];
-    let info = ProcmgrInfo {
+    let procmgr_info = ProcmgrInfo {
         token,
         exit_endpoint,
         initrd_size: initrd_size as u64,
+        tty_endpoint,
     };
-    let bytes = unsafe {
+    let procmgr_bytes = unsafe {
         core::slice::from_raw_parts(
-            &info as *const ProcmgrInfo as *const u8,
+            &procmgr_info as *const ProcmgrInfo as *const u8,
             core::mem::size_of::<ProcmgrInfo>(),
         )
     };
-    let offset = PROCMGR_INFO_ADDR - page_base;
+    let procmgr_offset = PROCMGR_INFO_ADDR - page_base;
+    let procmgr_end = procmgr_offset + procmgr_bytes.len();
+    if procmgr_end > PAGE_SIZE {
+        return Err(Error::InvalidArgument);
+    }
+    page[procmgr_offset..procmgr_end].copy_from_slice(procmgr_bytes);
+
+    let parent_info = ParentInfo {
+        exit_endpoint: 0,
+        exit_cookie: 0,
+    };
+    let parent_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &parent_info as *const ParentInfo as *const u8,
+            core::mem::size_of::<ParentInfo>(),
+        )
+    };
+    let parent_offset = PARENT_INFO_ADDR - page_base;
+    let parent_end = parent_offset + parent_bytes.len();
+    if parent_end > PAGE_SIZE {
+        return Err(Error::InvalidArgument);
+    }
+    page[parent_offset..parent_end].copy_from_slice(parent_bytes);
+
+    space_map(
+        space_token,
+        page_base,
+        page.as_ptr() as usize,
+        READ_ONLY,
+        PAGE_SIZE,
+    )?;
+    Ok(())
+}
+
+fn map_console_info(space_token: usize, endpoint: usize) -> Result<()> {
+    const PAGE_SIZE: usize = 4096;
+    const READ_ONLY: usize = 0x01;
+    let page_base = CONSOLE_INFO_ADDR & !(PAGE_SIZE - 1);
+
+    let info = boot_info();
+    let mut page = [0u8; PAGE_SIZE];
+    let payload = ConsoleInfo {
+        fb_base: CONSOLE_FB_BASE as u64,
+        fb_size: info.fb_size,
+        width: info.fb_width,
+        height: info.fb_height,
+        pitch: info.fb_pitch,
+        endpoint,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &payload as *const ConsoleInfo as *const u8,
+            core::mem::size_of::<ConsoleInfo>(),
+        )
+    };
+    let offset = CONSOLE_INFO_ADDR - page_base;
     let end = offset + bytes.len();
     if end > PAGE_SIZE {
         return Err(Error::InvalidArgument);
@@ -172,23 +304,29 @@ fn map_procmgr_info(
     Ok(())
 }
 
-fn map_parent_info(space_token: usize) -> Result<()> {
+fn map_kbd_info(
+    space_token: usize,
+    irq_token: usize,
+    endpoint: usize,
+    tty_endpoint: usize,
+) -> Result<()> {
     const PAGE_SIZE: usize = 4096;
     const READ_ONLY: usize = 0x01;
-    let page_base = PARENT_INFO_ADDR & !(PAGE_SIZE - 1);
+    let page_base = KBD_INFO_ADDR & !(PAGE_SIZE - 1);
 
     let mut page = [0u8; PAGE_SIZE];
-    let info = ParentInfo {
-        exit_endpoint: 0,
-        exit_cookie: 0,
+    let payload = KbdInfo {
+        irq_token,
+        endpoint,
+        tty_endpoint,
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(
-            &info as *const ParentInfo as *const u8,
-            core::mem::size_of::<ParentInfo>(),
+            &payload as *const KbdInfo as *const u8,
+            core::mem::size_of::<KbdInfo>(),
         )
     };
-    let offset = PARENT_INFO_ADDR - page_base;
+    let offset = KBD_INFO_ADDR - page_base;
     let end = offset + bytes.len();
     if end > PAGE_SIZE {
         return Err(Error::InvalidArgument);
@@ -202,6 +340,59 @@ fn map_parent_info(space_token: usize) -> Result<()> {
         READ_ONLY,
         end,
     )?;
+    Ok(())
+}
+
+fn map_tty_info(space_token: usize, endpoint: usize, console_endpoint: usize) -> Result<()> {
+    const PAGE_SIZE: usize = 4096;
+    const READ_ONLY: usize = 0x01;
+    let page_base = TTY_INFO_ADDR & !(PAGE_SIZE - 1);
+
+    let mut page = [0u8; PAGE_SIZE];
+    let payload = TtyInfo {
+        endpoint,
+        console_endpoint,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &payload as *const TtyInfo as *const u8,
+            core::mem::size_of::<TtyInfo>(),
+        )
+    };
+    let offset = TTY_INFO_ADDR - page_base;
+    let end = offset + bytes.len();
+    if end > PAGE_SIZE {
+        return Err(Error::InvalidArgument);
+    }
+    page[offset..end].copy_from_slice(bytes);
+
+    space_map(
+        space_token,
+        page_base,
+        page.as_ptr() as usize,
+        READ_ONLY,
+        end,
+    )?;
+    Ok(())
+}
+
+fn map_framebuffer(space_token: usize, fb_phys: u64, fb_size: u64) -> Result<()> {
+    const READ_WRITE: usize = 0x03;
+    if fb_phys == 0 || fb_size == 0 {
+        return Ok(());
+    }
+    let mut offset = 0usize;
+    while offset < fb_size as usize {
+        let phys = fb_phys + offset as u64;
+        space_map(
+            space_token,
+            CONSOLE_FB_BASE + offset,
+            phys as usize,
+            READ_WRITE | MAP_DEVICE,
+            0,
+        )?;
+        offset += 4096;
+    }
     Ok(())
 }
 

@@ -67,6 +67,9 @@ pub enum InvokeOp {
     EndpointCreate = 40,
 }
 
+/// Page mapping flags for space_map.
+pub const MAP_DEVICE: usize = 0x100;
+
 /// Raw syscall invocation using x86_64 SYSCALL instruction
 ///
 /// # Safety
@@ -220,6 +223,9 @@ pub fn ipc_send(endpoint_token: usize, msg: &[u8]) -> Result<()> {
 ///
 /// - `Ok(bytes_received)`: Number of bytes received
 /// - `Err(error)`: Receive failed (invalid token, buffer too small, etc.)
+
+const IPC_RECV_NONBLOCK_FLAG: usize = 1usize << (usize::BITS - 1);
+
 #[inline]
 pub fn ipc_recv(endpoint_token: usize, buf: &mut [u8]) -> Result<usize> {
     unsafe {
@@ -228,6 +234,19 @@ pub fn ipc_recv(endpoint_token: usize, buf: &mut [u8]) -> Result<usize> {
             endpoint_token,
             buf.as_mut_ptr() as usize,
             buf.len(),
+        )
+    }
+}
+
+pub fn ipc_recv_nonblocking(endpoint_token: usize, buf: &mut [u8]) -> Result<usize> {
+    let len = buf.len();
+    let flagged_len = len | IPC_RECV_NONBLOCK_FLAG;
+    unsafe {
+        syscall3(
+            SyscallNumber::Recv,
+            endpoint_token,
+            buf.as_mut_ptr() as usize,
+            flagged_len,
         )
     }
 }
@@ -489,8 +508,17 @@ pub fn endpoint_create(root_token: usize) -> Result<usize> {
 ///
 /// - `Ok(())`: IRQ attached successfully
 /// - `Err(error)`: Attach failed
-pub fn irq_attach(irq_token: usize, endpoint_token: usize) -> Result<()> {
-    unsafe { invoke(irq_token, InvokeOp::IrqAttach, endpoint_token, 0, 0, 0)? };
+pub fn irq_attach(irq_token: usize, endpoint_token: usize, irq_number: usize) -> Result<()> {
+    unsafe {
+        invoke(
+            irq_token,
+            InvokeOp::IrqAttach,
+            endpoint_token,
+            irq_number,
+            0,
+            0,
+        )?
+    };
     Ok(())
 }
 

@@ -127,7 +127,7 @@ extern "C" fn syscall_dispatch(
         None => {
             klibcluu::warn("Invalid syscall number: ");
             klibcluu::log_dec(klibcluu::LogLevel::Warn, "", number as u64);
-            return -(Error::InvalidArgument as isize);
+            return Error::InvalidArgument.to_errno() as isize;
         }
     };
 
@@ -137,7 +137,7 @@ extern "C" fn syscall_dispatch(
     // Dispatch to syscall handler
     match dispatch_syscall(syscall_num, args) {
         Ok(ret) => ret as isize,
-        Err(e) => -(e as isize),
+        Err(e) => e.to_errno() as isize,
     }
 }
 
@@ -316,6 +316,16 @@ pub unsafe fn get_current_kernel_stack() -> u64 {
         options(nostack, preserves_flags)
     );
     kernel_rsp
+}
+
+#[inline(always)]
+pub fn request_resched() {
+    unsafe {
+        core::arch::asm!(
+            "mov qword ptr gs:[0x20], 1",
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 #[cfg(test)]

@@ -20,8 +20,8 @@
  * - peripheral: Hardware device drivers and interfaces
  */
 
-pub mod gdt;
 pub mod apic;
+pub mod gdt;
 pub mod idt;
 pub mod interrupts;
 pub mod pic;

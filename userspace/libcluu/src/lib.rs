@@ -32,7 +32,10 @@ pub mod tar;
 pub mod types;
 
 // Re-exports
-pub use boot::{boot_info, root_token_handle, BootInfo, INITRD_USER_BASE};
+pub use boot::{
+    boot_info, console_info, kbd_info, proc_info, root_token_handle, tty_info, BootInfo,
+    CONSOLE_FB_BASE, INITRD_USER_BASE,
+};
 pub use elf::{ElfFile, LoadableSegment};
 pub use error::{Error, Result};
 pub use ipc::{call, recv, reply, send};
@@ -61,5 +64,6 @@ pub use syscall::{
     InvokeOp,
     // Types
     SyscallNumber,
+    MAP_DEVICE,
 };
 pub use types::*;

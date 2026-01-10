@@ -217,7 +217,8 @@ impl Thread {
         priority: Priority,
         flags: ThreadFlags,
     ) -> Self {
-        let mut context = Context::for_new_thread(entry.as_u64(), stack.as_u64(), page_table_root.as_u64());
+        let mut context =
+            Context::for_new_thread(entry.as_u64(), stack.as_u64(), page_table_root.as_u64());
 
         // Ensure interrupts are enabled for the idle thread.
         context.rflags = 0x202;

@@ -108,6 +108,29 @@ pub unsafe fn init() {
     klibcluu::info("PIC initialized (all IRQs masked)");
 }
 
+/// Unmask a specific IRQ line on the PIC.
+///
+/// This enables the given IRQ number (0-15).
+pub unsafe fn unmask(irq: u8) {
+    if irq >= 16 {
+        return;
+    }
+    if irq < 8 {
+        let mut data_pic1 = Port::<u8>::new(PIC1_DATA);
+        let mask = data_pic1.read() & !(1 << irq);
+        data_pic1.write(mask);
+    } else {
+        // Unmask cascade on PIC1 first.
+        let mut data_pic1 = Port::<u8>::new(PIC1_DATA);
+        let mask1 = data_pic1.read() & !(1 << 2);
+        data_pic1.write(mask1);
+
+        let mut data_pic2 = Port::<u8>::new(PIC2_DATA);
+        let mask2 = data_pic2.read() & !(1 << (irq - 8));
+        data_pic2.write(mask2);
+    }
+}
+
 /// I/O wait - small delay for PIC to process commands
 ///
 /// Some systems need a small delay between PIC I/O operations.

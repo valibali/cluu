@@ -1,0 +1,14 @@
+[package]
+name = "cluu-kbd"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU keyboard service"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "kbd"
+path = "src/main.rs"

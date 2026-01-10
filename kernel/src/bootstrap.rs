@@ -163,6 +163,11 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
         boot_info.root_token = root_token_handle.as_usize();
         boot_info.initrd_phys = initrd_phys;
         boot_info.initrd_size = initrd_size;
+        boot_info.fb_phys = crate::bootboot::bootboot.fb_ptr as u64;
+        boot_info.fb_size = crate::bootboot::bootboot.fb_size as u64;
+        boot_info.fb_width = crate::bootboot::bootboot.fb_width;
+        boot_info.fb_height = crate::bootboot::bootboot.fb_height;
+        boot_info.fb_pitch = crate::bootboot::bootboot.fb_scanline;
     }
 
     klibcluu::info("");
@@ -237,4 +242,9 @@ struct BootInfo {
     root_token: usize,
     initrd_phys: u64,
     initrd_size: u64,
+    fb_phys: u64,
+    fb_size: u64,
+    fb_width: u32,
+    fb_height: u32,
+    fb_pitch: u32,
 }

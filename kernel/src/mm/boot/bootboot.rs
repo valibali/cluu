@@ -184,6 +184,47 @@ impl BootInfoProvider for BootbootAdapter {
     }
 
     fn info_structure_location(&self) -> u64 {
-        self.bootboot_ptr as u64
+        translate_bootboot_virt(self.bootboot_ptr as u64)
     }
+}
+
+fn translate_bootboot_virt(virt: u64) -> u64 {
+    use x86_64::registers::control::Cr3;
+    use x86_64::structures::paging::{PageTable, PageTableFlags};
+
+    let (pml4_frame, _) = Cr3::read();
+    let pml4 = unsafe { &*(pml4_frame.start_address().as_u64() as *const PageTable) };
+    let pml4e = &pml4[((virt >> 39) & 0x1ff) as usize];
+    if !pml4e.flags().contains(PageTableFlags::PRESENT) {
+        panic!("BOOTBOOT virt->phys: PML4 entry not present");
+    }
+
+    let pdpt = unsafe { &*(pml4e.addr().as_u64() as *const PageTable) };
+    let pdpte = &pdpt[((virt >> 30) & 0x1ff) as usize];
+    if !pdpte.flags().contains(PageTableFlags::PRESENT) {
+        panic!("BOOTBOOT virt->phys: PDPT entry not present");
+    }
+    if pdpte.flags().contains(PageTableFlags::HUGE_PAGE) {
+        let base = pdpte.addr().as_u64() & !0x3fff_ffff;
+        return base + (virt & 0x3fff_ffff);
+    }
+
+    let pd = unsafe { &*(pdpte.addr().as_u64() as *const PageTable) };
+    let pde = &pd[((virt >> 21) & 0x1ff) as usize];
+    if !pde.flags().contains(PageTableFlags::PRESENT) {
+        panic!("BOOTBOOT virt->phys: PD entry not present");
+    }
+    if pde.flags().contains(PageTableFlags::HUGE_PAGE) {
+        let base = pde.addr().as_u64() & !0x1f_ffff;
+        return base + (virt & 0x1f_ffff);
+    }
+
+    let pt = unsafe { &*(pde.addr().as_u64() as *const PageTable) };
+    let pte = &pt[((virt >> 12) & 0x1ff) as usize];
+    if !pte.flags().contains(PageTableFlags::PRESENT) {
+        panic!("BOOTBOOT virt->phys: PT entry not present");
+    }
+
+    let base = pte.addr().as_u64() & !0xfff;
+    base + (virt & 0xfff)
 }

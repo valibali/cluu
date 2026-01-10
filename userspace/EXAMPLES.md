@@ -238,7 +238,7 @@ fn run() -> Result<()> {
 | DebugPrint | `debug_print(msg)` | ✅ Working | hello, cap_demo |
 | TokenCreate | `token_create(cap, token)` | 🔨 Validated | cap_demo |
 | TokenDelete | `token_delete(token)` | 🔨 Validated | cap_demo |
-| IrqAttach | `irq_attach(irq, ep)` | 📋 Stub | - |
+| IrqAttach | `irq_attach(irq_token, ep, irq)` | ✅ | - |
 | IrqAck | `irq_ack(irq)` | 📋 Stub | - |
 
 **Legend:**

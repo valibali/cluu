@@ -12,7 +12,7 @@ use crate::sched::{
     Context, Priority, PriorityBitmapScheduler, SchedulingPolicy, Thread, ThreadId,
     ThreadRepository,
 };
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 use x86_64::PhysAddr;
@@ -50,7 +50,21 @@ static SCHEDULER_MODE: AtomicBool = AtomicBool::new(false); // false = INIT, tru
 
 /// Number of critical processes still initializing
 static CRITICAL_PROCESS_COUNT: AtomicUsize = AtomicUsize::new(0);
-static IDLE_THREAD_CREATED: AtomicBool = AtomicBool::new(false);
+static CURRENT_THREAD_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Multi-slot pending wake queue (lock-free)
+/// Each slot holds a thread ID (0 = empty). Allows multiple concurrent wakes.
+const PENDING_WAKE_SLOTS: usize = 8;
+static PENDING_WAKE_QUEUE: [AtomicU64; PENDING_WAKE_SLOTS] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Thread Manager API
@@ -117,7 +131,7 @@ impl ThreadManager {
         scheduler.pick_next()
     }
 
-    /// Yield current thread (add back to scheduler)
+    /// Yield current thread (expire to expired array for fair scheduling)
     pub fn yield_current() {
         let current = {
             let mut current_lock = CURRENT_THREAD.lock();
@@ -125,16 +139,10 @@ impl ThreadManager {
         };
 
         if let Some(thread_id) = current {
-            // Get thread priority and add back to scheduler
-            let priority = {
-                let repo = THREAD_REPOSITORY.lock();
-                repo.get(thread_id).map(|t| t.priority)
-            };
-
-            if let Some(priority) = priority {
-                let mut scheduler = SCHEDULER.lock();
-                scheduler.add(thread_id, priority);
-            }
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.expire_current();
+            drop(scheduler);
+            let _ = thread_id; // Silence unused warning
         }
     }
 
@@ -142,12 +150,17 @@ impl ThreadManager {
     pub fn set_current(thread_id: ThreadId) {
         let mut current = CURRENT_THREAD.lock();
         *current = Some(thread_id);
+        CURRENT_THREAD_ID.store(thread_id.as_u64(), Ordering::Release);
     }
 
     /// Get the currently running thread
     pub fn current() -> Option<ThreadId> {
         let current = CURRENT_THREAD.lock();
         *current
+    }
+
+    pub fn current_id_raw() -> u64 {
+        CURRENT_THREAD_ID.load(Ordering::Acquire)
     }
 
     pub fn mark_current_dead() {
@@ -158,6 +171,65 @@ impl ThreadManager {
         Self::with_thread_mut(current, |thread| {
             thread.make_dead();
         });
+    }
+
+    pub fn block_current() {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return,
+        };
+        Self::with_thread_mut(current, |thread| {
+            thread.make_blocked();
+        });
+    }
+
+    pub fn wake_thread(thread_id: ThreadId) {
+        // Try to wake immediately if locks are available
+        let priority = {
+            let mut repo = match THREAD_REPOSITORY.try_lock() {
+                Some(repo) => repo,
+                None => {
+                    // Can't get lock, queue for later
+                    Self::queue_pending_wake(thread_id);
+                    return;
+                }
+            };
+            match repo.get_mut(thread_id) {
+                Some(thread) if !thread.is_dead() => {
+                    thread.make_ready();
+                    Some(thread.priority)
+                }
+                _ => None,
+            }
+        };
+
+        let priority = match priority {
+            Some(p) => p,
+            None => return, // Thread not found or dead
+        };
+
+        if let Some(mut scheduler) = SCHEDULER.try_lock() {
+            scheduler.add(thread_id, priority);
+        } else {
+            // Can't get scheduler lock, queue for later
+            Self::queue_pending_wake(thread_id);
+        }
+    }
+
+    /// Queue a thread ID for deferred wake (lock-free)
+    fn queue_pending_wake(thread_id: ThreadId) {
+        let tid = thread_id.as_u64();
+        // Try each slot until we find an empty one
+        for slot in &PENDING_WAKE_QUEUE {
+            if slot
+                .compare_exchange(0, tid, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return; // Successfully queued
+            }
+        }
+        // All slots full - this is a bug if it happens frequently
+        // The wake will be lost, but thread will eventually be woken by retry logic
     }
 
     /// Get page table root (CR3) of currently running thread
@@ -207,7 +279,12 @@ impl ThreadManager {
 
                     SCHEDULER_MODE.store(true, Ordering::Release);
                     Self::demote_current_thread();
-                    Self::ensure_idle_thread();
+
+                    // Mark init (thread 1) as dead - its bootstrap job is done
+                    Self::with_thread_mut(ThreadId::new(1), |thread| {
+                        thread.make_dead();
+                    });
+
                     true
                 } else {
                     false
@@ -240,24 +317,16 @@ impl ThreadManager {
         }
     }
 
-    pub fn ensure_idle_thread() {
-        if IDLE_THREAD_CREATED.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        let page_table_root = kernel_page_table_root();
-        let entry = x86_64::VirtAddr::new(idle_thread_entry as u64);
-        let stack = x86_64::VirtAddr::new(kernel_stack_top());
-        let thread = Thread::new_kernel(
-            ThreadId::new(0),
-            page_table_root,
-            entry,
-            stack,
-            Priority::LOWEST,
-            crate::sched::thread::ThreadFlags::empty(),
-        );
-
-        let _ = Self::add_thread(thread);
+    /// Idle in kernel context until an interrupt wakes a thread
+    ///
+    /// Called when no threads are runnable. Enables interrupts and halts
+    /// until an interrupt (timer, IRQ) potentially wakes a thread.
+    fn idle_until_runnable() {
+        // Enable interrupts so we can receive timer/IRQ
+        x86_64::instructions::interrupts::enable();
+        // Halt until next interrupt
+        x86_64::instructions::hlt();
+        // Interrupts are disabled again after hlt returns
     }
 
     /// Start the scheduler and jump to the first thread
@@ -313,26 +382,25 @@ impl ThreadManager {
             Self::save_context(current_id, &*current_ctx_ptr);
         }
 
-        // Re-queue current thread for next scheduling round
-        Self::requeue_thread(current_id);
+        // Expire current thread (moves to expired array for fair scheduling)
+        Self::expire_current_thread(current_id);
+        Self::drain_pending_wake();
 
-        // Pick next thread
-        let next_id = match Self::pick_next() {
-            Some(id) => id,
-            None => {
-                klibcluu::warn("No threads ready, returning to current");
-                return Self::get_context_ptr(current_id);
+        // Pick next thread, idling if none ready
+        let next_id = loop {
+            if let Some(id) = Self::pick_next() {
+                break id;
             }
+            // No threads ready - idle until interrupt wakes one
+            Self::idle_until_runnable();
+            // After interrupt, drain any pending wakes and retry
+            Self::drain_pending_wake();
         };
 
         // No switch needed if same thread
         if next_id == current_id {
             return core::ptr::null();
         }
-
-        klibcluu::trace("Context switch: thread ");
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, " -> ", current_id.as_u64());
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", next_id.as_u64());
 
         // Set next thread as current
         Self::set_current(next_id);
@@ -363,16 +431,46 @@ impl ThreadManager {
         });
     }
 
-    /// Re-queue thread back to scheduler
-    fn requeue_thread(thread_id: ThreadId) {
-        let is_dead = Self::with_thread(thread_id, |t| t.is_dead()).unwrap_or(true);
-        if is_dead {
+    /// Expire current thread (move to expired array for fair scheduling)
+    ///
+    /// After a thread yields or uses its timeslice, it moves to the expired
+    /// array. Once all threads in active have run, arrays swap and the cycle
+    /// repeats. This guarantees every thread gets a timeslice per epoch.
+    fn expire_current_thread(thread_id: ThreadId) {
+        let state = Self::with_thread(thread_id, |t| (t.is_dead(), t.is_blocked()))
+            .unwrap_or((true, false));
+        if state.0 || state.1 {
+            // Dead or blocked threads don't go back to scheduler
             return;
         }
 
-        let priority = Self::with_thread(thread_id, |t| t.priority).unwrap_or(Priority(100));
         let mut scheduler = SCHEDULER.lock();
-        scheduler.add(thread_id, priority);
+        scheduler.expire_current();
+    }
+
+    fn drain_pending_wake() {
+        // Process all slots in the pending wake queue
+        for slot in &PENDING_WAKE_QUEUE {
+            let raw = slot.swap(0, Ordering::AcqRel);
+            if raw == 0 {
+                continue; // Empty slot
+            }
+            let thread_id = ThreadId::new(raw);
+            let priority = {
+                let mut repo = THREAD_REPOSITORY.lock();
+                match repo.get_mut(thread_id) {
+                    Some(thread) if !thread.is_dead() => {
+                        thread.make_ready();
+                        Some(thread.priority)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(priority) = priority {
+                let mut scheduler = SCHEDULER.lock();
+                scheduler.add(thread_id, priority);
+            }
+        }
     }
 
     /// Get pointer to thread's context
@@ -466,26 +564,6 @@ unsafe fn enter_userspace(context: &Context) -> ! {
         in(reg) context.rip,
         options(noreturn)
     );
-}
-
-fn kernel_stack_top() -> u64 {
-    extern "C" {
-        static BSP_STACK: u8;
-    }
-    (&raw const BSP_STACK as u64) + (64 * 1024)
-}
-
-fn kernel_page_table_root() -> PhysAddr {
-    use x86_64::registers::control::Cr3;
-    let (frame, _) = Cr3::read();
-    frame.start_address()
-}
-
-fn idle_thread_entry() -> ! {
-    loop {
-        x86_64::instructions::interrupts::enable();
-        x86_64::instructions::hlt();
-    }
 }
 
 #[cfg(test)]

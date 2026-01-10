@@ -21,7 +21,6 @@
 use super::process::{ProcessId, ProcessType};
 use super::process_manager::ProcessManager;
 use crate::elf;
-use crate::mm::AddressSpace;
 
 /// Spawn a userspace process from an ELF binary
 ///

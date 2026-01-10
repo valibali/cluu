@@ -14,13 +14,14 @@ members = [
 
     # Userspace
     "userspace/libcluu",
-    "userspace/hello",
     "userspace/cap_demo",
     "userspace/init",
     "userspace/procmgr",
     "userspace/vfs",
     "userspace/ramfs",
     "userspace/console",
+    "userspace/kbd",
+    "userspace/tty",
     "userspace/shell",
     "userspace/cat",
 ]
@@ -30,13 +31,14 @@ default-members = [
     "kernel",
     "klibcluu",
     "userspace/libcluu",
-    "userspace/hello",
     "userspace/cap_demo",
     "userspace/init",
     "userspace/procmgr",
     "userspace/vfs",
     "userspace/ramfs",
     "userspace/console",
+    "userspace/kbd",
+    "userspace/tty",
     "userspace/shell",
     "userspace/cat",
 ]
@@ -66,7 +68,74 @@ opt-level = 0
 lto = false
 panic = "abort"
 
+[profile.dev.package.libcluu]
+debug = 0
+
+[profile.dev.package."cap-demo"]
+debug = 0
+
+[profile.dev.package."cluu-init"]
+debug = 0
+
+[profile.dev.package."cluu-procmgr"]
+debug = 0
+
+[profile.dev.package."cluu-console"]
+debug = 0
+
+[profile.dev.package."cluu-kbd"]
+debug = 0
+
+[profile.dev.package."cluu-tty"]
+debug = 0
+
+[profile.dev.package."cluu-shell"]
+debug = 0
+
+[profile.dev.package."cluu-vfs"]
+debug = 0
+
+[profile.dev.package."cluu-ramfs"]
+debug = 0
+
+[profile.dev.package."cluu-cat"]
+debug = 0
+
 [profile.release]
 opt-level = 0
 lto = false
 panic = "abort"
+
+[profile.release.package.libcluu]
+debug = 0
+
+[profile.release.package."cap-demo"]
+debug = 0
+
+[profile.release.package."cluu-init"]
+debug = 0
+
+[profile.release.package."cluu-procmgr"]
+debug = 0
+
+[profile.release.package."cluu-console"]
+debug = 0
+
+[profile.release.package."cluu-kbd"]
+debug = 0
+
+[profile.release.package."cluu-tty"]
+debug = 0
+
+[profile.release.package."cluu-shell"]
+debug = 0
+
+[profile.release.package."cluu-vfs"]
+debug = 0
+
+[profile.release.package."cluu-ramfs"]
+debug = 0
+
+[profile.release.package."cluu-cat"]
+debug = 0
+

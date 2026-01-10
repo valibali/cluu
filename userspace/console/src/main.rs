@@ -1,19 +1,412 @@
 #![no_std]
 #![no_main]
 
-use libcluu::*;
+extern crate alloc;
+
+use alloc::{format, vec::Vec};
+use core::mem::size_of;
+use core::sync::atomic::{AtomicBool, Ordering};
+use libcluu::ipc::{
+    CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL, CONSOLE_WRITE_LABEL,
+};
+use libcluu::types::Message;
+use libcluu::{console_info, debug_print, syscall, yield_cpu, Error, Result, CONSOLE_FB_BASE};
+
+const GLYPH_W: usize = 8;
+const GLYPH_H: usize = 8;
+const COLOR_BG: u32 = 0x00000000;
+const COLOR_FG: u32 = 0x00FFFFFF;
+
+static LOG_WRITE_SEEN: AtomicBool = AtomicBool::new(false);
+static LOG_CLEAR_SEEN: AtomicBool = AtomicBool::new(false);
+static LOG_CURSOR_SEEN: AtomicBool = AtomicBool::new(false);
+static LOG_BLINK_SEEN: AtomicBool = AtomicBool::new(false);
+static LOG_RECV_OK: AtomicBool = AtomicBool::new(false);
+static LOG_RECV_WOULDBLOCK: AtomicBool = AtomicBool::new(false);
+static LOG_PARSE_FAIL: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
-    // TODO: Implement console driver
-    // - Handle framebuffer writes
-    // - Process keyboard input
-    // - Provide terminal I/O
-
-    loop {
-        let mut msg = Message::new(0, [0; 6], 0);
-        let _ = recv(0, &mut msg, IpcFlags::empty());
-
-        // Handle console operation
+    match run() {
+        Ok(_) => 0,
+        Err(_) => -1,
     }
 }
+
+fn run() -> Result<()> {
+    let info = console_info();
+    let fb = CONSOLE_FB_BASE as *mut u8;
+    let mut console = Console::new(
+        fb,
+        info.width as usize,
+        info.height as usize,
+        info.pitch as usize,
+    );
+
+    debug_print(&format!("console: endpoint {}", info.endpoint))?;
+    debug_print("console: ready")?;
+    yield_cpu()?;
+
+    let mut buf = [0u8; 512];
+    loop {
+        // Try receiving without blocking so we can keep blinking even while idle.
+        match syscall::ipc_recv(info.endpoint, &mut buf) {
+            Ok(len) => {
+                if !LOG_RECV_OK.swap(true, Ordering::Relaxed) {
+                    let _ = debug_print(&format!("console: recv len {}", len));
+                }
+                if let Some((msg, payload)) = parse_message(&buf[..len]) {
+                    console.handle_message(&msg, payload);
+                } else if !LOG_PARSE_FAIL.swap(true, Ordering::Relaxed) {
+                    let _ = debug_print(&format!("console: parse failed len {}", len));
+                }
+            }
+            Err(Error::WouldBlock) => {
+                if !LOG_RECV_WOULDBLOCK.swap(true, Ordering::Relaxed) {
+                    let _ = debug_print("console: recv would-block");
+                }
+                // no messages — keep running so the cursor can blink
+            }
+            Err(_) => {
+                // ignore other IPC issues for now
+            }
+        }
+
+        // Run blink/timer logic regardless of IPC activity.
+        console.tick();
+
+        // Cooperate with scheduler.
+        let _ = yield_cpu();
+    }
+}
+
+fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
+    if buf.len() < size_of::<Message>() {
+        return None;
+    }
+    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
+    let payload_len = msg.words[0];
+    let header = size_of::<Message>();
+    let end = header + payload_len;
+    if end > buf.len() {
+        return None;
+    }
+    Some((msg, &buf[header..end]))
+}
+
+struct Console {
+    fb: *mut u8,
+    width: usize,
+    height: usize,
+    pitch: usize,
+    cols: usize,
+    rows: usize,
+    cursor_x: usize,
+    cursor_y: usize,
+    cursor_visible: bool,
+    blink_enabled: bool,
+    blink_ticks: usize,
+    cells: Vec<u8>,
+    last_cursor_x: usize,
+    last_cursor_y: usize,
+}
+
+impl Console {
+    fn new(fb: *mut u8, width: usize, height: usize, pitch: usize) -> Self {
+        let cols = width / GLYPH_W;
+        let rows = height / GLYPH_H;
+        let mut console = Self {
+            fb,
+            width,
+            height,
+            pitch,
+            cols,
+            rows,
+            cursor_x: 0,
+            cursor_y: 0,
+            cursor_visible: true,
+            blink_enabled: true,
+            blink_ticks: 0,
+            cells: alloc::vec![b' '; cols * rows],
+            last_cursor_x: 0,
+            last_cursor_y: 0,
+        };
+        console.clear();
+        console
+    }
+
+    fn handle_message(&mut self, msg: &Message, payload: &[u8]) {
+        match msg.tag.label {
+            CONSOLE_WRITE_LABEL => {
+                if !LOG_WRITE_SEEN.swap(true, Ordering::Relaxed) {
+                    let _ = debug_print("console: recv write");
+                }
+                self.write_bytes(payload);
+            }
+            CONSOLE_CLEAR_LABEL => {
+                if !LOG_CLEAR_SEEN.swap(true, Ordering::Relaxed) {
+                    let _ = debug_print("console: recv clear");
+                }
+                self.clear();
+            }
+            CONSOLE_CURSOR_LABEL => {
+                if !LOG_CURSOR_SEEN.swap(true, Ordering::Relaxed) {
+                    let _ = debug_print("console: recv cursor");
+                }
+                self.cursor_x = msg.words[0].min(self.cols.saturating_sub(1));
+                self.cursor_y = msg.words[1].min(self.rows.saturating_sub(1));
+                self.redraw_cursor();
+            }
+            CONSOLE_BLINK_LABEL => {
+                if !LOG_BLINK_SEEN.swap(true, Ordering::Relaxed) {
+                    let _ = debug_print("console: recv blink");
+                }
+                self.blink_enabled = msg.words[0] != 0;
+                if !self.blink_enabled {
+                    self.cursor_visible = true;
+                }
+                self.redraw_cursor();
+            }
+            _ => {}
+        }
+    }
+
+    fn tick(&mut self) {
+        if !self.blink_enabled {
+            return;
+        }
+        self.blink_ticks = self.blink_ticks.wrapping_add(1);
+        if self.blink_ticks % 20 == 0 {
+            self.cursor_visible = !self.cursor_visible;
+            self.redraw_cursor();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.cells.fill(b' ');
+        for y in 0..self.height {
+            for x in 0..self.width {
+                self.put_pixel(x, y, COLOR_BG);
+            }
+        }
+        self.cursor_x = 0;
+        self.cursor_y = 0;
+        self.last_cursor_x = self.cursor_x;
+        self.last_cursor_y = self.cursor_y;
+        self.redraw_cursor();
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.put_char(b);
+        }
+    }
+
+    fn newline(&mut self) {
+        self.cursor_x = 0;
+        if self.cursor_y + 1 >= self.rows {
+            self.scroll_up();
+        } else {
+            self.cursor_y += 1;
+        }
+    }
+
+    fn scroll_up(&mut self) {
+        if self.rows == 0 || self.cols == 0 {
+            return;
+        }
+        let w = self.cols;
+
+        // Move rows 1..end up by one row.
+        self.cells.copy_within(w.., 0);
+
+        // Clear last row.
+        let last = (self.rows - 1) * w;
+        self.cells[last..last + w].fill(b' ');
+
+        // Redraw whole console (simple, correct; can be optimized later).
+        self.redraw_all();
+
+        // Cursor stays on last row after scroll.
+        self.cursor_y = self.rows - 1;
+    }
+
+    fn redraw_all(&mut self) {
+        for y in 0..self.rows {
+            for x in 0..self.cols {
+                let ch = self.get_cell(x, y);
+                self.draw_glyph(x, y, ch, COLOR_FG, COLOR_BG);
+            }
+        }
+        self.redraw_cursor();
+    }
+
+    fn put_char(&mut self, ch: u8) {
+        match ch {
+            b'\n' => self.newline(),
+            b'\r' => {
+                self.cursor_x = 0;
+            }
+            0x08 => {
+                // Backspace: move left; if at column 0, go to previous line end.
+                if self.cursor_x > 0 {
+                    self.cursor_x -= 1;
+                } else if self.cursor_y > 0 {
+                    self.cursor_y -= 1;
+                    self.cursor_x = self.cols.saturating_sub(1);
+                }
+                self.set_cell(self.cursor_x, self.cursor_y, b' ');
+            }
+            _ => {
+                self.set_cell(self.cursor_x, self.cursor_y, ch);
+
+                self.cursor_x += 1;
+                if self.cursor_x >= self.cols {
+                    self.newline();
+                }
+            }
+        }
+        self.redraw_cursor();
+    }
+
+    fn set_cell(&mut self, x: usize, y: usize, ch: u8) {
+        if x >= self.cols || y >= self.rows {
+            return;
+        }
+        let idx = y * self.cols + x;
+        self.cells[idx] = ch;
+        self.draw_glyph(x, y, ch, COLOR_FG, COLOR_BG);
+    }
+
+    fn redraw_cursor(&mut self) {
+        // 1) If cursor moved, repaint the old cursor cell to erase the old cursor block.
+        if self.last_cursor_x != self.cursor_x || self.last_cursor_y != self.cursor_y {
+            let old_ch = self.get_cell(self.last_cursor_x, self.last_cursor_y);
+            self.draw_glyph(
+                self.last_cursor_x,
+                self.last_cursor_y,
+                old_ch,
+                COLOR_FG,
+                COLOR_BG,
+            );
+        }
+
+        // 2) Paint the current cell (to clear any old cursor block there too).
+        let ch = self.get_cell(self.cursor_x, self.cursor_y);
+        self.draw_glyph(self.cursor_x, self.cursor_y, ch, COLOR_FG, COLOR_BG);
+
+        // 3) Draw cursor block if visible.
+        if self.cursor_visible {
+            self.draw_cursor_block(self.cursor_x, self.cursor_y);
+        }
+
+        // 4) Update last cursor position.
+        self.last_cursor_x = self.cursor_x;
+        self.last_cursor_y = self.cursor_y;
+    }
+
+    fn get_cell(&self, x: usize, y: usize) -> u8 {
+        if x >= self.cols || y >= self.rows {
+            return b' ';
+        }
+        self.cells[y * self.cols + x]
+    }
+
+    fn draw_cursor_block(&mut self, x: usize, y: usize) {
+        let px = x * GLYPH_W;
+        let py = y * GLYPH_H + (GLYPH_H - 2);
+        for dy in 0..2 {
+            for dx in 0..GLYPH_W {
+                self.put_pixel(px + dx, py + dy, COLOR_FG);
+            }
+        }
+    }
+
+    fn draw_glyph(&mut self, x: usize, y: usize, ch: u8, fg: u32, bg: u32) {
+        let glyph = font_glyph(ch);
+        let px = x * GLYPH_W;
+        let py = y * GLYPH_H;
+
+        for row in 0..GLYPH_H {
+            let line = glyph[row];
+            for col in 0..GLYPH_W {
+                // FIX: Most 8x8 fonts store leftmost pixel in bit 7.
+                let bit = (line >> (7 - col)) & 1;
+                let color = if bit == 1 { fg } else { bg };
+                self.put_pixel(px + col, py + row, color);
+            }
+        }
+    }
+    fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let offset = y * self.pitch + x * 4;
+        unsafe {
+            let ptr = self.fb.add(offset) as *mut u32;
+            ptr.write_volatile(color);
+        }
+    }
+}
+
+fn font_glyph(ch: u8) -> [u8; GLYPH_H] {
+    if ch < 32 || ch > 127 {
+        return [0u8; GLYPH_H];
+    }
+    let idx = (ch - 32) as usize * GLYPH_H;
+    let mut glyph = [0u8; GLYPH_H];
+    glyph.copy_from_slice(&FONT8X8[idx..idx + GLYPH_H]);
+    glyph
+}
+
+// font8x8_basic for ASCII 0x20..0x7F
+const FONT8X8: [u8; 96 * 8] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x3c, 0x3c, 0x18, 0x18, 0x00, 0x18, 0x00,
+    0x6c, 0x6c, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6c, 0x6c, 0xfe, 0x6c, 0xfe, 0x6c, 0x6c, 0x00,
+    0x18, 0x3e, 0x60, 0x3c, 0x06, 0x7c, 0x18, 0x00, 0x00, 0xc6, 0xcc, 0x18, 0x30, 0x66, 0xc6, 0x00,
+    0x38, 0x6c, 0x38, 0x76, 0xdc, 0xcc, 0x76, 0x00, 0x30, 0x30, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0c, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0c, 0x00, 0x30, 0x18, 0x0c, 0x0c, 0x0c, 0x18, 0x30, 0x00,
+    0x00, 0x66, 0x3c, 0xff, 0x3c, 0x66, 0x00, 0x00, 0x00, 0x18, 0x18, 0x7e, 0x18, 0x18, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x06, 0x0c, 0x18, 0x30, 0x60, 0xc0, 0x80, 0x00,
+    0x7c, 0xc6, 0xce, 0xde, 0xf6, 0xe6, 0x7c, 0x00, 0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00,
+    0x7c, 0xc6, 0x06, 0x1c, 0x70, 0xc0, 0xfe, 0x00, 0x7c, 0xc6, 0x06, 0x3c, 0x06, 0xc6, 0x7c, 0x00,
+    0x1c, 0x3c, 0x6c, 0xcc, 0xfe, 0x0c, 0x1e, 0x00, 0xfe, 0xc0, 0xfc, 0x06, 0x06, 0xc6, 0x7c, 0x00,
+    0x3c, 0x60, 0xc0, 0xfc, 0xc6, 0xc6, 0x7c, 0x00, 0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x30, 0x30, 0x00,
+    0x7c, 0xc6, 0xc6, 0x7c, 0xc6, 0xc6, 0x7c, 0x00, 0x7c, 0xc6, 0xc6, 0x7e, 0x06, 0x0c, 0x78, 0x00,
+    0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x30,
+    0x0e, 0x1c, 0x38, 0x70, 0x38, 0x1c, 0x0e, 0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x7e, 0x00, 0x00,
+    0x70, 0x38, 0x1c, 0x0e, 0x1c, 0x38, 0x70, 0x00, 0x7c, 0xc6, 0x0c, 0x18, 0x18, 0x00, 0x18, 0x00,
+    0x7c, 0xc6, 0xde, 0xde, 0xde, 0xc0, 0x7c, 0x00, 0x38, 0x6c, 0xc6, 0xc6, 0xfe, 0xc6, 0xc6, 0x00,
+    0xfc, 0x66, 0x66, 0x7c, 0x66, 0x66, 0xfc, 0x00, 0x3c, 0x66, 0xc0, 0xc0, 0xc0, 0x66, 0x3c, 0x00,
+    0xf8, 0x6c, 0x66, 0x66, 0x66, 0x6c, 0xf8, 0x00, 0xfe, 0x62, 0x68, 0x78, 0x68, 0x62, 0xfe, 0x00,
+    0xfe, 0x62, 0x68, 0x78, 0x68, 0x60, 0xf0, 0x00, 0x3c, 0x66, 0xc0, 0xc0, 0xce, 0x66, 0x3e, 0x00,
+    0xc6, 0xc6, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00, 0x7e, 0x18, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00,
+    0x1e, 0x0c, 0x0c, 0x0c, 0xcc, 0xcc, 0x78, 0x00, 0xe6, 0x66, 0x6c, 0x78, 0x6c, 0x66, 0xe6, 0x00,
+    0xf0, 0x60, 0x60, 0x60, 0x62, 0x66, 0xfe, 0x00, 0xc6, 0xee, 0xfe, 0xfe, 0xd6, 0xc6, 0xc6, 0x00,
+    0xc6, 0xe6, 0xf6, 0xde, 0xce, 0xc6, 0xc6, 0x00, 0x38, 0x6c, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x00,
+    0xfc, 0x66, 0x66, 0x7c, 0x60, 0x60, 0xf0, 0x00, 0x38, 0x6c, 0xc6, 0xc6, 0xda, 0x6c, 0x3a, 0x00,
+    0xfc, 0x66, 0x66, 0x7c, 0x6c, 0x66, 0xe6, 0x00, 0x7c, 0xc6, 0x60, 0x38, 0x0c, 0xc6, 0x7c, 0x00,
+    0x7e, 0x7e, 0x5a, 0x18, 0x18, 0x18, 0x3c, 0x00, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00,
+    0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x00, 0xc6, 0xc6, 0xc6, 0xd6, 0xfe, 0xee, 0xc6, 0x00,
+    0xc6, 0xc6, 0x6c, 0x38, 0x38, 0x6c, 0xc6, 0x00, 0x66, 0x66, 0x66, 0x3c, 0x18, 0x18, 0x3c, 0x00,
+    0xfe, 0xc6, 0x8c, 0x18, 0x32, 0x66, 0xfe, 0x00, 0x3c, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3c, 0x00,
+    0xc0, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x02, 0x00, 0x3c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3c, 0x00,
+    0x10, 0x38, 0x6c, 0xc6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff,
+    0x30, 0x18, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7c, 0x06, 0x7e, 0xc6, 0x7e, 0x00,
+    0xe0, 0x60, 0x7c, 0x66, 0x66, 0x66, 0xdc, 0x00, 0x00, 0x00, 0x7c, 0xc6, 0xc0, 0xc6, 0x7c, 0x00,
+    0x1c, 0x0c, 0x7c, 0xcc, 0xcc, 0xcc, 0x76, 0x00, 0x00, 0x00, 0x7c, 0xc6, 0xfe, 0xc0, 0x7c, 0x00,
+    0x3c, 0x66, 0x60, 0xf8, 0x60, 0x60, 0xf0, 0x00, 0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0xf8,
+    0xe0, 0x60, 0x6c, 0x76, 0x66, 0x66, 0xe6, 0x00, 0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3c, 0x00,
+    0x06, 0x00, 0x06, 0x06, 0x06, 0x66, 0x66, 0x3c, 0xe0, 0x60, 0x66, 0x6c, 0x78, 0x6c, 0xe6, 0x00,
+    0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00, 0x00, 0x00, 0xec, 0xfe, 0xd6, 0xd6, 0xc6, 0x00,
+    0x00, 0x00, 0xdc, 0x66, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00, 0x7c, 0xc6, 0xc6, 0xc6, 0x7c, 0x00,
+    0x00, 0x00, 0xdc, 0x66, 0x66, 0x7c, 0x60, 0xf0, 0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0x1e,
+    0x00, 0x00, 0xdc, 0x76, 0x66, 0x60, 0xf0, 0x00, 0x00, 0x00, 0x7e, 0xc0, 0x7c, 0x06, 0xfc, 0x00,
+    0x30, 0x30, 0xfc, 0x30, 0x30, 0x36, 0x1c, 0x00, 0x00, 0x00, 0xcc, 0xcc, 0xcc, 0xcc, 0x76, 0x00,
+    0x00, 0x00, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x00, 0x00, 0x00, 0xc6, 0xd6, 0xd6, 0xfe, 0x6c, 0x00,
+    0x00, 0x00, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0x00, 0x00, 0x00, 0xc6, 0xc6, 0xc6, 0x7e, 0x06, 0xfc,
+    0x00, 0x00, 0xfe, 0x8c, 0x18, 0x32, 0xfe, 0x00, 0x0e, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0e, 0x00,
+    0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00, 0x70, 0x18, 0x18, 0x0e, 0x18, 0x18, 0x70, 0x00,
+    0x76, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x38, 0x6c, 0xc6, 0xc6, 0xfe, 0x00,
+];
