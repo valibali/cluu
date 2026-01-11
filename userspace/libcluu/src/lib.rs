@@ -48,6 +48,7 @@ pub use syscall::{
     endpoint_create,
     ipc_call,
     ipc_recv,
+    ipc_recv_timeout,
     ipc_reply,
 
     // IPC

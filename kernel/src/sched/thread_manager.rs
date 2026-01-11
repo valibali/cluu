@@ -52,6 +52,9 @@ static SCHEDULER_MODE: AtomicBool = AtomicBool::new(false); // false = INIT, tru
 static CRITICAL_PROCESS_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_THREAD_ID: AtomicU64 = AtomicU64::new(u64::MAX);
 
+/// Global scheduler tick counter (incremented by timer interrupt)
+static SCHEDULER_TICKS: AtomicU64 = AtomicU64::new(0);
+
 /// Multi-slot pending wake queue (lock-free)
 /// Each slot holds a thread ID (0 = empty). Allows multiple concurrent wakes.
 const PENDING_WAKE_SLOTS: usize = 8;
@@ -183,6 +186,54 @@ impl ThreadManager {
         });
     }
 
+    /// Block current thread with a timeout deadline
+    ///
+    /// The thread will be automatically woken when the deadline expires.
+    pub fn block_current_with_timeout(deadline: u64) {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return,
+        };
+        klibcluu::trace("block_current_with_timeout: thread=");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", current.as_u64());
+        klibcluu::trace(" deadline=");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", deadline);
+        klibcluu::trace(" current_tick=");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", Self::current_tick());
+        Self::with_thread_mut(current, |thread| {
+            thread.set_timeout_deadline(deadline);
+            thread.make_blocked();
+        });
+    }
+
+    /// Convert milliseconds to tick deadline from now
+    ///
+    /// Timer runs at 250Hz = 4ms per tick.
+    /// Returns absolute deadline tick.
+    pub fn ms_to_deadline(timeout_ms: u64) -> u64 {
+        const MS_PER_TICK: u64 = 4;
+        let current = Self::current_tick();
+        let ticks = (timeout_ms + MS_PER_TICK - 1) / MS_PER_TICK; // Round up
+        current + ticks
+    }
+
+    /// Check if current thread woke from timeout and clear the flag
+    ///
+    /// Returns true if the thread was woken due to timeout expiry.
+    /// The flag is cleared after checking.
+    pub fn check_and_clear_timeout_wake() -> bool {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return false,
+        };
+        Self::with_thread_mut(current, |thread| {
+            let was_timeout = thread.woke_from_timeout;
+            thread.woke_from_timeout = false;
+            was_timeout
+        })
+        .unwrap_or(false)
+    }
+
     pub fn wake_thread(thread_id: ThreadId) {
         // Try to wake immediately if locks are available
         let priority = {
@@ -197,6 +248,8 @@ impl ThreadManager {
             match repo.get_mut(thread_id) {
                 Some(thread) if !thread.is_dead() => {
                     thread.make_ready();
+                    thread.clear_timeout_deadline(); // Clear any pending timeout
+                    thread.woke_from_timeout = false; // Not a timeout wake
                     Some(thread.priority)
                 }
                 _ => None,
@@ -311,9 +364,94 @@ impl ThreadManager {
 
     /// Handle timer tick (only in NORMALMODE)
     pub fn tick() {
+        // Increment global tick counter
+        let tick = SCHEDULER_TICKS.fetch_add(1, Ordering::SeqCst) + 1;
+
+        // Log first 30 ticks and then every 50 ticks for debugging
+        if tick <= 30 || tick % 50 == 0 {
+            klibcluu::trace("tick: ");
+            klibcluu::log_dec(klibcluu::LogLevel::Trace, "", tick);
+        }
+
         if Self::is_normal_mode() {
-            let mut scheduler = SCHEDULER.lock();
-            scheduler.tick();
+            if let Some(mut scheduler) = SCHEDULER.try_lock() {
+                scheduler.tick();
+            }
+        }
+
+        // Check for expired timeouts and wake blocked threads
+        Self::check_timeouts();
+    }
+
+    /// Get current scheduler tick count
+    pub fn current_tick() -> u64 {
+        SCHEDULER_TICKS.load(Ordering::Acquire)
+    }
+
+    /// Check all blocked threads for expired timeouts and wake them
+    ///
+    /// Uses try_lock to avoid deadlock when called from interrupt context.
+    fn check_timeouts() {
+        let current_tick = Self::current_tick();
+
+        // Try to get repo lock - skip if unavailable (avoid deadlock in interrupt)
+        let mut repo = match THREAD_REPOSITORY.try_lock() {
+            Some(r) => r,
+            None => {
+                // Log first few skips
+                static SKIP_COUNT: core::sync::atomic::AtomicU64 =
+                    core::sync::atomic::AtomicU64::new(0);
+                let count = SKIP_COUNT.fetch_add(1, Ordering::Relaxed);
+                if count < 10 {
+                    klibcluu::trace("check_timeouts: skip (lock held)");
+                }
+                return;
+            }
+        };
+
+        // Collect thread IDs to wake (can't wake while holding repo lock)
+        let mut to_wake = alloc::vec::Vec::new();
+
+        for (thread_id, thread) in repo.iter_mut() {
+            // Debug: log blocked threads with deadlines (once per second)
+            if thread.is_blocked() && thread.timeout_deadline.is_some() && current_tick % 250 == 0 {
+                klibcluu::trace("check_timeouts: blocked thread ");
+                klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+                klibcluu::trace(" deadline=");
+                klibcluu::log_dec(
+                    klibcluu::LogLevel::Trace,
+                    "",
+                    thread.timeout_deadline.unwrap_or(0),
+                );
+                klibcluu::trace(" tick=");
+                klibcluu::log_dec(klibcluu::LogLevel::Trace, "", current_tick);
+            }
+
+            if thread.is_blocked() && thread.is_timeout_expired(current_tick) {
+                klibcluu::trace("check_timeouts: waking thread ");
+                klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+                klibcluu::trace(" at tick ");
+                klibcluu::log_dec(klibcluu::LogLevel::Trace, "", current_tick);
+                thread.make_ready();
+                thread.clear_timeout_deadline();
+                thread.woke_from_timeout = true; // Mark as timeout wakeup
+                to_wake.push((*thread_id, thread.priority));
+            }
+        }
+        drop(repo);
+
+        // Add woken threads to scheduler - also use try_lock
+        if !to_wake.is_empty() {
+            if let Some(mut scheduler) = SCHEDULER.try_lock() {
+                for (thread_id, priority) in to_wake {
+                    scheduler.add(thread_id, priority);
+                }
+            } else {
+                // Can't get scheduler lock - queue for later pickup
+                for (thread_id, _priority) in to_wake {
+                    Self::queue_pending_wake(thread_id);
+                }
+            }
         }
     }
 
@@ -461,6 +599,8 @@ impl ThreadManager {
                 match repo.get_mut(thread_id) {
                     Some(thread) if !thread.is_dead() => {
                         thread.make_ready();
+                        thread.clear_timeout_deadline(); // Clear any pending timeout
+                        thread.woke_from_timeout = false; // Not a timeout wake
                         Some(thread.priority)
                     }
                     _ => None,

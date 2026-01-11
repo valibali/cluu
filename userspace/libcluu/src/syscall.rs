@@ -251,6 +251,34 @@ pub fn ipc_recv_nonblocking(endpoint_token: usize, buf: &mut [u8]) -> Result<usi
     }
 }
 
+/// Receive IPC message from endpoint with timeout
+///
+/// Blocks until a message arrives or the timeout expires.
+///
+/// # Arguments
+///
+/// - `endpoint_token`: Token handle for the endpoint
+/// - `buf`: Buffer to receive message into
+/// - `timeout_ms`: Timeout in milliseconds (0 = block forever)
+///
+/// # Returns
+///
+/// - `Ok(bytes_received)`: Number of bytes received
+/// - `Err(Error::Timeout)`: Timeout expired before message arrived
+/// - `Err(error)`: Other errors (invalid token, buffer too small, etc.)
+#[inline]
+pub fn ipc_recv_timeout(endpoint_token: usize, buf: &mut [u8], timeout_ms: usize) -> Result<usize> {
+    unsafe {
+        syscall4(
+            SyscallNumber::Recv,
+            endpoint_token,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+            timeout_ms,
+        )
+    }
+}
+
 /// Call (send + receive) for synchronous RPC
 ///
 /// Sends a message and blocks waiting for a reply.

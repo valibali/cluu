@@ -10,7 +10,7 @@ use libcluu::ipc::{
     CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL, CONSOLE_WRITE_LABEL,
 };
 use libcluu::types::Message;
-use libcluu::{console_info, debug_print, syscall, yield_cpu, Error, Result, CONSOLE_FB_BASE};
+use libcluu::{console_info, debug_print, syscall, Error, Result, CONSOLE_FB_BASE};
 
 const GLYPH_W: usize = 8;
 const GLYPH_H: usize = 8;
@@ -21,9 +21,6 @@ static LOG_WRITE_SEEN: AtomicBool = AtomicBool::new(false);
 static LOG_CLEAR_SEEN: AtomicBool = AtomicBool::new(false);
 static LOG_CURSOR_SEEN: AtomicBool = AtomicBool::new(false);
 static LOG_BLINK_SEEN: AtomicBool = AtomicBool::new(false);
-static LOG_RECV_OK: AtomicBool = AtomicBool::new(false);
-static LOG_RECV_WOULDBLOCK: AtomicBool = AtomicBool::new(false);
-static LOG_PARSE_FAIL: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -32,6 +29,10 @@ pub extern "C" fn main() -> i32 {
         Err(_) => -1,
     }
 }
+
+/// Cursor blink timeout in milliseconds
+/// At 250Hz timer (4ms per tick), 80ms gives us ~12.5Hz blink rate
+const BLINK_TIMEOUT_MS: usize = 500;
 
 fn run() -> Result<()> {
     let info = console_info();
@@ -43,40 +44,32 @@ fn run() -> Result<()> {
         info.pitch as usize,
     );
 
-    debug_print(&format!("console: endpoint {}", info.endpoint))?;
-    debug_print("console: ready")?;
-    yield_cpu()?;
+    syscall::yield_cpu()?;
 
     let mut buf = [0u8; 512];
     loop {
-        // Try receiving without blocking so we can keep blinking even while idle.
-        match syscall::ipc_recv(info.endpoint, &mut buf) {
+        // Block until message arrives or timeout expires (for cursor blinking)
+        match syscall::ipc_recv_timeout(info.endpoint, &mut buf, BLINK_TIMEOUT_MS) {
             Ok(len) => {
-                if !LOG_RECV_OK.swap(true, Ordering::Relaxed) {
-                    let _ = debug_print(&format!("console: recv len {}", len));
-                }
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
                     console.handle_message(&msg, payload);
-                } else if !LOG_PARSE_FAIL.swap(true, Ordering::Relaxed) {
+                } else {
                     let _ = debug_print(&format!("console: parse failed len {}", len));
                 }
             }
+            Err(Error::Timeout) => {
+                // Timeout expired - toggle cursor visibility
+                console.tick();
+            }
             Err(Error::WouldBlock) => {
-                if !LOG_RECV_WOULDBLOCK.swap(true, Ordering::Relaxed) {
-                    let _ = debug_print("console: recv would-block");
-                }
-                // no messages — keep running so the cursor can blink
+                // Shouldn't happen with blocking recv, but handle it
+                console.tick();
             }
             Err(_) => {
+                let _ = debug_print("console: other recv error");
                 // ignore other IPC issues for now
             }
         }
-
-        // Run blink/timer logic regardless of IPC activity.
-        console.tick();
-
-        // Cooperate with scheduler.
-        let _ = yield_cpu();
     }
 }
 
@@ -105,7 +98,6 @@ struct Console {
     cursor_y: usize,
     cursor_visible: bool,
     blink_enabled: bool,
-    blink_ticks: usize,
     cells: Vec<u8>,
     last_cursor_x: usize,
     last_cursor_y: usize,
@@ -126,7 +118,6 @@ impl Console {
             cursor_y: 0,
             cursor_visible: true,
             blink_enabled: true,
-            blink_ticks: 0,
             cells: alloc::vec![b' '; cols * rows],
             last_cursor_x: 0,
             last_cursor_y: 0,
@@ -175,11 +166,9 @@ impl Console {
         if !self.blink_enabled {
             return;
         }
-        self.blink_ticks = self.blink_ticks.wrapping_add(1);
-        if self.blink_ticks % 20 == 0 {
-            self.cursor_visible = !self.cursor_visible;
-            self.redraw_cursor();
-        }
+        // Toggle cursor visibility on each timeout
+        self.cursor_visible = !self.cursor_visible;
+        self.redraw_cursor();
     }
 
     fn clear(&mut self) {

@@ -143,6 +143,12 @@ pub struct Thread {
 
     /// Remaining time slice in ticks (for round-robin within priority)
     pub time_slice_remaining: u64,
+
+    /// Deadline tick for timeout wakeup (None = no timeout, blocks forever)
+    pub timeout_deadline: Option<u64>,
+
+    /// Set to true when thread was woken due to timeout expiry
+    pub woke_from_timeout: bool,
 }
 
 impl Thread {
@@ -203,6 +209,8 @@ impl Thread {
             context,
             page_table_root,
             time_slice_remaining: 10, // Default 10 ticks
+            timeout_deadline: None,
+            woke_from_timeout: false,
         }
     }
 
@@ -231,6 +239,8 @@ impl Thread {
             context,
             page_table_root,
             time_slice_remaining: 10,
+            timeout_deadline: None,
+            woke_from_timeout: false,
         }
     }
 
@@ -305,6 +315,24 @@ impl Thread {
             self.time_slice_remaining == 0
         } else {
             true
+        }
+    }
+
+    /// Set timeout deadline for blocking operations
+    pub fn set_timeout_deadline(&mut self, deadline: u64) {
+        self.timeout_deadline = Some(deadline);
+    }
+
+    /// Clear timeout deadline
+    pub fn clear_timeout_deadline(&mut self) {
+        self.timeout_deadline = None;
+    }
+
+    /// Check if timeout has expired given the current tick
+    pub fn is_timeout_expired(&self, current_tick: u64) -> bool {
+        match self.timeout_deadline {
+            Some(deadline) => current_tick >= deadline,
+            None => false,
         }
     }
 }

@@ -564,6 +564,12 @@ extern "C" fn timer_interrupt_dispatch(
 
 #[no_mangle]
 extern "C" fn timer_interrupt_ack() {
+    // Always tick the scheduler counter, even on fast path (kernel mode without scheduling)
+    // This ensures timeouts are checked and the tick counter advances
+    if crate::sched::ThreadManager::is_normal_mode() {
+        crate::sched::ThreadManager::tick();
+    }
+
     if crate::architecture::x86_64::apic::is_enabled() {
         crate::architecture::x86_64::apic::eoi();
     } else {

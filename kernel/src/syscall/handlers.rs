@@ -73,11 +73,13 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
 /// - arg1: endpoint_token (TokenHandle)
 /// - arg2: buf_ptr (*mut u8)
 /// - arg3: buf_len (usize)
-/// - arg4-arg6: unused
+/// - arg4: timeout_ms (0 = block forever, >0 = timeout in milliseconds)
+/// - arg5-arg6: unused
 ///
 /// # Returns
 ///
 /// - Ok(bytes_received): Number of bytes received
+/// - Err(Error::Timeout): Timeout expired before message arrived
 /// - Err(Error): Token invalid, insufficient rights, or IPC error
 pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
@@ -88,6 +90,15 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     let buf_len_arg = args.arg3;
     let nonblocking = buf_len_arg & NONBLOCK_FLAG != 0;
     let buf_len = buf_len_arg & !NONBLOCK_FLAG;
+    let timeout_ms = args.arg4 as u64;
+
+    // Debug: log timeout value (once to avoid spam)
+    static LOGGED_TIMEOUT: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+    if timeout_ms > 0 && !LOGGED_TIMEOUT.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        klibcluu::trace("sys_recv: timeout_ms=");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", timeout_ms);
+    }
 
     let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
     if !token.has_right(Rights::IPC_RECV) {
@@ -124,9 +135,20 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
             if nonblocking {
                 Err(err)
             } else {
-                crate::sched::ThreadManager::block_current();
+                // Block with or without timeout
+                if timeout_ms > 0 {
+                    let deadline = crate::sched::ThreadManager::ms_to_deadline(timeout_ms);
+                    crate::sched::ThreadManager::block_current_with_timeout(deadline);
+                } else {
+                    crate::sched::ThreadManager::block_current();
+                }
                 crate::architecture::x86_64::syscall::request_resched();
-                Err(err)
+                // After waking, check if it was due to timeout
+                if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
+                    Err(Error::Timeout)
+                } else {
+                    Err(err) // WouldBlock - message arrived, retry will succeed
+                }
             }
         }
         Err(err) => Err(err),
