@@ -45,23 +45,47 @@ impl EndpointMessage {
     }
 }
 
+/// A call message includes the caller's thread ID for reply routing
+#[derive(Clone)]
+pub struct CallMessage {
+    pub caller: ThreadId,
+    pub message: EndpointMessage,
+}
+
 pub trait ByteEndpoint: Send {
     fn send(&mut self, data: &[u8]) -> Result<Option<ThreadId>, Error>;
     fn recv(&mut self, receiver: ThreadId) -> Result<Option<EndpointMessage>, Error>;
     fn recv_nonblocking(&mut self) -> Result<Option<EndpointMessage>, Error>;
+    /// Send a call message (with caller ID for reply routing)
+    fn send_call(&mut self, caller: ThreadId, data: &[u8]) -> Result<Option<ThreadId>, Error>;
+    /// Receive, preferring call messages. Returns (message, caller_id if call)
+    fn recv_call(&mut self, receiver: ThreadId) -> Result<Option<(EndpointMessage, Option<ThreadId>)>, Error>;
 }
 
 pub struct QueueEndpoint {
+    /// Regular message queue
     queue: VecDeque<EndpointMessage>,
+    /// Call message queue (messages from call() that expect reply)
+    call_queue: VecDeque<CallMessage>,
+    /// Threads waiting to receive
     waiting_receivers: VecDeque<ThreadId>,
+    /// The caller currently being served (for reply routing)
+    current_caller: Option<ThreadId>,
 }
 
 impl QueueEndpoint {
     fn new() -> Self {
         Self {
             queue: VecDeque::new(),
+            call_queue: VecDeque::new(),
             waiting_receivers: VecDeque::new(),
+            current_caller: None,
         }
+    }
+
+    /// Get and clear the current caller (for reply)
+    pub fn take_current_caller(&mut self) -> Option<ThreadId> {
+        self.current_caller.take()
     }
 }
 
@@ -73,6 +97,12 @@ impl ByteEndpoint for QueueEndpoint {
     }
 
     fn recv(&mut self, receiver: ThreadId) -> Result<Option<EndpointMessage>, Error> {
+        // First check call queue (call messages take priority)
+        if let Some(call_msg) = self.call_queue.pop_front() {
+            self.current_caller = Some(call_msg.caller);
+            return Ok(Some(call_msg.message));
+        }
+        // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
             return Ok(Some(msg));
         }
@@ -81,9 +111,35 @@ impl ByteEndpoint for QueueEndpoint {
     }
 
     fn recv_nonblocking(&mut self) -> Result<Option<EndpointMessage>, Error> {
+        // First check call queue
+        if let Some(call_msg) = self.call_queue.pop_front() {
+            self.current_caller = Some(call_msg.caller);
+            return Ok(Some(call_msg.message));
+        }
+        // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
             return Ok(Some(msg));
         }
+        Err(Error::WouldBlock)
+    }
+
+    fn send_call(&mut self, caller: ThreadId, data: &[u8]) -> Result<Option<ThreadId>, Error> {
+        let msg = EndpointMessage::new(data)?;
+        self.call_queue.push_back(CallMessage { caller, message: msg });
+        Ok(self.waiting_receivers.pop_front())
+    }
+
+    fn recv_call(&mut self, receiver: ThreadId) -> Result<Option<(EndpointMessage, Option<ThreadId>)>, Error> {
+        // First check call queue
+        if let Some(call_msg) = self.call_queue.pop_front() {
+            self.current_caller = Some(call_msg.caller);
+            return Ok(Some((call_msg.message, Some(call_msg.caller))));
+        }
+        // Then check regular queue
+        if let Some(msg) = self.queue.pop_front() {
+            return Ok(Some((msg, None)));
+        }
+        self.waiting_receivers.push_back(receiver);
         Err(Error::WouldBlock)
     }
 }
@@ -265,4 +321,97 @@ pub fn recv_to_user_nonblocking(
         page_table_root,
     )?;
     Ok(msg.len())
+}
+
+/// Send a call message from userspace (includes caller ID for reply routing)
+pub fn call_from_user(
+    endpoint: EndpointId,
+    msg_ptr: usize,
+    msg_len: usize,
+    page_table_root: x86_64::PhysAddr,
+    caller: ThreadId,
+) -> Result<(), Error> {
+    crate::syscall::userptr::validate_user_buffer(msg_ptr, msg_len)?;
+    let mut buffer = [0u8; IPC_MESSAGE_MAX];
+    if msg_len > buffer.len() {
+        return Err(Error::InvalidParameter);
+    }
+    crate::syscall::userptr::copy_from_user(
+        buffer.as_mut_ptr(),
+        msg_ptr,
+        msg_len,
+        page_table_root,
+    )?;
+
+    let wake = {
+        let mut guard = ENDPOINTS.lock();
+        let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+        endpoint_obj.send_call(caller, &buffer[..msg_len])?
+    };
+
+    if let Some(thread_id) = wake {
+        crate::sched::ThreadManager::wake_thread(thread_id);
+    }
+    Ok(())
+}
+
+/// Get the current caller for an endpoint (used by reply)
+pub fn take_current_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
+    let mut guard = ENDPOINTS.lock();
+    let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    endpoint_obj.take_current_caller().ok_or(Error::InvalidState)
+}
+
+/// Deliver a reply to a waiting caller
+///
+/// Copies the reply data directly to the caller's reply buffer and wakes them.
+pub fn deliver_reply(
+    caller: ThreadId,
+    reply_data: &[u8],
+) -> Result<usize, Error> {
+    use crate::sched::{CallReplyInfo, ThreadManager};
+
+    // Get caller's reply buffer info
+    let reply_info: CallReplyInfo = ThreadManager::with_thread_mut(caller, |thread| {
+        thread.call_reply_info.take().ok_or(Error::InvalidState)
+    }).ok_or(Error::NotFound)??;
+
+    // Validate and copy reply to caller's buffer
+    if reply_data.len() > reply_info.reply_buf_len {
+        return Err(Error::BufferTooSmall);
+    }
+
+    crate::syscall::userptr::copy_to_user(
+        reply_info.reply_buf_ptr,
+        reply_data.as_ptr(),
+        reply_data.len(),
+        reply_info.page_table_root,
+    )?;
+
+    // Wake the caller
+    ThreadManager::wake_thread(caller);
+
+    Ok(reply_data.len())
+}
+
+/// Deliver a reply from userspace data
+pub fn reply_from_user(
+    caller: ThreadId,
+    reply_ptr: usize,
+    reply_len: usize,
+    page_table_root: x86_64::PhysAddr,
+) -> Result<usize, Error> {
+    crate::syscall::userptr::validate_user_buffer(reply_ptr, reply_len)?;
+    let mut buffer = [0u8; IPC_MESSAGE_MAX];
+    if reply_len > buffer.len() {
+        return Err(Error::InvalidParameter);
+    }
+    crate::syscall::userptr::copy_from_user(
+        buffer.as_mut_ptr(),
+        reply_ptr,
+        reply_len,
+        page_table_root,
+    )?;
+
+    deliver_reply(caller, &buffer[..reply_len])
 }

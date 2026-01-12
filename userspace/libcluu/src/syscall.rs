@@ -313,16 +313,23 @@ pub fn ipc_call(endpoint_token: usize, msg: &[u8], reply_buf: &mut [u8]) -> Resu
 ///
 /// # Arguments
 ///
+/// - `endpoint_token`: Token handle for the endpoint we received the call on
 /// - `msg`: Reply message to send
 ///
 /// # Returns
 ///
-/// - `Ok(())`: Reply sent successfully
+/// - `Ok(bytes_sent)`: Number of bytes sent in reply
 /// - `Err(error)`: No pending call or send failed
 #[inline]
-pub fn ipc_reply(msg: &[u8]) -> Result<()> {
-    unsafe { syscall2(SyscallNumber::Reply, msg.as_ptr() as usize, msg.len())? };
-    Ok(())
+pub fn ipc_reply(endpoint_token: usize, msg: &[u8]) -> Result<usize> {
+    unsafe {
+        syscall3(
+            SyscallNumber::Reply,
+            endpoint_token,
+            msg.as_ptr() as usize,
+            msg.len(),
+        )
+    }
 }
 
 //

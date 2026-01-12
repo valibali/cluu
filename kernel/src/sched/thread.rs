@@ -88,6 +88,17 @@ impl Priority {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadFlags(u32);
 
+/// Information stored when a thread is waiting for a reply from IPC call
+#[derive(Debug, Clone, Copy)]
+pub struct CallReplyInfo {
+    /// Userspace buffer to receive reply
+    pub reply_buf_ptr: usize,
+    /// Size of reply buffer
+    pub reply_buf_len: usize,
+    /// Page table root for copying reply to userspace
+    pub page_table_root: PhysAddr,
+}
+
 impl ThreadFlags {
     /// No flags
     pub const NONE: Self = Self(0);
@@ -149,6 +160,9 @@ pub struct Thread {
 
     /// Set to true when thread was woken due to timeout expiry
     pub woke_from_timeout: bool,
+
+    /// Information for pending IPC call reply (set when thread is waiting for reply)
+    pub call_reply_info: Option<CallReplyInfo>,
 }
 
 impl Thread {
@@ -211,6 +225,7 @@ impl Thread {
             time_slice_remaining: 10, // Default 10 ticks
             timeout_deadline: None,
             woke_from_timeout: false,
+            call_reply_info: None,
         }
     }
 
@@ -241,6 +256,7 @@ impl Thread {
             time_slice_remaining: 10,
             timeout_deadline: None,
             woke_from_timeout: false,
+            call_reply_info: None,
         }
     }
 

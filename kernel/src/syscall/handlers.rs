@@ -171,48 +171,114 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
 /// - Ok(bytes_received): Number of bytes in reply
 /// - Err(Error): Token invalid, insufficient rights, or IPC error
 pub fn sys_call(args: SyscallArgs) -> SyscallResult {
-    let _token_handle = TokenHandle::from_raw(args.arg1);
-    let _msg_ptr = args.arg2 as *const u8;
-    let _msg_len = args.arg3;
-    let _reply_buf = args.arg4 as *mut u8;
-    let _reply_len = args.arg5;
+    use crate::sched::CallReplyInfo;
+    use crate::token::{ObjectRef, ObjectType, Rights};
 
-    // TODO: Implement IPC call
+    let token_handle = TokenHandle::from_raw(args.arg1);
+    let msg_ptr = args.arg2 as usize;
+    let msg_len = args.arg3;
+    let reply_buf = args.arg4 as usize;
+    let reply_len = args.arg5;
+
     // 1. Validate token and check IPC_CALL right
-    // 2. Validate user pointers
-    // 3. Send message
-    // 4. Block for reply
-    // 5. Copy reply to userspace
-    // 6. Return bytes received
+    let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
+    if !token.has_right(Rights::IPC_CALL) {
+        return Err(Error::PermissionDenied);
+    }
 
-    klibcluu::warn("sys_call not yet implemented");
-    Err(Error::NotImplemented)
+    let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+        .map_err(|_| Error::InvalidArgument)?;
+    let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let page_table_root =
+        crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
+    let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
+
+    // 2. Store reply buffer info in current thread before sending
+    crate::sched::ThreadManager::with_thread_mut(current, |thread| {
+        thread.call_reply_info = Some(CallReplyInfo {
+            reply_buf_ptr: reply_buf,
+            reply_buf_len: reply_len,
+            page_table_root,
+        });
+    });
+
+    // 3. Send call message (includes our thread ID for reply routing)
+    crate::ipc::endpoint::call_from_user(endpoint_id, msg_ptr, msg_len, page_table_root, current)?;
+
+    // 4. Block waiting for reply
+    crate::sched::ThreadManager::block_current();
+    crate::architecture::x86_64::syscall::request_resched();
+
+    // 5. When we wake up, the reply has been copied to our buffer by reply handler
+    // Check if reply was actually delivered (reply_info was consumed)
+    let reply_delivered = crate::sched::ThreadManager::with_thread(current, |thread| {
+        thread.call_reply_info.is_none()
+    }).unwrap_or(false);
+
+    if !reply_delivered {
+        // Woken without a reply (e.g., timeout or error) - clean up
+        crate::sched::ThreadManager::with_thread_mut(current, |thread| {
+            thread.call_reply_info = None;
+        });
+        return Err(Error::InvalidState);
+    }
+
+    // 6. Return success - the actual byte count was set by reply handler
+    // For now, return reply_len as we don't track actual bytes written
+    // TODO: Store actual reply length in thread
+    Ok(reply_len)
 }
 
 /// sys_reply - Reply to IPC sender
 ///
 /// # Arguments
 ///
-/// - arg1: msg_ptr (*const u8)
-/// - arg2: msg_len (usize)
-/// - arg3-arg6: unused
+/// - arg1: endpoint_token (TokenHandle) - endpoint we received the call on
+/// - arg2: msg_ptr (*const u8) - reply message
+/// - arg3: msg_len (usize) - reply length
+/// - arg4-arg6: unused
 ///
 /// # Returns
 ///
-/// - Ok(0): Success
+/// - Ok(bytes_sent): Number of bytes in reply
 /// - Err(Error): No pending call or IPC error
 pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
-    let _msg_ptr = args.arg1 as *const u8;
-    let _msg_len = args.arg2;
+    use crate::token::{ObjectRef, ObjectType, Rights};
 
-    // TODO: Implement IPC reply
-    // 1. Check current thread has pending call
-    // 2. Validate user pointer
-    // 3. Copy reply message
-    // 4. Unblock caller
+    let token_handle = TokenHandle::from_raw(args.arg1);
+    let msg_ptr = args.arg2 as usize;
+    let msg_len = args.arg3;
 
-    klibcluu::warn("sys_reply not yet implemented");
-    Err(Error::NotImplemented)
+    // 1. Validate token and check IPC_REPLY right (same as IPC_RECV for now)
+    let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
+    if !token.has_right(Rights::IPC_RECV) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+        .map_err(|_| Error::InvalidArgument)?;
+    let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    // 2. Get the current caller for this endpoint
+    let caller = crate::ipc::endpoint::take_current_caller(endpoint_id)?;
+
+    // 3. Get page table root for copying from userspace
+    let page_table_root =
+        crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
+
+    // 4. Deliver reply to caller (copies to caller's buffer and wakes them)
+    let bytes_sent = crate::ipc::endpoint::reply_from_user(caller, msg_ptr, msg_len, page_table_root)?;
+
+    Ok(bytes_sent)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

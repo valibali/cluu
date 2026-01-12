@@ -64,10 +64,17 @@ pub fn call(endpoint_token: usize, msg: &mut Message, _flags: IpcFlags) -> Resul
 }
 
 /// Reply to a received message
-pub fn reply(msg: &Message, _flags: IpcFlags) -> Result<()> {
+///
+/// # Arguments
+///
+/// - `endpoint_token`: The endpoint token we received the call on
+/// - `msg`: Reply message to send
+/// - `_flags`: IPC flags (currently unused)
+pub fn reply(endpoint_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()> {
     // Send reply using syscall::ipc_reply
     let msg_bytes = msg.as_bytes();
-    syscall::ipc_reply(msg_bytes)
+    syscall::ipc_reply(endpoint_token, msg_bytes)?;
+    Ok(())
 }
 
 /// Reply and receive next message (server loop optimization)
@@ -76,7 +83,7 @@ pub fn reply(msg: &Message, _flags: IpcFlags) -> Result<()> {
 /// In the future, this could be a single optimized syscall.
 pub fn reply_recv(endpoint_token: usize, msg: &mut Message, flags: IpcFlags) -> Result<()> {
     // Send reply first
-    reply(msg, flags)?;
+    reply(endpoint_token, msg, flags)?;
     // Then receive next message
     recv(endpoint_token, msg, flags)
 }
