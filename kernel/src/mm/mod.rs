@@ -229,8 +229,7 @@ pub fn allocate_user_stack(
     stack_size_bytes: usize,
 ) -> Result<(), crate::error::Error> {
     use core::ptr::write_bytes;
-
-    const PAGE_SIZE: usize = 4096;
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
     // Round up to page boundary
     let stack_pages = (stack_size_bytes + PAGE_SIZE - 1) / PAGE_SIZE;

@@ -1,12 +1,11 @@
 //! Helpers for loading ELF segments and stacks into a new address space.
 
-use crate::syscall::space_map;
+use crate::mem::PAGE_SIZE;
+use crate::syscall::space_map_range;
 use crate::{
     elf::{ElfFile, LoadableSegment},
     Error, Result,
 };
-
-const PAGE_SIZE: usize = 4096;
 
 pub fn map_segments(space_token: usize, elf: &ElfFile, bytes: &[u8]) -> Result<()> {
     for segment in elf.segments_iter() {
@@ -32,29 +31,19 @@ fn map_segment(space_token: usize, segment: &LoadableSegment, bytes: &[u8]) -> R
         return Err(Error::InvalidArgument.into());
     }
 
+    // Calculate number of pages needed
+    let num_pages = (mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
     let slice = &bytes[file_offset..file_offset + file_size];
-    let mut mapped = 0usize;
 
-    while mapped < mem_size {
-        let virt = start + mapped;
-        let remaining = file_size.saturating_sub(mapped);
-        let copy_len = remaining.min(PAGE_SIZE);
-        let ptr = if copy_len > 0 {
-            slice[mapped..mapped + copy_len].as_ptr() as usize
-        } else {
-            0
-        };
-
-        space_map(
-            space_token,
-            virt,
-            ptr,
-            segment.page_flags() as usize,
-            copy_len,
-        )?;
-
-        mapped += PAGE_SIZE;
-    }
+    // Use batch mapping for efficiency - maps all pages in one syscall
+    space_map_range(
+        space_token,
+        start,
+        slice.as_ptr() as usize,
+        segment.page_flags() as usize,
+        num_pages,
+        file_size,
+    )?;
 
     Ok(())
 }
@@ -65,10 +54,18 @@ pub fn map_stack(
     stack_size: usize,
     flags: usize,
 ) -> Result<()> {
-    let mut addr = stack_top - stack_size;
-    while addr < stack_top {
-        space_map(space_token, addr, 0, flags, 0)?;
-        addr += PAGE_SIZE;
-    }
+    let stack_base = stack_top - stack_size;
+    let num_pages = stack_size / PAGE_SIZE;
+
+    // Use batch mapping for efficiency - maps all stack pages in one syscall
+    space_map_range(
+        space_token,
+        stack_base,
+        0,      // zero-fill (no source data)
+        flags,
+        num_pages,
+        0,      // no data to copy
+    )?;
+
     Ok(())
 }

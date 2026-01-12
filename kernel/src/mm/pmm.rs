@@ -18,10 +18,8 @@
 extern crate alloc;
 use super::traits::{AllocationStats, PageAllocator};
 use alloc::vec::Vec;
+use klibcluu::util::PAGE_SIZE;
 use x86_64::PhysAddr;
-
-/// Page size constant (4 KiB)
-const PAGE_SIZE: u64 = 0x1000;
 
 /// Maximum order supported (2^MAX_ORDER pages)
 /// Order 12 = 4096 pages = 16 MB max allocation

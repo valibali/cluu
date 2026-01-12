@@ -355,6 +355,7 @@ pub enum InvokeOp {
     SpaceMap = 12,
     SpaceUnmap = 13,
     SpaceGrant = 14,
+    SpaceMapRange = 15, // Batch mapping for multiple pages
 
     // Token operations
     TokenDerive = 20,
@@ -381,6 +382,7 @@ impl InvokeOp {
             12 => Some(Self::SpaceMap),
             13 => Some(Self::SpaceUnmap),
             14 => Some(Self::SpaceGrant),
+            15 => Some(Self::SpaceMapRange),
             20 => Some(Self::TokenDerive),
             21 => Some(Self::TokenRevoke),
             30 => Some(Self::IrqAttach),

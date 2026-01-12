@@ -42,7 +42,7 @@ pub fn map_phys_to_userspace(
     size: u64,
     writable: bool,
 ) -> Result<(), Error> {
-    const PAGE_SIZE: u64 = 4096;
+    use klibcluu::util::PAGE_SIZE;
 
     // Validate alignment
     if virt_base & 0xFFF != 0 {
@@ -96,7 +96,7 @@ pub fn unmap_phys_from_userspace(
     virt_base: u64,
     size: u64,
 ) -> Result<(), Error> {
-    const PAGE_SIZE: u64 = 4096;
+    use klibcluu::util::PAGE_SIZE;
 
     // Validate alignment
     if virt_base & 0xFFF != 0 {

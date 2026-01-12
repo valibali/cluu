@@ -1265,8 +1265,7 @@ fn convert_flags_from_x86(x86_flags: PageTableFlags) -> PageFlags {
 mod tests {
     use super::*;
     use crate::mm::{BuddyAllocator, MemoryRegion, MockPageAllocator};
-
-    const PAGE_SIZE: u64 = 4096;
+    use klibcluu::util::PAGE_SIZE;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Page Table Creation Tests

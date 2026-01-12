@@ -24,6 +24,7 @@ pub mod boot;
 pub mod elf;
 pub mod error;
 pub mod ipc;
+pub mod mem;
 pub mod process;
 pub mod rights;
 pub mod runtime;
@@ -58,6 +59,7 @@ pub use syscall::{
     irq_attach,
     space_create,
     space_map,
+    space_map_range,
     thread_create,
     token_derive,
     // Core syscalls
@@ -68,3 +70,11 @@ pub use syscall::{
     MAP_DEVICE,
 };
 pub use types::*;
+
+// Memory constants
+pub use mem::{
+    LARGE_PAGE_SIZE, PAGE_SIZE, PAGES_PER_LARGE_PAGE,
+    page_align_up, page_align_down, is_aligned,
+    large_page_align_up, large_page_align_down, is_large_page_aligned,
+    pages_for_size, large_pages_for_size,
+};

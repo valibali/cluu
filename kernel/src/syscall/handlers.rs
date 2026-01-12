@@ -105,9 +105,8 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
         return Err(Error::PermissionDenied);
     }
 
-    let endpoint_ref =
-        crate::token::resolve_token_object(&token, ObjectType::Endpoint)
-            .map_err(|_| Error::InvalidArgument)?;
+    let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+        .map_err(|_| Error::InvalidArgument)?;
     let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
         id
     } else {
@@ -218,7 +217,8 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     // Check if reply was actually delivered (reply_info was consumed)
     let reply_delivered = crate::sched::ThreadManager::with_thread(current, |thread| {
         thread.call_reply_info.is_none()
-    }).unwrap_or(false);
+    })
+    .unwrap_or(false);
 
     if !reply_delivered {
         // Woken without a reply (e.g., timeout or error) - clean up
@@ -276,7 +276,8 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
         crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
 
     // 4. Deliver reply to caller (copies to caller's buffer and wakes them)
-    let bytes_sent = crate::ipc::endpoint::reply_from_user(caller, msg_ptr, msg_len, page_table_root)?;
+    let bytes_sent =
+        crate::ipc::endpoint::reply_from_user(caller, msg_ptr, msg_len, page_table_root)?;
 
     Ok(bytes_sent)
 }
@@ -368,6 +369,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::SpaceMap => invoke_space_map(&token, args),
         InvokeOp::SpaceUnmap => invoke_space_unmap(&token, args),
         InvokeOp::SpaceGrant => invoke_space_grant(&token, args),
+        InvokeOp::SpaceMapRange => invoke_space_map_range(&token, args),
 
         // Token operations
         InvokeOp::TokenDerive => invoke_token_derive(token_handle, &token, args),
@@ -572,11 +574,11 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     use crate::syscall::userptr;
     use crate::token::{ObjectRef, ObjectType, Rights};
     use core::ptr::{copy_nonoverlapping, write_bytes};
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
-    const PAGE_SIZE: usize = 4096;
     const MAP_DEVICE: u32 = 0x100;
 
-    //klibcluu::trace("invoke_space_map");
+    klibcluu::trace("invoke_space_map");
 
     if !token.has_right(Rights::SPACE_MAP) {
         klibcluu::warn("invoke_space_map: missing SPACE_MAP right");
@@ -666,6 +668,136 @@ fn invoke_space_unmap(_token: &Token, _args: SyscallArgs) -> SyscallResult {
 fn invoke_space_grant(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     klibcluu::warn("invoke_space_grant not yet implemented");
     Err(Error::NotImplemented)
+}
+
+/// Batch map multiple pages into an address space
+///
+/// # Arguments
+///
+/// - arg3: virt_start (u64) - starting virtual address (must be page-aligned)
+/// - arg4: data_ptr (usize) - pointer to source data buffer, or 0 for zero-fill
+/// - arg5: flags (usize) - permission flags (same as SpaceMap)
+/// - arg6: combined (usize) - upper 32 bits: num_pages, lower 32 bits: data_len
+///
+/// # Behavior
+///
+/// Maps `num_pages` consecutive 4KB pages starting at `virt_start`.
+/// - If data_ptr is 0, all pages are zero-filled
+/// - If data_ptr is non-zero, copies `data_len` bytes from data_ptr into the mapped pages
+/// - Any bytes beyond data_len are zero-filled (for .bss sections)
+fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::elf;
+    use crate::mm::{physmap, pmm_simple, space_repository};
+    use crate::syscall::userptr;
+    use crate::token::{ObjectRef, ObjectType, Rights};
+    use core::ptr::{copy_nonoverlapping, write_bytes};
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+    klibcluu::trace("invoke_space_map_range");
+
+    if !token.has_right(Rights::SPACE_MAP) {
+        klibcluu::warn("invoke_space_map_range: missing SPACE_MAP right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let virt_start = args.arg3 as u64;
+    let data_ptr = args.arg4 as usize;
+    let flags = args.arg5 as u32;
+    let combined = args.arg6;
+    let num_pages = (combined >> 32) as usize;
+    let data_len = (combined & 0xFFFFFFFF) as usize;
+
+    // Validate arguments
+    if virt_start & 0xFFF != 0 {
+        klibcluu::warn("invoke_space_map_range: virt_start not page-aligned");
+        return Err(Error::InvalidArgument);
+    }
+    if num_pages == 0 {
+        return Ok(0); // Nothing to do
+    }
+    if num_pages > 4096 {
+        // Limit batch size to prevent excessive resource consumption
+        klibcluu::warn("invoke_space_map_range: num_pages too large");
+        return Err(Error::InvalidArgument);
+    }
+    let total_size = num_pages * PAGE_SIZE;
+    if data_len > total_size {
+        klibcluu::warn("invoke_space_map_range: data_len exceeds total size");
+        return Err(Error::InvalidArgument);
+    }
+
+    let writable = (flags & 0x02) != 0;
+    let executable = (flags & 0x04) != 0;
+
+    // Validate data buffer if provided
+    if data_ptr != 0 && data_len > 0 {
+        userptr::validate_user_buffer(data_ptr, data_len)?;
+    }
+
+    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    // Map each page
+    let mut bytes_copied = 0usize;
+    for page_idx in 0..num_pages {
+        let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
+
+        // Allocate physical frame
+        let frame_phys = pmm_simple::alloc_frame().ok_or(Error::OutOfMemory)?;
+        let frame_virt = unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
+
+        // Copy data if available, zero-fill the rest
+        let page_start_offset = page_idx * PAGE_SIZE;
+        if data_ptr != 0 && bytes_copied < data_len {
+            let remaining_data = data_len - bytes_copied;
+            let copy_len = remaining_data.min(PAGE_SIZE);
+
+            unsafe {
+                copy_nonoverlapping((data_ptr + bytes_copied) as *const u8, frame_virt, copy_len);
+            }
+            bytes_copied += copy_len;
+
+            // Zero-fill the rest of the page
+            if copy_len < PAGE_SIZE {
+                unsafe {
+                    write_bytes(frame_virt.add(copy_len), 0, PAGE_SIZE - copy_len);
+                }
+            }
+        } else {
+            // Zero-fill entire page
+            unsafe {
+                write_bytes(frame_virt, 0, PAGE_SIZE);
+            }
+        }
+
+        // Map the page into the address space
+        let result = space_repository::with_space_mut(space_id, |space| unsafe {
+            elf::map_user_page(virt_addr, frame_phys, writable, executable, space.page_table_root)
+        });
+
+        match result {
+            Some(Ok(())) => {}
+            Some(Err(_)) => {
+                klibcluu::warn("invoke_space_map_range: map_user_page failed");
+                return Err(Error::OutOfMemory);
+            }
+            None => {
+                klibcluu::warn("invoke_space_map_range: space not found");
+                return Err(Error::NotFound);
+            }
+        }
+    }
+
+    klibcluu::trace("invoke_space_map_range: mapped ");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", num_pages as u64);
+    klibcluu::trace(" pages");
+
+    Ok(num_pages)
 }
 
 // Token operations

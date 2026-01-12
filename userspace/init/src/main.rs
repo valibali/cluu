@@ -215,7 +215,6 @@ fn map_procmgr_bootstrap(
     initrd_size: usize,
     tty_endpoint: usize,
 ) -> Result<()> {
-    const PAGE_SIZE: usize = 4096;
     const READ_ONLY: usize = 0x01;
     let page_base = PROCMGR_INFO_ADDR & !(PAGE_SIZE - 1);
 
@@ -267,7 +266,6 @@ fn map_procmgr_bootstrap(
 }
 
 fn map_console_info(space_token: usize, endpoint: usize) -> Result<()> {
-    const PAGE_SIZE: usize = 4096;
     const READ_ONLY: usize = 0x01;
     let page_base = CONSOLE_INFO_ADDR & !(PAGE_SIZE - 1);
 
@@ -310,7 +308,6 @@ fn map_kbd_info(
     endpoint: usize,
     tty_endpoint: usize,
 ) -> Result<()> {
-    const PAGE_SIZE: usize = 4096;
     const READ_ONLY: usize = 0x01;
     let page_base = KBD_INFO_ADDR & !(PAGE_SIZE - 1);
 
@@ -344,7 +341,6 @@ fn map_kbd_info(
 }
 
 fn map_tty_info(space_token: usize, endpoint: usize, console_endpoint: usize) -> Result<()> {
-    const PAGE_SIZE: usize = 4096;
     const READ_ONLY: usize = 0x01;
     let page_base = TTY_INFO_ADDR & !(PAGE_SIZE - 1);
 
@@ -397,7 +393,6 @@ fn map_framebuffer(space_token: usize, fb_phys: u64, fb_size: u64) -> Result<()>
 }
 
 fn map_initrd(space_token: usize, initrd: &[u8], initrd_size: usize) -> Result<()> {
-    const PAGE_SIZE: usize = 4096;
     const READ_ONLY: usize = 0x01;
     let mut offset = 0usize;
     while offset < initrd_size {

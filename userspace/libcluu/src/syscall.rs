@@ -54,6 +54,7 @@ pub enum InvokeOp {
     SpaceMap = 12,
     SpaceUnmap = 13,
     SpaceGrant = 14,
+    SpaceMapRange = 15, // Batch mapping for multiple pages
 
     // Token operations
     TokenDerive = 20,
@@ -487,6 +488,48 @@ pub fn space_map(
         )?
     };
     Ok(())
+}
+
+/// Map multiple consecutive pages into an address space in a single syscall
+///
+/// This is more efficient than multiple space_map calls when mapping
+/// contiguous regions (like ELF segments or stacks).
+///
+/// # Arguments
+///
+/// - `space_token`: Token for the address space (requires SPACE_MAP right)
+/// - `virt_start`: Starting virtual address (must be page-aligned)
+/// - `source_ptr`: Pointer to source data, or 0 for zero-fill
+/// - `flags`: Permission flags (same as space_map)
+/// - `num_pages`: Number of 4KB pages to map
+/// - `data_len`: Length of data to copy from source_ptr (can be less than num_pages * 4096)
+///
+/// # Returns
+///
+/// - `Ok(pages_mapped)`: Number of pages successfully mapped
+/// - `Err(error)`: Mapping failed
+pub fn space_map_range(
+    space_token: usize,
+    virt_start: usize,
+    source_ptr: usize,
+    flags: usize,
+    num_pages: usize,
+    data_len: usize,
+) -> Result<usize> {
+    // Pack num_pages and data_len into a single usize
+    // Upper 32 bits: num_pages, lower 32 bits: data_len
+    let combined = ((num_pages as usize) << 32) | (data_len & 0xFFFFFFFF);
+
+    unsafe {
+        invoke(
+            space_token,
+            InvokeOp::SpaceMapRange,
+            virt_start,
+            source_ptr,
+            flags,
+            combined,
+        )
+    }
 }
 
 /// Derive a new token with reduced rights

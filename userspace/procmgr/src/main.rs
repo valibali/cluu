@@ -5,7 +5,7 @@ extern crate alloc;
 
 use alloc::{collections::BTreeMap, format};
 use libcluu::boot::{procmgr_info, ParentInfo, ProcInfo, PARENT_INFO_ADDR, PROC_INFO_ADDR};
-use libcluu::elf::{ElfFile, LoadableSegment};
+use libcluu::elf::ElfFile;
 use libcluu::syscall::thread_destroy;
 use libcluu::tar::find_member;
 use libcluu::*;
@@ -13,8 +13,8 @@ use libcluu::*;
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
 const SERVICE_STACK_BASE: usize = 0x6d000000;
 const SERVICE_STACK_TOP: usize = SERVICE_STACK_BASE + SERVICE_STACK_SIZE;
-const PAGE_SIZE: usize = 4096;
 const STACK_FLAGS: usize = 0x03; // read + write
+// PAGE_SIZE is imported from libcluu::*
 const SERVICE_PATH: &str = "bin/shell";
 const PROCMGR_EXIT_LABEL: u32 = 1;
 
@@ -123,8 +123,8 @@ impl ProcessManager {
         debug_print("Parsed service ELF")?;
 
         let space_token = space_create(self.token)?;
-        map_segments(space_token, &elf, service_bytes)?;
-        map_stack(space_token)?;
+        libcluu::map_segments(space_token, &elf, service_bytes)?;
+        libcluu::map_stack(space_token, SERVICE_STACK_TOP, SERVICE_STACK_SIZE, STACK_FLAGS)?;
 
         let send_rights = Rights::IPC_SEND.bits() as usize;
         let child_endpoint = token_derive(self.exit_endpoint, send_rights, u64::MAX)?;
@@ -158,65 +158,6 @@ impl ProcessManager {
     }
 }
 
-fn map_segments(space_token: usize, elf: &ElfFile, bytes: &[u8]) -> Result<()> {
-    for segment in elf.segments_iter() {
-        map_segment(space_token, segment, bytes)?;
-    }
-    Ok(())
-}
-
-fn map_segment(space_token: usize, segment: &LoadableSegment, bytes: &[u8]) -> Result<()> {
-    let start = segment.vaddr as usize;
-    if start % PAGE_SIZE != 0 {
-        return Err(Error::InvalidArgument);
-    }
-
-    let mem_size = segment.mem_size as usize;
-    if mem_size == 0 {
-        return Ok(());
-    }
-
-    let file_offset = segment.file_offset as usize;
-    let file_size = segment.file_size as usize;
-    if file_offset + file_size > bytes.len() {
-        return Err(Error::InvalidArgument);
-    }
-
-    let slice = &bytes[file_offset..file_offset + file_size];
-    let mut mapped = 0usize;
-    while mapped < mem_size {
-        let virt = start + mapped;
-        let remaining = file_size.saturating_sub(mapped);
-        let copy_len = remaining.min(PAGE_SIZE);
-        let ptr = if copy_len > 0 {
-            slice[mapped..mapped + copy_len].as_ptr() as usize
-        } else {
-            0
-        };
-
-        space_map(
-            space_token,
-            virt,
-            ptr,
-            segment.page_flags() as usize,
-            copy_len,
-        )?;
-
-        mapped += PAGE_SIZE;
-    }
-
-    Ok(())
-}
-
-fn map_stack(space_token: usize) -> Result<()> {
-    let mut addr = SERVICE_STACK_TOP - SERVICE_STACK_SIZE;
-    while addr < SERVICE_STACK_TOP {
-        space_map(space_token, addr, 0, STACK_FLAGS, 0)?;
-        addr += PAGE_SIZE;
-    }
-    Ok(())
-}
-
 fn map_process_info_page(
     space_token: usize,
     exit_endpoint: usize,
@@ -226,7 +167,6 @@ fn map_process_info_page(
     stderr_endpoint: usize,
     stdlog_endpoint: usize,
 ) -> Result<()> {
-    const PAGE_SIZE: usize = 4096;
     const READ_ONLY: usize = 0x01;
     let page_base = PARENT_INFO_ADDR & !(PAGE_SIZE - 1);
 
