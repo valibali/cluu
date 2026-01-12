@@ -65,7 +65,7 @@ pub trait PageAllocator {
     fn free(&mut self, addr: PhysAddr, count: usize);
 }
 
-// BuddyAllocator, BitmapAllocator, etc. all work interchangeably
+// any PageAllocator implementation, BitmapAllocator, etc. all work interchangeably
 ```
 
 #### I - Interface Segregation
@@ -109,7 +109,7 @@ pub struct IpcSubsystem<S: Scheduler, M: MemoryOperations> {
 // BAD: Depend on concrete types
 pub struct IpcSubsystem {
     scheduler: PriorityBitmapScheduler,  // Concrete!
-    memory: BuddyAllocator,              // Concrete!
+    memory: any PageAllocator implementation,              // Concrete!
 }
 ```
 
@@ -2027,7 +2027,7 @@ setup_syscall_msrs:
 - [ ] CI/CD pipeline
 
 ### Phase 2: Physical Memory Manager (100% tested)
-- [ ] BuddyAllocator with full test coverage
+- [ ] any PageAllocator implementation with full test coverage
 - [ ] Property-based tests for allocation
 - [ ] Edge case tests (fragmentation, exhaustion)
 - [ ] Mock allocator for dependent components

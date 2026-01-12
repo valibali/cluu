@@ -34,7 +34,7 @@ use x86_64::VirtAddr;
 ///
 /// # Type Parameters
 ///
-/// * `A` - Page allocator type (e.g., BuddyAllocator)
+/// * `A` - Page allocator type (e.g., any PageAllocator implementation)
 /// * `M` - Virtual memory mapper type (e.g., PageTableManager)
 pub struct FaultHandler<'a, A, M>
 where
@@ -187,9 +187,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mm::{
-        BuddyAllocator, HeapRegion, MemoryRegion, MockPageAllocator, PageTableManager,
-    };
+    use crate::mm::{HeapRegion, MemoryRegion, MockPageAllocator, PageTableManager};
     use alloc::vec::Vec;
 
     /// Mock mapper for testing

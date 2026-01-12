@@ -68,6 +68,7 @@ pub use syscall::{
     // Types
     SyscallNumber,
     MAP_DEVICE,
+    MAP_LARGE_PAGES,
 };
 pub use types::*;
 

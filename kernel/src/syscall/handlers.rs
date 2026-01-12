@@ -570,7 +570,7 @@ fn invoke_space_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
 
 fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     use crate::elf;
-    use crate::mm::{physmap, pmm_simple, space_repository};
+    use crate::mm::{physmap, pmm, space_repository};
     use crate::syscall::userptr;
     use crate::token::{ObjectRef, ObjectType, Rights};
     use core::ptr::{copy_nonoverlapping, write_bytes};
@@ -620,7 +620,7 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
         }
         data_ptr as u64
     } else {
-        pmm_simple::alloc_frame().ok_or(Error::OutOfMemory)?
+        pmm::alloc_frame().ok_or(Error::OutOfMemory)?
     };
     let frame_virt = if map_device {
         core::ptr::null_mut()
@@ -685,9 +685,18 @@ fn invoke_space_grant(_token: &Token, _args: SyscallArgs) -> SyscallResult {
 /// - If data_ptr is 0, all pages are zero-filled
 /// - If data_ptr is non-zero, copies `data_len` bytes from data_ptr into the mapped pages
 /// - Any bytes beyond data_len are zero-filled (for .bss sections)
+/// Flag to request large page (2MB) mapping when possible
+const MAP_LARGE_PAGES: u32 = 0x200;
+
+/// Number of 4KB pages in a 2MB large page
+const PAGES_PER_LARGE_PAGE: usize = 512;
+
+/// Size of a large page (2MB)
+const LARGE_PAGE_SIZE: usize = 2 * 1024 * 1024;
+
 fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     use crate::elf;
-    use crate::mm::{physmap, pmm_simple, space_repository};
+    use crate::mm::{physmap, pmm, space_repository};
     use crate::syscall::userptr;
     use crate::token::{ObjectRef, ObjectType, Rights};
     use core::ptr::{copy_nonoverlapping, write_bytes};
@@ -728,6 +737,7 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
 
     let writable = (flags & 0x02) != 0;
     let executable = (flags & 0x04) != 0;
+    let use_large_pages = (flags & MAP_LARGE_PAGES) != 0;
 
     // Validate data buffer if provided
     if data_ptr != 0 && data_len > 0 {
@@ -742,17 +752,129 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     };
 
-    // Map each page
+    // Check if we can use large pages:
+    // - Flag is set
+    // - Zero-fill only (no data to copy)
+    // - Virtual start is 2MB aligned
+    // - At least 512 pages (2MB) requested
+    let can_use_large_pages = use_large_pages
+        && data_ptr == 0
+        && (virt_start & 0x1FFFFF) == 0
+        && num_pages >= PAGES_PER_LARGE_PAGE;
+
+    if can_use_large_pages {
+        // Use large pages for the bulk of the mapping
+        let num_large_pages = num_pages / PAGES_PER_LARGE_PAGE;
+        let remaining_pages = num_pages % PAGES_PER_LARGE_PAGE;
+
+        klibcluu::trace("Using large pages: ");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", num_large_pages as u64);
+
+        // Map large pages
+        for lp_idx in 0..num_large_pages {
+            let virt_addr = virt_start + (lp_idx * LARGE_PAGE_SIZE) as u64;
+
+            // Allocate 2MB-aligned physical memory
+            let frame_phys = match pmm::alloc_large_frame() {
+                Some(p) => p,
+                None => {
+                    // Fall back to regular pages if large frame allocation fails
+                    klibcluu::warn("Large frame allocation failed, falling back to 4KB pages");
+                    return map_range_4kb(
+                        space_id,
+                        virt_start,
+                        data_ptr,
+                        data_len,
+                        num_pages,
+                        writable,
+                        executable,
+                    );
+                }
+            };
+
+            // Zero the large frame via physmap
+            let frame_virt = unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
+            unsafe {
+                write_bytes(frame_virt, 0, LARGE_PAGE_SIZE);
+            }
+
+            // Map the large page
+            let result = space_repository::with_space_mut(space_id, |space| unsafe {
+                elf::map_user_large_page(
+                    virt_addr,
+                    frame_phys,
+                    writable,
+                    executable,
+                    space.page_table_root,
+                )
+            });
+
+            match result {
+                Some(Ok(())) => {}
+                Some(Err(_)) => {
+                    klibcluu::warn("invoke_space_map_range: map_user_large_page failed");
+                    pmm::free_large_frame(frame_phys);
+                    return Err(Error::OutOfMemory);
+                }
+                None => {
+                    klibcluu::warn("invoke_space_map_range: space not found");
+                    return Err(Error::NotFound);
+                }
+            }
+        }
+
+        // Map remaining pages with regular 4KB pages
+        if remaining_pages > 0 {
+            let remaining_start = virt_start + (num_large_pages * LARGE_PAGE_SIZE) as u64;
+            map_remaining_4kb(
+                space_id,
+                remaining_start,
+                remaining_pages,
+                writable,
+                executable,
+            )?;
+        }
+
+        klibcluu::trace("invoke_space_map_range: mapped with large pages");
+        Ok(num_pages)
+    } else {
+        // Use regular 4KB pages
+        map_range_4kb(
+            space_id,
+            virt_start,
+            data_ptr,
+            data_len,
+            num_pages,
+            writable,
+            executable,
+        )
+    }
+}
+
+/// Map a range using 4KB pages (internal helper)
+fn map_range_4kb(
+    space_id: crate::token::scope::AddressSpaceId,
+    virt_start: u64,
+    data_ptr: usize,
+    data_len: usize,
+    num_pages: usize,
+    writable: bool,
+    executable: bool,
+) -> SyscallResult {
+    use crate::elf;
+    use crate::mm::{physmap, pmm, space_repository};
+    use core::ptr::{copy_nonoverlapping, write_bytes};
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
     let mut bytes_copied = 0usize;
     for page_idx in 0..num_pages {
         let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
 
         // Allocate physical frame
-        let frame_phys = pmm_simple::alloc_frame().ok_or(Error::OutOfMemory)?;
+        let frame_phys = pmm::alloc_frame().ok_or(Error::OutOfMemory)?;
         let frame_virt = unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
 
         // Copy data if available, zero-fill the rest
-        let page_start_offset = page_idx * PAGE_SIZE;
         if data_ptr != 0 && bytes_copied < data_len {
             let remaining_data = data_len - bytes_copied;
             let copy_len = remaining_data.min(PAGE_SIZE);
@@ -783,19 +905,56 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
         match result {
             Some(Ok(())) => {}
             Some(Err(_)) => {
-                klibcluu::warn("invoke_space_map_range: map_user_page failed");
+                klibcluu::warn("map_range_4kb: map_user_page failed");
                 return Err(Error::OutOfMemory);
             }
             None => {
-                klibcluu::warn("invoke_space_map_range: space not found");
+                klibcluu::warn("map_range_4kb: space not found");
                 return Err(Error::NotFound);
             }
         }
     }
 
-    klibcluu::trace("invoke_space_map_range: mapped ");
+    klibcluu::trace("map_range_4kb: mapped ");
     klibcluu::log_dec(klibcluu::LogLevel::Trace, "", num_pages as u64);
     klibcluu::trace(" pages");
+
+    Ok(num_pages)
+}
+
+/// Map remaining 4KB pages after large page mapping (zero-fill only)
+fn map_remaining_4kb(
+    space_id: crate::token::scope::AddressSpaceId,
+    virt_start: u64,
+    num_pages: usize,
+    writable: bool,
+    executable: bool,
+) -> SyscallResult {
+    use crate::elf;
+    use crate::mm::{physmap, pmm, space_repository};
+    use core::ptr::write_bytes;
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+    for page_idx in 0..num_pages {
+        let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
+
+        let frame_phys = pmm::alloc_frame().ok_or(Error::OutOfMemory)?;
+        let frame_virt = unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
+
+        unsafe {
+            write_bytes(frame_virt, 0, PAGE_SIZE);
+        }
+
+        let result = space_repository::with_space_mut(space_id, |space| unsafe {
+            elf::map_user_page(virt_addr, frame_phys, writable, executable, space.page_table_root)
+        });
+
+        match result {
+            Some(Ok(())) => {}
+            Some(Err(_)) => return Err(Error::OutOfMemory),
+            None => return Err(Error::NotFound),
+        }
+    }
 
     Ok(num_pages)
 }

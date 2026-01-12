@@ -1,7 +1,7 @@
 //! Virtual Memory Manager
 //!
 //! This module provides page table management using the x86_64 crate's
-//! `OffsetPageTable` abstraction, integrated with our BuddyAllocator for
+//! `OffsetPageTable` abstraction, integrated with our PMM bitmap allocator for
 //! frame allocation.
 //!
 //! # Architecture
@@ -20,11 +20,11 @@
 //! # Example Usage
 //!
 //! ```rust,no_run
-//! use crate::mm::{BuddyAllocator, PageTableManager, PageFlags};
+//! use crate::mm::{MockPageAllocator, PageTableManager, PageFlags};
 //! use x86_64::VirtAddr;
 //!
-//! // Create page table manager with buddy allocator
-//! let mut allocator = BuddyAllocator::new(&regions);
+//! // Create page table manager with a PageAllocator implementation
+//! let mut allocator = MockPageAllocator::new();
 //! let mut vmm = unsafe {
 //!     PageTableManager::new(
 //!         VirtAddr::new(0xffff_8000_0000_0000), // Physmap base
@@ -113,11 +113,11 @@ impl<'a, A: PageAllocator> PageTableManager<'a, A> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// let mut buddy = BuddyAllocator::new(&regions);
+    /// let mut allocator = MockPageAllocator::new();
     /// let vmm = unsafe {
     ///     PageTableManager::new(
     ///         VirtAddr::new(0xffff_8000_0000_0000),
-    ///         &mut buddy
+    ///         &mut allocator
     ///     )
     /// };
     /// ```
@@ -446,7 +446,7 @@ pub unsafe fn create_initial_page_tables(
     }
     let bootboot_ptr = unsafe { &bootboot as *const _ };
     unsafe {
-        crate::mm::pmm_simple::init(&*bootboot_ptr, boot_info);
+        crate::mm::pmm::init(&*bootboot_ptr, boot_info);
     }
 
     klibcluu::trace("Creating initial page tables (4KB pages only)...");
@@ -468,7 +468,7 @@ pub unsafe fn create_initial_page_tables(
     let kernel_phys_start_aligned = kernel_phys_start & !0xFFF; // Round down to page
 
     // Step 2: Allocate PML4 from PMM (returns physical address)
-    let pml4_phys_addr = crate::mm::pmm_simple::alloc_frame().expect("Failed to allocate PML4");
+    let pml4_phys_addr = crate::mm::pmm::alloc_frame().expect("Failed to allocate PML4");
     let pml4_phys = PhysAddr::new(pml4_phys_addr);
 
     // Access PML4 through BOOTBOOT's identity mapping (physical address == virtual address for identity-mapped regions)
@@ -480,7 +480,7 @@ pub unsafe fn create_initial_page_tables(
 
     // Allocate PDPT for physmap from PMM
     let physmap_pdpt_phys =
-        crate::mm::pmm_simple::alloc_frame().expect("Failed to allocate PDPT for physmap");
+        crate::mm::pmm::alloc_frame().expect("Failed to allocate PDPT for physmap");
     let physmap_pdpt = unsafe { &mut *(physmap_pdpt_phys as *mut [u64; 512]) };
     unsafe { write_bytes(physmap_pdpt.as_mut_ptr(), 0, 4096) };
     pml4[physmap_pml4_idx] = physmap_pdpt_phys | 0x3;
@@ -514,7 +514,7 @@ pub unsafe fn create_initial_page_tables(
         let gb_count = ((aligned_end + 0x3FFF_FFFF) / 0x4000_0000) as usize;
 
         for gb_idx in 0..gb_count.min(512) {
-            let pd_phys = crate::mm::pmm_simple::alloc_frame().expect("Failed to allocate PD");
+            let pd_phys = crate::mm::pmm::alloc_frame().expect("Failed to allocate PD");
             let pd = unsafe { &mut *(pd_phys as *mut [u64; 512]) };
             unsafe { write_bytes(pd.as_mut_ptr(), 0, 4096) };
             physmap_pdpt[gb_idx] = pd_phys | 0x3;
@@ -576,13 +576,13 @@ pub unsafe fn create_initial_page_tables(
     // (e.g., virtual 0xffffffffffe02078 has offset 0x2078, but physical 0xe000078 has offset 0x78)
     let kernel_pml4_idx = 511;
     let kernel_pdpt_phys =
-        crate::mm::pmm_simple::alloc_frame().expect("Failed to allocate kernel PDPT");
+        crate::mm::pmm::alloc_frame().expect("Failed to allocate kernel PDPT");
     let kernel_pdpt = unsafe { &mut *(kernel_pdpt_phys as *mut [u64; 512]) };
     unsafe { write_bytes(kernel_pdpt.as_mut_ptr(), 0, 4096) };
     pml4[kernel_pml4_idx] = kernel_pdpt_phys | 0x3;
 
     let kernel_pd_phys =
-        crate::mm::pmm_simple::alloc_frame().expect("Failed to allocate kernel PD");
+        crate::mm::pmm::alloc_frame().expect("Failed to allocate kernel PD");
     let kernel_pd = unsafe { &mut *(kernel_pd_phys as *mut [u64; 512]) };
     unsafe { write_bytes(kernel_pd.as_mut_ptr(), 0, 4096) };
     kernel_pdpt[511] = kernel_pd_phys | 0x3;
@@ -618,7 +618,7 @@ pub unsafe fn create_initial_page_tables(
         let pd_idx = ((virt_2mb >> 21) & 0x1FF) as usize;
 
         // Allocate PT for this 2MB block from PMM
-        let pt_phys = crate::mm::pmm_simple::alloc_frame().expect("Failed to allocate kernel PT");
+        let pt_phys = crate::mm::pmm::alloc_frame().expect("Failed to allocate kernel PT");
         let pt = unsafe { &mut *(pt_phys as *mut [u64; 512]) };
         unsafe { write_bytes(pt.as_mut_ptr(), 0, 4096) };
         kernel_pd[pd_idx] = pt_phys | 0x3;
@@ -898,7 +898,7 @@ pub unsafe fn map_heap_region(virt_start: u64, size: u64) -> Result<(), &'static
         let virt_addr = virt_start + (i * 0x1000);
 
         // Allocate one physical frame
-        let phys_frame = crate::mm::pmm_simple::alloc_frame().ok_or("Out of memory for heap")?;
+        let phys_frame = crate::mm::pmm::alloc_frame().ok_or("Out of memory for heap")?;
 
         // Map the page
         unsafe {
@@ -973,7 +973,7 @@ unsafe fn map_single_4k_page(
         pml4[pml4_idx] & !0xFFF
     } else {
         let pdpt_phys =
-            crate::mm::pmm_simple::alloc_frame().ok_or("Out of memory allocating PDPT")?;
+            crate::mm::pmm::alloc_frame().ok_or("Out of memory allocating PDPT")?;
         let pdpt_virt = unsafe { super::physmap::phys_to_virt_u64(pdpt_phys) };
         unsafe { write_bytes(pdpt_virt as *mut u8, 0, 4096) };
         pml4[pml4_idx] = pdpt_phys | table_flags;
@@ -986,7 +986,7 @@ unsafe fn map_single_4k_page(
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
         pdpt[pdpt_idx] & !0xFFF
     } else {
-        let pd_phys = crate::mm::pmm_simple::alloc_frame().ok_or("Out of memory allocating PD")?;
+        let pd_phys = crate::mm::pmm::alloc_frame().ok_or("Out of memory allocating PD")?;
         let pd_virt = unsafe { super::physmap::phys_to_virt_u64(pd_phys) };
         unsafe { write_bytes(pd_virt as *mut u8, 0, 4096) };
         pdpt[pdpt_idx] = pd_phys | table_flags;
@@ -1003,7 +1003,7 @@ unsafe fn map_single_4k_page(
         }
         pd[pd_idx] & !0xFFF
     } else {
-        let pt_phys = crate::mm::pmm_simple::alloc_frame().ok_or("Out of memory allocating PT")?;
+        let pt_phys = crate::mm::pmm::alloc_frame().ok_or("Out of memory allocating PT")?;
         let pt_virt = unsafe { super::physmap::phys_to_virt_u64(pt_phys) };
         unsafe { write_bytes(pt_virt as *mut u8, 0, 4096) };
         pd[pd_idx] = pt_phys | table_flags;
@@ -1046,7 +1046,7 @@ pub unsafe fn alloc_pml4() -> Result<PhysAddr, &'static str> {
     use core::ptr::write_bytes;
 
     // Allocate one frame for PML4
-    let pml4_phys = crate::mm::pmm_simple::alloc_frame().ok_or("Out of memory allocating PML4")?;
+    let pml4_phys = crate::mm::pmm::alloc_frame().ok_or("Out of memory allocating PML4")?;
 
     // Zero out the PML4
     let pml4_virt = unsafe { super::physmap::phys_to_virt_u64(pml4_phys) };
@@ -1120,7 +1120,7 @@ unsafe fn map_4kb_region(
         } else {
             // Allocate new PD from PMM
             let pd_phys =
-                crate::mm::pmm_simple::alloc_frame().expect("Failed to allocate PD for 4KB region");
+                crate::mm::pmm::alloc_frame().expect("Failed to allocate PD for 4KB region");
             unsafe { write_bytes(pd_phys as *mut u8, 0, 4096) };
             pdpt[gb_idx] = pd_phys | 0x3;
             pd_phys as *mut u8
@@ -1140,7 +1140,7 @@ unsafe fn map_4kb_region(
         for block_2mb in start_2mb..end_2mb.min(512) {
             // Allocate PT for this 2MB block from PMM
             let pt_phys =
-                crate::mm::pmm_simple::alloc_frame().expect("Failed to allocate PT for 4KB pages");
+                crate::mm::pmm::alloc_frame().expect("Failed to allocate PT for 4KB pages");
             unsafe { write_bytes(pt_phys as *mut u8, 0, 4096) };
             pd[block_2mb] = pt_phys | 0x3; // Present | Writable (NOT huge page)
 
@@ -1162,7 +1162,7 @@ unsafe fn map_4kb_region(
 /// Frame allocator adapter
 ///
 /// Adapts our `PageAllocator` trait to the x86_64 crate's `FrameAllocator` trait.
-/// This allows us to use the BuddyAllocator with x86_64's page table operations.
+/// This allows us to use any PageAllocator implementation with x86_64's page table operations.
 struct FrameAllocatorAdapter<'a, A: PageAllocator> {
     allocator: &'a mut A,
 }
@@ -1264,7 +1264,7 @@ fn convert_flags_from_x86(x86_flags: PageTableFlags) -> PageFlags {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mm::{BuddyAllocator, MemoryRegion, MockPageAllocator};
+    use crate::mm::MockPageAllocator;
     use klibcluu::util::PAGE_SIZE;
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -71,6 +71,10 @@ pub enum InvokeOp {
 /// Page mapping flags for space_map.
 pub const MAP_DEVICE: usize = 0x100;
 
+/// Request 2MB large page mapping when possible (for space_map_range).
+/// Requires: zero-fill only (no data), 2MB-aligned virtual address, >= 512 pages.
+pub const MAP_LARGE_PAGES: usize = 0x200;
+
 /// Raw syscall invocation using x86_64 SYSCALL instruction
 ///
 /// # Safety

@@ -430,67 +430,72 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 }
 
-/// Handle page fault in heap region (lazy allocation)
+/// Handle page fault via demand paging (lazy allocation)
 ///
 /// Returns Some(true) if page was successfully allocated,
-/// Some(false) if fault is not in heap region,
+/// Some(false) if fault is not in a demand-pageable region,
 /// None if allocation failed.
-fn handle_heap_fault(_fault_addr: x86_64::VirtAddr) -> Option<bool> {
-    // TODO Phase 8: Implement lazy heap allocation
-    // Requires: scheduler, memory::phys, memory::paging
-    None
+fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
+    use crate::mm::space::layout;
+    use x86_64::registers::control::Cr3;
 
-    /* Original implementation - restore in Phase 8
-    use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
+    let addr = fault_addr.as_u64();
 
-    // Get current process and check if fault is in heap region
-    let result = crate::scheduler::ProcessManager::with_current_mut(|process| {
-        let heap = &process.address_space.heap;
+    // Check if fault is in a demand-pageable region
+    let is_stack_region = addr >= layout::USER_STACK_BOTTOM && addr < layout::USER_STACK_TOP;
+    let is_heap_region = addr >= layout::USER_HEAP_START && addr < layout::USER_HEAP_MAX;
 
-        // Check if fault address is in allocated heap region (below current_brk)
-        if fault_addr >= heap.start && fault_addr < heap.current_brk {
-            klibcluu::warn("Lazy heap allocation");
-            klibcluu::log_hex(klibcluu::LogLevel::Warn, "  Addr=", fault_addr.as_u64());
+    if !is_stack_region && !is_heap_region {
+        // Fault is not in a demand-pageable region
+        return Some(false);
+    }
 
-            // Allocate physical frame for this page
-            let frame = match crate::memory::phys::alloc_frame() {
-                Some(f) => f,
-                None => {
-                    klibcluu::warn("Out of memory during lazy heap allocation");
-                    return false;
-                }
-            };
+    klibcluu::trace("Demand paging: allocating page for fault at 0x");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", addr);
 
-            // Map page with USER_ACCESSIBLE | WRITABLE | PRESENT
-            let page: Page<Size4KiB> = Page::containing_address(fault_addr);
-            let phys_addr = x86_64::PhysAddr::new(frame.start_address());
-            let flags = PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::USER_ACCESSIBLE;
+    // Get current page table root from CR3
+    let (pml4_frame, _) = Cr3::read();
+    let page_table_root = pml4_frame.start_address();
 
-            if let Err(_e) = crate::memory::paging::map_user_page(page.start_address(), phys_addr, flags) {
-                klibcluu::warn("Failed to map heap page");
-                crate::memory::phys::free_frame(frame);
-                return false;
-            }
-
-            // Zero the page for security (prevent information leakage)
-            unsafe {
-                let ptr = fault_addr.as_u64() as *mut u8;
-                let page_start = (ptr as usize) & !0xfff; // Align to page boundary
-                core::ptr::write_bytes(page_start as *mut u8, 0, 4096);
-            }
-
-            klibcluu::warn("Successfully allocated heap page");
-            true
-        } else {
-            // Fault is not in valid heap region
-            false
+    // Allocate a physical frame
+    let frame_phys = match crate::mm::pmm::alloc_frame() {
+        Some(f) => f,
+        None => {
+            klibcluu::warn("Demand paging: out of memory");
+            return None;
         }
-    });
+    };
 
-    result
-    */
+    // Zero the frame via physmap before mapping (security: prevent info leakage)
+    let frame_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(frame_phys) };
+    unsafe {
+        core::ptr::write_bytes(frame_virt as *mut u8, 0, 4096);
+    }
+
+    // Map the page with user read+write permissions (no execute for stack/heap)
+    let virt_page = addr & !0xFFF; // Align to page boundary
+    let result = unsafe {
+        crate::elf::map_user_page(
+            virt_page,
+            frame_phys,
+            true,  // writable
+            false, // not executable
+            page_table_root,
+        )
+    };
+
+    match result {
+        Ok(()) => {
+            klibcluu::trace("Demand paging: successfully mapped page");
+            Some(true)
+        }
+        Err(_) => {
+            klibcluu::warn("Demand paging: failed to map page");
+            // Free the frame since mapping failed
+            crate::mm::pmm::free_frame(frame_phys);
+            None
+        }
+    }
 }
 
 extern "x86-interrupt" fn x87_floating_point_handler(_stack_frame: InterruptStackFrame) {

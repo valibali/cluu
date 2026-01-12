@@ -215,7 +215,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mm::pmm::BuddyAllocator;
     use crate::mm::vmm::PageTableManager;
     use x86_64::structures::paging::OffsetPageTable;
     use x86_64::PhysAddr;

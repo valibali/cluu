@@ -39,11 +39,11 @@
 //! # Example Usage
 //!
 //! ```rust,no_run
-//! use crate::mm::{BuddyAllocator, MemoryRegion, PageAllocator};
+//! use crate::mm::{any PageAllocator implementation, MemoryRegion, PageAllocator};
 //!
 //! // Create allocator with memory regions
 //! let regions = [MemoryRegion::new(0x100000, 0x100000)];
-//! let mut allocator = BuddyAllocator::new(&regions);
+//! let mut allocator = any PageAllocator implementation::new(&regions);
 //!
 //! // Allocate a single page (order 0)
 //! if let Some(addr) = allocator.alloc(0) {
@@ -69,11 +69,8 @@ pub mod boot;
 // Bootstrap bump allocator (used for heap allocations in other subsystems)
 pub mod bump;
 
-// Physical memory manager (Buddy allocator)
+// Physical memory manager (bitmap allocator)
 pub mod pmm;
-
-// Simple physical memory manager (for early boot, used for page tables)
-pub mod pmm_simple;
 
 // Physical memory direct mapping
 pub mod physmap;
@@ -107,8 +104,7 @@ pub use traits::{
 
 pub use fault::FaultHandler;
 pub use mock::MockPageAllocator;
-pub use pmm::{BuddyAllocator, MemoryRegion};
-pub use space::{layout, AddressSpace, HeapRegion, MemoryRegion as SpaceMemoryRegion};
+pub use space::{layout, AddressSpace, HeapRegion, MemoryRegion};
 pub use user_map::{map_phys_to_userspace, unmap_phys_from_userspace};
 pub use vmm::PageTableManager;
 
@@ -247,7 +243,7 @@ pub fn allocate_user_stack(
         let virt_addr = stack_top - offset;
 
         // Allocate physical frame
-        let phys_frame = pmm_simple::alloc_frame().ok_or(crate::error::Error::OutOfMemory)?;
+        let phys_frame = pmm::alloc_frame().ok_or(crate::error::Error::OutOfMemory)?;
 
         // Map page (writable, non-executable, user-accessible)
         unsafe {

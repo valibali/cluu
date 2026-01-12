@@ -128,6 +128,8 @@ pub enum ElfLoadError {
     SegmentTooLarge,
     MemoryAllocationFailed,
     MappingFailed(&'static str),
+    InvalidSegmentAddress,
+    AddressConflict,
 }
 
 impl core::fmt::Display for ElfLoadError {
@@ -144,6 +146,8 @@ impl core::fmt::Display for ElfLoadError {
             ElfLoadError::SegmentTooLarge => write!(f, "Segment too large"),
             ElfLoadError::MemoryAllocationFailed => write!(f, "Failed to allocate memory"),
             ElfLoadError::MappingFailed(msg) => write!(f, "Failed to map pages: {}", msg),
+            ElfLoadError::InvalidSegmentAddress => write!(f, "Invalid segment address"),
+            ElfLoadError::AddressConflict => write!(f, "Address already mapped"),
         }
     }
 }
@@ -445,7 +449,7 @@ unsafe fn load_segment(
 
         // Allocate physical frame
         let phys_frame =
-            crate::mm::pmm_simple::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+            crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
 
         // Map page using VMM helper (similar to heap mapping)
         unsafe {
@@ -550,7 +554,7 @@ pub(crate) unsafe fn map_user_page(
         pml4[pml4_idx] & PHYS_MASK
     } else {
         let pdpt_phys =
-            crate::mm::pmm_simple::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+            crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pdpt_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pdpt_phys) };
         unsafe { write_bytes(pdpt_virt as *mut u8, 0, 4096) };
         pml4[pml4_idx] = pdpt_phys | table_flags;
@@ -565,7 +569,7 @@ pub(crate) unsafe fn map_user_page(
         pdpt[pdpt_idx] & PHYS_MASK
     } else {
         let pd_phys =
-            crate::mm::pmm_simple::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+            crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pd_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pd_phys) };
         unsafe { write_bytes(pd_virt as *mut u8, 0, 4096) };
         pdpt[pdpt_idx] = pd_phys | table_flags;
@@ -580,7 +584,7 @@ pub(crate) unsafe fn map_user_page(
         pd[pd_idx] & PHYS_MASK
     } else {
         let pt_phys =
-            crate::mm::pmm_simple::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+            crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pt_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pt_phys) };
         unsafe { write_bytes(pt_virt as *mut u8, 0, 4096) };
         pd[pd_idx] = pt_phys | table_flags;
@@ -596,6 +600,95 @@ pub(crate) unsafe fn map_user_page(
         return Ok(());
     }
     pt[pt_idx] = phys | page_flags;
+
+    Ok(())
+}
+
+/// Map a 2MB large page into user address space
+///
+/// Both virtual and physical addresses must be 2MB-aligned.
+/// Uses the PS (Page Size) bit in the Page Directory entry to create a 2MB mapping.
+pub(crate) unsafe fn map_user_large_page(
+    virt: u64,
+    phys: u64,
+    writable: bool,
+    executable: bool,
+    page_table_root: PhysAddr,
+) -> Result<(), ElfLoadError> {
+    use crate::mm::vmm::pte_flags;
+    use core::ptr::write_bytes;
+
+    // Verify 2MB alignment
+    if virt & 0x1FFFFF != 0 || phys & 0x1FFFFF != 0 {
+        klibcluu::warn("map_user_large_page: addresses not 2MB aligned");
+        return Err(ElfLoadError::InvalidSegmentAddress);
+    }
+
+    // Calculate page table indices (no PT index for large pages)
+    let pml4_idx = ((virt >> 39) & 0x1FF) as usize;
+    let pdpt_idx = ((virt >> 30) & 0x1FF) as usize;
+    let pd_idx = ((virt >> 21) & 0x1FF) as usize;
+
+    // Flags for intermediate tables (present + writable + user)
+    let table_flags = pte_flags::PRESENT | pte_flags::WRITABLE | pte_flags::USER;
+
+    // Flags for the large page PDE (includes HUGE bit)
+    let mut page_flags = pte_flags::PRESENT | pte_flags::USER | pte_flags::HUGE;
+    if writable {
+        page_flags |= pte_flags::WRITABLE;
+    }
+    if !executable {
+        page_flags |= pte_flags::NO_EXECUTE;
+    }
+
+    // Access PML4
+    let pml4_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(page_table_root.as_u64()) };
+    let pml4 = unsafe { &mut *(pml4_virt as *mut [u64; 512]) };
+
+    // Mask to extract physical address from PTE (bits 12-51 only)
+    const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    // Get or create PDPT
+    let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
+        pml4[pml4_idx] & PHYS_MASK
+    } else {
+        let pdpt_phys =
+            crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pdpt_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pdpt_phys) };
+        unsafe { write_bytes(pdpt_virt as *mut u8, 0, 4096) };
+        pml4[pml4_idx] = pdpt_phys | table_flags;
+        pdpt_phys
+    };
+
+    let pdpt_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pdpt_phys) };
+    let pdpt = unsafe { &mut *(pdpt_virt as *mut [u64; 512]) };
+
+    // Get or create PD
+    let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
+        pdpt[pdpt_idx] & PHYS_MASK
+    } else {
+        let pd_phys =
+            crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pd_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pd_phys) };
+        unsafe { write_bytes(pd_virt as *mut u8, 0, 4096) };
+        pdpt[pdpt_idx] = pd_phys | table_flags;
+        pd_phys
+    };
+
+    let pd_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(pd_phys) };
+    let pd = unsafe { &mut *(pd_virt as *mut [u64; 512]) };
+
+    // Map the large page directly in PD (no PT needed)
+    if pd[pd_idx] & 0x1 != 0 {
+        // Already mapped
+        klibcluu::warn("map_user_large_page: PD entry already mapped");
+        return Err(ElfLoadError::AddressConflict);
+    }
+
+    pd[pd_idx] = phys | page_flags;
+
+    klibcluu::trace("Mapped 2MB large page: virt=0x");
+    klibcluu::log_hex(klibcluu::LogLevel::Trace, "", virt);
 
     Ok(())
 }

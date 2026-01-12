@@ -25,7 +25,7 @@
 //!
 //! - Preserves the exact memory layout from the reference implementation
 //! - Uses PageTableManager (Phase 3) for page table operations
-//! - Uses BuddyAllocator (Phase 2) for frame allocation
+//! - Uses any PageAllocator implementation (Phase 2) for frame allocation
 //! - Implements AddressSpaceManager trait for clean architecture
 
 use crate::mm::traits::PageFlags;

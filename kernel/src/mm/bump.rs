@@ -13,11 +13,11 @@
 //!
 //! This allocator is used during boot to:
 //! 1. Parse BOOTBOOT memory map (needs Vec)
-//! 2. Initialize BuddyAllocator (needs Vec for free lists)
+//! 2. Initialize any PageAllocator implementation (needs Vec for free lists)
 //! 3. Set up initial page tables
 //!
 //! After initialization completes, we'll replace this with a proper
-//! heap allocator (linked_list_allocator) backed by the BuddyAllocator.
+//! heap allocator (linked_list_allocator) backed by the any PageAllocator implementation.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
@@ -27,7 +27,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 ///
 /// This is enough for:
 /// - BOOTBOOT memory map parsing (~few KB)
-/// - BuddyAllocator free lists (MAX_ORDER + 1 = 13 Vecs)
+/// - any PageAllocator implementation free lists (MAX_ORDER + 1 = 13 Vecs)
 /// - Initial page table structures (~100-200 KB max)
 const HEAP_SIZE: usize = 512 * 1024;
 

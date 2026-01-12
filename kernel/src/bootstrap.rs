@@ -136,7 +136,7 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
         ObjectRef::Space(AddressSpaceId::new(0)),
     );
 
-    let boot_frame = crate::mm::pmm_simple::alloc_frame().ok_or_else(|| {
+    let boot_frame = crate::mm::pmm::alloc_frame().ok_or_else(|| {
         klibcluu::error("Failed to allocate boot info frame");
         Error::OutOfMemory
     })?;
