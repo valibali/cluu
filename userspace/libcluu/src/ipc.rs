@@ -91,13 +91,8 @@ pub fn reply_recv(endpoint_token: usize, msg: &mut Message, flags: IpcFlags) -> 
 /// Notify the parent process manager that this process is exiting.
 pub fn notify_exit(exit_code: i32) -> Result<()> {
     let info = boot::parent_info();
-    let _ = crate::syscall::debug_print(&alloc::format!(
-        "TRACE: parent info ep {} cookie {}",
-        info.exit_endpoint,
-        info.exit_cookie
-    ));
     if info.exit_endpoint == 0 {
-        let _ = crate::syscall::debug_print("TRACE: missing exit endpoint");
+        // No parent to notify (e.g., init process)
         return Ok(());
     }
 
@@ -106,6 +101,5 @@ pub fn notify_exit(exit_code: i32) -> Result<()> {
         [info.exit_cookie, exit_code as usize, 0, 0, 0, 0],
         2,
     );
-    let _ = crate::syscall::debug_print("TRACE: notify_exit");
     send(info.exit_endpoint, &msg, IpcFlags::empty())
 }

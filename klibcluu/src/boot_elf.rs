@@ -1,6 +1,8 @@
-//! Minimal ELF parser used during early bootstrap.
-//! This loader extracts just enough information to locate loadable segments.
-//! It avoids kernel-side dependencies by living in `klibcluu`.
+//! ELF64 Parser
+//!
+//! Shared ELF parser used by both kernel and userspace.
+//! Extracts entry point and loadable segments from ELF binaries.
+//! No heap allocation - uses fixed-size arrays.
 
 use core::mem;
 
@@ -14,6 +16,17 @@ const ELFDATA2LSB: u8 = 1;
 const PT_LOAD: u32 = 1;
 const EM_X86_64: u16 = 62;
 const ET_EXEC: u16 = 2;
+
+/// ELF segment flags
+const PF_X: u32 = 1 << 0; // Execute
+const PF_W: u32 = 1 << 1; // Write
+const PF_R: u32 = 1 << 2; // Read
+
+/// Page flags for memory mapping
+pub const PAGE_READ: u32 = 0x01;
+pub const PAGE_WRITE: u32 = 0x02;
+pub const PAGE_EXEC: u32 = 0x04;
+pub const PAGE_USER: u32 = 0x08;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -58,13 +71,49 @@ pub enum BootElfError {
 pub type BootElfResult<T> = core::result::Result<T, BootElfError>;
 
 /// Information about a loadable segment.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct LoadableSegment {
     pub vaddr: u64,
     pub file_offset: u64,
     pub file_size: u64,
     pub mem_size: u64,
     pub flags: u32,
+}
+
+impl LoadableSegment {
+    /// Check if segment is readable
+    #[inline]
+    pub fn is_readable(&self) -> bool {
+        (self.flags & PF_R) != 0
+    }
+
+    /// Check if segment is writable
+    #[inline]
+    pub fn is_writable(&self) -> bool {
+        (self.flags & PF_W) != 0
+    }
+
+    /// Check if segment is executable
+    #[inline]
+    pub fn is_executable(&self) -> bool {
+        (self.flags & PF_X) != 0
+    }
+
+    /// Convert ELF flags to page table flags for memory mapping
+    #[inline]
+    pub fn page_flags(&self) -> u32 {
+        let mut flags = PAGE_USER; // Always user-accessible
+        if self.is_readable() {
+            flags |= PAGE_READ;
+        }
+        if self.is_writable() {
+            flags |= PAGE_WRITE;
+        }
+        if self.is_executable() {
+            flags |= PAGE_EXEC;
+        }
+        flags
+    }
 }
 
 /// Parsed ELF metadata.
@@ -75,6 +124,22 @@ pub struct ParsedElf {
 }
 
 impl ParsedElf {
+    /// Get segment by index
+    #[inline]
+    pub fn get_segment(&self, index: usize) -> Option<&LoadableSegment> {
+        if index < self.segment_count {
+            self.segments[index].as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Iterate over all loadable segments
+    #[inline]
+    pub fn segments_iter(&self) -> impl Iterator<Item = &LoadableSegment> {
+        self.segments[..self.segment_count].iter().filter_map(|s| s.as_ref())
+    }
+
     /// Parse the ELF bytes and extract PT_LOAD segments.
     pub fn parse(data: &[u8]) -> BootElfResult<Self> {
         if data.len() < mem::size_of::<Elf64Ehdr>() {

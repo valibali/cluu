@@ -699,10 +699,10 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     use crate::mm::{physmap, pmm, space_repository};
     use crate::syscall::userptr;
     use crate::token::{ObjectRef, ObjectType, Rights};
-    use core::ptr::{copy_nonoverlapping, write_bytes};
+    use core::ptr::write_bytes;
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
-    klibcluu::trace("invoke_space_map_range");
+    const MAP_DEVICE: u32 = 0x100;
 
     if !token.has_right(Rights::SPACE_MAP) {
         klibcluu::warn("invoke_space_map_range: missing SPACE_MAP right");
@@ -724,8 +724,8 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     if num_pages == 0 {
         return Ok(0); // Nothing to do
     }
-    if num_pages > 4096 {
-        // Limit batch size to prevent excessive resource consumption
+    if num_pages > 16384 {
+        // Limit batch size to prevent excessive resource consumption (max 64MB)
         klibcluu::warn("invoke_space_map_range: num_pages too large");
         return Err(Error::InvalidArgument);
     }
@@ -738,10 +738,24 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     let writable = (flags & 0x02) != 0;
     let executable = (flags & 0x04) != 0;
     let use_large_pages = (flags & MAP_LARGE_PAGES) != 0;
+    let map_device = (flags & MAP_DEVICE) != 0;
 
-    // Validate data buffer if provided
-    if data_ptr != 0 && data_len > 0 {
+    // For device mapping, data_ptr is a physical address base
+    // For regular mapping, validate data buffer if provided
+    if !map_device && data_ptr != 0 && data_len > 0 {
         userptr::validate_user_buffer(data_ptr, data_len)?;
+    }
+
+    // Device mapping requires page-aligned physical address and no data copy
+    if map_device {
+        if data_ptr == 0 || (data_ptr & 0xFFF) != 0 {
+            klibcluu::warn("invoke_space_map_range: device mapping requires aligned phys addr");
+            return Err(Error::InvalidArgument);
+        }
+        if data_len != 0 {
+            klibcluu::warn("invoke_space_map_range: device mapping cannot copy data");
+            return Err(Error::InvalidArgument);
+        }
     }
 
     let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
@@ -751,6 +765,11 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     } else {
         return Err(Error::InvalidArgument);
     };
+
+    // Device mapping: map physical address range directly
+    if map_device {
+        return map_device_range(space_id, virt_start, data_ptr as u64, num_pages, writable);
+    }
 
     // Check if we can use large pages:
     // - Flag is set
@@ -953,6 +972,48 @@ fn map_remaining_4kb(
             Some(Ok(())) => {}
             Some(Err(_)) => return Err(Error::OutOfMemory),
             None => return Err(Error::NotFound),
+        }
+    }
+
+    Ok(num_pages)
+}
+
+/// Map a range of physical device memory (no frame allocation)
+fn map_device_range(
+    space_id: crate::token::scope::AddressSpaceId,
+    virt_start: u64,
+    phys_start: u64,
+    num_pages: usize,
+    writable: bool,
+) -> SyscallResult {
+    use crate::elf;
+    use crate::mm::space_repository;
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+    for page_idx in 0..num_pages {
+        let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
+        let phys_addr = phys_start + (page_idx * PAGE_SIZE) as u64;
+
+        let result = space_repository::with_space_mut(space_id, |space| unsafe {
+            elf::map_user_page(
+                virt_addr,
+                phys_addr,
+                writable,
+                false, // device memory not executable
+                space.page_table_root,
+            )
+        });
+
+        match result {
+            Some(Ok(())) => {}
+            Some(Err(_)) => {
+                klibcluu::warn("map_device_range: map_user_page failed");
+                return Err(Error::OutOfMemory);
+            }
+            None => {
+                klibcluu::warn("map_device_range: space not found");
+                return Err(Error::NotFound);
+            }
         }
     }
 

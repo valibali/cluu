@@ -102,6 +102,15 @@ impl fmt::Display for Error {
     }
 }
 
+impl From<klibcluu::boot_elf::BootElfError> for Error {
+    fn from(err: klibcluu::boot_elf::BootElfError) -> Self {
+        match err {
+            klibcluu::boot_elf::BootElfError::InvalidFormat => Error::InvalidArgument,
+            klibcluu::boot_elf::BootElfError::NoLoadableSegments => Error::InvalidArgument,
+        }
+    }
+}
+
 /// Result type for syscalls
 pub type Result<T> = core::result::Result<T, Error>;
 

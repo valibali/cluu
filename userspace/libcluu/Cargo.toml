@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 bitflags = { workspace = true }
+klibcluu = { path = "../../klibcluu" }
 
 [dev-dependencies]
 proptest = { workspace = true }

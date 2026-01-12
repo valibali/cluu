@@ -377,36 +377,28 @@ fn map_framebuffer(space_token: usize, fb_phys: u64, fb_size: u64) -> Result<()>
     if fb_phys == 0 || fb_size == 0 {
         return Ok(());
     }
-    let mut offset = 0usize;
-    while offset < fb_size as usize {
-        let phys = fb_phys + offset as u64;
-        space_map(
-            space_token,
-            CONSOLE_FB_BASE + offset,
-            phys as usize,
-            READ_WRITE | MAP_DEVICE,
-            0,
-        )?;
-        offset += 4096;
-    }
+    let num_pages = ((fb_size as usize) + PAGE_SIZE - 1) / PAGE_SIZE;
+    space_map_range(
+        space_token,
+        CONSOLE_FB_BASE,
+        fb_phys as usize,
+        READ_WRITE | MAP_DEVICE,
+        num_pages,
+        0, // no data copy for device mapping
+    )?;
     Ok(())
 }
 
 fn map_initrd(space_token: usize, initrd: &[u8], initrd_size: usize) -> Result<()> {
     const READ_ONLY: usize = 0x01;
-    let mut offset = 0usize;
-    while offset < initrd_size {
-        let remaining = initrd_size - offset;
-        let copy_len = remaining.min(PAGE_SIZE);
-        let ptr = initrd[offset..offset + copy_len].as_ptr() as usize;
-        space_map(
-            space_token,
-            INITRD_USER_BASE + offset,
-            ptr,
-            READ_ONLY,
-            copy_len,
-        )?;
-        offset += PAGE_SIZE;
-    }
+    let num_pages = (initrd_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    space_map_range(
+        space_token,
+        INITRD_USER_BASE,
+        initrd.as_ptr() as usize,
+        READ_ONLY,
+        num_pages,
+        initrd_size,
+    )?;
     Ok(())
 }
