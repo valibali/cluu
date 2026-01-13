@@ -37,8 +37,8 @@ pub extern "C" fn main() -> i32 {
 }
 
 /// Cursor blink timeout in milliseconds
-/// At 250Hz timer (4ms per tick), 80ms gives us ~12.5Hz blink rate
-const BLINK_TIMEOUT_MS: usize = 500;
+/// At 250Hz timer (4ms per tick), 500ms gives us ~1Hz blink rate
+const BLINK_TIMEOUT_MS: u64 = 500;
 
 fn run() -> Result<()> {
     let info = process_info();

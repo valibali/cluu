@@ -217,7 +217,65 @@ pub fn ipc_send(endpoint_token: usize, msg: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Receive IPC message from endpoint
+/// Receive IPC message from any of the given endpoints (recv_any)
+///
+/// Waits for a message on any of the provided endpoints. Returns which
+/// endpoint received the message and the message length.
+///
+/// # Timeout semantics
+///
+/// - `0`: Non-blocking (return WouldBlock immediately if no message)
+/// - `u64::MAX`: Block forever
+/// - `1..MAX-1`: Block with timeout in milliseconds
+///
+/// # Arguments
+///
+/// - `tokens`: Slice of endpoint tokens to wait on
+/// - `buf`: Buffer to receive message into
+/// - `timeout_ms`: Timeout value (see semantics above)
+///
+/// # Returns
+///
+/// - `Ok((index, bytes_received))`: Index of endpoint that had message, and length
+/// - `Err(Error::WouldBlock)`: No message available (timeout_ms=0 only)
+/// - `Err(Error::Timeout)`: Timeout expired before message arrived
+/// - `Err(error)`: Other errors (invalid token, buffer too small, etc.)
+#[inline]
+pub fn ipc_recv_any(tokens: &[usize], buf: &mut [u8], timeout_ms: u64) -> Result<(usize, usize)> {
+    let nonblocking = timeout_ms == 0;
+
+    loop {
+        let result = unsafe {
+            syscall5(
+                SyscallNumber::Recv,
+                tokens.as_ptr() as usize,
+                tokens.len(),
+                buf.as_mut_ptr() as usize,
+                buf.len(),
+                timeout_ms as usize,
+            )
+        };
+
+        match result {
+            Ok(value) => {
+                // Result is (index << 32) | msg_len
+                let index = value >> 32;
+                let msg_len = value & 0xFFFFFFFF;
+                return Ok((index, msg_len));
+            }
+            Err(Error::WouldBlock) if nonblocking => {
+                return Err(Error::WouldBlock);
+            }
+            Err(Error::WouldBlock) => {
+                // Kernel woke us up after blocking, retry to actually get the message
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Receive IPC message from endpoint (blocking forever)
 ///
 /// # Arguments
 ///
@@ -228,32 +286,21 @@ pub fn ipc_send(endpoint_token: usize, msg: &[u8]) -> Result<()> {
 ///
 /// - `Ok(bytes_received)`: Number of bytes received
 /// - `Err(error)`: Receive failed (invalid token, buffer too small, etc.)
-
-const IPC_RECV_NONBLOCK_FLAG: usize = 1usize << (usize::BITS - 1);
-
 #[inline]
 pub fn ipc_recv(endpoint_token: usize, buf: &mut [u8]) -> Result<usize> {
-    unsafe {
-        syscall3(
-            SyscallNumber::Recv,
-            endpoint_token,
-            buf.as_mut_ptr() as usize,
-            buf.len(),
-        )
-    }
+    let tokens = [endpoint_token];
+    let (_index, len) = ipc_recv_any(&tokens, buf, u64::MAX)?;
+    Ok(len)
 }
 
+/// Receive IPC message from endpoint (non-blocking)
+///
+/// Returns immediately with WouldBlock if no message is available.
+#[inline]
 pub fn ipc_recv_nonblocking(endpoint_token: usize, buf: &mut [u8]) -> Result<usize> {
-    let len = buf.len();
-    let flagged_len = len | IPC_RECV_NONBLOCK_FLAG;
-    unsafe {
-        syscall3(
-            SyscallNumber::Recv,
-            endpoint_token,
-            buf.as_mut_ptr() as usize,
-            flagged_len,
-        )
-    }
+    let tokens = [endpoint_token];
+    let (_index, len) = ipc_recv_any(&tokens, buf, 0)?;
+    Ok(len)
 }
 
 /// Receive IPC message from endpoint with timeout
@@ -264,7 +311,7 @@ pub fn ipc_recv_nonblocking(endpoint_token: usize, buf: &mut [u8]) -> Result<usi
 ///
 /// - `endpoint_token`: Token handle for the endpoint
 /// - `buf`: Buffer to receive message into
-/// - `timeout_ms`: Timeout in milliseconds (0 = block forever)
+/// - `timeout_ms`: Timeout in milliseconds (use u64::MAX for block forever)
 ///
 /// # Returns
 ///
@@ -272,16 +319,10 @@ pub fn ipc_recv_nonblocking(endpoint_token: usize, buf: &mut [u8]) -> Result<usi
 /// - `Err(Error::Timeout)`: Timeout expired before message arrived
 /// - `Err(error)`: Other errors (invalid token, buffer too small, etc.)
 #[inline]
-pub fn ipc_recv_timeout(endpoint_token: usize, buf: &mut [u8], timeout_ms: usize) -> Result<usize> {
-    unsafe {
-        syscall4(
-            SyscallNumber::Recv,
-            endpoint_token,
-            buf.as_mut_ptr() as usize,
-            buf.len(),
-            timeout_ms,
-        )
-    }
+pub fn ipc_recv_timeout(endpoint_token: usize, buf: &mut [u8], timeout_ms: u64) -> Result<usize> {
+    let tokens = [endpoint_token];
+    let (_index, len) = ipc_recv_any(&tokens, buf, timeout_ms)?;
+    Ok(len)
 }
 
 /// Call (send + receive) for synchronous RPC

@@ -66,91 +66,128 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
     Ok(0)
 }
 
-/// sys_recv - Receive IPC message from endpoint
+/// sys_recv - Receive IPC message from one or more endpoints (recv_any)
 ///
 /// # Arguments
 ///
-/// - arg1: endpoint_token (TokenHandle)
-/// - arg2: buf_ptr (*mut u8)
-/// - arg3: buf_len (usize)
-/// - arg4: timeout_ms (0 = block forever, >0 = timeout in milliseconds)
-/// - arg5-arg6: unused
+/// - arg1: tokens_ptr (*const usize) - pointer to array of endpoint tokens
+/// - arg2: tokens_count (usize) - number of tokens in array
+/// - arg3: buf_ptr (*mut u8)
+/// - arg4: buf_len (usize) - high bit is NONBLOCK_FLAG
+/// - arg5: timeout_ms (0 = block forever, >0 = timeout in milliseconds)
 ///
 /// # Returns
 ///
-/// - Ok(bytes_received): Number of bytes received
+/// - Ok((index << 32) | bytes_received): index of endpoint that had message, and length
 /// - Err(Error::Timeout): Timeout expired before message arrived
 /// - Err(Error): Token invalid, insufficient rights, or IPC error
 pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
-    use crate::token::{ObjectRef, ObjectType, Rights};
+    use crate::token::{EndpointId, ObjectRef, ObjectType, Rights};
 
-    let token_handle = TokenHandle::from_raw(args.arg1);
-    let buf_ptr = args.arg2 as usize;
-    const NONBLOCK_FLAG: usize = 1usize << (usize::BITS - 1);
-    let buf_len_arg = args.arg3;
-    let nonblocking = buf_len_arg & NONBLOCK_FLAG != 0;
-    let buf_len = buf_len_arg & !NONBLOCK_FLAG;
-    let timeout_ms = args.arg4 as u64;
+    let tokens_ptr = args.arg1 as usize;
+    let tokens_count = args.arg2;
+    let buf_ptr = args.arg3 as usize;
+    let buf_len = args.arg4;
+    let timeout_ms = args.arg5 as u64;
 
-    // Debug: log timeout value (once to avoid spam)
-    static LOGGED_TIMEOUT: core::sync::atomic::AtomicBool =
-        core::sync::atomic::AtomicBool::new(false);
-    if timeout_ms > 0 && !LOGGED_TIMEOUT.swap(true, core::sync::atomic::Ordering::Relaxed) {
-        klibcluu::trace("sys_recv: timeout_ms=");
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", timeout_ms);
-    }
+    // Timeout semantics:
+    // - 0: non-blocking (return WouldBlock immediately if no message)
+    // - u64::MAX: block forever
+    // - 1..MAX-1: block with timeout in milliseconds
+    let nonblocking = timeout_ms == 0;
 
-    let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
-    if !token.has_right(Rights::IPC_RECV) {
-        return Err(Error::PermissionDenied);
-    }
-
-    let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
-        .map_err(|_| Error::InvalidArgument)?;
-    let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
-        id
-    } else {
+    // Validate tokens_count
+    const MAX_RECV_ENDPOINTS: usize = 16;
+    if tokens_count == 0 || tokens_count > MAX_RECV_ENDPOINTS {
         return Err(Error::InvalidArgument);
-    };
+    }
 
     let page_table_root =
         crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
     let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
 
-    let recv_result = if nonblocking {
-        crate::ipc::endpoint::recv_to_user_nonblocking(
-            endpoint_id,
-            buf_ptr,
-            buf_len,
-            page_table_root,
-        )
-    } else {
-        crate::ipc::endpoint::recv_to_user(endpoint_id, buf_ptr, buf_len, page_table_root, current)
-    };
+    // Read token handles from userspace and resolve to endpoint IDs
+    let mut endpoint_ids: [Option<EndpointId>; MAX_RECV_ENDPOINTS] = [None; MAX_RECV_ENDPOINTS];
+    for i in 0..tokens_count {
+        let token_addr = tokens_ptr + i * core::mem::size_of::<usize>();
+        crate::syscall::userptr::validate_user_buffer(token_addr, core::mem::size_of::<usize>())?;
 
-    match recv_result {
-        Ok(len) => Ok(len),
-        Err(err @ Error::WouldBlock) => {
-            if nonblocking {
-                Err(err)
-            } else {
-                // Block with or without timeout
-                if timeout_ms > 0 {
-                    let deadline = crate::sched::ThreadManager::ms_to_deadline(timeout_ms);
-                    crate::sched::ThreadManager::block_current_with_timeout(deadline);
-                } else {
-                    crate::sched::ThreadManager::block_current();
-                }
-                crate::architecture::x86_64::syscall::request_resched();
-                // After waking, check if it was due to timeout
-                if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
-                    Err(Error::Timeout)
-                } else {
-                    Err(err) // WouldBlock - message arrived, retry will succeed
+        let mut token_raw: usize = 0;
+        crate::syscall::userptr::copy_from_user(
+            &mut token_raw as *mut usize as *mut u8,
+            token_addr,
+            core::mem::size_of::<usize>(),
+            page_table_root,
+        )?;
+
+        let token_handle = TokenHandle::from_raw(token_raw);
+        let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
+        if !token.has_right(Rights::IPC_RECV) {
+            return Err(Error::PermissionDenied);
+        }
+
+        let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+            .map_err(|_| Error::InvalidArgument)?;
+        if let ObjectRef::Endpoint(id) = endpoint_ref {
+            endpoint_ids[i] = Some(id);
+        } else {
+            return Err(Error::InvalidArgument);
+        }
+    }
+
+    // Try to receive from each endpoint in order
+    let try_recv_any = || -> Result<(usize, usize), Error> {
+        for i in 0..tokens_count {
+            if let Some(endpoint_id) = endpoint_ids[i] {
+                match crate::ipc::endpoint::recv_to_user_nonblocking(
+                    endpoint_id,
+                    buf_ptr,
+                    buf_len,
+                    page_table_root,
+                ) {
+                    Ok(len) => return Ok((i, len)),
+                    Err(Error::WouldBlock) => continue,
+                    Err(err) => return Err(err),
                 }
             }
         }
-        Err(err) => Err(err),
+        Err(Error::WouldBlock)
+    };
+
+    // First attempt
+    match try_recv_any() {
+        Ok((index, len)) => return Ok((index << 32) | len),
+        Err(Error::WouldBlock) if nonblocking => return Err(Error::WouldBlock),
+        Err(Error::WouldBlock) => { /* fall through to blocking */ }
+        Err(err) => return Err(err),
+    }
+
+    // Register as waiter on all endpoints
+    for i in 0..tokens_count {
+        if let Some(endpoint_id) = endpoint_ids[i] {
+            // Try recv which will register us as a waiter if no message
+            let _ = crate::ipc::endpoint::recv_to_user(
+                endpoint_id, buf_ptr, buf_len, page_table_root, current
+            );
+        }
+    }
+
+    // Block with or without timeout
+    if timeout_ms == u64::MAX {
+        // Block forever
+        crate::sched::ThreadManager::block_current();
+    } else {
+        // Block with timeout
+        let deadline = crate::sched::ThreadManager::ms_to_deadline(timeout_ms);
+        crate::sched::ThreadManager::block_current_with_timeout(deadline);
+    }
+    crate::architecture::x86_64::syscall::request_resched();
+
+    // After waking, check if it was due to timeout
+    if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
+        Err(Error::Timeout)
+    } else {
+        Err(Error::WouldBlock) // Message arrived on one endpoint, retry will succeed
     }
 }
 
