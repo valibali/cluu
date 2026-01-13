@@ -8,12 +8,17 @@ extern crate alloc;
 use alloc::{format, vec::Vec};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
+use libcluu::boot::process_info;
 use libcluu::ipc::{
     send_with_payload, CONSOLE_WRITE_LABEL, KBD_EVENT_LABEL, TTY_READ_LABEL, TTY_REGISTER_LABEL,
     TTY_WRITE_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
-use libcluu::{debug_print, ipc_recv, tty_info, yield_cpu, Error, Result};
+use libcluu::{debug_print, ipc_recv, yield_cpu, Error, Result};
+
+// Token indices (set by init)
+const SVC_TOKEN_LISTEN: usize = 0;
+const SVC_TOKEN_CONSOLE_SEND: usize = 2;
 
 static LOG_WRITE_SEEN: AtomicBool = AtomicBool::new(false);
 static LOG_REGISTER_SEEN: AtomicBool = AtomicBool::new(false);
@@ -27,10 +32,13 @@ pub extern "C" fn main() -> i32 {
 }
 
 fn run() -> Result<()> {
-    let info = tty_info();
+    let info = process_info();
+    let endpoint = info.tokens[SVC_TOKEN_LISTEN];
+    let console_endpoint = info.tokens[SVC_TOKEN_CONSOLE_SEND];
+
     debug_print(&format!(
         "tty: endpoint {} console {}",
-        info.endpoint, info.console_endpoint
+        endpoint, console_endpoint
     ))?;
     debug_print("tty: ready")?;
     yield_cpu()?;
@@ -41,7 +49,7 @@ fn run() -> Result<()> {
 
     let mut buf = [0u8; 256];
     loop {
-        match ipc_recv(info.endpoint, &mut buf) {
+        match ipc_recv(endpoint, &mut buf) {
             Ok(len) => {
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
                     match msg.tag.label {
@@ -51,14 +59,14 @@ fn run() -> Result<()> {
                                 saw_key = true;
                                 let _ = debug_print("tty: first key event");
                             }
-                            handle_char(info.console_endpoint, shell_stdin, ch, &mut line)?;
+                            handle_char(console_endpoint, shell_stdin, ch, &mut line)?;
                         }
                         TTY_WRITE_LABEL => {
                             if !LOG_WRITE_SEEN.swap(true, Ordering::Relaxed) {
                                 let _ = debug_print("tty: forward to console");
                             }
                             let _ = send_with_payload(
-                                info.console_endpoint,
+                                console_endpoint,
                                 CONSOLE_WRITE_LABEL,
                                 payload,
                             );

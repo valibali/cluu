@@ -2,7 +2,7 @@
 //!
 //! Higher-level IPC wrappers using the Message type.
 
-use crate::boot;
+use crate::boot::{self, process_info};
 use crate::error::Result;
 use crate::syscall;
 use crate::types::*;
@@ -90,8 +90,8 @@ pub fn reply_recv(endpoint_token: usize, msg: &mut Message, flags: IpcFlags) -> 
 
 /// Notify the parent process manager that this process is exiting.
 pub fn notify_exit(exit_code: i32) -> Result<()> {
-    let info = boot::parent_info();
-    if info.exit_endpoint == 0 {
+    let info = process_info();
+    if info.exit_token == 0 {
         // No parent to notify (e.g., init process)
         return Ok(());
     }
@@ -101,5 +101,5 @@ pub fn notify_exit(exit_code: i32) -> Result<()> {
         [info.exit_cookie, exit_code as usize, 0, 0, 0, 0],
         2,
     );
-    send(info.exit_endpoint, &msg, IpcFlags::empty())
+    send(info.exit_token, &msg, IpcFlags::empty())
 }

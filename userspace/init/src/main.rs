@@ -5,9 +5,9 @@ extern crate alloc;
 
 use alloc::format;
 use libcluu::boot::{
-    boot_info, ConsoleInfo, KbdInfo, ParentInfo, ProcmgrInfo, TtyInfo, CONSOLE_FB_BASE,
-    CONSOLE_INFO_ADDR, INITRD_USER_BASE, KBD_INFO_ADDR, PARENT_INFO_ADDR, PROCMGR_INFO_ADDR,
-    TTY_INFO_ADDR,
+    boot_info, ProcessInfo, CONSOLE_FB_BASE, INITRD_USER_BASE, PROCESS_INFO_ADDR,
+    PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
+    PARAM_INITRD_SIZE,
 };
 use libcluu::elf::ElfFile;
 use libcluu::tar::find_member;
@@ -18,6 +18,13 @@ const PROC_STACK_BASE: usize = 0x6f000000;
 const PROC_STACK_TOP: usize = PROC_STACK_BASE + PROC_STACK_SIZE;
 const STACK_FLAGS: usize = 0x03; // read + write
 const STACK_STEP: usize = PROC_STACK_SIZE + 0x1000;
+
+// Service-specific token indices (beyond standard stdin/stdout/stderr)
+const SVC_TOKEN_LISTEN: usize = 0;      // recv endpoint for service requests
+const SVC_TOKEN_CAP: usize = 1;         // capability token (procmgr)
+const SVC_TOKEN_TTY_SEND: usize = 2;    // send to tty (kbd, procmgr)
+const SVC_TOKEN_CONSOLE_SEND: usize = 2; // send to console (tty)
+const SVC_TOKEN_IRQ: usize = 3;         // irq token (kbd)
 
 struct ServiceSpec {
     name: &'static str,
@@ -173,26 +180,41 @@ fn spawn_service(
     let space_token = space_create(token)?;
     map_segments(space_token, &elf, service_bytes)?;
     map_stack(space_token, stack_top, PROC_STACK_SIZE, STACK_FLAGS)?;
+
+    // Build ProcessInfo for each service
+    let mut tokens = [0usize; 16];
+    let mut params = [0u64; 8];
+
     match service.kind {
         ServiceKind::Console => {
-            map_console_info(space_token, console_endpoint)?;
-            map_framebuffer(space_token, boot_info().fb_phys, boot_info().fb_size)?;
+            tokens[SVC_TOKEN_LISTEN] = console_endpoint;
+            let info = boot_info();
+            params[PARAM_FB_BASE] = CONSOLE_FB_BASE as u64;
+            params[PARAM_FB_SIZE] = info.fb_size;
+            params[PARAM_FB_WIDTH] = info.fb_width as u64;
+            params[PARAM_FB_HEIGHT] = info.fb_height as u64;
+            params[PARAM_FB_PITCH] = info.fb_pitch as u64;
+            map_process_info(space_token, 0, 0, &tokens, &params)?;
+            map_framebuffer(space_token, info.fb_phys, info.fb_size)?;
         }
         ServiceKind::Kbd => {
-            map_kbd_info(space_token, kbd_irq_token, kbd_recv, tty_send)?;
+            tokens[SVC_TOKEN_LISTEN] = kbd_recv;
+            tokens[SVC_TOKEN_TTY_SEND] = tty_send;
+            tokens[SVC_TOKEN_IRQ] = kbd_irq_token;
+            map_process_info(space_token, 0, 0, &tokens, &params)?;
         }
         ServiceKind::Tty => {
-            map_tty_info(space_token, tty_endpoint, console_send)?;
+            tokens[SVC_TOKEN_LISTEN] = tty_endpoint;
+            tokens[SVC_TOKEN_CONSOLE_SEND] = console_send;
+            map_process_info(space_token, 0, 0, &tokens, &params)?;
         }
         ServiceKind::Procmgr => {
-            if let Some((shared, exit_endpoint, initrd_size)) = token_share {
-                map_procmgr_bootstrap(
-                    space_token,
-                    shared,
-                    exit_endpoint,
-                    initrd_size,
-                    tty_endpoint,
-                )?;
+            if let Some((cap_token, exit_endpoint, initrd_size)) = token_share {
+                tokens[SVC_TOKEN_LISTEN] = exit_endpoint;
+                tokens[SVC_TOKEN_CAP] = cap_token;
+                tokens[SVC_TOKEN_TTY_SEND] = tty_send;
+                params[PARAM_INITRD_SIZE] = initrd_size as u64;
+                map_process_info(space_token, 0, 0, &tokens, &params)?;
                 map_initrd(space_token, initrd, initrd_size)?;
             }
         }
@@ -208,52 +230,37 @@ fn spawn_service(
     Ok(())
 }
 
-fn map_procmgr_bootstrap(
+/// Map the unified ProcessInfo structure into a child's address space.
+fn map_process_info(
     space_token: usize,
-    token: usize,
-    exit_endpoint: usize,
-    initrd_size: usize,
-    tty_endpoint: usize,
+    exit_token: usize,
+    exit_cookie: usize,
+    tokens: &[usize; 16],
+    params: &[u64; 8],
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
-    let page_base = PROCMGR_INFO_ADDR & !(PAGE_SIZE - 1);
+    let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
+
+    let info = ProcessInfo {
+        exit_token,
+        exit_cookie,
+        tokens: *tokens,
+        params: *params,
+    };
 
     let mut page = [0u8; PAGE_SIZE];
-    let procmgr_info = ProcmgrInfo {
-        token,
-        exit_endpoint,
-        initrd_size: initrd_size as u64,
-        tty_endpoint,
-    };
-    let procmgr_bytes = unsafe {
+    let bytes = unsafe {
         core::slice::from_raw_parts(
-            &procmgr_info as *const ProcmgrInfo as *const u8,
-            core::mem::size_of::<ProcmgrInfo>(),
+            &info as *const ProcessInfo as *const u8,
+            core::mem::size_of::<ProcessInfo>(),
         )
     };
-    let procmgr_offset = PROCMGR_INFO_ADDR - page_base;
-    let procmgr_end = procmgr_offset + procmgr_bytes.len();
-    if procmgr_end > PAGE_SIZE {
+    let offset = PROCESS_INFO_ADDR - page_base;
+    let end = offset + bytes.len();
+    if end > PAGE_SIZE {
         return Err(Error::InvalidArgument);
     }
-    page[procmgr_offset..procmgr_end].copy_from_slice(procmgr_bytes);
-
-    let parent_info = ParentInfo {
-        exit_endpoint: 0,
-        exit_cookie: 0,
-    };
-    let parent_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &parent_info as *const ParentInfo as *const u8,
-            core::mem::size_of::<ParentInfo>(),
-        )
-    };
-    let parent_offset = PARENT_INFO_ADDR - page_base;
-    let parent_end = parent_offset + parent_bytes.len();
-    if parent_end > PAGE_SIZE {
-        return Err(Error::InvalidArgument);
-    }
-    page[parent_offset..parent_end].copy_from_slice(parent_bytes);
+    page[offset..end].copy_from_slice(bytes);
 
     space_map(
         space_token,
@@ -261,113 +268,6 @@ fn map_procmgr_bootstrap(
         page.as_ptr() as usize,
         READ_ONLY,
         PAGE_SIZE,
-    )?;
-    Ok(())
-}
-
-fn map_console_info(space_token: usize, endpoint: usize) -> Result<()> {
-    const READ_ONLY: usize = 0x01;
-    let page_base = CONSOLE_INFO_ADDR & !(PAGE_SIZE - 1);
-
-    let info = boot_info();
-    let mut page = [0u8; PAGE_SIZE];
-    let payload = ConsoleInfo {
-        fb_base: CONSOLE_FB_BASE as u64,
-        fb_size: info.fb_size,
-        width: info.fb_width,
-        height: info.fb_height,
-        pitch: info.fb_pitch,
-        endpoint,
-    };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            &payload as *const ConsoleInfo as *const u8,
-            core::mem::size_of::<ConsoleInfo>(),
-        )
-    };
-    let offset = CONSOLE_INFO_ADDR - page_base;
-    let end = offset + bytes.len();
-    if end > PAGE_SIZE {
-        return Err(Error::InvalidArgument);
-    }
-    page[offset..end].copy_from_slice(bytes);
-
-    space_map(
-        space_token,
-        page_base,
-        page.as_ptr() as usize,
-        READ_ONLY,
-        end,
-    )?;
-    Ok(())
-}
-
-fn map_kbd_info(
-    space_token: usize,
-    irq_token: usize,
-    endpoint: usize,
-    tty_endpoint: usize,
-) -> Result<()> {
-    const READ_ONLY: usize = 0x01;
-    let page_base = KBD_INFO_ADDR & !(PAGE_SIZE - 1);
-
-    let mut page = [0u8; PAGE_SIZE];
-    let payload = KbdInfo {
-        irq_token,
-        endpoint,
-        tty_endpoint,
-    };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            &payload as *const KbdInfo as *const u8,
-            core::mem::size_of::<KbdInfo>(),
-        )
-    };
-    let offset = KBD_INFO_ADDR - page_base;
-    let end = offset + bytes.len();
-    if end > PAGE_SIZE {
-        return Err(Error::InvalidArgument);
-    }
-    page[offset..end].copy_from_slice(bytes);
-
-    space_map(
-        space_token,
-        page_base,
-        page.as_ptr() as usize,
-        READ_ONLY,
-        end,
-    )?;
-    Ok(())
-}
-
-fn map_tty_info(space_token: usize, endpoint: usize, console_endpoint: usize) -> Result<()> {
-    const READ_ONLY: usize = 0x01;
-    let page_base = TTY_INFO_ADDR & !(PAGE_SIZE - 1);
-
-    let mut page = [0u8; PAGE_SIZE];
-    let payload = TtyInfo {
-        endpoint,
-        console_endpoint,
-    };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            &payload as *const TtyInfo as *const u8,
-            core::mem::size_of::<TtyInfo>(),
-        )
-    };
-    let offset = TTY_INFO_ADDR - page_base;
-    let end = offset + bytes.len();
-    if end > PAGE_SIZE {
-        return Err(Error::InvalidArgument);
-    }
-    page[offset..end].copy_from_slice(bytes);
-
-    space_map(
-        space_token,
-        page_base,
-        page.as_ptr() as usize,
-        READ_ONLY,
-        end,
     )?;
     Ok(())
 }

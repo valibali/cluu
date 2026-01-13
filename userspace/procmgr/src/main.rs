@@ -4,11 +4,19 @@
 extern crate alloc;
 
 use alloc::{collections::BTreeMap, format};
-use libcluu::boot::{procmgr_info, ParentInfo, ProcInfo, PARENT_INFO_ADDR, PROC_INFO_ADDR};
+use libcluu::boot::{
+    process_info, ProcessInfo, PROCESS_INFO_ADDR, PARAM_INITRD_SIZE,
+    TOKEN_STDIN, TOKEN_STDOUT, TOKEN_STDERR, TOKEN_STDLOG,
+};
 use libcluu::elf::ElfFile;
 use libcluu::syscall::thread_destroy;
 use libcluu::tar::find_member;
 use libcluu::*;
+
+// Service-specific token indices used by init for procmgr
+const SVC_TOKEN_LISTEN: usize = 0;
+const SVC_TOKEN_CAP: usize = 1;
+const SVC_TOKEN_TTY_SEND: usize = 2;
 
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
 const SERVICE_STACK_BASE: usize = 0x6d000000;
@@ -38,7 +46,7 @@ fn main_result() -> Result<()> {
 struct ProcessManager {
     token: usize,
     exit_endpoint: usize,
-    tty_endpoint: usize,
+    tty_send: usize,  // send-only token to tty
     initrd_size: usize,
     exit_cookie_next: usize,
     exit_table: BTreeMap<usize, usize>,
@@ -46,12 +54,12 @@ struct ProcessManager {
 
 impl ProcessManager {
     fn new() -> Result<Self> {
-        let info = procmgr_info();
+        let info = process_info();
         Ok(Self {
-            token: info.token,
-            exit_endpoint: info.exit_endpoint,
-            tty_endpoint: info.tty_endpoint,
-            initrd_size: info.initrd_size as usize,
+            token: info.tokens[SVC_TOKEN_CAP],
+            exit_endpoint: info.tokens[SVC_TOKEN_LISTEN],
+            tty_send: info.tokens[SVC_TOKEN_TTY_SEND],
+            initrd_size: info.params[PARAM_INITRD_SIZE] as usize,
             exit_cookie_next: 1,
             exit_table: BTreeMap::new(),
         })
@@ -134,7 +142,8 @@ impl ProcessManager {
             child_endpoint, cookie
         ))?;
         let stdin_endpoint = endpoint_create(self.token)?;
-        let tty_send = token_derive(self.tty_endpoint, send_rights, u64::MAX)?;
+        // self.tty_send is already a send token from init, use it directly
+        let tty_send = self.tty_send;
         map_process_info_page(
             space_token,
             child_endpoint,
@@ -144,7 +153,7 @@ impl ProcessManager {
             tty_send,
             tty_send,
         )?;
-        register_tty(stdin_endpoint, self.tty_endpoint)?;
+        register_tty(stdin_endpoint, tty_send)?;
 
         let thread_token = thread_create(
             space_token,
@@ -160,52 +169,42 @@ impl ProcessManager {
 
 fn map_process_info_page(
     space_token: usize,
-    exit_endpoint: usize,
+    exit_token: usize,
     exit_cookie: usize,
-    stdin_endpoint: usize,
-    stdout_endpoint: usize,
-    stderr_endpoint: usize,
-    stdlog_endpoint: usize,
+    stdin_token: usize,
+    stdout_token: usize,
+    stderr_token: usize,
+    stdlog_token: usize,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
-    let page_base = PARENT_INFO_ADDR & !(PAGE_SIZE - 1);
+    let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
+
+    let mut tokens = [0usize; 16];
+    tokens[TOKEN_STDIN] = stdin_token;
+    tokens[TOKEN_STDOUT] = stdout_token;
+    tokens[TOKEN_STDERR] = stderr_token;
+    tokens[TOKEN_STDLOG] = stdlog_token;
+
+    let info = ProcessInfo {
+        exit_token,
+        exit_cookie,
+        tokens,
+        params: [0u64; 8],
+    };
 
     let mut page = [0u8; PAGE_SIZE];
-    let parent_info = ParentInfo {
-        exit_endpoint,
-        exit_cookie,
-    };
-    let parent_bytes = unsafe {
+    let bytes = unsafe {
         core::slice::from_raw_parts(
-            &parent_info as *const ParentInfo as *const u8,
-            core::mem::size_of::<ParentInfo>(),
+            &info as *const ProcessInfo as *const u8,
+            core::mem::size_of::<ProcessInfo>(),
         )
     };
-    let parent_offset = PARENT_INFO_ADDR - page_base;
-    let parent_end = parent_offset + parent_bytes.len();
-    if parent_end > PAGE_SIZE {
+    let offset = PROCESS_INFO_ADDR - page_base;
+    let end = offset + bytes.len();
+    if end > PAGE_SIZE {
         return Err(Error::InvalidArgument);
     }
-    page[parent_offset..parent_end].copy_from_slice(parent_bytes);
-
-    let info = ProcInfo {
-        stdin_endpoint,
-        stdout_endpoint,
-        stderr_endpoint,
-        stdlog_endpoint,
-    };
-    let proc_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &info as *const ProcInfo as *const u8,
-            core::mem::size_of::<ProcInfo>(),
-        )
-    };
-    let proc_offset = PROC_INFO_ADDR - page_base;
-    let proc_end = proc_offset + proc_bytes.len();
-    if proc_end > PAGE_SIZE {
-        return Err(Error::InvalidArgument);
-    }
-    page[proc_offset..proc_end].copy_from_slice(proc_bytes);
+    page[offset..end].copy_from_slice(bytes);
 
     space_map(
         space_token,

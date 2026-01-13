@@ -5,9 +5,10 @@ extern crate alloc;
 
 use alloc::format;
 use core::mem::size_of;
+use libcluu::boot::{process_info, TOKEN_STDIN, TOKEN_STDOUT, TOKEN_STDERR, TOKEN_STDLOG};
 use libcluu::ipc::{send_with_payload, TTY_READ_LABEL, TTY_WRITE_LABEL};
 use libcluu::types::Message;
-use libcluu::{debug_print, ipc_recv, proc_info, yield_cpu, Error, Result};
+use libcluu::{debug_print, ipc_recv, yield_cpu, Error, Result};
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -18,25 +19,30 @@ pub extern "C" fn main() -> i32 {
 }
 
 fn run() -> Result<()> {
-    let info = proc_info();
+    let info = process_info();
+    let stdin = info.tokens[TOKEN_STDIN];
+    let stdout = info.tokens[TOKEN_STDOUT];
+    let stderr = info.tokens[TOKEN_STDERR];
+    let stdlog = info.tokens[TOKEN_STDLOG];
+
     debug_print("shell: ready")?;
     let _ = debug_print(&format!(
         "shell: stdin {} stdout {} stderr {} stdlog {}",
-        info.stdin_endpoint, info.stdout_endpoint, info.stderr_endpoint, info.stdlog_endpoint
+        stdin, stdout, stderr, stdlog
     ));
-    if let Err(_) = print_prompt(info.stdout_endpoint) {
+    if let Err(_) = print_prompt(stdout) {
         let _ = debug_print("shell: prompt write failed");
     }
 
     let mut buf = [0u8; 128];
     loop {
-        match ipc_recv(info.stdin_endpoint, &mut buf) {
+        match ipc_recv(stdin, &mut buf) {
             Ok(len) => {
                 if let Some((msg, _payload)) = parse_message(&buf[..len]) {
                     if msg.tag.label == TTY_READ_LABEL && msg.tag.words >= 1 {
                         let ch = msg.words[0] as u8;
                         if ch == b'\n' {
-                            print_prompt(info.stdout_endpoint)?;
+                            print_prompt(stdout)?;
                         }
                     }
                 }

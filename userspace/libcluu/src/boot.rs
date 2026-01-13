@@ -32,132 +32,83 @@ pub fn root_token_handle() -> usize {
     boot_info().root_token
 }
 
-/// Additional location where init writes the derived procmgr info.
-pub const PROCMGR_INFO_ADDR: usize = BOOT_INFO_ADDR + 0x100;
-/// Location where the parent process manager writes per-process exit info.
-pub const PARENT_INFO_ADDR: usize = BOOT_INFO_ADDR + 0x200;
-/// Console service bootstrap payload written by init.
-pub const CONSOLE_INFO_ADDR: usize = BOOT_INFO_ADDR + 0x300;
-/// Keyboard service bootstrap payload written by init.
-pub const KBD_INFO_ADDR: usize = BOOT_INFO_ADDR + 0x400;
-/// TTY service bootstrap payload written by init.
-pub const TTY_INFO_ADDR: usize = BOOT_INFO_ADDR + 0x500;
-/// Per-process stdio payload written by the spawner (procmgr).
-pub const PROC_INFO_ADDR: usize = BOOT_INFO_ADDR + 0x600;
+/// Universal process info address - same for all processes.
+pub const PROCESS_INFO_ADDR: usize = BOOT_INFO_ADDR + 0x100;
 
 /// Virtual address where the console maps the framebuffer.
 pub const CONSOLE_FB_BASE: usize = 0x9000_0000;
 
-/// Procmgr bootstrap payload written by init.
+/// Universal process info structure.
+///
+/// All processes receive this structure at PROCESS_INFO_ADDR.
+/// The spawner fills in the appropriate fields.
 #[repr(C)]
-pub struct ProcmgrInfo {
-    pub token: usize,
-    pub exit_endpoint: usize,
-    pub initrd_size: u64,
-    pub tty_endpoint: usize,
-}
-
-/// Parent-managed exit info payload written by the spawner.
-#[repr(C)]
-pub struct ParentInfo {
-    pub exit_endpoint: usize,
+pub struct ProcessInfo {
+    /// Token to send exit notification to parent (0 if root process)
+    pub exit_token: usize,
+    /// Cookie to identify this process to parent
     pub exit_cookie: usize,
+
+    /// Generic token slots (indexed by convention)
+    pub tokens: [usize; 16],
+
+    /// Generic parameters (service-specific data)
+    pub params: [u64; 8],
 }
 
-/// Console bootstrap payload written by init.
-#[repr(C)]
-pub struct ConsoleInfo {
-    pub fb_base: u64,
-    pub fb_size: u64,
-    pub width: u32,
-    pub height: u32,
-    pub pitch: u32,
-    pub endpoint: usize,
+// Well-known token indices (convention, not enforced)
+pub const TOKEN_STDIN: usize = 0;
+pub const TOKEN_STDOUT: usize = 1;
+pub const TOKEN_STDERR: usize = 2;
+pub const TOKEN_STDLOG: usize = 3;
+// Services use indices 4+ for their specific needs
+
+// Well-known param indices for console service
+pub const PARAM_FB_BASE: usize = 0;
+pub const PARAM_FB_SIZE: usize = 1;
+pub const PARAM_FB_WIDTH: usize = 2;
+pub const PARAM_FB_HEIGHT: usize = 3;
+pub const PARAM_FB_PITCH: usize = 4;
+
+// Well-known param indices for procmgr
+pub const PARAM_INITRD_SIZE: usize = 0;
+
+/// Read the process info structure.
+pub fn process_info() -> &'static ProcessInfo {
+    unsafe { &*(PROCESS_INFO_ADDR as *const ProcessInfo) }
 }
 
-/// Keyboard bootstrap payload written by init.
-#[repr(C)]
-pub struct KbdInfo {
-    pub irq_token: usize,
-    pub endpoint: usize,
-    pub tty_endpoint: usize,
+/// Convenience: get exit token
+pub fn exit_token() -> usize {
+    process_info().exit_token
 }
 
-/// TTY bootstrap payload written by init.
-#[repr(C)]
-pub struct TtyInfo {
-    pub endpoint: usize,
-    pub console_endpoint: usize,
+/// Convenience: get exit cookie
+pub fn exit_cookie() -> usize {
+    process_info().exit_cookie
 }
 
-/// Per-process stdio payload written by the spawner.
-#[repr(C)]
-pub struct ProcInfo {
-    pub stdin_endpoint: usize,
-    pub stdout_endpoint: usize,
-    pub stderr_endpoint: usize,
-    pub stdlog_endpoint: usize,
+/// Convenience: get a token by index
+pub fn token(index: usize) -> usize {
+    process_info().tokens[index]
 }
 
-/// Write the derived procmgr bootstrap info for the child to pick up.
-pub fn set_procmgr_info(token: usize, exit_endpoint: usize, initrd_size: u64, tty_endpoint: usize) {
-    unsafe {
-        let ptr = PROCMGR_INFO_ADDR as *mut ProcmgrInfo;
-        ptr.write(ProcmgrInfo {
-            token,
-            exit_endpoint,
-            initrd_size,
-            tty_endpoint,
-        });
-    }
+/// Convenience: get a param by index
+pub fn param(index: usize) -> u64 {
+    process_info().params[index]
 }
 
-/// Read the procmgr bootstrap info stored by init.
-pub fn procmgr_info() -> &'static ProcmgrInfo {
-    unsafe { &*(PROCMGR_INFO_ADDR as *const ProcmgrInfo) }
+/// Convenience: get stdin token
+pub fn stdin() -> usize {
+    token(TOKEN_STDIN)
 }
 
-/// Read the procmgr token handle stored by init.
-pub fn procmgr_token_handle() -> usize {
-    procmgr_info().token
+/// Convenience: get stdout token
+pub fn stdout() -> usize {
+    token(TOKEN_STDOUT)
 }
 
-/// Read the exit endpoint token for the process manager.
-pub fn procmgr_exit_endpoint() -> usize {
-    procmgr_info().exit_endpoint
-}
-
-/// Read the parent info stored by the spawner.
-pub fn parent_info() -> &'static ParentInfo {
-    unsafe { &*(PARENT_INFO_ADDR as *const ParentInfo) }
-}
-
-/// Read the console bootstrap info stored by init.
-pub fn console_info() -> &'static ConsoleInfo {
-    unsafe { &*(CONSOLE_INFO_ADDR as *const ConsoleInfo) }
-}
-
-/// Read the keyboard bootstrap info stored by init.
-pub fn kbd_info() -> &'static KbdInfo {
-    unsafe { &*(KBD_INFO_ADDR as *const KbdInfo) }
-}
-
-/// Read the TTY bootstrap info stored by init.
-pub fn tty_info() -> &'static TtyInfo {
-    unsafe { &*(TTY_INFO_ADDR as *const TtyInfo) }
-}
-
-/// Read the per-process stdio info stored by the spawner.
-pub fn proc_info() -> &'static ProcInfo {
-    unsafe { &*(PROC_INFO_ADDR as *const ProcInfo) }
-}
-
-/// Read the exit endpoint token for the current process.
-pub fn parent_exit_endpoint() -> usize {
-    parent_info().exit_endpoint
-}
-
-/// Read the parent-provided exit cookie for the current process.
-pub fn parent_exit_cookie() -> usize {
-    parent_info().exit_cookie
+/// Convenience: get stderr token
+pub fn stderr() -> usize {
+    token(TOKEN_STDERR)
 }

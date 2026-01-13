@@ -4,9 +4,15 @@
 #![no_main]
 
 use core::mem::size_of;
+use libcluu::boot::process_info;
 use libcluu::ipc::{send, KBD_EVENT_LABEL};
 use libcluu::types::Message;
-use libcluu::{debug_print, ipc_recv, irq_attach, kbd_info, yield_cpu, Error, Result};
+use libcluu::{debug_print, ipc_recv, irq_attach, yield_cpu, Error, Result};
+
+// Token indices (set by init)
+const SVC_TOKEN_LISTEN: usize = 0;
+const SVC_TOKEN_TTY_SEND: usize = 2;
+const SVC_TOKEN_IRQ: usize = 3;
 
 const KEYBOARD_IRQ: usize = 1;
 
@@ -19,9 +25,13 @@ pub extern "C" fn main() -> i32 {
 }
 
 fn run() -> Result<()> {
-    let info = kbd_info();
+    let info = process_info();
+    let endpoint = info.tokens[SVC_TOKEN_LISTEN];
+    let irq_token = info.tokens[SVC_TOKEN_IRQ];
+    let tty_endpoint = info.tokens[SVC_TOKEN_TTY_SEND];
+
     debug_print("kbd: ready")?;
-    irq_attach(info.irq_token, info.endpoint, KEYBOARD_IRQ)?;
+    irq_attach(irq_token, endpoint, KEYBOARD_IRQ)?;
     debug_print("kbd: irq attached")?;
     yield_cpu()?;
 
@@ -30,7 +40,7 @@ fn run() -> Result<()> {
     let mut saw_msg = false;
     let mut saw_error = false;
     loop {
-        match ipc_recv(info.endpoint, &mut buf) {
+        match ipc_recv(endpoint, &mut buf) {
             Ok(len) => {
                 if !saw_msg {
                     saw_msg = true;
@@ -48,7 +58,7 @@ fn run() -> Result<()> {
                             let msg =
                                 Message::new(KBD_EVENT_LABEL, [0, ascii as usize, 0, 0, 0, 0], 2);
                             let _ =
-                                send(info.tty_endpoint, &msg, libcluu::types::IpcFlags::empty());
+                                send(tty_endpoint, &msg, libcluu::types::IpcFlags::empty());
                         }
                     }
                 }

@@ -34,8 +34,11 @@ pub mod types;
 
 // Re-exports
 pub use boot::{
-    boot_info, console_info, kbd_info, proc_info, root_token_handle, tty_info, BootInfo,
-    CONSOLE_FB_BASE, INITRD_USER_BASE,
+    boot_info, process_info, root_token_handle, BootInfo, ProcessInfo,
+    CONSOLE_FB_BASE, INITRD_USER_BASE, PROCESS_INFO_ADDR,
+    TOKEN_STDIN, TOKEN_STDOUT, TOKEN_STDERR, TOKEN_STDLOG,
+    PARAM_FB_BASE, PARAM_FB_SIZE, PARAM_FB_WIDTH, PARAM_FB_HEIGHT, PARAM_FB_PITCH,
+    PARAM_INITRD_SIZE,
 };
 pub use elf::{ElfFile, LoadableSegment};
 pub use error::{Error, Result};

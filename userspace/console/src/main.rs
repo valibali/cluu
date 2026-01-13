@@ -6,11 +6,17 @@ extern crate alloc;
 use alloc::{format, vec::Vec};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
+use libcluu::boot::{
+    process_info, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
+};
 use libcluu::ipc::{
     CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL, CONSOLE_WRITE_LABEL,
 };
 use libcluu::types::Message;
-use libcluu::{console_info, debug_print, syscall, Error, Result, CONSOLE_FB_BASE};
+use libcluu::{debug_print, syscall, Error, Result};
+
+// Token index for listen endpoint (set by init)
+const SVC_TOKEN_LISTEN: usize = 0;
 
 const GLYPH_W: usize = 8;
 const GLYPH_H: usize = 8;
@@ -35,13 +41,14 @@ pub extern "C" fn main() -> i32 {
 const BLINK_TIMEOUT_MS: usize = 500;
 
 fn run() -> Result<()> {
-    let info = console_info();
-    let fb = CONSOLE_FB_BASE as *mut u8;
+    let info = process_info();
+    let fb = info.params[PARAM_FB_BASE] as *mut u8;
+    let endpoint = info.tokens[SVC_TOKEN_LISTEN];
     let mut console = Console::new(
         fb,
-        info.width as usize,
-        info.height as usize,
-        info.pitch as usize,
+        info.params[PARAM_FB_WIDTH] as usize,
+        info.params[PARAM_FB_HEIGHT] as usize,
+        info.params[PARAM_FB_PITCH] as usize,
     );
 
     syscall::yield_cpu()?;
@@ -49,7 +56,7 @@ fn run() -> Result<()> {
     let mut buf = [0u8; 512];
     loop {
         // Block until message arrives or timeout expires (for cursor blinking)
-        match syscall::ipc_recv_timeout(info.endpoint, &mut buf, BLINK_TIMEOUT_MS) {
+        match syscall::ipc_recv_timeout(endpoint, &mut buf, BLINK_TIMEOUT_MS) {
             Ok(len) => {
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
                     console.handle_message(&msg, payload);
