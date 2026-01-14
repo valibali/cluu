@@ -5,7 +5,7 @@ extern crate alloc;
 
 use alloc::format;
 use core::mem::size_of;
-use libcluu::boot::{process_info, TOKEN_STDIN, TOKEN_STDOUT, TOKEN_STDERR, TOKEN_STDLOG};
+use libcluu::boot::{process_info, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT};
 use libcluu::ipc::{send_with_payload, TTY_READ_LABEL, TTY_WRITE_LABEL};
 use libcluu::types::Message;
 use libcluu::{debug_print, ipc_recv, yield_cpu, Error, Result};

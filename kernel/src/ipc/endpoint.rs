@@ -59,7 +59,10 @@ pub trait ByteEndpoint: Send {
     /// Send a call message (with caller ID for reply routing)
     fn send_call(&mut self, caller: ThreadId, data: &[u8]) -> Result<Option<ThreadId>, Error>;
     /// Receive, preferring call messages. Returns (message, caller_id if call)
-    fn recv_call(&mut self, receiver: ThreadId) -> Result<Option<(EndpointMessage, Option<ThreadId>)>, Error>;
+    fn recv_call(
+        &mut self,
+        receiver: ThreadId,
+    ) -> Result<Option<(EndpointMessage, Option<ThreadId>)>, Error>;
 }
 
 pub struct QueueEndpoint {
@@ -125,11 +128,17 @@ impl ByteEndpoint for QueueEndpoint {
 
     fn send_call(&mut self, caller: ThreadId, data: &[u8]) -> Result<Option<ThreadId>, Error> {
         let msg = EndpointMessage::new(data)?;
-        self.call_queue.push_back(CallMessage { caller, message: msg });
+        self.call_queue.push_back(CallMessage {
+            caller,
+            message: msg,
+        });
         Ok(self.waiting_receivers.pop_front())
     }
 
-    fn recv_call(&mut self, receiver: ThreadId) -> Result<Option<(EndpointMessage, Option<ThreadId>)>, Error> {
+    fn recv_call(
+        &mut self,
+        receiver: ThreadId,
+    ) -> Result<Option<(EndpointMessage, Option<ThreadId>)>, Error> {
         // First check call queue
         if let Some(call_msg) = self.call_queue.pop_front() {
             self.current_caller = Some(call_msg.caller);
@@ -359,22 +368,22 @@ pub fn call_from_user(
 pub fn take_current_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
     let mut guard = ENDPOINTS.lock();
     let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
-    endpoint_obj.take_current_caller().ok_or(Error::InvalidState)
+    endpoint_obj
+        .take_current_caller()
+        .ok_or(Error::InvalidState)
 }
 
 /// Deliver a reply to a waiting caller
 ///
 /// Copies the reply data directly to the caller's reply buffer and wakes them.
-pub fn deliver_reply(
-    caller: ThreadId,
-    reply_data: &[u8],
-) -> Result<usize, Error> {
+pub fn deliver_reply(caller: ThreadId, reply_data: &[u8]) -> Result<usize, Error> {
     use crate::sched::{CallReplyInfo, ThreadManager};
 
     // Get caller's reply buffer info
     let reply_info: CallReplyInfo = ThreadManager::with_thread_mut(caller, |thread| {
         thread.call_reply_info.take().ok_or(Error::InvalidState)
-    }).ok_or(Error::NotFound)??;
+    })
+    .ok_or(Error::NotFound)??;
 
     // Validate and copy reply to caller's buffer
     if reply_data.len() > reply_info.reply_buf_len {

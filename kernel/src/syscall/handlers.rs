@@ -167,7 +167,11 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
         if let Some(endpoint_id) = endpoint_ids[i] {
             // Try recv which will register us as a waiter if no message
             let _ = crate::ipc::endpoint::recv_to_user(
-                endpoint_id, buf_ptr, buf_len, page_table_root, current
+                endpoint_id,
+                buf_ptr,
+                buf_len,
+                page_table_root,
+                current,
             );
         }
     }
@@ -837,13 +841,7 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
                     // Fall back to regular pages if large frame allocation fails
                     klibcluu::warn("Large frame allocation failed, falling back to 4KB pages");
                     return map_range_4kb(
-                        space_id,
-                        virt_start,
-                        data_ptr,
-                        data_len,
-                        num_pages,
-                        writable,
-                        executable,
+                        space_id, virt_start, data_ptr, data_len, num_pages, writable, executable,
                     );
                 }
             };
@@ -896,13 +894,7 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     } else {
         // Use regular 4KB pages
         map_range_4kb(
-            space_id,
-            virt_start,
-            data_ptr,
-            data_len,
-            num_pages,
-            writable,
-            executable,
+            space_id, virt_start, data_ptr, data_len, num_pages, writable, executable,
         )
     }
 }
@@ -955,7 +947,13 @@ fn map_range_4kb(
 
         // Map the page into the address space
         let result = space_repository::with_space_mut(space_id, |space| unsafe {
-            elf::map_user_page(virt_addr, frame_phys, writable, executable, space.page_table_root)
+            elf::map_user_page(
+                virt_addr,
+                frame_phys,
+                writable,
+                executable,
+                space.page_table_root,
+            )
         });
 
         match result {
@@ -1002,7 +1000,13 @@ fn map_remaining_4kb(
         }
 
         let result = space_repository::with_space_mut(space_id, |space| unsafe {
-            elf::map_user_page(virt_addr, frame_phys, writable, executable, space.page_table_root)
+            elf::map_user_page(
+                virt_addr,
+                frame_phys,
+                writable,
+                executable,
+                space.page_table_root,
+            )
         });
 
         match result {

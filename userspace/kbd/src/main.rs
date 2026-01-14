@@ -57,8 +57,7 @@ fn run() -> Result<()> {
                             // words[0] = payload len (0), words[1] = ascii char
                             let msg =
                                 Message::new(KBD_EVENT_LABEL, [0, ascii as usize, 0, 0, 0, 0], 2);
-                            let _ =
-                                send(tty_endpoint, &msg, libcluu::types::IpcFlags::empty());
+                            let _ = send(tty_endpoint, &msg, libcluu::types::IpcFlags::empty());
                         }
                     }
                 }

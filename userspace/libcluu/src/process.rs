@@ -61,10 +61,10 @@ pub fn map_stack(
     space_map_range(
         space_token,
         stack_base,
-        0,      // zero-fill (no source data)
+        0, // zero-fill (no source data)
         flags,
         num_pages,
-        0,      // no data to copy
+        0, // no data to copy
     )?;
 
     Ok(())

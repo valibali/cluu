@@ -575,14 +575,12 @@ pub unsafe fn create_initial_page_tables(
     // We MUST use 4KB pages because the virtual offset != physical offset
     // (e.g., virtual 0xffffffffffe02078 has offset 0x2078, but physical 0xe000078 has offset 0x78)
     let kernel_pml4_idx = 511;
-    let kernel_pdpt_phys =
-        crate::mm::pmm::alloc_frame().expect("Failed to allocate kernel PDPT");
+    let kernel_pdpt_phys = crate::mm::pmm::alloc_frame().expect("Failed to allocate kernel PDPT");
     let kernel_pdpt = unsafe { &mut *(kernel_pdpt_phys as *mut [u64; 512]) };
     unsafe { write_bytes(kernel_pdpt.as_mut_ptr(), 0, 4096) };
     pml4[kernel_pml4_idx] = kernel_pdpt_phys | 0x3;
 
-    let kernel_pd_phys =
-        crate::mm::pmm::alloc_frame().expect("Failed to allocate kernel PD");
+    let kernel_pd_phys = crate::mm::pmm::alloc_frame().expect("Failed to allocate kernel PD");
     let kernel_pd = unsafe { &mut *(kernel_pd_phys as *mut [u64; 512]) };
     unsafe { write_bytes(kernel_pd.as_mut_ptr(), 0, 4096) };
     kernel_pdpt[511] = kernel_pd_phys | 0x3;
@@ -972,8 +970,7 @@ unsafe fn map_single_4k_page(
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
         pml4[pml4_idx] & !0xFFF
     } else {
-        let pdpt_phys =
-            crate::mm::pmm::alloc_frame().ok_or("Out of memory allocating PDPT")?;
+        let pdpt_phys = crate::mm::pmm::alloc_frame().ok_or("Out of memory allocating PDPT")?;
         let pdpt_virt = unsafe { super::physmap::phys_to_virt_u64(pdpt_phys) };
         unsafe { write_bytes(pdpt_virt as *mut u8, 0, 4096) };
         pml4[pml4_idx] = pdpt_phys | table_flags;

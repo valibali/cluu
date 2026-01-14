@@ -237,7 +237,13 @@ fn load_segment_batch(
 
         // Map the page
         unsafe {
-            map_user_page(page_vaddr, frame_phys, writable, executable, page_table_root)?;
+            map_user_page(
+                page_vaddr,
+                frame_phys,
+                writable,
+                executable,
+                page_table_root,
+            )?;
         }
     }
 

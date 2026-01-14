@@ -4,8 +4,8 @@
 //! All ELF parsing is done in one place to avoid code duplication.
 
 pub use klibcluu::boot_elf::{
-    BootElfError, BootElfResult, LoadableSegment, ParsedElf,
-    PAGE_EXEC, PAGE_READ, PAGE_USER, PAGE_WRITE,
+    BootElfError, BootElfResult, LoadableSegment, ParsedElf, PAGE_EXEC, PAGE_READ, PAGE_USER,
+    PAGE_WRITE,
 };
 
 /// Type alias for compatibility with existing code

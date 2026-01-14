@@ -65,11 +65,8 @@ fn run() -> Result<()> {
                             if !LOG_WRITE_SEEN.swap(true, Ordering::Relaxed) {
                                 let _ = debug_print("tty: forward to console");
                             }
-                            let _ = send_with_payload(
-                                console_endpoint,
-                                CONSOLE_WRITE_LABEL,
-                                payload,
-                            );
+                            let _ =
+                                send_with_payload(console_endpoint, CONSOLE_WRITE_LABEL, payload);
                         }
                         TTY_REGISTER_LABEL => {
                             shell_stdin = msg.words[0];

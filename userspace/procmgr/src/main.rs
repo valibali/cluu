@@ -5,8 +5,8 @@ extern crate alloc;
 
 use alloc::{collections::BTreeMap, format};
 use libcluu::boot::{
-    process_info, ProcessInfo, PROCESS_INFO_ADDR, PARAM_INITRD_SIZE,
-    TOKEN_STDIN, TOKEN_STDOUT, TOKEN_STDERR, TOKEN_STDLOG,
+    process_info, ProcessInfo, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_STDERR, TOKEN_STDIN,
+    TOKEN_STDLOG, TOKEN_STDOUT,
 };
 use libcluu::elf::ElfFile;
 use libcluu::syscall::thread_destroy;
@@ -22,7 +22,7 @@ const SERVICE_STACK_SIZE: usize = 64 * 1024;
 const SERVICE_STACK_BASE: usize = 0x6d000000;
 const SERVICE_STACK_TOP: usize = SERVICE_STACK_BASE + SERVICE_STACK_SIZE;
 const STACK_FLAGS: usize = 0x03; // read + write
-// PAGE_SIZE is imported from libcluu::*
+                                 // PAGE_SIZE is imported from libcluu::*
 const SERVICE_PATH: &str = "bin/shell";
 const PROCMGR_EXIT_LABEL: u32 = 1;
 
@@ -46,7 +46,7 @@ fn main_result() -> Result<()> {
 struct ProcessManager {
     token: usize,
     exit_endpoint: usize,
-    tty_send: usize,  // send-only token to tty
+    tty_send: usize, // send-only token to tty
     initrd_size: usize,
     exit_cookie_next: usize,
     exit_table: BTreeMap<usize, usize>,
@@ -132,7 +132,12 @@ impl ProcessManager {
 
         let space_token = space_create(self.token)?;
         libcluu::map_segments(space_token, &elf, service_bytes)?;
-        libcluu::map_stack(space_token, SERVICE_STACK_TOP, SERVICE_STACK_SIZE, STACK_FLAGS)?;
+        libcluu::map_stack(
+            space_token,
+            SERVICE_STACK_TOP,
+            SERVICE_STACK_SIZE,
+            STACK_FLAGS,
+        )?;
 
         let send_rights = Rights::IPC_SEND.bits() as usize;
         let child_endpoint = token_derive(self.exit_endpoint, send_rights, u64::MAX)?;

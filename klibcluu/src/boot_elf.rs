@@ -137,7 +137,9 @@ impl ParsedElf {
     /// Iterate over all loadable segments
     #[inline]
     pub fn segments_iter(&self) -> impl Iterator<Item = &LoadableSegment> {
-        self.segments[..self.segment_count].iter().filter_map(|s| s.as_ref())
+        self.segments[..self.segment_count]
+            .iter()
+            .filter_map(|s| s.as_ref())
     }
 
     /// Parse the ELF bytes and extract PT_LOAD segments.

@@ -5,9 +5,8 @@ extern crate alloc;
 
 use alloc::format;
 use libcluu::boot::{
-    boot_info, ProcessInfo, CONSOLE_FB_BASE, INITRD_USER_BASE, PROCESS_INFO_ADDR,
-    PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
-    PARAM_INITRD_SIZE,
+    boot_info, ProcessInfo, CONSOLE_FB_BASE, INITRD_USER_BASE, PARAM_FB_BASE, PARAM_FB_HEIGHT,
+    PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR,
 };
 use libcluu::elf::ElfFile;
 use libcluu::tar::find_member;
@@ -20,11 +19,11 @@ const STACK_FLAGS: usize = 0x03; // read + write
 const STACK_STEP: usize = PROC_STACK_SIZE + 0x1000;
 
 // Service-specific token indices (beyond standard stdin/stdout/stderr)
-const SVC_TOKEN_LISTEN: usize = 0;      // recv endpoint for service requests
-const SVC_TOKEN_CAP: usize = 1;         // capability token (procmgr)
-const SVC_TOKEN_TTY_SEND: usize = 2;    // send to tty (kbd, procmgr)
+const SVC_TOKEN_LISTEN: usize = 0; // recv endpoint for service requests
+const SVC_TOKEN_CAP: usize = 1; // capability token (procmgr)
+const SVC_TOKEN_TTY_SEND: usize = 2; // send to tty (kbd, procmgr)
 const SVC_TOKEN_CONSOLE_SEND: usize = 2; // send to console (tty)
-const SVC_TOKEN_IRQ: usize = 3;         // irq token (kbd)
+const SVC_TOKEN_IRQ: usize = 3; // irq token (kbd)
 
 struct ServiceSpec {
     name: &'static str,

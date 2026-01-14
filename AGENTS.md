@@ -16,7 +16,8 @@
 - Rust sources default to 4 spaces (use `cargo fmt`). Keep `no_std` kernels tidy (avoid panics, prefer `Result` + `Error`).  
 - Syscall handlers live under `kernel/src/syscall/**` and log via `klibcluu::trace/info/warn` with the `sys_` or `invoke_` naming scheme (e.g., `invoke_space_create`).  
 - Userspace services follow a declarative configuration (init’s `Service` list) and use the shared `libcluu` syscall wrappers.  
-- Prioritize SOLID separation: kernel scheduling, console rendering, and IPC/keyboard drivers live in distinct modules, with traits or clear APIs (e.g., scheduler tick/priority table vs. console cursor blinking vs. kbd IRQ attach).  
+- Prioritize SOLID separation: kernel scheduling, console rendering, and IPC/keyboard drivers live in distinct modules, with traits or clear APIs (e.g., scheduler tick/priority table vs. console cursor blinking vs. kbd IRQ attach).
+- SOLID printiples shall be followed! Traits everywhere and well-known architectural patterns shall be used!  
 - Use descriptive logging levels (`TRACE` for scheduler/IRQ noise, `INFO` for user-relevant events like “init: console ready”); avoid introducing redundant syscall variants (keep `sys_recv` blocking/nonblocking via flags, not new numbers).
 
 ## Testing Guidelines

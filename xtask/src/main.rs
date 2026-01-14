@@ -58,6 +58,7 @@ fn main() -> Result<()> {
             build_userspace(&profile)?;
             build_kernel(&profile)?;
             create_initrd(&profile)?;
+            create_user_block_image(&profile)?;
             create_disk_image(&profile)?;
             println!("✓ Build complete: target/cluu.img");
         }
@@ -65,6 +66,7 @@ fn main() -> Result<()> {
             build_userspace(&profile)?;
             build_kernel(&profile)?;
             create_initrd(&profile)?;
+            create_user_block_image(&profile)?;
             create_disk_image(&profile)?;
             run_qemu(debug)?;
         }
@@ -106,6 +108,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/kbd",
         "userspace/tty",
         "userspace/shell",
+        "userspace/timeserver",
         "userspace/cat",
     ];
 
@@ -290,7 +293,7 @@ fn create_initrd(profile: &str) -> Result<()> {
     }
 
     // Copy user programs to initrd/bin/
-    let bin_programs = ["shell"];
+    let bin_programs = ["shell", "timeserver"];
     for prog in &bin_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("bin").join(prog);
@@ -364,11 +367,70 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     Ok(())
 }
 
+fn create_user_block_image(profile: &str) -> Result<()> {
+    println!("▸ Creating virtio-blk userspace image...");
+
+    let cargo_profile = if profile == "dev" { "debug" } else { profile };
+
+    let userspace_target_dir = project_root()
+        .join("target/x86_64-cluu-user")
+        .join(cargo_profile);
+
+    let staging_dir = project_root().join("target/userfs");
+    let bin_dir = staging_dir.join("bin");
+    let _ = fs::remove_dir_all(&staging_dir);
+    fs::create_dir_all(&bin_dir)?;
+
+    let bin_programs = ["shell", "timeserver"];
+    for prog in &bin_programs {
+        let src = userspace_target_dir.join(format!("{}.elf", prog));
+        let dst = bin_dir.join(prog);
+        if !src.exists() {
+            bail!("{} not found in {:?}", prog, userspace_target_dir);
+        }
+        fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
+        println!("  Added {}", prog);
+    }
+
+    let disk_path = project_root().join("target/userdisk.img");
+    if disk_path.exists() {
+        fs::remove_file(&disk_path)?;
+    }
+
+    // Create ext2 image populated from staging_dir using mke2fs -d
+    let status = Command::new("mke2fs")
+        .args([
+            "-t",
+            "ext2",
+            "-d",
+            staging_dir.to_str().unwrap(),
+            "-L",
+            "cluuuser",
+            "-b",
+            "1024",
+            disk_path.to_str().unwrap(),
+            "32768", // 32MB image (32768 blocks * 1KiB)
+        ])
+        .status()
+        .context("Failed to run mke2fs for user disk")?;
+
+    if !status.success() {
+        bail!("mke2fs failed while creating user disk image");
+    }
+
+    println!("  ✓ userdisk.img created");
+    Ok(())
+}
+
 fn run_qemu(debug: bool) -> Result<()> {
     let img_path = project_root().join("target/cluu.img");
+    let user_disk = project_root().join("target/userdisk.img");
 
     if !img_path.exists() {
         bail!("Disk image not found. Run 'cargo xtask build' first.");
+    }
+    if !user_disk.exists() {
+        bail!("User disk image not found. Run 'cargo xtask build' first.");
     }
 
     // Try to find OVMF.fd
@@ -391,6 +453,10 @@ fn run_qemu(debug: bool) -> Result<()> {
         "256M",
         "-drive",
         &format!("file={},format=raw", img_path.display()),
+        "-drive",
+        &format!("file={},format=raw,if=none,id=userblk", user_disk.display()),
+        "-device",
+        "virtio-blk-pci,drive=userblk",
         "-display",
         "gtk",
         "-no-reboot",
@@ -488,6 +554,8 @@ fn clean() -> Result<()> {
     let _ = fs::remove_dir_all(project_root().join("target/initrd"));
     let _ = fs::remove_file(project_root().join("target/initrd.tar"));
     let _ = fs::remove_file(project_root().join("target/cluu.img"));
+    let _ = fs::remove_dir_all(project_root().join("target/userfs"));
+    let _ = fs::remove_file(project_root().join("target/userdisk.img"));
     let _ = fs::remove_dir_all(project_root().join("target/asm"));
 
     println!("  ✓ Cleaned");

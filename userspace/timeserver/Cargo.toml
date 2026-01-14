@@ -1,0 +1,14 @@
+[package]
+name = "cluu-timeserver"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU timeserver stub"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "timeserver"
+path = "src/main.rs"

@@ -34,11 +34,10 @@ pub mod types;
 
 // Re-exports
 pub use boot::{
-    boot_info, process_info, root_token_handle, BootInfo, ProcessInfo,
-    CONSOLE_FB_BASE, INITRD_USER_BASE, PROCESS_INFO_ADDR,
-    TOKEN_STDIN, TOKEN_STDOUT, TOKEN_STDERR, TOKEN_STDLOG,
-    PARAM_FB_BASE, PARAM_FB_SIZE, PARAM_FB_WIDTH, PARAM_FB_HEIGHT, PARAM_FB_PITCH,
-    PARAM_INITRD_SIZE,
+    boot_info, process_info, root_token_handle, BootInfo, ProcessInfo, CONSOLE_FB_BASE,
+    INITRD_USER_BASE, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE,
+    PARAM_FB_WIDTH, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG,
+    TOKEN_STDOUT,
 };
 pub use elf::{ElfFile, LoadableSegment};
 pub use error::{Error, Result};
@@ -79,8 +78,7 @@ pub use types::*;
 
 // Memory constants
 pub use mem::{
-    LARGE_PAGE_SIZE, PAGE_SIZE, PAGES_PER_LARGE_PAGE,
-    page_align_up, page_align_down, is_aligned,
-    large_page_align_up, large_page_align_down, is_large_page_aligned,
-    pages_for_size, large_pages_for_size,
+    is_aligned, is_large_page_aligned, large_page_align_down, large_page_align_up,
+    large_pages_for_size, page_align_down, page_align_up, pages_for_size, LARGE_PAGE_SIZE,
+    PAGES_PER_LARGE_PAGE, PAGE_SIZE,
 };
