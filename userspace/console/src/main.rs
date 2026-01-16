@@ -8,15 +8,18 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
 use libcluu::boot::{
     process_info, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
+    TOKEN_PROC_CAP,
 };
 use libcluu::ipc::{
     CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL, CONSOLE_WRITE_LABEL,
 };
+use libcluu::registry;
 use libcluu::types::Message;
 use libcluu::{debug_print, syscall, Error, Result};
 
 // Token index for listen endpoint (set by init)
-const SVC_TOKEN_LISTEN: usize = 0;
+// Token index for the console's input endpoint (set by init).
+const SVC_TOKEN_LISTEN: usize = 6;
 
 const GLYPH_W: usize = 8;
 const GLYPH_H: usize = 16;
@@ -44,7 +47,22 @@ const BLINK_TIMEOUT_MS: u64 = 500;
 fn run() -> Result<()> {
     let info = process_info();
     let fb = info.params[PARAM_FB_BASE] as *mut u8;
-    let endpoint = info.tokens[SVC_TOKEN_LISTEN];
+    let proc_cap = info.tokens[TOKEN_PROC_CAP];
+    // Prefer a fresh endpoint created from proc_cap so the console can grant
+    // send-only tokens to subscribers via the registry.
+    let endpoint = if proc_cap != 0 {
+        match syscall::endpoint_create(proc_cap) {
+            Ok(token) => token,
+            Err(_) => info.tokens[SVC_TOKEN_LISTEN],
+        }
+    } else {
+        info.tokens[SVC_TOKEN_LISTEN]
+    };
+    registry::init("console")?;
+    registry::register_default_outputs()?;
+    // Expose the console write input for tty to subscribe to.
+    registry::register_output("write", endpoint)?;
+    let registry_endpoint = registry::control_endpoint();
     let mut console = Console::new(
         fb,
         info.params[PARAM_FB_WIDTH] as usize,
@@ -55,43 +73,44 @@ fn run() -> Result<()> {
     syscall::yield_cpu()?;
 
     let mut buf = [0u8; 512];
+    // Main loop handles console input and registry control traffic.
     loop {
-        // Block until message arrives or timeout expires (for cursor blinking)
-        match syscall::ipc_recv_timeout(endpoint, &mut buf, BLINK_TIMEOUT_MS) {
-            Ok(len) => {
+        let tokens = [endpoint, registry_endpoint];
+        match syscall::ipc_recv_any(&tokens, &mut buf, BLINK_TIMEOUT_MS) {
+            Ok((index, len)) => {
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
-                    console.handle_message(&msg, payload);
+                    if index == 0 {
+                        console.handle_message(&msg, payload);
+                    } else {
+                        // Registry control messages are handled out-of-band.
+                        let _ = registry::handle_incoming_message(&msg, payload);
+                    }
                 } else {
                     let _ = debug_print(&format!("console: parse failed len {}", len));
                 }
             }
-            Err(Error::Timeout) => {
-                // Timeout expired - toggle cursor visibility
-                console.tick();
-            }
-            Err(Error::WouldBlock) => {
-                // Shouldn't happen with blocking recv, but handle it
+            Err(Error::Timeout) | Err(Error::WouldBlock) => {
                 console.tick();
             }
             Err(_) => {
                 let _ = debug_print("console: other recv error");
-                // ignore other IPC issues for now
             }
-        }
+        };
     }
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
+    // IPC messages are header + payload; guard against truncated payloads.
     if buf.len() < size_of::<Message>() {
         return None;
     }
     let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
-    let payload_len = msg.words[0];
+    let mut payload_len = msg.words[0];
     let header = size_of::<Message>();
-    let end = header + payload_len;
-    if end > buf.len() {
-        return None;
+    if header + payload_len > buf.len() {
+        payload_len = 0;
     }
+    let end = header + payload_len;
     Some((msg, &buf[header..end]))
 }
 

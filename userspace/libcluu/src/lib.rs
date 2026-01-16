@@ -26,6 +26,7 @@ pub mod error;
 pub mod ipc;
 pub mod mem;
 pub mod process;
+pub mod registry;
 pub mod rights;
 pub mod runtime;
 pub mod syscall;
@@ -36,8 +37,8 @@ pub mod types;
 pub use boot::{
     boot_info, process_info, root_token_handle, BootInfo, ProcessInfo, CONSOLE_FB_BASE,
     INITRD_USER_BASE, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE,
-    PARAM_FB_WIDTH, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG,
-    TOKEN_STDOUT,
+    PARAM_FB_WIDTH, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_PROC_CAP, TOKEN_REGISTRY,
+    TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
 };
 pub use elf::{ElfFile, LoadableSegment};
 pub use error::{Error, Result};

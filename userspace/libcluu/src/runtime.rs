@@ -4,7 +4,7 @@
 use core::panic::PanicInfo;
 
 #[cfg(all(not(feature = "std"), not(test)))]
-use crate::{allocator, ipc::notify_exit, syscall::yield_cpu};
+use crate::{allocator, ipc::notify_exit, syscall::debug_print, syscall::yield_cpu};
 
 /// Entry point for userspace programs
 ///
@@ -21,6 +21,9 @@ pub extern "C" fn _start() -> ! {
     allocator::init();
 
     let exit_code = unsafe { main() };
+    if exit_code != 0 {
+        let _ = debug_print("userspace: exiting with error");
+    }
     let _ = notify_exit(exit_code);
     loop {
         let _ = yield_cpu();
@@ -33,7 +36,7 @@ pub extern "C" fn _start() -> ! {
 #[cfg(all(not(feature = "std"), not(test)))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    // TODO: Print panic info via syscall
+    let _ = debug_print("userspace: panic");
     let _ = notify_exit(-1);
     loop {
         let _ = yield_cpu();

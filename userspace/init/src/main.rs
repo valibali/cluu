@@ -18,12 +18,10 @@ const PROC_STACK_TOP: usize = PROC_STACK_BASE + PROC_STACK_SIZE;
 const STACK_FLAGS: usize = 0x03; // read + write
 const STACK_STEP: usize = PROC_STACK_SIZE + 0x1000;
 
-// Service-specific token indices (beyond standard stdin/stdout/stderr)
-const SVC_TOKEN_LISTEN: usize = 0; // recv endpoint for service requests
-const SVC_TOKEN_CAP: usize = 1; // capability token (procmgr)
-const SVC_TOKEN_TTY_SEND: usize = 2; // send to tty (kbd, procmgr)
-const SVC_TOKEN_CONSOLE_SEND: usize = 2; // send to console (tty)
-const SVC_TOKEN_IRQ: usize = 3; // irq token (kbd)
+// Service-specific token indices (beyond standard stdin/stdout/stderr/stdlog/registry/proc_cap)
+const SVC_TOKEN_LISTEN: usize = 6; // recv endpoint for service requests
+const SVC_TOKEN_CAP: usize = 7; // capability token (procmgr)
+const SVC_TOKEN_IRQ: usize = 8; // irq token (kbd)
 
 struct ServiceSpec {
     name: &'static str,
@@ -34,6 +32,7 @@ struct ServiceSpec {
 }
 
 enum ServiceKind {
+    Registry,
     Console,
     Kbd,
     Tty,
@@ -59,6 +58,13 @@ const PROCMGR_RIGHTS_BITS: u32 = Rights::READ.bits()
 const PROCMGR_RIGHTS: Rights = Rights::from_bits_truncate(PROCMGR_RIGHTS_BITS);
 
 const SERVICE_LIST: &[ServiceSpec] = &[
+    ServiceSpec {
+        name: "registry",
+        path: "sys/registry",
+        priority: 190,
+        rights: None,
+        kind: ServiceKind::Registry,
+    },
     ServiceSpec {
         name: "procmgr",
         path: "sys/procmgr",
@@ -104,18 +110,16 @@ fn run() -> Result<()> {
     let initrd = unsafe {
         core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, info.initrd_size as usize)
     };
-    let exit_endpoint = endpoint_create(info.root_token)?;
-    let console_endpoint = endpoint_create(info.root_token)?;
-    let tty_endpoint = endpoint_create(info.root_token)?;
-    let console_send = token_derive(console_endpoint, Rights::IPC_SEND.bits() as usize, u64::MAX)?;
-    let tty_send = token_derive(tty_endpoint, Rights::IPC_SEND.bits() as usize, u64::MAX)?;
+    let exit_endpoint = create_exit_endpoint(info.root_token)?;
+    let registry_full = endpoint_create(info.root_token)?;
+    let registry_endpoint =
+        token_derive(registry_full, Rights::IPC_RECV.bits() as usize, u64::MAX)?;
+    let registry_send = token_derive(registry_full, Rights::IPC_SEND.bits() as usize, u64::MAX)?;
     let kbd_irq_token = token_derive(
         info.root_token,
         Rights::IRQ_HANDLE.bits() as usize,
         u64::MAX,
     )?;
-    let kbd_endpoint = endpoint_create(info.root_token)?;
-    let kbd_recv = token_derive(kbd_endpoint, Rights::IPC_RECV.bits() as usize, u64::MAX)?;
 
     let root_token = info.root_token;
     for (index, service) in SERVICE_LIST.iter().enumerate() {
@@ -140,12 +144,9 @@ fn run() -> Result<()> {
             initrd,
             index,
             token_share,
-            console_endpoint,
-            console_send,
-            tty_endpoint,
-            tty_send,
+            registry_endpoint,
+            registry_send,
             kbd_irq_token,
-            kbd_recv,
         )?;
         debug_print(&format!("init: {} ready", service.name))?;
 
@@ -164,12 +165,9 @@ fn spawn_service(
     initrd: &[u8],
     index: usize,
     token_share: Option<(usize, usize, usize)>,
-    console_endpoint: usize,
-    console_send: usize,
-    tty_endpoint: usize,
-    tty_send: usize,
+    registry_endpoint: usize,
+    registry_send: usize,
     kbd_irq_token: usize,
-    kbd_recv: usize,
 ) -> Result<()> {
     let service_bytes = find_member(initrd, service.path).ok_or(Error::NotFound)?;
     debug_print(&format!("init: parsed {} entry", service.name))?;
@@ -184,9 +182,18 @@ fn spawn_service(
     let mut tokens = [0usize; 16];
     let mut params = [0u64; 8];
 
+    let proc_cap = derive_proc_cap(token)?;
+    tokens[TOKEN_REGISTRY] = registry_send;
+    tokens[TOKEN_PROC_CAP] = proc_cap;
+    fill_default_endpoints(token, &mut tokens)?;
+
     match service.kind {
+        ServiceKind::Registry => {
+            tokens[SVC_TOKEN_LISTEN] = registry_endpoint;
+            map_process_info(space_token, 0, 0, &tokens, &params)?;
+        }
         ServiceKind::Console => {
-            tokens[SVC_TOKEN_LISTEN] = console_endpoint;
+            tokens[SVC_TOKEN_LISTEN] = create_grantable_listen_endpoint(token)?;
             let info = boot_info();
             params[PARAM_FB_BASE] = CONSOLE_FB_BASE as u64;
             params[PARAM_FB_SIZE] = info.fb_size;
@@ -197,21 +204,18 @@ fn spawn_service(
             map_framebuffer(space_token, info.fb_phys, info.fb_size)?;
         }
         ServiceKind::Kbd => {
-            tokens[SVC_TOKEN_LISTEN] = kbd_recv;
-            tokens[SVC_TOKEN_TTY_SEND] = tty_send;
+            tokens[SVC_TOKEN_LISTEN] = create_listen_endpoint(token)?;
             tokens[SVC_TOKEN_IRQ] = kbd_irq_token;
             map_process_info(space_token, 0, 0, &tokens, &params)?;
         }
         ServiceKind::Tty => {
-            tokens[SVC_TOKEN_LISTEN] = tty_endpoint;
-            tokens[SVC_TOKEN_CONSOLE_SEND] = console_send;
+            tokens[SVC_TOKEN_LISTEN] = create_grantable_listen_endpoint(token)?;
             map_process_info(space_token, 0, 0, &tokens, &params)?;
         }
         ServiceKind::Procmgr => {
             if let Some((cap_token, exit_endpoint, initrd_size)) = token_share {
                 tokens[SVC_TOKEN_LISTEN] = exit_endpoint;
                 tokens[SVC_TOKEN_CAP] = cap_token;
-                tokens[SVC_TOKEN_TTY_SEND] = tty_send;
                 params[PARAM_INITRD_SIZE] = initrd_size as u64;
                 map_process_info(space_token, 0, 0, &tokens, &params)?;
                 map_initrd(space_token, initrd, initrd_size)?;
@@ -227,6 +231,45 @@ fn spawn_service(
     )?;
     let _ = thread_token;
     Ok(())
+}
+
+fn fill_default_endpoints(token: usize, tokens: &mut [usize; 16]) -> Result<()> {
+    if tokens[TOKEN_STDIN] == 0 {
+        tokens[TOKEN_STDIN] = endpoint_create(token)?;
+    }
+    if tokens[TOKEN_STDOUT] == 0 {
+        tokens[TOKEN_STDOUT] = endpoint_create(token)?;
+    }
+    if tokens[TOKEN_STDERR] == 0 {
+        tokens[TOKEN_STDERR] = endpoint_create(token)?;
+    }
+    if tokens[TOKEN_STDLOG] == 0 {
+        tokens[TOKEN_STDLOG] = endpoint_create(token)?;
+    }
+    Ok(())
+}
+
+fn derive_proc_cap(token: usize) -> Result<usize> {
+    let rights =
+        Rights::CREATE | Rights::IPC_SEND | Rights::IPC_RECV | Rights::IPC_CALL | Rights::GRANT;
+    token_derive(token, rights.bits() as usize, u64::MAX)
+}
+
+fn create_listen_endpoint(token: usize) -> Result<usize> {
+    let endpoint = endpoint_create(token)?;
+    token_derive(endpoint, Rights::IPC_RECV.bits() as usize, u64::MAX)
+}
+
+fn create_grantable_listen_endpoint(token: usize) -> Result<usize> {
+    let endpoint = endpoint_create(token)?;
+    let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::GRANT;
+    token_derive(endpoint, rights.bits() as usize, u64::MAX)
+}
+
+fn create_exit_endpoint(token: usize) -> Result<usize> {
+    let endpoint = endpoint_create(token)?;
+    let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::GRANT;
+    token_derive(endpoint, rights.bits() as usize, u64::MAX)
 }
 
 /// Map the unified ProcessInfo structure into a child's address space.

@@ -221,6 +221,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-registry"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-shell"
 version = "0.1.0"
 dependencies = [
@@ -343,7 +350,9 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "klibcluu",
+ "lazy_static",
  "proptest",
+ "spin",
 ]
 
 [[package]]

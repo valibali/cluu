@@ -6,13 +6,13 @@
 use core::mem::size_of;
 use libcluu::boot::process_info;
 use libcluu::ipc::{send, KBD_EVENT_LABEL};
+use libcluu::registry;
 use libcluu::types::Message;
-use libcluu::{debug_print, ipc_recv, irq_attach, yield_cpu, Error, Result};
+use libcluu::{debug_print, irq_attach, yield_cpu, Error, Result};
 
 // Token indices (set by init)
-const SVC_TOKEN_LISTEN: usize = 0;
-const SVC_TOKEN_TTY_SEND: usize = 2;
-const SVC_TOKEN_IRQ: usize = 3;
+const SVC_TOKEN_LISTEN: usize = 6;
+const SVC_TOKEN_IRQ: usize = 8;
 
 const KEYBOARD_IRQ: usize = 1;
 
@@ -28,7 +28,9 @@ fn run() -> Result<()> {
     let info = process_info();
     let endpoint = info.tokens[SVC_TOKEN_LISTEN];
     let irq_token = info.tokens[SVC_TOKEN_IRQ];
-    let tty_endpoint = info.tokens[SVC_TOKEN_TTY_SEND];
+    registry::init("kbd")?;
+    registry::register_default_outputs()?;
+    let registry_endpoint = registry::control_endpoint();
 
     debug_print("kbd: ready")?;
     irq_attach(irq_token, endpoint, KEYBOARD_IRQ)?;
@@ -39,24 +41,52 @@ fn run() -> Result<()> {
     let mut saw_key = false;
     let mut saw_msg = false;
     let mut saw_error = false;
+    let mut tty_endpoint = 0usize;
+    let mut requested_tty = false;
     loop {
-        match ipc_recv(endpoint, &mut buf) {
-            Ok(len) => {
+        if tty_endpoint == 0 && !requested_tty {
+            if registry::request_subscription("tty", "main").is_ok() {
+                requested_tty = true;
+            }
+        }
+
+        let tokens = [endpoint, registry_endpoint];
+        match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+            Ok((index, len)) => {
+                let Some((msg, payload)) = parse_message(&buf[..len]) else {
+                    continue;
+                };
+                if index == 1 {
+                    if let Ok(Some(event)) = registry::handle_incoming_message(&msg, payload) {
+                        match event {
+                            registry::RegistryEvent::Grant { name, token } => {
+                                if name == "main" {
+                                    tty_endpoint = token;
+                                    let _ = debug_print("kbd: tty subscribed");
+                                }
+                            }
+                            registry::RegistryEvent::SubscribeStatus { code } => {
+                                if code != 0 {
+                                    requested_tty = false;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if !saw_msg {
                     saw_msg = true;
                     let _ = debug_print("kbd: received message");
                 }
-                if let Some(msg) = parse_message(&buf[..len]) {
-                    if msg.tag.label == KBD_EVENT_LABEL && msg.tag.words >= 1 {
-                        let scancode = msg.words[0] as u8;
-                        if !saw_key {
-                            saw_key = true;
-                            let _ = debug_print("kbd: first key event");
-                        }
-                        if let Some(ascii) = scancode_to_ascii(scancode) {
-                            // words[0] = payload len (0), words[1] = ascii char
-                            let msg =
-                                Message::new(KBD_EVENT_LABEL, [0, ascii as usize, 0, 0, 0, 0], 2);
+                if msg.tag.label == KBD_EVENT_LABEL && msg.tag.words >= 1 {
+                    let scancode = msg.words[0] as u8;
+                    if !saw_key {
+                        saw_key = true;
+                        let _ = debug_print("kbd: first key event");
+                    }
+                    if let Some(ascii) = scancode_to_ascii(scancode) {
+                        let msg = Message::new(KBD_EVENT_LABEL, [0, ascii as usize, 0, 0, 0, 0], 2);
+                        if tty_endpoint != 0 {
                             let _ = send(tty_endpoint, &msg, libcluu::types::IpcFlags::empty());
                         }
                     }
@@ -76,11 +106,18 @@ fn run() -> Result<()> {
     }
 }
 
-fn parse_message(buf: &[u8]) -> Option<Message> {
+fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
     if buf.len() < size_of::<Message>() {
         return None;
     }
-    Some(unsafe { (buf.as_ptr() as *const Message).read_unaligned() })
+    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
+    let mut payload_len = msg.words[0];
+    let header = size_of::<Message>();
+    if header + payload_len > buf.len() {
+        payload_len = 0;
+    }
+    let end = header + payload_len;
+    Some((msg, &buf[header..end]))
 }
 
 fn scancode_to_ascii(scancode: u8) -> Option<u8> {

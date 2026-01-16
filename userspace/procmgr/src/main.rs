@@ -4,19 +4,20 @@
 extern crate alloc;
 
 use alloc::{collections::BTreeMap, format};
+use core::mem::size_of;
 use libcluu::boot::{
-    process_info, ProcessInfo, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_STDERR, TOKEN_STDIN,
-    TOKEN_STDLOG, TOKEN_STDOUT,
+    process_info, ProcessInfo, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_PROC_CAP,
+    TOKEN_REGISTRY, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
 };
 use libcluu::elf::ElfFile;
+use libcluu::registry;
 use libcluu::syscall::thread_destroy;
 use libcluu::tar::find_member;
 use libcluu::*;
 
 // Service-specific token indices used by init for procmgr
-const SVC_TOKEN_LISTEN: usize = 0;
-const SVC_TOKEN_CAP: usize = 1;
-const SVC_TOKEN_TTY_SEND: usize = 2;
+const SVC_TOKEN_LISTEN: usize = 6;
+const SVC_TOKEN_CAP: usize = 7;
 
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
 const SERVICE_STACK_BASE: usize = 0x6d000000;
@@ -46,8 +47,9 @@ fn main_result() -> Result<()> {
 struct ProcessManager {
     token: usize,
     exit_endpoint: usize,
-    tty_send: usize, // send-only token to tty
+    registry_send: usize,
     initrd_size: usize,
+    proc_cap: usize,
     exit_cookie_next: usize,
     exit_table: BTreeMap<usize, usize>,
 }
@@ -58,14 +60,17 @@ impl ProcessManager {
         Ok(Self {
             token: info.tokens[SVC_TOKEN_CAP],
             exit_endpoint: info.tokens[SVC_TOKEN_LISTEN],
-            tty_send: info.tokens[SVC_TOKEN_TTY_SEND],
+            registry_send: info.tokens[TOKEN_REGISTRY],
             initrd_size: info.params[PARAM_INITRD_SIZE] as usize,
+            proc_cap: info.tokens[TOKEN_PROC_CAP],
             exit_cookie_next: 1,
             exit_table: BTreeMap::new(),
         })
     }
 
     fn init(&mut self) -> Result<()> {
+        registry::init("procmgr")?;
+        registry::register_default_outputs()?;
         debug_print("=========================================")?;
         debug_print("  Process Manager Starting")?;
         debug_print("=========================================")?;
@@ -85,12 +90,25 @@ impl ProcessManager {
     }
 
     fn poll_exit_notifications(&mut self) -> Result<()> {
-        let mut msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 0);
-        if let Err(err) = recv(self.exit_endpoint, &mut msg, IpcFlags::empty()) {
-            debug_print(&format!("TRACE: exit recv failed {:?}", err))?;
+        let registry_endpoint = registry::control_endpoint();
+        let tokens = [self.exit_endpoint, registry_endpoint];
+        let mut buf = [0u8; 256];
+        let (index, len) = match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+            Ok(res) => res,
+            Err(err) => {
+                debug_print(&format!("TRACE: exit recv failed {:?}", err))?;
+                return Ok(());
+            }
+        };
+        if index == 1 {
+            if let Some((msg, payload)) = parse_message(&buf[..len]) {
+                let _ = registry::handle_incoming_message(&msg, payload);
+            }
             return Ok(());
         }
-
+        let Some((msg, _payload)) = parse_message(&buf[..len]) else {
+            return Ok(());
+        };
         if msg.tag.label != PROCMGR_EXIT_LABEL || msg.tag.words < 2 {
             debug_print(&format!(
                 "TRACE: exit msg label {} words {}",
@@ -147,18 +165,21 @@ impl ProcessManager {
             child_endpoint, cookie
         ))?;
         let stdin_endpoint = endpoint_create(self.token)?;
-        // self.tty_send is already a send token from init, use it directly
-        let tty_send = self.tty_send;
+        let stdout_endpoint = endpoint_create(self.token)?;
+        let stderr_endpoint = endpoint_create(self.token)?;
+        let stdlog_endpoint = endpoint_create(self.token)?;
+        let proc_cap = derive_proc_cap(self.token)?;
         map_process_info_page(
             space_token,
             child_endpoint,
             cookie,
             stdin_endpoint,
-            tty_send,
-            tty_send,
-            tty_send,
+            stdout_endpoint,
+            stderr_endpoint,
+            stdlog_endpoint,
+            self.registry_send,
+            proc_cap,
         )?;
-        register_tty(stdin_endpoint, tty_send)?;
 
         let thread_token = thread_create(
             space_token,
@@ -180,6 +201,8 @@ fn map_process_info_page(
     stdout_token: usize,
     stderr_token: usize,
     stdlog_token: usize,
+    registry_token: usize,
+    proc_cap_token: usize,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -189,6 +212,8 @@ fn map_process_info_page(
     tokens[TOKEN_STDOUT] = stdout_token;
     tokens[TOKEN_STDERR] = stderr_token;
     tokens[TOKEN_STDLOG] = stdlog_token;
+    tokens[TOKEN_REGISTRY] = registry_token;
+    tokens[TOKEN_PROC_CAP] = proc_cap_token;
 
     let info = ProcessInfo {
         exit_token,
@@ -221,12 +246,22 @@ fn map_process_info_page(
     Ok(())
 }
 
-fn register_tty(stdin_endpoint: usize, tty_endpoint: usize) -> Result<()> {
-    let msg = Message::new(
-        libcluu::ipc::TTY_REGISTER_LABEL,
-        [stdin_endpoint, 0, 0, 0, 0, 0],
-        1,
-    );
-    libcluu::ipc::send(tty_endpoint, &msg, IpcFlags::empty())?;
-    Ok(())
+fn derive_proc_cap(token: usize) -> Result<usize> {
+    let rights =
+        Rights::CREATE | Rights::IPC_SEND | Rights::IPC_RECV | Rights::IPC_CALL | Rights::GRANT;
+    token_derive(token, rights.bits() as usize, u64::MAX)
+}
+
+fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
+    if buf.len() < size_of::<Message>() {
+        return None;
+    }
+    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
+    let mut payload_len = msg.words[0];
+    let header = size_of::<Message>();
+    if header + payload_len > buf.len() {
+        payload_len = 0;
+    }
+    let end = header + payload_len;
+    Some((msg, &buf[header..end]))
 }

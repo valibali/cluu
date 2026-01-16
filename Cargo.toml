@@ -23,6 +23,7 @@ members = [
     "userspace/kbd",
     "userspace/tty",
     "userspace/shell",
+    "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
 ]
@@ -41,6 +42,7 @@ default-members = [
     "userspace/kbd",
     "userspace/tty",
     "userspace/shell",
+    "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
 ]

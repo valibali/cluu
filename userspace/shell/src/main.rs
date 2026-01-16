@@ -7,8 +7,9 @@ use alloc::format;
 use core::mem::size_of;
 use libcluu::boot::{process_info, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT};
 use libcluu::ipc::{send_with_payload, TTY_READ_LABEL, TTY_WRITE_LABEL};
+use libcluu::registry;
 use libcluu::types::Message;
-use libcluu::{debug_print, ipc_recv, yield_cpu, Error, Result};
+use libcluu::{debug_print, yield_cpu, Error, Result};
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -21,26 +22,46 @@ pub extern "C" fn main() -> i32 {
 fn run() -> Result<()> {
     let info = process_info();
     let stdin = info.tokens[TOKEN_STDIN];
-    let stdout = info.tokens[TOKEN_STDOUT];
+    let mut stdout = info.tokens[TOKEN_STDOUT];
     let stderr = info.tokens[TOKEN_STDERR];
     let stdlog = info.tokens[TOKEN_STDLOG];
+    registry::init("shell")?;
+    registry::register_default_outputs()?;
+    // Lazily subscribe to tty's main output and use it as stdout.
+    loop {
+        match registry::subscribe_output("tty", "main") {
+            Ok(token) => {
+                stdout = token;
+                break;
+            }
+            Err(_) => {
+                let _ = yield_cpu();
+            }
+        }
+    }
+    let registry_endpoint = registry::control_endpoint();
 
     debug_print("shell: ready")?;
     let _ = debug_print(&format!(
         "shell: stdin {} stdout {} stderr {} stdlog {}",
         stdin, stdout, stderr, stdlog
     ));
-    if let Err(_) = print_prompt(stdout) {
-        let _ = debug_print("shell: prompt write failed");
-    }
+    let _ = print_prompt(stdout);
 
     let mut buf = [0u8; 128];
     loop {
-        match ipc_recv(stdin, &mut buf) {
-            Ok(len) => {
-                if let Some((msg, _payload)) = parse_message(&buf[..len]) {
-                    if msg.tag.label == TTY_READ_LABEL && msg.tag.words >= 1 {
-                        let ch = msg.words[0] as u8;
+        // Wait for either keyboard input via stdin or registry control traffic.
+        let tokens = [stdin, registry_endpoint];
+        match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+            Ok((index, len)) => {
+                if let Some((msg, payload)) = parse_message(&buf[..len]) {
+                    if index == 1 {
+                        // Registry control messages (grants/status).
+                        let _ = registry::handle_incoming_message(&msg, payload);
+                        continue;
+                    }
+                    if msg.tag.label == TTY_READ_LABEL && msg.tag.words >= 2 {
+                        let ch = msg.words[1] as u8;
                         if ch == b'\n' {
                             print_prompt(stdout)?;
                         }
@@ -58,20 +79,22 @@ fn run() -> Result<()> {
 }
 
 fn print_prompt(endpoint: usize) -> Result<()> {
+    // Prompt is sent to tty, which forwards to console.
     send_with_payload(endpoint, TTY_WRITE_LABEL, b"cluu> ")?;
     Ok(())
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
+    // Message header followed by optional payload bytes.
     if buf.len() < size_of::<Message>() {
         return None;
     }
     let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
-    let payload_len = msg.words[0];
+    let mut payload_len = msg.words[0];
     let header = size_of::<Message>();
-    let end = header + payload_len;
-    if end > buf.len() {
-        return None;
+    if header + payload_len > buf.len() {
+        payload_len = 0;
     }
+    let end = header + payload_len;
     Some((msg, &buf[header..end]))
 }

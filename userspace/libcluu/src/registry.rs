@@ -1,0 +1,396 @@
+//! Userspace registry client + producer grant handling.
+//!
+//! This module lets a process:
+//! - register outputs it owns (metadata only),
+//! - subscribe to outputs from other services via the registry,
+//! - handle grant requests to mint send-only tokens for subscribers.
+
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::mem::size_of;
+use spin::Mutex;
+
+use crate::boot::{process_info, TOKEN_PROC_CAP, TOKEN_REGISTRY};
+use crate::rights::Rights;
+use crate::syscall::{endpoint_create, ipc_recv_any, ipc_recv_nonblocking, token_derive};
+use crate::types::Message;
+use crate::{Error, Result};
+
+pub const REGISTRY_REGISTER_LABEL: u32 = 0x100;
+pub const REGISTRY_UNREGISTER_LABEL: u32 = 0x101;
+pub const REGISTRY_LIST_LABEL: u32 = 0x102;
+pub const REGISTRY_SUBSCRIBE_LABEL: u32 = 0x103;
+pub const REGISTRY_SUBSCRIBE_REPLY_LABEL: u32 = 0x104;
+pub const REGISTRY_GRANT_REQUEST_LABEL: u32 = 0x105;
+pub const REGISTRY_GRANT_DELIVER_LABEL: u32 = 0x106;
+pub enum RegistryEvent {
+    /// Producer granted a token for the named output.
+    Grant { name: String, token: usize },
+    /// Registry replied to a subscribe request; 0 is OK.
+    SubscribeStatus { code: i32 },
+}
+
+#[derive(Default)]
+struct RegistryState {
+    /// Service name used as the registry namespace.
+    service_name: Option<String>,
+    /// Registry endpoint token (send-only).
+    registry_endpoint: usize,
+    /// Per-process control endpoint (recv-only).
+    control_endpoint: usize,
+    /// Outputs owned by this process: name -> endpoint token.
+    outputs: BTreeMap<String, usize>,
+}
+
+lazy_static::lazy_static! {
+    // Global registry client state for this process.
+    static ref REGISTRY_STATE: Mutex<RegistryState> = Mutex::new(RegistryState::default());
+}
+
+/// Initialize the registry client for this process and allocate a control endpoint.
+pub fn init(service_name: &str) -> Result<()> {
+    let info = process_info();
+    let registry_endpoint = info.tokens[TOKEN_REGISTRY];
+    let proc_cap = info.tokens[TOKEN_PROC_CAP];
+    if registry_endpoint == 0 || proc_cap == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // The control endpoint is where subscribe replies and grants arrive.
+    let control_endpoint = endpoint_create(proc_cap)?;
+    let mut state = REGISTRY_STATE.lock();
+    state.service_name = Some(service_name.to_string());
+    state.registry_endpoint = registry_endpoint;
+    state.control_endpoint = control_endpoint;
+    let _ = service_name;
+    Ok(())
+}
+
+pub fn control_endpoint() -> usize {
+    REGISTRY_STATE.lock().control_endpoint
+}
+
+/// Register an output endpoint with the registry.
+pub fn register_output(endpoint_name: &str, endpoint_token: usize) -> Result<()> {
+    let mut state = REGISTRY_STATE.lock();
+    let service_name = state.service_name.clone().ok_or(Error::InvalidArgument)?;
+    let registry_endpoint = state.registry_endpoint;
+    let control_endpoint = state.control_endpoint;
+    if registry_endpoint == 0 || control_endpoint == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Keep a local map so we can grant later.
+    state
+        .outputs
+        .insert(endpoint_name.to_string(), endpoint_token);
+    let payload = encode_names(&service_name, endpoint_name);
+    let msg = make_payload_message(
+        REGISTRY_REGISTER_LABEL,
+        payload.len(),
+        &[control_endpoint, control_endpoint],
+    );
+    send_with_payload(registry_endpoint, &msg, &payload)
+}
+
+pub fn unregister_output(endpoint_name: &str) -> Result<()> {
+    let mut state = REGISTRY_STATE.lock();
+    let service_name = state.service_name.clone().ok_or(Error::InvalidArgument)?;
+    let registry_endpoint = state.registry_endpoint;
+    let control_endpoint = state.control_endpoint;
+    if registry_endpoint == 0 || control_endpoint == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Stop granting this output.
+    state.outputs.remove(endpoint_name);
+    let payload = encode_names(&service_name, endpoint_name);
+    let msg = make_payload_message(
+        REGISTRY_UNREGISTER_LABEL,
+        payload.len(),
+        &[control_endpoint],
+    );
+    send_with_payload(registry_endpoint, &msg, &payload)
+}
+
+/// Register standard outputs (stdin/stdout/stderr/stdlog) when present.
+pub fn register_default_outputs() -> Result<()> {
+    let info = process_info();
+    let stdin = info.tokens[crate::boot::TOKEN_STDIN];
+    let stdout = info.tokens[crate::boot::TOKEN_STDOUT];
+    let stderr = info.tokens[crate::boot::TOKEN_STDERR];
+    let stdlog = info.tokens[crate::boot::TOKEN_STDLOG];
+
+    if stdin != 0 {
+        let _ = register_output("stdin", stdin);
+    }
+    if stdout != 0 {
+        let _ = register_output("stdout", stdout);
+    }
+    if stderr != 0 {
+        let _ = register_output("stderr", stderr);
+    }
+    if stdlog != 0 {
+        let _ = register_output("stdlog", stdlog);
+    }
+    Ok(())
+}
+
+pub fn subscribe_output(service_name: &str, endpoint_name: &str) -> Result<usize> {
+    let (registry_endpoint, control_endpoint) = {
+        let state = REGISTRY_STATE.lock();
+        (state.registry_endpoint, state.control_endpoint)
+    };
+    if registry_endpoint == 0 || control_endpoint == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let payload = encode_names(service_name, endpoint_name);
+    let msg = make_payload_message(REGISTRY_SUBSCRIBE_LABEL, payload.len(), &[control_endpoint]);
+    // Ask the registry to broker a grant request to the producer.
+    send_with_payload(registry_endpoint, &msg, &payload)?;
+
+    wait_for_grant(endpoint_name)
+}
+
+pub fn request_subscription(service_name: &str, endpoint_name: &str) -> Result<()> {
+    let (registry_endpoint, control_endpoint) = {
+        let state = REGISTRY_STATE.lock();
+        (state.registry_endpoint, state.control_endpoint)
+    };
+    if registry_endpoint == 0 || control_endpoint == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let payload = encode_names(service_name, endpoint_name);
+    let msg = make_payload_message(REGISTRY_SUBSCRIBE_LABEL, payload.len(), &[control_endpoint]);
+    // Fire-and-forget request; caller will handle the grant later.
+    send_with_payload(registry_endpoint, &msg, &payload)?;
+    Ok(())
+}
+
+/// Drain any pending grant traffic without blocking.
+pub fn handle_grant_requests() -> Result<()> {
+    let control_endpoint = control_endpoint();
+    if control_endpoint == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let mut buf = [0u8; 256];
+    loop {
+        match ipc_recv_nonblocking(control_endpoint, &mut buf) {
+            Ok(len) => {
+                if let Some((msg, payload)) = parse_message(&buf[..len]) {
+                    let _ = handle_incoming_message(&msg, payload)?;
+                }
+            }
+            Err(Error::WouldBlock) => return Ok(()),
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+pub fn handle_incoming_message(msg: &Message, payload: &[u8]) -> Result<Option<RegistryEvent>> {
+    match msg.tag.label {
+        REGISTRY_GRANT_REQUEST_LABEL => {
+            handle_grant_request(msg, payload)?;
+            Ok(None)
+        }
+        REGISTRY_GRANT_DELIVER_LABEL => {
+            let name = decode_single_name(payload).ok_or(Error::InvalidArgument)?;
+            Ok(Some(RegistryEvent::Grant {
+                name,
+                token: msg.words[1],
+            }))
+        }
+        REGISTRY_SUBSCRIBE_REPLY_LABEL => {
+            let code = msg.words[1] as i32;
+            Ok(Some(RegistryEvent::SubscribeStatus { code }))
+        }
+        _ => Ok(None),
+    }
+}
+
+pub fn poll_or_recv_any(
+    endpoints: &[usize],
+    buf: &mut [u8],
+    timeout_ms: u64,
+) -> Result<(usize, usize)> {
+    let control_endpoint = control_endpoint();
+    let mut tokens = Vec::with_capacity(endpoints.len() + 1);
+    tokens.extend_from_slice(endpoints);
+    // Always include the registry control endpoint if configured.
+    if control_endpoint != 0 {
+        tokens.push(control_endpoint);
+    }
+    ipc_recv_any(&tokens, buf, timeout_ms)
+}
+
+fn wait_for_grant(endpoint_name: &str) -> Result<usize> {
+    let control_endpoint = control_endpoint();
+    let mut buf = [0u8; 256];
+    loop {
+        // Block on the control endpoint until a matching grant arrives.
+        let (index, len) = ipc_recv_any(&[control_endpoint], &mut buf, u64::MAX)?;
+        let _ = index;
+        if let Some((msg, payload)) = parse_message(&buf[..len]) {
+            if let Some(event) = handle_incoming_message(&msg, payload)? {
+                match event {
+                    RegistryEvent::Grant { name, token } => {
+                        if name == endpoint_name {
+                            return Ok(token);
+                        }
+                    }
+                    RegistryEvent::SubscribeStatus { code } => {
+                        if code != 0 {
+                            return Err(error_from_code(code));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
+    let requester_endpoint = msg.words[1];
+    if requester_endpoint == 0 {
+        return Err(Error::InvalidArgument);
+    }
+    // Payload encodes the output name being requested.
+    let endpoint_name = decode_single_name(payload).ok_or(Error::InvalidArgument)?;
+    // Look up the local output token so we can derive a send-only grant.
+    let endpoint_token = {
+        let state = REGISTRY_STATE.lock();
+        state.outputs.get(&endpoint_name).copied().unwrap_or(0)
+    };
+    if endpoint_token == 0 {
+        return Ok(());
+    }
+    // Mint a least-privilege token that only allows IPC_SEND.
+    let send_rights = Rights::IPC_SEND.bits() as usize;
+    let derived = match token_derive(endpoint_token, send_rights, u64::MAX) {
+        Ok(token) => token,
+        Err(err) => return Err(err),
+    };
+    let payload = encode_single_name(&endpoint_name);
+    // Reply directly to the requester with the derived token.
+    let reply = make_payload_message(REGISTRY_GRANT_DELIVER_LABEL, payload.len(), &[derived]);
+    match send_with_payload(requester_endpoint, &reply, &payload) {
+        Ok(()) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn make_payload_message(label: u32, payload_len: usize, words: &[usize]) -> Message {
+    let mut msg = Message::new(label, [0; 6], 1);
+    msg.words[0] = payload_len;
+    let mut count = 1;
+    for (idx, word) in words.iter().enumerate() {
+        if idx + 1 >= msg.words.len() {
+            break;
+        }
+        msg.words[idx + 1] = *word;
+        count += 1;
+    }
+    msg.tag.words = count as u8;
+    msg
+}
+
+fn send_with_payload(endpoint: usize, msg: &Message, payload: &[u8]) -> Result<()> {
+    // Serialize the message header + payload into a single IPC buffer.
+    let header = msg.as_bytes();
+    let mut buffer = Vec::with_capacity(header.len() + payload.len());
+    buffer.extend_from_slice(header);
+    buffer.extend_from_slice(payload);
+    crate::syscall::ipc_send(endpoint, &buffer)
+}
+
+fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
+    // Messages are encoded as a Message header followed by payload bytes.
+    if buf.len() < size_of::<Message>() {
+        return None;
+    }
+    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
+    let payload_len = msg.words[0];
+    let header = size_of::<Message>();
+    let end = header + payload_len;
+    if end > buf.len() {
+        return None;
+    }
+    Some((msg, &buf[header..end]))
+}
+
+fn encode_names(service_name: &str, endpoint_name: &str) -> Vec<u8> {
+    let service_bytes = service_name.as_bytes();
+    let endpoint_bytes = endpoint_name.as_bytes();
+    let mut payload = Vec::with_capacity(4 + service_bytes.len() + endpoint_bytes.len());
+    let service_len = service_bytes.len() as u16;
+    let endpoint_len = endpoint_bytes.len() as u16;
+    payload.extend_from_slice(&service_len.to_le_bytes());
+    payload.extend_from_slice(&endpoint_len.to_le_bytes());
+    payload.extend_from_slice(service_bytes);
+    payload.extend_from_slice(endpoint_bytes);
+    payload
+}
+
+fn encode_single_name(name: &str) -> Vec<u8> {
+    let bytes = name.as_bytes();
+    let mut payload = Vec::with_capacity(4 + bytes.len());
+    let len = bytes.len() as u16;
+    payload.extend_from_slice(&len.to_le_bytes());
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(bytes);
+    payload
+}
+
+fn decode_single_name(payload: &[u8]) -> Option<String> {
+    let (service, _endpoint) = decode_names(payload)?;
+    Some(service)
+}
+
+fn decode_names(payload: &[u8]) -> Option<(String, String)> {
+    if payload.len() < 4 {
+        return None;
+    }
+    let service_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+    let endpoint_len = u16::from_le_bytes([payload[2], payload[3]]) as usize;
+    let start = 4;
+    let mid = start + service_len;
+    let end = mid + endpoint_len;
+    if end > payload.len() {
+        return None;
+    }
+    let service = core::str::from_utf8(&payload[start..mid]).ok()?.to_string();
+    let endpoint = core::str::from_utf8(&payload[mid..end]).ok()?.to_string();
+    Some((service, endpoint))
+}
+
+fn error_from_code(code: i32) -> Error {
+    match code {
+        -1 => Error::InvalidArgument,
+        -2 => Error::OutOfMemory,
+        -3 => Error::NotFound,
+        -4 => Error::PermissionDenied,
+        -5 => Error::AlreadyExists,
+        -6 => Error::Timeout,
+        _ => Error::InvalidOperation,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_decode_names_roundtrip() {
+        let payload = encode_names("tty", "write");
+        let (service, endpoint) = decode_names(&payload).expect("decode");
+        assert_eq!(service, "tty");
+        assert_eq!(endpoint, "write");
+    }
+}

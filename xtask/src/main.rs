@@ -102,6 +102,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/cap_demo",
         "userspace/init", // System programs
         "userspace/procmgr",
+        "userspace/registry",
         "userspace/vfs",
         "userspace/ramfs",
         "userspace/console",
@@ -280,7 +281,7 @@ fn create_initrd(profile: &str) -> Result<()> {
     }
 
     // Copy system servers to initrd/sys/
-    let sys_programs = ["init", "procmgr", "console", "kbd", "tty"];
+    let sys_programs = ["init", "procmgr", "registry", "console", "kbd", "tty"];
     for prog in &sys_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("sys").join(prog);
