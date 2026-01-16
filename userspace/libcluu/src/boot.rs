@@ -75,6 +75,9 @@ pub const PARAM_FB_PITCH: usize = 4;
 // Well-known param indices for procmgr
 pub const PARAM_INITRD_SIZE: usize = 0;
 
+// Well-known param indices for tty
+pub const PARAM_TTY_INSTANCE: usize = 0;
+
 /// Read the process info structure.
 pub fn process_info() -> &'static ProcessInfo {
     unsafe { &*(PROCESS_INFO_ADDR as *const ProcessInfo) }

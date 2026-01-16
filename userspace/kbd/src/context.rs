@@ -53,7 +53,7 @@ impl KbdContext {
     pub fn ensure_tty_subscription(&mut self) {
         if self.tty_endpoint == 0
             && !self.requested_tty
-            && registry::request_subscription("tty", "main").is_ok()
+            && registry::request_subscription("tty:0", "main").is_ok()
         {
             self.requested_tty = true;
         }

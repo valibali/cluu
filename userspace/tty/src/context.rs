@@ -7,7 +7,7 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::vec::Vec;
-use libcluu::boot::{process_info, TOKEN_PROC_CAP};
+use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_PROC_CAP};
 use libcluu::ipc::{send_with_payload, CONSOLE_WRITE_LABEL};
 use libcluu::registry;
 use libcluu::{debug_print, yield_cpu, Result};
@@ -42,7 +42,9 @@ impl TtyContext {
             info.tokens[SVC_TOKEN_LISTEN]
         };
 
-        registry::init("tty")?;
+        let instance_id = info.params[PARAM_TTY_INSTANCE] as u64;
+        let service_name = format!("tty:{}", instance_id);
+        registry::init(&service_name)?;
         registry::register_default_outputs()?;
         // Expose the tty input for kbd/shell subscriptions.
         registry::register_output("main", endpoint)?;

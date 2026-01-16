@@ -28,7 +28,7 @@ fn run() -> Result<()> {
     let stdlog = info.tokens[TOKEN_STDLOG];
     let stdout = loop {
         // Lazily subscribe to tty's main output and use it as stdout.
-        match registry::subscribe_output("tty", "main") {
+        match registry::subscribe_output("tty:0", "main") {
             Ok(token) => break token,
             Err(_) => {
                 let _ = yield_cpu();

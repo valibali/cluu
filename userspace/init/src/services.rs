@@ -11,6 +11,7 @@ pub struct ServiceSpec {
     pub priority: usize,
     pub rights: Option<Rights>,
     pub kind: ServiceKind,
+    pub instance_id: Option<u64>,
 }
 
 #[derive(Copy, Clone)]
@@ -49,6 +50,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         priority: 190,
         rights: None,
         kind: ServiceKind::Registry,
+        instance_id: None,
     },
     ServiceSpec {
         name: "procmgr",
@@ -56,6 +58,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         priority: 200,
         rights: Some(PROCMGR_RIGHTS),
         kind: ServiceKind::Procmgr,
+        instance_id: None,
     },
     ServiceSpec {
         name: "kbd",
@@ -63,6 +66,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         priority: 230,
         rights: None,
         kind: ServiceKind::Kbd,
+        instance_id: None,
     },
     ServiceSpec {
         name: "tty",
@@ -70,6 +74,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         priority: 205,
         rights: None,
         kind: ServiceKind::Tty,
+        instance_id: Some(0),
     },
     ServiceSpec {
         name: "console",
@@ -77,5 +82,6 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         priority: 210,
         rights: None,
         kind: ServiceKind::Console,
+        instance_id: None,
     },
 ];

@@ -8,6 +8,7 @@ use libcluu::ipc::KBD_EVENT_LABEL;
 use libcluu::types::Message;
 
 /// Parsed key event from the keyboard service.
+#[allow(dead_code)]
 pub struct KbdEvent {
     pub ascii: u8,
     pub modifiers: u8,
