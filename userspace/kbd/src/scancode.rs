@@ -83,7 +83,7 @@ impl ScancodeDecoder {
             return None;
         }
 
-        let ascii = ascii_for_scancode(code, self.modifiers);
+        let ascii = ascii_for_scancode(code, self.modifiers, was_extended);
         Some(KeyEvent {
             ascii,
             scancode: code,
@@ -124,7 +124,7 @@ impl ScancodeDecoder {
 }
 
 /// Convert a scancode into ASCII using the current modifier state.
-fn ascii_for_scancode(scancode: u8, modifiers: Modifiers) -> Option<u8> {
+fn ascii_for_scancode(scancode: u8, modifiers: Modifiers, extended: bool) -> Option<u8> {
     if let Some(letter) = letter_for_scancode(scancode) {
         let uppercase = modifiers.shift ^ modifiers.caps;
         let mut ascii = if uppercase {
@@ -146,11 +146,13 @@ fn ascii_for_scancode(scancode: u8, modifiers: Modifiers) -> Option<u8> {
         _ => None,
     }
     .or_else(|| {
-        if modifiers.shift {
-            shifted_symbol(scancode)
-        } else {
-            base_symbol(scancode)
-        }
+        keypad_symbol(scancode, modifiers, extended).or_else(|| {
+            if modifiers.shift {
+                shifted_symbol(scancode)
+            } else {
+                base_symbol(scancode)
+            }
+        })
     })
 }
 
@@ -239,6 +241,33 @@ fn shifted_symbol(scancode: u8) -> Option<u8> {
         0x33 => Some(b'<'),
         0x34 => Some(b'>'),
         0x35 => Some(b'?'),
+        _ => None,
+    }
+}
+
+/// Return keypad digits and operators when NumLock is active.
+fn keypad_symbol(scancode: u8, modifiers: Modifiers, extended: bool) -> Option<u8> {
+    if extended {
+        return match scancode {
+            0x35 => Some(b'/'),
+            _ => None,
+        };
+    }
+    match scancode {
+        0x37 => Some(b'*'),
+        0x4A => Some(b'-'),
+        0x4E => Some(b'+'),
+        0x53 if modifiers.num => Some(b'.'),
+        0x47 if modifiers.num => Some(b'7'),
+        0x48 if modifiers.num => Some(b'8'),
+        0x49 if modifiers.num => Some(b'9'),
+        0x4B if modifiers.num => Some(b'4'),
+        0x4C if modifiers.num => Some(b'5'),
+        0x4D if modifiers.num => Some(b'6'),
+        0x4F if modifiers.num => Some(b'1'),
+        0x50 if modifiers.num => Some(b'2'),
+        0x51 if modifiers.num => Some(b'3'),
+        0x52 if modifiers.num => Some(b'0'),
         _ => None,
     }
 }
