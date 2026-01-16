@@ -56,10 +56,12 @@ fn run() -> Result<()> {
                         let _ = registry::handle_incoming_message(&msg, payload);
                         continue;
                     }
-                    if msg.tag.label == TTY_READ_LABEL && msg.tag.words >= 2 {
-                        let ch = msg.words[1] as u8;
-                        if ch == b'\n' {
-                            print_prompt(stdout)?;
+                    if msg.tag.label == TTY_READ_LABEL {
+                        if !payload.is_empty() {
+                            handle_line_payload(stdout, payload)?;
+                        } else if msg.tag.words >= 2 {
+                            let ch = msg.words[1] as u8;
+                            handle_line_payload(stdout, &[ch])?;
                         }
                     }
                 }
@@ -93,4 +95,15 @@ fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
     }
     let end = header + payload_len;
     Some((msg, &buf[header..end]))
+}
+
+/// Update the prompt when a complete line is received from tty.
+///
+/// The tty sends line-buffered input; we only need to react to newline markers.
+fn handle_line_payload(stdout: usize, payload: &[u8]) -> Result<()> {
+    // Print a new prompt after each completed line.
+    if payload.iter().any(|byte| *byte == b'\n') {
+        print_prompt(stdout)?;
+    }
+    Ok(())
 }
