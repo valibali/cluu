@@ -72,7 +72,7 @@ impl TtyContext {
     pub fn request_subscriptions(&mut self) {
         if self.console_endpoint == 0
             && !self.requested_console
-            && registry::request_subscription("console", "write").is_ok()
+            && registry::request_subscription("console:0", "write").is_ok()
         {
             self.requested_console = true;
         }

@@ -71,6 +71,7 @@ pub const PARAM_FB_SIZE: usize = 1;
 pub const PARAM_FB_WIDTH: usize = 2;
 pub const PARAM_FB_HEIGHT: usize = 3;
 pub const PARAM_FB_PITCH: usize = 4;
+pub const PARAM_CONSOLE_INSTANCE: usize = 5;
 
 // Well-known param indices for procmgr
 pub const PARAM_INITRD_SIZE: usize = 0;

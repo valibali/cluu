@@ -512,11 +512,7 @@ pub unsafe fn create_initial_page_tables(
     if aligned_end > 0 {
         let gb_count = aligned_end.div_ceil(0x4000_0000) as usize;
 
-        for (gb_idx, pdpt_entry) in physmap_pdpt
-            .iter_mut()
-            .enumerate()
-            .take(gb_count.min(512))
-        {
+        for (gb_idx, pdpt_entry) in physmap_pdpt.iter_mut().enumerate().take(gb_count.min(512)) {
             let pd_phys = crate::mm::pmm::alloc_frame().expect("Failed to allocate PD");
             let pd = unsafe { &mut *(pd_phys as *mut [u64; 512]) };
             unsafe { write_bytes(pd.as_mut_ptr(), 0, 4096) };

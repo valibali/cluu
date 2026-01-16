@@ -82,6 +82,6 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         priority: 210,
         rights: None,
         kind: ServiceKind::Console,
-        instance_id: None,
+        instance_id: Some(0),
     },
 ];

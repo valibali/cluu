@@ -13,10 +13,10 @@ mod line_discipline;
 mod protocol;
 
 use context::TtyContext;
-use line_discipline::{EchoAction, LineDiscipline};
-use protocol::{decode_kbd_event, parse_message};
 use libcluu::ipc::{KBD_EVENT_LABEL, TTY_READ_LABEL, TTY_REGISTER_LABEL, TTY_WRITE_LABEL};
 use libcluu::{yield_cpu, Error, Result};
+use line_discipline::{EchoAction, LineDiscipline};
+use protocol::{decode_kbd_event, parse_message};
 
 #[no_mangle]
 /// Kernel entrypoint for the tty service.

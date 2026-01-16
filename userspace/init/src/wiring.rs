@@ -6,8 +6,8 @@
 
 use alloc::format;
 use libcluu::boot::{
-    CONSOLE_FB_BASE, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
-    PARAM_INITRD_SIZE, PARAM_TTY_INSTANCE,
+    CONSOLE_FB_BASE, PARAM_CONSOLE_INSTANCE, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH,
+    PARAM_FB_SIZE, PARAM_FB_WIDTH, PARAM_INITRD_SIZE, PARAM_TTY_INSTANCE,
 };
 use libcluu::elf::ElfFile;
 use libcluu::tar::find_member;
@@ -79,6 +79,7 @@ impl ServiceWiring for ServiceKind {
                 params[PARAM_FB_WIDTH] = ctx.boot.fb_width as u64;
                 params[PARAM_FB_HEIGHT] = ctx.boot.fb_height as u64;
                 params[PARAM_FB_PITCH] = ctx.boot.fb_pitch as u64;
+                params[PARAM_CONSOLE_INSTANCE] = instance_id.unwrap_or(0);
             }
             ServiceKind::Kbd => {
                 tokens[SVC_TOKEN_LISTEN] = create_listen_endpoint(ctx.boot.root_token)?;
@@ -149,9 +150,13 @@ pub fn launch_service(ctx: &InitContext<'_>, service: &ServiceSpec, index: usize
     tokens[TOKEN_PROC_CAP] = derive_proc_cap(ctx.boot.root_token)?;
     fill_default_endpoints(ctx.boot.root_token, &mut tokens)?;
 
-    service
-        .kind
-        .configure_tokens(ctx, child_token, service.instance_id, &mut tokens, &mut params)?;
+    service.kind.configure_tokens(
+        ctx,
+        child_token,
+        service.instance_id,
+        &mut tokens,
+        &mut params,
+    )?;
     map_process_info(space_token, 0, 0, &tokens, &params)?;
 
     service.kind.map_resources(ctx, space_token, &params)?;

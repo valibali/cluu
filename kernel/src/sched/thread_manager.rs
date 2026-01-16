@@ -414,7 +414,10 @@ impl ThreadManager {
 
         for (thread_id, thread) in repo.iter_mut() {
             // Debug: log blocked threads with deadlines (once per second)
-            if thread.is_blocked() && thread.timeout_deadline.is_some() && current_tick.is_multiple_of(250) {
+            if thread.is_blocked()
+                && thread.timeout_deadline.is_some()
+                && current_tick.is_multiple_of(250)
+            {
                 klibcluu::trace("check_timeouts: blocked thread ");
                 klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
                 klibcluu::trace(" deadline=");
@@ -488,8 +491,7 @@ impl ThreadManager {
         Self::set_current(thread_id);
 
         // Get thread context
-        let context =
-            Self::with_thread(thread_id, |t| t.context).expect("Thread disappeared");
+        let context = Self::with_thread(thread_id, |t| t.context).expect("Thread disappeared");
 
         // Jump to thread context
         jump_to_thread(&context);

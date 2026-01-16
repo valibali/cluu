@@ -132,8 +132,7 @@ pub extern "C" fn kstart() -> ! {
             architecture::x86_64::syscall::PerCpuData::new();
 
         let per_cpu_ptr = core::ptr::addr_of_mut!(PER_CPU_DATA);
-        (*per_cpu_ptr)
-            .set_kernel_stack((&raw const BSP_STACK as *const u8 as u64) + (64 * 1024));
+        (*per_cpu_ptr).set_kernel_stack((&raw const BSP_STACK as *const u8 as u64) + (64 * 1024));
         architecture::x86_64::syscall::set_per_cpu_area(&*per_cpu_ptr);
     }
 

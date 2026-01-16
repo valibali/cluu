@@ -102,7 +102,7 @@ fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
 /// The tty sends line-buffered input; we only need to react to newline markers.
 fn handle_line_payload(stdout: usize, payload: &[u8]) -> Result<()> {
     // Print a new prompt after each completed line.
-    if payload.iter().any(|byte| *byte == b'\n') {
+    if payload.contains(&b'\n') {
         print_prompt(stdout)?;
     }
     Ok(())

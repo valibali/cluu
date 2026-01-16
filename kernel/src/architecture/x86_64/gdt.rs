@@ -35,7 +35,7 @@ lazy_static! {
             static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
             let stack_start = VirtAddr::from_ptr(&raw const STACK);
-            
+
             stack_start + STACK_SIZE as u64
         };
         tss
