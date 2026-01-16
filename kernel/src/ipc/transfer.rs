@@ -51,8 +51,8 @@ where
     A: PageAllocator,
     M: VirtualMemoryMapper,
 {
-    allocator: &'a mut A,
-    mapper: &'a mut M,
+    _allocator: &'a mut A,
+    _mapper: &'a mut M,
 }
 
 impl<'a, A, M> BufferTransfer<'a, A, M>
@@ -67,7 +67,10 @@ where
     /// * `allocator` - Page allocator for memory operations
     /// * `mapper` - Virtual memory mapper for page table operations
     pub fn new(allocator: &'a mut A, mapper: &'a mut M) -> Self {
-        Self { allocator, mapper }
+        Self {
+            _allocator: allocator,
+            _mapper: mapper,
+        }
     }
 
     /// Check if address and length are page-aligned
@@ -77,7 +80,7 @@ where
 
     /// Get number of pages needed for a buffer
     fn pages_needed(len: usize) -> usize {
-        (len + 0xFFF) / 0x1000
+        len.div_ceil(0x1000)
     }
 }
 

@@ -88,7 +88,6 @@ impl BootInfoProvider for BootbootAdapter {
         //
         // The BOOTBOOT structure itself is at a known location, so we can use that.
         let _bootboot_virt = self.bootboot_ptr as u64;
-        const BOOTBOOT_VIRT: u64 = 0xffffffffffe00000; // From linker script
 
         // If bootboot is identity mapped, then we know the offset
         // bootboot physical = bootboot_virt - offset

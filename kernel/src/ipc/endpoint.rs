@@ -36,6 +36,10 @@ impl EndpointMessage {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
@@ -249,12 +253,15 @@ pub fn send_from_user(
     if msg_len > buffer.len() {
         return Err(Error::InvalidParameter);
     }
-    crate::syscall::userptr::copy_from_user(
-        buffer.as_mut_ptr(),
-        msg_ptr,
-        msg_len,
-        page_table_root,
-    )?;
+    // Safety: buffer is a valid kernel buffer of IPC_MESSAGE_MAX bytes.
+    unsafe {
+        crate::syscall::userptr::copy_from_user(
+            buffer.as_mut_ptr(),
+            msg_ptr,
+            msg_len,
+            page_table_root,
+        )?;
+    }
     let wake = send(endpoint, &buffer[..msg_len])?;
     if let Some(thread_id) = wake {
         if first_send {
@@ -273,9 +280,6 @@ pub fn recv_to_user(
     page_table_root: x86_64::PhysAddr,
     receiver: ThreadId,
 ) -> Result<usize, Error> {
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    static IPC_RECV_DELIVERED_LOGGED: AtomicU64 = AtomicU64::new(0);
     crate::syscall::userptr::validate_user_buffer(buf_ptr, buf_len)?;
     let msg = match recv(endpoint, receiver) {
         Ok(Some(msg)) => msg,
@@ -291,12 +295,15 @@ pub fn recv_to_user(
         klibcluu::trace("recv_to_user: endpoint_id=");
         klibcluu::log_dec(klibcluu::LogLevel::Trace, "", endpoint.as_u64());
     }
-    crate::syscall::userptr::copy_to_user(
-        buf_ptr,
-        msg.raw_bytes().as_ptr(),
-        msg.len(),
-        page_table_root,
-    )?;
+    // Safety: msg.raw_bytes() points to a kernel buffer of msg.len() bytes.
+    unsafe {
+        crate::syscall::userptr::copy_to_user(
+            buf_ptr,
+            msg.raw_bytes().as_ptr(),
+            msg.len(),
+            page_table_root,
+        )?;
+    }
     Ok(msg.len())
 }
 
@@ -323,12 +330,15 @@ pub fn recv_to_user_nonblocking(
         klibcluu::trace("recv_to_user_nonblocking: msg_len=");
         klibcluu::log_dec(klibcluu::LogLevel::Trace, "", msg.len() as u64);
     }
-    crate::syscall::userptr::copy_to_user(
-        buf_ptr,
-        msg.raw_bytes().as_ptr(),
-        msg.len(),
-        page_table_root,
-    )?;
+    // Safety: msg.raw_bytes() points to a kernel buffer of msg.len() bytes.
+    unsafe {
+        crate::syscall::userptr::copy_to_user(
+            buf_ptr,
+            msg.raw_bytes().as_ptr(),
+            msg.len(),
+            page_table_root,
+        )?;
+    }
     Ok(msg.len())
 }
 
@@ -345,12 +355,15 @@ pub fn call_from_user(
     if msg_len > buffer.len() {
         return Err(Error::InvalidParameter);
     }
-    crate::syscall::userptr::copy_from_user(
-        buffer.as_mut_ptr(),
-        msg_ptr,
-        msg_len,
-        page_table_root,
-    )?;
+    // Safety: buffer is a valid kernel buffer of IPC_MESSAGE_MAX bytes.
+    unsafe {
+        crate::syscall::userptr::copy_from_user(
+            buffer.as_mut_ptr(),
+            msg_ptr,
+            msg_len,
+            page_table_root,
+        )?;
+    }
 
     let wake = {
         let mut guard = ENDPOINTS.lock();
@@ -390,12 +403,15 @@ pub fn deliver_reply(caller: ThreadId, reply_data: &[u8]) -> Result<usize, Error
         return Err(Error::BufferTooSmall);
     }
 
-    crate::syscall::userptr::copy_to_user(
-        reply_info.reply_buf_ptr,
-        reply_data.as_ptr(),
-        reply_data.len(),
-        reply_info.page_table_root,
-    )?;
+    // Safety: reply_data points to a kernel buffer for reply_data.len() bytes.
+    unsafe {
+        crate::syscall::userptr::copy_to_user(
+            reply_info.reply_buf_ptr,
+            reply_data.as_ptr(),
+            reply_data.len(),
+            reply_info.page_table_root,
+        )?;
+    }
 
     // Wake the caller
     ThreadManager::wake_thread(caller);
@@ -415,12 +431,15 @@ pub fn reply_from_user(
     if reply_len > buffer.len() {
         return Err(Error::InvalidParameter);
     }
-    crate::syscall::userptr::copy_from_user(
-        buffer.as_mut_ptr(),
-        reply_ptr,
-        reply_len,
-        page_table_root,
-    )?;
+    // Safety: buffer is a valid kernel buffer of IPC_MESSAGE_MAX bytes.
+    unsafe {
+        crate::syscall::userptr::copy_from_user(
+            buffer.as_mut_ptr(),
+            reply_ptr,
+            reply_len,
+            page_table_root,
+        )?;
+    }
 
     deliver_reply(caller, &buffer[..reply_len])
 }

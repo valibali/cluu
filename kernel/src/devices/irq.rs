@@ -81,7 +81,6 @@ pub fn dispatch_scancode(irq: u8, scancode: u8) {
     match endpoint::try_send(endpoint_id, msg_bytes) {
         Ok(Some(thread_id)) => {
             if IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
-                klibcluu::info("dispatch_scancode: delivered");
                 klibcluu::trace("dispatch_scancode: endpoint_id=");
                 klibcluu::log_dec(klibcluu::LogLevel::Trace, "", endpoint_id.as_u64());
                 klibcluu::trace("dispatch_scancode: wake_thread_id=");
@@ -91,7 +90,6 @@ pub fn dispatch_scancode(irq: u8, scancode: u8) {
         }
         Ok(None) => {
             if IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
-                klibcluu::info("dispatch_scancode: queued");
                 klibcluu::trace("dispatch_scancode: endpoint_id=");
                 klibcluu::log_dec(klibcluu::LogLevel::Trace, "", endpoint_id.as_u64());
             }

@@ -2,7 +2,7 @@
 //!
 //! Higher-level IPC wrappers using the Message type.
 
-use crate::boot::{self, process_info};
+use crate::boot::process_info;
 use crate::error::Result;
 use crate::syscall;
 use crate::types::*;

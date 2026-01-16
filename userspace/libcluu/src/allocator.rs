@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 const HEAP_SIZE: usize = 128 * 1024;
 
 /// Align the heap to 4 KiB boundaries.
+#[allow(dead_code)]
 #[repr(align(4096))]
 struct HeapRegion([u8; HEAP_SIZE]);
 
@@ -29,7 +30,7 @@ impl BumpAllocator {
 
     /// Initializes the heap region. Must be called before any allocation.
     pub fn init(&self) {
-        let start = unsafe { HEAP.0.as_ptr() as usize };
+        let start = core::ptr::addr_of!(HEAP).cast::<u8>() as usize;
         let end = start + HEAP_SIZE;
         self.next.store(start, Ordering::SeqCst);
         self.end.store(end, Ordering::SeqCst);
@@ -42,6 +43,12 @@ impl BumpAllocator {
 
     fn heap_end(&self) -> usize {
         self.end.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for BumpAllocator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

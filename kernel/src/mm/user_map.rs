@@ -55,7 +55,7 @@ pub fn map_phys_to_userspace(
     }
 
     // Round size up to page boundary
-    let num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    let num_pages = size.div_ceil(PAGE_SIZE);
     let page_table_root = space.page_table_root;
 
     klibcluu::trace("Mapping phys region: 0x");
@@ -103,7 +103,7 @@ pub fn unmap_phys_from_userspace(
         return Err(Error::InvalidArgument);
     }
 
-    let num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    let num_pages = size.div_ceil(PAGE_SIZE);
 
     klibcluu::trace("Unmapping phys region: virt 0x");
     klibcluu::log_hex(klibcluu::LogLevel::Trace, " (", virt_base);

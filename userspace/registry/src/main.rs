@@ -21,6 +21,12 @@ use libcluu::{debug_print, yield_cpu, Error, Result};
 
 const SVC_TOKEN_LISTEN: usize = 6;
 
+struct PendingSubscription {
+    requester_endpoint: usize,
+    service: String,
+    endpoint: String,
+}
+
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     match run() {
@@ -36,23 +42,17 @@ fn run() -> Result<()> {
     registry::register_default_outputs()?;
 
     debug_print("registry: ready")?;
-    let mut waiting_logged = false;
-
     // Registry table: (service, endpoint) -> grant endpoint owned by producer.
     let mut entries: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let mut pending: Vec<PendingSubscription> = Vec::new();
     let registry_control = registry::control_endpoint();
     let mut buf = [0u8; 256];
     // Main dispatch loop: handle register/unregister/list/subscribe requests.
     loop {
-        if !waiting_logged {
-            waiting_logged = true;
-            let _ = debug_print("registry: waiting");
-        }
         let tokens = [endpoint, registry_control];
         // Wait for either registry API calls or a grant reply on our control endpoint.
         match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
             Ok((index, len)) => {
-                waiting_logged = false;
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
                     if index == 1 {
                         let _ = registry::handle_incoming_message(&msg, payload);
@@ -72,6 +72,36 @@ fn run() -> Result<()> {
                                         "registry: registered {}:{}",
                                         service, endpoint
                                     ));
+                                    // Drain any queued subscribers now that the output exists.
+                                    let mut idx = 0;
+                                    while idx < pending.len() {
+                                        if pending[idx].service == service
+                                            && pending[idx].endpoint == endpoint
+                                        {
+                                            let requester = pending[idx].requester_endpoint;
+                                            let grant_payload = encode_single_name(&endpoint);
+                                            let grant_msg = make_payload_message(
+                                                REGISTRY_GRANT_REQUEST_LABEL,
+                                                grant_payload.len(),
+                                                &[requester],
+                                            );
+                                            if let Err(_err) = send_with_payload(
+                                                grant_endpoint,
+                                                &grant_msg,
+                                                &grant_payload,
+                                            ) {
+                                                send_status(
+                                                    requester,
+                                                    Error::InvalidArgument as i32,
+                                                )?;
+                                                idx += 1;
+                                            } else {
+                                                pending.swap_remove(idx);
+                                            }
+                                        } else {
+                                            idx += 1;
+                                        }
+                                    }
                                 }
                             }
                             send_status(msg.words[1], 0)?;
@@ -116,7 +146,7 @@ fn run() -> Result<()> {
                                             grant_payload.len(),
                                             &[reply_endpoint],
                                         );
-                                        if let Err(err) = send_with_payload(
+                                        if let Err(_err) = send_with_payload(
                                             *grant_endpoint,
                                             &grant_msg,
                                             &grant_payload,
@@ -130,12 +160,22 @@ fn run() -> Result<()> {
                                         }
                                     }
                                     None => {
-                                        let _ = debug_print("registry: subscribe missing entry");
-                                        send_status(reply_endpoint, Error::NotFound as i32)?;
+                                        if !pending.iter().any(|entry| {
+                                            entry.requester_endpoint == reply_endpoint
+                                                && entry.service == service
+                                                && entry.endpoint == endpoint
+                                        }) {
+                                            pending.push(PendingSubscription {
+                                                requester_endpoint: reply_endpoint,
+                                                service,
+                                                endpoint,
+                                            });
+                                        }
+                                        // Accept the request and grant when the output appears.
+                                        send_status(reply_endpoint, 0)?;
                                     }
                                 }
                             } else {
-                                let _ = debug_print("registry: subscribe malformed payload");
                                 send_status(reply_endpoint, Error::InvalidArgument as i32)?;
                             }
                         }

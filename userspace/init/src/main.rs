@@ -124,8 +124,7 @@ fn run() -> Result<()> {
     let root_token = info.root_token;
     for (index, service) in SERVICE_LIST.iter().enumerate() {
         let child_token = if let Some(rights) = service.rights {
-            let derived = token_derive(root_token, rights.bits() as usize, u64::MAX)?;
-            derived
+            token_derive(root_token, rights.bits() as usize, u64::MAX)?
         } else {
             root_token
         };
@@ -159,6 +158,7 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_service(
     service: &ServiceSpec,
     token: usize,
@@ -319,7 +319,7 @@ fn map_framebuffer(space_token: usize, fb_phys: u64, fb_size: u64) -> Result<()>
     if fb_phys == 0 || fb_size == 0 {
         return Ok(());
     }
-    let num_pages = ((fb_size as usize) + PAGE_SIZE - 1) / PAGE_SIZE;
+    let num_pages = (fb_size as usize).div_ceil(PAGE_SIZE);
     space_map_range(
         space_token,
         CONSOLE_FB_BASE,
@@ -333,7 +333,7 @@ fn map_framebuffer(space_token: usize, fb_phys: u64, fb_size: u64) -> Result<()>
 
 fn map_initrd(space_token: usize, initrd: &[u8], initrd_size: usize) -> Result<()> {
     const READ_ONLY: usize = 0x01;
-    let num_pages = (initrd_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    let num_pages = initrd_size.div_ceil(PAGE_SIZE);
     space_map_range(
         space_token,
         INITRD_USER_BASE,

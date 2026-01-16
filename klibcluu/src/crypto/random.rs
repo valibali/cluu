@@ -120,6 +120,7 @@ pub fn fill_random(buf: &mut [u8]) {
 }
 
 /// Get a random u64
+#[allow(dead_code)]
 pub fn random_u64() -> u64 {
     let mut state = RNG_STATE.lock();
     state.next_u64()

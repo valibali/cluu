@@ -70,15 +70,17 @@ fn run() -> Result<()> {
     let mut buf = [0u8; 256];
     loop {
         // Request console and shell subscriptions lazily; retry on failure.
-        if console_endpoint == 0 && !requested_console {
-            if registry::request_subscription("console", "write").is_ok() {
-                requested_console = true;
-            }
+        if console_endpoint == 0
+            && !requested_console
+            && registry::request_subscription("console", "write").is_ok()
+        {
+            requested_console = true;
         }
-        if shell_stdin == 0 && !requested_shell {
-            if registry::request_subscription("shell", "stdin").is_ok() {
-                requested_shell = true;
-            }
+        if shell_stdin == 0
+            && !requested_shell
+            && registry::request_subscription("shell", "stdin").is_ok()
+        {
+            requested_shell = true;
         }
 
         let tokens = [endpoint, registry_endpoint];

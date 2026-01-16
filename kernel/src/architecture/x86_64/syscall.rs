@@ -88,6 +88,12 @@ impl PerCpuData {
     }
 }
 
+impl Default for PerCpuData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Syscall Dispatcher (called from assembly)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -127,7 +133,7 @@ extern "C" fn syscall_dispatch(
         None => {
             klibcluu::warn("Invalid syscall number: ");
             klibcluu::log_dec(klibcluu::LogLevel::Warn, "", number as u64);
-            return Error::InvalidArgument.to_errno() as isize;
+            return Error::InvalidArgument.to_errno();
         }
     };
 
@@ -137,7 +143,7 @@ extern "C" fn syscall_dispatch(
     // Dispatch to syscall handler
     match dispatch_syscall(syscall_num, args) {
         Ok(ret) => ret as isize,
-        Err(e) => e.to_errno() as isize,
+        Err(e) => e.to_errno(),
     }
 }
 

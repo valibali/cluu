@@ -49,7 +49,7 @@ struct ProcessManager {
     exit_endpoint: usize,
     registry_send: usize,
     initrd_size: usize,
-    proc_cap: usize,
+    _proc_cap: usize,
     exit_cookie_next: usize,
     exit_table: BTreeMap<usize, usize>,
 }
@@ -62,7 +62,7 @@ impl ProcessManager {
             exit_endpoint: info.tokens[SVC_TOKEN_LISTEN],
             registry_send: info.tokens[TOKEN_REGISTRY],
             initrd_size: info.params[PARAM_INITRD_SIZE] as usize,
-            proc_cap: info.tokens[TOKEN_PROC_CAP],
+            _proc_cap: info.tokens[TOKEN_PROC_CAP],
             exit_cookie_next: 1,
             exit_table: BTreeMap::new(),
         })
@@ -193,6 +193,7 @@ impl ProcessManager {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn map_process_info_page(
     space_token: usize,
     exit_token: usize,

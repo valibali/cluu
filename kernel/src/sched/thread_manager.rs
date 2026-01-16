@@ -213,7 +213,7 @@ impl ThreadManager {
     pub fn ms_to_deadline(timeout_ms: u64) -> u64 {
         const MS_PER_TICK: u64 = 4;
         let current = Self::current_tick();
-        let ticks = (timeout_ms + MS_PER_TICK - 1) / MS_PER_TICK; // Round up
+        let ticks = timeout_ms.div_ceil(MS_PER_TICK); // Round up
         current + ticks
     }
 
@@ -368,7 +368,7 @@ impl ThreadManager {
         let tick = SCHEDULER_TICKS.fetch_add(1, Ordering::SeqCst) + 1;
 
         // Log first 30 ticks and then every 50 ticks for debugging
-        if tick <= 30 || tick % 50 == 0 {
+        if tick <= 30 || tick.is_multiple_of(50) {
             klibcluu::trace("tick: ");
             klibcluu::log_dec(klibcluu::LogLevel::Trace, "", tick);
         }
@@ -414,7 +414,7 @@ impl ThreadManager {
 
         for (thread_id, thread) in repo.iter_mut() {
             // Debug: log blocked threads with deadlines (once per second)
-            if thread.is_blocked() && thread.timeout_deadline.is_some() && current_tick % 250 == 0 {
+            if thread.is_blocked() && thread.timeout_deadline.is_some() && current_tick.is_multiple_of(250) {
                 klibcluu::trace("check_timeouts: blocked thread ");
                 klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
                 klibcluu::trace(" deadline=");
@@ -489,7 +489,7 @@ impl ThreadManager {
 
         // Get thread context
         let context =
-            Self::with_thread(thread_id, |t| t.context.clone()).expect("Thread disappeared");
+            Self::with_thread(thread_id, |t| t.context).expect("Thread disappeared");
 
         // Jump to thread context
         jump_to_thread(&context);
@@ -502,6 +502,11 @@ impl ThreadManager {
     /// # Returns
     ///
     /// Pointer to next thread's Context, or null if no switch needed
+    ///
+    /// # Safety
+    ///
+    /// `current_ctx_ptr` must point to a valid saved context for the current thread.
+    /// The caller must ensure interrupts are in a safe state for switching.
     #[no_mangle]
     pub unsafe extern "C" fn schedule_and_switch(
         current_ctx_ptr: *const Context,

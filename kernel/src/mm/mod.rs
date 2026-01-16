@@ -228,7 +228,7 @@ pub fn allocate_user_stack(
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
     // Round up to page boundary
-    let stack_pages = (stack_size_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    let stack_pages = stack_size_bytes.div_ceil(PAGE_SIZE);
     let page_table_root = space.page_table_root;
 
     klibcluu::trace("MM: Allocating user stack: ");

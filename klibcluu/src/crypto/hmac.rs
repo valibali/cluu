@@ -30,8 +30,8 @@ pub fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
     let mut inner_data = alloc::vec::Vec::with_capacity(BLOCK_SIZE + data.len());
 
     // K ⊕ ipad
-    for i in 0..BLOCK_SIZE {
-        inner_data.push(key_block[i] ^ IPAD);
+    for byte in key_block.iter().take(BLOCK_SIZE) {
+        inner_data.push(byte ^ IPAD);
     }
 
     // Append message
@@ -43,8 +43,8 @@ pub fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
     let mut outer_data = alloc::vec::Vec::with_capacity(BLOCK_SIZE + 32);
 
     // K ⊕ opad
-    for i in 0..BLOCK_SIZE {
-        outer_data.push(key_block[i] ^ OPAD);
+    for byte in key_block.iter().take(BLOCK_SIZE) {
+        outer_data.push(byte ^ OPAD);
     }
 
     // Append inner hash
@@ -71,8 +71,8 @@ pub fn hmac_sha256_fixed(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
     key_block[..32].copy_from_slice(key);
 
     let mut inner_data = [0u8; BLOCK_SIZE + MAX_DATA];
-    for i in 0..BLOCK_SIZE {
-        inner_data[i] = key_block[i] ^ IPAD;
+    for (idx, byte) in key_block.iter().enumerate().take(BLOCK_SIZE) {
+        inner_data[idx] = byte ^ IPAD;
     }
 
     inner_data[BLOCK_SIZE..BLOCK_SIZE + data.len()].copy_from_slice(data);
@@ -80,8 +80,8 @@ pub fn hmac_sha256_fixed(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
     let inner_hash = hash_sha256(&inner_data[..inner_len]);
 
     let mut outer_data = [0u8; BLOCK_SIZE + 32];
-    for i in 0..BLOCK_SIZE {
-        outer_data[i] = key_block[i] ^ OPAD;
+    for (idx, byte) in key_block.iter().enumerate().take(BLOCK_SIZE) {
+        outer_data[idx] = byte ^ OPAD;
     }
     outer_data[BLOCK_SIZE..BLOCK_SIZE + 32].copy_from_slice(&inner_hash);
 

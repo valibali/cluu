@@ -202,17 +202,9 @@ fn load_segment_batch(
 
         if page_end_in_segment > file_data_start && page_start_in_segment < file_data_end {
             // This page overlaps with file data
-            let copy_start_in_page = if page_start_in_segment < file_data_start {
-                file_data_start - page_start_in_segment
-            } else {
-                0
-            };
+            let copy_start_in_page = file_data_start.saturating_sub(page_start_in_segment);
 
-            let copy_start_in_file = if page_start_in_segment > file_data_start {
-                page_start_in_segment - file_data_start
-            } else {
-                0
-            };
+            let copy_start_in_file = page_start_in_segment.saturating_sub(file_data_start);
 
             let copy_end_in_page = if page_end_in_segment > file_data_end {
                 file_data_end - page_start_in_segment
@@ -363,7 +355,7 @@ pub(crate) unsafe fn map_user_large_page(
     const LARGE_PAGE_SIZE: u64 = 2 * 1024 * 1024; // 2MB
 
     // Verify 2MB alignment
-    if virt % LARGE_PAGE_SIZE != 0 || phys % LARGE_PAGE_SIZE != 0 {
+    if !virt.is_multiple_of(LARGE_PAGE_SIZE) || !phys.is_multiple_of(LARGE_PAGE_SIZE) {
         klibcluu::warn("map_user_large_page: addresses not 2MB aligned");
         return Err(ElfLoadError::InvalidSegmentAddress);
     }
@@ -448,7 +440,7 @@ pub fn translate_vaddr(page_table_root: PhysAddr, vaddr: VirtAddr) -> Option<Phy
     let pdpt_idx = ((vaddr.as_u64() >> 30) & 0x1FF) as usize;
     let pd_idx = ((vaddr.as_u64() >> 21) & 0x1FF) as usize;
     let pt_idx = ((vaddr.as_u64() >> 12) & 0x1FF) as usize;
-    let offset = (vaddr.as_u64() & 0xFFF) as u64;
+    let offset = vaddr.as_u64() & 0xFFF;
 
     const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -515,7 +507,7 @@ pub fn translate_vaddr_with_flags(
     let pdpt_idx = ((vaddr.as_u64() >> 30) & 0x1FF) as usize;
     let pd_idx = ((vaddr.as_u64() >> 21) & 0x1FF) as usize;
     let pt_idx = ((vaddr.as_u64() >> 12) & 0x1FF) as usize;
-    let offset = (vaddr.as_u64() & 0xFFF) as u64;
+    let offset = vaddr.as_u64() & 0xFFF;
 
     const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 

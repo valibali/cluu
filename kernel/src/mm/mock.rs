@@ -3,8 +3,6 @@
 //! This module provides mock implementations of memory management traits
 //! for use in testing components that depend on memory allocation.
 
-#![cfg_attr(not(test), no_std)]
-
 extern crate alloc;
 use super::traits::{AllocationStats, PageAllocator};
 use alloc::vec::Vec;

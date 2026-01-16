@@ -36,9 +36,14 @@ pub static mut BSP_STACK: AlignedBspStack = AlignedBspStack([0; 64 * 1024]);
 /// 2. Jumps to the Rust kernel_main() function
 ///
 /// For now, we don't handle multi-core (AP parking) - that's Phase 8.
+///
+/// # Safety
+///
+/// This is the kernel entry point. It must only be invoked by the bootloader
+/// with the expected BOOTBOOT memory layout and a valid initial stack.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start() -> () {
+pub unsafe extern "C" fn _start() {
     core::arch::naked_asm!(
         // CPUID leaf 1 → EBX[31:24] = APIC ID
         "mov eax, 1",
@@ -126,13 +131,14 @@ pub extern "C" fn kstart() -> ! {
         pub static mut PER_CPU_DATA: architecture::x86_64::syscall::PerCpuData =
             architecture::x86_64::syscall::PerCpuData::new();
 
-        PER_CPU_DATA.set_kernel_stack((&raw const BSP_STACK as *const u8 as u64) + (64 * 1024));
-
-        architecture::x86_64::syscall::set_per_cpu_area(&PER_CPU_DATA);
+        let per_cpu_ptr = core::ptr::addr_of_mut!(PER_CPU_DATA);
+        (*per_cpu_ptr)
+            .set_kernel_stack((&raw const BSP_STACK as *const u8 as u64) + (64 * 1024));
+        architecture::x86_64::syscall::set_per_cpu_area(&*per_cpu_ptr);
     }
 
     // Phase 2: Extract initrd info before MM switches page tables
-    let bootboot_ptr = &raw const bootboot::bootboot as *const bootboot::BOOTBOOT;
+    let bootboot_ptr = &raw const bootboot::bootboot;
     let (initrd_phys, initrd_size) = unsafe {
         let bb = &*bootboot_ptr;
         (bb.initrd_ptr, bb.initrd_size)

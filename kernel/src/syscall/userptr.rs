@@ -135,7 +135,10 @@ pub fn ensure_pages_mapped(ptr: usize, len: usize, page_table_root: PhysAddr) ->
 }
 
 /// Copy bytes from user buffer into kernel destination via physmap.
-pub fn copy_from_user(
+///
+/// # Safety
+/// Caller must ensure `dst` points to a valid kernel buffer for `len` bytes.
+pub unsafe fn copy_from_user(
     dst: *mut u8,
     src: usize,
     len: usize,
@@ -164,10 +167,8 @@ pub fn copy_from_user(
 
         let bytes_in_page = core::cmp::min(4096 - page_offset, len - offset);
         let phys_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(phys.as_u64()) };
-        unsafe {
-            let src_ptr = (phys_virt + page_offset as u64) as *const u8;
-            core::ptr::copy_nonoverlapping(src_ptr, dst.add(offset), bytes_in_page);
-        }
+        let src_ptr = (phys_virt + page_offset as u64) as *const u8;
+        core::ptr::copy_nonoverlapping(src_ptr, dst.add(offset), bytes_in_page);
 
         offset += bytes_in_page;
     }
@@ -176,7 +177,10 @@ pub fn copy_from_user(
 }
 
 /// Copy bytes from kernel source into a user buffer via physmap.
-pub fn copy_to_user(
+///
+/// # Safety
+/// Caller must ensure `src` points to `len` readable bytes.
+pub unsafe fn copy_to_user(
     dst: usize,
     src: *const u8,
     len: usize,
@@ -205,10 +209,8 @@ pub fn copy_to_user(
 
         let bytes_in_page = core::cmp::min(4096 - page_offset, len - offset);
         let phys_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(phys.as_u64()) };
-        unsafe {
-            let dst_ptr = (phys_virt + page_offset as u64) as *mut u8;
-            core::ptr::copy_nonoverlapping(src.add(offset), dst_ptr, bytes_in_page);
-        }
+        let dst_ptr = (phys_virt + page_offset as u64) as *mut u8;
+        core::ptr::copy_nonoverlapping(src.add(offset), dst_ptr, bytes_in_page);
 
         offset += bytes_in_page;
     }

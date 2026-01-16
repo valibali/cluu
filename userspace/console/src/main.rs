@@ -7,8 +7,7 @@ use alloc::{format, vec::Vec};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
 use libcluu::boot::{
-    process_info, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
-    TOKEN_PROC_CAP,
+    process_info, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_WIDTH, TOKEN_PROC_CAP,
 };
 use libcluu::ipc::{
     CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL, CONSOLE_WRITE_LABEL,
@@ -343,8 +342,7 @@ impl Console {
         let px = x * GLYPH_W;
         let py = y * GLYPH_H;
 
-        for row in 0..GLYPH_H {
-            let line = glyph[row];
+        for (row, line) in glyph.iter().enumerate() {
             for col in 0..GLYPH_W {
                 let bit = (line >> (7 - col)) & 1; // MSB-first
                 let color = if bit != 0 { fg } else { bg };

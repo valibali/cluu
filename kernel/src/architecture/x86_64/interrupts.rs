@@ -79,6 +79,12 @@ impl DisableInterrupts {
     }
 }
 
+impl Default for DisableInterrupts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for DisableInterrupts {
     fn drop(&mut self) {
         // Only re-enable if they were enabled before

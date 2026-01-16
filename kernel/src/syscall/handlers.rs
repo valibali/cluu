@@ -44,7 +44,7 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     let token_handle = TokenHandle::from_raw(args.arg1);
-    let msg_ptr = args.arg2 as usize;
+    let msg_ptr = args.arg2;
     let msg_len = args.arg3;
 
     let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
@@ -84,9 +84,9 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
 pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     use crate::token::{EndpointId, ObjectRef, ObjectType, Rights};
 
-    let tokens_ptr = args.arg1 as usize;
+    let tokens_ptr = args.arg1;
     let tokens_count = args.arg2;
-    let buf_ptr = args.arg3 as usize;
+    let buf_ptr = args.arg3;
     let buf_len = args.arg4;
     let timeout_ms = args.arg5 as u64;
 
@@ -108,17 +108,20 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
 
     // Read token handles from userspace and resolve to endpoint IDs
     let mut endpoint_ids: [Option<EndpointId>; MAX_RECV_ENDPOINTS] = [None; MAX_RECV_ENDPOINTS];
-    for i in 0..tokens_count {
+    for (i, endpoint_slot) in endpoint_ids.iter_mut().enumerate().take(tokens_count) {
         let token_addr = tokens_ptr + i * core::mem::size_of::<usize>();
         crate::syscall::userptr::validate_user_buffer(token_addr, core::mem::size_of::<usize>())?;
 
         let mut token_raw: usize = 0;
-        crate::syscall::userptr::copy_from_user(
-            &mut token_raw as *mut usize as *mut u8,
-            token_addr,
-            core::mem::size_of::<usize>(),
-            page_table_root,
-        )?;
+        // Safety: token_raw points to a kernel buffer sized for usize.
+        unsafe {
+            crate::syscall::userptr::copy_from_user(
+                &mut token_raw as *mut usize as *mut u8,
+                token_addr,
+                core::mem::size_of::<usize>(),
+                page_table_root,
+            )?;
+        }
 
         let token_handle = TokenHandle::from_raw(token_raw);
         let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
@@ -129,7 +132,7 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
         let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
             .map_err(|_| Error::InvalidArgument)?;
         if let ObjectRef::Endpoint(id) = endpoint_ref {
-            endpoint_ids[i] = Some(id);
+            *endpoint_slot = Some(id);
         } else {
             return Err(Error::InvalidArgument);
         }
@@ -137,10 +140,10 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
 
     // Try to receive from each endpoint in order
     let try_recv_any = || -> Result<(usize, usize), Error> {
-        for i in 0..tokens_count {
-            if let Some(endpoint_id) = endpoint_ids[i] {
+        for (i, endpoint_id) in endpoint_ids.iter().enumerate().take(tokens_count) {
+            if let Some(endpoint_id) = endpoint_id {
                 match crate::ipc::endpoint::recv_to_user_nonblocking(
-                    endpoint_id,
+                    *endpoint_id,
                     buf_ptr,
                     buf_len,
                     page_table_root,
@@ -163,17 +166,15 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     }
 
     // Register as waiter on all endpoints
-    for i in 0..tokens_count {
-        if let Some(endpoint_id) = endpoint_ids[i] {
-            // Try recv which will register us as a waiter if no message
-            let _ = crate::ipc::endpoint::recv_to_user(
-                endpoint_id,
-                buf_ptr,
-                buf_len,
-                page_table_root,
-                current,
-            );
-        }
+    for endpoint_id in endpoint_ids.iter().take(tokens_count).filter_map(|id| *id) {
+        // Try recv which will register us as a waiter if no message
+        let _ = crate::ipc::endpoint::recv_to_user(
+            endpoint_id,
+            buf_ptr,
+            buf_len,
+            page_table_root,
+            current,
+        );
     }
 
     // Block with or without timeout
@@ -215,9 +216,9 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     let token_handle = TokenHandle::from_raw(args.arg1);
-    let msg_ptr = args.arg2 as usize;
+    let msg_ptr = args.arg2;
     let msg_len = args.arg3;
-    let reply_buf = args.arg4 as usize;
+    let reply_buf = args.arg4;
     let reply_len = args.arg5;
 
     // 1. Validate token and check IPC_CALL right
@@ -292,7 +293,7 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     let token_handle = TokenHandle::from_raw(args.arg1);
-    let msg_ptr = args.arg2 as usize;
+    let msg_ptr = args.arg2;
     let msg_len = args.arg3;
 
     // 1. Validate token and check IPC_REPLY right (same as IPC_RECV for now)
@@ -627,9 +628,9 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
 
     let virt_addr = args.arg3 as u64;
-    let data_ptr = args.arg4 as usize;
+    let data_ptr = args.arg4;
     let perms = args.arg5 as u32;
-    let copy_len = args.arg6 as usize;
+    let copy_len = args.arg6;
 
     if copy_len > PAGE_SIZE {
         return Err(Error::InvalidArgument);
@@ -726,6 +727,7 @@ fn invoke_space_grant(_token: &Token, _args: SyscallArgs) -> SyscallResult {
 /// - If data_ptr is 0, all pages are zero-filled
 /// - If data_ptr is non-zero, copies `data_len` bytes from data_ptr into the mapped pages
 /// - Any bytes beyond data_len are zero-filled (for .bss sections)
+///
 /// Flag to request large page (2MB) mapping when possible
 const MAP_LARGE_PAGES: u32 = 0x200;
 
@@ -751,11 +753,11 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
 
     let virt_start = args.arg3 as u64;
-    let data_ptr = args.arg4 as usize;
+    let data_ptr = args.arg4;
     let flags = args.arg5 as u32;
     let combined = args.arg6;
-    let num_pages = (combined >> 32) as usize;
-    let data_len = (combined & 0xFFFFFFFF) as usize;
+    let num_pages = combined >> 32;
+    let data_len = combined & 0xFFFFFFFF;
 
     // Validate arguments
     if virt_start & 0xFFF != 0 {
@@ -1192,8 +1194,9 @@ pub fn sys_debug_print(args: SyscallArgs) -> SyscallResult {
 
     // Convert to string (best effort)
     if let Ok(msg) = core::str::from_utf8(msg_slice) {
-        klibcluu::info("[USER] ");
-        klibcluu::info(msg);
+        use alloc::format;
+
+        klibcluu::info(&format!("[USER] {}", msg));
     } else {
         klibcluu::info("[USER] <invalid UTF-8>");
     }

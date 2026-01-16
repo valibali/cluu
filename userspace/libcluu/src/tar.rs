@@ -5,7 +5,7 @@ use core::str;
 const BLOCK_SIZE: usize = 512;
 
 fn align_up(value: usize, align: usize) -> usize {
-    ((value + align - 1) / align) * align
+    value.div_ceil(align) * align
 }
 
 fn parse_octal(field: &[u8]) -> Option<usize> {

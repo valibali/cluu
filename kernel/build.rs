@@ -13,18 +13,16 @@ fn main() {
     if asm_dir.exists() {
         println!("cargo:rustc-link-search=native={}", asm_dir.display());
 
-        for entry in std::fs::read_dir(&asm_dir).unwrap() {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.extension().map_or(false, |e| e == "o") {
-                    let name = path.file_stem().unwrap().to_str().unwrap();
-                    // Create archive for linking
-                    let ar_path = asm_dir.join(format!("lib{}.a", name));
-                    let _ = std::process::Command::new("ar")
-                        .args(["rcs", ar_path.to_str().unwrap(), path.to_str().unwrap()])
-                        .status();
-                    println!("cargo:rustc-link-lib=static={}", name);
-                }
+        for entry in std::fs::read_dir(&asm_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "o") {
+                let name = path.file_stem().unwrap().to_str().unwrap();
+                // Create archive for linking
+                let ar_path = asm_dir.join(format!("lib{}.a", name));
+                let _ = std::process::Command::new("ar")
+                    .args(["rcs", ar_path.to_str().unwrap(), path.to_str().unwrap()])
+                    .status();
+                println!("cargo:rustc-link-lib=static={}", name);
             }
         }
     }

@@ -16,8 +16,8 @@ pub fn map_segments(space_token: usize, elf: &ElfFile, bytes: &[u8]) -> Result<(
 
 fn map_segment(space_token: usize, segment: &LoadableSegment, bytes: &[u8]) -> Result<()> {
     let start = segment.vaddr as usize;
-    if start % PAGE_SIZE != 0 {
-        return Err(Error::InvalidArgument.into());
+    if !start.is_multiple_of(PAGE_SIZE) {
+        return Err(Error::InvalidArgument);
     }
 
     let mem_size = segment.mem_size as usize;
@@ -28,11 +28,11 @@ fn map_segment(space_token: usize, segment: &LoadableSegment, bytes: &[u8]) -> R
     let file_offset = segment.file_offset as usize;
     let file_size = segment.file_size as usize;
     if file_offset + file_size > bytes.len() {
-        return Err(Error::InvalidArgument.into());
+        return Err(Error::InvalidArgument);
     }
 
     // Calculate number of pages needed
-    let num_pages = (mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    let num_pages = mem_size.div_ceil(PAGE_SIZE);
     let slice = &bytes[file_offset..file_offset + file_size];
 
     // Use batch mapping for efficiency - maps all pages in one syscall

@@ -65,7 +65,7 @@ pub const fn should_log(level: LogLevel) -> bool {
 
     #[cfg(debug_assertions)]
     {
-        return level as u8 <= current_log_level() as u8;
+        level as u8 <= current_log_level() as u8
     }
 }
 

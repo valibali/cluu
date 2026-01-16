@@ -35,6 +35,7 @@ const HEAP_SIZE: usize = 512 * 1024;
 ///
 /// This is placed in the .bss section and zeroed by the bootloader.
 #[repr(align(16))]
+#[allow(dead_code)]
 struct HeapBuffer([u8; HEAP_SIZE]);
 
 static mut HEAP: HeapBuffer = HeapBuffer([0; HEAP_SIZE]);
@@ -91,10 +92,8 @@ unsafe impl GlobalAlloc for BumpAllocator {
             ) {
                 Ok(_) => {
                     // Success! Return pointer to our allocation
-                    let ptr = unsafe {
-                        let heap_base = HEAP.0.as_ptr() as usize;
-                        (heap_base + aligned_offset) as *mut u8
-                    };
+                    let heap_base = core::ptr::addr_of!(HEAP) as usize;
+                    let ptr = (heap_base + aligned_offset) as *mut u8;
 
                     // Log large allocations for debugging
                     if size > 1024 {

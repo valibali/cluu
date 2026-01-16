@@ -72,7 +72,6 @@ pub mod pte_flags {
 
 // Common flag combinations for convenience
 const PTE_PRESENT_WRITABLE: u64 = pte_flags::PRESENT | pte_flags::WRITABLE;
-const PTE_HUGE_PAGE: u64 = pte_flags::PRESENT | pte_flags::WRITABLE | pte_flags::HUGE;
 
 /// Page Table Manager
 ///
@@ -511,20 +510,24 @@ pub unsafe fn create_initial_page_tables(
 
     // Map aligned region with 2MB pages
     if aligned_end > 0 {
-        let gb_count = ((aligned_end + 0x3FFF_FFFF) / 0x4000_0000) as usize;
+        let gb_count = aligned_end.div_ceil(0x4000_0000) as usize;
 
-        for gb_idx in 0..gb_count.min(512) {
+        for (gb_idx, pdpt_entry) in physmap_pdpt
+            .iter_mut()
+            .enumerate()
+            .take(gb_count.min(512))
+        {
             let pd_phys = crate::mm::pmm::alloc_frame().expect("Failed to allocate PD");
             let pd = unsafe { &mut *(pd_phys as *mut [u64; 512]) };
             unsafe { write_bytes(pd.as_mut_ptr(), 0, 4096) };
-            physmap_pdpt[gb_idx] = pd_phys | 0x3;
+            *pdpt_entry = pd_phys | 0x3;
             let base_phys = (gb_idx as u64) * 0x4000_0000;
 
-            for pd_idx in 0..512 {
+            for (pd_idx, pd_entry) in pd.iter_mut().enumerate() {
                 let phys_addr = base_phys + (pd_idx as u64) * 0x20_0000;
                 if phys_addr < aligned_end {
                     // 2MB huge page: Present | Writable | Huge Page (0x80)
-                    pd[pd_idx] = phys_addr | 0x83;
+                    *pd_entry = phys_addr | 0x83;
                     total_2mb_pages += 1;
                 }
             }
@@ -622,8 +625,7 @@ pub unsafe fn create_initial_page_tables(
         kernel_pd[pd_idx] = pt_phys | 0x3;
 
         // Map 4KB pages in this PT
-        let mut mapped_count = 0;
-        for pt_idx in 0..512 {
+        for (pt_idx, pt_entry) in pt.iter_mut().enumerate() {
             let virt_addr = virt_2mb.wrapping_add(pt_idx as u64 * 0x1000);
 
             // Only map pages that are within the kernel virtual range
@@ -631,14 +633,13 @@ pub unsafe fn create_initial_page_tables(
                 // Calculate corresponding physical address using aligned base addresses
                 let phys_addr = kernel_phys_start_aligned
                     .wrapping_add(virt_addr.wrapping_sub(kernel_virt_base));
-                pt[pt_idx] = phys_addr | PTE_PRESENT_WRITABLE;
-                mapped_count += 1;
+                *pt_entry = phys_addr | PTE_PRESENT_WRITABLE;
             }
         }
 
         if block_idx == 0 && bootboot_size > 0 {
             // Map BOOTBOOT info structure (needed during early bootstrap).
-            let bootboot_pages = (bootboot_size + 0xfff) / 0x1000;
+            let bootboot_pages = bootboot_size.div_ceil(0x1000);
             for page_idx in 0..bootboot_pages {
                 let virt_addr = bootboot_virt + (page_idx * 0x1000);
                 let delta = virt_addr.wrapping_sub(virt_2mb);
@@ -887,7 +888,7 @@ pub unsafe fn switch_to_page_tables(pml4_phys: PhysAddr) {
 /// - Virtual range must not overlap existing mappings
 /// - Must use current CR3 (kernel page tables)
 pub unsafe fn map_heap_region(virt_start: u64, size: u64) -> Result<(), &'static str> {
-    let page_count = (size + 0xFFF) / 0x1000;
+    let page_count = size.div_ceil(0x1000);
 
     klibcluu::log_dec(klibcluu::LogLevel::Trace, "  Mapping heap: ", page_count);
     klibcluu::trace(" pages");
@@ -919,7 +920,7 @@ pub unsafe fn map_heap_region(virt_start: u64, size: u64) -> Result<(), &'static
 /// - `phys` must be a page-aligned physical MMIO address
 /// - Caller must ensure no aliasing or overlap with existing mappings
 pub unsafe fn map_kernel_mmio(virt: u64, phys: u64) -> Result<(), &'static str> {
-    if virt % 0x1000 != 0 || phys % 0x1000 != 0 {
+    if !virt.is_multiple_of(0x1000) || !phys.is_multiple_of(0x1000) {
         return Err("MMIO mapping requires page alignment");
     }
     map_single_4k_page(virt, phys, true, false)
@@ -1103,23 +1104,28 @@ unsafe fn map_4kb_region(
     let start_gb = (start_phys / 0x4000_0000) as usize;
     let end_gb = ((end_phys - 1) / 0x4000_0000) as usize;
 
-    for gb_idx in start_gb..=end_gb.min(511) {
+    for (gb_idx, pdpt_entry) in pdpt
+        .iter_mut()
+        .enumerate()
+        .take(end_gb.min(511) + 1)
+        .skip(start_gb)
+    {
         // Allocate or reuse PD for this GB
-        let pd_frame = if pdpt[gb_idx] & 0x1 != 0 {
+        let pd_frame = if *pdpt_entry & 0x1 != 0 {
             // Already allocated (from 2MB mapping)
             // Check if it's a huge page or PD
-            if pdpt[gb_idx] & 0x80 != 0 {
+            if *pdpt_entry & 0x80 != 0 {
                 // It's a 1GB huge page, we need to split it
                 // For now, panic - this shouldn't happen with our allocation strategy
                 panic!("Cannot split 1GB huge page");
             }
-            (pdpt[gb_idx] & !0xFFF) as *mut u8
+            (*pdpt_entry & !0xFFF) as *mut u8
         } else {
             // Allocate new PD from PMM
             let pd_phys =
                 crate::mm::pmm::alloc_frame().expect("Failed to allocate PD for 4KB region");
             unsafe { write_bytes(pd_phys as *mut u8, 0, 4096) };
-            pdpt[gb_idx] = pd_phys | 0x3;
+            *pdpt_entry = pd_phys | 0x3;
             pd_phys as *mut u8
         };
 
@@ -1132,23 +1138,28 @@ unsafe fn map_4kb_region(
         } else {
             0
         };
-        let end_2mb = (((end_phys - gb_base).min(0x4000_0000) + 0x1F_FFFF) / 0x20_0000) as usize;
+        let end_2mb = (end_phys - gb_base).min(0x4000_0000).div_ceil(0x20_0000) as usize;
 
-        for block_2mb in start_2mb..end_2mb.min(512) {
+        for (block_2mb, pd_entry) in pd
+            .iter_mut()
+            .enumerate()
+            .take(end_2mb.min(512))
+            .skip(start_2mb)
+        {
             // Allocate PT for this 2MB block from PMM
             let pt_phys =
                 crate::mm::pmm::alloc_frame().expect("Failed to allocate PT for 4KB pages");
             unsafe { write_bytes(pt_phys as *mut u8, 0, 4096) };
-            pd[block_2mb] = pt_phys | 0x3; // Present | Writable (NOT huge page)
+            *pd_entry = pt_phys | 0x3; // Present | Writable (NOT huge page)
 
             let pt = unsafe { core::slice::from_raw_parts_mut(pt_phys as *mut u64, 512) };
             let block_base = gb_base + (block_2mb as u64) * 0x20_0000;
 
             // Map 4KB pages in this PT
-            for pt_idx in 0..512 {
+            for (pt_idx, pt_entry) in pt.iter_mut().enumerate() {
                 let phys_addr = block_base + (pt_idx as u64) * 0x1000;
                 if phys_addr >= start_phys && phys_addr < end_phys {
-                    pt[pt_idx] = phys_addr | 0x3; // Present | Writable (4KB page)
+                    *pt_entry = phys_addr | 0x3; // Present | Writable (4KB page)
                     *page_count += 1;
                 }
             }

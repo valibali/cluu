@@ -132,6 +132,7 @@ unsafe fn syscall0(n: SyscallNumber) -> Result<usize> {
 
 /// Helper for syscalls with 1 argument
 #[inline]
+#[allow(dead_code)]
 unsafe fn syscall1(n: SyscallNumber, arg1: usize) -> Result<usize> {
     syscall_raw(n as usize, arg1, 0, 0, 0, 0, 0)
 }
@@ -150,6 +151,7 @@ unsafe fn syscall3(n: SyscallNumber, arg1: usize, arg2: usize, arg3: usize) -> R
 
 /// Helper for syscalls with 4 arguments
 #[inline]
+#[allow(dead_code)]
 unsafe fn syscall4(
     n: SyscallNumber,
     arg1: usize,
@@ -430,6 +432,9 @@ pub fn yield_cpu() -> Result<()> {
 ///
 /// - `Ok(value)`: Operation-specific return value (often a new token handle)
 /// - `Err(error)`: Invalid token, insufficient rights, or operation failed
+///
+/// # Safety
+/// Caller must ensure the arguments are valid for the selected operation.
 #[inline]
 pub unsafe fn invoke(
     token_handle: usize,
@@ -563,7 +568,7 @@ pub fn space_map_range(
 ) -> Result<usize> {
     // Pack num_pages and data_len into a single usize
     // Upper 32 bits: num_pages, lower 32 bits: data_len
-    let combined = ((num_pages as usize) << 32) | (data_len & 0xFFFFFFFF);
+    let combined = (num_pages << 32) | (data_len & 0xFFFFFFFF);
 
     unsafe {
         invoke(

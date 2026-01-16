@@ -1,7 +1,9 @@
 #![no_std]
 #![no_main]
 
-use libcluu::*;
+// Pull in the shared userspace runtime (panic handler + _start).
+#[allow(unused_imports)]
+use libcluu::runtime as _;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {

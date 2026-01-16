@@ -23,13 +23,16 @@ const PIC2_DATA: u16 = 0xA1;
 /// PIC initialization command
 const ICW1_INIT: u8 = 0x10;
 const ICW1_ICW4: u8 = 0x01;
-/// PIC end of interrupt command
-const PIC_EOI: u8 = 0x20;
-
 /// Disable both PICs by masking all interrupts
 ///
 /// This is the safest approach during early boot to prevent
 /// spurious interrupts from causing issues.
+/// Disable the legacy PIC by masking all IRQ lines.
+///
+/// # Safety
+///
+/// Must be called only during early boot or when interrupts are already
+/// masked, because it directly programs the PIC without synchronization.
 pub unsafe fn disable() {
     klibcluu::info("Disabling legacy 8259 PIC...");
 
@@ -49,6 +52,11 @@ pub unsafe fn disable() {
 /// # Arguments
 /// * `offset1` - Vector offset for master PIC (typically 32)
 /// * `offset2` - Vector offset for slave PIC (typically 40)
+///
+/// # Safety
+///
+/// The caller must ensure no IRQs are firing during the remap sequence and
+/// that the offsets do not overlap CPU exception vectors.
 pub unsafe fn remap(offset1: u8, offset2: u8) {
     klibcluu::info("Remapping 8259 PIC...");
 
@@ -96,6 +104,11 @@ pub unsafe fn remap(offset1: u8, offset2: u8) {
 ///
 /// This remaps the PIC to vectors 32-47 and masks all interrupts
 /// except those we explicitly enable.
+/// Initialize the PIC to a known state and mask all IRQs.
+///
+/// # Safety
+///
+/// Must only be called once during early boot before enabling interrupts.
 pub unsafe fn init() {
     // Remap PIC to vectors 32-47 (IRQ 0-15 → INT 32-47)
     remap(32, 40);
@@ -111,6 +124,11 @@ pub unsafe fn init() {
 /// Unmask a specific IRQ line on the PIC.
 ///
 /// This enables the given IRQ number (0-15).
+/// Unmask a specific IRQ line on the PIC.
+///
+/// # Safety
+///
+/// The caller must ensure the IRQ handler is installed before unmasking.
 pub unsafe fn unmask(irq: u8) {
     if irq >= 16 {
         return;

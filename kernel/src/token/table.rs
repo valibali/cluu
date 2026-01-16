@@ -88,11 +88,6 @@ impl TokenTableInner {
         self.handles.get(&handle)
     }
 
-    /// Lookup a token by handle (mutable)
-    fn get_mut(&mut self, handle: TokenHandle) -> Option<&mut Token> {
-        self.handles.get_mut(&handle)
-    }
-
     /// Resolve opaque scope to object reference
     fn resolve_scope(&self, scope: &OpaqueScope) -> Option<ObjectRef> {
         self.scopes.get(scope).copied()

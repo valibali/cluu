@@ -5,7 +5,7 @@ extern crate alloc;
 
 use alloc::format;
 use core::mem::size_of;
-use libcluu::boot::{process_info, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT};
+use libcluu::boot::{process_info, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG};
 use libcluu::ipc::{send_with_payload, TTY_READ_LABEL, TTY_WRITE_LABEL};
 use libcluu::registry;
 use libcluu::types::Message;
@@ -21,24 +21,20 @@ pub extern "C" fn main() -> i32 {
 
 fn run() -> Result<()> {
     let info = process_info();
-    let stdin = info.tokens[TOKEN_STDIN];
-    let mut stdout = info.tokens[TOKEN_STDOUT];
-    let stderr = info.tokens[TOKEN_STDERR];
-    let stdlog = info.tokens[TOKEN_STDLOG];
     registry::init("shell")?;
     registry::register_default_outputs()?;
-    // Lazily subscribe to tty's main output and use it as stdout.
-    loop {
+    let stdin = info.tokens[TOKEN_STDIN];
+    let stderr = info.tokens[TOKEN_STDERR];
+    let stdlog = info.tokens[TOKEN_STDLOG];
+    let stdout = loop {
+        // Lazily subscribe to tty's main output and use it as stdout.
         match registry::subscribe_output("tty", "main") {
-            Ok(token) => {
-                stdout = token;
-                break;
-            }
+            Ok(token) => break token,
             Err(_) => {
                 let _ = yield_cpu();
             }
         }
-    }
+    };
     let registry_endpoint = registry::control_endpoint();
 
     debug_print("shell: ready")?;

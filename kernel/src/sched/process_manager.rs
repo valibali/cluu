@@ -58,7 +58,7 @@ impl ProcessTable {
     /// PIDs are allocated sequentially and never reused within
     /// a single boot session.
     fn allocate_pid(&mut self) -> Option<ProcessId> {
-        if self.next_pid >= usize::MAX {
+        if self.next_pid == usize::MAX {
             return None; // PID exhaustion (unlikely!)
         }
 

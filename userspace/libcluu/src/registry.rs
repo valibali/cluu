@@ -8,7 +8,6 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -273,10 +272,7 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
     }
     // Mint a least-privilege token that only allows IPC_SEND.
     let send_rights = Rights::IPC_SEND.bits() as usize;
-    let derived = match token_derive(endpoint_token, send_rights, u64::MAX) {
-        Ok(token) => token,
-        Err(err) => return Err(err),
-    };
+    let derived = token_derive(endpoint_token, send_rights, u64::MAX)?;
     let payload = encode_single_name(&endpoint_name);
     // Reply directly to the requester with the derived token.
     let reply = make_payload_message(REGISTRY_GRANT_DELIVER_LABEL, payload.len(), &[derived]);

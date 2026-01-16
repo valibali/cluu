@@ -3,8 +3,10 @@
 #[cfg(all(not(feature = "std"), not(test)))]
 use core::panic::PanicInfo;
 
+#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
+use crate::allocator;
 #[cfg(all(not(feature = "std"), not(test)))]
-use crate::{allocator, ipc::notify_exit, syscall::debug_print, syscall::yield_cpu};
+use crate::{ipc::notify_exit, syscall::debug_print, syscall::yield_cpu};
 
 /// Entry point for userspace programs
 ///

@@ -83,11 +83,11 @@ pub const fn is_large_page_aligned(value: usize) -> bool {
 /// Calculate number of 4KB pages needed for a given size
 #[inline]
 pub const fn pages_for_size(size: usize) -> usize {
-    (size + PAGE_SIZE - 1) / PAGE_SIZE
+    size.div_ceil(PAGE_SIZE)
 }
 
 /// Calculate number of 2MB large pages needed for a given size
 #[inline]
 pub const fn large_pages_for_size(size: usize) -> usize {
-    (size + LARGE_PAGE_SIZE - 1) / LARGE_PAGE_SIZE
+    size.div_ceil(LARGE_PAGE_SIZE)
 }

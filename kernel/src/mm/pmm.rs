@@ -11,12 +11,15 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// For 4GB of RAM with 4KB pages = 1M frames = 128KB bitmap
 const MAX_FRAMES: usize = 1024 * 1024; // 1M frames = 4GB
 
+/// Number of u64 entries in the frame bitmap.
+const FRAME_BITMAP_LEN: usize = MAX_FRAMES / 64;
+
 /// Number of 4KB frames in a 2MB large page
 const FRAMES_PER_LARGE_PAGE: usize = 512;
 
 /// Bitmap to track free/allocated frames
 /// Each bit represents one 4KB frame
-static mut FRAME_BITMAP: [u64; MAX_FRAMES / 64] = [0; MAX_FRAMES / 64];
+static mut FRAME_BITMAP: [u64; FRAME_BITMAP_LEN] = [0; FRAME_BITMAP_LEN];
 
 /// Total number of frames available
 static TOTAL_FRAMES: AtomicUsize = AtomicUsize::new(0);
@@ -28,6 +31,9 @@ static USED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Parses BOOTBOOT memory map and marks free regions in the bitmap
 /// Reserves all system regions: low memory, kernel, initrd, BOOTBOOT, framebuffer
+/// # Safety
+///
+/// Must run exactly once during boot before any allocations occur.
 pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
     klibcluu::info("Initializing Physical Memory Manager...");
 
@@ -36,9 +42,8 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
 
     // Clear bitmap (all frames marked as used initially)
     unsafe {
-        for i in 0..FRAME_BITMAP.len() {
-            FRAME_BITMAP[i] = 0;
-        }
+        let bitmap_ptr = core::ptr::addr_of_mut!(FRAME_BITMAP).cast::<u64>();
+        core::ptr::write_bytes(bitmap_ptr, 0, FRAME_BITMAP_LEN);
     }
 
     // Parse memory map and mark free regions
@@ -62,7 +67,7 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
             // Mark frames in this region as free
             // Never allocate frame 0 (reserved for BIOS/NULL pointer protection)
             let start_frame = ((start_addr / 4096) as usize).max(1);
-            let end_frame = ((end_addr + 4095) / 4096) as usize;
+            let end_frame = end_addr.div_ceil(4096) as usize;
 
             for frame in start_frame..end_frame.min(MAX_FRAMES) {
                 mark_free(frame);
@@ -90,7 +95,7 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
 
     // 2. Reserve kernel physical memory
     let kernel_start_frame = (kernel_phys_start / 4096) as usize;
-    let kernel_end_frame = ((kernel_phys_end + 4095) / 4096) as usize;
+    let kernel_end_frame = kernel_phys_end.div_ceil(4096) as usize;
     for frame in kernel_start_frame..kernel_end_frame {
         mark_used(frame);
     }
@@ -104,7 +109,7 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
     // 3. Reserve initrd (initial ramdisk)
     if let Some((initrd_ptr, initrd_size)) = boot_info.initrd_location() {
         let initrd_start_frame = (initrd_ptr / 4096) as usize;
-        let initrd_end_frame = ((initrd_ptr + initrd_size + 4095) / 4096) as usize;
+        let initrd_end_frame = (initrd_ptr + initrd_size).div_ceil(4096) as usize;
         for frame in initrd_start_frame..initrd_end_frame {
             mark_used(frame);
         }
@@ -125,7 +130,7 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
     let bootboot_size = bootboot.size as u64;
     if bootboot_size > 0 {
         let bootboot_start_frame = (bootboot_phys / 4096) as usize;
-        let bootboot_end_frame = ((bootboot_phys + bootboot_size + 4095) / 4096) as usize;
+        let bootboot_end_frame = (bootboot_phys + bootboot_size).div_ceil(4096) as usize;
         for frame in bootboot_start_frame..bootboot_end_frame {
             mark_used(frame);
         }
@@ -144,7 +149,7 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
     // 5. Reserve framebuffer
     if let Some((fb_phys, fb_size)) = boot_info.framebuffer_location() {
         let fb_start_frame = (fb_phys / 4096) as usize;
-        let fb_end_frame = ((fb_phys + fb_size + 4095) / 4096) as usize;
+        let fb_end_frame = (fb_phys + fb_size).div_ceil(4096) as usize;
         for frame in fb_start_frame..fb_end_frame {
             mark_used(frame);
         }
@@ -171,15 +176,19 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
 /// Returns the physical address of a free 4KB frame, or None if out of memory
 pub fn alloc_frame() -> Option<u64> {
     unsafe {
-        for i in 0..FRAME_BITMAP.len() {
-            if FRAME_BITMAP[i] != 0 {
+        let bitmap_ptr = core::ptr::addr_of!(FRAME_BITMAP).cast::<u64>();
+        let mut i = 0;
+        while i < FRAME_BITMAP_LEN {
+            let entry = *bitmap_ptr.add(i);
+            if entry != 0 {
                 // Find first set bit
-                let bit = FRAME_BITMAP[i].trailing_zeros() as usize;
+                let bit = entry.trailing_zeros() as usize;
                 if bit < 64 {
                     let frame = i * 64 + bit;
                     // Safety check: never allocate frame 0 (NULL protection)
                     if frame == 0 {
                         klibcluu::error("  WARNING: Attempted to allocate frame 0, skipping!");
+                        i += 1;
                         continue;
                     }
                     mark_used(frame);
@@ -187,6 +196,7 @@ pub fn alloc_frame() -> Option<u64> {
                     return Some(phys_addr);
                 }
             }
+            i += 1;
         }
     }
     klibcluu::error("  PMM: Out of memory!");

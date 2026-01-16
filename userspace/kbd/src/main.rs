@@ -38,16 +38,15 @@ fn run() -> Result<()> {
     yield_cpu()?;
 
     let mut buf = [0u8; 64];
-    let mut saw_key = false;
-    let mut saw_msg = false;
     let mut saw_error = false;
     let mut tty_endpoint = 0usize;
     let mut requested_tty = false;
     loop {
-        if tty_endpoint == 0 && !requested_tty {
-            if registry::request_subscription("tty", "main").is_ok() {
-                requested_tty = true;
-            }
+        if tty_endpoint == 0
+            && !requested_tty
+            && registry::request_subscription("tty", "main").is_ok()
+        {
+            requested_tty = true;
         }
 
         let tokens = [endpoint, registry_endpoint];
@@ -74,16 +73,9 @@ fn run() -> Result<()> {
                     }
                     continue;
                 }
-                if !saw_msg {
-                    saw_msg = true;
-                    let _ = debug_print("kbd: received message");
-                }
+
                 if msg.tag.label == KBD_EVENT_LABEL && msg.tag.words >= 1 {
                     let scancode = msg.words[0] as u8;
-                    if !saw_key {
-                        saw_key = true;
-                        let _ = debug_print("kbd: first key event");
-                    }
                     if let Some(ascii) = scancode_to_ascii(scancode) {
                         let msg = Message::new(KBD_EVENT_LABEL, [0, ascii as usize, 0, 0, 0, 0], 2);
                         if tty_endpoint != 0 {

@@ -100,7 +100,7 @@ lazy_static! {
         // Set up hardware interrupt handlers (IRQ 0-15 map to interrupts 32-47)
         // IRQ 0 - Timer: Use our simple timer handler (scheduler not yet implemented)
         unsafe {
-            idt[32].set_handler_addr(VirtAddr::new(timer_interrupt_entry as u64));
+            idt[32].set_handler_addr(VirtAddr::new(timer_interrupt_entry as *const () as u64));
         }
         idt[33].set_handler_fn(keyboard_interrupt_handler); // IRQ 1 - Keyboard
         idt[36].set_handler_fn(serial_interrupt_handler);   // IRQ 4 - Serial COM1
@@ -212,8 +212,8 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
         // If kernel space, try direct read; if userspace, would need page table walk
         if !is_userspace {
             let bytes = core::slice::from_raw_parts(rip as *const u8, 8);
-            for i in 0..8 {
-                klibcluu::log_hex(klibcluu::LogLevel::Warn, "", bytes[i] as u64);
+            for byte in bytes.iter().take(8) {
+                klibcluu::log_hex(klibcluu::LogLevel::Warn, "", (*byte) as u64);
                 klibcluu::warn(" ");
             }
         } else {
@@ -442,8 +442,8 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
     let addr = fault_addr.as_u64();
 
     // Check if fault is in a demand-pageable region
-    let is_stack_region = addr >= layout::USER_STACK_BOTTOM && addr < layout::USER_STACK_TOP;
-    let is_heap_region = addr >= layout::USER_HEAP_START && addr < layout::USER_HEAP_MAX;
+    let is_stack_region = (layout::USER_STACK_BOTTOM..layout::USER_STACK_TOP).contains(&addr);
+    let is_heap_region = (layout::USER_HEAP_START..layout::USER_HEAP_MAX).contains(&addr);
 
     if !is_stack_region && !is_heap_region {
         // Fault is not in a demand-pageable region
@@ -596,15 +596,8 @@ extern "C" fn timer_interrupt_should_schedule() -> u8 {
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    static KBD_IRQ_COUNT: AtomicU64 = AtomicU64::new(0);
-
     let mut port = x86_64::instructions::port::Port::<u8>::new(0x60);
     let scancode = unsafe { port.read() };
-    if KBD_IRQ_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
-        klibcluu::info("KBD IRQ: first scancode");
-    }
     crate::devices::irq::dispatch_scancode(1, scancode);
 
     if crate::architecture::x86_64::apic::is_enabled() {
