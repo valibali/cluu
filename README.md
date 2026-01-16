@@ -4,11 +4,43 @@
 
 # CLUU (Compact Lightweight Unix Utopia)
 
+**Current Capabilities (Quick Facts)**
+- **Microkernel core**: scheduler, IPC, memory, tokens, IRQs, syscalls
+- **IPC endpoints + registry**: dynamic endpoint registration and lazy subscription at runtime
+- **Capability tokens**: unforgeable handles, explicit rights, transferable via IPC
+- **Dataflow**: multi-subscriber outputs, per-process input ownership, runtime wiring
+- **Userspace services**: init, registry, procmgr, console, tty, kbd, shell, vfs, ramfs
+- **Tooling**: xtask build/run, initrd, QEMU debug with telnet + GDB
+
 CLUU is a hobby operating system written in Rust, pursuing a **clean L4-inspired microkernel** architecture with strong emphasis on **minimality, and explicit authority**. The project is deliberately engineered, test-driven, and uncompromising about architectural discipline.
 
-This README reflects the **current kernel status**. The token system is complete and integrated. Core kernel subsystems are implemented, tested, and internally consistent.
+This README reflects the **current system status**. The token system and IPC/endpoint registry are integrated. Core kernel subsystems are implemented, tested, and internally consistent.
 
 ---
+
+## Getting Started (Quick Run)
+
+```
+cargo xtask run --debug
+```
+
+Open the serial console:
+
+```
+telnet localhost 4321
+```
+
+Expected boot flow:
+
+```
+init -> registry -> procmgr -> kbd -> tty -> console -> shell
+```
+
+Primary dataflow:
+
+```
+kbd -> tty (line discipline) -> shell -> tty -> console
+```
 
 ## Motivation
 
@@ -140,6 +172,30 @@ IPC is the **only communication primitive**.
 
 ---
 
+## Endpoint Registry and Dataflow
+
+Userspace endpoint wiring is **dynamic and lazy**:
+
+- Each process **owns its input endpoints**.
+- Output endpoints are **registered** with the registry service by name.
+- Consumers **subscribe at runtime**; the registry brokers discovery and grant flow.
+- Tokens are **transferred via blocking send/recv** (no new syscall numbers).
+- Outputs can have **multiple subscribers**; inputs remain per-process.
+
+Flow overview:
+
+```
+Requester -> registry.subscribe(producer, endpoint)
+registry  -> producer.grant(requester)
+producer  -> send(token) to requester (or via registry)
+requester -> recv(token)
+```
+
+The registry stores **metadata only**. Tokens are issued by the endpoint owner and
+granted on demand, preserving least privilege.
+
+---
+
 ## Token-Based Authority System
 
 All authority is represented by **cryptographically signed tokens**.
@@ -223,7 +279,36 @@ Userspace programs are:
 * error handling
 * runtime entry point
 
+### Core Services (Current)
+
+```
+init       - bootstrap and service spawning
+registry   - endpoint registration and discovery
+procmgr    - process management and exit notifications
+kbd        - keyboard input producer
+tty        - line discipline + stdio routing
+console    - display output sink
+shell      - interactive command frontend
+vfs/ramfs  - filesystem services (evolving)
+```
+
 ---
+
+## Screenshots
+
+Place screenshots under `artwork/` and link them here.
+
+Suggested captures:
+- **Boot + service bring-up**: telnet output showing `init` launching `registry`, `procmgr`, `kbd`, `tty`, `console`, `shell`.
+- **Interactive shell**: a prompt with a few builtins (`help`, `set`, `expr`, `repeat`) and visible output routed via `tty`.
+- **Registry activity**: telnet output showing endpoint registrations and a subscription/grant flow.
+- **Console output**: framebuffer view showing the console rendering and cursor blink.
+
+Screenshots:
+
+![boot](artwork/bootlog.png)
+![shell](artwork/shell.png)
+![registry](artwork/registry.png)
 
 ## Bootloader
 

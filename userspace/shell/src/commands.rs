@@ -447,19 +447,39 @@ impl BuiltinCommand for LetBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(name) = args.first() else {
+        if args.is_empty() {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"let: missing name\n")?;
             return Ok(());
-        };
-        let Some(eq) = args.get(1) else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"let: missing =\n")?;
-            return Ok(());
-        };
-        if eq.as_str() != "=" {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"let: expected =\n")?;
-            return Ok(());
         }
-        let expr_args = &args[2..];
+
+        let mut name = args[0].as_str();
+        let mut expr_tokens: Vec<String> = Vec::new();
+
+        if args.len() == 1 {
+            if let Some((lhs, rhs)) = args[0].split_once('=') {
+                if lhs.is_empty() || rhs.is_empty() {
+                    send_with_payload(stdout, TTY_WRITE_LABEL, b"let: expected NAME=EXPR\n")?;
+                    return Ok(());
+                }
+                name = lhs;
+                expr_tokens.push(rhs.to_string());
+            } else {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"let: missing =\n")?;
+                return Ok(());
+            }
+        } else {
+            let Some(eq) = args.get(1) else {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"let: missing =\n")?;
+                return Ok(());
+            };
+            if eq.as_str() != "=" {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"let: expected =\n")?;
+                return Ok(());
+            }
+            expr_tokens.extend_from_slice(&args[2..]);
+        }
+
+        let expr_args = expr_tokens.as_slice();
         let Some((lhs, op, rhs)) = parse_expr_tokens(expr_args) else {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"let: invalid expression\n")?;
             return Ok(());

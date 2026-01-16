@@ -14,6 +14,7 @@ use libcluu::{debug_print, yield_cpu, Result};
 
 // Token indices (set by init).
 const SVC_TOKEN_LISTEN: usize = 6;
+const CONSOLE_MAX_PAYLOAD: usize = 256;
 
 /// TTY context shared by the main loop.
 pub struct TtyContext {
@@ -111,7 +112,7 @@ impl TtyContext {
     /// Forward output to the console or buffer it until the console is ready.
     pub fn forward_to_console(&mut self, payload: &[u8]) {
         if self.console_endpoint != 0 {
-            let _ = send_with_payload(self.console_endpoint, CONSOLE_WRITE_LABEL, payload);
+            self.send_to_console(payload);
         } else if self.pending_console_output.len() + payload.len() <= 2048 {
             // Keep a small buffer so early shell output is not lost.
             self.pending_console_output.extend_from_slice(payload);
@@ -123,11 +124,13 @@ impl TtyContext {
         if self.console_endpoint == 0 || self.pending_console_output.is_empty() {
             return;
         }
-        let _ = send_with_payload(
-            self.console_endpoint,
-            CONSOLE_WRITE_LABEL,
-            &self.pending_console_output,
-        );
+        self.send_to_console(&self.pending_console_output);
         self.pending_console_output.clear();
+    }
+
+    fn send_to_console(&self, payload: &[u8]) {
+        for chunk in payload.chunks(CONSOLE_MAX_PAYLOAD) {
+            let _ = send_with_payload(self.console_endpoint, CONSOLE_WRITE_LABEL, chunk);
+        }
     }
 }

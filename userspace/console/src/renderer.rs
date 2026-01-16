@@ -66,7 +66,7 @@ impl<B: ConsoleBackend> Console<B> {
     pub fn handle_message(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
         match msg.tag.label {
             CONSOLE_WRITE_LABEL => {
-                self.write_bytes(payload);
+                self.write_utf8_bytes(payload);
             }
             CONSOLE_CLEAR_LABEL => {
                 self.clear();
@@ -113,9 +113,34 @@ impl<B: ConsoleBackend> Console<B> {
     }
 
     /// Write a byte stream into the grid, honoring control characters.
-    fn write_bytes(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.put_char(b);
+    ///
+    /// This decodes a tiny UTF-8 subset for block elements used in banners.
+    fn write_utf8_bytes(&mut self, bytes: &[u8]) {
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b < 0x80 {
+                self.put_char(b);
+                i += 1;
+                continue;
+            }
+            if b == 0xE2 && i + 2 < bytes.len() {
+                match (bytes[i + 1], bytes[i + 2]) {
+                    // U+2588 FULL BLOCK
+                    (0x96, 0x88) => self.put_char(0xDB),
+                    // U+2591 LIGHT SHADE
+                    (0x96, 0x91) => self.put_char(0xB0),
+                    // U+2592 MEDIUM SHADE
+                    (0x96, 0x92) => self.put_char(0xB1),
+                    // U+2593 DARK SHADE
+                    (0x96, 0x93) => self.put_char(0xB2),
+                    _ => self.put_char(b'?'),
+                }
+                i += 3;
+                continue;
+            }
+            self.put_char(b'?');
+            i += 1;
         }
     }
 
@@ -270,9 +295,30 @@ impl<B: ConsoleBackend> Console<B> {
 
 /// Load the glyph bitmap for a single ASCII character.
 fn font_glyph(ch: u8) -> [u8; GLYPH_H] {
+    if let Some(glyph) = shade_glyph(ch) {
+        return glyph;
+    }
     let idx = (ch as usize) * GLYPH_H; // 16 bytes per glyph
     let mut glyph = [0u8; GLYPH_H];
     glyph.copy_from_slice(&FONT8X16[idx..idx + GLYPH_H]);
+    glyph
+}
+
+fn shade_glyph(ch: u8) -> Option<[u8; GLYPH_H]> {
+    match ch {
+        0xDB => Some([0xFF; GLYPH_H]), // full block
+        0xB0 => Some(make_shade(0x88, 0x22)), // light shade
+        0xB1 => Some(make_shade(0xAA, 0x55)), // medium shade
+        0xB2 => Some(make_shade(0xEE, 0x77)), // dark shade
+        _ => None,
+    }
+}
+
+fn make_shade(a: u8, b: u8) -> [u8; GLYPH_H] {
+    let mut glyph = [0u8; GLYPH_H];
+    for row in 0..GLYPH_H {
+        glyph[row] = if row % 2 == 0 { a } else { b };
+    }
     glyph
 }
 

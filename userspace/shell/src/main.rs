@@ -13,7 +13,9 @@ use alloc::string::ToString;
 use commands::{BuiltinFactory, CommandContext, CommandExecutor, ExecResult};
 use core::mem::size_of;
 use libcluu::boot::{process_info, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG};
-use libcluu::ipc::{send_with_payload, TTY_READ_LABEL, TTY_WRITE_LABEL};
+use libcluu::ipc::{
+    send_with_payload, CONSOLE_CLEAR_LABEL, CONSOLE_WRITE_LABEL, TTY_READ_LABEL, TTY_WRITE_LABEL,
+};
 use libcluu::registry;
 use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Error, Result};
@@ -42,6 +44,15 @@ fn run() -> Result<()> {
             }
         }
     };
+    let console_write = loop {
+        // Best-effort console access for clearing before banner.
+        match registry::subscribe_output("console:0", "write") {
+            Ok(token) => break token,
+            Err(_) => {
+                let _ = yield_cpu();
+            }
+        }
+    };
     let registry_endpoint = registry::control_endpoint();
     let mut command_context = CommandContext::new();
 
@@ -50,6 +61,8 @@ fn run() -> Result<()> {
         "shell: stdin {} stdout {} stderr {} stdlog {}",
         stdin, stdout, stderr, stdlog
     ));
+    let _ = send_with_payload(console_write, CONSOLE_CLEAR_LABEL, &[]);
+    let _ = print_banner(console_write);
     let _ = print_prompt(stdout);
 
     let mut buf = [0u8; 128];
@@ -87,6 +100,18 @@ fn run() -> Result<()> {
 fn print_prompt(endpoint: usize) -> Result<()> {
     // Prompt is sent to tty, which forwards to console.
     send_with_payload(endpoint, TTY_WRITE_LABEL, b"cluu> ")?;
+    Ok(())
+}
+
+fn print_banner(console_endpoint: usize) -> Result<()> {
+    // ASCII-only banner, stored in a separate file for easy editing.
+    const BANNER: &str = include_str!("banner.txt");
+    // Send per line to avoid splitting UTF-8 sequences across IPC messages.
+    for line in BANNER.lines() {
+        send_with_payload(console_endpoint, CONSOLE_WRITE_LABEL, line.as_bytes())?;
+        send_with_payload(console_endpoint, CONSOLE_WRITE_LABEL, b"\n")?;
+    }
+    send_with_payload(console_endpoint, CONSOLE_WRITE_LABEL, b"\n")?;
     Ok(())
 }
 
@@ -136,22 +161,20 @@ fn parse_and_execute_line(
 ) -> Result<()> {
     let line = strip_trailing_newline(payload);
     match core::str::from_utf8(line) {
-        Ok(text) => {
-            match cluu_lang::parse_program(text) {
-                Ok(ast) => {
-                    let factory = BuiltinFactory::new();
-                    let registry = factory.build();
-                    match registry.execute(stdout, context, &ast)? {
-                        ExecResult::Handled => return Ok(()),
-                        ExecResult::NotHandled => {}
-                    }
-                    let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, b"shell: unsupported command\n");
+        Ok(text) => match cluu_lang::parse_program(text) {
+            Ok(ast) => {
+                let factory = BuiltinFactory::new();
+                let registry = factory.build();
+                match registry.execute(stdout, context, &ast)? {
+                    ExecResult::Handled => return Ok(()),
+                    ExecResult::NotHandled => {}
                 }
-                Err(err) => {
-                    let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, err.to_string().as_bytes());
-                }
+                let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, b"shell: unsupported command\n");
             }
-        }
+            Err(err) => {
+                let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, err.to_string().as_bytes());
+            }
+        },
         Err(_) => {
             let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, b"shell: invalid utf-8\n");
         }
