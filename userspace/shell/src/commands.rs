@@ -253,9 +253,7 @@ struct ParsedCommand {
 }
 
 fn flatten_simple_command(program: &Program) -> Option<ParsedCommand> {
-    let Some(stmt) = program.stmts.first() else {
-        return None;
-    };
+    let stmt = program.stmts.first()?;
     let Stmt::Pipeline(pipeline) = stmt;
     if pipeline.commands.len() != 1 {
         return None;
@@ -449,7 +447,7 @@ impl BuiltinCommand for LetBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(name) = args.get(0) else {
+        let Some(name) = args.first() else {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"let: missing name\n")?;
             return Ok(());
         };
@@ -508,7 +506,7 @@ fn arithmetic_op<F>(
 where
     F: FnOnce(i64, i64) -> i64,
 {
-    let Some(a) = parse_value(context, args.get(0).unwrap_or(&String::new())) else {
+    let Some(a) = parse_value(context, args.first().unwrap_or(&String::new())) else {
         send_with_payload(stdout, TTY_WRITE_LABEL, b"arith: invalid lhs\n")?;
         return Ok(());
     };
