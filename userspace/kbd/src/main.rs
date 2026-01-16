@@ -7,6 +7,7 @@
 //! scancodes to ASCII, and forwards key events to the tty via the registry.
 
 mod context;
+mod layout;
 mod protocol;
 mod scancode;
 

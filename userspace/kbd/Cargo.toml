@@ -9,6 +9,11 @@ license = "MIT"
 [dependencies]
 libcluu = { path = "../libcluu" }
 
+[features]
+default = ["hu-layout"]
+hu-layout = []
+us-layout = []
+
 [[bin]]
 name = "kbd"
 path = "src/main.rs"
