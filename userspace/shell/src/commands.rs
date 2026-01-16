@@ -4,14 +4,16 @@
 //! parser wiring, following SOLID separation between parsing, dispatch, and IO.
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::format;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
 use libcluu::syscall;
 use libcluu::Result;
 
-use cluu_lang::ast::{CmdElem, DqPart, Program, Stmt, Word, WordPart};
+use cluu_lang::ast::{Assign, CmdElem, DqPart, Program, Stmt, Word, WordPart};
 
 /// Execution result for a command handler.
 pub enum ExecResult {
@@ -19,15 +21,57 @@ pub enum ExecResult {
     NotHandled,
 }
 
+/// Per-shell execution context shared across command invocations.
+pub struct CommandContext {
+    vars: BTreeMap<String, String>,
+}
+
+impl CommandContext {
+    /// Create a fresh shell context.
+    pub fn new() -> Self {
+        Self {
+            vars: BTreeMap::new(),
+        }
+    }
+
+    /// Set or update a variable in the shell context.
+    pub fn set(&mut self, name: &str, value: String) {
+        self.vars.insert(name.to_string(), value);
+    }
+
+    /// Remove a variable from the shell context.
+    pub fn unset(&mut self, name: &str) {
+        self.vars.remove(name);
+    }
+
+    /// Fetch a variable value, if present.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.vars.get(name).map(|v| v.as_str())
+    }
+
+    /// Clone variable entries for display.
+    pub fn entries(&self) -> Vec<(String, String)> {
+        self.vars
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+}
+
 /// Shell command executor abstraction.
 pub trait CommandExecutor {
-    fn execute(&self, stdout: usize, program: &Program) -> Result<ExecResult>;
+    fn execute(
+        &self,
+        stdout: usize,
+        context: &mut CommandContext,
+        program: &Program,
+    ) -> Result<ExecResult>;
 }
 
 /// A single builtin command implementation.
 pub trait BuiltinCommand {
     fn name(&self) -> &'static str;
-    fn run(&self, stdout: usize, args: &[String]) -> Result<()>;
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()>;
 }
 
 /// Builtin dispatcher that owns the builtin registry.
@@ -104,27 +148,40 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(HelpBuiltin));
         registry.register(Box::new(EchoBuiltin));
         registry.register(Box::new(ExitBuiltin));
+        registry.register(Box::new(SetBuiltin));
+        registry.register(Box::new(UnsetBuiltin));
+        registry.register(Box::new(EnvBuiltin));
+        registry.register(Box::new(ExprBuiltin));
+        registry.register(Box::new(LetBuiltin));
     }
 }
 
 impl CommandExecutor for BuiltinRegistry {
-    fn execute(&self, stdout: usize, program: &Program) -> Result<ExecResult> {
+    fn execute(
+        &self,
+        stdout: usize,
+        context: &mut CommandContext,
+        program: &Program,
+    ) -> Result<ExecResult> {
         let command = match flatten_simple_command(program) {
             Some(command) => command,
             None => return Ok(ExecResult::NotHandled),
         };
+        for assign in command.assigns {
+            let value = render_word(context, &assign.value);
+            context.set(&assign.name, value);
+        }
         let mut args = Vec::new();
-        for elem in command {
-            args.push(render_word(&elem));
+        for elem in command.words {
+            args.push(render_word(context, &elem));
         }
         let Some(name) = args.first() else {
             return Ok(ExecResult::NotHandled);
         };
-        if let Some(builtin) = self.find(name) {
-            builtin.run(stdout, &args[1..])?;
-            return Ok(ExecResult::Handled);
+        if name.as_str() == "repeat" {
+            return self.execute_repeat(stdout, context, &args[1..]);
         }
-        Ok(ExecResult::NotHandled)
+        self.run_builtin(stdout, context, name, &args[1..])
     }
 }
 
@@ -152,8 +209,12 @@ impl BuiltinCommand for HelpBuiltin {
         "help"
     }
 
-    fn run(&self, stdout: usize, _args: &[String]) -> Result<()> {
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"builtins: help, echo, exit\n")?;
+    fn run(&self, stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        send_with_payload(
+            stdout,
+            TTY_WRITE_LABEL,
+            b"builtins: help, echo, exit, set, unset, env, expr, let, repeat\n",
+        )?;
         Ok(())
     }
 }
@@ -165,7 +226,7 @@ impl BuiltinCommand for EchoBuiltin {
         "echo"
     }
 
-    fn run(&self, stdout: usize, args: &[String]) -> Result<()> {
+    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
         let output = join_words(args);
         send_with_payload(stdout, TTY_WRITE_LABEL, output.as_bytes())?;
         send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
@@ -180,13 +241,18 @@ impl BuiltinCommand for ExitBuiltin {
         "exit"
     }
 
-    fn run(&self, stdout: usize, _args: &[String]) -> Result<()> {
+    fn run(&self, stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
         let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shell: exiting\n");
         syscall::thread_exit(0);
     }
 }
 
-fn flatten_simple_command(program: &Program) -> Option<Vec<Word>> {
+struct ParsedCommand {
+    assigns: Vec<Assign>,
+    words: Vec<Word>,
+}
+
+fn flatten_simple_command(program: &Program) -> Option<ParsedCommand> {
     let Some(stmt) = program.stmts.first() else {
         return None;
     };
@@ -195,7 +261,7 @@ fn flatten_simple_command(program: &Program) -> Option<Vec<Word>> {
         return None;
     }
     let command = &pipeline.commands[0];
-    if !command.redirs.is_empty() || !command.assigns.is_empty() {
+    if !command.redirs.is_empty() {
         return None;
     }
     let mut words = Vec::new();
@@ -205,10 +271,13 @@ fn flatten_simple_command(program: &Program) -> Option<Vec<Word>> {
             CmdElem::Subshell(_) => return None,
         }
     }
-    Some(words)
+    Some(ParsedCommand {
+        assigns: command.assigns.clone(),
+        words,
+    })
 }
 
-fn render_word(word: &Word) -> String {
+fn render_word(context: &CommandContext, word: &Word) -> String {
     let mut out = String::new();
     for part in &word.parts {
         match part {
@@ -219,18 +288,12 @@ fn render_word(word: &Word) -> String {
                     match dq {
                         DqPart::Text(text) => out.push_str(text),
                         DqPart::Escaped(text) => out.push_str(text),
-                        DqPart::Var(name) => {
-                            out.push('$');
-                            out.push_str(name);
-                        }
+                        DqPart::Var(name) => out.push_str(context.get(name).unwrap_or("")),
                         DqPart::CmdSub(_) => out.push_str(""),
                     }
                 }
             }
-            WordPart::Var(name) => {
-                out.push('$');
-                out.push_str(name);
-            }
+            WordPart::Var(name) => out.push_str(context.get(name).unwrap_or("")),
             WordPart::CmdSub(_) => {}
         }
     }
@@ -246,4 +309,286 @@ fn join_words(words: &[String]) -> String {
         out.push_str(word);
     }
     out
+}
+
+impl BuiltinRegistry {
+    fn run_builtin(
+        &self,
+        stdout: usize,
+        context: &mut CommandContext,
+        name: &str,
+        args: &[String],
+    ) -> Result<ExecResult> {
+        if let Some(builtin) = self.find(name) {
+            builtin.run(stdout, context, args)?;
+            return Ok(ExecResult::Handled);
+        }
+        Ok(ExecResult::NotHandled)
+    }
+
+    fn execute_repeat(
+        &self,
+        stdout: usize,
+        context: &mut CommandContext,
+        args: &[String],
+    ) -> Result<ExecResult> {
+        let Some(count_token) = args.first() else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"repeat: missing count\n")?;
+            return Ok(ExecResult::Handled);
+        };
+        let count = match parse_value(context, count_token) {
+            Some(value) if value >= 0 => value as usize,
+            _ => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"repeat: invalid count\n")?;
+                return Ok(ExecResult::Handled);
+            }
+        };
+        let Some(command_name) = args.get(1) else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"repeat: missing command\n")?;
+            return Ok(ExecResult::Handled);
+        };
+        let rest = &args[2..];
+        for _ in 0..count {
+            match self.run_builtin(stdout, context, command_name, rest)? {
+                ExecResult::Handled => {}
+                ExecResult::NotHandled => {
+                    send_with_payload(
+                        stdout,
+                        TTY_WRITE_LABEL,
+                        b"repeat: unknown command\n",
+                    )?;
+                    break;
+                }
+            }
+        }
+        Ok(ExecResult::Handled)
+    }
+}
+
+struct SetBuiltin;
+
+impl BuiltinCommand for SetBuiltin {
+    fn name(&self) -> &'static str {
+        "set"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let Some(name) = args.first() else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"set: missing name\n")?;
+            return Ok(());
+        };
+        let value = join_words(&args[1..]);
+        context.set(name, value);
+        Ok(())
+    }
+}
+
+struct UnsetBuiltin;
+
+impl BuiltinCommand for UnsetBuiltin {
+    fn name(&self) -> &'static str {
+        "unset"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let Some(name) = args.first() else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"unset: missing name\n")?;
+            return Ok(());
+        };
+        context.unset(name);
+        Ok(())
+    }
+}
+
+struct EnvBuiltin;
+
+impl BuiltinCommand for EnvBuiltin {
+    fn name(&self) -> &'static str {
+        "env"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        for (name, value) in context.entries() {
+            let line = format!("{}={}\n", name, value);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        }
+        Ok(())
+    }
+}
+
+struct ExprBuiltin;
+
+impl BuiltinCommand for ExprBuiltin {
+    fn name(&self) -> &'static str {
+        "expr"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let Some((lhs, op, rhs)) = parse_expr_tokens(args) else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"expr: invalid expression\n")?;
+            return Ok(());
+        };
+        match op.as_str() {
+            "+" => arithmetic_op(stdout, context, &[lhs, rhs], |a, b| a + b),
+            "-" => arithmetic_op(stdout, context, &[lhs, rhs], |a, b| a - b),
+            "*" => arithmetic_op(stdout, context, &[lhs, rhs], |a, b| a * b),
+            "/" => div_op(stdout, context, &lhs, &rhs),
+            _ => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"expr: unknown op\n")?;
+                Ok(())
+            }
+        }
+    }
+}
+
+struct LetBuiltin;
+
+impl BuiltinCommand for LetBuiltin {
+    fn name(&self) -> &'static str {
+        "let"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let Some(name) = args.get(0) else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"let: missing name\n")?;
+            return Ok(());
+        };
+        let Some(eq) = args.get(1) else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"let: missing =\n")?;
+            return Ok(());
+        };
+        if eq.as_str() != "=" {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"let: expected =\n")?;
+            return Ok(());
+        }
+        let expr_args = &args[2..];
+        let Some((lhs, op, rhs)) = parse_expr_tokens(expr_args) else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"let: invalid expression\n")?;
+            return Ok(());
+        };
+        let value = match op.as_str() {
+            "+" => calc_value(context, &lhs, &rhs, |a, b| a + b),
+            "-" => calc_value(context, &lhs, &rhs, |a, b| a - b),
+            "*" => calc_value(context, &lhs, &rhs, |a, b| a * b),
+            "/" => {
+                let Some(a) = parse_value(context, &lhs) else {
+                    send_with_payload(stdout, TTY_WRITE_LABEL, b"let: invalid lhs\n")?;
+                    return Ok(());
+                };
+                let Some(b) = parse_value(context, &rhs) else {
+                    send_with_payload(stdout, TTY_WRITE_LABEL, b"let: invalid rhs\n")?;
+                    return Ok(());
+                };
+                if b == 0 {
+                    send_with_payload(stdout, TTY_WRITE_LABEL, b"let: divide by zero\n")?;
+                    return Ok(());
+                }
+                Some((a / b).to_string())
+            }
+            _ => None,
+        };
+        match value {
+            Some(result) => {
+                context.set(name, result);
+            }
+            None => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"let: invalid expression\n")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn arithmetic_op<F>(
+    stdout: usize,
+    context: &mut CommandContext,
+    args: &[String],
+    op: F,
+) -> Result<()>
+where
+    F: FnOnce(i64, i64) -> i64,
+{
+    let Some(a) = parse_value(context, args.get(0).unwrap_or(&String::new())) else {
+        send_with_payload(stdout, TTY_WRITE_LABEL, b"arith: invalid lhs\n")?;
+        return Ok(());
+    };
+    let Some(b) = parse_value(context, args.get(1).unwrap_or(&String::new())) else {
+        send_with_payload(stdout, TTY_WRITE_LABEL, b"arith: invalid rhs\n")?;
+        return Ok(());
+    };
+    let result = op(a, b).to_string();
+    send_with_payload(stdout, TTY_WRITE_LABEL, result.as_bytes())?;
+    send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
+    Ok(())
+}
+
+fn div_op(
+    stdout: usize,
+    context: &mut CommandContext,
+    lhs: &str,
+    rhs: &str,
+) -> Result<()> {
+    let Some(a) = parse_value(context, lhs) else {
+        send_with_payload(stdout, TTY_WRITE_LABEL, b"div: invalid lhs\n")?;
+        return Ok(());
+    };
+    let Some(b) = parse_value(context, rhs) else {
+        send_with_payload(stdout, TTY_WRITE_LABEL, b"div: invalid rhs\n")?;
+        return Ok(());
+    };
+    if b == 0 {
+        send_with_payload(stdout, TTY_WRITE_LABEL, b"div: divide by zero\n")?;
+        return Ok(());
+    }
+    let result = (a / b).to_string();
+    send_with_payload(stdout, TTY_WRITE_LABEL, result.as_bytes())?;
+    send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
+    Ok(())
+}
+
+fn calc_value<F>(context: &CommandContext, lhs: &str, rhs: &str, op: F) -> Option<String>
+where
+    F: FnOnce(i64, i64) -> i64,
+{
+    let a = parse_value(context, lhs)?;
+    let b = parse_value(context, rhs)?;
+    Some(op(a, b).to_string())
+}
+
+fn parse_value(context: &CommandContext, token: &str) -> Option<i64> {
+    if let Ok(value) = token.parse::<i64>() {
+        return Some(value);
+    }
+    context
+        .get(token)
+        .and_then(|val| val.parse::<i64>().ok())
+}
+
+fn parse_expr_tokens(args: &[String]) -> Option<(String, String, String)> {
+    if args.len() >= 3 {
+        return Some((args[0].clone(), args[1].clone(), args[2].clone()));
+    }
+    if let Some(token) = args.first() {
+        if let Some((lhs, op, rhs)) = split_expr_token(token) {
+            return Some((lhs, op, rhs));
+        }
+    }
+    None
+}
+
+fn split_expr_token(token: &str) -> Option<(String, String, String)> {
+    let mut idx = None;
+    for (pos, ch) in token.char_indices() {
+        if matches!(ch, '+' | '-' | '*' | '/') {
+            idx = Some((pos, ch));
+            break;
+        }
+    }
+    let (pos, ch) = idx?;
+    let lhs = token.get(0..pos)?.trim();
+    let rhs = token.get(pos + ch.len_utf8()..)?.trim();
+    if lhs.is_empty() || rhs.is_empty() {
+        return None;
+    }
+    Some((lhs.to_string(), ch.to_string(), rhs.to_string()))
 }

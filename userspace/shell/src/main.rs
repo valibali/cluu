@@ -10,7 +10,7 @@ use alloc::format;
 #[cfg(feature = "lang-parser")]
 use alloc::string::ToString;
 #[cfg(feature = "lang-parser")]
-use commands::{BuiltinFactory, CommandExecutor, ExecResult};
+use commands::{BuiltinFactory, CommandContext, CommandExecutor, ExecResult};
 use core::mem::size_of;
 use libcluu::boot::{process_info, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG};
 use libcluu::ipc::{send_with_payload, TTY_READ_LABEL, TTY_WRITE_LABEL};
@@ -43,6 +43,7 @@ fn run() -> Result<()> {
         }
     };
     let registry_endpoint = registry::control_endpoint();
+    let mut command_context = CommandContext::new();
 
     debug_print("shell: ready")?;
     let _ = debug_print(&format!(
@@ -65,10 +66,10 @@ fn run() -> Result<()> {
                     }
                     if msg.tag.label == TTY_READ_LABEL {
                         if !payload.is_empty() {
-                            handle_line_payload(stdout, stdlog, payload)?;
+                            handle_line_payload(stdout, stdlog, &mut command_context, payload)?;
                         } else if msg.tag.words >= 2 {
                             let ch = msg.words[1] as u8;
-                            handle_line_payload(stdout, stdlog, &[ch])?;
+                            handle_line_payload(stdout, stdlog, &mut command_context, &[ch])?;
                         }
                     }
                 }
@@ -107,14 +108,19 @@ fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
 /// Update the prompt when a complete line is received from tty.
 ///
 /// The tty sends line-buffered input; we only need to react to newline markers.
-fn handle_line_payload(stdout: usize, stdlog: usize, payload: &[u8]) -> Result<()> {
+fn handle_line_payload(
+    stdout: usize,
+    stdlog: usize,
+    context: &mut CommandContext,
+    payload: &[u8],
+) -> Result<()> {
     #[cfg(not(feature = "lang-parser"))]
-    let _ = stdlog;
+    let _ = (stdlog, context);
     // Print a new prompt after each completed line.
     if payload.contains(&b'\n') {
         #[cfg(feature = "lang-parser")]
         {
-            parse_and_execute_line(stdout, stdlog, payload)?;
+            parse_and_execute_line(stdout, stdlog, context, payload)?;
         }
         print_prompt(stdout)?;
     }
@@ -122,7 +128,12 @@ fn handle_line_payload(stdout: usize, stdlog: usize, payload: &[u8]) -> Result<(
 }
 
 #[cfg(feature = "lang-parser")]
-fn parse_and_execute_line(stdout: usize, stdlog: usize, payload: &[u8]) -> Result<()> {
+fn parse_and_execute_line(
+    stdout: usize,
+    stdlog: usize,
+    context: &mut CommandContext,
+    payload: &[u8],
+) -> Result<()> {
     let line = strip_trailing_newline(payload);
     match core::str::from_utf8(line) {
         Ok(text) => {
@@ -130,7 +141,7 @@ fn parse_and_execute_line(stdout: usize, stdlog: usize, payload: &[u8]) -> Resul
                 Ok(ast) => {
                     let factory = BuiltinFactory::new();
                     let registry = factory.build();
-                    match registry.execute(stdout, &ast)? {
+                    match registry.execute(stdout, context, &ast)? {
                         ExecResult::Handled => return Ok(()),
                         ExecResult::NotHandled => {}
                     }
