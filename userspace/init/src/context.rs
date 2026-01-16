@@ -1,0 +1,62 @@
+//! Shared initialization context.
+//!
+//! Init constructs long-lived resources (registry endpoints, exit endpoint,
+//! IRQ handle) once and passes them to each service launcher. This keeps
+//! ownership and lifetime explicit and avoids global singletons.
+
+use crate::boot::BootSnapshot;
+use libcluu::{endpoint_create, token_derive, Result, Rights};
+
+/// Shared resources available to every service during startup.
+pub struct InitContext<'a> {
+    pub boot: BootSnapshot,
+    pub initrd: &'a [u8],
+    pub exit_endpoint: usize,
+    pub registry_endpoint: usize,
+    pub registry_send: usize,
+    pub kbd_irq_token: usize,
+}
+
+impl<'a> InitContext<'a> {
+    /// Build the shared init context from boot snapshot + initrd mapping.
+    ///
+    /// This aggregates endpoints/tokens that are reused by many services so
+    /// we can construct them once and pass references explicitly.
+    pub fn new(boot: BootSnapshot, initrd: &'a [u8]) -> Result<Self> {
+        // Exit endpoint used by procmgr to receive child exit notifications.
+        let exit_endpoint = create_exit_endpoint(boot.root_token)?;
+
+        // Registry uses a single shared listen endpoint (recv) and a send token.
+        let registry_full = endpoint_create(boot.root_token)?;
+        let registry_endpoint =
+            token_derive(registry_full, Rights::IPC_RECV.bits() as usize, u64::MAX)?;
+        let registry_send =
+            token_derive(registry_full, Rights::IPC_SEND.bits() as usize, u64::MAX)?;
+
+        // Keyboard service needs an IRQ handle token.
+        let kbd_irq_token = token_derive(
+            boot.root_token,
+            Rights::IRQ_HANDLE.bits() as usize,
+            u64::MAX,
+        )?;
+
+        Ok(Self {
+            boot,
+            initrd,
+            exit_endpoint,
+            registry_endpoint,
+            registry_send,
+            kbd_irq_token,
+        })
+    }
+}
+
+/// Create a grantable endpoint for exit notifications.
+///
+/// Procmgr needs to receive exit notifications and forward them, so this
+/// endpoint is created with both recv and grant capabilities.
+fn create_exit_endpoint(token: usize) -> Result<usize> {
+    let endpoint = endpoint_create(token)?;
+    let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::GRANT;
+    token_derive(endpoint, rights.bits() as usize, u64::MAX)
+}
