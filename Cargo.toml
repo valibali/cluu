@@ -26,6 +26,10 @@ members = [
     "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
+
+    # Language tooling
+    "crates/cluu_lang",
+    "crates/cluu_lang_harness",
 ]
 
 # Exclude xtask from default members (it uses std)

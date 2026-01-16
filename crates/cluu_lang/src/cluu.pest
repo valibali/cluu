@@ -1,0 +1,43 @@
+WS = _{ " " | "\t" }
+NL = _{ "\r\n" | "\n" }
+LINE_COMMENT = _{ "#" ~ (!NL ~ ANY)* }
+ws0 = _{ (WS | LINE_COMMENT)* }
+
+program = { SOI ~ ws0 ~ stmt_list? ~ ws0 ~ EOI }
+subprogram = { stmt_list? }
+stmt_list = { stmt ~ (sep ~ stmt)* ~ sep? }
+sep = _{ ws0 ~ (NL+ | ";") ~ ws0 }
+
+stmt = _{ pipeline }
+pipeline = { command ~ (ws0 ~ "|" ~ ws0 ~ command)* }
+
+command = { prefix_assign* ~ cmd_item? ~ (ws0 ~ cmd_item)* }
+prefix_assign = { ident ~ "=" ~ word }
+cmd_item = { redir | cmd_elem }
+cmd_elem = { word | subshell }
+subshell = { "(" ~ ws0 ~ subprogram ~ ws0 ~ ")" }
+
+redir = { redir_op ~ ws0 ~ word }
+redir_op = { ">>" | "2>" | ">" | "<" }
+
+word = { word_part+ }
+word_part = { single_quoted | double_quoted | var | cmdsub | bare }
+
+var = { "$" ~ ident }
+cmdsub = { "$(" ~ ws0 ~ subprogram ~ ws0 ~ ")" }
+
+bare = { (bare_escape | bare_char)+ }
+bare_escape = { "\\" ~ ANY }
+bare_char = { !(WS | NL | ";" | "|" | ">" | "<" | "(" | ")" | "#" | "\"" | "'" | "$" | "\\") ~ ANY }
+
+single_quoted = { "'" ~ single_inner* ~ "'" }
+single_inner = { (!"'" ~ ANY) }
+
+double_quoted = { "\"" ~ dq_part* ~ "\"" }
+dq_part = { dq_escaped | dq_var | dq_cmdsub | dq_text }
+dq_var = { "$" ~ ident }
+dq_cmdsub = { "$(" ~ ws0 ~ subprogram ~ ws0 ~ ")" }
+dq_escaped = { "\\" ~ ("\"" | "\\" | "$" | "n" | "t") }
+dq_text = { (!"\"" ~ !"\\" ~ !"$" ~ ANY)+ }
+
+ident = { (ASCII_ALPHANUMERIC | "_")+ }

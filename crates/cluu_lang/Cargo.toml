@@ -1,0 +1,11 @@
+[package]
+name = "cluu_lang"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pest = { version = "2", default-features = false }
+pest_derive = { version = "2", default-features = false }
+
+[lib]
+path = "src/lib.rs"
