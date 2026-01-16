@@ -1,8 +1,9 @@
 //! Keyboard layout selection and key maps.
 //!
-//! Layouts return ASCII-only mappings. For layouts that would normally emit
-//! non-ASCII glyphs (e.g., Hungarian accents), we fall back to approximate
-//! ASCII letters and then defer to the US layout for any unmapped scancodes.
+//! Layouts return ASCII-only mappings. Hungarian emits accented letters and
+//! dead keys in the real layout, so we approximate with closest ASCII
+//! characters and map dead keys to simple ASCII stand-ins. US is the fallback
+//! for any unmapped scancodes.
 
 use crate::scancode::Modifiers;
 
@@ -117,46 +118,101 @@ impl KeyLayout for HuLayout {
         match scancode {
             0x15 => Some(b'z'),
             0x2C => Some(b'y'),
+            0x0B => Some(b'o'),
+            0x0C => Some(b'u'),
+            0x0D => Some(b'o'),
+            0x1A => Some(b'o'),
+            0x1B => Some(b'u'),
+            0x27 => Some(b'e'),
+            0x28 => Some(b'a'),
+            0x2B => Some(b'u'),
+            0x56 => Some(b'i'),
             _ => UsLayout::letter_for_scancode(scancode),
         }
     }
 
     fn base_symbol(scancode: u8) -> Option<u8> {
         match scancode {
-            0x0C => Some(b'o'),
-            0x0D => Some(b'u'),
-            0x1A => Some(b'o'),
-            0x1B => Some(b'u'),
-            0x27 => Some(b'e'),
-            0x28 => Some(b'a'),
-            0x2B => Some(b'u'),
+            0x29 => Some(b'0'),
+            0x02 => Some(b'1'),
+            0x03 => Some(b'2'),
+            0x04 => Some(b'3'),
+            0x05 => Some(b'4'),
+            0x06 => Some(b'5'),
+            0x07 => Some(b'6'),
+            0x08 => Some(b'7'),
+            0x09 => Some(b'8'),
+            0x0A => Some(b'9'),
+            0x33 => Some(b','),
+            0x34 => Some(b'.'),
+            0x35 => Some(b'-'),
             _ => UsLayout::base_symbol(scancode),
         }
     }
 
     fn shifted_symbol(scancode: u8) -> Option<u8> {
         match scancode {
-            0x0C => Some(b'O'),
-            0x0D => Some(b'U'),
-            0x1A => Some(b'O'),
-            0x1B => Some(b'U'),
-            0x27 => Some(b'E'),
-            0x28 => Some(b'A'),
-            0x2B => Some(b'U'),
+            0x29 => Some(b'?'),
+            0x02 => Some(b'\''),
+            0x03 => Some(b'"'),
+            0x04 => Some(b'+'),
+            0x05 => Some(b'!'),
+            0x06 => Some(b'%'),
+            0x07 => Some(b'/'),
+            0x08 => Some(b'='),
+            0x09 => Some(b'('),
+            0x0A => Some(b')'),
+            0x33 => Some(b'?'),
+            0x34 => Some(b':'),
+            0x35 => Some(b'_'),
             _ => UsLayout::shifted_symbol(scancode),
         }
     }
 
     fn altgr_symbol(scancode: u8) -> Option<u8> {
+        // Dead keys and non-ASCII symbols are approximated with ASCII.
         match scancode {
-            0x12 => Some(b'@'),
-            0x13 => Some(b'\\'),
-            0x16 => Some(b'|'),
+            0x02 => Some(b'~'),
+            0x03 => Some(b'^'),
+            0x04 => Some(b'^'),
+            0x05 => Some(b'~'),
+            0x06 => Some(b'0'),
+            0x07 => Some(b','),
+            0x08 => Some(b'`'),
+            0x09 => Some(b'.'),
+            0x0A => Some(b'\''),
+            0x0B => Some(b'"'),
+            0x0C => Some(b'"'),
+            0x0D => Some(b','),
+            0x10 => Some(b'\\'),
+            0x11 => Some(b'|'),
+            0x12 => Some(b'A'),
+            0x16 => Some(b'E'),
+            0x17 => Some(b'I'),
+            0x1A => Some(b'/'),
+            0x1B => Some(b'*'),
+            0x1E => Some(b'a'),
+            0x1F => Some(b'd'),
+            0x20 => Some(b'D'),
             0x21 => Some(b'['),
             0x22 => Some(b']'),
-            0x2E => Some(b'{'),
-            0x30 => Some(b'}'),
+            0x24 => Some(b'i'),
+            0x25 => Some(b'l'),
+            0x26 => Some(b'L'),
+            0x27 => Some(b'$'),
+            0x28 => Some(b's'),
+            0x2B => Some(b'$'),
+            0x56 => Some(b'<'),
+            0x32 => Some(b'<'),
+            0x33 => Some(b';'),
+            0x34 => Some(b'>'),
+            0x35 => Some(b'*'),
+            0x2C => Some(b'>'),
             0x2D => Some(b'#'),
+            0x2E => Some(b'&'),
+            0x2F => Some(b'@'),
+            0x30 => Some(b'{'),
+            0x31 => Some(b'}'),
             _ => None,
         }
     }
