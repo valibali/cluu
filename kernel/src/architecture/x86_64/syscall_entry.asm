@@ -148,12 +148,36 @@ syscall_entry:
     pop r11                             ; User RFLAGS -> R11
     pop rcx                             ; User RIP -> RCX
 
+    ; ─────────────────────────────────────────────────────────────────────────
+    ; SECURITY: Validate RCX is canonical user address before SYSRET
+    ; Intel SYSRET bug: if RCX is non-canonical, #GP fires at CPL 0 after
+    ; partial instruction execution, potentially allowing privilege escalation.
+    ; User canonical addresses: bits 63:47 must all be 0 (0 to 0x7FFFFFFFFFFF)
+    ; ─────────────────────────────────────────────────────────────────────────
+    mov r10, rcx
+    shr r10, 47
+    test r10, r10
+    jnz .sysret_unsafe_fallback          ; Non-zero = non-canonical or kernel addr
+
     ; Restore user stack
     mov rsp, [gs:PERCPU_USER_RSP]
 
-    ; Return to userspace
+    ; Return to userspace via fast SYSRET
     swapgs
     o64 sysret
+
+    ; ─────────────────────────────────────────────────────────────────────────
+    ; SYSRET fallback: use safe IRETQ for non-canonical addresses
+    ; ─────────────────────────────────────────────────────────────────────────
+.sysret_unsafe_fallback:
+    ; Build IRETQ frame on kernel stack (still have kernel RSP)
+    push 0x2b                           ; User SS (0x28 | RPL 3)
+    push qword [gs:PERCPU_USER_RSP]     ; User RSP
+    push r11                            ; User RFLAGS
+    push 0x33                           ; User CS (0x30 | RPL 3)
+    push rcx                            ; User RIP (possibly non-canonical)
+    swapgs
+    iretq                               ; IRETQ safely handles non-canonical RIP
 
 ; ═══════════════════════════════════════════════════════════════════════════
 ; SLOW PATH: Full context switch

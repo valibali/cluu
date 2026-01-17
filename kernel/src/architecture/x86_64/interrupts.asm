@@ -41,6 +41,13 @@ extern timer_interrupt_should_schedule
 ; ─────────────────────────────────────────────────────────────────────────
 
 timer_interrupt_entry:
+    ; Check if we came from user mode (CS on stack has RPL bits set)
+    ; Stack at entry: [rsp+0]=RIP, [rsp+8]=CS, [rsp+16]=RFLAGS, [rsp+24]=RSP, [rsp+32]=SS
+    test qword [rsp + 0x08], 0x3
+    jz .skip_swapgs_entry
+    swapgs                                  ; User->kernel: switch to kernel GS
+.skip_swapgs_entry:
+
     ; Reserve space for Context
     sub rsp, CONTEXT_SIZE
 
@@ -127,6 +134,11 @@ timer_interrupt_entry:
     mov rbp, [rsp + CONTEXT_RBP]
     mov r10, [rsp + CONTEXT_R10]
     add rsp, CONTEXT_SIZE
+    ; Check if returning to user mode (CS on iret frame has RPL bits)
+    test qword [rsp + 0x08], 0x3
+    jz .no_swapgs_fast_ret
+    swapgs                                  ; Kernel->user: restore user GS
+.no_swapgs_fast_ret:
     iretq
 
 .do_schedule:
@@ -177,6 +189,7 @@ timer_interrupt_entry:
     push rcx
     push rdx
     push rsi
+    swapgs                                  ; Kernel->user: restore user GS
     jmp .restore_regs
 
 .build_kernel_frame:
