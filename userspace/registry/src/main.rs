@@ -21,11 +21,7 @@ use libcluu::{debug_print, yield_cpu, Error, Result};
 
 const SVC_TOKEN_LISTEN: usize = 6;
 
-struct PendingSubscription {
-    requester_endpoint: usize,
-    service: String,
-    endpoint: String,
-}
+// PendingSubscription struct removed - now using indexed BTreeMap instead.
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -44,7 +40,9 @@ fn run() -> Result<()> {
     debug_print("registry: ready")?;
     // Registry table: (service, endpoint) -> grant endpoint owned by producer.
     let mut entries: BTreeMap<(String, String), usize> = BTreeMap::new();
-    let mut pending: Vec<PendingSubscription> = Vec::new();
+    // Pending subscriptions indexed by (service, endpoint) -> list of requester endpoints.
+    // O(1) lookup instead of O(n) scan.
+    let mut pending: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     let registry_control = registry::control_endpoint();
     let mut buf = [0u8; 256];
     // Main dispatch loop: handle register/unregister/list/subscribe requests.
@@ -64,22 +62,16 @@ fn run() -> Result<()> {
                             if let Some((service, endpoint)) = parse_names(payload) {
                                 let grant_endpoint = msg.words[2];
                                 if grant_endpoint != 0 {
-                                    entries.insert(
-                                        (service.clone(), endpoint.clone()),
-                                        grant_endpoint,
-                                    );
+                                    let key = (service.clone(), endpoint.clone());
+                                    entries.insert(key.clone(), grant_endpoint);
                                     let _ = debug_print(&format!(
                                         "registry: registered {}:{}",
                                         service, endpoint
                                     ));
-                                    // Drain any queued subscribers now that the output exists.
-                                    let mut idx = 0;
-                                    while idx < pending.len() {
-                                        if pending[idx].service == service
-                                            && pending[idx].endpoint == endpoint
-                                        {
-                                            let requester = pending[idx].requester_endpoint;
-                                            let grant_payload = encode_single_name(&endpoint);
+                                    // O(1) lookup + O(k) drain where k = pending for THIS output
+                                    if let Some(requesters) = pending.remove(&key) {
+                                        let grant_payload = encode_single_name(&endpoint);
+                                        for requester in requesters {
                                             let grant_msg = make_payload_message(
                                                 REGISTRY_GRANT_REQUEST_LABEL,
                                                 grant_payload.len(),
@@ -90,16 +82,11 @@ fn run() -> Result<()> {
                                                 &grant_msg,
                                                 &grant_payload,
                                             ) {
-                                                send_status(
+                                                let _ = send_status(
                                                     requester,
                                                     Error::InvalidArgument as i32,
-                                                )?;
-                                                idx += 1;
-                                            } else {
-                                                pending.swap_remove(idx);
+                                                );
                                             }
-                                        } else {
-                                            idx += 1;
                                         }
                                     }
                                 }
@@ -138,7 +125,8 @@ fn run() -> Result<()> {
                                     "registry: subscribe {}:{} reply {} words {}",
                                     service, endpoint, reply_endpoint, msg.tag.words
                                 ));
-                                match entries.get(&(service.clone(), endpoint.clone())) {
+                                let key = (service.clone(), endpoint.clone());
+                                match entries.get(&key) {
                                     Some(grant_endpoint) => {
                                         let grant_payload = encode_single_name(&endpoint);
                                         let grant_msg = make_payload_message(
@@ -160,16 +148,10 @@ fn run() -> Result<()> {
                                         }
                                     }
                                     None => {
-                                        if !pending.iter().any(|entry| {
-                                            entry.requester_endpoint == reply_endpoint
-                                                && entry.service == service
-                                                && entry.endpoint == endpoint
-                                        }) {
-                                            pending.push(PendingSubscription {
-                                                requester_endpoint: reply_endpoint,
-                                                service,
-                                                endpoint,
-                                            });
+                                        // O(1) insert with dedup via contains check on small vec
+                                        let requesters = pending.entry(key).or_default();
+                                        if !requesters.contains(&reply_endpoint) {
+                                            requesters.push(reply_endpoint);
                                         }
                                         // Accept the request and grant when the output appears.
                                         send_status(reply_endpoint, 0)?;
