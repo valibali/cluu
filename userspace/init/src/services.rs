@@ -21,6 +21,7 @@ pub enum ServiceKind {
     Kbd,
     Tty,
     Procmgr,
+    Vfs,
 }
 
 // Capability grant for procmgr (it needs to create, map, and manage children).
@@ -58,6 +59,14 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         priority: 200,
         rights: Some(PROCMGR_RIGHTS),
         kind: ServiceKind::Procmgr,
+        instance_id: None,
+    },
+    ServiceSpec {
+        name: "vfs",
+        path: "sys/vfs",
+        priority: 195,
+        rights: None,
+        kind: ServiceKind::Vfs,
         instance_id: None,
     },
     ServiceSpec {

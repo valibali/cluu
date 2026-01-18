@@ -281,7 +281,7 @@ fn create_initrd(profile: &str) -> Result<()> {
     }
 
     // Copy system servers to initrd/sys/
-    let sys_programs = ["init", "procmgr", "registry", "console", "kbd", "tty"];
+    let sys_programs = ["init", "procmgr", "registry", "vfs", "console", "kbd", "tty"];
     for prog in &sys_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("sys").join(prog);
