@@ -531,7 +531,12 @@ pub fn translate_vaddr_with_flags(
         if pdpt[pdpt_idx] & pte_flags::HUGE != 0 {
             let phys_base = pdpt[pdpt_idx] & 0x000F_FFFF_C000_0000;
             let gb_offset = vaddr.as_u64() & 0x3FFF_FFFF;
-            let flags = pdpt[pdpt_idx] & 0xFFF;
+            let flags = pdpt[pdpt_idx]
+                & (pte_flags::PRESENT
+                    | pte_flags::WRITABLE
+                    | pte_flags::USER
+                    | pte_flags::NO_EXECUTE
+                    | pte_flags::HUGE);
             return Some((PhysAddr::new(phys_base + gb_offset), flags));
         }
 
@@ -547,7 +552,12 @@ pub fn translate_vaddr_with_flags(
         if pd[pd_idx] & pte_flags::HUGE != 0 {
             let phys_base = pd[pd_idx] & 0x000F_FFFF_FFE0_0000;
             let mb_offset = vaddr.as_u64() & 0x1F_FFFF;
-            let flags = pd[pd_idx] & 0xFFF;
+            let flags = pd[pd_idx]
+                & (pte_flags::PRESENT
+                    | pte_flags::WRITABLE
+                    | pte_flags::USER
+                    | pte_flags::NO_EXECUTE
+                    | pte_flags::HUGE);
             return Some((PhysAddr::new(phys_base + mb_offset), flags));
         }
 
@@ -560,7 +570,12 @@ pub fn translate_vaddr_with_flags(
         }
 
         let page_phys = pt[pt_idx] & PHYS_MASK;
-        let flags = pt[pt_idx] & 0xFFF;
+        let flags = pt[pt_idx]
+            & (pte_flags::PRESENT
+                | pte_flags::WRITABLE
+                | pte_flags::USER
+                | pte_flags::NO_EXECUTE
+                | pte_flags::HUGE);
         Some((PhysAddr::new(page_phys + offset), flags))
     }
 }

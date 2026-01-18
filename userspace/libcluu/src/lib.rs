@@ -23,6 +23,7 @@ pub mod allocator;
 pub mod boot;
 pub mod elf;
 pub mod error;
+pub mod fs;
 pub mod ipc;
 pub mod mem;
 pub mod process;
@@ -38,7 +39,7 @@ pub use boot::{
     boot_info, process_info, root_token_handle, BootInfo, ProcessInfo, CONSOLE_FB_BASE,
     INITRD_USER_BASE, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE,
     PARAM_FB_WIDTH, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_PROC_CAP, TOKEN_REGISTRY,
-    TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
+    TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
 };
 pub use elf::{ElfFile, LoadableSegment};
 pub use error::{Error, Result};
@@ -63,6 +64,7 @@ pub use syscall::{
 
     irq_attach,
     space_create,
+    space_grant,
     space_map,
     space_map_range,
     thread_create,

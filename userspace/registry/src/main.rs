@@ -19,7 +19,7 @@ use libcluu::registry::{
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, yield_cpu, Error, Result};
 
-const SVC_TOKEN_LISTEN: usize = 6;
+const SVC_TOKEN_LISTEN: usize = 7;
 
 // PendingSubscription struct removed - now using indexed BTreeMap instead.
 

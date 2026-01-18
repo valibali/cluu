@@ -582,6 +582,58 @@ pub fn space_map_range(
     }
 }
 
+/// Grant a page from one address space to another (zero-copy sharing)
+///
+/// This syscall shares a physical page between two address spaces without
+/// copying data. The source page is mapped into the target address space.
+///
+/// # Arguments
+///
+/// - `source_space_token`: Source address space token (requires SPACE_GRANT right)
+/// - `target_space_token`: Target address space token (requires SPACE_MAP right)
+/// - `source_virt`: Virtual address in source space (page-aligned)
+/// - `target_virt`: Virtual address in target space where to map (page-aligned)
+/// - `flags`: Permission flags (0x02 = writable, 0x04 = executable)
+///
+/// # Returns
+///
+/// - `Ok(())`: Page granted successfully
+/// - `Err(error)`: Grant failed (permission denied, invalid address, etc.)
+///
+/// # Example
+///
+/// ```no_run
+/// use libcluu::syscall::space_grant;
+///
+/// // Share a page from producer to consumer
+/// space_grant(
+///     my_space_token,      // Source space with SPACE_GRANT right
+///     target_space_token,  // Target space with SPACE_MAP right
+///     0x1000_0000,         // Source page address
+///     0x2000_0000,         // Target page address
+///     0x02,                // Writable
+/// ).expect("grant failed");
+/// ```
+pub fn space_grant(
+    source_space_token: usize,
+    target_space_token: usize,
+    source_virt: usize,
+    target_virt: usize,
+    flags: usize,
+) -> Result<()> {
+    unsafe {
+        invoke(
+            source_space_token,
+            InvokeOp::SpaceGrant,
+            target_space_token,
+            source_virt,
+            target_virt,
+            flags,
+        )?
+    };
+    Ok(())
+}
+
 /// Derive a new token with reduced rights
 ///
 /// # Arguments

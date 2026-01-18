@@ -16,8 +16,8 @@ use libcluu::tar::find_member;
 use libcluu::*;
 
 // Service-specific token indices used by init for procmgr
-const SVC_TOKEN_LISTEN: usize = 6;
-const SVC_TOKEN_CAP: usize = 7;
+const SVC_TOKEN_LISTEN: usize = 7;
+const SVC_TOKEN_CAP: usize = 8;
 
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
 const SERVICE_STACK_BASE: usize = 0x6d000000;
@@ -169,6 +169,7 @@ impl ProcessManager {
         let stderr_endpoint = endpoint_create(self.token)?;
         let stdlog_endpoint = endpoint_create(self.token)?;
         let proc_cap = derive_proc_cap(self.token)?;
+        let space_grant_token = derive_space_token(space_token)?;
         map_process_info_page(
             space_token,
             child_endpoint,
@@ -179,6 +180,7 @@ impl ProcessManager {
             stdlog_endpoint,
             self.registry_send,
             proc_cap,
+            space_grant_token,
         )?;
 
         let thread_token = thread_create(
@@ -204,6 +206,7 @@ fn map_process_info_page(
     stdlog_token: usize,
     registry_token: usize,
     proc_cap_token: usize,
+    space_grant_token: usize,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -215,6 +218,7 @@ fn map_process_info_page(
     tokens[TOKEN_STDLOG] = stdlog_token;
     tokens[TOKEN_REGISTRY] = registry_token;
     tokens[TOKEN_PROC_CAP] = proc_cap_token;
+    tokens[TOKEN_SPACE] = space_grant_token;
 
     let info = ProcessInfo {
         exit_token,
@@ -251,6 +255,11 @@ fn derive_proc_cap(token: usize) -> Result<usize> {
     let rights =
         Rights::CREATE | Rights::IPC_SEND | Rights::IPC_RECV | Rights::IPC_CALL | Rights::GRANT;
     token_derive(token, rights.bits() as usize, u64::MAX)
+}
+
+fn derive_space_token(space_token: usize) -> Result<usize> {
+    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT;
+    token_derive(space_token, rights.bits() as usize, u64::MAX)
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {

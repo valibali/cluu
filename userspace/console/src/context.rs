@@ -9,7 +9,7 @@ use libcluu::registry;
 use libcluu::{debug_print, syscall, Result};
 
 // Token index for listen endpoint (set by init).
-const SVC_TOKEN_LISTEN: usize = 6;
+const SVC_TOKEN_LISTEN: usize = 7;
 
 /// Shared console context.
 pub struct ConsoleContext {

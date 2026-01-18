@@ -10,8 +10,8 @@ use libcluu::types::Message;
 use libcluu::{debug_print, irq_attach, yield_cpu, Error, Result};
 
 // Token indices (set by init)
-const SVC_TOKEN_LISTEN: usize = 6;
-const SVC_TOKEN_IRQ: usize = 8;
+const SVC_TOKEN_LISTEN: usize = 7;
+const SVC_TOKEN_IRQ: usize = 9;
 
 const KEYBOARD_IRQ: usize = 1;
 

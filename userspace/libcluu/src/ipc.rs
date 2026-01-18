@@ -38,6 +38,22 @@ pub fn send_with_payload(endpoint_token: usize, label: u32, payload: &[u8]) -> R
     syscall::ipc_send(endpoint_token, &buffer)
 }
 
+/// Call (send + wait for reply) with an inline payload appended after the Message header.
+pub fn call_with_payload(
+    endpoint_token: usize,
+    msg: &Message,
+    payload: &[u8],
+    reply: &mut Message,
+) -> Result<()> {
+    let header = msg.as_bytes();
+    let mut buffer = Vec::with_capacity(header.len() + payload.len());
+    buffer.extend_from_slice(header);
+    buffer.extend_from_slice(payload);
+    let reply_bytes = reply.as_bytes_mut();
+    let _ = syscall::ipc_call(endpoint_token, &buffer, reply_bytes)?;
+    Ok(())
+}
+
 /// Receive a message
 pub fn recv(endpoint_token: usize, msg: &mut Message, _flags: IpcFlags) -> Result<()> {
     let msg_bytes = msg.as_bytes_mut();

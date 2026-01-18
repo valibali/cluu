@@ -271,7 +271,7 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
         return Ok(());
     }
     // Mint a least-privilege token that only allows IPC_SEND.
-    let send_rights = Rights::IPC_SEND.bits() as usize;
+    let send_rights = (Rights::IPC_SEND | Rights::IPC_CALL).bits() as usize;
     let derived = token_derive(endpoint_token, send_rights, u64::MAX)?;
     let payload = encode_single_name(&endpoint_name);
     // Reply directly to the requester with the derived token.

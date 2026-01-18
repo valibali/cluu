@@ -63,7 +63,8 @@ pub const TOKEN_STDERR: usize = 2;
 pub const TOKEN_STDLOG: usize = 3;
 pub const TOKEN_REGISTRY: usize = 4;
 pub const TOKEN_PROC_CAP: usize = 5;
-// Services use indices 6+ for their specific needs
+pub const TOKEN_SPACE: usize = 6;
+// Services use indices 7+ for their specific needs
 
 // Well-known param indices for console service
 pub const PARAM_FB_BASE: usize = 0;
@@ -117,4 +118,9 @@ pub fn stdout() -> usize {
 /// Convenience: get stderr token
 pub fn stderr() -> usize {
     token(TOKEN_STDERR)
+}
+
+/// Convenience: get process space token (SPACE_MAP right).
+pub fn space_token() -> usize {
+    token(TOKEN_SPACE)
 }

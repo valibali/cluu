@@ -25,9 +25,9 @@ const STACK_FLAGS: usize = 0x03; // read + write
 const STACK_STEP: usize = PROC_STACK_SIZE + 0x1000;
 
 // ===== Service token layout =====
-const SVC_TOKEN_LISTEN: usize = 6; // recv endpoint for service requests
-const SVC_TOKEN_CAP: usize = 7; // capability token (procmgr)
-const SVC_TOKEN_IRQ: usize = 8; // irq token (kbd)
+const SVC_TOKEN_LISTEN: usize = 7; // recv endpoint for service requests
+const SVC_TOKEN_CAP: usize = 8; // capability token (procmgr)
+const SVC_TOKEN_IRQ: usize = 9; // irq token (kbd)
 
 /// Wiring policy interface. Each service kind implements its own behavior.
 ///
@@ -94,6 +94,10 @@ impl ServiceWiring for ServiceKind {
                 tokens[SVC_TOKEN_CAP] = child_token;
                 params[PARAM_INITRD_SIZE] = ctx.boot.initrd_size as u64;
             }
+            ServiceKind::Vfs => {
+                tokens[SVC_TOKEN_LISTEN] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                params[PARAM_INITRD_SIZE] = ctx.boot.initrd_size as u64;
+            }
         }
         Ok(())
     }
@@ -109,6 +113,9 @@ impl ServiceWiring for ServiceKind {
                 map_framebuffer(space_token, ctx.boot.fb_phys, params[PARAM_FB_SIZE])
             }
             ServiceKind::Procmgr => {
+                map_initrd(space_token, ctx.initrd, params[PARAM_INITRD_SIZE] as usize)
+            }
+            ServiceKind::Vfs => {
                 map_initrd(space_token, ctx.initrd, params[PARAM_INITRD_SIZE] as usize)
             }
             ServiceKind::Registry | ServiceKind::Kbd | ServiceKind::Tty => Ok(()),
@@ -148,6 +155,7 @@ pub fn launch_service(ctx: &InitContext<'_>, service: &ServiceSpec, index: usize
 
     tokens[TOKEN_REGISTRY] = ctx.registry_send;
     tokens[TOKEN_PROC_CAP] = derive_proc_cap(ctx.boot.root_token)?;
+    tokens[TOKEN_SPACE] = derive_space_token(space_token)?;
     fill_default_endpoints(ctx.boot.root_token, &mut tokens)?;
 
     service.kind.configure_tokens(
@@ -212,6 +220,12 @@ fn derive_proc_cap(token: usize) -> Result<usize> {
     token_derive(token, rights.bits() as usize, u64::MAX)
 }
 
+/// Derive a space token for the child so services can accept grants.
+fn derive_space_token(space_token: usize) -> Result<usize> {
+    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT;
+    token_derive(space_token, rights.bits() as usize, u64::MAX)
+}
+
 /// Create a recv-only endpoint for passive listeners.
 ///
 /// Used when the service only needs to wait on incoming messages.
@@ -225,6 +239,6 @@ fn create_listen_endpoint(token: usize) -> Result<usize> {
 /// This allows the service to hand out derived tokens to subscribers.
 fn create_grantable_listen_endpoint(token: usize) -> Result<usize> {
     let endpoint = endpoint_create(token)?;
-    let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::GRANT;
+    let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT;
     token_derive(endpoint, rights.bits() as usize, u64::MAX)
 }

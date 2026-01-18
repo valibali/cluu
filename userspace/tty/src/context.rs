@@ -13,7 +13,7 @@ use libcluu::registry;
 use libcluu::{debug_print, yield_cpu, Result};
 
 // Token indices (set by init).
-const SVC_TOKEN_LISTEN: usize = 6;
+const SVC_TOKEN_LISTEN: usize = 7;
 const CONSOLE_MAX_PAYLOAD: usize = 256;
 
 /// TTY context shared by the main loop.

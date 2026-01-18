@@ -707,9 +707,139 @@ fn invoke_space_unmap(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     Err(Error::NotImplemented)
 }
 
-fn invoke_space_grant(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    klibcluu::warn("invoke_space_grant not yet implemented");
-    Err(Error::NotImplemented)
+/// Grant a page from one address space to another (zero-copy sharing)
+///
+/// # Arguments
+///
+/// - token: Source address space token (must have SPACE_GRANT right)
+/// - arg3: Target space token handle (must have SPACE_MAP right)
+/// - arg4: Source virtual address (page-aligned, page to share)
+/// - arg5: Target virtual address (page-aligned, where to map)
+/// - arg6: Flags (0x02 = writable, 0x04 = executable)
+///
+/// # Returns
+///
+/// - Ok(0): Success
+/// - Err(Error): Permission denied, invalid address, or mapping failure
+fn invoke_space_grant(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::elf;
+    use crate::mm::space::layout;
+    use crate::mm::{space_repository, vmm::pte_flags};
+    use crate::token::{lookup_token, ObjectRef, ObjectType, Rights, TokenHandle};
+    use x86_64::VirtAddr;
+
+    // Check source token has SPACE_GRANT right
+    if !token.has_right(Rights::SPACE_GRANT) {
+        klibcluu::warn("invoke_space_grant: missing SPACE_GRANT right on source token");
+        return Err(Error::PermissionDenied);
+    }
+
+    let target_token_handle = TokenHandle::from_raw(args.arg3);
+    let source_virt = args.arg4 as u64;
+    let target_virt = args.arg5 as u64;
+    let flags = args.arg6 as u32;
+    const ALLOWED_FLAGS: u32 = 0x02 | 0x04;
+    const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    // Validate alignment
+    if source_virt & 0xFFF != 0 || target_virt & 0xFFF != 0 {
+        klibcluu::warn("invoke_space_grant: addresses not page-aligned");
+        return Err(Error::InvalidArgument);
+    }
+    if (flags & !ALLOWED_FLAGS) != 0 {
+        klibcluu::warn("invoke_space_grant: unsupported flags");
+        return Err(Error::InvalidArgument);
+    }
+    if source_virt < layout::USER_NULL_REGION_END || source_virt >= layout::USER_STACK_TOP {
+        klibcluu::warn("invoke_space_grant: source not in user range");
+        return Err(Error::InvalidArgument);
+    }
+    if target_virt < layout::USER_NULL_REGION_END || target_virt >= layout::USER_STACK_TOP {
+        klibcluu::warn("invoke_space_grant: target not in user range");
+        return Err(Error::InvalidArgument);
+    }
+
+    // Resolve source address space
+    let source_space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+    let source_space_id = if let ObjectRef::Space(id) = source_space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    // Lookup and validate target token
+    let target_token = lookup_token(target_token_handle).map_err(|_| Error::InvalidArgument)?;
+    if !target_token.has_right(Rights::SPACE_MAP) {
+        klibcluu::warn("invoke_space_grant: missing SPACE_MAP right on target token");
+        return Err(Error::PermissionDenied);
+    }
+
+    // Resolve target address space
+    let target_space_ref = crate::token::resolve_token_object(&target_token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+    let target_space_id = if let ObjectRef::Space(id) = target_space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    // Translate source virtual address to physical using source page tables.
+    let source_mapping = space_repository::with_space(source_space_id, |source_space| {
+        elf::translate_vaddr_with_flags(source_space.page_table_root, VirtAddr::new(source_virt))
+    });
+
+    let (phys_addr, pte_flags) = match source_mapping {
+        Some(Some((phys, pte_flags))) => (phys.as_u64() & PHYS_MASK, pte_flags),
+        Some(None) => {
+            klibcluu::warn("invoke_space_grant: source page not mapped");
+            return Err(Error::InvalidArgument);
+        }
+        None => {
+            klibcluu::warn("invoke_space_grant: source address space not found");
+            return Err(Error::NotFound);
+        }
+    };
+    if (pte_flags & pte_flags::PRESENT) == 0 || (pte_flags & pte_flags::USER) == 0 {
+        klibcluu::warn("invoke_space_grant: source page not user-accessible");
+        return Err(Error::PermissionDenied);
+    }
+
+    let writable = (flags & 0x02) != 0;
+    let executable = (flags & 0x04) != 0;
+    let source_writable = (pte_flags & pte_flags::WRITABLE) != 0;
+    let source_executable = (pte_flags & pte_flags::NO_EXECUTE) == 0;
+    if writable && !source_writable {
+        klibcluu::warn("invoke_space_grant: source page not writable");
+        return Err(Error::PermissionDenied);
+    }
+    if executable && !source_executable {
+        klibcluu::warn("invoke_space_grant: source page not executable");
+        return Err(Error::PermissionDenied);
+    }
+
+    // Map the physical page into target address space
+    let result = space_repository::with_space_mut(target_space_id, |target_space| unsafe {
+        elf::map_user_page(
+            target_virt,
+            phys_addr,
+            writable,
+            executable,
+            target_space.page_table_root,
+        )
+    });
+
+    match result {
+        Some(Ok(())) => Ok(0),
+        Some(Err(_)) => {
+            klibcluu::warn("invoke_space_grant: failed to map page in target");
+            Err(Error::OutOfMemory)
+        }
+        None => {
+            klibcluu::warn("invoke_space_grant: target address space not found");
+            Err(Error::NotFound)
+        }
+    }
 }
 
 /// Batch map multiple pages into an address space
