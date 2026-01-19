@@ -93,6 +93,7 @@ pub struct MessageTag {
     pub label: u32,
     pub words: u8,
     pub extra: u8,
+    pub _pad: u16,
 }
 
 impl MessageTag {
@@ -101,6 +102,7 @@ impl MessageTag {
             label,
             words,
             extra: 0,
+            _pad: 0,
         }
     }
 }

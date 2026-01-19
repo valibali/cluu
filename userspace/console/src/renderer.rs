@@ -10,9 +10,10 @@ use alloc::vec::Vec;
 
 use crate::backend::ConsoleBackend;
 use libcluu::ipc::{
-    CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL, CONSOLE_WRITE_LABEL,
+    extract_reply_token, reply, CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL,
+    CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
 };
-use libcluu::types::Message;
+use libcluu::types::{IpcFlags, Message};
 use libcluu::Result;
 
 const GLYPH_W: usize = 8;
@@ -67,6 +68,14 @@ impl<B: ConsoleBackend> Console<B> {
         match msg.tag.label {
             CONSOLE_WRITE_LABEL => {
                 self.write_utf8_bytes(payload);
+            }
+            CONSOLE_WRITE_SYNC_LABEL => {
+                // Sync write: render, then reply
+                self.write_utf8_bytes(payload);
+                if let Some(reply_token) = extract_reply_token(msg) {
+                    let reply_msg = Message::new(CONSOLE_WRITE_SYNC_LABEL, [0; 6], 0);
+                    let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
             }
             CONSOLE_CLEAR_LABEL => {
                 self.clear();
@@ -306,7 +315,7 @@ fn font_glyph(ch: u8) -> [u8; GLYPH_H] {
 
 fn shade_glyph(ch: u8) -> Option<[u8; GLYPH_H]> {
     match ch {
-        0xDB => Some([0xFF; GLYPH_H]), // full block
+        0xDB => Some([0xFF; GLYPH_H]),        // full block
         0xB0 => Some(make_shade(0x88, 0x22)), // light shade
         0xB1 => Some(make_shade(0xAA, 0x55)), // medium shade
         0xB2 => Some(make_shade(0xEE, 0x77)), // dark shade
@@ -316,9 +325,11 @@ fn shade_glyph(ch: u8) -> Option<[u8; GLYPH_H]> {
 
 fn make_shade(a: u8, b: u8) -> [u8; GLYPH_H] {
     let mut glyph = [0u8; GLYPH_H];
-    for row in 0..GLYPH_H {
-        glyph[row] = if row % 2 == 0 { a } else { b };
+
+    for (row, cell) in glyph.iter_mut().enumerate() {
+        *cell = if row % 2 == 0 { a } else { b };
     }
+
     glyph
 }
 

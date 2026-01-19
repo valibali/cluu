@@ -14,11 +14,21 @@ pub const CONSOLE_WRITE_LABEL: u32 = 1;
 pub const CONSOLE_CLEAR_LABEL: u32 = 2;
 pub const CONSOLE_CURSOR_LABEL: u32 = 3;
 pub const CONSOLE_BLINK_LABEL: u32 = 4;
+pub const CONSOLE_WRITE_SYNC_LABEL: u32 = 5;
 pub const KBD_EVENT_LABEL: u32 = 1;
 pub const TTY_READ_LABEL: u32 = 1;
 pub const TTY_WRITE_LABEL: u32 = 2;
 pub const TTY_CTL_LABEL: u32 = 3;
 pub const TTY_REGISTER_LABEL: u32 = 4;
+pub const TTY_WRITE_SYNC_LABEL: u32 = 5;
+pub const TTY_CTL_SYNC: u32 = 1;
+pub const CALL_COOKIE_TAG: u8 = 1;
+pub const CALL_COOKIE_WORD: usize = 5;
+
+/// Tag indicating the message contains a reply token (new system)
+pub const REPLY_TOKEN_TAG: u8 = 2;
+/// Word index where reply token handle is stored
+pub const REPLY_TOKEN_WORD: usize = 5;
 
 /// Send a message (one-way)
 pub fn send(endpoint_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()> {
@@ -36,6 +46,15 @@ pub fn send_with_payload(endpoint_token: usize, label: u32, payload: &[u8]) -> R
     buffer.extend_from_slice(header);
     buffer.extend_from_slice(payload);
     syscall::ipc_send(endpoint_token, &buffer)
+}
+
+/// Synchronous write to TTY - waits for acknowledgement before returning.
+/// Use this before exiting to ensure output is flushed.
+pub fn tty_write_sync(endpoint_token: usize, payload: &[u8]) -> Result<()> {
+    let mut msg = Message::new(TTY_WRITE_SYNC_LABEL, [0; 6], 1);
+    msg.words[0] = payload.len();
+    let mut reply = Message::new(0, [0; 6], 0);
+    call_with_payload(endpoint_token, &msg, payload, &mut reply)
 }
 
 /// Call (send + wait for reply) with an inline payload appended after the Message header.
@@ -79,18 +98,40 @@ pub fn call(endpoint_token: usize, msg: &mut Message, _flags: IpcFlags) -> Resul
     Ok(())
 }
 
-/// Reply to a received message
+/// Extract reply token from a received call message
+///
+/// Returns the reply token handle if the message was from a call, None otherwise.
+pub fn extract_reply_token(msg: &Message) -> Option<usize> {
+    if msg.tag.extra == REPLY_TOKEN_TAG {
+        Some(msg.words[REPLY_TOKEN_WORD])
+    } else {
+        None
+    }
+}
+
+/// Reply to a received call message using the reply token
 ///
 /// # Arguments
 ///
-/// - `endpoint_token`: The endpoint token we received the call on
+/// - `reply_token`: The reply token extracted from the received call message
 /// - `msg`: Reply message to send
 /// - `_flags`: IPC flags (currently unused)
-pub fn reply(endpoint_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()> {
-    // Send reply using syscall::ipc_reply
+pub fn reply(reply_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()> {
     let msg_bytes = msg.as_bytes();
-    syscall::ipc_reply(endpoint_token, msg_bytes)?;
+    syscall::ipc_reply(reply_token, msg_bytes)?;
     Ok(())
+}
+
+/// Copy an IPC call cookie from a request into a reply.
+///
+/// Servers should call this when replying to ipc_call() so the kernel
+/// can route the reply to the correct caller even if calls overlap.
+pub fn copy_call_cookie(reply: &mut Message, request: &Message) {
+    if request.tag.extra != CALL_COOKIE_TAG {
+        return;
+    }
+    reply.tag.extra = CALL_COOKIE_TAG;
+    reply.words[CALL_COOKIE_WORD] = request.words[CALL_COOKIE_WORD];
 }
 
 /// Reply and receive next message (server loop optimization)

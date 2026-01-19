@@ -20,7 +20,7 @@ pub struct BootInfo {
 }
 
 /// Virtual address where the initrd is mapped in userspace.
-pub const INITRD_USER_BASE: usize = 0x8000_0000;
+pub const INITRD_USER_BASE: usize = 0x7000_0000;
 
 /// Return a reference to the boot info structure.
 pub fn boot_info() -> &'static BootInfo {

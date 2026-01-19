@@ -8,8 +8,9 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_PROC_CAP};
-use libcluu::ipc::{send_with_payload, CONSOLE_WRITE_LABEL};
+use libcluu::ipc::{call_with_payload, send_with_payload, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL};
 use libcluu::registry;
+use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Result};
 
 // Token indices (set by init).
@@ -25,6 +26,8 @@ pub struct TtyContext {
     requested_console: bool,
     requested_shell: bool,
     pending_console_output: Vec<u8>,
+    /// Deferred sync write reply token (if console wasn't ready)
+    pending_sync_reply: Option<usize>,
 }
 
 impl TtyContext {
@@ -66,6 +69,7 @@ impl TtyContext {
             requested_console: false,
             requested_shell: false,
             pending_console_output: Vec::new(),
+            pending_sync_reply: None,
         })
     }
 
@@ -119,18 +123,64 @@ impl TtyContext {
         }
     }
 
+    /// Forward output for sync write. Returns true if output was sent to console,
+    /// false if it was buffered (caller should defer reply).
+    pub fn forward_to_console_sync(&mut self, payload: &[u8], reply_token: usize) -> bool {
+        if self.console_endpoint != 0 {
+            // Use sync write to console so we wait for it to render
+            self.send_to_console_sync(payload);
+            true
+        } else {
+            // Buffer the output and defer the reply
+            if self.pending_console_output.len() + payload.len() <= 2048 {
+                self.pending_console_output.extend_from_slice(payload);
+            }
+            self.pending_sync_reply = Some(reply_token);
+            false
+        }
+    }
+
     /// Flush any pending console output once the console is subscribed.
+    /// Also sends any deferred sync write reply.
     pub fn flush_pending_console(&mut self) {
-        if self.console_endpoint == 0 || self.pending_console_output.is_empty() {
+        if self.console_endpoint == 0 {
             return;
         }
-        self.send_to_console(&self.pending_console_output);
-        self.pending_console_output.clear();
+        if !self.pending_console_output.is_empty() {
+            // Use sync write for pending output that has a deferred reply
+            if self.pending_sync_reply.is_some() {
+                self.send_to_console_sync(&self.pending_console_output);
+            } else {
+                self.send_to_console(&self.pending_console_output);
+            }
+            self.pending_console_output.clear();
+        }
+
+        // Send deferred sync reply now that console is ready
+        if let Some(reply_token) = self.pending_sync_reply.take() {
+            use libcluu::ipc::{reply, TTY_WRITE_SYNC_LABEL};
+            use libcluu::types::{IpcFlags, Message};
+            let reply_msg = Message::new(TTY_WRITE_SYNC_LABEL, [0; 6], 0);
+            let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
     }
 
     fn send_to_console(&self, payload: &[u8]) {
         for chunk in payload.chunks(CONSOLE_MAX_PAYLOAD) {
             let _ = send_with_payload(self.console_endpoint, CONSOLE_WRITE_LABEL, chunk);
+        }
+    }
+
+    fn send_to_console_sync(&self, payload: &[u8]) {
+        for chunk in payload.chunks(CONSOLE_MAX_PAYLOAD) {
+            let mut msg = Message::new(CONSOLE_WRITE_SYNC_LABEL, [0; 6], 1);
+            msg.words[0] = chunk.len();
+            let mut reply_msg = Message::new(0, [0; 6], 0);
+            // Use ipc_call to wait for console to render
+            if call_with_payload(self.console_endpoint, &msg, chunk, &mut reply_msg).is_err() {
+                // Fall back to async
+                let _ = send_with_payload(self.console_endpoint, CONSOLE_WRITE_LABEL, chunk);
+            }
         }
     }
 }
