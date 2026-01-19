@@ -26,6 +26,7 @@ members = [
     "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
+    "userspace/vfs_demo",
 
     # Language tooling
     "crates/cluu_lang",
@@ -49,6 +50,7 @@ default-members = [
     "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
+    "userspace/vfs_demo",
 ]
 
 [workspace.package]

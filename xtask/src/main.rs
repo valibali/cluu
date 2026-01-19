@@ -111,6 +111,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/shell",
         "userspace/timeserver",
         "userspace/cat",
+        "userspace/vfs_demo",
     ];
 
     let target_json = project_root().join("triplets/x86_64-cluu-user.json");
@@ -294,7 +295,7 @@ fn create_initrd(profile: &str) -> Result<()> {
     }
 
     // Copy user programs to initrd/bin/
-    let bin_programs = ["shell", "timeserver"];
+    let bin_programs = ["shell", "timeserver", "vfs_demo"];
     for prog in &bin_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("bin").join(prog);
@@ -382,7 +383,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
     let _ = fs::remove_dir_all(&staging_dir);
     fs::create_dir_all(&bin_dir)?;
 
-    let bin_programs = ["shell", "timeserver"];
+    let bin_programs = ["shell", "timeserver", "vfs_demo"];
     for prog in &bin_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = bin_dir.join(prog);

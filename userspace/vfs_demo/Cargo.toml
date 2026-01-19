@@ -1,0 +1,8 @@
+[package]
+name = "vfs_demo"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny VFS client demo for initrd reads"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
