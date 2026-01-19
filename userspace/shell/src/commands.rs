@@ -9,11 +9,16 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
+use libcluu::ipc::{call_with_payload, recv, send_with_payload, TTY_WRITE_LABEL};
+use libcluu::registry;
 use libcluu::syscall;
-use libcluu::Result;
+use libcluu::types::Message;
+use libcluu::{process_info, Error, Result, IpcFlags, TOKEN_PROC_CAP};
 
 use cluu_lang::ast::{Assign, CmdElem, DqPart, Program, Stmt, Word, WordPart};
+
+const PROCMGR_SPAWN_LABEL: u32 = 2;
+const DEFAULT_PRIORITY: usize = 200;
 
 /// Execution result for a command handler.
 pub enum ExecResult {
@@ -24,6 +29,7 @@ pub enum ExecResult {
 /// Per-shell execution context shared across command invocations.
 pub struct CommandContext {
     vars: BTreeMap<String, String>,
+    procmgr_spawn: usize,
 }
 
 impl CommandContext {
@@ -31,6 +37,7 @@ impl CommandContext {
     pub fn new() -> Self {
         Self {
             vars: BTreeMap::new(),
+            procmgr_spawn: 0,
         }
     }
 
@@ -55,6 +62,13 @@ impl CommandContext {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
+    }
+
+    fn procmgr_spawn_endpoint(&mut self) -> Result<usize> {
+        if self.procmgr_spawn == 0 {
+            self.procmgr_spawn = registry::subscribe_output("procmgr", "spawn")?;
+        }
+        Ok(self.procmgr_spawn)
     }
 }
 
@@ -153,6 +167,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(EnvBuiltin));
         registry.register(Box::new(ExprBuiltin));
         registry.register(Box::new(LetBuiltin));
+        registry.register(Box::new(SpawnBuiltin));
     }
 }
 
@@ -213,7 +228,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, repeat\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, repeat\n",
         )?;
         Ok(())
     }
@@ -517,6 +532,48 @@ impl BuiltinCommand for LetBuiltin {
     }
 }
 
+struct SpawnBuiltin;
+
+impl BuiltinCommand for SpawnBuiltin {
+    fn name(&self) -> &'static str {
+        "spawn"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let Some(path) = args.first() else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"spawn: missing path\n")?;
+            return Ok(());
+        };
+        let priority = args
+            .get(1)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_PRIORITY);
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        let initrd_path = normalize_spawn_path(path);
+        let payload = initrd_path.as_bytes();
+        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_PROC_CAP])?;
+        let mut msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
+        msg.words[0] = payload.len();
+        msg.words[1] = priority;
+        msg.words[2] = 0;
+        msg.words[3] = notify_endpoint;
+        let mut reply = Message::new(0, [0; 6], 0);
+        call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
+        match parse_status(reply.words[0]) {
+            Ok(()) => {
+                let mut exit_msg = Message::new(0, [0; 6], 0);
+                let _ = recv(notify_endpoint, &mut exit_msg, IpcFlags::empty());
+                Ok(())
+            }
+            Err(err) => {
+                let line = format!("spawn: {:?}\n", err);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                Ok(())
+            }
+        }
+    }
+}
+
 fn arithmetic_op<F>(
     stdout: usize,
     context: &mut CommandContext,
@@ -537,6 +594,30 @@ where
     let result = op(a, b).to_string();
     send_with_payload(stdout, TTY_WRITE_LABEL, result.as_bytes())?;
     send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
+    Ok(())
+}
+
+fn normalize_spawn_path(path: &str) -> String {
+    if let Some(rel) = path.strip_prefix("/dev/initrd/") {
+        return rel.to_string();
+    }
+    if let Some(rel) = path.strip_prefix("/bin/") {
+        return format!("bin/{}", rel);
+    }
+    if let Some(rel) = path.strip_prefix('/') {
+        return rel.to_string();
+    }
+    if path.contains('/') {
+        return path.to_string();
+    }
+    format!("bin/{}", path)
+}
+
+fn parse_status(raw: usize) -> Result<()> {
+    let signed = raw as isize;
+    if signed < 0 {
+        return Err(Error::from_errno(signed));
+    }
     Ok(())
 }
 

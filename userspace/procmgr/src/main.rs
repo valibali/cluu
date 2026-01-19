@@ -10,6 +10,7 @@ use libcluu::boot::{
     TOKEN_REGISTRY, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
 };
 use libcluu::elf::ElfFile;
+use libcluu::ipc::extract_reply_token;
 use libcluu::registry;
 use libcluu::syscall::thread_destroy;
 use libcluu::tar::find_member;
@@ -26,6 +27,8 @@ const STACK_FLAGS: usize = 0x03; // read + write
                                  // PAGE_SIZE is imported from libcluu::*
 const SERVICE_PATH: &str = "bin/shell";
 const PROCMGR_EXIT_LABEL: u32 = 1;
+const PROCMGR_SPAWN_LABEL: u32 = 2;
+const DEFAULT_PRIORITY: usize = 200;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -47,11 +50,15 @@ fn main_result() -> Result<()> {
 struct ProcessManager {
     token: usize,
     exit_endpoint: usize,
+    spawn_endpoint: usize,
     registry_send: usize,
     initrd_size: usize,
     _proc_cap: usize,
     exit_cookie_next: usize,
     exit_table: BTreeMap<usize, usize>,
+    exit_notify: BTreeMap<usize, usize>,
+    tty_main: usize,
+    requested_tty: bool,
 }
 
 impl ProcessManager {
@@ -60,24 +67,46 @@ impl ProcessManager {
         Ok(Self {
             token: info.tokens[SVC_TOKEN_CAP],
             exit_endpoint: info.tokens[SVC_TOKEN_LISTEN],
+            spawn_endpoint: 0,
             registry_send: info.tokens[TOKEN_REGISTRY],
             initrd_size: info.params[PARAM_INITRD_SIZE] as usize,
             _proc_cap: info.tokens[TOKEN_PROC_CAP],
             exit_cookie_next: 1,
             exit_table: BTreeMap::new(),
+            exit_notify: BTreeMap::new(),
+            tty_main: 0,
+            requested_tty: false,
         })
     }
 
     fn init(&mut self) -> Result<()> {
         registry::init("procmgr")?;
         registry::register_default_outputs()?;
+        self.spawn_endpoint = endpoint_create(self.token)?;
+        registry::register_output("spawn", self.spawn_endpoint)?;
+
+        // Wait for tty:main to be available before spawning any processes
+        // This ensures children get proper stdout with IPC_CALL rights
+        while self.tty_main == 0 {
+            match registry::subscribe_output("tty:0", "main") {
+                Ok(token) => {
+                    self.tty_main = token;
+                    let _ = debug_print(&format!("procmgr: tty main granted {}", token));
+                    self.requested_tty = true;
+                }
+                Err(_) => {
+                    let _ = yield_cpu();
+                }
+            }
+        }
+
         debug_print("=========================================")?;
         debug_print("  Process Manager Starting")?;
         debug_print("=========================================")?;
         debug_print("Derived procmgr token handle")?;
         debug_print(&format!("  Handle: {}", self.token))?;
 
-        self.spawn_service(SERVICE_PATH, 200)?;
+        let _ = self.spawn_service(SERVICE_PATH, DEFAULT_PRIORITY)?;
         debug_print("Service spawned; yielding to scheduler")?;
         yield_cpu()?;
         Ok(())
@@ -85,24 +114,34 @@ impl ProcessManager {
 
     fn run(&mut self) -> Result<()> {
         loop {
+            if self.tty_main == 0 && !self.requested_tty {
+                let _ = registry::request_subscription("tty:0", "main");
+                self.requested_tty = true;
+            }
             self.poll_exit_notifications()?;
         }
     }
 
     fn poll_exit_notifications(&mut self) -> Result<()> {
         let registry_endpoint = registry::control_endpoint();
-        let tokens = [self.exit_endpoint, registry_endpoint];
+        let tokens = [self.exit_endpoint, self.spawn_endpoint, registry_endpoint];
         let mut buf = [0u8; 256];
         let (index, len) = match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
             Ok(res) => res,
             Err(err) => {
-                debug_print(&format!("TRACE: exit recv failed {:?}", err))?;
+                let _ = debug_print(&format!("TRACE: exit recv failed {:?}", err));
                 return Ok(());
             }
         };
+        if index == 2 {
+            if let Some((msg, payload)) = parse_message(&buf[..len]) {
+                let _ = self.handle_registry_event(&msg, payload);
+            }
+            return Ok(());
+        }
         if index == 1 {
             if let Some((msg, payload)) = parse_message(&buf[..len]) {
-                let _ = registry::handle_incoming_message(&msg, payload);
+                let _ = self.handle_spawn_message(&msg, payload);
             }
             return Ok(());
         }
@@ -110,10 +149,10 @@ impl ProcessManager {
             return Ok(());
         };
         if msg.tag.label != PROCMGR_EXIT_LABEL || msg.tag.words < 2 {
-            debug_print(&format!(
+            let _ = debug_print(&format!(
                 "TRACE: exit msg label {} words {}",
                 msg.tag.label, msg.tag.words
-            ))?;
+            ));
             return Ok(());
         }
 
@@ -123,13 +162,81 @@ impl ProcessManager {
             Some(token) => token,
             None => return Ok(()),
         };
+        if let Some(notify_endpoint) = self.exit_notify.remove(&cookie) {
+            let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+            notify_msg.words[0] = cookie;
+            notify_msg.words[1] = exit_code as usize;
+            let _ = send(notify_endpoint, &notify_msg, IpcFlags::empty());
+        }
 
-        debug_print(&format!(
+        let _ = debug_print(&format!(
             "procmgr: exit cookie {} (code {})",
             cookie, exit_code
-        ))?;
+        ));
         if thread_destroy(thread_token).is_ok() {
-            debug_print(&format!("TRACE: reaped thread token {}", thread_token))?;
+            let _ = debug_print(&format!("TRACE: reaped thread token {}", thread_token));
+        }
+        Ok(())
+    }
+
+    fn handle_registry_event(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+        if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
+            if let registry::RegistryEvent::Grant { name, token } = event {
+                if name == "main" {
+                    self.tty_main = token;
+                    let _ = debug_print(&format!("procmgr: tty main granted {}", token));
+                }
+            } else if let registry::RegistryEvent::SubscribeStatus { code } = event {
+                if code != 0 {
+                    self.requested_tty = false;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_spawn_message(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+        let mut reply_msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 2);
+        // Extract reply token for call messages (prefer this over legacy reply_endpoint)
+        let reply_token = extract_reply_token(msg);
+        let reply_endpoint = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
+        let notify_endpoint = if msg.tag.words >= 4 { msg.words[3] } else { 0 };
+        if msg.tag.label != PROCMGR_SPAWN_LABEL {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            let _ = self.send_spawn_reply(reply_token, reply_endpoint, &reply_msg);
+            return Ok(());
+        }
+
+        let path = match core::str::from_utf8(payload) {
+            Ok(value) => value,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                let _ = self.send_spawn_reply(reply_token, reply_endpoint, &reply_msg);
+                return Ok(());
+            }
+        };
+        let priority = if msg.tag.words >= 2 { msg.words[1] } else { DEFAULT_PRIORITY };
+
+        if self.tty_main == 0 {
+            if let Ok(token) = registry::subscribe_output("tty:0", "main") {
+                self.tty_main = token;
+            }
+        }
+
+        match self.spawn_service(path, priority) {
+            Ok((thread_token, cookie)) => {
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = thread_token;
+                if notify_endpoint != 0 {
+                    self.exit_notify.insert(cookie, notify_endpoint);
+                }
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+        if let Err(err) = self.send_spawn_reply(reply_token, reply_endpoint, &reply_msg) {
+            let _ = debug_print(&format!("procmgr: spawn reply failed {:?}", err));
         }
         Ok(())
     }
@@ -140,7 +247,7 @@ impl ProcessManager {
         cookie
     }
 
-    fn spawn_service(&mut self, path: &str, priority: usize) -> Result<()> {
+    fn spawn_service(&mut self, path: &str, priority: usize) -> Result<(usize, usize)> {
         let initrd =
             unsafe { core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, self.initrd_size) };
         let service_bytes = find_member(initrd, path).ok_or(Error::NotFound)?;
@@ -165,11 +272,17 @@ impl ProcessManager {
             child_endpoint, cookie
         ))?;
         let stdin_endpoint = endpoint_create(self.token)?;
-        let stdout_endpoint = endpoint_create(self.token)?;
-        let stderr_endpoint = endpoint_create(self.token)?;
-        let stdlog_endpoint = endpoint_create(self.token)?;
+        let (stdout_endpoint, stderr_endpoint, stdlog_endpoint) = if self.tty_main != 0 {
+            // The tty main endpoint already grants IPC_SEND, so reuse it directly.
+            (self.tty_main, self.tty_main, self.tty_main)
+        } else {
+            (
+                endpoint_create(self.token)?,
+                endpoint_create(self.token)?,
+                endpoint_create(self.token)?,
+            )
+        };
         let proc_cap = derive_proc_cap(self.token)?;
-        let space_grant_token = derive_space_token(space_token)?;
         map_process_info_page(
             space_token,
             child_endpoint,
@@ -180,7 +293,7 @@ impl ProcessManager {
             stdlog_endpoint,
             self.registry_send,
             proc_cap,
-            space_grant_token,
+            space_token,
         )?;
 
         let thread_token = thread_create(
@@ -191,7 +304,18 @@ impl ProcessManager {
         )?;
 
         self.exit_table.insert(cookie, thread_token);
-        Ok(())
+        Ok((thread_token, cookie))
+    }
+
+    fn send_spawn_reply(&self, reply_token: Option<usize>, reply_endpoint: usize, msg: &Message) -> Result<()> {
+        // Prefer reply token (from ipc_call), fall back to explicit endpoint, then legacy reply
+        if let Some(token) = reply_token {
+            reply(token, msg, IpcFlags::empty())
+        } else if reply_endpoint != 0 {
+            send(reply_endpoint, msg, IpcFlags::empty())
+        } else {
+            reply(self.spawn_endpoint, msg, IpcFlags::empty())
+        }
     }
 }
 
@@ -255,11 +379,6 @@ fn derive_proc_cap(token: usize) -> Result<usize> {
     let rights =
         Rights::CREATE | Rights::IPC_SEND | Rights::IPC_RECV | Rights::IPC_CALL | Rights::GRANT;
     token_derive(token, rights.bits() as usize, u64::MAX)
-}
-
-fn derive_space_token(space_token: usize) -> Result<usize> {
-    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT;
-    token_derive(space_token, rights.bits() as usize, u64::MAX)
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {

@@ -161,16 +161,21 @@ fn parse_and_execute_line(
 ) -> Result<()> {
     let line = strip_trailing_newline(payload);
     match core::str::from_utf8(line) {
-        Ok(text) => match cluu_lang::parse_program(text) {
-            Ok(ast) => {
-                let factory = BuiltinFactory::new();
-                let registry = factory.build();
-                match registry.execute(stdout, context, &ast)? {
-                    ExecResult::Handled => return Ok(()),
-                    ExecResult::NotHandled => {}
+            Ok(text) => match cluu_lang::parse_program(text) {
+                Ok(ast) => {
+                    let factory = BuiltinFactory::new();
+                    let registry = factory.build();
+                    match registry.execute(stdout, context, &ast) {
+                        Ok(ExecResult::Handled) => return Ok(()),
+                        Ok(ExecResult::NotHandled) => {}
+                        Err(err) => {
+                            let _ =
+                                send_with_payload(stdlog, TTY_WRITE_LABEL, err.to_string().as_bytes());
+                            return Ok(());
+                        }
+                    }
+                    let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, b"shell: unsupported command\n");
                 }
-                let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, b"shell: unsupported command\n");
-            }
             Err(err) => {
                 let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, err.to_string().as_bytes());
             }
