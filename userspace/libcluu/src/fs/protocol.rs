@@ -2,7 +2,26 @@
 //!
 //! The protocol is intentionally minimal. Messages use the shared `Message`
 //! struct and encode arguments into the word slots. Any additional payload
-//! (such as path strings) is appended after the message header.
+//! (such as path strings or grant bases) is appended after the message header.
+//!
+//! Request layout (common):
+//! - words[0] = payload length (bytes)
+//! - words[1] = client_id (registry control endpoint token)
+//!
+//! OPEN:
+//! - payload: path bytes
+//! - reply: words[1] = fd, words[2] = size
+//!
+//! CLOSE:
+//! - words[2] = fd
+//!
+//! READ_GRANT:
+//! - words[2] = fd
+//! - words[3] = offset
+//! - words[4] = len
+//! - words[5] = target_space_token
+//! - payload: target_base (usize)
+//! - reply: words[1] = len, words[2] = page_offset
 
 /// Open a path and return a file descriptor + size.
 pub const VFS_OPEN: u32 = 0x200;

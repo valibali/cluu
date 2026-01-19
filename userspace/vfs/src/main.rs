@@ -3,15 +3,22 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
 use alloc::format;
 use core::mem::size_of;
 use libcluu::fs::protocol::{VfsOp, VFS_CLOSE, VFS_OPEN, VFS_READ_GRANT};
-use libcluu::tar::find_member;
+use libcluu::ipc::extract_reply_token;
 use libcluu::*;
+
+mod fd_table;
+mod mount;
+
+use fd_table::{FdTable, FileEntry};
+use mount::MountTable;
 
 const SVC_TOKEN_LISTEN: usize = 7;
 const IPC_MESSAGE_MAX: usize = 256;
+const USIZE_BYTES: usize = size_of::<usize>();
+const TWO_USIZE_BYTES: usize = size_of::<usize>() * 2;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -32,13 +39,18 @@ fn run_vfs() -> Result<()> {
     registry::init("vfs")?;
     registry::register_default_outputs()?;
     registry::register_output("main", endpoint)?;
-    debug_print("vfs: ready")?;
 
     let mut server = VfsServer::new(endpoint, space_token, initrd);
+    let registry_endpoint = registry::control_endpoint();
     let mut buf = [0u8; IPC_MESSAGE_MAX];
     loop {
-        let len = ipc_recv_timeout(endpoint, &mut buf, u64::MAX)?;
+        let tokens = [endpoint, registry_endpoint];
+        let (index, len) = libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX)?;
         if let Some((msg, payload)) = parse_message(&buf[..len]) {
+            if index == 1 {
+                let _ = registry::handle_incoming_message(&msg, payload);
+                continue;
+            }
             server.handle_message(&msg, payload)?;
         }
     }
@@ -51,8 +63,8 @@ fn map_initrd_slice(initrd_size: usize) -> &'static [u8] {
 struct VfsServer<'a> {
     endpoint: usize,
     space_token: usize,
-    initrd: &'a [u8],
-    files: FileTable,
+    mounts: MountTable<'a>,
+    files: FdTable,
 }
 
 impl<'a> VfsServer<'a> {
@@ -60,8 +72,8 @@ impl<'a> VfsServer<'a> {
         Self {
             endpoint,
             space_token,
-            initrd,
-            files: FileTable::new(),
+            mounts: MountTable::new(initrd),
+            files: FdTable::new(),
         }
     }
 
@@ -69,52 +81,71 @@ impl<'a> VfsServer<'a> {
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             return Ok(());
         };
+        // Extract reply token for call messages
+        let reply_token = extract_reply_token(msg).unwrap_or(self.endpoint);
         match op {
-            VfsOp::Open => self.handle_open(msg, payload),
-            VfsOp::Close => self.handle_close(msg),
-            VfsOp::ReadGrant => self.handle_read_grant(msg),
+            VfsOp::Open => self.handle_open(msg, payload, reply_token),
+            VfsOp::Close => self.handle_close(msg, reply_token),
+            VfsOp::ReadGrant => self.handle_read_grant(msg, payload, reply_token),
         }
     }
 
-    fn handle_open(&mut self, _msg: &Message, payload: &[u8]) -> Result<()> {
-        let path = core::str::from_utf8(payload).map_err(|_| Error::InvalidArgument)?;
-        let entry = self.open_path(path)?;
+    fn handle_open(&mut self, msg: &Message, payload: &[u8], reply_token: usize) -> Result<()> {
+        let client_id = msg.words[1];
         let mut reply_msg = Message::new(VFS_OPEN, [0; 6], 3);
-        reply_msg.words[0] = 0;
-        reply_msg.words[1] = entry.fd;
-        reply_msg.words[2] = entry.size;
-        reply(self.endpoint, &reply_msg, IpcFlags::empty())
+        let path = match core::str::from_utf8(payload) {
+            Ok(path) => path,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        match self.open_path(path) {
+            Ok(entry) => {
+                let fd = self.files.open(client_id, entry);
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = fd;
+                reply_msg.words[2] = entry.size;
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+        reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn handle_close(&mut self, msg: &Message) -> Result<()> {
-        let fd = msg.words[1];
-        self.files.close(fd);
+    fn handle_close(&mut self, msg: &Message, reply_token: usize) -> Result<()> {
+        let client_id = msg.words[1];
+        let fd = msg.words[2];
+        self.files.close(client_id, fd);
         let mut reply_msg = Message::new(VFS_CLOSE, [0; 6], 1);
         reply_msg.words[0] = 0;
-        reply(self.endpoint, &reply_msg, IpcFlags::empty())
+        reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn handle_read_grant(&mut self, msg: &Message) -> Result<()> {
-        let fd = msg.words[1];
-        let offset = msg.words[2];
-        let requested = msg.words[3];
-        let target_space = msg.words[4];
-        let target_base = msg.words[5];
-
+    fn handle_read_grant(&mut self, msg: &Message, payload: &[u8], reply_token: usize) -> Result<()> {
+        let client_id = msg.words[1];
+        let fd = msg.words[2];
+        let offset = msg.words[3];
+        let requested = msg.words[4];
         let mut reply_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
-        let Some(entry) = self.files.get(fd) else {
-            reply_msg.words[0] = Error::NotFound as isize as usize;
-            return reply(self.endpoint, &reply_msg, IpcFlags::empty());
+        let Some((target_base, target_space)) = parse_usize_pair(payload) else {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            return reply(reply_token, &reply_msg, IpcFlags::empty());
+        };
+        let Some(entry) = self.files.get(client_id, fd) else {
+            reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+            return reply(reply_token, &reply_msg, IpcFlags::empty());
         };
         if requested == 0 {
             reply_msg.words[0] = 0;
             reply_msg.words[1] = 0;
             reply_msg.words[2] = 0;
-            return reply(self.endpoint, &reply_msg, IpcFlags::empty());
+            return reply(reply_token, &reply_msg, IpcFlags::empty());
         }
         if target_base & (PAGE_SIZE - 1) != 0 {
             reply_msg.words[0] = Error::InvalidArgument as isize as usize;
-            return reply(self.endpoint, &reply_msg, IpcFlags::empty());
+            return reply(reply_token, &reply_msg, IpcFlags::empty());
         }
 
         let available = entry.size.saturating_sub(offset);
@@ -123,10 +154,10 @@ impl<'a> VfsServer<'a> {
             reply_msg.words[0] = 0;
             reply_msg.words[1] = 0;
             reply_msg.words[2] = 0;
-            return reply(self.endpoint, &reply_msg, IpcFlags::empty());
+            return reply(reply_token, &reply_msg, IpcFlags::empty());
         }
 
-        let file_base = self.initrd.as_ptr() as usize + entry.offset + offset;
+        let file_base = entry.base + entry.offset + offset;
         let page_offset = file_base & (PAGE_SIZE - 1);
         let page_start = file_base - page_offset;
         let total = page_offset + len;
@@ -135,58 +166,22 @@ impl<'a> VfsServer<'a> {
         for page_idx in 0..pages {
             let src = page_start + page_idx * PAGE_SIZE;
             let dst = target_base + page_idx * PAGE_SIZE;
-            space_grant(self.space_token, target_space, src, dst, 0)?;
+            if let Err(err) = space_grant(self.space_token, target_space, src, dst, 0) {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
         }
 
         reply_msg.words[0] = 0;
         reply_msg.words[1] = len;
         reply_msg.words[2] = page_offset;
-        reply(self.endpoint, &reply_msg, IpcFlags::empty())
+        reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn open_path(&mut self, path: &str) -> Result<VfsFile> {
-        let slice = find_member(self.initrd, path).ok_or(Error::NotFound)?;
-        let base = self.initrd.as_ptr() as usize;
-        let offset = slice.as_ptr() as usize - base;
-        Ok(self.files.open(offset, slice.len()))
-    }
-}
-
-#[derive(Clone, Copy)]
-struct VfsFile {
-    fd: usize,
-    offset: usize,
-    size: usize,
-}
-
-struct FileTable {
-    next_fd: usize,
-    entries: BTreeMap<usize, VfsFile>,
-}
-
-impl FileTable {
-    fn new() -> Self {
-        Self {
-            next_fd: 4,
-            entries: BTreeMap::new(),
-        }
+    fn open_path(&mut self, path: &str) -> Result<FileEntry> {
+        self.mounts.open(path)
     }
 
-    fn open(&mut self, offset: usize, size: usize) -> VfsFile {
-        let fd = self.next_fd;
-        self.next_fd += 1;
-        let entry = VfsFile { fd, offset, size };
-        self.entries.insert(fd, entry);
-        entry
-    }
-
-    fn get(&self, fd: usize) -> Option<VfsFile> {
-        self.entries.get(&fd).copied()
-    }
-
-    fn close(&mut self, fd: usize) {
-        self.entries.remove(&fd);
-    }
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
@@ -201,4 +196,24 @@ fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
         return None;
     }
     Some((msg, &buf[header..end]))
+}
+
+fn parse_usize_payload(payload: &[u8]) -> Option<usize> {
+    if payload.len() < USIZE_BYTES {
+        return None;
+    }
+    let mut bytes = [0u8; USIZE_BYTES];
+    bytes.copy_from_slice(&payload[..USIZE_BYTES]);
+    Some(usize::from_ne_bytes(bytes))
+}
+
+fn parse_usize_pair(payload: &[u8]) -> Option<(usize, usize)> {
+    if payload.len() < TWO_USIZE_BYTES {
+        return None;
+    }
+    let first = parse_usize_payload(payload)?;
+    let mut bytes = [0u8; USIZE_BYTES];
+    bytes.copy_from_slice(&payload[USIZE_BYTES..TWO_USIZE_BYTES]);
+    let second = usize::from_ne_bytes(bytes);
+    Some((first, second))
 }

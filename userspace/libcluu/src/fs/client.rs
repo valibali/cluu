@@ -29,18 +29,28 @@ pub struct VfsGrant {
 /// Simple VFS client wrapper.
 pub struct VfsClient {
     endpoint: usize,
+    client_id: usize,
 }
 
 impl VfsClient {
     /// Create a new client for the given VFS endpoint token.
-    pub const fn new(endpoint: usize) -> Self {
-        Self { endpoint }
+    pub const fn new(endpoint: usize, client_id: usize) -> Self {
+        Self { endpoint, client_id }
+    }
+
+    /// Create a client using the current process registry control endpoint.
+    pub fn new_from_registry(endpoint: usize) -> Result<Self> {
+        let client_id = crate::registry::control_endpoint();
+        if client_id == 0 {
+            return Err(Error::InvalidState);
+        }
+        Ok(Self { endpoint, client_id })
     }
 
     /// Open a path in the VFS service.
     pub fn open(&self, path: &str) -> Result<VfsFile> {
         let payload = path.as_bytes();
-        let msg = make_payload_message(VFS_OPEN, payload.len(), &[]);
+        let msg = make_payload_message(VFS_OPEN, payload.len(), &[self.client_id]);
         let mut reply = Message::new(0, [0; 6], 0);
         ipc::call_with_payload(self.endpoint, &msg, payload, &mut reply)?;
         parse_status(reply.words[0])?;
@@ -52,9 +62,10 @@ impl VfsClient {
 
     /// Close a file descriptor in the VFS service.
     pub fn close(&self, file: VfsFile) -> Result<()> {
-        let mut msg = Message::new(VFS_CLOSE, [0; 6], 2);
+        let mut msg = Message::new(VFS_CLOSE, [0; 6], 3);
         msg.words[0] = 0;
-        msg.words[1] = file.fd;
+        msg.words[1] = self.client_id;
+        msg.words[2] = file.fd;
         ipc::call(self.endpoint, &mut msg, crate::IpcFlags::empty())?;
         // call() already wrote reply into msg; use msg as reply for consistency.
         parse_status(msg.words[0])?;
@@ -74,19 +85,21 @@ impl VfsClient {
         target_space_token: usize,
         target_base: usize,
     ) -> Result<VfsGrant> {
-        let mut msg = Message::new(VFS_READ_GRANT, [0; 6], 6);
-        msg.words[0] = 0;
-        msg.words[1] = file.fd;
-        msg.words[2] = offset;
-        msg.words[3] = len;
-        msg.words[4] = target_space_token;
-        msg.words[5] = target_base;
-        ipc::call(self.endpoint, &mut msg, crate::IpcFlags::empty())?;
-        parse_status(msg.words[0])?;
+        let mut payload = [0u8; core::mem::size_of::<usize>() * 2];
+        payload[..core::mem::size_of::<usize>()].copy_from_slice(&target_base.to_ne_bytes());
+        payload[core::mem::size_of::<usize>()..].copy_from_slice(&target_space_token.to_ne_bytes());
+        let msg = make_payload_message(
+            VFS_READ_GRANT,
+            payload.len(),
+            &[self.client_id, file.fd, offset, len],
+        );
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, &payload, &mut reply)?;
+        parse_status(reply.words[0])?;
         Ok(VfsGrant {
             base: target_base,
-            offset: msg.words[2],
-            len: msg.words[1],
+            offset: reply.words[2],
+            len: reply.words[1],
         })
     }
 }
