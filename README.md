@@ -1,6 +1,5 @@
 ![logo](artwork/logo_v1.png)
-![Static Badge](https://img.shields.io/badge/builds-passing-green?style=flat&label=builds&color=green) ![Static Badge](https://img.shields.io/badge/unit--tests-145-blue?style=flat&color=green) ![Static Badge](https://img.shields.io/badge/coverage-~90%25-orange?style=flat&color=green)
-
+![Static Badge](https://img.shields.io/badge/builds-passing-green?style=flat&label=builds&color=green) ![Static Badge](https://img.shields.io/badge/unit--tests-145-blue?style=flat&color=green) ![Static Badge](https://img.shields.io/badge/coverage-~90%25-orange?style=flat&color=green) ![Static Badge](https://img.shields.io/badge/LOOKING%20FOR-CONTRIBUTORS-orange)
 
 # CLUU (Compact Lightweight Unix Utopia)
 
