@@ -239,48 +239,49 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
         crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
     let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
 
-    // 2. Store reply buffer info in current thread before sending
-    crate::sched::ThreadManager::with_thread_mut(current, |thread| {
-        thread.call_reply_info = Some(CallReplyInfo {
+    // 2. Create a one-time reply token
+    let reply_id = crate::sched::ThreadManager::alloc_reply_id();
+    let reply_token_handle = crate::token::create_token(
+        crate::token::OpaqueScope::random(),
+        crate::token::Rights::IPC_REPLY,
+        crate::token::Issuer::Kernel,
+        crate::token::Timestamp::NEVER,
+        crate::token::ObjectRef::Reply(reply_id),
+    );
+
+    // 3. Store reply buffer info keyed by ReplyId
+    crate::sched::ThreadManager::set_call_reply_info(
+        reply_id,
+        CallReplyInfo {
+            caller: current,
             reply_buf_ptr: reply_buf,
             reply_buf_len: reply_len,
             page_table_root,
-        });
-    });
+        },
+    );
 
-    // 3. Send call message (includes our thread ID for reply routing)
-    crate::ipc::endpoint::call_from_user(endpoint_id, msg_ptr, msg_len, page_table_root, current)?;
+    // 4. Send call message with reply token handle injected
+    crate::ipc::endpoint::call_from_user_with_reply_token(
+        endpoint_id,
+        msg_ptr,
+        msg_len,
+        page_table_root,
+        reply_token_handle,
+    )?;
 
-    // 4. Block waiting for reply
+    // 5. Block waiting for reply
     crate::sched::ThreadManager::block_current();
     crate::architecture::x86_64::syscall::request_resched();
 
-    // 5. When we wake up, the reply has been copied to our buffer by reply handler
-    // Check if reply was actually delivered (reply_info was consumed)
-    let reply_delivered = crate::sched::ThreadManager::with_thread(current, |thread| {
-        thread.call_reply_info.is_none()
-    })
-    .unwrap_or(false);
-
-    if !reply_delivered {
-        // Woken without a reply (e.g., timeout or error) - clean up
-        crate::sched::ThreadManager::with_thread_mut(current, |thread| {
-            thread.call_reply_info = None;
-        });
-        return Err(Error::InvalidState);
-    }
-
-    // 6. Return success - the actual byte count was set by reply handler
-    // For now, return reply_len as we don't track actual bytes written
-    // TODO: Store actual reply length in thread
-    Ok(reply_len)
+    // Return value will be set by deliver_reply in thread.context.rax
+    Ok(0)
 }
 
-/// sys_reply - Reply to IPC sender
+/// sys_reply - Reply to IPC sender using one-time reply token
 ///
 /// # Arguments
 ///
-/// - arg1: endpoint_token (TokenHandle) - endpoint we received the call on
+/// - arg1: reply_token (TokenHandle) - one-time reply token from received message
 /// - arg2: msg_ptr (*const u8) - reply message
 /// - arg3: msg_len (usize) - reply length
 /// - arg4-arg6: unused
@@ -288,38 +289,53 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
 /// # Returns
 ///
 /// - Ok(bytes_sent): Number of bytes in reply
-/// - Err(Error): No pending call or IPC error
+/// - Err(Error): Invalid token or IPC error
 pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
-    let token_handle = TokenHandle::from_raw(args.arg1);
+    let reply_token_handle = TokenHandle::from_raw(args.arg1);
     let msg_ptr = args.arg2;
     let msg_len = args.arg3;
 
-    // 1. Validate token and check IPC_REPLY right (same as IPC_RECV for now)
-    let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
-    if !token.has_right(Rights::IPC_RECV) {
+    // 1. Validate reply token and check IPC_REPLY right
+    let token = lookup_token(reply_token_handle).map_err(|_| Error::InvalidArgument)?;
+    if !token.has_right(Rights::IPC_REPLY) {
         return Err(Error::PermissionDenied);
     }
 
-    let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+    // 2. Extract ReplyId from token
+    let reply_ref = crate::token::resolve_token_object(&token, ObjectType::Reply)
         .map_err(|_| Error::InvalidArgument)?;
-    let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
+    let reply_id = if let ObjectRef::Reply(id) = reply_ref {
         id
     } else {
         return Err(Error::InvalidArgument);
     };
 
-    // 2. Get the current caller for this endpoint
-    let caller = crate::ipc::endpoint::take_current_caller(endpoint_id)?;
-
     // 3. Get page table root for copying from userspace
     let page_table_root =
         crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
 
-    // 4. Deliver reply to caller (copies to caller's buffer and wakes them)
-    let bytes_sent =
-        crate::ipc::endpoint::reply_from_user(caller, msg_ptr, msg_len, page_table_root)?;
+    // 4. Copy reply message from userspace
+    crate::syscall::userptr::validate_user_buffer(msg_ptr, msg_len)?;
+    let mut buffer = [0u8; crate::ipc::endpoint::IPC_MESSAGE_MAX];
+    if msg_len > buffer.len() {
+        return Err(Error::InvalidParameter);
+    }
+    unsafe {
+        crate::syscall::userptr::copy_from_user(
+            buffer.as_mut_ptr(),
+            msg_ptr,
+            msg_len,
+            page_table_root,
+        )?;
+    }
+
+    // 5. Deliver reply (copies to caller's buffer and wakes them)
+    let bytes_sent = crate::ipc::endpoint::deliver_reply_by_id(reply_id, &buffer[..msg_len])?;
+
+    // 6. Revoke reply token (one-time use)
+    let _ = crate::token::revoke_token(reply_token_handle);
 
     Ok(bytes_sent)
 }
@@ -750,11 +766,11 @@ fn invoke_space_grant(token: &Token, args: SyscallArgs) -> SyscallResult {
         klibcluu::warn("invoke_space_grant: unsupported flags");
         return Err(Error::InvalidArgument);
     }
-    if source_virt < layout::USER_NULL_REGION_END || source_virt >= layout::USER_STACK_TOP {
+    if !(layout::USER_NULL_REGION_END..layout::USER_STACK_TOP).contains(&source_virt) {
         klibcluu::warn("invoke_space_grant: source not in user range");
         return Err(Error::InvalidArgument);
     }
-    if target_virt < layout::USER_NULL_REGION_END || target_virt >= layout::USER_STACK_TOP {
+    if !(layout::USER_NULL_REGION_END..layout::USER_STACK_TOP).contains(&target_virt) {
         klibcluu::warn("invoke_space_grant: target not in user range");
         return Err(Error::InvalidArgument);
     }

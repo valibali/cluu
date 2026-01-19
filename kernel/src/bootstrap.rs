@@ -33,7 +33,7 @@ const INIT_STACK_TOP: u64 = 0x7ff00000;
 
 /// Initrd mapping address in userspace (high address, read-only)
 /// Maps at 2GB mark, well above normal userspace regions
-const INITRD_USER_BASE: u64 = 0x80000000;
+const INITRD_USER_BASE: u64 = 0x70000000;
 
 /// Userspace boot info page (contains token + initrd metadata)
 const BOOT_INFO_ADDR: u64 = 0x7fe00000;

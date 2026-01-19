@@ -264,6 +264,7 @@ pub fn resolve_token_object(
         (ObjectRef::Space(_), ObjectType::Space) => Ok(obj_ref),
         (ObjectRef::Endpoint(_), ObjectType::Endpoint) => Ok(obj_ref),
         (ObjectRef::Irq(_), ObjectType::Irq) => Ok(obj_ref),
+        (ObjectRef::Reply(_), ObjectType::Reply) => Ok(obj_ref),
         _ => Err("Object type mismatch"),
     }
 }
@@ -307,6 +308,7 @@ pub enum ObjectType {
     Space,
     Endpoint,
     Irq,
+    Reply,
 }
 
 /// Get current timestamp (monotonic nanoseconds since boot)

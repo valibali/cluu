@@ -54,6 +54,7 @@ impl EndpointMessage {
 pub struct CallMessage {
     pub caller: ThreadId,
     pub message: EndpointMessage,
+    pub cookie: u64,
 }
 
 pub trait ByteEndpoint: Send {
@@ -61,7 +62,12 @@ pub trait ByteEndpoint: Send {
     fn recv(&mut self, receiver: ThreadId) -> Result<Option<EndpointMessage>, Error>;
     fn recv_nonblocking(&mut self) -> Result<Option<EndpointMessage>, Error>;
     /// Send a call message (with caller ID for reply routing)
-    fn send_call(&mut self, caller: ThreadId, data: &[u8]) -> Result<Option<ThreadId>, Error>;
+    fn send_call(
+        &mut self,
+        caller: ThreadId,
+        data: &[u8],
+        cookie: u64,
+    ) -> Result<Option<ThreadId>, Error>;
     /// Receive, preferring call messages. Returns (message, caller_id if call)
     fn recv_call(
         &mut self,
@@ -78,6 +84,8 @@ pub struct QueueEndpoint {
     waiting_receivers: VecDeque<ThreadId>,
     /// The caller currently being served (for reply routing)
     current_caller: Option<ThreadId>,
+    /// Active callers keyed by call cookie.
+    callers_by_cookie: BTreeMap<u64, ThreadId>,
 }
 
 impl QueueEndpoint {
@@ -87,12 +95,25 @@ impl QueueEndpoint {
             call_queue: VecDeque::new(),
             waiting_receivers: VecDeque::new(),
             current_caller: None,
+            callers_by_cookie: BTreeMap::new(),
         }
     }
 
     /// Get and clear the current caller (for reply)
     pub fn take_current_caller(&mut self) -> Option<ThreadId> {
         self.current_caller.take()
+    }
+
+    pub fn take_caller_by_cookie(&mut self, cookie: u64) -> Option<ThreadId> {
+        self.callers_by_cookie.remove(&cookie)
+    }
+
+    pub fn take_any_caller(&mut self) -> Option<ThreadId> {
+        if self.callers_by_cookie.len() != 1 {
+            return None;
+        }
+        let cookie = *self.callers_by_cookie.keys().next()?;
+        self.callers_by_cookie.remove(&cookie)
     }
 }
 
@@ -130,11 +151,18 @@ impl ByteEndpoint for QueueEndpoint {
         Err(Error::WouldBlock)
     }
 
-    fn send_call(&mut self, caller: ThreadId, data: &[u8]) -> Result<Option<ThreadId>, Error> {
+    fn send_call(
+        &mut self,
+        caller: ThreadId,
+        data: &[u8],
+        cookie: u64,
+    ) -> Result<Option<ThreadId>, Error> {
         let msg = EndpointMessage::new(data)?;
+        self.callers_by_cookie.insert(cookie, caller);
         self.call_queue.push_back(CallMessage {
             caller,
             message: msg,
+            cookie,
         });
         Ok(self.waiting_receivers.pop_front())
     }
@@ -342,13 +370,13 @@ pub fn recv_to_user_nonblocking(
     Ok(msg.len())
 }
 
-/// Send a call message from userspace (includes caller ID for reply routing)
-pub fn call_from_user(
+/// Send a call message from userspace with reply token injected
+pub fn call_from_user_with_reply_token(
     endpoint: EndpointId,
     msg_ptr: usize,
     msg_len: usize,
     page_table_root: x86_64::PhysAddr,
-    caller: ThreadId,
+    reply_token: crate::token::TokenHandle,
 ) -> Result<(), Error> {
     crate::syscall::userptr::validate_user_buffer(msg_ptr, msg_len)?;
     let mut buffer = [0u8; IPC_MESSAGE_MAX];
@@ -365,10 +393,14 @@ pub fn call_from_user(
         )?;
     }
 
+    // Inject reply token handle into message
+    inject_reply_token(&mut buffer[..msg_len], reply_token);
+
     let wake = {
         let mut guard = ENDPOINTS.lock();
         let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
-        endpoint_obj.send_call(caller, &buffer[..msg_len])?
+        // Just send as regular message - reply routing via token
+        endpoint_obj.send(&buffer[..msg_len])?
     };
 
     if let Some(thread_id) = wake {
@@ -386,17 +418,79 @@ pub fn take_current_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
         .ok_or(Error::InvalidState)
 }
 
-/// Deliver a reply to a waiting caller
+/// Get a caller for a specific call cookie.
+pub fn take_caller_by_cookie(endpoint: EndpointId, cookie: u64) -> Result<ThreadId, Error> {
+    let mut guard = ENDPOINTS.lock();
+    let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    endpoint_obj
+        .take_caller_by_cookie(cookie)
+        .ok_or(Error::InvalidState)
+}
+
+pub fn take_any_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
+    let mut guard = ENDPOINTS.lock();
+    let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    endpoint_obj.take_any_caller().ok_or(Error::InvalidState)
+}
+
+/// Tag indicating the message contains a reply token
+pub const REPLY_TOKEN_TAG: u8 = 2;
+/// Word index where reply token handle is stored
+pub const REPLY_TOKEN_WORD: usize = 5;
+
+#[repr(C)]
+pub struct UserMessageTag {
+    pub label: u32,
+    pub words: u8,
+    pub extra: u8,
+    pub _pad: u16,
+}
+
+#[repr(C)]
+pub struct UserMessage {
+    pub tag: UserMessageTag,
+    pub words: [usize; 6],
+}
+
+/// Inject reply token handle into message
+fn inject_reply_token(buffer: &mut [u8], token_handle: crate::token::TokenHandle) {
+    if buffer.len() < core::mem::size_of::<UserMessage>() {
+        return;
+    }
+    let msg = unsafe { &mut *(buffer.as_mut_ptr() as *mut UserMessage) };
+    msg.tag.extra = REPLY_TOKEN_TAG;
+    msg.words[REPLY_TOKEN_WORD] = token_handle.as_usize();
+}
+
+/// Extract reply token handle from message
+pub fn extract_reply_token(buffer: &[u8]) -> Option<crate::token::TokenHandle> {
+    if buffer.len() < core::mem::size_of::<UserMessage>() {
+        return None;
+    }
+    let msg = unsafe { &*(buffer.as_ptr() as *const UserMessage) };
+    if msg.tag.extra != REPLY_TOKEN_TAG {
+        return None;
+    }
+    Some(crate::token::TokenHandle::new(msg.words[REPLY_TOKEN_WORD]))
+}
+
+/// Deliver a reply using a ReplyId (one-time use)
 ///
 /// Copies the reply data directly to the caller's reply buffer and wakes them.
-pub fn deliver_reply(caller: ThreadId, reply_data: &[u8]) -> Result<usize, Error> {
+pub fn deliver_reply_by_id(
+    reply_id: crate::token::ReplyId,
+    reply_data: &[u8],
+) -> Result<usize, Error> {
     use crate::sched::{CallReplyInfo, ThreadManager};
 
-    // Get caller's reply buffer info
-    let reply_info: CallReplyInfo = ThreadManager::with_thread_mut(caller, |thread| {
-        thread.call_reply_info.take().ok_or(Error::InvalidState)
-    })
-    .ok_or(Error::NotFound)??;
+    // Take the reply info (removes from map - one-time use)
+    let reply_info: CallReplyInfo =
+        ThreadManager::take_call_reply_info(reply_id).ok_or(Error::InvalidState)?;
+
+    let caller = reply_info.caller;
+
+    // Validate caller thread exists
+    ThreadManager::with_thread(caller, |_| ()).ok_or(Error::NotFound)?;
 
     // Validate and copy reply to caller's buffer
     if reply_data.len() > reply_info.reply_buf_len {
@@ -413,33 +507,14 @@ pub fn deliver_reply(caller: ThreadId, reply_data: &[u8]) -> Result<usize, Error
         )?;
     }
 
+    // Set the return value in the caller's saved context (RAX).
+    let bytes_received = reply_data.len();
+    ThreadManager::with_thread_mut(caller, |thread| {
+        thread.context.rax = bytes_received as u64;
+    });
+
     // Wake the caller
     ThreadManager::wake_thread(caller);
 
-    Ok(reply_data.len())
-}
-
-/// Deliver a reply from userspace data
-pub fn reply_from_user(
-    caller: ThreadId,
-    reply_ptr: usize,
-    reply_len: usize,
-    page_table_root: x86_64::PhysAddr,
-) -> Result<usize, Error> {
-    crate::syscall::userptr::validate_user_buffer(reply_ptr, reply_len)?;
-    let mut buffer = [0u8; IPC_MESSAGE_MAX];
-    if reply_len > buffer.len() {
-        return Err(Error::InvalidParameter);
-    }
-    // Safety: buffer is a valid kernel buffer of IPC_MESSAGE_MAX bytes.
-    unsafe {
-        crate::syscall::userptr::copy_from_user(
-            buffer.as_mut_ptr(),
-            reply_ptr,
-            reply_len,
-            page_table_root,
-        )?;
-    }
-
-    deliver_reply(caller, &buffer[..reply_len])
+    Ok(bytes_received)
 }

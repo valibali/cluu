@@ -95,6 +95,9 @@ impl Rights {
     /// Call (send + receive) on endpoint
     pub const IPC_CALL: Self = Self(1 << 26);
 
+    /// Reply to an IPC call (one-time reply capability)
+    pub const IPC_REPLY: Self = Self(1 << 27);
+
     // ═══════════════════════════════════════════════════════════════════════
     // IRQ-Specific Rights (28-31)
     // ═══════════════════════════════════════════════════════════════════════
@@ -187,7 +190,7 @@ impl Rights {
 
     /// Full IPC rights
     pub const fn ipc_full() -> Self {
-        Self(Self::IPC_SEND.0 | Self::IPC_RECV.0 | Self::IPC_CALL.0)
+        Self(Self::IPC_SEND.0 | Self::IPC_RECV.0 | Self::IPC_CALL.0 | Self::IPC_REPLY.0)
     }
 
     /// Serialize to bytes (for signature computation)
@@ -256,6 +259,7 @@ impl fmt::Debug for Rights {
         write_right("IPC_SEND", Self::IPC_SEND)?;
         write_right("IPC_RECV", Self::IPC_RECV)?;
         write_right("IPC_CALL", Self::IPC_CALL)?;
+        write_right("IPC_REPLY", Self::IPC_REPLY)?;
 
         // IRQ
         write_right("IRQ_HANDLE", Self::IRQ_HANDLE)?;

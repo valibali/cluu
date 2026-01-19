@@ -91,6 +91,8 @@ pub struct ThreadFlags(u32);
 /// Information stored when a thread is waiting for a reply from IPC call
 #[derive(Debug, Clone, Copy)]
 pub struct CallReplyInfo {
+    /// The caller thread (to wake up when reply arrives)
+    pub caller: ThreadId,
     /// Userspace buffer to receive reply
     pub reply_buf_ptr: usize,
     /// Size of reply buffer
@@ -131,6 +133,12 @@ impl ThreadFlags {
 ///
 /// Represents a single thread of execution in the system.
 /// Contains all state needed to manage and schedule the thread.
+///
+/// # Layout
+///
+/// Uses #[repr(C)] to ensure predictable field ordering.
+/// The `context` field is accessed by assembly code via save_context.
+#[repr(C)]
 #[derive(Debug)]
 pub struct Thread {
     /// Unique thread identifier

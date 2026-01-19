@@ -9,10 +9,11 @@
 
 use crate::architecture::x86_64::gdt::set_tss_rsp0;
 use crate::sched::{
-    Context, Priority, PriorityBitmapScheduler, SchedulingPolicy, Thread, ThreadId,
+    CallReplyInfo, Context, Priority, PriorityBitmapScheduler, SchedulingPolicy, Thread, ThreadId,
     ThreadRepository,
 };
-use alloc::collections::BinaryHeap;
+use crate::token::ReplyId;
+use alloc::collections::{BTreeMap, BinaryHeap};
 use core::cmp::Reverse;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
@@ -51,7 +52,14 @@ lazy_static! {
     /// (threads woken by other means) are cleaned lazily when popped.
     static ref TIMEOUT_HEAP: Mutex<BinaryHeap<Reverse<(u64, u64)>>> =
         Mutex::new(BinaryHeap::new());
+
+    /// Map from ReplyId to CallReplyInfo for IPC call/reply
+    static ref CALL_REPLY_MAP: Mutex<BTreeMap<ReplyId, CallReplyInfo>> =
+        Mutex::new(BTreeMap::new());
 }
+
+/// Counter for generating unique ReplyIds
+static NEXT_REPLY_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Current scheduler mode (starts in INITMODE)
 static SCHEDULER_MODE: AtomicBool = AtomicBool::new(false); // false = INIT, true = NORMAL
@@ -186,6 +194,26 @@ impl ThreadManager {
         Self::with_thread_mut(current, |thread| {
             thread.make_dead();
         });
+    }
+
+    /// Allocate a new unique ReplyId
+    pub fn alloc_reply_id() -> ReplyId {
+        ReplyId::new(NEXT_REPLY_ID.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Store call reply info for a reply ID
+    pub fn set_call_reply_info(reply_id: ReplyId, info: CallReplyInfo) {
+        CALL_REPLY_MAP.lock().insert(reply_id, info);
+    }
+
+    /// Take and remove call reply info for a reply ID (one-time use)
+    pub fn take_call_reply_info(reply_id: ReplyId) -> Option<CallReplyInfo> {
+        CALL_REPLY_MAP.lock().remove(&reply_id)
+    }
+
+    /// Check if call reply info exists for a reply ID
+    pub fn has_call_reply_info(reply_id: ReplyId) -> bool {
+        CALL_REPLY_MAP.lock().contains_key(&reply_id)
     }
 
     pub fn block_current() {
@@ -554,6 +582,7 @@ impl ThreadManager {
 
         // Expire current thread (moves to expired array for fair scheduling)
         Self::expire_current_thread(current_id);
+
         Self::drain_pending_wake();
 
         // Pick next thread, idling if none ready

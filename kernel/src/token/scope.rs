@@ -89,6 +89,10 @@ impl OpaqueScope {
                 input[0] = 0x04;
                 input[8..12].copy_from_slice(&num.to_le_bytes());
             }
+            ObjectRef::Reply(id) => {
+                input[0] = 0x05;
+                input[8..16].copy_from_slice(&id.as_u64().to_le_bytes());
+            }
         }
 
         // Add nonce for uniqueness
@@ -143,6 +147,22 @@ pub enum ObjectRef {
     Space(AddressSpaceId),
     Endpoint(EndpointId),
     Irq(u32),
+    /// One-time reply capability for IPC call/reply
+    Reply(ReplyId),
+}
+
+/// Reply capability identifier (for IPC call/reply)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ReplyId(pub u64);
+
+impl ReplyId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 /// Address space identifier
