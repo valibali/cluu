@@ -3,8 +3,10 @@
 //! The client uses IPC call semantics with an inline payload for path strings.
 //! Replies encode status in words[0] and return values in subsequent words.
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use crate::error::{Error, Result};
-use crate::fs::protocol::{VFS_CLOSE, VFS_OPEN, VFS_READ_GRANT};
+use crate::fs::protocol::{VFS_CLOSE, VFS_OPEN, VFS_READ_GRANT, VFS_READDIR};
 use crate::ipc;
 use crate::types::Message;
 
@@ -24,6 +26,13 @@ pub struct VfsGrant {
     pub offset: usize,
     /// Length of valid data.
     pub len: usize,
+}
+
+/// Directory entry returned by readdir.
+#[derive(Debug, Clone)]
+pub struct VfsDirEntry {
+    pub name: String,
+    pub is_dir: bool,
 }
 
 /// Simple VFS client wrapper.
@@ -101,6 +110,47 @@ impl VfsClient {
             offset: reply.words[2],
             len: reply.words[1],
         })
+    }
+
+    /// Read directory entries for a path.
+    ///
+    /// Returns a list of directory entries with name and type info.
+    pub fn readdir(&self, path: &str) -> Result<Vec<VfsDirEntry>> {
+        let payload = path.as_bytes();
+        let msg = make_payload_message(VFS_READDIR, payload.len(), &[self.client_id]);
+
+        // Use larger buffer for reply with entry data
+        let mut reply_buf = [0u8; 4096];
+        let (reply, payload_len) = ipc::call_with_reply_buf(self.endpoint, &msg, payload, &mut reply_buf)?;
+        parse_status(reply.words[0])?;
+
+        let entry_count = reply.words[1];
+        let data_start = core::mem::size_of::<Message>();
+        let data = &reply_buf[data_start..data_start + payload_len];
+
+        // Parse entries: each entry is [name_len: u8, is_dir: u8, name: [u8; name_len]]
+        let mut entries = Vec::new();
+        let mut offset = 0;
+        for _ in 0..entry_count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let name_len = data[offset] as usize;
+            let is_dir = data[offset + 1] != 0;
+            offset += 2;
+            if offset + name_len > data.len() {
+                break;
+            }
+            if let Ok(name) = core::str::from_utf8(&data[offset..offset + name_len]) {
+                entries.push(VfsDirEntry {
+                    name: String::from(name),
+                    is_dir,
+                });
+            }
+            offset += name_len;
+        }
+
+        Ok(entries)
     }
 }
 

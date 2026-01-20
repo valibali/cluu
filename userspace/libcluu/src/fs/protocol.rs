@@ -29,6 +29,8 @@ pub const VFS_OPEN: u32 = 0x200;
 pub const VFS_CLOSE: u32 = 0x201;
 /// Read using zero-copy grant into the caller address space.
 pub const VFS_READ_GRANT: u32 = 0x202;
+/// Read directory entries.
+pub const VFS_READDIR: u32 = 0x203;
 
 /// Structured enum for protocol routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +38,7 @@ pub enum VfsOp {
     Open,
     Close,
     ReadGrant,
+    Readdir,
 }
 
 impl VfsOp {
@@ -44,6 +47,7 @@ impl VfsOp {
             VFS_OPEN => Some(Self::Open),
             VFS_CLOSE => Some(Self::Close),
             VFS_READ_GRANT => Some(Self::ReadGrant),
+            VFS_READDIR => Some(Self::Readdir),
             _ => None,
         }
     }
