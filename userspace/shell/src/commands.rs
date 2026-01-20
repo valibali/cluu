@@ -9,11 +9,13 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use libcluu::boot::TOKEN_SPACE;
+use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{call_with_payload, recv, send_with_payload, TTY_WRITE_LABEL};
 use libcluu::registry;
 use libcluu::syscall;
 use libcluu::types::Message;
-use libcluu::{process_info, Error, Result, IpcFlags, TOKEN_PROC_CAP};
+use libcluu::{debug_print, process_info, Error, Result, IpcFlags, TOKEN_PROC_CAP};
 
 use cluu_lang::ast::{Assign, CmdElem, DqPart, Program, Stmt, Word, WordPart};
 
@@ -168,6 +170,8 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(ExprBuiltin));
         registry.register(Box::new(LetBuiltin));
         registry.register(Box::new(SpawnBuiltin));
+        registry.register(Box::new(CatBuiltin));
+        registry.register(Box::new(LsBuiltin));
     }
 }
 
@@ -228,7 +232,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, repeat\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, repeat, cat, ls\n",
         )?;
         Ok(())
     }
@@ -690,4 +694,159 @@ fn split_expr_token(token: &str) -> Option<(String, String, String)> {
         return None;
     }
     Some((lhs.to_string(), ch.to_string(), rhs.to_string()))
+}
+
+struct CatBuiltin;
+
+impl BuiltinCommand for CatBuiltin {
+    fn name(&self) -> &'static str {
+        "cat"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let Some(path) = args.first() else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"cat: missing path\n")?;
+            return Ok(());
+        };
+
+        // Get VFS endpoint
+        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+            Ok(ep) => ep,
+            Err(_) => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"cat: vfs not available\n")?;
+                return Ok(());
+            }
+        };
+
+        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+            Ok(c) => c,
+            Err(_) => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"cat: failed to create vfs client\n")?;
+                return Ok(());
+            }
+        };
+
+        // Open the file
+        let file = match vfs.open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                let msg = format!("cat: {}: {:?}\n", path, e);
+                send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        if file.size == 0 {
+            let _ = vfs.close(file);
+            return Ok(());
+        }
+
+        // Read using grant - use address based on fd to avoid conflicts
+        let info = process_info();
+        let space_token = info.tokens[TOKEN_SPACE];
+        // Each fd gets a 16MB region to avoid overlap
+        const GRANT_REGION_BASE: usize = 0x50000000;
+        const GRANT_REGION_SIZE: usize = 16 * 1024 * 1024;
+        let read_buf_base = GRANT_REGION_BASE + (file.fd % 16) * GRANT_REGION_SIZE;
+
+        match vfs.read_grant(file, 0, file.size, space_token, read_buf_base) {
+            Ok(grant) => {
+                let addr = grant.base + grant.offset;
+                let _ = debug_print(&format!("cat: grant addr={:#x} len={}", addr, grant.len));
+                let data = unsafe {
+                    core::slice::from_raw_parts(addr as *const u8, grant.len)
+                };
+                // Show first 8 bytes for debugging
+                let preview: alloc::vec::Vec<u8> = data.iter().take(8).copied().collect();
+                let _ = debug_print(&format!("cat: first 8 bytes = {:02x?}", preview.as_slice()));
+
+                // For large files, test page accessibility and show info
+                if grant.len > 4096 {
+                    let msg = format!("cat: file is {} bytes, testing page access...\n", grant.len);
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes());
+
+                    // Test reading one byte from each page
+                    let page_size = 4096usize;
+                    let num_pages = (grant.len + page_size - 1) / page_size;
+                    for i in 0..num_pages {
+                        let offset = i * page_size;
+                        if offset < grant.len {
+                            let _ = data[offset]; // Touch the page
+                        }
+                        if i % 100 == 0 {
+                            let _ = debug_print(&format!("cat: tested page {}/{}", i, num_pages));
+                        }
+                    }
+                    let _ = debug_print(&format!("cat: all {} pages accessible!", num_pages));
+
+                    // Show hex dump of first 64 bytes
+                    let hex_preview: alloc::vec::Vec<u8> = data.iter().take(64).copied().collect();
+                    let hex_str = format!("First 64 bytes: {:02x?}\n", hex_preview.as_slice());
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, hex_str.as_bytes());
+                } else {
+                    // Print small files in chunks
+                    for chunk in data.chunks(256) {
+                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, chunk);
+                    }
+                }
+                // Add newline if file doesn't end with one
+                if !data.is_empty() && data[data.len() - 1] != b'\n' {
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"\n");
+                }
+            }
+            Err(e) => {
+                let msg = format!("cat: read error: {:?}\n", e);
+                send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
+            }
+        }
+
+        let _ = vfs.close(file);
+        Ok(())
+    }
+}
+
+struct LsBuiltin;
+
+impl BuiltinCommand for LsBuiltin {
+    fn name(&self) -> &'static str {
+        "ls"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let path = args.first().map(|s| s.as_str()).unwrap_or("/mnt/disk");
+
+        // Get VFS endpoint
+        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+            Ok(ep) => ep,
+            Err(_) => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"ls: vfs not available\n")?;
+                return Ok(());
+            }
+        };
+
+        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+            Ok(c) => c,
+            Err(_) => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"ls: failed to create vfs client\n")?;
+                return Ok(());
+            }
+        };
+
+        // Read directory
+        match vfs.readdir(path) {
+            Ok(entries) => {
+                for entry in entries {
+                    let suffix = if entry.is_dir { "/" } else { "" };
+                    let line = format!("{}{}\n", entry.name, suffix);
+                    send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                }
+            }
+            Err(e) => {
+                let msg = format!("ls: {}: {:?}\n", path, e);
+                send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
+            }
+        }
+
+        Ok(())
+    }
 }
