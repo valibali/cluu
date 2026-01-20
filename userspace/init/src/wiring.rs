@@ -98,6 +98,10 @@ impl ServiceWiring for ServiceKind {
                 tokens[SVC_TOKEN_LISTEN] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
                 params[PARAM_INITRD_SIZE] = ctx.boot.initrd_size as u64;
             }
+            ServiceKind::VirtioBlk => {
+                tokens[SVC_TOKEN_LISTEN] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                tokens[SVC_TOKEN_CAP] = child_token; // Pass PCI-capable token
+            }
         }
         Ok(())
     }
@@ -118,7 +122,7 @@ impl ServiceWiring for ServiceKind {
             ServiceKind::Vfs => {
                 map_initrd(space_token, ctx.initrd, params[PARAM_INITRD_SIZE] as usize)
             }
-            ServiceKind::Registry | ServiceKind::Kbd | ServiceKind::Tty => Ok(()),
+            ServiceKind::Registry | ServiceKind::Kbd | ServiceKind::Tty | ServiceKind::VirtioBlk => Ok(()),
         }
     }
 }

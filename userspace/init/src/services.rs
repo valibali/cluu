@@ -22,6 +22,7 @@ pub enum ServiceKind {
     Tty,
     Procmgr,
     Vfs,
+    VirtioBlk,
 }
 
 // Capability grant for procmgr (it needs to create, map, and manage children).
@@ -42,6 +43,16 @@ const PROCMGR_RIGHTS_BITS: u32 = Rights::READ.bits()
     | Rights::GRANT.bits();
 
 const PROCMGR_RIGHTS: Rights = Rights::from_bits_truncate(PROCMGR_RIGHTS_BITS);
+
+// virtio-blk needs PCI access and space mapping for MMIO/DMA
+const VIRTIOBLK_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
+    | Rights::SPACE_MAP.bits()
+    | Rights::IPC_SEND.bits()
+    | Rights::IPC_RECV.bits()
+    | Rights::CREATE.bits()
+    | Rights::GRANT.bits();
+
+const VIRTIOBLK_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIOBLK_RIGHTS_BITS);
 
 // Boot-critical services in launch order.
 pub const SERVICE_LIST: &[ServiceSpec] = &[
@@ -92,5 +103,13 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         rights: None,
         kind: ServiceKind::Console,
         instance_id: Some(0),
+    },
+    ServiceSpec {
+        name: "virtio-blk",
+        path: "sys/virtio-blk",
+        priority: 180,
+        rights: Some(VIRTIOBLK_RIGHTS),
+        kind: ServiceKind::VirtioBlk,
+        instance_id: None,
     },
 ];
