@@ -329,12 +329,13 @@ pub(crate) unsafe fn map_user_page(
     let pt_virt = crate::mm::physmap::phys_to_virt_u64(pt_phys);
     let pt = &mut *(pt_virt as *mut [u64; 512]);
 
-    // Map the page
-    if pt[pt_idx] & 0x1 != 0 {
-        // Already mapped - this can happen when segments share pages
-        return Ok(());
-    }
+    // Map the page (overwrite any existing mapping)
+    // Note: For ELF loading, segments may share pages so we allow remapping.
+    // For space_grant, we need to replace the old mapping with the new one.
     pt[pt_idx] = phys | page_flags;
+
+    // Flush TLB for this page to ensure CPU sees the new mapping
+    core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
 
     Ok(())
 }
