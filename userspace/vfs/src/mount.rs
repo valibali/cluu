@@ -1,87 +1,378 @@
-//! Mount table and path resolution for the VFS service.
+//! Unified mount table for the VFS service.
 //!
-//! The table is intentionally minimal but structured for extension. Each
-//! mountpoint resolves a path prefix to a backend. We start with the initrd
-//! image mounted at `/dev/initrd` and keep the registration API for future
-//! devices (e.g., block, procfs, tmpfs).
+//! All mount points are declared in one place with a clean plugin architecture.
+//! Supported backends:
+//! - Initrd: Direct memory access to tar archive
+//! - Remote: IPC forwarding to external service (e.g., virtio-blk)
+//! - Virtual: Dynamic content generation (e.g., procfs)
 
-use alloc::vec::Vec;
+use alloc::boxed::Box;
 use alloc::string::String;
-use crate::fd_table::FileEntry;
-use libcluu::tar::find_member;
+use alloc::vec::Vec;
+use core::mem::size_of;
+use crate::fd_table::{FileEntry, Ext2Entry, OpenFile};
+use libcluu::ipc::{call_with_payload, call_with_reply_buf};
+use libcluu::tar::{find_member, list_entries};
+use libcluu::types::Message;
 use libcluu::{Error, Result};
 
-pub const INITRD_MOUNT: &str = "/dev/initrd";
+/// IPC labels for remote filesystem operations
+const FS_OPEN: u32 = 0x300;
+const FS_READ: u32 = 0x302;
+const FS_READDIR: u32 = 0x304;
 
-enum MountBackend<'a> {
-    Initrd(&'a [u8]),
+/// Directory entry for readdir results.
+#[derive(Clone)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
 }
 
-struct Mount<'a> {
-    prefix: &'static str,
-    backend: MountBackend<'a>,
+/// Mount backend trait - all mount types implement this.
+pub trait MountBackend: Send + Sync {
+    /// Backend name for debugging.
+    fn name(&self) -> &'static str;
+
+    /// Open a file at the given relative path.
+    fn open(&self, rel_path: &str) -> Result<OpenFile>;
+
+    /// Read directory entries at the given relative path.
+    fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>>;
+
+    /// Read file data (for remote backends that need IPC).
+    fn read(&self, file: &OpenFile, offset: usize, len: usize) -> Result<Vec<u8>> {
+        // Default implementation for memory-backed files
+        let _ = (file, offset, len);
+        Err(Error::InvalidOperation)
+    }
 }
 
-pub struct MountTable<'a> {
-    mounts: Vec<Mount<'a>>,
+/// Initrd backend - serves files from a tar archive in memory.
+pub struct InitrdBackend {
+    data: &'static [u8],
 }
 
-impl<'a> MountTable<'a> {
-    pub fn new(initrd: &'a [u8]) -> Self {
-        let mut table = Self { mounts: Vec::new() };
-        table.add_initrd(INITRD_MOUNT, initrd);
-        table
+impl InitrdBackend {
+    pub fn new(data: &'static [u8]) -> Self {
+        Self { data }
+    }
+}
+
+impl MountBackend for InitrdBackend {
+    fn name(&self) -> &'static str {
+        "initrd"
     }
 
-    pub fn add_initrd(&mut self, prefix: &'static str, initrd: &'a [u8]) {
-        self.mounts.push(Mount {
-            prefix,
-            backend: MountBackend::Initrd(initrd),
-        });
+    fn open(&self, rel_path: &str) -> Result<OpenFile> {
+        let slice = find_member(self.data, rel_path)
+            .or_else(|| find_member(self.data, &dot_prefixed(rel_path)))
+            .ok_or(Error::NotFound)?;
+
+        let base = self.data.as_ptr() as usize;
+        let offset = slice.as_ptr() as usize - base;
+
+        Ok(OpenFile::Memory(FileEntry {
+            base,
+            offset,
+            size: slice.len(),
+        }))
     }
 
-    pub fn open(&self, path: &str) -> Result<FileEntry> {
-        let mount = resolve_mount(&self.mounts, path)?;
-        match mount.backend {
-            MountBackend::Initrd(initrd) => open_from_initrd(initrd, mount.prefix, path),
+    fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>> {
+        let entries = list_entries(self.data, rel_path);
+        Ok(entries
+            .into_iter()
+            .map(|e| DirEntry {
+                name: e.name,
+                is_dir: e.is_dir,
+            })
+            .collect())
+    }
+}
+
+/// Remote backend - forwards requests to an external service via IPC.
+pub struct RemoteBackend {
+    endpoint: usize,
+    service_name: &'static str,
+}
+
+impl RemoteBackend {
+    pub fn new(endpoint: usize, service_name: &'static str) -> Self {
+        Self { endpoint, service_name }
+    }
+}
+
+impl MountBackend for RemoteBackend {
+    fn name(&self) -> &'static str {
+        self.service_name
+    }
+
+    fn open(&self, rel_path: &str) -> Result<OpenFile> {
+        let _ = libcluu::debug_print(&alloc::format!("vfs: remote open '{}' endpoint={}", rel_path, self.endpoint));
+        let req = Message::new(FS_OPEN, [rel_path.len(), 0, 0, 0, 0, 0], 1);
+        let mut reply = Message::new(0, [0; 6], 0);
+        call_with_payload(self.endpoint, &req, rel_path.as_bytes(), &mut reply)?;
+        let _ = libcluu::debug_print("vfs: remote open got reply");
+
+        let status = reply.words[0] as isize;
+        if status < 0 {
+            return Err(Error::NotFound);
+        }
+
+        let inode = reply.words[1];
+        let size = reply.words[2];
+
+        Ok(OpenFile::Ext2(Ext2Entry {
+            inode: inode as u32,
+            size,
+            data: None,
+        }))
+    }
+
+    fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>> {
+        let req = Message::new(FS_READDIR, [rel_path.len(), 0, 0, 0, 0, 0], 1);
+        let mut reply_buf = [0u8; 4096];
+        let (reply, payload_len) = call_with_reply_buf(
+            self.endpoint,
+            &req,
+            rel_path.as_bytes(),
+            &mut reply_buf,
+        )?;
+
+        let status = reply.words[0] as isize;
+        if status < 0 {
+            return Err(Error::NotFound);
+        }
+
+        let entry_count = reply.words[1];
+        let data_start = size_of::<Message>();
+        let data = &reply_buf[data_start..data_start + payload_len];
+
+        // Parse entries: [name_len: u8, is_dir: u8, name bytes...]
+        let mut entries = Vec::new();
+        let mut offset = 0;
+        for _ in 0..entry_count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let name_len = data[offset] as usize;
+            let is_dir = data[offset + 1] != 0;
+            offset += 2;
+            if offset + name_len > data.len() {
+                break;
+            }
+            if let Ok(name) = core::str::from_utf8(&data[offset..offset + name_len]) {
+                entries.push(DirEntry {
+                    name: String::from(name),
+                    is_dir,
+                });
+            }
+            offset += name_len;
+        }
+
+        Ok(entries)
+    }
+
+    fn read(&self, file: &OpenFile, offset: usize, len: usize) -> Result<Vec<u8>> {
+        let inode = match file {
+            OpenFile::Ext2(e) => e.inode,
+            _ => return Err(Error::InvalidArgument),
+        };
+
+        let req = Message::new(FS_READ, [0, 0, inode as usize, offset, len, 0], 5);
+        let mut reply_buf = alloc::vec![0u8; size_of::<Message>() + len];
+        let (reply, payload_len) = call_with_reply_buf(self.endpoint, &req, &[], &mut reply_buf)?;
+
+        let status = reply.words[0] as isize;
+        if status < 0 {
+            return Err(Error::InvalidState);
+        }
+
+        let bytes_read = reply.words[1];
+        let data_start = size_of::<Message>();
+        let data_len = payload_len.min(bytes_read);
+
+        Ok(reply_buf[data_start..data_start + data_len].to_vec())
+    }
+}
+
+/// Virtual file content generator.
+pub type VirtualFileGenerator = fn() -> Result<Vec<u8>>;
+
+/// Virtual directory entry generator.
+pub type VirtualDirGenerator = fn() -> Result<Vec<DirEntry>>;
+
+/// Virtual filesystem entry.
+pub enum VirtualEntry {
+    File(VirtualFileGenerator),
+    Dir(VirtualDirGenerator),
+}
+
+/// Virtual backend - dynamic content generation (procfs, sysfs, etc.)
+pub struct VirtualBackend {
+    name: &'static str,
+    entries: &'static [(&'static str, VirtualEntry)],
+}
+
+impl VirtualBackend {
+    pub const fn new(name: &'static str, entries: &'static [(&'static str, VirtualEntry)]) -> Self {
+        Self { name, entries }
+    }
+
+    fn find_entry(&self, path: &str) -> Option<&VirtualEntry> {
+        let path = path.trim_start_matches('/');
+        for (name, entry) in self.entries {
+            if *name == path {
+                return Some(entry);
+            }
+        }
+        None
+    }
+}
+
+impl MountBackend for VirtualBackend {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn open(&self, rel_path: &str) -> Result<OpenFile> {
+        let entry = self.find_entry(rel_path).ok_or(Error::NotFound)?;
+
+        match entry {
+            VirtualEntry::File(generator) => {
+                let data = generator()?;
+                Ok(OpenFile::Virtual(VirtualFile {
+                    data,
+                    path: String::from(rel_path),
+                }))
+            }
+            VirtualEntry::Dir(_) => Err(Error::InvalidArgument), // Can't open dir as file
+        }
+    }
+
+    fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>> {
+        if rel_path.is_empty() || rel_path == "/" {
+            // List all entries at root
+            return Ok(self.entries
+                .iter()
+                .filter(|(name, _)| !name.contains('/'))
+                .map(|(name, entry)| DirEntry {
+                    name: String::from(*name),
+                    is_dir: matches!(entry, VirtualEntry::Dir(_)),
+                })
+                .collect());
+        }
+
+        let entry = self.find_entry(rel_path).ok_or(Error::NotFound)?;
+        match entry {
+            VirtualEntry::Dir(generator) => generator(),
+            VirtualEntry::File(_) => Err(Error::InvalidArgument),
         }
     }
 }
 
-fn resolve_mount<'a>(mounts: &'a [Mount<'a>], path: &str) -> Result<&'a Mount<'a>> {
-    let mut best: Option<&Mount<'a>> = None;
-    for mount in mounts {
-        if (path == mount.prefix || path.starts_with(mount.prefix) && path.as_bytes().get(mount.prefix.len()) == Some(&b'/'))
-            && best.is_none_or(|current| mount.prefix.len() > current.prefix.len()) {
-                best = Some(mount);
+/// Virtual file handle with generated content.
+#[derive(Clone)]
+pub struct VirtualFile {
+    pub data: Vec<u8>,
+    pub path: String,
+}
+
+/// A single mount point configuration.
+struct Mount {
+    prefix: &'static str,
+    backend: Box<dyn MountBackend>,
+}
+
+/// Unified mount table.
+pub struct MountTable {
+    mounts: Vec<Mount>,
+}
+
+impl MountTable {
+    pub fn new() -> Self {
+        Self { mounts: Vec::new() }
+    }
+
+    /// Add a mount point with the given backend.
+    pub fn mount(&mut self, prefix: &'static str, backend: Box<dyn MountBackend>) {
+        self.mounts.push(Mount { prefix, backend });
+    }
+
+    /// Convenience: mount initrd at a path.
+    pub fn mount_initrd(&mut self, prefix: &'static str, data: &'static [u8]) {
+        self.mount(prefix, Box::new(InitrdBackend::new(data)));
+    }
+
+    /// Convenience: mount remote service at a path.
+    pub fn mount_remote(&mut self, prefix: &'static str, endpoint: usize, service_name: &'static str) {
+        self.mount(prefix, Box::new(RemoteBackend::new(endpoint, service_name)));
+    }
+
+    /// Convenience: mount virtual filesystem at a path.
+    pub fn mount_virtual(&mut self, prefix: &'static str, name: &'static str, entries: &'static [(&'static str, VirtualEntry)]) {
+        self.mount(prefix, Box::new(VirtualBackend::new(name, entries)));
+    }
+
+    /// Open a file at the given absolute path.
+    pub fn open(&self, path: &str) -> Result<OpenFile> {
+        let (mount, rel_path) = self.resolve(path)?;
+        mount.backend.open(rel_path)
+    }
+
+    /// Read directory entries at the given absolute path.
+    pub fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
+        let (mount, rel_path) = self.resolve(path)?;
+        mount.backend.readdir(rel_path)
+    }
+
+    /// Read file data (for remote/virtual backends).
+    pub fn read(&self, path_prefix: &str, file: &OpenFile, offset: usize, len: usize) -> Result<Vec<u8>> {
+        let (mount, _) = self.resolve(path_prefix)?;
+        mount.backend.read(file, offset, len)
+    }
+
+    /// Check if a path matches a mount point.
+    pub fn is_mounted(&self, path: &str) -> bool {
+        self.resolve(path).is_ok()
+    }
+
+    /// Get the backend for a path (for special handling).
+    pub fn get_backend<'a>(&'a self, path: &'a str) -> Option<&'a dyn MountBackend> {
+        self.resolve(path).ok().map(|(m, _)| m.backend.as_ref())
+    }
+
+    /// Resolve path to mount and relative path.
+    fn resolve<'a>(&'a self, path: &'a str) -> Result<(&'a Mount, &'a str)> {
+        let mut best: Option<(&'a Mount, &'a str)> = None;
+
+        for mount in &self.mounts {
+            if path == mount.prefix {
+                // Exact match (root of mount)
+                let rel: &'a str = "";
+                if best.is_none() || mount.prefix.len() > best.unwrap().0.prefix.len() {
+                    best = Some((mount, rel));
+                }
+            } else if path.starts_with(mount.prefix) {
+                // Check for proper path separator
+                let rest = &path[mount.prefix.len()..];
+                if rest.starts_with('/') {
+                    let rel = rest.trim_start_matches('/');
+                    if best.is_none() || mount.prefix.len() > best.unwrap().0.prefix.len() {
+                        best = Some((mount, rel));
+                    }
+                }
             }
+        }
+
+        best.ok_or(Error::NotFound)
     }
-    best.ok_or(Error::NotFound)
 }
 
-fn open_from_initrd(initrd: &[u8], prefix: &str, path: &str) -> Result<FileEntry> {
-    let rel_path = strip_prefix(path, prefix)?;
-    let slice = find_member(initrd, rel_path)
-        .or_else(|| find_member(initrd, &dot_prefixed(rel_path)))
-        .ok_or(Error::NotFound)?;
-    let base = initrd.as_ptr() as usize;
-    let offset = slice.as_ptr() as usize - base;
-    Ok(FileEntry {
-        base,
-        offset,
-        size: slice.len(),
-    })
-}
-
-fn strip_prefix<'a>(path: &'a str, prefix: &str) -> Result<&'a str> {
-    let Some(rest) = path.strip_prefix(prefix) else {
-        return Err(Error::NotFound);
-    };
-    let rel = rest.strip_prefix('/').unwrap_or("");
-    if rel.is_empty() {
-        return Err(Error::InvalidArgument);
+impl Default for MountTable {
+    fn default() -> Self {
+        Self::new()
     }
-    Ok(rel)
 }
 
 fn dot_prefixed(path: &str) -> String {
