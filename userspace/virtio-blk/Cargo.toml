@@ -1,0 +1,17 @@
+[package]
+name = "cluu-virtio-blk"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cluu_virtio_blk"
+path = "src/lib.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-ext2 = { path = "../ext2" }
+spin = "0.9"
+
+[[bin]]
+name = "virtio-blk"
+path = "src/main.rs"
