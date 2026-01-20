@@ -27,6 +27,7 @@ members = [
     "userspace/timeserver",
     "userspace/cat",
     "userspace/vfs_demo",
+    "userspace/virtio-blk",
 
     # Language tooling
     "crates/cluu_lang",
@@ -51,6 +52,7 @@ default-members = [
     "userspace/timeserver",
     "userspace/cat",
     "userspace/vfs_demo",
+    "userspace/virtio-blk",
 ]
 
 [workspace.package]

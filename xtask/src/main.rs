@@ -98,7 +98,9 @@ fn build_userspace(profile: &str) -> Result<()> {
     println!("▸ Building userspace programs...");
 
     let userspace_crates = [
-        "userspace/libcluu", // Library must be first
+        "userspace/libcluu",    // Library must be first
+        "userspace/virtio-blk", // Driver library
+        "userspace/ext2",       // Filesystem library
         "userspace/cap_demo",
         "userspace/init", // System programs
         "userspace/procmgr",
@@ -282,7 +284,16 @@ fn create_initrd(profile: &str) -> Result<()> {
     }
 
     // Copy system servers to initrd/sys/
-    let sys_programs = ["init", "procmgr", "registry", "vfs", "console", "kbd", "tty"];
+    let sys_programs = [
+        "init",
+        "procmgr",
+        "registry",
+        "vfs",
+        "console",
+        "kbd",
+        "tty",
+        "virtio-blk",
+    ];
     for prog in &sys_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("sys").join(prog);
@@ -378,9 +389,9 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         .join("target/x86_64-cluu-user")
         .join(cargo_profile);
 
-    let staging_dir = project_root().join("target/userfs");
+    let staging_dir = project_root().join("userfs");
     let bin_dir = staging_dir.join("bin");
-    let _ = fs::remove_dir_all(&staging_dir);
+    let _ = fs::remove_dir_all(&bin_dir);
     fs::create_dir_all(&bin_dir)?;
 
     let bin_programs = ["shell", "timeserver", "vfs_demo"];
@@ -453,8 +464,10 @@ fn run_qemu(debug: bool) -> Result<()> {
         ovmf,
         "-m",
         "256M",
+        // Boot disk: force IDE so BOOTBOOT can read it
         "-drive",
-        &format!("file={},format=raw", img_path.display()),
+        &format!("file={},format=raw,if=ide,index=0", img_path.display()),
+        // Data disk: virtio-blk for your driver
         "-drive",
         &format!("file={},format=raw,if=none,id=userblk", user_disk.display()),
         "-device",
@@ -531,6 +544,8 @@ fn run_tests() -> Result<()> {
             "cluu-shell",
             "--exclude",
             "cluu-cat",
+            "--exclude",
+            "cluu-virtio-blk",
             "--features",
             "test-mock",
         ])
@@ -556,7 +571,7 @@ fn clean() -> Result<()> {
     let _ = fs::remove_dir_all(project_root().join("target/initrd"));
     let _ = fs::remove_file(project_root().join("target/initrd.tar"));
     let _ = fs::remove_file(project_root().join("target/cluu.img"));
-    let _ = fs::remove_dir_all(project_root().join("target/userfs"));
+    //let _ = fs::remove_dir_all(project_root().join("target/userfs"));
     let _ = fs::remove_file(project_root().join("target/userdisk.img"));
     let _ = fs::remove_dir_all(project_root().join("target/asm"));
 

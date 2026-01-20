@@ -7,16 +7,14 @@ extern crate alloc;
 #[allow(unused_imports)]
 use libcluu::runtime as _;
 
+use libcluu::debug_print;
 use libcluu::fs::VfsClient;
 use libcluu::ipc::{send_with_payload, tty_write_sync, CONSOLE_WRITE_LABEL, TTY_WRITE_LABEL};
 use libcluu::mem::PAGE_SIZE;
-use libcluu::{
-    process_info, registry, Error, Result, TOKEN_SPACE, TOKEN_STDLOG, TOKEN_STDOUT,
-};
-use libcluu::debug_print;
+use libcluu::{process_info, registry, Error, Result, TOKEN_SPACE, TOKEN_STDLOG, TOKEN_STDOUT};
 
 const GRANT_BASE: usize = 0x3FF0_0000;
-const TARGET_PATH: &str = "/dev/initrd/etc/motd";
+const TARGET_PATH: &str = "/mnt/disk/hello";
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -49,7 +47,8 @@ fn run_demo() -> Result<()> {
     }
 
     let grant = client.read_grant(file, 0, file.size, space_token, align_grant_base())?;
-    let data = unsafe { core::slice::from_raw_parts((grant.base + grant.offset) as *const u8, grant.len) };
+    let data =
+        unsafe { core::slice::from_raw_parts((grant.base + grant.offset) as *const u8, grant.len) };
     send_with_payload_stdout_bytes(data)?;
     Ok(())
 }

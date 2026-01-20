@@ -178,6 +178,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-ext2"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-init"
 version = "0.1.0"
 dependencies = [
@@ -263,6 +270,15 @@ name = "cluu-vfs"
 version = "0.1.0"
 dependencies = [
  "libcluu",
+]
+
+[[package]]
+name = "cluu-virtio-blk"
+version = "0.1.0"
+dependencies = [
+ "cluu-ext2",
+ "libcluu",
+ "spin",
 ]
 
 [[package]]
