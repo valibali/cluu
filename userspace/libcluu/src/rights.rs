@@ -26,6 +26,8 @@ bitflags! {
 
         const IRQ_HANDLE = 1 << 28;
         const IRQ_ACK = 1 << 29;
+
+        const PCI_ACCESS = 1 << 30;
     }
 }
 

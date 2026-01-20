@@ -66,6 +66,10 @@ pub enum InvokeOp {
 
     // IPC operations
     EndpointCreate = 40,
+
+    // PCI operations
+    PciConfigRead = 50,
+    PciConfigWrite = 51,
 }
 
 /// Page mapping flags for space_map.
@@ -714,6 +718,78 @@ pub fn irq_attach(irq_token: usize, endpoint_token: usize, irq_number: usize) ->
 /// - `Err(error)`: Ack failed
 pub fn irq_ack(irq_token: usize) -> Result<()> {
     unsafe { invoke(irq_token, InvokeOp::IrqAck, 0, 0, 0, 0)? };
+    Ok(())
+}
+
+/// Read from PCI configuration space
+///
+/// # Arguments
+///
+/// - `pci_token`: Token with PCI_ACCESS right
+/// - `bus`: PCI bus number (0-255)
+/// - `device`: PCI device number (0-31)
+/// - `function`: PCI function number (0-7)
+/// - `offset`: Register offset (must be 4-byte aligned)
+///
+/// # Returns
+///
+/// - `Ok(value)`: 32-bit value read from PCI config space
+/// - `Err(error)`: Read failed
+pub fn pci_config_read(
+    pci_token: usize,
+    bus: u8,
+    device: u8,
+    function: u8,
+    offset: u8,
+) -> Result<u32> {
+    let devfn = ((device & 0x1F) << 3) | (function & 0x07);
+    let value = unsafe {
+        invoke(
+            pci_token,
+            InvokeOp::PciConfigRead,
+            bus as usize,
+            devfn as usize,
+            offset as usize,
+            0,
+        )?
+    };
+    Ok(value as u32)
+}
+
+/// Write to PCI configuration space
+///
+/// # Arguments
+///
+/// - `pci_token`: Token with PCI_ACCESS right
+/// - `bus`: PCI bus number (0-255)
+/// - `device`: PCI device number (0-31)
+/// - `function`: PCI function number (0-7)
+/// - `offset`: Register offset (must be 4-byte aligned)
+/// - `value`: 32-bit value to write
+///
+/// # Returns
+///
+/// - `Ok(())`: Write successful
+/// - `Err(error)`: Write failed
+pub fn pci_config_write(
+    pci_token: usize,
+    bus: u8,
+    device: u8,
+    function: u8,
+    offset: u8,
+    value: u32,
+) -> Result<()> {
+    let devfn = ((device & 0x1F) << 3) | (function & 0x07);
+    unsafe {
+        invoke(
+            pci_token,
+            InvokeOp::PciConfigWrite,
+            bus as usize,
+            devfn as usize,
+            offset as usize,
+            value as usize,
+        )?
+    };
     Ok(())
 }
 

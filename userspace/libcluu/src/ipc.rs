@@ -122,6 +122,16 @@ pub fn reply(reply_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()> 
     Ok(())
 }
 
+/// Reply with an additional payload appended after the message header.
+pub fn reply_with_payload(reply_token: usize, msg: &Message, payload: &[u8]) -> Result<()> {
+    let header = msg.as_bytes();
+    let mut buffer = Vec::with_capacity(header.len() + payload.len());
+    buffer.extend_from_slice(header);
+    buffer.extend_from_slice(payload);
+    syscall::ipc_reply(reply_token, &buffer)?;
+    Ok(())
+}
+
 /// Copy an IPC call cookie from a request into a reply.
 ///
 /// Servers should call this when replying to ipc_call() so the kernel
@@ -143,6 +153,35 @@ pub fn reply_recv(endpoint_token: usize, msg: &mut Message, flags: IpcFlags) -> 
     reply(endpoint_token, msg, flags)?;
     // Then receive next message
     recv(endpoint_token, msg, flags)
+}
+
+/// Call with payload, receiving both message and reply payload.
+///
+/// Returns (reply_message, bytes_in_reply_payload).
+pub fn call_with_reply_buf(
+    endpoint_token: usize,
+    msg: &Message,
+    send_payload: &[u8],
+    reply_buf: &mut [u8],
+) -> Result<(Message, usize)> {
+    use core::mem::size_of;
+
+    let header = msg.as_bytes();
+    let mut buffer = Vec::with_capacity(header.len() + send_payload.len());
+    buffer.extend_from_slice(header);
+    buffer.extend_from_slice(send_payload);
+
+    let bytes_received = syscall::ipc_call(endpoint_token, &buffer, reply_buf)?;
+
+    if bytes_received < size_of::<Message>() {
+        return Err(Error::InvalidState);
+    }
+
+    // Parse the reply message
+    let reply_msg = unsafe { (reply_buf.as_ptr() as *const Message).read_unaligned() };
+    let payload_len = bytes_received - size_of::<Message>();
+
+    Ok((reply_msg, payload_len))
 }
 
 /// Notify the parent process manager that this process is exiting.

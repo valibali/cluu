@@ -1,5 +1,6 @@
-//! Ext2 directory entry parsing.
+#![allow(unused)]
 
+// Ext2 directory entry parsing.
 use alloc::string::String;
 
 /// Directory entry file types.
