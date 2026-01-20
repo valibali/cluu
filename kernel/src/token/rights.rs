@@ -108,6 +108,9 @@ impl Rights {
     /// Acknowledge IRQ
     pub const IRQ_ACK: Self = Self(1 << 29);
 
+    /// PCI config space access
+    pub const PCI_ACCESS: Self = Self(1 << 30);
+
     // ═══════════════════════════════════════════════════════════════════════
     // Constructors and Operations
     // ═══════════════════════════════════════════════════════════════════════
@@ -264,6 +267,9 @@ impl fmt::Debug for Rights {
         // IRQ
         write_right("IRQ_HANDLE", Self::IRQ_HANDLE)?;
         write_right("IRQ_ACK", Self::IRQ_ACK)?;
+
+        // PCI
+        write_right("PCI_ACCESS", Self::PCI_ACCESS)?;
 
         write!(f, ")")
     }

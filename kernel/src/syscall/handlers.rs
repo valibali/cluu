@@ -439,6 +439,10 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
 
         // IPC operations
         InvokeOp::EndpointCreate => invoke_endpoint_create(&token, args),
+
+        // PCI operations
+        InvokeOp::PciConfigRead => invoke_pci_config_read(&token, args),
+        InvokeOp::PciConfigWrite => invoke_pci_config_write(&token, args),
     }
 }
 
@@ -1287,6 +1291,108 @@ fn invoke_irq_attach(_token: &Token, _args: SyscallArgs) -> SyscallResult {
 fn invoke_irq_ack(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     klibcluu::warn("invoke_irq_ack not yet implemented");
     Err(Error::NotImplemented)
+}
+
+// PCI operations
+
+/// Read from PCI configuration space
+///
+/// # Arguments
+/// - arg3: bus (8 bits)
+/// - arg4: device (5 bits) | function (3 bits) packed as (device << 3) | function
+/// - arg5: offset (register offset, must be 4-byte aligned)
+///
+/// # Returns
+/// - Ok(value): 32-bit value read from PCI config space
+fn invoke_pci_config_read(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::PCI_ACCESS) {
+        klibcluu::warn("invoke_pci_config_read: missing PCI_ACCESS right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let bus = args.arg3 as u8;
+    let devfn = args.arg4 as u8;
+    let offset = args.arg5 as u8;
+
+    // Offset must be 4-byte aligned
+    if offset & 0x03 != 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let value = pci_config_read_u32(bus, devfn >> 3, devfn & 0x07, offset);
+    Ok(value as usize)
+}
+
+/// Write to PCI configuration space
+///
+/// # Arguments
+/// - arg3: bus (8 bits)
+/// - arg4: device (5 bits) | function (3 bits) packed as (device << 3) | function
+/// - arg5: offset (register offset, must be 4-byte aligned)
+/// - arg6: value to write (32 bits)
+///
+/// # Returns
+/// - Ok(0): Write successful
+fn invoke_pci_config_write(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::PCI_ACCESS) {
+        klibcluu::warn("invoke_pci_config_write: missing PCI_ACCESS right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let bus = args.arg3 as u8;
+    let devfn = args.arg4 as u8;
+    let offset = args.arg5 as u8;
+    let value = args.arg6 as u32;
+
+    // Offset must be 4-byte aligned
+    if offset & 0x03 != 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    pci_config_write_u32(bus, devfn >> 3, devfn & 0x07, offset, value);
+    Ok(0)
+}
+
+/// Read 32-bit value from PCI configuration space using I/O ports 0xCF8/0xCFC
+fn pci_config_read_u32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+    use x86_64::instructions::port::Port;
+
+    let address: u32 = 0x8000_0000
+        | ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | ((offset as u32) & 0xFC);
+
+    unsafe {
+        let mut config_address: Port<u32> = Port::new(0xCF8);
+        let mut config_data: Port<u32> = Port::new(0xCFC);
+
+        config_address.write(address);
+        config_data.read()
+    }
+}
+
+/// Write 32-bit value to PCI configuration space using I/O ports 0xCF8/0xCFC
+fn pci_config_write_u32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
+    use x86_64::instructions::port::Port;
+
+    let address: u32 = 0x8000_0000
+        | ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | ((offset as u32) & 0xFC);
+
+    unsafe {
+        let mut config_address: Port<u32> = Port::new(0xCF8);
+        let mut config_data: Port<u32> = Port::new(0xCFC);
+
+        config_address.write(address);
+        config_data.write(value);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
