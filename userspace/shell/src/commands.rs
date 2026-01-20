@@ -741,13 +741,20 @@ impl BuiltinCommand for CatBuiltin {
             return Ok(());
         }
 
-        // Read using grant - use address based on fd to avoid conflicts
+        // Read using grant - allocate address from vspace manager
         let info = process_info();
         let space_token = info.tokens[TOKEN_SPACE];
-        // Each fd gets a 16MB region to avoid overlap
-        const GRANT_REGION_BASE: usize = 0x50000000;
-        const GRANT_REGION_SIZE: usize = 16 * 1024 * 1024;
-        let read_buf_base = GRANT_REGION_BASE + (file.fd % 16) * GRANT_REGION_SIZE;
+
+        // Allocate virtual address region for the grant
+        let grant_size = (file.size + 4095) & !4095; // Page-align
+        let read_buf_base = match libcluu::vspace::VSPACE.lock().alloc(grant_size) {
+            Ok(addr) => addr,
+            Err(_) => {
+                let _ = vfs.close(file);
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"cat: out of virtual memory\n")?;
+                return Ok(());
+            }
+        };
 
         match vfs.read_grant(file, 0, file.size, space_token, read_buf_base) {
             Ok(grant) => {
@@ -799,6 +806,9 @@ impl BuiltinCommand for CatBuiltin {
                 send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
             }
         }
+
+        // Free the allocated virtual address region
+        let _ = libcluu::vspace::VSPACE.lock().free(read_buf_base, grant_size);
 
         let _ = vfs.close(file);
         Ok(())

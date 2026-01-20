@@ -33,6 +33,7 @@ pub mod runtime;
 pub mod syscall;
 pub mod tar;
 pub mod types;
+pub mod vspace;
 
 // Re-exports
 pub use boot::{
