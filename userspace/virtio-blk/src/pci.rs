@@ -1,7 +1,9 @@
 #![allow(unused)]
 //! PCI device discovery for virtio-blk.
 
-use libcluu::syscall::pci_config_read;
+extern crate alloc;
+
+use libcluu::syscall::{pci_config_read, pci_config_write};
 use libcluu::{Error, Result};
 
 /// PCI vendor ID for virtio devices (Red Hat)
@@ -11,12 +13,9 @@ const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 const VIRTIO_BLK_DEVICE_ID_LEGACY: u16 = 0x1001; // Transitional device
 const VIRTIO_BLK_DEVICE_ID_MODERN: u16 = 0x1042; // Non-transitional (1.0+)
 
-/// PCI configuration space offsets
-const PCI_VENDOR_ID: u8 = 0x00;
-const PCI_DEVICE_ID: u8 = 0x02;
-const PCI_COMMAND: u8 = 0x04;
-const PCI_STATUS: u8 = 0x06;
-const PCI_CLASS_REVISION: u8 = 0x08;
+/// PCI configuration space offsets (byte offsets; reads are 32-bit aligned in pci_config_read)
+const PCI_VENDOR_DEVICE_DWORD: u8 = 0x00;
+const PCI_COMMAND_STATUS_DWORD: u8 = 0x04;
 const PCI_BAR0: u8 = 0x10;
 const PCI_CAP_PTR: u8 = 0x34;
 
@@ -37,49 +36,60 @@ pub struct PciDevice {
     pub function: u8,
     pub vendor_id: u16,
     pub device_id: u16,
+
+    /// BAR0 base (masked address)
     pub bar0: u32,
     pub bar0_size: u32,
+
     /// Offset of common config capability in BAR
     pub common_cfg_offset: u32,
     pub common_cfg_bar: u8,
+
     /// Offset of notify capability in BAR
     pub notify_cfg_offset: u32,
     pub notify_cfg_bar: u8,
     pub notify_off_multiplier: u32,
+
     /// Offset of device-specific config in BAR
     pub device_cfg_offset: u32,
     pub device_cfg_bar: u8,
+
     /// Offset of ISR config in BAR
     pub isr_cfg_offset: u32,
     pub isr_cfg_bar: u8,
+
     /// True if device supports modern virtio (1.0+)
     pub is_modern: bool,
 }
 
-/// Find a virtio-blk PCI device by scanning the bus.
+/// Find a virtio-blk PCI device by scanning buses/devices/functions.
+///
+/// Enumeration is READ-ONLY: we only read vendor/device IDs during scanning.
+/// Once a candidate virtio-blk function is found, we then read BARs and parse capabilities.
 pub fn find_virtio_blk(pci_token: usize) -> Result<PciDevice> {
     let _ = libcluu::debug_print("pci: scanning for virtio-blk...");
 
-    // Scan PCI buses 0-7 (OVMF may place virtio on higher buses)
+    // Scan PCI buses 0-7 (OVMF may place devices on higher buses in some topologies)
     for bus in 0..8u8 {
         for device in 0..32u8 {
             for function in 0..8u8 {
-                if let Ok(dev) = probe_device(pci_token, bus, device, function) {
+                let ids = probe_ids(pci_token, bus, device, function);
+                if let Ok((vendor_id, device_id)) = ids {
                     let _ = libcluu::debug_print(&alloc::format!(
                         "pci: {:02x}:{:02x}.{} vendor={:04x} device={:04x}",
                         bus,
                         device,
                         function,
-                        dev.vendor_id,
-                        dev.device_id
+                        vendor_id,
+                        device_id
                     ));
-                    // Check if it's a virtio-blk device
-                    if dev.vendor_id == VIRTIO_VENDOR_ID
-                        && (dev.device_id == VIRTIO_BLK_DEVICE_ID_LEGACY
-                            || dev.device_id == VIRTIO_BLK_DEVICE_ID_MODERN)
+
+                    if vendor_id == VIRTIO_VENDOR_ID
+                        && (device_id == VIRTIO_BLK_DEVICE_ID_LEGACY
+                            || device_id == VIRTIO_BLK_DEVICE_ID_MODERN)
                     {
                         let _ = libcluu::debug_print("pci: found virtio-blk!");
-                        return Ok(dev);
+                        return init_device(pci_token, bus, device, function, vendor_id, device_id);
                     }
                 }
             }
@@ -90,31 +100,42 @@ pub fn find_virtio_blk(pci_token: usize) -> Result<PciDevice> {
     Err(Error::NotFound)
 }
 
-/// Probe a specific PCI device location.
-fn probe_device(pci_token: usize, bus: u8, device: u8, function: u8) -> Result<PciDevice> {
-    // Read vendor/device ID
-    let vendor_device = pci_config_read(pci_token, bus, device, function, PCI_VENDOR_ID)?;
-    let vendor_id = (vendor_device & 0xFFFF) as u16;
-    let device_id = ((vendor_device >> 16) & 0xFFFF) as u16;
+/// Read-only probe: returns (vendor_id, device_id) if a function exists.
+fn probe_ids(pci_token: usize, bus: u8, device: u8, function: u8) -> Result<(u16, u16)> {
+    let vendor_device = pci_config_read(pci_token, bus, device, function, PCI_VENDOR_DEVICE_DWORD)?;
 
-    // 0xFFFF means no device present
+    let vendor_id = (vendor_device & 0xFFFF) as u16;
     if vendor_id == 0xFFFF {
         return Err(Error::NotFound);
     }
+    let device_id = ((vendor_device >> 16) & 0xFFFF) as u16;
 
-    // Read BAR0
-    let bar0 = pci_config_read(pci_token, bus, device, function, PCI_BAR0)?;
+    Ok((vendor_id, device_id))
+}
 
-    // Determine if BAR0 is memory-mapped (bit 0 = 0) or I/O (bit 0 = 1)
-    let is_mmio = (bar0 & 1) == 0;
+/// Full initialization once we know the function is the device we want.
+/// Safe to read BARs, size them, and parse virtio caps here.
+fn init_device(
+    pci_token: usize,
+    bus: u8,
+    device: u8,
+    function: u8,
+    vendor_id: u16,
+    device_id: u16,
+) -> Result<PciDevice> {
+    // Read BAR0 (raw)
+    let bar0_raw = pci_config_read(pci_token, bus, device, function, PCI_BAR0)?;
+
+    // Mask BAR0 to address base
+    let is_mmio = (bar0_raw & 1) == 0;
     let bar0_addr = if is_mmio {
-        bar0 & 0xFFFFFFF0
+        bar0_raw & 0xFFFF_FFF0
     } else {
-        bar0 & 0xFFFFFFFC
+        bar0_raw & 0xFFFF_FFFC
     };
 
-    // Determine BAR0 size by writing all 1s and reading back
-    let bar0_size = determine_bar_size(pci_token, bus, device, function, PCI_BAR0, bar0)?;
+    // Determine BAR0 size by writing all 1s and reading back (only for the matched device)
+    let bar0_size = determine_bar_size(pci_token, bus, device, function, PCI_BAR0, bar0_raw)?;
 
     let is_modern = device_id == VIRTIO_BLK_DEVICE_ID_MODERN;
 
@@ -138,7 +159,7 @@ fn probe_device(pci_token: usize, bus: u8, device: u8, function: u8) -> Result<P
         is_modern,
     };
 
-    // For modern virtio devices, parse capability structures
+    // Parse modern virtio capabilities if virtio vendor (applies to both modern and transitional)
     if vendor_id == VIRTIO_VENDOR_ID {
         parse_virtio_caps(pci_token, &mut dev)?;
     }
@@ -147,6 +168,9 @@ fn probe_device(pci_token: usize, bus: u8, device: u8, function: u8) -> Result<P
 }
 
 /// Determine the size of a BAR by writing all 1s and reading back.
+///
+/// WARNING: This should only be used after you've identified the target device.
+/// Do not do this during broad PCI enumeration.
 fn determine_bar_size(
     pci_token: usize,
     bus: u8,
@@ -156,20 +180,20 @@ fn determine_bar_size(
     original: u32,
 ) -> Result<u32> {
     // Write all 1s
-    libcluu::syscall::pci_config_write(pci_token, bus, device, function, bar_offset, 0xFFFFFFFF)?;
+    pci_config_write(pci_token, bus, device, function, bar_offset, 0xFFFF_FFFF)?;
 
     // Read back
     let size_mask = pci_config_read(pci_token, bus, device, function, bar_offset)?;
 
     // Restore original value
-    libcluu::syscall::pci_config_write(pci_token, bus, device, function, bar_offset, original)?;
+    pci_config_write(pci_token, bus, device, function, bar_offset, original)?;
 
     // Calculate size from mask
     let is_mmio = (original & 1) == 0;
     let mask = if is_mmio {
-        size_mask & 0xFFFFFFF0
+        size_mask & 0xFFFF_FFF0
     } else {
-        size_mask & 0xFFFFFFFC
+        size_mask & 0xFFFF_FFFC
     };
 
     if mask == 0 {
@@ -177,32 +201,41 @@ fn determine_bar_size(
     }
 
     // Size is (~mask) + 1
-    let size = (!mask).wrapping_add(1);
-    Ok(size)
+    Ok((!mask).wrapping_add(1))
 }
 
 /// Parse virtio PCI capability structures to find MMIO region offsets.
 fn parse_virtio_caps(pci_token: usize, dev: &mut PciDevice) -> Result<()> {
-    // Read status register to check if capabilities list is valid
-    let status = pci_config_read(pci_token, dev.bus, dev.device, dev.function, PCI_STATUS)?;
-    let has_caps = ((status >> 16) & 0x10) != 0;
+    // Status bit 4 (Capabilities List) is in the upper 16 bits of the dword at 0x04.
+    let cmd_status = pci_config_read(
+        pci_token,
+        dev.bus,
+        dev.device,
+        dev.function,
+        PCI_COMMAND_STATUS_DWORD,
+    )?;
+    let status16 = (cmd_status >> 16) as u16;
+    let has_caps = (status16 & 0x0010) != 0;
 
     if !has_caps {
         return Ok(());
     }
 
-    // Read capabilities pointer
-    let cap_ptr = pci_config_read(pci_token, dev.bus, dev.device, dev.function, PCI_CAP_PTR)?;
-    let mut offset = (cap_ptr & 0xFF) as u8;
+    // Capabilities pointer is at 0x34 (low byte) for conventional PCI config space.
+    let cap_ptr_dword = pci_config_read(pci_token, dev.bus, dev.device, dev.function, PCI_CAP_PTR)?;
+    let mut offset = (cap_ptr_dword & 0xFF) as u8;
 
-    // Walk the capabilities list
+    // Walk the capabilities list.
+    // Each capability header:
+    //   offset+0: cap_id (8), next_ptr (8), then capability-specific bytes...
+    // We read cap_id and next_ptr from the low 16 bits of the dword at `offset`.
     while offset != 0 && offset != 0xFF {
         let cap_header = pci_config_read(pci_token, dev.bus, dev.device, dev.function, offset)?;
         let cap_id = (cap_header & 0xFF) as u8;
         let next_ptr = ((cap_header >> 8) & 0xFF) as u8;
 
         if cap_id == PCI_CAP_ID_VENDOR {
-            // This is a virtio capability
+            // Virtio uses vendor-specific capability (0x09)
             parse_virtio_cap(pci_token, dev, offset)?;
         }
 
@@ -213,30 +246,33 @@ fn parse_virtio_caps(pci_token: usize, dev: &mut PciDevice) -> Result<()> {
 }
 
 /// Parse a single virtio PCI capability structure.
+///
+/// Layout (virtio 1.0+):
+///  0x00: cap_id (8), cap_next (8), cap_len (8), cfg_type (8)
+///  0x04: bar (8), padding (24)
+///  0x08: offset (32)
+///  0x0C: length (32)
+///  0x10: (notify) notify_off_multiplier (32) for NOTIFY cap
 fn parse_virtio_cap(pci_token: usize, dev: &mut PciDevice, cap_offset: u8) -> Result<()> {
-    // Virtio capability structure:
-    // Offset 0: cap_id (8), cap_next (8), cap_len (8), cfg_type (8)
-    // Offset 4: bar (8), padding (24)
-    // Offset 8: offset (32)
-    // Offset 12: length (32)
-
     let header = pci_config_read(pci_token, dev.bus, dev.device, dev.function, cap_offset)?;
     let cfg_type = ((header >> 24) & 0xFF) as u8;
 
     let bar_word = pci_config_read(pci_token, dev.bus, dev.device, dev.function, cap_offset + 4)?;
     let bar = (bar_word & 0xFF) as u8;
 
-    let offset = pci_config_read(pci_token, dev.bus, dev.device, dev.function, cap_offset + 8)?;
+    let region_offset =
+        pci_config_read(pci_token, dev.bus, dev.device, dev.function, cap_offset + 8)?;
 
     match cfg_type {
         VIRTIO_PCI_CAP_COMMON_CFG => {
             dev.common_cfg_bar = bar;
-            dev.common_cfg_offset = offset;
+            dev.common_cfg_offset = region_offset;
         }
         VIRTIO_PCI_CAP_NOTIFY_CFG => {
             dev.notify_cfg_bar = bar;
-            dev.notify_cfg_offset = offset;
-            // Read notify_off_multiplier at offset 16
+            dev.notify_cfg_offset = region_offset;
+
+            // notify_off_multiplier at cap_offset + 16
             dev.notify_off_multiplier = pci_config_read(
                 pci_token,
                 dev.bus,
@@ -247,11 +283,11 @@ fn parse_virtio_cap(pci_token: usize, dev: &mut PciDevice, cap_offset: u8) -> Re
         }
         VIRTIO_PCI_CAP_ISR_CFG => {
             dev.isr_cfg_bar = bar;
-            dev.isr_cfg_offset = offset;
+            dev.isr_cfg_offset = region_offset;
         }
         VIRTIO_PCI_CAP_DEVICE_CFG => {
             dev.device_cfg_bar = bar;
-            dev.device_cfg_offset = offset;
+            dev.device_cfg_offset = region_offset;
         }
         _ => {}
     }
@@ -261,15 +297,28 @@ fn parse_virtio_cap(pci_token: usize, dev: &mut PciDevice, cap_offset: u8) -> Re
 
 /// Enable bus mastering and memory space access for a PCI device.
 pub fn enable_device(pci_token: usize, dev: &PciDevice) -> Result<()> {
-    let cmd = pci_config_read(pci_token, dev.bus, dev.device, dev.function, PCI_COMMAND)?;
-    // Set bits: Memory Space Enable (1), Bus Master Enable (2)
-    let new_cmd = cmd | 0x06;
-    libcluu::syscall::pci_config_write(
+    // Command is low 16 bits of dword at 0x04.
+    let cmd_status = pci_config_read(
         pci_token,
         dev.bus,
         dev.device,
         dev.function,
-        PCI_COMMAND,
-        new_cmd,
+        PCI_COMMAND_STATUS_DWORD,
+    )?;
+    let cmd16 = (cmd_status & 0xFFFF) as u16;
+
+    // Set bits: Memory Space Enable (bit1), Bus Master Enable (bit2)
+    let new_cmd16 = cmd16 | 0x0006;
+
+    // Write back the whole dword: preserve status (upper 16).
+    let new_cmd_status = (cmd_status & 0xFFFF_0000) | (new_cmd16 as u32);
+
+    pci_config_write(
+        pci_token,
+        dev.bus,
+        dev.device,
+        dev.function,
+        PCI_COMMAND_STATUS_DWORD,
+        new_cmd_status,
     )
 }
