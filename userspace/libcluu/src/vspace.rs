@@ -210,7 +210,7 @@ impl VSpaceAllocator {
                 break;
             }
         }
-        if let Some((prev, prev_size)) = prev_addr {
+        if let Some((prev, _prev_size)) = prev_addr {
             let current_size = self.free_regions.remove(&addr).unwrap();
             *self.free_regions.get_mut(&prev).unwrap() += current_size;
         }

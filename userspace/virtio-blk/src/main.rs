@@ -9,8 +9,8 @@
 //! 3. Exposes filesystem operations via IPC for VFS
 
 extern crate alloc;
-extern crate cluu_virtio_blk;
 extern crate cluu_ext2;
+extern crate cluu_virtio_blk;
 
 use alloc::format;
 use alloc::vec::Vec;
@@ -59,7 +59,10 @@ fn run() -> Result<()> {
     let pci_token = info.tokens[SVC_TOKEN_CAP]; // PCI-capable token from init
     let space_token = info.tokens[TOKEN_SPACE];
 
-    debug_print(&format!("virtio-blk: pci_token={} space={}", pci_token, space_token))?;
+    debug_print(&format!(
+        "virtio-blk: pci_token={} space={}",
+        pci_token, space_token
+    ))?;
 
     // Find virtio-blk PCI device
     let pci_addr = match pci::find_virtio_blk(pci_token) {
@@ -105,7 +108,10 @@ fn run() -> Result<()> {
             Some(fs)
         }
         Err(e) => {
-            debug_print(&format!("virtio-blk: no ext2 found ({:?}), raw block only", e))?;
+            debug_print(&format!(
+                "virtio-blk: no ext2 found ({:?}), raw block only",
+                e
+            ))?;
             None
         }
     };
@@ -209,11 +215,8 @@ fn handle_fs_request(fs: &Ext2Fs, blk: &VirtioBlkAdapter, msg: &Message, payload
             match fs.stat(inode) {
                 Ok(stat) => {
                     let flags = if stat.is_dir { 1 } else { 0 } | if stat.is_file { 2 } else { 0 };
-                    let reply_msg = Message::new(
-                        FS_STAT,
-                        [0, stat.size as usize, flags, 0, 0, 0],
-                        3,
-                    );
+                    let reply_msg =
+                        Message::new(FS_STAT, [0, stat.size as usize, flags, 0, 0, 0], 3);
                     if let Some(token) = reply_token {
                         let _ = reply(token, &reply_msg, IpcFlags::empty());
                     }
@@ -241,11 +244,8 @@ fn handle_fs_request(fs: &Ext2Fs, blk: &VirtioBlkAdapter, msg: &Message, payload
                                 data.extend_from_slice(name_bytes);
                             }
 
-                            let reply_msg = Message::new(
-                                FS_READDIR,
-                                [0, entries.len(), 0, 0, 0, 0],
-                                2,
-                            );
+                            let reply_msg =
+                                Message::new(FS_READDIR, [0, entries.len(), 0, 0, 0, 0], 2);
                             if let Some(token) = reply_token {
                                 let _ = reply_with_payload(token, &reply_msg, &data);
                             }

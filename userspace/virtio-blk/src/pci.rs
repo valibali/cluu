@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! PCI device discovery for virtio-blk.
 
 use libcluu::syscall::pci_config_read;
@@ -66,7 +67,11 @@ pub fn find_virtio_blk(pci_token: usize) -> Result<PciDevice> {
                 if let Ok(dev) = probe_device(pci_token, bus, device, function) {
                     let _ = libcluu::debug_print(&alloc::format!(
                         "pci: {:02x}:{:02x}.{} vendor={:04x} device={:04x}",
-                        bus, device, function, dev.vendor_id, dev.device_id
+                        bus,
+                        device,
+                        function,
+                        dev.vendor_id,
+                        dev.device_id
                     ));
                     // Check if it's a virtio-blk device
                     if dev.vendor_id == VIRTIO_VENDOR_ID
@@ -102,7 +107,11 @@ fn probe_device(pci_token: usize, bus: u8, device: u8, function: u8) -> Result<P
 
     // Determine if BAR0 is memory-mapped (bit 0 = 0) or I/O (bit 0 = 1)
     let is_mmio = (bar0 & 1) == 0;
-    let bar0_addr = if is_mmio { bar0 & 0xFFFFFFF0 } else { bar0 & 0xFFFFFFFC };
+    let bar0_addr = if is_mmio {
+        bar0 & 0xFFFFFFF0
+    } else {
+        bar0 & 0xFFFFFFFC
+    };
 
     // Determine BAR0 size by writing all 1s and reading back
     let bar0_size = determine_bar_size(pci_token, bus, device, function, PCI_BAR0, bar0)?;
@@ -157,7 +166,11 @@ fn determine_bar_size(
 
     // Calculate size from mask
     let is_mmio = (original & 1) == 0;
-    let mask = if is_mmio { size_mask & 0xFFFFFFF0 } else { size_mask & 0xFFFFFFFC };
+    let mask = if is_mmio {
+        size_mask & 0xFFFFFFF0
+    } else {
+        size_mask & 0xFFFFFFFC
+    };
 
     if mask == 0 {
         return Ok(0);

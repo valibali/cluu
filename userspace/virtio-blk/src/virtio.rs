@@ -1,10 +1,11 @@
+#![allow(unused)]
 //! Virtio-blk device implementation.
 //!
 //! This module implements the virtio device initialization sequence and
 //! block I/O operations.
 
 use crate::pci::{self, PciDevice};
-use crate::virtqueue::{Virtqueue, VirtqDesc, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
+use crate::virtqueue::{VirtqDesc, Virtqueue, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
 use alloc::vec;
 use core::sync::atomic::{fence, Ordering};
 use libcluu::syscall::{space_map, MAP_DEVICE};
@@ -26,7 +27,7 @@ const VIRTIO_BLK_F_BLK_SIZE: u64 = 1 << 6;
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 
 /// Virtio-blk request types
-const VIRTIO_BLK_T_IN: u32 = 0;  // Read
+const VIRTIO_BLK_T_IN: u32 = 0; // Read
 const VIRTIO_BLK_T_OUT: u32 = 1; // Write
 
 /// Virtio-blk status values
@@ -114,11 +115,7 @@ pub struct VirtioBlkDevice {
 
 impl VirtioBlkDevice {
     /// Create and initialize a new virtio-blk device.
-    pub fn new(
-        pci_token: usize,
-        space_token: usize,
-        pci_device: PciDevice,
-    ) -> Result<Self> {
+    pub fn new(pci_token: usize, space_token: usize, pci_device: PciDevice) -> Result<Self> {
         let mut dev = Self {
             pci_token,
             space_token,
@@ -203,14 +200,14 @@ impl VirtioBlkDevice {
         let mmio_virt = 0x40000000usize;
 
         // Map pages for the BAR
-        let pages = (bar0_size + 4095) / 4096;
+        let pages = bar0_size.div_ceil(4096);
         for i in 0..pages {
             let virt = mmio_virt + i * 4096;
             let phys = bar0_phys + (i * 4096) as u64;
             space_map(
                 self.space_token,
                 virt,
-                phys as usize, // For MAP_DEVICE, this is the physical address
+                phys as usize,     // For MAP_DEVICE, this is the physical address
                 MAP_DEVICE | 0x03, // read+write+device
                 0,
             )?;
@@ -280,7 +277,7 @@ impl VirtioBlkDevice {
 
         // Allocate virtqueue memory
         let vq_bytes = Virtqueue::size_bytes(queue_size);
-        let vq_pages = (vq_bytes + 4095) / 4096;
+        let vq_pages = vq_bytes.div_ceil(4096);
 
         // Map pages for virtqueue (zero-filled)
         for i in 0..vq_pages {
@@ -291,9 +288,7 @@ impl VirtioBlkDevice {
         self.vq_mem = VIRTQUEUE_BASE;
 
         // Create the virtqueue
-        let vq = unsafe {
-            Virtqueue::new(queue_size, VIRTQUEUE_BASE, VIRTQUEUE_BASE as u64)
-        };
+        let vq = unsafe { Virtqueue::new(queue_size, VIRTQUEUE_BASE, VIRTQUEUE_BASE as u64) };
 
         // Configure the queue in the device
         self.configure_queue(&vq)?;
@@ -359,10 +354,13 @@ impl VirtioBlkDevice {
         unsafe {
             if self.is_modern {
                 let common = self.common_cfg as *mut u8;
-                common.add(modern::DEVICE_STATUS as usize).write_volatile(status);
+                common
+                    .add(modern::DEVICE_STATUS as usize)
+                    .write_volatile(status);
             } else {
                 let base = self.mmio_base as *mut u8;
-                base.add(legacy::DEVICE_STATUS as usize).write_volatile(status);
+                base.add(legacy::DEVICE_STATUS as usize)
+                    .write_volatile(status);
             }
         }
         fence(Ordering::SeqCst);
@@ -375,11 +373,13 @@ impl VirtioBlkDevice {
                 // Select feature set 0 (bits 0-31)
                 (common.add(modern::DEVICE_FEATURE_SELECT as usize) as *mut u32).write_volatile(0);
                 fence(Ordering::SeqCst);
-                let lo = (common.add(modern::DEVICE_FEATURE as usize) as *const u32).read_volatile();
+                let lo =
+                    (common.add(modern::DEVICE_FEATURE as usize) as *const u32).read_volatile();
                 // Select feature set 1 (bits 32-63)
                 (common.add(modern::DEVICE_FEATURE_SELECT as usize) as *mut u32).write_volatile(1);
                 fence(Ordering::SeqCst);
-                let hi = (common.add(modern::DEVICE_FEATURE as usize) as *const u32).read_volatile();
+                let hi =
+                    (common.add(modern::DEVICE_FEATURE as usize) as *const u32).read_volatile();
                 (hi as u64) << 32 | (lo as u64)
             } else {
                 let base = self.mmio_base as *const u8;
@@ -589,7 +589,11 @@ impl VirtioBlkDevice {
             // For reads, copy data from device buffer
             if req_type == VIRTIO_BLK_T_IN {
                 unsafe {
-                    core::ptr::copy_nonoverlapping(data_addr as *const u8, buf.as_mut_ptr(), buf.len());
+                    core::ptr::copy_nonoverlapping(
+                        data_addr as *const u8,
+                        buf.as_mut_ptr(),
+                        buf.len(),
+                    );
                 }
             }
             Ok(buf.len())

@@ -49,7 +49,7 @@ impl BlockDevice for VirtioBlkAdapter {
 
         // Calculate how many sectors we need
         let end_byte = offset + buf.len() as u64;
-        let end_sector = (end_byte + sector_size - 1) / sector_size;
+        let end_sector = end_byte.div_ceil(sector_size);
         let sector_count = end_sector - start_sector;
 
         // Read sectors
@@ -78,14 +78,14 @@ impl BlockDevice for VirtioBlkAdapter {
 
         // For partial sector writes, we need to read-modify-write
         let end_byte = offset + buf.len() as u64;
-        let end_sector = (end_byte + sector_size - 1) / sector_size;
+        let end_sector = end_byte.div_ceil(sector_size);
         let sector_count = end_sector - start_sector;
 
         let total_bytes = (sector_count as usize) * device.sector_size();
         let mut sector_buf = alloc::vec![0u8; total_bytes];
 
         // Read existing sectors if partial write
-        if sector_offset != 0 || buf.len() % device.sector_size() != 0 {
+        if sector_offset != 0 || !buf.len().is_multiple_of(device.sector_size()) {
             device.read_sectors(start_sector, &mut sector_buf)?;
         }
 
