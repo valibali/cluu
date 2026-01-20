@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Unified mount table for the VFS service.
 //!
 //! All mount points are declared in one place with a clean plugin architecture.
@@ -6,11 +7,11 @@
 //! - Remote: IPC forwarding to external service (e.g., virtio-blk)
 //! - Virtual: Dynamic content generation (e.g., procfs)
 
+use crate::fd_table::{Ext2Entry, FileEntry, OpenFile};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use crate::fd_table::{FileEntry, Ext2Entry, OpenFile};
 use libcluu::ipc::{call_with_payload, call_with_reply_buf};
 use libcluu::tar::{find_member, list_entries};
 use libcluu::types::Message;
@@ -98,7 +99,10 @@ pub struct RemoteBackend {
 
 impl RemoteBackend {
     pub fn new(endpoint: usize, service_name: &'static str) -> Self {
-        Self { endpoint, service_name }
+        Self {
+            endpoint,
+            service_name,
+        }
     }
 }
 
@@ -108,7 +112,11 @@ impl MountBackend for RemoteBackend {
     }
 
     fn open(&self, rel_path: &str) -> Result<OpenFile> {
-        let _ = libcluu::debug_print(&alloc::format!("vfs: remote open '{}' endpoint={}", rel_path, self.endpoint));
+        let _ = libcluu::debug_print(&alloc::format!(
+            "vfs: remote open '{}' endpoint={}",
+            rel_path,
+            self.endpoint
+        ));
         let req = Message::new(FS_OPEN, [rel_path.len(), 0, 0, 0, 0, 0], 1);
         let mut reply = Message::new(0, [0; 6], 0);
         call_with_payload(self.endpoint, &req, rel_path.as_bytes(), &mut reply)?;
@@ -132,12 +140,8 @@ impl MountBackend for RemoteBackend {
     fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>> {
         let req = Message::new(FS_READDIR, [rel_path.len(), 0, 0, 0, 0, 0], 1);
         let mut reply_buf = [0u8; 4096];
-        let (reply, payload_len) = call_with_reply_buf(
-            self.endpoint,
-            &req,
-            rel_path.as_bytes(),
-            &mut reply_buf,
-        )?;
+        let (reply, payload_len) =
+            call_with_reply_buf(self.endpoint, &req, rel_path.as_bytes(), &mut reply_buf)?;
 
         let status = reply.words[0] as isize;
         if status < 0 {
@@ -253,7 +257,8 @@ impl MountBackend for VirtualBackend {
     fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>> {
         if rel_path.is_empty() || rel_path == "/" {
             // List all entries at root
-            return Ok(self.entries
+            return Ok(self
+                .entries
                 .iter()
                 .filter(|(name, _)| !name.contains('/'))
                 .map(|(name, entry)| DirEntry {
@@ -305,12 +310,22 @@ impl MountTable {
     }
 
     /// Convenience: mount remote service at a path.
-    pub fn mount_remote(&mut self, prefix: &'static str, endpoint: usize, service_name: &'static str) {
+    pub fn mount_remote(
+        &mut self,
+        prefix: &'static str,
+        endpoint: usize,
+        service_name: &'static str,
+    ) {
         self.mount(prefix, Box::new(RemoteBackend::new(endpoint, service_name)));
     }
 
     /// Convenience: mount virtual filesystem at a path.
-    pub fn mount_virtual(&mut self, prefix: &'static str, name: &'static str, entries: &'static [(&'static str, VirtualEntry)]) {
+    pub fn mount_virtual(
+        &mut self,
+        prefix: &'static str,
+        name: &'static str,
+        entries: &'static [(&'static str, VirtualEntry)],
+    ) {
         self.mount(prefix, Box::new(VirtualBackend::new(name, entries)));
     }
 
@@ -327,7 +342,13 @@ impl MountTable {
     }
 
     /// Read file data (for remote/virtual backends).
-    pub fn read(&self, path_prefix: &str, file: &OpenFile, offset: usize, len: usize) -> Result<Vec<u8>> {
+    pub fn read(
+        &self,
+        path_prefix: &str,
+        file: &OpenFile,
+        offset: usize,
+        len: usize,
+    ) -> Result<Vec<u8>> {
         let (mount, _) = self.resolve(path_prefix)?;
         mount.backend.read(file, offset, len)
     }
