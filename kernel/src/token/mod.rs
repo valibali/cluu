@@ -371,6 +371,14 @@ pub enum InvokeOp {
     // PCI operations
     PciConfigRead = 50,
     PciConfigWrite = 51,
+
+    // I/O port operations
+    PortIn8 = 52,
+    PortIn16 = 53,
+    PortIn32 = 54,
+    PortOut8 = 55,
+    PortOut16 = 56,
+    PortOut32 = 57,
 }
 
 impl InvokeOp {
@@ -394,6 +402,12 @@ impl InvokeOp {
             40 => Some(Self::EndpointCreate),
             50 => Some(Self::PciConfigRead),
             51 => Some(Self::PciConfigWrite),
+            52 => Some(Self::PortIn8),
+            53 => Some(Self::PortIn16),
+            54 => Some(Self::PortIn32),
+            55 => Some(Self::PortOut8),
+            56 => Some(Self::PortOut16),
+            57 => Some(Self::PortOut32),
             _ => None,
         }
     }

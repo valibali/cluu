@@ -443,6 +443,14 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         // PCI operations
         InvokeOp::PciConfigRead => invoke_pci_config_read(&token, args),
         InvokeOp::PciConfigWrite => invoke_pci_config_write(&token, args),
+
+        // I/O port operations
+        InvokeOp::PortIn8 => invoke_port_in8(&token, args),
+        InvokeOp::PortIn16 => invoke_port_in16(&token, args),
+        InvokeOp::PortIn32 => invoke_port_in32(&token, args),
+        InvokeOp::PortOut8 => invoke_port_out8(&token, args),
+        InvokeOp::PortOut16 => invoke_port_out16(&token, args),
+        InvokeOp::PortOut32 => invoke_port_out32(&token, args),
     }
 }
 
@@ -1393,6 +1401,157 @@ fn pci_config_write_u32(bus: u8, device: u8, function: u8, offset: u8, value: u3
         config_address.write(address);
         config_data.write(value);
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// I/O Port Operations
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Read 8-bit value from I/O port
+///
+/// # Arguments
+/// - arg3: port address (16 bits)
+///
+/// # Returns
+/// - Ok(value): 8-bit value read from port
+fn invoke_port_in8(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::PCI_ACCESS) {
+        klibcluu::warn("invoke_port_in8: missing PCI_ACCESS right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let port = args.arg3 as u16;
+
+    unsafe {
+        let mut p: x86_64::instructions::port::Port<u8> = x86_64::instructions::port::Port::new(port);
+        Ok(p.read() as usize)
+    }
+}
+
+/// Read 16-bit value from I/O port
+///
+/// # Arguments
+/// - arg3: port address (16 bits)
+///
+/// # Returns
+/// - Ok(value): 16-bit value read from port
+fn invoke_port_in16(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::PCI_ACCESS) {
+        klibcluu::warn("invoke_port_in16: missing PCI_ACCESS right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let port = args.arg3 as u16;
+
+    unsafe {
+        let mut p: x86_64::instructions::port::Port<u16> = x86_64::instructions::port::Port::new(port);
+        Ok(p.read() as usize)
+    }
+}
+
+/// Read 32-bit value from I/O port
+///
+/// # Arguments
+/// - arg3: port address (16 bits)
+///
+/// # Returns
+/// - Ok(value): 32-bit value read from port
+fn invoke_port_in32(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::PCI_ACCESS) {
+        klibcluu::warn("invoke_port_in32: missing PCI_ACCESS right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let port = args.arg3 as u16;
+
+    unsafe {
+        let mut p: x86_64::instructions::port::Port<u32> = x86_64::instructions::port::Port::new(port);
+        Ok(p.read() as usize)
+    }
+}
+
+/// Write 8-bit value to I/O port
+///
+/// # Arguments
+/// - arg3: port address (16 bits)
+/// - arg4: value to write (8 bits)
+///
+/// # Returns
+/// - Ok(0): Write successful
+fn invoke_port_out8(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::PCI_ACCESS) {
+        klibcluu::warn("invoke_port_out8: missing PCI_ACCESS right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let port = args.arg3 as u16;
+    let value = args.arg4 as u8;
+
+    unsafe {
+        let mut p: x86_64::instructions::port::Port<u8> = x86_64::instructions::port::Port::new(port);
+        p.write(value);
+    }
+    Ok(0)
+}
+
+/// Write 16-bit value to I/O port
+///
+/// # Arguments
+/// - arg3: port address (16 bits)
+/// - arg4: value to write (16 bits)
+///
+/// # Returns
+/// - Ok(0): Write successful
+fn invoke_port_out16(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::PCI_ACCESS) {
+        klibcluu::warn("invoke_port_out16: missing PCI_ACCESS right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let port = args.arg3 as u16;
+    let value = args.arg4 as u16;
+
+    unsafe {
+        let mut p: x86_64::instructions::port::Port<u16> = x86_64::instructions::port::Port::new(port);
+        p.write(value);
+    }
+    Ok(0)
+}
+
+/// Write 32-bit value to I/O port
+///
+/// # Arguments
+/// - arg3: port address (16 bits)
+/// - arg4: value to write (32 bits)
+///
+/// # Returns
+/// - Ok(0): Write successful
+fn invoke_port_out32(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::PCI_ACCESS) {
+        klibcluu::warn("invoke_port_out32: missing PCI_ACCESS right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let port = args.arg3 as u16;
+    let value = args.arg4 as u32;
+
+    unsafe {
+        let mut p: x86_64::instructions::port::Port<u32> = x86_64::instructions::port::Port::new(port);
+        p.write(value);
+    }
+    Ok(0)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

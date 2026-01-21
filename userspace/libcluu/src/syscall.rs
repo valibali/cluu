@@ -70,6 +70,14 @@ pub enum InvokeOp {
     // PCI operations
     PciConfigRead = 50,
     PciConfigWrite = 51,
+
+    // I/O port operations
+    PortIn8 = 52,
+    PortIn16 = 53,
+    PortIn32 = 54,
+    PortOut8 = 55,
+    PortOut16 = 56,
+    PortOut32 = 57,
 }
 
 /// Page mapping flags for space_map.
@@ -793,6 +801,81 @@ pub fn pci_config_write(
     Ok(())
 }
 
+/// Read 8-bit value from I/O port
+///
+/// Requires PCI_ACCESS right on the token.
+pub fn port_in8(pci_token: usize, port: u16) -> Result<u8> {
+    let value = unsafe { invoke(pci_token, InvokeOp::PortIn8, port as usize, 0, 0, 0)? };
+    Ok(value as u8)
+}
+
+/// Read 16-bit value from I/O port
+///
+/// Requires PCI_ACCESS right on the token.
+pub fn port_in16(pci_token: usize, port: u16) -> Result<u16> {
+    let value = unsafe { invoke(pci_token, InvokeOp::PortIn16, port as usize, 0, 0, 0)? };
+    Ok(value as u16)
+}
+
+/// Read 32-bit value from I/O port
+///
+/// Requires PCI_ACCESS right on the token.
+pub fn port_in32(pci_token: usize, port: u16) -> Result<u32> {
+    let value = unsafe { invoke(pci_token, InvokeOp::PortIn32, port as usize, 0, 0, 0)? };
+    Ok(value as u32)
+}
+
+/// Write 8-bit value to I/O port
+///
+/// Requires PCI_ACCESS right on the token.
+pub fn port_out8(pci_token: usize, port: u16, value: u8) -> Result<()> {
+    unsafe {
+        invoke(
+            pci_token,
+            InvokeOp::PortOut8,
+            port as usize,
+            value as usize,
+            0,
+            0,
+        )?
+    };
+    Ok(())
+}
+
+/// Write 16-bit value to I/O port
+///
+/// Requires PCI_ACCESS right on the token.
+pub fn port_out16(pci_token: usize, port: u16, value: u16) -> Result<()> {
+    unsafe {
+        invoke(
+            pci_token,
+            InvokeOp::PortOut16,
+            port as usize,
+            value as usize,
+            0,
+            0,
+        )?
+    };
+    Ok(())
+}
+
+/// Write 32-bit value to I/O port
+///
+/// Requires PCI_ACCESS right on the token.
+pub fn port_out32(pci_token: usize, port: u16, value: u32) -> Result<()> {
+    unsafe {
+        invoke(
+            pci_token,
+            InvokeOp::PortOut32,
+            port as usize,
+            value as usize,
+            0,
+            0,
+        )?
+    };
+    Ok(())
+}
+
 //
 // ═══════════════════════════════════════════════════════════════════════════
 // Debug Syscall
@@ -836,10 +919,21 @@ pub fn debug_print(message: &str) -> Result<()> {
 
 /// Exit the current thread
 ///
-/// Sends an exit notification to the parent manager and yields forever.
+/// Sends an exit notification to the parent manager and blocks forever.
 pub fn thread_exit(code: i32) -> ! {
     let _ = debug_print("Thread exiting");
     let _ = crate::ipc::notify_exit(code);
+
+    // Block forever waiting for procmgr to destroy us
+    let info = crate::boot::process_info();
+    let proc_cap = info.tokens[crate::boot::TOKEN_PROC_CAP];
+    if proc_cap != 0 {
+        if let Ok(ep) = endpoint_create(proc_cap) {
+            let mut buf = [0u8; 64];
+            let _ = ipc_recv(ep, &mut buf);
+        }
+    }
+    // Fallback: yield loop
     loop {
         let _ = yield_cpu();
     }
