@@ -741,12 +741,16 @@ impl BuiltinCommand for CatBuiltin {
             return Ok(());
         }
 
-        // Read using grant - allocate address from vspace manager
+        // Read using grant with streaming/chunked reads
         let info = process_info();
         let space_token = info.tokens[TOKEN_SPACE];
 
-        // Allocate virtual address region for the grant
-        let grant_size = (file.size + 4095) & !4095; // Page-align
+        // Use 1MB chunks for streaming (works for files of any size)
+        const CHUNK_SIZE: usize = 1024 * 1024;
+        let chunk_size = CHUNK_SIZE.min(file.size);
+        let grant_size = (chunk_size + 4095) & !4095; // Page-align
+
+        // Allocate virtual address region for chunks
         let read_buf_base = match libcluu::vspace::VSPACE.lock().alloc(grant_size) {
             Ok(addr) => addr,
             Err(_) => {
@@ -756,54 +760,44 @@ impl BuiltinCommand for CatBuiltin {
             }
         };
 
-        match vfs.read_grant(file, 0, file.size, space_token, read_buf_base) {
-            Ok(grant) => {
-                let addr = grant.base + grant.offset;
-                let _ = debug_print(&format!("cat: grant addr={:#x} len={}", addr, grant.len));
-                let data = unsafe {
-                    core::slice::from_raw_parts(addr as *const u8, grant.len)
-                };
-                // Show first 8 bytes for debugging
-                let preview: alloc::vec::Vec<u8> = data.iter().take(8).copied().collect();
-                let _ = debug_print(&format!("cat: first 8 bytes = {:02x?}", preview.as_slice()));
+        // Stream the file in chunks
+        let mut offset = 0;
+        let mut last_char = None;
+        while offset < file.size {
+            let remaining = file.size - offset;
+            let read_size = remaining.min(CHUNK_SIZE);
 
-                // For large files, test page accessibility and show info
-                if grant.len > 4096 {
-                    let msg = format!("cat: file is {} bytes, testing page access...\n", grant.len);
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes());
+            match vfs.read_grant(file, offset, read_size, space_token, read_buf_base) {
+                Ok(grant) => {
+                    let addr = grant.base + grant.offset;
+                    let data = unsafe {
+                        core::slice::from_raw_parts(addr as *const u8, grant.len)
+                    };
 
-                    // Test reading one byte from each page
-                    let page_size = 4096usize;
-                    let num_pages = (grant.len + page_size - 1) / page_size;
-                    for i in 0..num_pages {
-                        let offset = i * page_size;
-                        if offset < grant.len {
-                            let _ = data[offset]; // Touch the page
-                        }
-                        if i % 100 == 0 {
-                            let _ = debug_print(&format!("cat: tested page {}/{}", i, num_pages));
-                        }
-                    }
-                    let _ = debug_print(&format!("cat: all {} pages accessible!", num_pages));
-
-                    // Show hex dump of first 64 bytes
-                    let hex_preview: alloc::vec::Vec<u8> = data.iter().take(64).copied().collect();
-                    let hex_str = format!("First 64 bytes: {:02x?}\n", hex_preview.as_slice());
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, hex_str.as_bytes());
-                } else {
-                    // Print small files in chunks
+                    // Output the chunk
                     for chunk in data.chunks(256) {
                         let _ = send_with_payload(stdout, TTY_WRITE_LABEL, chunk);
                     }
+
+                    // Remember last character for newline check
+                    if !data.is_empty() {
+                        last_char = Some(data[data.len() - 1]);
+                    }
+
+                    offset += grant.len;
                 }
-                // Add newline if file doesn't end with one
-                if !data.is_empty() && data[data.len() - 1] != b'\n' {
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"\n");
+                Err(e) => {
+                    let msg = format!("cat: read error at offset {}: {:?}\n", offset, e);
+                    send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
+                    break;
                 }
             }
-            Err(e) => {
-                let msg = format!("cat: read error: {:?}\n", e);
-                send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
+        }
+
+        // Add newline if file doesn't end with one
+        if let Some(ch) = last_char {
+            if ch != b'\n' {
+                let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"\n");
             }
         }
 
