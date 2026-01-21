@@ -451,6 +451,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::PortOut8 => invoke_port_out8(&token, args),
         InvokeOp::PortOut16 => invoke_port_out16(&token, args),
         InvokeOp::PortOut32 => invoke_port_out32(&token, args),
+        InvokeOp::VirtToPhys => invoke_virt_to_phys(&token, args),
     }
 }
 
@@ -1552,6 +1553,49 @@ fn invoke_port_out32(token: &Token, args: SyscallArgs) -> SyscallResult {
         p.write(value);
     }
     Ok(0)
+}
+
+/// Translate virtual address to physical address for DMA
+///
+/// # Arguments
+/// - token: Space token (requires SPACE_MAP right)
+/// - arg3: Virtual address to translate
+///
+/// # Returns
+/// - Ok(phys_addr): Physical address, or 0 if not mapped
+fn invoke_virt_to_phys(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::elf::translate_vaddr;
+    use crate::mm::space_repository;
+    use crate::token::{ObjectRef, ObjectType, Rights};
+    use x86_64::{PhysAddr, VirtAddr};
+
+    if !token.has_right(Rights::SPACE_MAP) {
+        klibcluu::warn("invoke_virt_to_phys: missing SPACE_MAP right");
+        return Err(Error::PermissionDenied);
+    }
+
+    // Get the space ID from the token
+    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        klibcluu::warn("invoke_virt_to_phys: token not a space");
+        return Err(Error::InvalidArgument);
+    };
+
+    let virt_addr = VirtAddr::new(args.arg3 as u64);
+
+    // Get the page table root and translate
+    let phys_addr = space_repository::with_space(space_id, |space| {
+        translate_vaddr(space.page_table_root, virt_addr)
+    });
+
+    match phys_addr {
+        Some(Some(phys)) => Ok(phys.as_u64() as usize),
+        _ => Ok(0), // Not mapped, return 0
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

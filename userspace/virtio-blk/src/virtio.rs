@@ -307,16 +307,31 @@ impl VirtioBlkDevice {
         let vq_bytes = Virtqueue::size_bytes(queue_size);
         let vq_pages = vq_bytes.div_ceil(4096);
 
-        // Map pages for virtqueue (zero-filled)
-        for i in 0..vq_pages {
+        // We also need memory for request headers/data at offset 0x10000
+        // Map at least 32 pages (128KB) to cover virtqueue + request buffer area
+        let total_pages = vq_pages.max(32);
+
+        // Map pages for virtqueue and request buffers (zero-filled)
+        for i in 0..total_pages {
             let virt = VIRTQUEUE_BASE + i * 4096;
             space_map(self.space_token, virt, 0, 0x03, 0)?; // read+write, zero-fill
         }
 
         self.vq_mem = VIRTQUEUE_BASE;
 
-        // Create the virtqueue
-        let vq = unsafe { Virtqueue::new(queue_size, VIRTQUEUE_BASE, VIRTQUEUE_BASE as u64) };
+        // Translate virtual address to physical for DMA
+        let vq_phys = libcluu::syscall::virt_to_phys(self.space_token, VIRTQUEUE_BASE)?;
+        if vq_phys == 0 {
+            return Err(Error::InvalidState);
+        }
+
+        libcluu::debug_print(&alloc::format!(
+            "virtio-blk: virtqueue virt={:#x} phys={:#x}",
+            VIRTQUEUE_BASE, vq_phys
+        ))?;
+
+        // Create the virtqueue with physical addresses
+        let vq = unsafe { Virtqueue::new(queue_size, VIRTQUEUE_BASE, vq_phys) };
 
         // Configure the queue in the device
         self.configure_queue(&vq)?;
@@ -515,18 +530,30 @@ impl VirtioBlkDevice {
             let status_addr = header_addr + core::mem::size_of::<VirtioBlkReqHeader>();
             let data_addr = status_addr + 8; // Leave room for status
 
+            // Translate virtual addresses to physical for DMA
+            let header_phys = libcluu::syscall::virt_to_phys(self.space_token, header_addr)?;
+            let data_phys = libcluu::syscall::virt_to_phys(self.space_token, data_addr)?;
+            let status_phys = libcluu::syscall::virt_to_phys(self.space_token, status_addr)?;
+
+            if header_phys == 0 || data_phys == 0 || status_phys == 0 {
+                vq.free_desc(desc_head);
+                vq.free_desc(desc_data);
+                vq.free_desc(desc_status);
+                return Err(Error::InvalidState);
+            }
+
             // Copy header to device-accessible memory
             unsafe {
                 (header_addr as *mut VirtioBlkReqHeader).write(header);
             }
 
-            // Setup descriptor chain
+            // Setup descriptor chain with physical addresses
             unsafe {
                 let descs = vq.desc_ptr();
 
                 // Descriptor 0: header (device reads)
                 (*descs.add(desc_head as usize)) = VirtqDesc {
-                    addr: header_addr as u64,
+                    addr: header_phys,
                     len: core::mem::size_of::<VirtioBlkReqHeader>() as u32,
                     flags: VIRTQ_DESC_F_NEXT,
                     next: desc_data,
@@ -545,7 +572,7 @@ impl VirtioBlkDevice {
                 }
 
                 (*descs.add(desc_data as usize)) = VirtqDesc {
-                    addr: data_addr as u64,
+                    addr: data_phys,
                     len: buf.len() as u32,
                     flags: data_flags,
                     next: desc_status,
@@ -554,7 +581,7 @@ impl VirtioBlkDevice {
                 // Descriptor 2: status (device writes)
                 *(status_addr as *mut u8) = 0xFF; // Initialize to invalid status
                 (*descs.add(desc_status as usize)) = VirtqDesc {
-                    addr: status_addr as u64,
+                    addr: status_phys,
                     len: 1,
                     flags: VIRTQ_DESC_F_WRITE,
                     next: 0,

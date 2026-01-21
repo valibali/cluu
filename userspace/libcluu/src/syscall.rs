@@ -78,6 +78,9 @@ pub enum InvokeOp {
     PortOut8 = 55,
     PortOut16 = 56,
     PortOut32 = 57,
+
+    // Memory translation
+    VirtToPhys = 58,
 }
 
 /// Page mapping flags for space_map.
@@ -874,6 +877,15 @@ pub fn port_out32(pci_token: usize, port: u16, value: u32) -> Result<()> {
         )?
     };
     Ok(())
+}
+
+/// Translate virtual address to physical address for DMA operations.
+///
+/// Requires a space token with SPACE_MAP right.
+/// Returns the physical address, or 0 if the virtual address is not mapped.
+pub fn virt_to_phys(space_token: usize, virt_addr: usize) -> Result<u64> {
+    let phys = unsafe { invoke(space_token, InvokeOp::VirtToPhys, virt_addr, 0, 0, 0)? };
+    Ok(phys as u64)
 }
 
 //

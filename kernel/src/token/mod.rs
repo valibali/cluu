@@ -379,6 +379,9 @@ pub enum InvokeOp {
     PortOut8 = 55,
     PortOut16 = 56,
     PortOut32 = 57,
+
+    // Memory translation
+    VirtToPhys = 58,
 }
 
 impl InvokeOp {
@@ -408,6 +411,7 @@ impl InvokeOp {
             55 => Some(Self::PortOut8),
             56 => Some(Self::PortOut16),
             57 => Some(Self::PortOut32),
+            58 => Some(Self::VirtToPhys),
             _ => None,
         }
     }
