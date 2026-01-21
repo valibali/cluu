@@ -6,8 +6,10 @@
 
 use crate::pci::{self, PciDevice};
 use crate::virtqueue::{VirtqDesc, Virtqueue, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
+use alloc::boxed::Box;
 use alloc::vec;
 use core::sync::atomic::{fence, Ordering};
+use libcluu::device_io::{DeviceIo, MmioRegion, PortIoRegion};
 use libcluu::syscall::{space_map, MAP_DEVICE};
 use libcluu::{Error, Result};
 
@@ -89,7 +91,9 @@ pub struct VirtioBlkDevice {
     space_token: usize,
     pci_device: PciDevice,
 
-    /// MMIO base address (virtual)
+    /// Device register I/O (MMIO or I/O ports)
+    device_io: Box<dyn DeviceIo>,
+    /// MMIO base address (used for modern virtio direct access and I/O port base)
     mmio_base: usize,
     /// Common config MMIO base (for modern devices)
     common_cfg: usize,
@@ -116,10 +120,14 @@ pub struct VirtioBlkDevice {
 impl VirtioBlkDevice {
     /// Create and initialize a new virtio-blk device.
     pub fn new(pci_token: usize, space_token: usize, pci_device: PciDevice) -> Result<Self> {
+        // Create temporary DeviceIo - will be replaced in map_mmio()
+        let temp_io: Box<dyn DeviceIo> = Box::new(MmioRegion::new(0));
+
         let mut dev = Self {
             pci_token,
             space_token,
             pci_device: pci_device.clone(),
+            device_io: temp_io,
             mmio_base: 0,
             common_cfg: 0,
             notify_base: 0,
@@ -146,15 +154,21 @@ impl VirtioBlkDevice {
 
         // Reset device
         self.write_status(0);
+        libcluu::debug_print("virtio-blk: device reset")?;
 
         // Set ACKNOWLEDGE status
         self.write_status(VIRTIO_STATUS_ACKNOWLEDGE);
+        let status_ack = self.read_status();
+        libcluu::debug_print(&alloc::format!("virtio-blk: ACKNOWLEDGE status={:#x}", status_ack))?;
 
         // Set DRIVER status
         self.write_status(VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+        let status_drv = self.read_status();
+        libcluu::debug_print(&alloc::format!("virtio-blk: DRIVER status={:#x}", status_drv))?;
 
         // Negotiate features
         let features = self.negotiate_features()?;
+        libcluu::debug_print(&alloc::format!("virtio-blk: negotiated features={:#x}", features))?;
 
         // Set FEATURES_OK
         self.write_status(
@@ -163,7 +177,9 @@ impl VirtioBlkDevice {
 
         // Verify FEATURES_OK was accepted
         let status = self.read_status();
+        libcluu::debug_print(&alloc::format!("virtio-blk: FEATURES_OK status={:#x}", status))?;
         if status & VIRTIO_STATUS_FEATURES_OK == 0 {
+            libcluu::debug_print("virtio-blk: device rejected FEATURES_OK")?;
             self.write_status(VIRTIO_STATUS_FAILED);
             return Err(Error::InvalidState);
         }
@@ -191,10 +207,19 @@ impl VirtioBlkDevice {
         Ok(())
     }
 
-    /// Map the device MMIO regions.
+    /// Map the device MMIO regions (or just store I/O port base for legacy).
     fn map_mmio(&mut self) -> Result<()> {
         let bar0_phys = self.pci_device.bar0 as u64;
         let bar0_size = self.pci_device.bar0_size as usize;
+
+        // For I/O port BARs, create PortIoRegion
+        if self.pci_device.is_io_bar {
+            let port_base = (bar0_phys & 0xFFFC) as u16;
+            self.mmio_base = port_base as usize;
+            self.device_io = Box::new(PortIoRegion::new(port_base, self.pci_token));
+            libcluu::debug_print(&alloc::format!("virtio-blk: using I/O ports at {:#x}", port_base))?;
+            return Ok(());
+        }
 
         // Use a fixed virtual address for device MMIO
         let mmio_virt = 0x40000000usize;
@@ -214,6 +239,7 @@ impl VirtioBlkDevice {
         }
 
         self.mmio_base = mmio_virt;
+        self.device_io = Box::new(MmioRegion::new(mmio_virt));
 
         if self.is_modern && self.pci_device.common_cfg_bar == 0 {
             self.common_cfg = mmio_virt + self.pci_device.common_cfg_offset as usize;
@@ -227,6 +253,7 @@ impl VirtioBlkDevice {
     /// Negotiate device features.
     fn negotiate_features(&mut self) -> Result<u64> {
         let device_features = self.read_device_features();
+        libcluu::debug_print(&alloc::format!("virtio-blk: device features={:#x}", device_features))?;
 
         // Select features we support
         let mut driver_features = 0u64;
@@ -243,6 +270,7 @@ impl VirtioBlkDevice {
             self.read_only = true;
         }
 
+        libcluu::debug_print(&alloc::format!("virtio-blk: driver features={:#x}", driver_features))?;
         self.write_driver_features(driver_features);
 
         Ok(driver_features)
@@ -325,50 +353,44 @@ impl VirtioBlkDevice {
         } else {
             // Legacy virtio: set PFN (page frame number)
             let pfn = (vq.desc_phys / 4096) as u32;
-            unsafe {
-                let base = self.mmio_base as *mut u8;
-                (base.add(legacy::QUEUE_ADDRESS as usize) as *mut u32).write_volatile(pfn);
-            }
+            self.device_io.write_u32(legacy::QUEUE_ADDRESS as u16, pfn);
         }
 
         Ok(())
     }
 
     // =========================================================================
-    // Low-level register access
+    // Device register access
     // =========================================================================
 
     fn read_status(&self) -> u8 {
-        unsafe {
-            if self.is_modern {
+        if self.is_modern {
+            unsafe {
                 let common = self.common_cfg as *const u8;
                 common.add(modern::DEVICE_STATUS as usize).read_volatile()
-            } else {
-                let base = self.mmio_base as *const u8;
-                base.add(legacy::DEVICE_STATUS as usize).read_volatile()
             }
+        } else {
+            self.device_io.read_u8(legacy::DEVICE_STATUS as u16)
         }
     }
 
     fn write_status(&self, status: u8) {
-        unsafe {
-            if self.is_modern {
+        if self.is_modern {
+            unsafe {
                 let common = self.common_cfg as *mut u8;
                 common
                     .add(modern::DEVICE_STATUS as usize)
                     .write_volatile(status);
-            } else {
-                let base = self.mmio_base as *mut u8;
-                base.add(legacy::DEVICE_STATUS as usize)
-                    .write_volatile(status);
             }
+            fence(Ordering::SeqCst);
+        } else {
+            self.device_io.write_u8(legacy::DEVICE_STATUS as u16, status);
         }
-        fence(Ordering::SeqCst);
     }
 
     fn read_device_features(&self) -> u64 {
-        unsafe {
-            if self.is_modern {
+        if self.is_modern {
+            unsafe {
                 let common = self.common_cfg as *mut u8;
                 // Select feature set 0 (bits 0-31)
                 (common.add(modern::DEVICE_FEATURE_SELECT as usize) as *mut u32).write_volatile(0);
@@ -381,16 +403,15 @@ impl VirtioBlkDevice {
                 let hi =
                     (common.add(modern::DEVICE_FEATURE as usize) as *const u32).read_volatile();
                 (hi as u64) << 32 | (lo as u64)
-            } else {
-                let base = self.mmio_base as *const u8;
-                (base.add(legacy::DEVICE_FEATURES as usize) as *const u32).read_volatile() as u64
             }
+        } else {
+            self.device_io.read_u32(legacy::DEVICE_FEATURES as u16) as u64
         }
     }
 
     fn write_driver_features(&self, features: u64) {
-        unsafe {
-            if self.is_modern {
+        if self.is_modern {
+            unsafe {
                 let common = self.common_cfg as *mut u8;
                 // Select feature set 0 (bits 0-31)
                 (common.add(modern::DRIVER_FEATURE_SELECT as usize) as *mut u32).write_volatile(0);
@@ -402,56 +423,51 @@ impl VirtioBlkDevice {
                 fence(Ordering::SeqCst);
                 (common.add(modern::DRIVER_FEATURE as usize) as *mut u32)
                     .write_volatile((features >> 32) as u32);
-            } else {
-                let base = self.mmio_base as *mut u8;
-                (base.add(legacy::GUEST_FEATURES as usize) as *mut u32)
-                    .write_volatile(features as u32);
             }
+            fence(Ordering::SeqCst);
+        } else {
+            self.device_io.write_u32(legacy::GUEST_FEATURES as u16, features as u32);
         }
-        fence(Ordering::SeqCst);
     }
 
     fn select_queue(&self, queue_num: u16) {
-        unsafe {
-            if self.is_modern {
+        if self.is_modern {
+            unsafe {
                 let common = self.common_cfg as *mut u8;
                 (common.add(modern::QUEUE_SELECT as usize) as *mut u16).write_volatile(queue_num);
-            } else {
-                let base = self.mmio_base as *mut u8;
-                (base.add(legacy::QUEUE_SELECT as usize) as *mut u16).write_volatile(queue_num);
             }
+            fence(Ordering::SeqCst);
+        } else {
+            self.device_io.write_u16(legacy::QUEUE_SELECT as u16, queue_num);
         }
-        fence(Ordering::SeqCst);
     }
 
     fn read_queue_size(&self) -> u16 {
-        unsafe {
-            if self.is_modern {
+        if self.is_modern {
+            unsafe {
                 let common = self.common_cfg as *const u8;
                 (common.add(modern::QUEUE_SIZE as usize) as *const u16).read_volatile()
-            } else {
-                let base = self.mmio_base as *const u8;
-                (base.add(legacy::QUEUE_SIZE as usize) as *const u16).read_volatile()
             }
+        } else {
+            self.device_io.read_u16(legacy::QUEUE_SIZE as u16)
         }
     }
 
     fn read_device_config_u32(&self, offset: usize) -> u32 {
-        unsafe {
-            if self.is_modern {
+        if self.is_modern {
+            unsafe {
                 let device = self.device_cfg as *const u8;
                 (device.add(offset) as *const u32).read_volatile()
-            } else {
-                let base = self.mmio_base as *const u8;
-                (base.add(legacy::CONFIG_OFFSET as usize + offset) as *const u32).read_volatile()
             }
+        } else {
+            self.device_io.read_u32((legacy::CONFIG_OFFSET + offset as u32) as u16)
         }
     }
 
     fn notify_queue(&self, queue_num: u16) {
         fence(Ordering::SeqCst);
-        unsafe {
-            if self.is_modern {
+        if self.is_modern {
+            unsafe {
                 // Modern: notify via notify_base + queue_notify_off * notify_off_multiplier
                 let notify_off = {
                     let common = self.common_cfg as *const u8;
@@ -460,10 +476,9 @@ impl VirtioBlkDevice {
                 let offset = notify_off as u32 * self.pci_device.notify_off_multiplier;
                 let notify_addr = self.notify_base + offset as usize;
                 (notify_addr as *mut u16).write_volatile(queue_num);
-            } else {
-                let base = self.mmio_base as *mut u8;
-                (base.add(legacy::QUEUE_NOTIFY as usize) as *mut u16).write_volatile(queue_num);
             }
+        } else {
+            self.device_io.write_u16(legacy::QUEUE_NOTIFY as u16, queue_num);
         }
         fence(Ordering::SeqCst);
     }
@@ -474,101 +489,87 @@ impl VirtioBlkDevice {
 
     /// Perform a block I/O request.
     fn do_request(&mut self, req_type: u32, sector: u64, buf: &mut [u8]) -> Result<usize> {
-        // Cache values needed for notify before taking mutable borrow of vq
-        let is_modern = self.is_modern;
-        let mmio_base = self.mmio_base;
-        let common_cfg = self.common_cfg;
-        let notify_base = self.notify_base;
-        let notify_off_multiplier = self.pci_device.notify_off_multiplier;
+        let desc_head;
+        let desc_data;
+        let desc_status;
 
-        let vq = self.vq.as_mut().ok_or(Error::InvalidState)?;
+        // Allocate descriptors and setup the request
+        {
+            let vq = self.vq.as_mut().ok_or(Error::InvalidState)?;
 
-        // We need 3 descriptors: header, data, status
-        let desc_head = vq.alloc_desc().ok_or(Error::OutOfMemory)?;
-        let desc_data = vq.alloc_desc().ok_or(Error::OutOfMemory)?;
-        let desc_status = vq.alloc_desc().ok_or(Error::OutOfMemory)?;
+            // We need 3 descriptors: header, data, status
+            desc_head = vq.alloc_desc().ok_or(Error::OutOfMemory)?;
+            desc_data = vq.alloc_desc().ok_or(Error::OutOfMemory)?;
+            desc_status = vq.alloc_desc().ok_or(Error::OutOfMemory)?;
 
-        // Build request header
-        let header = VirtioBlkReqHeader {
-            req_type,
-            reserved: 0,
-            sector,
-        };
-
-        // We need to place the header in memory accessible to the device
-        // For simplicity, use a fixed location after virtqueue memory
-        let header_addr = self.vq_mem + 0x10000;
-        let status_addr = header_addr + core::mem::size_of::<VirtioBlkReqHeader>();
-        let data_addr = status_addr + 8; // Leave room for status
-
-        // Copy header to device-accessible memory
-        unsafe {
-            (header_addr as *mut VirtioBlkReqHeader).write(header);
-        }
-
-        // Setup descriptor chain
-        unsafe {
-            let descs = vq.desc_ptr();
-
-            // Descriptor 0: header (device reads)
-            (*descs.add(desc_head as usize)) = VirtqDesc {
-                addr: header_addr as u64,
-                len: core::mem::size_of::<VirtioBlkReqHeader>() as u32,
-                flags: VIRTQ_DESC_F_NEXT,
-                next: desc_data,
+            // Build request header
+            let header = VirtioBlkReqHeader {
+                req_type,
+                reserved: 0,
+                sector,
             };
 
-            // Descriptor 1: data buffer
-            let data_flags = if req_type == VIRTIO_BLK_T_IN {
-                VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE // Device writes (read request)
-            } else {
-                VIRTQ_DESC_F_NEXT // Device reads (write request)
-            };
+            // We need to place the header in memory accessible to the device
+            // For simplicity, use a fixed location after virtqueue memory
+            let header_addr = self.vq_mem + 0x10000;
+            let status_addr = header_addr + core::mem::size_of::<VirtioBlkReqHeader>();
+            let data_addr = status_addr + 8; // Leave room for status
 
-            // For reads, device writes to buffer. For writes, copy data first.
-            if req_type == VIRTIO_BLK_T_OUT {
-                core::ptr::copy_nonoverlapping(buf.as_ptr(), data_addr as *mut u8, buf.len());
+            // Copy header to device-accessible memory
+            unsafe {
+                (header_addr as *mut VirtioBlkReqHeader).write(header);
             }
 
-            (*descs.add(desc_data as usize)) = VirtqDesc {
-                addr: data_addr as u64,
-                len: buf.len() as u32,
-                flags: data_flags,
-                next: desc_status,
-            };
+            // Setup descriptor chain
+            unsafe {
+                let descs = vq.desc_ptr();
 
-            // Descriptor 2: status (device writes)
-            *(status_addr as *mut u8) = 0xFF; // Initialize to invalid status
-            (*descs.add(desc_status as usize)) = VirtqDesc {
-                addr: status_addr as u64,
-                len: 1,
-                flags: VIRTQ_DESC_F_WRITE,
-                next: 0,
-            };
-        }
-
-        // Add to available ring
-        vq.add_to_avail(desc_head);
-
-        // Notify device (inline to avoid borrow conflict)
-        fence(Ordering::SeqCst);
-        unsafe {
-            if is_modern {
-                let notify_off = {
-                    let common = common_cfg as *const u8;
-                    (common.add(modern::QUEUE_NOTIFY_OFF as usize) as *const u16).read_volatile()
+                // Descriptor 0: header (device reads)
+                (*descs.add(desc_head as usize)) = VirtqDesc {
+                    addr: header_addr as u64,
+                    len: core::mem::size_of::<VirtioBlkReqHeader>() as u32,
+                    flags: VIRTQ_DESC_F_NEXT,
+                    next: desc_data,
                 };
-                let offset = notify_off as u32 * notify_off_multiplier;
-                let notify_addr = notify_base + offset as usize;
-                (notify_addr as *mut u16).write_volatile(0);
-            } else {
-                let base = mmio_base as *mut u8;
-                (base.add(legacy::QUEUE_NOTIFY as usize) as *mut u16).write_volatile(0);
-            }
-        }
-        fence(Ordering::SeqCst);
 
-        // Wait for completion (polling)
+                // Descriptor 1: data buffer
+                let data_flags = if req_type == VIRTIO_BLK_T_IN {
+                    VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE // Device writes (read request)
+                } else {
+                    VIRTQ_DESC_F_NEXT // Device reads (write request)
+                };
+
+                // For reads, device writes to buffer. For writes, copy data first.
+                if req_type == VIRTIO_BLK_T_OUT {
+                    core::ptr::copy_nonoverlapping(buf.as_ptr(), data_addr as *mut u8, buf.len());
+                }
+
+                (*descs.add(desc_data as usize)) = VirtqDesc {
+                    addr: data_addr as u64,
+                    len: buf.len() as u32,
+                    flags: data_flags,
+                    next: desc_status,
+                };
+
+                // Descriptor 2: status (device writes)
+                *(status_addr as *mut u8) = 0xFF; // Initialize to invalid status
+                (*descs.add(desc_status as usize)) = VirtqDesc {
+                    addr: status_addr as u64,
+                    len: 1,
+                    flags: VIRTQ_DESC_F_WRITE,
+                    next: 0,
+                };
+            }
+
+            // Add to available ring
+            vq.add_to_avail(desc_head);
+        } // Release vq borrow
+
+        // Notify device
+        self.notify_queue(0);
+
+        // Wait for completion and process result
+        let vq = self.vq.as_mut().ok_or(Error::InvalidState)?;
         let mut timeout = 1_000_000u32;
         while !vq.has_used() && timeout > 0 {
             timeout -= 1;
@@ -584,6 +585,9 @@ impl VirtioBlkDevice {
         let (used_head, _used_len) = vq.pop_used().ok_or(Error::InvalidState)?;
 
         // Check status
+        let header_addr = self.vq_mem + 0x10000;
+        let status_addr = header_addr + core::mem::size_of::<VirtioBlkReqHeader>();
+        let data_addr = status_addr + 8;
         let status = unsafe { *(status_addr as *const u8) };
         let result = if status == VIRTIO_BLK_S_OK {
             // For reads, copy data from device buffer

@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+use libcluu::pci;
 use libcluu::syscall::{pci_config_read, pci_config_write};
 use libcluu::{Error, Result};
 
@@ -14,10 +15,9 @@ const VIRTIO_BLK_DEVICE_ID_LEGACY: u16 = 0x1001; // Transitional device
 const VIRTIO_BLK_DEVICE_ID_MODERN: u16 = 0x1042; // Non-transitional (1.0+)
 
 /// PCI configuration space offsets (byte offsets; reads are 32-bit aligned in pci_config_read)
-const PCI_VENDOR_DEVICE_DWORD: u8 = 0x00;
-const PCI_COMMAND_STATUS_DWORD: u8 = 0x04;
 const PCI_BAR0: u8 = 0x10;
 const PCI_CAP_PTR: u8 = 0x34;
+const PCI_COMMAND_STATUS: u8 = 0x04;
 
 /// PCI capability IDs
 const PCI_CAP_ID_VENDOR: u8 = 0x09;
@@ -40,6 +40,8 @@ pub struct PciDevice {
     /// BAR0 base (masked address)
     pub bar0: u32,
     pub bar0_size: u32,
+    /// True if BAR0 is I/O port (not MMIO)
+    pub is_io_bar: bool,
 
     /// Offset of common config capability in BAR
     pub common_cfg_offset: u32,
@@ -73,7 +75,7 @@ pub fn find_virtio_blk(pci_token: usize) -> Result<PciDevice> {
     for bus in 0..8u8 {
         for device in 0..32u8 {
             for function in 0..8u8 {
-                let ids = probe_ids(pci_token, bus, device, function);
+                let ids = pci::read_ids(pci_token, bus, device, function);
                 if let Ok((vendor_id, device_id)) = ids {
                     let _ = libcluu::debug_print(&alloc::format!(
                         "pci: {:02x}:{:02x}.{} vendor={:04x} device={:04x}",
@@ -100,19 +102,6 @@ pub fn find_virtio_blk(pci_token: usize) -> Result<PciDevice> {
     Err(Error::NotFound)
 }
 
-/// Read-only probe: returns (vendor_id, device_id) if a function exists.
-fn probe_ids(pci_token: usize, bus: u8, device: u8, function: u8) -> Result<(u16, u16)> {
-    let vendor_device = pci_config_read(pci_token, bus, device, function, PCI_VENDOR_DEVICE_DWORD)?;
-
-    let vendor_id = (vendor_device & 0xFFFF) as u16;
-    if vendor_id == 0xFFFF {
-        return Err(Error::NotFound);
-    }
-    let device_id = ((vendor_device >> 16) & 0xFFFF) as u16;
-
-    Ok((vendor_id, device_id))
-}
-
 /// Full initialization once we know the function is the device we want.
 /// Safe to read BARs, size them, and parse virtio caps here.
 fn init_device(
@@ -124,18 +113,15 @@ fn init_device(
     device_id: u16,
 ) -> Result<PciDevice> {
     // Read BAR0 (raw)
-    let bar0_raw = pci_config_read(pci_token, bus, device, function, PCI_BAR0)?;
+    let bar0_raw = pci::config_read_u32(pci_token, bus, device, function, PCI_BAR0)?;
 
-    // Mask BAR0 to address base
-    let is_mmio = (bar0_raw & 1) == 0;
-    let bar0_addr = if is_mmio {
-        bar0_raw & 0xFFFF_FFF0
-    } else {
-        bar0_raw & 0xFFFF_FFFC
-    };
+    // Parse BAR0 to get address and type
+    let bar_info = pci::parse_bar(bar0_raw).ok_or(Error::InvalidState)?;
+    let bar0_addr = bar_info.address;
+    let is_mmio = !bar_info.is_io;
 
     // Determine BAR0 size by writing all 1s and reading back (only for the matched device)
-    let bar0_size = determine_bar_size(pci_token, bus, device, function, PCI_BAR0, bar0_raw)?;
+    let bar0_size = pci::measure_bar_size(pci_token, bus, device, function, PCI_BAR0, bar0_raw)?;
 
     let is_modern = device_id == VIRTIO_BLK_DEVICE_ID_MODERN;
 
@@ -147,6 +133,7 @@ fn init_device(
         device_id,
         bar0: bar0_addr,
         bar0_size,
+        is_io_bar: !is_mmio,
         common_cfg_offset: 0,
         common_cfg_bar: 0,
         notify_cfg_offset: 0,
@@ -167,43 +154,6 @@ fn init_device(
     Ok(dev)
 }
 
-/// Determine the size of a BAR by writing all 1s and reading back.
-///
-/// WARNING: This should only be used after you've identified the target device.
-/// Do not do this during broad PCI enumeration.
-fn determine_bar_size(
-    pci_token: usize,
-    bus: u8,
-    device: u8,
-    function: u8,
-    bar_offset: u8,
-    original: u32,
-) -> Result<u32> {
-    // Write all 1s
-    pci_config_write(pci_token, bus, device, function, bar_offset, 0xFFFF_FFFF)?;
-
-    // Read back
-    let size_mask = pci_config_read(pci_token, bus, device, function, bar_offset)?;
-
-    // Restore original value
-    pci_config_write(pci_token, bus, device, function, bar_offset, original)?;
-
-    // Calculate size from mask
-    let is_mmio = (original & 1) == 0;
-    let mask = if is_mmio {
-        size_mask & 0xFFFF_FFF0
-    } else {
-        size_mask & 0xFFFF_FFFC
-    };
-
-    if mask == 0 {
-        return Ok(0);
-    }
-
-    // Size is (~mask) + 1
-    Ok((!mask).wrapping_add(1))
-}
-
 /// Parse virtio PCI capability structures to find MMIO region offsets.
 fn parse_virtio_caps(pci_token: usize, dev: &mut PciDevice) -> Result<()> {
     // Status bit 4 (Capabilities List) is in the upper 16 bits of the dword at 0x04.
@@ -212,7 +162,7 @@ fn parse_virtio_caps(pci_token: usize, dev: &mut PciDevice) -> Result<()> {
         dev.bus,
         dev.device,
         dev.function,
-        PCI_COMMAND_STATUS_DWORD,
+        PCI_COMMAND_STATUS,
     )?;
     let status16 = (cmd_status >> 16) as u16;
     let has_caps = (status16 & 0x0010) != 0;
@@ -295,30 +245,8 @@ fn parse_virtio_cap(pci_token: usize, dev: &mut PciDevice, cap_offset: u8) -> Re
     Ok(())
 }
 
-/// Enable bus mastering and memory space access for a PCI device.
+/// Enable bus mastering and memory/IO space access for a PCI device.
 pub fn enable_device(pci_token: usize, dev: &PciDevice) -> Result<()> {
-    // Command is low 16 bits of dword at 0x04.
-    let cmd_status = pci_config_read(
-        pci_token,
-        dev.bus,
-        dev.device,
-        dev.function,
-        PCI_COMMAND_STATUS_DWORD,
-    )?;
-    let cmd16 = (cmd_status & 0xFFFF) as u16;
-
-    // Set bits: Memory Space Enable (bit1), Bus Master Enable (bit2)
-    let new_cmd16 = cmd16 | 0x0006;
-
-    // Write back the whole dword: preserve status (upper 16).
-    let new_cmd_status = (cmd_status & 0xFFFF_0000) | (new_cmd16 as u32);
-
-    pci_config_write(
-        pci_token,
-        dev.bus,
-        dev.device,
-        dev.function,
-        PCI_COMMAND_STATUS_DWORD,
-        new_cmd_status,
-    )
+    // Enable I/O space (for legacy I/O port devices), memory space (for MMIO), and bus mastering (for DMA)
+    pci::enable_device(pci_token, dev.bus, dev.device, dev.function, true, true, true)
 }
