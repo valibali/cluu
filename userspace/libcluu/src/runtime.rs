@@ -27,6 +27,18 @@ pub extern "C" fn _start() -> ! {
         let _ = debug_print("userspace: exiting with error");
     }
     let _ = notify_exit(exit_code);
+
+    // Block forever waiting for procmgr to destroy us
+    // Create a temporary endpoint to block on (prevents CPU consumption)
+    let info = crate::boot::process_info();
+    let proc_cap = info.tokens[crate::boot::TOKEN_PROC_CAP];
+    if proc_cap != 0 {
+        if let Ok(ep) = crate::syscall::endpoint_create(proc_cap) {
+            let mut buf = [0u8; 64];
+            let _ = crate::syscall::ipc_recv(ep, &mut buf);
+        }
+    }
+    // Fallback: yield loop (only if endpoint creation failed)
     loop {
         let _ = yield_cpu();
     }
@@ -40,6 +52,17 @@ pub extern "C" fn _start() -> ! {
 fn panic(_info: &PanicInfo) -> ! {
     let _ = debug_print("userspace: panic");
     let _ = notify_exit(-1);
+
+    // Block forever waiting for procmgr to destroy us
+    let info = crate::boot::process_info();
+    let proc_cap = info.tokens[crate::boot::TOKEN_PROC_CAP];
+    if proc_cap != 0 {
+        if let Ok(ep) = crate::syscall::endpoint_create(proc_cap) {
+            let mut buf = [0u8; 64];
+            let _ = crate::syscall::ipc_recv(ep, &mut buf);
+        }
+    }
+    // Fallback: yield loop
     loop {
         let _ = yield_cpu();
     }
