@@ -21,11 +21,13 @@ extern crate alloc;
 
 pub mod allocator;
 pub mod boot;
+pub mod device_io;
 pub mod elf;
 pub mod error;
 pub mod fs;
 pub mod ipc;
 pub mod mem;
+pub mod pci;
 pub mod process;
 pub mod registry;
 pub mod rights;
