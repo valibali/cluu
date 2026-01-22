@@ -4,7 +4,7 @@ use core::ptr;
 use spin::Mutex;
 
 /// Number of bytes reserved for the runtime heap.
-const HEAP_SIZE: usize = 128 * 1024;
+const HEAP_SIZE: usize = 512 * 1024;
 
 /// Align the heap to 4 KiB boundaries.
 #[allow(dead_code)]
@@ -271,10 +271,19 @@ pub fn stats() -> AllocStats {
 
 unsafe impl GlobalAlloc for LockedAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.inner.lock().alloc(layout)
+        if let Some(mut guard) = self.inner.try_lock() {
+            guard.alloc(layout)
+        } else {
+            // Avoid deadlock on re-entrant allocation; signal OOM to caller.
+            ptr::null_mut()
+        }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        self.inner.lock().dealloc(ptr)
+        if let Some(mut guard) = self.inner.try_lock() {
+            guard.dealloc(ptr)
+        } else {
+            // Avoid deadlock on re-entrant free; leak as a safe fallback.
+        }
     }
 }
