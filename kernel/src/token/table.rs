@@ -30,62 +30,53 @@
 use super::scope::ObjectRef;
 use super::{OpaqueScope, Token, TokenHandle};
 use alloc::collections::BTreeMap;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Token Table Structure
+// Token Table Structure - Sharded for Reduced Contention
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Global token table
+/// Number of shards for the token table
+/// More shards = less contention, but more memory overhead
+const NUM_SHARDS: usize = 16;
+
+/// Hash function for token handles to determine shard
+#[inline(always)]
+fn hash_handle(handle: TokenHandle) -> usize {
+    // Simple hash: use handle value modulo number of shards
+    // TokenHandle is usize, so we can use it directly
+    handle.as_usize() % NUM_SHARDS
+}
+
+/// Single shard of the token table
 ///
-/// Maintains bidirectional mappings:
-/// - TokenHandle → Token (for syscall validation)
-/// - OpaqueScope → ObjectRef (for resolving objects)
-struct TokenTableInner {
-    /// Map from handle to token
+/// Each shard contains a subset of tokens based on handle hash.
+/// This allows concurrent access to different tokens without contention.
+struct TokenTableShard {
+    /// Map from handle to token (only handles that hash to this shard)
     handles: BTreeMap<TokenHandle, Token>,
 
     /// Map from opaque scope to object reference
+    /// Note: Scopes are shared across shards, but lookups are rare
     scopes: BTreeMap<OpaqueScope, ObjectRef>,
-
-    /// Next handle to allocate
-    next_handle: usize,
-
-    /// Generation counter - increments on revocation to invalidate caches
-    /// Threads cache tokens with this generation; if it changes, cache is stale
-    revocation_generation: u64,
 }
 
-impl TokenTableInner {
+impl TokenTableShard {
     const fn new() -> Self {
         Self {
             handles: BTreeMap::new(),
             scopes: BTreeMap::new(),
-            next_handle: 1, // 0 is reserved as invalid handle
-            revocation_generation: 0,
         }
     }
 
-    /// Allocate a new token handle
-    fn alloc_handle(&mut self) -> TokenHandle {
-        let handle = TokenHandle::new(self.next_handle);
-        self.next_handle += 1;
-        handle
-    }
-
-    /// Insert a token and return its handle
-    ///
-    /// Also registers the scope → object mapping if not already present.
-    fn insert(&mut self, token: Token, object_ref: ObjectRef) -> TokenHandle {
-        let handle = self.alloc_handle();
-
+    /// Insert a token into this shard
+    fn insert(&mut self, handle: TokenHandle, token: Token, object_ref: ObjectRef) {
         // Register scope → object mapping
         self.scopes.insert(token.scope, object_ref);
 
         // Register handle → token mapping
         self.handles.insert(handle, token);
-
-        handle
     }
 
     /// Lookup a token by handle
@@ -93,54 +84,55 @@ impl TokenTableInner {
         self.handles.get(&handle)
     }
 
+    /// Remove a token by handle
+    fn remove(&mut self, handle: TokenHandle) -> Option<Token> {
+        self.handles.remove(&handle)
+    }
+
     /// Resolve opaque scope to object reference
     fn resolve_scope(&self, scope: &OpaqueScope) -> Option<ObjectRef> {
         self.scopes.get(scope).copied()
     }
 
-    /// Remove a token by handle
-    ///
-    /// Note: This doesn't remove the scope mapping, as the same scope
-    /// might be used in other tokens.
-    fn remove(&mut self, handle: TokenHandle) -> Option<Token> {
-        let removed = self.handles.remove(&handle);
-        if removed.is_some() {
-            // Increment generation to invalidate all thread-local caches
-            self.revocation_generation = self.revocation_generation.wrapping_add(1);
-        }
-        removed
-    }
-
-    /// Get current revocation generation (for cache validation)
-    fn revocation_generation(&self) -> u64 {
-        self.revocation_generation
-    }
-
-    /// Count total tokens
+    /// Count tokens in this shard
     fn count(&self) -> usize {
         self.handles.len()
     }
 
-    /// Count tokens for a specific object
+    /// Count tokens for a specific object in this shard
     fn count_for_object(&self, object_ref: ObjectRef) -> usize {
         self.handles
             .values()
             .filter(|token| {
-                self.scopes
-                    .get(&token.scope)
-                    .map(|obj| *obj == object_ref)
-                    .unwrap_or(false)
+                // Resolve scope to check if it matches object_ref
+                self.scopes.get(&token.scope).copied() == Some(object_ref)
             })
             .count()
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Global Token Table
+// Global Token Table - Sharded for Reduced Contention
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Global token table instance
-static TOKEN_TABLE: Mutex<TokenTableInner> = Mutex::new(TokenTableInner::new());
+/// Sharded token table - each shard has its own mutex
+/// This allows concurrent access to different tokens without contention
+/// Array is initialized with NUM_SHARDS copies of a new shard
+static TOKEN_TABLE_SHARDS: [Mutex<TokenTableShard>; NUM_SHARDS] =
+    [const { Mutex::new(TokenTableShard::new()) }; NUM_SHARDS];
+
+/// Global revocation generation counter (atomic for lock-free reads)
+/// Incremented when any token is revoked to invalidate all thread-local caches
+static REVOCATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Global handle allocator (atomic for lock-free allocation)
+static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1); // 0 is reserved as invalid handle
+
+/// Get the shard for a given handle
+#[inline(always)]
+fn get_shard(handle: TokenHandle) -> &'static Mutex<TokenTableShard> {
+    &TOKEN_TABLE_SHARDS[hash_handle(handle)]
+}
 
 /// Kernel secret for HMAC signatures
 ///
@@ -200,7 +192,14 @@ pub fn create_token(
     let secret = kernel_secret();
     let token = Token::new(scope, role, issuer, expire_at, &secret);
 
-    TOKEN_TABLE.lock().insert(token, object_ref)
+    // Allocate handle atomically (lock-free)
+    let handle = TokenHandle::new(NEXT_HANDLE.fetch_add(1, Ordering::SeqCst) as usize);
+
+    // Insert into appropriate shard
+    let shard = get_shard(handle);
+    shard.lock().insert(handle, token, object_ref);
+
+    handle
 }
 
 /// Lookup and validate a token (with thread-local caching)
@@ -231,7 +230,9 @@ pub fn lookup_token(handle: TokenHandle) -> Result<Token, &'static str> {
 
     // Cache miss or no current thread - do full lookup
     let (token, object_ref, generation) = {
-        let table = TOKEN_TABLE.lock();
+        // Lock only the shard for this handle
+        let shard = get_shard(handle);
+        let table = shard.lock();
 
         // Lookup token
         let token = table.get(handle).ok_or("Invalid token handle")?;
@@ -250,7 +251,7 @@ pub fn lookup_token(handle: TokenHandle) -> Result<Token, &'static str> {
 
         // Get object ref and generation for caching
         let object_ref = table.resolve_scope(&token.scope).ok_or("Unknown scope")?;
-        let generation = table.revocation_generation();
+        let generation = revocation_generation();
 
         (token.clone(), object_ref, generation)
     };
@@ -306,7 +307,9 @@ fn try_cache_lookup(
 
     // Verify token still exists in table (defense in depth)
     {
-        let table = TOKEN_TABLE.lock();
+        // Lock only the shard for this handle
+        let shard = get_shard(handle);
+        let table = shard.lock();
         if table.get(handle).is_none() {
             // Token was removed - invalidate cache
             ThreadManager::with_thread_mut(thread_id, |thread| {
@@ -352,7 +355,14 @@ fn update_cache(
 /// * `Some(ObjectRef)` - Kernel object this scope refers to
 /// * `None` - Unknown scope
 pub fn resolve_scope(scope: &OpaqueScope) -> Option<ObjectRef> {
-    TOKEN_TABLE.lock().resolve_scope(scope)
+    // Check all shards (scopes are replicated across shards for simplicity)
+    // In practice, we could optimize this by storing scopes separately
+    for shard in &TOKEN_TABLE_SHARDS {
+        if let Some(obj_ref) = shard.lock().resolve_scope(scope) {
+            return Some(obj_ref);
+        }
+    }
+    None
 }
 
 /// Resolve token scope with type checking
@@ -400,27 +410,42 @@ pub fn resolve_token_object(
 /// * `Ok(())` - Token revoked
 /// * `Err(&str)` - Handle not found
 pub fn revoke_token(handle: TokenHandle) -> Result<(), &'static str> {
-    TOKEN_TABLE.lock().remove(handle).ok_or("Token not found")?;
-    // Generation counter is incremented by remove() to invalidate caches
-    Ok(())
+    // Lock only the shard for this handle
+    let shard = get_shard(handle);
+    let removed = shard.lock().remove(handle);
+
+    if removed.is_some() {
+        // Increment generation counter atomically (invalidates all thread-local caches)
+        REVOCATION_GENERATION.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    } else {
+        Err("Token not found")
+    }
 }
 
 /// Get current revocation generation (for cache validation)
 ///
 /// Threads can cache tokens with this generation number.
 /// If the generation changes (due to revocation), cached tokens are invalid.
+/// This is lock-free (atomic read).
 pub fn revocation_generation() -> u64 {
-    TOKEN_TABLE.lock().revocation_generation()
+    REVOCATION_GENERATION.load(Ordering::SeqCst)
 }
 
-/// Get token count
+/// Get token count (sum across all shards)
 pub fn count_tokens() -> usize {
-    TOKEN_TABLE.lock().count()
+    TOKEN_TABLE_SHARDS
+        .iter()
+        .map(|shard| shard.lock().count())
+        .sum()
 }
 
-/// Get token count for specific object
+/// Get token count for specific object (sum across all shards)
 pub fn count_tokens_for_object(object_ref: ObjectRef) -> usize {
-    TOKEN_TABLE.lock().count_for_object(object_ref)
+    TOKEN_TABLE_SHARDS
+        .iter()
+        .map(|shard| shard.lock().count_for_object(object_ref))
+        .sum()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

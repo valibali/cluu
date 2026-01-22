@@ -7,6 +7,7 @@ use crate::error::Error;
 use crate::sched::ThreadId;
 use crate::token::EndpointId;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -220,7 +221,9 @@ pub trait EndpointStore: Send {
 }
 
 pub struct EndpointRepository {
-    endpoints: BTreeMap<EndpointId, QueueEndpoint>,
+    /// Endpoints stored with per-endpoint mutexes for concurrent access
+    /// Each endpoint can be accessed independently without blocking others
+    endpoints: BTreeMap<EndpointId, Arc<Mutex<QueueEndpoint>>>,
 }
 
 impl EndpointRepository {
@@ -234,7 +237,8 @@ impl EndpointRepository {
 impl EndpointStore for EndpointRepository {
     fn create(&mut self) -> EndpointId {
         let id = EndpointId::new(NEXT_ENDPOINT_ID.fetch_add(1, Ordering::SeqCst));
-        self.endpoints.insert(id, QueueEndpoint::new());
+        self.endpoints
+            .insert(id, Arc::new(Mutex::new(QueueEndpoint::new())));
         id
     }
 
@@ -243,7 +247,16 @@ impl EndpointStore for EndpointRepository {
         F: FnOnce(&mut dyn ByteEndpoint) -> Result<R, Error>,
     {
         let endpoint = self.endpoints.get_mut(&id).ok_or(Error::NotFound)?;
-        f(endpoint)
+        let mut guard = endpoint.lock();
+        f(&mut *guard)
+    }
+}
+
+impl EndpointRepository {
+    /// Get endpoint by ID (returns Arc for concurrent access)
+    /// This allows callers to hold the endpoint mutex without holding repository lock
+    fn get_endpoint(&self, id: EndpointId) -> Option<Arc<Mutex<QueueEndpoint>>> {
+        self.endpoints.get(&id).map(Arc::clone)
     }
 }
 
@@ -268,26 +281,51 @@ pub fn create_endpoint() -> EndpointId {
 }
 
 pub fn send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, Error> {
-    ENDPOINTS
-        .lock()
-        .with_endpoint(endpoint, |queue| queue.send(data))
+    // Get endpoint Arc (brief repository lock)
+    let endpoint_arc = {
+        let repo = ENDPOINTS.lock();
+        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+    };
+    
+    // Lock only this endpoint (allows concurrent access to other endpoints)
+    let mut guard = endpoint_arc.lock();
+    guard.send(data)
 }
 
 pub fn try_send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, Error> {
-    let mut guard = ENDPOINTS.try_lock().ok_or(Error::WouldBlock)?;
-    guard.with_endpoint(endpoint, |queue| queue.send(data))
+    // Get endpoint Arc (brief repository lock)
+    let endpoint_arc = {
+        let repo = ENDPOINTS.try_lock().ok_or(Error::WouldBlock)?;
+        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+    };
+    
+    // Try to lock only this endpoint (non-blocking)
+    let mut guard = endpoint_arc.try_lock().ok_or(Error::WouldBlock)?;
+    guard.send(data)
 }
 
 pub fn recv(endpoint: EndpointId, receiver: ThreadId) -> Result<Option<EndpointMessage>, Error> {
-    ENDPOINTS
-        .lock()
-        .with_endpoint(endpoint, |queue| queue.recv(receiver))
+    // Get endpoint Arc (brief repository lock)
+    let endpoint_arc = {
+        let repo = ENDPOINTS.lock();
+        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+    };
+    
+    // Lock only this endpoint (allows concurrent access to other endpoints)
+    let mut guard = endpoint_arc.lock();
+    guard.recv(receiver)
 }
 
 pub fn recv_nonblocking(endpoint: EndpointId) -> Result<Option<EndpointMessage>, Error> {
-    ENDPOINTS
-        .lock()
-        .with_endpoint(endpoint, |queue| queue.recv_nonblocking())
+    // Get endpoint Arc (brief repository lock)
+    let endpoint_arc = {
+        let repo = ENDPOINTS.lock();
+        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+    };
+    
+    // Lock only this endpoint (allows concurrent access to other endpoints)
+    let mut guard = endpoint_arc.lock();
+    guard.recv_nonblocking()
 }
 
 pub fn send_from_user(
@@ -321,12 +359,18 @@ pub fn send_from_user(
         )?;
     }
     let wake = {
-        let mut guard = ENDPOINTS.lock();
-        let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
-        match endpoint_obj.send(&buffer[..msg_len]) {
+        // Get endpoint Arc (brief repository lock)
+        let endpoint_arc = {
+            let repo = ENDPOINTS.lock();
+            repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+        };
+        
+        // Lock only this endpoint
+        let mut guard = endpoint_arc.lock();
+        match guard.send(&buffer[..msg_len]) {
             Ok(wake) => wake,
             Err(Error::Busy) => {
-                log_endpoint_busy(endpoint, endpoint_obj.stats(), false);
+                log_endpoint_busy(endpoint, guard.stats(), false);
                 return Err(Error::Busy);
             }
             Err(err) => return Err(err),
@@ -438,13 +482,19 @@ pub fn call_from_user_with_reply_token(
     inject_reply_token(&mut buffer[..msg_len], reply_token);
 
     let wake = {
-        let mut guard = ENDPOINTS.lock();
-        let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+        // Get endpoint Arc (brief repository lock)
+        let endpoint_arc = {
+            let repo = ENDPOINTS.lock();
+            repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+        };
+        
+        // Lock only this endpoint
+        let mut guard = endpoint_arc.lock();
         // Just send as regular message - reply routing via token
-        match endpoint_obj.send(&buffer[..msg_len]) {
+        match guard.send(&buffer[..msg_len]) {
             Ok(wake) => wake,
             Err(Error::Busy) => {
-                log_endpoint_busy(endpoint, endpoint_obj.stats(), true);
+                log_endpoint_busy(endpoint, guard.stats(), true);
                 return Err(Error::Busy);
             }
             Err(err) => return Err(err),
@@ -487,26 +537,40 @@ fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
 
 /// Get the current caller for an endpoint (used by reply)
 pub fn take_current_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
-    let mut guard = ENDPOINTS.lock();
-    let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
-    endpoint_obj
-        .take_current_caller()
-        .ok_or(Error::InvalidState)
+    // Get endpoint Arc (brief repository lock)
+    let endpoint_arc = {
+        let repo = ENDPOINTS.lock();
+        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+    };
+    
+    // Lock only this endpoint
+    let mut guard = endpoint_arc.lock();
+    guard.take_current_caller().ok_or(Error::InvalidState)
 }
 
 /// Get a caller for a specific call cookie.
 pub fn take_caller_by_cookie(endpoint: EndpointId, cookie: u64) -> Result<ThreadId, Error> {
-    let mut guard = ENDPOINTS.lock();
-    let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
-    endpoint_obj
-        .take_caller_by_cookie(cookie)
-        .ok_or(Error::InvalidState)
+    // Get endpoint Arc (brief repository lock)
+    let endpoint_arc = {
+        let repo = ENDPOINTS.lock();
+        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+    };
+    
+    // Lock only this endpoint
+    let mut guard = endpoint_arc.lock();
+    guard.take_caller_by_cookie(cookie).ok_or(Error::InvalidState)
 }
 
 pub fn take_any_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
-    let mut guard = ENDPOINTS.lock();
-    let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
-    endpoint_obj.take_any_caller().ok_or(Error::InvalidState)
+    // Get endpoint Arc (brief repository lock)
+    let endpoint_arc = {
+        let repo = ENDPOINTS.lock();
+        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+    };
+    
+    // Lock only this endpoint
+    let mut guard = endpoint_arc.lock();
+    guard.take_any_caller().ok_or(Error::InvalidState)
 }
 
 /// Tag indicating the message contains a reply token
