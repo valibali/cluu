@@ -382,6 +382,7 @@ pub enum InvokeOp {
 
     // Memory translation
     VirtToPhys = 58,
+    PmmAllocLarge = 59,
 }
 
 impl InvokeOp {
@@ -412,6 +413,7 @@ impl InvokeOp {
             56 => Some(Self::PortOut16),
             57 => Some(Self::PortOut32),
             58 => Some(Self::VirtToPhys),
+            59 => Some(Self::PmmAllocLarge),
             _ => None,
         }
     }

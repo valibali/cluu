@@ -452,6 +452,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::PortOut16 => invoke_port_out16(&token, args),
         InvokeOp::PortOut32 => invoke_port_out32(&token, args),
         InvokeOp::VirtToPhys => invoke_virt_to_phys(&token, args),
+        InvokeOp::PmmAllocLarge => invoke_pmm_alloc_large(&token, args),
     }
 }
 
@@ -1426,7 +1427,8 @@ fn invoke_port_in8(token: &Token, args: SyscallArgs) -> SyscallResult {
     let port = args.arg3 as u16;
 
     unsafe {
-        let mut p: x86_64::instructions::port::Port<u8> = x86_64::instructions::port::Port::new(port);
+        let mut p: x86_64::instructions::port::Port<u8> =
+            x86_64::instructions::port::Port::new(port);
         Ok(p.read() as usize)
     }
 }
@@ -1449,7 +1451,8 @@ fn invoke_port_in16(token: &Token, args: SyscallArgs) -> SyscallResult {
     let port = args.arg3 as u16;
 
     unsafe {
-        let mut p: x86_64::instructions::port::Port<u16> = x86_64::instructions::port::Port::new(port);
+        let mut p: x86_64::instructions::port::Port<u16> =
+            x86_64::instructions::port::Port::new(port);
         Ok(p.read() as usize)
     }
 }
@@ -1472,7 +1475,8 @@ fn invoke_port_in32(token: &Token, args: SyscallArgs) -> SyscallResult {
     let port = args.arg3 as u16;
 
     unsafe {
-        let mut p: x86_64::instructions::port::Port<u32> = x86_64::instructions::port::Port::new(port);
+        let mut p: x86_64::instructions::port::Port<u32> =
+            x86_64::instructions::port::Port::new(port);
         Ok(p.read() as usize)
     }
 }
@@ -1497,7 +1501,8 @@ fn invoke_port_out8(token: &Token, args: SyscallArgs) -> SyscallResult {
     let value = args.arg4 as u8;
 
     unsafe {
-        let mut p: x86_64::instructions::port::Port<u8> = x86_64::instructions::port::Port::new(port);
+        let mut p: x86_64::instructions::port::Port<u8> =
+            x86_64::instructions::port::Port::new(port);
         p.write(value);
     }
     Ok(0)
@@ -1523,7 +1528,8 @@ fn invoke_port_out16(token: &Token, args: SyscallArgs) -> SyscallResult {
     let value = args.arg4 as u16;
 
     unsafe {
-        let mut p: x86_64::instructions::port::Port<u16> = x86_64::instructions::port::Port::new(port);
+        let mut p: x86_64::instructions::port::Port<u16> =
+            x86_64::instructions::port::Port::new(port);
         p.write(value);
     }
     Ok(0)
@@ -1549,7 +1555,8 @@ fn invoke_port_out32(token: &Token, args: SyscallArgs) -> SyscallResult {
     let value = args.arg4 as u32;
 
     unsafe {
-        let mut p: x86_64::instructions::port::Port<u32> = x86_64::instructions::port::Port::new(port);
+        let mut p: x86_64::instructions::port::Port<u32> =
+            x86_64::instructions::port::Port::new(port);
         p.write(value);
     }
     Ok(0)
@@ -1567,7 +1574,7 @@ fn invoke_virt_to_phys(token: &Token, args: SyscallArgs) -> SyscallResult {
     use crate::elf::translate_vaddr;
     use crate::mm::space_repository;
     use crate::token::{ObjectRef, ObjectType, Rights};
-    use x86_64::{PhysAddr, VirtAddr};
+    use x86_64::VirtAddr;
 
     if !token.has_right(Rights::SPACE_MAP) {
         klibcluu::warn("invoke_virt_to_phys: missing SPACE_MAP right");
@@ -1596,6 +1603,21 @@ fn invoke_virt_to_phys(token: &Token, args: SyscallArgs) -> SyscallResult {
         Some(Some(phys)) => Ok(phys.as_u64() as usize),
         _ => Ok(0), // Not mapped, return 0
     }
+}
+
+fn invoke_pmm_alloc_large(token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::mm::pmm;
+    use crate::token::Rights;
+
+    // Reuse an existing right that already gates “memory management” operations.
+    // SPACE_MAP is appropriate because this is only useful for later mapping.
+    if !token.has_right(Rights::SPACE_MAP) {
+        return Err(Error::PermissionDenied);
+    }
+
+    // 2MB contiguous, 2MB-aligned physical block
+    let phys = pmm::alloc_large_frame().ok_or(Error::OutOfMemory)?;
+    Ok(phys as usize)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

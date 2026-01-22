@@ -15,7 +15,7 @@ use libcluu::*;
 
 use crate::context::InitContext;
 use crate::mappings::{map_framebuffer, map_initrd, map_process_info};
-use crate::services::{ServiceKind, ServiceSpec};
+use crate::services::{ServiceKind, ServiceSpec, SpacePolicy};
 
 // ===== Process layout =====
 const PROC_STACK_SIZE: usize = 64 * 1024;
@@ -159,7 +159,7 @@ pub fn launch_service(ctx: &InitContext<'_>, service: &ServiceSpec, index: usize
 
     tokens[TOKEN_REGISTRY] = ctx.registry_send;
     tokens[TOKEN_PROC_CAP] = derive_proc_cap(ctx.boot.root_token)?;
-    tokens[TOKEN_SPACE] = derive_space_token(space_token)?;
+    tokens[TOKEN_SPACE] = 0;
     fill_default_endpoints(ctx.boot.root_token, &mut tokens)?;
 
     service.kind.configure_tokens(
@@ -169,6 +169,9 @@ pub fn launch_service(ctx: &InitContext<'_>, service: &ServiceSpec, index: usize
         &mut tokens,
         &mut params,
     )?;
+    if tokens[TOKEN_SPACE] == 0 {
+        tokens[TOKEN_SPACE] = derive_space_token_for_policy(space_token, service.space_policy)?;
+    }
     map_process_info(space_token, 0, 0, &tokens, &params)?;
 
     service.kind.map_resources(ctx, space_token, &params)?;
@@ -228,6 +231,23 @@ fn derive_proc_cap(token: usize) -> Result<usize> {
 fn derive_space_token(space_token: usize) -> Result<usize> {
     let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT;
     token_derive(space_token, rights.bits() as usize, u64::MAX)
+}
+
+/// Derive a space token that also allows re-derivation (GRANT right).
+///
+/// Needed by services like VFS that must mint SPACE_MAP tokens to share
+/// their address space window with other services.
+fn derive_space_token_with_grant(space_token: usize) -> Result<usize> {
+    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT | Rights::GRANT;
+    token_derive(space_token, rights.bits() as usize, u64::MAX)
+}
+
+/// Select the appropriate space token policy per service kind.
+fn derive_space_token_for_policy(space_token: usize, policy: SpacePolicy) -> Result<usize> {
+    match policy {
+        SpacePolicy::Grantable => derive_space_token_with_grant(space_token),
+        SpacePolicy::Standard => derive_space_token(space_token),
+    }
 }
 
 /// Create a recv-only endpoint for passive listeners.

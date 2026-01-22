@@ -10,8 +10,15 @@ pub struct ServiceSpec {
     pub path: &'static str,
     pub priority: usize,
     pub rights: Option<Rights>,
+    pub space_policy: SpacePolicy,
     pub kind: ServiceKind,
     pub instance_id: Option<u64>,
+}
+
+#[derive(Copy, Clone)]
+pub enum SpacePolicy {
+    Standard,
+    Grantable,
 }
 
 #[derive(Copy, Clone)]
@@ -61,6 +68,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         path: "sys/registry",
         priority: 190,
         rights: None,
+        space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Registry,
         instance_id: None,
     },
@@ -69,6 +77,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         path: "sys/procmgr",
         priority: 200,
         rights: Some(PROCMGR_RIGHTS),
+        space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Procmgr,
         instance_id: None,
     },
@@ -77,6 +86,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         path: "sys/vfs",
         priority: 195,
         rights: None,
+        space_policy: SpacePolicy::Grantable,
         kind: ServiceKind::Vfs,
         instance_id: None,
     },
@@ -85,6 +95,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         path: "sys/kbd",
         priority: 230,
         rights: None,
+        space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Kbd,
         instance_id: None,
     },
@@ -93,6 +104,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         path: "sys/tty",
         priority: 205,
         rights: None,
+        space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Tty,
         instance_id: Some(0),
     },
@@ -101,6 +113,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         path: "sys/console",
         priority: 210,
         rights: None,
+        space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Console,
         instance_id: Some(0),
     },
@@ -109,6 +122,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         path: "sys/virtio-blk",
         priority: 180,
         rights: Some(VIRTIOBLK_RIGHTS),
+        space_policy: SpacePolicy::Standard,
         kind: ServiceKind::VirtioBlk,
         instance_id: None,
     },
