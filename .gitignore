@@ -37,3 +37,7 @@ Thumbs.db
 
 # Debug
 *.log
+userfs/hello
+userfs/bin/shell
+userfs/bin/timeserver
+userfs/bin/vfs_demo
