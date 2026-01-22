@@ -50,11 +50,33 @@ pub fn send_with_payload(endpoint_token: usize, label: u32, payload: &[u8]) -> R
 
 /// Send a message with an inline payload, retrying on busy endpoints.
 pub fn send_with_retry(endpoint_token: usize, label: u32, payload: &[u8]) -> Result<()> {
+    send_with_retry_timeout(endpoint_token, label, payload, 0)
+}
+
+/// Send a message with an inline payload, retrying on busy endpoints with backoff.
+///
+/// When `max_retries` is 0, retries indefinitely.
+pub fn send_with_retry_timeout(
+    endpoint_token: usize,
+    label: u32,
+    payload: &[u8],
+    max_retries: u32,
+) -> Result<()> {
+    const MAX_BACKOFF_YIELDS: u32 = 64;
+    let mut backoff = 1u32;
+    let mut retries = 0u32;
     loop {
         match send_with_payload(endpoint_token, label, payload) {
             Ok(()) => return Ok(()),
             Err(Error::Busy) => {
-                let _ = syscall::yield_cpu();
+                retries = retries.saturating_add(1);
+                if max_retries != 0 && retries > max_retries {
+                    return Err(Error::Busy);
+                }
+                for _ in 0..backoff {
+                    let _ = syscall::yield_cpu();
+                }
+                backoff = (backoff.saturating_mul(2)).min(MAX_BACKOFF_YIELDS);
             }
             Err(err) => return Err(err),
         }

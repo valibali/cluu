@@ -8,7 +8,9 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_PROC_CAP};
-use libcluu::ipc::{call_with_payload, send_with_payload, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL};
+use libcluu::ipc::{
+    call_with_payload, send_with_retry_timeout, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
+};
 use libcluu::registry;
 use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Result};
@@ -16,6 +18,8 @@ use libcluu::{debug_print, yield_cpu, Result};
 // Token indices (set by init).
 const SVC_TOKEN_LISTEN: usize = 7;
 const CONSOLE_MAX_PAYLOAD: usize = 256;
+const CONSOLE_CREDIT_WINDOW: usize = 1024;
+const CONSOLE_SEND_RETRIES: u32 = 256;
 
 /// TTY context shared by the main loop.
 pub struct TtyContext {
@@ -28,6 +32,7 @@ pub struct TtyContext {
     pending_console_output: Vec<u8>,
     /// Deferred sync write reply token (if console wasn't ready)
     pending_sync_reply: Option<usize>,
+    console_credit: usize,
 }
 
 impl TtyContext {
@@ -70,6 +75,7 @@ impl TtyContext {
             requested_shell: false,
             pending_console_output: Vec::new(),
             pending_sync_reply: None,
+            console_credit: CONSOLE_CREDIT_WINDOW,
         })
     }
 
@@ -147,13 +153,13 @@ impl TtyContext {
             return;
         }
         if !self.pending_console_output.is_empty() {
+            let pending = core::mem::take(&mut self.pending_console_output);
             // Use sync write for pending output that has a deferred reply
             if self.pending_sync_reply.is_some() {
-                self.send_to_console_sync(&self.pending_console_output);
+                self.send_to_console_sync(&pending);
             } else {
-                self.send_to_console(&self.pending_console_output);
+                self.send_to_console(&pending);
             }
-            self.pending_console_output.clear();
         }
 
         // Send deferred sync reply now that console is ready
@@ -165,13 +171,24 @@ impl TtyContext {
         }
     }
 
-    fn send_to_console(&self, payload: &[u8]) {
+    fn send_to_console(&mut self, payload: &[u8]) {
         for chunk in payload.chunks(CONSOLE_MAX_PAYLOAD) {
-            let _ = send_with_payload(self.console_endpoint, CONSOLE_WRITE_LABEL, chunk);
+            if self.console_credit < chunk.len() {
+                self.send_to_console_sync(chunk);
+                self.console_credit = CONSOLE_CREDIT_WINDOW.saturating_sub(chunk.len());
+                continue;
+            }
+            let _ = send_with_retry_timeout(
+                self.console_endpoint,
+                CONSOLE_WRITE_LABEL,
+                chunk,
+                CONSOLE_SEND_RETRIES,
+            );
+            self.console_credit = self.console_credit.saturating_sub(chunk.len());
         }
     }
 
-    fn send_to_console_sync(&self, payload: &[u8]) {
+    fn send_to_console_sync(&mut self, payload: &[u8]) {
         for chunk in payload.chunks(CONSOLE_MAX_PAYLOAD) {
             let mut msg = Message::new(CONSOLE_WRITE_SYNC_LABEL, [0; 6], 1);
             msg.words[0] = chunk.len();
@@ -179,7 +196,12 @@ impl TtyContext {
             // Use ipc_call to wait for console to render
             if call_with_payload(self.console_endpoint, &msg, chunk, &mut reply_msg).is_err() {
                 // Fall back to async
-                let _ = send_with_payload(self.console_endpoint, CONSOLE_WRITE_LABEL, chunk);
+                let _ = send_with_retry_timeout(
+                    self.console_endpoint,
+                    CONSOLE_WRITE_LABEL,
+                    chunk,
+                    CONSOLE_SEND_RETRIES,
+                );
             }
         }
     }

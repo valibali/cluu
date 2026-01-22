@@ -90,6 +90,15 @@ pub struct QueueEndpoint {
 
 const MAX_QUEUE_LEN: usize = 1024;
 const MAX_CALL_QUEUE_LEN: usize = 256;
+const BUSY_LOG_EVERY: u64 = 64;
+
+#[derive(Copy, Clone)]
+struct QueueStats {
+    queue_len: usize,
+    call_queue_len: usize,
+    waiting_len: usize,
+    callers_len: usize,
+}
 
 impl QueueEndpoint {
     fn new() -> Self {
@@ -117,6 +126,15 @@ impl QueueEndpoint {
         }
         let cookie = *self.callers_by_cookie.keys().next()?;
         self.callers_by_cookie.remove(&cookie)
+    }
+
+    fn stats(&self) -> QueueStats {
+        QueueStats {
+            queue_len: self.queue.len(),
+            call_queue_len: self.call_queue.len(),
+            waiting_len: self.waiting_receivers.len(),
+            callers_len: self.callers_by_cookie.len(),
+        }
     }
 }
 
@@ -239,6 +257,9 @@ lazy_static! {
 lazy_static! {
     static ref SEND_LOGGED: Mutex<BTreeSet<EndpointId>> = Mutex::new(BTreeSet::new());
 }
+lazy_static! {
+    static ref BUSY_COUNTS: Mutex<BTreeMap<(EndpointId, u8), u64>> = Mutex::new(BTreeMap::new());
+}
 
 static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -299,7 +320,18 @@ pub fn send_from_user(
             page_table_root,
         )?;
     }
-    let wake = send(endpoint, &buffer[..msg_len])?;
+    let wake = {
+        let mut guard = ENDPOINTS.lock();
+        let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+        match endpoint_obj.send(&buffer[..msg_len]) {
+            Ok(wake) => wake,
+            Err(Error::Busy) => {
+                log_endpoint_busy(endpoint, endpoint_obj.stats(), false);
+                return Err(Error::Busy);
+            }
+            Err(err) => return Err(err),
+        }
+    };
     if let Some(thread_id) = wake {
         if first_send {
             klibcluu::trace("send_from_user: wake_thread_id=");
@@ -409,13 +441,48 @@ pub fn call_from_user_with_reply_token(
         let mut guard = ENDPOINTS.lock();
         let endpoint_obj = guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
         // Just send as regular message - reply routing via token
-        endpoint_obj.send(&buffer[..msg_len])?
+        match endpoint_obj.send(&buffer[..msg_len]) {
+            Ok(wake) => wake,
+            Err(Error::Busy) => {
+                log_endpoint_busy(endpoint, endpoint_obj.stats(), true);
+                return Err(Error::Busy);
+            }
+            Err(err) => return Err(err),
+        }
     };
 
     if let Some(thread_id) = wake {
         crate::sched::ThreadManager::wake_thread(thread_id);
     }
     Ok(())
+}
+
+fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
+    let mut counts = BUSY_COUNTS.lock();
+    let key = (endpoint, if is_call { 1 } else { 0 });
+    let count = counts.entry(key).or_insert(0);
+    *count = count.saturating_add(1);
+    if *count % BUSY_LOG_EVERY != 0 {
+        return;
+    }
+    klibcluu::warn("ipc endpoint busy");
+    klibcluu::log_dec(klibcluu::LogLevel::Warn, "  endpoint=", endpoint.as_u64());
+    klibcluu::log_dec(klibcluu::LogLevel::Warn, "  queue_len=", stats.queue_len as u64);
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Warn,
+        "  call_queue_len=",
+        stats.call_queue_len as u64,
+    );
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Warn,
+        "  waiting_receivers=",
+        stats.waiting_len as u64,
+    );
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Warn,
+        "  callers_by_cookie=",
+        stats.callers_len as u64,
+    );
 }
 
 /// Get the current caller for an endpoint (used by reply)
