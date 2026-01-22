@@ -13,6 +13,16 @@ use libcluu::device_io::{DeviceIo, MmioRegion, PortIoRegion};
 use libcluu::syscall::{space_map, MAP_DEVICE};
 use libcluu::{Error, Result};
 
+const IO_TRACE: bool = false;
+
+macro_rules! io_trace {
+    ($($arg:tt)*) => {
+        if IO_TRACE {
+            let _ = libcluu::debug_print(&alloc::format!($($arg)*));
+        }
+    };
+}
+
 /// Virtio device status bits
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
@@ -84,6 +94,9 @@ struct VirtioBlkReqHeader {
 
 /// Base address for virtqueue memory allocation
 const VIRTQUEUE_BASE: usize = 0x50000000;
+const DATA_BUFFER_OFFSET: usize =
+    0x10000 + core::mem::size_of::<VirtioBlkReqHeader>() + 8;
+const DATA_BUFFER_MAX: usize = 64 * 1024;
 
 /// Virtio-blk device
 pub struct VirtioBlkDevice {
@@ -159,16 +172,25 @@ impl VirtioBlkDevice {
         // Set ACKNOWLEDGE status
         self.write_status(VIRTIO_STATUS_ACKNOWLEDGE);
         let status_ack = self.read_status();
-        libcluu::debug_print(&alloc::format!("virtio-blk: ACKNOWLEDGE status={:#x}", status_ack))?;
+        libcluu::debug_print(&alloc::format!(
+            "virtio-blk: ACKNOWLEDGE status={:#x}",
+            status_ack
+        ))?;
 
         // Set DRIVER status
         self.write_status(VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
         let status_drv = self.read_status();
-        libcluu::debug_print(&alloc::format!("virtio-blk: DRIVER status={:#x}", status_drv))?;
+        libcluu::debug_print(&alloc::format!(
+            "virtio-blk: DRIVER status={:#x}",
+            status_drv
+        ))?;
 
         // Negotiate features
         let features = self.negotiate_features()?;
-        libcluu::debug_print(&alloc::format!("virtio-blk: negotiated features={:#x}", features))?;
+        libcluu::debug_print(&alloc::format!(
+            "virtio-blk: negotiated features={:#x}",
+            features
+        ))?;
 
         // Set FEATURES_OK
         self.write_status(
@@ -177,7 +199,10 @@ impl VirtioBlkDevice {
 
         // Verify FEATURES_OK was accepted
         let status = self.read_status();
-        libcluu::debug_print(&alloc::format!("virtio-blk: FEATURES_OK status={:#x}", status))?;
+        libcluu::debug_print(&alloc::format!(
+            "virtio-blk: FEATURES_OK status={:#x}",
+            status
+        ))?;
         if status & VIRTIO_STATUS_FEATURES_OK == 0 {
             libcluu::debug_print("virtio-blk: device rejected FEATURES_OK")?;
             self.write_status(VIRTIO_STATUS_FAILED);
@@ -198,6 +223,12 @@ impl VirtioBlkDevice {
                 | VIRTIO_STATUS_DRIVER_OK,
         );
 
+        let status_ok = self.read_status();
+        libcluu::debug_print(&alloc::format!(
+            "virtio-blk: DRIVER_OK status={:#x}",
+            status_ok
+        ))?;
+
         libcluu::debug_print(&alloc::format!(
             "virtio-blk: initialized, capacity={} sectors, sector_size={}",
             self.capacity,
@@ -217,7 +248,10 @@ impl VirtioBlkDevice {
             let port_base = (bar0_phys & 0xFFFC) as u16;
             self.mmio_base = port_base as usize;
             self.device_io = Box::new(PortIoRegion::new(port_base, self.pci_token));
-            libcluu::debug_print(&alloc::format!("virtio-blk: using I/O ports at {:#x}", port_base))?;
+            libcluu::debug_print(&alloc::format!(
+                "virtio-blk: using I/O ports at {:#x}",
+                port_base
+            ))?;
             return Ok(());
         }
 
@@ -241,7 +275,7 @@ impl VirtioBlkDevice {
         self.mmio_base = mmio_virt;
         self.device_io = Box::new(MmioRegion::new(mmio_virt));
 
-        if self.is_modern && self.pci_device.common_cfg_bar == 0 {
+        if self.is_modern {
             self.common_cfg = mmio_virt + self.pci_device.common_cfg_offset as usize;
             self.notify_base = mmio_virt + self.pci_device.notify_cfg_offset as usize;
             self.device_cfg = mmio_virt + self.pci_device.device_cfg_offset as usize;
@@ -253,7 +287,10 @@ impl VirtioBlkDevice {
     /// Negotiate device features.
     fn negotiate_features(&mut self) -> Result<u64> {
         let device_features = self.read_device_features();
-        libcluu::debug_print(&alloc::format!("virtio-blk: device features={:#x}", device_features))?;
+        libcluu::debug_print(&alloc::format!(
+            "virtio-blk: device features={:#x}",
+            device_features
+        ))?;
 
         // Select features we support
         let mut driver_features = 0u64;
@@ -270,7 +307,10 @@ impl VirtioBlkDevice {
             self.read_only = true;
         }
 
-        libcluu::debug_print(&alloc::format!("virtio-blk: driver features={:#x}", driver_features))?;
+        libcluu::debug_print(&alloc::format!(
+            "virtio-blk: driver features={:#x}",
+            driver_features
+        ))?;
         self.write_driver_features(driver_features);
 
         Ok(driver_features)
@@ -292,50 +332,65 @@ impl VirtioBlkDevice {
 
     /// Setup the request virtqueue.
     fn setup_virtqueue(&mut self) -> Result<()> {
-        let queue_num = 0u16; // Block devices use queue 0
-
-        // Select queue
+        let queue_num = 0u16;
         self.select_queue(queue_num);
 
-        // Get queue size
         let queue_size = self.read_queue_size();
         if queue_size == 0 {
             return Err(Error::InvalidState);
         }
 
-        // Allocate virtqueue memory
         let vq_bytes = Virtqueue::size_bytes(queue_size);
         let vq_pages = vq_bytes.div_ceil(4096);
 
-        // We also need memory for request headers/data at offset 0x10000
-        // Map at least 32 pages (128KB) to cover virtqueue + request buffer area
-        let total_pages = vq_pages.max(32);
+        // Ensure the request data buffer fits in the mapped region.
+        let data_pages = (DATA_BUFFER_OFFSET + DATA_BUFFER_MAX).div_ceil(4096);
+        let total_pages = vq_pages.max(data_pages).max(32);
 
-        // Map pages for virtqueue and request buffers (zero-filled)
+        // Allocate one 2MB physically-contiguous block from the kernel.
+        // This gives you 512 pages; we use only total_pages of them.
+        let vq_phys_base = libcluu::syscall::pmm_alloc_large(self.space_token)?;
+        let _ = libcluu::debug_print(&alloc::format!(
+            "virtio-blk: vq phys base={:#x}",
+            vq_phys_base
+        ));
+
+        // Map the required pages into our address space at VIRTQUEUE_BASE.
+        // We intentionally use MAP_DEVICE here to “map a caller-provided physical frame”.
+        // (Your kernel’s invoke_space_map treats MAP_DEVICE as: do not alloc_frame, use data_ptr as phys.)
         for i in 0..total_pages {
             let virt = VIRTQUEUE_BASE + i * 4096;
-            space_map(self.space_token, virt, 0, 0x03, 0)?; // read+write, zero-fill
+            let phys = vq_phys_base + (i as u64) * 4096;
+
+            // perms: RW + MAP_DEVICE; copy_len=0
+            if let Err(err) = space_map(self.space_token, virt, phys as usize, MAP_DEVICE | 0x03, 0) {
+                let _ = libcluu::debug_print(&alloc::format!(
+                    "virtio-blk: space_map failed virt={:#x} phys={:#x} err={:?}",
+                    virt,
+                    phys,
+                    err
+                ));
+                return Err(err);
+            }
+        }
+
+        // Zero the region explicitly (MAP_DEVICE path does not zero-fill).
+        unsafe {
+            core::ptr::write_bytes(VIRTQUEUE_BASE as *mut u8, 0, total_pages * 4096);
         }
 
         self.vq_mem = VIRTQUEUE_BASE;
 
-        // Translate virtual address to physical for DMA
-        let vq_phys = libcluu::syscall::virt_to_phys(self.space_token, VIRTQUEUE_BASE)?;
-        if vq_phys == 0 {
-            return Err(Error::InvalidState);
-        }
-
         libcluu::debug_print(&alloc::format!(
-            "virtio-blk: virtqueue virt={:#x} phys={:#x}",
-            VIRTQUEUE_BASE, vq_phys
+            "virtio-blk: virtqueue virt={:#x} phys={:#x} pages={}",
+            VIRTQUEUE_BASE,
+            vq_phys_base,
+            total_pages
         ))?;
 
-        // Create the virtqueue with physical addresses
-        let vq = unsafe { Virtqueue::new(queue_size, VIRTQUEUE_BASE, vq_phys) };
-
-        // Configure the queue in the device
+        // Now the phys base is guaranteed contiguous by construction.
+        let vq = unsafe { Virtqueue::new(queue_size, VIRTQUEUE_BASE, vq_phys_base) };
         self.configure_queue(&vq)?;
-
         self.vq = Some(vq);
 
         Ok(())
@@ -368,6 +423,10 @@ impl VirtioBlkDevice {
         } else {
             // Legacy virtio: set PFN (page frame number)
             let pfn = (vq.desc_phys / 4096) as u32;
+            let _ = libcluu::debug_print(&alloc::format!(
+                "virtio-blk: configure queue - writing PFN {:#x} to QUEUE_ADDRESS",
+                pfn
+            ));
             self.device_io.write_u32(legacy::QUEUE_ADDRESS as u16, pfn);
         }
 
@@ -399,7 +458,8 @@ impl VirtioBlkDevice {
             }
             fence(Ordering::SeqCst);
         } else {
-            self.device_io.write_u8(legacy::DEVICE_STATUS as u16, status);
+            self.device_io
+                .write_u8(legacy::DEVICE_STATUS as u16, status);
         }
     }
 
@@ -441,7 +501,8 @@ impl VirtioBlkDevice {
             }
             fence(Ordering::SeqCst);
         } else {
-            self.device_io.write_u32(legacy::GUEST_FEATURES as u16, features as u32);
+            self.device_io
+                .write_u32(legacy::GUEST_FEATURES as u16, features as u32);
         }
     }
 
@@ -453,7 +514,8 @@ impl VirtioBlkDevice {
             }
             fence(Ordering::SeqCst);
         } else {
-            self.device_io.write_u16(legacy::QUEUE_SELECT as u16, queue_num);
+            self.device_io
+                .write_u16(legacy::QUEUE_SELECT as u16, queue_num);
         }
     }
 
@@ -475,7 +537,8 @@ impl VirtioBlkDevice {
                 (device.add(offset) as *const u32).read_volatile()
             }
         } else {
-            self.device_io.read_u32((legacy::CONFIG_OFFSET + offset as u32) as u16)
+            self.device_io
+                .read_u32((legacy::CONFIG_OFFSET + offset as u32) as u16)
         }
     }
 
@@ -493,7 +556,13 @@ impl VirtioBlkDevice {
                 (notify_addr as *mut u16).write_volatile(queue_num);
             }
         } else {
-            self.device_io.write_u16(legacy::QUEUE_NOTIFY as u16, queue_num);
+            io_trace!(
+                "virtio-blk: notify queue {} via I/O port {:#x}",
+                queue_num,
+                legacy::QUEUE_NOTIFY
+            );
+            self.device_io
+                .write_u16(legacy::QUEUE_NOTIFY as u16, queue_num);
         }
         fence(Ordering::SeqCst);
     }
@@ -508,6 +577,9 @@ impl VirtioBlkDevice {
         let desc_data;
         let desc_status;
 
+        if buf.is_empty() {
+            return Err(Error::InvalidArgument);
+        }
         // Allocate descriptors and setup the request
         {
             let vq = self.vq.as_mut().ok_or(Error::InvalidState)?;
@@ -530,17 +602,32 @@ impl VirtioBlkDevice {
             let status_addr = header_addr + core::mem::size_of::<VirtioBlkReqHeader>();
             let data_addr = status_addr + 8; // Leave room for status
 
+            if buf.len() > DATA_BUFFER_MAX {
+                return Err(Error::BufferTooSmall);
+            }
+
             // Translate virtual addresses to physical for DMA
             let header_phys = libcluu::syscall::virt_to_phys(self.space_token, header_addr)?;
             let data_phys = libcluu::syscall::virt_to_phys(self.space_token, data_addr)?;
             let status_phys = libcluu::syscall::virt_to_phys(self.space_token, status_addr)?;
 
             if header_phys == 0 || data_phys == 0 || status_phys == 0 {
+                io_trace!(
+                    "virtio-blk: virt_to_phys failed: header={:#x} data={:#x} status={:#x}",
+                    header_phys,
+                    data_phys,
+                    status_phys
+                );
                 vq.free_desc(desc_head);
                 vq.free_desc(desc_data);
                 vq.free_desc(desc_status);
                 return Err(Error::InvalidState);
             }
+
+            io_trace!(
+                "virtio-blk: I/O req sector={} header_phys={:#x} data_phys={:#x} status_phys={:#x}",
+                sector, header_phys, data_phys, status_phys
+            );
 
             // Copy header to device-accessible memory
             unsafe {
@@ -588,15 +675,49 @@ impl VirtioBlkDevice {
                 };
             }
 
+            // Debug: confirm we did not accidentally submit a zero-length descriptor.
+            unsafe {
+                let d0 = *vq.desc_ptr().add(desc_head as usize);
+                let d1 = *vq.desc_ptr().add(desc_data as usize);
+                let d2 = *vq.desc_ptr().add(desc_status as usize);
+                io_trace!(
+                    "virtio-blk: desc lens head={} data={} status={} flags {:x} {:x} {:x}",
+                    d0.len,
+                    d1.len,
+                    d2.len,
+                    d0.flags,
+                    d1.flags,
+                    d2.flags
+                );
+            }
+
             // Add to available ring
             vq.add_to_avail(desc_head);
+
+            io_trace!(
+                "virtio-blk: added to avail ring, desc_head={} buf_len={}",
+                desc_head,
+                buf.len()
+            );
+            io_trace!(
+                "virtio-blk: ring idx avail={} used={}",
+                vq.avail_idx(),
+                vq.used_idx()
+            );
         } // Release vq borrow
 
         // Notify device
         self.notify_queue(0);
+        io_trace!("virtio-blk: notified device");
 
         // Wait for completion and process result
         let vq = self.vq.as_mut().ok_or(Error::InvalidState)?;
+        io_trace!(
+            "virtio-blk: wait start avail={} used={} last_used={}",
+            vq.avail_idx(),
+            vq.used_idx(),
+            vq.last_used_idx()
+        );
         let mut timeout = 1_000_000u32;
         while !vq.has_used() && timeout > 0 {
             timeout -= 1;
@@ -604,12 +725,31 @@ impl VirtioBlkDevice {
         }
 
         if timeout == 0 {
+            io_trace!(
+                "virtio-blk: timeout waiting (avail={}, used={}, last_used={})",
+                vq.avail_idx(),
+                vq.used_idx(),
+                vq.last_used_idx()
+            );
             vq.free_chain(desc_head);
             return Err(Error::Timeout);
         }
 
+        io_trace!(
+            "virtio-blk: wait done avail={} used={} last_used={}",
+            vq.avail_idx(),
+            vq.used_idx(),
+            vq.last_used_idx()
+        );
+
         // Get result from used ring
         let (used_head, _used_len) = vq.pop_used().ok_or(Error::InvalidState)?;
+        io_trace!(
+            "virtio-blk: pop_used head={} now used_idx={} last_used={}",
+            used_head,
+            vq.used_idx(),
+            vq.last_used_idx()
+        );
 
         // Check status
         let header_addr = self.vq_mem + 0x10000;

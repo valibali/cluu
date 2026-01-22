@@ -23,9 +23,9 @@ const SVC_TOKEN_CAP: usize = 8;
 use libcluu::fs::{BlockDevice, Filesystem};
 use libcluu::ipc::{extract_reply_token, reply, reply_with_payload};
 use libcluu::registry;
-use libcluu::syscall::{endpoint_create, ipc_recv_any};
+use libcluu::syscall::{endpoint_create, ipc_recv_any, space_map_range};
 use libcluu::types::{IpcFlags, Message};
-use libcluu::{debug_print, yield_cpu, Result};
+use libcluu::{debug_print, space_grant, yield_cpu, Result, PAGE_SIZE};
 
 /// IPC labels for filesystem operations (matches VFS protocol)
 const FS_OPEN: u32 = 0x300;
@@ -33,6 +33,9 @@ const FS_CLOSE: u32 = 0x301;
 const FS_READ: u32 = 0x302;
 const FS_STAT: u32 = 0x303;
 const FS_READDIR: u32 = 0x304;
+/// Zero-copy read into a caller-provided mapping (VFS grant buffer).
+const FS_READ_GRANT: u32 = 0x306;
+const IPC_MESSAGE_MAX: usize = 256;
 
 /// IPC labels for raw block operations (legacy, for debugging)
 const BLK_READ_LABEL: u32 = 1;
@@ -40,6 +43,15 @@ const BLK_INFO_LABEL: u32 = 3;
 
 /// Token slot for the service's listen endpoint
 const SVC_TOKEN_LISTEN: usize = 7;
+/// Fixed grant scratch mapping base for zero-copy reads.
+const GRANT_SCRATCH_BASE: usize = 0x6100_0000;
+/// Size of the grant scratch buffer (must fit VFS grant buffer).
+const GRANT_SCRATCH_SIZE: usize = 64 * 1024;
+
+struct GrantScratch {
+    base: usize,
+    size: usize,
+}
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -130,6 +142,7 @@ fn run() -> Result<()> {
     debug_print("virtio-blk: registered as blkdev:main")?;
 
     let registry_endpoint = registry::control_endpoint();
+    let grant_scratch = map_grant_scratch(space_token)?;
 
     // Main service loop
     let mut buf = [0u8; 4096];
@@ -152,7 +165,7 @@ fn run() -> Result<()> {
 
                 // Handle request
                 if let Some(ref fs) = fs {
-                    handle_fs_request(fs, &adapter, msg, payload);
+                    handle_fs_request(fs, &adapter, space_token, &grant_scratch, msg, payload);
                 } else {
                     handle_block_request(&adapter, msg);
                 }
@@ -164,7 +177,14 @@ fn run() -> Result<()> {
     }
 }
 
-fn handle_fs_request(fs: &Ext2Fs, blk: &VirtioBlkAdapter, msg: &Message, payload: &[u8]) {
+fn handle_fs_request(
+    fs: &Ext2Fs,
+    blk: &VirtioBlkAdapter,
+    space_token: usize,
+    grant_scratch: &GrantScratch,
+    msg: &Message,
+    payload: &[u8],
+) {
     let reply_token = extract_reply_token(msg);
 
     match msg.tag.label {
@@ -195,7 +215,7 @@ fn handle_fs_request(fs: &Ext2Fs, blk: &VirtioBlkAdapter, msg: &Message, payload
             // words[1] = client_id, words[2] = inode, words[3] = offset, words[4] = len
             let inode = msg.words[2] as u64;
             let offset = msg.words[3] as u64;
-            let len = msg.words[4].min(4096 - 64); // Cap at buffer size
+            let len = msg.words[4].min(IPC_MESSAGE_MAX - core::mem::size_of::<Message>());
 
             let mut read_buf = alloc::vec![0u8; len];
             match fs.read(inode, offset, &mut read_buf) {
@@ -203,6 +223,71 @@ fn handle_fs_request(fs: &Ext2Fs, blk: &VirtioBlkAdapter, msg: &Message, payload
                     let reply_msg = Message::new(FS_READ, [0, bytes_read, 0, 0, 0, 0], 2);
                     if let Some(token) = reply_token {
                         let _ = reply_with_payload(token, &reply_msg, &read_buf[..bytes_read]);
+                    }
+                }
+                Err(_) => send_error_reply(reply_token, -1),
+            }
+        }
+
+        FS_READ_GRANT => {
+            // words[2] = inode, words[3] = offset, words[4] = len
+            let Some((target_base, target_space)) = parse_usize_pair(payload) else {
+                send_error_reply(reply_token, -2);
+                return;
+            };
+
+            let inode = msg.words[2] as u64;
+            let offset = msg.words[3] as u64;
+            let len = msg.words[4];
+            if len == 0 {
+                let reply_msg = Message::new(FS_READ_GRANT, [0, 0, 0, 0, 0, 0], 2);
+                if let Some(token) = reply_token {
+                    let _ = reply(token, &reply_msg, IpcFlags::empty());
+                }
+                return;
+            }
+
+            if len > grant_scratch.size {
+                send_error_reply(reply_token, -4);
+                return;
+            }
+
+            let scratch = unsafe {
+                core::slice::from_raw_parts_mut(grant_scratch.base as *mut u8, grant_scratch.size)
+            };
+            match fs.read(inode, offset, &mut scratch[..len]) {
+                Ok(bytes_read) => {
+                    if bytes_read == 0 {
+                        let reply_msg = Message::new(FS_READ_GRANT, [0, 0, 0, 0, 0, 0], 2);
+                        if let Some(token) = reply_token {
+                            let _ = reply(token, &reply_msg, IpcFlags::empty());
+                        }
+                        return;
+                    }
+                    let pages = bytes_read.div_ceil(PAGE_SIZE);
+
+                    let mut grant_err = None;
+                    for page_idx in 0..pages {
+                        let src = grant_scratch.base + page_idx * PAGE_SIZE;
+                        let dst = target_base + page_idx * PAGE_SIZE;
+                        if let Err(err) = space_grant(space_token, target_space, src, dst, 0) {
+                            grant_err = Some(err);
+                            break;
+                        }
+                    }
+
+                    if grant_err.is_some() {
+                        send_error_reply(reply_token, -1);
+                        return;
+                    }
+
+                    let reply_msg = Message::new(
+                        FS_READ_GRANT,
+                        [0, bytes_read, 0, 0, 0, 0],
+                        3,
+                    );
+                    if let Some(token) = reply_token {
+                        let _ = reply(token, &reply_msg, IpcFlags::empty());
                     }
                 }
                 Err(_) => send_error_reply(reply_token, -1),
@@ -310,6 +395,29 @@ fn handle_fs_request(fs: &Ext2Fs, blk: &VirtioBlkAdapter, msg: &Message, payload
 
         _ => {}
     }
+}
+
+fn map_grant_scratch(space_token: usize) -> Result<GrantScratch> {
+    let pages = (GRANT_SCRATCH_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+    match space_map_range(space_token, GRANT_SCRATCH_BASE, 0, 0x03, pages, 0) {
+        Ok(_) | Err(libcluu::Error::AlreadyExists) => Ok(GrantScratch {
+            base: GRANT_SCRATCH_BASE,
+            size: GRANT_SCRATCH_SIZE,
+        }),
+        Err(err) => Err(err),
+    }
+}
+
+fn parse_usize_pair(payload: &[u8]) -> Option<(usize, usize)> {
+    if payload.len() < core::mem::size_of::<usize>() * 2 {
+        return None;
+    }
+    let mut bytes = [0u8; core::mem::size_of::<usize>()];
+    bytes.copy_from_slice(&payload[..core::mem::size_of::<usize>()]);
+    let first = usize::from_ne_bytes(bytes);
+    bytes.copy_from_slice(&payload[core::mem::size_of::<usize>()..core::mem::size_of::<usize>() * 2]);
+    let second = usize::from_ne_bytes(bytes);
+    Some((first, second))
 }
 
 fn handle_block_request(blk: &VirtioBlkAdapter, msg: &Message) {

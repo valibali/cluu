@@ -25,8 +25,8 @@ impl<T> SendPtr<T> {
 }
 
 /// Virtqueue descriptor flags
-pub const VIRTQ_DESC_F_NEXT: u16 = 1;     // Buffer continues via 'next' field
-pub const VIRTQ_DESC_F_WRITE: u16 = 2;    // Buffer is device-writable (vs read-only)
+pub const VIRTQ_DESC_F_NEXT: u16 = 1; // Buffer continues via 'next' field
+pub const VIRTQ_DESC_F_WRITE: u16 = 2; // Buffer is device-writable (vs read-only)
 pub const VIRTQ_DESC_F_INDIRECT: u16 = 4; // Buffer contains a list of descriptors
 
 /// Virtqueue descriptor - describes a buffer
@@ -103,7 +103,7 @@ impl Virtqueue {
     pub fn size_bytes(queue_size: u16) -> usize {
         let desc_size = (queue_size as usize) * core::mem::size_of::<VirtqDesc>();
         let avail_size = 4 + (queue_size as usize) * 2 + 2; // flags, idx, ring[], used_event
-        let used_size = 4 + (queue_size as usize) * 8 + 2;  // flags, idx, ring[], avail_event
+        let used_size = 4 + (queue_size as usize) * 8 + 2; // flags, idx, ring[], avail_event
 
         // Align avail to 2, used to 4096
         let desc_avail = desc_size + avail_size;
@@ -119,11 +119,7 @@ impl Virtqueue {
     /// - Page-aligned
     /// - At least `size_bytes(queue_size)` bytes
     /// - Zeroed
-    pub unsafe fn new(
-        queue_size: u16,
-        virt_base: usize,
-        phys_base: u64,
-    ) -> Self {
+    pub unsafe fn new(queue_size: u16, virt_base: usize, phys_base: u64) -> Self {
         let desc_size = (queue_size as usize) * core::mem::size_of::<VirtqDesc>();
         let avail_size = 4 + (queue_size as usize) * 2 + 2;
         let desc_avail = desc_size + avail_size;
@@ -157,6 +153,29 @@ impl Virtqueue {
     /// Get descriptor pointer for direct access.
     pub fn desc_ptr(&self) -> *mut VirtqDesc {
         self.desc.as_ptr()
+    }
+
+    /// Read the driver-owned available ring index.
+    pub fn avail_idx(&self) -> u16 {
+        unsafe {
+            let avail = &*self.avail.as_ptr();
+            let idx_ptr = &avail.idx as *const u16;
+            idx_ptr.read_volatile()
+        }
+    }
+
+    /// Read the device-owned used ring index.
+    pub fn used_idx(&self) -> u16 {
+        unsafe {
+            let used_ptr = self.used.as_ptr();
+            let idx_ptr = &(*used_ptr).idx as *const u16;
+            idx_ptr.read_volatile()
+        }
+    }
+
+    /// Current driver-side used index cursor.
+    pub fn last_used_idx(&self) -> u16 {
+        self.last_used_idx
     }
 
     /// Allocate a descriptor from the free list.
@@ -219,7 +238,9 @@ impl Virtqueue {
             ring_ptr.add(ring_idx).write_volatile(head);
 
             fence(Ordering::SeqCst);
-            avail.idx = idx.wrapping_add(1);
+            // Must use write_volatile so device can see the idx update
+            let idx_ptr = &mut avail.idx as *mut u16;
+            idx_ptr.write_volatile(idx.wrapping_add(1));
         }
 
         fence(Ordering::SeqCst);
@@ -228,7 +249,12 @@ impl Virtqueue {
     /// Check if there are used buffers to process.
     pub fn has_used(&self) -> bool {
         fence(Ordering::SeqCst);
-        let used_idx = unsafe { (*self.used.as_ptr()).idx };
+        // Must use read_volatile since device updates this
+        let used_idx = unsafe {
+            let used_ptr = self.used.as_ptr();
+            let idx_ptr = &(*used_ptr).idx as *const u16;
+            idx_ptr.read_volatile()
+        };
         used_idx != self.last_used_idx
     }
 
@@ -238,15 +264,19 @@ impl Virtqueue {
     pub fn pop_used(&mut self) -> Option<(u16, u32)> {
         fence(Ordering::SeqCst);
 
-        let used_idx = unsafe { (*self.used.as_ptr()).idx };
+        // Device updates used->idx; must be read_volatile.
+        let used_idx = unsafe {
+            let used_ptr = self.used.as_ptr();
+            let idx_ptr = &(*used_ptr).idx as *const u16;
+            idx_ptr.read_volatile()
+        };
+
         if used_idx == self.last_used_idx {
             return None;
         }
 
         let ring_idx = (self.last_used_idx % self.size) as usize;
-        let elem_ptr = unsafe {
-            (self.used.as_ptr() as *const u8).add(4) as *const VirtqUsedElem
-        };
+        let elem_ptr = unsafe { (self.used.as_ptr() as *const u8).add(4) as *const VirtqUsedElem };
         let elem = unsafe { elem_ptr.add(ring_idx).read_volatile() };
 
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
