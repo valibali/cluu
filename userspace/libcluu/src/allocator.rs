@@ -129,8 +129,10 @@ impl LinkedListAllocator {
     fn coalesce(&mut self) {
         let mut current = &mut self.head;
         while let Some(next) = current.next.as_mut() {
+            let next_end = next.end_addr();
             if let Some(next_next) = next.next.as_mut() {
-                if next.end_addr() == next_next.start_addr() {
+                let next_next_start = next_next.start_addr();
+                if next_end == next_next_start {
                     let merged_size = next.size + next_next.size;
                     let next_next_next = next_next.next.take();
                     next.size = merged_size;

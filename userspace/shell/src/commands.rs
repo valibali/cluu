@@ -173,6 +173,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(SpawnBuiltin));
         registry.register(Box::new(CatBuiltin));
         registry.register(Box::new(LsBuiltin));
+        registry.register(Box::new(HeapBuiltin));
     }
 }
 
@@ -233,7 +234,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, repeat, cat, ls\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -963,6 +964,24 @@ impl BuiltinCommand for LsBuiltin {
             }
         }
 
+        Ok(())
+    }
+}
+
+struct HeapBuiltin;
+
+impl BuiltinCommand for HeapBuiltin {
+    fn name(&self) -> &'static str {
+        "heap"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let stats = libcluu::allocator::stats();
+        let line = format!(
+            "heap: used={} total={} peak={} free={}\n",
+            stats.used, stats.total, stats.peak, stats.free
+        );
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         Ok(())
     }
 }
