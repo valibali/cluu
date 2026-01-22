@@ -10,6 +10,8 @@ extern crate alloc;
 /// via the registry. Rendering stays synchronous and deterministic so the
 /// console can later be swapped to a different backend (e.g., a GPU driver).
 mod backend;
+#[cfg(target_arch = "x86_64")]
+mod simd;
 mod context;
 mod protocol;
 mod renderer;

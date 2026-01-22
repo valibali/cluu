@@ -107,13 +107,12 @@ impl<B: ConsoleBackend> Console<B> {
     }
 
     /// Reset the grid contents and repaint the framebuffer to a clean state.
+    /// Optimized to use bulk fill operation instead of per-pixel writes.
     fn clear(&mut self) {
         self.cells.fill(b' ');
-        for y in 0..self.height {
-            for x in 0..self.width {
-                self.put_pixel(x, y, COLOR_BG);
-            }
-        }
+        // Use bulk fill_rect for much faster clearing
+        self.backend
+            .fill_rect(0, 0, self.width, self.height, COLOR_BG);
         self.cursor_x = 0;
         self.cursor_y = 0;
         self.last_cursor_x = self.cursor_x;
@@ -164,24 +163,38 @@ impl<B: ConsoleBackend> Console<B> {
     }
 
     /// Scroll the grid up by one row and redraw the full buffer.
+    /// Optimized to use framebuffer memory copying instead of full redraw.
     fn scroll_up(&mut self) {
         if self.rows == 0 || self.cols == 0 {
             return;
         }
         let w = self.cols;
 
-        // Move rows 1..end up by one row.
+        // Move rows 1..end up by one row in cell buffer.
         self.cells.copy_within(w.., 0);
 
-        // Clear last row.
+        // Clear last row in cell buffer.
         let last = (self.rows - 1) * w;
         self.cells[last..last + w].fill(b' ');
 
-        // Redraw whole console (simple, correct; can be optimized later).
-        self.redraw_all();
+        // Optimized scroll: copy framebuffer memory instead of redrawing everything
+        // Copy all glyph rows from row 1 to row 0 (scroll up by one text row = GLYPH_H pixels)
+        let scroll_height = (self.rows - 1) * GLYPH_H;
+        if scroll_height > 0 {
+            self.backend
+                .copy_rect(0, GLYPH_H, 0, 0, self.width, scroll_height);
+        }
+
+        // Only redraw the last row (much faster than redrawing everything)
+        let last_row = self.rows - 1;
+        for x in 0..self.cols {
+            let ch = self.get_cell(x, last_row);
+            self.draw_glyph(x, last_row, ch, COLOR_FG, COLOR_BG);
+        }
 
         // Cursor stays on last row after scroll.
         self.cursor_y = self.rows - 1;
+        self.redraw_cursor();
     }
 
     /// Redraw every cell in the grid, then update the cursor overlay.
@@ -282,17 +295,23 @@ impl<B: ConsoleBackend> Console<B> {
     }
 
     /// Render a glyph bitmap into the framebuffer cell at x,y.
+    /// Optimized to use bulk row writes instead of individual pixels.
     fn draw_glyph(&mut self, x: usize, y: usize, ch: u8, fg: u32, bg: u32) {
         let glyph = font_glyph(ch);
         let px = x * GLYPH_W;
         let py = y * GLYPH_H;
 
+        // Pre-allocate buffer for a row of pixels
+        let mut row_buffer = [0u32; GLYPH_W];
+
         for (row, line) in glyph.iter().enumerate() {
+            // Build entire row in buffer
             for col in 0..GLYPH_W {
                 let bit = (line >> (7 - col)) & 1; // MSB-first
-                let color = if bit != 0 { fg } else { bg };
-                self.put_pixel(px + col, py + row, color);
+                row_buffer[col] = if bit != 0 { fg } else { bg };
             }
+            // Write entire row at once (much faster than individual pixels)
+            self.backend.put_pixels_row(px, py + row, &row_buffer);
         }
     }
 
