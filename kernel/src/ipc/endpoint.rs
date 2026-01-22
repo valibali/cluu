@@ -88,6 +88,9 @@ pub struct QueueEndpoint {
     callers_by_cookie: BTreeMap<u64, ThreadId>,
 }
 
+const MAX_QUEUE_LEN: usize = 1024;
+const MAX_CALL_QUEUE_LEN: usize = 256;
+
 impl QueueEndpoint {
     fn new() -> Self {
         Self {
@@ -119,6 +122,9 @@ impl QueueEndpoint {
 
 impl ByteEndpoint for QueueEndpoint {
     fn send(&mut self, data: &[u8]) -> Result<Option<ThreadId>, Error> {
+        if self.queue.len() >= MAX_QUEUE_LEN {
+            return Err(Error::Busy);
+        }
         let msg = EndpointMessage::new(data)?;
         self.queue.push_back(msg);
         Ok(self.waiting_receivers.pop_front())
@@ -157,6 +163,9 @@ impl ByteEndpoint for QueueEndpoint {
         data: &[u8],
         cookie: u64,
     ) -> Result<Option<ThreadId>, Error> {
+        if self.call_queue.len() >= MAX_CALL_QUEUE_LEN {
+            return Err(Error::Busy);
+        }
         let msg = EndpointMessage::new(data)?;
         self.callers_by_cookie.insert(cookie, caller);
         self.call_queue.push_back(CallMessage {

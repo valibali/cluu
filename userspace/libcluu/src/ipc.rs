@@ -48,6 +48,19 @@ pub fn send_with_payload(endpoint_token: usize, label: u32, payload: &[u8]) -> R
     syscall::ipc_send(endpoint_token, &buffer)
 }
 
+/// Send a message with an inline payload, retrying on busy endpoints.
+pub fn send_with_retry(endpoint_token: usize, label: u32, payload: &[u8]) -> Result<()> {
+    loop {
+        match send_with_payload(endpoint_token, label, payload) {
+            Ok(()) => return Ok(()),
+            Err(Error::Busy) => {
+                let _ = syscall::yield_cpu();
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Synchronous write to TTY - waits for acknowledgement before returning.
 /// Use this before exiting to ensure output is flushed.
 pub fn tty_write_sync(endpoint_token: usize, payload: &[u8]) -> Result<()> {

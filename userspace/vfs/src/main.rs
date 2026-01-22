@@ -287,9 +287,7 @@ impl VfsServer {
             }
         }
 
-        let res = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-        let _ = debug_print("vfs: read_grant reply sent");
-        res
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
     fn read_grant_memory(

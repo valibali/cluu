@@ -233,6 +233,8 @@ fn panic(info: &PanicInfo) -> ! {
         klibcluu::COM2.write_str("\n");
     }
 
+    dump_stacktrace();
+
     klibcluu::logger::error("========================================");
     klibcluu::logger::error("System halted.");
 
@@ -242,4 +244,64 @@ fn panic(info: &PanicInfo) -> ! {
             core::arch::asm!("cli; hlt");
         }
     }
+}
+
+fn dump_stacktrace() {
+    let rsp = read_rsp();
+    let mut rbp = read_rbp();
+    let max = rsp.saturating_add(256 * 1024);
+
+    klibcluu::logger::error("Stack trace:");
+    klibcluu::log_hex(klibcluu::LogLevel::Error, "  rsp=0x", rsp);
+    klibcluu::log_hex(klibcluu::LogLevel::Error, "  rbp=0x", rbp);
+
+    for i in 0..32 {
+        if rbp < rsp || rbp + 16 > max || (rbp & 0x7) != 0 {
+            break;
+        }
+
+        let ret = unsafe { *((rbp + 8) as *const u64) };
+        if !is_canonical(ret) {
+            break;
+        }
+
+        klibcluu::COM2.write_str("  #");
+        klibcluu::log_dec(klibcluu::LogLevel::Error, "", i as u64);
+        klibcluu::log_hex(klibcluu::LogLevel::Error, "  rip=0x", ret);
+
+        let next = unsafe { *(rbp as *const u64) };
+        if next <= rbp || !is_canonical(next) {
+            break;
+        }
+        rbp = next;
+    }
+}
+
+fn is_canonical(addr: u64) -> bool {
+    let top = addr >> 48;
+    top == 0 || top == 0xffff
+}
+
+fn read_rbp() -> u64 {
+    let rbp: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, rbp",
+            out(reg) rbp,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    rbp
+}
+
+fn read_rsp() -> u64 {
+    let rsp: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, rsp",
+            out(reg) rsp,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    rsp
 }

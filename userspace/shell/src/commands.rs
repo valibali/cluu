@@ -12,7 +12,7 @@ use core::fmt::Write;
 
 use libcluu::boot::TOKEN_SPACE;
 use libcluu::fs::client::VfsClient;
-use libcluu::ipc::{call_with_payload, recv, send_with_payload, TTY_WRITE_LABEL};
+use libcluu::ipc::{call_with_payload, recv, send_with_payload, send_with_retry, TTY_WRITE_LABEL};
 use libcluu::registry;
 use libcluu::syscall;
 use libcluu::types::Message;
@@ -757,7 +757,7 @@ fn write_hexdump(stdout: usize, base_offset: usize, data: &[u8]) -> Result<()> {
         line[idx] = b'\n';
         idx += 1;
 
-        send_with_payload(stdout, TTY_WRITE_LABEL, &line[..idx])?;
+        send_with_retry(stdout, TTY_WRITE_LABEL, &line[..idx])?;
     }
 
     Ok(())
@@ -785,7 +785,7 @@ impl BuiltinCommand for CatBuiltin {
         }
 
         let Some(path) = path else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"cat: missing path\n")?;
+            send_with_retry(stdout, TTY_WRITE_LABEL, b"cat: missing path\n")?;
             return Ok(());
         };
 
@@ -793,7 +793,7 @@ impl BuiltinCommand for CatBuiltin {
         let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
             Ok(ep) => ep,
             Err(_) => {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"cat: vfs not available\n")?;
+                send_with_retry(stdout, TTY_WRITE_LABEL, b"cat: vfs not available\n")?;
                 return Ok(());
             }
         };
@@ -801,7 +801,7 @@ impl BuiltinCommand for CatBuiltin {
         let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
             Ok(c) => c,
             Err(_) => {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"cat: failed to create vfs client\n")?;
+                send_with_retry(stdout, TTY_WRITE_LABEL, b"cat: failed to create vfs client\n")?;
                 return Ok(());
             }
         };
@@ -811,7 +811,7 @@ impl BuiltinCommand for CatBuiltin {
             Ok(f) => f,
             Err(e) => {
                 let msg = format!("cat: {}: {:?}\n", path, e);
-                send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
+                send_with_retry(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
                 return Ok(());
             }
         };
@@ -835,7 +835,7 @@ impl BuiltinCommand for CatBuiltin {
             Ok(addr) => addr,
             Err(_) => {
                 let _ = vfs.close(file);
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"cat: out of virtual memory\n")?;
+                send_with_retry(stdout, TTY_WRITE_LABEL, b"cat: out of virtual memory\n")?;
                 return Ok(());
             }
         };
@@ -859,7 +859,7 @@ impl BuiltinCommand for CatBuiltin {
                             "cat: read size mismatch (requested {}, got {})\n",
                             read_size, grant.len
                         );
-                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes());
+                        let _ = send_with_retry(stdout, TTY_WRITE_LABEL, msg.as_bytes());
                         break;
                     }
 
@@ -868,7 +868,7 @@ impl BuiltinCommand for CatBuiltin {
                             "cat: grant range out of bounds (offset {}, len {})\n",
                             grant.offset, grant.len
                         );
-                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes());
+                        let _ = send_with_retry(stdout, TTY_WRITE_LABEL, msg.as_bytes());
                         break;
                     }
 
@@ -886,7 +886,7 @@ impl BuiltinCommand for CatBuiltin {
                     } else {
                         // Output the chunk
                         for chunk in data.chunks(256) {
-                            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, chunk);
+                            let _ = send_with_retry(stdout, TTY_WRITE_LABEL, chunk);
                         }
 
                         // Remember last character for newline check
@@ -899,7 +899,7 @@ impl BuiltinCommand for CatBuiltin {
                 }
                 Err(e) => {
                     let msg = format!("cat: read error at offset {}: {:?}\n", offset, e);
-                    send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
+                    send_with_retry(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
                     break;
                 }
             }
@@ -909,9 +909,9 @@ impl BuiltinCommand for CatBuiltin {
         if !hex_mode {
             if let Some(ch) = last_char {
                 if ch != b'\n' {
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"\n");
-                }
+                let _ = send_with_retry(stdout, TTY_WRITE_LABEL, b"\n");
             }
+        }
         }
 
         // Free the allocated virtual address region

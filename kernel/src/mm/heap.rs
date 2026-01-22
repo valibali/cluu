@@ -59,14 +59,14 @@ use linked_list_allocator::LockedHeap;
 /// - Kernel:     0xffff_ffff_ffe0_0000 - ...
 pub const HEAP_START: u64 = 0xffff_ffff_c000_0000;
 
-/// Size of the kernel heap in bytes (2 MiB)
+/// Size of the kernel heap in bytes (8 MiB)
 ///
 /// Size rationale:
 /// - Limited by BOOTBOOT's kernel virtual address space
-/// - 2 MiB = 1 huge page, efficient mapping
-/// - Enough for scheduler data structures and moderate thread count
+/// - 8 MiB = 4 huge pages, still efficient mapping
+/// - Matches kernel needs for VFS/IPC/driver buffers under load
 /// - Can be increased when we implement our own address space management
-pub const HEAP_SIZE: u64 = 2 * 1024 * 1024; // 2 MiB
+pub const HEAP_SIZE: u64 = 8 * 1024 * 1024; // 8 MiB
 
 /// Global allocator instance
 ///
@@ -154,5 +154,22 @@ pub unsafe fn init() -> Result<(), &'static str> {
 #[cfg(not(feature = "testing"))]
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
+    let heap = ALLOCATOR.lock();
+    klibcluu::error("Kernel heap allocation failed");
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Error,
+        "  Request size: ",
+        layout.size() as u64,
+    );
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Error,
+        "  Request align: ",
+        layout.align() as u64,
+    );
+    klibcluu::log_dec(klibcluu::LogLevel::Error, "  Heap size: ", heap.size() as u64);
+    klibcluu::log_dec(klibcluu::LogLevel::Error, "  Heap used: ", heap.used() as u64);
+    klibcluu::log_dec(klibcluu::LogLevel::Error, "  Heap free: ", heap.free() as u64);
+    klibcluu::log_hex(klibcluu::LogLevel::Error, "  Heap bottom: 0x", heap.bottom() as u64);
+    klibcluu::log_hex(klibcluu::LogLevel::Error, "  Heap top: 0x", heap.top() as u64);
     panic!("Kernel heap allocation failed: {:?}", layout);
 }
