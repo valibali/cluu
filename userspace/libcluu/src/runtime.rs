@@ -80,10 +80,11 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let proc_info = crate::boot::process_info();
+    let heap_stats = allocator::stats();
     let mut line = StackString::<512>::new();
     let _ = write!(
         &mut line,
-        "userspace: panic cookie={} stdin={} stdout={} stderr={} stdlog={} reg={} proc_cap={} space={}",
+        "userspace: panic cookie={} stdin={} stdout={} stderr={} stdlog={} reg={} proc_cap={} space={} heap_used={}/{} peak={} free={}",
         proc_info.exit_cookie,
         proc_info.tokens[crate::boot::TOKEN_STDIN],
         proc_info.tokens[crate::boot::TOKEN_STDOUT],
@@ -92,6 +93,10 @@ fn panic(info: &PanicInfo) -> ! {
         proc_info.tokens[crate::boot::TOKEN_REGISTRY],
         proc_info.tokens[crate::boot::TOKEN_PROC_CAP],
         proc_info.tokens[crate::boot::TOKEN_SPACE],
+        heap_stats.used,
+        heap_stats.total,
+        heap_stats.peak,
+        heap_stats.free,
     );
     if let Some(loc) = info.location() {
         let _ = write!(
