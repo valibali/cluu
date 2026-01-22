@@ -81,6 +81,7 @@ pub enum InvokeOp {
 
     // Memory translation
     VirtToPhys = 58,
+    PmmAllocLarge = 59,
 }
 
 /// Page mapping flags for space_map.
@@ -886,6 +887,13 @@ pub fn port_out32(pci_token: usize, port: u16, value: u32) -> Result<()> {
 pub fn virt_to_phys(space_token: usize, virt_addr: usize) -> Result<u64> {
     let phys = unsafe { invoke(space_token, InvokeOp::VirtToPhys, virt_addr, 0, 0, 0)? };
     Ok(phys as u64)
+}
+
+pub fn pmm_alloc_large(space_token: usize) -> Result<u64> {
+    // Uses sys_invoke(space_token, InvokeOp::PmmAllocLarge, 0,0,0,0)
+    // Return physical address.
+    let r = unsafe { invoke(space_token, InvokeOp::PmmAllocLarge, 0, 0, 0, 0) }?;
+    Ok(r as u64)
 }
 
 //

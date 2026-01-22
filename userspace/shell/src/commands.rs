@@ -8,6 +8,7 @@ use alloc::format;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt::Write;
 
 use libcluu::boot::TOKEN_SPACE;
 use libcluu::fs::client::VfsClient;
@@ -696,6 +697,71 @@ fn split_expr_token(token: &str) -> Option<(String, String, String)> {
     Some((lhs.to_string(), ch.to_string(), rhs.to_string()))
 }
 
+fn is_elf_magic(data: &[u8]) -> bool {
+    data.len() >= 4 && data[0] == 0x7f && data[1] == b'E' && data[2] == b'L' && data[3] == b'F'
+}
+
+fn write_hexdump(stdout: usize, base_offset: usize, data: &[u8]) -> Result<()> {
+    const BYTES_PER_LINE: usize = 16;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut line = [0u8; 96];
+
+    for (line_idx, chunk) in data.chunks(BYTES_PER_LINE).enumerate() {
+        let offset = (base_offset + line_idx * BYTES_PER_LINE) as u32;
+        let mut idx = 0usize;
+
+        // 8-hex offset
+        for shift in (0..32).step_by(4).rev() {
+            line[idx] = HEX[((offset >> shift) & 0xF) as usize];
+            idx += 1;
+        }
+        line[idx] = b':';
+        idx += 1;
+        line[idx] = b' ';
+        idx += 1;
+
+        // Hex bytes
+        for i in 0..BYTES_PER_LINE {
+            if i < chunk.len() {
+                let b = chunk[i];
+                line[idx] = HEX[(b >> 4) as usize];
+                idx += 1;
+                line[idx] = HEX[(b & 0xF) as usize];
+                idx += 1;
+                line[idx] = b' ';
+                idx += 1;
+            } else {
+                line[idx] = b' ';
+                line[idx + 1] = b' ';
+                line[idx + 2] = b' ';
+                idx += 3;
+            }
+        }
+
+        line[idx] = b' ';
+        idx += 1;
+        line[idx] = b'|';
+        idx += 1;
+
+        for &b in chunk {
+            line[idx] = if b.is_ascii_graphic() || b == b' ' { b } else { b'.' };
+            idx += 1;
+        }
+        for _ in chunk.len()..BYTES_PER_LINE {
+            line[idx] = b' ';
+            idx += 1;
+        }
+        line[idx] = b'|';
+        idx += 1;
+        line[idx] = b'\n';
+        idx += 1;
+
+        send_with_payload(stdout, TTY_WRITE_LABEL, &line[..idx])?;
+    }
+
+    Ok(())
+}
+
 struct CatBuiltin;
 
 impl BuiltinCommand for CatBuiltin {
@@ -704,7 +770,20 @@ impl BuiltinCommand for CatBuiltin {
     }
 
     fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(path) = args.first() else {
+        let mut hex_requested = false;
+        let mut path: Option<&str> = None;
+        for arg in args {
+            if arg == "-x" {
+                hex_requested = true;
+            } else if arg == "--grant" {
+                // Explicitly request zero-copy grant path (default).
+                continue;
+            } else if path.is_none() {
+                path = Some(arg.as_str());
+            }
+        }
+
+        let Some(path) = path else {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"cat: missing path\n")?;
             return Ok(());
         };
@@ -745,8 +824,8 @@ impl BuiltinCommand for CatBuiltin {
         let info = process_info();
         let space_token = info.tokens[TOKEN_SPACE];
 
-        // Use 1MB chunks for streaming (works for files of any size)
-        const CHUNK_SIZE: usize = 1024 * 1024;
+        // Match VFS grant window size to avoid oversized remote reads.
+        const CHUNK_SIZE: usize = 64 * 1024;
         let chunk_size = CHUNK_SIZE.min(file.size);
         let grant_size = (chunk_size + 4095) & !4095; // Page-align
 
@@ -763,25 +842,56 @@ impl BuiltinCommand for CatBuiltin {
         // Stream the file in chunks
         let mut offset = 0;
         let mut last_char = None;
+        let mut hex_mode = hex_requested;
         while offset < file.size {
             let remaining = file.size - offset;
             let read_size = remaining.min(CHUNK_SIZE);
 
             match vfs.read_grant(file, offset, read_size, space_token, read_buf_base) {
                 Ok(grant) => {
+                    if grant.len == 0 {
+                        break;
+                    }
+
+                    if grant.len > read_size {
+                        let msg = format!(
+                            "cat: read size mismatch (requested {}, got {})\n",
+                            read_size, grant.len
+                        );
+                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes());
+                        break;
+                    }
+
+                    if grant.offset + grant.len > grant_size {
+                        let msg = format!(
+                            "cat: grant range out of bounds (offset {}, len {})\n",
+                            grant.offset, grant.len
+                        );
+                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes());
+                        break;
+                    }
+
                     let addr = grant.base + grant.offset;
                     let data = unsafe {
                         core::slice::from_raw_parts(addr as *const u8, grant.len)
                     };
 
-                    // Output the chunk
-                    for chunk in data.chunks(256) {
-                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, chunk);
+                    if !hex_mode && offset == 0 && is_elf_magic(data) {
+                        hex_mode = true;
                     }
 
-                    // Remember last character for newline check
-                    if !data.is_empty() {
-                        last_char = Some(data[data.len() - 1]);
+                    if hex_mode {
+                        write_hexdump(stdout, offset, data)?;
+                    } else {
+                        // Output the chunk
+                        for chunk in data.chunks(256) {
+                            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, chunk);
+                        }
+
+                        // Remember last character for newline check
+                        if !data.is_empty() {
+                            last_char = Some(data[data.len() - 1]);
+                        }
                     }
 
                     offset += grant.len;
@@ -794,10 +904,12 @@ impl BuiltinCommand for CatBuiltin {
             }
         }
 
-        // Add newline if file doesn't end with one
-        if let Some(ch) = last_char {
-            if ch != b'\n' {
-                let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"\n");
+        // Add newline if file doesn't end with one (text mode only)
+        if !hex_mode {
+            if let Some(ch) = last_char {
+                if ch != b'\n' {
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"\n");
+                }
             }
         }
 
@@ -817,7 +929,7 @@ impl BuiltinCommand for LsBuiltin {
     }
 
     fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let path = args.first().map(|s| s.as_str()).unwrap_or("/mnt/disk");
+        let path = args.first().map(|s| s.as_str()).unwrap_or("/");
 
         // Get VFS endpoint
         let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
