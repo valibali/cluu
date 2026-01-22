@@ -171,6 +171,29 @@ pub struct Thread {
 
     /// Information for pending IPC call reply (set when thread is waiting for reply)
     pub call_reply_info: Option<CallReplyInfo>,
+
+    /// Thread-local token cache (for performance optimization)
+    /// Caches recently looked-up tokens to avoid repeated HMAC verification
+    pub token_cache: Option<TokenCacheEntry>,
+}
+
+/// Thread-local token cache entry
+///
+/// Caches a verified token to avoid repeated expensive operations.
+/// Cache is invalidated when:
+/// - Token expires (checked on every lookup)
+/// - Token is revoked (generation counter changes)
+/// - Token is removed from table (checked on every lookup)
+#[derive(Clone, Debug)]
+pub struct TokenCacheEntry {
+    /// Cached token handle
+    pub handle: crate::token::TokenHandle,
+    /// Cached token (already verified)
+    pub token: crate::token::Token,
+    /// Cached object reference
+    pub object_ref: crate::token::scope::ObjectRef,
+    /// Generation when cached (for revocation detection)
+    pub cached_generation: u64,
 }
 
 impl Thread {
@@ -234,6 +257,7 @@ impl Thread {
             timeout_deadline: None,
             woke_from_timeout: false,
             call_reply_info: None,
+            token_cache: None,
         }
     }
 
@@ -265,6 +289,7 @@ impl Thread {
             timeout_deadline: None,
             woke_from_timeout: false,
             call_reply_info: None,
+            token_cache: None,
         }
     }
 

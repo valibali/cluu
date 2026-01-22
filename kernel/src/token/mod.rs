@@ -51,7 +51,7 @@ pub use scope::{AddressSpaceId, EndpointId, ObjectRef, OpaqueScope, ReplyId};
 pub use signature::Signature;
 pub use table::{
     count_tokens, count_tokens_for_object, create_token, init as init_token_table, lookup_token,
-    resolve_scope, resolve_token_object, revoke_token, ObjectType,
+    resolve_scope, resolve_token_object, revocation_generation, revoke_token, ObjectType,
 };
 
 /// Derive a new token from an existing one.

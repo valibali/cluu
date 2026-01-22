@@ -50,6 +50,10 @@ struct TokenTableInner {
 
     /// Next handle to allocate
     next_handle: usize,
+
+    /// Generation counter - increments on revocation to invalidate caches
+    /// Threads cache tokens with this generation; if it changes, cache is stale
+    revocation_generation: u64,
 }
 
 impl TokenTableInner {
@@ -58,6 +62,7 @@ impl TokenTableInner {
             handles: BTreeMap::new(),
             scopes: BTreeMap::new(),
             next_handle: 1, // 0 is reserved as invalid handle
+            revocation_generation: 0,
         }
     }
 
@@ -98,7 +103,17 @@ impl TokenTableInner {
     /// Note: This doesn't remove the scope mapping, as the same scope
     /// might be used in other tokens.
     fn remove(&mut self, handle: TokenHandle) -> Option<Token> {
-        self.handles.remove(&handle)
+        let removed = self.handles.remove(&handle);
+        if removed.is_some() {
+            // Increment generation to invalidate all thread-local caches
+            self.revocation_generation = self.revocation_generation.wrapping_add(1);
+        }
+        removed
+    }
+
+    /// Get current revocation generation (for cache validation)
+    fn revocation_generation(&self) -> u64 {
+        self.revocation_generation
     }
 
     /// Count total tokens
@@ -188,12 +203,15 @@ pub fn create_token(
     TOKEN_TABLE.lock().insert(token, object_ref)
 }
 
-/// Lookup and validate a token
+/// Lookup and validate a token (with thread-local caching)
 ///
 /// Returns the token if:
 /// - Handle is valid
 /// - Token hasn't expired
-/// - Signature is valid
+/// - Signature is valid (or cached and still valid)
+///
+/// Uses thread-local cache to avoid repeated HMAC verification for the same token.
+/// Cache is invalidated on expiration, revocation, or if token is removed.
 ///
 /// # Arguments
 ///
@@ -201,27 +219,126 @@ pub fn create_token(
 ///
 /// # Returns
 ///
-/// * `Ok(&Token)` - Valid token
+/// * `Ok(Token)` - Valid token
 /// * `Err(&str)` - Error reason
 pub fn lookup_token(handle: TokenHandle) -> Result<Token, &'static str> {
-    let table = TOKEN_TABLE.lock();
+    // Try to use thread-local cache if available
+    if let Some(current_thread_id) = crate::sched::ThreadManager::current() {
+        if let Some(cached) = try_cache_lookup(handle, current_thread_id) {
+            return Ok(cached);
+        }
+    }
 
-    // Lookup token
-    let token = table.get(handle).ok_or("Invalid token handle")?;
+    // Cache miss or no current thread - do full lookup
+    let (token, object_ref, generation) = {
+        let table = TOKEN_TABLE.lock();
 
-    // Check expiration
+        // Lookup token
+        let token = table.get(handle).ok_or("Invalid token handle")?;
+
+        // Check expiration (always check - can't cache expiration)
+        let now = current_timestamp();
+        if token.is_expired(now) {
+            return Err("Token expired");
+        }
+
+        // Verify signature (expensive operation - this is what we're caching)
+        let secret = kernel_secret();
+        if !token.verify(&secret) {
+            return Err("Invalid token signature");
+        }
+
+        // Get object ref and generation for caching
+        let object_ref = table.resolve_scope(&token.scope).ok_or("Unknown scope")?;
+        let generation = table.revocation_generation();
+
+        (token.clone(), object_ref, generation)
+    };
+
+    // Update thread-local cache
+    if let Some(current_thread_id) = crate::sched::ThreadManager::current() {
+        update_cache(current_thread_id, handle, &token, object_ref, generation);
+    }
+
+    Ok(token)
+}
+
+/// Try to lookup token from thread-local cache
+///
+/// Returns cached token if:
+/// - Cache entry exists for this handle
+/// - Generation matches (token not revoked)
+/// - Token not expired
+/// - Token still exists in table
+fn try_cache_lookup(
+    handle: TokenHandle,
+    thread_id: crate::sched::thread::ThreadId,
+) -> Option<Token> {
+    use crate::sched::thread_manager::ThreadManager;
+
+    // Get cached entry (if any)
+    let cache = ThreadManager::with_thread(thread_id, |thread| thread.token_cache.clone())??; // Unwrap Option<Option<TokenCacheEntry>>
+
+    // Check if cache entry matches this handle
+    if cache.handle != handle {
+        return None; // Cache miss
+    }
+
+    // Check generation (detects revocation)
+    let current_generation = revocation_generation();
+    if cache.cached_generation != current_generation {
+        // Cache invalid - token was revoked, clear it
+        ThreadManager::with_thread_mut(thread_id, |thread| {
+            thread.token_cache = None;
+        });
+        return None;
+    }
+
+    // Check expiration (always check - can't cache expiration check)
     let now = current_timestamp();
-    if token.is_expired(now) {
-        return Err("Token expired");
+    if cache.token.is_expired(now) {
+        // Cache invalid - token expired, clear it
+        ThreadManager::with_thread_mut(thread_id, |thread| {
+            thread.token_cache = None;
+        });
+        return None;
     }
 
-    // Verify signature
-    let secret = kernel_secret();
-    if !token.verify(&secret) {
-        return Err("Invalid token signature");
+    // Verify token still exists in table (defense in depth)
+    {
+        let table = TOKEN_TABLE.lock();
+        if table.get(handle).is_none() {
+            // Token was removed - invalidate cache
+            ThreadManager::with_thread_mut(thread_id, |thread| {
+                thread.token_cache = None;
+            });
+            return None;
+        }
     }
 
-    Ok(token.clone())
+    // Cache hit! Return cached token (skip HMAC verification)
+    Some(cache.token.clone())
+}
+
+/// Update thread-local token cache
+fn update_cache(
+    thread_id: crate::sched::thread::ThreadId,
+    handle: TokenHandle,
+    token: &Token,
+    object_ref: crate::token::scope::ObjectRef,
+    generation: u64,
+) {
+    use crate::sched::thread::TokenCacheEntry;
+    use crate::sched::thread_manager::ThreadManager;
+
+    ThreadManager::with_thread_mut(thread_id, |thread| {
+        thread.token_cache = Some(TokenCacheEntry {
+            handle,
+            token: token.clone(),
+            object_ref,
+            cached_generation: generation,
+        });
+    });
 }
 
 /// Resolve opaque scope to object reference
@@ -272,6 +389,7 @@ pub fn resolve_token_object(
 /// Revoke a token
 ///
 /// Removes token from table, making handle invalid.
+/// Also increments revocation generation to invalidate thread-local caches.
 ///
 /// # Arguments
 ///
@@ -283,8 +401,16 @@ pub fn resolve_token_object(
 /// * `Err(&str)` - Handle not found
 pub fn revoke_token(handle: TokenHandle) -> Result<(), &'static str> {
     TOKEN_TABLE.lock().remove(handle).ok_or("Token not found")?;
-
+    // Generation counter is incremented by remove() to invalidate caches
     Ok(())
+}
+
+/// Get current revocation generation (for cache validation)
+///
+/// Threads can cache tokens with this generation number.
+/// If the generation changes (due to revocation), cached tokens are invalid.
+pub fn revocation_generation() -> u64 {
+    TOKEN_TABLE.lock().revocation_generation()
 }
 
 /// Get token count
