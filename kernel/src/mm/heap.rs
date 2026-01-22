@@ -48,7 +48,109 @@
 //! let s = String::from("hello");
 //! ```
 
+use core::alloc::{GlobalAlloc, Layout};
 use linked_list_allocator::LockedHeap;
+
+/// Wrapper allocator that logs large allocation requests
+///
+/// This helps identify what's requesting large allocations (e.g., 4MB)
+/// that might be causing heap exhaustion.
+struct LoggingAllocator;
+
+unsafe impl GlobalAlloc for LoggingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // Log large allocations (>1MB) to help diagnose issues
+        const LARGE_ALLOC_THRESHOLD: usize = 1024 * 1024; // 1MB
+        if layout.size() >= LARGE_ALLOC_THRESHOLD {
+            let heap = INNER_ALLOCATOR.lock();
+            klibcluu::warn("Large heap allocation requested");
+            klibcluu::log_dec(klibcluu::LogLevel::Warn, "  Size: ", layout.size() as u64);
+            klibcluu::log_dec(klibcluu::LogLevel::Warn, "  Align: ", layout.align() as u64);
+            klibcluu::log_dec(
+                klibcluu::LogLevel::Warn,
+                "  Heap free: ",
+                heap.free() as u64,
+            );
+            klibcluu::log_dec(
+                klibcluu::LogLevel::Warn,
+                "  Heap used: ",
+                heap.used() as u64,
+            );
+
+            // Capture caller's RIP from stack frame (may not be reliable in all cases)
+            // This is just for debugging - the real issue is why such large allocations are requested
+            let caller_rip: u64;
+            unsafe {
+                core::arch::asm!(
+                    "mov {}, [rbp + 8]",
+                    out(reg) caller_rip,
+                    options(nostack, nomem, preserves_flags)
+                );
+            }
+            klibcluu::log_hex(klibcluu::LogLevel::Warn, "  Caller RIP: 0x", caller_rip);
+            
+            // Dump a short stack trace to see the call chain
+            klibcluu::warn("  Stack trace:");
+            let mut rbp: u64;
+            unsafe {
+                core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags));
+            }
+            for i in 0..5 {
+                if rbp == 0 || (rbp & 0x7) != 0 {
+                    break;
+                }
+                let ret_addr = unsafe { *((rbp + 8) as *const u64) };
+                if ret_addr == 0 || ret_addr > 0xffff_ffff_ffff_0000 {
+                    break;
+                }
+                klibcluu::log_hex(klibcluu::LogLevel::Warn, "    #", i as u64);
+                klibcluu::log_hex(klibcluu::LogLevel::Warn, "  rip=0x", ret_addr);
+                let next_rbp = unsafe { *(rbp as *const u64) };
+                if next_rbp <= rbp || next_rbp > 0xffff_ffff_ffff_0000 {
+                    break;
+                }
+                rbp = next_rbp;
+            }
+
+            // Note: Progressive 1MB → 2MB → 4MB allocations suggest either:
+            // 1. Multiple separate allocations
+            // 2. Allocator trying different strategies
+            // 3. Heap fragmentation preventing large contiguous blocks
+            drop(heap);
+        }
+
+        // Delegate to inner allocator
+        let result = INNER_ALLOCATOR.alloc(layout);
+
+        // Log if allocation failed
+        if result.is_null() && layout.size() >= LARGE_ALLOC_THRESHOLD {
+            let heap = INNER_ALLOCATOR.lock();
+            klibcluu::error("Large heap allocation FAILED");
+            klibcluu::log_dec(
+                klibcluu::LogLevel::Error,
+                "  Requested: ",
+                layout.size() as u64,
+            );
+            klibcluu::log_dec(
+                klibcluu::LogLevel::Error,
+                "  Heap free: ",
+                heap.free() as u64,
+            );
+            klibcluu::log_dec(
+                klibcluu::LogLevel::Error,
+                "  Heap used: ",
+                heap.used() as u64,
+            );
+            klibcluu::warn("  Likely cause: Heap fragmentation - free memory not contiguous");
+        }
+
+        result
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        INNER_ALLOCATOR.dealloc(ptr, layout)
+    }
+}
 
 /// Virtual address where the kernel heap begins
 ///
@@ -59,25 +161,29 @@ use linked_list_allocator::LockedHeap;
 /// - Kernel:     0xffff_ffff_ffe0_0000 - ...
 pub const HEAP_START: u64 = 0xffff_ffff_c000_0000;
 
-/// Size of the kernel heap in bytes (8 MiB)
+/// Size of the kernel heap in bytes (16 MiB)
 ///
 /// Size rationale:
 /// - Limited by BOOTBOOT's kernel virtual address space
-/// - 8 MiB = 4 huge pages, still efficient mapping
-/// - Matches kernel needs for VFS/IPC/driver buffers under load
-/// - Can be increased when we implement our own address space management
-pub const HEAP_SIZE: u64 = 8 * 1024 * 1024; // 8 MiB
+/// - 16 MiB = 8 huge pages, still efficient mapping
+/// - Increased from 8MB to handle BTreeMap growth in space_repository
+/// - Linux kernels typically use 32-128MB, this is still conservative
+/// - Can be increased further when we implement our own address space management
+pub const HEAP_SIZE: u64 = 16 * 1024 * 1024; // 16 MiB
 
-/// Global allocator instance
+/// Inner allocator (wrapped for logging)
+static INNER_ALLOCATOR: LockedHeap = LockedHeap::empty();
+
+/// Global allocator instance with logging
 ///
 /// The #[global_allocator] attribute makes this the default allocator
 /// for all heap allocations (Box, Vec, String, etc.)
 #[cfg(not(feature = "testing"))]
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: LoggingAllocator = LoggingAllocator;
 
 #[cfg(feature = "testing")]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: LoggingAllocator = LoggingAllocator;
 
 /// Initialize the kernel heap
 ///
@@ -129,7 +235,7 @@ pub unsafe fn init() -> Result<(), &'static str> {
     // Initialize the linked list allocator over the mapped memory
     // SAFETY: We just mapped this range, so it's valid memory
     unsafe {
-        ALLOCATOR
+        INNER_ALLOCATOR
             .lock()
             .init(HEAP_START as *mut u8, HEAP_SIZE as usize);
     }
@@ -154,7 +260,7 @@ pub unsafe fn init() -> Result<(), &'static str> {
 #[cfg(not(feature = "testing"))]
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    let heap = ALLOCATOR.lock();
+    let heap = INNER_ALLOCATOR.lock();
     klibcluu::error("Kernel heap allocation failed");
     klibcluu::log_dec(
         klibcluu::LogLevel::Error,
@@ -166,10 +272,30 @@ fn alloc_error(layout: core::alloc::Layout) -> ! {
         "  Request align: ",
         layout.align() as u64,
     );
-    klibcluu::log_dec(klibcluu::LogLevel::Error, "  Heap size: ", heap.size() as u64);
-    klibcluu::log_dec(klibcluu::LogLevel::Error, "  Heap used: ", heap.used() as u64);
-    klibcluu::log_dec(klibcluu::LogLevel::Error, "  Heap free: ", heap.free() as u64);
-    klibcluu::log_hex(klibcluu::LogLevel::Error, "  Heap bottom: 0x", heap.bottom() as u64);
-    klibcluu::log_hex(klibcluu::LogLevel::Error, "  Heap top: 0x", heap.top() as u64);
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Error,
+        "  Heap size: ",
+        heap.size() as u64,
+    );
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Error,
+        "  Heap used: ",
+        heap.used() as u64,
+    );
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Error,
+        "  Heap free: ",
+        heap.free() as u64,
+    );
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Error,
+        "  Heap bottom: 0x",
+        heap.bottom() as u64,
+    );
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Error,
+        "  Heap top: 0x",
+        heap.top() as u64,
+    );
     panic!("Kernel heap allocation failed: {:?}", layout);
 }

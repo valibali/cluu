@@ -614,6 +614,26 @@ impl ThreadManager {
 
     /// Save context to thread structure
     fn save_context(thread_id: ThreadId, context: &Context) {
+        // Validate RIP before saving (sanity check for memory corruption)
+        // RIP should be in userspace range (0x400000 - 0x7FFFFFFFFFFF)
+        // Very low addresses (< 0x1000) are almost certainly invalid
+        if context.rip < 0x1000 {
+            klibcluu::error("FATAL: Attempted to save context with invalid RIP=0x");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "", context.rip);
+            klibcluu::error("This indicates memory corruption - halting");
+            loop {
+                x86_64::instructions::hlt();
+            }
+        }
+        // Check if canonical (bits 63:47 must be 0 for userspace)
+        if (context.rip >> 47) != 0 {
+            klibcluu::error("FATAL: Attempted to save context with non-canonical RIP=0x");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "", context.rip);
+            klibcluu::error("This indicates memory corruption - halting");
+            loop {
+                x86_64::instructions::hlt();
+            }
+        }
         Self::with_thread_mut(thread_id, |thread| {
             thread.context = *context;
         });

@@ -268,6 +268,29 @@ syscall_entry:
     ; Restore context and return via IRETQ
     ; ─────────────────────────────────────────────────────────────────────────
 
+    ; Validate RIP before restoring (sanity check for memory corruption)
+    mov rsi, [r10 + CONTEXT_RIP]
+    ; RIP should be in userspace range (0x400000 - 0x7FFFFFFFFFFF)
+    ; Very low addresses (< 0x1000) are almost certainly invalid
+    cmp rsi, 0x1000
+    jb .invalid_rip
+    ; Check if canonical (bits 63:47 must be 0 for userspace)
+    mov rax, rsi
+    shr rax, 47
+    test rax, rax
+    jnz .invalid_rip
+    jmp .rip_valid
+
+.invalid_rip:
+    ; RIP is corrupted - halt to prevent page fault
+    ; The validation in Rust code will log the error before we get here
+    ; This is a safety check in case we somehow get a corrupted context
+    cli
+.halt_loop:
+    hlt
+    jmp .halt_loop
+
+.rip_valid:
     ; Switch address space if needed
     mov rax, [r10 + CONTEXT_CR3]
     mov cr3, rax
@@ -277,7 +300,6 @@ syscall_entry:
     mov rbx, [r10 + CONTEXT_RSP]
     mov rcx, [r10 + CONTEXT_RFLAGS]
     mov rdx, [r10 + CONTEXT_CS]
-    mov rsi, [r10 + CONTEXT_RIP]
 
     push rax                            ; SS
     push rbx                            ; RSP

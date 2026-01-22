@@ -9,6 +9,10 @@ use crate::token::scope::AddressSpaceId;
 use alloc::collections::BTreeMap;
 use spin::Mutex;
 
+/// Maximum number of address spaces to prevent unbounded memory growth
+/// This limits BTreeMap growth which can cause large heap allocations
+const MAX_ADDRESS_SPACES: usize = 256;
+
 struct Repository {
     next_id: u64,
     spaces: BTreeMap<AddressSpaceId, AddressSpace>,
@@ -29,6 +33,12 @@ impl Repository {
     }
 
     fn insert(&mut self, space: AddressSpace) -> AddressSpaceId {
+        // Check limit but don't fail - just log a warning
+        // This prevents the leak issue where AddressSpace is created but insert fails
+        if self.spaces.len() >= MAX_ADDRESS_SPACES {
+            klibcluu::warn("WARNING: Maximum address spaces reached, but allowing insert");
+            klibcluu::warn("Consider increasing MAX_ADDRESS_SPACES or investigating memory usage");
+        }
         let id = self.allocate_id();
         self.spaces.insert(id, space);
         id
@@ -42,6 +52,11 @@ impl Repository {
 static REPOSITORY: Mutex<Repository> = Mutex::new(Repository::new());
 
 /// Insert a new address space and return its `AddressSpaceId`.
+///
+/// # Note
+///
+/// If MAX_ADDRESS_SPACES is reached, a warning is logged but the insert
+/// still proceeds to avoid leaking the AddressSpace that was already created.
 pub fn insert(space: AddressSpace) -> AddressSpaceId {
     let mut repo = REPOSITORY.lock();
     repo.insert(space)

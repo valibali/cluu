@@ -885,6 +885,8 @@ impl BuiltinCommand for CatBuiltin {
                         write_hexdump(stdout, offset, data)?;
                     } else {
                         // Output the chunk
+                        // Note: IPC_MESSAGE_MAX is 256 bytes, so we're limited to 256-byte chunks
+                        // This causes many IPC calls for large files, but it's the current limitation
                         for chunk in data.chunks(256) {
                             let _ = send_with_retry(stdout, TTY_WRITE_LABEL, chunk);
                         }

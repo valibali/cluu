@@ -7,7 +7,6 @@ use crate::error::Error;
 use crate::sched::ThreadId;
 use crate::token::EndpointId;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
-use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -261,25 +260,60 @@ pub trait EndpointStore: Send {
         F: FnOnce(&mut dyn ByteEndpoint) -> Result<R, Error>;
 }
 
-pub struct EndpointRepository {
-    /// Endpoints stored with per-endpoint mutexes for concurrent access
-    /// Each endpoint can be accessed independently without blocking others
-    endpoints: BTreeMap<EndpointId, Arc<Mutex<QueueEndpoint>>>,
+/// Sharded endpoint repository to reduce lock contention and avoid Arc heap allocations
+/// Each shard has its own mutex, endpoints distributed by ID hash
+const NUM_ENDPOINT_SHARDS: usize = 16;
+
+struct EndpointShard {
+    endpoints: BTreeMap<EndpointId, Mutex<QueueEndpoint>>,
 }
 
-impl EndpointRepository {
-    fn new() -> Self {
+impl EndpointShard {
+    const fn new() -> Self {
         Self {
             endpoints: BTreeMap::new(),
         }
     }
 }
 
+/// Hash function for endpoint IDs to determine shard
+#[inline(always)]
+fn hash_endpoint_id(id: EndpointId) -> usize {
+    // Use endpoint ID value modulo number of shards
+    // EndpointId is a newtype wrapper around u64
+    (id.0 as usize) % NUM_ENDPOINT_SHARDS
+}
+
+/// Static sharded endpoint table - each shard has its own mutex
+/// This allows concurrent access to different endpoints without contention
+/// and avoids Arc heap allocations
+static ENDPOINT_SHARDS: [Mutex<EndpointShard>; NUM_ENDPOINT_SHARDS] =
+    [const { Mutex::new(EndpointShard::new()) }; NUM_ENDPOINT_SHARDS];
+
+/// Get the shard for a given endpoint ID
+#[inline(always)]
+fn get_endpoint_shard(id: EndpointId) -> &'static Mutex<EndpointShard> {
+    &ENDPOINT_SHARDS[hash_endpoint_id(id)]
+}
+
+pub struct EndpointRepository {
+    // Empty - kept for compatibility with EndpointStore trait
+    // Actual storage is in static ENDPOINT_SHARDS
+}
+
+impl EndpointRepository {
+    #[allow(dead_code)]
+    fn new() -> Self {
+        Self {}
+    }
+}
+
 impl EndpointStore for EndpointRepository {
     fn create(&mut self) -> EndpointId {
         let id = EndpointId::new(NEXT_ENDPOINT_ID.fetch_add(1, Ordering::SeqCst));
-        self.endpoints
-            .insert(id, Arc::new(Mutex::new(QueueEndpoint::new())));
+        let shard = get_endpoint_shard(id);
+        let mut shard_guard = shard.lock();
+        shard_guard.endpoints.insert(id, Mutex::new(QueueEndpoint::new()));
         id
     }
 
@@ -287,17 +321,11 @@ impl EndpointStore for EndpointRepository {
     where
         F: FnOnce(&mut dyn ByteEndpoint) -> Result<R, Error>,
     {
-        let endpoint = self.endpoints.get_mut(&id).ok_or(Error::NotFound)?;
+        let shard = get_endpoint_shard(id);
+        let mut shard_guard = shard.lock();
+        let endpoint = shard_guard.endpoints.get_mut(&id).ok_or(Error::NotFound)?;
         let mut guard = endpoint.lock();
         f(&mut *guard)
-    }
-}
-
-impl EndpointRepository {
-    /// Get endpoint by ID (returns Arc for concurrent access)
-    /// This allows callers to hold the endpoint mutex without holding repository lock
-    fn get_endpoint(&self, id: EndpointId) -> Option<Arc<Mutex<QueueEndpoint>>> {
-        self.endpoints.get(&id).map(Arc::clone)
     }
 }
 
@@ -318,54 +346,54 @@ lazy_static! {
 static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn create_endpoint() -> EndpointId {
-    ENDPOINTS.lock().create()
+    let id = EndpointId::new(NEXT_ENDPOINT_ID.fetch_add(1, Ordering::SeqCst));
+    let shard = get_endpoint_shard(id);
+    let mut shard_guard = shard.lock();
+    shard_guard.endpoints.insert(id, Mutex::new(QueueEndpoint::new()));
+    id
 }
 
 pub fn send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, Error> {
-    // Get endpoint Arc (brief repository lock)
-    let endpoint_arc = {
-        let repo = ENDPOINTS.lock();
-        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-    };
+    // Get shard directly (static, no repository lock needed)
+    let shard = get_endpoint_shard(endpoint);
 
-    // Lock only this endpoint (allows concurrent access to other endpoints)
-    let mut guard = endpoint_arc.lock();
+    // Lock shard, then endpoint (allows concurrent access to endpoints in different shards)
+    let mut shard_guard = shard.lock();
+    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let mut guard = endpoint_mutex.lock();
     guard.send(data)
 }
 
 pub fn try_send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, Error> {
-    // Get endpoint Arc (brief repository lock)
-    let endpoint_arc = {
-        let repo = ENDPOINTS.try_lock().ok_or(Error::WouldBlock)?;
-        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-    };
+    // Get shard directly (static, no repository lock needed)
+    let shard = get_endpoint_shard(endpoint);
 
-    // Try to lock only this endpoint (non-blocking)
-    let mut guard = endpoint_arc.try_lock().ok_or(Error::WouldBlock)?;
+    // Lock shard, then endpoint (non-blocking)
+    let mut shard_guard = shard.try_lock().ok_or(Error::WouldBlock)?;
+    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let mut guard = endpoint_mutex.try_lock().ok_or(Error::WouldBlock)?;
     guard.send(data)
 }
 
 pub fn recv(endpoint: EndpointId, receiver: ThreadId) -> Result<Option<EndpointMessage>, Error> {
-    // Get endpoint Arc (brief repository lock)
-    let endpoint_arc = {
-        let repo = ENDPOINTS.lock();
-        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-    };
+    // Get shard directly (static, no repository lock needed)
+    let shard = get_endpoint_shard(endpoint);
 
-    // Lock only this endpoint (allows concurrent access to other endpoints)
-    let mut guard = endpoint_arc.lock();
+    // Lock shard, then endpoint (allows concurrent access to endpoints in different shards)
+    let mut shard_guard = shard.lock();
+    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let mut guard = endpoint_mutex.lock();
     guard.recv(receiver)
 }
 
 pub fn recv_nonblocking(endpoint: EndpointId) -> Result<Option<EndpointMessage>, Error> {
-    // Get endpoint Arc (brief repository lock)
-    let endpoint_arc = {
-        let repo = ENDPOINTS.lock();
-        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-    };
+    // Get shard directly (static, no repository lock needed)
+    let shard = get_endpoint_shard(endpoint);
 
-    // Lock only this endpoint (allows concurrent access to other endpoints)
-    let mut guard = endpoint_arc.lock();
+    // Lock shard, then endpoint (allows concurrent access to endpoints in different shards)
+    let mut shard_guard = shard.lock();
+    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let mut guard = endpoint_mutex.lock();
     guard.recv_nonblocking()
 }
 
@@ -399,50 +427,43 @@ pub fn send_from_user(
             page_table_root,
         )?;
     }
-    // Retry loop for backpressure - block if queue is full
-    loop {
-        let (wake, should_block) = {
-            // Get endpoint Arc (brief repository lock)
-            let endpoint_arc = {
-                let repo = ENDPOINTS.lock();
-                repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-            };
+    // Try to send - if queue is full, block and return (will be retried from userspace when woken)
+    let wake = {
+        // Get shard directly (static, no repository lock needed)
+        let shard = get_endpoint_shard(endpoint);
 
-            // Lock only this endpoint
-            let mut guard = endpoint_arc.lock();
-            match guard.send(&buffer[..msg_len]) {
-                Ok(wake) => (wake, false), // Success, don't block
-                Err(Error::WouldBlock) => {
-                    // Queue is full - sender was added to waiting_senders, need to block
-                    (None, true)
-                }
-                Err(Error::Busy) => {
-                    // Fallback for edge cases (shouldn't happen with backpressure)
-                    log_endpoint_busy(endpoint, guard.stats(), false);
-                    return Err(Error::Busy);
-                }
-                Err(err) => return Err(err),
+        // Lock shard, then endpoint
+        let mut shard_guard = shard.lock();
+        let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+        let mut guard = endpoint_mutex.lock();
+        match guard.send(&buffer[..msg_len]) {
+            Ok(wake) => wake, // Success
+            Err(Error::WouldBlock) => {
+                // Queue is full - sender was added to waiting_senders, need to block
+                // Return WouldBlock so syscall returns and context switch can happen
+                // When woken, userspace will retry the syscall
+                crate::sched::ThreadManager::block_current();
+                crate::architecture::x86_64::syscall::request_resched();
+                return Err(Error::WouldBlock);
             }
-        };
-
-        if should_block {
-            // Block current thread until queue has space (will be woken by recv)
-            crate::sched::ThreadManager::block_current();
-            crate::architecture::x86_64::syscall::request_resched();
-            // After waking, retry the send
-            continue;
-        }
-
-        // Success - wake receiver if any
-        if let Some(thread_id) = wake {
-            if first_send {
-                klibcluu::trace("send_from_user: wake_thread_id=");
-                klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+            Err(Error::Busy) => {
+                // Fallback for edge cases (shouldn't happen with backpressure)
+                log_endpoint_busy(endpoint, guard.stats(), false);
+                return Err(Error::Busy);
             }
-            crate::sched::ThreadManager::wake_thread(thread_id);
+            Err(err) => return Err(err),
         }
-        return Ok(());
+    };
+
+    // Success - wake receiver if any
+    if let Some(thread_id) = wake {
+        if first_send {
+            klibcluu::trace("send_from_user: wake_thread_id=");
+            klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+        }
+        crate::sched::ThreadManager::wake_thread(thread_id);
     }
+    Ok(())
 }
 
 pub fn recv_to_user(
@@ -540,47 +561,40 @@ pub fn call_from_user_with_reply_token(
     // Inject reply token handle into message
     inject_reply_token(&mut buffer[..msg_len], reply_token);
 
-    // Retry loop for backpressure - block if queue is full
-    loop {
-        let (wake, should_block) = {
-            // Get endpoint Arc (brief repository lock)
-            let endpoint_arc = {
-                let repo = ENDPOINTS.lock();
-                repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-            };
+    // Try to send - if queue is full, block and return (will be retried from userspace when woken)
+    let wake = {
+        // Get shard directly (static, no repository lock needed)
+        let shard = get_endpoint_shard(endpoint);
 
-            // Lock only this endpoint
-            let mut guard = endpoint_arc.lock();
-            // Just send as regular message - reply routing via token
-            match guard.send(&buffer[..msg_len]) {
-                Ok(wake) => (wake, false), // Success, don't block
-                Err(Error::WouldBlock) => {
-                    // Queue is full - sender was added to waiting_senders, need to block
-                    (None, true)
-                }
-                Err(Error::Busy) => {
-                    // Fallback for edge cases (shouldn't happen with backpressure)
-                    log_endpoint_busy(endpoint, guard.stats(), true);
-                    return Err(Error::Busy);
-                }
-                Err(err) => return Err(err),
+        // Lock shard, then endpoint
+        let mut shard_guard = shard.lock();
+        let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+        let mut guard = endpoint_mutex.lock();
+        // Just send as regular message - reply routing via token
+        match guard.send(&buffer[..msg_len]) {
+            Ok(wake) => wake, // Success
+            Err(Error::WouldBlock) => {
+                // Queue is full - sender was added to waiting_senders, need to block
+                // Return WouldBlock so syscall returns and context switch can happen
+                // When woken, userspace will retry the syscall
+                crate::sched::ThreadManager::block_current();
+                crate::architecture::x86_64::syscall::request_resched();
+                return Err(Error::WouldBlock);
             }
-        };
-
-        if should_block {
-            // Block current thread until queue has space (will be woken by recv)
-            crate::sched::ThreadManager::block_current();
-            crate::architecture::x86_64::syscall::request_resched();
-            // After waking, retry the send
-            continue;
+            Err(Error::Busy) => {
+                // Fallback for edge cases (shouldn't happen with backpressure)
+                log_endpoint_busy(endpoint, guard.stats(), true);
+                return Err(Error::Busy);
+            }
+            Err(err) => return Err(err),
         }
+    };
 
-        // Success - wake receiver if any
-        if let Some(thread_id) = wake {
-            crate::sched::ThreadManager::wake_thread(thread_id);
-        }
-        return Ok(());
+    // Success - wake receiver if any
+    if let Some(thread_id) = wake {
+        crate::sched::ThreadManager::wake_thread(thread_id);
     }
+    Ok(())
 }
 
 fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
@@ -617,41 +631,38 @@ fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
 
 /// Get the current caller for an endpoint (used by reply)
 pub fn take_current_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
-    // Get endpoint Arc (brief repository lock)
-    let endpoint_arc = {
-        let repo = ENDPOINTS.lock();
-        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-    };
+    // Get shard directly (static, no repository lock needed)
+    let shard = get_endpoint_shard(endpoint);
 
-    // Lock only this endpoint
-    let mut guard = endpoint_arc.lock();
+    // Lock shard, then endpoint
+    let mut shard_guard = shard.lock();
+    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let mut guard = endpoint_mutex.lock();
     guard.take_current_caller().ok_or(Error::InvalidState)
 }
 
 /// Get a caller for a specific call cookie.
 pub fn take_caller_by_cookie(endpoint: EndpointId, cookie: u64) -> Result<ThreadId, Error> {
-    // Get endpoint Arc (brief repository lock)
-    let endpoint_arc = {
-        let repo = ENDPOINTS.lock();
-        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-    };
+    // Get shard directly (static, no repository lock needed)
+    let shard = get_endpoint_shard(endpoint);
 
-    // Lock only this endpoint
-    let mut guard = endpoint_arc.lock();
+    // Lock shard, then endpoint
+    let mut shard_guard = shard.lock();
+    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let mut guard = endpoint_mutex.lock();
     guard
         .take_caller_by_cookie(cookie)
         .ok_or(Error::InvalidState)
 }
 
 pub fn take_any_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
-    // Get endpoint Arc (brief repository lock)
-    let endpoint_arc = {
-        let repo = ENDPOINTS.lock();
-        repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-    };
+    // Get shard directly (static, no repository lock needed)
+    let shard = get_endpoint_shard(endpoint);
 
-    // Lock only this endpoint
-    let mut guard = endpoint_arc.lock();
+    // Lock shard, then endpoint
+    let mut shard_guard = shard.lock();
+    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let mut guard = endpoint_mutex.lock();
     guard.take_any_caller().ok_or(Error::InvalidState)
 }
 
