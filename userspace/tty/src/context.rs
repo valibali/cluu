@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_PROC_CAP};
 use libcluu::ipc::{
     call_with_payload, send_with_retry_timeout, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
+    IPC_CHUNK_BYTES_DEFAULT, IPC_SEND_RETRIES_DEFAULT,
 };
 use libcluu::registry;
 use libcluu::types::Message;
@@ -17,9 +18,6 @@ use libcluu::{debug_print, yield_cpu, Result};
 
 // Token indices (set by init).
 const SVC_TOKEN_LISTEN: usize = 7;
-const CONSOLE_MAX_PAYLOAD: usize = 256;
-const CONSOLE_CREDIT_WINDOW: usize = 1024;
-const CONSOLE_SEND_RETRIES: u32 = 256;
 
 /// TTY context shared by the main loop.
 pub struct TtyContext {
@@ -206,3 +204,6 @@ impl TtyContext {
         }
     }
 }
+const CONSOLE_MAX_PAYLOAD: usize = IPC_CHUNK_BYTES_DEFAULT;
+const CONSOLE_CREDIT_WINDOW: usize = IPC_CHUNK_BYTES_DEFAULT * 4;
+const CONSOLE_SEND_RETRIES: u32 = IPC_SEND_RETRIES_DEFAULT;

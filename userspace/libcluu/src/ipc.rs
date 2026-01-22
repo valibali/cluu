@@ -15,6 +15,9 @@ pub const CONSOLE_CLEAR_LABEL: u32 = 2;
 pub const CONSOLE_CURSOR_LABEL: u32 = 3;
 pub const CONSOLE_BLINK_LABEL: u32 = 4;
 pub const CONSOLE_WRITE_SYNC_LABEL: u32 = 5;
+pub const IPC_CHUNK_BYTES_DEFAULT: usize = 256;
+pub const IPC_SEND_RETRIES_DEFAULT: u32 = 256;
+pub const IPC_BACKOFF_MAX_DEFAULT: u32 = 64;
 pub const KBD_EVENT_LABEL: u32 = 1;
 pub const TTY_READ_LABEL: u32 = 1;
 pub const TTY_WRITE_LABEL: u32 = 2;
@@ -62,7 +65,7 @@ pub fn send_with_retry_timeout(
     payload: &[u8],
     max_retries: u32,
 ) -> Result<()> {
-    const MAX_BACKOFF_YIELDS: u32 = 64;
+    let max_backoff = IPC_BACKOFF_MAX_DEFAULT;
     let mut backoff = 1u32;
     let mut retries = 0u32;
     loop {
@@ -76,7 +79,7 @@ pub fn send_with_retry_timeout(
                 for _ in 0..backoff {
                     let _ = syscall::yield_cpu();
                 }
-                backoff = (backoff.saturating_mul(2)).min(MAX_BACKOFF_YIELDS);
+                backoff = (backoff.saturating_mul(2)).min(max_backoff);
             }
             Err(err) => return Err(err),
         }
