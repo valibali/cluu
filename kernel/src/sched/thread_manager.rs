@@ -648,27 +648,39 @@ impl ThreadManager {
     }
 
     fn drain_pending_wake() {
-        // Process all slots in the pending wake queue
+        // Collect all pending thread IDs first (lock-free)
+        let mut pending_threads = alloc::vec::Vec::new();
         for slot in &PENDING_WAKE_QUEUE {
             let raw = slot.swap(0, Ordering::AcqRel);
-            if raw == 0 {
-                continue; // Empty slot
+            if raw != 0 {
+                pending_threads.push(ThreadId::new(raw));
             }
-            let thread_id = ThreadId::new(raw);
-            let priority = {
-                let mut repo = THREAD_REPOSITORY.lock();
-                match repo.get_mut(thread_id) {
-                    Some(thread) if !thread.is_dead() => {
+        }
+
+        if pending_threads.is_empty() {
+            return;
+        }
+
+        // Batch update threads (minimize lock hold time)
+        let mut to_schedule = alloc::vec::Vec::new();
+        {
+            let mut repo = THREAD_REPOSITORY.lock();
+            for thread_id in pending_threads {
+                if let Some(thread) = repo.get_mut(thread_id) {
+                    if !thread.is_dead() {
                         thread.make_ready();
                         thread.clear_timeout_deadline(); // Clear any pending timeout
                         thread.woke_from_timeout = false; // Not a timeout wake
-                        Some(thread.priority)
+                        to_schedule.push((thread_id, thread.priority));
                     }
-                    _ => None,
                 }
-            };
-            if let Some(priority) = priority {
-                let mut scheduler = SCHEDULER.lock();
+            }
+        } // Drop repo lock before acquiring scheduler lock
+
+        // Batch add to scheduler (reduces lock contention)
+        if !to_schedule.is_empty() {
+            let mut scheduler = SCHEDULER.lock();
+            for (thread_id, priority) in to_schedule {
                 scheduler.add(thread_id, priority);
             }
         }

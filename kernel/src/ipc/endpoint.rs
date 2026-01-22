@@ -83,6 +83,8 @@ pub struct QueueEndpoint {
     call_queue: VecDeque<CallMessage>,
     /// Threads waiting to receive
     waiting_receivers: VecDeque<ThreadId>,
+    /// Threads waiting to send (backpressure - queue was full)
+    waiting_senders: VecDeque<ThreadId>,
     /// The caller currently being served (for reply routing)
     current_caller: Option<ThreadId>,
     /// Active callers keyed by call cookie.
@@ -107,6 +109,7 @@ impl QueueEndpoint {
             queue: VecDeque::new(),
             call_queue: VecDeque::new(),
             waiting_receivers: VecDeque::new(),
+            waiting_senders: VecDeque::new(),
             current_caller: None,
             callers_by_cookie: BTreeMap::new(),
         }
@@ -141,22 +144,49 @@ impl QueueEndpoint {
 
 impl ByteEndpoint for QueueEndpoint {
     fn send(&mut self, data: &[u8]) -> Result<Option<ThreadId>, Error> {
+        // Check if queue is full - implement backpressure by blocking sender
         if self.queue.len() >= MAX_QUEUE_LEN {
+            // Get current thread ID to block it
+            if let Some(sender_id) = crate::sched::ThreadManager::current() {
+                self.waiting_senders.push_back(sender_id);
+                return Err(Error::WouldBlock); // This will block the sender thread
+            }
+            // Fallback if no current thread (shouldn't happen in normal operation)
             return Err(Error::Busy);
         }
         let msg = EndpointMessage::new(data)?;
         self.queue.push_back(msg);
-        Ok(self.waiting_receivers.pop_front())
+
+        // Wake a receiver if available
+        let receiver_to_wake = self.waiting_receivers.pop_front();
+
+        // Also wake a waiting sender if queue now has space (shouldn't happen here, but handle it)
+        // Note: This case is rare since we just added a message, but handle it for completeness
+        if !self.waiting_senders.is_empty() && self.queue.len() < MAX_QUEUE_LEN {
+            if let Some(sender_id) = self.waiting_senders.pop_front() {
+                crate::sched::ThreadManager::wake_thread(sender_id);
+            }
+        }
+
+        Ok(receiver_to_wake)
     }
 
     fn recv(&mut self, receiver: ThreadId) -> Result<Option<EndpointMessage>, Error> {
         // First check call queue (call messages take priority)
         if let Some(call_msg) = self.call_queue.pop_front() {
             self.current_caller = Some(call_msg.caller);
+            // Queue now has space - wake a waiting sender if any
+            if let Some(sender_id) = self.waiting_senders.pop_front() {
+                crate::sched::ThreadManager::wake_thread(sender_id);
+            }
             return Ok(Some(call_msg.message));
         }
         // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
+            // Queue now has space - wake a waiting sender if any
+            if let Some(sender_id) = self.waiting_senders.pop_front() {
+                crate::sched::ThreadManager::wake_thread(sender_id);
+            }
             return Ok(Some(msg));
         }
         self.waiting_receivers.push_back(receiver);
@@ -167,10 +197,18 @@ impl ByteEndpoint for QueueEndpoint {
         // First check call queue
         if let Some(call_msg) = self.call_queue.pop_front() {
             self.current_caller = Some(call_msg.caller);
+            // Queue now has space - wake a waiting sender if any
+            if let Some(sender_id) = self.waiting_senders.pop_front() {
+                crate::sched::ThreadManager::wake_thread(sender_id);
+            }
             return Ok(Some(call_msg.message));
         }
         // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
+            // Queue now has space - wake a waiting sender if any
+            if let Some(sender_id) = self.waiting_senders.pop_front() {
+                crate::sched::ThreadManager::wake_thread(sender_id);
+            }
             return Ok(Some(msg));
         }
         Err(Error::WouldBlock)
@@ -182,8 +220,11 @@ impl ByteEndpoint for QueueEndpoint {
         data: &[u8],
         cookie: u64,
     ) -> Result<Option<ThreadId>, Error> {
+        // Check if call queue is full - implement backpressure
         if self.call_queue.len() >= MAX_CALL_QUEUE_LEN {
-            return Err(Error::Busy);
+            // Block the caller thread until space is available
+            self.waiting_senders.push_back(caller);
+            return Err(Error::WouldBlock); // This will block the caller thread
         }
         let msg = EndpointMessage::new(data)?;
         self.callers_by_cookie.insert(cookie, caller);
@@ -286,7 +327,7 @@ pub fn send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, Error
         let repo = ENDPOINTS.lock();
         repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
     };
-    
+
     // Lock only this endpoint (allows concurrent access to other endpoints)
     let mut guard = endpoint_arc.lock();
     guard.send(data)
@@ -298,7 +339,7 @@ pub fn try_send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, E
         let repo = ENDPOINTS.try_lock().ok_or(Error::WouldBlock)?;
         repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
     };
-    
+
     // Try to lock only this endpoint (non-blocking)
     let mut guard = endpoint_arc.try_lock().ok_or(Error::WouldBlock)?;
     guard.send(data)
@@ -310,7 +351,7 @@ pub fn recv(endpoint: EndpointId, receiver: ThreadId) -> Result<Option<EndpointM
         let repo = ENDPOINTS.lock();
         repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
     };
-    
+
     // Lock only this endpoint (allows concurrent access to other endpoints)
     let mut guard = endpoint_arc.lock();
     guard.recv(receiver)
@@ -322,7 +363,7 @@ pub fn recv_nonblocking(endpoint: EndpointId) -> Result<Option<EndpointMessage>,
         let repo = ENDPOINTS.lock();
         repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
     };
-    
+
     // Lock only this endpoint (allows concurrent access to other endpoints)
     let mut guard = endpoint_arc.lock();
     guard.recv_nonblocking()
@@ -358,32 +399,50 @@ pub fn send_from_user(
             page_table_root,
         )?;
     }
-    let wake = {
-        // Get endpoint Arc (brief repository lock)
-        let endpoint_arc = {
-            let repo = ENDPOINTS.lock();
-            repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-        };
-        
-        // Lock only this endpoint
-        let mut guard = endpoint_arc.lock();
-        match guard.send(&buffer[..msg_len]) {
-            Ok(wake) => wake,
-            Err(Error::Busy) => {
-                log_endpoint_busy(endpoint, guard.stats(), false);
-                return Err(Error::Busy);
+    // Retry loop for backpressure - block if queue is full
+    loop {
+        let (wake, should_block) = {
+            // Get endpoint Arc (brief repository lock)
+            let endpoint_arc = {
+                let repo = ENDPOINTS.lock();
+                repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+            };
+
+            // Lock only this endpoint
+            let mut guard = endpoint_arc.lock();
+            match guard.send(&buffer[..msg_len]) {
+                Ok(wake) => (wake, false), // Success, don't block
+                Err(Error::WouldBlock) => {
+                    // Queue is full - sender was added to waiting_senders, need to block
+                    (None, true)
+                }
+                Err(Error::Busy) => {
+                    // Fallback for edge cases (shouldn't happen with backpressure)
+                    log_endpoint_busy(endpoint, guard.stats(), false);
+                    return Err(Error::Busy);
+                }
+                Err(err) => return Err(err),
             }
-            Err(err) => return Err(err),
+        };
+
+        if should_block {
+            // Block current thread until queue has space (will be woken by recv)
+            crate::sched::ThreadManager::block_current();
+            crate::architecture::x86_64::syscall::request_resched();
+            // After waking, retry the send
+            continue;
         }
-    };
-    if let Some(thread_id) = wake {
-        if first_send {
-            klibcluu::trace("send_from_user: wake_thread_id=");
-            klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+
+        // Success - wake receiver if any
+        if let Some(thread_id) = wake {
+            if first_send {
+                klibcluu::trace("send_from_user: wake_thread_id=");
+                klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+            }
+            crate::sched::ThreadManager::wake_thread(thread_id);
         }
-        crate::sched::ThreadManager::wake_thread(thread_id);
+        return Ok(());
     }
-    Ok(())
 }
 
 pub fn recv_to_user(
@@ -481,30 +540,47 @@ pub fn call_from_user_with_reply_token(
     // Inject reply token handle into message
     inject_reply_token(&mut buffer[..msg_len], reply_token);
 
-    let wake = {
-        // Get endpoint Arc (brief repository lock)
-        let endpoint_arc = {
-            let repo = ENDPOINTS.lock();
-            repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
-        };
-        
-        // Lock only this endpoint
-        let mut guard = endpoint_arc.lock();
-        // Just send as regular message - reply routing via token
-        match guard.send(&buffer[..msg_len]) {
-            Ok(wake) => wake,
-            Err(Error::Busy) => {
-                log_endpoint_busy(endpoint, guard.stats(), true);
-                return Err(Error::Busy);
-            }
-            Err(err) => return Err(err),
-        }
-    };
+    // Retry loop for backpressure - block if queue is full
+    loop {
+        let (wake, should_block) = {
+            // Get endpoint Arc (brief repository lock)
+            let endpoint_arc = {
+                let repo = ENDPOINTS.lock();
+                repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
+            };
 
-    if let Some(thread_id) = wake {
-        crate::sched::ThreadManager::wake_thread(thread_id);
+            // Lock only this endpoint
+            let mut guard = endpoint_arc.lock();
+            // Just send as regular message - reply routing via token
+            match guard.send(&buffer[..msg_len]) {
+                Ok(wake) => (wake, false), // Success, don't block
+                Err(Error::WouldBlock) => {
+                    // Queue is full - sender was added to waiting_senders, need to block
+                    (None, true)
+                }
+                Err(Error::Busy) => {
+                    // Fallback for edge cases (shouldn't happen with backpressure)
+                    log_endpoint_busy(endpoint, guard.stats(), true);
+                    return Err(Error::Busy);
+                }
+                Err(err) => return Err(err),
+            }
+        };
+
+        if should_block {
+            // Block current thread until queue has space (will be woken by recv)
+            crate::sched::ThreadManager::block_current();
+            crate::architecture::x86_64::syscall::request_resched();
+            // After waking, retry the send
+            continue;
+        }
+
+        // Success - wake receiver if any
+        if let Some(thread_id) = wake {
+            crate::sched::ThreadManager::wake_thread(thread_id);
+        }
+        return Ok(());
     }
-    Ok(())
 }
 
 fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
@@ -517,7 +593,11 @@ fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
     }
     klibcluu::warn("ipc endpoint busy");
     klibcluu::log_dec(klibcluu::LogLevel::Warn, "  endpoint=", endpoint.as_u64());
-    klibcluu::log_dec(klibcluu::LogLevel::Warn, "  queue_len=", stats.queue_len as u64);
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Warn,
+        "  queue_len=",
+        stats.queue_len as u64,
+    );
     klibcluu::log_dec(
         klibcluu::LogLevel::Warn,
         "  call_queue_len=",
@@ -542,7 +622,7 @@ pub fn take_current_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
         let repo = ENDPOINTS.lock();
         repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
     };
-    
+
     // Lock only this endpoint
     let mut guard = endpoint_arc.lock();
     guard.take_current_caller().ok_or(Error::InvalidState)
@@ -555,10 +635,12 @@ pub fn take_caller_by_cookie(endpoint: EndpointId, cookie: u64) -> Result<Thread
         let repo = ENDPOINTS.lock();
         repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
     };
-    
+
     // Lock only this endpoint
     let mut guard = endpoint_arc.lock();
-    guard.take_caller_by_cookie(cookie).ok_or(Error::InvalidState)
+    guard
+        .take_caller_by_cookie(cookie)
+        .ok_or(Error::InvalidState)
 }
 
 pub fn take_any_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
@@ -567,7 +649,7 @@ pub fn take_any_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
         let repo = ENDPOINTS.lock();
         repo.get_endpoint(endpoint).ok_or(Error::NotFound)?
     };
-    
+
     // Lock only this endpoint
     let mut guard = endpoint_arc.lock();
     guard.take_any_caller().ok_or(Error::InvalidState)
