@@ -21,6 +21,7 @@ use libcluu::{Error, Result};
 const FS_OPEN: u32 = 0x300;
 const FS_READ: u32 = 0x302;
 const FS_READDIR: u32 = 0x304;
+const IPC_MESSAGE_MAX: usize = 256;
 
 /// Directory entry for readdir results.
 #[derive(Clone)]
@@ -112,15 +113,9 @@ impl MountBackend for RemoteBackend {
     }
 
     fn open(&self, rel_path: &str) -> Result<OpenFile> {
-        let _ = libcluu::debug_print(&alloc::format!(
-            "vfs: remote open '{}' endpoint={}",
-            rel_path,
-            self.endpoint
-        ));
         let req = Message::new(FS_OPEN, [rel_path.len(), 0, 0, 0, 0, 0], 1);
         let mut reply = Message::new(0, [0; 6], 0);
         call_with_payload(self.endpoint, &req, rel_path.as_bytes(), &mut reply)?;
-        let _ = libcluu::debug_print("vfs: remote open got reply");
 
         let status = reply.words[0] as isize;
         if status < 0 {
@@ -131,6 +126,7 @@ impl MountBackend for RemoteBackend {
         let size = reply.words[2];
 
         Ok(OpenFile::Ext2(Ext2Entry {
+            endpoint: self.endpoint,
             inode: inode as u32,
             size,
             data: None,
@@ -183,8 +179,9 @@ impl MountBackend for RemoteBackend {
             _ => return Err(Error::InvalidArgument),
         };
 
-        let req = Message::new(FS_READ, [0, 0, inode as usize, offset, len, 0], 5);
-        let mut reply_buf = alloc::vec![0u8; size_of::<Message>() + len];
+        let max_len = len.min(IPC_MESSAGE_MAX - size_of::<Message>());
+        let req = Message::new(FS_READ, [0, 0, inode as usize, offset, max_len, 0], 5);
+        let mut reply_buf = alloc::vec![0u8; size_of::<Message>() + max_len];
         let (reply, payload_len) = call_with_reply_buf(self.endpoint, &req, &[], &mut reply_buf)?;
 
         let status = reply.words[0] as isize;
@@ -192,7 +189,7 @@ impl MountBackend for RemoteBackend {
             return Err(Error::InvalidState);
         }
 
-        let bytes_read = reply.words[1];
+        let bytes_read = reply.words[1].min(max_len);
         let data_start = size_of::<Message>();
         let data_len = payload_len.min(bytes_read);
 
@@ -368,6 +365,13 @@ impl MountTable {
         let mut best: Option<(&'a Mount, &'a str)> = None;
 
         for mount in &self.mounts {
+            if mount.prefix == "/" && path.starts_with('/') {
+                let rel = path.trim_start_matches('/');
+                if best.is_none() || mount.prefix.len() > best.unwrap().0.prefix.len() {
+                    best = Some((mount, rel));
+                }
+                continue;
+            }
             if path == mount.prefix {
                 // Exact match (root of mount)
                 let rel: &'a str = "";

@@ -172,16 +172,7 @@ fn make_payload_message(label: u32, payload_len: usize, words: &[usize]) -> Mess
 fn parse_status(raw: usize) -> Result<()> {
     let signed = raw as isize;
     if signed < 0 {
-        let err = match signed as i32 {
-            -1 => Error::InvalidArgument,
-            -2 => Error::OutOfMemory,
-            -3 => Error::NotFound,
-            -4 => Error::PermissionDenied,
-            -5 => Error::AlreadyExists,
-            -6 => Error::Timeout,
-            _ => Error::InvalidOperation,
-        };
-        return Err(err);
+        return Err(Error::from_errno(signed));
     }
     Ok(())
 }

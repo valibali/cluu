@@ -18,6 +18,8 @@ pub struct FileEntry {
 /// A file entry backed by a remote service (ext2 via virtio-blk).
 #[derive(Clone)]
 pub struct Ext2Entry {
+    /// Remote filesystem endpoint that owns this inode.
+    pub endpoint: usize,
     pub inode: u32,
     pub size: usize,
     /// Cached file data (loaded on first read).
