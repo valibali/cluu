@@ -462,7 +462,7 @@ fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
     let key = (endpoint, if is_call { 1 } else { 0 });
     let count = counts.entry(key).or_insert(0);
     *count = count.saturating_add(1);
-    if *count % BUSY_LOG_EVERY != 0 {
+    if !(*count).is_multiple_of(BUSY_LOG_EVERY) {
         return;
     }
     klibcluu::warn("ipc endpoint busy");

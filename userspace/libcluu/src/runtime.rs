@@ -1,41 +1,52 @@
 //! Userspace runtime - entry point and panic handler
 
-#[cfg(all(not(feature = "std"), not(test)))]
+#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
 use core::panic::PanicInfo;
 
 #[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
 use crate::allocator;
-#[cfg(all(not(feature = "std"), not(test)))]
+#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
 use crate::{ipc::notify_exit, syscall::debug_print, syscall::yield_cpu};
-#[cfg(all(not(feature = "std"), not(test)))]
+#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
 use core::fmt::{self, Write};
 
-struct StackString<const N: usize> {
-    buf: [u8; N],
-    len: usize,
-}
+#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
+mod stack_string {
+    use core::fmt::{self, Write};
 
-impl<const N: usize> StackString<N> {
-    const fn new() -> Self {
-        Self { buf: [0u8; N], len: 0 }
+    pub struct StackString<const N: usize> {
+        buf: [u8; N],
+        len: usize,
     }
 
-    fn as_str(&self) -> &str {
-        // Safety: we only write valid UTF-8 through core::fmt::Write.
-        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+    impl<const N: usize> StackString<N> {
+        pub const fn new() -> Self {
+            Self {
+                buf: [0u8; N],
+                len: 0,
+            }
+        }
+
+        pub fn as_str(&self) -> &str {
+            // Safety: we only write valid UTF-8 through core::fmt::Write.
+            unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+        }
+    }
+
+    impl<const N: usize> Write for StackString<N> {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            let bytes = s.as_bytes();
+            let available = N.saturating_sub(self.len);
+            let to_copy = bytes.len().min(available);
+            self.buf[self.len..self.len + to_copy].copy_from_slice(&bytes[..to_copy]);
+            self.len += to_copy;
+            Ok(())
+        }
     }
 }
 
-impl<const N: usize> Write for StackString<N> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let bytes = s.as_bytes();
-        let available = N.saturating_sub(self.len);
-        let to_copy = bytes.len().min(available);
-        self.buf[self.len..self.len + to_copy].copy_from_slice(&bytes[..to_copy]);
-        self.len += to_copy;
-        Ok(())
-    }
-}
+#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
+use stack_string::StackString;
 
 /// Entry point for userspace programs
 ///
@@ -76,7 +87,7 @@ pub extern "C" fn _start() -> ! {
 /// Panic handler for userspace
 ///
 /// Note: This is only active when building for the target (not during testing)
-#[cfg(all(not(feature = "std"), not(test)))]
+#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let proc_info = crate::boot::process_info();
