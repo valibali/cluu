@@ -13,9 +13,10 @@ rustflags = [
 ]
 
 # Userspace target configuration
+# Note: opt-level is not set here to allow --release to use opt-level=3
+# For debug builds, cargo will use opt-level=0 by default
 [target.x86_64-cluu-user]
 rustflags = [
-    "-C", "opt-level=0",
     "-C", "lto=off",
     "-C", "link-arg=-nostdlib",
     "-C", "link-arg=-static",
