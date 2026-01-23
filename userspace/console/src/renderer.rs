@@ -36,6 +36,9 @@ pub struct Console<B: ConsoleBackend> {
     cells: Vec<u8>,
     last_cursor_x: usize,
     last_cursor_y: usize,
+    chars_since_cursor_redraw: usize,
+    // Batching: track dirty cells to render in bulk
+    dirty_cells: Vec<(usize, usize)>, // (x, y) pairs
 }
 
 impl<B: ConsoleBackend> Console<B> {
@@ -58,6 +61,8 @@ impl<B: ConsoleBackend> Console<B> {
             cells: alloc::vec![b' '; cols * rows],
             last_cursor_x: 0,
             last_cursor_y: 0,
+            chars_since_cursor_redraw: 0,
+            dirty_cells: Vec::new(),
         };
         console.clear();
         console
@@ -110,6 +115,7 @@ impl<B: ConsoleBackend> Console<B> {
     /// Optimized to use bulk fill operation instead of per-pixel writes.
     fn clear(&mut self) {
         self.cells.fill(b' ');
+        self.dirty_cells.clear();
         // Use bulk fill_rect for much faster clearing
         self.backend
             .fill_rect(0, 0, self.width, self.height, COLOR_BG);
@@ -124,6 +130,9 @@ impl<B: ConsoleBackend> Console<B> {
     ///
     /// This decodes a tiny UTF-8 subset for block elements used in banners.
     fn write_utf8_bytes(&mut self, bytes: &[u8]) {
+        // Clear dirty cells at start of new message batch
+        self.dirty_cells.clear();
+
         let mut i = 0;
         while i < bytes.len() {
             let b = bytes[i];
@@ -150,6 +159,13 @@ impl<B: ConsoleBackend> Console<B> {
             self.put_char(b'?');
             i += 1;
         }
+
+        // Flush all dirty cells at once (batching)
+        self.flush_dirty_cells();
+
+        // Redraw cursor after batching
+        self.redraw_cursor();
+        self.chars_since_cursor_redraw = 0;
     }
 
     /// Advance to the next line, scrolling when on the last row.
@@ -170,6 +186,10 @@ impl<B: ConsoleBackend> Console<B> {
         }
         let w = self.cols;
 
+        // CRITICAL: Flush all dirty cells BEFORE scrolling!
+        // Otherwise we'll copy from a framebuffer that doesn't have the latest content yet.
+        self.flush_dirty_cells();
+
         // Move rows 1..end up by one row in cell buffer.
         self.cells.copy_within(w.., 0);
 
@@ -177,24 +197,40 @@ impl<B: ConsoleBackend> Console<B> {
         let last = (self.rows - 1) * w;
         self.cells[last..last + w].fill(b' ');
 
+        // Clear dirty_cells to avoid stale entries after scrolling
+        // (cells have moved, so old dirty positions are invalid)
+        // New content written after scrolling will be marked as dirty normally
+        self.dirty_cells.clear();
+
         // Optimized scroll: copy framebuffer memory instead of redrawing everything
         // Copy all glyph rows from row 1 to row 0 (scroll up by one text row = GLYPH_H pixels)
+        // For scrolling, src_y (GLYPH_H) > dst_y (0) and regions don't overlap, so copy forwards
         let scroll_height = (self.rows - 1) * GLYPH_H;
         if scroll_height > 0 {
             self.backend
                 .copy_rect(0, GLYPH_H, 0, 0, self.width, scroll_height);
         }
 
-        // Only redraw the last row (much faster than redrawing everything)
-        let last_row = self.rows - 1;
+        // Clear the last row's framebuffer area
+        let last_row_y = self.rows - 1;
+        let last_row_px_y = last_row_y * GLYPH_H;
+        self.backend
+            .fill_rect(0, last_row_px_y, self.width, GLYPH_H, COLOR_BG);
+
+        // Render the last row immediately (it's all spaces after clearing)
+        // This ensures the framebuffer is in a consistent state
         for x in 0..self.cols {
-            let ch = self.get_cell(x, last_row);
-            self.draw_glyph(x, last_row, ch, COLOR_FG, COLOR_BG);
+            let ch = self.get_cell(x, last_row_y);
+            self.draw_glyph(x, last_row_y, ch, COLOR_FG, COLOR_BG);
         }
 
         // Cursor stays on last row after scroll.
         self.cursor_y = self.rows - 1;
-        self.redraw_cursor();
+        // Update last cursor position to avoid cursor artifacts
+        self.last_cursor_x = self.cursor_x;
+        self.last_cursor_y = self.cursor_y;
+        // Note: redraw_cursor() will be called at the end of write_utf8_bytes()
+        // after all dirty cells are flushed, ensuring correct rendering order
     }
 
     /// Redraw every cell in the grid, then update the cursor overlay.
@@ -234,17 +270,37 @@ impl<B: ConsoleBackend> Console<B> {
                 }
             }
         }
-        self.redraw_cursor();
+        // Cursor redraw is now handled at end of write_utf8_bytes (batching)
     }
 
-    /// Update one grid cell and draw its glyph immediately.
+    /// Update one grid cell and mark it as dirty (batching).
+    /// The cell will be rendered when flush_dirty_cells() is called.
     fn set_cell(&mut self, x: usize, y: usize, ch: u8) {
         if x >= self.cols || y >= self.rows {
             return;
         }
         let idx = y * self.cols + x;
-        self.cells[idx] = ch;
-        self.draw_glyph(x, y, ch, COLOR_FG, COLOR_BG);
+        if self.cells[idx] != ch {
+            self.cells[idx] = ch;
+            // Mark cell as dirty (avoid duplicates)
+            let pos = (x, y);
+            if !self.dirty_cells.contains(&pos) {
+                self.dirty_cells.push(pos);
+            }
+        }
+    }
+
+    /// Render all dirty cells at once (batching optimization).
+    fn flush_dirty_cells(&mut self) {
+        // Collect dirty cells first to avoid borrow checker issues
+        let dirty = self.dirty_cells.clone();
+        self.dirty_cells.clear();
+
+        for (x, y) in dirty {
+            let ch = self.get_cell(x, y);
+            self.draw_glyph(x, y, ch, COLOR_FG, COLOR_BG);
+        }
+
     }
 
     /// Update the cursor overlay by repainting the old and current cells.

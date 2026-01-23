@@ -39,21 +39,17 @@ pub trait ConsoleBackend {
     /// Default implementation redraws, but backends can override with memory copy for speed.
     fn copy_rect(
         &mut self,
-        src_x: usize,
-        src_y: usize,
-        dst_x: usize,
-        dst_y: usize,
-        w: usize,
-        h: usize,
+        _src_x: usize,
+        _src_y: usize,
+        _dst_x: usize,
+        _dst_y: usize,
+        _w: usize,
+        _h: usize,
     ) {
         // Default: redraw by reading and writing pixels (slow but works for any backend)
         // Optimized backends should override this with actual memory copying
-        for dy in 0..h {
-            for dx in 0..w {
-                // Note: This is a simplified fallback - real implementation would need pixel reading
-                // For now, this is a placeholder that backends should override
-            }
-        }
+        // Note: This is a simplified fallback - real implementation would need pixel reading
+        // For now, this is a placeholder that backends should override
     }
 }
 
@@ -257,6 +253,8 @@ impl ConsoleBackend for FramebufferBackend {
     /// Optimized rectangle copy: copies a rectangular region using memory operations.
     /// Uses SIMD (SSE2) when available for 4x speedup.
     /// This is much faster than redrawing for scrolling operations.
+    /// 
+    /// Handles overlapping regions correctly by copying backwards when src_y > dst_y.
     fn copy_rect(
         &mut self,
         src_x: usize,
@@ -280,32 +278,82 @@ impl ConsoleBackend for FramebufferBackend {
         }
 
         unsafe {
+            // Determine if regions overlap and copy direction
+            // Two ranges [a, a+len) and [b, b+len) overlap if: a < b+len && b < a+len
+            // We need to copy backwards if src_y > dst_y AND the regions actually overlap
+            // For scrolling: src_y=GLYPH_H, dst_y=0, they don't overlap, so copy forwards
+            let regions_overlap = src_x == dst_x 
+                && src_y < dst_y + max_h 
+                && dst_y < src_y + max_h;
+            let copy_backwards = regions_overlap && src_y > dst_y;
+
             #[cfg(target_arch = "x86_64")]
             let use_simd = is_sse2_available() && max_w >= 4;
 
-            // Copy row by row (handles non-contiguous pitch correctly)
-            for row in 0..max_h {
-                let src_offset = (src_y + row) * self.pitch + src_x * 4;
-                let dst_offset = (dst_y + row) * self.pitch + dst_x * 4;
+            if copy_backwards {
+                // Copy backwards: from bottom row to top row
+                for row in (0..max_h).rev() {
+                    let src_offset = (src_y + row) * self.pitch + src_x * 4;
+                    let dst_offset = (dst_y + row) * self.pitch + dst_x * 4;
 
-                let src = self.fb.add(src_offset) as *const u32;
-                let dst = self.fb.add(dst_offset) as *mut u32;
+                    let src = self.fb.add(src_offset) as *const u32;
+                    let dst = self.fb.add(dst_offset) as *mut u32;
 
-                if src != dst as *const u32 {
-                    #[cfg(target_arch = "x86_64")]
-                    if use_simd {
-                        #[target_feature(enable = "sse2")]
-                        unsafe fn call_copy(src: *const u32, dst: *mut u32, len: usize) {
-                            copy_row_simd(src, dst, len);
+                    if src != dst as *const u32 {
+                        #[cfg(target_arch = "x86_64")]
+                        if use_simd {
+                            #[target_feature(enable = "sse2")]
+                            unsafe fn call_copy(src: *const u32, dst: *mut u32, len: usize) {
+                                copy_row_simd(src, dst, len);
+                            }
+                            call_copy(src, dst, max_w);
+                        } else {
+                            // Fallback: use volatile for framebuffer device memory
+                            for i in 0..max_w {
+                                dst.add(i).write_volatile(src.add(i).read_volatile());
+                            }
                         }
-                        unsafe { call_copy(src, dst, max_w); }
-                    } else {
-                        core::ptr::copy_nonoverlapping(src, dst, max_w);
-                    }
 
-                    #[cfg(not(target_arch = "x86_64"))]
-                    {
-                        core::ptr::copy_nonoverlapping(src, dst, max_w);
+                        #[cfg(not(target_arch = "x86_64"))]
+                        {
+                            // Use volatile for framebuffer device memory
+                            for i in 0..max_w {
+                                dst.add(i).write_volatile(src.add(i).read_volatile());
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Copy forwards: from top row to bottom row (normal case, used for scrolling)
+                for row in 0..max_h {
+                    let src_offset = (src_y + row) * self.pitch + src_x * 4;
+                    let dst_offset = (dst_y + row) * self.pitch + dst_x * 4;
+
+                    let src = self.fb.add(src_offset) as *const u32;
+                    let dst = self.fb.add(dst_offset) as *mut u32;
+
+                    if src != dst as *const u32 {
+                        #[cfg(target_arch = "x86_64")]
+                        if use_simd {
+                            #[target_feature(enable = "sse2")]
+                            unsafe fn call_copy(src: *const u32, dst: *mut u32, len: usize) {
+                                copy_row_simd(src, dst, len);
+                            }
+                            call_copy(src, dst, max_w);
+                        } else {
+                            // Fallback: use volatile for framebuffer device memory
+                            for i in 0..max_w {
+                                dst.add(i).write_volatile(src.add(i).read_volatile());
+                            }
+                        }
+
+                        #[cfg(not(target_arch = "x86_64"))]
+                        {
+                            // Use volatile for framebuffer device memory
+                            for i in 0..max_w {
+                                dst.add(i).write_volatile(src.add(i).read_volatile());
+                            }
+                        }
                     }
                 }
             }

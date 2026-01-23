@@ -59,6 +59,9 @@ pub fn send_with_retry(endpoint_token: usize, label: u32, payload: &[u8]) -> Res
 /// Send a message with an inline payload, retrying on busy endpoints with backoff.
 ///
 /// When `max_retries` is 0, retries indefinitely.
+///
+/// Note: Error::WouldBlock means the kernel blocked the thread and will wake it
+/// when space is available. We just retry - the kernel handles the blocking.
 pub fn send_with_retry_timeout(
     endpoint_token: usize,
     label: u32,
@@ -71,6 +74,11 @@ pub fn send_with_retry_timeout(
     loop {
         match send_with_payload(endpoint_token, label, payload) {
             Ok(()) => return Ok(()),
+            Err(Error::WouldBlock) => {
+                // Kernel blocked us and will wake when space is available
+                // Just retry - no need for backoff since kernel handles blocking
+                continue;
+            }
             Err(Error::Busy) => {
                 retries = retries.saturating_add(1);
                 if max_retries != 0 && retries > max_retries {
