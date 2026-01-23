@@ -22,8 +22,8 @@ pub struct Ext2Entry {
     pub endpoint: usize,
     pub inode: u32,
     pub size: usize,
-    /// Cached file data (loaded on first read).
-    pub data: Option<Vec<u8>>,
+    /// Original path used to open this file (for caching).
+    pub path: String,
 }
 
 /// A file entry backed by a virtual filesystem (procfs, etc.)

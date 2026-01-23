@@ -8,7 +8,9 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use libcluu::fs::protocol::{VfsOp, VFS_CLOSE, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT};
@@ -33,11 +35,14 @@ const TWO_USIZE_BYTES: usize = size_of::<usize>() * 2;
 /// Buffer base for file data reads (shared grant window).
 const READ_BUF_BASE: usize = 0x60000000;
 /// Size of the shared grant window in the VFS address space.
-/// 256KB - large enough for good throughput, small enough to not waste memory.
-/// Files larger than this are read in multiple chunks.
-const GRANT_BUF_SIZE: usize = 256 * 1024;
+/// 1MB for good throughput - reduces IPC round-trips for large files.
+const GRANT_BUF_SIZE: usize = 1024 * 1024;
 /// Cap for remote grant reads to avoid large transient allocations.
 const REMOTE_READ_CAP: usize = GRANT_BUF_SIZE;
+/// Maximum size of file to cache (8MB - covers most executables).
+const FILE_CACHE_MAX_SIZE: usize = 8 * 1024 * 1024;
+/// Maximum total cache size (32MB).
+const FILE_CACHE_TOTAL_MAX: usize = 32 * 1024 * 1024;
 const VFS_TRACE: bool = false;
 
 macro_rules! vfs_trace {
@@ -154,6 +159,79 @@ fn map_initrd_slice(initrd_size: usize) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, initrd_size) }
 }
 
+/// Simple LRU-ish file cache for ext2 files.
+/// Caches entire file contents by path to avoid repeated disk reads.
+struct FileCache {
+    /// Map from path to (data, access_order).
+    entries: BTreeMap<String, CacheEntry>,
+    /// Total bytes currently cached.
+    total_size: usize,
+    /// Access counter for LRU ordering.
+    access_counter: usize,
+}
+
+struct CacheEntry {
+    data: Vec<u8>,
+    last_access: usize,
+}
+
+impl FileCache {
+    fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            total_size: 0,
+            access_counter: 0,
+        }
+    }
+
+    fn get(&mut self, path: &str) -> Option<Vec<u8>> {
+        if let Some(entry) = self.entries.get_mut(path) {
+            self.access_counter += 1;
+            entry.last_access = self.access_counter;
+            Some(entry.data.clone())
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, path: String, data: Vec<u8>) {
+        let size = data.len();
+        if size > FILE_CACHE_MAX_SIZE {
+            return; // Don't cache files that are too large
+        }
+
+        // Evict old entries if needed
+        while self.total_size + size > FILE_CACHE_TOTAL_MAX && !self.entries.is_empty() {
+            self.evict_lru();
+        }
+
+        self.access_counter += 1;
+        self.total_size += size;
+        self.entries.insert(
+            path,
+            CacheEntry {
+                data,
+                last_access: self.access_counter,
+            },
+        );
+    }
+
+    fn evict_lru(&mut self) {
+        // Find entry with lowest access counter
+        let lru_path = self
+            .entries
+            .iter()
+            .min_by_key(|(_, e)| e.last_access)
+            .map(|(k, _)| k.clone());
+
+        if let Some(path) = lru_path {
+            if let Some(entry) = self.entries.remove(&path) {
+                self.total_size -= entry.data.len();
+            }
+        }
+    }
+}
+
 struct VfsServer {
     endpoint: usize,
     space_token: usize,
@@ -162,6 +240,7 @@ struct VfsServer {
     grant_buf_size: usize,
     mounts: MountTable,
     files: FdTable,
+    cache: FileCache,
 }
 
 impl VfsServer {
@@ -181,6 +260,7 @@ impl VfsServer {
             grant_buf_size,
             mounts,
             files: FdTable::new(),
+            cache: FileCache::new(),
         }
     }
 
@@ -297,8 +377,14 @@ impl VfsServer {
                 )?;
             }
             OpenFile::Ext2(entry) => {
-                self.read_grant_remote(
-                    entry,
+                // Direct chunked reads from disk
+                // Note: Heap-based caching causes page faults due to VFS init timing
+                // (VFS starts with static 64KB heap, dynamic growth creates disjoint regions)
+                // TODO: Implement dedicated mapped cache region instead of heap-based cache
+                self.read_grant_remote_chunked(
+                    entry.endpoint,
+                    entry.inode,
+                    entry.size,
                     offset,
                     requested,
                     target_base,
@@ -409,6 +495,132 @@ impl VfsServer {
             .copy_from_slice(&self.vfs_space_map_token.to_ne_bytes());
 
         let result = ipc::call_with_payload(entry.endpoint, &req, &payload, &mut reply);
+        match result {
+            Ok(()) => {
+                let status = reply.words[0] as isize;
+                if status < 0 {
+                    reply_msg.words[0] = status as usize;
+                    reply_msg.words[1] = 0;
+                    reply_msg.words[2] = 0;
+                    return Ok(());
+                }
+
+                let bytes_read = reply.words[1];
+                let page_offset = reply.words[2];
+                self.grant_buffer_to_caller(
+                    bytes_read,
+                    page_offset,
+                    target_base,
+                    target_space,
+                    reply_msg,
+                )
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                reply_msg.words[1] = 0;
+                reply_msg.words[2] = 0;
+                Ok(())
+            }
+        }
+    }
+
+    /// Read from cached data (Vec in memory).
+    fn read_grant_cached(
+        &self,
+        data: &[u8],
+        offset: usize,
+        requested: usize,
+        target_base: usize,
+        target_space: usize,
+        reply_msg: &mut Message,
+    ) -> Result<()> {
+        let available = data.len().saturating_sub(offset);
+        let len = requested.min(available).min(REMOTE_READ_CAP);
+        if len == 0 {
+            reply_msg.words[0] = 0;
+            reply_msg.words[1] = 0;
+            reply_msg.words[2] = 0;
+            return Ok(());
+        }
+
+        let slice = &data[offset..offset + len];
+        self.grant_data_to_caller(slice, target_base, target_space, reply_msg)
+    }
+
+    /// Read entire file from remote backend into memory (for caching).
+    fn read_entire_file(&self, endpoint: usize, inode: u32, size: usize) -> Option<Vec<u8>> {
+        let mut data = Vec::with_capacity(size);
+        let mut offset = 0;
+
+        while offset < size {
+            let remaining = size - offset;
+            let chunk_size = remaining.min(REMOTE_READ_CAP);
+
+            let req = Message::new(
+                FS_READ_GRANT,
+                [0, 0, inode as usize, offset, chunk_size, 0],
+                5,
+            );
+            let mut reply = Message::new(0, [0; 6], 0);
+            let mut payload = [0u8; TWO_USIZE_BYTES];
+            payload[..USIZE_BYTES].copy_from_slice(&self.grant_buf_base.to_ne_bytes());
+            payload[USIZE_BYTES..TWO_USIZE_BYTES]
+                .copy_from_slice(&self.vfs_space_map_token.to_ne_bytes());
+
+            if ipc::call_with_payload(endpoint, &req, &payload, &mut reply).is_err() {
+                return None;
+            }
+
+            let status = reply.words[0] as isize;
+            if status < 0 {
+                return None;
+            }
+
+            let bytes_read = reply.words[1];
+            if bytes_read == 0 {
+                break;
+            }
+
+            // Copy from grant buffer to our Vec
+            let src = unsafe {
+                core::slice::from_raw_parts(self.grant_buf_base as *const u8, bytes_read)
+            };
+            data.extend_from_slice(src);
+            offset += bytes_read;
+        }
+
+        Some(data)
+    }
+
+    /// Chunked read from remote - used when file is too large to cache.
+    fn read_grant_remote_chunked(
+        &self,
+        endpoint: usize,
+        inode: u32,
+        file_size: usize,
+        offset: usize,
+        requested: usize,
+        target_base: usize,
+        target_space: usize,
+        reply_msg: &mut Message,
+    ) -> Result<()> {
+        let available = file_size.saturating_sub(offset);
+        let len = requested.min(available).min(REMOTE_READ_CAP);
+        if len == 0 {
+            reply_msg.words[0] = 0;
+            reply_msg.words[1] = 0;
+            reply_msg.words[2] = 0;
+            return Ok(());
+        }
+
+        let req = Message::new(FS_READ_GRANT, [0, 0, inode as usize, offset, len, 0], 5);
+        let mut reply = Message::new(0, [0; 6], 0);
+        let mut payload = [0u8; TWO_USIZE_BYTES];
+        payload[..USIZE_BYTES].copy_from_slice(&self.grant_buf_base.to_ne_bytes());
+        payload[USIZE_BYTES..TWO_USIZE_BYTES]
+            .copy_from_slice(&self.vfs_space_map_token.to_ne_bytes());
+
+        let result = ipc::call_with_payload(endpoint, &req, &payload, &mut reply);
         match result {
             Ok(()) => {
                 let status = reply.words[0] as isize;

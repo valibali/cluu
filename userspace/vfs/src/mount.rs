@@ -36,7 +36,8 @@ pub trait MountBackend: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// Open a file at the given relative path.
-    fn open(&self, rel_path: &str) -> Result<OpenFile>;
+    /// full_path is the original absolute path (for caching).
+    fn open(&self, rel_path: &str, full_path: &str) -> Result<OpenFile>;
 
     /// Read directory entries at the given relative path.
     fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>>;
@@ -65,7 +66,7 @@ impl MountBackend for InitrdBackend {
         "initrd"
     }
 
-    fn open(&self, rel_path: &str) -> Result<OpenFile> {
+    fn open(&self, rel_path: &str, _full_path: &str) -> Result<OpenFile> {
         let slice = find_member(self.data, rel_path)
             .or_else(|| find_member(self.data, &dot_prefixed(rel_path)))
             .ok_or(Error::NotFound)?;
@@ -112,7 +113,7 @@ impl MountBackend for RemoteBackend {
         self.service_name
     }
 
-    fn open(&self, rel_path: &str) -> Result<OpenFile> {
+    fn open(&self, rel_path: &str, full_path: &str) -> Result<OpenFile> {
         let req = Message::new(FS_OPEN, [rel_path.len(), 0, 0, 0, 0, 0], 1);
         let mut reply = Message::new(0, [0; 6], 0);
         call_with_payload(self.endpoint, &req, rel_path.as_bytes(), &mut reply)?;
@@ -129,7 +130,7 @@ impl MountBackend for RemoteBackend {
             endpoint: self.endpoint,
             inode: inode as u32,
             size,
-            data: None,
+            path: String::from(full_path),
         }))
     }
 
@@ -236,7 +237,7 @@ impl MountBackend for VirtualBackend {
         self.name
     }
 
-    fn open(&self, rel_path: &str) -> Result<OpenFile> {
+    fn open(&self, rel_path: &str, full_path: &str) -> Result<OpenFile> {
         let entry = self.find_entry(rel_path).ok_or(Error::NotFound)?;
 
         match entry {
@@ -244,7 +245,7 @@ impl MountBackend for VirtualBackend {
                 let data = generator()?;
                 Ok(OpenFile::Virtual(VirtualFile {
                     data,
-                    path: String::from(rel_path),
+                    path: String::from(full_path),
                 }))
             }
             VirtualEntry::Dir(_) => Err(Error::InvalidArgument), // Can't open dir as file
@@ -329,7 +330,7 @@ impl MountTable {
     /// Open a file at the given absolute path.
     pub fn open(&self, path: &str) -> Result<OpenFile> {
         let (mount, rel_path) = self.resolve(path)?;
-        mount.backend.open(rel_path)
+        mount.backend.open(rel_path, path)
     }
 
     /// Read directory entries at the given absolute path.

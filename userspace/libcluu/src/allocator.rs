@@ -1,13 +1,14 @@
 //! Dynamic heap allocator for userspace processes.
 //!
-//! This allocator uses a small static buffer for early allocations (before
-//! boot tokens are available), then grows dynamically by requesting pages
-//! from the kernel via the `space_map_range` syscall.
+//! This allocator eagerly maps a dynamic heap region at init time for a unified,
+//! contiguous heap. A small static buffer is kept as fallback for very early
+//! allocations before boot tokens are available.
 //!
 //! # Design
 //!
-//! - Early heap: 64KB static buffer in .bss (for bootstrap)
-//! - Dynamic growth: 64KB increments via syscall once boot tokens ready
+//! - Primary heap: 256KB initial at USER_HEAP_START, grows dynamically
+//! - Fallback heap: 64KB static buffer in .bss (bootstrap only)
+//! - Growth strategy: Double current size (min 256KB, max 16MB per growth)
 //! - Maximum heap: ~1GB (0x40000000 - 0x00800000)
 //! - Allocation strategy: First-fit linked list with coalescing
 
@@ -16,11 +17,17 @@ use core::mem::{align_of, size_of};
 use core::ptr;
 use spin::Mutex;
 
-/// Size of static bootstrap heap (64KB - enough for early init).
+/// Size of static bootstrap heap (64KB - fallback for early init).
 const STATIC_HEAP_SIZE: usize = 64 * 1024;
 
-/// Minimum heap growth increment (64KB).
-const HEAP_GROW_SIZE: usize = 64 * 1024;
+/// Initial dynamic heap size (256KB - mapped eagerly at init).
+const INITIAL_HEAP_SIZE: usize = 256 * 1024;
+
+/// Minimum heap growth increment (256KB).
+const MIN_HEAP_GROW: usize = 256 * 1024;
+
+/// Maximum single heap growth (16MB - prevents excessive single allocations).
+const MAX_HEAP_GROW: usize = 16 * 1024 * 1024;
 
 /// Page size for heap allocation.
 const PAGE_SIZE: usize = 4096;
@@ -92,24 +99,46 @@ impl LinkedListAllocator {
         }
     }
 
-    /// Initialize the allocator with static bootstrap heap.
+    /// Initialize the allocator.
     ///
-    /// The static heap is used immediately. Dynamic growth will be enabled
-    /// once boot tokens become available.
+    /// Tries to eagerly map a dynamic heap region for a unified, contiguous heap.
+    /// Falls back to static heap if dynamic mapping fails (e.g., before boot tokens ready).
     unsafe fn init(&mut self) {
-        // Start with static heap
+        self.heap_max = USER_HEAP_MAX;
+        self.dynamic_start = USER_HEAP_START;
+        self.used = 0;
+        self.peak = 0;
+        self.head.next = None;
+
+        // Try to map initial dynamic heap immediately
+        let space_token = crate::boot::space_token();
+        if space_token != 0 {
+            let pages = INITIAL_HEAP_SIZE / PAGE_SIZE;
+            if crate::syscall::space_map_range(
+                space_token,
+                USER_HEAP_START,
+                0,    // source_ptr (0 = zero-fill)
+                0x03, // flags: read + write
+                pages,
+                0, // data_len
+            )
+            .is_ok()
+            {
+                // Success - use dynamic heap as primary
+                self.heap_start = USER_HEAP_START;
+                self.heap_end = USER_HEAP_START + INITIAL_HEAP_SIZE;
+                self.add_free_region(USER_HEAP_START, INITIAL_HEAP_SIZE);
+                return;
+            }
+        }
+
+        // Fallback to static heap if dynamic init fails
+        // (bootstrap case before boot tokens ready)
         let static_start = core::ptr::addr_of!(STATIC_HEAP).cast::<u8>() as usize;
         let static_end = static_start + STATIC_HEAP_SIZE;
 
         self.heap_start = static_start;
         self.heap_end = static_end;
-        self.heap_max = USER_HEAP_MAX;
-        self.dynamic_start = USER_HEAP_START; // Dynamic region starts here
-        self.used = 0;
-        self.peak = 0;
-        self.head.next = None;
-
-        // Add static heap to free list
         self.add_free_region(static_start, STATIC_HEAP_SIZE);
     }
 
@@ -131,6 +160,9 @@ impl LinkedListAllocator {
 
     /// Grow the heap by mapping additional pages via syscall.
     ///
+    /// Uses a doubling strategy: tries to double current heap size (clamped to min/max).
+    /// This reduces fragmentation and syscall overhead for large allocations.
+    ///
     /// Returns true if growth succeeded, false otherwise.
     fn grow_heap(&mut self, min_size: usize) -> bool {
         // Get space token - if not available, can't grow dynamically
@@ -148,17 +180,53 @@ impl LinkedListAllocator {
             self.dynamic_start
         };
 
-        // Calculate how much to grow (at least min_size, aligned to pages)
-        let grow_size = min_size.max(HEAP_GROW_SIZE);
+        // Calculate how much to grow using doubling strategy:
+        // - At least min_size (what the allocation needs)
+        // - At least MIN_HEAP_GROW (256KB minimum)
+        // - Try to double current heap size (reduces future growth syscalls)
+        // - At most MAX_HEAP_GROW (16MB cap to prevent excessive single mapping)
+        let current_size = if self.heap_end >= self.dynamic_start {
+            self.heap_end.saturating_sub(self.dynamic_start)
+        } else {
+            0
+        };
+        let double_size = current_size; // Double = add current size again
+
+        let grow_size = min_size
+            .max(double_size)
+            .max(MIN_HEAP_GROW)
+            .min(MAX_HEAP_GROW);
+
         let grow_pages = (grow_size + PAGE_SIZE - 1) / PAGE_SIZE;
         let actual_grow = grow_pages * PAGE_SIZE;
-        let new_end = map_start + actual_grow;
+        let new_end = map_start.saturating_add(actual_grow);
 
         // Check if we'd exceed max
         if new_end > self.heap_max {
-            return false;
+            // Try with just min_size if doubling would exceed
+            let fallback_pages = (min_size + PAGE_SIZE - 1) / PAGE_SIZE;
+            let fallback_grow = fallback_pages * PAGE_SIZE;
+            let fallback_end = map_start.saturating_add(fallback_grow);
+
+            if fallback_end > self.heap_max {
+                return false;
+            }
+
+            // Use fallback size
+            return self.do_grow(space_token, map_start, fallback_pages, fallback_grow);
         }
 
+        self.do_grow(space_token, map_start, grow_pages, actual_grow)
+    }
+
+    /// Actually perform the heap growth mapping.
+    fn do_grow(
+        &mut self,
+        space_token: usize,
+        map_start: usize,
+        pages: usize,
+        size: usize,
+    ) -> bool {
         // Request kernel to map pages (zero-filled, read+write)
         // flags: 0x03 = read (0x01) + write (0x02)
         match crate::syscall::space_map_range(
@@ -166,16 +234,16 @@ impl LinkedListAllocator {
             map_start, // virt_start
             0,         // source_ptr (0 = zero-fill)
             0x03,      // flags: read + write
-            grow_pages,
+            pages,
             0, // data_len
         ) {
             Ok(_) => {
                 // Add new region to free list
                 unsafe {
-                    self.add_free_region(map_start, actual_grow);
+                    self.add_free_region(map_start, size);
                 }
                 // Update heap_end to track the dynamic region
-                self.heap_end = new_end;
+                self.heap_end = map_start + size;
                 true
             }
             Err(_) => false,
