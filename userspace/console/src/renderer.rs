@@ -103,12 +103,30 @@ impl<B: ConsoleBackend> Console<B> {
     }
 
     /// Advance the blink timer; called on IPC timeout.
-    pub fn tick(&mut self) {
+    /// Returns true if cursor visibility changed.
+    pub fn tick(&mut self) -> bool {
         if !self.blink_enabled {
-            return;
+            return false;
         }
         self.cursor_visible = !self.cursor_visible;
         self.redraw_cursor();
+        true
+    }
+
+    /// Flush any buffered writes to the display.
+    ///
+    /// For double-buffered backends, this copies the dirty region to the frontbuffer.
+    /// Should be called after rendering operations and periodically for cursor blink.
+    #[inline]
+    pub fn flush(&mut self) {
+        self.backend.flush();
+    }
+
+    /// Check if the backend has pending changes to flush.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn is_dirty(&self) -> bool {
+        self.backend.is_dirty()
     }
 
     /// Reset the grid contents and repaint the framebuffer to a clean state.

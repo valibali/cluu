@@ -4,7 +4,8 @@ use core::ptr;
 use spin::Mutex;
 
 /// Number of bytes reserved for the runtime heap.
-const HEAP_SIZE: usize = 512 * 1024;
+/// 4MB allows for double-buffered console (~3MB backbuffer) plus other allocations.
+const HEAP_SIZE: usize = 4 * 1024 * 1024;
 
 /// Align the heap to 4 KiB boundaries.
 #[allow(dead_code)]
