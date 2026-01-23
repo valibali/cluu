@@ -475,8 +475,8 @@ fn run_qemu(debug: bool) -> Result<()> {
         // Reduce CPU usage when guest is idle (works with TCG)
         // shift=auto: automatically determine instruction count shift
         // sleep=on: sleep when guest is idle (reduces host CPU usage)
-        "-icount",
-        "shift=auto,sleep=on",
+        // "-icount",
+        // "shift=auto,sleep=on",
         // Boot disk: force IDE so BOOTBOOT can read it
         "-drive",
         &format!("file={},format=raw,if=ide,index=0", img_path.display()),
