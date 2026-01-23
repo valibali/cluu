@@ -48,6 +48,8 @@ pub struct ProcessInfo {
     pub exit_token: usize,
     /// Cookie to identify this process to parent
     pub exit_cookie: usize,
+    /// Process ID (set by procmgr at spawn time)
+    pub pid: usize,
 
     /// Generic token slots (indexed by convention)
     pub tokens: [usize; 16],
@@ -123,4 +125,9 @@ pub fn stderr() -> usize {
 /// Convenience: get process space token (SPACE_MAP right).
 pub fn space_token() -> usize {
     token(TOKEN_SPACE)
+}
+
+/// Convenience: get process ID.
+pub fn pid() -> usize {
+    process_info().pid
 }

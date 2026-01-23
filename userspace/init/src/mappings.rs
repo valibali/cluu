@@ -14,6 +14,7 @@ pub fn map_process_info(
     space_token: usize,
     exit_token: usize,
     exit_cookie: usize,
+    pid: usize,
     tokens: &[usize; 16],
     params: &[u64; 8],
 ) -> Result<()> {
@@ -23,6 +24,7 @@ pub fn map_process_info(
     let info = ProcessInfo {
         exit_token,
         exit_cookie,
+        pid,
         tokens: *tokens,
         params: *params,
     };

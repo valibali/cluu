@@ -28,6 +28,7 @@ const STACK_FLAGS: usize = 0x03; // read + write
 const SERVICE_PATH: &str = "bin/shell";
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
+const PROCMGR_KILL_LABEL: u32 = 3;
 const DEFAULT_PRIORITY: usize = 200;
 
 #[no_mangle]
@@ -55,8 +56,11 @@ struct ProcessManager {
     initrd_size: usize,
     _proc_cap: usize,
     exit_cookie_next: usize,
-    exit_table: BTreeMap<usize, usize>,
-    exit_notify: BTreeMap<usize, usize>,
+    pid_next: usize,
+    exit_table: BTreeMap<usize, usize>,       // cookie -> thread_token
+    exit_notify: BTreeMap<usize, usize>,      // cookie -> notify_endpoint
+    pid_to_cookie: BTreeMap<usize, usize>,    // pid -> cookie (for PROC_KILL)
+    cookie_to_pid: BTreeMap<usize, usize>,    // cookie -> pid (for exit handling)
     tty_main: usize,
     requested_tty: bool,
 }
@@ -72,8 +76,11 @@ impl ProcessManager {
             initrd_size: info.params[PARAM_INITRD_SIZE] as usize,
             _proc_cap: info.tokens[TOKEN_PROC_CAP],
             exit_cookie_next: 1,
+            pid_next: 2, // PID 1 is typically init
             exit_table: BTreeMap::new(),
             exit_notify: BTreeMap::new(),
+            pid_to_cookie: BTreeMap::new(),
+            cookie_to_pid: BTreeMap::new(),
             tty_main: 0,
             requested_tty: false,
         })
@@ -141,7 +148,7 @@ impl ProcessManager {
         }
         if index == 1 {
             if let Some((msg, payload)) = parse_message(&buf[..len]) {
-                let _ = self.handle_spawn_message(&msg, payload);
+                let _ = self.handle_spawn_or_kill_message(&msg, payload);
             }
             return Ok(());
         }
@@ -162,6 +169,12 @@ impl ProcessManager {
             Some(token) => token,
             None => return Ok(()),
         };
+        
+        // Clean up PID tracking
+        if let Some(pid) = self.cookie_to_pid.remove(&cookie) {
+            self.pid_to_cookie.remove(&pid);
+        }
+        
         if let Some(notify_endpoint) = self.exit_notify.remove(&cookie) {
             let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
             notify_msg.words[0] = cookie;
@@ -195,6 +208,14 @@ impl ProcessManager {
         Ok(())
     }
 
+    fn handle_spawn_or_kill_message(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+        // Route to appropriate handler based on label
+        if msg.tag.label == PROCMGR_KILL_LABEL {
+            return self.handle_kill_message(msg);
+        }
+        self.handle_spawn_message(msg, payload)
+    }
+
     fn handle_spawn_message(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
         let mut reply_msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 2);
         // Extract reply token for call messages (prefer this over legacy reply_endpoint)
@@ -224,9 +245,10 @@ impl ProcessManager {
         }
 
         match self.spawn_service(path, priority) {
-            Ok((thread_token, cookie)) => {
+            Ok((thread_token, cookie, pid)) => {
                 reply_msg.words[0] = 0;
-                reply_msg.words[1] = thread_token;
+                reply_msg.words[1] = pid; // Return PID instead of thread_token
+                reply_msg.words[2] = cookie; // Return cookie for _wait()
                 if notify_endpoint != 0 {
                     self.exit_notify.insert(cookie, notify_endpoint);
                 }
@@ -247,7 +269,13 @@ impl ProcessManager {
         cookie
     }
 
-    fn spawn_service(&mut self, path: &str, priority: usize) -> Result<(usize, usize)> {
+    fn next_pid(&mut self) -> usize {
+        let pid = self.pid_next;
+        self.pid_next = self.pid_next.wrapping_add(1);
+        pid
+    }
+
+    fn spawn_service(&mut self, path: &str, priority: usize) -> Result<(usize, usize, usize)> {
         let initrd =
             unsafe { core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, self.initrd_size) };
         let service_bytes = find_member(initrd, path).ok_or(Error::NotFound)?;
@@ -267,9 +295,10 @@ impl ProcessManager {
         let send_rights = Rights::IPC_SEND.bits() as usize;
         let child_endpoint = token_derive(self.exit_endpoint, send_rights, u64::MAX)?;
         let cookie = self.next_exit_cookie();
+        let pid = self.next_pid();
         debug_print(&format!(
-            "TRACE: child exit ep {} cookie {}",
-            child_endpoint, cookie
+            "TRACE: child exit ep {} cookie {} pid {}",
+            child_endpoint, cookie, pid
         ))?;
         let stdin_endpoint = endpoint_create(self.token)?;
         let (stdout_endpoint, stderr_endpoint, stdlog_endpoint) = if self.tty_main != 0 {
@@ -287,6 +316,7 @@ impl ProcessManager {
             space_token,
             child_endpoint,
             cookie,
+            pid,
             stdin_endpoint,
             stdout_endpoint,
             stderr_endpoint,
@@ -304,7 +334,71 @@ impl ProcessManager {
         )?;
 
         self.exit_table.insert(cookie, thread_token);
-        Ok((thread_token, cookie))
+        self.pid_to_cookie.insert(pid, cookie);
+        self.cookie_to_pid.insert(cookie, pid);
+        Ok((thread_token, cookie, pid))
+    }
+    
+    fn handle_kill_message(&mut self, msg: &Message) -> Result<()> {
+        let reply_token = extract_reply_token(msg);
+        let mut reply_msg = Message::new(PROCMGR_KILL_LABEL, [0; 6], 1);
+        
+        if msg.tag.words < 2 {
+            reply_msg.words[0] = (-1isize) as usize; // EINVAL
+            if let Some(token) = reply_token {
+                let _ = reply(token, &reply_msg, IpcFlags::empty());
+            }
+            return Ok(());
+        }
+        
+        let target_pid = msg.words[0];
+        let _signal = msg.words[1]; // Signal number (9 = SIGKILL, 15 = SIGTERM)
+        
+        // Look up the process by PID
+        let cookie = match self.pid_to_cookie.get(&target_pid) {
+            Some(&c) => c,
+            None => {
+                reply_msg.words[0] = (-3isize) as usize; // ESRCH - no such process
+                if let Some(token) = reply_token {
+                    let _ = reply(token, &reply_msg, IpcFlags::empty());
+                }
+                return Ok(());
+            }
+        };
+        
+        // Get the thread token
+        let thread_token = match self.exit_table.get(&cookie) {
+            Some(&t) => t,
+            None => {
+                reply_msg.words[0] = (-3isize) as usize; // ESRCH
+                if let Some(token) = reply_token {
+                    let _ = reply(token, &reply_msg, IpcFlags::empty());
+                }
+                return Ok(());
+            }
+        };
+        
+        // Destroy the thread
+        match thread_destroy(thread_token) {
+            Ok(()) => {
+                // Clean up tracking
+                self.exit_table.remove(&cookie);
+                self.pid_to_cookie.remove(&target_pid);
+                self.cookie_to_pid.remove(&cookie);
+                self.exit_notify.remove(&cookie);
+                
+                reply_msg.words[0] = 0; // Success
+                let _ = debug_print(&format!("procmgr: killed pid {} (cookie {})", target_pid, cookie));
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+        
+        if let Some(token) = reply_token {
+            let _ = reply(token, &reply_msg, IpcFlags::empty());
+        }
+        Ok(())
     }
 
     fn send_spawn_reply(&self, reply_token: Option<usize>, reply_endpoint: usize, msg: &Message) -> Result<()> {
@@ -324,6 +418,7 @@ fn map_process_info_page(
     space_token: usize,
     exit_token: usize,
     exit_cookie: usize,
+    pid: usize,
     stdin_token: usize,
     stdout_token: usize,
     stderr_token: usize,
@@ -347,6 +442,7 @@ fn map_process_info_page(
     let info = ProcessInfo {
         exit_token,
         exit_cookie,
+        pid,
         tokens,
         params: [0u64; 8],
     };

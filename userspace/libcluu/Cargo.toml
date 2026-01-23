@@ -22,3 +22,4 @@ crate-type = ["rlib"]
 [features]
 default = []
 std = []  # For testing on host
+posix = []  # Enable POSIX syscall stubs for newlib compatibility

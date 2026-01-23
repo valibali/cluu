@@ -172,7 +172,9 @@ pub fn launch_service(ctx: &InitContext<'_>, service: &ServiceSpec, index: usize
     if tokens[TOKEN_SPACE] == 0 {
         tokens[TOKEN_SPACE] = derive_space_token_for_policy(space_token, service.space_policy)?;
     }
-    map_process_info(space_token, 0, 0, &tokens, &params)?;
+    // init-spawned services are system services without PIDs (pid=0)
+    // User processes spawned by procmgr get proper PIDs
+    map_process_info(space_token, 0, 0, 0, &tokens, &params)?;
 
     service.kind.map_resources(ctx, space_token, &params)?;
 

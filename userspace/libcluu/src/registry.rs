@@ -73,6 +73,27 @@ pub fn control_endpoint() -> usize {
     REGISTRY_STATE.lock().control_endpoint
 }
 
+/// Look up a service by its full name (e.g., "vfs:main", "procmgr:spawn").
+///
+/// This is a convenience function that subscribes to the service and returns
+/// the granted endpoint token. The service name should be in "service:output" format.
+///
+/// # Returns
+/// - `Some(token)`: Endpoint token for the service
+/// - `None`: Service not found or lookup failed
+pub fn lookup_service(full_name: &str) -> Option<usize> {
+    // Parse "service:output" format
+    let parts: Vec<&str> = full_name.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let service_name = parts[0];
+    let endpoint_name = parts[1];
+
+    // Subscribe and get the token
+    subscribe_output(service_name, endpoint_name).ok()
+}
+
 /// Register an output endpoint with the registry.
 pub fn register_output(endpoint_name: &str, endpoint_token: usize) -> Result<()> {
     let mut state = REGISTRY_STATE.lock();

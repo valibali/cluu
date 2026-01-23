@@ -37,6 +37,14 @@ pub mod tar;
 pub mod types;
 pub mod vspace;
 
+// POSIX syscall stubs (feature-gated for newlib compatibility)
+#[cfg(feature = "posix")]
+pub mod errno;
+#[cfg(feature = "posix")]
+pub mod fd_table;
+#[cfg(feature = "posix")]
+pub mod posix;
+
 // Re-exports
 pub use boot::{
     boot_info, process_info, root_token_handle, BootInfo, ProcessInfo, CONSOLE_FB_BASE,
