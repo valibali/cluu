@@ -45,8 +45,8 @@ const BLK_INFO_LABEL: u32 = 3;
 const SVC_TOKEN_LISTEN: usize = 7;
 /// Fixed grant scratch mapping base for zero-copy reads.
 const GRANT_SCRATCH_BASE: usize = 0x6100_0000;
-/// Size of the grant scratch buffer (must fit VFS grant buffer).
-const GRANT_SCRATCH_SIZE: usize = 64 * 1024;
+/// Size of the grant scratch buffer (must match VFS GRANT_BUF_SIZE).
+const GRANT_SCRATCH_SIZE: usize = 256 * 1024;
 
 struct GrantScratch {
     base: usize,

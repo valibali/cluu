@@ -33,7 +33,9 @@ const TWO_USIZE_BYTES: usize = size_of::<usize>() * 2;
 /// Buffer base for file data reads (shared grant window).
 const READ_BUF_BASE: usize = 0x60000000;
 /// Size of the shared grant window in the VFS address space.
-const GRANT_BUF_SIZE: usize = 64 * 1024;
+/// 256KB - large enough for good throughput, small enough to not waste memory.
+/// Files larger than this are read in multiple chunks.
+const GRANT_BUF_SIZE: usize = 256 * 1024;
 /// Cap for remote grant reads to avoid large transient allocations.
 const REMOTE_READ_CAP: usize = GRANT_BUF_SIZE;
 const VFS_TRACE: bool = false;

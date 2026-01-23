@@ -399,8 +399,12 @@ impl ProcessManager {
     }
 
     /// Try to load a file from VFS. Returns None if VFS is not available or file not found.
+    /// Uses chunked reading to support files of any size.
     fn load_from_vfs(&mut self, path: &str) -> Option<Vec<u8>> {
-        const CHUNK_SIZE: usize = 64 * 1024; // Match VFS grant buffer size
+        // Match VFS grant buffer size for optimal throughput
+        const CHUNK_SIZE: usize = 256 * 1024;
+
+        let _ = debug_print(&format!("load_from_vfs: {}", path));
 
         // Ensure we have VFS endpoint
         if self.vfs_endpoint == 0 {
@@ -409,22 +413,31 @@ impl ProcessManager {
 
         let client_id = registry::control_endpoint();
         if client_id == 0 {
+            let _ = debug_print("load_from_vfs: no client_id");
             return None;
         }
 
         let client = VfsClient::new(self.vfs_endpoint, client_id);
 
         // Open the file
-        let file = client.open(path).ok()?;
+        let file = match client.open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = debug_print(&format!("load_from_vfs: open failed {:?}", e));
+                return None;
+            }
+        };
+        let _ = debug_print(&format!(
+            "load_from_vfs: opened fd={} size={}",
+            file.fd, file.size
+        ));
+
         if file.size == 0 {
             let _ = client.close(file);
             return None;
         }
 
-        // Allocate buffer for the full file
-        let mut data = Vec::with_capacity(file.size);
-
-        // Map a single chunk-sized grant buffer for reading
+        // Map a single chunk-sized grant buffer (reused for each chunk)
         let chunk_pages = CHUNK_SIZE.div_ceil(PAGE_SIZE);
         let grant_base = self.grant_base_next;
         self.grant_base_next = grant_base + (chunk_pages * PAGE_SIZE);
@@ -439,12 +452,17 @@ impl ProcessManager {
         )
         .is_err()
         {
+            let _ = debug_print("load_from_vfs: grant buffer map failed");
             let _ = client.close(file);
             return None;
         }
 
+        // Pre-allocate buffer for the full file
+        let mut data = Vec::with_capacity(file.size);
+
         // Read file in chunks
         let mut offset = 0;
+        let mut chunk_num = 0;
         while offset < file.size {
             let remaining = file.size - offset;
             let read_size = remaining.min(CHUNK_SIZE);
@@ -452,23 +470,33 @@ impl ProcessManager {
             match client.read_grant(file, offset, read_size, self.space_token, grant_base) {
                 Ok(grant) => {
                     if grant.len == 0 {
+                        let _ = debug_print(&format!(
+                            "load_from_vfs: chunk {} returned 0 bytes",
+                            chunk_num
+                        ));
                         break;
                     }
-                    // Copy chunk to our buffer
                     let chunk = unsafe {
                         let ptr = (grant.base + grant.offset) as *const u8;
                         core::slice::from_raw_parts(ptr, grant.len)
                     };
                     data.extend_from_slice(chunk);
                     offset += grant.len;
+                    chunk_num += 1;
                 }
-                Err(_) => {
+                Err(e) => {
+                    let _ = debug_print(&format!("load_from_vfs: read_grant failed {:?}", e));
                     let _ = client.close(file);
                     return None;
                 }
             }
         }
 
+        let _ = debug_print(&format!(
+            "load_from_vfs: read {} bytes in {} chunks",
+            data.len(),
+            chunk_num
+        ));
         let _ = client.close(file);
         Some(data)
     }
