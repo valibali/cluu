@@ -1,5 +1,12 @@
 /* CLUU Userspace Linker Script */
-/* Links userspace programs starting at 0x400000 */
+/* Memory layout:
+ *   0x00400000 - Code (.text)
+ *   0x00500000+ - Data (.rodata, .data, .bss)
+ *   0x00800000 - Dynamic heap start (grows up via syscalls)
+ *   0x40000000 - Heap maximum
+ *   0x7F000000 - Stack bottom (grows down)
+ *   0x80000000 - Stack top
+ */
 
 ENTRY(_start)
 
@@ -32,14 +39,13 @@ SECTIONS
         __bss_end = .;
     }
 
-    /* Heap area starts after BSS */
-    . = ALIGN(4K);
-    __heap_start = .;
-    . += 4M;  /* 4MB heap */
-    __heap_end = .;
+    /* Note: Heap is now dynamically allocated at 0x800000 via syscalls.
+     * No static reservation needed - the kernel's space_map_range handles it.
+     * Maximum heap extends to 0x40000000 (1GB).
+     */
 
-    /* Stack grows down from 0x800000 (8MB) */
-    . = 0x800000;
+    /* Stack grows down from 0x80000000 (2GB) with 16MB size */
+    . = 0x80000000;
     __stack_top = .;
 
     /DISCARD/ :

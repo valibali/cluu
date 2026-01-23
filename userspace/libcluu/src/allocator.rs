@@ -1,19 +1,41 @@
+//! Dynamic heap allocator for userspace processes.
+//!
+//! This allocator uses a small static buffer for early allocations (before
+//! boot tokens are available), then grows dynamically by requesting pages
+//! from the kernel via the `space_map_range` syscall.
+//!
+//! # Design
+//!
+//! - Early heap: 64KB static buffer in .bss (for bootstrap)
+//! - Dynamic growth: 64KB increments via syscall once boot tokens ready
+//! - Maximum heap: ~1GB (0x40000000 - 0x00800000)
+//! - Allocation strategy: First-fit linked list with coalescing
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::{align_of, size_of};
 use core::ptr;
 use spin::Mutex;
 
-/// Number of bytes reserved for the runtime heap.
-/// 4MB allows for double-buffered console (~3MB backbuffer) plus other allocations.
-const HEAP_SIZE: usize = 4 * 1024 * 1024;
+/// Size of static bootstrap heap (64KB - enough for early init).
+const STATIC_HEAP_SIZE: usize = 64 * 1024;
 
-/// Align the heap to 4 KiB boundaries.
-#[allow(dead_code)]
+/// Minimum heap growth increment (64KB).
+const HEAP_GROW_SIZE: usize = 64 * 1024;
+
+/// Page size for heap allocation.
+const PAGE_SIZE: usize = 4096;
+
+/// Start of dynamic userspace heap region (must match kernel's USER_HEAP_START).
+const USER_HEAP_START: usize = 0x0080_0000;
+
+/// Maximum heap address (must match kernel's USER_HEAP_MAX).
+const USER_HEAP_MAX: usize = 0x4000_0000;
+
+/// Static bootstrap heap for early allocations before boot tokens are ready.
 #[repr(align(4096))]
-struct HeapRegion([u8; HEAP_SIZE]);
+struct StaticHeap([u8; STATIC_HEAP_SIZE]);
 
-// Heap must live in writable memory; use a mutable static to place it in .bss.
-static mut HEAP: HeapRegion = HeapRegion([0; HEAP_SIZE]);
+static mut STATIC_HEAP: StaticHeap = StaticHeap([0; STATIC_HEAP_SIZE]);
 
 #[derive(Copy, Clone, Debug)]
 pub struct AllocStats {
@@ -50,7 +72,9 @@ impl ListNode {
 struct LinkedListAllocator {
     head: ListNode,
     heap_start: usize,
-    heap_end: usize,
+    heap_end: usize,      // Current mapped end (for dynamic region)
+    heap_max: usize,      // Maximum allowed address
+    dynamic_start: usize, // Start of dynamic heap region
     used: usize,
     peak: usize,
 }
@@ -61,20 +85,32 @@ impl LinkedListAllocator {
             head: ListNode::new(0),
             heap_start: 0,
             heap_end: 0,
+            heap_max: 0,
+            dynamic_start: 0,
             used: 0,
             peak: 0,
         }
     }
 
+    /// Initialize the allocator with static bootstrap heap.
+    ///
+    /// The static heap is used immediately. Dynamic growth will be enabled
+    /// once boot tokens become available.
     unsafe fn init(&mut self) {
-        let start = core::ptr::addr_of!(HEAP).cast::<u8>() as usize;
-        let end = start + HEAP_SIZE;
-        self.heap_start = start;
-        self.heap_end = end;
+        // Start with static heap
+        let static_start = core::ptr::addr_of!(STATIC_HEAP).cast::<u8>() as usize;
+        let static_end = static_start + STATIC_HEAP_SIZE;
+
+        self.heap_start = static_start;
+        self.heap_end = static_end;
+        self.heap_max = USER_HEAP_MAX;
+        self.dynamic_start = USER_HEAP_START; // Dynamic region starts here
         self.used = 0;
         self.peak = 0;
         self.head.next = None;
-        self.add_free_region(start, HEAP_SIZE);
+
+        // Add static heap to free list
+        self.add_free_region(static_start, STATIC_HEAP_SIZE);
     }
 
     fn stats(&self) -> AllocStats {
@@ -91,6 +127,59 @@ impl LinkedListAllocator {
 
     fn align_up(value: usize, align: usize) -> usize {
         (value + align - 1) & !(align - 1)
+    }
+
+    /// Grow the heap by mapping additional pages via syscall.
+    ///
+    /// Returns true if growth succeeded, false otherwise.
+    fn grow_heap(&mut self, min_size: usize) -> bool {
+        // Get space token - if not available, can't grow dynamically
+        let space_token = crate::boot::space_token();
+        if space_token == 0 {
+            return false;
+        }
+
+        // Calculate where to start the new mapping
+        // First dynamic allocation starts at USER_HEAP_START
+        // Subsequent ones continue from heap_end if it's in the dynamic region
+        let map_start = if self.heap_end >= self.dynamic_start {
+            self.heap_end
+        } else {
+            self.dynamic_start
+        };
+
+        // Calculate how much to grow (at least min_size, aligned to pages)
+        let grow_size = min_size.max(HEAP_GROW_SIZE);
+        let grow_pages = (grow_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let actual_grow = grow_pages * PAGE_SIZE;
+        let new_end = map_start + actual_grow;
+
+        // Check if we'd exceed max
+        if new_end > self.heap_max {
+            return false;
+        }
+
+        // Request kernel to map pages (zero-filled, read+write)
+        // flags: 0x03 = read (0x01) + write (0x02)
+        match crate::syscall::space_map_range(
+            space_token,
+            map_start, // virt_start
+            0,         // source_ptr (0 = zero-fill)
+            0x03,      // flags: read + write
+            grow_pages,
+            0, // data_len
+        ) {
+            Ok(_) => {
+                // Add new region to free list
+                unsafe {
+                    self.add_free_region(map_start, actual_grow);
+                }
+                // Update heap_end to track the dynamic region
+                self.heap_end = new_end;
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     unsafe fn add_free_region(&mut self, addr: usize, size: usize) {
@@ -175,7 +264,8 @@ impl LinkedListAllocator {
         Some((header_start, user_start, alloc_end))
     }
 
-    fn alloc(&mut self, layout: Layout) -> *mut u8 {
+    /// Try to allocate without growing the heap.
+    fn try_alloc(&mut self, layout: Layout) -> Option<*mut u8> {
         let size = layout.size().max(1);
         let align = layout
             .align()
@@ -214,12 +304,33 @@ impl LinkedListAllocator {
                     self.peak = self.used;
                 }
 
-                return user_start as *mut u8;
+                return Some(user_start as *mut u8);
             }
 
             current = current.next.as_mut().unwrap();
         }
 
+        None
+    }
+
+    /// Allocate memory, growing the heap if necessary.
+    fn alloc(&mut self, layout: Layout) -> *mut u8 {
+        // Try allocation first
+        if let Some(ptr) = self.try_alloc(layout) {
+            return ptr;
+        }
+
+        // Allocation failed - try to grow heap dynamically
+        // Request enough for the allocation plus some overhead and slack
+        let needed = layout.size() + size_of::<AllocHeader>() + align_of::<ListNode>() + 64;
+        if self.grow_heap(needed) {
+            // Retry allocation after growth
+            if let Some(ptr) = self.try_alloc(layout) {
+                return ptr;
+            }
+        }
+
+        // Growth failed or still can't allocate
         ptr::null_mut()
     }
 
