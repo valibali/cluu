@@ -57,6 +57,26 @@ pub fn init() {
     crate::fd_table::init_stdio();
 }
 
+/// C-callable debug print (outputs to kernel log).
+///
+/// Useful for debugging C programs before stdout is working.
+#[no_mangle]
+pub extern "C" fn debug_print(msg: *const c_char) {
+    if msg.is_null() {
+        return;
+    }
+    let s = unsafe {
+        let mut len = 0;
+        let mut p = msg;
+        while *p != 0 {
+            len += 1;
+            p = p.add(1);
+        }
+        core::str::from_utf8_unchecked(core::slice::from_raw_parts(msg as *const u8, len))
+    };
+    let _ = crate::syscall::debug_print(s);
+}
+
 /// C-callable runtime initialization.
 ///
 /// This is called by crt0.S before main() to initialize:

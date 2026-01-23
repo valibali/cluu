@@ -52,7 +52,10 @@ use stack_string::StackString;
 ///
 /// This is called by the kernel after loading the program.
 /// It sets up the runtime and calls main().
-#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
+///
+/// Note: This is disabled when the `c-runtime` feature is enabled,
+/// as C programs use crt0.S for their entry point instead.
+#[cfg(all(not(feature = "std"), not(test), not(feature = "c-runtime"), target_os = "none"))]
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
@@ -84,10 +87,11 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
-/// Panic handler for userspace
+/// Panic handler for Rust userspace programs
 ///
 /// Note: This is only active when building for the target (not during testing)
-#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
+/// and when not using the C runtime (which has its own simpler panic handler).
+#[cfg(all(not(feature = "std"), not(test), not(feature = "c-runtime"), target_os = "none"))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let proc_info = crate::boot::process_info();
@@ -133,5 +137,19 @@ fn panic(info: &PanicInfo) -> ! {
     // Fallback: yield loop
     loop {
         let _ = yield_cpu();
+    }
+}
+
+/// Simple panic handler for C runtime
+///
+/// Used when building for C programs. Just halts the CPU.
+#[cfg(all(not(feature = "std"), not(test), feature = "c-runtime", target_os = "none"))]
+#[panic_handler]
+fn panic_c(_info: &PanicInfo) -> ! {
+    // For C programs, just halt. The C program should use _exit() for clean shutdown.
+    loop {
+        unsafe {
+            core::arch::asm!("hlt");
+        }
     }
 }

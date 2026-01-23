@@ -48,6 +48,28 @@ enum Commands {
         #[arg(long, default_value = "dev")]
         profile: String,
     },
+    /// Build newlib C library for CLUU
+    BuildNewlib,
+    /// Build libcluu_syscalls static library
+    BuildSyscalls {
+        #[arg(long, default_value = "dev")]
+        profile: String,
+    },
+    /// Assemble crt0.o for C programs
+    BuildCrt0,
+    /// Build a C program
+    BuildC {
+        /// Name for the output binary
+        name: String,
+        /// Path to the C source file
+        source: PathBuf,
+        #[arg(long, default_value = "dev")]
+        profile: String,
+    },
+    /// Show sysroot path
+    Sysroot,
+    /// Setup complete C toolchain (newlib + syscalls + crt0)
+    SetupC,
 }
 
 fn main() -> Result<()> {
@@ -57,6 +79,7 @@ fn main() -> Result<()> {
         Commands::Build { profile } => {
             build_userspace(&profile)?;
             build_kernel(&profile)?;
+            build_c_programs(&profile)?;
             create_initrd(&profile)?;
             create_user_block_image(&profile)?;
             create_disk_image(&profile)?;
@@ -65,6 +88,7 @@ fn main() -> Result<()> {
         Commands::Run { profile, debug } => {
             build_userspace(&profile)?;
             build_kernel(&profile)?;
+            build_c_programs(&profile)?;
             create_initrd(&profile)?;
             create_user_block_image(&profile)?;
             create_disk_image(&profile)?;
@@ -81,6 +105,24 @@ fn main() -> Result<()> {
         }
         Commands::Kernel { profile } => {
             build_kernel(&profile)?;
+        }
+        Commands::BuildNewlib => {
+            build_newlib()?;
+        }
+        Commands::BuildSyscalls { profile } => {
+            build_syscalls(&profile)?;
+        }
+        Commands::BuildCrt0 => {
+            build_crt0()?;
+        }
+        Commands::BuildC { name, source, profile } => {
+            build_c_program(&name, &source, &profile)?;
+        }
+        Commands::Sysroot => {
+            println!("{}", sysroot_path().display());
+        }
+        Commands::SetupC => {
+            setup_c_toolchain()?;
         }
     }
 
@@ -318,6 +360,9 @@ fn create_initrd(profile: &str) -> Result<()> {
         }
     }
 
+    // Note: C programs are intentionally NOT in the initrd.
+    // They are placed on the ext2 disk and spawned via VFS.
+
     // Create etc/motd
     fs::write(initrd_dir.join("etc/motd"), "Welcome to CLUU!\n")?;
 
@@ -403,6 +448,17 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         }
         fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
         println!("  Added {}", prog);
+    }
+
+    // Also add any C programs (built via cargo xtask build-c)
+    let c_programs = ["hello"];
+    for prog in &c_programs {
+        let src = userspace_target_dir.join(format!("{}.elf", prog));
+        let dst = bin_dir.join(prog);
+        if src.exists() {
+            fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
+            println!("  Added {} (C program)", prog);
+        }
     }
 
     let disk_path = project_root().join("target/userdisk.img");
@@ -585,5 +641,355 @@ fn clean() -> Result<()> {
     let _ = fs::remove_dir_all(project_root().join("target/asm"));
 
     println!("  ✓ Cleaned");
+    Ok(())
+}
+
+// ============================================================================
+// C Toolchain Support
+// ============================================================================
+
+fn sysroot_path() -> PathBuf {
+    project_root().join("target/sysroot")
+}
+
+fn build_newlib() -> Result<()> {
+    println!("▸ Building newlib...");
+
+    let script = project_root().join("scripts/build-newlib.sh");
+    if !script.exists() {
+        bail!("build-newlib.sh not found. Run from repository root.");
+    }
+
+    let status = Command::new("bash")
+        .current_dir(project_root())
+        .arg(&script)
+        .status()
+        .context("Failed to run build-newlib.sh")?;
+
+    if !status.success() {
+        bail!("Newlib build failed");
+    }
+
+    println!("  ✓ Newlib built");
+    Ok(())
+}
+
+fn build_syscalls(profile: &str) -> Result<()> {
+    println!("▸ Building libcluu_syscalls...");
+
+    let target_json = project_root().join("triplets/x86_64-cluu-user.json");
+    let tmp_dir = project_root().join("tmp");
+    fs::create_dir_all(&tmp_dir)?;
+
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(project_root()).args([
+        "build",
+        "-p",
+        "libcluu_syscalls",
+        "--target",
+        target_json.to_str().unwrap(),
+        "-Z",
+        "build-std=core,alloc",
+        "-Z",
+        "build-std-features=compiler-builtins-mem",
+    ]);
+    cmd.env("TMPDIR", tmp_dir.as_os_str());
+
+    if profile == "release" {
+        cmd.arg("--release");
+    }
+
+    let status = cmd.status().context("Failed to build libcluu_syscalls")?;
+    if !status.success() {
+        bail!("Failed to build libcluu_syscalls");
+    }
+
+    // Copy to sysroot
+    let cargo_profile = if profile == "dev" { "debug" } else { profile };
+    let src = project_root()
+        .join("target/x86_64-cluu-user")
+        .join(cargo_profile)
+        .join("libcluu_syscalls.a");
+    let sysroot = sysroot_path();
+    fs::create_dir_all(sysroot.join("lib"))?;
+    let dst = sysroot.join("lib/libcluu_syscalls.a");
+    fs::copy(&src, &dst).context("Failed to copy libcluu_syscalls.a to sysroot")?;
+
+    println!("  ✓ libcluu_syscalls.a installed to {}", dst.display());
+    Ok(())
+}
+
+fn build_crt0() -> Result<()> {
+    println!("▸ Assembling crt0.o...");
+
+    let crt0_src = project_root().join("userspace/newlib/crt0.S");
+    if !crt0_src.exists() {
+        bail!("crt0.S not found at {:?}", crt0_src);
+    }
+
+    let sysroot = sysroot_path();
+    fs::create_dir_all(sysroot.join("lib"))?;
+    let crt0_dst = sysroot.join("lib/crt0.o");
+
+    // Try clang first, fall back to GCC
+    let status = Command::new("clang")
+        .args([
+            "--target=x86_64-unknown-none-elf",
+            "-c",
+            "-o",
+            crt0_dst.to_str().unwrap(),
+            crt0_src.to_str().unwrap(),
+        ])
+        .status();
+
+    let success = match status {
+        Ok(s) if s.success() => true,
+        _ => {
+            // Fall back to GNU assembler
+            println!("  clang not found, trying x86_64-linux-gnu-as...");
+            let status = Command::new("x86_64-linux-gnu-as")
+                .args([
+                    "-o",
+                    crt0_dst.to_str().unwrap(),
+                    crt0_src.to_str().unwrap(),
+                ])
+                .status()
+                .context("Failed to run assembler")?;
+            status.success()
+        }
+    };
+
+    if !success {
+        bail!("Failed to assemble crt0.o");
+    }
+
+    println!("  ✓ crt0.o installed to {}", crt0_dst.display());
+    Ok(())
+}
+
+/// Build all C programs in userspace/c_hello etc.
+/// This builds prerequisites (syscalls, crt0) if needed, then compiles C programs.
+fn build_c_programs(profile: &str) -> Result<()> {
+    let sysroot = sysroot_path();
+    let crt0 = sysroot.join("lib/crt0.o");
+    let syscalls = sysroot.join("lib/libcluu_syscalls.a");
+
+    // Build prerequisites if missing
+    if !syscalls.exists() {
+        println!("▸ Building libcluu_syscalls.a (prerequisite for C programs)...");
+        build_syscalls(profile)?;
+    }
+    if !crt0.exists() {
+        println!("▸ Building crt0.o (prerequisite for C programs)...");
+        build_crt0()?;
+    }
+
+    // List of C programs to build: (name, source_path)
+    let c_programs: &[(&str, &str)] = &[
+        ("hello", "userspace/c_hello/hello.c"),
+    ];
+
+    for (name, source) in c_programs {
+        let source_path = project_root().join(source);
+        if source_path.exists() {
+            build_c_program(name, &source_path, profile)?;
+        } else {
+            println!("  Skipping {} (source not found)", name);
+        }
+    }
+
+    Ok(())
+}
+
+fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
+    println!("▸ Building C program: {}", name);
+
+    let sysroot = sysroot_path();
+    let crt0 = sysroot.join("lib/crt0.o");
+    let syscalls = sysroot.join("lib/libcluu_syscalls.a");
+
+    // Check prerequisites
+    if !crt0.exists() {
+        bail!("crt0.o not found. Run 'cargo xtask build-crt0' first.");
+    }
+    if !syscalls.exists() {
+        bail!("libcluu_syscalls.a not found. Run 'cargo xtask build-syscalls' first.");
+    }
+    if !source.exists() {
+        bail!("Source file not found: {:?}", source);
+    }
+
+    let cargo_profile = if profile == "dev" { "debug" } else { profile };
+    let out_dir = project_root()
+        .join("target/x86_64-cluu-user")
+        .join(cargo_profile);
+    fs::create_dir_all(&out_dir)?;
+
+    let obj_file = out_dir.join(format!("{}.o", name));
+    let elf_file = out_dir.join(format!("{}.elf", name));
+    let linker_script = project_root().join("userspace/user.ld");
+
+    // Check for newlib in sysroot
+    let newlib_lib = sysroot.join("x86_64-cluu/lib/libc.a");
+    let newlib_include = sysroot.join("x86_64-cluu/include");
+    let have_newlib = newlib_lib.exists();
+
+    // Compile - try clang first, fall back to GCC
+    println!("  Compiling {}...", source.display());
+    
+    let compile_success = {
+        // Try clang first
+        let mut compile_cmd = Command::new("clang");
+        compile_cmd.args([
+            "--target=x86_64-unknown-none-elf",
+            "-ffreestanding",
+            "-fno-stack-protector",
+            "-nostdlib",
+            "-c",
+        ]);
+
+        if have_newlib {
+            compile_cmd.arg("-I").arg(newlib_include.to_str().unwrap());
+        }
+
+        compile_cmd.args(["-o", obj_file.to_str().unwrap(), source.to_str().unwrap()]);
+
+        match compile_cmd.status() {
+            Ok(s) if s.success() => true,
+            _ => {
+                // Fall back to GCC
+                println!("  clang not found, trying x86_64-linux-gnu-gcc...");
+                let mut gcc_cmd = Command::new("x86_64-linux-gnu-gcc");
+                gcc_cmd.args([
+                    "-ffreestanding",
+                    "-fno-stack-protector",
+                    "-nostdlib",
+                    "-mno-red-zone",
+                    "-c",
+                ]);
+
+                if have_newlib {
+                    gcc_cmd.arg("-I").arg(newlib_include.to_str().unwrap());
+                }
+
+                gcc_cmd.args(["-o", obj_file.to_str().unwrap(), source.to_str().unwrap()]);
+
+                match gcc_cmd.status() {
+                    Ok(s) => s.success(),
+                    Err(e) => {
+                        eprintln!("  Failed to run compiler: {}", e);
+                        false
+                    }
+                }
+            }
+        }
+    };
+
+    if !compile_success {
+        bail!("Compilation failed. Install clang or x86_64-linux-gnu-gcc.");
+    }
+
+    // Link - try ld.lld first, fall back to ld
+    println!("  Linking {}...", name);
+    
+    let link_success = {
+        let mut link_cmd = Command::new("ld.lld");
+        link_cmd.args([
+            "-T",
+            linker_script.to_str().unwrap(),
+            "-o",
+            elf_file.to_str().unwrap(),
+            crt0.to_str().unwrap(),
+            obj_file.to_str().unwrap(),
+            "-L",
+            sysroot.join("lib").to_str().unwrap(),
+            "-lcluu_syscalls",
+        ]);
+
+        if have_newlib {
+            link_cmd
+                .arg("-L")
+                .arg(sysroot.join("x86_64-cluu/lib").to_str().unwrap());
+            link_cmd.args(["-lc", "-lm"]);
+        }
+
+        match link_cmd.status() {
+            Ok(s) if s.success() => true,
+            _ => {
+                // Fall back to GNU ld
+                println!("  ld.lld not found, trying x86_64-linux-gnu-ld...");
+                let mut ld_cmd = Command::new("x86_64-linux-gnu-ld");
+                ld_cmd.args([
+                    "-T",
+                    linker_script.to_str().unwrap(),
+                    "-o",
+                    elf_file.to_str().unwrap(),
+                    crt0.to_str().unwrap(),
+                    obj_file.to_str().unwrap(),
+                    "-L",
+                    sysroot.join("lib").to_str().unwrap(),
+                    "-lcluu_syscalls",
+                ]);
+
+                if have_newlib {
+                    ld_cmd
+                        .arg("-L")
+                        .arg(sysroot.join("x86_64-cluu/lib").to_str().unwrap());
+                    ld_cmd.args(["-lc", "-lm"]);
+                }
+
+                match ld_cmd.status() {
+                    Ok(s) => s.success(),
+                    Err(e) => {
+                        eprintln!("  Failed to run linker: {}", e);
+                        false
+                    }
+                }
+            }
+        }
+    };
+
+    if !link_success {
+        bail!("Linking failed. Install lld or x86_64-linux-gnu-ld.");
+    }
+
+    println!("  ✓ Built: {}", elf_file.display());
+    Ok(())
+}
+
+fn setup_c_toolchain() -> Result<()> {
+    println!("▸ Setting up C toolchain for CLUU...");
+
+    // Step 1: Build syscalls library
+    build_syscalls("dev")?;
+
+    // Step 2: Build crt0.o
+    build_crt0()?;
+
+    // Step 3: Check for newlib
+    let newlib_src = project_root().join("external/newlib-4.4.0.20231231");
+    if newlib_src.exists() {
+        println!("");
+        println!("  Newlib source found. Building...");
+        build_newlib()?;
+    } else {
+        println!("");
+        println!("  Newlib source not found.");
+        println!("  To enable full C library support, run:");
+        println!("    ./scripts/download-newlib.sh");
+        println!("    cargo xtask build-newlib");
+    }
+
+    println!("");
+    println!("✓ C toolchain setup complete!");
+    println!("");
+    println!("Sysroot: {}", sysroot_path().display());
+    println!("");
+    println!("To build a C program:");
+    println!("  cargo xtask build-c <name> <source.c>");
+    println!("");
+    println!("Example:");
+    println!("  cargo xtask build-c hello userspace/c_hello/hello.c");
+
     Ok(())
 }

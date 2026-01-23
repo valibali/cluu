@@ -604,19 +604,13 @@ where
 }
 
 fn normalize_spawn_path(path: &str) -> String {
-    if let Some(rel) = path.strip_prefix("/dev/initrd/") {
-        return rel.to_string();
+    // Procmgr requires absolute paths.
+    // If path doesn't start with '/', assume it's in /bin/
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/bin/{}", path)
     }
-    if let Some(rel) = path.strip_prefix("/bin/") {
-        return format!("bin/{}", rel);
-    }
-    if let Some(rel) = path.strip_prefix('/') {
-        return rel.to_string();
-    }
-    if path.contains('/') {
-        return path.to_string();
-    }
-    format!("bin/{}", path)
 }
 
 fn parse_status(raw: usize) -> Result<()> {

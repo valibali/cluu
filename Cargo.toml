@@ -28,6 +28,7 @@ members = [
     "userspace/cat",
     "userspace/vfs_demo",
     "userspace/virtio-blk",
+    "userspace/libcluu_syscalls",
 
     # Language tooling
     "crates/cluu_lang",

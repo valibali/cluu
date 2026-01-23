@@ -3,13 +3,14 @@
 
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, format};
+use alloc::{collections::BTreeMap, format, string::ToString, vec::Vec};
 use core::mem::size_of;
 use libcluu::boot::{
     process_info, ProcessInfo, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_PROC_CAP,
-    TOKEN_REGISTRY, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
+    TOKEN_REGISTRY, TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
 };
 use libcluu::elf::ElfFile;
+use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_token;
 use libcluu::registry;
 use libcluu::syscall::thread_destroy;
@@ -25,7 +26,7 @@ const SERVICE_STACK_BASE: usize = 0x6d000000;
 const SERVICE_STACK_TOP: usize = SERVICE_STACK_BASE + SERVICE_STACK_SIZE;
 const STACK_FLAGS: usize = 0x03; // read + write
                                  // PAGE_SIZE is imported from libcluu::*
-const SERVICE_PATH: &str = "bin/shell";
+const SERVICE_PATH: &str = "/dev/initrd/bin/shell";
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
 const PROCMGR_KILL_LABEL: u32 = 3;
@@ -57,12 +58,15 @@ struct ProcessManager {
     _proc_cap: usize,
     exit_cookie_next: usize,
     pid_next: usize,
-    exit_table: BTreeMap<usize, usize>,       // cookie -> thread_token
-    exit_notify: BTreeMap<usize, usize>,      // cookie -> notify_endpoint
-    pid_to_cookie: BTreeMap<usize, usize>,    // pid -> cookie (for PROC_KILL)
-    cookie_to_pid: BTreeMap<usize, usize>,    // cookie -> pid (for exit handling)
+    exit_table: BTreeMap<usize, usize>,  // cookie -> thread_token
+    exit_notify: BTreeMap<usize, usize>, // cookie -> notify_endpoint
+    pid_to_cookie: BTreeMap<usize, usize>, // pid -> cookie (for PROC_KILL)
+    cookie_to_pid: BTreeMap<usize, usize>, // cookie -> pid (for exit handling)
     tty_main: usize,
     requested_tty: bool,
+    vfs_endpoint: usize,    // VFS service endpoint
+    space_token: usize,     // Our address space token for grants
+    grant_base_next: usize, // Next available address for grant buffers
 }
 
 impl ProcessManager {
@@ -83,6 +87,9 @@ impl ProcessManager {
             cookie_to_pid: BTreeMap::new(),
             tty_main: 0,
             requested_tty: false,
+            vfs_endpoint: 0,
+            space_token: info.tokens[TOKEN_SPACE],
+            grant_base_next: 0x50100000, // Start after virtqueue region
         })
     }
 
@@ -169,12 +176,12 @@ impl ProcessManager {
             Some(token) => token,
             None => return Ok(()),
         };
-        
+
         // Clean up PID tracking
         if let Some(pid) = self.cookie_to_pid.remove(&cookie) {
             self.pid_to_cookie.remove(&pid);
         }
-        
+
         if let Some(notify_endpoint) = self.exit_notify.remove(&cookie) {
             let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
             notify_msg.words[0] = cookie;
@@ -236,7 +243,20 @@ impl ProcessManager {
                 return Ok(());
             }
         };
-        let priority = if msg.tag.words >= 2 { msg.words[1] } else { DEFAULT_PRIORITY };
+
+        // Require absolute paths (must start with '/')
+        if !path.starts_with('/') {
+            let _ = debug_print(&format!("procmgr: rejecting relative path '{}'", path));
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            let _ = self.send_spawn_reply(reply_token, reply_endpoint, &reply_msg);
+            return Ok(());
+        }
+
+        let priority = if msg.tag.words >= 2 {
+            msg.words[1]
+        } else {
+            DEFAULT_PRIORITY
+        };
 
         if self.tty_main == 0 {
             if let Ok(token) = registry::subscribe_output("tty:0", "main") {
@@ -276,21 +296,34 @@ impl ProcessManager {
     }
 
     fn spawn_service(&mut self, path: &str, priority: usize) -> Result<(usize, usize, usize)> {
-        let initrd =
-            unsafe { core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, self.initrd_size) };
-        let service_bytes = find_member(initrd, path).ok_or(Error::NotFound)?;
+        // Try loading from VFS first, then fall back to initrd
+        let (elf_data, from_vfs) = self.load_elf(path)?;
+        let service_bytes: &[u8] = &elf_data;
 
         let elf = ElfFile::parse(service_bytes)?;
-        debug_print("Parsed service ELF")?;
+        debug_print(&format!(
+            "Parsed ELF from {} (entry=0x{:x}, size={})",
+            if from_vfs { "VFS" } else { "initrd" },
+            elf.entry_point,
+            service_bytes.len()
+        ))?;
 
+        debug_print("Creating address space...")?;
         let space_token = space_create(self.token)?;
+        debug_print(&format!("Address space created: {}", space_token))?;
+
+        debug_print("Mapping ELF segments...")?;
         libcluu::map_segments(space_token, &elf, service_bytes)?;
+        debug_print("ELF segments mapped")?;
+
+        debug_print("Mapping stack...")?;
         libcluu::map_stack(
             space_token,
             SERVICE_STACK_TOP,
             SERVICE_STACK_SIZE,
             STACK_FLAGS,
         )?;
+        debug_print("Stack mapped")?;
 
         let send_rights = Rights::IPC_SEND.bits() as usize;
         let child_endpoint = token_derive(self.exit_endpoint, send_rights, u64::MAX)?;
@@ -338,11 +371,112 @@ impl ProcessManager {
         self.cookie_to_pid.insert(cookie, pid);
         Ok((thread_token, cookie, pid))
     }
-    
+
+    /// Load ELF data from VFS or initrd.
+    /// Returns (data, from_vfs) where from_vfs indicates the source.
+    /// Path must be absolute (start with '/').
+    /// Initrd is only accessible via /dev/initrd/ prefix.
+    fn load_elf(&mut self, path: &str) -> Result<(Vec<u8>, bool)> {
+        const INITRD_PREFIX: &str = "/dev/initrd/";
+
+        // Check if path is for initrd
+        if let Some(initrd_path) = path.strip_prefix(INITRD_PREFIX) {
+            let initrd = unsafe {
+                core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, self.initrd_size)
+            };
+            if let Some(bytes) = find_member(initrd, initrd_path) {
+                return Ok((bytes.to_vec(), false));
+            }
+            return Err(Error::NotFound);
+        }
+
+        // All other paths go through VFS
+        if let Some(data) = self.load_from_vfs(path) {
+            return Ok((data, true));
+        }
+
+        Err(Error::NotFound)
+    }
+
+    /// Try to load a file from VFS. Returns None if VFS is not available or file not found.
+    fn load_from_vfs(&mut self, path: &str) -> Option<Vec<u8>> {
+        const CHUNK_SIZE: usize = 64 * 1024; // Match VFS grant buffer size
+
+        // Ensure we have VFS endpoint
+        if self.vfs_endpoint == 0 {
+            self.vfs_endpoint = registry::subscribe_output("vfs", "main").ok()?;
+        }
+
+        let client_id = registry::control_endpoint();
+        if client_id == 0 {
+            return None;
+        }
+
+        let client = VfsClient::new(self.vfs_endpoint, client_id);
+
+        // Open the file
+        let file = client.open(path).ok()?;
+        if file.size == 0 {
+            let _ = client.close(file);
+            return None;
+        }
+
+        // Allocate buffer for the full file
+        let mut data = Vec::with_capacity(file.size);
+
+        // Map a single chunk-sized grant buffer for reading
+        let chunk_pages = CHUNK_SIZE.div_ceil(PAGE_SIZE);
+        let grant_base = self.grant_base_next;
+        self.grant_base_next = grant_base + (chunk_pages * PAGE_SIZE);
+
+        if space_map_range(
+            self.space_token,
+            grant_base,
+            0,    // zero-fill
+            0x03, // read + write
+            chunk_pages,
+            0,
+        )
+        .is_err()
+        {
+            let _ = client.close(file);
+            return None;
+        }
+
+        // Read file in chunks
+        let mut offset = 0;
+        while offset < file.size {
+            let remaining = file.size - offset;
+            let read_size = remaining.min(CHUNK_SIZE);
+
+            match client.read_grant(file, offset, read_size, self.space_token, grant_base) {
+                Ok(grant) => {
+                    if grant.len == 0 {
+                        break;
+                    }
+                    // Copy chunk to our buffer
+                    let chunk = unsafe {
+                        let ptr = (grant.base + grant.offset) as *const u8;
+                        core::slice::from_raw_parts(ptr, grant.len)
+                    };
+                    data.extend_from_slice(chunk);
+                    offset += grant.len;
+                }
+                Err(_) => {
+                    let _ = client.close(file);
+                    return None;
+                }
+            }
+        }
+
+        let _ = client.close(file);
+        Some(data)
+    }
+
     fn handle_kill_message(&mut self, msg: &Message) -> Result<()> {
         let reply_token = extract_reply_token(msg);
         let mut reply_msg = Message::new(PROCMGR_KILL_LABEL, [0; 6], 1);
-        
+
         if msg.tag.words < 2 {
             reply_msg.words[0] = (-1isize) as usize; // EINVAL
             if let Some(token) = reply_token {
@@ -350,10 +484,10 @@ impl ProcessManager {
             }
             return Ok(());
         }
-        
+
         let target_pid = msg.words[0];
         let _signal = msg.words[1]; // Signal number (9 = SIGKILL, 15 = SIGTERM)
-        
+
         // Look up the process by PID
         let cookie = match self.pid_to_cookie.get(&target_pid) {
             Some(&c) => c,
@@ -365,7 +499,7 @@ impl ProcessManager {
                 return Ok(());
             }
         };
-        
+
         // Get the thread token
         let thread_token = match self.exit_table.get(&cookie) {
             Some(&t) => t,
@@ -377,7 +511,7 @@ impl ProcessManager {
                 return Ok(());
             }
         };
-        
+
         // Destroy the thread
         match thread_destroy(thread_token) {
             Ok(()) => {
@@ -386,22 +520,30 @@ impl ProcessManager {
                 self.pid_to_cookie.remove(&target_pid);
                 self.cookie_to_pid.remove(&cookie);
                 self.exit_notify.remove(&cookie);
-                
+
                 reply_msg.words[0] = 0; // Success
-                let _ = debug_print(&format!("procmgr: killed pid {} (cookie {})", target_pid, cookie));
+                let _ = debug_print(&format!(
+                    "procmgr: killed pid {} (cookie {})",
+                    target_pid, cookie
+                ));
             }
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
             }
         }
-        
+
         if let Some(token) = reply_token {
             let _ = reply(token, &reply_msg, IpcFlags::empty());
         }
         Ok(())
     }
 
-    fn send_spawn_reply(&self, reply_token: Option<usize>, reply_endpoint: usize, msg: &Message) -> Result<()> {
+    fn send_spawn_reply(
+        &self,
+        reply_token: Option<usize>,
+        reply_endpoint: usize,
+        msg: &Message,
+    ) -> Result<()> {
         // Prefer reply token (from ipc_call), fall back to explicit endpoint, then legacy reply
         if let Some(token) = reply_token {
             reply(token, msg, IpcFlags::empty())

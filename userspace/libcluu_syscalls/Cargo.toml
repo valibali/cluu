@@ -1,0 +1,17 @@
+[package]
+name = "libcluu_syscalls"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU POSIX syscall stubs for C programs (newlib)"
+authors = ["CLUU Team"]
+license = "MIT"
+
+[lib]
+name = "cluu_syscalls"
+crate-type = ["staticlib"]
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["c-runtime"] }
+
+[features]
+default = []

@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use libcluu::fs::protocol::{VfsOp, VFS_CLOSE, VFS_OPEN, VFS_READ_GRANT, VFS_READDIR};
+use libcluu::fs::protocol::{VfsOp, VFS_CLOSE, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT};
 use libcluu::ipc::{self, extract_reply_token, reply_with_payload};
 use libcluu::types::Message;
 use libcluu::*;
@@ -242,7 +242,12 @@ impl VfsServer {
         Ok(())
     }
 
-    fn handle_read_grant(&mut self, msg: &Message, payload: &[u8], reply_token: usize) -> Result<()> {
+    fn handle_read_grant(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+    ) -> Result<()> {
         let client_id = msg.words[1];
         let fd = msg.words[2];
         let offset = msg.words[3];
@@ -250,7 +255,10 @@ impl VfsServer {
         let mut reply_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
         vfs_trace!(
             "vfs: read_grant start client={} fd={} off={} req={}",
-            client_id, fd, offset, requested
+            client_id,
+            fd,
+            offset,
+            requested
         );
 
         let Some((target_base, target_space)) = parse_usize_pair(payload) else {
@@ -277,13 +285,34 @@ impl VfsServer {
 
         match file {
             OpenFile::Memory(entry) => {
-                self.read_grant_memory(entry, offset, requested, target_base, target_space, &mut reply_msg)?;
+                self.read_grant_memory(
+                    entry,
+                    offset,
+                    requested,
+                    target_base,
+                    target_space,
+                    &mut reply_msg,
+                )?;
             }
             OpenFile::Ext2(entry) => {
-                self.read_grant_remote(entry, offset, requested, target_base, target_space, &mut reply_msg)?;
+                self.read_grant_remote(
+                    entry,
+                    offset,
+                    requested,
+                    target_base,
+                    target_space,
+                    &mut reply_msg,
+                )?;
             }
             OpenFile::Virtual(vfile) => {
-                self.read_grant_virtual(&vfile.data, offset, requested, target_base, target_space, &mut reply_msg)?;
+                self.read_grant_virtual(
+                    &vfile.data,
+                    offset,
+                    requested,
+                    target_base,
+                    target_space,
+                    &mut reply_msg,
+                )?;
             }
         }
 
@@ -390,7 +419,13 @@ impl VfsServer {
 
                 let bytes_read = reply.words[1];
                 let page_offset = reply.words[2];
-                self.grant_buffer_to_caller(bytes_read, page_offset, target_base, target_space, reply_msg)
+                self.grant_buffer_to_caller(
+                    bytes_read,
+                    page_offset,
+                    target_base,
+                    target_space,
+                    reply_msg,
+                )
             }
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;

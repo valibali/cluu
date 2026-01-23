@@ -67,9 +67,7 @@ _start:
 .size _start, . - _start
 
 /*
- * Weak symbol for __cluu_init if not provided.
- * This allows linking without the full runtime for testing.
+ * __cluu_init is provided by libcluu_syscalls.a
+ * It initializes the heap allocator and fd table.
+ * Linking will fail if libcluu_syscalls.a is not linked.
  */
-.weak __cluu_init
-__cluu_init:
-    ret

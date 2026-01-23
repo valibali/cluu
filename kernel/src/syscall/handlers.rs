@@ -927,8 +927,8 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     if num_pages == 0 {
         return Ok(0); // Nothing to do
     }
-    if num_pages > 16384 {
-        // Limit batch size to prevent excessive resource consumption (max 64MB)
+    if num_pages > 32768 {
+        // Limit batch size to prevent excessive resource consumption (max 128MB)
         klibcluu::warn("invoke_space_map_range: num_pages too large");
         return Err(Error::InvalidArgument);
     }
