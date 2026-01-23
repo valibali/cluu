@@ -234,7 +234,10 @@ impl Thread {
     ) -> Self {
         let mut context = Context::new();
         context.rip = entry.as_u64();
-        context.rsp = stack.as_u64();
+        // SysV x86-64 ABI: at function entry, (RSP + 8) % 16 == 0
+        // This is because `call` pushes an 8-byte return address.
+        // Since we enter via iretq (no call), we must set RSP to 16n+8.
+        context.rsp = stack.as_u64() - 8;
         context.cr3 = page_table_root.as_u64();
 
         // Set up initial RFLAGS (interrupts enabled)

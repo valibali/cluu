@@ -123,7 +123,7 @@ impl Context {
     /// # Arguments
     ///
     /// * `entry` - Entry point (RIP)
-    /// * `stack` - Stack pointer (RSP)
+    /// * `stack` - Stack pointer (RSP) - will be adjusted for ABI alignment
     /// * `cr3` - Page table root physical address
     ///
     /// # Returns
@@ -147,7 +147,9 @@ impl Context {
             r13: 0,
             r14: 0,
             r15: 0,
-            rsp: stack,
+            // SysV x86-64 ABI: at function entry, (RSP + 8) % 16 == 0
+            // Since we enter directly (no call), set RSP to 16n+8
+            rsp: stack - 8,
             rip: entry,
             rflags: 0x202, // Bit 1 (reserved, always 1) | Bit 9 (IF)
             cs: 0x08,      // Kernel code segment (placeholder until GDT setup)
@@ -229,7 +231,8 @@ mod tests {
     fn test_context_for_new_thread() {
         let ctx = Context::for_new_thread(0x400000, 0x7ff00000, 0x1000);
         assert_eq!(ctx.rip, 0x400000);
-        assert_eq!(ctx.rsp, 0x7ff00000);
+        // RSP is adjusted by -8 for SysV ABI alignment (16n+8 at entry)
+        assert_eq!(ctx.rsp, 0x7feffff8);
         assert_eq!(ctx.cr3, 0x1000);
         assert_eq!(ctx.rflags, 0x200); // IF flag set
     }

@@ -460,23 +460,19 @@ fn run_qemu(debug: bool) -> Result<()> {
 
     let mut cmd = Command::new("qemu-system-x86_64");
 
-    // KVM acceleration can cause GPF during boot on some systems
-    // Using TCG (software emulation) for stability
-    // To enable KVM: uncomment the "-accel", "kvm" lines below
+    // KVM acceleration with host CPU for accurate instruction behavior
+    // This exposes real hardware alignment requirements (SSE/AVX)
     cmd.args([
         "-bios",
         ovmf,
         "-m",
         "256M",
-        // KVM acceleration (hardware virtualization) - DISABLED by default
-        // Uncomment below to enable (may cause GPF during boot):
-        // "-accel",
-        // "kvm",
-        // Reduce CPU usage when guest is idle (works with TCG)
-        // shift=auto: automatically determine instruction count shift
-        // sleep=on: sleep when guest is idle (reduces host CPU usage)
-        // "-icount",
-        // "shift=auto,sleep=on",
+        // KVM acceleration (hardware virtualization)
+        "-accel",
+        "kvm",
+        // Use host CPU model for accurate behavior (exposes alignment faults)
+        "-cpu",
+        "host",
         // Boot disk: force IDE so BOOTBOOT can read it
         "-drive",
         &format!("file={},format=raw,if=ide,index=0", img_path.display()),

@@ -69,6 +69,11 @@ pub unsafe extern "C" fn _start() {
         "add rax, {stack_size}",
         "mov rsp, rax",
 
+        // SysV ABI: at function entry, (RSP + 8) % 16 == 0
+        // Since we use jmp (not call), we must adjust RSP to simulate
+        // the 8-byte return address that call would push.
+        "sub rsp, 8",
+
         // Jump into real Rust kernel entry
         "jmp kstart",
 
