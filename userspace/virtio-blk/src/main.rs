@@ -270,7 +270,8 @@ fn handle_fs_request(
                     for page_idx in 0..pages {
                         let src = grant_scratch.base + page_idx * PAGE_SIZE;
                         let dst = target_base + page_idx * PAGE_SIZE;
-                        if let Err(err) = space_grant(space_token, target_space, src, dst, 0) {
+                        // Grant writable pages so VFS can reuse the buffer safely.
+                        if let Err(err) = space_grant(space_token, target_space, src, dst, 0x02) {
                             grant_err = Some(err);
                             break;
                         }

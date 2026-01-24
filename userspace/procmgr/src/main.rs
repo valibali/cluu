@@ -66,7 +66,7 @@ struct ProcessManager {
     requested_tty: bool,
     vfs_endpoint: usize,    // VFS service endpoint
     space_token: usize,     // Our address space token for grants
-    grant_base_next: usize, // Next available address for grant buffers
+    grant_base_next: usize, // Reused base address for grant buffer
 }
 
 impl ProcessManager {
@@ -296,25 +296,41 @@ impl ProcessManager {
     }
 
     fn spawn_service(&mut self, path: &str, priority: usize) -> Result<(usize, usize, usize)> {
-        // Try loading from VFS first, then fall back to initrd
-        let (elf_data, from_vfs) = self.load_elf(path)?;
-        let service_bytes: &[u8] = &elf_data;
-
-        let elf = ElfFile::parse(service_bytes)?;
-        debug_print(&format!(
-            "Parsed ELF from {} (entry=0x{:x}, size={})",
-            if from_vfs { "VFS" } else { "initrd" },
-            elf.entry_point,
-            service_bytes.len()
-        ))?;
-
         debug_print("Creating address space...")?;
         let space_token = space_create(self.token)?;
         debug_print(&format!("Address space created: {}", space_token))?;
 
-        debug_print("Mapping ELF segments...")?;
-        libcluu::map_segments(space_token, &elf, service_bytes)?;
-        debug_print("ELF segments mapped")?;
+        let mut entry_point = 0usize;
+        let mut mapped = false;
+
+        if !path.starts_with("/dev/initrd/") {
+            if let Ok(Some(entry)) = self.map_elf_from_vfs(path, space_token) {
+                entry_point = entry;
+                mapped = true;
+                debug_print(&format!("Mapped ELF from VFS (entry=0x{:x})", entry_point))?;
+            }
+        }
+
+        if !mapped {
+            // Fall back to loading bytes in-process.
+            let (elf_data, from_vfs) = self.load_elf(path)?;
+            let service_bytes: &[u8] = &elf_data;
+
+            let elf = ElfFile::parse(service_bytes)?;
+            entry_point = elf.entry_point as usize;
+            debug_print(&format!(
+                "Parsed ELF from {} (entry=0x{:x}, size={})",
+                if from_vfs { "VFS" } else { "initrd" },
+                elf.entry_point,
+                service_bytes.len()
+            ))?;
+
+            debug_print("Mapping ELF segments...")?;
+            libcluu::map_segments(space_token, &elf, service_bytes)?;
+            debug_print("ELF segments mapped")?;
+        } else {
+            debug_print("ELF segments mapped")?;
+        }
 
         debug_print("Mapping stack...")?;
         libcluu::map_stack(
@@ -359,12 +375,7 @@ impl ProcessManager {
             space_token,
         )?;
 
-        let thread_token = thread_create(
-            space_token,
-            elf.entry_point as usize,
-            SERVICE_STACK_TOP,
-            priority,
-        )?;
+        let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
 
         self.exit_table.insert(cookie, thread_token);
         self.pid_to_cookie.insert(pid, cookie);
@@ -404,10 +415,17 @@ impl ProcessManager {
         // Match VFS grant buffer size for optimal throughput
         const CHUNK_SIZE: usize = 1024 * 1024;
 
+        // #region agent log
+        let _ = debug_print(&format!("procmgr: load_from_vfs path={}", path));
+        // #endregion
+
         // Ensure we have VFS endpoint
         if self.vfs_endpoint == 0 {
             self.vfs_endpoint = registry::subscribe_output("vfs", "main").ok()?;
         }
+        // #region agent log
+        let _ = debug_print(&format!("procmgr: vfs_endpoint={}", self.vfs_endpoint));
+        // #endregion
 
         let client_id = registry::control_endpoint();
         if client_id == 0 {
@@ -416,54 +434,158 @@ impl ProcessManager {
 
         let client = VfsClient::new(self.vfs_endpoint, client_id);
 
+        // #region agent log
+        let _ = debug_print(&format!("procmgr: opening file via VFS..."));
+        // #endregion
+
         // Open the file
-        let file = client.open(path).ok()?;
+        let file = match client.open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                // #region agent log
+                let _ = debug_print(&format!("procmgr: VFS open failed {:?}", e));
+                // #endregion
+                return None;
+            }
+        };
+        // #region agent log
+        let _ = debug_print(&format!(
+            "procmgr: file opened fd={} size={}",
+            file.fd, file.size
+        ));
+        // #endregion
+
         if file.size == 0 {
             let _ = client.close(file);
             return None;
         }
 
-        // Map a single chunk-sized grant buffer (reused for each chunk)
-        let chunk_pages = CHUNK_SIZE.div_ceil(PAGE_SIZE);
-        let grant_base = self.grant_base_next;
-        self.grant_base_next = grant_base + (chunk_pages * PAGE_SIZE);
+        // Use a full-file read for cacheable sizes, otherwise chunked reads.
+        const FILE_CACHE_MAX_SIZE: usize = 8 * 1024 * 1024;
+        let use_full_read = file.size <= FILE_CACHE_MAX_SIZE;
+        let read_window = if use_full_read { file.size } else { CHUNK_SIZE };
 
-        if space_map_range(
+        // Map a grant buffer sized for the chosen read window (reused per call).
+        let chunk_pages = read_window.div_ceil(PAGE_SIZE);
+        let grant_base = self.grant_base_next;
+
+        // #region agent log
+        let _ = debug_print(&format!(
+            "procmgr: mapping grant buf at {:#x} pages={}",
+            grant_base, chunk_pages
+        ));
+        // #endregion
+
+        match space_map_range(
             self.space_token,
             grant_base,
             0,    // zero-fill
             0x03, // read + write
             chunk_pages,
             0,
-        )
-        .is_err()
-        {
-            let _ = client.close(file);
-            return None;
+        ) {
+            Ok(_) | Err(Error::AlreadyExists) => {}
+            Err(_) => {
+                // #region agent log
+                let _ = debug_print("procmgr: space_map_range FAILED");
+                // #endregion
+                let _ = client.close(file);
+                return None;
+            }
         }
+        // #region agent log
+        let _ = debug_print("procmgr: grant buf mapped OK");
+        // #endregion
 
         // Pre-allocate buffer for the full file
+        // #region agent log
+        let _ = debug_print(&format!("procmgr: allocating Vec capacity={}", file.size));
+        // #endregion
         let mut data = Vec::with_capacity(file.size);
+        // #region agent log
+        let _ = debug_print("procmgr: Vec allocated OK");
+        // #endregion
+
+        // Read file in chunks (optionally priming cache with a full read request).
+        let mut offset = 0;
+        if use_full_read {
+            let _ = debug_print(&format!(
+                "procmgr: priming cache with full read_grant size={}",
+                file.size
+            ));
+            let grant = match client.read_grant(file, 0, file.size, self.space_token, grant_base) {
+                Ok(grant) => grant,
+                Err(e) => {
+                    let _ = debug_print(&format!("procmgr: read_grant FAILED {:?}", e));
+                    let _ = client.close(file);
+                    return None;
+                }
+            };
+            if grant.len == 0 {
+                let _ = client.close(file);
+                return None;
+            }
+            let chunk = unsafe {
+                let ptr = (grant.base + grant.offset) as *const u8;
+                core::slice::from_raw_parts(ptr, grant.len)
+            };
+            data.extend_from_slice(chunk);
+            offset = grant.len;
+            let _ = debug_print(&format!(
+                "procmgr: primed {} bytes, continue chunked",
+                offset
+            ));
+        }
 
         // Read file in chunks
-        let mut offset = 0;
+        // #region agent log
+        let _ = debug_print(&format!(
+            "procmgr: starting read loop file_size={}",
+            file.size
+        ));
+        // #endregion
         while offset < file.size {
             let remaining = file.size - offset;
             let read_size = remaining.min(CHUNK_SIZE);
 
+            // #region agent log
+            let _ = debug_print(&format!(
+                "procmgr: read_grant offset={} size={} grant_base={:#x}",
+                offset, read_size, grant_base
+            ));
+            // #endregion
+
             match client.read_grant(file, offset, read_size, self.space_token, grant_base) {
                 Ok(grant) => {
+                    // #region agent log
+                    let _ = debug_print(&format!(
+                        "procmgr: read_grant OK base={:#x} offset={} len={}",
+                        grant.base, grant.offset, grant.len
+                    ));
+                    // #endregion
                     if grant.len == 0 {
                         break;
                     }
+                    // #region agent log
+                    let _ = debug_print(&format!(
+                        "procmgr: copying from {:#x}",
+                        grant.base + grant.offset
+                    ));
+                    // #endregion
                     let chunk = unsafe {
                         let ptr = (grant.base + grant.offset) as *const u8;
                         core::slice::from_raw_parts(ptr, grant.len)
                     };
                     data.extend_from_slice(chunk);
                     offset += grant.len;
+                    // #region agent log
+                    let _ = debug_print(&format!("procmgr: chunk copied, total={}", data.len()));
+                    // #endregion
                 }
-                Err(_) => {
+                Err(e) => {
+                    // #region agent log
+                    let _ = debug_print(&format!("procmgr: read_grant FAILED {:?}", e));
+                    // #endregion
                     let _ = client.close(file);
                     return None;
                 }
@@ -472,6 +594,39 @@ impl ProcessManager {
 
         let _ = client.close(file);
         Some(data)
+    }
+
+    fn map_elf_from_vfs(&mut self, path: &str, space_token: usize) -> Result<Option<usize>> {
+        // Ensure we have VFS endpoint
+        if self.vfs_endpoint == 0 {
+            match registry::subscribe_output("vfs", "main") {
+                Ok(token) => self.vfs_endpoint = token,
+                Err(_) => return Ok(None),
+            }
+        }
+
+        let client_id = registry::control_endpoint();
+        if client_id == 0 {
+            return Ok(None);
+        }
+
+        let client = VfsClient::new(self.vfs_endpoint, client_id);
+        let file = match client.open(path) {
+            Ok(file) => file,
+            Err(_) => return Ok(None),
+        };
+
+        let map_token = token_derive(space_token, Rights::SPACE_MAP.bits() as usize, u64::MAX)?;
+        let entry = match client.map_elf(file, map_token) {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                let _ = debug_print(&format!("procmgr: map_elf failed {:?}", err));
+                None
+            }
+        };
+
+        let _ = client.close(file);
+        Ok(entry)
     }
 
     fn handle_kill_message(&mut self, msg: &Message) -> Result<()> {

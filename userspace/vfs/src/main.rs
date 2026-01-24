@@ -10,10 +10,10 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use libcluu::fs::protocol::{VfsOp, VFS_CLOSE, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT};
+use libcluu::elf::{ElfFile, LoadableSegment};
+use libcluu::fs::protocol::{VfsOp, VFS_CLOSE, VFS_MAP_ELF, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT};
 use libcluu::ipc::{self, extract_reply_token, reply_with_payload};
 use libcluu::types::Message;
 use libcluu::*;
@@ -37,11 +37,15 @@ const READ_BUF_BASE: usize = 0x60000000;
 /// Size of the shared grant window in the VFS address space.
 /// 1MB for good throughput - reduces IPC round-trips for large files.
 const GRANT_BUF_SIZE: usize = 1024 * 1024;
+/// Buffer base for the VFS read cache region.
+const CACHE_BUF_BASE: usize = 0x64000000;
+/// Size of the VFS read cache region.
+const CACHE_BUF_SIZE: usize = 32 * 1024 * 1024;
 /// Cap for remote grant reads to avoid large transient allocations.
 const REMOTE_READ_CAP: usize = GRANT_BUF_SIZE;
 /// Maximum size of file to cache (8MB - covers most executables).
 const FILE_CACHE_MAX_SIZE: usize = 8 * 1024 * 1024;
-/// Maximum total cache size (32MB).
+/// Maximum total cache size (8MB).
 const FILE_CACHE_TOTAL_MAX: usize = 32 * 1024 * 1024;
 const VFS_TRACE: bool = false;
 
@@ -91,6 +95,11 @@ fn run_vfs() -> Result<()> {
         "vfs: grant buffer mapped base={:#x} size={}",
         grant_buf_base, GRANT_BUF_SIZE
     ));
+    let cache_buf_base = map_cache_buffer(space_token)?;
+    let _ = debug_print(&format!(
+        "vfs: cache buffer mapped base={:#x} size={}",
+        cache_buf_base, CACHE_BUF_SIZE
+    ));
     let vfs_space_map_token =
         token_derive(space_token, Rights::SPACE_MAP.bits() as usize, u64::MAX)?;
     let mut server = VfsServer::new(
@@ -99,6 +108,8 @@ fn run_vfs() -> Result<()> {
         vfs_space_map_token,
         grant_buf_base,
         GRANT_BUF_SIZE,
+        cache_buf_base,
+        CACHE_BUF_SIZE,
         mounts,
     );
     let registry_endpoint = registry::control_endpoint();
@@ -160,60 +171,107 @@ fn map_initrd_slice(initrd_size: usize) -> &'static [u8] {
 }
 
 /// Simple LRU-ish file cache for ext2 files.
-/// Caches entire file contents by path to avoid repeated disk reads.
+/// Caches entire file contents by (inode, size) to avoid repeated disk reads.
 struct FileCache {
-    /// Map from path to (data, access_order).
-    entries: BTreeMap<String, CacheEntry>,
+    /// Map from (inode, size) to cached entry.
+    entries: BTreeMap<(u32, usize), CacheEntry>,
     /// Total bytes currently cached.
     total_size: usize,
     /// Access counter for LRU ordering.
     access_counter: usize,
+    /// Dedicated cache region backing the entries.
+    region: CacheRegion,
 }
 
+#[derive(Clone, Copy)]
 struct CacheEntry {
-    data: Vec<u8>,
+    base: usize,
+    len: usize,
+    inode: u32,
+    size: usize,
     last_access: usize,
 }
 
+struct CacheRegion {
+    base: usize,
+    size: usize,
+    offset: usize,
+    free: Vec<FreeBlock>,
+}
+
+struct FreeBlock {
+    base: usize,
+    size: usize,
+}
+
 impl FileCache {
-    fn new() -> Self {
+    fn new(base: usize, size: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
             total_size: 0,
             access_counter: 0,
+            region: CacheRegion::new(base, size),
         }
     }
 
-    fn get(&mut self, path: &str) -> Option<Vec<u8>> {
-        if let Some(entry) = self.entries.get_mut(path) {
+    fn get(&mut self, inode: u32, size: usize) -> Option<CacheEntry> {
+        let key = (inode, size);
+        if let Some(entry) = self.entries.get_mut(&key) {
             self.access_counter += 1;
             entry.last_access = self.access_counter;
-            Some(entry.data.clone())
+            Some(*entry)
         } else {
             None
         }
     }
 
-    fn insert(&mut self, path: String, data: Vec<u8>) {
-        let size = data.len();
-        if size > FILE_CACHE_MAX_SIZE {
-            return; // Don't cache files that are too large
+    fn reserve(&mut self, size: usize) -> Option<usize> {
+        if size == 0 || size > FILE_CACHE_MAX_SIZE || size > FILE_CACHE_TOTAL_MAX {
+            return None;
         }
-
-        // Evict old entries if needed
-        while self.total_size + size > FILE_CACHE_TOTAL_MAX && !self.entries.is_empty() {
+        loop {
+            if self.total_size + size > FILE_CACHE_TOTAL_MAX {
+                if self.entries.is_empty() {
+                    return None;
+                }
+                self.evict_lru();
+                continue;
+            }
+            if let Some(base) = self.region.allocate(size) {
+                return Some(base);
+            }
+            if self.entries.is_empty() {
+                return None;
+            }
             self.evict_lru();
         }
+    }
 
+    fn insert(&mut self, inode: u32, size: usize, base: usize, len: usize) {
         self.access_counter += 1;
-        self.total_size += size;
+        self.total_size += len;
         self.entries.insert(
-            path,
+            (inode, size),
             CacheEntry {
-                data,
+                base,
+                len,
+                inode,
+                size,
                 last_access: self.access_counter,
             },
         );
+    }
+
+    fn release_reserved(&mut self, base: usize, len: usize) {
+        self.region.free(base, len);
+    }
+
+    fn remove(&mut self, inode: u32, size: usize) {
+        let key = (inode, size);
+        if let Some(entry) = self.entries.remove(&key) {
+            self.total_size = self.total_size.saturating_sub(entry.len);
+            self.region.free(entry.base, entry.len);
+        }
     }
 
     fn evict_lru(&mut self) {
@@ -222,14 +280,80 @@ impl FileCache {
             .entries
             .iter()
             .min_by_key(|(_, e)| e.last_access)
-            .map(|(k, _)| k.clone());
+            .map(|(k, _)| *k);
 
         if let Some(path) = lru_path {
             if let Some(entry) = self.entries.remove(&path) {
-                self.total_size -= entry.data.len();
+                self.total_size = self.total_size.saturating_sub(entry.len);
+                self.region.free(entry.base, entry.len);
             }
         }
     }
+}
+
+impl CacheRegion {
+    fn new(base: usize, size: usize) -> Self {
+        Self {
+            base,
+            size,
+            offset: 0,
+            free: Vec::new(),
+        }
+    }
+
+    fn allocate(&mut self, size: usize) -> Option<usize> {
+        let size = align_up(size, 16);
+        if let Some(index) = self.free.iter().position(|b| b.size >= size) {
+            let block = self.free.remove(index);
+            let base = block.base;
+            let remaining = block.size - size;
+            if remaining > 0 {
+                self.free.push(FreeBlock {
+                    base: block.base + size,
+                    size: remaining,
+                });
+            }
+            return Some(base);
+        }
+
+        if self.offset + size > self.size {
+            return None;
+        }
+        let base = self.base + self.offset;
+        self.offset += size;
+        Some(base)
+    }
+
+    fn free(&mut self, base: usize, size: usize) {
+        let size = align_up(size, 16);
+        self.free.push(FreeBlock { base, size });
+        self.coalesce();
+    }
+
+    fn coalesce(&mut self) {
+        if self.free.len() < 2 {
+            return;
+        }
+        self.free.sort_by_key(|b| b.base);
+        let mut merged: Vec<FreeBlock> = Vec::with_capacity(self.free.len());
+        for block in self.free.drain(..) {
+            if let Some(last) = merged.last_mut() {
+                if last.base + last.size == block.base {
+                    last.size += block.size;
+                    continue;
+                }
+            }
+            merged.push(block);
+        }
+        self.free = merged;
+    }
+}
+
+fn align_up(value: usize, align: usize) -> usize {
+    if align == 0 {
+        return value;
+    }
+    (value + align - 1) & !(align - 1)
 }
 
 struct VfsServer {
@@ -250,6 +374,8 @@ impl VfsServer {
         vfs_space_map_token: usize,
         grant_buf_base: usize,
         grant_buf_size: usize,
+        cache_buf_base: usize,
+        cache_buf_size: usize,
         mounts: MountTable,
     ) -> Self {
         Self {
@@ -260,7 +386,7 @@ impl VfsServer {
             grant_buf_size,
             mounts,
             files: FdTable::new(),
-            cache: FileCache::new(),
+            cache: FileCache::new(cache_buf_base, cache_buf_size),
         }
     }
 
@@ -276,6 +402,7 @@ impl VfsServer {
             VfsOp::Close => self.handle_close(msg, reply_token),
             VfsOp::ReadGrant => self.handle_read_grant(msg, payload, reply_token),
             VfsOp::Readdir => self.handle_readdir(payload, reply_token),
+            VfsOp::MapElf => self.handle_map_elf(msg, reply_token),
         };
         vfs_trace!("vfs: handled {:?} result={:?}", op, result);
         result
@@ -293,7 +420,9 @@ impl VfsServer {
             }
         };
 
-        vfs_trace!("vfs: open '{}' client={}", path, client_id);
+        // #region agent log
+        let _ = debug_print(&format!("vfs: open '{}' client={}", path, client_id));
+        // #endregion
 
         // Use unified mount table for all paths
         match self.mounts.open(path) {
@@ -303,8 +432,14 @@ impl VfsServer {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = fd;
                 reply_msg.words[2] = size;
+                // #region agent log
+                let _ = debug_print(&format!("vfs: open OK fd={} size={}", fd, size));
+                // #endregion
             }
             Err(err) => {
+                // #region agent log
+                let _ = debug_print(&format!("vfs: open FAILED {:?}", err));
+                // #endregion
                 reply_msg.words[0] = err.to_errno() as usize;
             }
         }
@@ -348,7 +483,7 @@ impl VfsServer {
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         };
 
-        let Some(file) = self.files.get(client_id, fd) else {
+        let Some(file) = self.files.get(client_id, fd).cloned() else {
             reply_msg.words[0] = Error::NotFound.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         };
@@ -365,10 +500,20 @@ impl VfsServer {
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
 
+        // #region agent log
+        let _ = debug_print(&format!(
+            "vfs: read_grant target_base={:#x} target_space={}",
+            target_base, target_space
+        ));
+        // #endregion
+
         match file {
             OpenFile::Memory(entry) => {
+                // #region agent log
+                let _ = debug_print("vfs: read_grant from Memory");
+                // #endregion
                 self.read_grant_memory(
-                    entry,
+                    &entry,
                     offset,
                     requested,
                     target_base,
@@ -377,22 +522,87 @@ impl VfsServer {
                 )?;
             }
             OpenFile::Ext2(entry) => {
-                // Direct chunked reads from disk
-                // Note: Heap-based caching causes page faults due to VFS init timing
-                // (VFS starts with static 64KB heap, dynamic growth creates disjoint regions)
-                // TODO: Implement dedicated mapped cache region instead of heap-based cache
-                self.read_grant_remote_chunked(
-                    entry.endpoint,
-                    entry.inode,
-                    entry.size,
-                    offset,
-                    requested,
-                    target_base,
-                    target_space,
-                    &mut reply_msg,
-                )?;
+                // #region agent log
+                let _ = debug_print(&format!(
+                    "vfs: read_grant from Ext2 inode={} size={}",
+                    entry.inode, entry.size
+                ));
+                // #endregion
+                if let Some(cache_entry) = self.cache.get(entry.inode, entry.size) {
+                    // #region agent log
+                    let _ = debug_print(&format!(
+                        "vfs: cache hit inode={} size={}",
+                        entry.inode, entry.size
+                    ));
+                    // #endregion
+                    self.read_grant_cached_region(
+                        cache_entry.base,
+                        cache_entry.len,
+                        offset,
+                        requested,
+                        target_base,
+                        target_space,
+                        &mut reply_msg,
+                    )?;
+                } else if offset == 0 && requested >= entry.size {
+                    // #region agent log
+                    let _ = debug_print(&format!(
+                        "vfs: cache miss, filling inode={} size={}",
+                        entry.inode, entry.size
+                    ));
+                    // #endregion
+                    if let Some(cache_entry) = self.cache_ext2_file(&entry) {
+                        // #region agent log
+                        let _ = debug_print(&format!(
+                            "vfs: cache fill ok inode={} size={}",
+                            entry.inode, entry.size
+                        ));
+                        // #endregion
+                        self.read_grant_cached_region(
+                            cache_entry.base,
+                            cache_entry.len,
+                            offset,
+                            requested,
+                            target_base,
+                            target_space,
+                            &mut reply_msg,
+                        )?;
+                    } else {
+                        // #region agent log
+                        let _ = debug_print(&format!(
+                            "vfs: cache fill skipped inode={} size={}",
+                            entry.inode, entry.size
+                        ));
+                        // #endregion
+                        self.read_grant_remote_chunked(
+                            entry.endpoint,
+                            entry.inode,
+                            entry.size,
+                            offset,
+                            requested,
+                            target_base,
+                            target_space,
+                            &mut reply_msg,
+                        )?;
+                    }
+                } else {
+                    // Direct chunked reads from disk when cache is unavailable.
+                    self.read_grant_remote_chunked(
+                        entry.endpoint,
+                        entry.inode,
+                        entry.size,
+                        offset,
+                        requested,
+                        target_base,
+                        target_space,
+                        &mut reply_msg,
+                    )?;
+                }
             }
             OpenFile::Virtual(vfile) => {
+                // #region agent log
+                let _ = debug_print("vfs: read_grant from Virtual");
+                // #endregion
                 self.read_grant_virtual(
                     &vfile.data,
                     offset,
@@ -403,6 +613,13 @@ impl VfsServer {
                 )?;
             }
         }
+
+        // #region agent log
+        let _ = debug_print(&format!(
+            "vfs: read_grant done status={} len={}",
+            reply_msg.words[0], reply_msg.words[1]
+        ));
+        // #endregion
 
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
@@ -547,9 +764,54 @@ impl VfsServer {
         self.grant_data_to_caller(slice, target_base, target_space, reply_msg)
     }
 
-    /// Read entire file from remote backend into memory (for caching).
-    fn read_entire_file(&self, endpoint: usize, inode: u32, size: usize) -> Option<Vec<u8>> {
-        let mut data = Vec::with_capacity(size);
+    fn read_grant_cached_region(
+        &self,
+        base: usize,
+        len: usize,
+        offset: usize,
+        requested: usize,
+        target_base: usize,
+        target_space: usize,
+        reply_msg: &mut Message,
+    ) -> Result<()> {
+        let data = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
+        self.read_grant_cached(
+            data,
+            offset,
+            requested,
+            target_base,
+            target_space,
+            reply_msg,
+        )
+    }
+
+    fn cache_ext2_file(&mut self, entry: &fd_table::Ext2Entry) -> Option<CacheEntry> {
+        let base = self.cache.reserve(entry.size)?;
+        if self
+            .read_remote_into_cache(entry.endpoint, entry.inode, entry.size, base)
+            .is_err()
+        {
+            self.cache.release_reserved(base, entry.size);
+            return None;
+        }
+        self.cache.insert(entry.inode, entry.size, base, entry.size);
+        self.cache.get(entry.inode, entry.size)
+    }
+
+    /// Read entire file from remote backend into the cache region.
+    fn read_remote_into_cache(
+        &self,
+        endpoint: usize,
+        inode: u32,
+        size: usize,
+        target_base: usize,
+    ) -> Result<()> {
+        // #region agent log
+        let _ = debug_print(&format!(
+            "vfs: cache read_remote_start inode={} size={}",
+            inode, size
+        ));
+        // #endregion
         let mut offset = 0;
 
         while offset < size {
@@ -567,29 +829,49 @@ impl VfsServer {
             payload[USIZE_BYTES..TWO_USIZE_BYTES]
                 .copy_from_slice(&self.vfs_space_map_token.to_ne_bytes());
 
-            if ipc::call_with_payload(endpoint, &req, &payload, &mut reply).is_err() {
-                return None;
-            }
+            ipc::call_with_payload(endpoint, &req, &payload, &mut reply)?;
 
             let status = reply.words[0] as isize;
             if status < 0 {
-                return None;
+                return Err(Error::InvalidState);
             }
 
-            let bytes_read = reply.words[1];
+            let bytes_read = reply.words[1].min(chunk_size);
+            let page_offset = reply.words[2];
+            if page_offset >= self.grant_buf_size {
+                return Err(Error::InvalidState);
+            }
+            let available = self.grant_buf_size - page_offset;
+            if bytes_read > available {
+                return Err(Error::InvalidState);
+            }
             if bytes_read == 0 {
-                break;
+                return Err(Error::InvalidState);
             }
 
-            // Copy from grant buffer to our Vec
             let src = unsafe {
-                core::slice::from_raw_parts(self.grant_buf_base as *const u8, bytes_read)
+                core::slice::from_raw_parts(
+                    (self.grant_buf_base + page_offset) as *const u8,
+                    bytes_read,
+                )
             };
-            data.extend_from_slice(src);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr(),
+                    (target_base + offset) as *mut u8,
+                    bytes_read,
+                );
+            }
             offset += bytes_read;
         }
 
-        Some(data)
+        // #region agent log
+        let _ = debug_print(&format!(
+            "vfs: cache read_remote_done inode={} size={}",
+            inode, size
+        ));
+        // #endregion
+        Ok(())
     }
 
     /// Chunked read from remote - used when file is too large to cache.
@@ -606,6 +888,12 @@ impl VfsServer {
     ) -> Result<()> {
         let available = file_size.saturating_sub(offset);
         let len = requested.min(available).min(REMOTE_READ_CAP);
+        // #region agent log
+        let _ = debug_print(&format!(
+            "vfs: remote_chunked len={} offset={} target={:#x}",
+            len, offset, target_base
+        ));
+        // #endregion
         if len == 0 {
             reply_msg.words[0] = 0;
             reply_msg.words[1] = 0;
@@ -620,10 +908,19 @@ impl VfsServer {
         payload[USIZE_BYTES..TWO_USIZE_BYTES]
             .copy_from_slice(&self.vfs_space_map_token.to_ne_bytes());
 
+        // #region agent log
+        let _ = debug_print("vfs: calling blkdev read_grant");
+        // #endregion
         let result = ipc::call_with_payload(endpoint, &req, &payload, &mut reply);
         match result {
             Ok(()) => {
                 let status = reply.words[0] as isize;
+                // #region agent log
+                let _ = debug_print(&format!(
+                    "vfs: blkdev replied status={} bytes={}",
+                    status, reply.words[1]
+                ));
+                // #endregion
                 if status < 0 {
                     reply_msg.words[0] = status as usize;
                     reply_msg.words[1] = 0;
@@ -642,6 +939,9 @@ impl VfsServer {
                 )
             }
             Err(err) => {
+                // #region agent log
+                let _ = debug_print(&format!("vfs: blkdev call FAILED {:?}", err));
+                // #endregion
                 reply_msg.words[0] = err.to_errno() as usize;
                 reply_msg.words[1] = 0;
                 reply_msg.words[2] = 0;
@@ -658,6 +958,12 @@ impl VfsServer {
         target_space: usize,
         reply_msg: &mut Message,
     ) -> Result<()> {
+        // #region agent log
+        let _ = debug_print(&format!(
+            "vfs: grant_buffer len={} page_off={} target={:#x} space={}",
+            len, page_offset, target_base, target_space
+        ));
+        // #endregion
         if len == 0 {
             reply_msg.words[0] = 0;
             reply_msg.words[1] = 0;
@@ -668,16 +974,31 @@ impl VfsServer {
         let total = page_offset + len;
         let pages = total.div_ceil(PAGE_SIZE);
         if pages * PAGE_SIZE > self.grant_buf_size {
+            // #region agent log
+            let _ = debug_print("vfs: buffer too small!");
+            // #endregion
             reply_msg.words[0] = Error::BufferTooSmall.to_errno() as usize;
             reply_msg.words[1] = 0;
             reply_msg.words[2] = 0;
             return Ok(());
         }
 
+        // #region agent log
+        let _ = debug_print(&format!(
+            "vfs: granting {} pages from {:#x} to {:#x}",
+            pages, self.grant_buf_base, target_base
+        ));
+        // #endregion
         for page_idx in 0..pages {
             let src = self.grant_buf_base + page_idx * PAGE_SIZE;
             let dst = target_base + page_idx * PAGE_SIZE;
             if let Err(err) = space_grant(self.space_token, target_space, src, dst, 0) {
+                // #region agent log
+                let _ = debug_print(&format!(
+                    "vfs: space_grant FAILED page {} src={:#x} dst={:#x} err={:?}",
+                    page_idx, src, dst, err
+                ));
+                // #endregion
                 reply_msg.words[0] = err.to_errno() as usize;
                 reply_msg.words[1] = 0;
                 reply_msg.words[2] = 0;
@@ -685,6 +1006,9 @@ impl VfsServer {
             }
         }
 
+        // #region agent log
+        let _ = debug_print("vfs: grant_buffer OK");
+        // #endregion
         reply_msg.words[0] = 0;
         reply_msg.words[1] = len;
         reply_msg.words[2] = page_offset;
@@ -816,6 +1140,119 @@ impl VfsServer {
             }
         }
     }
+
+    fn handle_map_elf(&mut self, msg: &Message, reply_token: usize) -> Result<()> {
+        let client_id = msg.words[1];
+        let fd = msg.words[2];
+        let target_space = msg.words[3];
+        let mut reply_msg = Message::new(VFS_MAP_ELF, [0; 6], 3);
+
+        let Some(file) = self.files.get(client_id, fd).cloned() else {
+            reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        };
+
+        match file {
+            OpenFile::Ext2(entry) => {
+                let cache_entry = if let Some(entry) = self.cache.get(entry.inode, entry.size) {
+                    Some(entry)
+                } else if entry.size <= FILE_CACHE_MAX_SIZE {
+                    self.cache_ext2_file(&entry)
+                } else {
+                    None
+                };
+
+                let Some(cache_entry) = cache_entry else {
+                    reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                };
+
+                let data = unsafe {
+                    core::slice::from_raw_parts(cache_entry.base as *const u8, cache_entry.len)
+                };
+                let elf = match ElfFile::parse(data) {
+                    Ok(elf) => elf,
+                    Err(_) => {
+                        reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                };
+
+                self.map_elf_segments(target_space, &elf, data)?;
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = elf.entry_point as usize;
+                reply_msg.words[2] = cache_entry.len;
+            }
+            OpenFile::Memory(entry) => {
+                let data = unsafe {
+                    core::slice::from_raw_parts(
+                        (entry.base + entry.offset) as *const u8,
+                        entry.size,
+                    )
+                };
+                let elf = match ElfFile::parse(data) {
+                    Ok(elf) => elf,
+                    Err(_) => {
+                        reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                };
+                self.map_elf_segments(target_space, &elf, data)?;
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = elf.entry_point as usize;
+                reply_msg.words[2] = entry.size;
+            }
+            OpenFile::Virtual(_) => {
+                reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
+            }
+        }
+
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn map_elf_segments(&self, target_space: usize, elf: &ElfFile, data: &[u8]) -> Result<()> {
+        for segment in elf.segments_iter() {
+            self.map_elf_segment(target_space, segment, data)?;
+        }
+        Ok(())
+    }
+
+    fn map_elf_segment(
+        &self,
+        target_space: usize,
+        segment: &LoadableSegment,
+        data: &[u8],
+    ) -> Result<()> {
+        let start = segment.vaddr as usize;
+        if !start.is_multiple_of(PAGE_SIZE) {
+            return Err(Error::InvalidArgument);
+        }
+
+        let mem_size = segment.mem_size as usize;
+        if mem_size == 0 {
+            return Ok(());
+        }
+
+        let file_offset = segment.file_offset as usize;
+        let file_size = segment.file_size as usize;
+        if file_offset + file_size > data.len() {
+            return Err(Error::InvalidArgument);
+        }
+
+        let num_pages = mem_size.div_ceil(PAGE_SIZE);
+        let data_ptr = data.as_ptr() as usize + file_offset;
+
+        syscall::space_map_range(
+            target_space,
+            start,
+            data_ptr,
+            segment.page_flags() as usize,
+            num_pages,
+            file_size,
+        )?;
+
+        Ok(())
+    }
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
@@ -861,6 +1298,28 @@ fn map_grant_buffer(space_token: usize) -> Result<usize> {
         }
         Err(err) => {
             let _ = debug_print(&format!("vfs: grant buffer map failed {:?}", err));
+            Err(err)
+        }
+    }
+}
+
+fn map_cache_buffer(space_token: usize) -> Result<usize> {
+    let pages = (CACHE_BUF_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+    if pages == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    match syscall::space_map_range(space_token, CACHE_BUF_BASE, 0, 0x03, pages, 0) {
+        Ok(_) => {
+            let _ = debug_print("vfs: cache buffer space_map_range ok");
+            Ok(CACHE_BUF_BASE)
+        }
+        Err(Error::AlreadyExists) => {
+            let _ = debug_print("vfs: cache buffer already mapped");
+            Ok(CACHE_BUF_BASE)
+        }
+        Err(err) => {
+            let _ = debug_print(&format!("vfs: cache buffer map failed {:?}", err));
             Err(err)
         }
     }

@@ -115,7 +115,11 @@ fn main() -> Result<()> {
         Commands::BuildCrt0 => {
             build_crt0()?;
         }
-        Commands::BuildC { name, source, profile } => {
+        Commands::BuildC {
+            name,
+            source,
+            profile,
+        } => {
             build_c_program(&name, &source, &profile)?;
         }
         Commands::Sysroot => {
@@ -522,7 +526,7 @@ fn run_qemu(debug: bool) -> Result<()> {
         "-bios",
         ovmf,
         "-m",
-        "256M",
+        "512M",
         // KVM acceleration (hardware virtualization)
         "-accel",
         "kvm",
@@ -748,11 +752,7 @@ fn build_crt0() -> Result<()> {
             // Fall back to GNU assembler
             println!("  clang not found, trying x86_64-linux-gnu-as...");
             let status = Command::new("x86_64-linux-gnu-as")
-                .args([
-                    "-o",
-                    crt0_dst.to_str().unwrap(),
-                    crt0_src.to_str().unwrap(),
-                ])
+                .args(["-o", crt0_dst.to_str().unwrap(), crt0_src.to_str().unwrap()])
                 .status()
                 .context("Failed to run assembler")?;
             status.success()
@@ -785,9 +785,7 @@ fn build_c_programs(profile: &str) -> Result<()> {
     }
 
     // List of C programs to build: (name, source_path)
-    let c_programs: &[(&str, &str)] = &[
-        ("hello", "userspace/c_hello/hello.c"),
-    ];
+    let c_programs: &[(&str, &str)] = &[("hello", "userspace/c_hello/hello.c")];
 
     for (name, source) in c_programs {
         let source_path = project_root().join(source);
@@ -836,7 +834,7 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
 
     // Compile - try clang first, fall back to GCC
     println!("  Compiling {}...", source.display());
-    
+
     let compile_success = {
         // Try clang first
         let mut compile_cmd = Command::new("clang");
@@ -891,7 +889,7 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
 
     // Link - try ld.lld first, fall back to ld
     println!("  Linking {}...", name);
-    
+
     let link_success = {
         let mut link_cmd = Command::new("ld.lld");
         link_cmd.args([

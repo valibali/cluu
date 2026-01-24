@@ -22,6 +22,11 @@
 //! - words[5] = target_space_token
 //! - payload: target_base (usize)
 //! - reply: words[1] = len, words[2] = page_offset
+//!
+//! MAP_ELF:
+//! - words[2] = fd
+//! - words[3] = target_space_token
+//! - reply: words[1] = entry_point, words[2] = file_size
 
 /// Open a path and return a file descriptor + size.
 pub const VFS_OPEN: u32 = 0x200;
@@ -31,6 +36,8 @@ pub const VFS_CLOSE: u32 = 0x201;
 pub const VFS_READ_GRANT: u32 = 0x202;
 /// Read directory entries.
 pub const VFS_READDIR: u32 = 0x203;
+/// Map ELF segments into a target address space.
+pub const VFS_MAP_ELF: u32 = 0x204;
 
 /// Structured enum for protocol routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +46,7 @@ pub enum VfsOp {
     Close,
     ReadGrant,
     Readdir,
+    MapElf,
 }
 
 impl VfsOp {
@@ -48,6 +56,7 @@ impl VfsOp {
             VFS_CLOSE => Some(Self::Close),
             VFS_READ_GRANT => Some(Self::ReadGrant),
             VFS_READDIR => Some(Self::Readdir),
+            VFS_MAP_ELF => Some(Self::MapElf),
             _ => None,
         }
     }

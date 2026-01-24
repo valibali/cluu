@@ -6,7 +6,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::error::{Error, Result};
-use crate::fs::protocol::{VFS_CLOSE, VFS_OPEN, VFS_READ_GRANT, VFS_READDIR};
+use crate::fs::protocol::{VFS_CLOSE, VFS_MAP_ELF, VFS_OPEN, VFS_READ_GRANT, VFS_READDIR};
 use crate::ipc;
 use crate::types::Message;
 
@@ -110,6 +110,19 @@ impl VfsClient {
             offset: reply.words[2],
             len: reply.words[1],
         })
+    }
+
+    /// Map ELF segments into a target address space and return entry point.
+    pub fn map_elf(&self, file: VfsFile, target_space_token: usize) -> Result<usize> {
+        let msg = make_payload_message(
+            VFS_MAP_ELF,
+            0,
+            &[self.client_id, file.fd, target_space_token],
+        );
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, &[], &mut reply)?;
+        parse_status(reply.words[0])?;
+        Ok(reply.words[1])
     }
 
     /// Read directory entries for a path.
