@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use spin::Mutex;
 
-use crate::boot::{process_info, TOKEN_PROC_CAP, TOKEN_REGISTRY};
+use crate::boot::{process_info, TOKEN_IPC, TOKEN_REGISTRY};
 use crate::rights::Rights;
 use crate::syscall::{endpoint_create, ipc_recv_any, ipc_recv_nonblocking, token_derive};
 use crate::types::Message;
@@ -54,13 +54,13 @@ lazy_static::lazy_static! {
 pub fn init(service_name: &str) -> Result<()> {
     let info = process_info();
     let registry_endpoint = info.tokens[TOKEN_REGISTRY];
-    let proc_cap = info.tokens[TOKEN_PROC_CAP];
-    if registry_endpoint == 0 || proc_cap == 0 {
+    let ipc_cap = info.tokens[TOKEN_IPC];
+    if registry_endpoint == 0 || ipc_cap == 0 {
         return Err(Error::InvalidArgument);
     }
 
     // The control endpoint is where subscribe replies and grants arrive.
-    let control_endpoint = endpoint_create(proc_cap)?;
+    let control_endpoint = endpoint_create(ipc_cap)?;
     let mut state = REGISTRY_STATE.lock();
     state.service_name = Some(service_name.to_string());
     state.registry_endpoint = registry_endpoint;

@@ -6,8 +6,22 @@ extern crate alloc;
 use alloc::{collections::BTreeMap, format, string::ToString, vec::Vec};
 use core::mem::size_of;
 use libcluu::boot::{
-    process_info, ProcessInfo, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_CLOCK, TOKEN_PROC_CAP,
-    TOKEN_REGISTRY, TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
+    process_info,
+    ProcessInfo,
+    PARAM_INITRD_SIZE,
+    PROCESS_INFO_ADDR,
+    // New token slot constants
+    TOKEN_CLOCK,
+    TOKEN_EXTRA_0,
+    TOKEN_EXTRA_1,
+    TOKEN_IPC,
+    TOKEN_REGISTRY,
+    TOKEN_SELF,
+    TOKEN_SPACE,
+    TOKEN_STDERR,
+    TOKEN_STDIN,
+    TOKEN_STDLOG,
+    TOKEN_STDOUT,
 };
 use libcluu::elf::ElfFile;
 use libcluu::fs::client::VfsClient;
@@ -16,10 +30,6 @@ use libcluu::registry;
 use libcluu::syscall::thread_destroy;
 use libcluu::tar::find_member;
 use libcluu::*;
-
-// Service-specific token indices used by init for procmgr
-const SVC_TOKEN_LISTEN: usize = 7;
-const SVC_TOKEN_CAP: usize = 8;
 
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
 const SERVICE_STACK_BASE: usize = 0x6d000000;
@@ -74,12 +84,14 @@ impl ProcessManager {
     fn new() -> Result<Self> {
         let info = process_info();
         Ok(Self {
-            token: info.tokens[SVC_TOKEN_CAP],
-            exit_endpoint: info.tokens[SVC_TOKEN_LISTEN],
+            // TOKEN_EXTRA_0: exit notification endpoint from init
+            exit_endpoint: info.tokens[TOKEN_EXTRA_0],
+            // TOKEN_EXTRA_1: elevated capability token for process management
+            token: info.tokens[TOKEN_EXTRA_1],
             spawn_endpoint: 0,
             registry_send: info.tokens[TOKEN_REGISTRY],
             initrd_size: info.params[PARAM_INITRD_SIZE] as usize,
-            _proc_cap: info.tokens[TOKEN_PROC_CAP],
+            _proc_cap: info.tokens[TOKEN_IPC], // Now using TOKEN_IPC
             exit_cookie_next: 1,
             pid_next: 2, // PID 1 is typically init
             exit_table: BTreeMap::new(),
@@ -363,6 +375,17 @@ impl ProcessManager {
             )
         };
         let proc_cap = derive_proc_cap(self.token)?;
+        // Derive space token with SPACE_MAP rights for the child
+        let child_space_token = match derive_space_token(space_token) {
+            Ok(t) => {
+                let _ = debug_print(&format!("procmgr: derived child_space_token={}", t));
+                t
+            }
+            Err(e) => {
+                let _ = debug_print(&format!("procmgr: derive_space_token FAILED {:?}", e));
+                return Err(e);
+            }
+        };
         map_process_info_page(
             space_token,
             child_endpoint,
@@ -374,7 +397,7 @@ impl ProcessManager {
             stdlog_endpoint,
             self.registry_send,
             proc_cap,
-            space_token,
+            child_space_token, // Now properly derived!
             self.clock_token,
         )?;
 
@@ -715,7 +738,10 @@ impl ProcessManager {
 }
 
 fn parse_cstr(payload: &[u8]) -> Option<&str> {
-    let end = payload.iter().position(|b| *b == 0).unwrap_or(payload.len());
+    let end = payload
+        .iter()
+        .position(|b| *b == 0)
+        .unwrap_or(payload.len());
     if end == 0 {
         return None;
     }
@@ -741,14 +767,19 @@ fn map_process_info_page(
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
 
     let mut tokens = [0usize; 16];
+    // Slots 0-3: Standard I/O
     tokens[TOKEN_STDIN] = stdin_token;
     tokens[TOKEN_STDOUT] = stdout_token;
     tokens[TOKEN_STDERR] = stderr_token;
     tokens[TOKEN_STDLOG] = stdlog_token;
-    tokens[TOKEN_REGISTRY] = registry_token;
-    tokens[TOKEN_PROC_CAP] = proc_cap_token;
+    // Slots 4-7: Core capabilities
+    tokens[TOKEN_SELF] = proc_cap_token; // For now, same as IPC cap; TODO: separate self cap
     tokens[TOKEN_SPACE] = space_grant_token;
+    tokens[TOKEN_IPC] = proc_cap_token;
     tokens[TOKEN_CLOCK] = clock_token;
+    // Slot 8: System service
+    tokens[TOKEN_REGISTRY] = registry_token;
+    // Slots 9-15: Contextual (empty for regular programs)
 
     let info = ProcessInfo {
         exit_token,
@@ -786,6 +817,13 @@ fn derive_proc_cap(token: usize) -> Result<usize> {
     let rights =
         Rights::CREATE | Rights::IPC_SEND | Rights::IPC_RECV | Rights::IPC_CALL | Rights::GRANT;
     token_derive(token, rights.bits() as usize, u64::MAX)
+}
+
+/// Derive a space token with SPACE_MAP rights for child processes.
+/// This allows the child's allocator to map heap pages.
+fn derive_space_token(space_token: usize) -> Result<usize> {
+    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT;
+    token_derive(space_token, rights.bits() as usize, u64::MAX)
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {

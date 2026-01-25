@@ -16,7 +16,7 @@ use libcluu::ipc::{call_with_payload, recv, send_with_payload, send_with_retry, 
 use libcluu::registry;
 use libcluu::syscall;
 use libcluu::types::Message;
-use libcluu::{debug_print, process_info, Error, Result, IpcFlags, TOKEN_PROC_CAP};
+use libcluu::{debug_print, process_info, Error, Result, IpcFlags, TOKEN_IPC};
 
 use cluu_lang::ast::{Assign, CmdElem, DqPart, Program, Stmt, Word, WordPart};
 
@@ -557,7 +557,7 @@ impl BuiltinCommand for SpawnBuiltin {
         let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
         let initrd_path = normalize_spawn_path(path);
         let payload = initrd_path.as_bytes();
-        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_PROC_CAP])?;
+        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
         let mut msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
         msg.words[0] = payload.len();
         msg.words[1] = priority;

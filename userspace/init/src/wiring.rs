@@ -8,6 +8,8 @@ use alloc::format;
 use libcluu::boot::{
     CONSOLE_FB_BASE, PARAM_CONSOLE_INSTANCE, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH,
     PARAM_FB_SIZE, PARAM_FB_WIDTH, PARAM_INITRD_SIZE, PARAM_TTY_INSTANCE,
+    // New token slot constants
+    TOKEN_CLOCK, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_IPC, TOKEN_REGISTRY, TOKEN_SELF, TOKEN_SPACE,
 };
 use libcluu::elf::ElfFile;
 use libcluu::tar::find_member;
@@ -23,11 +25,6 @@ const PROC_STACK_BASE: usize = 0x6f000000;
 const PROC_STACK_TOP: usize = PROC_STACK_BASE + PROC_STACK_SIZE;
 const STACK_FLAGS: usize = 0x03; // read + write
 const STACK_STEP: usize = PROC_STACK_SIZE + 0x1000;
-
-// ===== Service token layout =====
-const SVC_TOKEN_LISTEN: usize = 7; // recv endpoint for service requests
-const SVC_TOKEN_CAP: usize = 8; // capability token (procmgr)
-const SVC_TOKEN_IRQ: usize = 9; // irq token (kbd)
 
 /// Wiring policy interface. Each service kind implements its own behavior.
 ///
@@ -67,16 +64,28 @@ impl ServiceWiring for ServiceKind {
         tokens: &mut [usize; 16],
         params: &mut [u64; 8],
     ) -> Result<()> {
+        // New token layout:
+        // - Slots 0-8: Universal (set in launch_service)
+        // - Slots 9-15 (TOKEN_EXTRA_*): Contextual, set here per service kind
+        //
+        // In the new model, services create their own listen endpoints using TOKEN_IPC.
+        // We only pass device-specific capabilities (IRQ, PCI) in TOKEN_EXTRA_* slots.
+        // TODO: Phase 3 will update services to create own endpoints; for now we still
+        // pass pre-created endpoints in TOKEN_EXTRA_0 for backward compatibility.
+
         match self {
             ServiceKind::Registry => {
                 // Registry owns the shared listen endpoint so everyone can contact it.
-                tokens[SVC_TOKEN_LISTEN] = ctx.registry_endpoint;
+                // This is a special case - registry endpoint is set by init.
+                tokens[TOKEN_EXTRA_0] = ctx.registry_endpoint;
             }
             ServiceKind::Timeserver => {
-                tokens[SVC_TOKEN_LISTEN] = create_listen_endpoint(ctx.boot.root_token)?;
+                // Timeserver will create its own endpoint in Phase 3
+                tokens[TOKEN_EXTRA_0] = create_listen_endpoint(ctx.boot.root_token)?;
             }
             ServiceKind::Console => {
-                tokens[SVC_TOKEN_LISTEN] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                // Console will create its own endpoint in Phase 3
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
                 params[PARAM_FB_BASE] = CONSOLE_FB_BASE as u64;
                 params[PARAM_FB_SIZE] = ctx.boot.fb_size;
                 params[PARAM_FB_WIDTH] = ctx.boot.fb_width as u64;
@@ -85,25 +94,33 @@ impl ServiceWiring for ServiceKind {
                 params[PARAM_CONSOLE_INSTANCE] = instance_id.unwrap_or(0);
             }
             ServiceKind::Kbd => {
-                tokens[SVC_TOKEN_LISTEN] = create_listen_endpoint(ctx.boot.root_token)?;
-                tokens[SVC_TOKEN_IRQ] = ctx.kbd_irq_token;
+                // Kbd will create its own endpoint in Phase 3
+                tokens[TOKEN_EXTRA_0] = create_listen_endpoint(ctx.boot.root_token)?;
+                // IRQ token for keyboard interrupt handling
+                tokens[TOKEN_EXTRA_1] = ctx.kbd_irq_token;
             }
             ServiceKind::Tty => {
-                tokens[SVC_TOKEN_LISTEN] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                // Tty will create its own endpoint in Phase 3
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
                 params[PARAM_TTY_INSTANCE] = instance_id.unwrap_or(0);
             }
             ServiceKind::Procmgr => {
-                tokens[SVC_TOKEN_LISTEN] = ctx.exit_endpoint;
-                tokens[SVC_TOKEN_CAP] = child_token;
+                // Procmgr exit notification endpoint
+                tokens[TOKEN_EXTRA_0] = ctx.exit_endpoint;
+                // Elevated capability token for process management
+                tokens[TOKEN_EXTRA_1] = child_token;
                 params[PARAM_INITRD_SIZE] = ctx.boot.initrd_size as u64;
             }
             ServiceKind::Vfs => {
-                tokens[SVC_TOKEN_LISTEN] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                // VFS will create its own endpoint in Phase 3
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
                 params[PARAM_INITRD_SIZE] = ctx.boot.initrd_size as u64;
             }
             ServiceKind::VirtioBlk => {
-                tokens[SVC_TOKEN_LISTEN] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
-                tokens[SVC_TOKEN_CAP] = child_token; // Pass PCI-capable token
+                // VirtioBlk will create its own endpoint in Phase 3
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                // PCI-capable token for device access
+                tokens[TOKEN_EXTRA_1] = child_token;
             }
         }
         Ok(())
@@ -161,11 +178,18 @@ pub fn launch_service(ctx: &InitContext<'_>, service: &ServiceSpec, index: usize
     let mut tokens = [0usize; 16];
     let mut params = [0u64; 8];
 
-    tokens[TOKEN_REGISTRY] = ctx.registry_send;
-    tokens[TOKEN_PROC_CAP] = derive_proc_cap(ctx.boot.root_token)?;
-    tokens[TOKEN_SPACE] = 0;
-    tokens[TOKEN_CLOCK] = ctx.boot.clock_token;
+    // Universal token slots (0-8) - every process gets these
+    // Slots 0-3: Standard I/O (filled by fill_default_endpoints)
     fill_default_endpoints(ctx.boot.root_token, &mut tokens)?;
+
+    // Slots 4-7: Core capabilities
+    tokens[TOKEN_SELF] = derive_self_cap(ctx.boot.root_token)?;
+    tokens[TOKEN_SPACE] = 0; // Set later by derive_space_token_for_policy
+    tokens[TOKEN_IPC] = derive_ipc_cap(ctx.boot.root_token)?;
+    tokens[TOKEN_CLOCK] = ctx.boot.clock_token;
+
+    // Slot 8: System service
+    tokens[TOKEN_REGISTRY] = ctx.registry_send;
 
     service.kind.configure_tokens(
         ctx,
@@ -225,10 +249,23 @@ fn fill_default_endpoints(token: usize, tokens: &mut [usize; 16]) -> Result<()> 
     Ok(())
 }
 
-/// Derive a minimal process capability token for child services.
+/// Derive a self/thread capability token for child services.
 ///
-/// This limits privileges while still allowing IPC and endpoint creation.
-fn derive_proc_cap(token: usize) -> Result<usize> {
+/// TOKEN_SELF provides authority for thread operations within the process.
+/// For now, this provides basic thread control; elevated rights (THREAD_SUSPEND,
+/// DESTROY) are given to procmgr via its elevated token in TOKEN_EXTRA_1.
+fn derive_self_cap(token: usize) -> Result<usize> {
+    // Basic thread control for all processes
+    // TODO: Add THREAD_CONTROL right once kernel supports it for self-operations
+    let rights = Rights::CREATE | Rights::GRANT;
+    token_derive(token, rights.bits() as usize, u64::MAX)
+}
+
+/// Derive an IPC capability token for child services.
+///
+/// TOKEN_IPC provides authority for IPC operations: creating endpoints,
+/// sending/receiving messages, and granting capabilities to others.
+fn derive_ipc_cap(token: usize) -> Result<usize> {
     let rights =
         Rights::CREATE | Rights::IPC_SEND | Rights::IPC_RECV | Rights::IPC_CALL | Rights::GRANT;
     token_derive(token, rights.bits() as usize, u64::MAX)

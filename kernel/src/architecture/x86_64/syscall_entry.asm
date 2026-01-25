@@ -162,6 +162,13 @@ syscall_entry:
     ; Restore user stack
     mov rsp, [gs:PERCPU_USER_RSP]
 
+    ; Initialize userspace segment registers (DS, ES, FS)
+    ; SYSRET sets CS/SS automatically, but DS/ES/FS need manual init
+    mov r10w, 0x2b
+    mov ds, r10w
+    mov es, r10w
+    mov fs, r10w
+
     ; Return to userspace via fast SYSRET
     swapgs
     o64 sysret
@@ -176,6 +183,13 @@ syscall_entry:
     push r11                            ; User RFLAGS
     push 0x33                           ; User CS (0x30 | RPL 3)
     push rcx                            ; User RIP (possibly non-canonical)
+
+    ; Initialize userspace segment registers (DS, ES, FS)
+    mov r10w, 0x2b
+    mov ds, r10w
+    mov es, r10w
+    mov fs, r10w
+
     swapgs
     iretq                               ; IRETQ safely handles non-canonical RIP
 
@@ -306,6 +320,12 @@ syscall_entry:
     push rcx                            ; RFLAGS
     push rdx                            ; CS
     push rsi                            ; RIP
+
+    ; ALWAYS set userspace segment registers (DS, ES, FS)
+    mov ax, 0x2b
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
 
     ; Restore all general-purpose registers
     mov rax, [r10 + CONTEXT_RAX]

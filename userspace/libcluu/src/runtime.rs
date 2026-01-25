@@ -59,7 +59,7 @@ use stack_string::StackString;
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
-    extern "Rust" {
+    extern "C" {
         fn main() -> i32;
     }
 
@@ -74,9 +74,9 @@ pub extern "C" fn _start() -> ! {
     // Block forever waiting for procmgr to destroy us
     // Create a temporary endpoint to block on (prevents CPU consumption)
     let info = crate::boot::process_info();
-    let proc_cap = info.tokens[crate::boot::TOKEN_PROC_CAP];
-    if proc_cap != 0 {
-        if let Ok(ep) = crate::syscall::endpoint_create(proc_cap) {
+    let ipc_cap = info.tokens[crate::boot::TOKEN_IPC];
+    if ipc_cap != 0 {
+        if let Ok(ep) = crate::syscall::endpoint_create(ipc_cap) {
             let mut buf = [0u8; 64];
             let _ = crate::syscall::ipc_recv(ep, &mut buf);
         }
@@ -99,14 +99,14 @@ fn panic(info: &PanicInfo) -> ! {
     let mut line = StackString::<512>::new();
     let _ = write!(
         &mut line,
-        "userspace: panic cookie={} stdin={} stdout={} stderr={} stdlog={} reg={} proc_cap={} space={} heap_used={}/{} peak={} free={}",
+        "userspace: panic cookie={} stdin={} stdout={} stderr={} stdlog={} reg={} ipc={} space={} heap_used={}/{} peak={} free={}",
         proc_info.exit_cookie,
         proc_info.tokens[crate::boot::TOKEN_STDIN],
         proc_info.tokens[crate::boot::TOKEN_STDOUT],
         proc_info.tokens[crate::boot::TOKEN_STDERR],
         proc_info.tokens[crate::boot::TOKEN_STDLOG],
         proc_info.tokens[crate::boot::TOKEN_REGISTRY],
-        proc_info.tokens[crate::boot::TOKEN_PROC_CAP],
+        proc_info.tokens[crate::boot::TOKEN_IPC],
         proc_info.tokens[crate::boot::TOKEN_SPACE],
         heap_stats.used,
         heap_stats.total,
@@ -127,9 +127,9 @@ fn panic(info: &PanicInfo) -> ! {
     let _ = notify_exit(-1);
 
     // Block forever waiting for procmgr to destroy us
-    let proc_cap = proc_info.tokens[crate::boot::TOKEN_PROC_CAP];
-    if proc_cap != 0 {
-        if let Ok(ep) = crate::syscall::endpoint_create(proc_cap) {
+    let ipc_cap = proc_info.tokens[crate::boot::TOKEN_IPC];
+    if ipc_cap != 0 {
+        if let Ok(ep) = crate::syscall::endpoint_create(ipc_cap) {
             let mut buf = [0u8; 64];
             let _ = crate::syscall::ipc_recv(ep, &mut buf);
         }

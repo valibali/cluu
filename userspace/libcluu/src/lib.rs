@@ -48,10 +48,26 @@ pub mod posix;
 
 // Re-exports
 pub use boot::{
-    boot_info, process_info, root_token_handle, BootInfo, ProcessInfo, CONSOLE_FB_BASE,
-    INITRD_USER_BASE, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE,
-    PARAM_FB_WIDTH, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_PROC_CAP, TOKEN_REGISTRY,
-    TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
+    // Structs and functions
+    boot_info, process_info, root_token_handle, BootInfo, ProcessInfo,
+    // Convenience accessors
+    pid, space_token, stderr, stdin, stdout, token, token_clock, token_extra, token_ipc,
+    token_registry, token_self,
+    // Address constants
+    CONSOLE_FB_BASE, INITRD_USER_BASE, PROCESS_INFO_ADDR,
+    // Param indices
+    PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
+    PARAM_INITRD_SIZE,
+    // Token slot constants - Universal (0-8)
+    TOKEN_STDIN, TOKEN_STDOUT, TOKEN_STDERR, TOKEN_STDLOG, // I/O (0-3)
+    TOKEN_SELF, TOKEN_SPACE, TOKEN_IPC, TOKEN_CLOCK,       // Core caps (4-7)
+    TOKEN_REGISTRY,                                         // System (8)
+    // Token slot constants - Contextual (9-15)
+    TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_EXTRA_3, TOKEN_EXTRA_4, TOKEN_EXTRA_5,
+    TOKEN_EXTRA_6,
+    // Slot ranges
+    TOKEN_CAPS_END, TOKEN_CAPS_START, TOKEN_EXTRA_END, TOKEN_EXTRA_START, TOKEN_STDIO_END,
+    TOKEN_STDIO_START,
 };
 pub use elf::{ElfFile, LoadableSegment};
 pub use error::{Error, Result};

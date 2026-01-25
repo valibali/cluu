@@ -43,9 +43,9 @@ pub extern "C" fn _exit(status: c_int) -> ! {
 
     // Block forever waiting for procmgr to clean us up
     let info = crate::boot::process_info();
-    let proc_cap = info.tokens[crate::boot::TOKEN_PROC_CAP];
-    if proc_cap != 0 {
-        if let Ok(ep) = crate::syscall::endpoint_create(proc_cap) {
+    let ipc_cap = info.tokens[crate::boot::TOKEN_IPC];
+    if ipc_cap != 0 {
+        if let Ok(ep) = crate::syscall::endpoint_create(ipc_cap) {
             let mut buf = [0u8; 64];
             let _ = crate::syscall::ipc_recv(ep, &mut buf);
         }
@@ -298,11 +298,11 @@ pub extern "C" fn posix_spawn(
     let notify_endpoint = {
         let mut state = WAIT_STATE.lock();
         if state.notify_endpoint == 0 {
-            let proc_cap = crate::boot::process_info().tokens[crate::boot::TOKEN_PROC_CAP];
-            if proc_cap == 0 {
+            let ipc_cap = crate::boot::process_info().tokens[crate::boot::TOKEN_IPC];
+            if ipc_cap == 0 {
                 return ENOSYS;
             }
-            match crate::syscall::endpoint_create(proc_cap) {
+            match crate::syscall::endpoint_create(ipc_cap) {
                 Ok(ep) => state.notify_endpoint = ep,
                 Err(err) => return crate::errno::from_cluu_error(err),
             }

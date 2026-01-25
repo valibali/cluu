@@ -28,7 +28,7 @@ mod procfs;
 use fd_table::{FdTable, OpenFile};
 use mount::MountTable;
 
-const SVC_TOKEN_LISTEN: usize = 7;
+use libcluu::boot::TOKEN_EXTRA_0;
 const IPC_MESSAGE_MAX: usize = 256;
 /// Remote filesystem IPC label for zero-copy reads into the VFS grant buffer.
 const FS_READ_GRANT: u32 = 0x306;
@@ -79,7 +79,7 @@ fn run_vfs() -> Result<()> {
     debug_print("vfs: starting...")?;
 
     let info = process_info();
-    let endpoint = info.tokens[SVC_TOKEN_LISTEN];
+    let endpoint = info.tokens[TOKEN_EXTRA_0];
     let space_token = info.tokens[TOKEN_SPACE];
     let initrd_size = info.params[PARAM_INITRD_SIZE] as usize;
     let initrd = map_initrd_slice(initrd_size);

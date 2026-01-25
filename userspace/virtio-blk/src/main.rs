@@ -16,10 +16,7 @@ use alloc::format;
 use alloc::vec::Vec;
 use cluu_ext2::Ext2Fs;
 use cluu_virtio_blk::{pci, VirtioBlkAdapter, VirtioBlkDevice};
-use libcluu::boot::{process_info, TOKEN_SPACE};
-
-/// Token slot where init places the PCI-capable token
-const SVC_TOKEN_CAP: usize = 8;
+use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_SPACE};
 use libcluu::fs::{BlockDevice, Filesystem};
 use libcluu::ipc::{extract_reply_token, reply, reply_with_payload};
 use libcluu::registry;
@@ -41,8 +38,6 @@ const IPC_MESSAGE_MAX: usize = 256;
 const BLK_READ_LABEL: u32 = 1;
 const BLK_INFO_LABEL: u32 = 3;
 
-/// Token slot for the service's listen endpoint
-const SVC_TOKEN_LISTEN: usize = 7;
 /// Fixed grant scratch mapping base for zero-copy reads.
 const GRANT_SCRATCH_BASE: usize = 0x6100_0000;
 /// Size of the grant scratch buffer (must match VFS GRANT_BUF_SIZE).
@@ -68,7 +63,7 @@ fn run() -> Result<()> {
     debug_print("virtio-blk: starting")?;
 
     let info = process_info();
-    let pci_token = info.tokens[SVC_TOKEN_CAP]; // PCI-capable token from init
+    let pci_token = info.tokens[TOKEN_EXTRA_1]; // PCI-capable token from init
     let space_token = info.tokens[TOKEN_SPACE];
 
     debug_print(&format!(
@@ -131,7 +126,7 @@ fn run() -> Result<()> {
     // Initialize registry and create listen endpoint
     registry::init("blkdev")?;
 
-    let listen_endpoint = info.tokens[SVC_TOKEN_LISTEN];
+    let listen_endpoint = info.tokens[TOKEN_EXTRA_0];
     let listen_endpoint = if listen_endpoint != 0 {
         listen_endpoint
     } else {

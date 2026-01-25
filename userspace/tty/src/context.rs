@@ -7,7 +7,7 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::vec::Vec;
-use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_PROC_CAP};
+use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::ipc::{
     call_with_payload, send_with_retry_timeout, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
     IPC_CHUNK_BYTES_DEFAULT, IPC_SEND_RETRIES_DEFAULT,
@@ -15,9 +15,6 @@ use libcluu::ipc::{
 use libcluu::registry;
 use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Result};
-
-// Token indices (set by init).
-const SVC_TOKEN_LISTEN: usize = 7;
 
 /// TTY context shared by the main loop.
 pub struct TtyContext {
@@ -37,16 +34,16 @@ impl TtyContext {
     /// Initialize registry wiring and select the listen endpoint.
     pub fn new() -> Result<Self> {
         let info = process_info();
-        let proc_cap = info.tokens[TOKEN_PROC_CAP];
-        // Prefer a fresh endpoint created from proc_cap so tty can grant send-only
+        let ipc_cap = info.tokens[TOKEN_IPC];
+        // Prefer a fresh endpoint created from TOKEN_IPC so tty can grant send-only
         // tokens to subscribers via the registry.
-        let endpoint = if proc_cap != 0 {
-            match libcluu::syscall::endpoint_create(proc_cap) {
+        let endpoint = if ipc_cap != 0 {
+            match libcluu::syscall::endpoint_create(ipc_cap) {
                 Ok(token) => token,
-                Err(_) => info.tokens[SVC_TOKEN_LISTEN],
+                Err(_) => info.tokens[TOKEN_EXTRA_0],
             }
         } else {
-            info.tokens[SVC_TOKEN_LISTEN]
+            info.tokens[TOKEN_EXTRA_0]
         };
 
         let instance_id = info.params[PARAM_TTY_INSTANCE] as u64;

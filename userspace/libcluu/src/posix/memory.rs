@@ -76,7 +76,7 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
                 pages_needed,
                 0, // data_len = 0
             ) {
-                Ok(_) => {}
+                Ok(_) | Err(crate::Error::AlreadyExists) => {}
                 Err(_) => {
                     set_errno(ENOMEM);
                     return (-1isize) as *mut c_void;

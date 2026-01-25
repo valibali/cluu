@@ -18,6 +18,8 @@ pub const CONSOLE_WRITE_SYNC_LABEL: u32 = 5;
 pub const IPC_CHUNK_BYTES_DEFAULT: usize = 256;
 pub const IPC_SEND_RETRIES_DEFAULT: u32 = 256;
 pub const IPC_BACKOFF_MAX_DEFAULT: u32 = 64;
+/// Inline stack buffer size for small IPC payloads (avoid heap use).
+const IPC_INLINE_STACK_MAX: usize = 512;
 pub const KBD_EVENT_LABEL: u32 = 1;
 pub const TTY_READ_LABEL: u32 = 1;
 pub const TTY_WRITE_LABEL: u32 = 2;
@@ -45,7 +47,15 @@ pub fn send_with_payload(endpoint_token: usize, label: u32, payload: &[u8]) -> R
     let mut msg = Message::new(label, [0; 6], 1);
     msg.words[0] = payload.len();
     let header = msg.as_bytes();
-    let mut buffer = Vec::with_capacity(header.len() + payload.len());
+    let total_len = header.len() + payload.len();
+    if total_len <= IPC_INLINE_STACK_MAX {
+        let mut buffer = [0u8; IPC_INLINE_STACK_MAX];
+        buffer[..header.len()].copy_from_slice(header);
+        buffer[header.len()..total_len].copy_from_slice(payload);
+        return syscall::ipc_send(endpoint_token, &buffer[..total_len]);
+    }
+
+    let mut buffer = Vec::with_capacity(total_len);
     buffer.extend_from_slice(header);
     buffer.extend_from_slice(payload);
     syscall::ipc_send(endpoint_token, &buffer)
@@ -111,10 +121,19 @@ pub fn call_with_payload(
     reply: &mut Message,
 ) -> Result<()> {
     let header = msg.as_bytes();
-    let mut buffer = Vec::with_capacity(header.len() + payload.len());
+    let total_len = header.len() + payload.len();
+    let reply_bytes = reply.as_bytes_mut();
+    if total_len <= IPC_INLINE_STACK_MAX {
+        let mut buffer = [0u8; IPC_INLINE_STACK_MAX];
+        buffer[..header.len()].copy_from_slice(header);
+        buffer[header.len()..total_len].copy_from_slice(payload);
+        let _ = syscall::ipc_call(endpoint_token, &buffer[..total_len], reply_bytes)?;
+        return Ok(());
+    }
+
+    let mut buffer = Vec::with_capacity(total_len);
     buffer.extend_from_slice(header);
     buffer.extend_from_slice(payload);
-    let reply_bytes = reply.as_bytes_mut();
     let _ = syscall::ipc_call(endpoint_token, &buffer, reply_bytes)?;
     Ok(())
 }

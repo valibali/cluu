@@ -152,8 +152,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/libcluu",    // Library must be first
         "userspace/virtio-blk", // Driver library
         "userspace/ext2",       // Filesystem library
-        "userspace/cap_demo",
-        "userspace/init", // System programs
+        "userspace/init",       // System programs
         "userspace/procmgr",
         "userspace/registry",
         "userspace/vfs",
@@ -164,7 +163,6 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/shell",
         "userspace/timeserver",
         "userspace/cat",
-        "userspace/vfs_demo",
     ];
 
     let target_json = project_root().join("triplets/x86_64-cluu-user.json");
@@ -339,6 +337,7 @@ fn create_initrd(profile: &str) -> Result<()> {
         "init",
         "procmgr",
         "registry",
+        "timeserver",
         "vfs",
         "console",
         "kbd",
@@ -357,7 +356,7 @@ fn create_initrd(profile: &str) -> Result<()> {
     }
 
     // Copy user programs to initrd/bin/
-    let bin_programs = ["shell", "timeserver", "vfs_demo"];
+    let bin_programs = ["shell"];
     for prog in &bin_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("bin").join(prog);
@@ -448,7 +447,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
     let _ = fs::remove_dir_all(&bin_dir);
     fs::create_dir_all(&bin_dir)?;
 
-    let bin_programs = ["shell", "timeserver", "vfs_demo"];
+    let bin_programs = ["shell"];
     for prog in &bin_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = bin_dir.join(prog);
@@ -789,15 +788,22 @@ fn build_crt0() -> Result<()> {
 }
 
 /// Build all C programs in userspace/c_hello etc.
-/// This builds prerequisites (syscalls, crt0) if needed, then compiles C programs.
+/// This builds prerequisites (syscalls, crt0, newlib) if needed, then compiles C programs.
 fn build_c_programs(profile: &str) -> Result<()> {
     let sysroot = sysroot_path();
     let crt0 = sysroot.join("lib/crt0.o");
     let syscalls = sysroot.join("lib/libcluu_syscalls.a");
 
-    // Build prerequisites if missing
-    if !syscalls.exists() {
-        println!("▸ Building libcluu_syscalls.a (prerequisite for C programs)...");
+    // Check if libcluu source is newer than syscalls.a (staleness detection)
+    let syscalls_stale = is_syscalls_stale(&syscalls);
+
+    // Build prerequisites if missing or stale
+    if !syscalls.exists() || syscalls_stale {
+        if syscalls_stale {
+            println!("▸ Rebuilding libcluu_syscalls.a (source changed)...");
+        } else {
+            println!("▸ Building libcluu_syscalls.a (prerequisite for C programs)...");
+        }
         build_syscalls(profile)?;
     }
     if !crt0.exists() {
@@ -805,8 +811,21 @@ fn build_c_programs(profile: &str) -> Result<()> {
         build_crt0()?;
     }
 
+    // Check for newlib and build/install if needed
+    let (newlib_lib, _) = newlib_paths(&sysroot);
+    if !newlib_lib.exists() {
+        let newlib_src = project_root().join("external").join(format!("newlib-{}", "4.4.0.20231231"));
+        if newlib_src.exists() {
+            println!("▸ Installing newlib to sysroot (required for C programs)...");
+            ensure_newlib_installed()?;
+        } else {
+            println!("  ⚠ Newlib not found - C programs will have limited libc support");
+            println!("    To enable full C library: ./scripts/download-newlib.sh && cargo xtask build-newlib");
+        }
+    }
+
     // List of C programs to build: (name, source_path)
-    let c_programs: &[(&str, &str)] = &[("hello", "userspace/c_hello/hello.c")];
+    let c_programs: &[(&str, &str)] = &[("hello", "userspace/c_hello/minimal.c")];
 
     for (name, source) in c_programs {
         let source_path = project_root().join(source);
@@ -815,6 +834,85 @@ fn build_c_programs(profile: &str) -> Result<()> {
         } else {
             println!("  Skipping {} (source not found)", name);
         }
+    }
+
+    Ok(())
+}
+
+/// Check if libcluu_syscalls.a is stale (source newer than artifact)
+fn is_syscalls_stale(syscalls_path: &Path) -> bool {
+    if !syscalls_path.exists() {
+        return false; // Not stale, just missing
+    }
+
+    let syscalls_mtime = match fs::metadata(syscalls_path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+
+    // Check if any libcluu source file is newer
+    let libcluu_src = project_root().join("userspace/libcluu/src");
+    if let Ok(entries) = fs::read_dir(&libcluu_src) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    if mtime > syscalls_mtime {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check boot.rs specifically (token constants live here)
+    let boot_rs = libcluu_src.join("boot.rs");
+    if let Ok(meta) = fs::metadata(&boot_rs) {
+        if let Ok(mtime) = meta.modified() {
+            if mtime > syscalls_mtime {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Ensure newlib is built and installed to sysroot
+fn ensure_newlib_installed() -> Result<()> {
+    let sysroot = sysroot_path();
+    let (newlib_lib, _) = newlib_paths(&sysroot);
+
+    if newlib_lib.exists() {
+        return Ok(());
+    }
+
+    // Check if newlib was built but not installed
+    let build_dir = project_root().join("target/newlib-build");
+    let built_libc = build_dir.join(NEWLIB_CLUU_TRIPLET).join("newlib/libc.a");
+
+    if built_libc.exists() {
+        // Newlib was built, just need to install
+        println!("  Running make install for newlib...");
+        let status = Command::new("make")
+            .current_dir(&build_dir)
+            .arg("install")
+            .status()
+            .context("Failed to run make install for newlib")?;
+
+        if !status.success() {
+            bail!("Newlib install failed");
+        }
+
+        // Verify installation
+        let (newlib_lib_after, _) = newlib_paths(&sysroot);
+        if !newlib_lib_after.exists() {
+            bail!("Newlib install completed but libc.a not found in sysroot");
+        }
+
+        println!("  ✓ Newlib installed to sysroot");
+    } else {
+        // Need full build
+        build_newlib()?;
     }
 
     Ok(())
@@ -969,6 +1067,13 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
     };
 
     if !link_success {
+        if !have_newlib {
+            bail!(
+                "Linking failed - newlib not found in sysroot.\n\
+                 C programs using printf/malloc/etc require newlib.\n\
+                 Run: ./scripts/download-newlib.sh && cargo xtask build-newlib"
+            );
+        }
         bail!("Linking failed. Install lld or x86_64-linux-gnu-ld.");
     }
 

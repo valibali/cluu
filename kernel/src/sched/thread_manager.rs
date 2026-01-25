@@ -782,8 +782,18 @@ unsafe fn load_address_space(cr3: u64) {
 /// Builds interrupt frame on stack and executes iretq to switch to Ring 3.
 unsafe fn enter_userspace(context: &Context) -> ! {
     klibcluu::trace("Executing iretq to userspace");
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "Entry RIP=", context.rip);
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "Entry RSP=", context.rsp);
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "Entry CS=", context.cs);
+    klibcluu::log_hex(klibcluu::LogLevel::Info, "Entry SS=", context.ss);
 
     core::arch::asm!(
+        // Initialize userspace segment registers (DS, ES, FS)
+        "mov ax, 0x2b",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov fs, ax",
+        // Build iretq frame
         "push {0}",      // SS
         "push {1}",      // RSP
         "push {2}",      // RFLAGS

@@ -4,12 +4,9 @@
 //! event loop integration so rendering code stays focused on drawing.
 
 use alloc::format;
-use libcluu::boot::{process_info, PARAM_CONSOLE_INSTANCE, TOKEN_PROC_CAP};
+use libcluu::boot::{process_info, PARAM_CONSOLE_INSTANCE, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::registry;
 use libcluu::{debug_print, syscall, Result};
-
-// Token index for listen endpoint (set by init).
-const SVC_TOKEN_LISTEN: usize = 7;
 
 /// Shared console context.
 pub struct ConsoleContext {
@@ -23,16 +20,16 @@ impl ConsoleContext {
     /// Initialize registry wiring and resolve the listen endpoint.
     pub fn new() -> Result<Self> {
         let info = process_info();
-        let proc_cap = info.tokens[TOKEN_PROC_CAP];
-        // Prefer a fresh endpoint created from proc_cap so the console can grant
+        let ipc_cap = info.tokens[TOKEN_IPC];
+        // Prefer a fresh endpoint created from TOKEN_IPC so the console can grant
         // send-only tokens to subscribers via the registry.
-        let endpoint = if proc_cap != 0 {
-            match syscall::endpoint_create(proc_cap) {
+        let endpoint = if ipc_cap != 0 {
+            match syscall::endpoint_create(ipc_cap) {
                 Ok(token) => token,
-                Err(_) => info.tokens[SVC_TOKEN_LISTEN],
+                Err(_) => info.tokens[TOKEN_EXTRA_0],
             }
         } else {
-            info.tokens[SVC_TOKEN_LISTEN]
+            info.tokens[TOKEN_EXTRA_0]
         };
 
         let instance_id = info.params[PARAM_CONSOLE_INSTANCE] as u64;

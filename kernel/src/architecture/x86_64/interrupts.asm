@@ -204,6 +204,13 @@ timer_interrupt_entry:
     push rsi
 
 .restore_regs:
+    ; ALWAYS set userspace segment registers (DS, ES, FS)
+    ; This is safe even for kernel threads as they don't use segment-relative addressing
+    mov ax, 0x2b
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+
     ; Restore general-purpose registers
     mov rax, [r10 + CONTEXT_RAX]
     mov rbx, [r10 + CONTEXT_RBX]

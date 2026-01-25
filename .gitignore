@@ -40,7 +40,6 @@ Thumbs.db
 userfs/hello
 userfs/bin/shell
 userfs/bin/timeserver
-userfs/bin/vfs_demo
 userfs/bin/hello
 
 # Ignore external folder except for patched config.sub

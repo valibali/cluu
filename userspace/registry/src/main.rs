@@ -10,7 +10,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::mem::size_of;
-use libcluu::boot::process_info;
+use libcluu::boot::{process_info, TOKEN_EXTRA_0};
 use libcluu::ipc::send;
 use libcluu::registry::{
     self, REGISTRY_GRANT_REQUEST_LABEL, REGISTRY_LIST_LABEL, REGISTRY_REGISTER_LABEL,
@@ -18,8 +18,6 @@ use libcluu::registry::{
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, yield_cpu, Error, Result};
-
-const SVC_TOKEN_LISTEN: usize = 7;
 
 // PendingSubscription struct removed - now using indexed BTreeMap instead.
 
@@ -33,7 +31,7 @@ pub extern "C" fn main() -> i32 {
 
 fn run() -> Result<()> {
     let info = process_info();
-    let endpoint = info.tokens[SVC_TOKEN_LISTEN];
+    let endpoint = info.tokens[TOKEN_EXTRA_0];
     registry::init("registry")?;
     registry::register_default_outputs()?;
 

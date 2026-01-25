@@ -956,9 +956,9 @@ pub fn thread_exit(code: i32) -> ! {
 
     // Block forever waiting for procmgr to destroy us
     let info = crate::boot::process_info();
-    let proc_cap = info.tokens[crate::boot::TOKEN_PROC_CAP];
-    if proc_cap != 0 {
-        if let Ok(ep) = endpoint_create(proc_cap) {
+    let ipc_cap = info.tokens[crate::boot::TOKEN_IPC];
+    if ipc_cap != 0 {
+        if let Ok(ep) = endpoint_create(ipc_cap) {
             let mut buf = [0u8; 64];
             let _ = ipc_recv(ep, &mut buf);
         }

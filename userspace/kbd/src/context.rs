@@ -3,15 +3,11 @@
 //! This module isolates registry interaction and endpoint lifecycle so the
 //! main loop can focus on decoding scancodes and emitting events.
 
-use libcluu::boot::process_info;
+use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1};
 use libcluu::ipc::send;
 use libcluu::registry;
 use libcluu::types::Message;
 use libcluu::{debug_print, irq_attach, yield_cpu, Error, Result};
-
-// Token indices (set by init)
-const SVC_TOKEN_LISTEN: usize = 7;
-const SVC_TOKEN_IRQ: usize = 9;
 
 const KEYBOARD_IRQ: usize = 1;
 
@@ -27,8 +23,8 @@ impl KbdContext {
     /// Build the context, initialize registry state, and attach IRQ.
     pub fn new() -> Result<Self> {
         let info = process_info();
-        let endpoint = info.tokens[SVC_TOKEN_LISTEN];
-        let irq_token = info.tokens[SVC_TOKEN_IRQ];
+        let endpoint = info.tokens[TOKEN_EXTRA_0];
+        let irq_token = info.tokens[TOKEN_EXTRA_1];
 
         registry::init("kbd")?;
         registry::register_default_outputs()?;

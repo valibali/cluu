@@ -14,7 +14,6 @@ members = [
 
     # Userspace
     "userspace/libcluu",
-    "userspace/cap_demo",
     "userspace/init",
     "userspace/procmgr",
     "userspace/vfs",
@@ -26,7 +25,6 @@ members = [
     "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
-    "userspace/vfs_demo",
     "userspace/virtio-blk",
     "userspace/libcluu_syscalls",
 
@@ -40,7 +38,6 @@ default-members = [
     "kernel",
     "klibcluu",
     "userspace/libcluu",
-    "userspace/cap_demo",
     "userspace/init",
     "userspace/procmgr",
     "userspace/vfs",
@@ -52,7 +49,6 @@ default-members = [
     "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
-    "userspace/vfs_demo",
     "userspace/virtio-blk",
 ]
 
@@ -84,8 +80,6 @@ panic = "abort"
 [profile.dev.package.libcluu]
 debug = 0
 
-[profile.dev.package."cap-demo"]
-debug = 0
 
 [profile.dev.package."cluu-init"]
 debug = 0

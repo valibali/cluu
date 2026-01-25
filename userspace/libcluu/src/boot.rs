@@ -64,16 +64,102 @@ pub struct ProcessInfo {
     pub params: [u64; 8],
 }
 
-// Well-known token indices (convention, not enforced)
+// ═══════════════════════════════════════════════════════════════════════════
+// Token Slot Layout
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ProcessInfo.tokens[16] layout:
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │  UNIVERSAL (0-8) - Same meaning for every process                       │
+// ├─────────────────────────────────────────────────────────────────────────┤
+// │  0-3:  Standard I/O endpoints                                           │
+// │  4-7:  Core capabilities (rights vary per process)                      │
+// │  8:    System services                                                  │
+// ├─────────────────────────────────────────────────────────────────────────┤
+// │  CONTEXTUAL (9-15) - Parent-defined, varies by process type             │
+// │  9-15: Device caps (IRQs, PCI, DMA), or empty for regular programs      │
+// └─────────────────────────────────────────────────────────────────────────┘
+//
+// Token types:
+//   • Endpoints: IPC destinations (stdin, stdout, registry, etc.)
+//   • Capabilities: Authority for kernel operations (self, space, ipc, clock)
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Standard I/O Endpoints (0-3) ───────────────────────────────────────────
+/// Input stream endpoint (slot 0)
 pub const TOKEN_STDIN: usize = 0;
+/// Output stream endpoint (slot 1)
 pub const TOKEN_STDOUT: usize = 1;
+/// Error stream endpoint (slot 2)
 pub const TOKEN_STDERR: usize = 2;
+/// Logging stream endpoint (slot 3)
 pub const TOKEN_STDLOG: usize = 3;
-pub const TOKEN_REGISTRY: usize = 4;
-pub const TOKEN_PROC_CAP: usize = 5;
-pub const TOKEN_SPACE: usize = 6;
+
+// ─── Core Capabilities (4-7) ────────────────────────────────────────────────
+/// Thread control capability (slot 4)
+/// Operations: create threads, set priority, suspend/resume
+/// Rights vary: normal processes get basic, procmgr gets elevated
+pub const TOKEN_SELF: usize = 4;
+
+/// Address space capability (slot 5)
+/// Operations: map, unmap, grant memory regions
+/// Rights vary: normal processes get SPACE_MAP|SPACE_GRANT, vfs/procmgr get more
+pub const TOKEN_SPACE: usize = 5;
+
+/// IPC capability (slot 6)
+/// Operations: create endpoints, send/receive messages
+/// All processes get: CREATE, IPC_SEND, IPC_RECV, IPC_CALL, GRANT
+pub const TOKEN_IPC: usize = 6;
+
+/// Clock/time capability (slot 7)
+/// Operations: read TSC, query time
+/// All processes get: READ
 pub const TOKEN_CLOCK: usize = 7;
-// Services use indices 8+ for their specific needs
+
+// ─── System Services (8) ────────────────────────────────────────────────────
+/// Registry endpoint for service discovery (slot 8)
+pub const TOKEN_REGISTRY: usize = 8;
+
+// ─── Contextual / Parent-Defined (9-15) ─────────────────────────────────────
+// These slots have meaning defined by the parent process.
+// For drivers: device capabilities (IRQ, PCI, DMA)
+// For regular programs: typically empty (0)
+
+/// Extra capability slot 0 (slot 9) - e.g., IRQ token for drivers
+pub const TOKEN_EXTRA_0: usize = 9;
+/// Extra capability slot 1 (slot 10) - e.g., PCI/device capability
+pub const TOKEN_EXTRA_1: usize = 10;
+/// Extra capability slot 2 (slot 11) - e.g., DMA capability
+pub const TOKEN_EXTRA_2: usize = 11;
+/// Extra capability slot 3 (slot 12)
+pub const TOKEN_EXTRA_3: usize = 12;
+/// Extra capability slot 4 (slot 13)
+pub const TOKEN_EXTRA_4: usize = 13;
+/// Extra capability slot 5 (slot 14)
+pub const TOKEN_EXTRA_5: usize = 14;
+/// Extra capability slot 6 (slot 15)
+pub const TOKEN_EXTRA_6: usize = 15;
+
+// ─── Slot Ranges ────────────────────────────────────────────────────────────
+/// First standard I/O slot
+pub const TOKEN_STDIO_START: usize = 0;
+/// Last standard I/O slot
+pub const TOKEN_STDIO_END: usize = 3;
+/// First core capability slot
+pub const TOKEN_CAPS_START: usize = 4;
+/// Last core capability slot
+pub const TOKEN_CAPS_END: usize = 7;
+/// First contextual/extra slot
+pub const TOKEN_EXTRA_START: usize = 9;
+/// Last contextual/extra slot
+pub const TOKEN_EXTRA_END: usize = 15;
+
+// ─── Deprecated Aliases (for migration) ─────────────────────────────────────
+// TODO: Remove these after migration is complete
+#[deprecated(since = "0.2.0", note = "Use TOKEN_IPC instead")]
+pub const TOKEN_PROC_CAP: usize = TOKEN_IPC;
 
 // Well-known param indices for console service
 pub const PARAM_FB_BASE: usize = 0;
@@ -129,9 +215,35 @@ pub fn stderr() -> usize {
     token(TOKEN_STDERR)
 }
 
+/// Convenience: get self/thread control token.
+pub fn token_self() -> usize {
+    token(TOKEN_SELF)
+}
+
 /// Convenience: get process space token (SPACE_MAP right).
 pub fn space_token() -> usize {
     token(TOKEN_SPACE)
+}
+
+/// Convenience: get IPC capability token.
+pub fn token_ipc() -> usize {
+    token(TOKEN_IPC)
+}
+
+/// Convenience: get clock token.
+pub fn token_clock() -> usize {
+    token(TOKEN_CLOCK)
+}
+
+/// Convenience: get registry endpoint.
+pub fn token_registry() -> usize {
+    token(TOKEN_REGISTRY)
+}
+
+/// Convenience: get extra token by index (0-6 → slots 9-15).
+pub fn token_extra(index: usize) -> usize {
+    assert!(index <= 6, "token_extra index must be 0-6");
+    token(TOKEN_EXTRA_START + index)
 }
 
 /// Convenience: get process ID.

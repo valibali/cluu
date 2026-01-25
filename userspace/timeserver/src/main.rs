@@ -1,13 +1,14 @@
 #![no_std]
 #![no_main]
 
-use libcluu::boot::{process_info, TOKEN_CLOCK};
+extern crate alloc;
+
+use libcluu::boot::{process_info, TOKEN_CLOCK, TOKEN_EXTRA_0, TOKEN_IPC, TOKEN_REGISTRY};
 use libcluu::ipc::extract_reply_token;
 use libcluu::time::{TIME_GETCLOCK, TIME_GETTIMEOFDAY};
 use libcluu::types::Message;
 use libcluu::{clock_now, debug_print, registry, Result};
 
-const SVC_TOKEN_LISTEN: usize = 7;
 const TICKS_PER_SEC_ASSUMED: u64 = 1_000_000_000;
 
 #[no_mangle]
@@ -19,13 +20,14 @@ pub extern "C" fn main() -> i32 {
 }
 
 fn run() -> Result<()> {
-    debug_print("timeserver: starting")?;
+    let info = process_info();
+    
     registry::init("timeserver")?;
-    registry::register_output("main", process_info().tokens[SVC_TOKEN_LISTEN])?;
+    registry::register_output("main", info.tokens[TOKEN_EXTRA_0])?;
     debug_print("timeserver: ready")?;
 
-    let endpoint = process_info().tokens[SVC_TOKEN_LISTEN];
-    let clock_token = process_info().tokens[TOKEN_CLOCK];
+    let endpoint = info.tokens[TOKEN_EXTRA_0];
+    let clock_token = info.tokens[TOKEN_CLOCK];
 
     let mut buf = [0u8; 256];
     loop {
