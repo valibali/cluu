@@ -34,6 +34,7 @@ pub mod rights;
 pub mod runtime;
 pub mod syscall;
 pub mod tar;
+pub mod time;
 pub mod types;
 pub mod vspace;
 
@@ -74,6 +75,7 @@ pub use syscall::{
     irq_ack,
 
     irq_attach,
+    clock_now,
     space_create,
     space_grant,
     space_map,

@@ -383,6 +383,9 @@ pub enum InvokeOp {
     // Memory translation
     VirtToPhys = 58,
     PmmAllocLarge = 59,
+
+    // Clock/time
+    ClockNow = 60,
 }
 
 impl InvokeOp {
@@ -414,6 +417,7 @@ impl InvokeOp {
             57 => Some(Self::PortOut32),
             58 => Some(Self::VirtToPhys),
             59 => Some(Self::PmmAllocLarge),
+            60 => Some(Self::ClockNow),
             _ => None,
         }
     }

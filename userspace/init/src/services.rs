@@ -24,6 +24,7 @@ pub enum SpacePolicy {
 #[derive(Copy, Clone)]
 pub enum ServiceKind {
     Registry,
+    Timeserver,
     Console,
     Kbd,
     Tty,
@@ -70,6 +71,15 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         rights: None,
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Registry,
+        instance_id: None,
+    },
+    ServiceSpec {
+        name: "timeserver",
+        path: "sys/timeserver",
+        priority: 185,
+        rights: None,
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::Timeserver,
         instance_id: None,
     },
     ServiceSpec {

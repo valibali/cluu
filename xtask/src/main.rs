@@ -12,6 +12,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const CLUU_TARGET_TRIPLET: &str = "x86_64-cluu";
+const NEWLIB_TARGET_TRIPLET: &str = "x86_64-unknown-elf";
+const NEWLIB_CLUU_TRIPLET: &str = "x86_64-cluu-elf";
+const CLUU_CLANG_TARGET: &str = "x86_64-unknown-none-elf";
+
 #[derive(Parser)]
 #[command(name = "xtask", about = "CLUU build system")]
 struct Cli {
@@ -656,6 +661,22 @@ fn sysroot_path() -> PathBuf {
     project_root().join("target/sysroot")
 }
 
+fn newlib_paths(sysroot: &Path) -> (PathBuf, PathBuf) {
+    let cluu_lib = sysroot.join(CLUU_TARGET_TRIPLET).join("lib/libc.a");
+    let cluu_include = sysroot.join(CLUU_TARGET_TRIPLET).join("include");
+    if cluu_lib.exists() {
+        return (cluu_lib, cluu_include);
+    }
+    let cluu_elf_lib = sysroot.join(NEWLIB_CLUU_TRIPLET).join("lib/libc.a");
+    let cluu_elf_include = sysroot.join(NEWLIB_CLUU_TRIPLET).join("include");
+    if cluu_elf_lib.exists() {
+        return (cluu_elf_lib, cluu_elf_include);
+    }
+    let newlib_lib = sysroot.join(NEWLIB_TARGET_TRIPLET).join("lib/libc.a");
+    let newlib_include = sysroot.join(NEWLIB_TARGET_TRIPLET).join("include");
+    (newlib_lib, newlib_include)
+}
+
 fn build_newlib() -> Result<()> {
     println!("▸ Building newlib...");
 
@@ -738,7 +759,7 @@ fn build_crt0() -> Result<()> {
     // Try clang first, fall back to GCC
     let status = Command::new("clang")
         .args([
-            "--target=x86_64-unknown-none-elf",
+            &format!("--target={}", CLUU_CLANG_TARGET),
             "-c",
             "-o",
             crt0_dst.to_str().unwrap(),
@@ -828,9 +849,9 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
     let linker_script = project_root().join("userspace/user.ld");
 
     // Check for newlib in sysroot
-    let newlib_lib = sysroot.join("x86_64-cluu/lib/libc.a");
-    let newlib_include = sysroot.join("x86_64-cluu/include");
+    let (newlib_lib, newlib_include) = newlib_paths(&sysroot);
     let have_newlib = newlib_lib.exists();
+    let newlib_lib_dir = newlib_lib.parent();
 
     // Compile - try clang first, fall back to GCC
     println!("  Compiling {}...", source.display());
@@ -839,7 +860,7 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
         // Try clang first
         let mut compile_cmd = Command::new("clang");
         compile_cmd.args([
-            "--target=x86_64-unknown-none-elf",
+            &format!("--target={}", CLUU_CLANG_TARGET),
             "-ffreestanding",
             "-fno-stack-protector",
             "-nostdlib",
@@ -905,9 +926,9 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
         ]);
 
         if have_newlib {
-            link_cmd
-                .arg("-L")
-                .arg(sysroot.join("x86_64-cluu/lib").to_str().unwrap());
+            if let Some(dir) = newlib_lib_dir {
+                link_cmd.arg("-L").arg(dir.to_str().unwrap());
+            }
             link_cmd.args(["-lc", "-lm"]);
         }
 
@@ -930,9 +951,9 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
                 ]);
 
                 if have_newlib {
-                    ld_cmd
-                        .arg("-L")
-                        .arg(sysroot.join("x86_64-cluu/lib").to_str().unwrap());
+                    if let Some(dir) = newlib_lib_dir {
+                        ld_cmd.arg("-L").arg(dir.to_str().unwrap());
+                    }
                     ld_cmd.args(["-lc", "-lm"]);
                 }
 

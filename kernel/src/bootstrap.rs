@@ -136,6 +136,14 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
         ObjectRef::Space(AddressSpaceId::new(0)),
     );
 
+    let clock_token_handle = crate::token::create_token(
+        crate::token::OpaqueScope::random(),
+        crate::token::Rights::READ,
+        crate::token::Issuer::Kernel,
+        crate::token::Timestamp::far_future(),
+        ObjectRef::Clock,
+    );
+
     let boot_frame = crate::mm::pmm::alloc_frame().ok_or_else(|| {
         klibcluu::error("Failed to allocate boot info frame");
         Error::OutOfMemory
@@ -161,6 +169,7 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
 
         let boot_info = &mut *boot_info_ptr;
         boot_info.root_token = root_token_handle.as_usize();
+        boot_info.clock_token = clock_token_handle.as_usize();
         boot_info.initrd_phys = initrd_phys;
         boot_info.initrd_size = initrd_size;
         boot_info.fb_phys = crate::bootboot::bootboot.fb_ptr as u64;
@@ -240,6 +249,7 @@ fn map_initrd_to_userspace(
 #[repr(C)]
 struct BootInfo {
     root_token: usize,
+    clock_token: usize,
     initrd_phys: u64,
     initrd_size: u64,
     fb_phys: u64,

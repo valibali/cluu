@@ -2,6 +2,35 @@
 
 use super::{c_char, c_int, pid_t};
 use crate::errno::{set_errno, ECHILD, EINVAL, ENOSYS, ESRCH};
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use lazy_static::lazy_static;
+use spin::Mutex;
+
+const PROCMGR_SPAWN_LABEL: u32 = 2;
+const PROCMGR_EXIT_LABEL: u32 = 1;
+
+struct WaitState {
+    notify_endpoint: usize,
+    cookie_to_pid: BTreeMap<usize, pid_t>,
+    pid_to_cookie: BTreeMap<pid_t, usize>,
+    pending_exits: BTreeMap<pid_t, i32>,
+}
+
+impl WaitState {
+    fn new() -> Self {
+        Self {
+            notify_endpoint: 0,
+            cookie_to_pid: BTreeMap::new(),
+            pid_to_cookie: BTreeMap::new(),
+            pending_exits: BTreeMap::new(),
+        }
+    }
+}
+
+lazy_static! {
+    static ref WAIT_STATE: Mutex<WaitState> = Mutex::new(WaitState::new());
+}
 
 /// Exit the current process.
 ///
@@ -122,13 +151,7 @@ pub extern "C" fn _execve(
 /// Child PID on success, -1 on error (errno set).
 #[no_mangle]
 pub extern "C" fn _wait(_status: *mut c_int) -> pid_t {
-    // In CLUU, we wait on exit notification endpoint
-    // This requires the process to have spawned children with exit tracking
-
-    // For now, return ECHILD (no children)
-    // TODO: Implement proper child tracking and exit notification
-    set_errno(ECHILD);
-    -1
+    waitpid(-1, _status, 0)
 }
 
 /// Wait for a specific child process.
@@ -142,13 +165,69 @@ pub extern "C" fn _wait(_status: *mut c_int) -> pid_t {
 /// Child PID on success, 0 if WNOHANG and no child exited, -1 on error.
 #[no_mangle]
 pub extern "C" fn waitpid(pid: pid_t, status: *mut c_int, _options: c_int) -> pid_t {
-    if pid == -1 {
-        // Wait for any child
-        _wait(status)
-    } else {
-        // Wait for specific child - not fully implemented
+    let mut state = WAIT_STATE.lock();
+    if state.notify_endpoint == 0 {
         set_errno(ECHILD);
-        -1
+        return -1;
+    }
+    let notify_endpoint = state.notify_endpoint;
+
+    if pid > 0 {
+        if let Some(exit_code) = state.pending_exits.remove(&pid) {
+            if !status.is_null() {
+                unsafe {
+                    *status = exit_code;
+                }
+            }
+            return pid;
+        }
+        if !state.pid_to_cookie.contains_key(&pid) {
+            set_errno(ECHILD);
+            return -1;
+        }
+    }
+
+    drop(state);
+
+    loop {
+        let mut buf = [0u8; core::mem::size_of::<crate::types::Message>()];
+        let len = match crate::syscall::ipc_recv(notify_endpoint, &mut buf) {
+            Ok(len) => len,
+            Err(err) => {
+                set_errno(crate::errno::from_cluu_error(err));
+                return -1;
+            }
+        };
+
+        if len < core::mem::size_of::<crate::types::Message>() {
+            continue;
+        }
+
+        let msg = unsafe { (buf.as_ptr() as *const crate::types::Message).read_unaligned() };
+        if msg.tag.label != PROCMGR_EXIT_LABEL || msg.tag.words < 2 {
+            continue;
+        }
+
+        let cookie = msg.words[0];
+        let exit_code = msg.words[1] as i32;
+
+        let mut state = WAIT_STATE.lock();
+        let child_pid = match state.cookie_to_pid.remove(&cookie) {
+            Some(pid) => pid,
+            None => continue,
+        };
+        state.pid_to_cookie.remove(&child_pid);
+
+        if pid == -1 || pid == child_pid {
+            if !status.is_null() {
+                unsafe {
+                    *status = exit_code;
+                }
+            }
+            return child_pid;
+        }
+
+        state.pending_exits.insert(child_pid, exit_code);
     }
 }
 
@@ -216,30 +295,78 @@ pub extern "C" fn posix_spawn(
         None => return ENOSYS,
     };
 
+    let notify_endpoint = {
+        let mut state = WAIT_STATE.lock();
+        if state.notify_endpoint == 0 {
+            let proc_cap = crate::boot::process_info().tokens[crate::boot::TOKEN_PROC_CAP];
+            if proc_cap == 0 {
+                return ENOSYS;
+            }
+            match crate::syscall::endpoint_create(proc_cap) {
+                Ok(ep) => state.notify_endpoint = ep,
+                Err(err) => return crate::errno::from_cluu_error(err),
+            }
+        }
+        state.notify_endpoint
+    };
+
     // Send spawn request to procmgr
-    // For now, use simple path-only spawn (no args/env)
-    let payload = path_str.as_bytes();
-    let mut msg = crate::types::Message::new(3, [0; 6], 2); // Label 3 = PROC_SPAWN
+    let mut payload = Vec::new();
+    push_cstr(path, &mut payload);
+
+    let mut argc = 0usize;
+    if !_argv.is_null() {
+        unsafe {
+            let mut p = _argv;
+            while !(*p).is_null() {
+                push_cstr(*p, &mut payload);
+                argc += 1;
+                p = p.add(1);
+            }
+        }
+    }
+
+    let mut msg = crate::types::Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
     msg.words[0] = payload.len();
-    msg.words[1] = 0; // argc = 0 for now
+    msg.words[1] = argc;
+    msg.words[2] = 0; // reply endpoint (legacy)
+    msg.words[3] = notify_endpoint;
 
     let mut reply = crate::types::Message::new(0, [0; 6], 0);
-    match crate::ipc::call_with_payload(procmgr_ep, &msg, payload, &mut reply) {
+    match crate::ipc::call_with_payload(procmgr_ep, &msg, &payload, &mut reply) {
         Ok(()) => {
             let status = reply.words[0] as isize;
             if status < 0 {
                 return (-status) as c_int;
             }
             let child_pid = reply.words[1] as pid_t;
+            let cookie = reply.words[2];
             if !pid.is_null() {
                 unsafe {
                     *pid = child_pid;
                 }
             }
+            let mut state = WAIT_STATE.lock();
+            state.cookie_to_pid.insert(cookie, child_pid);
+            state.pid_to_cookie.insert(child_pid, cookie);
             0
         }
         Err(e) => crate::errno::from_cluu_error(e),
     }
+}
+
+fn push_cstr(ptr: *const c_char, out: &mut Vec<u8>) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let mut p = ptr;
+        while *p != 0 {
+            out.push(*p as u8);
+            p = p.add(1);
+        }
+    }
+    out.push(0);
 }
 
 /// posix_spawnp - spawn with PATH search.

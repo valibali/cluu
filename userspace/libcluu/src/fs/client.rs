@@ -3,12 +3,14 @@
 //! The client uses IPC call semantics with an inline payload for path strings.
 //! Replies encode status in words[0] and return values in subsequent words.
 
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::error::{Error, Result};
-use crate::fs::protocol::{VFS_CLOSE, VFS_MAP_ELF, VFS_OPEN, VFS_READ_GRANT, VFS_READDIR};
+use crate::fs::protocol::{
+    VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_OPEN, VFS_READ_GRANT, VFS_READDIR, VFS_STAT, VFS_WRITE,
+};
 use crate::ipc;
 use crate::types::Message;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Handle to an open file in the VFS service.
 #[derive(Debug, Clone, Copy)]
@@ -28,6 +30,13 @@ pub struct VfsGrant {
     pub len: usize,
 }
 
+/// File metadata returned by stat/fstat.
+#[derive(Debug, Clone, Copy)]
+pub struct VfsStat {
+    pub size: usize,
+    pub mode: usize,
+}
+
 /// Directory entry returned by readdir.
 #[derive(Debug, Clone)]
 pub struct VfsDirEntry {
@@ -44,7 +53,10 @@ pub struct VfsClient {
 impl VfsClient {
     /// Create a new client for the given VFS endpoint token.
     pub const fn new(endpoint: usize, client_id: usize) -> Self {
-        Self { endpoint, client_id }
+        Self {
+            endpoint,
+            client_id,
+        }
     }
 
     /// Create a client using the current process registry control endpoint.
@@ -53,7 +65,10 @@ impl VfsClient {
         if client_id == 0 {
             return Err(Error::InvalidState);
         }
-        Ok(Self { endpoint, client_id })
+        Ok(Self {
+            endpoint,
+            client_id,
+        })
     }
 
     /// Open a path in the VFS service.
@@ -134,7 +149,8 @@ impl VfsClient {
 
         // Use larger buffer for reply with entry data
         let mut reply_buf = [0u8; 4096];
-        let (reply, payload_len) = ipc::call_with_reply_buf(self.endpoint, &msg, payload, &mut reply_buf)?;
+        let (reply, payload_len) =
+            ipc::call_with_reply_buf(self.endpoint, &msg, payload, &mut reply_buf)?;
         parse_status(reply.words[0])?;
 
         let entry_count = reply.words[1];
@@ -164,6 +180,46 @@ impl VfsClient {
         }
 
         Ok(entries)
+    }
+
+    /// Write data to a file.
+    pub fn write(&self, file: VfsFile, offset: usize, data: &[u8]) -> Result<usize> {
+        let msg = make_payload_message(
+            VFS_WRITE,
+            data.len(),
+            &[self.client_id, file.fd, offset, data.len()],
+        );
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, data, &mut reply)?;
+        parse_status(reply.words[0])?;
+        Ok(reply.words[1])
+    }
+
+    /// Stat a path.
+    pub fn stat(&self, path: &str) -> Result<VfsStat> {
+        let payload = path.as_bytes();
+        let msg = make_payload_message(VFS_STAT, payload.len(), &[self.client_id]);
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, payload, &mut reply)?;
+        parse_status(reply.words[0])?;
+        Ok(VfsStat {
+            size: reply.words[1],
+            mode: reply.words[2],
+        })
+    }
+
+    /// Stat an open file descriptor.
+    pub fn fstat(&self, file: VfsFile) -> Result<VfsStat> {
+        let mut msg = Message::new(VFS_FSTAT, [0; 6], 3);
+        msg.words[0] = 0;
+        msg.words[1] = self.client_id;
+        msg.words[2] = file.fd;
+        ipc::call(self.endpoint, &mut msg, crate::IpcFlags::empty())?;
+        parse_status(msg.words[0])?;
+        Ok(VfsStat {
+            size: msg.words[1],
+            mode: msg.words[2],
+        })
     }
 }
 

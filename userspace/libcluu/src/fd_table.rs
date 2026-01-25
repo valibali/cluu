@@ -43,6 +43,10 @@ pub struct FdEntry {
     pub remote_fd: Option<usize>,
     /// Client ID for VFS operations
     pub client_id: usize,
+    /// Cached file size (if known)
+    pub file_size: Option<usize>,
+    /// Cached mode bits (if known)
+    pub file_mode: Option<usize>,
 }
 
 impl FdEntry {
@@ -61,6 +65,8 @@ impl FdEntry {
             position: 0,
             remote_fd: None,
             client_id: 0,
+            file_size: None,
+            file_mode: None,
         }
     }
 
@@ -85,6 +91,8 @@ impl FdEntry {
             position: 0,
             remote_fd: Some(remote_fd),
             client_id,
+            file_size: None,
+            file_mode: None,
         }
     }
 

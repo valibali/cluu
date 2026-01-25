@@ -13,7 +13,10 @@ use alloc::format;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use libcluu::elf::{ElfFile, LoadableSegment};
-use libcluu::fs::protocol::{VfsOp, VFS_CLOSE, VFS_MAP_ELF, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT};
+use libcluu::fs::protocol::{
+    VfsOp, VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT, VFS_STAT,
+    VFS_WRITE,
+};
 use libcluu::ipc::{self, extract_reply_token, reply_with_payload};
 use libcluu::types::Message;
 use libcluu::*;
@@ -48,6 +51,12 @@ const FILE_CACHE_MAX_SIZE: usize = 8 * 1024 * 1024;
 /// Maximum total cache size (8MB).
 const FILE_CACHE_TOTAL_MAX: usize = 32 * 1024 * 1024;
 const VFS_TRACE: bool = false;
+
+// POSIX-style mode bits (matching libcluu::posix::stat)
+const S_IFREG: usize = 0o100000;
+const S_IFDIR: usize = 0o040000;
+const MODE_FILE: usize = S_IFREG | 0o644;
+const MODE_DIR: usize = S_IFDIR | 0o755;
 
 macro_rules! vfs_trace {
     ($($arg:tt)*) => {
@@ -403,6 +412,9 @@ impl VfsServer {
             VfsOp::ReadGrant => self.handle_read_grant(msg, payload, reply_token),
             VfsOp::Readdir => self.handle_readdir(payload, reply_token),
             VfsOp::MapElf => self.handle_map_elf(msg, reply_token),
+            VfsOp::Write => self.handle_write(msg, payload, reply_token),
+            VfsOp::Stat => self.handle_stat(msg, payload, reply_token),
+            VfsOp::Fstat => self.handle_fstat(msg, reply_token),
         };
         vfs_trace!("vfs: handled {:?} result={:?}", op, result);
         result
@@ -457,6 +469,99 @@ impl VfsServer {
             vfs_trace!("vfs: close reply failed {:?}", err);
         }
         Ok(())
+    }
+
+    fn handle_write(&mut self, msg: &Message, payload: &[u8], reply_token: usize) -> Result<()> {
+        let client_id = msg.words[1];
+        let fd = msg.words[2];
+        let offset = msg.words[3];
+        let requested = msg.words[4];
+        let mut reply_msg = Message::new(VFS_WRITE, [0; 6], 2);
+
+        let Some(entry) = self.files.get_mut(client_id, fd) else {
+            reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        };
+
+        let to_write = requested.min(payload.len());
+        let data = &payload[..to_write];
+
+        match entry {
+            OpenFile::Virtual(file) => {
+                let end = offset.saturating_add(data.len());
+                if end > file.data.len() {
+                    file.data.resize(end, 0);
+                }
+                if offset < file.data.len() {
+                    file.data[offset..end].copy_from_slice(data);
+                    reply_msg.words[0] = 0;
+                    reply_msg.words[1] = data.len();
+                } else {
+                    reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                }
+            }
+            OpenFile::Memory(_) | OpenFile::Ext2(_) => {
+                reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
+                reply_msg.words[1] = 0;
+            }
+        }
+
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn handle_stat(&mut self, msg: &Message, payload: &[u8], reply_token: usize) -> Result<()> {
+        let _client_id = msg.words[1];
+        let mut reply_msg = Message::new(VFS_STAT, [0; 6], 3);
+
+        let path = match core::str::from_utf8(payload) {
+            Ok(path) => path,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        match self.stat_path(path) {
+            Ok((size, mode)) => {
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = size;
+                reply_msg.words[2] = mode;
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn handle_fstat(&mut self, msg: &Message, reply_token: usize) -> Result<()> {
+        let client_id = msg.words[1];
+        let fd = msg.words[2];
+        let mut reply_msg = Message::new(VFS_FSTAT, [0; 6], 3);
+
+        let Some(entry) = self.files.get(client_id, fd) else {
+            reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        };
+
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = entry.size();
+        reply_msg.words[2] = MODE_FILE;
+
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn stat_path(&self, path: &str) -> Result<(usize, usize)> {
+        if let Ok(file) = self.mounts.open(path) {
+            return Ok((file.size(), MODE_FILE));
+        }
+
+        if self.mounts.readdir(path).is_ok() {
+            return Ok((0, MODE_DIR));
+        }
+
+        Err(Error::NotFound)
     }
 
     fn handle_read_grant(

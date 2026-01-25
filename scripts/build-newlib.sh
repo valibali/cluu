@@ -10,6 +10,10 @@ NEWLIB_VERSION="4.4.0.20231231"
 NEWLIB_SRC="${PROJECT_ROOT}/external/newlib-${NEWLIB_VERSION}"
 BUILD_DIR="${PROJECT_ROOT}/target/newlib-build"
 SYSROOT="${PROJECT_ROOT}/target/sysroot"
+# newlib config.sub patched to recognize "cluu".
+TARGET_TRIPLET="x86_64-cluu-elf"
+CLANG_TARGET="x86_64-unknown-none-elf"
+SYSROOT_TRIPLET_DIR="${SYSROOT}/${TARGET_TRIPLET}"
 
 # Check for newlib source
 if [ ! -d "$NEWLIB_SRC" ]; then
@@ -29,11 +33,14 @@ echo "Building newlib for CLUU..."
 echo "  Source: ${NEWLIB_SRC}"
 echo "  Build:  ${BUILD_DIR}"
 echo "  Sysroot: ${SYSROOT}"
+echo "  Target: ${TARGET_TRIPLET}"
 
 # Create directories
 mkdir -p "${BUILD_DIR}"
 mkdir -p "${SYSROOT}/lib"
 mkdir -p "${SYSROOT}/include"
+mkdir -p "${SYSROOT_TRIPLET_DIR}/lib"
+mkdir -p "${SYSROOT_TRIPLET_DIR}/include"
 
 cd "${BUILD_DIR}"
 
@@ -43,9 +50,10 @@ if [ ! -f "Makefile" ]; then
     echo "Configuring newlib..."
     
     "${NEWLIB_SRC}/configure" \
-        --target=x86_64-cluu \
+        --target="${TARGET_TRIPLET}" \
         --prefix="${SYSROOT}" \
         --disable-newlib-supplied-syscalls \
+        --disable-libgloss \
         --enable-newlib-reent-small \
         --enable-lite-exit \
         --disable-multilib \
@@ -55,9 +63,9 @@ if [ ! -f "Makefile" ]; then
         --disable-newlib-unbuf-stream-opt \
         --enable-newlib-global-atexit \
         --enable-newlib-nano-malloc \
-        CC_FOR_TARGET="clang --target=x86_64-unknown-none-elf -ffreestanding -fno-stack-protector" \
-        AR_FOR_TARGET="llvm-ar" \
-        RANLIB_FOR_TARGET="llvm-ranlib" \
+        CC_FOR_TARGET="clang --target=${CLANG_TARGET} -ffreestanding -fno-stack-protector" \
+        AR_FOR_TARGET="ar" \
+        RANLIB_FOR_TARGET="ranlib" \
         CFLAGS_FOR_TARGET="-O2 -g -nostdlib -fno-builtin"
 fi
 

@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::{collections::BTreeMap, format, string::ToString, vec::Vec};
 use core::mem::size_of;
 use libcluu::boot::{
-    process_info, ProcessInfo, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_PROC_CAP,
+    process_info, ProcessInfo, PARAM_INITRD_SIZE, PROCESS_INFO_ADDR, TOKEN_CLOCK, TOKEN_PROC_CAP,
     TOKEN_REGISTRY, TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
 };
 use libcluu::elf::ElfFile;
@@ -67,6 +67,7 @@ struct ProcessManager {
     vfs_endpoint: usize,    // VFS service endpoint
     space_token: usize,     // Our address space token for grants
     grant_base_next: usize, // Reused base address for grant buffer
+    clock_token: usize,
 }
 
 impl ProcessManager {
@@ -90,6 +91,7 @@ impl ProcessManager {
             vfs_endpoint: 0,
             space_token: info.tokens[TOKEN_SPACE],
             grant_base_next: 0x50100000, // Start after virtqueue region
+            clock_token: info.tokens[TOKEN_CLOCK],
         })
     }
 
@@ -235,9 +237,9 @@ impl ProcessManager {
             return Ok(());
         }
 
-        let path = match core::str::from_utf8(payload) {
-            Ok(value) => value,
-            Err(_) => {
+        let path = match parse_cstr(payload) {
+            Some(value) => value,
+            None => {
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
                 let _ = self.send_spawn_reply(reply_token, reply_endpoint, &reply_msg);
                 return Ok(());
@@ -373,6 +375,7 @@ impl ProcessManager {
             self.registry_send,
             proc_cap,
             space_token,
+            self.clock_token,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
@@ -711,6 +714,14 @@ impl ProcessManager {
     }
 }
 
+fn parse_cstr(payload: &[u8]) -> Option<&str> {
+    let end = payload.iter().position(|b| *b == 0).unwrap_or(payload.len());
+    if end == 0 {
+        return None;
+    }
+    core::str::from_utf8(&payload[..end]).ok()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn map_process_info_page(
     space_token: usize,
@@ -724,6 +735,7 @@ fn map_process_info_page(
     registry_token: usize,
     proc_cap_token: usize,
     space_grant_token: usize,
+    clock_token: usize,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -736,6 +748,7 @@ fn map_process_info_page(
     tokens[TOKEN_REGISTRY] = registry_token;
     tokens[TOKEN_PROC_CAP] = proc_cap_token;
     tokens[TOKEN_SPACE] = space_grant_token;
+    tokens[TOKEN_CLOCK] = clock_token;
 
     let info = ProcessInfo {
         exit_token,

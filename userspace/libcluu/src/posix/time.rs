@@ -1,7 +1,10 @@
 //! Time-related syscall stubs.
 
 use super::{c_int, c_void, clock_t, time_t};
-use crate::errno::{set_errno, EINVAL};
+use crate::errno::{set_errno, EINVAL, ENOENT};
+use crate::ipc;
+use crate::time::{TIME_GETCLOCK, TIME_GETTIMEOFDAY};
+use crate::types::Message;
 
 /// Time value structure (seconds + microseconds).
 #[repr(C)]
@@ -59,14 +62,19 @@ pub extern "C" fn _gettimeofday(tv: *mut Timeval, _tz: *mut c_void) -> c_int {
         return -1;
     }
 
-    // TODO: Query timeserver or use TSC
-    // For now, return 0 (epoch) - programs will see time as 1970-01-01
-    unsafe {
-        (*tv).tv_sec = 0;
-        (*tv).tv_usec = 0;
+    match query_time(TIME_GETTIMEOFDAY) {
+        Ok((sec, nsec)) => {
+            unsafe {
+                (*tv).tv_sec = sec as time_t;
+                (*tv).tv_usec = (nsec / 1000) as i64;
+            }
+            0
+        }
+        Err(_) => {
+            set_errno(ENOENT);
+            -1
+        }
     }
-
-    0
 }
 
 /// Get process times.
@@ -91,8 +99,15 @@ pub extern "C" fn _times(buf: *mut Tms) -> clock_t {
         }
     }
 
-    // Return 0 ticks elapsed
-    0
+    // Report elapsed time in clock ticks (100 ticks/sec)
+    const TICKS_PER_SEC: i64 = 100;
+    match query_time(TIME_GETCLOCK) {
+        Ok((sec, nsec)) => {
+            let ticks = (sec as i64 * TICKS_PER_SEC) + (nsec as i64 / (1_000_000_000 / TICKS_PER_SEC));
+            ticks as clock_t
+        }
+        Err(_) => 0,
+    }
 }
 
 /// Get time (seconds since epoch).
@@ -135,26 +150,32 @@ pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int {
     }
 
     match clock_id {
-        CLOCK_REALTIME => {
-            let mut tv = Timeval {
-                tv_sec: 0,
-                tv_usec: 0,
-            };
-            _gettimeofday(&mut tv, core::ptr::null_mut());
-            unsafe {
-                (*tp).tv_sec = tv.tv_sec;
-                (*tp).tv_nsec = tv.tv_usec * 1000;
+        CLOCK_REALTIME => match query_time(TIME_GETTIMEOFDAY) {
+            Ok((sec, nsec)) => {
+                unsafe {
+                    (*tp).tv_sec = sec as time_t;
+                    (*tp).tv_nsec = nsec as i64;
+                }
+                0
             }
-            0
-        }
-        CLOCK_MONOTONIC => {
-            // TODO: Use TSC or scheduler ticks for monotonic time
-            unsafe {
-                (*tp).tv_sec = 0;
-                (*tp).tv_nsec = 0;
+            Err(_) => {
+                set_errno(EINVAL);
+                -1
             }
-            0
-        }
+        },
+        CLOCK_MONOTONIC => match query_time(TIME_GETCLOCK) {
+            Ok((sec, nsec)) => {
+                unsafe {
+                    (*tp).tv_sec = sec as time_t;
+                    (*tp).tv_nsec = nsec as i64;
+                }
+                0
+            }
+            Err(_) => {
+                set_errno(EINVAL);
+                -1
+            }
+        },
         _ => {
             set_errno(EINVAL);
             -1
@@ -195,4 +216,19 @@ pub extern "C" fn usleep(usec: u32) -> c_int {
         let _ = crate::syscall::yield_cpu();
     }
     0
+}
+
+fn query_time(label: u32) -> core::result::Result<(u64, u64), crate::Error> {
+    let endpoint = match crate::registry::lookup_service("timeserver:main") {
+        Some(ep) => ep,
+        None => return Err(crate::Error::NotFound),
+    };
+    let mut msg = Message::new(label, [0; 6], 1);
+    msg.words[0] = 0;
+    ipc::call(endpoint, &mut msg, crate::IpcFlags::empty())?;
+    let status = msg.words[0] as isize;
+    if status < 0 {
+        return Err(crate::Error::from_errno(status));
+    }
+    Ok((msg.words[1] as u64, msg.words[2] as u64))
 }

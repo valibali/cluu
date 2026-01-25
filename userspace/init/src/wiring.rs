@@ -72,6 +72,9 @@ impl ServiceWiring for ServiceKind {
                 // Registry owns the shared listen endpoint so everyone can contact it.
                 tokens[SVC_TOKEN_LISTEN] = ctx.registry_endpoint;
             }
+            ServiceKind::Timeserver => {
+                tokens[SVC_TOKEN_LISTEN] = create_listen_endpoint(ctx.boot.root_token)?;
+            }
             ServiceKind::Console => {
                 tokens[SVC_TOKEN_LISTEN] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
                 params[PARAM_FB_BASE] = CONSOLE_FB_BASE as u64;
@@ -123,6 +126,7 @@ impl ServiceWiring for ServiceKind {
                 map_initrd(space_token, ctx.initrd, params[PARAM_INITRD_SIZE] as usize)
             }
             ServiceKind::Registry | ServiceKind::Kbd | ServiceKind::Tty | ServiceKind::VirtioBlk => Ok(()),
+            ServiceKind::Timeserver => Ok(()),
         }
     }
 }
@@ -160,6 +164,7 @@ pub fn launch_service(ctx: &InitContext<'_>, service: &ServiceSpec, index: usize
     tokens[TOKEN_REGISTRY] = ctx.registry_send;
     tokens[TOKEN_PROC_CAP] = derive_proc_cap(ctx.boot.root_token)?;
     tokens[TOKEN_SPACE] = 0;
+    tokens[TOKEN_CLOCK] = ctx.boot.clock_token;
     fill_default_endpoints(ctx.boot.root_token, &mut tokens)?;
 
     service.kind.configure_tokens(

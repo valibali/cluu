@@ -90,3 +90,124 @@ pub extern "C" fn __cluu_init() {
     crate::allocator::init();
     crate::fd_table::init_stdio();
 }
+
+// -------------------------------------------------------------------------
+// newlib compatibility shims (non-underscore + reentrant forms)
+// -------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+    _open(path, flags, mode)
+}
+
+#[no_mangle]
+pub extern "C" fn close(fd: c_int) -> c_int {
+    _close(fd)
+}
+
+#[no_mangle]
+pub extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
+    _read(fd, buf, count)
+}
+
+#[no_mangle]
+pub extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
+    _write(fd, buf, count)
+}
+
+#[no_mangle]
+pub extern "C" fn lseek(fd: c_int, offset: off_t, whence: c_int) -> off_t {
+    _lseek(fd, offset, whence)
+}
+
+#[no_mangle]
+pub extern "C" fn fstat(fd: c_int, st: *mut stat::Stat) -> c_int {
+    _fstat(fd, st)
+}
+
+#[no_mangle]
+pub extern "C" fn stat(path: *const c_char, st: *mut stat::Stat) -> c_int {
+    _stat(path, st)
+}
+
+#[no_mangle]
+pub extern "C" fn isatty(fd: c_int) -> c_int {
+    _isatty(fd)
+}
+
+#[no_mangle]
+pub extern "C" fn getpid() -> pid_t {
+    _getpid()
+}
+
+#[no_mangle]
+pub extern "C" fn kill(pid: pid_t, sig: c_int) -> c_int {
+    _kill(pid, sig)
+}
+
+#[no_mangle]
+pub extern "C" fn sbrk(increment: isize) -> *mut c_void {
+    _sbrk(increment)
+}
+
+// Reentrant forms used by newlib
+
+#[no_mangle]
+pub extern "C" fn _open_r(_r: *mut c_void, path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+    _open(path, flags, mode)
+}
+
+#[no_mangle]
+pub extern "C" fn _close_r(_r: *mut c_void, fd: c_int) -> c_int {
+    _close(fd)
+}
+
+#[no_mangle]
+pub extern "C" fn _read_r(_r: *mut c_void, fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
+    _read(fd, buf, count)
+}
+
+#[no_mangle]
+pub extern "C" fn _write_r(
+    _r: *mut c_void,
+    fd: c_int,
+    buf: *const c_void,
+    count: size_t,
+) -> ssize_t {
+    _write(fd, buf, count)
+}
+
+#[no_mangle]
+pub extern "C" fn _lseek_r(_r: *mut c_void, fd: c_int, offset: off_t, whence: c_int) -> off_t {
+    _lseek(fd, offset, whence)
+}
+
+#[no_mangle]
+pub extern "C" fn _fstat_r(_r: *mut c_void, fd: c_int, st: *mut stat::Stat) -> c_int {
+    _fstat(fd, st)
+}
+
+#[no_mangle]
+pub extern "C" fn _stat_r(_r: *mut c_void, path: *const c_char, st: *mut stat::Stat) -> c_int {
+    _stat(path, st)
+}
+
+#[no_mangle]
+pub extern "C" fn _isatty_r(_r: *mut c_void, fd: c_int) -> c_int {
+    _isatty(fd)
+}
+
+#[no_mangle]
+pub extern "C" fn _getpid_r(_r: *mut c_void) -> pid_t {
+    _getpid()
+}
+
+#[no_mangle]
+pub extern "C" fn _kill_r(_r: *mut c_void, pid: pid_t, sig: c_int) -> c_int {
+    _kill(pid, sig)
+}
+
+#[no_mangle]
+pub extern "C" fn _sbrk_r(_r: *mut c_void, increment: isize) -> *mut c_void {
+    _sbrk(increment)
+}

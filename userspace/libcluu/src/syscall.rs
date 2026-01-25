@@ -82,6 +82,9 @@ pub enum InvokeOp {
     // Memory translation
     VirtToPhys = 58,
     PmmAllocLarge = 59,
+
+    // Clock/time
+    ClockNow = 60,
 }
 
 /// Page mapping flags for space_map.
@@ -893,6 +896,13 @@ pub fn pmm_alloc_large(space_token: usize) -> Result<u64> {
     // Uses sys_invoke(space_token, InvokeOp::PmmAllocLarge, 0,0,0,0)
     // Return physical address.
     let r = unsafe { invoke(space_token, InvokeOp::PmmAllocLarge, 0, 0, 0, 0) }?;
+    Ok(r as u64)
+}
+
+/// Query a monotonic clock value (TSC-based).
+#[inline]
+pub fn clock_now(clock_token: usize) -> Result<u64> {
+    let r = unsafe { invoke(clock_token, InvokeOp::ClockNow, 0, 0, 0, 0) }?;
     Ok(r as u64)
 }
 

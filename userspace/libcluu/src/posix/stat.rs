@@ -1,7 +1,7 @@
 // File status syscall stubs.
 
 use super::{c_char, c_int, mode_t, off_t, time_t};
-use crate::errno::{set_errno, EBADF, EINVAL, ENOSYS};
+use crate::errno::{set_errno, EBADF, EINVAL, ENOENT};
 use crate::fd_table::{FdCaps, FD_TABLE};
 
 /// Stat structure (simplified, matches newlib expectations).
@@ -114,8 +114,8 @@ pub extern "C" fn _fstat(fd: c_int, st: *mut Stat) -> c_int {
         return -1;
     }
 
-    let table = FD_TABLE.lock();
-    let entry = match table.get(fd) {
+    let mut table = FD_TABLE.lock();
+    let entry = match table.get_mut(fd) {
         Some(e) => e,
         None => {
             set_errno(EBADF);
@@ -125,9 +125,23 @@ pub extern "C" fn _fstat(fd: c_int, st: *mut Stat) -> c_int {
 
     let stat = if entry.caps.contains(FdCaps::IS_TTY) {
         Stat::char_device()
+    } else if let Some(remote_fd) = entry.remote_fd {
+        let vfs_client = crate::fs::client::VfsClient::new(entry.endpoint, entry.client_id);
+        let vfs_file = crate::fs::client::VfsFile {
+            fd: remote_fd,
+            size: 0,
+        };
+        match vfs_client.fstat(vfs_file) {
+            Ok(info) => {
+                entry.file_size = Some(info.size);
+                entry.file_mode = Some(info.mode);
+                let mut st = Stat::regular_file(info.size as u64);
+                st.st_mode = info.mode as mode_t;
+                st
+            }
+            Err(_) => Stat::regular_file(0),
+        }
     } else {
-        // For files, we'd need to query VFS for size
-        // For now, return a basic regular file stat
         Stat::regular_file(0)
     };
 
@@ -152,10 +166,55 @@ pub extern "C" fn _stat(_path: *const c_char, st: *mut Stat) -> c_int {
         return -1;
     }
 
-    // TODO: Query VFS for file info
-    // For now, just return ENOSYS
-    set_errno(ENOSYS);
-    -1
+    if _path.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    let path_str = unsafe {
+        let mut len = 0;
+        let mut p = _path;
+        while *p != 0 {
+            len += 1;
+            p = p.add(1);
+        }
+        match core::str::from_utf8(core::slice::from_raw_parts(_path as *const u8, len)) {
+            Ok(s) => s,
+            Err(_) => {
+                set_errno(EINVAL);
+                return -1;
+            }
+        }
+    };
+
+    let vfs_endpoint = match crate::registry::lookup_service("vfs:main") {
+        Some(ep) => ep,
+        None => {
+            set_errno(ENOENT);
+            return -1;
+        }
+    };
+    let client_id = crate::registry::control_endpoint();
+    if client_id == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    let vfs_client = crate::fs::client::VfsClient::new(vfs_endpoint, client_id);
+    match vfs_client.stat(path_str) {
+        Ok(info) => {
+            let mut stat = Stat::regular_file(info.size as u64);
+            stat.st_mode = info.mode as mode_t;
+            unsafe {
+                *st = stat;
+            }
+            0
+        }
+        Err(e) => {
+            set_errno(crate::errno::from_cluu_error(e));
+            -1
+        }
+    }
 }
 
 /// Check if file descriptor is a terminal.

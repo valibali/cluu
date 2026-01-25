@@ -115,6 +115,24 @@ This directory contains example userspace programs demonstrating how to use the 
 
 ---
 
+### 3. c_hello - C/Newlib Integration
+
+**Location**: `userspace/c_hello/`
+**Purpose**: Validates newlib headers, stdio, malloc, and VFS file I/O
+
+**Features Demonstrated:**
+- `printf()` output via TTY
+- `malloc()`/`free()` using `_sbrk`
+- `stat()` and `read()` via VFS
+- `usleep()` via timeserver
+
+**Build**:
+```
+cargo xtask build-c hello userspace/c_hello/hello.c
+```
+
+---
+
 ## Building Examples
 
 ### Prerequisites

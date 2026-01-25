@@ -38,6 +38,12 @@ pub const VFS_READ_GRANT: u32 = 0x202;
 pub const VFS_READDIR: u32 = 0x203;
 /// Map ELF segments into a target address space.
 pub const VFS_MAP_ELF: u32 = 0x204;
+/// Write data to a file descriptor.
+pub const VFS_WRITE: u32 = 0x205;
+/// Stat a path.
+pub const VFS_STAT: u32 = 0x206;
+/// Stat an open file descriptor.
+pub const VFS_FSTAT: u32 = 0x207;
 
 /// Structured enum for protocol routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +53,9 @@ pub enum VfsOp {
     ReadGrant,
     Readdir,
     MapElf,
+    Write,
+    Stat,
+    Fstat,
 }
 
 impl VfsOp {
@@ -57,6 +66,9 @@ impl VfsOp {
             VFS_READ_GRANT => Some(Self::ReadGrant),
             VFS_READDIR => Some(Self::Readdir),
             VFS_MAP_ELF => Some(Self::MapElf),
+            VFS_WRITE => Some(Self::Write),
+            VFS_STAT => Some(Self::Stat),
+            VFS_FSTAT => Some(Self::Fstat),
             _ => None,
         }
     }

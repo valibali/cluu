@@ -10,6 +10,7 @@ pub const BOOT_INFO_ADDR: usize = 0x7fe0_0000;
 #[repr(C)]
 pub struct BootInfo {
     pub root_token: usize,
+    pub clock_token: usize,
     pub initrd_phys: u64,
     pub initrd_size: u64,
     pub fb_phys: u64,
@@ -30,6 +31,11 @@ pub fn boot_info() -> &'static BootInfo {
 /// Root token handle supplied by the kernel.
 pub fn root_token_handle() -> usize {
     boot_info().root_token
+}
+
+/// Clock token handle supplied by the kernel.
+pub fn clock_token_handle() -> usize {
+    boot_info().clock_token
 }
 
 /// Universal process info address - same for all processes.
@@ -66,7 +72,8 @@ pub const TOKEN_STDLOG: usize = 3;
 pub const TOKEN_REGISTRY: usize = 4;
 pub const TOKEN_PROC_CAP: usize = 5;
 pub const TOKEN_SPACE: usize = 6;
-// Services use indices 7+ for their specific needs
+pub const TOKEN_CLOCK: usize = 7;
+// Services use indices 8+ for their specific needs
 
 // Well-known param indices for console service
 pub const PARAM_FB_BASE: usize = 0;

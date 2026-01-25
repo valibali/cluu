@@ -1,65 +1,68 @@
 /*
- * CLUU C Hello World
+ * CLUU C integration test
  *
- * A simple test program to verify the C toolchain works.
- * This uses the POSIX syscall stubs provided by libcluu.
+ * Verifies newlib headers, stdio, malloc, and VFS-backed file I/O.
  */
 
-/* For now, we use minimal headers since newlib may not be installed */
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
-/* Syscall stubs provided by libcluu_syscalls */
-extern int _write(int fd, const void *buf, unsigned long count);
-extern void _exit(int status);
-extern int _getpid(void);
+static void dump_file(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("open('%s') failed\n", path);
+        return;
+    }
 
-/* Simple string length function */
-static unsigned long strlen(const char *s) {
-    unsigned long len = 0;
-    while (*s++) len++;
-    return len;
+    char buf[128];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        printf("read('%s'): %s\n", path, buf);
+    } else {
+        printf("read('%s') returned %ld\n", path, (long)n);
+    }
+    close(fd);
 }
 
-/* Print a string to stdout */
-static void print(const char *s) {
-    _write(1, s, strlen(s));
-}
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
 
-/* Print a number (simple implementation) */
-static void print_num(int n) {
-    char buf[16];
-    int i = 0;
-    int neg = 0;
-    
-    if (n < 0) {
-        neg = 1;
-        n = -n;
-    }
-    
-    do {
-        buf[i++] = '0' + (n % 10);
-        n /= 10;
-    } while (n > 0);
-    
-    if (neg) {
-        buf[i++] = '-';
-    }
-    
-    /* Reverse and print */
-    while (i > 0) {
-        char c = buf[--i];
-        _write(1, &c, 1);
-    }
-}
+    printf("Hello from C on CLUU!\n");
+    printf("PID: %d\n", getpid());
 
-/* Debug syscall to kernel log */
-extern void debug_print(const char *msg);
+    char *buf = malloc(64);
+    if (buf) {
+        strcpy(buf, "malloc/free OK");
+        printf("%s\n", buf);
+        free(buf);
+    }
 
-int main(void) {
-    print("Hello from C on CLUU!\n");
-    print("PID: ");
-    print_num(_getpid());
-    print("\n");
-    print("C runtime is working!\n");
-    
+    struct stat st;
+    if (stat("/dev/initrd/bin/hello", &st) == 0) {
+        printf("stat: size=%ld mode=%o\n", (long)st.st_size, st.st_mode);
+    } else {
+        printf("stat failed\n");
+    }
+
+    dump_file("/dev/initrd/bin/hello");
+
+    int wfd = open("/proc/uptime", O_WRONLY);
+    if (wfd >= 0) {
+        const char *msg = "write-test\n";
+        ssize_t written = write(wfd, msg, strlen(msg));
+        printf("write('/proc/uptime') -> %ld\n", (long)written);
+        close(wfd);
+    } else {
+        printf("open('/proc/uptime', O_WRONLY) failed\n");
+    }
+
+    usleep(5000);
+    printf("sleep/usleep OK\n");
     return 0;
 }

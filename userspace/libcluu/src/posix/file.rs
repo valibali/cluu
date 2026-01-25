@@ -1,11 +1,12 @@
 //! File I/O syscall stubs.
 
 use super::{c_char, c_int, c_void, mode_t, off_t, size_t, ssize_t};
-use crate::errno::{return_error, set_errno, EBADF, EINVAL, ENOENT, ENOSYS, ESPIPE};
+use crate::errno::{from_cluu_error, return_error, set_errno, EBADF, EINVAL, ENOENT, ENOSYS, ESPIPE};
 use crate::fd_table::{FdCaps, FdEntry, FD_TABLE};
 use crate::ipc::{TTY_READ_LABEL, TTY_WRITE_LABEL};
 use crate::types::Message;
 use core::slice;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 // Open flags (matching Linux values)
 pub const O_RDONLY: c_int = 0;
@@ -20,6 +21,10 @@ pub const O_APPEND: c_int = 0o2000;
 pub const SEEK_SET: c_int = 0;
 pub const SEEK_CUR: c_int = 1;
 pub const SEEK_END: c_int = 2;
+
+const GRANT_BUF_BASE: usize = 0x5000_0000;
+const GRANT_BUF_SIZE: usize = 64 * 1024;
+static GRANT_BUF_READY: AtomicBool = AtomicBool::new(false);
 
 /// Open a file.
 ///
@@ -78,7 +83,12 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, _mode: mode_t) -> c_i
             let readable = (flags & O_WRONLY) == 0;
             let writable = (flags & (O_WRONLY | O_RDWR)) != 0;
 
-            let entry = FdEntry::file(vfs_endpoint, vfs_file.fd, client_id, readable, writable);
+            let mut entry =
+                FdEntry::file(vfs_endpoint, vfs_file.fd, client_id, readable, writable);
+            entry.file_size = Some(vfs_file.size);
+            if (flags & O_APPEND) != 0 {
+                entry.position = vfs_file.size as u64;
+            }
             let fd = FD_TABLE.lock().insert(entry);
             fd
         }
@@ -153,10 +163,7 @@ pub extern "C" fn _read(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
         // TTY read via IPC
         read_tty(entry.endpoint, buffer)
     } else if let Some(_remote_fd) = entry.remote_fd {
-        // VFS file read - for now use grant-based read
-        // TODO: implement proper VFS read with position tracking
-        set_errno(ENOSYS);
-        -1
+        read_vfs(fd, &entry, buffer)
     } else {
         set_errno(EBADF);
         -1
@@ -200,9 +207,7 @@ pub extern "C" fn _write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_
         // TTY write via IPC
         write_tty(entry.endpoint, buffer)
     } else if let Some(_remote_fd) = entry.remote_fd {
-        // VFS file write - not implemented yet
-        set_errno(ENOSYS);
-        -1
+        write_vfs(fd, &entry, buffer)
     } else {
         set_errno(EBADF);
         -1
@@ -234,8 +239,6 @@ pub extern "C" fn _lseek(fd: c_int, offset: off_t, whence: c_int) -> off_t {
         return -1;
     }
 
-    // For now, just track position locally
-    // TODO: Get actual file size for SEEK_END
     let new_pos = match whence {
         SEEK_SET => offset as u64,
         SEEK_CUR => {
@@ -246,9 +249,21 @@ pub extern "C" fn _lseek(fd: c_int, offset: off_t, whence: c_int) -> off_t {
             }
         }
         SEEK_END => {
-            // Would need file size - for now just use current position
-            set_errno(ENOSYS);
-            return -1;
+            let size = match entry.file_size {
+                Some(size) => size as u64,
+                None => match vfs_fstat(entry) {
+                    Some(size) => size as u64,
+                    None => {
+                        set_errno(ENOSYS);
+                        return -1;
+                    }
+                },
+            };
+            if offset < 0 {
+                size.saturating_sub((-offset) as u64)
+            } else {
+                size.saturating_add(offset as u64)
+            }
         }
         _ => {
             set_errno(EINVAL);
@@ -290,6 +305,148 @@ fn write_tty(endpoint: usize, buffer: &[u8]) -> ssize_t {
     match crate::ipc::send_with_retry(endpoint, TTY_WRITE_LABEL, buffer) {
         Ok(()) => buffer.len() as ssize_t,
         Err(e) => crate::errno::return_error(e),
+    }
+}
+
+fn ensure_grant_buffer() -> Option<usize> {
+    if GRANT_BUF_READY.load(Ordering::SeqCst) {
+        return Some(GRANT_BUF_BASE);
+    }
+
+    let space_token = crate::boot::space_token();
+    if space_token == 0 {
+        set_errno(ENOSYS);
+        return None;
+    }
+
+    let pages = (GRANT_BUF_SIZE + crate::mem::PAGE_SIZE - 1) / crate::mem::PAGE_SIZE;
+    match crate::syscall::space_map_range(
+        space_token,
+        GRANT_BUF_BASE,
+        0,
+        0x03,
+        pages,
+        0,
+    ) {
+        Ok(_) | Err(crate::Error::AlreadyExists) => {
+            GRANT_BUF_READY.store(true, Ordering::SeqCst);
+            Some(GRANT_BUF_BASE)
+        }
+        Err(e) => {
+            set_errno(from_cluu_error(e));
+            None
+        }
+    }
+}
+
+fn read_vfs(fd: c_int, entry: &FdEntry, buffer: &mut [u8]) -> ssize_t {
+    let base = match ensure_grant_buffer() {
+        Some(base) => base,
+        None => return -1,
+    };
+
+    let remote_fd = match entry.remote_fd {
+        Some(fd) => fd,
+        None => {
+            set_errno(EBADF);
+            return -1;
+        }
+    };
+
+    let vfs_client = crate::fs::client::VfsClient::new(entry.endpoint, entry.client_id);
+    let mut total = 0usize;
+    let mut offset = entry.position as usize;
+
+    while total < buffer.len() {
+        let chunk = (buffer.len() - total).min(GRANT_BUF_SIZE);
+        let vfs_file = crate::fs::client::VfsFile {
+            fd: remote_fd,
+            size: 0,
+        };
+        let grant = match vfs_client.read_grant(
+            vfs_file,
+            offset,
+            chunk,
+            crate::boot::space_token(),
+            base,
+        ) {
+            Ok(grant) => grant,
+            Err(e) => return return_error(e) as ssize_t,
+        };
+
+        if grant.len == 0 {
+            break;
+        }
+
+        let src = unsafe {
+            slice::from_raw_parts((grant.base + grant.offset) as *const u8, grant.len)
+        };
+        let to_copy = src.len().min(buffer.len() - total);
+        buffer[total..total + to_copy].copy_from_slice(&src[..to_copy]);
+        total += to_copy;
+        offset += to_copy;
+
+        if to_copy < chunk {
+            break;
+        }
+    }
+
+    if total > 0 {
+        let mut table = FD_TABLE.lock();
+        if let Some(current) = table.get_mut(fd) {
+            current.position = current.position.saturating_add(total as u64);
+        }
+    }
+
+    total as ssize_t
+}
+
+fn write_vfs(fd: c_int, entry: &FdEntry, buffer: &[u8]) -> ssize_t {
+    let remote_fd = match entry.remote_fd {
+        Some(fd) => fd,
+        None => {
+            set_errno(EBADF);
+            return -1;
+        }
+    };
+
+    let vfs_client = crate::fs::client::VfsClient::new(entry.endpoint, entry.client_id);
+    let vfs_file = crate::fs::client::VfsFile {
+        fd: remote_fd,
+        size: 0,
+    };
+
+    let offset = entry.position as usize;
+    let written = match vfs_client.write(vfs_file, offset, buffer) {
+        Ok(bytes) => bytes,
+        Err(e) => return return_error(e) as ssize_t,
+    };
+
+    if written > 0 {
+        let mut table = FD_TABLE.lock();
+        if let Some(current) = table.get_mut(fd) {
+            current.position = current.position.saturating_add(written as u64);
+            current.file_size = Some(current.file_size.unwrap_or(0).max(current.position as usize));
+        }
+    }
+
+    written as ssize_t
+}
+
+fn vfs_fstat(entry: &mut FdEntry) -> Option<usize> {
+    let remote_fd = entry.remote_fd?;
+    let vfs_client = crate::fs::client::VfsClient::new(entry.endpoint, entry.client_id);
+    let vfs_file = crate::fs::client::VfsFile {
+        fd: remote_fd,
+        size: 0,
+    };
+    match vfs_client.fstat(vfs_file) {
+        Ok(stat) => {
+            entry.file_size = Some(stat.size);
+            entry.file_mode = Some(stat.mode);
+            Some(stat.size)
+        }
+        Err(_) => None,
     }
 }
 

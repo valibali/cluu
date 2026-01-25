@@ -453,6 +453,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::PortOut32 => invoke_port_out32(&token, args),
         InvokeOp::VirtToPhys => invoke_virt_to_phys(&token, args),
         InvokeOp::PmmAllocLarge => invoke_pmm_alloc_large(&token, args),
+        InvokeOp::ClockNow => invoke_clock_now(&token, args),
     }
 }
 
@@ -1618,6 +1619,21 @@ fn invoke_pmm_alloc_large(token: &Token, _args: SyscallArgs) -> SyscallResult {
     // 2MB contiguous, 2MB-aligned physical block
     let phys = pmm::alloc_large_frame().ok_or(Error::OutOfMemory)?;
     Ok(phys as usize)
+}
+
+fn invoke_clock_now(token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::READ) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let tsc = unsafe {
+        let mut tsc: u64;
+        core::arch::asm!("rdtsc", out("rax") tsc, out("rdx") _, options(nomem, nostack));
+        tsc
+    };
+    Ok(tsc as usize)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
