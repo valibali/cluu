@@ -51,6 +51,18 @@ extern "C" {
 /// 0x08    8     Kernel RSP (loaded during syscall)
 /// 0x10    8     Current thread pointer (future)
 /// 0x18    8     CPU ID (future)
+/// 0x20    8     Need-resched flag (set by request_resched)
+/// 0x28    8     Last syscall number (debug)
+/// 0x30    8     Last syscall RIP (debug)
+/// 0x38    8     Last syscall RSP (debug)
+/// 0x40    8     Last syscall RBX (debug)
+/// 0x48    8     Last syscall arg1 (debug)
+/// 0x50    8     Last syscall arg2 (debug)
+/// 0x58    8     Last syscall arg3 (debug)
+/// 0x60    8     Last syscall arg4 (debug)
+/// 0x68    8     Last syscall arg5 (debug)
+/// 0x70    8     Last syscall arg6 (debug)
+/// 0x78    8     Last RBX before return to user (debug)
 /// ```
 #[repr(C)]
 #[derive(Debug)]
@@ -66,6 +78,42 @@ pub struct PerCpuData {
 
     /// CPU ID (for future use in SMP)
     pub cpu_id: u64,
+
+    /// Flag to request rescheduling on syscall exit
+    pub need_resched: u64,
+
+    /// Debug: last syscall number
+    pub last_sysno: u64,
+
+    /// Debug: last syscall RIP (user)
+    pub last_rip: u64,
+
+    /// Debug: last syscall RSP (user)
+    pub last_rsp: u64,
+
+    /// Debug: last syscall RBX (user)
+    pub last_rbx: u64,
+
+    /// Debug: last syscall arg1 (user RDI)
+    pub last_arg1: u64,
+
+    /// Debug: last syscall arg2 (user RSI)
+    pub last_arg2: u64,
+
+    /// Debug: last syscall arg3 (user RDX)
+    pub last_arg3: u64,
+
+    /// Debug: last syscall arg4 (user R10)
+    pub last_arg4: u64,
+
+    /// Debug: last syscall arg5 (user R8)
+    pub last_arg5: u64,
+
+    /// Debug: last syscall arg6 (user R9)
+    pub last_arg6: u64,
+
+    /// Debug: last RBX value right before returning to user
+    pub last_rbx_ret: u64,
 }
 
 impl PerCpuData {
@@ -76,6 +124,18 @@ impl PerCpuData {
             kernel_rsp: 0,
             current_thread: 0,
             cpu_id: 0,
+            need_resched: 0,
+            last_sysno: 0,
+            last_rip: 0,
+            last_rsp: 0,
+            last_rbx: 0,
+            last_arg1: 0,
+            last_arg2: 0,
+            last_arg3: 0,
+            last_arg4: 0,
+            last_arg5: 0,
+            last_arg6: 0,
+            last_rbx_ret: 0,
         }
     }
 
@@ -93,6 +153,28 @@ impl Default for PerCpuData {
         Self::new()
     }
 }
+
+// Compile-time layout verification (must match syscall_entry.asm offsets)
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert!(offset_of!(PerCpuData, user_rsp) == 0x00);
+    assert!(offset_of!(PerCpuData, kernel_rsp) == 0x08);
+    assert!(offset_of!(PerCpuData, need_resched) == 0x20);
+    assert!(offset_of!(PerCpuData, last_sysno) == 0x28);
+    assert!(offset_of!(PerCpuData, last_rip) == 0x30);
+    assert!(offset_of!(PerCpuData, last_rsp) == 0x38);
+    assert!(offset_of!(PerCpuData, last_rbx) == 0x40);
+    assert!(offset_of!(PerCpuData, last_arg1) == 0x48);
+    assert!(offset_of!(PerCpuData, last_arg2) == 0x50);
+    assert!(offset_of!(PerCpuData, last_arg3) == 0x58);
+    assert!(offset_of!(PerCpuData, last_arg4) == 0x60);
+    assert!(offset_of!(PerCpuData, last_arg5) == 0x68);
+    assert!(offset_of!(PerCpuData, last_arg6) == 0x70);
+    assert!(offset_of!(PerCpuData, last_rbx_ret) == 0x78);
+    assert!(size_of::<PerCpuData>() == 0x80);
+    assert!(align_of::<PerCpuData>() == 8);
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Syscall Dispatcher (called from assembly)
@@ -146,6 +228,7 @@ extern "C" fn syscall_dispatch(
         Err(e) => e.to_errno(),
     }
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Initialization
@@ -347,9 +430,12 @@ mod tests {
         unsafe {
             let user_rsp_offset = &data.user_rsp as *const _ as usize - base;
             let kernel_rsp_offset = &data.kernel_rsp as *const _ as usize - base;
+            let need_resched_offset = &data.need_resched as *const _ as usize - base;
 
             assert_eq!(user_rsp_offset, 0x00);
             assert_eq!(kernel_rsp_offset, 0x08);
+            assert_eq!(need_resched_offset, 0x20);
+            assert_eq!(core::mem::size_of::<PerCpuData>(), 0x28);
         }
     }
 }

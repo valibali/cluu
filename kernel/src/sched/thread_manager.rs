@@ -746,7 +746,7 @@ unsafe fn setup_kernel_stack() {
     extern "C" {
         static BSP_STACK: u8;
     }
-    let kernel_stack_top = (&raw const BSP_STACK as u64) + (64 * 1024);
+    let kernel_stack_top = ((&raw const BSP_STACK as u64) + (64 * 1024)) & !0xF;
 
     // Update PerCpuData.kernel_rsp (for SYSCALL path)
     crate::architecture::x86_64::syscall::set_current_thread_kernel_stack(kernel_stack_top);

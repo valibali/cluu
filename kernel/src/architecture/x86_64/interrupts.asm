@@ -9,9 +9,13 @@
 section .text
 
 global timer_interrupt_entry
+global gpf_interrupt_entry
+global pf_interrupt_entry
 extern timer_interrupt_dispatch
 extern timer_interrupt_ack
 extern timer_interrupt_should_schedule
+extern gpf_with_regs
+extern pf_with_regs
 
 %define CONTEXT_RAX     0x00
 %define CONTEXT_RBX     0x08
@@ -35,6 +39,176 @@ extern timer_interrupt_should_schedule
 %define CONTEXT_SS      0x98
 %define CONTEXT_CR3     0xA0
 %define CONTEXT_SIZE    0xA8
+
+%define GPF_RAX     0x00
+%define GPF_RBX     0x08
+%define GPF_RCX     0x10
+%define GPF_RDX     0x18
+%define GPF_RSI     0x20
+%define GPF_RDI     0x28
+%define GPF_RBP     0x30
+%define GPF_R8      0x38
+%define GPF_R9      0x40
+%define GPF_R10     0x48
+%define GPF_R11     0x50
+%define GPF_R12     0x58
+%define GPF_R13     0x60
+%define GPF_R14     0x68
+%define GPF_R15     0x70
+%define GPF_ERROR   0x78
+%define GPF_RIP     0x80
+%define GPF_CS      0x88
+%define GPF_RFLAGS  0x90
+%define GPF_RSP     0x98
+%define GPF_SS      0xA0
+%define GPF_SIZE    0xA8
+
+%define PF_RAX     0x00
+%define PF_RBX     0x08
+%define PF_RCX     0x10
+%define PF_RDX     0x18
+%define PF_RSI     0x20
+%define PF_RDI     0x28
+%define PF_RBP     0x30
+%define PF_R8      0x38
+%define PF_R9      0x40
+%define PF_R10     0x48
+%define PF_R11     0x50
+%define PF_R12     0x58
+%define PF_R13     0x60
+%define PF_R14     0x68
+%define PF_R15     0x70
+%define PF_ERROR   0x78
+%define PF_RIP     0x80
+%define PF_CS      0x88
+%define PF_RFLAGS  0x90
+%define PF_RSP     0x98
+%define PF_SS      0xA0
+%define PF_SIZE    0xA8
+
+; ─────────────────────────────────────────────────────────────────────────
+; General Protection Fault entry (saves full GPR set for debug)
+; ─────────────────────────────────────────────────────────────────────────
+gpf_interrupt_entry:
+    ; Swap GS to kernel if fault came from userspace
+    mov r10, [rsp + 16]     ; CS
+    test r10b, 0x3
+    jz .gpf_no_swapgs
+    swapgs
+.gpf_no_swapgs:
+    sub rsp, GPF_SIZE
+
+    mov [rsp + GPF_RAX], rax
+    mov [rsp + GPF_RBX], rbx
+    mov [rsp + GPF_RCX], rcx
+    mov [rsp + GPF_RDX], rdx
+    mov [rsp + GPF_RSI], rsi
+    mov [rsp + GPF_RDI], rdi
+    mov [rsp + GPF_RBP], rbp
+    mov [rsp + GPF_R8], r8
+    mov [rsp + GPF_R9], r9
+    mov [rsp + GPF_R10], r10
+    mov [rsp + GPF_R11], r11
+    mov [rsp + GPF_R12], r12
+    mov [rsp + GPF_R13], r13
+    mov [rsp + GPF_R14], r14
+    mov [rsp + GPF_R15], r15
+
+    ; Original exception frame is above this struct.
+    lea r11, [rsp + GPF_SIZE]
+    mov r10, [r11]          ; error code
+    mov [rsp + GPF_ERROR], r10
+    mov r10, [r11 + 8]      ; RIP
+    mov [rsp + GPF_RIP], r10
+    mov r10, [r11 + 16]     ; CS
+    mov [rsp + GPF_CS], r10
+    mov r10, [r11 + 24]     ; RFLAGS
+    mov [rsp + GPF_RFLAGS], r10
+
+    ; If CPL=3, user RSP/SS are present on stack.
+    mov r10, [r11 + 16]
+    test r10b, 0x3
+    jz .gpf_no_user
+    mov r10, [r11 + 32]     ; RSP
+    mov [rsp + GPF_RSP], r10
+    mov r10, [r11 + 40]     ; SS
+    mov [rsp + GPF_SS], r10
+    jmp .gpf_have_user
+.gpf_no_user:
+    mov qword [rsp + GPF_RSP], 0
+    mov qword [rsp + GPF_SS], 0
+.gpf_have_user:
+
+    mov rdi, rsp
+    sub rsp, 8              ; align for call
+    call gpf_with_regs
+    add rsp, 8
+    cli
+.gpf_halt:
+    hlt
+    jmp .gpf_halt
+
+; ─────────────────────────────────────────────────────────────────────────
+; Page Fault entry (saves full GPR set for debug)
+; ─────────────────────────────────────────────────────────────────────────
+pf_interrupt_entry:
+    ; Swap GS to kernel if fault came from userspace
+    mov r10, [rsp + 16]     ; CS
+    test r10b, 0x3
+    jz .pf_no_swapgs
+    swapgs
+.pf_no_swapgs:
+    sub rsp, PF_SIZE
+
+    mov [rsp + PF_RAX], rax
+    mov [rsp + PF_RBX], rbx
+    mov [rsp + PF_RCX], rcx
+    mov [rsp + PF_RDX], rdx
+    mov [rsp + PF_RSI], rsi
+    mov [rsp + PF_RDI], rdi
+    mov [rsp + PF_RBP], rbp
+    mov [rsp + PF_R8], r8
+    mov [rsp + PF_R9], r9
+    mov [rsp + PF_R10], r10
+    mov [rsp + PF_R11], r11
+    mov [rsp + PF_R12], r12
+    mov [rsp + PF_R13], r13
+    mov [rsp + PF_R14], r14
+    mov [rsp + PF_R15], r15
+
+    ; Original exception frame is above this struct.
+    lea r11, [rsp + PF_SIZE]
+    mov r10, [r11]          ; error code
+    mov [rsp + PF_ERROR], r10
+    mov r10, [r11 + 8]      ; RIP
+    mov [rsp + PF_RIP], r10
+    mov r10, [r11 + 16]     ; CS
+    mov [rsp + PF_CS], r10
+    mov r10, [r11 + 24]     ; RFLAGS
+    mov [rsp + PF_RFLAGS], r10
+
+    ; If CPL=3, user RSP/SS are present on stack.
+    mov r10, [r11 + 16]
+    test r10b, 0x3
+    jz .pf_no_user
+    mov r10, [r11 + 32]     ; RSP
+    mov [rsp + PF_RSP], r10
+    mov r10, [r11 + 40]     ; SS
+    mov [rsp + PF_SS], r10
+    jmp .pf_have_user
+.pf_no_user:
+    mov qword [rsp + PF_RSP], 0
+    mov qword [rsp + PF_SS], 0
+.pf_have_user:
+
+    mov rdi, rsp
+    sub rsp, 8              ; align for call
+    call pf_with_regs
+    add rsp, 8
+    cli
+.pf_halt:
+    hlt
+    jmp .pf_halt
 
 ; ─────────────────────────────────────────────────────────────────────────
 ; Timer interrupt entry (IRQ 0)

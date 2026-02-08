@@ -4,26 +4,41 @@ use super::{c_char, c_int, mode_t, off_t, time_t};
 use crate::errno::{set_errno, EBADF, EINVAL, ENOENT};
 use crate::fd_table::{FdCaps, FD_TABLE};
 
-/// Stat structure (simplified, matches newlib expectations).
+/// Stat structure matching newlib's `struct stat` layout for x86_64-cluu-elf.
+///
+/// Field types must match newlib's sys/_types.h exactly:
+///   dev_t = short (i16), ino_t = unsigned short (u16),
+///   nlink_t = unsigned short (u16), uid_t/gid_t = unsigned short (u16),
+///   off_t = long (i64), time_t = long (i64),
+///   blksize_t = long (i64), blkcnt_t = long (i64).
+///
+/// Field order: timespec fields come BEFORE blksize/blocks (non-SVR4 path),
+/// followed by st_spare4[2].
+///
+/// Total size: 104 bytes.
 #[repr(C)]
 pub struct Stat {
-    pub st_dev: u64,
-    pub st_ino: u64,
+    pub st_dev: i16,
+    pub st_ino: u16,
     pub st_mode: mode_t,
-    pub st_nlink: u32,
-    pub st_uid: u32,
-    pub st_gid: u32,
-    pub st_rdev: u64,
+    pub st_nlink: u16,
+    pub st_uid: u16,
+    pub st_gid: u16,
+    pub st_rdev: i16,
     pub st_size: off_t,
-    pub st_blksize: i64,
-    pub st_blocks: i64,
     pub st_atime: time_t,
     pub st_atime_nsec: i64,
     pub st_mtime: time_t,
     pub st_mtime_nsec: i64,
     pub st_ctime: time_t,
     pub st_ctime_nsec: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    pub st_spare4: [i64; 2],
 }
+
+// Compile-time check: Stat must be exactly 104 bytes to match newlib's struct stat.
+const _: () = assert!(core::mem::size_of::<Stat>() == 104);
 
 // File type bits for st_mode
 pub const S_IFMT: mode_t = 0o170000; // File type mask
@@ -61,14 +76,15 @@ impl Stat {
             st_gid: 0,
             st_rdev: 0,
             st_size: 0,
-            st_blksize: 512,
-            st_blocks: 0,
             st_atime: 0,
             st_atime_nsec: 0,
             st_mtime: 0,
             st_mtime_nsec: 0,
             st_ctime: 0,
             st_ctime_nsec: 0,
+            st_blksize: 512,
+            st_blocks: 0,
+            st_spare4: [0; 2],
         }
     }
 
@@ -86,6 +102,7 @@ impl Stat {
         s.st_mode = S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
         s.st_size = size as off_t;
         s.st_blocks = ((size + 511) / 512) as i64;
+        s.st_blksize = 512;
         s
     }
 

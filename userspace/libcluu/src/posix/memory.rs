@@ -4,8 +4,9 @@ use super::c_void;
 use crate::errno::{set_errno, ENOMEM};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// Start of dynamic heap region.
-const HEAP_START: usize = 0x0080_0000;
+/// Start of dynamic heap region for newlib's _sbrk.
+/// Region 0x0080_0000 - 0x0100_0000 is reserved for the Rust allocator.
+const HEAP_START: usize = 0x0100_0000;
 
 /// Maximum heap address.
 const HEAP_MAX: usize = 0x4000_0000;

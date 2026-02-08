@@ -19,6 +19,17 @@ extern schedule_and_switch
 %define PERCPU_USER_RSP        0x00
 %define PERCPU_KERNEL_RSP      0x08
 %define PERCPU_NEED_RESCHED    0x20   ; u64 flag set by request_resched()
+%define PERCPU_LAST_SYSNO      0x28
+%define PERCPU_LAST_RIP        0x30
+%define PERCPU_LAST_RSP        0x38
+%define PERCPU_LAST_RBX        0x40
+%define PERCPU_LAST_ARG1       0x48
+%define PERCPU_LAST_ARG2       0x50
+%define PERCPU_LAST_ARG3       0x58
+%define PERCPU_LAST_ARG4       0x60
+%define PERCPU_LAST_ARG5       0x68
+%define PERCPU_LAST_ARG6       0x70
+%define PERCPU_LAST_RBX_RET    0x78
 
 ; Full context structure (for slow path)
 %define CONTEXT_RAX     0x00
@@ -62,8 +73,20 @@ syscall_entry:
     ; ─────────────────────────────────────────────────────────────────────────
     swapgs                              ; Switch GS to kernel PerCpuData
 
+    ; Debug trace: capture last syscall context (user values)
+    mov [gs:PERCPU_LAST_SYSNO], rax     ; Syscall number
+    mov [gs:PERCPU_LAST_RIP], rcx       ; User RIP (from SYSCALL)
+    mov [gs:PERCPU_LAST_RSP], rsp       ; User RSP (still in RSP)
+    mov [gs:PERCPU_LAST_RBX], rbx       ; User RBX
+    mov [gs:PERCPU_LAST_ARG1], rdi      ; Arg1 (RDI)
+    mov [gs:PERCPU_LAST_ARG2], rsi      ; Arg2 (RSI)
+    mov [gs:PERCPU_LAST_ARG3], rdx      ; Arg3 (RDX)
+    mov [gs:PERCPU_LAST_ARG4], r10      ; Arg4 (R10)
+    mov [gs:PERCPU_LAST_ARG5], r8       ; Arg5 (R8)
+    mov [gs:PERCPU_LAST_ARG6], r9       ; Arg6 (R9)
+
     mov [gs:PERCPU_USER_RSP], rsp       ; Save user RSP
-    mov rsp, [gs:PERCPU_KERNEL_RSP]     ; Load kernel RSP
+    mov rsp, [gs:PERCPU_KERNEL_RSP]     ; Load kernel RSP (already aligned)
 
     ; ─────────────────────────────────────────────────────────────────────────
     ; Fast path: Save only what SYSCALL clobbers + syscall number
@@ -114,9 +137,7 @@ syscall_entry:
     ; ─────────────────────────────────────────────────────────────────────────
     ; Call syscall handler
     ; ─────────────────────────────────────────────────────────────────────────
-    sti                                 ; Enable interrupts during syscall
     call syscall_dispatch
-    cli                                 ; Disable interrupts for return path
 
     add rsp, 8                          ; Pop arg6 from stack
 
@@ -139,7 +160,10 @@ syscall_entry:
     pop r13
     pop r12
     pop rbp
-    pop rbx
+    ; Restore user RBX directly from PerCpuData capture, then drop saved slot
+    mov rbx, [gs:PERCPU_LAST_RBX]
+    add rsp, 8                          ; Drop saved RBX slot
+    mov [gs:PERCPU_LAST_RBX_RET], rbx
 
     ; Skip saved syscall number (we don't need it)
     add rsp, 8
@@ -211,6 +235,9 @@ syscall_entry:
     pop r12
     pop rbp
     pop rbx
+    ; Restore user RBX directly from PerCpuData capture
+    mov rbx, [gs:PERCPU_LAST_RBX]
+    mov [gs:PERCPU_LAST_RBX_RET], rbx
 
     ; Now stack has: syscall_num, r11 (rflags), rcx (rip)
     ; And we have the callee-saved values in registers

@@ -39,6 +39,8 @@ use x86_64::VirtAddr;
 
 extern "C" {
     fn timer_interrupt_entry();
+    fn gpf_interrupt_entry();
+    fn pf_interrupt_entry();
 }
 
 /// Send End of Interrupt (EOI) signal to PIC
@@ -78,8 +80,14 @@ lazy_static! {
         idt.invalid_tss.set_handler_fn(invalid_tss_handler);
         idt.segment_not_present.set_handler_fn(segment_not_present_handler);
         idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
-        idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
-        idt.page_fault.set_handler_fn(page_fault_handler);
+        unsafe {
+            idt.general_protection_fault
+                .set_handler_addr(VirtAddr::new(gpf_interrupt_entry as *const () as u64));
+        }
+        unsafe {
+            idt.page_fault
+                .set_handler_addr(VirtAddr::new(pf_interrupt_entry as *const () as u64));
+        }
         idt.x87_floating_point.set_handler_fn(x87_floating_point_handler);
         idt.alignment_check.set_handler_fn(alignment_check_handler);
         idt.machine_check.set_handler_fn(machine_check_handler);
@@ -306,6 +314,11 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     let rsp = stack_frame.stack_pointer.as_u64();
     let ss = stack_frame.stack_segment.0 as u64;
     let is_userspace = (cs & 3) == 3;
+    let rflags = stack_frame.cpu_flags.bits();
+    let cr2 = match x86_64::registers::control::Cr2::read() {
+        Ok(addr) => addr.as_u64(),
+        Err(_) => 0,
+    };
 
     // Use IRQ-safe logging
     klibcluu::log_hex(klibcluu::LogLevel::Warn, "GPF: error_code=", error_code);
@@ -313,6 +326,8 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     klibcluu::log_hex(klibcluu::LogLevel::Warn, "GPF: CS=", cs);
     klibcluu::log_hex(klibcluu::LogLevel::Warn, "GPF: RSP=", rsp);
     klibcluu::log_hex(klibcluu::LogLevel::Warn, "GPF: SS=", ss);
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "GPF: RFLAGS=", rflags);
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "GPF: CR2=", cr2);
 
     if is_userspace {
         klibcluu::warn("GPF: Fault in USERSPACE (Ring 3)\n");
@@ -323,11 +338,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     // Decode error code
     let selector_index = (error_code >> 3) & 0x1FFF;
     if selector_index != 0 {
-        klibcluu::log_hex(
-            klibcluu::LogLevel::Warn,
-            "GPF: Selector index=",
-            selector_index,
-        );
+        klibcluu::log_hex(klibcluu::LogLevel::Warn, "GPF: Selector index=", selector_index);
     }
 
     let table = (error_code >> 1) & 0x3;
@@ -344,19 +355,113 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     }
 }
 
+#[repr(C)]
+struct GpfDebugFrame {
+    rax: u64,
+    rbx: u64,
+    rcx: u64,
+    rdx: u64,
+    rsi: u64,
+    rdi: u64,
+    rbp: u64,
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    error_code: u64,
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+    rsp: u64,
+    ss: u64,
+}
+
+#[no_mangle]
+extern "C" fn gpf_with_regs(frame: *const GpfDebugFrame) -> ! {
+    use klibcluu::uart::COM2;
+
+    #[inline(always)]
+    fn uart_hex(prefix: &str, value: u64) {
+        COM2.write_str(prefix);
+        COM2.write_str("0x");
+        let mut started = false;
+        for shift in (0..16).rev() {
+            let nibble = (value >> (shift * 4)) & 0xF;
+            if nibble != 0 || started || shift == 0 {
+                started = true;
+                let c = if nibble < 10 {
+                    b'0' + (nibble as u8)
+                } else {
+                    b'a' + ((nibble - 10) as u8)
+                };
+                COM2.write_byte(c);
+            }
+        }
+        COM2.write_str("\n");
+    }
+
+    let f = unsafe { &*frame };
+    COM2.write_str("[WARN]  GENERAL_PROTECTION_FAULT (regs)\n");
+    uart_hex("GPF: error_code=", f.error_code);
+    uart_hex("GPF: RIP=", f.rip);
+    uart_hex("GPF: CS=", f.cs);
+    uart_hex("GPF: RFLAGS=", f.rflags);
+    uart_hex("GPF: RSP=", f.rsp);
+    uart_hex("GPF: SS=", f.ss);
+    uart_hex("GPF: RBX=", f.rbx);
+    uart_hex("GPF: RBP=", f.rbp);
+    uart_hex("GPF: RDI=", f.rdi);
+    uart_hex("GPF: RSI=", f.rsi);
+    uart_hex("GPF: R12=", f.r12);
+    uart_hex("GPF: R13=", f.r13);
+    uart_hex("GPF: R14=", f.r14);
+    uart_hex("GPF: R15=", f.r15);
+
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
+    use klibcluu::uart::COM2;
+
+    #[inline(always)]
+    fn uart_hex(prefix: &str, value: u64) {
+        COM2.write_str(prefix);
+        COM2.write_str("0x");
+        let mut started = false;
+        for shift in (0..16).rev() {
+            let nibble = (value >> (shift * 4)) & 0xF;
+            if nibble != 0 || started || shift == 0 {
+                started = true;
+                let c = if nibble < 10 {
+                    b'0' + (nibble as u8)
+                } else {
+                    b'a' + ((nibble - 10) as u8)
+                };
+                COM2.write_byte(c);
+            }
+        }
+        COM2.write_str("\n");
+    }
 
     // Read the faulting address from CR2
     // CR2 always contains the faulting address; if invalid, system is in bad state
     let fault_addr = match Cr2::read() {
         Ok(addr) => addr,
         Err(_) => {
-            klibcluu::warn("Failed to read CR2 register (invalid fault address)");
-            panic!("Invalid page fault address in CR2");
+            COM2.write_str("[WARN]  Failed to read CR2 register (invalid fault address)\n");
+            loop {
+                x86_64::instructions::hlt();
+            }
         }
     };
 
@@ -377,39 +482,35 @@ extern "x86-interrupt" fn page_fault_handler(
         error_code.contains(x86_64::structures::idt::PageFaultErrorCode::INSTRUCTION_FETCH);
 
     // Log page fault with detailed information
-    klibcluu::warn("PAGE_FAULT");
-    klibcluu::log_hex(
-        klibcluu::LogLevel::Warn,
-        "PF: Fault address (CR2)=",
-        fault_addr.as_u64(),
-    );
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: RIP=", rip);
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: CS=", cs);
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: RSP=", rsp);
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: SS=", ss);
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "PF: RFLAGS=", rflags);
+    COM2.write_str("[WARN]  PAGE_FAULT\n");
+    uart_hex("PF: Fault address (CR2)=", fault_addr.as_u64());
+    uart_hex("PF: RIP=", rip);
+    uart_hex("PF: CS=", cs);
+    uart_hex("PF: RSP=", rsp);
+    uart_hex("PF: SS=", ss);
+    uart_hex("PF: RFLAGS=", rflags);
 
     // Log error code details
     if is_user {
-        klibcluu::warn("PF: Fault in USERSPACE (Ring 3)");
+        COM2.write_str("[WARN]  PF: Fault in USERSPACE (Ring 3)\n");
     } else {
-        klibcluu::warn("PF: Fault in KERNEL (Ring 0)");
+        COM2.write_str("[WARN]  PF: Fault in KERNEL (Ring 0)\n");
     }
 
     if is_present {
-        klibcluu::warn("PF: Protection violation (page is present)");
+        COM2.write_str("[WARN]  PF: Protection violation (page is present)\n");
     } else {
-        klibcluu::warn("PF: Page not present");
+        COM2.write_str("[WARN]  PF: Page not present\n");
     }
 
     if is_write {
-        klibcluu::warn("PF: Caused by WRITE");
+        COM2.write_str("[WARN]  PF: Caused by WRITE\n");
     } else {
-        klibcluu::warn("PF: Caused by READ");
+        COM2.write_str("[WARN]  PF: Caused by READ\n");
     }
 
     if is_instruction_fetch {
-        klibcluu::warn("PF: Caused by INSTRUCTION FETCH");
+        COM2.write_str("[WARN]  PF: Caused by INSTRUCTION FETCH\n");
     }
 
     // If page is not present and fault is from user mode, try lazy allocation
@@ -425,6 +526,139 @@ extern "x86-interrupt" fn page_fault_handler(
 
     // Unrecoverable page fault
     klibcluu::warn("[PF] UNRECOVERABLE - halting");
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+#[repr(C)]
+struct PfDebugFrame {
+    rax: u64,
+    rbx: u64,
+    rcx: u64,
+    rdx: u64,
+    rsi: u64,
+    rdi: u64,
+    rbp: u64,
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    error_code: u64,
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+    rsp: u64,
+    ss: u64,
+}
+
+#[no_mangle]
+extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> ! {
+    use klibcluu::uart::COM2;
+    use x86_64::registers::control::Cr2;
+    use core::arch::asm;
+
+    #[inline(always)]
+    fn uart_hex(prefix: &str, value: u64) {
+        COM2.write_str(prefix);
+        COM2.write_str("0x");
+        let mut started = false;
+        for shift in (0..16).rev() {
+            let nibble = (value >> (shift * 4)) & 0xF;
+            if nibble != 0 || started || shift == 0 {
+                started = true;
+                let c = if nibble < 10 {
+                    b'0' + (nibble as u8)
+                } else {
+                    b'a' + ((nibble - 10) as u8)
+                };
+                COM2.write_byte(c);
+            }
+        }
+        COM2.write_str("\n");
+    }
+
+    let f = unsafe { &*frame };
+    let cr2 = match Cr2::read() {
+        Ok(addr) => addr.as_u64(),
+        Err(_) => 0,
+    };
+
+    #[inline(always)]
+    fn read_gs_u64(offset: u64) -> u64 {
+        let value: u64;
+        unsafe {
+            asm!(
+                "mov {0}, qword ptr gs:[{1}]",
+                out(reg) value,
+                in(reg) offset,
+                options(nostack, preserves_flags)
+            );
+        }
+        value
+    }
+
+    COM2.write_str("[WARN]  PAGE_FAULT (regs)\n");
+    uart_hex("PF: Fault address (CR2)=", cr2);
+    uart_hex("PF: Error code=", f.error_code);
+    uart_hex("PF: RIP=", f.rip);
+    uart_hex("PF: CS=", f.cs);
+    uart_hex("PF: RFLAGS=", f.rflags);
+    uart_hex("PF: RSP=", f.rsp);
+    uart_hex("PF: SS=", f.ss);
+    uart_hex("PF: RBX=", f.rbx);
+    uart_hex("PF: RBP=", f.rbp);
+    uart_hex("PF: RDI=", f.rdi);
+    uart_hex("PF: RSI=", f.rsi);
+    uart_hex("PF: R12=", f.r12);
+    uart_hex("PF: R13=", f.r13);
+    uart_hex("PF: R14=", f.r14);
+    uart_hex("PF: R15=", f.r15);
+
+    // If fault came from userspace, dump last syscall info from PerCpuData
+    if (f.cs & 0x3) == 0x3 {
+        const PERCPU_LAST_SYSNO: u64 = 0x28;
+        const PERCPU_LAST_RIP: u64 = 0x30;
+        const PERCPU_LAST_RSP: u64 = 0x38;
+        const PERCPU_LAST_RBX: u64 = 0x40;
+        const PERCPU_LAST_ARG1: u64 = 0x48;
+        const PERCPU_LAST_ARG2: u64 = 0x50;
+        const PERCPU_LAST_ARG3: u64 = 0x58;
+        const PERCPU_LAST_ARG4: u64 = 0x60;
+        const PERCPU_LAST_ARG5: u64 = 0x68;
+        const PERCPU_LAST_ARG6: u64 = 0x70;
+        const PERCPU_LAST_RBX_RET: u64 = 0x78;
+
+        let last_sysno = read_gs_u64(PERCPU_LAST_SYSNO);
+        let last_rip = read_gs_u64(PERCPU_LAST_RIP);
+        let last_rsp = read_gs_u64(PERCPU_LAST_RSP);
+        let last_rbx = read_gs_u64(PERCPU_LAST_RBX);
+        let last_arg1 = read_gs_u64(PERCPU_LAST_ARG1);
+        let last_arg2 = read_gs_u64(PERCPU_LAST_ARG2);
+        let last_arg3 = read_gs_u64(PERCPU_LAST_ARG3);
+        let last_arg4 = read_gs_u64(PERCPU_LAST_ARG4);
+        let last_arg5 = read_gs_u64(PERCPU_LAST_ARG5);
+        let last_arg6 = read_gs_u64(PERCPU_LAST_ARG6);
+        let last_rbx_ret = read_gs_u64(PERCPU_LAST_RBX_RET);
+
+        COM2.write_str("[DBG] Last syscall (from PerCpuData)\n");
+        uart_hex("PF: last_sysno=", last_sysno);
+        uart_hex("PF: last_rip=", last_rip);
+        uart_hex("PF: last_rsp=", last_rsp);
+        uart_hex("PF: last_rbx=", last_rbx);
+        uart_hex("PF: last_arg1=", last_arg1);
+        uart_hex("PF: last_arg2=", last_arg2);
+        uart_hex("PF: last_arg3=", last_arg3);
+        uart_hex("PF: last_arg4=", last_arg4);
+        uart_hex("PF: last_arg5=", last_arg5);
+        uart_hex("PF: last_arg6=", last_arg6);
+        uart_hex("PF: last_rbx_ret=", last_rbx_ret);
+    }
+
     loop {
         x86_64::instructions::hlt();
     }

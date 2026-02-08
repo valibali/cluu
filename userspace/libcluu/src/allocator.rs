@@ -35,8 +35,9 @@ const PAGE_SIZE: usize = 4096;
 /// Start of dynamic userspace heap region (must match kernel's USER_HEAP_START).
 const USER_HEAP_START: usize = 0x0080_0000;
 
-/// Maximum heap address (must match kernel's USER_HEAP_MAX).
-const USER_HEAP_MAX: usize = 0x4000_0000;
+/// Maximum heap address for the Rust allocator.
+/// The region 0x0100_0000 and above is reserved for newlib's _sbrk.
+const USER_HEAP_MAX: usize = 0x0100_0000;
 
 /// Static bootstrap heap for early allocations before boot tokens are ready.
 #[repr(align(4096))]

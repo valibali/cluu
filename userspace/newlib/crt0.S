@@ -22,6 +22,8 @@
 .type _start, @function
 
 _start:
+    /* Align stack to 16 bytes before any call (SysV ABI). */
+    sub     $8, %rsp
     /* Clear BSS section to zero */
     lea     __bss_start(%rip), %rdi     /* destination = BSS start */
     lea     __bss_end(%rip), %rcx       /* end address */
