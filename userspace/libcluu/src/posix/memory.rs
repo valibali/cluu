@@ -5,8 +5,9 @@ use crate::errno::{set_errno, ENOMEM};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Start of dynamic heap region for newlib's _sbrk.
-/// Region 0x0080_0000 - 0x0100_0000 is reserved for the Rust allocator.
-const HEAP_START: usize = 0x0100_0000;
+/// In c-runtime mode, the Rust allocator delegates to malloc, so _sbrk
+/// owns the full heap range starting at USER_HEAP_START.
+const HEAP_START: usize = 0x0080_0000;
 
 /// Maximum heap address.
 const HEAP_MAX: usize = 0x4000_0000;
@@ -15,7 +16,7 @@ const HEAP_MAX: usize = 0x4000_0000;
 const PAGE_SIZE: usize = 4096;
 
 /// Current heap break (end of allocated heap).
-static HEAP_BRK: AtomicUsize = AtomicUsize::new(HEAP_START);
+static HEAP_BRK: AtomicUsize = AtomicUsize::new(0x0080_0000);
 
 /// Expand or contract the heap.
 ///
