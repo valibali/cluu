@@ -355,27 +355,35 @@ timer_interrupt_entry:
     mov rax, [r10 + CONTEXT_SS]
     mov rbx, [r10 + CONTEXT_RSP]
     mov rcx, [r10 + CONTEXT_RFLAGS]
+    ; Sanitize RFLAGS: clear TF/IOPL/NT/RF/AC, ensure IF + reserved bit 1
+    and rcx, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  rcx, (1 << 9) | (1 << 1)
     mov rdx, [r10 + CONTEXT_CS]
     mov rsi, [r10 + CONTEXT_RIP]
 
     push rax
     push rbx
-    push rcx
+    push rcx                                ; RFLAGS (sanitized)
     push rdx
     push rsi
     swapgs                                  ; Kernel->user: restore user GS
     jmp .restore_regs
 
 .build_kernel_frame:
-    ; Switch to the target kernel stack (saved RSP) before iretq.
+    ; x86_64 IRETQ always pops 5 values (RIP, CS, RFLAGS, RSP, SS)
+    ; even for same-privilege returns. Build the full frame.
+    ; Use the saved RSP as the post-IRETQ stack pointer.
     mov rsp, [r10 + CONTEXT_RSP]
-    mov rcx, [r10 + CONTEXT_RFLAGS]
-    mov rdx, [r10 + CONTEXT_CS]
-    mov rsi, [r10 + CONTEXT_RIP]
 
+    push qword [r10 + CONTEXT_SS]
+    push qword [r10 + CONTEXT_RSP]
+    ; Sanitize RFLAGS for kernel return too (ensure IF is set)
+    mov rcx, [r10 + CONTEXT_RFLAGS]
+    and rcx, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  rcx, (1 << 9) | (1 << 1)
     push rcx
-    push rdx
-    push rsi
+    push qword [r10 + CONTEXT_CS]
+    push qword [r10 + CONTEXT_RIP]
 
 .restore_regs:
     ; ALWAYS set userspace segment registers (DS, ES, FS)

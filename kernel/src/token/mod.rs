@@ -262,9 +262,8 @@ impl Token {
     ///
     /// Returns true if signature is valid (token hasn't been tampered with).
     pub fn verify(&self, secret: &[u8; 32]) -> bool {
-        let _ = secret;
-        // TODO: Re-enable signature verification once token derive path is stable.
-        true
+        let expected = Signature::compute(self.scope, self.role, self.issuer, self.expire_at, secret);
+        self.signature.constant_time_eq(&expected)
     }
 
     /// Check if token is expired

@@ -173,6 +173,16 @@ syscall_entry:
     pop rcx                             ; User RIP -> RCX
 
     ; ─────────────────────────────────────────────────────────────────────────
+    ; SECURITY: Sanitize RFLAGS before returning to userspace
+    ; Clear: TF (bit 8, single-step), NT (bit 14, nested task),
+    ;        IOPL (bits 12-13), AC (bit 18, alignment check),
+    ;        RF (bit 16, resume flag)
+    ; Ensure: IF (bit 9) and reserved bit 1 are set
+    ; ─────────────────────────────────────────────────────────────────────────
+    and r11, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  r11, (1 << 9) | (1 << 1)        ; IF + reserved bit 1
+
+    ; ─────────────────────────────────────────────────────────────────────────
     ; SECURITY: Validate RCX is canonical user address before SYSRET
     ; Intel SYSRET bug: if RCX is non-canonical, #GP fires at CPL 0 after
     ; partial instruction execution, potentially allowing privilege escalation.
@@ -258,8 +268,10 @@ syscall_entry:
     mov [rsp + CONTEXT_RIP], rcx
     mov qword [rsp + CONTEXT_RCX], 0    ; RCX is clobbered by syscall
 
-    ; Get saved RFLAGS
+    ; Get saved RFLAGS and sanitize before storing
     mov r11, [rsp + CONTEXT_SIZE + 8]   ; R11 (RFLAGS) was pushed second
+    and r11, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  r11, (1 << 9) | (1 << 1)        ; IF + reserved bit 1
     mov [rsp + CONTEXT_RFLAGS], r11
     mov qword [rsp + CONTEXT_R11], 0    ; R11 is clobbered by syscall
 
@@ -336,15 +348,17 @@ syscall_entry:
     mov rax, [r10 + CONTEXT_CR3]
     mov cr3, rax
 
-    ; Build IRETQ frame on stack
+    ; Build IRETQ frame on stack (sanitize RFLAGS from context)
     mov rax, [r10 + CONTEXT_SS]
     mov rbx, [r10 + CONTEXT_RSP]
     mov rcx, [r10 + CONTEXT_RFLAGS]
+    and rcx, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  rcx, (1 << 9) | (1 << 1)        ; IF + reserved bit 1
     mov rdx, [r10 + CONTEXT_CS]
 
     push rax                            ; SS
     push rbx                            ; RSP
-    push rcx                            ; RFLAGS
+    push rcx                            ; RFLAGS (sanitized)
     push rdx                            ; CS
     push rsi                            ; RIP
 

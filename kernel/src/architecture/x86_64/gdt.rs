@@ -30,12 +30,16 @@ use x86_64::{
 };
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+pub const GPF_IST_INDEX: u16 = 1;
+pub const PF_IST_INDEX: u16 = 2;
 
-/// Double fault stack - 4KB aligned
+/// IST stacks - 4KB each, 16-byte aligned
 #[repr(C, align(16))]
-struct DoubleStack([u8; 4096]);
+struct IstStack([u8; 4096]);
 
-static mut DOUBLE_FAULT_STACK: DoubleStack = DoubleStack([0; 4096]);
+static mut DOUBLE_FAULT_STACK: IstStack = IstStack([0; 4096]);
+static mut GPF_STACK: IstStack = IstStack([0; 4096]);
+static mut PF_STACK: IstStack = IstStack([0; 4096]);
 
 /// TSS - initialized at runtime
 static mut TSS: MaybeUninit<TaskStateSegment> = MaybeUninit::uninit();
@@ -78,9 +82,13 @@ pub fn init() {
 
     unsafe {
         // Initialize TSS first
-        let stack_end = &raw const DOUBLE_FAULT_STACK as u64 + 4096;
+        let df_stack_end = &raw const DOUBLE_FAULT_STACK as u64 + 4096;
+        let gpf_stack_end = &raw const GPF_STACK as u64 + 4096;
+        let pf_stack_end = &raw const PF_STACK as u64 + 4096;
         let mut tss = TaskStateSegment::new();
-        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(stack_end);
+        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(df_stack_end);
+        tss.interrupt_stack_table[GPF_IST_INDEX as usize] = VirtAddr::new(gpf_stack_end);
+        tss.interrupt_stack_table[PF_IST_INDEX as usize] = VirtAddr::new(pf_stack_end);
         TSS.write(tss);
 
         // Now initialize GDT with reference to TSS

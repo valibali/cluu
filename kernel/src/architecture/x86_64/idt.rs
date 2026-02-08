@@ -82,11 +82,13 @@ lazy_static! {
         idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
         unsafe {
             idt.general_protection_fault
-                .set_handler_addr(VirtAddr::new(gpf_interrupt_entry as *const () as u64));
+                .set_handler_addr(VirtAddr::new(gpf_interrupt_entry as *const () as u64))
+                .set_stack_index(crate::architecture::x86_64::gdt::GPF_IST_INDEX);
         }
         unsafe {
             idt.page_fault
-                .set_handler_addr(VirtAddr::new(pf_interrupt_entry as *const () as u64));
+                .set_handler_addr(VirtAddr::new(pf_interrupt_entry as *const () as u64))
+                .set_stack_index(crate::architecture::x86_64::gdt::PF_IST_INDEX);
         }
         idt.x87_floating_point.set_handler_fn(x87_floating_point_handler);
         idt.alignment_check.set_handler_fn(alignment_check_handler);
@@ -676,7 +678,10 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
     let addr = fault_addr.as_u64();
 
     // Check if fault is in a demand-pageable region
-    let is_stack_region = (layout::USER_STACK_BOTTOM..layout::USER_STACK_TOP).contains(&addr);
+    // Guard page: bottom page of stack region is NOT demand-paged.
+    // Stack overflow into the guard page triggers an unrecoverable fault.
+    let stack_guard_end = layout::USER_STACK_BOTTOM + 0x1000;
+    let is_stack_region = (stack_guard_end..layout::USER_STACK_TOP).contains(&addr);
     let is_heap_region = (layout::USER_HEAP_START..layout::USER_HEAP_MAX).contains(&addr);
 
     if !is_stack_region && !is_heap_region {
@@ -782,14 +787,9 @@ extern "C" fn timer_interrupt_dispatch(
         crate::sched::ThreadManager::tick();
     }
 
-    // Only preempt in NORMALMODE
-    let next_ctx = if crate::sched::ThreadManager::is_normal_mode() {
-        unsafe { crate::sched::ThreadManager::schedule_and_switch(current_ctx_ptr) }
-    } else {
-        core::ptr::null()
-    };
-
-    // Send EOI to interrupt controller
+    // Send EOI BEFORE scheduling — schedule_and_switch may call
+    // idle_until_runnable() which does sti;hlt. If EOI hasn't been sent,
+    // the timer IRQ stays masked and the system deadlocks.
     if crate::architecture::x86_64::apic::is_enabled() {
         crate::architecture::x86_64::apic::eoi();
     } else {
@@ -798,7 +798,12 @@ extern "C" fn timer_interrupt_dispatch(
         }
     }
 
-    next_ctx
+    // Only preempt in NORMALMODE
+    if crate::sched::ThreadManager::is_normal_mode() {
+        unsafe { crate::sched::ThreadManager::schedule_and_switch(current_ctx_ptr) }
+    } else {
+        core::ptr::null()
+    }
 }
 
 #[no_mangle]

@@ -799,6 +799,9 @@ unsafe fn enter_userspace(context: &Context) -> ! {
         "push {2}",      // RFLAGS
         "push {3}",      // CS
         "push {4}",      // RIP
+        // Swap GS to user mode — kernel GS base moves to KernelGsBase MSR
+        // so the next syscall's swapgs will load it correctly.
+        "swapgs",
         "iretq",
         in(reg) context.ss,
         in(reg) context.rsp,
