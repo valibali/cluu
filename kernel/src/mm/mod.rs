@@ -117,12 +117,12 @@ pub use vmm::PageTableManager;
 pub struct PmmPageAllocator;
 
 impl PageAllocator for PmmPageAllocator {
-    fn alloc(&mut self, _order: usize) -> Option<x86_64::PhysAddr> {
-        pmm::alloc_frame().map(x86_64::PhysAddr::new)
+    fn alloc(&mut self, order: usize) -> Option<x86_64::PhysAddr> {
+        pmm::alloc_order(order).map(x86_64::PhysAddr::new)
     }
 
-    fn free(&mut self, addr: x86_64::PhysAddr, _order: usize) {
-        pmm::free_frame(addr.as_u64());
+    fn free(&mut self, addr: x86_64::PhysAddr, order: usize) {
+        pmm::free_order(addr.as_u64(), order);
     }
 
     fn stats(&self) -> AllocationStats {
@@ -130,7 +130,7 @@ impl PageAllocator for PmmPageAllocator {
         AllocationStats {
             total_pages: total,
             free_pages: total.saturating_sub(used),
-            largest_free_order: 0,
+            largest_free_order: 9,
         }
     }
 }
@@ -211,6 +211,10 @@ pub unsafe fn init(boot_info: &dyn boot::BootInfoProvider) {
     unsafe {
         physmap::activate();
     }
+
+    // Step 6: Build buddy free lists (requires physmap)
+    klibcluu::info("Step 6: Building buddy allocator free lists...");
+    pmm::init_buddy();
 
     klibcluu::info("========================================");
     klibcluu::info("Memory Management Ready:");
