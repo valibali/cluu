@@ -89,6 +89,9 @@ pub mod fault;
 
 pub mod space_repository;
 
+// Capability-based frame accounting
+pub mod frame_registry;
+
 // Userspace physical memory mapping
 pub mod user_map;
 

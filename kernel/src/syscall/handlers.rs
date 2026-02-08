@@ -506,6 +506,11 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::VirtToPhys => invoke_virt_to_phys(&token, args),
         InvokeOp::PmmAllocLarge => invoke_pmm_alloc_large(&token, args),
         InvokeOp::ClockNow => invoke_clock_now(&token, args),
+
+        // Frame operations
+        InvokeOp::FrameAllocate => invoke_frame_allocate(&token, args),
+        InvokeOp::FrameFree => invoke_frame_free(token_handle, &token, args),
+        InvokeOp::FrameGetPhys => invoke_frame_get_phys(&token, args),
     }
 }
 
@@ -740,13 +745,14 @@ fn invoke_space_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
 
 fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     use crate::elf;
-    use crate::mm::{physmap, pmm, space_repository};
+    use crate::mm::{frame_registry, physmap, pmm, space_repository};
     use crate::syscall::userptr;
     use crate::token::{ObjectRef, ObjectType, Rights};
     use core::ptr::{copy_nonoverlapping, write_bytes};
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
     const MAP_DEVICE: u32 = 0x100;
+    const MAP_FRAME_TOKEN: u32 = 0x400;
 
     klibcluu::trace("invoke_space_map");
 
@@ -760,10 +766,6 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     let perms = args.arg5 as u32;
     let copy_len = args.arg6;
 
-    if copy_len > PAGE_SIZE {
-        return Err(Error::InvalidArgument);
-    }
-
     if virt_addr & 0xFFF != 0 {
         return Err(Error::InvalidArgument);
     }
@@ -771,6 +773,7 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     let writable = (perms & 0x02) != 0;
     let executable = (perms & 0x04) != 0;
     let map_device = (perms & MAP_DEVICE) != 0;
+    let map_frame_token = (perms & MAP_FRAME_TOKEN) != 0;
 
     let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
@@ -781,7 +784,25 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     };
 
-    let frame_phys = if map_device {
+    let frame_phys = if map_frame_token {
+        // Frame token path: arg6 = frame token handle
+        let frame_token_handle = crate::token::TokenHandle::from_raw(copy_len);
+        let frame_token =
+            crate::token::lookup_token(frame_token_handle).map_err(|_| Error::InvalidArgument)?;
+        if !frame_token.has_right(Rights::MAP) {
+            return Err(Error::PermissionDenied);
+        }
+        let frame_ref = crate::token::resolve_token_object(&frame_token, ObjectType::Frame)
+            .map_err(|_| Error::InvalidArgument)?;
+        let frame_id = if let ObjectRef::Frame(id) = frame_ref {
+            id
+        } else {
+            return Err(Error::InvalidArgument);
+        };
+        let phys = frame_registry::get_phys(frame_id).ok_or(Error::NotFound)?;
+        frame_registry::inc_map_count(frame_id);
+        phys
+    } else if map_device {
         if copy_len != 0 {
             return Err(Error::InvalidArgument);
         }
@@ -790,15 +811,19 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
         }
         data_ptr as u64
     } else {
+        if copy_len > PAGE_SIZE {
+            return Err(Error::InvalidArgument);
+        }
         pmm::alloc_frame().ok_or(Error::OutOfMemory)?
     };
-    let frame_virt = if map_device {
+
+    let frame_virt = if map_device || map_frame_token {
         core::ptr::null_mut()
     } else {
         unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 }
     };
 
-    if !map_device {
+    if !map_device && !map_frame_token {
         if copy_len > 0 {
             userptr::validate_user_buffer(data_ptr, copy_len)?;
             unsafe {
@@ -831,7 +856,7 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
 }
 
 fn invoke_space_unmap(token: &Token, args: SyscallArgs) -> SyscallResult {
-    use crate::mm::{pmm, space_repository};
+    use crate::mm::{frame_registry, pmm, space_repository};
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::SPACE_MAP) {
@@ -869,7 +894,13 @@ fn invoke_space_unmap(token: &Token, args: SyscallArgs) -> SyscallResult {
         for i in 0..num_pages {
             let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
             if let Ok(phys) = vmm.unmap(addr) {
-                pmm::free_frame(phys.as_u64());
+                let phys_addr = phys.as_u64();
+                // Check if this is a tracked frame (allocated via frame capabilities)
+                if let Some(frame_id) = frame_registry::lookup_by_phys(phys_addr) {
+                    frame_registry::dec_map_count(frame_id);
+                } else {
+                    pmm::free_frame(phys_addr);
+                }
                 unmapped += 1;
             }
         }
@@ -1778,6 +1809,110 @@ fn invoke_clock_now(token: &Token, _args: SyscallArgs) -> SyscallResult {
         tsc
     };
     Ok(tsc as usize)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Frame Operations
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Allocate a physical frame and return a frame token.
+///
+/// # Arguments
+/// - token: Space token (requires CREATE right, used to identify owner)
+/// - arg3: unused
+///
+/// # Returns
+/// - Ok(frame_token_handle): Token handle for the new frame
+///   The physical address is returned packed: upper 32 bits in arg4 style
+///   Actually we return frame_token in rax and caller can use FrameGetPhys.
+fn invoke_frame_allocate(token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::mm::frame_registry;
+    use crate::token::{
+        create_token, scope::OpaqueScope, FrameId, Issuer, ObjectRef, ObjectType, Rights, Timestamp,
+    };
+
+    if !token.has_right(Rights::CREATE) {
+        return Err(Error::PermissionDenied);
+    }
+
+    // Resolve space to get owner
+    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let (frame_id, _phys) = frame_registry::alloc_frame(space_id).ok_or(Error::OutOfMemory)?;
+
+    // Create a frame token with all rights
+    let obj_ref = ObjectRef::Frame(frame_id);
+    let scope = OpaqueScope::from_object_ref(&obj_ref, frame_id.as_u64());
+    let frame_token = create_token(
+        scope,
+        Rights::all(),
+        Issuer::Kernel,
+        Timestamp::NEVER,
+        obj_ref,
+    );
+
+    Ok(frame_token.as_usize())
+}
+
+/// Free a tracked frame. Requires DESTROY right and map_count == 0.
+///
+/// # Arguments
+/// - token: Frame token (requires DESTROY right)
+fn invoke_frame_free(token_handle: TokenHandle, token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::mm::frame_registry;
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::DESTROY) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let frame_ref = crate::token::resolve_token_object(token, ObjectType::Frame)
+        .map_err(|_| Error::InvalidArgument)?;
+    let frame_id = if let ObjectRef::Frame(id) = frame_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    frame_registry::free_frame(frame_id).map_err(|_| Error::InvalidState)?;
+
+    // Revoke the frame token
+    let _ = crate::token::revoke_token(token_handle);
+
+    Ok(0)
+}
+
+/// Get the physical address of a frame.
+///
+/// # Arguments
+/// - token: Frame token (requires READ right)
+///
+/// # Returns
+/// - Ok(phys_addr)
+fn invoke_frame_get_phys(token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::mm::frame_registry;
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::READ) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let frame_ref = crate::token::resolve_token_object(token, ObjectType::Frame)
+        .map_err(|_| Error::InvalidArgument)?;
+    let frame_id = if let ObjectRef::Frame(id) = frame_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let phys = frame_registry::get_phys(frame_id).ok_or(Error::NotFound)?;
+    Ok(phys as usize)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -96,6 +96,10 @@ impl OpaqueScope {
             ObjectRef::Clock => {
                 input[0] = 0x06;
             }
+            ObjectRef::Frame(id) => {
+                input[0] = 0x07;
+                input[8..16].copy_from_slice(&id.as_u64().to_le_bytes());
+            }
         }
 
         // Add nonce for uniqueness
@@ -154,6 +158,22 @@ pub enum ObjectRef {
     Reply(ReplyId),
     /// Clock/time source
     Clock,
+    /// Physical memory frame
+    Frame(FrameId),
+}
+
+/// Physical memory frame identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FrameId(pub u64);
+
+impl FrameId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 /// Reply capability identifier (for IPC call/reply)

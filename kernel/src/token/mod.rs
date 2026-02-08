@@ -47,7 +47,7 @@ pub mod signature;
 pub mod table;
 
 pub use rights::Rights;
-pub use scope::{AddressSpaceId, EndpointId, ObjectRef, OpaqueScope, ReplyId};
+pub use scope::{AddressSpaceId, EndpointId, FrameId, ObjectRef, OpaqueScope, ReplyId};
 pub use signature::Signature;
 pub use table::{
     count_tokens, count_tokens_for_object, create_token, init as init_token_table, lookup_token,
@@ -386,6 +386,11 @@ pub enum InvokeOp {
 
     // Clock/time
     ClockNow = 60,
+
+    // Frame operations
+    FrameAllocate = 70,
+    FrameFree = 71,
+    FrameGetPhys = 72,
 }
 
 impl InvokeOp {
@@ -419,6 +424,9 @@ impl InvokeOp {
             58 => Some(Self::VirtToPhys),
             59 => Some(Self::PmmAllocLarge),
             60 => Some(Self::ClockNow),
+            70 => Some(Self::FrameAllocate),
+            71 => Some(Self::FrameFree),
+            72 => Some(Self::FrameGetPhys),
             _ => None,
         }
     }
