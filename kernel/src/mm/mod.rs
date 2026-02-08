@@ -108,6 +108,30 @@ pub use space::{layout, AddressSpace, HeapRegion, MemoryRegion};
 pub use user_map::{map_phys_to_userspace, unmap_phys_from_userspace};
 pub use vmm::PageTableManager;
 
+/// PageAllocator adapter for the real PMM bitmap allocator.
+///
+/// Used when a `PageAllocator` trait object is needed for `PageTableManager`.
+pub struct PmmPageAllocator;
+
+impl PageAllocator for PmmPageAllocator {
+    fn alloc(&mut self, _order: usize) -> Option<x86_64::PhysAddr> {
+        pmm::alloc_frame().map(x86_64::PhysAddr::new)
+    }
+
+    fn free(&mut self, addr: x86_64::PhysAddr, _order: usize) {
+        pmm::free_frame(addr.as_u64());
+    }
+
+    fn stats(&self) -> AllocationStats {
+        let (used, total) = pmm::get_stats();
+        AllocationStats {
+            total_pages: total,
+            free_pages: total.saturating_sub(used),
+            largest_free_order: 0,
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // High-Level Memory Management Initialization
 // ═══════════════════════════════════════════════════════════════════════════

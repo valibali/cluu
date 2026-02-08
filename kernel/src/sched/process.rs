@@ -328,14 +328,34 @@ impl core::fmt::Debug for Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        // Process cleanup happens here when the process is destroyed
-        // The address_space Drop implementation will handle:
-        // - Unmapping all user pages
-        // - Freeing page tables
-        // - Returning physical frames to the allocator
+        // Only tear down page tables for user processes that have their own
+        // address space. Kernel processes share the kernel's page tables.
+        if self.process_type == ProcessType::Critical {
+            return;
+        }
 
-        // Note: We don't log here because this may run in IRQ context
-        // Use IRQ-safe logging if needed
+        // Don't tear down the kernel's own page table root
+        let pml4_phys = self.address_space.page_table_root;
+        let current_cr3 = {
+            use x86_64::registers::control::Cr3;
+            let (frame, _) = Cr3::read();
+            frame.start_address()
+        };
+
+        if pml4_phys == current_cr3 {
+            // This is the kernel's page table — don't free it
+            return;
+        }
+
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Trace,
+            "Process::drop: tearing down PID ",
+            self.id.as_usize() as u64,
+        );
+
+        unsafe {
+            crate::mm::vmm::teardown_user_pages(pml4_phys);
+        }
     }
 }
 

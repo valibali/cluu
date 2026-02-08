@@ -1021,6 +1021,119 @@ unsafe fn map_single_4k_page(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Page Table Teardown
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Tear down user-half page tables and free all associated physical memory.
+///
+/// Walks PML4 entries 0-255 (the user half), recursively frees:
+/// - All mapped 4KB frames (leaf PTEs)
+/// - All mapped 2MB huge page frames
+/// - All intermediate page table frames (PTs, PDs, PDPTs)
+/// - The PML4 frame itself
+///
+/// The kernel half (entries 256-511) is NOT touched — those are shared
+/// references to the kernel's page tables.
+///
+/// # Safety
+///
+/// - `pml4_phys` must point to a valid PML4 that is NOT currently loaded in CR3
+/// - Physmap must be active
+/// - No other CPU may be using this address space
+pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
+    let pml4_virt = super::physmap::phys_to_virt_u64(pml4_phys.as_u64());
+    let pml4 = &mut *(pml4_virt as *mut [u64; 512]);
+
+    let mut freed_frames: u64 = 0;
+    let mut freed_tables: u64 = 0;
+
+    // Only walk user half (entries 0-255)
+    for pml4_idx in 0..256 {
+        let pml4e = pml4[pml4_idx];
+        if pml4e & pte_flags::PRESENT == 0 {
+            continue;
+        }
+
+        let pdpt_phys = pml4e & !0xFFF;
+        let pdpt_virt = super::physmap::phys_to_virt_u64(pdpt_phys);
+        let pdpt = &mut *(pdpt_virt as *mut [u64; 512]);
+
+        for pdpt_idx in 0..512 {
+            let pdpte = pdpt[pdpt_idx];
+            if pdpte & pte_flags::PRESENT == 0 {
+                continue;
+            }
+
+            // 1GB huge page (unlikely but handle it)
+            if pdpte & pte_flags::HUGE != 0 {
+                // Can't free 1GB frames with current PMM, just skip
+                continue;
+            }
+
+            let pd_phys = pdpte & !0xFFF;
+            let pd_virt = super::physmap::phys_to_virt_u64(pd_phys);
+            let pd = &mut *(pd_virt as *mut [u64; 512]);
+
+            for pd_idx in 0..512 {
+                let pde = pd[pd_idx];
+                if pde & pte_flags::PRESENT == 0 {
+                    continue;
+                }
+
+                // 2MB huge page
+                if pde & pte_flags::HUGE != 0 {
+                    let frame_phys = pde & !0x1FFFFF; // 2MB aligned
+                    crate::mm::pmm::free_large_frame(frame_phys);
+                    freed_frames += 512; // 512 x 4KB equivalent
+                    continue;
+                }
+
+                // Regular PD entry → points to PT
+                let pt_phys = pde & !0xFFF;
+                let pt_virt = super::physmap::phys_to_virt_u64(pt_phys);
+                let pt = &mut *(pt_virt as *mut [u64; 512]);
+
+                for pt_idx in 0..512 {
+                    let pte = pt[pt_idx];
+                    if pte & pte_flags::PRESENT == 0 {
+                        continue;
+                    }
+
+                    let frame_phys = pte & !0xFFF;
+                    crate::mm::pmm::free_frame(frame_phys);
+                    freed_frames += 1;
+                }
+
+                // Free the PT frame
+                crate::mm::pmm::free_frame(pt_phys);
+                freed_tables += 1;
+            }
+
+            // Free the PD frame
+            crate::mm::pmm::free_frame(pd_phys);
+            freed_tables += 1;
+        }
+
+        // Free the PDPT frame
+        crate::mm::pmm::free_frame(pdpt_phys);
+        freed_tables += 1;
+    }
+
+    // Free the PML4 frame itself
+    crate::mm::pmm::free_frame(pml4_phys.as_u64());
+    freed_tables += 1;
+
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Trace,
+        "  teardown: freed ",
+        freed_frames,
+    );
+    klibcluu::trace(" user frames, ");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", freed_tables);
+    klibcluu::trace(" table frames");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Address Space Management Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 

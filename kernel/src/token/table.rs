@@ -433,6 +433,39 @@ pub fn revocation_generation() -> u64 {
     REVOCATION_GENERATION.load(Ordering::SeqCst)
 }
 
+/// Revoke all tokens that reference a specific kernel object.
+///
+/// Used during process cleanup to invalidate tokens referring to
+/// destroyed threads, address spaces, or endpoints.
+///
+/// Returns the number of tokens revoked.
+pub fn revoke_tokens_for_object(target: ObjectRef) -> usize {
+    let mut revoked = 0;
+
+    for shard_mutex in &TOKEN_TABLE_SHARDS {
+        let mut shard = shard_mutex.lock();
+
+        // Collect handles to revoke (can't modify while iterating)
+        let handles_to_revoke: alloc::vec::Vec<TokenHandle> = shard
+            .handles
+            .iter()
+            .filter(|(_, token)| shard.scopes.get(&token.scope).copied() == Some(target))
+            .map(|(handle, _)| *handle)
+            .collect();
+
+        for handle in handles_to_revoke {
+            shard.remove(handle);
+            revoked += 1;
+        }
+    }
+
+    if revoked > 0 {
+        REVOCATION_GENERATION.fetch_add(1, Ordering::SeqCst);
+    }
+
+    revoked
+}
+
 /// Get token count (sum across all shards)
 pub fn count_tokens() -> usize {
     TOKEN_TABLE_SHARDS

@@ -733,9 +733,56 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
 }
 
-fn invoke_space_unmap(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    klibcluu::warn("invoke_space_unmap not yet implemented");
-    Err(Error::NotImplemented)
+fn invoke_space_unmap(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::mm::{pmm, space_repository};
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::SPACE_MAP) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let virt_addr = args.arg3 as u64;
+    let num_pages = if args.arg4 == 0 { 1 } else { args.arg4 };
+
+    if virt_addr & 0xFFF != 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let result = space_repository::with_space_mut(space_id, |space| {
+        let physmap_base = x86_64::VirtAddr::new(crate::mm::physmap::PHYS_MAP_BASE);
+        let mut alloc = crate::mm::PmmPageAllocator;
+        let mut vmm = unsafe {
+            crate::mm::vmm::PageTableManager::for_page_table(
+                physmap_base,
+                space.page_table_root,
+                &mut alloc,
+            )
+        };
+
+        let mut unmapped = 0u64;
+        for i in 0..num_pages {
+            let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
+            if let Ok(phys) = vmm.unmap(addr) {
+                pmm::free_frame(phys.as_u64());
+                unmapped += 1;
+            }
+        }
+        unmapped
+    });
+
+    match result {
+        Some(unmapped) => Ok(unmapped as usize),
+        None => Err(Error::NotFound),
+    }
 }
 
 /// Grant a page from one address space to another (zero-copy sharing)
