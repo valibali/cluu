@@ -26,6 +26,7 @@
 
 use crate::mm::space::AddressSpace;
 use crate::sched::context::Context;
+use crate::token::scope::{EndpointId, ReplyId};
 use x86_64::{PhysAddr, VirtAddr};
 
 /// Thread ID type
@@ -99,6 +100,26 @@ pub struct CallReplyInfo {
     pub reply_buf_len: usize,
     /// Page table root for copying reply to userspace
     pub page_table_root: PhysAddr,
+}
+
+/// Fault type discriminant for IPC fault messages
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultType {
+    PageFault = 0,
+    GeneralProtection = 1,
+    InvalidOpcode = 2,
+    DivideByZero = 3,
+}
+
+/// Saved state of a faulted thread waiting for handler decision
+#[derive(Debug, Clone, Copy)]
+pub struct FaultState {
+    pub fault_type: FaultType,
+    pub fault_addr: u64,
+    pub error_code: u64,
+    pub saved_context: Context,
+    pub reply_id: ReplyId,
 }
 
 impl ThreadFlags {
@@ -175,6 +196,12 @@ pub struct Thread {
     /// Thread-local token cache (for performance optimization)
     /// Caches recently looked-up tokens to avoid repeated HMAC verification
     pub token_cache: Option<TokenCacheEntry>,
+
+    /// Endpoint to receive fault notifications (None = kill on fault)
+    pub fault_endpoint: Option<EndpointId>,
+
+    /// Saved fault state while waiting for handler response
+    pub fault_state: Option<FaultState>,
 }
 
 /// Thread-local token cache entry
@@ -261,6 +288,8 @@ impl Thread {
             woke_from_timeout: false,
             call_reply_info: None,
             token_cache: None,
+            fault_endpoint: None,
+            fault_state: None,
         }
     }
 
@@ -293,6 +322,8 @@ impl Thread {
             woke_from_timeout: false,
             call_reply_info: None,
             token_cache: None,
+            fault_endpoint: None,
+            fault_state: None,
         }
     }
 

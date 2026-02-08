@@ -87,12 +87,11 @@ extern pf_with_regs
 %define PF_SIZE    0xA8
 
 ; ─────────────────────────────────────────────────────────────────────────
-; General Protection Fault entry (saves full GPR set for debug)
+; General Protection Fault entry (saves full GPR set, supports context switch)
 ; ─────────────────────────────────────────────────────────────────────────
 gpf_interrupt_entry:
-    ; Swap GS to kernel if fault came from userspace
-    mov r10, [rsp + 16]     ; CS
-    test r10b, 0x3
+    ; Swap GS to kernel if fault came from userspace (test CS without clobbering r10)
+    test byte [rsp + 16], 0x3
     jz .gpf_no_swapgs
     swapgs
 .gpf_no_swapgs:
@@ -114,7 +113,7 @@ gpf_interrupt_entry:
     mov [rsp + GPF_R14], r14
     mov [rsp + GPF_R15], r15
 
-    ; Original exception frame is above this struct.
+    ; Copy exception frame fields into struct
     lea r11, [rsp + GPF_SIZE]
     mov r10, [r11]          ; error code
     mov [rsp + GPF_ERROR], r10
@@ -143,18 +142,87 @@ gpf_interrupt_entry:
     sub rsp, 8              ; align for call
     call gpf_with_regs
     add rsp, 8
-    cli
+
+    ; RAX = *const Context (non-null = switch, null = kernel halt — shouldn't reach here)
+    test rax, rax
+    jz .gpf_halt
+
+    ; Context switch to next thread (same pattern as timer interrupt)
+    mov r10, rax
+
+    ; Switch address space
+    mov rax, [r10 + CONTEXT_CR3]
+    mov cr3, rax
+
+    ; Build iretq frame for target thread
+    mov rax, [r10 + CONTEXT_CS]
+    test al, 0x3
+    jz .gpf_build_kernel_frame
+
+    ; User-mode target
+    mov rax, [r10 + CONTEXT_SS]
+    mov rbx, [r10 + CONTEXT_RSP]
+    mov rcx, [r10 + CONTEXT_RFLAGS]
+    ; Sanitize RFLAGS: clear TF/IOPL/NT/RF/AC, ensure IF + reserved bit 1
+    and rcx, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  rcx, (1 << 9) | (1 << 1)
+    mov rdx, [r10 + CONTEXT_CS]
+    mov rsi, [r10 + CONTEXT_RIP]
+
+    ; Build new iretq frame on IST stack (current position is fine)
+    push rax                ; SS
+    push rbx                ; RSP
+    push rcx                ; RFLAGS (sanitized)
+    push rdx                ; CS
+    push rsi                ; RIP
+    swapgs                  ; Kernel→user GS
+    jmp .gpf_restore_regs
+
+.gpf_build_kernel_frame:
+    mov rsp, [r10 + CONTEXT_RSP]
+    push qword [r10 + CONTEXT_SS]
+    push qword [r10 + CONTEXT_RSP]
+    mov rcx, [r10 + CONTEXT_RFLAGS]
+    and rcx, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  rcx, (1 << 9) | (1 << 1)
+    push rcx
+    push qword [r10 + CONTEXT_CS]
+    push qword [r10 + CONTEXT_RIP]
+
+.gpf_restore_regs:
+    mov ax, 0x2b
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+
+    mov rax, [r10 + CONTEXT_RAX]
+    mov rbx, [r10 + CONTEXT_RBX]
+    mov rcx, [r10 + CONTEXT_RCX]
+    mov rdx, [r10 + CONTEXT_RDX]
+    mov rsi, [r10 + CONTEXT_RSI]
+    mov rdi, [r10 + CONTEXT_RDI]
+    mov r8,  [r10 + CONTEXT_R8]
+    mov r9,  [r10 + CONTEXT_R9]
+    mov r11, [r10 + CONTEXT_R11]
+    mov r12, [r10 + CONTEXT_R12]
+    mov r13, [r10 + CONTEXT_R13]
+    mov r14, [r10 + CONTEXT_R14]
+    mov r15, [r10 + CONTEXT_R15]
+    mov rbp, [r10 + CONTEXT_RBP]
+    mov r10, [r10 + CONTEXT_R10]
+    iretq
+
 .gpf_halt:
+    cli
     hlt
     jmp .gpf_halt
 
 ; ─────────────────────────────────────────────────────────────────────────
-; Page Fault entry (saves full GPR set for debug)
+; Page Fault entry (saves full GPR set, supports resume + context switch)
 ; ─────────────────────────────────────────────────────────────────────────
 pf_interrupt_entry:
-    ; Swap GS to kernel if fault came from userspace
-    mov r10, [rsp + 16]     ; CS
-    test r10b, 0x3
+    ; Swap GS to kernel if fault came from userspace (test CS without clobbering r10)
+    test byte [rsp + 16], 0x3
     jz .pf_no_swapgs
     swapgs
 .pf_no_swapgs:
@@ -176,7 +244,7 @@ pf_interrupt_entry:
     mov [rsp + PF_R14], r14
     mov [rsp + PF_R15], r15
 
-    ; Original exception frame is above this struct.
+    ; Copy exception frame fields into struct
     lea r11, [rsp + PF_SIZE]
     mov r10, [r11]          ; error code
     mov [rsp + PF_ERROR], r10
@@ -205,10 +273,100 @@ pf_interrupt_entry:
     sub rsp, 8              ; align for call
     call pf_with_regs
     add rsp, 8
-    cli
-.pf_halt:
-    hlt
-    jmp .pf_halt
+
+    ; RAX = null (resume via iretq) or non-null (context switch)
+    test rax, rax
+    jz .pf_resume
+
+    ; ── Context switch to next thread ──
+    mov r10, rax
+
+    ; Switch address space
+    mov rax, [r10 + CONTEXT_CR3]
+    mov cr3, rax
+
+    ; Build iretq frame for target thread
+    mov rax, [r10 + CONTEXT_CS]
+    test al, 0x3
+    jz .pf_build_kernel_frame
+
+    ; User-mode target
+    mov rax, [r10 + CONTEXT_SS]
+    mov rbx, [r10 + CONTEXT_RSP]
+    mov rcx, [r10 + CONTEXT_RFLAGS]
+    ; Sanitize RFLAGS
+    and rcx, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  rcx, (1 << 9) | (1 << 1)
+    mov rdx, [r10 + CONTEXT_CS]
+    mov rsi, [r10 + CONTEXT_RIP]
+
+    push rax                ; SS
+    push rbx                ; RSP
+    push rcx                ; RFLAGS (sanitized)
+    push rdx                ; CS
+    push rsi                ; RIP
+    swapgs                  ; Kernel→user GS
+    jmp .pf_restore_switch_regs
+
+.pf_build_kernel_frame:
+    mov rsp, [r10 + CONTEXT_RSP]
+    push qword [r10 + CONTEXT_SS]
+    push qword [r10 + CONTEXT_RSP]
+    mov rcx, [r10 + CONTEXT_RFLAGS]
+    and rcx, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  rcx, (1 << 9) | (1 << 1)
+    push rcx
+    push qword [r10 + CONTEXT_CS]
+    push qword [r10 + CONTEXT_RIP]
+
+.pf_restore_switch_regs:
+    mov ax, 0x2b
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+
+    mov rax, [r10 + CONTEXT_RAX]
+    mov rbx, [r10 + CONTEXT_RBX]
+    mov rcx, [r10 + CONTEXT_RCX]
+    mov rdx, [r10 + CONTEXT_RDX]
+    mov rsi, [r10 + CONTEXT_RSI]
+    mov rdi, [r10 + CONTEXT_RDI]
+    mov r8,  [r10 + CONTEXT_R8]
+    mov r9,  [r10 + CONTEXT_R9]
+    mov r11, [r10 + CONTEXT_R11]
+    mov r12, [r10 + CONTEXT_R12]
+    mov r13, [r10 + CONTEXT_R13]
+    mov r14, [r10 + CONTEXT_R14]
+    mov r15, [r10 + CONTEXT_R15]
+    mov rbp, [r10 + CONTEXT_RBP]
+    mov r10, [r10 + CONTEXT_R10]
+    iretq
+
+.pf_resume:
+    ; ── Resume faulting instruction (lazy alloc succeeded) ──
+    ; Restore all GPRs from the saved PfDebugFrame
+    mov rax, [rsp + PF_RAX]
+    mov rbx, [rsp + PF_RBX]
+    mov rcx, [rsp + PF_RCX]
+    mov rdx, [rsp + PF_RDX]
+    mov rsi, [rsp + PF_RSI]
+    mov rdi, [rsp + PF_RDI]
+    mov rbp, [rsp + PF_RBP]
+    mov r8,  [rsp + PF_R8]
+    mov r9,  [rsp + PF_R9]
+    mov r10, [rsp + PF_R10]
+    mov r11, [rsp + PF_R11]
+    mov r12, [rsp + PF_R12]
+    mov r13, [rsp + PF_R13]
+    mov r14, [rsp + PF_R14]
+    mov r15, [rsp + PF_R15]
+
+    ; Skip PfDebugFrame + error_code to reach iretq frame (RIP, CS, RFLAGS, RSP, SS)
+    add rsp, PF_SIZE + 8
+
+    ; Swap GS back to user mode (resume always returns to userspace)
+    swapgs
+    iretq
 
 ; ─────────────────────────────────────────────────────────────────────────
 ; Timer interrupt entry (IRQ 0)

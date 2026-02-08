@@ -13,6 +13,12 @@ use crate::sched::{
     ThreadRepository,
 };
 use crate::token::ReplyId;
+
+/// Info stored when a thread is waiting for fault handler reply
+#[derive(Debug, Clone, Copy)]
+pub struct FaultReplyInfo {
+    pub faulted_thread: ThreadId,
+}
 use alloc::collections::{BTreeMap, BinaryHeap};
 use core::cmp::Reverse;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -55,6 +61,10 @@ lazy_static! {
 
     /// Map from ReplyId to CallReplyInfo for IPC call/reply
     static ref CALL_REPLY_MAP: Mutex<BTreeMap<ReplyId, CallReplyInfo>> =
+        Mutex::new(BTreeMap::new());
+
+    /// Map from ReplyId to FaultReplyInfo for fault IPC
+    static ref FAULT_REPLY_MAP: Mutex<BTreeMap<ReplyId, FaultReplyInfo>> =
         Mutex::new(BTreeMap::new());
 }
 
@@ -214,6 +224,37 @@ impl ThreadManager {
     /// Check if call reply info exists for a reply ID
     pub fn has_call_reply_info(reply_id: ReplyId) -> bool {
         CALL_REPLY_MAP.lock().contains_key(&reply_id)
+    }
+
+    /// Store fault reply info for a reply ID
+    pub fn set_fault_reply_info(reply_id: ReplyId, info: FaultReplyInfo) {
+        FAULT_REPLY_MAP.lock().insert(reply_id, info);
+    }
+
+    /// Take and remove fault reply info for a reply ID (one-time use)
+    pub fn take_fault_reply_info(reply_id: ReplyId) -> Option<FaultReplyInfo> {
+        FAULT_REPLY_MAP.lock().remove(&reply_id)
+    }
+
+    /// Schedule next thread after a fault (safe for IST context)
+    ///
+    /// Unlike `schedule_and_switch`, this does NOT idle if no threads are ready
+    /// (idling on IST stack is unsafe — re-entrant exceptions would clobber it).
+    /// Instead, halts if no threads are available (shouldn't happen if a fault
+    /// message was just sent to wake a handler).
+    pub fn schedule_next_from_fault() -> *const Context {
+        Self::drain_pending_wake();
+        let next_id = match Self::pick_next() {
+            Some(id) => id,
+            None => {
+                klibcluu::error("schedule_next_from_fault: no runnable threads!");
+                loop {
+                    x86_64::instructions::hlt();
+                }
+            }
+        };
+        Self::set_current(next_id);
+        Self::get_context_ptr(next_id)
     }
 
     pub fn block_current() {

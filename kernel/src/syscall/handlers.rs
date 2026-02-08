@@ -331,13 +331,64 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
         )?;
     }
 
-    // 5. Deliver reply (copies to caller's buffer and wakes them)
-    let bytes_sent = crate::ipc::endpoint::deliver_reply_by_id(reply_id, &buffer[..msg_len])?;
+    // 5. Try to deliver as regular IPC call reply
+    match crate::ipc::endpoint::deliver_reply_by_id(reply_id, &buffer[..msg_len]) {
+        Ok(bytes_sent) => {
+            let _ = crate::token::revoke_token(reply_token_handle);
+            Ok(bytes_sent)
+        }
+        Err(Error::InvalidState) => {
+            // Not a call reply — check if it's a fault reply
+            if let Some(fault_info) =
+                crate::sched::ThreadManager::take_fault_reply_info(reply_id)
+            {
+                handle_fault_reply(fault_info, &buffer[..msg_len]);
+                let _ = crate::token::revoke_token(reply_token_handle);
+                Ok(0)
+            } else {
+                Err(Error::InvalidState)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
 
-    // 6. Revoke reply token (one-time use)
-    let _ = crate::token::revoke_token(reply_token_handle);
+/// Handle a fault reply from a fault handler process.
+///
+/// Convention: label=0 → RESUME (restore saved context, re-execute faulting instruction)
+///             label≠0 → KILL (terminate the faulted thread)
+fn handle_fault_reply(
+    fault_info: crate::sched::FaultReplyInfo,
+    reply_data: &[u8],
+) {
+    // Parse label from reply message (first 4 bytes = UserMessageTag.label)
+    let label = if reply_data.len() >= 4 {
+        u32::from_ne_bytes([reply_data[0], reply_data[1], reply_data[2], reply_data[3]])
+    } else {
+        1 // Default: kill (no valid message)
+    };
 
-    Ok(bytes_sent)
+    let thread_id = fault_info.faulted_thread;
+
+    if label == 0 {
+        // RESUME: restore saved context and wake thread
+        crate::sched::ThreadManager::with_thread_mut(thread_id, |t| {
+            if let Some(fault_state) = t.fault_state.take() {
+                t.context = fault_state.saved_context;
+            }
+        });
+        crate::sched::ThreadManager::wake_thread(thread_id);
+        klibcluu::trace("Fault reply: RESUME thread ");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+    } else {
+        // KILL: mark thread dead
+        crate::sched::ThreadManager::with_thread_mut(thread_id, |t| {
+            t.fault_state = None;
+            t.make_dead();
+        });
+        klibcluu::trace("Fault reply: KILL thread ");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -420,6 +471,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::ThreadSuspend => invoke_thread_suspend(&token, args),
         InvokeOp::ThreadResume => invoke_thread_resume(&token, args),
         InvokeOp::ThreadSetPriority => invoke_thread_set_priority(&token, args),
+        InvokeOp::ThreadSetFaultEndpoint => invoke_thread_set_fault_endpoint(&token, args),
 
         // Space operations
         InvokeOp::SpaceCreate => invoke_space_create(&token, args),
@@ -572,6 +624,51 @@ fn invoke_thread_resume(_token: &Token, _args: SyscallArgs) -> SyscallResult {
 fn invoke_thread_set_priority(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     klibcluu::warn("invoke_thread_set_priority not yet implemented");
     Err(Error::NotImplemented)
+}
+
+/// Set the fault handler endpoint for a thread
+///
+/// # Arguments
+/// - token: Thread token (requires THREAD_CONTROL right)
+/// - arg3: Endpoint token handle (or 0 to clear)
+fn invoke_thread_set_fault_endpoint(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::THREAD_CONTROL) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let thread_ref = crate::token::resolve_token_object(token, ObjectType::Thread)
+        .map_err(|_| Error::InvalidArgument)?;
+    let thread_id = if let ObjectRef::Thread(id) = thread_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let endpoint_id = if args.arg3 == 0 {
+        None
+    } else {
+        let ep_handle = TokenHandle::from_raw(args.arg3);
+        let ep_token = lookup_token(ep_handle).map_err(|_| Error::InvalidArgument)?;
+        if !ep_token.has_right(Rights::IPC_SEND) {
+            return Err(Error::PermissionDenied);
+        }
+        let ep_ref = crate::token::resolve_token_object(&ep_token, ObjectType::Endpoint)
+            .map_err(|_| Error::InvalidArgument)?;
+        if let ObjectRef::Endpoint(id) = ep_ref {
+            Some(id)
+        } else {
+            return Err(Error::InvalidArgument);
+        }
+    };
+
+    crate::sched::ThreadManager::with_thread_mut(thread_id, |thread| {
+        thread.fault_endpoint = endpoint_id;
+    })
+    .ok_or(Error::NotFound)?;
+
+    Ok(0)
 }
 
 fn invoke_endpoint_create(token: &Token, _args: SyscallArgs) -> SyscallResult {

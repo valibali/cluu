@@ -33,6 +33,10 @@
  * - It ensures system stability by preventing crashes from becoming system hangs
  */
 
+use crate::ipc::endpoint;
+use crate::sched::context::Context;
+use crate::sched::thread::FaultType;
+use crate::sched::ThreadManager;
 use lazy_static::lazy_static;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use x86_64::VirtAddr;
@@ -382,8 +386,126 @@ struct GpfDebugFrame {
     ss: u64,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Fault Forwarding Helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Convert GpfDebugFrame to a Context (for saving faulted thread state)
+fn gpf_frame_to_context(f: &GpfDebugFrame) -> Context {
+    let cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    Context {
+        rax: f.rax, rbx: f.rbx, rcx: f.rcx, rdx: f.rdx,
+        rsi: f.rsi, rdi: f.rdi, r8: f.r8, r9: f.r9,
+        r10: f.r10, r11: f.r11, r12: f.r12, r13: f.r13,
+        r14: f.r14, r15: f.r15, rbp: f.rbp,
+        rsp: f.rsp, rip: f.rip, rflags: f.rflags,
+        cs: f.cs, ss: f.ss, cr3,
+    }
+}
+
+/// Convert PfDebugFrame to a Context (for saving faulted thread state)
+fn pf_frame_to_context(f: &PfDebugFrame) -> Context {
+    let cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    Context {
+        rax: f.rax, rbx: f.rbx, rcx: f.rcx, rdx: f.rdx,
+        rsi: f.rsi, rdi: f.rdi, r8: f.r8, r9: f.r9,
+        r10: f.r10, r11: f.r11, r12: f.r12, r13: f.r13,
+        r14: f.r14, r15: f.r15, rbp: f.rbp,
+        rsp: f.rsp, rip: f.rip, rflags: f.rflags,
+        cs: f.cs, ss: f.ss, cr3,
+    }
+}
+
+/// Try to forward a user fault to the thread's fault endpoint.
+///
+/// Returns true if fault was successfully forwarded (thread is now blocked).
+/// Returns false if no handler, recursion guard, or send failed.
+fn try_forward_fault(
+    fault_type: FaultType,
+    fault_addr: u64,
+    error_code: u64,
+    saved_context: &Context,
+) -> bool {
+    use crate::sched::thread::FaultState;
+    use crate::sched::FaultReplyInfo;
+    use crate::token::{self, Issuer, OpaqueScope, Rights, Timestamp};
+
+    let current_id = match ThreadManager::current() {
+        Some(id) => id,
+        None => return false,
+    };
+
+    // Get fault endpoint, guard against recursive faults
+    let fault_ep = match ThreadManager::with_thread(current_id, |t| {
+        if t.fault_state.is_some() {
+            None // Already handling a fault — recursion guard
+        } else {
+            t.fault_endpoint
+        }
+    }) {
+        Some(Some(ep)) => ep,
+        _ => return false,
+    };
+
+    // Allocate reply ID and create one-time reply token
+    let reply_id = ThreadManager::alloc_reply_id();
+    let reply_token_handle = token::create_token(
+        OpaqueScope::random(),
+        Rights::IPC_REPLY,
+        Issuer::Kernel,
+        Timestamp::NEVER,
+        token::ObjectRef::Reply(reply_id),
+    );
+
+    // Build fault message: label=0xFA017, words=[type, addr, err, rip, tid, reply_tok]
+    let mut msg_bytes = [0u8; core::mem::size_of::<endpoint::UserMessage>()];
+    let msg = unsafe { &mut *(msg_bytes.as_mut_ptr() as *mut endpoint::UserMessage) };
+    msg.tag.label = 0xFA017;
+    msg.tag.words = 6;
+    msg.tag.extra = endpoint::REPLY_TOKEN_TAG;
+    msg.tag._pad = 0;
+    msg.words[0] = fault_type as usize;
+    msg.words[1] = fault_addr as usize;
+    msg.words[2] = error_code as usize;
+    msg.words[3] = saved_context.rip as usize;
+    msg.words[4] = current_id.as_u64() as usize;
+    msg.words[5] = reply_token_handle.as_usize();
+
+    // Non-blocking send (safe from IST context — uses try_lock)
+    match endpoint::try_send(fault_ep, &msg_bytes) {
+        Ok(receiver_to_wake) => {
+            if let Some(thread_id) = receiver_to_wake {
+                ThreadManager::wake_thread(thread_id);
+            }
+        }
+        Err(_) => {
+            let _ = token::revoke_token(reply_token_handle);
+            return false;
+        }
+    }
+
+    // Store fault reply info and save fault state on thread
+    ThreadManager::set_fault_reply_info(reply_id, FaultReplyInfo {
+        faulted_thread: current_id,
+    });
+
+    ThreadManager::with_thread_mut(current_id, |t| {
+        t.fault_state = Some(FaultState {
+            fault_type,
+            fault_addr,
+            error_code,
+            saved_context: *saved_context,
+            reply_id,
+        });
+        t.make_blocked();
+    });
+
+    klibcluu::warn("Fault forwarded to handler endpoint");
+    true
+}
+
 #[no_mangle]
-extern "C" fn gpf_with_regs(frame: *const GpfDebugFrame) -> ! {
+extern "C" fn gpf_with_regs(frame: *const GpfDebugFrame) -> *const Context {
     use klibcluu::uart::COM2;
 
     #[inline(always)]
@@ -423,6 +545,20 @@ extern "C" fn gpf_with_regs(frame: *const GpfDebugFrame) -> ! {
     uart_hex("GPF: R14=", f.r14);
     uart_hex("GPF: R15=", f.r15);
 
+    // Userspace fault: try to forward or kill
+    if (f.cs & 0x3) == 0x3 {
+        let saved_ctx = gpf_frame_to_context(f);
+        if try_forward_fault(FaultType::GeneralProtection, 0, f.error_code, &saved_ctx) {
+            return ThreadManager::schedule_next_from_fault();
+        }
+        // No handler — kill thread
+        klibcluu::warn("GPF: no fault handler — killing thread");
+        ThreadManager::mark_current_dead();
+        return ThreadManager::schedule_next_from_fault();
+    }
+
+    // Kernel fault — halt
+    klibcluu::warn("GPF: KERNEL FAULT — halting");
     loop {
         x86_64::instructions::hlt();
     }
@@ -558,11 +694,16 @@ struct PfDebugFrame {
     ss: u64,
 }
 
+/// Page fault handler with full register context.
+///
+/// Returns:
+/// - null: lazy allocation succeeded, resume faulting instruction via iretq
+/// - non-null: context pointer for next thread (fault forwarded or thread killed)
+/// - never returns for kernel faults (halts)
 #[no_mangle]
-extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> ! {
+extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
     use klibcluu::uart::COM2;
     use x86_64::registers::control::Cr2;
-    use core::arch::asm;
 
     #[inline(always)]
     fn uart_hex(prefix: &str, value: u64) {
@@ -590,20 +731,17 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> ! {
         Err(_) => 0,
     };
 
-    #[inline(always)]
-    fn read_gs_u64(offset: u64) -> u64 {
-        let value: u64;
-        unsafe {
-            asm!(
-                "mov {0}, qword ptr gs:[{1}]",
-                out(reg) value,
-                in(reg) offset,
-                options(nostack, preserves_flags)
-            );
+    let is_userspace = (f.cs & 0x3) == 0x3;
+    let is_present = (f.error_code & 1) != 0;
+
+    // Try lazy allocation for not-present userspace page faults
+    if !is_present && is_userspace {
+        if let Some(true) = handle_heap_fault(x86_64::VirtAddr::new(cr2)) {
+            return core::ptr::null(); // Resume — lazy alloc succeeded
         }
-        value
     }
 
+    // Log the fault details (only for unrecoverable faults)
     COM2.write_str("[WARN]  PAGE_FAULT (regs)\n");
     uart_hex("PF: Fault address (CR2)=", cr2);
     uart_hex("PF: Error code=", f.error_code);
@@ -612,55 +750,21 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> ! {
     uart_hex("PF: RFLAGS=", f.rflags);
     uart_hex("PF: RSP=", f.rsp);
     uart_hex("PF: SS=", f.ss);
-    uart_hex("PF: RBX=", f.rbx);
-    uart_hex("PF: RBP=", f.rbp);
-    uart_hex("PF: RDI=", f.rdi);
-    uart_hex("PF: RSI=", f.rsi);
-    uart_hex("PF: R12=", f.r12);
-    uart_hex("PF: R13=", f.r13);
-    uart_hex("PF: R14=", f.r14);
-    uart_hex("PF: R15=", f.r15);
 
-    // If fault came from userspace, dump last syscall info from PerCpuData
-    if (f.cs & 0x3) == 0x3 {
-        const PERCPU_LAST_SYSNO: u64 = 0x28;
-        const PERCPU_LAST_RIP: u64 = 0x30;
-        const PERCPU_LAST_RSP: u64 = 0x38;
-        const PERCPU_LAST_RBX: u64 = 0x40;
-        const PERCPU_LAST_ARG1: u64 = 0x48;
-        const PERCPU_LAST_ARG2: u64 = 0x50;
-        const PERCPU_LAST_ARG3: u64 = 0x58;
-        const PERCPU_LAST_ARG4: u64 = 0x60;
-        const PERCPU_LAST_ARG5: u64 = 0x68;
-        const PERCPU_LAST_ARG6: u64 = 0x70;
-        const PERCPU_LAST_RBX_RET: u64 = 0x78;
-
-        let last_sysno = read_gs_u64(PERCPU_LAST_SYSNO);
-        let last_rip = read_gs_u64(PERCPU_LAST_RIP);
-        let last_rsp = read_gs_u64(PERCPU_LAST_RSP);
-        let last_rbx = read_gs_u64(PERCPU_LAST_RBX);
-        let last_arg1 = read_gs_u64(PERCPU_LAST_ARG1);
-        let last_arg2 = read_gs_u64(PERCPU_LAST_ARG2);
-        let last_arg3 = read_gs_u64(PERCPU_LAST_ARG3);
-        let last_arg4 = read_gs_u64(PERCPU_LAST_ARG4);
-        let last_arg5 = read_gs_u64(PERCPU_LAST_ARG5);
-        let last_arg6 = read_gs_u64(PERCPU_LAST_ARG6);
-        let last_rbx_ret = read_gs_u64(PERCPU_LAST_RBX_RET);
-
-        COM2.write_str("[DBG] Last syscall (from PerCpuData)\n");
-        uart_hex("PF: last_sysno=", last_sysno);
-        uart_hex("PF: last_rip=", last_rip);
-        uart_hex("PF: last_rsp=", last_rsp);
-        uart_hex("PF: last_rbx=", last_rbx);
-        uart_hex("PF: last_arg1=", last_arg1);
-        uart_hex("PF: last_arg2=", last_arg2);
-        uart_hex("PF: last_arg3=", last_arg3);
-        uart_hex("PF: last_arg4=", last_arg4);
-        uart_hex("PF: last_arg5=", last_arg5);
-        uart_hex("PF: last_arg6=", last_arg6);
-        uart_hex("PF: last_rbx_ret=", last_rbx_ret);
+    // Userspace fault that can't be handled by lazy alloc
+    if is_userspace {
+        let saved_ctx = pf_frame_to_context(f);
+        if try_forward_fault(FaultType::PageFault, cr2, f.error_code, &saved_ctx) {
+            return ThreadManager::schedule_next_from_fault();
+        }
+        // No handler — kill thread
+        klibcluu::warn("PF: no fault handler — killing thread");
+        ThreadManager::mark_current_dead();
+        return ThreadManager::schedule_next_from_fault();
     }
 
+    // Kernel fault — halt
+    klibcluu::warn("PF: KERNEL FAULT — halting");
     loop {
         x86_64::instructions::hlt();
     }
