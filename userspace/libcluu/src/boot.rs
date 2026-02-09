@@ -156,11 +156,6 @@ pub const TOKEN_EXTRA_START: usize = 9;
 /// Last contextual/extra slot
 pub const TOKEN_EXTRA_END: usize = 15;
 
-// ─── Deprecated Aliases (for migration) ─────────────────────────────────────
-// TODO: Remove these after migration is complete
-#[deprecated(since = "0.2.0", note = "Use TOKEN_IPC instead")]
-pub const TOKEN_PROC_CAP: usize = TOKEN_IPC;
-
 // Well-known param indices for console service
 pub const PARAM_FB_BASE: usize = 0;
 pub const PARAM_FB_SIZE: usize = 1;

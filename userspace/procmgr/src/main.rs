@@ -375,6 +375,7 @@ impl ProcessManager {
             )
         };
         let proc_cap = derive_proc_cap(self.token)?;
+        let self_cap = derive_self_cap(self.token)?;
         // Derive space token with SPACE_MAP rights for the child
         let child_space_token = match derive_space_token(space_token) {
             Ok(t) => {
@@ -397,6 +398,7 @@ impl ProcessManager {
             stdlog_endpoint,
             self.registry_send,
             proc_cap,
+            self_cap,
             child_space_token, // Now properly derived!
             self.clock_token,
         )?;
@@ -760,6 +762,7 @@ fn map_process_info_page(
     stdlog_token: usize,
     registry_token: usize,
     proc_cap_token: usize,
+    self_cap_token: usize,
     space_grant_token: usize,
     clock_token: usize,
 ) -> Result<()> {
@@ -773,7 +776,7 @@ fn map_process_info_page(
     tokens[TOKEN_STDERR] = stderr_token;
     tokens[TOKEN_STDLOG] = stdlog_token;
     // Slots 4-7: Core capabilities
-    tokens[TOKEN_SELF] = proc_cap_token; // For now, same as IPC cap; TODO: separate self cap
+    tokens[TOKEN_SELF] = self_cap_token;
     tokens[TOKEN_SPACE] = space_grant_token;
     tokens[TOKEN_IPC] = proc_cap_token;
     tokens[TOKEN_CLOCK] = clock_token;
@@ -816,6 +819,15 @@ fn map_process_info_page(
 fn derive_proc_cap(token: usize) -> Result<usize> {
     let rights =
         Rights::CREATE | Rights::IPC_SEND | Rights::IPC_RECV | Rights::IPC_CALL | Rights::GRANT;
+    token_derive(token, rights.bits() as usize, u64::MAX)
+}
+
+/// Derive a self/thread capability token for child processes.
+///
+/// TOKEN_SELF provides basic thread control authority (CREATE + GRANT).
+/// This is intentionally narrower than TOKEN_IPC to follow least-privilege.
+fn derive_self_cap(token: usize) -> Result<usize> {
+    let rights = Rights::CREATE | Rights::GRANT;
     token_derive(token, rights.bits() as usize, u64::MAX)
 }
 
