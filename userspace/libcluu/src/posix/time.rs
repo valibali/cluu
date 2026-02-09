@@ -183,7 +183,10 @@ pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int {
     }
 }
 
-/// Sleep for specified time.
+/// Sleep for specified time using kernel-level timed blocking.
+///
+/// Uses `ipc_recv_any` with a timeout on a dummy endpoint so the kernel
+/// blocks the thread without burning CPU.
 ///
 /// # Arguments
 /// - `seconds`: Number of seconds to sleep
@@ -192,16 +195,11 @@ pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int {
 /// 0 on success, remaining seconds if interrupted.
 #[no_mangle]
 pub extern "C" fn sleep(seconds: u32) -> u32 {
-    // Simple implementation: yield in a loop
-    // Each scheduler tick is ~4ms, so 250 ticks ≈ 1 second
-    let ticks = seconds as u64 * 250;
-    for _ in 0..ticks {
-        let _ = crate::syscall::yield_cpu();
-    }
+    timed_sleep_ms(seconds as u64 * 1000);
     0
 }
 
-/// Sleep for specified microseconds.
+/// Sleep for specified microseconds using kernel-level timed blocking.
 ///
 /// # Arguments
 /// - `usec`: Microseconds to sleep
@@ -210,12 +208,103 @@ pub extern "C" fn sleep(seconds: u32) -> u32 {
 /// 0 on success, -1 on error.
 #[no_mangle]
 pub extern "C" fn usleep(usec: u32) -> c_int {
-    // Each tick ≈ 4000 microseconds (4ms)
-    let ticks = (usec as u64 + 3999) / 4000;
+    timed_sleep_ms(((usec as u64) + 999) / 1000);
+    0
+}
+
+/// POSIX nanosleep - sleep with nanosecond granularity.
+///
+/// Sleeps for the time specified in `req`. The actual resolution is
+/// milliseconds (kernel timer granularity), so nanosecond precision
+/// is rounded up to the nearest millisecond.
+///
+/// # Arguments
+/// - `req`: Requested sleep duration
+/// - `rem`: If non-NULL, stores remaining time if interrupted (always zeroed)
+///
+/// # Returns
+/// 0 on success, -1 on error (errno set).
+#[no_mangle]
+pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> c_int {
+    if req.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    let ts = unsafe { &*req };
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    // Convert to milliseconds (round up so we never sleep less than requested)
+    let ms = (ts.tv_sec as u64) * 1000 + ((ts.tv_nsec as u64) + 999_999) / 1_000_000;
+    timed_sleep_ms(ms);
+
+    // No interruption support — remaining is always zero
+    if !rem.is_null() {
+        unsafe {
+            (*rem).tv_sec = 0;
+            (*rem).tv_nsec = 0;
+        }
+    }
+
+    0
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Timed sleep via kernel blocking
+// ═══════════════════════════════════════════════════════════════════════════
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Cached dummy endpoint for sleep operations.
+/// Created once, recv on it always times out (nobody sends to it).
+static SLEEP_ENDPOINT: AtomicUsize = AtomicUsize::new(0);
+
+fn get_sleep_endpoint() -> usize {
+    let cached = SLEEP_ENDPOINT.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let info = crate::boot::process_info();
+    let ipc_cap = info.tokens[crate::boot::TOKEN_IPC];
+    if ipc_cap == 0 {
+        return 0;
+    }
+    match crate::syscall::endpoint_create(ipc_cap) {
+        Ok(ep) => {
+            SLEEP_ENDPOINT.store(ep, Ordering::Relaxed);
+            ep
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Sleep for `ms` milliseconds using kernel timed IPC recv.
+///
+/// Creates a dummy endpoint (lazily, once) and does a timed recv on it.
+/// The kernel blocks the thread and wakes it after the timeout expires.
+/// Falls back to yield loop if endpoint creation fails.
+fn timed_sleep_ms(ms: u64) {
+    if ms == 0 {
+        return;
+    }
+
+    let ep = get_sleep_endpoint();
+    if ep != 0 {
+        let tokens = [ep];
+        let mut buf = [0u8; 64];
+        // This blocks until timeout — the Timeout error is expected
+        let _ = crate::syscall::ipc_recv_any(&tokens, &mut buf, ms);
+        return;
+    }
+
+    // Fallback: yield loop (only if endpoint creation failed)
+    let ticks = (ms + 3) / 4; // ~4ms per tick
     for _ in 0..ticks.max(1) {
         let _ = crate::syscall::yield_cpu();
     }
-    0
 }
 
 fn query_time(label: u32) -> core::result::Result<(u64, u64), crate::Error> {

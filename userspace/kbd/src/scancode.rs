@@ -4,7 +4,10 @@
 //! (shift/ctrl/alt/caps/num/scroll). Only key presses generate output.
 
 use crate::layout;
-use crate::protocol::{MOD_ALT, MOD_CAPS, MOD_CTRL, MOD_NUM, MOD_SCROLL, MOD_SHIFT};
+use crate::protocol::{
+    MOD_ALT, MOD_CAPS, MOD_CTRL, MOD_NUM, MOD_SCROLL, MOD_SHIFT,
+    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END, KEY_DELETE,
+};
 
 /// Snapshot of current modifier state.
 #[derive(Copy, Clone, Default)]
@@ -36,6 +39,8 @@ pub struct KeyEvent {
     pub ascii: Option<u8>,
     pub scancode: u8,
     pub modifiers: Modifiers,
+    /// Extended key code for non-ASCII keys (arrows, nav). 0 = normal key.
+    pub extended: u8,
 }
 
 /// Stateful decoder for set-1 scancodes.
@@ -87,10 +92,12 @@ impl ScancodeDecoder {
         }
 
         let ascii = ascii_for_scancode(code, self.modifiers, was_extended);
+        let extended = extended_key_code(code, was_extended);
         Some(KeyEvent {
             ascii,
             scancode: code,
             modifiers: self.modifiers,
+            extended,
         })
     }
 
@@ -166,5 +173,26 @@ fn keypad_symbol(scancode: u8, modifiers: Modifiers, extended: bool) -> Option<u
         0x51 if modifiers.num => Some(b'3'),
         0x52 if modifiers.num => Some(b'0'),
         _ => None,
+    }
+}
+
+/// Map extended scancodes to extended key codes for navigation keys.
+///
+/// These are only valid when the 0xE0 prefix was seen (extended = true).
+/// When NumLock is off, the same scancodes on the keypad also map here,
+/// but those are already handled by `keypad_symbol` when NumLock is on.
+fn extended_key_code(scancode: u8, extended: bool) -> u8 {
+    if !extended {
+        return 0;
+    }
+    match scancode {
+        0x48 => KEY_UP,
+        0x50 => KEY_DOWN,
+        0x4B => KEY_LEFT,
+        0x4D => KEY_RIGHT,
+        0x47 => KEY_HOME,
+        0x4F => KEY_END,
+        0x53 => KEY_DELETE,
+        _ => 0,
     }
 }

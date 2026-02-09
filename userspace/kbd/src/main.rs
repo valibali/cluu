@@ -66,8 +66,14 @@ fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: 
 
     let scancode = msg.words[0] as u8;
     if let Some(event) = decoder.handle_scancode(scancode) {
-        if let Some(ascii) = event.ascii {
-            let outbound = build_kbd_event(Some(ascii), event.scancode, event.modifiers.as_bits());
+        // Forward if there's an ASCII char OR an extended key code (arrows etc.)
+        if event.ascii.is_some() || event.extended != 0 {
+            let outbound = build_kbd_event(
+                event.ascii,
+                event.scancode,
+                event.modifiers.as_bits(),
+                event.extended,
+            );
             ctx.send_to_tty(&outbound);
         }
     }

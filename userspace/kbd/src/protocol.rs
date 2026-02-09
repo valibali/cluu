@@ -15,6 +15,15 @@ pub const MOD_CAPS: u8 = 1 << 3;
 pub const MOD_NUM: u8 = 1 << 4;
 pub const MOD_SCROLL: u8 = 1 << 5;
 
+/// Extended key codes for non-ASCII keys (arrows, nav keys).
+pub const KEY_UP: u8 = 1;
+pub const KEY_DOWN: u8 = 2;
+pub const KEY_LEFT: u8 = 3;
+pub const KEY_RIGHT: u8 = 4;
+pub const KEY_HOME: u8 = 5;
+pub const KEY_END: u8 = 6;
+pub const KEY_DELETE: u8 = 7;
+
 /// Parse an IPC message buffer into a Message header + payload slice.
 ///
 /// This clamps malformed payload sizes to avoid out-of-bounds access.
@@ -32,17 +41,18 @@ pub fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
     Some((msg, &buf[header..end]))
 }
 
-/// Build a keyboard event message from ASCII/scancode/modifier state.
+/// Build a keyboard event message from ASCII/scancode/modifier/extended state.
 ///
 /// Word layout:
 /// - words[1]: ASCII (0 if none)
 /// - words[2]: modifier bitmask
 /// - words[3]: raw scancode (press/release stripped)
-pub fn build_kbd_event(ascii: Option<u8>, scancode: u8, modifiers: u8) -> Message {
+/// - words[4]: extended key code (0 for normal keys)
+pub fn build_kbd_event(ascii: Option<u8>, scancode: u8, modifiers: u8, extended: u8) -> Message {
     let ascii_word = ascii.unwrap_or(0) as usize;
     Message::new(
         KBD_EVENT_LABEL,
-        [0, ascii_word, modifiers as usize, scancode as usize, 0, 0],
-        4,
+        [0, ascii_word, modifiers as usize, scancode as usize, extended as usize, 0],
+        5,
     )
 }

@@ -79,6 +79,14 @@ echo ""
 echo "Installing to sysroot..."
 make install
 
+# Overlay CLUU-specific headers (not part of newlib)
+echo ""
+echo "Installing CLUU headers overlay..."
+OVERLAY_DIR="${PROJECT_ROOT}/include"
+if [ -d "$OVERLAY_DIR" ]; then
+    cp -r "${OVERLAY_DIR}"/* "${SYSROOT_TRIPLET_DIR}/include/"
+fi
+
 echo ""
 echo "Newlib built and installed to ${SYSROOT}"
 echo ""

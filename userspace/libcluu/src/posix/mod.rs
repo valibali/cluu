@@ -23,16 +23,22 @@
 // Allow non-camel-case types for C compatibility
 #![allow(non_camel_case_types)]
 
+mod dir;
+mod env;
 mod file;
 mod memory;
 mod process;
 mod stat;
+pub mod termios;
 mod time;
 
+pub use dir::*;
+pub use env::*;
 pub use file::*;
 pub use memory::*;
 pub use process::*;
 pub use stat::*;
+pub use termios::*;
 pub use time::*;
 
 // C type aliases
@@ -89,6 +95,7 @@ pub extern "C" fn debug_print(msg: *const c_char) {
 pub extern "C" fn __cluu_init() {
     crate::allocator::init();
     crate::fd_table::init_stdio();
+    dir::init_cwd();
 }
 
 // -------------------------------------------------------------------------

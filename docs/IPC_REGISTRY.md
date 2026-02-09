@@ -50,7 +50,7 @@ The requester blocks on its registry control endpoint until it receives a
 
 **Startup and Defaults**
 - Each process is given a registry send token in `TOKEN_REGISTRY`.
-- Each process is given a default capability token (`TOKEN_PROC_CAP`) with
+- Each process is given a default capability token (`TOKEN_IPC`) with
   `CREATE` and IPC rights to create endpoints.
 - Processes should call `registry::init("service_name")` and
   `registry::register_default_outputs()` at startup.

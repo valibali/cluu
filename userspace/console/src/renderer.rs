@@ -22,6 +22,17 @@ const GLYPH_H: usize = 16;
 const COLOR_BG: u32 = 0x00000000;
 const COLOR_FG: u32 = 0x00FFFFFF;
 
+/// ANSI escape sequence parser state.
+#[derive(Clone, Copy, PartialEq)]
+enum EscState {
+    /// Normal character processing.
+    Normal,
+    /// Seen ESC (0x1B), waiting for '[' or other sequence introducer.
+    Escape,
+    /// Inside a CSI sequence (ESC [ ...), accumulating parameters.
+    Csi,
+}
+
 /// Console renderer backed by a pluggable pixel backend.
 pub struct Console<B: ConsoleBackend> {
     backend: B,
@@ -39,6 +50,11 @@ pub struct Console<B: ConsoleBackend> {
     chars_since_cursor_redraw: usize,
     // Batching: track dirty cells to render in bulk
     dirty_cells: Vec<(usize, usize)>, // (x, y) pairs
+    // ANSI escape sequence parser state (persists across IPC messages)
+    esc_state: EscState,
+    esc_params: [u16; 4],
+    esc_param_count: usize,
+    esc_current_param: u16,
 }
 
 impl<B: ConsoleBackend> Console<B> {
@@ -63,6 +79,10 @@ impl<B: ConsoleBackend> Console<B> {
             last_cursor_y: 0,
             chars_since_cursor_redraw: 0,
             dirty_cells: Vec::new(),
+            esc_state: EscState::Normal,
+            esc_params: [0; 4],
+            esc_param_count: 0,
+            esc_current_param: 0,
         };
         console.clear();
         console
@@ -262,33 +282,184 @@ impl<B: ConsoleBackend> Console<B> {
         self.redraw_cursor();
     }
 
-    /// Render a single character at the current cursor position.
+    /// Render a single character at the current cursor position,
+    /// routing through the ANSI escape sequence state machine.
     fn put_char(&mut self, ch: u8) {
-        match ch {
-            b'\n' => self.newline(),
-            b'\r' => {
-                self.cursor_x = 0;
-            }
-            0x08 => {
-                // Backspace: move left; if at column 0, go to previous line end.
-                if self.cursor_x > 0 {
-                    self.cursor_x -= 1;
-                } else if self.cursor_y > 0 {
-                    self.cursor_y -= 1;
-                    self.cursor_x = self.cols.saturating_sub(1);
+        match self.esc_state {
+            EscState::Normal => match ch {
+                0x1B => {
+                    // ESC — begin escape sequence
+                    self.esc_state = EscState::Escape;
                 }
-                self.set_cell(self.cursor_x, self.cursor_y, b' ');
-            }
-            _ => {
-                self.set_cell(self.cursor_x, self.cursor_y, ch);
-
-                self.cursor_x += 1;
-                if self.cursor_x >= self.cols {
-                    self.newline();
+                b'\n' => self.newline(),
+                b'\r' => {
+                    self.cursor_x = 0;
+                }
+                0x08 => {
+                    // Backspace: move left; if at column 0, go to previous line end.
+                    if self.cursor_x > 0 {
+                        self.cursor_x -= 1;
+                    } else if self.cursor_y > 0 {
+                        self.cursor_y -= 1;
+                        self.cursor_x = self.cols.saturating_sub(1);
+                    }
+                    self.set_cell(self.cursor_x, self.cursor_y, b' ');
+                }
+                _ => {
+                    self.set_cell(self.cursor_x, self.cursor_y, ch);
+                    self.cursor_x += 1;
+                    if self.cursor_x >= self.cols {
+                        self.newline();
+                    }
+                }
+            },
+            EscState::Escape => match ch {
+                b'[' => {
+                    // CSI introducer
+                    self.esc_state = EscState::Csi;
+                    self.esc_params = [0; 4];
+                    self.esc_param_count = 0;
+                    self.esc_current_param = 0;
+                }
+                _ => {
+                    // Unknown escape sequence — reset
+                    self.esc_state = EscState::Normal;
+                }
+            },
+            EscState::Csi => {
+                if ch.is_ascii_digit() {
+                    // Accumulate parameter digit
+                    self.esc_current_param = self.esc_current_param
+                        .saturating_mul(10)
+                        .saturating_add((ch - b'0') as u16);
+                } else if ch == b';' {
+                    // Parameter separator
+                    if self.esc_param_count < self.esc_params.len() {
+                        self.esc_params[self.esc_param_count] = self.esc_current_param;
+                        self.esc_param_count += 1;
+                    }
+                    self.esc_current_param = 0;
+                } else if ch == b'~' {
+                    // Tilde-terminated sequences (e.g., \e[3~)
+                    if self.esc_param_count < self.esc_params.len() {
+                        self.esc_params[self.esc_param_count] = self.esc_current_param;
+                        self.esc_param_count += 1;
+                    }
+                    // Currently no tilde sequences needed — just reset
+                    self.esc_state = EscState::Normal;
+                } else if (0x40..=0x7E).contains(&ch) {
+                    // Final byte — dispatch CSI sequence
+                    if self.esc_param_count < self.esc_params.len() {
+                        self.esc_params[self.esc_param_count] = self.esc_current_param;
+                        self.esc_param_count += 1;
+                    }
+                    self.dispatch_csi(ch);
+                    self.esc_state = EscState::Normal;
+                } else {
+                    // Invalid character in CSI — abort
+                    self.esc_state = EscState::Normal;
                 }
             }
         }
-        // Cursor redraw is now handled at end of write_utf8_bytes (batching)
+    }
+
+    /// Dispatch a CSI (Control Sequence Introducer) escape sequence.
+    ///
+    /// Supports the minimum set needed for MicroPython REPL:
+    /// - A (CUU): cursor up
+    /// - B (CUD): cursor down
+    /// - C (CUF): cursor forward (right)
+    /// - D (CUB): cursor back (left)
+    /// - H (CUP): cursor position (row;col)
+    /// - J (ED):  erase display (2J = clear screen)
+    /// - K (EL):  erase in line (0K = cursor to end)
+    fn dispatch_csi(&mut self, cmd: u8) {
+        let p0 = if self.esc_param_count > 0 { self.esc_params[0] } else { 0 };
+        let p1 = if self.esc_param_count > 1 { self.esc_params[1] } else { 0 };
+
+        match cmd {
+            b'A' => {
+                // CUU — cursor up n (default 1)
+                let n = if p0 == 0 { 1 } else { p0 as usize };
+                self.cursor_y = self.cursor_y.saturating_sub(n);
+            }
+            b'B' => {
+                // CUD — cursor down n (default 1)
+                let n = if p0 == 0 { 1 } else { p0 as usize };
+                self.cursor_y = (self.cursor_y + n).min(self.rows.saturating_sub(1));
+            }
+            b'C' => {
+                // CUF — cursor forward n (default 1)
+                let n = if p0 == 0 { 1 } else { p0 as usize };
+                self.cursor_x = (self.cursor_x + n).min(self.cols.saturating_sub(1));
+            }
+            b'D' => {
+                // CUB — cursor back n (default 1)
+                let n = if p0 == 0 { 1 } else { p0 as usize };
+                self.cursor_x = self.cursor_x.saturating_sub(n);
+            }
+            b'H' => {
+                // CUP — cursor position (row;col), 1-based
+                let row = if p0 == 0 { 1 } else { p0 as usize };
+                let col = if p1 == 0 { 1 } else { p1 as usize };
+                self.cursor_y = (row - 1).min(self.rows.saturating_sub(1));
+                self.cursor_x = (col - 1).min(self.cols.saturating_sub(1));
+            }
+            b'J' => {
+                // ED — erase display
+                match p0 {
+                    2 => {
+                        // Clear entire screen
+                        self.clear();
+                    }
+                    0 => {
+                        // Clear from cursor to end of screen
+                        // Clear rest of current line
+                        for x in self.cursor_x..self.cols {
+                            self.set_cell(x, self.cursor_y, b' ');
+                        }
+                        // Clear all lines below
+                        for y in (self.cursor_y + 1)..self.rows {
+                            for x in 0..self.cols {
+                                self.set_cell(x, y, b' ');
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            b'K' => {
+                // EL — erase in line
+                match p0 {
+                    0 => {
+                        // Clear from cursor to end of line
+                        for x in self.cursor_x..self.cols {
+                            self.set_cell(x, self.cursor_y, b' ');
+                        }
+                    }
+                    1 => {
+                        // Clear from start of line to cursor
+                        for x in 0..=self.cursor_x.min(self.cols.saturating_sub(1)) {
+                            self.set_cell(x, self.cursor_y, b' ');
+                        }
+                    }
+                    2 => {
+                        // Clear entire line
+                        for x in 0..self.cols {
+                            self.set_cell(x, self.cursor_y, b' ');
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            b'm' => {
+                // SGR — select graphic rendition (ignore for now, just reset state)
+                // MicroPython uses \e[0m etc. — safe to ignore without color support
+            }
+            _ => {
+                // Unknown CSI sequence — ignore
+            }
+        }
     }
 
     /// Update one grid cell and mark it as dirty (batching).

@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::vec::Vec;
 use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_EXTRA_0, TOKEN_IPC};
@@ -15,6 +16,12 @@ use libcluu::ipc::{
 use libcluu::registry;
 use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Result};
+
+/// A pending read request from a process that called read(0, ...).
+pub struct PendingRead {
+    pub reply_token: usize,
+    pub max_bytes: usize,
+}
 
 /// TTY context shared by the main loop.
 pub struct TtyContext {
@@ -28,6 +35,10 @@ pub struct TtyContext {
     /// Deferred sync write reply token (if console wasn't ready)
     pending_sync_reply: Option<usize>,
     console_credit: usize,
+    /// Queue of pending read requests waiting for input data.
+    pub pending_reads: VecDeque<PendingRead>,
+    /// Input bytes queued for pending readers (raw mode or canonical leftovers).
+    pub input_queue: VecDeque<u8>,
 }
 
 impl TtyContext {
@@ -71,6 +82,8 @@ impl TtyContext {
             pending_console_output: Vec::new(),
             pending_sync_reply: None,
             console_credit: CONSOLE_CREDIT_WINDOW,
+            pending_reads: VecDeque::new(),
+            input_queue: VecDeque::new(),
         })
     }
 
@@ -163,6 +176,24 @@ impl TtyContext {
             use libcluu::types::{IpcFlags, Message};
             let reply_msg = Message::new(TTY_WRITE_SYNC_LABEL, [0; 6], 0);
             let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+    }
+
+    /// Try to satisfy pending read requests from the input queue.
+    ///
+    /// Drains bytes from `input_queue` into the oldest pending read,
+    /// replies via `reply_with_payload`, and removes the satisfied request.
+    pub fn try_satisfy_reads(&mut self) {
+        while !self.pending_reads.is_empty() && !self.input_queue.is_empty() {
+            let pending = &self.pending_reads[0];
+            let n = pending.max_bytes.min(self.input_queue.len());
+            if n == 0 {
+                break;
+            }
+            let data: Vec<u8> = self.input_queue.drain(..n).collect();
+            let reply_token = self.pending_reads.pop_front().unwrap().reply_token;
+            let reply_msg = Message::new(libcluu::ipc::TTY_READ_REQUEST_LABEL, [0; 6], 0);
+            let _ = libcluu::ipc::reply_with_payload(reply_token, &reply_msg, &data);
         }
     }
 

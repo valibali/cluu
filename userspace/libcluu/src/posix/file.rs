@@ -3,10 +3,10 @@
 use super::{c_char, c_int, c_void, mode_t, off_t, size_t, ssize_t};
 use crate::errno::{from_cluu_error, return_error, set_errno, EBADF, EINVAL, ENOENT, ENOSYS, ESPIPE};
 use crate::fd_table::{FdCaps, FdEntry, FD_TABLE};
-use crate::ipc::{TTY_READ_LABEL, TTY_WRITE_LABEL};
+use crate::ipc::{TTY_READ_REQUEST_LABEL, TTY_WRITE_LABEL};
 use crate::types::Message;
 use core::slice;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // Open flags (matching Linux values)
 pub const O_RDONLY: c_int = 0;
@@ -279,13 +279,40 @@ pub extern "C" fn _lseek(fd: c_int, offset: off_t, whence: c_int) -> off_t {
 // Internal helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn read_tty(endpoint: usize, buffer: &mut [u8]) -> ssize_t {
-    // Use TTY_READ protocol
-    let mut msg = Message::new(TTY_READ_LABEL, [0; 6], 1);
+/// Cached TTY endpoint (from fd 1 = stdout = tty_main).
+///
+/// fd 0's endpoint is the process's OWN receive endpoint (created by procmgr),
+/// not the TTY's. We use fd 1's endpoint which points to tty_main.
+static TTY_ENDPOINT: AtomicUsize = AtomicUsize::new(0);
+
+/// Get the TTY's actual endpoint by looking up fd 1 (stdout).
+pub fn get_tty_endpoint() -> Option<usize> {
+    let cached = TTY_ENDPOINT.load(Ordering::Relaxed);
+    if cached != 0 {
+        return Some(cached);
+    }
+    let table = FD_TABLE.lock();
+    let ep = table.get(1)?.endpoint; // fd 1 = stdout = tty_main
+    TTY_ENDPOINT.store(ep, Ordering::Relaxed);
+    Some(ep)
+}
+
+fn read_tty(_stdin_endpoint: usize, buffer: &mut [u8]) -> ssize_t {
+    // Use the TTY's actual endpoint (fd 1), not fd 0's endpoint which is
+    // the process's own receive endpoint and would deadlock on ipc_call.
+    let tty_ep = match get_tty_endpoint() {
+        Some(ep) => ep,
+        None => {
+            set_errno(EBADF);
+            return -1;
+        }
+    };
+
+    let mut msg = Message::new(TTY_READ_REQUEST_LABEL, [0; 6], 1);
     msg.words[0] = buffer.len();
 
     let mut reply_buf = [0u8; 512];
-    match crate::syscall::ipc_call(endpoint, msg.as_bytes(), &mut reply_buf) {
+    match crate::syscall::ipc_call(tty_ep, msg.as_bytes(), &mut reply_buf) {
         Ok(bytes) => {
             if bytes <= core::mem::size_of::<Message>() {
                 return 0; // No data

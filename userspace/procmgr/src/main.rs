@@ -134,7 +134,7 @@ impl ProcessManager {
         debug_print("Derived procmgr token handle")?;
         debug_print(&format!("  Handle: {}", self.token))?;
 
-        let _ = self.spawn_service(SERVICE_PATH, DEFAULT_PRIORITY)?;
+        let _ = self.spawn_service(SERVICE_PATH, DEFAULT_PRIORITY, &[], 0)?;
         debug_print("Service spawned; yielding to scheduler")?;
         yield_cpu()?;
         Ok(())
@@ -266,10 +266,16 @@ impl ProcessManager {
             return Ok(());
         }
 
-        let priority = if msg.tag.words >= 2 {
-            msg.words[1]
+        let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
+        let priority = DEFAULT_PRIORITY;
+
+        // Extract argv data: payload is [path\0, argv[0]\0, argv[1]\0, ...]
+        // Skip past the path string (including its NUL terminator)
+        let path_nul_end = payload.iter().position(|b| *b == 0).unwrap_or(payload.len()) + 1;
+        let argv_data = if argc > 0 && path_nul_end < payload.len() {
+            &payload[path_nul_end..]
         } else {
-            DEFAULT_PRIORITY
+            &[]
         };
 
         if self.tty_main == 0 {
@@ -278,7 +284,7 @@ impl ProcessManager {
             }
         }
 
-        match self.spawn_service(path, priority) {
+        match self.spawn_service(path, priority, argv_data, argc) {
             Ok((thread_token, cookie, pid)) => {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = pid; // Return PID instead of thread_token
@@ -309,7 +315,7 @@ impl ProcessManager {
         pid
     }
 
-    fn spawn_service(&mut self, path: &str, priority: usize) -> Result<(usize, usize, usize)> {
+    fn spawn_service(&mut self, path: &str, priority: usize, argv_payload: &[u8], argc: usize) -> Result<(usize, usize, usize)> {
         debug_print("Creating address space...")?;
         let space_token = space_create(self.token)?;
         debug_print(&format!("Address space created: {}", space_token))?;
@@ -401,6 +407,8 @@ impl ProcessManager {
             self_cap,
             child_space_token, // Now properly derived!
             self.clock_token,
+            argv_payload,
+            argc,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
@@ -750,6 +758,11 @@ fn parse_cstr(payload: &[u8]) -> Option<&str> {
     core::str::from_utf8(&payload[..end]).ok()
 }
 
+/// Param index for argc (number of command-line arguments).
+const PARAM_ARGC: usize = 6;
+/// Param index for the byte offset within the info page where argv data starts.
+const PARAM_ARGV_OFFSET: usize = 7;
+
 #[allow(clippy::too_many_arguments)]
 fn map_process_info_page(
     space_token: usize,
@@ -765,6 +778,8 @@ fn map_process_info_page(
     self_cap_token: usize,
     space_grant_token: usize,
     clock_token: usize,
+    argv_payload: &[u8],
+    argc: usize,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -784,27 +799,46 @@ fn map_process_info_page(
     tokens[TOKEN_REGISTRY] = registry_token;
     // Slots 9-15: Contextual (empty for regular programs)
 
+    let mut params = [0u64; 8];
+    let info_offset = PROCESS_INFO_ADDR - page_base;
+    let info_size = size_of::<ProcessInfo>();
+    let argv_data_offset = info_offset + info_size; // byte offset within page
+
+    // Store argc and argv data offset in params
+    if argc > 0 && !argv_payload.is_empty() {
+        params[PARAM_ARGC] = argc as u64;
+        params[PARAM_ARGV_OFFSET] = argv_data_offset as u64;
+    }
+
     let info = ProcessInfo {
         exit_token,
         exit_cookie,
         pid,
         tokens,
-        params: [0u64; 8],
+        params,
     };
 
     let mut page = [0u8; PAGE_SIZE];
     let bytes = unsafe {
         core::slice::from_raw_parts(
             &info as *const ProcessInfo as *const u8,
-            core::mem::size_of::<ProcessInfo>(),
+            info_size,
         )
     };
-    let offset = PROCESS_INFO_ADDR - page_base;
-    let end = offset + bytes.len();
+    let end = info_offset + bytes.len();
     if end > PAGE_SIZE {
         return Err(Error::InvalidArgument);
     }
-    page[offset..end].copy_from_slice(bytes);
+    page[info_offset..end].copy_from_slice(bytes);
+
+    // Write argv data after ProcessInfo (null-terminated strings packed contiguously)
+    // The payload format from posix_spawn is: [path\0, arg0\0, arg1\0, ...]
+    if argc > 0 && !argv_payload.is_empty() {
+        let argv_end = argv_data_offset + argv_payload.len();
+        if argv_end <= PAGE_SIZE {
+            page[argv_data_offset..argv_end].copy_from_slice(argv_payload);
+        }
+    }
 
     space_map(
         space_token,

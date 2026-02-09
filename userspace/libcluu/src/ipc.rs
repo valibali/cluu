@@ -26,6 +26,7 @@ pub const TTY_WRITE_LABEL: u32 = 2;
 pub const TTY_CTL_LABEL: u32 = 3;
 pub const TTY_REGISTER_LABEL: u32 = 4;
 pub const TTY_WRITE_SYNC_LABEL: u32 = 5;
+pub const TTY_READ_REQUEST_LABEL: u32 = 6;
 pub const TTY_CTL_SYNC: u32 = 1;
 pub const CALL_COOKIE_TAG: u8 = 1;
 pub const CALL_COOKIE_WORD: usize = 5;

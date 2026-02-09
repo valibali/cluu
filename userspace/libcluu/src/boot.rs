@@ -170,6 +170,10 @@ pub const PARAM_INITRD_SIZE: usize = 0;
 // Well-known param indices for tty
 pub const PARAM_TTY_INSTANCE: usize = 0;
 
+// Well-known param indices for argv (shared by procmgr + crt0)
+pub const PARAM_ARGC: usize = 6;
+pub const PARAM_ARGV_OFFSET: usize = 7;
+
 /// Read the process info structure.
 pub fn process_info() -> &'static ProcessInfo {
     unsafe { &*(PROCESS_INFO_ADDR as *const ProcessInfo) }
