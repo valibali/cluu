@@ -7,9 +7,7 @@ use libcluu::boot::{process_info, TOKEN_CLOCK, TOKEN_EXTRA_0, TOKEN_IPC, TOKEN_R
 use libcluu::ipc::extract_reply_token;
 use libcluu::time::{TIME_GETCLOCK, TIME_GETTIMEOFDAY};
 use libcluu::types::Message;
-use libcluu::{clock_now, debug_print, registry, Result};
-
-const TICKS_PER_SEC_ASSUMED: u64 = 1_000_000_000;
+use libcluu::{clock_frequency, clock_now, debug_print, registry, Result};
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -21,13 +19,18 @@ pub extern "C" fn main() -> i32 {
 
 fn run() -> Result<()> {
     let info = process_info();
-    
+
     registry::init("timeserver")?;
     registry::register_output("main", info.tokens[TOKEN_EXTRA_0])?;
     debug_print("timeserver: ready")?;
 
     let endpoint = info.tokens[TOKEN_EXTRA_0];
     let clock_token = info.tokens[TOKEN_CLOCK];
+
+    let ticks_per_sec = match clock_frequency(clock_token) {
+        Ok(hz) if hz > 0 => hz,
+        _ => 1_000_000_000,
+    };
 
     let mut buf = [0u8; 256];
     loop {
@@ -40,19 +43,28 @@ fn run() -> Result<()> {
         let reply_token = extract_reply_token(&msg).unwrap_or(endpoint);
 
         match msg.tag.label {
-            TIME_GETTIMEOFDAY => reply_time(reply_token, clock_token, false)?,
-            TIME_GETCLOCK => reply_time(reply_token, clock_token, true)?,
+            TIME_GETTIMEOFDAY => reply_time(reply_token, clock_token, ticks_per_sec, false)?,
+            TIME_GETCLOCK => reply_time(reply_token, clock_token, ticks_per_sec, true)?,
             _ => {}
         }
     }
 }
 
-fn reply_time(reply_token: usize, clock_token: usize, monotonic: bool) -> Result<()> {
+fn reply_time(
+    reply_token: usize,
+    clock_token: usize,
+    ticks_per_sec: u64,
+    monotonic: bool,
+) -> Result<()> {
     let now = clock_now(clock_token).unwrap_or(0);
-    let seconds = now / TICKS_PER_SEC_ASSUMED;
-    let nanos = now % TICKS_PER_SEC_ASSUMED;
+    let seconds = now / ticks_per_sec;
+    let nanos = ((now % ticks_per_sec) as u128 * 1_000_000_000u128 / ticks_per_sec as u128) as u64;
 
-    let label = if monotonic { TIME_GETCLOCK } else { TIME_GETTIMEOFDAY };
+    let label = if monotonic {
+        TIME_GETCLOCK
+    } else {
+        TIME_GETTIMEOFDAY
+    };
     let mut reply = Message::new(label, [0; 6], 3);
     reply.words[0] = 0;
     reply.words[1] = seconds as usize;

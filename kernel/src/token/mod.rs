@@ -386,6 +386,7 @@ pub enum InvokeOp {
 
     // Clock/time
     ClockNow = 60,
+    ClockFrequency = 61,
 
     // Frame operations
     FrameAllocate = 70,
@@ -424,6 +425,7 @@ impl InvokeOp {
             58 => Some(Self::VirtToPhys),
             59 => Some(Self::PmmAllocLarge),
             60 => Some(Self::ClockNow),
+            61 => Some(Self::ClockFrequency),
             70 => Some(Self::FrameAllocate),
             71 => Some(Self::FrameFree),
             72 => Some(Self::FrameGetPhys),

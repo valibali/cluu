@@ -1,7 +1,9 @@
 //! File I/O syscall stubs.
 
 use super::{c_char, c_int, c_void, mode_t, off_t, size_t, ssize_t};
-use crate::errno::{from_cluu_error, return_error, set_errno, EBADF, EINVAL, ENOENT, ENOSYS, ESPIPE};
+use crate::errno::{
+    from_cluu_error, return_error, set_errno, EBADF, EINVAL, ENOENT, ENOSYS, ESPIPE,
+};
 use crate::fd_table::{FdCaps, FdEntry, FD_TABLE};
 use crate::ipc::{TTY_READ_REQUEST_LABEL, TTY_WRITE_LABEL};
 use crate::types::Message;
@@ -124,6 +126,36 @@ pub extern "C" fn _close(fd: c_int) -> c_int {
 
     table.remove(fd);
     0
+}
+
+/// Duplicate a file descriptor.
+#[no_mangle]
+pub extern "C" fn _dup(oldfd: c_int) -> c_int {
+    let mut table = FD_TABLE.lock();
+    match table.dup(oldfd) {
+        Some(fd) => fd,
+        None => {
+            set_errno(EBADF);
+            -1
+        }
+    }
+}
+
+/// Duplicate a file descriptor to a specific number.
+#[no_mangle]
+pub extern "C" fn _dup2(oldfd: c_int, newfd: c_int) -> c_int {
+    if newfd < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let mut table = FD_TABLE.lock();
+    match table.dup2(oldfd, newfd) {
+        Some(fd) => fd,
+        None => {
+            set_errno(EBADF);
+            -1
+        }
+    }
 }
 
 /// Read from a file descriptor.
@@ -487,6 +519,27 @@ pub extern "C" fn _link(_old: *const c_char, _new: *const c_char) -> c_int {
 /// Unlink (delete file) - not supported yet.
 #[no_mangle]
 pub extern "C" fn _unlink(_path: *const c_char) -> c_int {
+    set_errno(ENOSYS);
+    -1
+}
+
+/// Make directory - not supported yet.
+#[no_mangle]
+pub extern "C" fn _mkdir(_path: *const c_char, _mode: mode_t) -> c_int {
+    set_errno(ENOSYS);
+    -1
+}
+
+/// Remove directory - not supported yet.
+#[no_mangle]
+pub extern "C" fn _rmdir(_path: *const c_char) -> c_int {
+    set_errno(ENOSYS);
+    -1
+}
+
+/// Rename path - not supported yet.
+#[no_mangle]
+pub extern "C" fn _rename(_old: *const c_char, _new: *const c_char) -> c_int {
     set_errno(ENOSYS);
     -1
 }

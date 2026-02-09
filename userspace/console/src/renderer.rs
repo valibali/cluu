@@ -21,6 +21,26 @@ const GLYPH_H: usize = 16;
 
 const COLOR_BG: u32 = 0x00000000;
 const COLOR_FG: u32 = 0x00FFFFFF;
+const ANSI_COLORS: [u32; 8] = [
+    0x00000000, // black
+    0x00AA0000, // red
+    0x0000AA00, // green
+    0x00AA5500, // yellow/brown
+    0x000000AA, // blue
+    0x00AA00AA, // magenta
+    0x0000AAAA, // cyan
+    0x00AAAAAA, // white/gray
+];
+const ANSI_BRIGHT_COLORS: [u32; 8] = [
+    0x00555555, // bright black
+    0x00FF5555, // bright red
+    0x0055FF55, // bright green
+    0x00FFFF55, // bright yellow
+    0x005555FF, // bright blue
+    0x00FF55FF, // bright magenta
+    0x0055FFFF, // bright cyan
+    0x00FFFFFF, // bright white
+];
 
 /// ANSI escape sequence parser state.
 #[derive(Clone, Copy, PartialEq)]
@@ -45,6 +65,10 @@ pub struct Console<B: ConsoleBackend> {
     cursor_visible: bool,
     blink_enabled: bool,
     cells: Vec<u8>,
+    fg_cells: Vec<u32>,
+    bg_cells: Vec<u32>,
+    current_fg: u32,
+    current_bg: u32,
     last_cursor_x: usize,
     last_cursor_y: usize,
     chars_since_cursor_redraw: usize,
@@ -75,6 +99,10 @@ impl<B: ConsoleBackend> Console<B> {
             cursor_visible: true,
             blink_enabled: true,
             cells: alloc::vec![b' '; cols * rows],
+            fg_cells: alloc::vec![COLOR_FG; cols * rows],
+            bg_cells: alloc::vec![COLOR_BG; cols * rows],
+            current_fg: COLOR_FG,
+            current_bg: COLOR_BG,
             last_cursor_x: 0,
             last_cursor_y: 0,
             chars_since_cursor_redraw: 0,
@@ -153,6 +181,10 @@ impl<B: ConsoleBackend> Console<B> {
     /// Optimized to use bulk fill operation instead of per-pixel writes.
     fn clear(&mut self) {
         self.cells.fill(b' ');
+        self.fg_cells.fill(COLOR_FG);
+        self.bg_cells.fill(COLOR_BG);
+        self.current_fg = COLOR_FG;
+        self.current_bg = COLOR_BG;
         self.dirty_cells.clear();
         // Use bulk fill_rect for much faster clearing
         self.backend
@@ -164,9 +196,8 @@ impl<B: ConsoleBackend> Console<B> {
         self.redraw_cursor();
     }
 
-    /// Write a byte stream into the grid, honoring control characters.
-    ///
-    /// This decodes a tiny UTF-8 subset for block elements used in banners.
+    /// Write a byte stream into the grid, decoding UTF-8 and mapping
+    /// Unicode codepoints to CP437 glyphs.
     fn write_utf8_bytes(&mut self, bytes: &[u8]) {
         // Clear dirty cells at start of new message batch
         self.dirty_cells.clear();
@@ -174,28 +205,41 @@ impl<B: ConsoleBackend> Console<B> {
         let mut i = 0;
         while i < bytes.len() {
             let b = bytes[i];
+
+            // 1-byte (ASCII): 0xxxxxxx
             if b < 0x80 {
                 self.put_char(b);
                 i += 1;
                 continue;
             }
-            if b == 0xE2 && i + 2 < bytes.len() {
-                match (bytes[i + 1], bytes[i + 2]) {
-                    // U+2588 FULL BLOCK
-                    (0x96, 0x88) => self.put_char(0xDB),
-                    // U+2591 LIGHT SHADE
-                    (0x96, 0x91) => self.put_char(0xB0),
-                    // U+2592 MEDIUM SHADE
-                    (0x96, 0x92) => self.put_char(0xB1),
-                    // U+2593 DARK SHADE
-                    (0x96, 0x93) => self.put_char(0xB2),
-                    _ => self.put_char(b'?'),
-                }
-                i += 3;
+
+            // Decode multi-byte UTF-8 sequence
+            let (codepoint, seq_len) = if b & 0xE0 == 0xC0 && i + 1 < bytes.len() {
+                // 2-byte: 110xxxxx 10xxxxxx
+                let cp = ((b as u32 & 0x1F) << 6) | (bytes[i + 1] as u32 & 0x3F);
+                (cp, 2)
+            } else if b & 0xF0 == 0xE0 && i + 2 < bytes.len() {
+                // 3-byte: 1110xxxx 10xxxxxx 10xxxxxx
+                let cp = ((b as u32 & 0x0F) << 12)
+                    | ((bytes[i + 1] as u32 & 0x3F) << 6)
+                    | (bytes[i + 2] as u32 & 0x3F);
+                (cp, 3)
+            } else if b & 0xF8 == 0xF0 && i + 3 < bytes.len() {
+                // 4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+                let cp = ((b as u32 & 0x07) << 18)
+                    | ((bytes[i + 1] as u32 & 0x3F) << 12)
+                    | ((bytes[i + 2] as u32 & 0x3F) << 6)
+                    | (bytes[i + 3] as u32 & 0x3F);
+                (cp, 4)
+            } else {
+                // Invalid lead byte or truncated — skip
+                self.put_char(b'?');
+                i += 1;
                 continue;
-            }
-            self.put_char(b'?');
-            i += 1;
+            };
+
+            self.put_char(unicode_to_cp437(codepoint));
+            i += seq_len;
         }
 
         // Flush all dirty cells at once (batching)
@@ -230,10 +274,14 @@ impl<B: ConsoleBackend> Console<B> {
 
         // Move rows 1..end up by one row in cell buffer.
         self.cells.copy_within(w.., 0);
+        self.fg_cells.copy_within(w.., 0);
+        self.bg_cells.copy_within(w.., 0);
 
         // Clear last row in cell buffer.
         let last = (self.rows - 1) * w;
         self.cells[last..last + w].fill(b' ');
+        self.fg_cells[last..last + w].fill(self.current_fg);
+        self.bg_cells[last..last + w].fill(self.current_bg);
 
         // Clear dirty_cells to avoid stale entries after scrolling
         // (cells have moved, so old dirty positions are invalid)
@@ -259,7 +307,8 @@ impl<B: ConsoleBackend> Console<B> {
         // This ensures the framebuffer is in a consistent state
         for x in 0..self.cols {
             let ch = self.get_cell(x, last_row_y);
-            self.draw_glyph(x, last_row_y, ch, COLOR_FG, COLOR_BG);
+            let (fg, bg) = self.get_cell_colors(x, last_row_y);
+            self.draw_glyph(x, last_row_y, ch, fg, bg);
         }
 
         // Cursor stays on last row after scroll.
@@ -276,7 +325,8 @@ impl<B: ConsoleBackend> Console<B> {
         for y in 0..self.rows {
             for x in 0..self.cols {
                 let ch = self.get_cell(x, y);
-                self.draw_glyph(x, y, ch, COLOR_FG, COLOR_BG);
+                let (fg, bg) = self.get_cell_colors(x, y);
+                self.draw_glyph(x, y, ch, fg, bg);
             }
         }
         self.redraw_cursor();
@@ -303,10 +353,10 @@ impl<B: ConsoleBackend> Console<B> {
                         self.cursor_y -= 1;
                         self.cursor_x = self.cols.saturating_sub(1);
                     }
-                    self.set_cell(self.cursor_x, self.cursor_y, b' ');
+                    self.set_cell(self.cursor_x, self.cursor_y, b' ', self.current_fg, self.current_bg);
                 }
                 _ => {
-                    self.set_cell(self.cursor_x, self.cursor_y, ch);
+                    self.set_cell(self.cursor_x, self.cursor_y, ch, self.current_fg, self.current_bg);
                     self.cursor_x += 1;
                     if self.cursor_x >= self.cols {
                         self.newline();
@@ -416,12 +466,12 @@ impl<B: ConsoleBackend> Console<B> {
                         // Clear from cursor to end of screen
                         // Clear rest of current line
                         for x in self.cursor_x..self.cols {
-                            self.set_cell(x, self.cursor_y, b' ');
+                            self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
                         }
                         // Clear all lines below
                         for y in (self.cursor_y + 1)..self.rows {
                             for x in 0..self.cols {
-                                self.set_cell(x, y, b' ');
+                                self.set_cell(x, y, b' ', self.current_fg, self.current_bg);
                             }
                         }
                     }
@@ -434,27 +484,46 @@ impl<B: ConsoleBackend> Console<B> {
                     0 => {
                         // Clear from cursor to end of line
                         for x in self.cursor_x..self.cols {
-                            self.set_cell(x, self.cursor_y, b' ');
+                            self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
                         }
                     }
                     1 => {
                         // Clear from start of line to cursor
                         for x in 0..=self.cursor_x.min(self.cols.saturating_sub(1)) {
-                            self.set_cell(x, self.cursor_y, b' ');
+                            self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
                         }
                     }
                     2 => {
                         // Clear entire line
                         for x in 0..self.cols {
-                            self.set_cell(x, self.cursor_y, b' ');
+                            self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
                         }
                     }
                     _ => {}
                 }
             }
             b'm' => {
-                // SGR — select graphic rendition (ignore for now, just reset state)
-                // MicroPython uses \e[0m etc. — safe to ignore without color support
+                // SGR — select graphic rendition (colors + reset).
+                if self.esc_param_count == 0 {
+                    self.current_fg = COLOR_FG;
+                    self.current_bg = COLOR_BG;
+                    return;
+                }
+
+                for idx in 0..self.esc_param_count {
+                    let p = self.esc_params[idx];
+                    match p {
+                        0 => {
+                            self.current_fg = COLOR_FG;
+                            self.current_bg = COLOR_BG;
+                        }
+                        30..=37 => self.current_fg = ANSI_COLORS[(p - 30) as usize],
+                        40..=47 => self.current_bg = ANSI_COLORS[(p - 40) as usize],
+                        90..=97 => self.current_fg = ANSI_BRIGHT_COLORS[(p - 90) as usize],
+                        100..=107 => self.current_bg = ANSI_BRIGHT_COLORS[(p - 100) as usize],
+                        _ => {}
+                    }
+                }
             }
             _ => {
                 // Unknown CSI sequence — ignore
@@ -464,13 +533,15 @@ impl<B: ConsoleBackend> Console<B> {
 
     /// Update one grid cell and mark it as dirty (batching).
     /// The cell will be rendered when flush_dirty_cells() is called.
-    fn set_cell(&mut self, x: usize, y: usize, ch: u8) {
+    fn set_cell(&mut self, x: usize, y: usize, ch: u8, fg: u32, bg: u32) {
         if x >= self.cols || y >= self.rows {
             return;
         }
         let idx = y * self.cols + x;
-        if self.cells[idx] != ch {
+        if self.cells[idx] != ch || self.fg_cells[idx] != fg || self.bg_cells[idx] != bg {
             self.cells[idx] = ch;
+            self.fg_cells[idx] = fg;
+            self.bg_cells[idx] = bg;
             // Mark cell as dirty (avoid duplicates)
             let pos = (x, y);
             if !self.dirty_cells.contains(&pos) {
@@ -487,7 +558,8 @@ impl<B: ConsoleBackend> Console<B> {
 
         for (x, y) in dirty {
             let ch = self.get_cell(x, y);
-            self.draw_glyph(x, y, ch, COLOR_FG, COLOR_BG);
+            let (fg, bg) = self.get_cell_colors(x, y);
+            self.draw_glyph(x, y, ch, fg, bg);
         }
 
     }
@@ -497,18 +569,20 @@ impl<B: ConsoleBackend> Console<B> {
         // 1) If cursor moved, repaint the old cursor cell to erase the old cursor block.
         if self.last_cursor_x != self.cursor_x || self.last_cursor_y != self.cursor_y {
             let old_ch = self.get_cell(self.last_cursor_x, self.last_cursor_y);
+            let (old_fg, old_bg) = self.get_cell_colors(self.last_cursor_x, self.last_cursor_y);
             self.draw_glyph(
                 self.last_cursor_x,
                 self.last_cursor_y,
                 old_ch,
-                COLOR_FG,
-                COLOR_BG,
+                old_fg,
+                old_bg,
             );
         }
 
         // 2) Paint the current cell (to clear any old cursor block there too).
         let ch = self.get_cell(self.cursor_x, self.cursor_y);
-        self.draw_glyph(self.cursor_x, self.cursor_y, ch, COLOR_FG, COLOR_BG);
+        let (fg, bg) = self.get_cell_colors(self.cursor_x, self.cursor_y);
+        self.draw_glyph(self.cursor_x, self.cursor_y, ch, fg, bg);
 
         // 3) Draw cursor block if visible.
         if self.cursor_visible {
@@ -526,6 +600,14 @@ impl<B: ConsoleBackend> Console<B> {
             return b' ';
         }
         self.cells[y * self.cols + x]
+    }
+
+    fn get_cell_colors(&self, x: usize, y: usize) -> (u32, u32) {
+        if x >= self.cols || y >= self.rows {
+            return (COLOR_FG, COLOR_BG);
+        }
+        let idx = y * self.cols + x;
+        (self.fg_cells[idx], self.bg_cells[idx])
     }
 
     /// Draw a minimal cursor block at the bottom of the glyph cell.
@@ -595,6 +677,157 @@ fn make_shade(a: u8, b: u8) -> [u8; GLYPH_H] {
     }
 
     glyph
+}
+
+/// Map a Unicode codepoint to the closest CP437 glyph index.
+///
+/// Covers ASCII, Latin-1 supplement, box drawing, block elements,
+/// Greek letters, and common math/currency symbols.
+fn unicode_to_cp437(cp: u32) -> u8 {
+    match cp {
+        // ASCII — direct mapping
+        0x0000..=0x007F => cp as u8,
+
+        // Latin-1 supplement → CP437 extended
+        0x00C7 => 0x80, // Ç
+        0x00FC => 0x81, // ü
+        0x00E9 => 0x82, // é
+        0x00E2 => 0x83, // â
+        0x00E4 => 0x84, // ä
+        0x00E0 => 0x85, // à
+        0x00E5 => 0x86, // å
+        0x00E7 => 0x87, // ç
+        0x00EA => 0x88, // ê
+        0x00EB => 0x89, // ë
+        0x00E8 => 0x8A, // è
+        0x00EF => 0x8B, // ï
+        0x00EE => 0x8C, // î
+        0x00EC => 0x8D, // ì
+        0x00C4 => 0x8E, // Ä
+        0x00C5 => 0x8F, // Å
+        0x00C9 => 0x90, // É
+        0x00E6 => 0x91, // æ
+        0x00C6 => 0x92, // Æ
+        0x00F4 => 0x93, // ô
+        0x00F6 => 0x94, // ö
+        0x00F2 => 0x95, // ò
+        0x00FB => 0x96, // û
+        0x00F9 => 0x97, // ù
+        0x00FF => 0x98, // ÿ
+        0x00D6 => 0x99, // Ö
+        0x00DC => 0x9A, // Ü
+        0x00A2 => 0x9B, // ¢
+        0x00A3 => 0x9C, // £
+        0x00A5 => 0x9D, // ¥
+        0x00AA => 0xA6, // ª
+        0x00BA => 0xA7, // º
+        0x00BF => 0xA8, // ¿
+        0x00AC => 0xAA, // ¬
+        0x00BD => 0xAB, // ½
+        0x00BC => 0xAC, // ¼
+        0x00A1 => 0xAD, // ¡
+        0x00AB => 0xAE, // «
+        0x00BB => 0xAF, // »
+        0x00C1 => 0xA0, // Á (approx)
+        0x00ED => 0xA1, // í
+        0x00F3 => 0xA3, // ó
+        0x00FA => 0xA4, // ú
+        0x00F1 => 0xA5, // ñ
+        0x00D1 => 0xA5, // Ñ (same glyph)
+
+        // Currency / special
+        0x20A7 => 0x9E, // ₧ (peseta)
+        0x0192 => 0x9F, // ƒ (florin)
+
+        // Block elements
+        0x2591 => 0xB0, // ░ light shade
+        0x2592 => 0xB1, // ▒ medium shade
+        0x2593 => 0xB2, // ▓ dark shade
+        0x2588 => 0xDB, // █ full block
+        0x2584 => 0xDC, // ▄ lower half
+        0x258C => 0xDD, // ▌ left half
+        0x2590 => 0xDE, // ▐ right half
+        0x2580 => 0xDF, // ▀ upper half
+
+        // Box drawing — single lines
+        0x2502 => 0xB3, // │
+        0x2524 => 0xB4, // ┤
+        0x2510 => 0xBF, // ┐
+        0x2514 => 0xC0, // └
+        0x2534 => 0xC1, // ┴
+        0x252C => 0xC2, // ┬
+        0x251C => 0xC3, // ├
+        0x2500 => 0xC4, // ─
+        0x253C => 0xC5, // ┼
+        0x2518 => 0xD9, // ┘
+        0x250C => 0xDA, // ┌
+
+        // Box drawing — double lines
+        0x2551 => 0xBA, // ║
+        0x2557 => 0xBB, // ╗
+        0x255D => 0xBC, // ╝
+        0x255A => 0xC8, // ╚
+        0x2554 => 0xC9, // ╔
+        0x2569 => 0xCA, // ╩
+        0x2566 => 0xCB, // ╦
+        0x2560 => 0xCC, // ╠
+        0x2550 => 0xCD, // ═
+        0x256C => 0xCE, // ╬
+
+        // Box drawing — mixed single/double
+        0x2561 => 0xB5, // ╡
+        0x2562 => 0xB6, // ╢
+        0x2556 => 0xB7, // ╖
+        0x2555 => 0xB8, // ╕
+        0x2563 => 0xB9, // ╣
+        0x2558 => 0xBD, // ╘
+        0x2559 => 0xBE, // ╙
+        0x255C => 0xB7, // ╜ (approx ╖)
+        0x255B => 0xB8, // ╛ (approx ╕)
+        0x2564 => 0xD1, // ╤ (approx)
+        0x2565 => 0xD2, // ╥ (approx)
+        0x2567 => 0xCF, // ╧ (approx)
+        0x2568 => 0xD0, // ╨ (approx)
+
+        // Greek letters
+        0x0391 | 0x03B1 => 0xE0, // Α/α → α
+        0x0392 | 0x03B2 | 0x00DF => 0xE1, // Β/β/ß → ß
+        0x0393 => 0xE2, // Γ
+        0x03C0 => 0xE3, // π
+        0x03A3 => 0xE4, // Σ
+        0x03C3 => 0xE5, // σ
+        0x03BC | 0x00B5 => 0xE6, // μ/µ
+        0x03C4 => 0xE7, // τ
+        0x03A6 | 0x03C6 => 0xE8, // Φ/φ
+        0x0398 | 0x03B8 => 0xE9, // Θ/θ
+        0x03A9 | 0x03C9 => 0xEA, // Ω/ω
+        0x03B4 => 0xEB, // δ
+        0x03B5 => 0xEE, // ε
+
+        // Math symbols
+        0x221E => 0xEC, // ∞
+        0x2208 => 0xEE, // ∈ (approx ε)
+        0x2229 => 0xEF, // ∩
+        0x2261 => 0xF0, // ≡
+        0x00B1 => 0xF1, // ±
+        0x2265 => 0xF2, // ≥
+        0x2264 => 0xF3, // ≤
+        0x2320 => 0xF4, // ⌠
+        0x2321 => 0xF5, // ⌡
+        0x00F7 => 0xF6, // ÷
+        0x2248 => 0xF7, // ≈
+        0x00B0 => 0xF8, // °
+        0x2219 => 0xF9, // ∙
+        0x00B7 => 0xFA, // ·
+        0x221A => 0xFB, // √
+        0x207F => 0xFC, // ⁿ
+        0x00B2 => 0xFD, // ²
+        0x25A0 => 0xFE, // ■
+        0x00A0 => 0xFF, // NBSP → CP437 0xFF
+
+        // Unmapped codepoint
+        _ => b'?',
+    }
 }
 
 // font8x8_basic for ASCII 0x20..0x7F

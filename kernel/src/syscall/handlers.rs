@@ -506,6 +506,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::VirtToPhys => invoke_virt_to_phys(&token, args),
         InvokeOp::PmmAllocLarge => invoke_pmm_alloc_large(&token, args),
         InvokeOp::ClockNow => invoke_clock_now(&token, args),
+        InvokeOp::ClockFrequency => invoke_clock_frequency(&token, args),
 
         // Frame operations
         InvokeOp::FrameAllocate => invoke_frame_allocate(&token, args),
@@ -1803,12 +1804,18 @@ fn invoke_clock_now(token: &Token, _args: SyscallArgs) -> SyscallResult {
         return Err(Error::PermissionDenied);
     }
 
-    let tsc = unsafe {
-        let mut tsc: u64;
-        core::arch::asm!("rdtsc", out("rax") tsc, out("rdx") _, options(nomem, nostack));
-        tsc
-    };
+    let tsc = crate::architecture::x86_64::tsc::rdtsc();
     Ok(tsc as usize)
+}
+
+fn invoke_clock_frequency(token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::READ) {
+        return Err(Error::PermissionDenied);
+    }
+
+    Ok(crate::architecture::x86_64::tsc::tsc_hz() as usize)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -95,6 +95,10 @@ pub extern "C" fn debug_print(msg: *const c_char) {
 pub extern "C" fn __cluu_init() {
     crate::allocator::init();
     crate::fd_table::init_stdio();
+    // Initialize registry client so C programs can use VFS lookups
+    // (opendir, open, stat, etc. all need registry::lookup_service).
+    // The name is only used for service registration, not lookups.
+    let _ = crate::registry::init("app");
     dir::init_cwd();
 }
 
@@ -108,8 +112,38 @@ pub extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int
 }
 
 #[no_mangle]
+pub extern "C" fn mkdir(path: *const c_char, mode: mode_t) -> c_int {
+    _mkdir(path, mode)
+}
+
+#[no_mangle]
+pub extern "C" fn rmdir(path: *const c_char) -> c_int {
+    _rmdir(path)
+}
+
+#[no_mangle]
+pub extern "C" fn rename(old: *const c_char, new: *const c_char) -> c_int {
+    _rename(old, new)
+}
+
+#[no_mangle]
+pub extern "C" fn unlink(path: *const c_char) -> c_int {
+    _unlink(path)
+}
+
+#[no_mangle]
 pub extern "C" fn close(fd: c_int) -> c_int {
     _close(fd)
+}
+
+#[no_mangle]
+pub extern "C" fn dup(fd: c_int) -> c_int {
+    _dup(fd)
+}
+
+#[no_mangle]
+pub extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
+    _dup2(oldfd, newfd)
 }
 
 #[no_mangle]
@@ -160,13 +194,48 @@ pub extern "C" fn sbrk(increment: isize) -> *mut c_void {
 // Reentrant forms used by newlib
 
 #[no_mangle]
-pub extern "C" fn _open_r(_r: *mut c_void, path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+pub extern "C" fn _open_r(
+    _r: *mut c_void,
+    path: *const c_char,
+    flags: c_int,
+    mode: mode_t,
+) -> c_int {
     _open(path, flags, mode)
+}
+
+#[no_mangle]
+pub extern "C" fn _mkdir_r(_r: *mut c_void, path: *const c_char, mode: mode_t) -> c_int {
+    _mkdir(path, mode)
+}
+
+#[no_mangle]
+pub extern "C" fn _rmdir_r(_r: *mut c_void, path: *const c_char) -> c_int {
+    _rmdir(path)
+}
+
+#[no_mangle]
+pub extern "C" fn _rename_r(_r: *mut c_void, old: *const c_char, new: *const c_char) -> c_int {
+    _rename(old, new)
+}
+
+#[no_mangle]
+pub extern "C" fn _unlink_r(_r: *mut c_void, path: *const c_char) -> c_int {
+    _unlink(path)
 }
 
 #[no_mangle]
 pub extern "C" fn _close_r(_r: *mut c_void, fd: c_int) -> c_int {
     _close(fd)
+}
+
+#[no_mangle]
+pub extern "C" fn _dup_r(_r: *mut c_void, fd: c_int) -> c_int {
+    _dup(fd)
+}
+
+#[no_mangle]
+pub extern "C" fn _dup2_r(_r: *mut c_void, oldfd: c_int, newfd: c_int) -> c_int {
+    _dup2(oldfd, newfd)
 }
 
 #[no_mangle]
@@ -215,6 +284,29 @@ pub extern "C" fn _kill_r(_r: *mut c_void, pid: pid_t, sig: c_int) -> c_int {
 }
 
 #[no_mangle]
+pub extern "C" fn _ioctl_r(_r: *mut c_void, fd: c_int, request: c_ulong, argp: *mut c_void) -> c_int {
+    termios::_ioctl(fd, request, argp)
+}
+
+#[no_mangle]
 pub extern "C" fn _sbrk_r(_r: *mut c_void, increment: isize) -> *mut c_void {
     _sbrk(increment)
+}
+
+#[no_mangle]
+pub extern "C" fn _mmap_r(
+    _r: *mut c_void,
+    addr: *mut c_void,
+    length: size_t,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    offset: off_t,
+) -> *mut c_void {
+    _mmap(addr, length, prot, flags, fd, offset)
+}
+
+#[no_mangle]
+pub extern "C" fn _munmap_r(_r: *mut c_void, addr: *mut c_void, length: size_t) -> c_int {
+    _munmap(addr, length)
 }

@@ -167,6 +167,11 @@ pub extern "C" fn kstart() -> ! {
     crypto::init();
     token::init();
 
+    // Calibrate TSC before bringing up timer infrastructure.
+    let tsc_hz = architecture::x86_64::tsc::calibrate();
+    klibcluu::info("TSC calibrated");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "tsc_hz=", tsc_hz);
+
     // Phase 4: Enable APIC timer (250Hz) before launching userspace
     if let Err(err) = architecture::x86_64::apic::init_timer(250) {
         klibcluu::warn("APIC timer init failed: ");

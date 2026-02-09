@@ -3,7 +3,12 @@
 //! This module provides standard POSIX error codes for newlib compatibility.
 //! The global `ERRNO` variable is used by syscall stubs to report errors.
 
-use core::sync::atomic::{AtomicI32, Ordering};
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use lazy_static::lazy_static;
+use spin::Mutex;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // POSIX errno constants
@@ -86,28 +91,45 @@ pub const EALREADY: i32 = 114; // Operation already in progress
 pub const EINPROGRESS: i32 = 115; // Operation now in progress
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Global errno variable
+// Per-thread errno storage
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Global errno variable (atomic for basic thread safety).
-static ERRNO: AtomicI32 = AtomicI32::new(0);
+lazy_static! {
+    /// Per-thread errno cells keyed by current thread token.
+    ///
+    /// In CLUU userspace, `token_self()` uniquely identifies the current thread.
+    static ref ERRNO_BY_THREAD: Mutex<BTreeMap<usize, Box<i32>>> = Mutex::new(BTreeMap::new());
+}
+
+#[inline]
+fn errno_key() -> usize {
+    crate::boot::token_self()
+}
 
 /// Set the global errno value.
 #[inline]
 pub fn set_errno(e: i32) {
-    ERRNO.store(e, Ordering::SeqCst);
+    let key = errno_key();
+    let mut table = ERRNO_BY_THREAD.lock();
+    let cell = table.entry(key).or_insert_with(|| Box::new(0));
+    **cell = e;
 }
 
 /// Get the current errno value.
 #[inline]
 pub fn errno() -> i32 {
-    ERRNO.load(Ordering::SeqCst)
+    let key = errno_key();
+    let table = ERRNO_BY_THREAD.lock();
+    table.get(&key).map(|v| **v).unwrap_or(0)
 }
 
 /// Clear errno (set to 0).
 #[inline]
 pub fn clear_errno() {
-    ERRNO.store(0, Ordering::SeqCst);
+    let key = errno_key();
+    let mut table = ERRNO_BY_THREAD.lock();
+    let cell = table.entry(key).or_insert_with(|| Box::new(0));
+    **cell = 0;
 }
 
 /// C-compatible errno access for newlib.
@@ -115,9 +137,10 @@ pub fn clear_errno() {
 /// Newlib calls `__errno()` to get a pointer to errno.
 #[no_mangle]
 pub extern "C" fn __errno() -> *mut i32 {
-    // Safety: We return a pointer to our atomic's inner value.
-    // This is safe because AtomicI32 has the same layout as i32.
-    ERRNO.as_ptr() as *mut i32
+    let key = errno_key();
+    let mut table = ERRNO_BY_THREAD.lock();
+    let cell = table.entry(key).or_insert_with(|| Box::new(0));
+    &mut **cell as *mut i32
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

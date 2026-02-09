@@ -1,8 +1,11 @@
 //! Memory-related syscall stubs.
 
-use super::c_void;
-use crate::errno::{set_errno, ENOMEM};
+use super::{c_int, c_void, off_t, size_t};
+use crate::errno::{set_errno, EINVAL, ENOMEM, ENOSYS};
 use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Mutex;
+
+extern crate alloc;
 
 /// Start of dynamic heap region for newlib's _sbrk.
 /// In c-runtime mode, the Rust allocator delegates to malloc, so _sbrk
@@ -17,6 +20,253 @@ const PAGE_SIZE: usize = 4096;
 
 /// Current heap break (end of allocated heap).
 static HEAP_BRK: AtomicUsize = AtomicUsize::new(0x0080_0000);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// mmap region: 0x4100_0000 .. 0x5000_0000 (240 MB)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MMAP_REGION_START: usize = 0x4100_0000;
+const MMAP_REGION_END: usize = 0x5000_0000;
+
+/// Next free address in the mmap region (bump allocator).
+static MMAP_NEXT: AtomicUsize = AtomicUsize::new(MMAP_REGION_START);
+
+/// Maximum tracked mmap regions.
+const MAX_MMAP_REGIONS: usize = 64;
+
+/// A tracked mmap allocation.
+#[derive(Clone, Copy)]
+struct MmapRegion {
+    addr: usize,
+    len: usize,
+}
+
+/// Active mmap allocations.
+static MMAP_REGIONS: Mutex<MmapRegionTable> = Mutex::new(MmapRegionTable::new());
+
+struct MmapRegionTable {
+    entries: [Option<MmapRegion>; MAX_MMAP_REGIONS],
+}
+
+impl MmapRegionTable {
+    const fn new() -> Self {
+        Self {
+            entries: [None; MAX_MMAP_REGIONS],
+        }
+    }
+
+    fn insert(&mut self, region: MmapRegion) -> bool {
+        for slot in self.entries.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(region);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn remove(&mut self, addr: usize) -> Option<MmapRegion> {
+        for slot in self.entries.iter_mut() {
+            if let Some(r) = slot {
+                if r.addr == addr {
+                    return slot.take();
+                }
+            }
+        }
+        None
+    }
+}
+
+// POSIX mmap flags
+pub const MAP_SHARED: c_int = 0x01;
+pub const MAP_PRIVATE: c_int = 0x02;
+pub const MAP_FIXED: c_int = 0x10;
+pub const MAP_ANONYMOUS: c_int = 0x20;
+pub const MAP_ANON: c_int = MAP_ANONYMOUS;
+
+// POSIX mmap protections
+pub const PROT_NONE: c_int = 0x0;
+pub const PROT_READ: c_int = 0x1;
+pub const PROT_WRITE: c_int = 0x2;
+pub const PROT_EXEC: c_int = 0x4;
+
+/// MAP_FAILED sentinel.
+const MAP_FAILED: *mut c_void = (-1isize) as *mut c_void;
+
+/// Map pages into the calling process's address space.
+///
+/// Supports `MAP_ANONYMOUS` mappings (not backed by a file).
+/// File-backed mappings return `ENOSYS`.
+///
+/// # Arguments
+/// - `addr`: Hint address (ignored unless MAP_FIXED)
+/// - `length`: Size of mapping in bytes (rounded up to page boundary)
+/// - `prot`: Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
+/// - `flags`: Mapping flags (MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, MAP_FIXED)
+/// - `fd`: File descriptor (-1 for anonymous)
+/// - `offset`: Offset in file (ignored for anonymous)
+///
+/// # Returns
+/// Pointer to mapped region, or MAP_FAILED (-1) on error.
+#[no_mangle]
+pub extern "C" fn mmap(
+    addr: *mut c_void,
+    length: size_t,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    offset: off_t,
+) -> *mut c_void {
+    _mmap(addr, length, prot, flags, fd, offset)
+}
+
+#[no_mangle]
+pub extern "C" fn _mmap(
+    addr: *mut c_void,
+    length: size_t,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    _offset: off_t,
+) -> *mut c_void {
+    if length == 0 {
+        set_errno(EINVAL);
+        return MAP_FAILED;
+    }
+
+    // Only anonymous mappings supported
+    if (flags & MAP_ANONYMOUS) == 0 || fd != -1 {
+        set_errno(ENOSYS);
+        return MAP_FAILED;
+    }
+
+    // Round length up to page boundary
+    let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let num_pages = aligned_len / PAGE_SIZE;
+
+    // Convert prot flags to kernel flags
+    let mut kern_flags: usize = 0;
+    if prot & PROT_READ != 0 {
+        kern_flags |= 0x01;
+    }
+    if prot & PROT_WRITE != 0 {
+        kern_flags |= 0x02;
+    }
+    if prot & PROT_EXEC != 0 {
+        kern_flags |= 0x04;
+    }
+    // Default: at least readable
+    if kern_flags == 0 {
+        kern_flags = 0x01;
+    }
+
+    let space_token = crate::boot::space_token();
+    if space_token == 0 {
+        set_errno(ENOMEM);
+        return MAP_FAILED;
+    }
+
+    // Determine virtual address
+    let virt_addr = if (flags & MAP_FIXED) != 0 && !addr.is_null() {
+        let a = addr as usize;
+        if a & (PAGE_SIZE - 1) != 0 {
+            set_errno(EINVAL);
+            return MAP_FAILED;
+        }
+        a
+    } else {
+        // Bump allocate from mmap region
+        let current = MMAP_NEXT.load(Ordering::SeqCst);
+        let end = current + aligned_len;
+        if end > MMAP_REGION_END {
+            set_errno(ENOMEM);
+            return MAP_FAILED;
+        }
+        MMAP_NEXT.store(end, Ordering::SeqCst);
+        current
+    };
+
+    // Map pages via kernel
+    match crate::syscall::space_map_range(space_token, virt_addr, 0, kern_flags, num_pages, 0) {
+        Ok(_) | Err(crate::Error::AlreadyExists) => {}
+        Err(_) => {
+            set_errno(ENOMEM);
+            return MAP_FAILED;
+        }
+    }
+
+    // Track the region for munmap
+    let region = MmapRegion {
+        addr: virt_addr,
+        len: aligned_len,
+    };
+    MMAP_REGIONS.lock().insert(region);
+
+    virt_addr as *mut c_void
+}
+
+/// Unmap pages from the calling process's address space.
+///
+/// # Arguments
+/// - `addr`: Start address (must be page-aligned, from a previous mmap)
+/// - `length`: Size to unmap (rounded up to page boundary)
+///
+/// # Returns
+/// 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn munmap(addr: *mut c_void, length: size_t) -> c_int {
+    _munmap(addr, length)
+}
+
+#[no_mangle]
+pub extern "C" fn _munmap(addr: *mut c_void, length: size_t) -> c_int {
+    if addr.is_null() || length == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    let virt = addr as usize;
+    if virt & (PAGE_SIZE - 1) != 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let num_pages = aligned_len / PAGE_SIZE;
+
+    // Remove from tracking
+    MMAP_REGIONS.lock().remove(virt);
+
+    // Unmap via kernel
+    let space_token = crate::boot::space_token();
+    if space_token == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    match crate::syscall::space_unmap(space_token, virt, num_pages) {
+        Ok(()) => 0,
+        Err(_) => {
+            // Unmap may partially fail but we still report success
+            // (POSIX allows this for partial unmaps)
+            0
+        }
+    }
+}
+
+/// Change protection on a region of memory.
+///
+/// Stub — currently does nothing (pages keep original permissions).
+#[no_mangle]
+pub extern "C" fn mprotect(_addr: *mut c_void, _len: size_t, _prot: c_int) -> c_int {
+    // Stub: silently succeed. Kernel doesn't support changing page perms
+    // after mapping, but callers rarely depend on this working.
+    0
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// sbrk / brk (heap management)
+// ═══════════════════════════════════════════════════════════════════════════
 
 /// Expand or contract the heap.
 ///

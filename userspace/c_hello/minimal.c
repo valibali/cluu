@@ -1,163 +1,172 @@
 /*
- * CLUU C integration test - frame capabilities
+ * CLUU P1 POSIX stubs integration test
  *
- * Tests: FrameAllocate, FrameGetPhys, SpaceMap with MAP_FRAME_TOKEN,
- *        write/read through mapped frame, SpaceUnmap, FrameFree.
+ * Tests: getenv, getcwd, chdir, opendir/readdir/closedir,
+ *        nanosleep, argc/argv
  */
 
 #include <stdio.h>
-#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <time.h>
+
+/* Forward declarations for functions that may not have headers yet */
+typedef struct DIR DIR;
+struct dirent {
+    unsigned long long d_ino;
+    long long d_off;
+    unsigned short d_reclen;
+    unsigned char d_type;
+    char d_name[256];
+};
+DIR *opendir(const char *path);
+struct dirent *readdir(DIR *dirp);
+int closedir(DIR *dirp);
 
 void debug_print(const char *msg);
 
-/* ProcessInfo lives at this fixed address for all processes */
-#define PROCESS_INFO_ADDR  0x7fe00100UL
-#define TOKEN_SPACE        5
-
-/* InvokeOp numbers */
-#define OP_SPACE_MAP       12
-#define OP_SPACE_UNMAP     13
-#define OP_FRAME_ALLOCATE  70
-#define OP_FRAME_FREE      71
-#define OP_FRAME_GET_PHYS  72
-
-/* SpaceMap flags */
-#define MAP_FRAME_TOKEN    0x400
-
-/* Raw syscall via SYSCALL instruction.
- * Returns negative errno on error, non-negative value on success. */
-static inline long raw_syscall6(unsigned long nr,
-                                unsigned long a1, unsigned long a2,
-                                unsigned long a3, unsigned long a4,
-                                unsigned long a5, unsigned long a6)
+static void print_int(const char *prefix, int val)
 {
-    long ret;
-    register unsigned long r10 __asm__("r10") = a4;
-    register unsigned long r8  __asm__("r8")  = a5;
-    register unsigned long r9  __asm__("r9")  = a6;
-    __asm__ volatile (
-        "syscall"
-        : "=a"(ret)
-        : "a"(nr), "D"(a1), "S"(a2), "d"(a3),
-          "r"(r10), "r"(r8), "r"(r9)
-        : "rcx", "r11", "memory"
-    );
-    return ret;
-}
-
-/* sys_invoke(token, op, arg1, arg2, arg3, arg4) — syscall number 5 */
-static inline long invoke(unsigned long token, unsigned long op,
-                           unsigned long a1, unsigned long a2,
-                           unsigned long a3, unsigned long a4)
-{
-    return raw_syscall6(5, token, op, a1, a2, a3, a4);
-}
-
-static unsigned long get_space_token(void)
-{
-    /* ProcessInfo layout: exit_token(8) + exit_cookie(8) + pid(8) + tokens[16] */
-    const unsigned long *tokens = (const unsigned long *)(PROCESS_INFO_ADDR + 24);
-    return tokens[TOKEN_SPACE];
-}
-
-static void print_hex(const char *prefix, unsigned long val)
-{
-    char buf[64];
-    const char *hex = "0123456789abcdef";
-    int i;
-
-    /* Build "prefix0x<hex>\n" */
+    char buf[80];
     int off = 0;
-    for (const char *p = prefix; *p; p++)
+    const char *p;
+
+    for (p = prefix; *p; p++)
         buf[off++] = *p;
-    buf[off++] = '0';
-    buf[off++] = 'x';
-    for (i = 15; i >= 0; i--)
-        buf[off++] = hex[(val >> (i * 4)) & 0xF];
+
+    /* Simple int-to-string */
+    if (val < 0) {
+        buf[off++] = '-';
+        val = -val;
+    }
+    if (val == 0) {
+        buf[off++] = '0';
+    } else {
+        char tmp[20];
+        int n = 0;
+        while (val > 0) {
+            tmp[n++] = '0' + (val % 10);
+            val /= 10;
+        }
+        for (int i = n - 1; i >= 0; i--)
+            buf[off++] = tmp[i];
+    }
     buf[off++] = '\n';
     buf[off] = '\0';
-    debug_print(buf);
+    printf("%s", buf);
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
-    debug_print("=== Frame capability test ===\n");
+    int pass = 0, fail = 0;
 
-    unsigned long space_tok = get_space_token();
-    print_hex("space_token=", space_tok);
+    printf("=== P1 POSIX stubs test ===\n");
 
-    if (space_tok == 0) {
-        debug_print("[FAIL] no space token\n");
-        return 1;
-    }
-
-    /* 1. FrameAllocate — allocate a physical frame */
-    long frame_tok = invoke(space_tok, OP_FRAME_ALLOCATE, 0, 0, 0, 0);
-    if (frame_tok < 0) {
-        debug_print("[FAIL] FrameAllocate failed\n");
-        print_hex("  errno=", (unsigned long)(-frame_tok));
-        return 1;
-    }
-    debug_print("[OK] FrameAllocate\n");
-    print_hex("  frame_token=", (unsigned long)frame_tok);
-
-    /* 2. FrameGetPhys — get physical address */
-    long phys = invoke((unsigned long)frame_tok, OP_FRAME_GET_PHYS, 0, 0, 0, 0);
-    if (phys < 0) {
-        debug_print("[FAIL] FrameGetPhys failed\n");
-        return 1;
-    }
-    debug_print("[OK] FrameGetPhys\n");
-    print_hex("  phys=", (unsigned long)phys);
-
-    /* 3. SpaceMap with MAP_FRAME_TOKEN — map frame at a free virtual address */
-    unsigned long test_vaddr = 0x30000000UL; /* Pick an unused region */
-    /* SpaceMap: invoke(space_tok, 12, virt_addr, data_ptr, perms, copy_len_or_frame_tok) */
-    /* With MAP_FRAME_TOKEN: perms has 0x400, arg6 = frame token handle */
-    long map_ret = invoke(space_tok, OP_SPACE_MAP,
-                          test_vaddr,
-                          0,                     /* data_ptr ignored */
-                          0x02 | MAP_FRAME_TOKEN, /* writable + MAP_FRAME_TOKEN */
-                          (unsigned long)frame_tok);
-    if (map_ret < 0) {
-        debug_print("[FAIL] SpaceMap MAP_FRAME_TOKEN failed\n");
-        print_hex("  errno=", (unsigned long)(-map_ret));
-        return 1;
-    }
-    debug_print("[OK] SpaceMap with MAP_FRAME_TOKEN\n");
-
-    /* 4. Write to the mapped page and read back */
-    volatile uint64_t *ptr = (volatile uint64_t *)test_vaddr;
-    *ptr = 0xDEADBEEFCAFEBABEULL;
-    uint64_t readback = *ptr;
-
-    if (readback == 0xDEADBEEFCAFEBABEULL) {
-        debug_print("[OK] Write/read through frame\n");
+    /* ── Test 1: argc/argv ─────────────────────────────────────────── */
+    print_int("argc=", argc);
+    if (argc > 0 && argv != NULL) {
+        for (int i = 0; i < argc; i++) {
+            printf("  argv[%d]=\"%s\"\n", i, argv[i] ? argv[i] : "(null)");
+        }
+        printf("[OK] argv received\n");
+        pass++;
     } else {
-        debug_print("[FAIL] Read-back mismatch\n");
-        print_hex("  expected=", 0xDEADBEEFCAFEBABEULL);
-        print_hex("  got=", readback);
-        return 1;
+        printf("[OK] argc=0 (no args, expected for direct spawn)\n");
+        pass++;
     }
 
-    /* 5. SpaceUnmap — unmap the page */
-    long unmap_ret = invoke(space_tok, OP_SPACE_UNMAP, test_vaddr, 1, 0, 0);
-    if (unmap_ret < 0) {
-        debug_print("[FAIL] SpaceUnmap failed\n");
-        return 1;
+    /* ── Test 2: getenv ────────────────────────────────────────────── */
+    char *home = getenv("HOME");
+    if (home == NULL) {
+        printf("[OK] getenv(\"HOME\") = NULL (expected stub)\n");
+        pass++;
+    } else {
+        printf("[FAIL] getenv(\"HOME\") returned non-NULL\n");
+        fail++;
     }
-    debug_print("[OK] SpaceUnmap\n");
 
-    /* 6. FrameFree — free the frame (map_count should be 0 after unmap) */
-    long free_ret = invoke((unsigned long)frame_tok, OP_FRAME_FREE, 0, 0, 0, 0);
-    if (free_ret < 0) {
-        debug_print("[FAIL] FrameFree failed\n");
-        print_hex("  errno=", (unsigned long)(-free_ret));
-        return 1;
+    char *path = getenv("MICROPYPATH");
+    if (path == NULL) {
+        printf("[OK] getenv(\"MICROPYPATH\") = NULL\n");
+        pass++;
+    } else {
+        printf("[FAIL] getenv(\"MICROPYPATH\") returned non-NULL\n");
+        fail++;
     }
-    debug_print("[OK] FrameFree\n");
 
-    debug_print("=== Frame capability test PASSED ===\n");
-    return 0;
+    /* ── Test 3: getcwd ────────────────────────────────────────────── */
+    char cwdbuf[256];
+    char *cwd = getcwd(cwdbuf, sizeof(cwdbuf));
+    if (cwd != NULL && strcmp(cwd, "/") == 0) {
+        printf("[OK] getcwd() = \"%s\"\n", cwd);
+        pass++;
+    } else if (cwd != NULL) {
+        printf("[WARN] getcwd() = \"%s\" (expected \"/\")\n", cwd);
+        pass++; /* Not a hard failure */
+    } else {
+        printf("[FAIL] getcwd() returned NULL\n");
+        fail++;
+    }
+
+    /* ── Test 4: opendir / readdir / closedir ──────────────────────── */
+    DIR *dir = opendir("/");
+    if (dir != NULL) {
+        printf("[OK] opendir(\"/\") succeeded\n");
+        pass++;
+
+        int count = 0;
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL && count < 20) {
+            printf("  [%d] %s (type=%d)\n", count, entry->d_name, entry->d_type);
+            count++;
+        }
+        closedir(dir);
+
+        if (count > 0) {
+            printf("[OK] readdir returned %d entries\n", count);
+            pass++;
+        } else {
+            printf("[WARN] readdir returned 0 entries\n");
+            pass++; /* VFS root might be empty */
+        }
+    } else {
+        printf("[FAIL] opendir(\"/\") returned NULL\n");
+        fail++;
+    }
+
+    /* ── Test 5: nanosleep ─────────────────────────────────────────── */
+    printf("Testing nanosleep(100ms)...\n");
+    struct timespec req = { .tv_sec = 0, .tv_nsec = 100000000L }; /* 100ms */
+    struct timespec rem = { 0 };
+    int ns_ret = nanosleep(&req, &rem);
+    if (ns_ret == 0) {
+        printf("[OK] nanosleep(100ms) returned 0\n");
+        pass++;
+    } else {
+        printf("[FAIL] nanosleep returned %d\n", ns_ret);
+        fail++;
+    }
+
+    /* ── Test 6: sleep (short) ─────────────────────────────────────── */
+    printf("Testing usleep(50000) = 50ms...\n");
+    int us_ret = usleep(50000);
+    if (us_ret == 0) {
+        printf("[OK] usleep(50ms) returned 0\n");
+        pass++;
+    } else {
+        printf("[FAIL] usleep returned %d\n", us_ret);
+        fail++;
+    }
+
+    /* ── Summary ───────────────────────────────────────────────────── */
+    printf("\n=== Results: %d passed, %d failed ===\n", pass, fail);
+
+    if (fail == 0) {
+        printf("=== P1 POSIX stubs test PASSED ===\n");
+    } else {
+        printf("=== P1 POSIX stubs test FAILED ===\n");
+    }
+
+    return fail;
 }

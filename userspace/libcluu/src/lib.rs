@@ -91,11 +91,13 @@ pub use syscall::{
     irq_ack,
 
     irq_attach,
+    clock_frequency,
     clock_now,
     space_create,
     space_grant,
     space_map,
     space_map_range,
+    space_unmap,
     thread_create,
     token_derive,
     // Core syscalls

@@ -507,11 +507,7 @@ fn current_timestamp() -> super::Timestamp {
 
     // For now, use TSC (timestamp counter)
     // In production, this should use a proper monotonic clock
-    let tsc = unsafe {
-        let mut tsc: u64;
-        core::arch::asm!("rdtsc", out("rax") tsc, out("rdx") _, options(nomem, nostack));
-        tsc
-    };
+    let tsc = crate::architecture::x86_64::tsc::rdtsc();
 
     Timestamp::new(tsc)
 }

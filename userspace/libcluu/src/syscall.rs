@@ -85,6 +85,7 @@ pub enum InvokeOp {
 
     // Clock/time
     ClockNow = 60,
+    ClockFrequency = 61,
 
     // Frame operations
     FrameAllocate = 70,
@@ -338,11 +339,19 @@ pub fn ipc_recv_any(tokens: &[usize], buf: &mut [u8], timeout_ms: u64) -> Result
 ///
 /// - `Ok(bytes_received)`: Number of bytes received
 /// - `Err(error)`: Receive failed (invalid token, buffer too small, etc.)
-#[inline]
 pub fn ipc_recv(endpoint_token: usize, buf: &mut [u8]) -> Result<usize> {
     let tokens = [endpoint_token];
-    let (_index, len) = ipc_recv_any(&tokens, buf, u64::MAX)?;
-    Ok(len)
+    // Use a finite timeout and loop to avoid kernel deadline overflow with u64::MAX.
+    // 30 seconds per iteration is long enough to avoid busy-waiting but short enough
+    // to not overflow any reasonable kernel time representation.
+    loop {
+        match ipc_recv_any(&tokens, buf, 30_000) {
+            Ok((_index, len)) => return Ok(len),
+            Err(Error::Timeout) => continue,
+            Err(Error::WouldBlock) => continue,
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Receive IPC message from endpoint (non-blocking)
@@ -630,6 +639,26 @@ pub fn space_map_range(
             combined,
         )
     }
+}
+
+/// Unmap pages from the current address space.
+///
+/// # Arguments
+/// - `space_token`: Address space token (requires SPACE_MAP right)
+/// - `virt_addr`: Page-aligned virtual address to unmap
+/// - `num_pages`: Number of 4K pages to unmap (0 treated as 1)
+pub fn space_unmap(space_token: usize, virt_addr: usize, num_pages: usize) -> Result<()> {
+    unsafe {
+        invoke(
+            space_token,
+            InvokeOp::SpaceUnmap,
+            virt_addr,
+            num_pages,
+            0,
+            0,
+        )?;
+    }
+    Ok(())
 }
 
 /// Grant a page from one address space to another (zero-copy sharing)
@@ -934,6 +963,13 @@ pub fn pmm_alloc_large(space_token: usize) -> Result<u64> {
 #[inline]
 pub fn clock_now(clock_token: usize) -> Result<u64> {
     let r = unsafe { invoke(clock_token, InvokeOp::ClockNow, 0, 0, 0, 0) }?;
+    Ok(r as u64)
+}
+
+/// Query calibrated TSC frequency in Hz.
+#[inline]
+pub fn clock_frequency(clock_token: usize) -> Result<u64> {
+    let r = unsafe { invoke(clock_token, InvokeOp::ClockFrequency, 0, 0, 0, 0) }?;
     Ok(r as u64)
 }
 

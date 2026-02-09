@@ -26,9 +26,9 @@ const APIC_TIMER_MODE_PERIODIC: u32 = 1 << 17;
 const APIC_TIMER_VECTOR: u8 = 32;
 const APIC_SPURIOUS_VECTOR: u8 = 0x68;
 
-// TODO: Calibrate with PIT or TSC instead of assuming a bus rate.
-const APIC_BUS_HZ_ASSUMED: u32 = 1_000_000_000;
 const APIC_TIMER_DIVIDE: u32 = 16;
+const APIC_REG_TIMER_CUR_COUNT: u32 = 0x390;
+const APIC_LVT_MASKED: u32 = 1 << 16;
 
 static APIC_ENABLED: AtomicBool = AtomicBool::new(false);
 static APIC_MMIO_BASE: AtomicU64 = AtomicU64::new(0);
@@ -86,10 +86,17 @@ unsafe fn program_timer(hz: u32) {
         _ => 0b0011,
     };
 
-    let ticks_per_sec = APIC_BUS_HZ_ASSUMED / APIC_TIMER_DIVIDE;
-    let initial = ticks_per_sec / hz.max(1);
-
     write(APIC_REG_TIMER_DIVIDE, divider);
+
+    let ticks_per_sec = calibrate_apic_timer_hz().unwrap_or(1_000_000_000 / APIC_TIMER_DIVIDE);
+    let initial = (ticks_per_sec / hz.max(1)).max(1);
+
+    // Mask timer while calibrating/programming to avoid stray IRQs.
+    write(
+        APIC_REG_LVT_TIMER,
+        APIC_LVT_MASKED | (APIC_TIMER_VECTOR as u32),
+    );
+    write(APIC_REG_TIMER_INIT_COUNT, 0);
     write(
         APIC_REG_LVT_TIMER,
         APIC_TIMER_MODE_PERIODIC | (APIC_TIMER_VECTOR as u32),
@@ -103,8 +110,47 @@ unsafe fn program_timer(hz: u32) {
     klibcluu::info("APIC timer enabled");
 }
 
+unsafe fn calibrate_apic_timer_hz() -> Option<u32> {
+    let tsc_hz = crate::architecture::x86_64::tsc::tsc_hz();
+    if tsc_hz == 0 {
+        return None;
+    }
+
+    // 10ms window.
+    let tsc_delta_target = tsc_hz / 100;
+    if tsc_delta_target == 0 {
+        return None;
+    }
+
+    write(
+        APIC_REG_LVT_TIMER,
+        APIC_LVT_MASKED | (APIC_TIMER_VECTOR as u32),
+    );
+    write(APIC_REG_TIMER_INIT_COUNT, u32::MAX);
+    let start = crate::architecture::x86_64::tsc::rdtsc();
+    while crate::architecture::x86_64::tsc::rdtsc().saturating_sub(start) < tsc_delta_target {
+        core::hint::spin_loop();
+    }
+    let cur = read(APIC_REG_TIMER_CUR_COUNT);
+    let elapsed = u32::MAX.saturating_sub(cur);
+    if elapsed == 0 {
+        return None;
+    }
+    let per_sec = (elapsed as u64).saturating_mul(100);
+    if per_sec == 0 || per_sec > u32::MAX as u64 {
+        return None;
+    }
+    Some(per_sec as u32)
+}
+
 unsafe fn write(offset: u32, value: u32) {
     let base = APIC_MMIO_BASE.load(Ordering::Acquire);
     let addr = (base + offset as u64) as *mut u32;
     core::ptr::write_volatile(addr, value);
+}
+
+unsafe fn read(offset: u32) -> u32 {
+    let base = APIC_MMIO_BASE.load(Ordering::Acquire);
+    let addr = (base + offset as u64) as *const u32;
+    core::ptr::read_volatile(addr)
 }

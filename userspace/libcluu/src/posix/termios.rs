@@ -3,8 +3,8 @@
 //! Implements `tcgetattr` and `tcsetattr` by sending TTY_CTL messages
 //! to the TTY service endpoint.
 
-use super::c_int;
-use crate::errno::{set_errno, EBADF, EINVAL, ENOSYS};
+use super::{c_int, c_ulong, c_void};
+use crate::errno::{set_errno, EBADF, EINVAL, ENOTTY, ENOSYS};
 use crate::ipc::TTY_CTL_LABEL;
 use crate::posix::file::get_tty_endpoint;
 use crate::types::Message;
@@ -15,6 +15,20 @@ type cc_t = u8;
 type speed_t = u32;
 
 const NCCS: usize = 32;
+const GLYPH_W: u16 = 8;
+const GLYPH_H: u16 = 16;
+
+// Linux-compatible ioctl constants
+const TIOCGWINSZ: c_ulong = 0x5413;
+
+/// C-compatible winsize struct (sys/ioctl.h).
+#[repr(C)]
+pub struct WinSize {
+    pub ws_row: u16,
+    pub ws_col: u16,
+    pub ws_xpixel: u16,
+    pub ws_ypixel: u16,
+}
 
 /// C-compatible termios struct (matches sys/termios.h layout).
 #[repr(C)]
@@ -116,4 +130,33 @@ pub extern "C" fn tcsetattr(
             -1
         }
     }
+}
+
+/// ioctl stub with support for TIOCGWINSZ.
+#[no_mangle]
+pub extern "C" fn _ioctl(_fd: c_int, request: c_ulong, argp: *mut c_void) -> c_int {
+    match request {
+        TIOCGWINSZ => {
+            if argp.is_null() {
+                set_errno(EINVAL);
+                return -1;
+            }
+            let info = crate::boot::boot_info();
+            let ws = unsafe { &mut *(argp as *mut WinSize) };
+            ws.ws_col = (info.fb_width / GLYPH_W as u32) as u16;
+            ws.ws_row = (info.fb_height / GLYPH_H as u32) as u16;
+            ws.ws_xpixel = info.fb_width as u16;
+            ws.ws_ypixel = info.fb_height as u16;
+            0
+        }
+        _ => {
+            set_errno(ENOTTY);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn ioctl(fd: c_int, request: c_ulong, argp: *mut c_void) -> c_int {
+    _ioctl(fd, request, argp)
 }
