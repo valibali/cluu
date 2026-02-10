@@ -12,6 +12,7 @@ IMG="$PROJECT_ROOT/target/cluu.img"
 USER_DISK="$PROJECT_ROOT/target/userdisk.img"
 QEMU_PID=""
 BOOT_WAIT="${BOOT_WAIT:-8}"
+SHELL_READY_WAIT="${SHELL_READY_WAIT:-25}"
 RUN_WAIT="${RUN_WAIT:-5}"
 # Preserve explicit empty TEST_COMMAND; only auto-fill when it is truly unset.
 if [ -z "${TEST_COMMAND+x}" ]; then
@@ -24,6 +25,8 @@ MARKER_MODE="${MARKER_MODE:-legacy_p1}"
 if [ "$TEST_COMMAND" = "__AUTO__" ]; then
     case "$MARKER_MODE" in
         m3_mapfail) TEST_COMMAND="mapfail 12 4" ;;
+        m3_mapcopyfail) TEST_COMMAND="mapcpfail 4" ;;
+        m3_maperror) TEST_COMMAND="maperror 3" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
 fi
@@ -96,6 +99,25 @@ fi
 # --- Step 4: Wait for boot ---
 echo "Waiting ${BOOT_WAIT}s for CLUU to boot..."
 sleep "$BOOT_WAIT"
+
+wait_for_shell_ready() {
+    local deadline=$((SECONDS + SHELL_READY_WAIT))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if grep -Fq "[USER] shell: ready" "$SERIAL_LOG"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+if [ -n "$TEST_COMMAND" ]; then
+    echo "Waiting up to ${SHELL_READY_WAIT}s for shell readiness marker..."
+    if ! wait_for_shell_ready; then
+        echo "ERROR: shell readiness marker not observed before command injection"
+        exit 1
+    fi
+fi
 
 # --- Step 5: Type test command(s) via QEMU monitor ---
 send_key() {
@@ -173,6 +195,9 @@ fi
 # - m2_token_audit: recv churn + token audit telemetry invariants
 # - m2_leakdiag: churn + resource delta diagnostics
 # - m3_mapfail: kernel map-range failpoint rollback validation via shell builtin
+# - m3_mapcopyfail: copy_from_user failure branch rollback validation via shell builtin (`mapcpfail`)
+# - m3_maperror: map_user_page error branch rollback validation via shell builtin
+# - m4_sender_auth: authenticated sender binding in VFS (ignore caller-supplied client_id)
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -228,6 +253,28 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "mapfail: PASS"
+        )
+        ;;
+    m3_mapcopyfail)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "mapcpfail: PASS"
+        )
+        ;;
+    m3_maperror)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "maperror: PASS"
+        )
+        ;;
+    m4_sender_auth)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "vfs: open ignoring claimed client_id="
+            "authenticated="
         )
         ;;
     none)
@@ -387,6 +434,22 @@ fi
 if [ "$MARKER_MODE" = "m3_mapfail" ]; then
     if grep -Fq "mapfail: FAIL" "$SERIAL_LOG"; then
         echo "MISSING: mapfail reported failure"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+fi
+
+if [ "$MARKER_MODE" = "m3_mapcopyfail" ]; then
+    if grep -Fq "mapcpfail: FAIL" "$SERIAL_LOG"; then
+        echo "MISSING: mapcpfail reported failure"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+fi
+
+if [ "$MARKER_MODE" = "m3_maperror" ]; then
+    if grep -Fq "maperror: FAIL" "$SERIAL_LOG"; then
+        echo "MISSING: maperror reported failure"
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
     fi
