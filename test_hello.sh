@@ -20,6 +20,10 @@ KEY_DELAY="${KEY_DELAY:-0.05}"
 MARKER_MODE="${MARKER_MODE:-legacy_p1}"
 REQUIRED_MARKERS="${REQUIRED_MARKERS:-}"
 MIN_EXIT_COOKIES="${MIN_EXIT_COOKIES:-3}"
+MAX_DELTA_SPACES="${MAX_DELTA_SPACES:-}"
+MAX_DELTA_TOKENS="${MAX_DELTA_TOKENS:-}"
+MAX_DELTA_ENDPOINTS="${MAX_DELTA_ENDPOINTS:-}"
+MAX_DELTA_PMM_USED_FRAMES="${MAX_DELTA_PMM_USED_FRAMES:-}"
 
 cleanup() {
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -308,6 +312,59 @@ if [ "$MARKER_MODE" = "m2_leakdiag" ]; then
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
     fi
+
+    parse_last_delta() {
+        local marker="$1"
+        awk -v marker="$marker" '
+            $0 ~ marker {
+                if (getline > 0) {
+                    v = $0
+                    gsub(/[^0-9-]/, "", v)
+                    if (v != "") {
+                        last = v
+                    }
+                }
+            }
+            END {
+                if (last != "") {
+                    print last
+                }
+            }
+        ' "$SERIAL_LOG"
+    }
+
+    last_delta_spaces="$(parse_last_delta "delta_spaces=")"
+    last_delta_tokens="$(parse_last_delta "delta_tokens=")"
+    last_delta_endpoints="$(parse_last_delta "delta_endpoints=")"
+    last_delta_pmm="$(parse_last_delta "delta_pmm_used_frames=")"
+
+    check_delta_limit() {
+        local value="$1"
+        local limit="$2"
+        local name="$3"
+        if [ -z "$limit" ]; then
+            return 0
+        fi
+        if ! [[ "$limit" =~ ^-?[0-9]+$ ]]; then
+            echo "ERROR: $name limit must be an integer, got '$limit'"
+            exit 1
+        fi
+        if [ -z "$value" ]; then
+            echo "MISSING: could not parse $name"
+            echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+            exit 1
+        fi
+        if [ "$value" -gt "$limit" ]; then
+            echo "MISSING: $name exceeded limit (value=$value limit=$limit)"
+            echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+            exit 1
+        fi
+    }
+
+    check_delta_limit "$last_delta_spaces" "$MAX_DELTA_SPACES" "delta_spaces"
+    check_delta_limit "$last_delta_tokens" "$MAX_DELTA_TOKENS" "delta_tokens"
+    check_delta_limit "$last_delta_endpoints" "$MAX_DELTA_ENDPOINTS" "delta_endpoints"
+    check_delta_limit "$last_delta_pmm" "$MAX_DELTA_PMM_USED_FRAMES" "delta_pmm_used_frames"
 fi
 
 echo "No faults detected and all required markers found."
