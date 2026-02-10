@@ -29,14 +29,18 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         m3_mapcopyfail) TEST_COMMAND="mapcpfail 4" ;;
         m3_maperror) TEST_COMMAND="maperror 3" ;;
         m4_deny_paths)
-            TEST_COMMAND=""
+            TEST_COMMAND="killdeny 2 9"
             SHELL_AUTOSTART_CMD_DEFAULT="killdeny 2 9"
+            ;;
+        m4_registry_deny_paths)
+            TEST_COMMAND="regdeny"
+            SHELL_AUTOSTART_CMD_DEFAULT="regdeny"
             ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
 fi
 
-if [ -n "$SHELL_AUTOSTART_CMD_DEFAULT" ] && [ -z "${CLUU_SHELL_AUTOSTART_CMD+x}" ]; then
+if [ -n "$SHELL_AUTOSTART_CMD_DEFAULT" ] && [ -z "${CLUU_SHELL_AUTOSTART_CMD:-}" ]; then
     export CLUU_SHELL_AUTOSTART_CMD="$SHELL_AUTOSTART_CMD_DEFAULT"
 fi
 REQUIRED_MARKERS="${REQUIRED_MARKERS:-}"
@@ -210,6 +214,7 @@ fi
 # - m4_registry_sender_auth: authenticated sender binding in registry subscribe/register flows
 # - m4_notify_lifecycle: sender notify bindings are reclaimed after child lifecycle ends
 # - m4_deny_paths: explicit sender-auth denial path regressions (PermissionDenied flows)
+# - m4_registry_deny_paths: explicit registry ownership denial path regressions
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -310,6 +315,14 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "killdeny: PASS permission denied"
             "procmgr: deny kill pid"
+        )
+        ;;
+    m4_registry_deny_paths)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "regdeny: PASS permission denied"
+            "registry: deny unregister"
         )
         ;;
     none)

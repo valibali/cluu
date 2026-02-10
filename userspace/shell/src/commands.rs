@@ -8,7 +8,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use libcluu::boot::TOKEN_SPACE;
+use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
     call, call_with_payload, recv, send_with_payload, send_with_retry, TTY_WRITE_LABEL,
@@ -173,6 +173,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(LetBuiltin));
         registry.register(Box::new(SpawnBuiltin));
         registry.register(Box::new(KillDenyBuiltin));
+        registry.register(Box::new(RegistryDenyBuiltin));
         registry.register(Box::new(MapFailBuiltin));
         registry.register(Box::new(MapCopyFailBuiltin));
         registry.register(Box::new(MapErrorBuiltin));
@@ -239,7 +240,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, mapfail, mapcpfail, maperror, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -585,6 +586,8 @@ struct MapFailBuiltin;
 
 struct KillDenyBuiltin;
 
+struct RegistryDenyBuiltin;
+
 impl BuiltinCommand for KillDenyBuiltin {
     fn name(&self) -> &'static str {
         "killdeny"
@@ -619,6 +622,54 @@ impl BuiltinCommand for KillDenyBuiltin {
             }
             Err(err) => {
                 let line = format!("killdeny: FAIL wrong error {:?} pid={}\n", err, target_pid);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BuiltinCommand for RegistryDenyBuiltin {
+    fn name(&self) -> &'static str {
+        "regdeny"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let service = args.first().map_or("tty:0", String::as_str);
+        let endpoint = args.get(1).map_or("main", String::as_str);
+        let registry_endpoint = process_info().tokens[TOKEN_REGISTRY];
+        if registry_endpoint == 0 {
+            let line = "regdeny: FAIL missing registry token\n";
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print(line.trim_end());
+            return Ok(());
+        }
+
+        let payload = encode_registry_names(service, endpoint);
+        let mut req = Message::new(registry::REGISTRY_UNREGISTER_LABEL, [0; 6], 2);
+        req.words[0] = payload.len();
+        // Reply endpoint field is ignored for unauthorized sender paths, but keep format valid.
+        req.words[1] = process_info().tokens[libcluu::boot::TOKEN_STDOUT];
+        let header = req.as_bytes();
+        let mut buffer = Vec::with_capacity(header.len() + payload.len());
+        buffer.extend_from_slice(header);
+        buffer.extend_from_slice(&payload);
+
+        match syscall::ipc_send(registry_endpoint, &buffer) {
+            Ok(()) => {
+                let line = format!(
+                    "regdeny: PASS permission denied service={} endpoint={}\n",
+                    service, endpoint
+                );
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+            }
+            Err(err) => {
+                let line = format!(
+                    "regdeny: FAIL send error {:?} service={} endpoint={}\n",
+                    err, service, endpoint
+                );
                 send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
                 let _ = debug_print(line.trim_end());
             }
@@ -925,6 +976,17 @@ fn normalize_spawn_path(path: &str) -> String {
     } else {
         format!("/bin/{}", path)
     }
+}
+
+fn encode_registry_names(service: &str, endpoint: &str) -> Vec<u8> {
+    let service_bytes = service.as_bytes();
+    let endpoint_bytes = endpoint.as_bytes();
+    let mut payload = Vec::with_capacity(4 + service_bytes.len() + endpoint_bytes.len());
+    payload.extend_from_slice(&(service_bytes.len() as u16).to_le_bytes());
+    payload.extend_from_slice(&(endpoint_bytes.len() as u16).to_le_bytes());
+    payload.extend_from_slice(service_bytes);
+    payload.extend_from_slice(endpoint_bytes);
+    payload
 }
 
 fn parse_status(raw: usize) -> Result<()> {

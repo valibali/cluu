@@ -143,6 +143,10 @@ impl ProcessManager {
         debug_print("=========================================")?;
         debug_print("Derived procmgr token handle")?;
         debug_print(&format!("  Handle: {}", self.token))?;
+        debug_print(&format!(
+            "procmgr: shell startup command '{}'",
+            SHELL_AUTOSTART_CMD
+        ))?;
 
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
         let _ = self.spawn_service(

@@ -69,6 +69,10 @@ fn run() -> Result<()> {
                                 if grant_endpoint != 0 {
                                     let key = (service.clone(), endpoint.clone());
                                     if sender_tid == 0 {
+                                        let _ = debug_print(&format!(
+                                            "registry: deny register {}:{} sender_tid=0",
+                                            service, endpoint
+                                        ));
                                         send_status(
                                             reply_token,
                                             msg.words[1],
@@ -78,6 +82,10 @@ fn run() -> Result<()> {
                                     }
                                     if let Some(owner_tid) = entry_owner.get(&key).copied() {
                                         if owner_tid != sender_tid {
+                                            let _ = debug_print(&format!(
+                                                "registry: deny register {}:{} sender_tid={} owner_tid={}",
+                                                service, endpoint, sender_tid, owner_tid
+                                            ));
                                             send_status(
                                                 reply_token,
                                                 msg.words[1],
@@ -123,6 +131,10 @@ fn run() -> Result<()> {
                             if let Some((service, endpoint)) = parse_names(payload) {
                                 let key = (service.clone(), endpoint.clone());
                                 if sender_tid == 0 {
+                                    let _ = debug_print(&format!(
+                                        "registry: deny unregister {}:{} sender_tid=0",
+                                        service, endpoint
+                                    ));
                                     send_status(
                                         reply_token,
                                         msg.words[1],
@@ -132,6 +144,10 @@ fn run() -> Result<()> {
                                 }
                                 if let Some(owner_tid) = entry_owner.get(&key).copied() {
                                     if owner_tid != sender_tid {
+                                        let _ = debug_print(&format!(
+                                            "registry: deny unregister {}:{} sender_tid={} owner_tid={}",
+                                            service, endpoint, sender_tid, owner_tid
+                                        ));
                                         send_status(
                                             reply_token,
                                             msg.words[1],

@@ -72,11 +72,19 @@ fn run() -> Result<()> {
     let _ = print_prompt(stdout);
     #[cfg(feature = "lang-parser")]
     {
+        let info = process_info();
+        let _ = debug_print(&format!(
+            "shell: startup argc={} argv_offset={}",
+            info.params[PARAM_ARGC], info.params[PARAM_ARGV_OFFSET]
+        ));
         if let Some(startup_cmd) = startup_command_from_process_info() {
+            let _ = debug_print(&format!("shell: startup command '{}'", startup_cmd));
             let mut line = startup_cmd;
             line.push('\n');
             let _ = parse_and_execute_line(stdout, stdlog, &mut command_context, line.as_bytes());
             let _ = print_prompt(stdout);
+        } else {
+            let _ = debug_print("shell: no startup command");
         }
     }
 
@@ -236,17 +244,21 @@ fn parse_and_execute_line(
                     Err(err) => {
                         let _ =
                             send_with_payload(stdlog, TTY_WRITE_LABEL, err.to_string().as_bytes());
+                        let _ = debug_print(&format!("shell: builtin error {}", err));
                         return Ok(());
                     }
                 }
+                let _ = debug_print("shell: unsupported command");
                 let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, b"shell: unsupported command\n");
             }
             Err(err) => {
                 let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, err.to_string().as_bytes());
+                let _ = debug_print(&format!("shell: parse error {}", err));
             }
         },
         Err(_) => {
             let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, b"shell: invalid utf-8\n");
+            let _ = debug_print("shell: invalid utf-8");
         }
     }
     Ok(())
