@@ -242,6 +242,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(SpawnBgBuiltin));
         registry.register(Box::new(JobsBuiltin));
         registry.register(Box::new(JobChurnBuiltin));
+        registry.register(Box::new(JobMixBuiltin));
         registry.register(Box::new(StopBuiltin));
         registry.register(Box::new(ForegroundBuiltin));
         registry.register(Box::new(BackgroundBuiltin));
@@ -318,7 +319,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, jobchurn, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, jobchurn, jobmix, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -622,6 +623,7 @@ struct SpawnBuiltin;
 struct SpawnBgBuiltin;
 struct JobsBuiltin;
 struct JobChurnBuiltin;
+struct JobMixBuiltin;
 struct StopBuiltin;
 struct ForegroundBuiltin;
 struct BackgroundBuiltin;
@@ -831,6 +833,74 @@ impl BuiltinCommand for JobChurnBuiltin {
         }
 
         let line = format!("jobchurn: PASS iterations={}\n", iterations);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        let _ = debug_print(line.trim_end());
+        Ok(())
+    }
+}
+
+impl BuiltinCommand for JobMixBuiltin {
+    fn name(&self) -> &'static str {
+        "jobmix"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let stdin_endpoint = process_info().tokens[libcluu::boot::TOKEN_STDIN];
+        let spawn_a = spawn_process(context, "sleepy", DEFAULT_PRIORITY)?;
+        parse_status(spawn_a.status_word)?;
+        let pid_a = spawn_a.pid;
+        context.add_bg_job(
+            pid_a,
+            spawn_a.notify_endpoint,
+            normalize_spawn_path("sleepy"),
+        );
+
+        let spawn_b = spawn_process(context, "sleepy", DEFAULT_PRIORITY)?;
+        parse_status(spawn_b.status_word)?;
+        let pid_b = spawn_b.pid;
+        context.add_bg_job(
+            pid_b,
+            spawn_b.notify_endpoint,
+            normalize_spawn_path("sleepy"),
+        );
+
+        signal_process(spawn_a.procmgr_endpoint, pid_a, SIGSTOP)?;
+        ensure_bg_job_state(context, pid_a, JobState::Stopped)?;
+
+        signal_process(spawn_b.procmgr_endpoint, pid_b, SIGSTOP)?;
+        ensure_bg_job_state(context, pid_b, JobState::Stopped)?;
+
+        signal_process(spawn_a.procmgr_endpoint, pid_a, SIGCONT)?;
+        ensure_bg_job_state(context, pid_a, JobState::Running)?;
+
+        let Some(job_b) = context.take_bg_job(pid_b) else {
+            let line = format!("jobmix: FAIL missing job pid={}\n", pid_b);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
+        };
+        signal_process(spawn_b.procmgr_endpoint, pid_b, SIGCONT)?;
+        wait_for_exit_or_sigint(
+            spawn_b.procmgr_endpoint,
+            job_b.notify_endpoint,
+            stdin_endpoint,
+            pid_b,
+            stdout,
+        )?;
+
+        let Some(job_a) = context.take_bg_job(pid_a) else {
+            let line = format!("jobmix: FAIL missing job pid={}\n", pid_a);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
+        };
+        wait_for_exit_or_sigint(
+            spawn_a.procmgr_endpoint,
+            job_a.notify_endpoint,
+            stdin_endpoint,
+            pid_a,
+            stdout,
+        )?;
+
+        let line = format!("jobmix: PASS pids={},{}\n", pid_a, pid_b);
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         let _ = debug_print(line.trim_end());
         Ok(())
