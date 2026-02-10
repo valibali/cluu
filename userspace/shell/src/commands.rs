@@ -98,6 +98,18 @@ impl CommandContext {
         self.bg_jobs.remove(&pid);
     }
 
+    fn take_bg_job(&mut self, pid: usize) -> Option<BackgroundJob> {
+        self.bg_jobs.remove(&pid)
+    }
+
+    fn contains_bg_job(&self, pid: usize) -> bool {
+        self.bg_jobs.contains_key(&pid)
+    }
+
+    fn latest_bg_pid(&self) -> Option<usize> {
+        self.bg_jobs.keys().next_back().copied()
+    }
+
     fn bg_job_lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (pid, job) in &self.bg_jobs {
@@ -205,6 +217,8 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(SpawnBuiltin));
         registry.register(Box::new(SpawnBgBuiltin));
         registry.register(Box::new(JobsBuiltin));
+        registry.register(Box::new(ForegroundBuiltin));
+        registry.register(Box::new(BackgroundBuiltin));
         registry.register(Box::new(KillDenyBuiltin));
         registry.register(Box::new(RegistryDenyBuiltin));
         registry.register(Box::new(MapFailBuiltin));
@@ -278,7 +292,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -581,6 +595,8 @@ impl BuiltinCommand for LetBuiltin {
 struct SpawnBuiltin;
 struct SpawnBgBuiltin;
 struct JobsBuiltin;
+struct ForegroundBuiltin;
+struct BackgroundBuiltin;
 
 impl BuiltinCommand for SpawnBuiltin {
     fn name(&self) -> &'static str {
@@ -666,6 +682,61 @@ impl BuiltinCommand for JobsBuiltin {
             send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
             send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
         }
+        Ok(())
+    }
+}
+
+impl BuiltinCommand for ForegroundBuiltin {
+    fn name(&self) -> &'static str {
+        "fg"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let Some(pid) = resolve_job_pid(context, args.first()) else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"fg: no background jobs\n")?;
+            return Ok(());
+        };
+        let Some(job) = context.take_bg_job(pid) else {
+            let line = format!("fg: unknown pid={}\n", pid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
+        };
+
+        let line = format!("fg: pid={} {}\n", pid, job.command);
+        let _ = debug_print(line.trim_end());
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+
+        let stdin_endpoint = process_info().tokens[libcluu::boot::TOKEN_STDIN];
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        wait_for_exit_or_sigint(
+            procmgr_endpoint,
+            job.notify_endpoint,
+            stdin_endpoint,
+            pid,
+            stdout,
+        )?;
+        Ok(())
+    }
+}
+
+impl BuiltinCommand for BackgroundBuiltin {
+    fn name(&self) -> &'static str {
+        "bg"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let Some(pid) = resolve_job_pid(context, args.first()) else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"bg: no background jobs\n")?;
+            return Ok(());
+        };
+        if !context.contains_bg_job(pid) {
+            let line = format!("bg: unknown pid={}\n", pid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
+        }
+        // Current job model has only running background state (no stop/continue yet).
+        let line = format!("bg: pid={} already running\n", pid);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         Ok(())
     }
 }
@@ -780,6 +851,14 @@ fn parse_ipc_message(buf: &[u8]) -> Option<(Message, &[u8])> {
         payload_len = 0;
     }
     Some((msg, &buf[header..header + payload_len]))
+}
+
+fn resolve_job_pid(context: &CommandContext, arg: Option<&String>) -> Option<usize> {
+    let Some(token) = arg else {
+        return context.latest_bg_pid();
+    };
+    let raw = token.strip_prefix('%').unwrap_or(token.as_str());
+    raw.parse::<usize>().ok()
 }
 
 struct MapFailBuiltin;
