@@ -8,8 +8,6 @@ use alloc::format;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::fmt::Write;
-
 use libcluu::boot::TOKEN_SPACE;
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{call_with_payload, recv, send_with_payload, send_with_retry, TTY_WRITE_LABEL};
@@ -171,6 +169,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(ExprBuiltin));
         registry.register(Box::new(LetBuiltin));
         registry.register(Box::new(SpawnBuiltin));
+        registry.register(Box::new(MapFailBuiltin));
         registry.register(Box::new(CatBuiltin));
         registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(HeapBuiltin));
@@ -234,7 +233,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, mapfail, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -577,6 +576,96 @@ impl BuiltinCommand for SpawnBuiltin {
                 Ok(())
             }
         }
+    }
+}
+
+struct MapFailBuiltin;
+
+impl BuiltinCommand for MapFailBuiltin {
+    fn name(&self) -> &'static str {
+        "mapfail"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
+        // Keep this away from known service mappings (e.g. virtio/vfs windows).
+        const TEST_BASE: usize = 0x6C00_0000;
+        const MAP_TEST_FAILPOINT: usize = 0x8000_0000;
+        const MAP_TEST_FAIL_AFTER_SHIFT: usize = 16;
+        const MAP_TEST_FAIL_AFTER_MASK: usize = 0xFF;
+
+        let total_pages = args
+            .first()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(12);
+        let fail_after_raw = args
+            .get(1)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(4);
+
+        if total_pages < 2 {
+            let line = "mapfail: FAIL total_pages must be >= 2\n";
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print("mapfail: FAIL total_pages must be >= 2");
+            return Ok(());
+        }
+        let fail_after = fail_after_raw.clamp(1, total_pages - 1);
+        let fail_bits = (fail_after & MAP_TEST_FAIL_AFTER_MASK) << MAP_TEST_FAIL_AFTER_SHIFT;
+        let flags = 0x03 | MAP_TEST_FAILPOINT | fail_bits;
+        let space_token = process_info().tokens[TOKEN_SPACE];
+
+        let _ = syscall::space_unmap(space_token, TEST_BASE, total_pages);
+
+        let result = syscall::space_map_range(space_token, TEST_BASE, 0, flags, total_pages, 0);
+        match result {
+            Err(Error::OutOfMemory) => {}
+            Ok(pages) => {
+                let line = format!("mapfail: FAIL unexpected success pages={}\n", pages);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, TEST_BASE, total_pages);
+                return Ok(());
+            }
+            Err(err) => {
+                let line = format!("mapfail: FAIL wrong error {:?}\n", err);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, TEST_BASE, total_pages);
+                return Ok(());
+            }
+        }
+
+        // Verify rollback by remapping the exact same range without failpoint:
+        // if rollback is correct, this should map all requested pages.
+        let verify_result = syscall::space_map_range(space_token, TEST_BASE, 0, 0x03, total_pages, 0);
+        match verify_result {
+            Ok(mapped) if mapped == total_pages => {}
+            Ok(mapped) => {
+                let line = format!(
+                    "mapfail: FAIL rollback remap short mapped_pages={}\n",
+                    mapped
+                );
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, TEST_BASE, total_pages);
+                return Ok(());
+            }
+            Err(err) => {
+                let line = format!("mapfail: FAIL rollback remap error {:?}\n", err);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, TEST_BASE, total_pages);
+                return Ok(());
+            }
+        }
+
+        let line = format!(
+            "mapfail: PASS total_pages={} fail_after={}\n",
+            total_pages, fail_after
+        );
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        let _ = debug_print(line.trim_end());
+        let _ = syscall::space_unmap(space_token, TEST_BASE, total_pages);
+        Ok(())
     }
 }
 

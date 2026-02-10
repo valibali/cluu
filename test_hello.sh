@@ -1,5 +1,5 @@
 #!/bin/bash
-# Automated CLUU test harness: build, launch QEMU, type "spawn hello", capture serial output
+# Automated CLUU test harness: build, launch QEMU, type test command(s), capture serial output
 set -e
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -13,11 +13,20 @@ USER_DISK="$PROJECT_ROOT/target/userdisk.img"
 QEMU_PID=""
 BOOT_WAIT="${BOOT_WAIT:-8}"
 RUN_WAIT="${RUN_WAIT:-5}"
-TEST_COMMAND="${TEST_COMMAND:-spawn hello}"
+# Preserve explicit empty TEST_COMMAND; only auto-fill when it is truly unset.
+if [ -z "${TEST_COMMAND+x}" ]; then
+    TEST_COMMAND="__AUTO__"
+fi
 TEST_COMMAND_REPEAT="${TEST_COMMAND_REPEAT:-1}"
 COMMAND_GAP="${COMMAND_GAP:-1}"
 KEY_DELAY="${KEY_DELAY:-0.05}"
 MARKER_MODE="${MARKER_MODE:-legacy_p1}"
+if [ "$TEST_COMMAND" = "__AUTO__" ]; then
+    case "$MARKER_MODE" in
+        m3_mapfail) TEST_COMMAND="mapfail 12 4" ;;
+        *) TEST_COMMAND="spawn hello" ;;
+    esac
+fi
 REQUIRED_MARKERS="${REQUIRED_MARKERS:-}"
 MIN_EXIT_COOKIES="${MIN_EXIT_COOKIES:-3}"
 MAX_DELTA_SPACES="${MAX_DELTA_SPACES:-}"
@@ -163,6 +172,7 @@ fi
 # - m1_recv: recv/wakeup churn checks
 # - m2_token_audit: recv churn + token audit telemetry invariants
 # - m2_leakdiag: churn + resource delta diagnostics
+# - m3_mapfail: kernel map-range failpoint rollback validation via shell builtin
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -211,6 +221,13 @@ case "$MARKER_MODE" in
             "delta_spaces="
             "delta_tokens="
             "delta_pmm_used_frames="
+        )
+        ;;
+    m3_mapfail)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "mapfail: PASS"
         )
         ;;
     none)
@@ -365,6 +382,14 @@ if [ "$MARKER_MODE" = "m2_leakdiag" ]; then
     check_delta_limit "$last_delta_tokens" "$MAX_DELTA_TOKENS" "delta_tokens"
     check_delta_limit "$last_delta_endpoints" "$MAX_DELTA_ENDPOINTS" "delta_endpoints"
     check_delta_limit "$last_delta_pmm" "$MAX_DELTA_PMM_USED_FRAMES" "delta_pmm_used_frames"
+fi
+
+if [ "$MARKER_MODE" = "m3_mapfail" ]; then
+    if grep -Fq "mapfail: FAIL" "$SERIAL_LOG"; then
+        echo "MISSING: mapfail reported failure"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
 fi
 
 echo "No faults detected and all required markers found."
