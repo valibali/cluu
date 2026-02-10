@@ -421,10 +421,10 @@ impl VfsServer {
             VfsOp::Write => self.handle_write(msg, payload, reply_token, authenticated_client),
             VfsOp::Stat => self.handle_stat(msg, payload, reply_token),
             VfsOp::Fstat => self.handle_fstat(msg, reply_token, authenticated_client),
-            VfsOp::Unlink => self.handle_unlink(msg, payload, reply_token),
-            VfsOp::Mkdir => self.handle_mkdir(msg, payload, reply_token),
-            VfsOp::Rmdir => self.handle_rmdir(msg, payload, reply_token),
-            VfsOp::Rename => self.handle_rename(msg, payload, reply_token),
+            VfsOp::Unlink => self.handle_unlink(msg, payload, reply_token, authenticated_client),
+            VfsOp::Mkdir => self.handle_mkdir(msg, payload, reply_token, authenticated_client),
+            VfsOp::Rmdir => self.handle_rmdir(msg, payload, reply_token, authenticated_client),
+            VfsOp::Rename => self.handle_rename(msg, payload, reply_token, authenticated_client),
         };
         vfs_trace!("vfs: handled {:?} result={:?}", op, result);
         result
@@ -663,27 +663,144 @@ impl VfsServer {
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn handle_unlink(&mut self, _msg: &Message, _payload: &[u8], reply_token: usize) -> Result<()> {
+    fn handle_unlink(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_UNLINK, [0; 6], 1);
-        reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
+        let _client_id = match self.resolve_client_id("unlink", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let path = match core::str::from_utf8(payload) {
+            Ok(p) => p,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        match self.mounts.unlink(path) {
+            Ok(()) => {
+                reply_msg.words[0] = 0;
+                self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
+            }
+            Err(err) => reply_msg.words[0] = err.to_errno() as usize,
+        }
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn handle_mkdir(&mut self, _msg: &Message, _payload: &[u8], reply_token: usize) -> Result<()> {
+    fn handle_mkdir(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_MKDIR, [0; 6], 1);
-        reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
+        let _client_id = match self.resolve_client_id("mkdir", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let path = match core::str::from_utf8(payload) {
+            Ok(p) => p,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let mode = msg.words[2];
+        match self.mounts.mkdir(path, mode) {
+            Ok(()) => {
+                reply_msg.words[0] = 0;
+                self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
+            }
+            Err(err) => reply_msg.words[0] = err.to_errno() as usize,
+        }
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn handle_rmdir(&mut self, _msg: &Message, _payload: &[u8], reply_token: usize) -> Result<()> {
+    fn handle_rmdir(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_RMDIR, [0; 6], 1);
-        reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
+        let _client_id = match self.resolve_client_id("rmdir", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let path = match core::str::from_utf8(payload) {
+            Ok(p) => p,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        match self.mounts.rmdir(path) {
+            Ok(()) => {
+                reply_msg.words[0] = 0;
+                self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
+            }
+            Err(err) => reply_msg.words[0] = err.to_errno() as usize,
+        }
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn handle_rename(&mut self, _msg: &Message, _payload: &[u8], reply_token: usize) -> Result<()> {
+    fn handle_rename(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_RENAME, [0; 6], 1);
-        reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
+        let _client_id = match self.resolve_client_id("rename", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let old_len = msg.words[2];
+        if old_len > payload.len() {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+        let old_path = match core::str::from_utf8(&payload[..old_len]) {
+            Ok(p) => p,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let new_path = match core::str::from_utf8(&payload[old_len..]) {
+            Ok(p) => p,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        match self.mounts.rename(old_path, new_path) {
+            Ok(()) => {
+                reply_msg.words[0] = 0;
+                self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
+            }
+            Err(err) => reply_msg.words[0] = err.to_errno() as usize,
+        }
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 

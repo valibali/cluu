@@ -44,6 +44,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="ext2append"
             SHELL_AUTOSTART_CMD_DEFAULT="ext2append"
             ;;
+        l2_ext2mutate)
+            TEST_COMMAND="ext2mutate"
+            SHELL_AUTOSTART_CMD_DEFAULT="ext2mutate"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -229,6 +233,7 @@ fi
 # - m4_registry_deny_paths: explicit registry ownership denial path regressions
 # - l2_ext2write: end-to-end ext2 write smoke test via shell builtin
 # - l2_ext2append: append-past-EOF ext2 smoke test via shell builtin
+# - l2_ext2mutate: mkdir/rename/rmdir ext2 metadata mutation smoke test
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
 required_markers=()
@@ -363,6 +368,13 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "ext2append: PASS path=/bin/hello"
+        )
+        ;;
+    l2_ext2mutate)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "ext2mutate: PASS mkdir+rename+rmdir"
         )
         ;;
     none)
@@ -614,6 +626,14 @@ fi
 if [ "$MARKER_MODE" = "l2_ext2append" ]; then
     if grep -Fq "ext2append: FAIL" "$SERIAL_LOG"; then
         echo "MISSING: ext2append reported failure"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+fi
+
+if [ "$MARKER_MODE" = "l2_ext2mutate" ]; then
+    if grep -Fq "ext2mutate: FAIL" "$SERIAL_LOG"; then
+        echo "MISSING: ext2mutate reported failure"
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
     fi

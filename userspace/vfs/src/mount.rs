@@ -21,6 +21,10 @@ use libcluu::{Error, Result};
 const FS_OPEN: u32 = 0x300;
 const FS_READ: u32 = 0x302;
 const FS_READDIR: u32 = 0x304;
+const FS_UNLINK: u32 = 0x307;
+const FS_MKDIR: u32 = 0x308;
+const FS_RMDIR: u32 = 0x309;
+const FS_RENAME: u32 = 0x30A;
 const IPC_MESSAGE_MAX: usize = 256;
 
 /// Directory entry for readdir results.
@@ -47,6 +51,26 @@ pub trait MountBackend: Send + Sync {
         // Default implementation for memory-backed files
         let _ = (file, offset, len);
         Err(Error::InvalidOperation)
+    }
+
+    fn unlink(&self, rel_path: &str) -> Result<()> {
+        let _ = rel_path;
+        Err(Error::NotImplemented)
+    }
+
+    fn mkdir(&self, rel_path: &str, mode: usize) -> Result<()> {
+        let _ = (rel_path, mode);
+        Err(Error::NotImplemented)
+    }
+
+    fn rmdir(&self, rel_path: &str) -> Result<()> {
+        let _ = rel_path;
+        Err(Error::NotImplemented)
+    }
+
+    fn rename(&self, rel_old: &str, rel_new: &str) -> Result<()> {
+        let _ = (rel_old, rel_new);
+        Err(Error::NotImplemented)
     }
 }
 
@@ -196,6 +220,39 @@ impl MountBackend for RemoteBackend {
 
         Ok(reply_buf[data_start..data_start + data_len].to_vec())
     }
+
+    fn unlink(&self, rel_path: &str) -> Result<()> {
+        let req = Message::new(FS_UNLINK, [rel_path.len(), 0, 0, 0, 0, 0], 1);
+        let mut reply = Message::new(0, [0; 6], 0);
+        call_with_payload(self.endpoint, &req, rel_path.as_bytes(), &mut reply)?;
+        parse_status(reply.words[0])
+    }
+
+    fn mkdir(&self, rel_path: &str, mode: usize) -> Result<()> {
+        let req = Message::new(FS_MKDIR, [rel_path.len(), 0, mode, 0, 0, 0], 3);
+        let mut reply = Message::new(0, [0; 6], 0);
+        call_with_payload(self.endpoint, &req, rel_path.as_bytes(), &mut reply)?;
+        parse_status(reply.words[0])
+    }
+
+    fn rmdir(&self, rel_path: &str) -> Result<()> {
+        let req = Message::new(FS_RMDIR, [rel_path.len(), 0, 0, 0, 0, 0], 1);
+        let mut reply = Message::new(0, [0; 6], 0);
+        call_with_payload(self.endpoint, &req, rel_path.as_bytes(), &mut reply)?;
+        parse_status(reply.words[0])
+    }
+
+    fn rename(&self, rel_old: &str, rel_new: &str) -> Result<()> {
+        let old_bytes = rel_old.as_bytes();
+        let new_bytes = rel_new.as_bytes();
+        let mut payload = Vec::with_capacity(old_bytes.len() + new_bytes.len());
+        payload.extend_from_slice(old_bytes);
+        payload.extend_from_slice(new_bytes);
+        let req = Message::new(FS_RENAME, [payload.len(), 0, old_bytes.len(), 0, 0, 0], 3);
+        let mut reply = Message::new(0, [0; 6], 0);
+        call_with_payload(self.endpoint, &req, &payload, &mut reply)?;
+        parse_status(reply.words[0])
+    }
 }
 
 /// Virtual file content generator.
@@ -339,6 +396,30 @@ impl MountTable {
         mount.backend.readdir(rel_path)
     }
 
+    pub fn unlink(&self, path: &str) -> Result<()> {
+        let (mount, rel_path) = self.resolve(path)?;
+        mount.backend.unlink(rel_path)
+    }
+
+    pub fn mkdir(&self, path: &str, mode: usize) -> Result<()> {
+        let (mount, rel_path) = self.resolve(path)?;
+        mount.backend.mkdir(rel_path, mode)
+    }
+
+    pub fn rmdir(&self, path: &str) -> Result<()> {
+        let (mount, rel_path) = self.resolve(path)?;
+        mount.backend.rmdir(rel_path)
+    }
+
+    pub fn rename(&self, old_path: &str, new_path: &str) -> Result<()> {
+        let (old_mount, rel_old) = self.resolve(old_path)?;
+        let (new_mount, rel_new) = self.resolve(new_path)?;
+        if old_mount.prefix != new_mount.prefix {
+            return Err(Error::InvalidOperation);
+        }
+        old_mount.backend.rename(rel_old, rel_new)
+    }
+
     /// Read file data (for remote/virtual backends).
     pub fn read(
         &self,
@@ -393,6 +474,14 @@ impl MountTable {
 
         best.ok_or(Error::NotFound)
     }
+}
+
+fn parse_status(raw: usize) -> Result<()> {
+    let signed = raw as isize;
+    if signed < 0 {
+        return Err(Error::from_errno(signed));
+    }
+    Ok(())
 }
 
 impl Default for MountTable {

@@ -31,6 +31,10 @@ const FS_READ: u32 = 0x302;
 const FS_WRITE: u32 = 0x305;
 const FS_STAT: u32 = 0x303;
 const FS_READDIR: u32 = 0x304;
+const FS_UNLINK: u32 = 0x307;
+const FS_MKDIR: u32 = 0x308;
+const FS_RMDIR: u32 = 0x309;
+const FS_RENAME: u32 = 0x30A;
 /// Zero-copy read into a caller-provided mapping (VFS grant buffer).
 const FS_READ_GRANT: u32 = 0x306;
 const IPC_MESSAGE_MAX: usize = 256;
@@ -350,6 +354,65 @@ fn handle_fs_request(
                     }
                 }
                 Err(_) => send_error_reply(reply_token, -3),
+            }
+        }
+
+        FS_UNLINK => {
+            let path = core::str::from_utf8(payload).unwrap_or("");
+            match fs.unlink_path(path) {
+                Ok(()) => {
+                    let reply_msg = Message::new(FS_UNLINK, [0, 0, 0, 0, 0, 0], 1);
+                    if let Some(token) = reply_token {
+                        let _ = reply(token, &reply_msg, IpcFlags::empty());
+                    }
+                }
+                Err(err) => send_error_reply(reply_token, err.to_errno()),
+            }
+        }
+
+        FS_MKDIR => {
+            let mode = (msg.words[2] & 0o777) as u16;
+            let path = core::str::from_utf8(payload).unwrap_or("");
+            match fs.mkdir_path(path, mode) {
+                Ok(()) => {
+                    let reply_msg = Message::new(FS_MKDIR, [0, 0, 0, 0, 0, 0], 1);
+                    if let Some(token) = reply_token {
+                        let _ = reply(token, &reply_msg, IpcFlags::empty());
+                    }
+                }
+                Err(err) => send_error_reply(reply_token, err.to_errno()),
+            }
+        }
+
+        FS_RMDIR => {
+            let path = core::str::from_utf8(payload).unwrap_or("");
+            match fs.rmdir_path(path) {
+                Ok(()) => {
+                    let reply_msg = Message::new(FS_RMDIR, [0, 0, 0, 0, 0, 0], 1);
+                    if let Some(token) = reply_token {
+                        let _ = reply(token, &reply_msg, IpcFlags::empty());
+                    }
+                }
+                Err(err) => send_error_reply(reply_token, err.to_errno()),
+            }
+        }
+
+        FS_RENAME => {
+            let old_len = msg.words[2];
+            if old_len > payload.len() {
+                send_error_reply(reply_token, -2);
+                return;
+            }
+            let old = core::str::from_utf8(&payload[..old_len]).unwrap_or("");
+            let new = core::str::from_utf8(&payload[old_len..]).unwrap_or("");
+            match fs.rename_path(old, new) {
+                Ok(()) => {
+                    let reply_msg = Message::new(FS_RENAME, [0, 0, 0, 0, 0, 0], 1);
+                    if let Some(token) = reply_token {
+                        let _ = reply(token, &reply_msg, IpcFlags::empty());
+                    }
+                }
+                Err(err) => send_error_reply(reply_token, err.to_errno()),
             }
         }
 

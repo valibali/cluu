@@ -179,6 +179,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(MapErrorBuiltin));
         registry.register(Box::new(Ext2WriteBuiltin));
         registry.register(Box::new(Ext2AppendBuiltin));
+        registry.register(Box::new(Ext2MutateBuiltin));
         registry.register(Box::new(CatBuiltin));
         registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(HeapBuiltin));
@@ -242,7 +243,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -1071,6 +1072,63 @@ impl BuiltinCommand for Ext2AppendBuiltin {
         }
 
         let _ = vfs.close(file);
+        Ok(())
+    }
+}
+
+struct Ext2MutateBuiltin;
+
+impl BuiltinCommand for Ext2MutateBuiltin {
+    fn name(&self) -> &'static str {
+        "ext2mutate"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+            Ok(ep) => ep,
+            Err(err) => {
+                let line = format!("ext2mutate: FAIL vfs unavailable {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+            Ok(client) => client,
+            Err(err) => {
+                let line = format!("ext2mutate: FAIL client {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let from = "/l2a_dir";
+        let to = "/l2a_dir_renamed";
+        let mut op = "mkdir";
+        let result = (|| -> Result<()> {
+            vfs.mkdir(from, 0o755)?;
+            op = "rename";
+            vfs.rename(from, to)?;
+            op = "rmdir";
+            vfs.rmdir(to)?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                let line = "ext2mutate: PASS mkdir+rename+rmdir\n";
+                let _ = debug_print(line);
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+            Err(err) => {
+                let line = format!("ext2mutate: FAIL op={} err={:?}\n", op, err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+        }
+
         Ok(())
     }
 }

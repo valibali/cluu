@@ -202,7 +202,7 @@ impl<'a> Ext2Fs<'a> {
         }
 
         let mut inode = self.read_inode(inode_num)?;
-        if !inode.is_file() {
+        if !inode.is_file() && !inode.is_dir() {
             return Err(Error::InvalidOperation);
         }
 
@@ -301,12 +301,350 @@ impl<'a> Ext2Fs<'a> {
         self.write_file_by_num(inode as u32, offset as usize, data)
     }
 
+    pub fn unlink_path(&self, path: &str) -> Result<()> {
+        let (parent_ino, name) = self.resolve_parent(path)?;
+        let (entry, mut parent_data) = self.find_dir_entry(parent_ino, name)?;
+        let target = self.read_inode(entry.inode)?;
+        if target.is_dir() {
+            return Err(Error::InvalidOperation);
+        }
+
+        self.clear_dir_entry(&mut parent_data, entry.offset);
+        self.write_file_by_num(parent_ino, 0, &parent_data)?;
+
+        let mut target_inode = target;
+        if target_inode.links_count > 0 {
+            target_inode.links_count -= 1;
+            self.write_inode(entry.inode, &target_inode)?;
+        }
+        Ok(())
+    }
+
+    pub fn rmdir_path(&self, path: &str) -> Result<()> {
+        let (parent_ino, name) = self.resolve_parent(path)?;
+        let (entry, mut parent_data) = self.find_dir_entry(parent_ino, name)?;
+        if entry.inode == 2 {
+            return Err(Error::InvalidOperation);
+        }
+        let target = self.read_inode(entry.inode)?;
+        if !target.is_dir() {
+            return Err(Error::InvalidOperation);
+        }
+        let child_entries = self.parse_dir_entries(&self.read_file_data(&target)?);
+        for e in &child_entries {
+            if e.inode != 0 && e.name != "." && e.name != ".." {
+                return Err(Error::Busy);
+            }
+        }
+
+        self.clear_dir_entry(&mut parent_data, entry.offset);
+        self.write_file_by_num(parent_ino, 0, &parent_data)?;
+
+        let mut parent = self.read_inode(parent_ino)?;
+        if parent.links_count > 0 {
+            parent.links_count -= 1;
+            self.write_inode(parent_ino, &parent)?;
+        }
+
+        let mut child = target;
+        child.links_count = 0;
+        self.write_inode(entry.inode, &child)?;
+        Ok(())
+    }
+
+    pub fn mkdir_path(&self, path: &str, mode: u16) -> Result<()> {
+        if self.resolve_path_to_inode(path).is_ok() {
+            return Err(Error::AlreadyExists);
+        }
+        let (parent_ino, name) = self.resolve_parent(path)?;
+        let mut parent = self.read_inode(parent_ino)?;
+        if !parent.is_dir() {
+            return Err(Error::InvalidOperation);
+        }
+
+        let new_inode_num = self.allocate_inode()?;
+        let data_block = self.allocate_block()?;
+        let mut new_inode = Inode {
+            mode: (inode::S_IFDIR | (mode & 0o777)),
+            uid: 0,
+            size_lo: self.block_size as u32,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            gid: 0,
+            links_count: 2,
+            blocks: (self.block_size / 512) as u32,
+            flags: 0,
+            direct_blocks: [0; 12],
+            indirect_block: 0,
+            double_indirect: 0,
+            triple_indirect: 0,
+            size_hi: 0,
+        };
+        new_inode.direct_blocks[0] = data_block;
+        self.write_inode(new_inode_num, &new_inode)?;
+
+        let mut block = alloc::vec![0u8; self.block_size];
+        self.write_dir_record(&mut block, 0, new_inode_num, 12, ".", dir::FT_DIR)?;
+        self.write_dir_record(
+            &mut block,
+            12,
+            parent_ino,
+            (self.block_size - 12) as u16,
+            "..",
+            dir::FT_DIR,
+        )?;
+        let block_off = (data_block as usize) * self.block_size;
+        self.block.write_bytes(block_off as u64, &block)?;
+
+        self.add_dir_entry(parent_ino, name, new_inode_num, dir::FT_DIR)?;
+        parent.links_count = parent.links_count.saturating_add(1);
+        self.write_inode(parent_ino, &parent)?;
+        Ok(())
+    }
+
+    pub fn rename_path(&self, old_path: &str, new_path: &str) -> Result<()> {
+        if old_path == new_path {
+            return Ok(());
+        }
+
+        let (old_parent_ino, old_name) = self.resolve_parent(old_path)?;
+        let (new_parent_ino, new_name) = self.resolve_parent(new_path)?;
+        if self.lookup_entry(new_parent_ino, new_name)?.is_some() {
+            return Err(Error::AlreadyExists);
+        }
+
+        let (old_entry, mut old_parent_data) = self.find_dir_entry(old_parent_ino, old_name)?;
+        let old_inode = self.read_inode(old_entry.inode)?;
+        let file_type = if old_inode.is_dir() {
+            dir::FT_DIR
+        } else {
+            dir::FT_REG_FILE
+        };
+
+        if old_parent_ino == new_parent_ino
+            && self.can_rename_in_place(&old_parent_data, old_entry.offset, new_name)
+        {
+            self.update_dir_entry_name(&mut old_parent_data, old_entry.offset, new_name)?;
+            self.write_file_by_num(old_parent_ino, 0, &old_parent_data)?;
+            return Ok(());
+        }
+
+        if old_inode.is_dir() && old_parent_ino != new_parent_ino {
+            return Err(Error::NotImplemented);
+        }
+
+        self.add_dir_entry(new_parent_ino, new_name, old_entry.inode, file_type)?;
+        self.clear_dir_entry(&mut old_parent_data, old_entry.offset);
+        self.write_file_by_num(old_parent_ino, 0, &old_parent_data)?;
+        Ok(())
+    }
+
     /// Read all file data (for small files like directories).
     fn read_file_data(&self, inode: &Inode) -> Result<Vec<u8>> {
         let size = inode.size() as usize;
         let mut data = alloc::vec![0u8; size];
         self.read_file(inode, 0, &mut data)?;
         Ok(data)
+    }
+
+    fn resolve_parent<'b>(&self, path: &'b str) -> Result<(u32, &'b str)> {
+        let norm = path.trim_matches('/');
+        if norm.is_empty() {
+            return Err(Error::InvalidArgument);
+        }
+        let (parent, name) = if let Some(pos) = norm.rfind('/') {
+            (&norm[..pos], &norm[pos + 1..])
+        } else {
+            ("", norm)
+        };
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            return Err(Error::InvalidArgument);
+        }
+        let parent_inode = if parent.is_empty() {
+            2
+        } else {
+            self.resolve_path_to_inode(parent)?
+        };
+        Ok((parent_inode, name))
+    }
+
+    fn lookup_entry(&self, dir_inode_num: u32, name: &str) -> Result<Option<DirEntryMeta>> {
+        let dir_inode = self.read_inode(dir_inode_num)?;
+        if !dir_inode.is_dir() {
+            return Err(Error::InvalidOperation);
+        }
+        let data = self.read_file_data(&dir_inode)?;
+        for entry in self.parse_dir_entries(&data) {
+            if entry.inode != 0 && entry.name == name {
+                return Ok(Some(entry));
+            }
+        }
+        Ok(None)
+    }
+
+    fn find_dir_entry(&self, dir_inode_num: u32, name: &str) -> Result<(DirEntryMeta, Vec<u8>)> {
+        let dir_inode = self.read_inode(dir_inode_num)?;
+        if !dir_inode.is_dir() {
+            return Err(Error::InvalidOperation);
+        }
+        let data = self.read_file_data(&dir_inode)?;
+        for entry in self.parse_dir_entries(&data) {
+            if entry.inode != 0 && entry.name == name {
+                return Ok((entry, data));
+            }
+        }
+        Err(Error::NotFound)
+    }
+
+    fn parse_dir_entries(&self, data: &[u8]) -> Vec<DirEntryMeta> {
+        let mut entries = Vec::new();
+        let mut off = 0usize;
+        while off + 8 <= data.len() {
+            let inode =
+                u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+            let rec_len = u16::from_le_bytes([data[off + 4], data[off + 5]]) as usize;
+            if rec_len == 0 || off + rec_len > data.len() {
+                break;
+            }
+            let name_len = data[off + 6] as usize;
+            let file_type = data[off + 7];
+            if 8 + name_len <= rec_len {
+                let name_bytes = &data[off + 8..off + 8 + name_len];
+                let name = core::str::from_utf8(name_bytes)
+                    .map(String::from)
+                    .unwrap_or_else(|_| String::new());
+                entries.push(DirEntryMeta {
+                    offset: off,
+                    inode,
+                    rec_len,
+                    name_len,
+                    file_type,
+                    name,
+                });
+            }
+            off += rec_len;
+        }
+        entries
+    }
+
+    fn add_dir_entry(
+        &self,
+        dir_inode_num: u32,
+        name: &str,
+        inode_num: u32,
+        file_type: u8,
+    ) -> Result<()> {
+        if name.is_empty() || name.len() > 255 {
+            return Err(Error::InvalidArgument);
+        }
+        let needed = dir_entry_len(name.len());
+        let dir_inode = self.read_inode(dir_inode_num)?;
+        let mut data = self.read_file_data(&dir_inode)?;
+        let entries = self.parse_dir_entries(&data);
+
+        for entry in &entries {
+            if entry.inode == 0 && entry.rec_len >= needed {
+                self.write_dir_record(
+                    &mut data,
+                    entry.offset,
+                    inode_num,
+                    entry.rec_len as u16,
+                    name,
+                    file_type,
+                )?;
+                self.write_file_by_num(dir_inode_num, 0, &data)?;
+                return Ok(());
+            }
+        }
+
+        for entry in &entries {
+            if entry.inode == 0 {
+                continue;
+            }
+            let used = dir_entry_len(entry.name_len);
+            if entry.rec_len >= used + needed {
+                data[entry.offset + 4..entry.offset + 6]
+                    .copy_from_slice(&(used as u16).to_le_bytes());
+                let new_off = entry.offset + used;
+                let new_len = entry.rec_len - used;
+                self.write_dir_record(
+                    &mut data,
+                    new_off,
+                    inode_num,
+                    new_len as u16,
+                    name,
+                    file_type,
+                )?;
+                self.write_file_by_num(dir_inode_num, 0, &data)?;
+                return Ok(());
+            }
+        }
+
+        let mut new_block = alloc::vec![0u8; self.block_size];
+        self.write_dir_record(
+            &mut new_block,
+            0,
+            inode_num,
+            self.block_size as u16,
+            name,
+            file_type,
+        )?;
+        let old_size = data.len();
+        self.write_file_by_num(dir_inode_num, old_size, &new_block)?;
+        Ok(())
+    }
+
+    fn clear_dir_entry(&self, data: &mut [u8], offset: usize) {
+        data[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
+    }
+
+    fn can_rename_in_place(&self, data: &[u8], offset: usize, name: &str) -> bool {
+        if offset + 8 > data.len() {
+            return false;
+        }
+        let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]) as usize;
+        let need = dir_entry_len(name.len());
+        rec_len >= need
+    }
+
+    fn update_dir_entry_name(&self, data: &mut [u8], offset: usize, name: &str) -> Result<()> {
+        if !self.can_rename_in_place(data, offset, name) {
+            return Err(Error::BufferTooSmall);
+        }
+        let name_len = name.len();
+        data[offset + 6] = name_len as u8;
+        let dst = &mut data[offset + 8..offset + 8 + name_len];
+        dst.copy_from_slice(name.as_bytes());
+        Ok(())
+    }
+
+    fn write_dir_record(
+        &self,
+        dst: &mut [u8],
+        offset: usize,
+        inode_num: u32,
+        rec_len: u16,
+        name: &str,
+        file_type: u8,
+    ) -> Result<()> {
+        let name_len = name.len();
+        if name_len > 255
+            || offset + rec_len as usize > dst.len()
+            || (rec_len as usize) < 8 + name_len
+        {
+            return Err(Error::InvalidArgument);
+        }
+        dst[offset..offset + 4].copy_from_slice(&inode_num.to_le_bytes());
+        dst[offset + 4..offset + 6].copy_from_slice(&rec_len.to_le_bytes());
+        dst[offset + 6] = name_len as u8;
+        dst[offset + 7] = file_type;
+        dst[offset + 8..offset + 8 + name_len].copy_from_slice(name.as_bytes());
+        if offset + rec_len as usize > offset + 8 + name_len {
+            dst[offset + 8 + name_len..offset + rec_len as usize].fill(0);
+        }
+        Ok(())
     }
 
     /// Get the block number for a logical block index.
@@ -492,12 +830,63 @@ impl<'a> Ext2Fs<'a> {
         Err(Error::OutOfMemory)
     }
 
+    fn allocate_inode(&self) -> Result<u32> {
+        let groups = self.sb.inodes_count.div_ceil(self.sb.inodes_per_group);
+        for group in 0..groups {
+            let mut desc = self.read_group_desc(group)?;
+            let free_inodes = u16::from_le_bytes([desc[14], desc[15]]);
+            if free_inodes == 0 {
+                continue;
+            }
+            let bitmap_block = u32::from_le_bytes([desc[4], desc[5], desc[6], desc[7]]);
+            let bitmap_offset = (bitmap_block as usize) * self.block_size;
+            let mut bitmap = alloc::vec![0u8; self.block_size];
+            self.block.read_bytes(bitmap_offset as u64, &mut bitmap)?;
+
+            for bit_idx in 0..self.sb.inodes_per_group as usize {
+                let inode_num = group * self.sb.inodes_per_group + bit_idx as u32 + 1;
+                if inode_num < self.sb.first_ino && inode_num != 2 {
+                    continue;
+                }
+                if inode_num > self.sb.inodes_count {
+                    break;
+                }
+                let byte = bit_idx / 8;
+                let mask = 1u8 << (bit_idx % 8);
+                if byte >= bitmap.len() {
+                    break;
+                }
+                if bitmap[byte] & mask != 0 {
+                    continue;
+                }
+                bitmap[byte] |= mask;
+                self.block.write_bytes(bitmap_offset as u64, &bitmap)?;
+                let new_group_free = free_inodes.saturating_sub(1);
+                desc[14..16].copy_from_slice(&new_group_free.to_le_bytes());
+                self.write_group_desc(group, &desc)?;
+                self.dec_superblock_free_inodes()?;
+                return Ok(inode_num);
+            }
+        }
+        Err(Error::OutOfMemory)
+    }
+
     fn dec_superblock_free_blocks(&self) -> Result<()> {
         let mut sb_buf = [0u8; 1024];
         self.block.read_bytes(1024, &mut sb_buf)?;
         let cur = u32::from_le_bytes([sb_buf[12], sb_buf[13], sb_buf[14], sb_buf[15]]);
         let next = cur.saturating_sub(1);
         sb_buf[12..16].copy_from_slice(&next.to_le_bytes());
+        self.block.write_bytes(1024, &sb_buf)?;
+        Ok(())
+    }
+
+    fn dec_superblock_free_inodes(&self) -> Result<()> {
+        let mut sb_buf = [0u8; 1024];
+        self.block.read_bytes(1024, &mut sb_buf)?;
+        let cur = u32::from_le_bytes([sb_buf[16], sb_buf[17], sb_buf[18], sb_buf[19]]);
+        let next = cur.saturating_sub(1);
+        sb_buf[16..20].copy_from_slice(&next.to_le_bytes());
         self.block.write_bytes(1024, &sb_buf)?;
         Ok(())
     }
@@ -568,4 +957,18 @@ impl<'a> Filesystem for Ext2Fs<'a> {
         let ino = self.read_inode(inode as u32)?;
         self.read_file(&ino, offset as usize, buf)
     }
+}
+
+#[derive(Clone)]
+struct DirEntryMeta {
+    offset: usize,
+    inode: u32,
+    rec_len: usize,
+    name_len: usize,
+    file_type: u8,
+    name: String,
+}
+
+fn dir_entry_len(name_len: usize) -> usize {
+    (8 + name_len + 3) & !3
 }
