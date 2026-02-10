@@ -16,6 +16,10 @@ const CLUU_TARGET_TRIPLET: &str = "x86_64-cluu";
 const NEWLIB_TARGET_TRIPLET: &str = "x86_64-unknown-elf";
 const NEWLIB_CLUU_TRIPLET: &str = "x86_64-cluu-elf";
 const CLUU_CLANG_TARGET: &str = "x86_64-unknown-none-elf";
+const BOOT_MANIFEST_HMAC_KEY: [u8; 32] = [
+    0x43, 0x4c, 0x55, 0x55, 0x2d, 0x42, 0x4f, 0x4f, 0x54, 0x2d, 0x4d, 0x41, 0x4e, 0x49, 0x46, 0x45,
+    0x53, 0x54, 0x2d, 0x4b, 0x45, 0x59, 0x2d, 0x30, 0x31, 0x2d, 0x44, 0x45, 0x56, 0x2d, 0x41, 0x31,
+];
 
 const RIGHT_READ: u32 = 1 << 0;
 const RIGHT_WRITE: u32 = 1 << 1;
@@ -426,18 +430,26 @@ fn create_initrd(profile: &str) -> Result<()> {
 }
 
 fn build_boot_manifest(initrd_dir: &Path, service_paths: &[String]) -> Result<String> {
-    let mut out = String::from("# CLUU boot manifest\nmanifest_version=1\n");
+    let mut canonical = String::from("manifest_version=1\n");
     for path in service_paths {
         let data = fs::read(initrd_dir.join(path))
             .with_context(|| format!("Failed to read service image '{}'", path))?;
         let digest = legacy_hash_sha256(&data);
         let digest_hex = to_lower_hex(&digest);
         let rights_mask = manifest_rights_mask(path);
-        out.push_str(&format!(
+        canonical.push_str(&format!(
             "service path={} sha256={} rights=0x{:08x}\n",
             path, digest_hex, rights_mask
         ));
     }
+    let signature = to_lower_hex(&hmac_sha256_fixed(
+        &BOOT_MANIFEST_HMAC_KEY,
+        canonical.as_bytes(),
+    ));
+
+    let mut out = String::from("# CLUU boot manifest\n");
+    out.push_str(&canonical);
+    out.push_str(&format!("signature={}\n", signature));
     Ok(out)
 }
 
@@ -487,6 +499,29 @@ fn legacy_hash_sha256(data: &[u8]) -> [u8; 32] {
             .wrapping_mul(17);
     }
     hash
+}
+
+fn hmac_sha256_fixed(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    const IPAD: u8 = 0x36;
+    const OPAD: u8 = 0x5c;
+
+    let mut key_block = [0u8; BLOCK_SIZE];
+    key_block[..32].copy_from_slice(key);
+
+    let mut inner = Vec::with_capacity(BLOCK_SIZE + data.len());
+    for b in key_block.iter().take(BLOCK_SIZE) {
+        inner.push(*b ^ IPAD);
+    }
+    inner.extend_from_slice(data);
+    let inner_hash = legacy_hash_sha256(&inner);
+
+    let mut outer = [0u8; BLOCK_SIZE + 32];
+    for (i, b) in key_block.iter().enumerate().take(BLOCK_SIZE) {
+        outer[i] = *b ^ OPAD;
+    }
+    outer[BLOCK_SIZE..BLOCK_SIZE + 32].copy_from_slice(&inner_hash);
+    legacy_hash_sha256(&outer)
 }
 
 fn to_lower_hex(bytes: &[u8; 32]) -> String {

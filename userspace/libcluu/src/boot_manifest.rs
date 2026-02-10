@@ -19,6 +19,7 @@ pub const BOOT_MANIFEST_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootManifest {
     pub version: u32,
+    pub signature_hex: String,
     pub services: Vec<ServiceManifestEntry>,
 }
 
@@ -35,11 +36,13 @@ pub struct ServiceManifestEntry {
 ///
 /// Format:
 /// - `manifest_version=1`
+/// - `signature=<64hex>`
 /// - `service path=<path> sha256=<64hex> rights=0x<hex>`
 pub fn parse_boot_manifest(data: &[u8]) -> Result<BootManifest> {
     let text = core::str::from_utf8(data).map_err(|_| Error::InvalidArgument)?;
 
     let mut version: Option<u32> = None;
+    let mut signature_hex: Option<String> = None;
     let mut services = Vec::new();
     let mut seen_paths = BTreeSet::new();
 
@@ -61,6 +64,17 @@ pub fn parse_boot_manifest(data: &[u8]) -> Result<BootManifest> {
             continue;
         }
 
+        if let Some(value) = line.strip_prefix("signature=") {
+            if signature_hex.is_some() {
+                return Err(Error::AlreadyExists);
+            }
+            if !is_lower_hex_64(value) {
+                return Err(Error::InvalidArgument);
+            }
+            signature_hex = Some(value.to_string());
+            continue;
+        }
+
         let Some(rest) = line.strip_prefix("service ") else {
             let _ = line_no;
             return Err(Error::InvalidArgument);
@@ -79,6 +93,7 @@ pub fn parse_boot_manifest(data: &[u8]) -> Result<BootManifest> {
 
     Ok(BootManifest {
         version: BOOT_MANIFEST_VERSION,
+        signature_hex: signature_hex.ok_or(Error::InvalidArgument)?,
         services,
     })
 }
@@ -141,6 +156,7 @@ mod tests {
         let manifest = parse_boot_manifest(
             br#"
 manifest_version=1
+signature=1111111111111111111111111111111111111111111111111111111111111111
 service path=sys/registry sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa rights=0x0000000f
 service path=sys/procmgr sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb rights=0x0000ffff
 "#,
@@ -148,6 +164,10 @@ service path=sys/procmgr sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
         .expect("manifest should parse");
 
         assert_eq!(manifest.version, 1);
+        assert_eq!(
+            manifest.signature_hex,
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
         assert_eq!(manifest.services.len(), 2);
         assert_eq!(manifest.services[0].path, "sys/registry");
         assert_eq!(manifest.services[1].rights_mask, 0x0000ffff);
@@ -169,6 +189,7 @@ service path=sys/registry sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         let err = parse_boot_manifest(
             br#"
 manifest_version=1
+signature=1111111111111111111111111111111111111111111111111111111111111111
 service path=sys/registry sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa rights=0x1
 service path=sys/registry sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb rights=0x2
 "#,
@@ -182,10 +203,23 @@ service path=sys/registry sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
         let err = parse_boot_manifest(
             br#"
 manifest_version=1
+signature=1111111111111111111111111111111111111111111111111111111111111111
 service path=sys/registry sha256=ABCD rights=0x1
 "#,
         )
         .expect_err("uppercase/short sha must fail");
+        assert_eq!(err, Error::InvalidArgument);
+    }
+
+    #[test]
+    fn reject_missing_signature() {
+        let err = parse_boot_manifest(
+            br#"
+manifest_version=1
+service path=sys/registry sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa rights=0x1
+"#,
+        )
+        .expect_err("missing signature must fail");
         assert_eq!(err, Error::InvalidArgument);
     }
 }

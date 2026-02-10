@@ -37,6 +37,10 @@ const INITRD_USER_BASE: u64 = 0x70000000;
 
 /// Userspace boot info page (contains token + initrd metadata)
 const BOOT_INFO_ADDR: u64 = 0x7fe00000;
+const BOOT_MANIFEST_HMAC_KEY: [u8; 32] = [
+    0x43, 0x4c, 0x55, 0x55, 0x2d, 0x42, 0x4f, 0x4f, 0x54, 0x2d, 0x4d, 0x41, 0x4e, 0x49, 0x46, 0x45,
+    0x53, 0x54, 0x2d, 0x4b, 0x45, 0x59, 0x2d, 0x30, 0x31, 0x2d, 0x44, 0x45, 0x56, 0x2d, 0x41, 0x31,
+];
 
 /// Bootstrap the init thread
 ///
@@ -287,6 +291,8 @@ fn verify_boot_manifest(initrd: &[u8], init_elf: &[u8]) -> Result<(), Error> {
 
     let mut version_ok = false;
     let mut init_hash_hex: Option<&str> = None;
+    let mut signature_hex: Option<&str> = None;
+    let mut canonical = alloc::string::String::new();
 
     for raw_line in manifest.lines() {
         let line = raw_line.trim();
@@ -301,6 +307,17 @@ fn verify_boot_manifest(initrd: &[u8], init_elf: &[u8]) -> Result<(), Error> {
                 return Err(Error::InvalidArgument);
             }
             version_ok = true;
+            canonical.push_str(line);
+            canonical.push('\n');
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("signature=") {
+            if signature_hex.is_some() {
+                klibcluu::error("Boot manifest has duplicate signature field");
+                return Err(Error::InvalidArgument);
+            }
+            signature_hex = Some(value);
             continue;
         }
 
@@ -334,10 +351,23 @@ fn verify_boot_manifest(initrd: &[u8], init_elf: &[u8]) -> Result<(), Error> {
             }
             init_hash_hex = Some(sha256);
         }
+
+        canonical.push_str(line);
+        canonical.push('\n');
     }
 
     if !version_ok {
         klibcluu::error("Boot manifest missing manifest_version=1");
+        return Err(Error::InvalidArgument);
+    }
+
+    let expected_signature = parse_lower_hex_32(signature_hex.ok_or_else(|| {
+        klibcluu::error("Boot manifest missing signature field");
+        Error::InvalidArgument
+    })?)?;
+    let actual_signature = klibcluu::crypto::hmac_sha256_fixed(&BOOT_MANIFEST_HMAC_KEY, canonical.as_bytes());
+    if actual_signature != expected_signature {
+        klibcluu::error("Boot manifest signature verification failed");
         return Err(Error::InvalidArgument);
     }
 
@@ -357,6 +387,10 @@ fn verify_boot_manifest(initrd: &[u8], init_elf: &[u8]) -> Result<(), Error> {
 }
 
 fn parse_lower_hex_sha256(s: &str) -> Result<[u8; 32], Error> {
+    parse_lower_hex_32(s)
+}
+
+fn parse_lower_hex_32(s: &str) -> Result<[u8; 32], Error> {
     if s.len() != 64 {
         return Err(Error::InvalidArgument);
     }

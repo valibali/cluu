@@ -400,8 +400,8 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 |---|---|---|---|---|
 | WP-M0.1 Telemetry baseline (token/ipc/boot grant counters) | M0 | DONE | `kernel/src/telemetry.rs`, `kernel/src/token/table.rs`, `kernel/src/syscall/handlers.rs`, `kernel/src/bootstrap.rs`, `kernel/src/main.rs` | `cargo check -p cluu-kernel` + boot log contains telemetry snapshot |
 | WP-M0.2 Initrd manifest schema + parser stub | M0 | DONE (permissive mode) | `userspace/init`, `userspace/libcluu` (manifest type/parser) | malformed manifest vectors rejected by strict parser when manifest exists; boot still allows missing manifest |
-| WP-M1.1 Fail-closed manifest verify gate | M1 | DONE (hash+policy gate) | `userspace/init` (mandatory manifest + hash/rights enforcement), `xtask` (manifest generation), `kernel/src/bootstrap.rs` (`sys/init` hash verification) | boot fails if manifest missing/invalid/mismatched; next step is signature root-of-trust for anti-tamper guarantees |
-| WP-M1.2 Waitset receive syscall path | M1 | TODO | `kernel/src/syscall/handlers.rs`, `kernel/src/ipc/*`, userspace recv wrappers | multi-endpoint fairness test + no lost wakeups |
+| WP-M1.1 Fail-closed manifest verify gate | M1 | DONE (hash+policy+signature gate) | `userspace/init` (mandatory manifest + hash/rights enforcement), `userspace/libcluu` (signature-required parser), `xtask` (signed manifest generation), `kernel/src/bootstrap.rs` (`sys/init` hash+signature verification) | boot fails if manifest missing/invalid/mismatched/tampered |
+| WP-M1.2 Waitset receive syscall path | M1 | IN PROGRESS | `kernel/src/syscall/handlers.rs`, `kernel/src/ipc/*`, userspace recv wrappers | multi-endpoint fairness test + no lost wakeups |
 | WP-M2.1 Token lifecycle structured audit stream | M2 | TODO | `kernel/src/token/*`, logger schema | deterministic create/derive/revoke trace under churn |
 | WP-M2.2 Leak diagnostics and delta accounting | M2 | TODO | `kernel/src/mm/*`, `kernel/src/sched/*`, `kernel/src/token/*` | spawn/exit churn returns object deltas to baseline |
 | WP-M3.1 Mapping/copy failpoints + rollback checks | M3 | TODO | `kernel/src/mm/vmm.rs`, `kernel/src/syscall/userptr.rs`, copy/map callsites | forced failure leaves no partial mappings |
@@ -414,9 +414,9 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 
 ### Next execution batch
 
-1. Implement WP-M0.2 (manifest schema and parser stub) to unblock fail-closed boot work.
-2. Implement WP-M1.2 (waitset receive) before deep performance tuning.
-3. Implement WP-M2.2 churn/leak diagnostics to keep later milestones safe.
+1. Complete WP-M1.2 (waitset receive) before deep performance tuning.
+2. Implement WP-M2.2 churn/leak diagnostics to keep later milestones safe.
+3. Implement WP-M3.1 failpoint rollback checks to harden error paths.
 
 ### Completion criteria by level
 

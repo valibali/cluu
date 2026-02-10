@@ -139,6 +139,18 @@ impl QueueEndpoint {
             callers_len: self.callers_by_cookie.len(),
         }
     }
+
+    fn enqueue_receiver_if_absent(&mut self, receiver: ThreadId) {
+        if !self.waiting_receivers.contains(&receiver) {
+            self.waiting_receivers.push_back(receiver);
+        }
+    }
+
+    fn wake_one_waiting_sender(&mut self) {
+        if let Some(sender_id) = self.waiting_senders.pop_front() {
+            crate::sched::ThreadManager::wake_thread(sender_id);
+        }
+    }
 }
 
 impl ByteEndpoint for QueueEndpoint {
@@ -156,15 +168,11 @@ impl ByteEndpoint for QueueEndpoint {
         let msg = EndpointMessage::new(data)?;
         self.queue.push_back(msg);
 
-        // Wake a receiver if available
         let receiver_to_wake = self.waiting_receivers.pop_front();
 
-        // Also wake a waiting sender if queue now has space (shouldn't happen here, but handle it)
-        // Note: This case is rare since we just added a message, but handle it for completeness
+        // Also wake a waiting sender if queue now has space.
         if !self.waiting_senders.is_empty() && self.queue.len() < MAX_QUEUE_LEN {
-            if let Some(sender_id) = self.waiting_senders.pop_front() {
-                crate::sched::ThreadManager::wake_thread(sender_id);
-            }
+            self.wake_one_waiting_sender();
         }
 
         Ok(receiver_to_wake)
@@ -175,20 +183,16 @@ impl ByteEndpoint for QueueEndpoint {
         if let Some(call_msg) = self.call_queue.pop_front() {
             self.current_caller = Some(call_msg.caller);
             // Queue now has space - wake a waiting sender if any
-            if let Some(sender_id) = self.waiting_senders.pop_front() {
-                crate::sched::ThreadManager::wake_thread(sender_id);
-            }
+            self.wake_one_waiting_sender();
             return Ok(Some(call_msg.message));
         }
         // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
             // Queue now has space - wake a waiting sender if any
-            if let Some(sender_id) = self.waiting_senders.pop_front() {
-                crate::sched::ThreadManager::wake_thread(sender_id);
-            }
+            self.wake_one_waiting_sender();
             return Ok(Some(msg));
         }
-        self.waiting_receivers.push_back(receiver);
+        self.enqueue_receiver_if_absent(receiver);
         Err(Error::WouldBlock)
     }
 
@@ -197,17 +201,13 @@ impl ByteEndpoint for QueueEndpoint {
         if let Some(call_msg) = self.call_queue.pop_front() {
             self.current_caller = Some(call_msg.caller);
             // Queue now has space - wake a waiting sender if any
-            if let Some(sender_id) = self.waiting_senders.pop_front() {
-                crate::sched::ThreadManager::wake_thread(sender_id);
-            }
+            self.wake_one_waiting_sender();
             return Ok(Some(call_msg.message));
         }
         // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
             // Queue now has space - wake a waiting sender if any
-            if let Some(sender_id) = self.waiting_senders.pop_front() {
-                crate::sched::ThreadManager::wake_thread(sender_id);
-            }
+            self.wake_one_waiting_sender();
             return Ok(Some(msg));
         }
         Err(Error::WouldBlock)
@@ -248,7 +248,7 @@ impl ByteEndpoint for QueueEndpoint {
         if let Some(msg) = self.queue.pop_front() {
             return Ok(Some((msg, None)));
         }
-        self.waiting_receivers.push_back(receiver);
+        self.enqueue_receiver_if_absent(receiver);
         Err(Error::WouldBlock)
     }
 }
