@@ -14,9 +14,12 @@ QEMU_PID=""
 BOOT_WAIT="${BOOT_WAIT:-8}"
 RUN_WAIT="${RUN_WAIT:-5}"
 TEST_COMMAND="${TEST_COMMAND:-spawn hello}"
+TEST_COMMAND_REPEAT="${TEST_COMMAND_REPEAT:-1}"
+COMMAND_GAP="${COMMAND_GAP:-1}"
 KEY_DELAY="${KEY_DELAY:-0.05}"
 MARKER_MODE="${MARKER_MODE:-legacy_p1}"
 REQUIRED_MARKERS="${REQUIRED_MARKERS:-}"
+MIN_EXIT_COOKIES="${MIN_EXIT_COOKIES:-3}"
 
 cleanup() {
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -81,8 +84,7 @@ fi
 echo "Waiting ${BOOT_WAIT}s for CLUU to boot..."
 sleep "$BOOT_WAIT"
 
-# --- Step 5: Type test command via QEMU monitor ---
-echo "Sending command: '$TEST_COMMAND'"
+# --- Step 5: Type test command(s) via QEMU monitor ---
 send_key() {
     echo "sendkey $1" | nc -U -q0 "$MONITOR_SOCK" >/dev/null 2>&1 || true
     sleep "$KEY_DELAY"
@@ -110,7 +112,18 @@ type_ascii_command() {
     send_key "ret"
 }
 
-type_ascii_command "$TEST_COMMAND"
+if ! [[ "$TEST_COMMAND_REPEAT" =~ ^[0-9]+$ ]] || [ "$TEST_COMMAND_REPEAT" -lt 1 ]; then
+    echo "ERROR: TEST_COMMAND_REPEAT must be a positive integer"
+    exit 1
+fi
+
+for ((i = 1; i <= TEST_COMMAND_REPEAT; i++)); do
+    echo "Sending command ${i}/${TEST_COMMAND_REPEAT}: '$TEST_COMMAND'"
+    type_ascii_command "$TEST_COMMAND"
+    if [ "$i" -lt "$TEST_COMMAND_REPEAT" ]; then
+        sleep "$COMMAND_GAP"
+    fi
+done
 
 # --- Step 6: Wait for the test to run ---
 echo "Waiting ${RUN_WAIT}s for hello to execute..."
@@ -143,6 +156,7 @@ fi
 # Modes:
 # - legacy_p1: original timing/TSC fixture checks
 # - m0_boot: bootstrap telemetry/manifest checks
+# - m1_recv: recv/wakeup churn checks
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -162,6 +176,13 @@ case "$MARKER_MODE" in
             "boot-grant: clock token handle="
             "telemetry snapshot:"
             "[USER] init: boot manifest"
+            "procmgr: exit cookie"
+        )
+        ;;
+    m1_recv)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
             "procmgr: exit cookie"
         )
         ;;
@@ -190,6 +211,15 @@ if [ "${#required_markers[@]}" -gt 0 ]; then
     done
 
     if [ "$missing" -ne 0 ]; then
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+fi
+
+if [ "$MARKER_MODE" = "m1_recv" ]; then
+    exit_count=$(grep -c "procmgr: exit cookie" "$SERIAL_LOG" || true)
+    if [ "$exit_count" -lt "$MIN_EXIT_COOKIES" ]; then
+        echo "MISSING: expected at least $MIN_EXIT_COOKIES exit cookies, got $exit_count"
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
     fi
