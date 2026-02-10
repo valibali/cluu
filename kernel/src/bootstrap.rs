@@ -90,6 +90,7 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
         klibcluu::error("Failed to find sys/init in initrd");
         Error::InvalidArgument
     })?;
+    verify_boot_manifest(initrd_slice, init_elf)?;
 
     klibcluu::trace("Found sys/init (");
     klibcluu::log_dec(klibcluu::LogLevel::Trace, " bytes)", init_elf.len() as u64);
@@ -271,4 +272,109 @@ struct BootInfo {
     fb_width: u32,
     fb_height: u32,
     fb_pitch: u32,
+}
+
+fn verify_boot_manifest(initrd: &[u8], init_elf: &[u8]) -> Result<(), Error> {
+    let manifest_bytes = boot_tar::find_file(initrd, "sys/boot.manifest").ok_or_else(|| {
+        klibcluu::error("Missing required sys/boot.manifest in initrd");
+        Error::InvalidArgument
+    })?;
+
+    let manifest = core::str::from_utf8(manifest_bytes).map_err(|_| {
+        klibcluu::error("Boot manifest is not valid UTF-8");
+        Error::InvalidArgument
+    })?;
+
+    let mut version_ok = false;
+    let mut init_hash_hex: Option<&str> = None;
+
+    for raw_line in manifest.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("manifest_version=") {
+            let version = value.parse::<u32>().map_err(|_| Error::InvalidArgument)?;
+            if version != 1 {
+                klibcluu::error("Boot manifest version mismatch");
+                return Err(Error::InvalidArgument);
+            }
+            version_ok = true;
+            continue;
+        }
+
+        let Some(rest) = line.strip_prefix("service ") else {
+            klibcluu::error("Boot manifest has invalid line");
+            return Err(Error::InvalidArgument);
+        };
+
+        let mut path = None;
+        let mut sha256 = None;
+        let mut rights = None;
+
+        for token in rest.split_whitespace() {
+            let (k, v) = token.split_once('=').ok_or(Error::InvalidArgument)?;
+            match k {
+                "path" => path = Some(v),
+                "sha256" => sha256 = Some(v),
+                "rights" => rights = Some(v),
+                _ => return Err(Error::InvalidArgument),
+            }
+        }
+
+        let path = path.ok_or(Error::InvalidArgument)?;
+        let sha256 = sha256.ok_or(Error::InvalidArgument)?;
+        let _rights = rights.ok_or(Error::InvalidArgument)?;
+
+        if path == "sys/init" {
+            if init_hash_hex.is_some() {
+                klibcluu::error("Boot manifest contains duplicate sys/init entries");
+                return Err(Error::InvalidArgument);
+            }
+            init_hash_hex = Some(sha256);
+        }
+    }
+
+    if !version_ok {
+        klibcluu::error("Boot manifest missing manifest_version=1");
+        return Err(Error::InvalidArgument);
+    }
+
+    let expected_hash = parse_lower_hex_sha256(init_hash_hex.ok_or_else(|| {
+        klibcluu::error("Boot manifest missing sys/init entry");
+        Error::InvalidArgument
+    })?)?;
+
+    let actual_hash = klibcluu::crypto::hash_sha256(init_elf);
+    if actual_hash != expected_hash {
+        klibcluu::error("Boot manifest hash mismatch for sys/init");
+        return Err(Error::InvalidArgument);
+    }
+
+    klibcluu::info("Boot manifest verified for sys/init");
+    Ok(())
+}
+
+fn parse_lower_hex_sha256(s: &str) -> Result<[u8; 32], Error> {
+    if s.len() != 64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let mut out = [0u8; 32];
+    let bytes = s.as_bytes();
+    for i in 0..32 {
+        let hi = hex_nibble(bytes[i * 2]).ok_or(Error::InvalidArgument)?;
+        let lo = hex_nibble(bytes[i * 2 + 1]).ok_or(Error::InvalidArgument)?;
+        out[i] = (hi << 4) | lo;
+    }
+    Ok(out)
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + (b - b'a')),
+        _ => None,
+    }
 }
