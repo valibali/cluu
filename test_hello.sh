@@ -36,6 +36,7 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="regdeny"
             SHELL_AUTOSTART_CMD_DEFAULT="regdeny"
             ;;
+        m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
 fi
@@ -49,6 +50,9 @@ MAX_DELTA_SPACES="${MAX_DELTA_SPACES:-}"
 MAX_DELTA_TOKENS="${MAX_DELTA_TOKENS:-}"
 MAX_DELTA_ENDPOINTS="${MAX_DELTA_ENDPOINTS:-}"
 MAX_DELTA_PMM_USED_FRAMES="${MAX_DELTA_PMM_USED_FRAMES:-}"
+MAX_IPC_WAIT_P95_MS="${MAX_IPC_WAIT_P95_MS:-}"
+MAX_IPC_WAIT_P99_MS="${MAX_IPC_WAIT_P99_MS:-}"
+MAX_IPC_SCAN_AVG_STEPS_X100="${MAX_IPC_SCAN_AVG_STEPS_X100:-}"
 
 cleanup() {
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -215,6 +219,7 @@ fi
 # - m4_notify_lifecycle: sender notify bindings are reclaimed after child lifecycle ends
 # - m4_deny_paths: explicit sender-auth denial path regressions (PermissionDenied flows)
 # - m4_registry_deny_paths: explicit registry ownership denial path regressions
+# - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -323,6 +328,17 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "regdeny: PASS permission denied"
             "registry: deny unregister"
+        )
+        ;;
+    m5_fairness)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: exit cookie"
+            "resource delta:"
+            "ipc_wait_p95_ms="
+            "ipc_wait_p99_ms="
+            "ipc_scan_avg_steps_x100="
         )
         ;;
     none)
@@ -477,6 +493,66 @@ if [ "$MARKER_MODE" = "m2_leakdiag" ]; then
     check_delta_limit "$last_delta_tokens" "$MAX_DELTA_TOKENS" "delta_tokens"
     check_delta_limit "$last_delta_endpoints" "$MAX_DELTA_ENDPOINTS" "delta_endpoints"
     check_delta_limit "$last_delta_pmm" "$MAX_DELTA_PMM_USED_FRAMES" "delta_pmm_used_frames"
+fi
+
+if [ "$MARKER_MODE" = "m5_fairness" ]; then
+    exit_count=$(grep -c "procmgr: exit cookie" "$SERIAL_LOG" || true)
+    if [ "$exit_count" -lt "$MIN_EXIT_COOKIES" ]; then
+        echo "MISSING: expected at least $MIN_EXIT_COOKIES exit cookies, got $exit_count"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+
+    parse_last_metric() {
+        local marker="$1"
+        awk -v marker="$marker" '
+            $0 ~ marker {
+                if (getline > 0) {
+                    v = $0
+                    gsub(/[^0-9-]/, "", v)
+                    if (v != "") {
+                        last = v
+                    }
+                }
+            }
+            END {
+                if (last != "") {
+                    print last
+                }
+            }
+        ' "$SERIAL_LOG"
+    }
+
+    last_wait_p95_ms="$(parse_last_metric "ipc_wait_p95_ms=")"
+    last_wait_p99_ms="$(parse_last_metric "ipc_wait_p99_ms=")"
+    last_scan_avg_steps_x100="$(parse_last_metric "ipc_scan_avg_steps_x100=")"
+
+    check_metric_limit() {
+        local value="$1"
+        local limit="$2"
+        local name="$3"
+        if [ -z "$limit" ]; then
+            return 0
+        fi
+        if ! [[ "$limit" =~ ^-?[0-9]+$ ]]; then
+            echo "ERROR: $name limit must be an integer, got '$limit'"
+            exit 1
+        fi
+        if [ -z "$value" ]; then
+            echo "MISSING: could not parse $name"
+            echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+            exit 1
+        fi
+        if [ "$value" -gt "$limit" ]; then
+            echo "MISSING: $name exceeded limit (value=$value limit=$limit)"
+            echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+            exit 1
+        fi
+    }
+
+    check_metric_limit "$last_wait_p95_ms" "$MAX_IPC_WAIT_P95_MS" "ipc_wait_p95_ms"
+    check_metric_limit "$last_wait_p99_ms" "$MAX_IPC_WAIT_P99_MS" "ipc_wait_p99_ms"
+    check_metric_limit "$last_scan_avg_steps_x100" "$MAX_IPC_SCAN_AVG_STEPS_X100" "ipc_scan_avg_steps_x100"
 fi
 
 if [ "$MARKER_MODE" = "m3_mapfail" ]; then

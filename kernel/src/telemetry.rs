@@ -11,9 +11,34 @@ static TOKENS_CREATED: AtomicU64 = AtomicU64::new(0);
 static TOKENS_REVOKED: AtomicU64 = AtomicU64::new(0);
 static IPC_RECV_WOULD_BLOCK: AtomicU64 = AtomicU64::new(0);
 static IPC_RECV_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+static IPC_RECV_WAIT_EVENTS: AtomicU64 = AtomicU64::new(0);
+static IPC_RECV_WAIT_TOTAL_TICKS: AtomicU64 = AtomicU64::new(0);
+static IPC_RECV_WAIT_MAX_TICKS: AtomicU64 = AtomicU64::new(0);
+static IPC_RECV_SCAN_EVENTS: AtomicU64 = AtomicU64::new(0);
+static IPC_RECV_SCAN_TOTAL_STEPS: AtomicU64 = AtomicU64::new(0);
+static IPC_RECV_SCAN_MAX_STEPS: AtomicU64 = AtomicU64::new(0);
 static BOOT_TOKEN_GRANTS: AtomicU64 = AtomicU64::new(0);
 static RESOURCE_DELTA_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 const TOKEN_AUDIT_CAPACITY: usize = 256;
+const IPC_WAIT_HIST_BUCKETS: usize = 12;
+// 250Hz timer => 4ms/tick.
+const MS_PER_TICK: u64 = 4;
+const IPC_WAIT_BUCKET_UPPER_MS: [u64; IPC_WAIT_HIST_BUCKETS] =
+    [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, u64::MAX];
+static IPC_RECV_WAIT_HISTOGRAM: [AtomicU64; IPC_WAIT_HIST_BUCKETS] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -104,6 +129,14 @@ pub struct Snapshot {
     pub tokens_revoked: u64,
     pub ipc_recv_would_block: u64,
     pub ipc_recv_timeout: u64,
+    pub ipc_recv_wait_events: u64,
+    pub ipc_recv_wait_avg_ms: u64,
+    pub ipc_recv_wait_max_ms: u64,
+    pub ipc_recv_wait_p95_ms: u64,
+    pub ipc_recv_wait_p99_ms: u64,
+    pub ipc_recv_scan_events: u64,
+    pub ipc_recv_scan_avg_steps_x100: u64,
+    pub ipc_recv_scan_max_steps: u64,
     pub boot_token_grants: u64,
     pub token_audit_next_seq: u64,
     pub token_audit_stored: usize,
@@ -132,18 +165,96 @@ pub fn record_ipc_recv_timeout() {
 }
 
 #[inline(always)]
+fn update_max_atomic(target: &AtomicU64, candidate: u64) {
+    let mut current = target.load(Ordering::Relaxed);
+    while candidate > current {
+        match target.compare_exchange(current, candidate, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[inline(always)]
+fn wait_histogram_bucket_index(wait_ms: u64) -> usize {
+    for (idx, upper) in IPC_WAIT_BUCKET_UPPER_MS.iter().enumerate() {
+        if wait_ms <= *upper {
+            return idx;
+        }
+    }
+    IPC_WAIT_HIST_BUCKETS - 1
+}
+
+#[inline(always)]
+pub fn record_ipc_recv_wait_ticks(wait_ticks: u64) {
+    let wait_ms = wait_ticks.saturating_mul(MS_PER_TICK);
+    IPC_RECV_WAIT_EVENTS.fetch_add(1, Ordering::Relaxed);
+    IPC_RECV_WAIT_TOTAL_TICKS.fetch_add(wait_ticks, Ordering::Relaxed);
+    update_max_atomic(&IPC_RECV_WAIT_MAX_TICKS, wait_ticks);
+    let bucket = wait_histogram_bucket_index(wait_ms);
+    IPC_RECV_WAIT_HISTOGRAM[bucket].fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline(always)]
+pub fn record_ipc_recv_scan_steps(steps: usize) {
+    let steps_u64 = steps as u64;
+    IPC_RECV_SCAN_EVENTS.fetch_add(1, Ordering::Relaxed);
+    IPC_RECV_SCAN_TOTAL_STEPS.fetch_add(steps_u64, Ordering::Relaxed);
+    update_max_atomic(&IPC_RECV_SCAN_MAX_STEPS, steps_u64);
+}
+
+#[inline(always)]
 pub fn record_boot_token_grant() {
     BOOT_TOKEN_GRANTS.fetch_add(1, Ordering::Relaxed);
+}
+
+fn wait_percentile_ms(events: u64, percentile: u64) -> u64 {
+    if events == 0 {
+        return 0;
+    }
+    let rank = events
+        .saturating_mul(percentile)
+        .saturating_add(99)
+        .saturating_div(100);
+    let mut cumulative = 0u64;
+    for (idx, bucket) in IPC_RECV_WAIT_HISTOGRAM.iter().enumerate() {
+        cumulative = cumulative.saturating_add(bucket.load(Ordering::Relaxed));
+        if cumulative >= rank {
+            return IPC_WAIT_BUCKET_UPPER_MS[idx];
+        }
+    }
+    IPC_WAIT_BUCKET_UPPER_MS[IPC_WAIT_HIST_BUCKETS - 1]
 }
 
 #[inline(always)]
 pub fn snapshot() -> Snapshot {
     let audit = token_audit_stats();
+    let wait_events = IPC_RECV_WAIT_EVENTS.load(Ordering::Relaxed);
+    let wait_total_ticks = IPC_RECV_WAIT_TOTAL_TICKS.load(Ordering::Relaxed);
+    let wait_max_ticks = IPC_RECV_WAIT_MAX_TICKS.load(Ordering::Relaxed);
+    let scan_events = IPC_RECV_SCAN_EVENTS.load(Ordering::Relaxed);
+    let scan_total_steps = IPC_RECV_SCAN_TOTAL_STEPS.load(Ordering::Relaxed);
     Snapshot {
         tokens_created: TOKENS_CREATED.load(Ordering::Relaxed),
         tokens_revoked: TOKENS_REVOKED.load(Ordering::Relaxed),
         ipc_recv_would_block: IPC_RECV_WOULD_BLOCK.load(Ordering::Relaxed),
         ipc_recv_timeout: IPC_RECV_TIMEOUT.load(Ordering::Relaxed),
+        ipc_recv_wait_events: wait_events,
+        ipc_recv_wait_avg_ms: if wait_events == 0 {
+            0
+        } else {
+            wait_total_ticks.saturating_mul(MS_PER_TICK) / wait_events
+        },
+        ipc_recv_wait_max_ms: wait_max_ticks.saturating_mul(MS_PER_TICK),
+        ipc_recv_wait_p95_ms: wait_percentile_ms(wait_events, 95),
+        ipc_recv_wait_p99_ms: wait_percentile_ms(wait_events, 99),
+        ipc_recv_scan_events: scan_events,
+        ipc_recv_scan_avg_steps_x100: if scan_events == 0 {
+            0
+        } else {
+            scan_total_steps.saturating_mul(100) / scan_events
+        },
+        ipc_recv_scan_max_steps: IPC_RECV_SCAN_MAX_STEPS.load(Ordering::Relaxed),
         boot_token_grants: BOOT_TOKEN_GRANTS.load(Ordering::Relaxed),
         token_audit_next_seq: audit.next_seq,
         token_audit_stored: audit.stored,
@@ -229,6 +340,24 @@ pub fn log_resource_delta(reason: &str) {
         "  delta_pmm_used_frames=",
         current.pmm_used_frames as i64 - baseline.pmm_used_frames as i64,
     );
+
+    let s = snapshot();
+    klibcluu::info("  ipc_wait_events=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_events);
+    klibcluu::info("  ipc_wait_avg_ms=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_avg_ms);
+    klibcluu::info("  ipc_wait_p95_ms=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_p95_ms);
+    klibcluu::info("  ipc_wait_p99_ms=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_p99_ms);
+    klibcluu::info("  ipc_wait_max_ms=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_max_ms);
+    klibcluu::info("  ipc_scan_events=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_events);
+    klibcluu::info("  ipc_scan_avg_steps_x100=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_avg_steps_x100);
+    klibcluu::info("  ipc_scan_max_steps=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_max_steps);
 }
 
 #[inline(always)]
@@ -327,6 +456,23 @@ pub fn log_bootstrap_snapshot(stage: &str) {
     klibcluu::info("  ipc_recv_timeout=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_timeout);
 
+    klibcluu::info("  ipc_recv_wait_events=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_events);
+    klibcluu::info("  ipc_recv_wait_avg_ms=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_avg_ms);
+    klibcluu::info("  ipc_recv_wait_p95_ms=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_p95_ms);
+    klibcluu::info("  ipc_recv_wait_p99_ms=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_p99_ms);
+    klibcluu::info("  ipc_recv_wait_max_ms=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_max_ms);
+    klibcluu::info("  ipc_recv_scan_events=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_events);
+    klibcluu::info("  ipc_recv_scan_avg_steps_x100=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_avg_steps_x100);
+    klibcluu::info("  ipc_recv_scan_max_steps=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_max_steps);
+
     klibcluu::info("  boot_token_grants=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.boot_token_grants);
 
@@ -369,8 +515,17 @@ pub fn reset_for_tests() {
     TOKENS_REVOKED.store(0, Ordering::Relaxed);
     IPC_RECV_WOULD_BLOCK.store(0, Ordering::Relaxed);
     IPC_RECV_TIMEOUT.store(0, Ordering::Relaxed);
+    IPC_RECV_WAIT_EVENTS.store(0, Ordering::Relaxed);
+    IPC_RECV_WAIT_TOTAL_TICKS.store(0, Ordering::Relaxed);
+    IPC_RECV_WAIT_MAX_TICKS.store(0, Ordering::Relaxed);
+    IPC_RECV_SCAN_EVENTS.store(0, Ordering::Relaxed);
+    IPC_RECV_SCAN_TOTAL_STEPS.store(0, Ordering::Relaxed);
+    IPC_RECV_SCAN_MAX_STEPS.store(0, Ordering::Relaxed);
     BOOT_TOKEN_GRANTS.store(0, Ordering::Relaxed);
     RESOURCE_DELTA_LOG_SEQ.store(0, Ordering::Relaxed);
+    for bucket in IPC_RECV_WAIT_HISTOGRAM.iter() {
+        bucket.store(0, Ordering::Relaxed);
+    }
     let mut audit = TOKEN_AUDIT_RING.lock();
     *audit = TokenAuditRing::new();
     *RESOURCE_BASELINE.lock() = None;

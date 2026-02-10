@@ -158,6 +158,7 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
                     page_table_root,
                 ) {
                     Ok((len, sender)) => {
+                        crate::telemetry::record_ipc_recv_scan_steps(offset + 1);
                         if sender_out_ptr != 0 {
                             crate::syscall::userptr::validate_user_buffer(
                                 sender_out_ptr,
@@ -214,6 +215,7 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     }
 
     // Block with or without timeout
+    let wait_start_tick = crate::sched::ThreadManager::current_tick();
     if timeout_ms == u64::MAX {
         // Block forever
         crate::sched::ThreadManager::block_current();
@@ -223,6 +225,8 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
         crate::sched::ThreadManager::block_current_with_timeout(deadline);
     }
     crate::architecture::x86_64::syscall::request_resched();
+    let wait_ticks = crate::sched::ThreadManager::current_tick().saturating_sub(wait_start_tick);
+    crate::telemetry::record_ipc_recv_wait_ticks(wait_ticks);
 
     // After waking, check if it was due to timeout
     if crate::sched::ThreadManager::check_and_clear_timeout_wake() {

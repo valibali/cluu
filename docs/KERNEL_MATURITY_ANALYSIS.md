@@ -412,15 +412,15 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 | WP-M4.3 Procmgr notify binding lifecycle cleanup | M4 | DONE (procmgr now tracks sender active-child counts and clears sender notify bindings when last owned child is reaped/killed) | `userspace/procmgr/src/main.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `cargo xtask harness-matrix` passes including `m4_notify_lifecycle`; logs contain `procmgr: cleared sender notify binding sender_tid=` |
 | WP-M4.4 Sender-auth denial-path regression coverage | M4 | DONE (shell builtin + harness marker mode now forces shell autostart command and asserts `PermissionDenied` path for unauthorized procmgr `PROC_KILL`) | `userspace/shell/src/commands.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `MARKER_MODE=m4_deny_paths ./test_hello.sh` passes (full build); logs contain `killdeny: PASS permission denied` and `procmgr: deny kill pid` |
 | WP-M4.5 Registry ownership denial-path regression coverage | M4 | DONE (shell builtin + deterministic autostart marker mode now assert `PermissionDenied` for unauthorized registry `unregister`, with explicit deny logs) | `userspace/shell/src/commands.rs`, `userspace/registry/src/main.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `MARKER_MODE=m4_registry_deny_paths ./test_hello.sh` passes (full build); logs contain `regdeny: PASS permission denied` and `registry: deny unregister` |
-| WP-M5.1 Fairness + latency SLO instrumentation | M5 | TODO | scheduler + IPC telemetry/harness modules | P95/P99 thresholds met under mixed load |
+| WP-M5.1 Fairness + latency SLO instrumentation | M5 | DONE (IPC recv wait/scan telemetry + percentile snapshot + mixed-load harness mode + optional SLO env thresholds) | `kernel/src/telemetry.rs`, `kernel/src/syscall/handlers.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `MARKER_MODE=m5_fairness TEST_COMMAND_REPEAT=1 RUN_WAIT=16 MIN_EXIT_COOKIES=6 ./test_hello.sh` passes (full rebuild); latest run observed `ipc_wait_p95_ms=4`, `ipc_wait_p99_ms=4`, `ipc_scan_avg_steps_x100=158` |
 | WP-L2.1 Mutable FS operations + DAC checks | L2A | TODO | `userspace/vfs`, `userspace/ramfs`, libc POSIX wrappers | `create/write/read/rename/unlink` + permission-deny tests pass |
 | WP-L2.2 Minimal signals + shell job control | L2B | TODO | `userspace/procmgr`, `userspace/shell`, `userspace/libcluu` | interactive `SIGINT` + `SIGCHLD` behavior works in shell |
 | WP-L2.3 Real `mmap` allocator + `mprotect` | L2C | TODO | `userspace/libcluu/src/posix/memory.rs`, kernel VM path | map/unmap/reuse/protection tests pass |
 
 ### Next execution batch
 
-1. Add numeric leak thresholds to matrix runs (`MAX_DELTA_*`) once stable bounds are measured.
-2. Extend token audit with optional userspace-drain endpoint once leak counters land.
+1. Promote measured M5 telemetry into enforced matrix SLO limits (`MAX_IPC_WAIT_P95_MS`, `MAX_IPC_WAIT_P99_MS`, `MAX_IPC_SCAN_AVG_STEPS_X100`) with conservative headroom.
+2. Add numeric leak thresholds to matrix runs (`MAX_DELTA_*`) once stable bounds are measured.
 3. Consolidate denial-path modes into one matrix bundle for faster pre-commit coverage while preserving deterministic shell autostart triggers.
 
 ### Completion criteria by level
