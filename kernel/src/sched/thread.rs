@@ -210,6 +210,9 @@ pub struct Thread {
     /// This closes the race where sender arrives between waiter registration
     /// and the receiver transition to Blocked.
     pub recv_wait_armed: bool,
+    /// Monotonic ticket for recv wait registration generation.
+    /// Incremented on every arm so endpoint wait queues can reject stale waiters.
+    pub recv_wait_ticket: u64,
 
     /// Userspace buffer metadata used for direct send->recv transfer.
     pub recv_wait_buf_ptr: usize,
@@ -315,6 +318,7 @@ impl Thread {
             woke_from_timeout: false,
             call_reply_info: None,
             recv_wait_armed: false,
+            recv_wait_ticket: 0,
             recv_wait_buf_ptr: 0,
             recv_wait_buf_len: 0,
             recv_wait_delivery: None,
@@ -354,6 +358,7 @@ impl Thread {
             woke_from_timeout: false,
             call_reply_info: None,
             recv_wait_armed: false,
+            recv_wait_ticket: 0,
             recv_wait_buf_ptr: 0,
             recv_wait_buf_len: 0,
             recv_wait_delivery: None,
@@ -495,10 +500,18 @@ impl Thread {
     }
 
     pub fn arm_recv_wait(&mut self) {
+        self.recv_wait_ticket = self.recv_wait_ticket.wrapping_add(1);
+        if self.recv_wait_ticket == 0 {
+            self.recv_wait_ticket = 1;
+        }
         self.recv_wait_armed = true;
     }
 
     pub fn arm_recv_wait_with_buffer(&mut self, buf_ptr: usize, buf_len: usize) {
+        self.recv_wait_ticket = self.recv_wait_ticket.wrapping_add(1);
+        if self.recv_wait_ticket == 0 {
+            self.recv_wait_ticket = 1;
+        }
         self.recv_wait_armed = true;
         self.recv_wait_buf_ptr = buf_ptr;
         self.recv_wait_buf_len = buf_len;
@@ -513,6 +526,10 @@ impl Thread {
 
     pub fn is_recv_wait_armed(&self) -> bool {
         self.recv_wait_armed
+    }
+
+    pub fn recv_wait_ticket(&self) -> u64 {
+        self.recv_wait_ticket
     }
 
     pub fn recv_wait_buffer(&self) -> Option<(usize, usize)> {

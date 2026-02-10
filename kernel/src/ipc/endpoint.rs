@@ -109,13 +109,19 @@ pub struct QueueEndpoint {
     /// Call message queue (messages from call() that expect reply)
     call_queue: VecDeque<CallMessage>,
     /// Threads waiting to receive
-    waiting_receivers: VecDeque<ThreadId>,
+    waiting_receivers: VecDeque<RecvWaiter>,
     /// Threads waiting to send (backpressure - queue was full)
     waiting_senders: VecDeque<ThreadId>,
     /// The caller currently being served (for reply routing)
     current_caller: Option<ThreadId>,
     /// Active callers keyed by call cookie.
     callers_by_cookie: BTreeMap<u64, ThreadId>,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+struct RecvWaiter {
+    thread_id: ThreadId,
+    ticket: u64,
 }
 
 const MAX_QUEUE_LEN: usize = 1024;
@@ -172,9 +178,13 @@ impl QueueEndpoint {
         }
     }
 
-    fn enqueue_receiver_if_absent(&mut self, receiver: ThreadId) {
-        if !self.waiting_receivers.contains(&receiver) {
-            self.waiting_receivers.push_back(receiver);
+    fn enqueue_receiver_if_absent(&mut self, receiver: ThreadId, ticket: u64) {
+        let waiter = RecvWaiter {
+            thread_id: receiver,
+            ticket,
+        };
+        if !self.waiting_receivers.contains(&waiter) {
+            self.waiting_receivers.push_back(waiter);
         }
     }
 
@@ -184,13 +194,20 @@ impl QueueEndpoint {
         }
     }
 
-    fn pop_next_receiver_to_wake(&mut self) -> Option<ThreadId> {
-        while let Some(receiver_id) = self.waiting_receivers.pop_front() {
-            if crate::sched::ThreadManager::is_thread_recv_waiting(receiver_id) {
-                return Some(receiver_id);
+    fn pop_next_receiver_to_wake(&mut self) -> Option<RecvWaiter> {
+        while let Some(waiter) = self.waiting_receivers.pop_front() {
+            if crate::sched::ThreadManager::is_thread_recv_waiting_ticket(
+                waiter.thread_id,
+                waiter.ticket,
+            ) {
+                return Some(waiter);
             }
         }
         None
+    }
+
+    fn register_receiver_wait(&mut self, receiver: ThreadId, ticket: u64) {
+        self.enqueue_receiver_if_absent(receiver, ticket);
     }
 }
 
@@ -212,7 +229,7 @@ impl ByteEndpoint for QueueEndpoint {
             sender,
         });
 
-        let receiver_to_wake = self.pop_next_receiver_to_wake();
+        let receiver_to_wake = self.pop_next_receiver_to_wake().map(|w| w.thread_id);
 
         // Also wake a waiting sender if queue now has space.
         if !self.waiting_senders.is_empty() && self.queue.len() < MAX_QUEUE_LEN {
@@ -239,7 +256,8 @@ impl ByteEndpoint for QueueEndpoint {
             self.wake_one_waiting_sender();
             return Ok(Some(msg));
         }
-        self.enqueue_receiver_if_absent(receiver);
+        let ticket = crate::sched::ThreadManager::current_recv_wait_ticket().unwrap_or(0);
+        self.enqueue_receiver_if_absent(receiver, ticket);
         Err(Error::WouldBlock)
     }
 
@@ -282,7 +300,7 @@ impl ByteEndpoint for QueueEndpoint {
             message: msg,
             cookie,
         });
-        Ok(self.pop_next_receiver_to_wake())
+        Ok(self.pop_next_receiver_to_wake().map(|w| w.thread_id))
     }
 
     fn recv_call(
@@ -298,7 +316,8 @@ impl ByteEndpoint for QueueEndpoint {
         if let Some(msg) = self.queue.pop_front() {
             return Ok(Some((msg.message, msg.sender)));
         }
-        self.enqueue_receiver_if_absent(receiver);
+        let ticket = crate::sched::ThreadManager::current_recv_wait_ticket().unwrap_or(0);
+        self.enqueue_receiver_if_absent(receiver, ticket);
         Err(Error::WouldBlock)
     }
 }
@@ -455,6 +474,18 @@ pub fn recv(endpoint: EndpointId, receiver: ThreadId) -> Result<Option<ReceivedM
         .ok_or(Error::NotFound)?;
     let mut guard = endpoint_mutex.lock();
     guard.recv(receiver)
+}
+
+pub fn register_wait(endpoint: EndpointId, receiver: ThreadId, ticket: u64) -> Result<(), Error> {
+    let shard = get_endpoint_shard(endpoint);
+    let mut shard_guard = shard.lock();
+    let endpoint_mutex = shard_guard
+        .endpoints
+        .get_mut(&endpoint)
+        .ok_or(Error::NotFound)?;
+    let mut guard = endpoint_mutex.lock();
+    guard.register_receiver_wait(receiver, ticket);
+    Ok(())
 }
 
 pub fn recv_nonblocking(endpoint: EndpointId) -> Result<Option<ReceivedMessage>, Error> {
@@ -750,7 +781,8 @@ fn try_direct_deliver_to_waiting_receiver(
         return Ok(None);
     }
 
-    while let Some(receiver_id) = endpoint.pop_next_receiver_to_wake() {
+    while let Some(waiter) = endpoint.pop_next_receiver_to_wake() {
+        let receiver_id = waiter.thread_id;
         let Some((receiver_buf_ptr, receiver_buf_len, receiver_pt_root)) =
             crate::sched::ThreadManager::recv_wait_buffer(receiver_id)
         else {
@@ -758,7 +790,7 @@ fn try_direct_deliver_to_waiting_receiver(
         };
 
         if data.len() > receiver_buf_len {
-            endpoint.waiting_receivers.push_front(receiver_id);
+            endpoint.waiting_receivers.push_front(waiter);
             return Ok(None);
         }
 
@@ -772,7 +804,7 @@ fn try_direct_deliver_to_waiting_receiver(
             )
         };
         if copy_result.is_err() {
-            endpoint.waiting_receivers.push_front(receiver_id);
+            endpoint.waiting_receivers.push_front(waiter);
             return Ok(None);
         }
 
@@ -783,7 +815,7 @@ fn try_direct_deliver_to_waiting_receiver(
             sender,
         );
         if !stored {
-            endpoint.waiting_receivers.push_front(receiver_id);
+            endpoint.waiting_receivers.push_front(waiter);
             return Ok(None);
         }
         crate::telemetry::record_ipc_direct_delivery();

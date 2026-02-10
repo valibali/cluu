@@ -389,6 +389,18 @@ impl ThreadManager {
         .unwrap_or(false)
     }
 
+    pub fn is_thread_recv_waiting_ticket(thread_id: ThreadId, ticket: u64) -> bool {
+        Self::with_thread(thread_id, |thread| {
+            thread.recv_wait_ticket() == ticket && (thread.is_blocked() || thread.is_recv_wait_armed())
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn current_recv_wait_ticket() -> Option<u64> {
+        let current = Self::current()?;
+        Self::with_thread(current, |thread| thread.recv_wait_ticket())
+    }
+
     pub fn recv_wait_buffer(
         thread_id: ThreadId,
     ) -> Option<(usize, usize, PhysAddr)> {

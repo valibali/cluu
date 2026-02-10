@@ -201,17 +201,12 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
 
     // Arm recv wait before enqueueing on endpoints to close registration/block race.
     crate::sched::ThreadManager::arm_current_recv_wait_with_buffer(buf_ptr, buf_len);
+    let recv_wait_ticket =
+        crate::sched::ThreadManager::current_recv_wait_ticket().ok_or(Error::InvalidState)?;
 
     // Register as waiter on all endpoints
     for endpoint_id in endpoint_ids.iter().take(tokens_count).filter_map(|id| *id) {
-        // Try recv which will register us as a waiter if no message
-        let _ = crate::ipc::endpoint::recv_to_user(
-            endpoint_id,
-            buf_ptr,
-            buf_len,
-            page_table_root,
-            current,
-        );
+        crate::ipc::endpoint::register_wait(endpoint_id, current, recv_wait_ticket)?;
     }
 
     // Block with or without timeout
