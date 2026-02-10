@@ -540,6 +540,7 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "mmapprobe: PASS basic map/write"
             "mmapprobe: PASS mprotect exact"
+            "mmapprobe: PASS mprotect to rx"
             "mmapprobe: PASS mprotect prot-none unsupported"
             "mmapprobe: PASS mprotect restore rw"
             "mmapprobe: PASS reuse hole"

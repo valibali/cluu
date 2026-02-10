@@ -22,6 +22,10 @@
 #define PROT_WRITE 0x2
 #endif
 
+#ifndef PROT_EXEC
+#define PROT_EXEC 0x4
+#endif
+
 #ifndef PROT_NONE
 #define PROT_NONE 0x0
 #endif
@@ -65,17 +69,23 @@ int main(void) {
     debug_print("mmapprobe: PASS mprotect exact");
     printf("mmapprobe: PASS mprotect exact addr=%p len=%zu\n", region, len);
 
+    if (mprotect(region, len, PROT_READ | PROT_EXEC) != 0) {
+        return fail("mmapprobe: FAIL mprotect to rx", 12);
+    }
+    debug_print("mmapprobe: PASS mprotect to rx");
+    printf("mmapprobe: PASS mprotect to rx addr=%p len=%zu\n", region, len);
+
     errno = 0;
     if (mprotect(region, len, PROT_NONE) == 0) {
         debug_print("mmapprobe: FAIL mprotect prot-none unexpectedly succeeded");
         printf("mmapprobe: FAIL mprotect prot-none unexpectedly succeeded\n");
-        return 12;
+        return 13;
     }
     debug_print("mmapprobe: PASS mprotect prot-none unsupported");
     printf("mmapprobe: PASS mprotect prot-none unsupported errno=%d\n", errno);
 
     if (mprotect(region, len, PROT_READ | PROT_WRITE) != 0) {
-        return fail("mmapprobe: FAIL mprotect restore rw", 13);
+        return fail("mmapprobe: FAIL mprotect restore rw", 14);
     }
     p[0] = 0x11;
     p[page] = 0x22;
