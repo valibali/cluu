@@ -193,6 +193,9 @@ pub struct Thread {
     /// Information for pending IPC call reply (set when thread is waiting for reply)
     pub call_reply_info: Option<CallReplyInfo>,
 
+    /// Rotating scan hint for multi-endpoint recv_any fairness.
+    pub recv_scan_hint: usize,
+
     /// Thread-local token cache (for performance optimization)
     /// Caches recently looked-up tokens to avoid repeated HMAC verification
     pub token_cache: Option<TokenCacheEntry>,
@@ -287,6 +290,7 @@ impl Thread {
             timeout_deadline: None,
             woke_from_timeout: false,
             call_reply_info: None,
+            recv_scan_hint: 0,
             token_cache: None,
             fault_endpoint: None,
             fault_state: None,
@@ -321,6 +325,7 @@ impl Thread {
             timeout_deadline: None,
             woke_from_timeout: false,
             call_reply_info: None,
+            recv_scan_hint: 0,
             token_cache: None,
             fault_endpoint: None,
             fault_state: None,
@@ -417,6 +422,16 @@ impl Thread {
             Some(deadline) => current_tick >= deadline,
             None => false,
         }
+    }
+
+    /// Return the starting index for the next recv_any scan and advance the hint.
+    pub fn next_recv_scan_start(&mut self, endpoints: usize) -> usize {
+        if endpoints == 0 {
+            return 0;
+        }
+        let start = self.recv_scan_hint % endpoints;
+        self.recv_scan_hint = (start + 1) % endpoints;
+        start
     }
 }
 
@@ -621,5 +636,22 @@ mod tests {
             .entry(VirtAddr::new(0x400000))
             .stack(VirtAddr::new(0x7ff00000))
             .build();
+    }
+
+    #[test]
+    fn test_recv_scan_hint_rotates() {
+        let mut thread = Thread::new(
+            ThreadId::new(1),
+            PhysAddr::new(0x1000),
+            VirtAddr::new(0x400000),
+            VirtAddr::new(0x7ff00000),
+            Priority::DEFAULT,
+            ThreadFlags::empty(),
+        );
+
+        assert_eq!(thread.next_recv_scan_start(3), 0);
+        assert_eq!(thread.next_recv_scan_start(3), 1);
+        assert_eq!(thread.next_recv_scan_start(3), 2);
+        assert_eq!(thread.next_recv_scan_start(3), 0);
     }
 }

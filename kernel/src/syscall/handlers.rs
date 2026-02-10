@@ -138,12 +138,19 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
         }
     }
 
-    // Try to receive from each endpoint in order
+    // Rotate scan start per thread to prevent head-of-list starvation in recv_any.
+    let scan_start = crate::sched::ThreadManager::with_thread_mut(current, |thread| {
+        thread.next_recv_scan_start(tokens_count)
+    })
+    .unwrap_or(0);
+
+    // Try to receive from each endpoint in round-robin order
     let try_recv_any = || -> Result<(usize, usize), Error> {
-        for (i, endpoint_id) in endpoint_ids.iter().enumerate().take(tokens_count) {
-            if let Some(endpoint_id) = endpoint_id {
+        for offset in 0..tokens_count {
+            let i = (scan_start + offset) % tokens_count;
+            if let Some(endpoint_id) = endpoint_ids[i] {
                 match crate::ipc::endpoint::recv_to_user_nonblocking(
-                    *endpoint_id,
+                    endpoint_id,
                     buf_ptr,
                     buf_len,
                     page_table_root,
