@@ -379,6 +379,7 @@ struct VfsServer {
     mounts: MountTable,
     files: FdTable,
     cache: FileCache,
+    path_owners: BTreeMap<alloc::string::String, usize>,
 }
 
 impl VfsServer {
@@ -401,6 +402,7 @@ impl VfsServer {
             mounts,
             files: FdTable::new(),
             cache: FileCache::new(cache_buf_base, cache_buf_size),
+            path_owners: BTreeMap::new(),
         }
     }
 
@@ -503,13 +505,14 @@ impl VfsServer {
             }
             Err(err) => {
                 if err == Error::NotFound && (flags & O_CREAT) != 0 {
-                    if let Err(policy_err) = self.ensure_mutation_allowed(path) {
+                    if let Err(policy_err) = self.ensure_create_allowed(client_id, path) {
                         reply_msg.words[0] = policy_err.to_errno() as usize;
                         return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                     }
                     match self.mounts.create_file(path, mode) {
                         Ok(()) => match self.mounts.open(path) {
                             Ok(file) => {
+                                self.set_owner(path, client_id);
                                 let fd = self.files.open(client_id, file.clone());
                                 reply_msg.words[0] = 0;
                                 reply_msg.words[1] = fd;
@@ -703,7 +706,7 @@ impl VfsServer {
         caller_client: Option<usize>,
     ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_UNLINK, [0; 6], 1);
-        let _client_id = match self.resolve_client_id("unlink", caller_client, msg.words[1]) {
+        let client_id = match self.resolve_client_id("unlink", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
@@ -717,13 +720,14 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
-        if let Err(err) = self.ensure_mutation_allowed(path) {
+        if let Err(err) = self.ensure_mutation_allowed(client_id, path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
         match self.mounts.unlink(path) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
+                self.clear_owner_path(path);
                 self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
             }
             Err(err) => reply_msg.words[0] = err.to_errno() as usize,
@@ -739,7 +743,7 @@ impl VfsServer {
         caller_client: Option<usize>,
     ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_MKDIR, [0; 6], 1);
-        let _client_id = match self.resolve_client_id("mkdir", caller_client, msg.words[1]) {
+        let client_id = match self.resolve_client_id("mkdir", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
@@ -753,7 +757,7 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
-        if let Err(err) = self.ensure_mutation_allowed(path) {
+        if let Err(err) = self.ensure_create_allowed(client_id, path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
@@ -761,6 +765,7 @@ impl VfsServer {
         match self.mounts.mkdir(path, mode) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
+                self.set_owner(path, client_id);
                 self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
             }
             Err(err) => reply_msg.words[0] = err.to_errno() as usize,
@@ -776,7 +781,7 @@ impl VfsServer {
         caller_client: Option<usize>,
     ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_RMDIR, [0; 6], 1);
-        let _client_id = match self.resolve_client_id("rmdir", caller_client, msg.words[1]) {
+        let client_id = match self.resolve_client_id("rmdir", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
@@ -790,13 +795,14 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
-        if let Err(err) = self.ensure_mutation_allowed(path) {
+        if let Err(err) = self.ensure_mutation_allowed(client_id, path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
         match self.mounts.rmdir(path) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
+                self.clear_owner_subtree(path);
                 self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
             }
             Err(err) => reply_msg.words[0] = err.to_errno() as usize,
@@ -812,7 +818,7 @@ impl VfsServer {
         caller_client: Option<usize>,
     ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_RENAME, [0; 6], 1);
-        let _client_id = match self.resolve_client_id("rename", caller_client, msg.words[1]) {
+        let client_id = match self.resolve_client_id("rename", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
@@ -838,17 +844,18 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
-        if let Err(err) = self.ensure_mutation_allowed(old_path) {
+        if let Err(err) = self.ensure_mutation_allowed(client_id, old_path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
-        if let Err(err) = self.ensure_mutation_allowed(new_path) {
+        if let Err(err) = self.ensure_create_allowed(client_id, new_path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
         match self.mounts.rename(old_path, new_path) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
+                self.move_owner_subtree(old_path, new_path);
                 self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
             }
             Err(err) => reply_msg.words[0] = err.to_errno() as usize,
@@ -868,7 +875,32 @@ impl VfsServer {
         Err(Error::NotFound)
     }
 
-    fn ensure_mutation_allowed(&self, path: &str) -> Result<()> {
+    fn ensure_mutation_allowed(&self, client_id: usize, path: &str) -> Result<()> {
+        self.ensure_protected_path_allowed(path)?;
+        if let Some(owner) = self.owner_of(path) {
+            if owner != client_id {
+                return Err(Error::PermissionDenied);
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_create_allowed(&self, client_id: usize, path: &str) -> Result<()> {
+        self.ensure_protected_path_allowed(path)?;
+        if self.owner_of(path).is_some() {
+            return Err(Error::AlreadyExists);
+        }
+        if let Some(parent) = parent_path(path) {
+            if let Some(owner) = self.owner_of(&parent) {
+                if owner != client_id {
+                    return Err(Error::PermissionDenied);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_protected_path_allowed(&self, path: &str) -> Result<()> {
         let protected = ["/bin", "/proc", "/dev/initrd", "/sys"];
         for prefix in &protected {
             if path == *prefix || path.starts_with(&format!("{}/", prefix)) {
@@ -876,6 +908,78 @@ impl VfsServer {
             }
         }
         Ok(())
+    }
+
+    fn normalize_path(path: &str) -> alloc::string::String {
+        let mut out = alloc::string::String::from(path);
+        if out.is_empty() {
+            return alloc::string::String::from("/");
+        }
+        if !out.starts_with('/') {
+            out.insert(0, '/');
+        }
+        while out.len() > 1 && out.ends_with('/') {
+            out.pop();
+        }
+        out
+    }
+
+    fn owner_of(&self, path: &str) -> Option<usize> {
+        let key = Self::normalize_path(path);
+        self.path_owners.get(&key).copied()
+    }
+
+    fn set_owner(&mut self, path: &str, client_id: usize) {
+        let key = Self::normalize_path(path);
+        self.path_owners.insert(key, client_id);
+    }
+
+    fn clear_owner_path(&mut self, path: &str) {
+        let key = Self::normalize_path(path);
+        self.path_owners.remove(&key);
+    }
+
+    fn clear_owner_subtree(&mut self, root: &str) {
+        let root_key = Self::normalize_path(root);
+        let prefix = if root_key == "/" {
+            alloc::string::String::from("/")
+        } else {
+            format!("{}/", root_key)
+        };
+        let keys: Vec<_> = self
+            .path_owners
+            .keys()
+            .filter(|k| **k == root_key || k.starts_with(&prefix))
+            .cloned()
+            .collect();
+        for key in keys {
+            self.path_owners.remove(&key);
+        }
+    }
+
+    fn move_owner_subtree(&mut self, from: &str, to: &str) {
+        let from_key = Self::normalize_path(from);
+        let to_key = Self::normalize_path(to);
+        let from_prefix = if from_key == "/" {
+            alloc::string::String::from("/")
+        } else {
+            format!("{}/", from_key)
+        };
+        let mut updates: Vec<(alloc::string::String, alloc::string::String, usize)> = Vec::new();
+        for (path, owner) in &self.path_owners {
+            if *path == from_key {
+                updates.push((path.clone(), to_key.clone(), *owner));
+            } else if path.starts_with(&from_prefix) {
+                let suffix = &path[from_key.len()..];
+                updates.push((path.clone(), format!("{}{}", to_key, suffix), *owner));
+            }
+        }
+        for (old, _, _) in &updates {
+            self.path_owners.remove(old);
+        }
+        for (_, new, owner) in updates {
+            self.path_owners.insert(new, owner);
+        }
     }
 
     fn handle_read_grant(
@@ -1690,6 +1794,29 @@ impl VfsServer {
 
         Ok(())
     }
+}
+
+fn parent_path(path: &str) -> Option<alloc::string::String> {
+    let mut norm = alloc::string::String::from(path);
+    if norm.is_empty() {
+        return None;
+    }
+    if !norm.starts_with('/') {
+        norm.insert(0, '/');
+    }
+    while norm.len() > 1 && norm.ends_with('/') {
+        norm.pop();
+    }
+    if norm == "/" {
+        return None;
+    }
+    if let Some(pos) = norm.rfind('/') {
+        if pos == 0 {
+            return Some(alloc::string::String::from("/"));
+        }
+        return Some(alloc::string::String::from(&norm[..pos]));
+    }
+    None
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
