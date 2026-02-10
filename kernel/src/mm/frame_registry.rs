@@ -92,3 +92,17 @@ pub fn dec_map_count(frame_id: FrameId) {
 pub fn lookup_by_phys(phys: u64) -> Option<FrameId> {
     PHYS_TO_FRAME.lock().get(&phys).copied()
 }
+
+/// Number of tracked frames in the registry.
+pub fn tracked_count() -> usize {
+    FRAME_REGISTRY.lock().len()
+}
+
+/// Sum of map counts across all tracked frames.
+pub fn total_map_count() -> u64 {
+    FRAME_REGISTRY
+        .lock()
+        .values()
+        .map(|entry| entry.map_count as u64)
+        .sum()
+}

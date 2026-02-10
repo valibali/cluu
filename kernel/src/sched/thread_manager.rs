@@ -146,6 +146,20 @@ impl ThreadManager {
         repo.get_mut(id).map(f)
     }
 
+    /// Number of threads currently tracked in the repository (including dead).
+    pub fn thread_count_total() -> usize {
+        THREAD_REPOSITORY.lock().len()
+    }
+
+    /// Number of threads that are not in Dead state.
+    pub fn thread_count_live() -> usize {
+        THREAD_REPOSITORY
+            .lock()
+            .iter()
+            .filter(|(_, thread)| !thread.is_dead())
+            .count()
+    }
+
     /// Allocate a new ThreadId
     pub fn alloc_thread_id() -> ThreadId {
         let mut repo = THREAD_REPOSITORY.lock();

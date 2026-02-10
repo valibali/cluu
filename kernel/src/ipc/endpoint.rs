@@ -362,6 +362,14 @@ pub fn create_endpoint() -> EndpointId {
     id
 }
 
+/// Number of endpoints currently tracked across all shards.
+pub fn endpoint_count() -> usize {
+    ENDPOINT_SHARDS
+        .iter()
+        .map(|shard| shard.lock().endpoints.len())
+        .sum()
+}
+
 pub fn send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, Error> {
     // Get shard directly (static, no repository lock needed)
     let shard = get_endpoint_shard(endpoint);

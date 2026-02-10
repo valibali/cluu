@@ -626,6 +626,8 @@ fn invoke_thread_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
         thread.make_dead();
     });
 
+    crate::telemetry::log_resource_delta("thread_destroy");
+
     Ok(0)
 }
 

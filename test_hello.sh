@@ -158,6 +158,7 @@ fi
 # - m0_boot: bootstrap telemetry/manifest checks
 # - m1_recv: recv/wakeup churn checks
 # - m2_token_audit: recv churn + token audit telemetry invariants
+# - m2_leakdiag: churn + resource delta diagnostics
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -195,6 +196,17 @@ case "$MARKER_MODE" in
             "token_audit_next_seq="
             "token_audit_stored="
             "token_audit_dropped="
+        )
+        ;;
+    m2_leakdiag)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: exit cookie"
+            "resource delta:"
+            "delta_spaces="
+            "delta_tokens="
+            "delta_pmm_used_frames="
         )
         ;;
     none)
@@ -277,6 +289,22 @@ if [ "$MARKER_MODE" = "m2_token_audit" ]; then
 
     if [ "$audit_stored" -lt 2 ]; then
         echo "MISSING: expected token_audit_stored>=2, got $audit_stored"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+fi
+
+if [ "$MARKER_MODE" = "m2_leakdiag" ]; then
+    exit_count=$(grep -c "procmgr: exit cookie" "$SERIAL_LOG" || true)
+    if [ "$exit_count" -lt "$MIN_EXIT_COOKIES" ]; then
+        echo "MISSING: expected at least $MIN_EXIT_COOKIES exit cookies, got $exit_count"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+
+    delta_samples=$(grep -c "resource delta:" "$SERIAL_LOG" || true)
+    if [ "$delta_samples" -lt 1 ]; then
+        echo "MISSING: expected at least one resource delta sample"
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
     fi

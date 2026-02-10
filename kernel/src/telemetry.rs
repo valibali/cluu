@@ -12,6 +12,7 @@ static TOKENS_REVOKED: AtomicU64 = AtomicU64::new(0);
 static IPC_RECV_WOULD_BLOCK: AtomicU64 = AtomicU64::new(0);
 static IPC_RECV_TIMEOUT: AtomicU64 = AtomicU64::new(0);
 static BOOT_TOKEN_GRANTS: AtomicU64 = AtomicU64::new(0);
+static RESOURCE_DELTA_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 const TOKEN_AUDIT_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +83,20 @@ impl TokenAuditRing {
 }
 
 static TOKEN_AUDIT_RING: Mutex<TokenAuditRing> = Mutex::new(TokenAuditRing::new());
+static RESOURCE_BASELINE: Mutex<Option<ResourceSnapshot>> = Mutex::new(None);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceSnapshot {
+    pub threads_total: u64,
+    pub threads_live: u64,
+    pub spaces: u64,
+    pub endpoints: u64,
+    pub tokens: u64,
+    pub tracked_frames: u64,
+    pub mapped_frames: u64,
+    pub pmm_used_frames: u64,
+    pub pmm_total_frames: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Snapshot {
@@ -93,6 +108,7 @@ pub struct Snapshot {
     pub token_audit_next_seq: u64,
     pub token_audit_stored: usize,
     pub token_audit_dropped: u64,
+    pub resources: ResourceSnapshot,
 }
 
 #[inline(always)]
@@ -132,7 +148,87 @@ pub fn snapshot() -> Snapshot {
         token_audit_next_seq: audit.next_seq,
         token_audit_stored: audit.stored,
         token_audit_dropped: audit.dropped,
+        resources: resource_snapshot(),
     }
+}
+
+pub fn resource_snapshot() -> ResourceSnapshot {
+    let (pmm_used, pmm_total) = crate::mm::pmm::get_stats();
+    ResourceSnapshot {
+        threads_total: crate::sched::ThreadManager::thread_count_total() as u64,
+        threads_live: crate::sched::ThreadManager::thread_count_live() as u64,
+        spaces: crate::mm::space_repository::count() as u64,
+        endpoints: crate::ipc::endpoint::endpoint_count() as u64,
+        tokens: crate::token::count_tokens() as u64,
+        tracked_frames: crate::mm::frame_registry::tracked_count() as u64,
+        mapped_frames: crate::mm::frame_registry::total_map_count(),
+        pmm_used_frames: pmm_used as u64,
+        pmm_total_frames: pmm_total as u64,
+    }
+}
+
+pub fn set_resource_baseline_from_current() {
+    *RESOURCE_BASELINE.lock() = Some(resource_snapshot());
+}
+
+fn resource_baseline() -> ResourceSnapshot {
+    let mut guard = RESOURCE_BASELINE.lock();
+    if let Some(baseline) = *guard {
+        baseline
+    } else {
+        let baseline = resource_snapshot();
+        *guard = Some(baseline);
+        baseline
+    }
+}
+
+fn log_i64(label: &str, value: i64) {
+    klibcluu::info(label);
+    if value < 0 {
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "-", value.unsigned_abs());
+    } else {
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "", value as u64);
+    }
+}
+
+pub fn log_resource_delta(reason: &str) {
+    let seq = RESOURCE_DELTA_LOG_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let baseline = resource_baseline();
+    let current = resource_snapshot();
+
+    klibcluu::info("resource delta: ");
+    klibcluu::info(reason);
+    klibcluu::info("  sample_seq=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", seq);
+
+    log_i64(
+        "  delta_threads_live=",
+        current.threads_live as i64 - baseline.threads_live as i64,
+    );
+    log_i64(
+        "  delta_spaces=",
+        current.spaces as i64 - baseline.spaces as i64,
+    );
+    log_i64(
+        "  delta_endpoints=",
+        current.endpoints as i64 - baseline.endpoints as i64,
+    );
+    log_i64(
+        "  delta_tokens=",
+        current.tokens as i64 - baseline.tokens as i64,
+    );
+    log_i64(
+        "  delta_tracked_frames=",
+        current.tracked_frames as i64 - baseline.tracked_frames as i64,
+    );
+    log_i64(
+        "  delta_mapped_frames=",
+        current.mapped_frames as i64 - baseline.mapped_frames as i64,
+    );
+    log_i64(
+        "  delta_pmm_used_frames=",
+        current.pmm_used_frames as i64 - baseline.pmm_used_frames as i64,
+    );
 }
 
 #[inline(always)]
@@ -242,6 +338,29 @@ pub fn log_bootstrap_snapshot(stage: &str) {
 
     klibcluu::info("  token_audit_dropped=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.token_audit_dropped);
+
+    klibcluu::info("  resources_threads_total=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.threads_total);
+    klibcluu::info("  resources_threads_live=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.threads_live);
+    klibcluu::info("  resources_spaces=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.spaces);
+    klibcluu::info("  resources_endpoints=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.endpoints);
+    klibcluu::info("  resources_tokens=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.tokens);
+    klibcluu::info("  resources_tracked_frames=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.tracked_frames);
+    klibcluu::info("  resources_mapped_frames=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.mapped_frames);
+    klibcluu::info("  resources_pmm_used_frames=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.pmm_used_frames);
+    klibcluu::info("  resources_pmm_total_frames=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.pmm_total_frames);
+
+    if stage == "post-bootstrap" {
+        set_resource_baseline_from_current();
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +370,8 @@ pub fn reset_for_tests() {
     IPC_RECV_WOULD_BLOCK.store(0, Ordering::Relaxed);
     IPC_RECV_TIMEOUT.store(0, Ordering::Relaxed);
     BOOT_TOKEN_GRANTS.store(0, Ordering::Relaxed);
+    RESOURCE_DELTA_LOG_SEQ.store(0, Ordering::Relaxed);
     let mut audit = TOKEN_AUDIT_RING.lock();
     *audit = TokenAuditRing::new();
+    *RESOURCE_BASELINE.lock() = None;
 }

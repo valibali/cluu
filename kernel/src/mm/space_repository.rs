@@ -79,3 +79,8 @@ where
     let repo = REPOSITORY.lock();
     repo.spaces.get(&id).map(f)
 }
+
+/// Number of address spaces currently tracked by the repository.
+pub fn count() -> usize {
+    REPOSITORY.lock().spaces.len()
+}

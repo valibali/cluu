@@ -403,7 +403,7 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 | WP-M1.1 Fail-closed manifest verify gate | M1 | DONE (hash+policy+signature gate) | `userspace/init` (mandatory manifest + hash/rights enforcement), `userspace/libcluu` (signature-required parser), `xtask` (signed manifest generation), `kernel/src/bootstrap.rs` (`sys/init` hash+signature verification) | boot fails if manifest missing/invalid/mismatched/tampered |
 | WP-M1.2 Waitset receive syscall path | M1 | DONE (fair scan + armed waiter + churn harness; retry contract preserved) | `kernel/src/syscall/handlers.rs`, `kernel/src/ipc/*`, `kernel/src/sched/*`, userspace recv wrappers, `test_hello.sh` | `MARKER_MODE=m1_recv TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh` passes (full rebuild) |
 | WP-M2.1 Token lifecycle structured audit stream | M2 | DONE (bounded ring + monotonic sequence + create/derive/revoke hooks + harness assertions) | `kernel/src/token/*`, `kernel/src/telemetry.rs`, `test_hello.sh` | `MARKER_MODE=m2_token_audit TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh` passes (full rebuild), `token_audit_dropped=0` |
-| WP-M2.2 Leak diagnostics and delta accounting | M2 | TODO | `kernel/src/mm/*`, `kernel/src/sched/*`, `kernel/src/token/*` | spawn/exit churn returns object deltas to baseline |
+| WP-M2.2 Leak diagnostics and delta accounting | M2 | IN PROGRESS (live resource counters + baseline delta logs + harness mode) | `kernel/src/mm/*`, `kernel/src/sched/*`, `kernel/src/ipc/*`, `kernel/src/telemetry.rs`, `kernel/src/syscall/handlers.rs`, `test_hello.sh` | `MARKER_MODE=m2_leakdiag TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh` emits resource-delta samples during churn |
 | WP-M3.1 Mapping/copy failpoints + rollback checks | M3 | TODO | `kernel/src/mm/vmm.rs`, `kernel/src/syscall/userptr.rs`, copy/map callsites | forced failure leaves no partial mappings |
 | WP-M3.2 CI churn + leak detection harness | M3 | TODO | `xtask/`, `kernel-tests/`, QEMU runner scripts | CI hard-fails on leak/regression |
 | WP-M4.1 Sender identity/badge hardening | M4 | TODO | `kernel/src/ipc/*`, service contracts in `userspace/*` | services stop trusting caller-provided client IDs |
@@ -414,7 +414,7 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 
 ### Next execution batch
 
-1. Implement WP-M2.2 churn/leak diagnostics to keep later milestones safe.
+1. Finish WP-M2.2 by adding explicit per-resource pass/fail thresholds (acceptable deltas).
 2. Implement WP-M3.1 failpoint rollback checks to harden error paths.
 3. Extend token audit with optional userspace-drain endpoint once leak counters land.
 
