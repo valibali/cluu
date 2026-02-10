@@ -5,11 +5,13 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_ROOT"
 
-SERIAL_LOG="/tmp/cluu-serial-com2.log"
-MONITOR_SOCK="/tmp/cluu-qemu-monitor.sock"
-OVMF="/usr/share/ovmf/OVMF.fd"
-IMG="$PROJECT_ROOT/target/cluu.img"
-USER_DISK="$PROJECT_ROOT/target/userdisk.img"
+SERIAL_LOG="${SERIAL_LOG:-/tmp/cluu-serial-com2.log}"
+MONITOR_SOCK="${MONITOR_SOCK:-/tmp/cluu-qemu-monitor.sock}"
+OVMF="${OVMF:-/usr/share/ovmf/OVMF.fd}"
+IMG="${IMG:-$PROJECT_ROOT/target/cluu.img}"
+USER_DISK="${USER_DISK:-$PROJECT_ROOT/target/userdisk.img}"
+QEMU_GDB="${QEMU_GDB:-0}"
+QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
 QEMU_PID=""
 BOOT_WAIT="${BOOT_WAIT:-8}"
 SHELL_READY_WAIT="${SHELL_READY_WAIT:-25}"
@@ -150,21 +152,34 @@ rm -f "$MONITOR_SOCK"
 
 # --- Step 3: Launch QEMU ---
 echo "=== Starting QEMU (headless) ==="
-qemu-system-x86_64 \
-    -bios "$OVMF" \
-    -m 512M \
-    -accel kvm \
-    -cpu host \
-    -drive "file=$IMG,format=raw,if=ide,index=0" \
-    -drive "file=$USER_DISK,format=raw,if=none,id=userblk" \
-    -device virtio-blk-pci,drive=userblk \
-    -display none \
-    -no-reboot \
-    -no-shutdown \
-    -serial null \
-    -serial "file:$SERIAL_LOG" \
-    -monitor "unix:$MONITOR_SOCK,server,nowait" \
-    &
+qemu_args=(
+    -bios "$OVMF"
+    -m 512M
+    -accel kvm
+    -cpu host
+    -drive "file=$IMG,format=raw,if=ide,index=0"
+    -drive "file=$USER_DISK,format=raw,if=none,id=userblk"
+    -device virtio-blk-pci,drive=userblk
+    -display none
+    -no-reboot
+    -no-shutdown
+    -serial null
+    -serial "file:$SERIAL_LOG"
+    -monitor "unix:$MONITOR_SOCK,server,nowait"
+)
+
+if [ "$QEMU_GDB" = "1" ]; then
+    echo "QEMU_GDB=1: enabling -S -s (wait for GDB on tcp:1234)"
+    qemu_args+=(-S -s)
+fi
+
+if [ -n "$QEMU_EXTRA_ARGS" ]; then
+    # shellcheck disable=SC2206
+    extra_args=( $QEMU_EXTRA_ARGS )
+    qemu_args+=("${extra_args[@]}")
+fi
+
+qemu-system-x86_64 "${qemu_args[@]}" &
 QEMU_PID=$!
 echo "QEMU PID: $QEMU_PID"
 

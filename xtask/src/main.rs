@@ -125,6 +125,15 @@ enum Commands {
         #[arg(long)]
         no_build: bool,
     },
+    /// Run repeated fairness SLO sweep and collect summary metrics
+    HarnessSlo {
+        /// Reuse existing build artifacts for all runs
+        #[arg(long)]
+        no_build: bool,
+        /// Number of fairness runs to execute
+        #[arg(long, default_value_t = 5)]
+        repeats: u32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -186,6 +195,9 @@ fn main() -> Result<()> {
         Commands::HarnessMatrix { no_build } => {
             run_harness_matrix(no_build)?;
         }
+        Commands::HarnessSlo { no_build, repeats } => {
+            run_harness_slo(no_build, repeats)?;
+        }
     }
 
     Ok(())
@@ -207,6 +219,26 @@ fn run_harness_matrix(no_build: bool) -> Result<()> {
         bail!("Harness matrix failed");
     }
     println!("  ✓ Harness matrix passed");
+    Ok(())
+}
+
+fn run_harness_slo(no_build: bool, repeats: u32) -> Result<()> {
+    println!("▸ Running harness SLO sweep (repeats={repeats})...");
+    let script = project_root().join("scripts/harness_slo_sweep.sh");
+    let mut cmd = Command::new("bash");
+    cmd.current_dir(project_root())
+        .arg(script)
+        .arg("--repeats")
+        .arg(repeats.to_string());
+    if no_build {
+        cmd.arg("--no-build");
+    }
+
+    let status = cmd.status().context("Failed to run harness SLO script")?;
+    if !status.success() {
+        bail!("Harness SLO sweep failed");
+    }
+    println!("  ✓ Harness SLO sweep passed");
     Ok(())
 }
 
