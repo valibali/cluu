@@ -164,7 +164,9 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
                                 core::mem::size_of::<usize>(),
                             )?;
                             let sender_raw = sender
-                                .map_or(0usize, |tid: crate::sched::ThreadId| tid.as_u64() as usize);
+                                .map_or(0usize, |tid: crate::sched::ThreadId| {
+                                    tid.as_u64() as usize
+                                });
                             // Safety: sender_out_ptr is a validated userspace buffer for usize.
                             unsafe {
                                 crate::syscall::userptr::copy_to_user(

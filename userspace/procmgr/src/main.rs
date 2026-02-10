@@ -173,12 +173,12 @@ impl ProcessManager {
         let mut buf = [0u8; 256];
         let (index, len, sender_tid) =
             match libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, u64::MAX) {
-            Ok(res) => res,
-            Err(err) => {
-                let _ = debug_print(&format!("TRACE: exit recv failed {:?}", err));
-                return Ok(());
-            }
-        };
+                Ok(res) => res,
+                Err(err) => {
+                    let _ = debug_print(&format!("TRACE: exit recv failed {:?}", err));
+                    return Ok(());
+                }
+            };
         if index == 2 {
             if let Some((msg, payload)) = parse_message(&buf[..len]) {
                 let _ = self.handle_registry_event(&msg, payload);
@@ -263,7 +263,12 @@ impl ProcessManager {
         self.handle_spawn_message(msg, payload, sender_tid)
     }
 
-    fn handle_spawn_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
+    fn handle_spawn_message(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
         let mut reply_msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 2);
         // Spawn must come via ipc_call; do not trust caller-routed reply endpoints.
         let reply_token = extract_reply_token(msg);

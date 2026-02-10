@@ -525,7 +525,7 @@ pub fn recv_to_user(
     buf_len: usize,
     page_table_root: x86_64::PhysAddr,
     receiver: ThreadId,
- ) -> Result<(usize, Option<ThreadId>), Error> {
+) -> Result<(usize, Option<ThreadId>), Error> {
     crate::syscall::userptr::validate_user_buffer(buf_ptr, buf_len)?;
     let received = match recv(endpoint, receiver) {
         Ok(Some(msg)) => msg,

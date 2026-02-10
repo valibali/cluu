@@ -10,7 +10,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use libcluu::boot::TOKEN_SPACE;
 use libcluu::fs::client::VfsClient;
-use libcluu::ipc::{call_with_payload, recv, send_with_payload, send_with_retry, TTY_WRITE_LABEL};
+use libcluu::ipc::{
+    call, call_with_payload, recv, send_with_payload, send_with_retry, TTY_WRITE_LABEL,
+};
 use libcluu::registry;
 use libcluu::syscall;
 use libcluu::types::Message;
@@ -19,6 +21,7 @@ use libcluu::{debug_print, process_info, Error, IpcFlags, Result, TOKEN_IPC};
 use cluu_lang::ast::{Assign, CmdElem, DqPart, Program, Stmt, Word, WordPart};
 
 const PROCMGR_SPAWN_LABEL: u32 = 2;
+const PROCMGR_KILL_LABEL: u32 = 3;
 const DEFAULT_PRIORITY: usize = 200;
 
 /// Execution result for a command handler.
@@ -169,6 +172,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(ExprBuiltin));
         registry.register(Box::new(LetBuiltin));
         registry.register(Box::new(SpawnBuiltin));
+        registry.register(Box::new(KillDenyBuiltin));
         registry.register(Box::new(MapFailBuiltin));
         registry.register(Box::new(MapCopyFailBuiltin));
         registry.register(Box::new(MapErrorBuiltin));
@@ -235,7 +239,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, mapfail, mapcpfail, maperror, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, mapfail, mapcpfail, maperror, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -578,6 +582,50 @@ impl BuiltinCommand for SpawnBuiltin {
 }
 
 struct MapFailBuiltin;
+
+struct KillDenyBuiltin;
+
+impl BuiltinCommand for KillDenyBuiltin {
+    fn name(&self) -> &'static str {
+        "killdeny"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let target_pid = args
+            .first()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(2);
+        let signal = args
+            .get(1)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(9);
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+
+        let mut msg = Message::new(PROCMGR_KILL_LABEL, [0; 6], 2);
+        msg.words[0] = target_pid;
+        msg.words[1] = signal;
+        call(procmgr_endpoint, &mut msg, IpcFlags::empty())?;
+
+        match parse_status(msg.words[0]) {
+            Err(Error::PermissionDenied) => {
+                let line = format!("killdeny: PASS permission denied pid={}\n", target_pid);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+            }
+            Ok(()) => {
+                let line = format!("killdeny: FAIL unexpected success pid={}\n", target_pid);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+            }
+            Err(err) => {
+                let line = format!("killdeny: FAIL wrong error {:?} pid={}\n", err, target_pid);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+            }
+        }
+        Ok(())
+    }
+}
 
 impl BuiltinCommand for MapFailBuiltin {
     fn name(&self) -> &'static str {

@@ -431,7 +431,10 @@ impl VfsServer {
         claimed_client: usize,
     ) -> Result<usize> {
         let Some(client_id) = caller_client else {
-            let _ = debug_print(&format!("vfs: {} denied missing authenticated sender", op_name));
+            let _ = debug_print(&format!(
+                "vfs: {} denied missing authenticated sender",
+                op_name
+            ));
             return Err(Error::PermissionDenied);
         };
         if claimed_client != 0 && claimed_client != client_id {

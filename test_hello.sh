@@ -22,13 +22,22 @@ TEST_COMMAND_REPEAT="${TEST_COMMAND_REPEAT:-1}"
 COMMAND_GAP="${COMMAND_GAP:-1}"
 KEY_DELAY="${KEY_DELAY:-0.05}"
 MARKER_MODE="${MARKER_MODE:-legacy_p1}"
+SHELL_AUTOSTART_CMD_DEFAULT=""
 if [ "$TEST_COMMAND" = "__AUTO__" ]; then
     case "$MARKER_MODE" in
         m3_mapfail) TEST_COMMAND="mapfail 12 4" ;;
         m3_mapcopyfail) TEST_COMMAND="mapcpfail 4" ;;
         m3_maperror) TEST_COMMAND="maperror 3" ;;
+        m4_deny_paths)
+            TEST_COMMAND=""
+            SHELL_AUTOSTART_CMD_DEFAULT="killdeny 2 9"
+            ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
+fi
+
+if [ -n "$SHELL_AUTOSTART_CMD_DEFAULT" ] && [ -z "${CLUU_SHELL_AUTOSTART_CMD+x}" ]; then
+    export CLUU_SHELL_AUTOSTART_CMD="$SHELL_AUTOSTART_CMD_DEFAULT"
 fi
 REQUIRED_MARKERS="${REQUIRED_MARKERS:-}"
 MIN_EXIT_COOKIES="${MIN_EXIT_COOKIES:-3}"
@@ -200,6 +209,7 @@ fi
 # - m4_sender_auth: authenticated sender binding in VFS (ignore caller-supplied client_id)
 # - m4_registry_sender_auth: authenticated sender binding in registry subscribe/register flows
 # - m4_notify_lifecycle: sender notify bindings are reclaimed after child lifecycle ends
+# - m4_deny_paths: explicit sender-auth denial path regressions (PermissionDenied flows)
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -292,6 +302,14 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "procmgr: cleared sender notify binding sender_tid="
+        )
+        ;;
+    m4_deny_paths)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "killdeny: PASS permission denied"
+            "procmgr: deny kill pid"
         )
         ;;
     none)
