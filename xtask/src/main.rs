@@ -643,7 +643,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
     }
 
     // Also add any C programs (built via cargo xtask build-c)
-    let c_programs = ["hello", "ownerprobe", "sleepy", "waitprobe"];
+    let c_programs = ["hello", "ownerprobe", "sleepy", "waitprobe", "mmapprobe"];
     for prog in &c_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = bin_dir.join(prog);
@@ -1016,6 +1016,7 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("ownerprobe", "userspace/c_hello/ownerprobe.c"),
         ("sleepy", "userspace/c_hello/sleepy.c"),
         ("waitprobe", "userspace/c_hello/waitprobe.c"),
+        ("mmapprobe", "userspace/c_hello/mmapprobe.c"),
     ];
 
     for (name, source) in c_programs {

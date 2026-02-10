@@ -92,6 +92,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="spawn waitprobe"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn waitprobe"
             ;;
+        l2_mmap)
+            TEST_COMMAND="spawn mmapprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -297,6 +301,7 @@ fi
 # - l2_jobchurn_heavy: higher-volume jobchurn loop for transition stability
 # - l2_jobmix: deterministic two-job stop/bg/fg-style interleaving stress
 # - l2_waitpid: libc wait queue + `WNOHANG` behavior via userspace probe
+# - l2_mmap: mmap/munmap reuse + strict mprotect region validation
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
 required_markers=()
@@ -527,6 +532,16 @@ case "$MARKER_MODE" in
             "waitprobe: PASS wnohang no-exit"
             "waitprobe: PASS waitpid queue+wnohang"
             "procmgr: exit cookie"
+        )
+        ;;
+    l2_mmap)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "mmapprobe: PASS basic map/write"
+            "mmapprobe: PASS mprotect exact"
+            "mmapprobe: PASS reuse hole"
+            "mmapprobe: PASS complete"
         )
         ;;
     none)
