@@ -1,7 +1,7 @@
 # CLUU Build System - Thin wrapper around xtask
 # For idiomatic Rust development, prefer: cargo xtask <command>
 
-.PHONY: all build run test clean userspace kernel help
+.PHONY: all build run test test-harness clean userspace kernel help
 
 all: build
 
@@ -16,6 +16,9 @@ run-debug:
 
 test:
 	cargo xtask test
+
+test-harness:
+	cargo xtask harness-matrix
 
 clean:
 	cargo xtask clean
@@ -34,6 +37,7 @@ help:
 	@echo "  make run         - Build and run in QEMU"
 	@echo "  make run-debug   - Build and run in QEMU with GDB + telnet serial"
 	@echo "  make test        - Run all tests"
+	@echo "  make test-harness - Run harness churn/leak/failpoint matrix"
 	@echo "  make clean       - Clean build artifacts"
 	@echo "  make userspace   - Build only userspace"
 	@echo "  make kernel      - Build only kernel"
@@ -46,6 +50,7 @@ help:
 	@echo "  cargo xtask run [--profile dev|release]"
 	@echo "  cargo xtask run --debug              # Debug mode with GDB"
 	@echo "  cargo xtask test"
+	@echo "  cargo xtask harness-matrix [--no-build]"
 	@echo "  cargo xtask clean"
 	@echo "  cargo xtask userspace [--profile dev|release]"
 	@echo "  cargo xtask kernel [--profile dev|release]"

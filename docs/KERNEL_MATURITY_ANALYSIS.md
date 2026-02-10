@@ -405,7 +405,7 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 | WP-M2.1 Token lifecycle structured audit stream | M2 | DONE (bounded ring + monotonic sequence + create/derive/revoke hooks + harness assertions) | `kernel/src/token/*`, `kernel/src/telemetry.rs`, `test_hello.sh` | `MARKER_MODE=m2_token_audit TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh` passes (full rebuild), `token_audit_dropped=0` |
 | WP-M2.2 Leak diagnostics and delta accounting | M2 | DONE (live resource counters + baseline delta logs + harness mode + optional delta thresholds) | `kernel/src/mm/*`, `kernel/src/sched/*`, `kernel/src/ipc/*`, `kernel/src/telemetry.rs`, `kernel/src/syscall/handlers.rs`, `test_hello.sh` | `MARKER_MODE=m2_leakdiag TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh` emits resource-delta samples during churn; optional `MAX_DELTA_*` env vars can enforce limits |
 | WP-M3.1 Mapping/copy failpoints + rollback checks | M3 | DONE (space_map rollback hardening + injectable map-range failpoint + harnessed shell self-test) | `kernel/src/syscall/handlers.rs`, `kernel/src/syscall/userptr.rs`, `userspace/shell/src/commands.rs`, `test_hello.sh` | `CLUU_SHELL_AUTOSTART_CMD='mapfail 12 4' MARKER_MODE=m3_mapfail TEST_COMMAND='' TEST_COMMAND_REPEAT=1 ./test_hello.sh` passes |
-| WP-M3.2 CI churn + leak detection harness | M3 | TODO | `xtask/`, `kernel-tests/`, QEMU runner scripts | CI hard-fails on leak/regression |
+| WP-M3.2 CI churn + leak detection harness | M3 | DONE (matrix script + xtask entrypoint + make target over harness marker modes) | `scripts/harness_matrix.sh`, `xtask/src/main.rs`, `Makefile`, `test_hello.sh` | `cargo xtask harness-matrix` (or `--no-build`) runs `m1_recv`/`m2_token_audit`/`m2_leakdiag`/`m3_mapfail` and hard-fails on regressions |
 | WP-M4.1 Sender identity/badge hardening | M4 | TODO | `kernel/src/ipc/*`, service contracts in `userspace/*` | services stop trusting caller-provided client IDs |
 | WP-M5.1 Fairness + latency SLO instrumentation | M5 | TODO | scheduler + IPC telemetry/harness modules | P95/P99 thresholds met under mixed load |
 | WP-L2.1 Mutable FS operations + DAC checks | L2A | TODO | `userspace/vfs`, `userspace/ramfs`, libc POSIX wrappers | `create/write/read/rename/unlink` + permission-deny tests pass |
@@ -414,8 +414,8 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 
 ### Next execution batch
 
-1. Implement WP-M3.2 CI churn + leak detection matrix using the harness marker modes.
-2. Add failpoint matrix coverage for copy-from-user and map-error branches in CI.
+1. Add failpoint matrix coverage for copy-from-user and map-error branches in CI.
+2. Add numeric leak thresholds to matrix runs (`MAX_DELTA_*`) once stable bounds are measured.
 3. Extend token audit with optional userspace-drain endpoint once leak counters land.
 
 ### Completion criteria by level

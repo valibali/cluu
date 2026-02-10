@@ -119,6 +119,12 @@ enum Commands {
     Sysroot,
     /// Setup complete C toolchain (newlib + syscalls + crt0)
     SetupC,
+    /// Run QEMU harness matrix for churn/leak/failpoint regressions
+    HarnessMatrix {
+        /// Reuse existing build artifacts for all matrix cases
+        #[arg(long)]
+        no_build: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -177,8 +183,30 @@ fn main() -> Result<()> {
         Commands::SetupC => {
             setup_c_toolchain()?;
         }
+        Commands::HarnessMatrix { no_build } => {
+            run_harness_matrix(no_build)?;
+        }
     }
 
+    Ok(())
+}
+
+fn run_harness_matrix(no_build: bool) -> Result<()> {
+    println!("▸ Running harness matrix...");
+    let script = project_root().join("scripts/harness_matrix.sh");
+    let mut cmd = Command::new("bash");
+    cmd.current_dir(project_root()).arg(script);
+    if no_build {
+        cmd.arg("--no-build");
+    }
+
+    let status = cmd
+        .status()
+        .context("Failed to run harness matrix script")?;
+    if !status.success() {
+        bail!("Harness matrix failed");
+    }
+    println!("  ✓ Harness matrix passed");
     Ok(())
 }
 
@@ -970,7 +998,9 @@ fn build_c_programs(profile: &str) -> Result<()> {
     // Check for newlib and build/install if needed
     let (newlib_lib, _) = newlib_paths(&sysroot);
     if !newlib_lib.exists() {
-        let newlib_src = project_root().join("external").join(format!("newlib-{}", "4.4.0.20231231"));
+        let newlib_src = project_root()
+            .join("external")
+            .join(format!("newlib-{}", "4.4.0.20231231"));
         if newlib_src.exists() {
             println!("▸ Installing newlib to sysroot (required for C programs)...");
             ensure_newlib_installed()?;
