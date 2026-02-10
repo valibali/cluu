@@ -7,9 +7,9 @@
 //! - /proc/cpuinfo: CPU information
 //! - /proc/self: Current process info (directory)
 
+use crate::mount::{DirEntry, VirtualEntry};
 use alloc::format;
 use alloc::vec::Vec;
-use crate::mount::{DirEntry, VirtualEntry};
 use libcluu::Result;
 
 /// Static procfs entries table.

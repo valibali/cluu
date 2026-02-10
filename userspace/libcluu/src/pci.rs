@@ -3,7 +3,7 @@
 //! Provides utilities for PCI configuration space access, device enumeration,
 //! and BAR (Base Address Register) management.
 
-use crate::{Result, syscall};
+use crate::{syscall, Result};
 
 /// PCI configuration space register offsets
 pub mod config {
@@ -177,7 +177,14 @@ pub fn enable_device(
     }
 
     let new_cmd_status = (command as u32) | (cmd_status & 0xFFFF_0000);
-    config_write_u32(pci_token, bus, device, function, config::COMMAND_STATUS, new_cmd_status)?;
+    config_write_u32(
+        pci_token,
+        bus,
+        device,
+        function,
+        config::COMMAND_STATUS,
+        new_cmd_status,
+    )?;
 
     Ok(())
 }

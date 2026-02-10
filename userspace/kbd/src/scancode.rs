@@ -5,8 +5,8 @@
 
 use crate::layout;
 use crate::protocol::{
-    MOD_ALT, MOD_CAPS, MOD_CTRL, MOD_NUM, MOD_SCROLL, MOD_SHIFT,
-    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END, KEY_DELETE,
+    KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_UP, MOD_ALT, MOD_CAPS,
+    MOD_CTRL, MOD_NUM, MOD_SCROLL, MOD_SHIFT,
 };
 
 /// Snapshot of current modifier state.

@@ -85,8 +85,7 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, _mode: mode_t) -> c_i
             let readable = (flags & O_WRONLY) == 0;
             let writable = (flags & (O_WRONLY | O_RDWR)) != 0;
 
-            let mut entry =
-                FdEntry::file(vfs_endpoint, vfs_file.fd, client_id, readable, writable);
+            let mut entry = FdEntry::file(vfs_endpoint, vfs_file.fd, client_id, readable, writable);
             entry.file_size = Some(vfs_file.size);
             if (flags & O_APPEND) != 0 {
                 entry.position = vfs_file.size as u64;
@@ -379,14 +378,7 @@ fn ensure_grant_buffer() -> Option<usize> {
     }
 
     let pages = (GRANT_BUF_SIZE + crate::mem::PAGE_SIZE - 1) / crate::mem::PAGE_SIZE;
-    match crate::syscall::space_map_range(
-        space_token,
-        GRANT_BUF_BASE,
-        0,
-        0x03,
-        pages,
-        0,
-    ) {
+    match crate::syscall::space_map_range(space_token, GRANT_BUF_BASE, 0, 0x03, pages, 0) {
         Ok(_) | Err(crate::Error::AlreadyExists) => {
             GRANT_BUF_READY.store(true, Ordering::SeqCst);
             Some(GRANT_BUF_BASE)
@@ -437,9 +429,8 @@ fn read_vfs(fd: c_int, entry: &FdEntry, buffer: &mut [u8]) -> ssize_t {
             break;
         }
 
-        let src = unsafe {
-            slice::from_raw_parts((grant.base + grant.offset) as *const u8, grant.len)
-        };
+        let src =
+            unsafe { slice::from_raw_parts((grant.base + grant.offset) as *const u8, grant.len) };
         let to_copy = src.len().min(buffer.len() - total);
         buffer[total..total + to_copy].copy_from_slice(&src[..to_copy]);
         total += to_copy;
@@ -485,7 +476,12 @@ fn write_vfs(fd: c_int, entry: &FdEntry, buffer: &[u8]) -> ssize_t {
         let mut table = FD_TABLE.lock();
         if let Some(current) = table.get_mut(fd) {
             current.position = current.position.saturating_add(written as u64);
-            current.file_size = Some(current.file_size.unwrap_or(0).max(current.position as usize));
+            current.file_size = Some(
+                current
+                    .file_size
+                    .unwrap_or(0)
+                    .max(current.position as usize),
+            );
         }
     }
 

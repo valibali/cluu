@@ -94,8 +94,7 @@ struct VirtioBlkReqHeader {
 
 /// Base address for virtqueue memory allocation
 const VIRTQUEUE_BASE: usize = 0x50000000;
-const DATA_BUFFER_OFFSET: usize =
-    0x10000 + core::mem::size_of::<VirtioBlkReqHeader>() + 8;
+const DATA_BUFFER_OFFSET: usize = 0x10000 + core::mem::size_of::<VirtioBlkReqHeader>() + 8;
 const DATA_BUFFER_MAX: usize = 64 * 1024;
 
 /// Virtio-blk device
@@ -363,7 +362,8 @@ impl VirtioBlkDevice {
             let phys = vq_phys_base + (i as u64) * 4096;
 
             // perms: RW + MAP_DEVICE; copy_len=0
-            if let Err(err) = space_map(self.space_token, virt, phys as usize, MAP_DEVICE | 0x03, 0) {
+            if let Err(err) = space_map(self.space_token, virt, phys as usize, MAP_DEVICE | 0x03, 0)
+            {
                 let _ = libcluu::debug_print(&alloc::format!(
                     "virtio-blk: space_map failed virt={:#x} phys={:#x} err={:?}",
                     virt,
@@ -626,7 +626,10 @@ impl VirtioBlkDevice {
 
             io_trace!(
                 "virtio-blk: I/O req sector={} header_phys={:#x} data_phys={:#x} status_phys={:#x}",
-                sector, header_phys, data_phys, status_phys
+                sector,
+                header_phys,
+                data_phys,
+                status_phys
             );
 
             // Copy header to device-accessible memory

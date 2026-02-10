@@ -284,7 +284,12 @@ pub extern "C" fn _kill_r(_r: *mut c_void, pid: pid_t, sig: c_int) -> c_int {
 }
 
 #[no_mangle]
-pub extern "C" fn _ioctl_r(_r: *mut c_void, fd: c_int, request: c_ulong, argp: *mut c_void) -> c_int {
+pub extern "C" fn _ioctl_r(
+    _r: *mut c_void,
+    fd: c_int,
+    request: c_ulong,
+    argp: *mut c_void,
+) -> c_int {
     termios::_ioctl(fd, request, argp)
 }
 

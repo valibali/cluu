@@ -186,7 +186,8 @@ impl<'a> Ext2Fs<'a> {
             // Indirect block
             let idx = block_idx - 12;
             self.read_indirect_block(inode.indirect_block, idx as usize)
-        } else if block_idx < 12 + ptrs_per_block as u32 + (ptrs_per_block * ptrs_per_block) as u32 {
+        } else if block_idx < 12 + ptrs_per_block as u32 + (ptrs_per_block * ptrs_per_block) as u32
+        {
             // Double indirect
             let idx = block_idx - 12 - ptrs_per_block as u32;
             let i1 = idx / ptrs_per_block as u32;

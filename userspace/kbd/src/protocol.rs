@@ -52,7 +52,14 @@ pub fn build_kbd_event(ascii: Option<u8>, scancode: u8, modifiers: u8, extended:
     let ascii_word = ascii.unwrap_or(0) as usize;
     Message::new(
         KBD_EVENT_LABEL,
-        [0, ascii_word, modifiers as usize, scancode as usize, extended as usize, 0],
+        [
+            0,
+            ascii_word,
+            modifiers as usize,
+            scancode as usize,
+            extended as usize,
+            0,
+        ],
         5,
     )
 }

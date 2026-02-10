@@ -55,7 +55,12 @@ use stack_string::StackString;
 ///
 /// Note: This is disabled when the `c-runtime` feature is enabled,
 /// as C programs use crt0.S for their entry point instead.
-#[cfg(all(not(feature = "std"), not(test), not(feature = "c-runtime"), target_os = "none"))]
+#[cfg(all(
+    not(feature = "std"),
+    not(test),
+    not(feature = "c-runtime"),
+    target_os = "none"
+))]
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
@@ -91,7 +96,12 @@ pub extern "C" fn _start() -> ! {
 ///
 /// Note: This is only active when building for the target (not during testing)
 /// and when not using the C runtime (which has its own simpler panic handler).
-#[cfg(all(not(feature = "std"), not(test), not(feature = "c-runtime"), target_os = "none"))]
+#[cfg(all(
+    not(feature = "std"),
+    not(test),
+    not(feature = "c-runtime"),
+    target_os = "none"
+))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let proc_info = crate::boot::process_info();
@@ -143,7 +153,12 @@ fn panic(info: &PanicInfo) -> ! {
 /// Simple panic handler for C runtime
 ///
 /// Used when building for C programs. Just halts the CPU.
-#[cfg(all(not(feature = "std"), not(test), feature = "c-runtime", target_os = "none"))]
+#[cfg(all(
+    not(feature = "std"),
+    not(test),
+    feature = "c-runtime",
+    target_os = "none"
+))]
 #[panic_handler]
 fn panic_c(_info: &PanicInfo) -> ! {
     // For C programs, just halt. The C program should use _exit() for clean shutdown.

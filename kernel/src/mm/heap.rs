@@ -88,7 +88,7 @@ unsafe impl GlobalAlloc for LoggingAllocator {
                 );
             }
             klibcluu::log_hex(klibcluu::LogLevel::Warn, "  Caller RIP: 0x", caller_rip);
-            
+
             // Dump a short stack trace to see the call chain
             klibcluu::warn("  Stack trace:");
             let mut rbp: u64;

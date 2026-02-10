@@ -5,9 +5,9 @@
 //! - Open/Closed: New filesystems can be added without modifying existing code
 //! - Liskov Substitution: Any Filesystem impl can be used interchangeably
 
+use crate::error::Result;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::error::Result;
 
 /// Block device trait for low-level storage access.
 ///

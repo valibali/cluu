@@ -132,10 +132,13 @@ impl BuddyAllocator {
         let old_head = self.free_lists[order].head;
 
         // Write header into the free page
-        self.write_header(frame, &FreePageHeader {
-            next: old_head,
-            prev: 0, // we are the new head
-        });
+        self.write_header(
+            frame,
+            &FreePageHeader {
+                next: old_head,
+                prev: 0, // we are the new head
+            },
+        );
 
         // Update old head's prev pointer
         if old_head != 0 {
@@ -355,11 +358,7 @@ impl BuddyAllocator {
         );
         for order in 0..MAX_ORDER {
             if self.free_lists[order].count > 0 {
-                klibcluu::log_dec(
-                    klibcluu::LogLevel::Trace,
-                    "  order ",
-                    order as u64,
-                );
+                klibcluu::log_dec(klibcluu::LogLevel::Trace, "  order ", order as u64);
                 klibcluu::log_dec(
                     klibcluu::LogLevel::Trace,
                     ": blocks=",

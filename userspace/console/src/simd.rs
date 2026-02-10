@@ -18,14 +18,14 @@ use core::arch::x86_64::*;
 pub unsafe fn fill_row_simd(dst: *mut u32, color: u32, len: usize) {
     // Broadcast the color to all 4 lanes of an SSE register
     let color_vec = _mm_set1_epi32(color as i32);
-    
+
     // Process 4 pixels at a time (16 bytes = 128 bits)
     let simd_count = len / 4;
     let mut i = 0;
-    
+
     // Check if destination is 16-byte aligned for optimal performance
     let aligned = (dst as usize) % 16 == 0;
-    
+
     if aligned {
         // Aligned writes: use aligned store for better performance
         while i < simd_count {
@@ -39,7 +39,7 @@ pub unsafe fn fill_row_simd(dst: *mut u32, color: u32, len: usize) {
             i += 1;
         }
     }
-    
+
     // Handle remaining pixels (tail)
     let tail_start = i * 4;
     for j in tail_start..len {
@@ -60,11 +60,11 @@ pub unsafe fn copy_row_simd(src: *const u32, dst: *mut u32, len: usize) {
     // Process 4 pixels at a time (16 bytes = 128 bits)
     let simd_count = len / 4;
     let mut i = 0;
-    
+
     // Check alignment for optimal performance
     let src_aligned = (src as usize) % 16 == 0;
     let dst_aligned = (dst as usize) % 16 == 0;
-    
+
     if src_aligned && dst_aligned {
         // Both aligned: use aligned loads/stores
         while i < simd_count {
@@ -80,7 +80,7 @@ pub unsafe fn copy_row_simd(src: *const u32, dst: *mut u32, len: usize) {
             i += 1;
         }
     }
-    
+
     // Handle remaining pixels (tail)
     let tail_start = i * 4;
     for j in tail_start..len {
@@ -101,11 +101,11 @@ pub unsafe fn write_row_simd(dst: *mut u32, colors: &[u32], len: usize) {
     // Process 4 pixels at a time
     let simd_count = len / 4;
     let mut i = 0;
-    
+
     // Check alignment
     let dst_aligned = (dst as usize) % 16 == 0;
     let src_aligned = (colors.as_ptr() as usize) % 16 == 0;
-    
+
     if src_aligned && dst_aligned {
         // Both aligned: use aligned loads/stores
         while i < simd_count {
@@ -121,7 +121,7 @@ pub unsafe fn write_row_simd(dst: *mut u32, colors: &[u32], len: usize) {
             i += 1;
         }
     }
-    
+
     // Handle remaining pixels (tail) - use volatile for device memory
     let tail_start = i * 4;
     for j in tail_start..len {

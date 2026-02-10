@@ -61,9 +61,10 @@ fn run() -> Result<()> {
                             // A process called read(0, buf, n) — enqueue the request
                             if let Some(reply_token) = extract_reply_token(&msg) {
                                 let max_bytes = msg.words[0];
-                                ctx.pending_reads.push_back(
-                                    context::PendingRead { reply_token, max_bytes },
-                                );
+                                ctx.pending_reads.push_back(context::PendingRead {
+                                    reply_token,
+                                    max_bytes,
+                                });
                                 ctx.try_satisfy_reads();
                             }
                         }
@@ -93,14 +94,10 @@ fn run() -> Result<()> {
                                     0 => {
                                         // getattr: reply with current mode flags
                                         let mode = &discipline.mode;
-                                        let lflag: usize =
-                                            (if mode.canonical { 0x02 } else { 0 }) |
-                                            (if mode.echo { 0x08 } else { 0 });
-                                        let reply_msg = Message::new(
-                                            TTY_CTL_LABEL,
-                                            [0, 0, 0, 0, lflag, 0],
-                                            5,
-                                        );
+                                        let lflag: usize = (if mode.canonical { 0x02 } else { 0 })
+                                            | (if mode.echo { 0x08 } else { 0 });
+                                        let reply_msg =
+                                            Message::new(TTY_CTL_LABEL, [0, 0, 0, 0, lflag, 0], 5);
                                         let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
                                     }
                                     1 => {
@@ -143,12 +140,12 @@ fn run() -> Result<()> {
 fn handle_key(ctx: &mut TtyContext, discipline: &mut LineDiscipline, ch: u8, extended: u8) {
     // Convert extended key codes to ANSI escape sequences before processing
     let bytes: &[u8] = match extended {
-        1 => b"\x1b[A", // KEY_UP
-        2 => b"\x1b[B", // KEY_DOWN
-        3 => b"\x1b[D", // KEY_LEFT  (D = left in ANSI)
-        4 => b"\x1b[C", // KEY_RIGHT (C = right in ANSI)
-        5 => b"\x1b[H", // KEY_HOME
-        6 => b"\x1b[F", // KEY_END
+        1 => b"\x1b[A",  // KEY_UP
+        2 => b"\x1b[B",  // KEY_DOWN
+        3 => b"\x1b[D",  // KEY_LEFT  (D = left in ANSI)
+        4 => b"\x1b[C",  // KEY_RIGHT (C = right in ANSI)
+        5 => b"\x1b[H",  // KEY_HOME
+        6 => b"\x1b[F",  // KEY_END
         7 => b"\x1b[3~", // KEY_DELETE
         _ => {
             // Normal ASCII byte

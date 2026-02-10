@@ -103,7 +103,8 @@ pub extern "C" fn _times(buf: *mut Tms) -> clock_t {
     const TICKS_PER_SEC: i64 = 100;
     match query_time(TIME_GETCLOCK) {
         Ok((sec, nsec)) => {
-            let ticks = (sec as i64 * TICKS_PER_SEC) + (nsec as i64 / (1_000_000_000 / TICKS_PER_SEC));
+            let ticks =
+                (sec as i64 * TICKS_PER_SEC) + (nsec as i64 / (1_000_000_000 / TICKS_PER_SEC));
             ticks as clock_t
         }
         Err(_) => 0,

@@ -5,7 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::fs::protocol::{
-    VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_OPEN, VFS_READ_GRANT, VFS_READDIR, VFS_STAT, VFS_WRITE,
+    VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT, VFS_STAT, VFS_WRITE,
 };
 use crate::ipc;
 use crate::types::Message;

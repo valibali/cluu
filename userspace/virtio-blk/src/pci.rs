@@ -248,5 +248,13 @@ fn parse_virtio_cap(pci_token: usize, dev: &mut PciDevice, cap_offset: u8) -> Re
 /// Enable bus mastering and memory/IO space access for a PCI device.
 pub fn enable_device(pci_token: usize, dev: &PciDevice) -> Result<()> {
     // Enable I/O space (for legacy I/O port devices), memory space (for MMIO), and bus mastering (for DMA)
-    pci::enable_device(pci_token, dev.bus, dev.device, dev.function, true, true, true)
+    pci::enable_device(
+        pci_token,
+        dev.bus,
+        dev.device,
+        dev.function,
+        true,
+        true,
+        true,
+    )
 }

@@ -241,7 +241,9 @@ impl ConsoleBackend for FramebufferBackend {
                     unsafe fn call_write(dst: *mut u32, colors: &[u32], len: usize) {
                         write_row_simd(dst, colors, len);
                     }
-                    unsafe { call_write(dst, colors, len); }
+                    unsafe {
+                        call_write(dst, colors, len);
+                    }
                 } else {
                     // Fallback for small writes or non-x86_64
                     for i in 0..len {
@@ -286,7 +288,9 @@ impl ConsoleBackend for FramebufferBackend {
                 unsafe fn call_fill(dst: *mut u32, color: u32, len: usize) {
                     fill_row_simd(dst, color, len);
                 }
-                unsafe { call_fill(first_row, color, max_w); }
+                unsafe {
+                    call_fill(first_row, color, max_w);
+                }
             } else {
                 for i in 0..max_w {
                     first_row.add(i).write_volatile(color);
@@ -311,7 +315,9 @@ impl ConsoleBackend for FramebufferBackend {
                     }
                     for row in 1..max_h {
                         let dst = self.fb.add((y + row) * self.pitch + x * 4) as *mut u32;
-                        unsafe { call_copy(first_row, dst, max_w); }
+                        unsafe {
+                            call_copy(first_row, dst, max_w);
+                        }
                     }
                 } else {
                     for row in 1..max_h {
@@ -337,7 +343,9 @@ impl ConsoleBackend for FramebufferBackend {
                     }
                     for row in 1..max_h {
                         let dst = self.fb.add((y + row) * self.pitch + x * 4) as *mut u32;
-                        unsafe { call_fill(dst, color, max_w); }
+                        unsafe {
+                            call_fill(dst, color, max_w);
+                        }
                     }
                 } else {
                     for row in 1..max_h {
@@ -364,7 +372,7 @@ impl ConsoleBackend for FramebufferBackend {
     /// Optimized rectangle copy: copies a rectangular region using memory operations.
     /// Uses SIMD (SSE2) when available for 4x speedup.
     /// This is much faster than redrawing for scrolling operations.
-    /// 
+    ///
     /// Handles overlapping regions correctly by copying backwards when src_y > dst_y.
     fn copy_rect(
         &mut self,
@@ -393,9 +401,7 @@ impl ConsoleBackend for FramebufferBackend {
             // Two ranges [a, a+len) and [b, b+len) overlap if: a < b+len && b < a+len
             // We need to copy backwards if src_y > dst_y AND the regions actually overlap
             // For scrolling: src_y=GLYPH_H, dst_y=0, they don't overlap, so copy forwards
-            let regions_overlap = src_x == dst_x 
-                && src_y < dst_y + max_h 
-                && dst_y < src_y + max_h;
+            let regions_overlap = src_x == dst_x && src_y < dst_y + max_h && dst_y < src_y + max_h;
             let copy_backwards = regions_overlap && src_y > dst_y;
 
             #[cfg(target_arch = "x86_64")]
@@ -504,9 +510,14 @@ impl DoubleBufferBackend {
     ///
     /// Allocates a backbuffer on the heap and initializes it to black.
     /// Returns None if allocation fails (heap too small).
-    pub fn try_new(frontbuffer: *mut u8, width: usize, height: usize, pitch: usize) -> Option<Self> {
+    pub fn try_new(
+        frontbuffer: *mut u8,
+        width: usize,
+        height: usize,
+        pitch: usize,
+    ) -> Option<Self> {
         let size = width * height;
-        
+
         // Try to allocate backbuffer - may fail if heap is too small
         let mut backbuffer = Vec::new();
         if backbuffer.try_reserve_exact(size).is_err() {
@@ -684,8 +695,7 @@ impl ConsoleBackend for DoubleBufferBackend {
         }
 
         // Determine copy direction to handle overlapping regions
-        let regions_overlap =
-            src_x == dst_x && src_y < dst_y + max_h && dst_y < src_y + max_h;
+        let regions_overlap = src_x == dst_x && src_y < dst_y + max_h && dst_y < src_y + max_h;
         let copy_backwards = regions_overlap && src_y > dst_y;
 
         if copy_backwards {

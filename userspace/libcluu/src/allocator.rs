@@ -175,15 +175,8 @@ mod inner {
             let space_token = crate::boot::space_token();
             if space_token != 0 {
                 let pages = INITIAL_HEAP_SIZE / PAGE_SIZE;
-                if crate::syscall::space_map_range(
-                    space_token,
-                    USER_HEAP_START,
-                    0,
-                    0x03,
-                    pages,
-                    0,
-                )
-                .is_ok()
+                if crate::syscall::space_map_range(space_token, USER_HEAP_START, 0, 0x03, pages, 0)
+                    .is_ok()
                 {
                     self.heap_start = USER_HEAP_START;
                     self.heap_end = USER_HEAP_START + INITIAL_HEAP_SIZE;
@@ -266,14 +259,7 @@ mod inner {
             pages: usize,
             size: usize,
         ) -> bool {
-            match crate::syscall::space_map_range(
-                space_token,
-                map_start,
-                0,
-                0x03,
-                pages,
-                0,
-            ) {
+            match crate::syscall::space_map_range(space_token, map_start, 0, 0x03, pages, 0) {
                 Ok(_) => {
                     unsafe {
                         self.add_free_region(map_start, size);

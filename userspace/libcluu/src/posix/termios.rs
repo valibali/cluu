@@ -4,7 +4,7 @@
 //! to the TTY service endpoint.
 
 use super::{c_int, c_ulong, c_void};
-use crate::errno::{set_errno, EBADF, EINVAL, ENOTTY, ENOSYS};
+use crate::errno::{set_errno, EBADF, EINVAL, ENOSYS, ENOTTY};
 use crate::ipc::TTY_CTL_LABEL;
 use crate::posix::file::get_tty_endpoint;
 use crate::types::Message;
@@ -71,8 +71,7 @@ pub extern "C" fn tcgetattr(_fd: c_int, termios_p: *mut Termios) -> c_int {
                 set_errno(ENOSYS);
                 return -1;
             }
-            let reply_msg =
-                unsafe { (reply_buf.as_ptr() as *const Message).read_unaligned() };
+            let reply_msg = unsafe { (reply_buf.as_ptr() as *const Message).read_unaligned() };
             let lflag = reply_msg.words[4] as tcflag_t;
 
             let t = unsafe { &mut *termios_p };

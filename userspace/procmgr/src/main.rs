@@ -281,7 +281,11 @@ impl ProcessManager {
 
         // Extract argv data: payload is [path\0, argv[0]\0, argv[1]\0, ...]
         // Skip past the path string (including its NUL terminator)
-        let path_nul_end = payload.iter().position(|b| *b == 0).unwrap_or(payload.len()) + 1;
+        let path_nul_end = payload
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(payload.len())
+            + 1;
         let argv_data = if argc > 0 && path_nul_end < payload.len() {
             &payload[path_nul_end..]
         } else {
@@ -325,7 +329,13 @@ impl ProcessManager {
         pid
     }
 
-    fn spawn_service(&mut self, path: &str, priority: usize, argv_payload: &[u8], argc: usize) -> Result<(usize, usize, usize)> {
+    fn spawn_service(
+        &mut self,
+        path: &str,
+        priority: usize,
+        argv_payload: &[u8],
+        argc: usize,
+    ) -> Result<(usize, usize, usize)> {
         debug_print("Creating address space...")?;
         let space_token = space_create(self.token)?;
         debug_print(&format!("Address space created: {}", space_token))?;
@@ -848,12 +858,8 @@ fn map_process_info_page(
     };
 
     let mut page = [0u8; PAGE_SIZE];
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            &info as *const ProcessInfo as *const u8,
-            info_size,
-        )
-    };
+    let bytes =
+        unsafe { core::slice::from_raw_parts(&info as *const ProcessInfo as *const u8, info_size) };
     let end = info_offset + bytes.len();
     if end > PAGE_SIZE {
         return Err(Error::InvalidArgument);

@@ -10,5 +10,5 @@ pub mod protocol;
 pub mod traits;
 
 pub use client::{VfsClient, VfsDirEntry, VfsFile, VfsGrant};
-pub use protocol::{VfsOp, VFS_CLOSE, VFS_MAP_ELF, VFS_OPEN, VFS_READ_GRANT, VFS_READDIR};
+pub use protocol::{VfsOp, VFS_CLOSE, VFS_MAP_ELF, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT};
 pub use traits::{BlockDevice, DirEntry, FileStat, Filesystem};

@@ -277,11 +277,7 @@ fn handle_fs_request(
                         return;
                     }
 
-                    let reply_msg = Message::new(
-                        FS_READ_GRANT,
-                        [0, bytes_read, 0, 0, 0, 0],
-                        3,
-                    );
+                    let reply_msg = Message::new(FS_READ_GRANT, [0, bytes_read, 0, 0, 0, 0], 3);
                     if let Some(token) = reply_token {
                         let _ = reply(token, &reply_msg, IpcFlags::empty());
                     }
@@ -411,7 +407,9 @@ fn parse_usize_pair(payload: &[u8]) -> Option<(usize, usize)> {
     let mut bytes = [0u8; core::mem::size_of::<usize>()];
     bytes.copy_from_slice(&payload[..core::mem::size_of::<usize>()]);
     let first = usize::from_ne_bytes(bytes);
-    bytes.copy_from_slice(&payload[core::mem::size_of::<usize>()..core::mem::size_of::<usize>() * 2]);
+    bytes.copy_from_slice(
+        &payload[core::mem::size_of::<usize>()..core::mem::size_of::<usize>() * 2],
+    );
     let second = usize::from_ne_bytes(bytes);
     Some((first, second))
 }

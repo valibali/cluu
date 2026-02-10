@@ -64,5 +64,7 @@ pub use process_manager::ProcessManager;
 pub use repository::ThreadRepository;
 pub use scheduler::{PriorityBitmapScheduler, SchedulingPolicy};
 pub use spawn::{spawn_elf_process, spawn_kernel_process};
-pub use thread::{CallReplyInfo, FaultState, FaultType, Priority, Thread, ThreadFlags, ThreadId, ThreadState};
+pub use thread::{
+    CallReplyInfo, FaultState, FaultType, Priority, Thread, ThreadFlags, ThreadId, ThreadState,
+};
 pub use thread_manager::{FaultReplyInfo, SchedulerMode, ThreadManager};

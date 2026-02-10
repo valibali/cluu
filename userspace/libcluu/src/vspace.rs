@@ -19,9 +19,9 @@
 //! VSPACE.lock().free(addr, size);
 //! ```
 
+use crate::{Error, Result};
 use alloc::collections::BTreeMap;
 use spin::Mutex;
-use crate::{Error, Result};
 
 /// Page size constant (4KB)
 pub const PAGE_SIZE: usize = 4096;

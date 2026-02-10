@@ -365,7 +365,8 @@ fn verify_boot_manifest(initrd: &[u8], init_elf: &[u8]) -> Result<(), Error> {
         klibcluu::error("Boot manifest missing signature field");
         Error::InvalidArgument
     })?)?;
-    let actual_signature = klibcluu::crypto::hmac_sha256_fixed(&BOOT_MANIFEST_HMAC_KEY, canonical.as_bytes());
+    let actual_signature =
+        klibcluu::crypto::hmac_sha256_fixed(&BOOT_MANIFEST_HMAC_KEY, canonical.as_bytes());
     if actual_signature != expected_signature {
         klibcluu::error("Boot manifest signature verification failed");
         return Err(Error::InvalidArgument);

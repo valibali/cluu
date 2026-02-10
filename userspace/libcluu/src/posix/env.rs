@@ -18,11 +18,7 @@ pub extern "C" fn getenv(_name: *const c_char) -> *mut c_char {
 ///
 /// Currently a no-op stub that reports success.
 #[no_mangle]
-pub extern "C" fn setenv(
-    _name: *const c_char,
-    _value: *const c_char,
-    _overwrite: c_int,
-) -> c_int {
+pub extern "C" fn setenv(_name: *const c_char, _value: *const c_char, _overwrite: c_int) -> c_int {
     0
 }
 

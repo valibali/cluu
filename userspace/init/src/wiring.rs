@@ -6,10 +6,23 @@
 
 use alloc::format;
 use libcluu::boot::{
-    CONSOLE_FB_BASE, PARAM_CONSOLE_INSTANCE, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH,
-    PARAM_FB_SIZE, PARAM_FB_WIDTH, PARAM_INITRD_SIZE, PARAM_TTY_INSTANCE,
+    CONSOLE_FB_BASE,
+    PARAM_CONSOLE_INSTANCE,
+    PARAM_FB_BASE,
+    PARAM_FB_HEIGHT,
+    PARAM_FB_PITCH,
+    PARAM_FB_SIZE,
+    PARAM_FB_WIDTH,
+    PARAM_INITRD_SIZE,
+    PARAM_TTY_INSTANCE,
     // New token slot constants
-    TOKEN_CLOCK, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_IPC, TOKEN_REGISTRY, TOKEN_SELF, TOKEN_SPACE,
+    TOKEN_CLOCK,
+    TOKEN_EXTRA_0,
+    TOKEN_EXTRA_1,
+    TOKEN_IPC,
+    TOKEN_REGISTRY,
+    TOKEN_SELF,
+    TOKEN_SPACE,
 };
 use libcluu::boot_manifest::BootManifest;
 use libcluu::elf::ElfFile;
@@ -143,7 +156,10 @@ impl ServiceWiring for ServiceKind {
             ServiceKind::Vfs => {
                 map_initrd(space_token, ctx.initrd, params[PARAM_INITRD_SIZE] as usize)
             }
-            ServiceKind::Registry | ServiceKind::Kbd | ServiceKind::Tty | ServiceKind::VirtioBlk => Ok(()),
+            ServiceKind::Registry
+            | ServiceKind::Kbd
+            | ServiceKind::Tty
+            | ServiceKind::VirtioBlk => Ok(()),
             ServiceKind::Timeserver => Ok(()),
         }
     }
@@ -252,7 +268,10 @@ fn enforce_manifest_policy(
     }
 
     // In current model, services without explicit derived rights inherit root authority.
-    let expected_rights_mask = service.rights.map(|r| r.bits()).unwrap_or(Rights::all().bits());
+    let expected_rights_mask = service
+        .rights
+        .map(|r| r.bits())
+        .unwrap_or(Rights::all().bits());
     if entry.rights_mask != expected_rights_mask {
         debug_print(&format!(
             "init: manifest rights mismatch for {}",

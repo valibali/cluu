@@ -34,8 +34,8 @@ pub use libcluu::allocator;
 // ============================================================================
 
 pub use libcluu::posix::_close;
-pub use libcluu::posix::_lseek;
 pub use libcluu::posix::_link;
+pub use libcluu::posix::_lseek;
 pub use libcluu::posix::_open;
 pub use libcluu::posix::_read;
 pub use libcluu::posix::_unlink;

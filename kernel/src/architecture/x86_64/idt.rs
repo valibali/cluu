@@ -344,7 +344,11 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     // Decode error code
     let selector_index = (error_code >> 3) & 0x1FFF;
     if selector_index != 0 {
-        klibcluu::log_hex(klibcluu::LogLevel::Warn, "GPF: Selector index=", selector_index);
+        klibcluu::log_hex(
+            klibcluu::LogLevel::Warn,
+            "GPF: Selector index=",
+            selector_index,
+        );
     }
 
     let table = (error_code >> 1) & 0x3;
@@ -392,27 +396,63 @@ struct GpfDebugFrame {
 
 /// Convert GpfDebugFrame to a Context (for saving faulted thread state)
 fn gpf_frame_to_context(f: &GpfDebugFrame) -> Context {
-    let cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    let cr3 = x86_64::registers::control::Cr3::read()
+        .0
+        .start_address()
+        .as_u64();
     Context {
-        rax: f.rax, rbx: f.rbx, rcx: f.rcx, rdx: f.rdx,
-        rsi: f.rsi, rdi: f.rdi, r8: f.r8, r9: f.r9,
-        r10: f.r10, r11: f.r11, r12: f.r12, r13: f.r13,
-        r14: f.r14, r15: f.r15, rbp: f.rbp,
-        rsp: f.rsp, rip: f.rip, rflags: f.rflags,
-        cs: f.cs, ss: f.ss, cr3,
+        rax: f.rax,
+        rbx: f.rbx,
+        rcx: f.rcx,
+        rdx: f.rdx,
+        rsi: f.rsi,
+        rdi: f.rdi,
+        r8: f.r8,
+        r9: f.r9,
+        r10: f.r10,
+        r11: f.r11,
+        r12: f.r12,
+        r13: f.r13,
+        r14: f.r14,
+        r15: f.r15,
+        rbp: f.rbp,
+        rsp: f.rsp,
+        rip: f.rip,
+        rflags: f.rflags,
+        cs: f.cs,
+        ss: f.ss,
+        cr3,
     }
 }
 
 /// Convert PfDebugFrame to a Context (for saving faulted thread state)
 fn pf_frame_to_context(f: &PfDebugFrame) -> Context {
-    let cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    let cr3 = x86_64::registers::control::Cr3::read()
+        .0
+        .start_address()
+        .as_u64();
     Context {
-        rax: f.rax, rbx: f.rbx, rcx: f.rcx, rdx: f.rdx,
-        rsi: f.rsi, rdi: f.rdi, r8: f.r8, r9: f.r9,
-        r10: f.r10, r11: f.r11, r12: f.r12, r13: f.r13,
-        r14: f.r14, r15: f.r15, rbp: f.rbp,
-        rsp: f.rsp, rip: f.rip, rflags: f.rflags,
-        cs: f.cs, ss: f.ss, cr3,
+        rax: f.rax,
+        rbx: f.rbx,
+        rcx: f.rcx,
+        rdx: f.rdx,
+        rsi: f.rsi,
+        rdi: f.rdi,
+        r8: f.r8,
+        r9: f.r9,
+        r10: f.r10,
+        r11: f.r11,
+        r12: f.r12,
+        r13: f.r13,
+        r14: f.r14,
+        r15: f.r15,
+        rbp: f.rbp,
+        rsp: f.rsp,
+        rip: f.rip,
+        rflags: f.rflags,
+        cs: f.cs,
+        ss: f.ss,
+        cr3,
     }
 }
 
@@ -485,9 +525,12 @@ fn try_forward_fault(
     }
 
     // Store fault reply info and save fault state on thread
-    ThreadManager::set_fault_reply_info(reply_id, FaultReplyInfo {
-        faulted_thread: current_id,
-    });
+    ThreadManager::set_fault_reply_info(
+        reply_id,
+        FaultReplyInfo {
+            faulted_thread: current_id,
+        },
+    );
 
     ThreadManager::with_thread_mut(current_id, |t| {
         t.fault_state = Some(FaultState {
@@ -568,8 +611,8 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
-    use x86_64::registers::control::Cr2;
     use klibcluu::uart::COM2;
+    use x86_64::registers::control::Cr2;
 
     #[inline(always)]
     fn uart_hex(prefix: &str, value: u64) {

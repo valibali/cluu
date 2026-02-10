@@ -353,10 +353,22 @@ impl<B: ConsoleBackend> Console<B> {
                         self.cursor_y -= 1;
                         self.cursor_x = self.cols.saturating_sub(1);
                     }
-                    self.set_cell(self.cursor_x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                    self.set_cell(
+                        self.cursor_x,
+                        self.cursor_y,
+                        b' ',
+                        self.current_fg,
+                        self.current_bg,
+                    );
                 }
                 _ => {
-                    self.set_cell(self.cursor_x, self.cursor_y, ch, self.current_fg, self.current_bg);
+                    self.set_cell(
+                        self.cursor_x,
+                        self.cursor_y,
+                        ch,
+                        self.current_fg,
+                        self.current_bg,
+                    );
                     self.cursor_x += 1;
                     if self.cursor_x >= self.cols {
                         self.newline();
@@ -379,7 +391,8 @@ impl<B: ConsoleBackend> Console<B> {
             EscState::Csi => {
                 if ch.is_ascii_digit() {
                     // Accumulate parameter digit
-                    self.esc_current_param = self.esc_current_param
+                    self.esc_current_param = self
+                        .esc_current_param
                         .saturating_mul(10)
                         .saturating_add((ch - b'0') as u16);
                 } else if ch == b';' {
@@ -424,8 +437,16 @@ impl<B: ConsoleBackend> Console<B> {
     /// - J (ED):  erase display (2J = clear screen)
     /// - K (EL):  erase in line (0K = cursor to end)
     fn dispatch_csi(&mut self, cmd: u8) {
-        let p0 = if self.esc_param_count > 0 { self.esc_params[0] } else { 0 };
-        let p1 = if self.esc_param_count > 1 { self.esc_params[1] } else { 0 };
+        let p0 = if self.esc_param_count > 0 {
+            self.esc_params[0]
+        } else {
+            0
+        };
+        let p1 = if self.esc_param_count > 1 {
+            self.esc_params[1]
+        } else {
+            0
+        };
 
         match cmd {
             b'A' => {
@@ -561,7 +582,6 @@ impl<B: ConsoleBackend> Console<B> {
             let (fg, bg) = self.get_cell_colors(x, y);
             self.draw_glyph(x, y, ch, fg, bg);
         }
-
     }
 
     /// Update the cursor overlay by repainting the old and current cells.
@@ -790,19 +810,19 @@ fn unicode_to_cp437(cp: u32) -> u8 {
         0x2568 => 0xD0, // ╨ (approx)
 
         // Greek letters
-        0x0391 | 0x03B1 => 0xE0, // Α/α → α
+        0x0391 | 0x03B1 => 0xE0,          // Α/α → α
         0x0392 | 0x03B2 | 0x00DF => 0xE1, // Β/β/ß → ß
-        0x0393 => 0xE2, // Γ
-        0x03C0 => 0xE3, // π
-        0x03A3 => 0xE4, // Σ
-        0x03C3 => 0xE5, // σ
-        0x03BC | 0x00B5 => 0xE6, // μ/µ
-        0x03C4 => 0xE7, // τ
-        0x03A6 | 0x03C6 => 0xE8, // Φ/φ
-        0x0398 | 0x03B8 => 0xE9, // Θ/θ
-        0x03A9 | 0x03C9 => 0xEA, // Ω/ω
-        0x03B4 => 0xEB, // δ
-        0x03B5 => 0xEE, // ε
+        0x0393 => 0xE2,                   // Γ
+        0x03C0 => 0xE3,                   // π
+        0x03A3 => 0xE4,                   // Σ
+        0x03C3 => 0xE5,                   // σ
+        0x03BC | 0x00B5 => 0xE6,          // μ/µ
+        0x03C4 => 0xE7,                   // τ
+        0x03A6 | 0x03C6 => 0xE8,          // Φ/φ
+        0x0398 | 0x03B8 => 0xE9,          // Θ/θ
+        0x03A9 | 0x03C9 => 0xEA,          // Ω/ω
+        0x03B4 => 0xEB,                   // δ
+        0x03B5 => 0xEE,                   // ε
 
         // Math symbols
         0x221E => 0xEC, // ∞

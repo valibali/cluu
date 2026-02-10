@@ -4,8 +4,8 @@
 //! parser wiring, following SOLID separation between parsing, dispatch, and IO.
 
 use alloc::boxed::Box;
-use alloc::format;
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use libcluu::boot::TOKEN_SPACE;
@@ -14,7 +14,7 @@ use libcluu::ipc::{call_with_payload, recv, send_with_payload, send_with_retry, 
 use libcluu::registry;
 use libcluu::syscall;
 use libcluu::types::Message;
-use libcluu::{debug_print, process_info, Error, Result, IpcFlags, TOKEN_IPC};
+use libcluu::{debug_print, process_info, Error, IpcFlags, Result, TOKEN_IPC};
 
 use cluu_lang::ast::{Assign, CmdElem, DqPart, Program, Stmt, Word, WordPart};
 
@@ -170,6 +170,8 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(LetBuiltin));
         registry.register(Box::new(SpawnBuiltin));
         registry.register(Box::new(MapFailBuiltin));
+        registry.register(Box::new(MapCopyFailBuiltin));
+        registry.register(Box::new(MapErrorBuiltin));
         registry.register(Box::new(CatBuiltin));
         registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(HeapBuiltin));
@@ -233,7 +235,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, mapfail, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, mapfail, mapcpfail, maperror, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -370,11 +372,7 @@ impl BuiltinRegistry {
             match self.run_builtin(stdout, context, command_name, rest)? {
                 ExecResult::Handled => {}
                 ExecResult::NotHandled => {
-                    send_with_payload(
-                        stdout,
-                        TTY_WRITE_LABEL,
-                        b"repeat: unknown command\n",
-                    )?;
+                    send_with_payload(stdout, TTY_WRITE_LABEL, b"repeat: unknown command\n")?;
                     break;
                 }
             }
@@ -636,7 +634,8 @@ impl BuiltinCommand for MapFailBuiltin {
 
         // Verify rollback by remapping the exact same range without failpoint:
         // if rollback is correct, this should map all requested pages.
-        let verify_result = syscall::space_map_range(space_token, TEST_BASE, 0, 0x03, total_pages, 0);
+        let verify_result =
+            syscall::space_map_range(space_token, TEST_BASE, 0, 0x03, total_pages, 0);
         match verify_result {
             Ok(mapped) if mapped == total_pages => {}
             Ok(mapped) => {
@@ -665,6 +664,184 @@ impl BuiltinCommand for MapFailBuiltin {
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         let _ = debug_print(line.trim_end());
         let _ = syscall::space_unmap(space_token, TEST_BASE, total_pages);
+        Ok(())
+    }
+}
+
+struct MapCopyFailBuiltin;
+
+impl BuiltinCommand for MapCopyFailBuiltin {
+    fn name(&self) -> &'static str {
+        "mapcpfail"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
+        const SOURCE_BASE: usize = 0x7100_0000;
+        const TARGET_BASE: usize = 0x7110_0000;
+        const SOURCE_PAGES: usize = 2;
+        const PAGE_SIZE: usize = 4096;
+
+        let total_pages = args
+            .first()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(4);
+        if total_pages < 2 {
+            let line = "mapcpfail: FAIL total_pages must be >= 2\n";
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print("mapcpfail: FAIL total_pages must be >= 2");
+            return Ok(());
+        }
+
+        let space_token = process_info().tokens[TOKEN_SPACE];
+        let _ = syscall::space_unmap(space_token, SOURCE_BASE, SOURCE_PAGES);
+        let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+
+        if let Err(err) = syscall::space_map_range(space_token, SOURCE_BASE, 0, 0x03, 1, 0) {
+            let line = format!("mapcpfail: FAIL source map error {:?}\n", err);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print(line.trim_end());
+            let _ = syscall::space_unmap(space_token, SOURCE_BASE, SOURCE_PAGES);
+            return Ok(());
+        }
+
+        let result = syscall::space_map_range(
+            space_token,
+            TARGET_BASE,
+            SOURCE_BASE,
+            0x03,
+            total_pages,
+            PAGE_SIZE * 2,
+        );
+        match result {
+            Err(Error::InvalidAddress) => {}
+            Ok(pages) => {
+                let line = format!("mapcpfail: FAIL unexpected success pages={}\n", pages);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, SOURCE_BASE, SOURCE_PAGES);
+                let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+                return Ok(());
+            }
+            Err(err) => {
+                let line = format!("mapcpfail: FAIL wrong error {:?}\n", err);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, SOURCE_BASE, SOURCE_PAGES);
+                let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+                return Ok(());
+            }
+        }
+
+        let verify_result =
+            syscall::space_map_range(space_token, TARGET_BASE, 0, 0x03, total_pages, 0);
+        match verify_result {
+            Ok(mapped) if mapped == total_pages => {}
+            Ok(mapped) => {
+                let line = format!(
+                    "mapcpfail: FAIL rollback remap short mapped_pages={}\n",
+                    mapped
+                );
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, SOURCE_BASE, SOURCE_PAGES);
+                let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+                return Ok(());
+            }
+            Err(err) => {
+                let line = format!("mapcpfail: FAIL rollback remap error {:?}\n", err);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, SOURCE_BASE, SOURCE_PAGES);
+                let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+                return Ok(());
+            }
+        }
+
+        let line = format!("mapcpfail: PASS total_pages={}\n", total_pages);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        let _ = debug_print(line.trim_end());
+        let _ = syscall::space_unmap(space_token, SOURCE_BASE, SOURCE_PAGES);
+        let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+        Ok(())
+    }
+}
+
+struct MapErrorBuiltin;
+
+impl BuiltinCommand for MapErrorBuiltin {
+    fn name(&self) -> &'static str {
+        "maperror"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
+        const TARGET_BASE: usize = 0x6E00_0000;
+        const MAP_TEST_FAILPOINT: usize = 0x8000_0000;
+        const MAP_TEST_FAIL_ON_MAP_STAGE: usize = 0x4000_0000;
+        const MAP_TEST_FAIL_AFTER_SHIFT: usize = 16;
+        const MAP_TEST_FAIL_AFTER_MASK: usize = 0xFF;
+
+        let total_pages = args
+            .first()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(3);
+        if total_pages < 2 {
+            let line = "maperror: FAIL total_pages must be >= 2\n";
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print("maperror: FAIL total_pages must be >= 2");
+            return Ok(());
+        }
+
+        let space_token = process_info().tokens[TOKEN_SPACE];
+        let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+        let fail_after = 1usize.min(total_pages - 1);
+        let fail_bits = (fail_after & MAP_TEST_FAIL_AFTER_MASK) << MAP_TEST_FAIL_AFTER_SHIFT;
+        let flags = 0x03 | MAP_TEST_FAILPOINT | MAP_TEST_FAIL_ON_MAP_STAGE | fail_bits;
+        let result = syscall::space_map_range(space_token, TARGET_BASE, 0, flags, total_pages, 0);
+        match result {
+            Err(Error::OutOfMemory) => {}
+            Ok(pages) => {
+                let line = format!("maperror: FAIL unexpected success pages={}\n", pages);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+                return Ok(());
+            }
+            Err(err) => {
+                let line = format!("maperror: FAIL wrong error {:?}\n", err);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+                return Ok(());
+            }
+        }
+
+        let verify_result =
+            syscall::space_map_range(space_token, TARGET_BASE, 0, 0x03, total_pages, 0);
+        match verify_result {
+            Ok(mapped) if mapped == total_pages => {}
+            Ok(mapped) => {
+                let line = format!(
+                    "maperror: FAIL rollback remap short mapped_pages={}\n",
+                    mapped
+                );
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+                return Ok(());
+            }
+            Err(err) => {
+                let line = format!("maperror: FAIL rollback remap error {:?}\n", err);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+                return Ok(());
+            }
+        }
+
+        let line = format!("maperror: PASS total_pages={}\n", total_pages);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        let _ = debug_print(line.trim_end());
+        let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
         Ok(())
     }
 }
@@ -710,12 +887,7 @@ fn parse_status(raw: usize) -> Result<()> {
     Ok(())
 }
 
-fn div_op(
-    stdout: usize,
-    context: &mut CommandContext,
-    lhs: &str,
-    rhs: &str,
-) -> Result<()> {
+fn div_op(stdout: usize, context: &mut CommandContext, lhs: &str, rhs: &str) -> Result<()> {
     let Some(a) = parse_value(context, lhs) else {
         send_with_payload(stdout, TTY_WRITE_LABEL, b"div: invalid lhs\n")?;
         return Ok(());
@@ -747,9 +919,7 @@ fn parse_value(context: &CommandContext, token: &str) -> Option<i64> {
     if let Ok(value) = token.parse::<i64>() {
         return Some(value);
     }
-    context
-        .get(token)
-        .and_then(|val| val.parse::<i64>().ok())
+    context.get(token).and_then(|val| val.parse::<i64>().ok())
 }
 
 fn parse_expr_tokens(args: &[String]) -> Option<(String, String, String)> {
@@ -828,7 +998,11 @@ fn write_hexdump(stdout: usize, base_offset: usize, data: &[u8]) -> Result<()> {
         idx += 1;
 
         for &b in chunk {
-            line[idx] = if b.is_ascii_graphic() || b == b' ' { b } else { b'.' };
+            line[idx] = if b.is_ascii_graphic() || b == b' ' {
+                b
+            } else {
+                b'.'
+            };
             idx += 1;
         }
         for _ in chunk.len()..BYTES_PER_LINE {
@@ -884,7 +1058,11 @@ impl BuiltinCommand for CatBuiltin {
         let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
             Ok(c) => c,
             Err(_) => {
-                send_with_retry(stdout, TTY_WRITE_LABEL, b"cat: failed to create vfs client\n")?;
+                send_with_retry(
+                    stdout,
+                    TTY_WRITE_LABEL,
+                    b"cat: failed to create vfs client\n",
+                )?;
                 return Ok(());
             }
         };
@@ -956,9 +1134,7 @@ impl BuiltinCommand for CatBuiltin {
                     }
 
                     let addr = grant.base + grant.offset;
-                    let data = unsafe {
-                        core::slice::from_raw_parts(addr as *const u8, grant.len)
-                    };
+                    let data = unsafe { core::slice::from_raw_parts(addr as *const u8, grant.len) };
 
                     if !hex_mode && offset == 0 && is_elf_magic(data) {
                         hex_mode = true;
@@ -994,13 +1170,15 @@ impl BuiltinCommand for CatBuiltin {
         if !hex_mode {
             if let Some(ch) = last_char {
                 if ch != b'\n' {
-                let _ = send_with_retry(stdout, TTY_WRITE_LABEL, b"\n");
+                    let _ = send_with_retry(stdout, TTY_WRITE_LABEL, b"\n");
+                }
             }
-        }
         }
 
         // Free the allocated virtual address region
-        let _ = libcluu::vspace::VSPACE.lock().free(read_buf_base, grant_size);
+        let _ = libcluu::vspace::VSPACE
+            .lock()
+            .free(read_buf_base, grant_size);
 
         let _ = vfs.close(file);
         Ok(())
@@ -1029,7 +1207,11 @@ impl BuiltinCommand for LsBuiltin {
         let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
             Ok(c) => c,
             Err(_) => {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"ls: failed to create vfs client\n")?;
+                send_with_payload(
+                    stdout,
+                    TTY_WRITE_LABEL,
+                    b"ls: failed to create vfs client\n",
+                )?;
                 return Ok(());
             }
         };

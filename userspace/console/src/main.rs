@@ -16,11 +16,11 @@ extern crate alloc;
 /// If the heap is too small for the backbuffer (~3MB), it falls back to
 /// direct framebuffer writes.
 mod backend;
-#[cfg(target_arch = "x86_64")]
-mod simd;
 mod context;
 mod protocol;
 mod renderer;
+#[cfg(target_arch = "x86_64")]
+mod simd;
 
 use crate::backend::{ConsoleBackend, DoubleBufferBackend, FramebufferBackend};
 use crate::context::ConsoleContext;
