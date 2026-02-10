@@ -79,7 +79,7 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, _mode: mode_t) -> c_i
 
     // Create VFS client and open file
     let vfs_client = crate::fs::client::VfsClient::new(vfs_endpoint, client_id);
-    match vfs_client.open(path_str) {
+    match vfs_client.open_with(path_str, flags as usize, _mode as usize) {
         Ok(vfs_file) => {
             // Determine capabilities from flags
             let readable = (flags & O_WRONLY) == 0;
@@ -514,28 +514,183 @@ pub extern "C" fn _link(_old: *const c_char, _new: *const c_char) -> c_int {
 
 /// Unlink (delete file) - not supported yet.
 #[no_mangle]
-pub extern "C" fn _unlink(_path: *const c_char) -> c_int {
-    set_errno(ENOSYS);
-    -1
+pub extern "C" fn _unlink(path: *const c_char) -> c_int {
+    if path.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let path_str = unsafe {
+        let mut len = 0;
+        let mut p = path;
+        while *p != 0 {
+            len += 1;
+            p = p.add(1);
+        }
+        match core::str::from_utf8(slice::from_raw_parts(path as *const u8, len)) {
+            Ok(s) => s,
+            Err(_) => {
+                set_errno(EINVAL);
+                return -1;
+            }
+        }
+    };
+
+    let vfs_endpoint = match crate::registry::lookup_service("vfs:main") {
+        Some(ep) => ep,
+        None => {
+            set_errno(ENOENT);
+            return -1;
+        }
+    };
+    let client_id = crate::registry::control_endpoint();
+    if client_id == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let vfs_client = crate::fs::client::VfsClient::new(vfs_endpoint, client_id);
+    match vfs_client.unlink(path_str) {
+        Ok(()) => 0,
+        Err(e) => return_error(e) as c_int,
+    }
 }
 
 /// Make directory - not supported yet.
 #[no_mangle]
-pub extern "C" fn _mkdir(_path: *const c_char, _mode: mode_t) -> c_int {
-    set_errno(ENOSYS);
-    -1
+pub extern "C" fn _mkdir(path: *const c_char, mode: mode_t) -> c_int {
+    if path.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let path_str = unsafe {
+        let mut len = 0;
+        let mut p = path;
+        while *p != 0 {
+            len += 1;
+            p = p.add(1);
+        }
+        match core::str::from_utf8(slice::from_raw_parts(path as *const u8, len)) {
+            Ok(s) => s,
+            Err(_) => {
+                set_errno(EINVAL);
+                return -1;
+            }
+        }
+    };
+
+    let vfs_endpoint = match crate::registry::lookup_service("vfs:main") {
+        Some(ep) => ep,
+        None => {
+            set_errno(ENOENT);
+            return -1;
+        }
+    };
+    let client_id = crate::registry::control_endpoint();
+    if client_id == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let vfs_client = crate::fs::client::VfsClient::new(vfs_endpoint, client_id);
+    match vfs_client.mkdir(path_str, mode as usize) {
+        Ok(()) => 0,
+        Err(e) => return_error(e) as c_int,
+    }
 }
 
 /// Remove directory - not supported yet.
 #[no_mangle]
-pub extern "C" fn _rmdir(_path: *const c_char) -> c_int {
-    set_errno(ENOSYS);
-    -1
+pub extern "C" fn _rmdir(path: *const c_char) -> c_int {
+    if path.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let path_str = unsafe {
+        let mut len = 0;
+        let mut p = path;
+        while *p != 0 {
+            len += 1;
+            p = p.add(1);
+        }
+        match core::str::from_utf8(slice::from_raw_parts(path as *const u8, len)) {
+            Ok(s) => s,
+            Err(_) => {
+                set_errno(EINVAL);
+                return -1;
+            }
+        }
+    };
+
+    let vfs_endpoint = match crate::registry::lookup_service("vfs:main") {
+        Some(ep) => ep,
+        None => {
+            set_errno(ENOENT);
+            return -1;
+        }
+    };
+    let client_id = crate::registry::control_endpoint();
+    if client_id == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let vfs_client = crate::fs::client::VfsClient::new(vfs_endpoint, client_id);
+    match vfs_client.rmdir(path_str) {
+        Ok(()) => 0,
+        Err(e) => return_error(e) as c_int,
+    }
 }
 
 /// Rename path - not supported yet.
 #[no_mangle]
-pub extern "C" fn _rename(_old: *const c_char, _new: *const c_char) -> c_int {
-    set_errno(ENOSYS);
-    -1
+pub extern "C" fn _rename(old: *const c_char, new: *const c_char) -> c_int {
+    if old.is_null() || new.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let old_str = unsafe {
+        let mut len = 0;
+        let mut p = old;
+        while *p != 0 {
+            len += 1;
+            p = p.add(1);
+        }
+        match core::str::from_utf8(slice::from_raw_parts(old as *const u8, len)) {
+            Ok(s) => s,
+            Err(_) => {
+                set_errno(EINVAL);
+                return -1;
+            }
+        }
+    };
+    let new_str = unsafe {
+        let mut len = 0;
+        let mut p = new;
+        while *p != 0 {
+            len += 1;
+            p = p.add(1);
+        }
+        match core::str::from_utf8(slice::from_raw_parts(new as *const u8, len)) {
+            Ok(s) => s,
+            Err(_) => {
+                set_errno(EINVAL);
+                return -1;
+            }
+        }
+    };
+
+    let vfs_endpoint = match crate::registry::lookup_service("vfs:main") {
+        Some(ep) => ep,
+        None => {
+            set_errno(ENOENT);
+            return -1;
+        }
+    };
+    let client_id = crate::registry::control_endpoint();
+    if client_id == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let vfs_client = crate::fs::client::VfsClient::new(vfs_endpoint, client_id);
+    match vfs_client.rename(old_str, new_str) {
+        Ok(()) => 0,
+        Err(e) => return_error(e) as c_int,
+    }
 }

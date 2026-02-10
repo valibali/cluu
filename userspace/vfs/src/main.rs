@@ -14,8 +14,8 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use libcluu::elf::{ElfFile, LoadableSegment};
 use libcluu::fs::protocol::{
-    VfsOp, VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT, VFS_STAT,
-    VFS_WRITE,
+    VfsOp, VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT,
+    VFS_RENAME, VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
 };
 use libcluu::ipc::{self, extract_reply_token, reply_with_payload};
 use libcluu::types::Message;
@@ -32,6 +32,8 @@ use libcluu::boot::TOKEN_EXTRA_0;
 const IPC_MESSAGE_MAX: usize = 256;
 /// Remote filesystem IPC label for zero-copy reads into the VFS grant buffer.
 const FS_READ_GRANT: u32 = 0x306;
+/// Remote filesystem IPC label for write operations.
+const FS_WRITE: u32 = 0x305;
 const USIZE_BYTES: usize = size_of::<usize>();
 const TWO_USIZE_BYTES: usize = size_of::<usize>() * 2;
 
@@ -419,6 +421,10 @@ impl VfsServer {
             VfsOp::Write => self.handle_write(msg, payload, reply_token, authenticated_client),
             VfsOp::Stat => self.handle_stat(msg, payload, reply_token),
             VfsOp::Fstat => self.handle_fstat(msg, reply_token, authenticated_client),
+            VfsOp::Unlink => self.handle_unlink(msg, payload, reply_token),
+            VfsOp::Mkdir => self.handle_mkdir(msg, payload, reply_token),
+            VfsOp::Rmdir => self.handle_rmdir(msg, payload, reply_token),
+            VfsOp::Rename => self.handle_rename(msg, payload, reply_token),
         };
         vfs_trace!("vfs: handled {:?} result={:?}", op, result);
         result
@@ -561,13 +567,46 @@ impl VfsServer {
                     reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
                 }
             }
-            OpenFile::Memory(_) | OpenFile::Ext2(_) => {
+            OpenFile::Memory(_) => {
                 reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
                 reply_msg.words[1] = 0;
+            }
+            OpenFile::Ext2(ext2) => {
+                let endpoint = ext2.endpoint;
+                let inode = ext2.inode;
+                let old_size = ext2.size;
+                match Self::write_remote_ext2(endpoint, inode, offset, data) {
+                    Ok(written) => {
+                        reply_msg.words[0] = 0;
+                        reply_msg.words[1] = written;
+                        if written > 0 {
+                            let end = offset.saturating_add(written);
+                            if end > ext2.size {
+                                ext2.size = end;
+                            }
+                            self.cache.remove(inode, old_size);
+                        }
+                    }
+                    Err(err) => {
+                        reply_msg.words[0] = err.to_errno() as usize;
+                        reply_msg.words[1] = 0;
+                    }
+                }
             }
         }
 
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn write_remote_ext2(endpoint: usize, inode: u32, offset: usize, data: &[u8]) -> Result<usize> {
+        let req = Message::new(FS_WRITE, [0, 0, inode as usize, offset, data.len(), 0], 5);
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(endpoint, &req, data, &mut reply)?;
+        let status = reply.words[0] as isize;
+        if status < 0 {
+            return Err(Error::from_errno(status));
+        }
+        Ok(reply.words[1])
     }
 
     fn handle_stat(&mut self, msg: &Message, payload: &[u8], reply_token: usize) -> Result<()> {
@@ -621,6 +660,30 @@ impl VfsServer {
         reply_msg.words[1] = entry.size();
         reply_msg.words[2] = MODE_FILE;
 
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn handle_unlink(&mut self, _msg: &Message, _payload: &[u8], reply_token: usize) -> Result<()> {
+        let mut reply_msg = Message::new(VFS_UNLINK, [0; 6], 1);
+        reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn handle_mkdir(&mut self, _msg: &Message, _payload: &[u8], reply_token: usize) -> Result<()> {
+        let mut reply_msg = Message::new(VFS_MKDIR, [0; 6], 1);
+        reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn handle_rmdir(&mut self, _msg: &Message, _payload: &[u8], reply_token: usize) -> Result<()> {
+        let mut reply_msg = Message::new(VFS_RMDIR, [0; 6], 1);
+        reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn handle_rename(&mut self, _msg: &Message, _payload: &[u8], reply_token: usize) -> Result<()> {
+        let mut reply_msg = Message::new(VFS_RENAME, [0; 6], 1);
+        reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 

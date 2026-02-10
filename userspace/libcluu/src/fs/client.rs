@@ -5,7 +5,8 @@
 
 use crate::error::{Error, Result};
 use crate::fs::protocol::{
-    VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT, VFS_STAT, VFS_WRITE,
+    VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT,
+    VFS_RENAME, VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
 };
 use crate::ipc;
 use crate::types::Message;
@@ -73,8 +74,13 @@ impl VfsClient {
 
     /// Open a path in the VFS service.
     pub fn open(&self, path: &str) -> Result<VfsFile> {
+        self.open_with(path, 0, 0)
+    }
+
+    /// Open a path in the VFS service with POSIX-like flags/mode.
+    pub fn open_with(&self, path: &str, flags: usize, mode: usize) -> Result<VfsFile> {
         let payload = path.as_bytes();
-        let msg = make_payload_message(VFS_OPEN, payload.len(), &[self.client_id]);
+        let msg = make_payload_message(VFS_OPEN, payload.len(), &[self.client_id, flags, mode]);
         let mut reply = Message::new(0, [0; 6], 0);
         ipc::call_with_payload(self.endpoint, &msg, payload, &mut reply)?;
         parse_status(reply.words[0])?;
@@ -220,6 +226,50 @@ impl VfsClient {
             size: msg.words[1],
             mode: msg.words[2],
         })
+    }
+
+    /// Create a directory.
+    pub fn mkdir(&self, path: &str, mode: usize) -> Result<()> {
+        let payload = path.as_bytes();
+        let msg = make_payload_message(VFS_MKDIR, payload.len(), &[self.client_id, mode]);
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, payload, &mut reply)?;
+        parse_status(reply.words[0])
+    }
+
+    /// Remove a directory.
+    pub fn rmdir(&self, path: &str) -> Result<()> {
+        let payload = path.as_bytes();
+        let msg = make_payload_message(VFS_RMDIR, payload.len(), &[self.client_id]);
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, payload, &mut reply)?;
+        parse_status(reply.words[0])
+    }
+
+    /// Remove a file.
+    pub fn unlink(&self, path: &str) -> Result<()> {
+        let payload = path.as_bytes();
+        let msg = make_payload_message(VFS_UNLINK, payload.len(), &[self.client_id]);
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, payload, &mut reply)?;
+        parse_status(reply.words[0])
+    }
+
+    /// Rename/move a path.
+    pub fn rename(&self, old: &str, new: &str) -> Result<()> {
+        let old_bytes = old.as_bytes();
+        let new_bytes = new.as_bytes();
+        let mut payload = Vec::with_capacity(old_bytes.len() + new_bytes.len());
+        payload.extend_from_slice(old_bytes);
+        payload.extend_from_slice(new_bytes);
+        let msg = make_payload_message(
+            VFS_RENAME,
+            payload.len(),
+            &[self.client_id, old_bytes.len()],
+        );
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, &payload, &mut reply)?;
+        parse_status(reply.words[0])
     }
 }
 

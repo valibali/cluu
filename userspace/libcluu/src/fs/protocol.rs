@@ -45,6 +45,14 @@ pub const VFS_WRITE: u32 = 0x205;
 pub const VFS_STAT: u32 = 0x206;
 /// Stat an open file descriptor.
 pub const VFS_FSTAT: u32 = 0x207;
+/// Remove a file.
+pub const VFS_UNLINK: u32 = 0x208;
+/// Create a directory.
+pub const VFS_MKDIR: u32 = 0x209;
+/// Remove a directory.
+pub const VFS_RMDIR: u32 = 0x20A;
+/// Rename/move a path.
+pub const VFS_RENAME: u32 = 0x20B;
 
 /// Structured enum for protocol routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +65,10 @@ pub enum VfsOp {
     Write,
     Stat,
     Fstat,
+    Unlink,
+    Mkdir,
+    Rmdir,
+    Rename,
 }
 
 impl VfsOp {
@@ -70,6 +82,10 @@ impl VfsOp {
             VFS_WRITE => Some(Self::Write),
             VFS_STAT => Some(Self::Stat),
             VFS_FSTAT => Some(Self::Fstat),
+            VFS_UNLINK => Some(Self::Unlink),
+            VFS_MKDIR => Some(Self::Mkdir),
+            VFS_RMDIR => Some(Self::Rmdir),
+            VFS_RENAME => Some(Self::Rename),
             _ => None,
         }
     }

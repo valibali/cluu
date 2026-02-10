@@ -167,6 +167,66 @@ impl<'a> Ext2Fs<'a> {
         Ok(bytes_read)
     }
 
+    /// Write file data from a buffer.
+    ///
+    /// Current implementation supports in-place writes within the existing file size.
+    /// Extending file length and block allocation are intentionally not handled yet.
+    pub fn write_file(&self, inode: &Inode, offset: usize, buf: &[u8]) -> Result<usize> {
+        if !inode.is_file() {
+            return Err(Error::InvalidOperation);
+        }
+
+        let file_size = inode.size() as usize;
+        if offset >= file_size {
+            return Ok(0);
+        }
+
+        let available = file_size - offset;
+        let to_write = buf.len().min(available);
+
+        let mut bytes_written = 0;
+        let mut current_offset = offset;
+
+        while bytes_written < to_write {
+            let block_idx = current_offset / self.block_size;
+            let block_offset = current_offset % self.block_size;
+            let block_remaining = self.block_size - block_offset;
+            let chunk_size = (to_write - bytes_written).min(block_remaining);
+
+            let block_num = self.get_block_num(inode, block_idx as u32)?;
+            if block_num == 0 {
+                return Err(Error::InvalidOperation);
+            }
+
+            let block_byte_offset = (block_num as usize) * self.block_size;
+            if block_offset == 0 && chunk_size == self.block_size {
+                self.block.write_bytes(
+                    block_byte_offset as u64,
+                    &buf[bytes_written..bytes_written + chunk_size],
+                )?;
+            } else {
+                let mut block_buf = alloc::vec![0u8; self.block_size];
+                self.block
+                    .read_bytes(block_byte_offset as u64, &mut block_buf)?;
+                block_buf[block_offset..block_offset + chunk_size]
+                    .copy_from_slice(&buf[bytes_written..bytes_written + chunk_size]);
+                self.block
+                    .write_bytes(block_byte_offset as u64, &block_buf)?;
+            }
+
+            bytes_written += chunk_size;
+            current_offset += chunk_size;
+        }
+
+        Ok(bytes_written)
+    }
+
+    /// Write to inode by inode number.
+    pub fn write_by_inode(&self, inode: u64, offset: u64, data: &[u8]) -> Result<usize> {
+        let ino = self.read_inode(inode as u32)?;
+        self.write_file(&ino, offset as usize, data)
+    }
+
     /// Read all file data (for small files like directories).
     fn read_file_data(&self, inode: &Inode) -> Result<Vec<u8>> {
         let size = inode.size() as usize;

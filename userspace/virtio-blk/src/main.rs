@@ -28,6 +28,7 @@ use libcluu::{debug_print, space_grant, yield_cpu, Result, PAGE_SIZE};
 const FS_OPEN: u32 = 0x300;
 const FS_CLOSE: u32 = 0x301;
 const FS_READ: u32 = 0x302;
+const FS_WRITE: u32 = 0x305;
 const FS_STAT: u32 = 0x303;
 const FS_READDIR: u32 = 0x304;
 /// Zero-copy read into a caller-provided mapping (VFS grant buffer).
@@ -218,6 +219,24 @@ fn handle_fs_request(
                     let reply_msg = Message::new(FS_READ, [0, bytes_read, 0, 0, 0, 0], 2);
                     if let Some(token) = reply_token {
                         let _ = reply_with_payload(token, &reply_msg, &read_buf[..bytes_read]);
+                    }
+                }
+                Err(_) => send_error_reply(reply_token, -1),
+            }
+        }
+
+        FS_WRITE => {
+            // words[2] = inode, words[3] = offset, words[4] = len; payload = bytes
+            let inode = msg.words[2] as u64;
+            let offset = msg.words[3] as u64;
+            let len = msg.words[4].min(payload.len());
+            let data = &payload[..len];
+
+            match fs.write_by_inode(inode, offset, data) {
+                Ok(bytes_written) => {
+                    let reply_msg = Message::new(FS_WRITE, [0, bytes_written, 0, 0, 0, 0], 2);
+                    if let Some(token) = reply_token {
+                        let _ = reply(token, &reply_msg, IpcFlags::empty());
                     }
                 }
                 Err(_) => send_error_reply(reply_token, -1),

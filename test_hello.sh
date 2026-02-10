@@ -36,6 +36,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="regdeny"
             SHELL_AUTOSTART_CMD_DEFAULT="regdeny"
             ;;
+        l2_ext2write)
+            TEST_COMMAND="ext2write"
+            SHELL_AUTOSTART_CMD_DEFAULT="ext2write"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -219,6 +223,7 @@ fi
 # - m4_notify_lifecycle: sender notify bindings are reclaimed after child lifecycle ends
 # - m4_deny_paths: explicit sender-auth denial path regressions (PermissionDenied flows)
 # - m4_registry_deny_paths: explicit registry ownership denial path regressions
+# - l2_ext2write: end-to-end ext2 write smoke test via shell builtin
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
 required_markers=()
@@ -339,6 +344,13 @@ case "$MARKER_MODE" in
             "ipc_wait_p95_ms="
             "ipc_wait_p99_ms="
             "ipc_scan_avg_steps_x100="
+        )
+        ;;
+    l2_ext2write)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "ext2write: PASS path=/bin/hello"
         )
         ;;
     none)
@@ -574,6 +586,14 @@ fi
 if [ "$MARKER_MODE" = "m3_maperror" ]; then
     if grep -Fq "maperror: FAIL" "$SERIAL_LOG"; then
         echo "MISSING: maperror reported failure"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+fi
+
+if [ "$MARKER_MODE" = "l2_ext2write" ]; then
+    if grep -Fq "ext2write: FAIL" "$SERIAL_LOG"; then
+        echo "MISSING: ext2write reported failure"
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
     fi

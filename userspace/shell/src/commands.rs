@@ -177,6 +177,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(MapFailBuiltin));
         registry.register(Box::new(MapCopyFailBuiltin));
         registry.register(Box::new(MapErrorBuiltin));
+        registry.register(Box::new(Ext2WriteBuiltin));
         registry.register(Box::new(CatBuiltin));
         registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(HeapBuiltin));
@@ -240,7 +241,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -941,6 +942,70 @@ impl BuiltinCommand for MapErrorBuiltin {
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         let _ = debug_print(line.trim_end());
         let _ = syscall::space_unmap(space_token, TARGET_BASE, total_pages);
+        Ok(())
+    }
+}
+
+struct Ext2WriteBuiltin;
+
+impl BuiltinCommand for Ext2WriteBuiltin {
+    fn name(&self) -> &'static str {
+        "ext2write"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let path = args.first().map(|s| s.as_str()).unwrap_or("/bin/hello");
+
+        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+            Ok(ep) => ep,
+            Err(err) => {
+                let line = format!("ext2write: FAIL vfs unavailable {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+            Ok(client) => client,
+            Err(err) => {
+                let line = format!("ext2write: FAIL client {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let file = match vfs.open(path) {
+            Ok(file) => file,
+            Err(err) => {
+                let line = format!("ext2write: FAIL open {} {:?}\n", path, err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        // Keep the file valid by writing ELF magic byte at offset 0.
+        match vfs.write(file, 0, &[0x7f]) {
+            Ok(1) => {
+                let line = format!("ext2write: PASS path={}\n", path);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+            Ok(written) => {
+                let line = format!("ext2write: FAIL short-write {}\n", written);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+            Err(err) => {
+                let line = format!("ext2write: FAIL write {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+        }
+
+        let _ = vfs.close(file);
         Ok(())
     }
 }
