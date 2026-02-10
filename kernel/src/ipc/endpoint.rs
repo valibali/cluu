@@ -121,6 +121,10 @@ pub struct QueueEndpoint {
 const MAX_QUEUE_LEN: usize = 1024;
 const MAX_CALL_QUEUE_LEN: usize = 256;
 const BUSY_LOG_EVERY: u64 = 64;
+/// Temporary kill-switch for rendezvous direct delivery.
+///
+/// Kept disabled until waiter bookkeeping is tightened end-to-end.
+const IPC_RENDEZVOUS_DIRECT_ENABLED: bool = false;
 
 #[derive(Copy, Clone)]
 struct QueueStats {
@@ -525,6 +529,11 @@ pub fn send_from_user(
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
+        if let Some(receiver_id) =
+            try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, &payload)?
+        {
+            Some(receiver_id)
+        } else {
         match guard.send(sender, &payload) {
             Ok(wake) => wake, // Success
             Err(Error::WouldBlock) => {
@@ -541,6 +550,7 @@ pub fn send_from_user(
                 return Err(Error::Busy);
             }
             Err(err) => return Err(err),
+        }
         }
     };
 
@@ -665,23 +675,29 @@ pub fn call_from_user_with_reply_token(
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
-        // Just send as regular message - reply routing via token
-        match guard.send(sender, &payload) {
-            Ok(wake) => wake, // Success
-            Err(Error::WouldBlock) => {
-                // Queue is full - sender was added to waiting_senders, need to block
-                // Return WouldBlock so syscall returns and context switch can happen
-                // When woken, userspace will retry the syscall
-                crate::sched::ThreadManager::block_current();
-                crate::architecture::x86_64::syscall::request_resched();
-                return Err(Error::WouldBlock);
+        if let Some(receiver_id) =
+            try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, &payload)?
+        {
+            Some(receiver_id)
+        } else {
+            // Just send as regular message - reply routing via token
+            match guard.send(sender, &payload) {
+                Ok(wake) => wake, // Success
+                Err(Error::WouldBlock) => {
+                    // Queue is full - sender was added to waiting_senders, need to block
+                    // Return WouldBlock so syscall returns and context switch can happen
+                    // When woken, userspace will retry the syscall
+                    crate::sched::ThreadManager::block_current();
+                    crate::architecture::x86_64::syscall::request_resched();
+                    return Err(Error::WouldBlock);
+                }
+                Err(Error::Busy) => {
+                    // Fallback for edge cases (shouldn't happen with backpressure)
+                    log_endpoint_busy(endpoint, guard.stats(), true);
+                    return Err(Error::Busy);
+                }
+                Err(err) => return Err(err),
             }
-            Err(Error::Busy) => {
-                // Fallback for edge cases (shouldn't happen with backpressure)
-                log_endpoint_busy(endpoint, guard.stats(), true);
-                return Err(Error::Busy);
-            }
-            Err(err) => return Err(err),
         }
     };
 
@@ -722,6 +738,59 @@ fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
         "  callers_by_cookie=",
         stats.callers_len as u64,
     );
+}
+
+fn try_direct_deliver_to_waiting_receiver(
+    endpoint: &mut QueueEndpoint,
+    endpoint_id: EndpointId,
+    sender: Option<ThreadId>,
+    data: &[u8],
+) -> Result<Option<ThreadId>, Error> {
+    if !IPC_RENDEZVOUS_DIRECT_ENABLED {
+        return Ok(None);
+    }
+
+    while let Some(receiver_id) = endpoint.pop_next_receiver_to_wake() {
+        let Some((receiver_buf_ptr, receiver_buf_len, receiver_pt_root)) =
+            crate::sched::ThreadManager::recv_wait_buffer(receiver_id)
+        else {
+            continue;
+        };
+
+        if data.len() > receiver_buf_len {
+            endpoint.waiting_receivers.push_front(receiver_id);
+            return Ok(None);
+        }
+
+        // Safety: receiver buffer metadata is captured from the blocked receiver thread state.
+        let copy_result = unsafe {
+            crate::syscall::userptr::copy_to_user(
+                receiver_buf_ptr,
+                data.as_ptr(),
+                data.len(),
+                receiver_pt_root,
+            )
+        };
+        if copy_result.is_err() {
+            endpoint.waiting_receivers.push_front(receiver_id);
+            return Ok(None);
+        }
+
+        let stored = crate::sched::ThreadManager::set_recv_wait_delivery(
+            receiver_id,
+            endpoint_id,
+            data.len(),
+            sender,
+        );
+        if !stored {
+            endpoint.waiting_receivers.push_front(receiver_id);
+            return Ok(None);
+        }
+        crate::telemetry::record_ipc_direct_delivery();
+        return Ok(Some(receiver_id));
+    }
+
+    Ok(None)
 }
 
 /// Get the current caller for an endpoint (used by reply)

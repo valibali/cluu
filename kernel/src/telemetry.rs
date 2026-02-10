@@ -17,6 +17,7 @@ static IPC_RECV_WAIT_MAX_TICKS: AtomicU64 = AtomicU64::new(0);
 static IPC_RECV_SCAN_EVENTS: AtomicU64 = AtomicU64::new(0);
 static IPC_RECV_SCAN_TOTAL_STEPS: AtomicU64 = AtomicU64::new(0);
 static IPC_RECV_SCAN_MAX_STEPS: AtomicU64 = AtomicU64::new(0);
+static IPC_DIRECT_DELIVERIES: AtomicU64 = AtomicU64::new(0);
 static BOOT_TOKEN_GRANTS: AtomicU64 = AtomicU64::new(0);
 static THREAD_SUSPEND_CALLS: AtomicU64 = AtomicU64::new(0);
 static THREAD_SUSPEND_SUCCESS: AtomicU64 = AtomicU64::new(0);
@@ -141,6 +142,7 @@ pub struct Snapshot {
     pub ipc_recv_scan_events: u64,
     pub ipc_recv_scan_avg_steps_x100: u64,
     pub ipc_recv_scan_max_steps: u64,
+    pub ipc_direct_deliveries: u64,
     pub boot_token_grants: u64,
     pub thread_suspend_calls: u64,
     pub thread_suspend_success: u64,
@@ -217,6 +219,11 @@ pub fn record_boot_token_grant() {
 }
 
 #[inline(always)]
+pub fn record_ipc_direct_delivery() {
+    IPC_DIRECT_DELIVERIES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline(always)]
 pub fn record_thread_suspend(success: bool) {
     THREAD_SUSPEND_CALLS.fetch_add(1, Ordering::Relaxed);
     if success {
@@ -279,6 +286,7 @@ pub fn snapshot() -> Snapshot {
             scan_total_steps.saturating_mul(100) / scan_events
         },
         ipc_recv_scan_max_steps: IPC_RECV_SCAN_MAX_STEPS.load(Ordering::Relaxed),
+        ipc_direct_deliveries: IPC_DIRECT_DELIVERIES.load(Ordering::Relaxed),
         boot_token_grants: BOOT_TOKEN_GRANTS.load(Ordering::Relaxed),
         thread_suspend_calls: THREAD_SUSPEND_CALLS.load(Ordering::Relaxed),
         thread_suspend_success: THREAD_SUSPEND_SUCCESS.load(Ordering::Relaxed),
@@ -386,6 +394,8 @@ pub fn log_resource_delta(reason: &str) {
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_avg_steps_x100);
     klibcluu::info("  ipc_scan_max_steps=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_max_steps);
+    klibcluu::info("  ipc_direct_deliveries=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_direct_deliveries);
     klibcluu::info("  thread_suspend_calls=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_suspend_calls);
     klibcluu::info("  thread_suspend_success=");
@@ -508,6 +518,8 @@ pub fn log_bootstrap_snapshot(stage: &str) {
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_avg_steps_x100);
     klibcluu::info("  ipc_recv_scan_max_steps=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_max_steps);
+    klibcluu::info("  ipc_direct_deliveries=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_direct_deliveries);
 
     klibcluu::info("  boot_token_grants=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.boot_token_grants);

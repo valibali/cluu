@@ -101,6 +101,9 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         m6_ipc_compact)
             TEST_COMMAND="repeat 8 spawn hello"
             ;;
+        m6_ipc_rendezvous)
+            TEST_COMMAND="repeat 8 spawn hello"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -322,6 +325,7 @@ fi
 # - l2_mmap: mmap/munmap reuse + strict mprotect region validation
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - m6_ipc_compact: compact IPC queue storage regression smoke under spawn churn
+# - m6_ipc_rendezvous: direct sender->waiting-receiver transfer path under churn
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -449,6 +453,15 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "procmgr: exit cookie"
             "resource delta:"
+        )
+        ;;
+    m6_ipc_rendezvous)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: exit cookie"
+            "resource delta:"
+            "ipc_direct_deliveries="
         )
         ;;
     l2_ext2write)
@@ -786,6 +799,40 @@ if [ "$MARKER_MODE" = "m5_fairness" ]; then
     check_metric_limit "$last_wait_p95_ms" "$MAX_IPC_WAIT_P95_MS" "ipc_wait_p95_ms"
     check_metric_limit "$last_wait_p99_ms" "$MAX_IPC_WAIT_P99_MS" "ipc_wait_p99_ms"
     check_metric_limit "$last_scan_avg_steps_x100" "$MAX_IPC_SCAN_AVG_STEPS_X100" "ipc_scan_avg_steps_x100"
+fi
+
+if [ "$MARKER_MODE" = "m6_ipc_rendezvous" ]; then
+    parse_last_metric() {
+        local marker="$1"
+        awk -v marker="$marker" '
+            $0 ~ marker {
+                if (getline > 0) {
+                    v = $0
+                    gsub(/[^0-9-]/, "", v)
+                    if (v != "") {
+                        last = v
+                    }
+                }
+            }
+            END {
+                if (last != "") {
+                    print last
+                }
+            }
+        ' "$SERIAL_LOG"
+    }
+
+    direct_deliveries="$(parse_last_metric "ipc_direct_deliveries=")"
+    if [ -z "$direct_deliveries" ]; then
+        echo "MISSING: could not parse ipc_direct_deliveries"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+    if [ "$direct_deliveries" -lt 1 ]; then
+        echo "MISSING: expected ipc_direct_deliveries>=1, got $direct_deliveries"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
 fi
 
 if [ "$MARKER_MODE" = "m3_mapfail" ]; then

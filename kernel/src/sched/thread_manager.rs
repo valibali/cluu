@@ -362,6 +362,16 @@ impl ThreadManager {
         });
     }
 
+    pub fn arm_current_recv_wait_with_buffer(buf_ptr: usize, buf_len: usize) {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return,
+        };
+        Self::with_thread_mut(current, |thread| {
+            thread.arm_recv_wait_with_buffer(buf_ptr, buf_len);
+        });
+    }
+
     pub fn disarm_current_recv_wait() {
         let current = match Self::current() {
             Some(id) => id,
@@ -377,6 +387,42 @@ impl ThreadManager {
             thread.is_blocked() || thread.is_recv_wait_armed()
         })
         .unwrap_or(false)
+    }
+
+    pub fn recv_wait_buffer(
+        thread_id: ThreadId,
+    ) -> Option<(usize, usize, PhysAddr)> {
+        Self::with_thread(thread_id, |thread| {
+            let (buf_ptr, buf_len) = thread.recv_wait_buffer()?;
+            Some((buf_ptr, buf_len, thread.page_table_root))
+        })
+        .flatten()
+    }
+
+    pub fn set_recv_wait_delivery(
+        thread_id: ThreadId,
+        endpoint: crate::token::scope::EndpointId,
+        len: usize,
+        sender: Option<ThreadId>,
+    ) -> bool {
+        Self::with_thread_mut(thread_id, |thread| {
+            thread.set_recv_wait_delivery(crate::sched::thread::RecvWaitDelivery {
+                endpoint,
+                len,
+                sender,
+            });
+        })
+        .is_some()
+    }
+
+    pub fn take_current_recv_wait_delivery(
+    ) -> Option<(crate::token::scope::EndpointId, usize, Option<ThreadId>)> {
+        let current = Self::current()?;
+        Self::with_thread_mut(current, |thread| {
+            let delivery = thread.take_recv_wait_delivery()?;
+            Some((delivery.endpoint, delivery.len, delivery.sender))
+        })
+        .flatten()
     }
 
     pub fn wake_thread(thread_id: ThreadId) {

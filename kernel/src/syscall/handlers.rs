@@ -200,7 +200,7 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     }
 
     // Arm recv wait before enqueueing on endpoints to close registration/block race.
-    crate::sched::ThreadManager::arm_current_recv_wait();
+    crate::sched::ThreadManager::arm_current_recv_wait_with_buffer(buf_ptr, buf_len);
 
     // Register as waiter on all endpoints
     for endpoint_id in endpoint_ids.iter().take(tokens_count).filter_map(|id| *id) {
@@ -235,8 +235,56 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
         Err(Error::Timeout)
     } else {
         crate::sched::ThreadManager::disarm_current_recv_wait();
-        crate::telemetry::record_ipc_recv_would_block();
-        Err(Error::WouldBlock) // Message arrived on one endpoint, retry will succeed
+        if let Some((delivered_endpoint, delivered_len, delivered_sender)) =
+            crate::sched::ThreadManager::take_current_recv_wait_delivery()
+        {
+            let mut delivered_index: Option<usize> = None;
+            for (i, endpoint_id) in endpoint_ids.iter().enumerate().take(tokens_count) {
+                if *endpoint_id == Some(delivered_endpoint) {
+                    delivered_index = Some(i);
+                    break;
+                }
+            }
+            let Some(index) = delivered_index else {
+                // A direct delivery may target a stale wait registration from an older recv_any
+                // call. Treat this as a spurious wake and continue with normal queue probing.
+                return match try_recv_any() {
+                    Ok((index, len)) => Ok((index << 32) | len),
+                    Err(Error::WouldBlock) => {
+                        crate::telemetry::record_ipc_recv_would_block();
+                        Err(Error::WouldBlock)
+                    }
+                    Err(err) => Err(err),
+                };
+            };
+            if sender_out_ptr != 0 {
+                crate::syscall::userptr::validate_user_buffer(
+                    sender_out_ptr,
+                    core::mem::size_of::<usize>(),
+                )?;
+                let sender_raw = delivered_sender
+                    .map_or(0usize, |tid: crate::sched::ThreadId| tid.as_u64() as usize);
+                // Safety: sender_out_ptr is a validated userspace buffer for usize.
+                unsafe {
+                    crate::syscall::userptr::copy_to_user(
+                        sender_out_ptr,
+                        &sender_raw as *const usize as *const u8,
+                        core::mem::size_of::<usize>(),
+                        page_table_root,
+                    )?;
+                }
+            }
+            return Ok((index << 32) | delivered_len);
+        }
+
+        match try_recv_any() {
+            Ok((index, len)) => Ok((index << 32) | len),
+            Err(Error::WouldBlock) => {
+                crate::telemetry::record_ipc_recv_would_block();
+                Err(Error::WouldBlock) // Message arrived on one endpoint, retry will succeed
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 

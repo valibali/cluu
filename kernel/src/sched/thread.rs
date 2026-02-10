@@ -102,6 +102,14 @@ pub struct CallReplyInfo {
     pub page_table_root: PhysAddr,
 }
 
+/// Result metadata for a direct recv delivery while blocked/armed.
+#[derive(Debug, Clone, Copy)]
+pub struct RecvWaitDelivery {
+    pub endpoint: EndpointId,
+    pub len: usize,
+    pub sender: Option<ThreadId>,
+}
+
 /// Fault type discriminant for IPC fault messages
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +211,12 @@ pub struct Thread {
     /// and the receiver transition to Blocked.
     pub recv_wait_armed: bool,
 
+    /// Userspace buffer metadata used for direct send->recv transfer.
+    pub recv_wait_buf_ptr: usize,
+    pub recv_wait_buf_len: usize,
+    /// Direct-delivery completion metadata consumed by sys_recv.
+    pub recv_wait_delivery: Option<RecvWaitDelivery>,
+
     /// Rotating scan hint for multi-endpoint recv_any fairness.
     pub recv_scan_hint: usize,
 
@@ -301,6 +315,9 @@ impl Thread {
             woke_from_timeout: false,
             call_reply_info: None,
             recv_wait_armed: false,
+            recv_wait_buf_ptr: 0,
+            recv_wait_buf_len: 0,
+            recv_wait_delivery: None,
             recv_scan_hint: 0,
             token_cache: None,
             fault_endpoint: None,
@@ -337,6 +354,9 @@ impl Thread {
             woke_from_timeout: false,
             call_reply_info: None,
             recv_wait_armed: false,
+            recv_wait_buf_ptr: 0,
+            recv_wait_buf_len: 0,
+            recv_wait_delivery: None,
             recv_scan_hint: 0,
             token_cache: None,
             fault_endpoint: None,
@@ -478,12 +498,36 @@ impl Thread {
         self.recv_wait_armed = true;
     }
 
+    pub fn arm_recv_wait_with_buffer(&mut self, buf_ptr: usize, buf_len: usize) {
+        self.recv_wait_armed = true;
+        self.recv_wait_buf_ptr = buf_ptr;
+        self.recv_wait_buf_len = buf_len;
+        self.recv_wait_delivery = None;
+    }
+
     pub fn disarm_recv_wait(&mut self) {
         self.recv_wait_armed = false;
+        self.recv_wait_buf_ptr = 0;
+        self.recv_wait_buf_len = 0;
     }
 
     pub fn is_recv_wait_armed(&self) -> bool {
         self.recv_wait_armed
+    }
+
+    pub fn recv_wait_buffer(&self) -> Option<(usize, usize)> {
+        if self.recv_wait_buf_len == 0 {
+            return None;
+        }
+        Some((self.recv_wait_buf_ptr, self.recv_wait_buf_len))
+    }
+
+    pub fn set_recv_wait_delivery(&mut self, delivery: RecvWaitDelivery) {
+        self.recv_wait_delivery = Some(delivery);
+    }
+
+    pub fn take_recv_wait_delivery(&mut self) -> Option<RecvWaitDelivery> {
+        self.recv_wait_delivery.take()
     }
 }
 
