@@ -80,6 +80,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="jobchurn 3"
             SHELL_AUTOSTART_CMD_DEFAULT=""
             ;;
+        l2_jobchurn_heavy)
+            TEST_COMMAND="jobchurn 8"
+            SHELL_AUTOSTART_CMD_DEFAULT=""
+            ;;
         l2_waitpid)
             TEST_COMMAND="spawn waitprobe"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn waitprobe"
@@ -286,6 +290,7 @@ fi
 # - l2_fg: background spawn promoted to foreground wait path via `fg`
 # - l2_stop: background job transitions to stopped state via `stop`
 # - l2_jobchurn: repeated stop/resume/foreground cycles with telemetry signal counters
+# - l2_jobchurn_heavy: higher-volume jobchurn loop for transition stability
 # - l2_waitpid: libc wait queue + `WNOHANG` behavior via userspace probe
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
@@ -483,6 +488,17 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "jobchurn: PASS iterations=3"
+            "procmgr: signal 19 pid"
+            "procmgr: signal 18 pid"
+            "thread_suspend_success="
+            "thread_resume_success="
+        )
+        ;;
+    l2_jobchurn_heavy)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "jobchurn: PASS iterations=8"
             "procmgr: signal 19 pid"
             "procmgr: signal 18 pid"
             "thread_suspend_success="

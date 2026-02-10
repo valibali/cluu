@@ -775,7 +775,7 @@ impl BuiltinCommand for StopBuiltin {
 
         let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
         signal_process(procmgr_endpoint, pid, SIGSTOP)?;
-        context.set_bg_job_state(pid, JobState::Stopped);
+        ensure_bg_job_state(context, pid, JobState::Stopped)?;
         let line = format!("stop: pid={} stopped\n", pid);
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         Ok(())
@@ -810,10 +810,10 @@ impl BuiltinCommand for JobChurnBuiltin {
             context.add_bg_job(pid, spawn.notify_endpoint, normalize_spawn_path("sleepy"));
 
             signal_process(spawn.procmgr_endpoint, pid, SIGSTOP)?;
-            context.set_bg_job_state(pid, JobState::Stopped);
+            ensure_bg_job_state(context, pid, JobState::Stopped)?;
 
             signal_process(spawn.procmgr_endpoint, pid, SIGCONT)?;
-            context.set_bg_job_state(pid, JobState::Running);
+            ensure_bg_job_state(context, pid, JobState::Running)?;
 
             let Some(job) = context.take_bg_job(pid) else {
                 let line = format!("jobchurn: FAIL missing job pid={}\n", pid);
@@ -860,7 +860,7 @@ impl BuiltinCommand for BackgroundBuiltin {
 
         let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
         signal_process(procmgr_endpoint, pid, SIGCONT)?;
-        context.set_bg_job_state(pid, JobState::Running);
+        ensure_bg_job_state(context, pid, JobState::Running)?;
         let line = format!("bg: pid={} running\n", pid);
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         Ok(())
@@ -982,6 +982,15 @@ fn resolve_job_pid(context: &CommandContext, arg: Option<&String>) -> Option<usi
     };
     let raw = token.strip_prefix('%').unwrap_or(token.as_str());
     raw.parse::<usize>().ok()
+}
+
+fn ensure_bg_job_state(context: &mut CommandContext, pid: usize, state: JobState) -> Result<()> {
+    if context.set_bg_job_state(pid, state) {
+        return Ok(());
+    }
+    let line = format!("shell: invariant violation missing job pid={}", pid);
+    let _ = debug_print(line.as_str());
+    Err(Error::InvalidState)
 }
 
 struct MapFailBuiltin;

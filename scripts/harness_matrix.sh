@@ -42,6 +42,7 @@ if [[ "$RUN_BUILD_ONCE" -eq 1 ]]; then
     run_case "l2_fg" full env MARKER_MODE=l2_fg TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "l2_stop" full env MARKER_MODE=l2_stop TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "l2_jobchurn" full env MARKER_MODE=l2_jobchurn TEST_COMMAND_REPEAT=1 RUN_WAIT=16 ./test_hello.sh
+    run_case "l2_jobchurn_heavy" full env MARKER_MODE=l2_jobchurn_heavy TEST_COMMAND_REPEAT=1 RUN_WAIT=36 ./test_hello.sh
     run_case "l2_waitpid" full env MARKER_MODE=l2_waitpid TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "m5_fairness" full env MARKER_MODE=m5_fairness TEST_COMMAND_REPEAT=1 RUN_WAIT=16 MIN_EXIT_COOKIES=6 MAX_IPC_WAIT_P95_MS=16 MAX_IPC_WAIT_P99_MS=16 MAX_IPC_SCAN_AVG_STEPS_X100=250 ./test_hello.sh
 else
@@ -62,6 +63,7 @@ else
     run_case "l2_fg" full env MARKER_MODE=l2_fg TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "l2_stop" full env MARKER_MODE=l2_stop TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "l2_jobchurn" full env MARKER_MODE=l2_jobchurn TEST_COMMAND_REPEAT=1 RUN_WAIT=16 ./test_hello.sh
+    run_case "l2_jobchurn_heavy" full env MARKER_MODE=l2_jobchurn_heavy TEST_COMMAND_REPEAT=1 RUN_WAIT=36 ./test_hello.sh
     run_case "l2_waitpid" full env MARKER_MODE=l2_waitpid TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "m5_fairness" full env MARKER_MODE=m5_fairness TEST_COMMAND_REPEAT=1 RUN_WAIT=16 MIN_EXIT_COOKIES=6 MAX_IPC_WAIT_P95_MS=16 MAX_IPC_WAIT_P99_MS=16 MAX_IPC_SCAN_AVG_STEPS_X100=250 ./test_hello.sh
 fi
