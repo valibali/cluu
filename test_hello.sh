@@ -14,6 +14,8 @@ QEMU_PID=""
 BOOT_WAIT="${BOOT_WAIT:-8}"
 SHELL_READY_WAIT="${SHELL_READY_WAIT:-25}"
 RUN_WAIT="${RUN_WAIT:-5}"
+POST_SENDKEY="${POST_SENDKEY:-}"
+POST_SENDKEY_DELAY="${POST_SENDKEY_DELAY:-1}"
 # Preserve explicit empty TEST_COMMAND; only auto-fill when it is truly unset.
 if [ -z "${TEST_COMMAND+x}" ]; then
     TEST_COMMAND="__AUTO__"
@@ -23,6 +25,7 @@ COMMAND_GAP="${COMMAND_GAP:-1}"
 KEY_DELAY="${KEY_DELAY:-0.05}"
 MARKER_MODE="${MARKER_MODE:-legacy_p1}"
 SHELL_AUTOSTART_CMD_DEFAULT=""
+POST_SENDKEY_DEFAULT=""
 if [ "$TEST_COMMAND" = "__AUTO__" ]; then
     case "$MARKER_MODE" in
         m3_mapfail) TEST_COMMAND="mapfail 12 4" ;;
@@ -56,6 +59,11 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="ext2ownerdeny"
             SHELL_AUTOSTART_CMD_DEFAULT="ext2ownerdeny"
             ;;
+        l2_sigint)
+            TEST_COMMAND="spawn sleepy"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn sleepy"
+            POST_SENDKEY_DEFAULT="ctrl-c"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -63,6 +71,9 @@ fi
 
 if [ -n "$SHELL_AUTOSTART_CMD_DEFAULT" ] && [ -z "${CLUU_SHELL_AUTOSTART_CMD:-}" ]; then
     export CLUU_SHELL_AUTOSTART_CMD="$SHELL_AUTOSTART_CMD_DEFAULT"
+fi
+if [ -n "$POST_SENDKEY_DEFAULT" ] && [ -z "$POST_SENDKEY" ]; then
+    POST_SENDKEY="$POST_SENDKEY_DEFAULT"
 fi
 REQUIRED_MARKERS="${REQUIRED_MARKERS:-}"
 MIN_EXIT_COOKIES="${MIN_EXIT_COOKIES:-3}"
@@ -197,6 +208,12 @@ for ((i = 1; i <= TEST_COMMAND_REPEAT; i++)); do
     fi
 done
 
+if [ -n "$POST_SENDKEY" ]; then
+    sleep "$POST_SENDKEY_DELAY"
+    echo "Sending post key: '$POST_SENDKEY'"
+    send_key "$POST_SENDKEY"
+fi
+
 # --- Step 6: Wait for the test to run ---
 echo "Waiting ${RUN_WAIT}s for hello to execute..."
 sleep "$RUN_WAIT"
@@ -244,6 +261,7 @@ fi
 # - l2_ext2mutate: mkdir/rename/rmdir ext2 metadata mutation smoke test
 # - l2_ext2unlink: create+unlink verification smoke test
 # - l2_owner_deny: explicit non-owner mutation denial with second spawned client
+# - l2_sigint: foreground spawn interrupted by Ctrl-C (minimal SIGINT path)
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
 required_markers=()
@@ -400,6 +418,14 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "ownerprobe: PASS permission denied"
             "ext2ownerdeny: PASS non-owner denied + owner cleanup"
+        )
+        ;;
+    l2_sigint)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "spawn: SIGINT pid="
+            "procmgr: killed pid"
         )
         ;;
     none)

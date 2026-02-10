@@ -80,6 +80,16 @@ impl LineDiscipline {
     /// Canonical mode: buffer input, emit line on Enter.
     fn handle_byte_canonical(&mut self, byte: u8) -> LineEffect {
         match byte {
+            0x03 => {
+                // Ctrl-C (SIGINT): clear current line buffer and forward an out-of-band
+                // marker byte so foreground consumers can interrupt promptly.
+                self.buffer.clear();
+                LineEffect {
+                    echo: EchoAction::Bytes(b"^C\n"),
+                    line_ready: Some(alloc::vec![0x03]),
+                    raw_byte: None,
+                }
+            }
             b'\n' => {
                 self.buffer.push(byte);
                 let line = core::mem::take(&mut self.buffer);

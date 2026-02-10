@@ -214,6 +214,12 @@ fn handle_line_payload(
 ) -> Result<()> {
     #[cfg(not(feature = "lang-parser"))]
     let _ = (stdlog, context);
+    // Ctrl-C in canonical mode is delivered as a single 0x03 marker byte.
+    if payload.contains(&0x03) {
+        print_prompt(stdout)?;
+        return Ok(());
+    }
+
     // Print a new prompt after each completed line.
     if payload.contains(&b'\n') {
         #[cfg(feature = "lang-parser")]

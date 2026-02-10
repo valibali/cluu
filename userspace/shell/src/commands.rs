@@ -8,10 +8,12 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::mem::size_of;
 use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
-    call, call_with_payload, recv, send_with_payload, send_with_retry, TTY_WRITE_LABEL,
+    call, call_with_payload, recv, send_with_payload, send_with_retry, TTY_READ_LABEL,
+    TTY_WRITE_LABEL,
 };
 use libcluu::registry;
 use libcluu::syscall;
@@ -574,8 +576,15 @@ impl BuiltinCommand for SpawnBuiltin {
         call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
         match parse_status(reply.words[0]) {
             Ok(()) => {
-                let mut exit_msg = Message::new(0, [0; 6], 0);
-                let _ = recv(notify_endpoint, &mut exit_msg, IpcFlags::empty());
+                let child_pid = reply.words[1];
+                let stdin_endpoint = process_info().tokens[libcluu::boot::TOKEN_STDIN];
+                wait_for_exit_or_sigint(
+                    procmgr_endpoint,
+                    notify_endpoint,
+                    stdin_endpoint,
+                    child_pid,
+                    stdout,
+                )?;
                 Ok(())
             }
             Err(err) => {
@@ -585,6 +594,63 @@ impl BuiltinCommand for SpawnBuiltin {
             }
         }
     }
+}
+
+fn wait_for_exit_or_sigint(
+    procmgr_endpoint: usize,
+    notify_endpoint: usize,
+    stdin_endpoint: usize,
+    child_pid: usize,
+    stdout: usize,
+) -> Result<()> {
+    let mut buf = [0u8; 256];
+    let tokens = [notify_endpoint, stdin_endpoint];
+
+    loop {
+        let (index, len) = match syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+            Ok(v) => v,
+            Err(Error::WouldBlock) => continue,
+            Err(err) => return Err(err),
+        };
+        let Some((msg, payload)) = parse_ipc_message(&buf[..len]) else {
+            continue;
+        };
+        if index == 0 {
+            // Exit notification from procmgr.
+            if msg.tag.words >= 2 {
+                return Ok(());
+            }
+            continue;
+        }
+
+        // TTY input while child is foreground.
+        if msg.tag.label != TTY_READ_LABEL {
+            continue;
+        }
+        if payload.contains(&0x03) {
+            let mut kill = Message::new(PROCMGR_KILL_LABEL, [0; 6], 2);
+            kill.words[0] = child_pid;
+            kill.words[1] = 2; // SIGINT
+            let _ = call(procmgr_endpoint, &mut kill, IpcFlags::empty());
+            let line = format!("spawn: SIGINT pid={}\n", child_pid);
+            let _ = debug_print(line.trim_end());
+            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+            return Ok(());
+        }
+    }
+}
+
+fn parse_ipc_message(buf: &[u8]) -> Option<(Message, &[u8])> {
+    if buf.len() < size_of::<Message>() {
+        return None;
+    }
+    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
+    let mut payload_len = msg.words[0];
+    let header = size_of::<Message>();
+    if header + payload_len > buf.len() {
+        payload_len = 0;
+    }
+    Some((msg, &buf[header..header + payload_len]))
 }
 
 struct MapFailBuiltin;
