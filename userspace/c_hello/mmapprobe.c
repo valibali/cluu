@@ -22,6 +22,10 @@
 #define PROT_WRITE 0x2
 #endif
 
+#ifndef PROT_NONE
+#define PROT_NONE 0x0
+#endif
+
 extern void *mmap(void *addr, unsigned long len, int prot, int flags, int fd, long off);
 extern int munmap(void *addr, unsigned long len);
 extern int mprotect(void *addr, unsigned long len, int prot);
@@ -61,6 +65,23 @@ int main(void) {
     debug_print("mmapprobe: PASS mprotect exact");
     printf("mmapprobe: PASS mprotect exact addr=%p len=%zu\n", region, len);
 
+    errno = 0;
+    if (mprotect(region, len, PROT_NONE) == 0) {
+        debug_print("mmapprobe: FAIL mprotect prot-none unexpectedly succeeded");
+        printf("mmapprobe: FAIL mprotect prot-none unexpectedly succeeded\n");
+        return 12;
+    }
+    debug_print("mmapprobe: PASS mprotect prot-none unsupported");
+    printf("mmapprobe: PASS mprotect prot-none unsupported errno=%d\n", errno);
+
+    if (mprotect(region, len, PROT_READ | PROT_WRITE) != 0) {
+        return fail("mmapprobe: FAIL mprotect restore rw", 13);
+    }
+    p[0] = 0x11;
+    p[page] = 0x22;
+    debug_print("mmapprobe: PASS mprotect restore rw");
+    printf("mmapprobe: PASS mprotect restore rw addr=%p\n", region);
+
     if (munmap(region, len) != 0) {
         return fail("mmapprobe: FAIL munmap initial", 4);
     }
@@ -83,16 +104,16 @@ int main(void) {
     if (c != a) {
         debug_print("mmapprobe: FAIL first-fit hole reuse");
         printf("mmapprobe: FAIL first-fit hole reuse a=%p c=%p\n", a, c);
-        return 9;
+        return 14;
     }
     debug_print("mmapprobe: PASS reuse hole");
     printf("mmapprobe: PASS reuse hole a=%p c=%p\n", a, c);
 
     if (munmap(b, page) != 0) {
-        return fail("mmapprobe: FAIL munmap b", 10);
+        return fail("mmapprobe: FAIL munmap b", 15);
     }
     if (munmap(c, page) != 0) {
-        return fail("mmapprobe: FAIL munmap c", 11);
+        return fail("mmapprobe: FAIL munmap c", 16);
     }
 
     debug_print("mmapprobe: PASS complete");
