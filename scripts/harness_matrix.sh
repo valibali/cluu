@@ -32,6 +32,7 @@ if [[ "$RUN_BUILD_ONCE" -eq 1 ]]; then
     run_case "m3_mapcopyfail" no_build env MARKER_MODE=m3_mapcopyfail TEST_COMMAND_REPEAT=1 ./test_hello.sh
     run_case "m3_maperror" no_build env MARKER_MODE=m3_maperror TEST_COMMAND_REPEAT=1 ./test_hello.sh
     run_case "m4_sender_auth" no_build env MARKER_MODE=m4_sender_auth TEST_COMMAND_REPEAT=1 ./test_hello.sh
+    run_case "m4_registry_sender_auth" no_build env MARKER_MODE=m4_registry_sender_auth TEST_COMMAND_REPEAT=1 ./test_hello.sh
 else
     run_case "m1_recv" no_build env MARKER_MODE=m1_recv TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh
     run_case "m2_token_audit" no_build env MARKER_MODE=m2_token_audit TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh
@@ -40,6 +41,7 @@ else
     run_case "m3_mapcopyfail" no_build env MARKER_MODE=m3_mapcopyfail TEST_COMMAND_REPEAT=1 ./test_hello.sh
     run_case "m3_maperror" no_build env MARKER_MODE=m3_maperror TEST_COMMAND_REPEAT=1 ./test_hello.sh
     run_case "m4_sender_auth" no_build env MARKER_MODE=m4_sender_auth TEST_COMMAND_REPEAT=1 ./test_hello.sh
+    run_case "m4_registry_sender_auth" no_build env MARKER_MODE=m4_registry_sender_auth TEST_COMMAND_REPEAT=1 ./test_hello.sh
 fi
 
 echo "All harness matrix cases passed."

@@ -198,6 +198,7 @@ fi
 # - m3_mapcopyfail: copy_from_user failure branch rollback validation via shell builtin (`mapcpfail`)
 # - m3_maperror: map_user_page error branch rollback validation via shell builtin
 # - m4_sender_auth: authenticated sender binding in VFS (ignore caller-supplied client_id)
+# - m4_registry_sender_auth: authenticated sender binding in registry subscribe/register flows
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -275,6 +276,14 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "vfs: open ignoring claimed client_id="
             "authenticated="
+        )
+        ;;
+    m4_registry_sender_auth)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "registry: subscribe"
+            "sender"
         )
         ;;
     none)
