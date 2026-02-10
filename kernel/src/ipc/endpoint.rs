@@ -151,6 +151,15 @@ impl QueueEndpoint {
             crate::sched::ThreadManager::wake_thread(sender_id);
         }
     }
+
+    fn pop_next_receiver_to_wake(&mut self) -> Option<ThreadId> {
+        while let Some(receiver_id) = self.waiting_receivers.pop_front() {
+            if crate::sched::ThreadManager::is_thread_recv_waiting(receiver_id) {
+                return Some(receiver_id);
+            }
+        }
+        None
+    }
 }
 
 impl ByteEndpoint for QueueEndpoint {
@@ -168,7 +177,7 @@ impl ByteEndpoint for QueueEndpoint {
         let msg = EndpointMessage::new(data)?;
         self.queue.push_back(msg);
 
-        let receiver_to_wake = self.waiting_receivers.pop_front();
+        let receiver_to_wake = self.pop_next_receiver_to_wake();
 
         // Also wake a waiting sender if queue now has space.
         if !self.waiting_senders.is_empty() && self.queue.len() < MAX_QUEUE_LEN {
@@ -232,7 +241,7 @@ impl ByteEndpoint for QueueEndpoint {
             message: msg,
             cookie,
         });
-        Ok(self.waiting_receivers.pop_front())
+        Ok(self.pop_next_receiver_to_wake())
     }
 
     fn recv_call(

@@ -193,6 +193,11 @@ pub struct Thread {
     /// Information for pending IPC call reply (set when thread is waiting for reply)
     pub call_reply_info: Option<CallReplyInfo>,
 
+    /// Set while thread is in recv_any waiter-registration window.
+    /// This closes the race where sender arrives between waiter registration
+    /// and the receiver transition to Blocked.
+    pub recv_wait_armed: bool,
+
     /// Rotating scan hint for multi-endpoint recv_any fairness.
     pub recv_scan_hint: usize,
 
@@ -290,6 +295,7 @@ impl Thread {
             timeout_deadline: None,
             woke_from_timeout: false,
             call_reply_info: None,
+            recv_wait_armed: false,
             recv_scan_hint: 0,
             token_cache: None,
             fault_endpoint: None,
@@ -325,6 +331,7 @@ impl Thread {
             timeout_deadline: None,
             woke_from_timeout: false,
             call_reply_info: None,
+            recv_wait_armed: false,
             recv_scan_hint: 0,
             token_cache: None,
             fault_endpoint: None,
@@ -432,6 +439,18 @@ impl Thread {
         let start = self.recv_scan_hint % endpoints;
         self.recv_scan_hint = (start + 1) % endpoints;
         start
+    }
+
+    pub fn arm_recv_wait(&mut self) {
+        self.recv_wait_armed = true;
+    }
+
+    pub fn disarm_recv_wait(&mut self) {
+        self.recv_wait_armed = false;
+    }
+
+    pub fn is_recv_wait_armed(&self) -> bool {
+        self.recv_wait_armed
     }
 }
 
@@ -653,5 +672,23 @@ mod tests {
         assert_eq!(thread.next_recv_scan_start(3), 1);
         assert_eq!(thread.next_recv_scan_start(3), 2);
         assert_eq!(thread.next_recv_scan_start(3), 0);
+    }
+
+    #[test]
+    fn test_recv_wait_arm_disarm() {
+        let mut thread = Thread::new(
+            ThreadId::new(1),
+            PhysAddr::new(0x1000),
+            VirtAddr::new(0x400000),
+            VirtAddr::new(0x7ff00000),
+            Priority::DEFAULT,
+            ThreadFlags::empty(),
+        );
+
+        assert!(!thread.is_recv_wait_armed());
+        thread.arm_recv_wait();
+        assert!(thread.is_recv_wait_armed());
+        thread.disarm_recv_wait();
+        assert!(!thread.is_recv_wait_armed());
     }
 }

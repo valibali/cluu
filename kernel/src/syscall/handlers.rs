@@ -175,6 +175,9 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
         Err(err) => return Err(err),
     }
 
+    // Arm recv wait before enqueueing on endpoints to close registration/block race.
+    crate::sched::ThreadManager::arm_current_recv_wait();
+
     // Register as waiter on all endpoints
     for endpoint_id in endpoint_ids.iter().take(tokens_count).filter_map(|id| *id) {
         // Try recv which will register us as a waiter if no message
@@ -200,9 +203,11 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
 
     // After waking, check if it was due to timeout
     if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
+        crate::sched::ThreadManager::disarm_current_recv_wait();
         crate::telemetry::record_ipc_recv_timeout();
         Err(Error::Timeout)
     } else {
+        crate::sched::ThreadManager::disarm_current_recv_wait();
         crate::telemetry::record_ipc_recv_would_block();
         Err(Error::WouldBlock) // Message arrived on one endpoint, retry will succeed
     }

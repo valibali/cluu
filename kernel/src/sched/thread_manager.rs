@@ -322,6 +322,33 @@ impl ThreadManager {
         .unwrap_or(false)
     }
 
+    pub fn arm_current_recv_wait() {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return,
+        };
+        Self::with_thread_mut(current, |thread| {
+            thread.arm_recv_wait();
+        });
+    }
+
+    pub fn disarm_current_recv_wait() {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return,
+        };
+        Self::with_thread_mut(current, |thread| {
+            thread.disarm_recv_wait();
+        });
+    }
+
+    pub fn is_thread_recv_waiting(thread_id: ThreadId) -> bool {
+        Self::with_thread(thread_id, |thread| {
+            thread.is_blocked() || thread.is_recv_wait_armed()
+        })
+        .unwrap_or(false)
+    }
+
     pub fn wake_thread(thread_id: ThreadId) {
         // Try to wake immediately if locks are available
         let priority = {
@@ -338,6 +365,7 @@ impl ThreadManager {
                     thread.make_ready();
                     thread.clear_timeout_deadline(); // Clear any pending timeout
                     thread.woke_from_timeout = false; // Not a timeout wake
+                    thread.disarm_recv_wait();
                     Some(thread.priority)
                 }
                 _ => None,
@@ -532,6 +560,7 @@ impl ThreadManager {
                     thread.make_ready();
                     thread.clear_timeout_deadline();
                     thread.woke_from_timeout = true;
+                    thread.disarm_recv_wait();
                     to_wake.push((thread_id, thread.priority));
                 }
             }
@@ -732,6 +761,7 @@ impl ThreadManager {
                         thread.make_ready();
                         thread.clear_timeout_deadline(); // Clear any pending timeout
                         thread.woke_from_timeout = false; // Not a timeout wake
+                        thread.disarm_recv_wait();
                         to_schedule.push((thread_id, thread.priority));
                     }
                 }
