@@ -9,7 +9,7 @@ use crate::token::EndpointId;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
@@ -127,10 +127,10 @@ struct RecvWaiter {
 const MAX_QUEUE_LEN: usize = 1024;
 const MAX_CALL_QUEUE_LEN: usize = 256;
 const BUSY_LOG_EVERY: u64 = 64;
-/// Temporary kill-switch for rendezvous direct delivery.
+/// Runtime kill-switch for rendezvous direct delivery.
 ///
-/// Kept disabled until waiter bookkeeping is tightened end-to-end.
-const IPC_RENDEZVOUS_DIRECT_ENABLED: bool = false;
+/// Defaults to disabled until explicitly enabled by boot configuration.
+static IPC_RENDEZVOUS_DIRECT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Copy, Clone)]
 struct QueueStats {
@@ -202,6 +202,7 @@ impl QueueEndpoint {
             ) {
                 return Some(waiter);
             }
+            crate::telemetry::record_ipc_stale_waiter();
         }
         None
     }
@@ -777,7 +778,7 @@ fn try_direct_deliver_to_waiting_receiver(
     sender: Option<ThreadId>,
     data: &[u8],
 ) -> Result<Option<ThreadId>, Error> {
-    if !IPC_RENDEZVOUS_DIRECT_ENABLED {
+    if !rendezvous_direct_enabled() {
         return Ok(None);
     }
 
@@ -823,6 +824,16 @@ fn try_direct_deliver_to_waiting_receiver(
     }
 
     Ok(None)
+}
+
+#[inline(always)]
+pub fn set_rendezvous_direct_enabled(enabled: bool) {
+    IPC_RENDEZVOUS_DIRECT_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+#[inline(always)]
+pub fn rendezvous_direct_enabled() -> bool {
+    IPC_RENDEZVOUS_DIRECT_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Get the current caller for an endpoint (used by reply)
