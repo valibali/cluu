@@ -11,6 +11,7 @@ use libcluu::boot::{
     // New token slot constants
     TOKEN_CLOCK, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_IPC, TOKEN_REGISTRY, TOKEN_SELF, TOKEN_SPACE,
 };
+use libcluu::boot_manifest::BootManifest;
 use libcluu::elf::ElfFile;
 use libcluu::tar::find_member;
 use libcluu::*;
@@ -152,7 +153,12 @@ impl ServiceWiring for ServiceKind {
 ///
 /// This loads the ELF, maps its segments, builds ProcessInfo, and finally
 /// creates the first thread to start execution.
-pub fn launch_service(ctx: &InitContext<'_>, service: &ServiceSpec, index: usize) -> Result<()> {
+pub fn launch_service(
+    ctx: &InitContext<'_>,
+    service: &ServiceSpec,
+    index: usize,
+    manifest: Option<&BootManifest>,
+) -> Result<()> {
     // Derive an optional capability token for services that need elevated rights.
     let child_token = match service.rights {
         Some(rights) => token_derive(ctx.boot.root_token, rights.bits() as usize, u64::MAX)?,
@@ -166,6 +172,7 @@ pub fn launch_service(ctx: &InitContext<'_>, service: &ServiceSpec, index: usize
     debug_print(&format!("init: launching {}", service.name))?;
 
     let service_bytes = load_service_image(ctx.initrd, service.path, service.name)?;
+    enforce_manifest_policy(manifest, service, service_bytes)?;
     let elf = ElfFile::parse(service_bytes)?;
 
     let stack_top = PROC_STACK_TOP - index * STACK_STEP;
@@ -217,6 +224,56 @@ pub fn launch_service(ctx: &InitContext<'_>, service: &ServiceSpec, index: usize
 
     debug_print(&format!("init: {} ready", service.name))?;
     Ok(())
+}
+
+fn enforce_manifest_policy(
+    manifest: Option<&BootManifest>,
+    service: &ServiceSpec,
+    service_bytes: &[u8],
+) -> Result<()> {
+    let Some(manifest) = manifest else {
+        return Ok(());
+    };
+
+    let entry = manifest
+        .services
+        .iter()
+        .find(|entry| entry.path == service.path)
+        .ok_or(Error::PermissionDenied)?;
+
+    let actual_hash = klibcluu::crypto::hash_sha256(service_bytes);
+    let actual_hash_hex = to_lower_hex(&actual_hash);
+    if actual_hash_hex != entry.sha256_hex {
+        debug_print(&format!(
+            "init: manifest hash mismatch for {}",
+            service.name
+        ))?;
+        return Err(Error::PermissionDenied);
+    }
+
+    // In current model, services without explicit derived rights inherit root authority.
+    let expected_rights_mask = service.rights.map(|r| r.bits()).unwrap_or(Rights::all().bits());
+    if entry.rights_mask != expected_rights_mask {
+        debug_print(&format!(
+            "init: manifest rights mismatch for {}",
+            service.name
+        ))?;
+        return Err(Error::PermissionDenied);
+    }
+
+    Ok(())
+}
+
+fn to_lower_hex(bytes: &[u8; 32]) -> alloc::string::String {
+    use alloc::string::String;
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 /// Load a service binary from initrd and log the parse step.
