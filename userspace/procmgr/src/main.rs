@@ -37,6 +37,8 @@ const SERVICE_STACK_TOP: usize = SERVICE_STACK_BASE + SERVICE_STACK_SIZE;
 const STACK_FLAGS: usize = 0x03; // read + write
                                  // PAGE_SIZE is imported from libcluu::*
 const SERVICE_PATH: &str = "/dev/initrd/bin/shell";
+const SHELL_ARGC: usize = 3;
+const SHELL_AUTOSTART_PAYLOAD: &[u8] = b"shell\0spawn\0hello\0";
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
 const PROCMGR_KILL_LABEL: u32 = 3;
@@ -134,7 +136,12 @@ impl ProcessManager {
         debug_print("Derived procmgr token handle")?;
         debug_print(&format!("  Handle: {}", self.token))?;
 
-        let _ = self.spawn_service(SERVICE_PATH, DEFAULT_PRIORITY, &[], 0)?;
+        let _ = self.spawn_service(
+            SERVICE_PATH,
+            DEFAULT_PRIORITY,
+            SHELL_AUTOSTART_PAYLOAD,
+            SHELL_ARGC,
+        )?;
         debug_print("Service spawned; yielding to scheduler")?;
         yield_cpu()?;
         Ok(())
