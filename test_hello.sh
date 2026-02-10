@@ -15,6 +15,8 @@ BOOT_WAIT="${BOOT_WAIT:-8}"
 RUN_WAIT="${RUN_WAIT:-5}"
 TEST_COMMAND="${TEST_COMMAND:-spawn hello}"
 KEY_DELAY="${KEY_DELAY:-0.05}"
+MARKER_MODE="${MARKER_MODE:-legacy_p1}"
+REQUIRED_MARKERS="${REQUIRED_MARKERS:-}"
 
 cleanup() {
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -137,27 +139,61 @@ if grep -qE '\[FAIL\]|test FAILED|PANIC|panic' "$SERIAL_LOG"; then
     exit 1
 fi
 
-# Required success markers for timing/TSC fixture.
-required_markers=(
-    "TSC calibrated"
-    "=== P1 POSIX stubs test ==="
-    "[OK] nanosleep(100ms) returned 0"
-    "[OK] usleep(50ms) returned 0"
-    "=== P1 POSIX stubs test PASSED ==="
-)
+# Required success markers.
+# Modes:
+# - legacy_p1: original timing/TSC fixture checks
+# - m0_boot: bootstrap telemetry/manifest checks
+# - none: no required marker checks
+required_markers=()
+case "$MARKER_MODE" in
+    legacy_p1)
+        required_markers=(
+            "TSC calibrated"
+            "=== P1 POSIX stubs test ==="
+            "[OK] nanosleep(100ms) returned 0"
+            "[OK] usleep(50ms) returned 0"
+            "=== P1 POSIX stubs test PASSED ==="
+        )
+        ;;
+    m0_boot)
+        required_markers=(
+            "TSC calibrated"
+            "boot-grant: root token handle="
+            "boot-grant: clock token handle="
+            "telemetry snapshot:"
+            "[USER] init: boot manifest"
+            "procmgr: exit cookie"
+        )
+        ;;
+    none)
+        required_markers=()
+        ;;
+    *)
+        echo "ERROR: unknown MARKER_MODE='$MARKER_MODE'"
+        exit 1
+        ;;
+esac
 
-missing=0
-for marker in "${required_markers[@]}"; do
-    if ! grep -Fq "$marker" "$SERIAL_LOG"; then
-        echo "MISSING: $marker"
-        missing=1
-    fi
-done
-
-if [ "$missing" -ne 0 ]; then
-    echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
-    exit 1
+# Optional override from environment:
+# REQUIRED_MARKERS can be newline-separated markers.
+if [ -n "$REQUIRED_MARKERS" ]; then
+    mapfile -t required_markers <<< "$REQUIRED_MARKERS"
 fi
 
-echo "No faults detected and all required timing/TSC markers found."
+missing=0
+if [ "${#required_markers[@]}" -gt 0 ]; then
+    for marker in "${required_markers[@]}"; do
+        if ! grep -Fq "$marker" "$SERIAL_LOG"; then
+            echo "MISSING: $marker"
+            missing=1
+        fi
+    done
+
+    if [ "$missing" -ne 0 ]; then
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+fi
+
+echo "No faults detected and all required markers found."
 exit 0

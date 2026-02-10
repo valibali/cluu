@@ -198,6 +198,7 @@ pub fn create_token(
     // Insert into appropriate shard
     let shard = get_shard(handle);
     shard.lock().insert(handle, token, object_ref);
+    crate::telemetry::record_token_created();
 
     handle
 }
@@ -419,6 +420,7 @@ pub fn revoke_token(handle: TokenHandle) -> Result<(), &'static str> {
     if removed.is_some() {
         // Increment generation counter atomically (invalidates all thread-local caches)
         REVOCATION_GENERATION.fetch_add(1, Ordering::SeqCst);
+        crate::telemetry::record_token_revoked(1);
         Ok(())
     } else {
         Err("Token not found")
@@ -462,6 +464,7 @@ pub fn revoke_tokens_for_object(target: ObjectRef) -> usize {
 
     if revoked > 0 {
         REVOCATION_GENERATION.fetch_add(1, Ordering::SeqCst);
+        crate::telemetry::record_token_revoked(revoked as u64);
     }
 
     revoked

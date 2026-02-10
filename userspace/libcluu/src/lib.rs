@@ -21,6 +21,7 @@ extern crate alloc;
 
 pub mod allocator;
 pub mod boot;
+pub mod boot_manifest;
 pub mod device_io;
 pub mod elf;
 pub mod error;
@@ -49,25 +50,59 @@ pub mod posix;
 // Re-exports
 pub use boot::{
     // Structs and functions
-    boot_info, process_info, root_token_handle, BootInfo, ProcessInfo,
+    boot_info,
     // Convenience accessors
-    pid, space_token, stderr, stdin, stdout, token, token_clock, token_extra, token_ipc,
-    token_registry, token_self,
+    pid,
+    process_info,
+    root_token_handle,
+    space_token,
+    stderr,
+    stdin,
+    stdout,
+    token,
+    token_clock,
+    token_extra,
+    token_ipc,
+    token_registry,
+    token_self,
+    BootInfo,
+    ProcessInfo,
     // Address constants
-    CONSOLE_FB_BASE, INITRD_USER_BASE, PROCESS_INFO_ADDR,
+    CONSOLE_FB_BASE,
+    INITRD_USER_BASE,
     // Param indices
-    PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
+    PARAM_FB_BASE,
+    PARAM_FB_HEIGHT,
+    PARAM_FB_PITCH,
+    PARAM_FB_SIZE,
+    PARAM_FB_WIDTH,
     PARAM_INITRD_SIZE,
-    // Token slot constants - Universal (0-8)
-    TOKEN_STDIN, TOKEN_STDOUT, TOKEN_STDERR, TOKEN_STDLOG, // I/O (0-3)
-    TOKEN_SELF, TOKEN_SPACE, TOKEN_IPC, TOKEN_CLOCK,       // Core caps (4-7)
-    TOKEN_REGISTRY,                                         // System (8)
-    // Token slot constants - Contextual (9-15)
-    TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_EXTRA_3, TOKEN_EXTRA_4, TOKEN_EXTRA_5,
-    TOKEN_EXTRA_6,
+    PROCESS_INFO_ADDR,
     // Slot ranges
-    TOKEN_CAPS_END, TOKEN_CAPS_START, TOKEN_EXTRA_END, TOKEN_EXTRA_START, TOKEN_STDIO_END,
+    TOKEN_CAPS_END,
+    TOKEN_CAPS_START,
+    TOKEN_CLOCK, // Core caps (4-7)
+    // Token slot constants - Contextual (9-15)
+    TOKEN_EXTRA_0,
+    TOKEN_EXTRA_1,
+    TOKEN_EXTRA_2,
+    TOKEN_EXTRA_3,
+    TOKEN_EXTRA_4,
+    TOKEN_EXTRA_5,
+    TOKEN_EXTRA_6,
+    TOKEN_EXTRA_END,
+    TOKEN_EXTRA_START,
+    TOKEN_IPC,
+    TOKEN_REGISTRY, // System (8)
+    TOKEN_SELF,
+    TOKEN_SPACE,
+    TOKEN_STDERR,
+    // Token slot constants - Universal (0-8)
+    TOKEN_STDIN,
+    TOKEN_STDIO_END,
     TOKEN_STDIO_START,
+    TOKEN_STDLOG, // I/O (0-3)
+    TOKEN_STDOUT,
 };
 pub use elf::{ElfFile, LoadableSegment};
 pub use error::{Error, Result};
@@ -75,6 +110,8 @@ pub use ipc::{call, recv, reply, send};
 pub use process::{map_segments, map_stack};
 pub use rights::Rights;
 pub use syscall::{
+    clock_frequency,
+    clock_now,
     debug_print,
 
     // High-level wrappers
@@ -91,8 +128,6 @@ pub use syscall::{
     irq_ack,
 
     irq_attach,
-    clock_frequency,
-    clock_now,
     space_create,
     space_grant,
     space_map,

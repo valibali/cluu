@@ -135,6 +135,13 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
         crate::token::Timestamp::far_future(),
         ObjectRef::Space(AddressSpaceId::new(0)),
     );
+    crate::telemetry::record_boot_token_grant();
+    klibcluu::info("boot-grant: root token handle=");
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Info,
+        "",
+        root_token_handle.as_usize() as u64,
+    );
 
     let clock_token_handle = crate::token::create_token(
         crate::token::OpaqueScope::random(),
@@ -142,6 +149,13 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
         crate::token::Issuer::Kernel,
         crate::token::Timestamp::far_future(),
         ObjectRef::Clock,
+    );
+    crate::telemetry::record_boot_token_grant();
+    klibcluu::info("boot-grant: clock token handle=");
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Info,
+        "",
+        clock_token_handle.as_usize() as u64,
     );
 
     let boot_frame = crate::mm::pmm::alloc_frame().ok_or_else(|| {

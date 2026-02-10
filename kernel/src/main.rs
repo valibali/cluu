@@ -17,7 +17,7 @@
 extern crate klibcluu;
 
 // Use kernel lib modules
-use cluu_kernel::{architecture, bootboot, bootstrap, mm, token};
+use cluu_kernel::{architecture, bootboot, bootstrap, mm, telemetry, token};
 use klibcluu::crypto;
 
 use core::panic::PanicInfo;
@@ -190,6 +190,7 @@ pub extern "C" fn kstart() -> ! {
             }
         }
     };
+    telemetry::log_bootstrap_snapshot("post-bootstrap");
 
     // Phase 6: Log initialization status
 

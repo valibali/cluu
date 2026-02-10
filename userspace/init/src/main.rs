@@ -39,6 +39,14 @@ fn run() -> Result<()> {
 
     let boot = boot::capture_boot_snapshot()?;
     let initrd = boot::map_initrd_slice(boot.initrd_size);
+    if let Some(manifest) = boot::load_boot_manifest(initrd)? {
+        if manifest.services.is_empty() {
+            return Err(libcluu::Error::InvalidArgument);
+        }
+        debug_print("init: boot manifest parsed")?;
+    } else {
+        debug_print("init: boot manifest not present (compat mode)")?;
+    }
     let ctx = context::InitContext::new(boot, initrd)?;
 
     // Launch services in the declared order; wiring policy is in wiring.rs.

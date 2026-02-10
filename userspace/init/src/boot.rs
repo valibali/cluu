@@ -5,6 +5,8 @@
 //! consumes and keeps other modules testable.
 
 use libcluu::boot::{boot_info, INITRD_USER_BASE};
+use libcluu::boot_manifest::{parse_boot_manifest, BootManifest, DEFAULT_BOOT_MANIFEST_PATH};
+use libcluu::tar::find_member;
 use libcluu::Result;
 
 /// Minimal subset of boot info used by init.
@@ -49,4 +51,15 @@ pub fn capture_boot_snapshot() -> Result<BootSnapshot> {
 /// Safety: the kernel maps the initrd to INITRD_USER_BASE before init runs.
 pub fn map_initrd_slice(initrd_size: usize) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, initrd_size) }
+}
+
+/// Parse optional boot manifest from initrd.
+///
+/// If the manifest file is absent this returns `Ok(None)` so boot remains
+/// backward-compatible. If present, parsing is strict.
+pub fn load_boot_manifest(initrd: &[u8]) -> Result<Option<BootManifest>> {
+    let Some(data) = find_member(initrd, DEFAULT_BOOT_MANIFEST_PATH) else {
+        return Ok(None);
+    };
+    parse_boot_manifest(data).map(Some)
 }

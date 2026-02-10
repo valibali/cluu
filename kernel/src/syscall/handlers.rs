@@ -160,7 +160,10 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     // First attempt
     match try_recv_any() {
         Ok((index, len)) => return Ok((index << 32) | len),
-        Err(Error::WouldBlock) if nonblocking => return Err(Error::WouldBlock),
+        Err(Error::WouldBlock) if nonblocking => {
+            crate::telemetry::record_ipc_recv_would_block();
+            return Err(Error::WouldBlock);
+        }
         Err(Error::WouldBlock) => { /* fall through to blocking */ }
         Err(err) => return Err(err),
     }
@@ -190,8 +193,10 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
 
     // After waking, check if it was due to timeout
     if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
+        crate::telemetry::record_ipc_recv_timeout();
         Err(Error::Timeout)
     } else {
+        crate::telemetry::record_ipc_recv_would_block();
         Err(Error::WouldBlock) // Message arrived on one endpoint, retry will succeed
     }
 }
@@ -339,9 +344,7 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
         }
         Err(Error::InvalidState) => {
             // Not a call reply — check if it's a fault reply
-            if let Some(fault_info) =
-                crate::sched::ThreadManager::take_fault_reply_info(reply_id)
-            {
+            if let Some(fault_info) = crate::sched::ThreadManager::take_fault_reply_info(reply_id) {
                 handle_fault_reply(fault_info, &buffer[..msg_len]);
                 let _ = crate::token::revoke_token(reply_token_handle);
                 Ok(0)
@@ -357,10 +360,7 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
 ///
 /// Convention: label=0 → RESUME (restore saved context, re-execute faulting instruction)
 ///             label≠0 → KILL (terminate the faulted thread)
-fn handle_fault_reply(
-    fault_info: crate::sched::FaultReplyInfo,
-    reply_data: &[u8],
-) {
+fn handle_fault_reply(fault_info: crate::sched::FaultReplyInfo, reply_data: &[u8]) {
     // Parse label from reply message (first 4 bytes = UserMessageTag.label)
     let label = if reply_data.len() >= 4 {
         u32::from_ne_bytes([reply_data[0], reply_data[1], reply_data[2], reply_data[3]])
@@ -1871,7 +1871,11 @@ fn invoke_frame_allocate(token: &Token, _args: SyscallArgs) -> SyscallResult {
 ///
 /// # Arguments
 /// - token: Frame token (requires DESTROY right)
-fn invoke_frame_free(token_handle: TokenHandle, token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_frame_free(
+    token_handle: TokenHandle,
+    token: &Token,
+    _args: SyscallArgs,
+) -> SyscallResult {
     use crate::mm::frame_registry;
     use crate::token::{ObjectRef, ObjectType, Rights};
 
