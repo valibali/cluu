@@ -74,6 +74,7 @@ struct ProcessManager {
     pid_next: usize,
     exit_table: BTreeMap<usize, usize>,  // cookie -> thread_token
     exit_notify: BTreeMap<usize, usize>, // cookie -> notify_endpoint
+    sender_notify_endpoint: BTreeMap<usize, usize>, // sender_tid -> notify_endpoint
     pid_to_cookie: BTreeMap<usize, usize>, // pid -> cookie (for PROC_KILL)
     cookie_to_pid: BTreeMap<usize, usize>, // cookie -> pid (for exit handling)
     pid_owner_tid: BTreeMap<usize, usize>, // pid -> authenticated owner thread id
@@ -101,6 +102,7 @@ impl ProcessManager {
             pid_next: 2, // PID 1 is typically init
             exit_table: BTreeMap::new(),
             exit_notify: BTreeMap::new(),
+            sender_notify_endpoint: BTreeMap::new(),
             pid_to_cookie: BTreeMap::new(),
             cookie_to_pid: BTreeMap::new(),
             pid_owner_tid: BTreeMap::new(),
@@ -259,13 +261,20 @@ impl ProcessManager {
 
     fn handle_spawn_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
         let mut reply_msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 2);
-        // Extract reply token for call messages (prefer this over legacy reply_endpoint)
+        // Spawn must come via ipc_call; do not trust caller-routed reply endpoints.
         let reply_token = extract_reply_token(msg);
-        let reply_endpoint = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
         let notify_endpoint = if msg.tag.words >= 4 { msg.words[3] } else { 0 };
+        let notify_endpoint = match self.resolve_notify_endpoint(sender_tid, notify_endpoint) {
+            Ok(endpoint) => endpoint,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                let _ = self.send_spawn_reply(reply_token, &reply_msg);
+                return Ok(());
+            }
+        };
         if msg.tag.label != PROCMGR_SPAWN_LABEL {
             reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
-            let _ = self.send_spawn_reply(reply_token, reply_endpoint, &reply_msg);
+            let _ = self.send_spawn_reply(reply_token, &reply_msg);
             return Ok(());
         }
 
@@ -273,7 +282,7 @@ impl ProcessManager {
             Some(value) => value,
             None => {
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
-                let _ = self.send_spawn_reply(reply_token, reply_endpoint, &reply_msg);
+                let _ = self.send_spawn_reply(reply_token, &reply_msg);
                 return Ok(());
             }
         };
@@ -282,7 +291,7 @@ impl ProcessManager {
         if !path.starts_with('/') {
             let _ = debug_print(&format!("procmgr: rejecting relative path '{}'", path));
             reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
-            let _ = self.send_spawn_reply(reply_token, reply_endpoint, &reply_msg);
+            let _ = self.send_spawn_reply(reply_token, &reply_msg);
             return Ok(());
         }
 
@@ -309,7 +318,7 @@ impl ProcessManager {
         }
 
         match self.spawn_service(path, priority, argv_data, argc, sender_tid) {
-            Ok((thread_token, cookie, pid)) => {
+            Ok((_thread_token, cookie, pid)) => {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = pid; // Return PID instead of thread_token
                 reply_msg.words[2] = cookie; // Return cookie for _wait()
@@ -321,10 +330,31 @@ impl ProcessManager {
                 reply_msg.words[0] = err.to_errno() as usize;
             }
         }
-        if let Err(err) = self.send_spawn_reply(reply_token, reply_endpoint, &reply_msg) {
+        if let Err(err) = self.send_spawn_reply(reply_token, &reply_msg) {
             let _ = debug_print(&format!("procmgr: spawn reply failed {:?}", err));
         }
         Ok(())
+    }
+
+    fn resolve_notify_endpoint(
+        &mut self,
+        sender_tid: usize,
+        requested_notify_endpoint: usize,
+    ) -> Result<usize> {
+        if sender_tid == 0 {
+            return Err(Error::PermissionDenied);
+        }
+        if requested_notify_endpoint != 0 {
+            self.sender_notify_endpoint
+                .insert(sender_tid, requested_notify_endpoint);
+            return Ok(requested_notify_endpoint);
+        }
+
+        Ok(self
+            .sender_notify_endpoint
+            .get(&sender_tid)
+            .copied()
+            .unwrap_or(0))
     }
 
     fn next_exit_cookie(&mut self) -> usize {
@@ -785,19 +815,12 @@ impl ProcessManager {
         Ok(())
     }
 
-    fn send_spawn_reply(
-        &self,
-        reply_token: Option<usize>,
-        reply_endpoint: usize,
-        msg: &Message,
-    ) -> Result<()> {
-        // Prefer reply token (from ipc_call), fall back to explicit endpoint, then legacy reply
+    fn send_spawn_reply(&self, reply_token: Option<usize>, msg: &Message) -> Result<()> {
+        // Require reply token from ipc_call to avoid caller-controlled reply routing.
         if let Some(token) = reply_token {
             reply(token, msg, IpcFlags::empty())
-        } else if reply_endpoint != 0 {
-            send(reply_endpoint, msg, IpcFlags::empty())
         } else {
-            reply(self.spawn_endpoint, msg, IpcFlags::empty())
+            Err(Error::InvalidState)
         }
     }
 }
