@@ -401,8 +401,8 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 | WP-M0.1 Telemetry baseline (token/ipc/boot grant counters) | M0 | DONE | `kernel/src/telemetry.rs`, `kernel/src/token/table.rs`, `kernel/src/syscall/handlers.rs`, `kernel/src/bootstrap.rs`, `kernel/src/main.rs` | `cargo check -p cluu-kernel` + boot log contains telemetry snapshot |
 | WP-M0.2 Initrd manifest schema + parser stub | M0 | DONE (permissive mode) | `userspace/init`, `userspace/libcluu` (manifest type/parser) | malformed manifest vectors rejected by strict parser when manifest exists; boot still allows missing manifest |
 | WP-M1.1 Fail-closed manifest verify gate | M1 | DONE (hash+policy+signature gate) | `userspace/init` (mandatory manifest + hash/rights enforcement), `userspace/libcluu` (signature-required parser), `xtask` (signed manifest generation), `kernel/src/bootstrap.rs` (`sys/init` hash+signature verification) | boot fails if manifest missing/invalid/mismatched/tampered |
-| WP-M1.2 Waitset receive syscall path | M1 | IN PROGRESS (fair scan + armed waiter + churn harness) | `kernel/src/syscall/handlers.rs`, `kernel/src/ipc/*`, `kernel/src/sched/*`, userspace recv wrappers, `test_hello.sh` | `MARKER_MODE=m1_recv TEST_COMMAND_REPEAT=3` passes with >=3 `procmgr: exit cookie` lines and no faults |
-| WP-M2.1 Token lifecycle structured audit stream | M2 | TODO | `kernel/src/token/*`, logger schema | deterministic create/derive/revoke trace under churn |
+| WP-M1.2 Waitset receive syscall path | M1 | DONE (fair scan + armed waiter + churn harness; retry contract preserved) | `kernel/src/syscall/handlers.rs`, `kernel/src/ipc/*`, `kernel/src/sched/*`, userspace recv wrappers, `test_hello.sh` | `MARKER_MODE=m1_recv TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh` passes (full rebuild) |
+| WP-M2.1 Token lifecycle structured audit stream | M2 | IN PROGRESS (bounded ring + monotonic sequence + create/derive/revoke hooks) | `kernel/src/token/*`, `kernel/src/telemetry.rs` | deterministic event ordering under churn; no dropped events in baseline run |
 | WP-M2.2 Leak diagnostics and delta accounting | M2 | TODO | `kernel/src/mm/*`, `kernel/src/sched/*`, `kernel/src/token/*` | spawn/exit churn returns object deltas to baseline |
 | WP-M3.1 Mapping/copy failpoints + rollback checks | M3 | TODO | `kernel/src/mm/vmm.rs`, `kernel/src/syscall/userptr.rs`, copy/map callsites | forced failure leaves no partial mappings |
 | WP-M3.2 CI churn + leak detection harness | M3 | TODO | `xtask/`, `kernel-tests/`, QEMU runner scripts | CI hard-fails on leak/regression |
@@ -414,7 +414,7 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 
 ### Next execution batch
 
-1. Complete WP-M1.2 (waitset receive) before deep performance tuning.
+1. Finish WP-M2.1 with churn assertions and audit-drain helper for automated checks.
 2. Implement WP-M2.2 churn/leak diagnostics to keep later milestones safe.
 3. Implement WP-M3.1 failpoint rollback checks to harden error paths.
 

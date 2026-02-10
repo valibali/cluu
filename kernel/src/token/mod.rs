@@ -65,7 +65,7 @@ pub fn derive_token(
     let secret = table::kernel_secret();
     let derived = parent.derive(new_rights, new_expire, issuer, &secret)?;
 
-    Some(table::create_token(
+    Some(table::create_derived_token(
         derived.scope,
         derived.role,
         derived.issuer,
@@ -262,7 +262,8 @@ impl Token {
     ///
     /// Returns true if signature is valid (token hasn't been tampered with).
     pub fn verify(&self, secret: &[u8; 32]) -> bool {
-        let expected = Signature::compute(self.scope, self.role, self.issuer, self.expire_at, secret);
+        let expected =
+            Signature::compute(self.scope, self.role, self.issuer, self.expire_at, secret);
         self.signature.constant_time_eq(&expected)
     }
 

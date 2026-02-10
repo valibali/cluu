@@ -62,6 +62,11 @@ struct TokenTableShard {
     scopes: BTreeMap<OpaqueScope, ObjectRef>,
 }
 
+struct RemovedToken {
+    token: Token,
+    object_ref: Option<ObjectRef>,
+}
+
 impl TokenTableShard {
     const fn new() -> Self {
         Self {
@@ -85,8 +90,17 @@ impl TokenTableShard {
     }
 
     /// Remove a token by handle
-    fn remove(&mut self, handle: TokenHandle) -> Option<Token> {
-        self.handles.remove(&handle)
+    fn remove(&mut self, handle: TokenHandle) -> Option<RemovedToken> {
+        let token = self.handles.remove(&handle)?;
+        let object_ref = self.scopes.get(&token.scope).copied();
+        if !self
+            .handles
+            .values()
+            .any(|other| other.scope == token.scope)
+        {
+            self.scopes.remove(&token.scope);
+        }
+        Some(RemovedToken { token, object_ref })
     }
 
     /// Resolve opaque scope to object reference
@@ -189,6 +203,28 @@ pub fn create_token(
     expire_at: super::Timestamp,
     object_ref: ObjectRef,
 ) -> TokenHandle {
+    create_token_with_kind(scope, role, issuer, expire_at, object_ref, false)
+}
+
+/// Create a token representing explicit derivation from an existing authority.
+pub(crate) fn create_derived_token(
+    scope: OpaqueScope,
+    role: super::Rights,
+    issuer: super::Issuer,
+    expire_at: super::Timestamp,
+    object_ref: ObjectRef,
+) -> TokenHandle {
+    create_token_with_kind(scope, role, issuer, expire_at, object_ref, true)
+}
+
+fn create_token_with_kind(
+    scope: OpaqueScope,
+    role: super::Rights,
+    issuer: super::Issuer,
+    expire_at: super::Timestamp,
+    object_ref: ObjectRef,
+    derived: bool,
+) -> TokenHandle {
     let secret = kernel_secret();
     let token = Token::new(scope, role, issuer, expire_at, &secret);
 
@@ -196,9 +232,11 @@ pub fn create_token(
     let handle = TokenHandle::new(NEXT_HANDLE.fetch_add(1, Ordering::SeqCst) as usize);
 
     // Insert into appropriate shard
+    let telemetry_token = token.clone();
     let shard = get_shard(handle);
     shard.lock().insert(handle, token, object_ref);
     crate::telemetry::record_token_created();
+    crate::telemetry::record_token_audit_create(handle, &telemetry_token, object_ref, derived);
 
     handle
 }
@@ -417,10 +455,15 @@ pub fn revoke_token(handle: TokenHandle) -> Result<(), &'static str> {
     let shard = get_shard(handle);
     let removed = shard.lock().remove(handle);
 
-    if removed.is_some() {
+    if let Some(removed) = removed {
         // Increment generation counter atomically (invalidates all thread-local caches)
         REVOCATION_GENERATION.fetch_add(1, Ordering::SeqCst);
         crate::telemetry::record_token_revoked(1);
+        crate::telemetry::record_token_audit_revoke(
+            handle,
+            Some(&removed.token),
+            removed.object_ref,
+        );
         Ok(())
     } else {
         Err("Token not found")
@@ -457,7 +500,13 @@ pub fn revoke_tokens_for_object(target: ObjectRef) -> usize {
             .collect();
 
         for handle in handles_to_revoke {
-            shard.remove(handle);
+            if let Some(removed) = shard.remove(handle) {
+                crate::telemetry::record_token_audit_revoke(
+                    handle,
+                    Some(&removed.token),
+                    removed.object_ref,
+                );
+            }
             revoked += 1;
         }
     }
