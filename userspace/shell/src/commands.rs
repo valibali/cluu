@@ -180,6 +180,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(Ext2WriteBuiltin));
         registry.register(Box::new(Ext2AppendBuiltin));
         registry.register(Box::new(Ext2MutateBuiltin));
+        registry.register(Box::new(Ext2UnlinkBuiltin));
         registry.register(Box::new(CatBuiltin));
         registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(HeapBuiltin));
@@ -243,7 +244,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -1125,6 +1126,75 @@ impl BuiltinCommand for Ext2MutateBuiltin {
             Err(err) => {
                 let line = format!("ext2mutate: FAIL op={} err={:?}\n", op, err);
                 let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct Ext2UnlinkBuiltin;
+
+impl BuiltinCommand for Ext2UnlinkBuiltin {
+    fn name(&self) -> &'static str {
+        "ext2unlink"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let path = "/l2a_tmp_unlink";
+        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+            Ok(ep) => ep,
+            Err(err) => {
+                let line = format!("ext2unlink: FAIL vfs unavailable {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+            Ok(client) => client,
+            Err(err) => {
+                let line = format!("ext2unlink: FAIL client {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        // O_CREAT | O_RDWR
+        let created = match vfs.open_with(path, 0o100 | 2, 0o644) {
+            Ok(file) => file,
+            Err(err) => {
+                let line = format!("ext2unlink: FAIL create/open {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+        let _ = vfs.close(created);
+
+        if let Err(err) = vfs.unlink(path) {
+            let line = format!("ext2unlink: FAIL unlink {:?}\n", err);
+            let _ = debug_print(line.as_str());
+            send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
+        }
+
+        match vfs.stat(path) {
+            Err(Error::NotFound) => {
+                let line = "ext2unlink: PASS create+unlink+verify\n";
+                let _ = debug_print(line);
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+            Err(err) => {
+                let line = format!("ext2unlink: FAIL verify {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+            Ok(_) => {
+                let line = "ext2unlink: FAIL still-exists\n";
+                let _ = debug_print(line);
                 send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
             }
         }

@@ -35,6 +35,7 @@ const FS_UNLINK: u32 = 0x307;
 const FS_MKDIR: u32 = 0x308;
 const FS_RMDIR: u32 = 0x309;
 const FS_RENAME: u32 = 0x30A;
+const FS_CREATE: u32 = 0x30B;
 /// Zero-copy read into a caller-provided mapping (VFS grant buffer).
 const FS_READ_GRANT: u32 = 0x306;
 const IPC_MESSAGE_MAX: usize = 256;
@@ -408,6 +409,20 @@ fn handle_fs_request(
             match fs.rename_path(old, new) {
                 Ok(()) => {
                     let reply_msg = Message::new(FS_RENAME, [0, 0, 0, 0, 0, 0], 1);
+                    if let Some(token) = reply_token {
+                        let _ = reply(token, &reply_msg, IpcFlags::empty());
+                    }
+                }
+                Err(err) => send_error_reply(reply_token, err.to_errno()),
+            }
+        }
+
+        FS_CREATE => {
+            let mode = (msg.words[2] & 0o777) as u16;
+            let path = core::str::from_utf8(payload).unwrap_or("");
+            match fs.create_file_path(path, mode) {
+                Ok(_) => {
+                    let reply_msg = Message::new(FS_CREATE, [0, 0, 0, 0, 0, 0], 1);
                     if let Some(token) = reply_token {
                         let _ = reply(token, &reply_msg, IpcFlags::empty());
                     }

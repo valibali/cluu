@@ -59,6 +59,8 @@ const S_IFREG: usize = 0o100000;
 const S_IFDIR: usize = 0o040000;
 const MODE_FILE: usize = S_IFREG | 0o644;
 const MODE_DIR: usize = S_IFDIR | 0o755;
+const O_CREAT: usize = 0o100;
+const O_EXCL: usize = 0o200;
 
 macro_rules! vfs_trace {
     ($($arg:tt)*) => {
@@ -476,6 +478,9 @@ impl VfsServer {
             }
         };
 
+        let flags = msg.words[2];
+        let mode = msg.words[3];
+
         // #region agent log
         let _ = debug_print(&format!("vfs: open '{}' client={}", path, client_id));
         // #endregion
@@ -483,6 +488,10 @@ impl VfsServer {
         // Use unified mount table for all paths
         match self.mounts.open(path) {
             Ok(file) => {
+                if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
+                    reply_msg.words[0] = Error::AlreadyExists.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
                 let size = file.size();
                 let fd = self.files.open(client_id, file);
                 reply_msg.words[0] = 0;
@@ -493,6 +502,29 @@ impl VfsServer {
                 // #endregion
             }
             Err(err) => {
+                if err == Error::NotFound && (flags & O_CREAT) != 0 {
+                    if let Err(policy_err) = self.ensure_mutation_allowed(path) {
+                        reply_msg.words[0] = policy_err.to_errno() as usize;
+                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                    match self.mounts.create_file(path, mode) {
+                        Ok(()) => match self.mounts.open(path) {
+                            Ok(file) => {
+                                let fd = self.files.open(client_id, file.clone());
+                                reply_msg.words[0] = 0;
+                                reply_msg.words[1] = fd;
+                                reply_msg.words[2] = file.size();
+                            }
+                            Err(open_err) => {
+                                reply_msg.words[0] = open_err.to_errno() as usize;
+                            }
+                        },
+                        Err(create_err) => {
+                            reply_msg.words[0] = create_err.to_errno() as usize;
+                        }
+                    }
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
                 // #region agent log
                 let _ = debug_print(&format!("vfs: open FAILED {:?}", err));
                 // #endregion
@@ -685,6 +717,10 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        if let Err(err) = self.ensure_mutation_allowed(path) {
+            reply_msg.words[0] = err.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
         match self.mounts.unlink(path) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
@@ -717,6 +753,10 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        if let Err(err) = self.ensure_mutation_allowed(path) {
+            reply_msg.words[0] = err.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
         let mode = msg.words[2];
         match self.mounts.mkdir(path, mode) {
             Ok(()) => {
@@ -750,6 +790,10 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        if let Err(err) = self.ensure_mutation_allowed(path) {
+            reply_msg.words[0] = err.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
         match self.mounts.rmdir(path) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
@@ -794,6 +838,14 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        if let Err(err) = self.ensure_mutation_allowed(old_path) {
+            reply_msg.words[0] = err.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+        if let Err(err) = self.ensure_mutation_allowed(new_path) {
+            reply_msg.words[0] = err.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
         match self.mounts.rename(old_path, new_path) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
@@ -814,6 +866,16 @@ impl VfsServer {
         }
 
         Err(Error::NotFound)
+    }
+
+    fn ensure_mutation_allowed(&self, path: &str) -> Result<()> {
+        let protected = ["/bin", "/proc", "/dev/initrd", "/sys"];
+        for prefix in &protected {
+            if path == *prefix || path.starts_with(&format!("{}/", prefix)) {
+                return Err(Error::PermissionDenied);
+            }
+        }
+        Ok(())
     }
 
     fn handle_read_grant(

@@ -441,6 +441,40 @@ impl<'a> Ext2Fs<'a> {
         Ok(())
     }
 
+    pub fn create_file_path(&self, path: &str, mode: u16) -> Result<u32> {
+        if self.resolve_path_to_inode(path).is_ok() {
+            return Err(Error::AlreadyExists);
+        }
+        let (parent_ino, name) = self.resolve_parent(path)?;
+        let parent = self.read_inode(parent_ino)?;
+        if !parent.is_dir() {
+            return Err(Error::InvalidOperation);
+        }
+
+        let inode_num = self.allocate_inode()?;
+        let inode = Inode {
+            mode: (inode::S_IFREG | (mode & 0o777)),
+            uid: 0,
+            size_lo: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            gid: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            direct_blocks: [0; 12],
+            indirect_block: 0,
+            double_indirect: 0,
+            triple_indirect: 0,
+            size_hi: 0,
+        };
+        self.write_inode(inode_num, &inode)?;
+        self.add_dir_entry(parent_ino, name, inode_num, dir::FT_REG_FILE)?;
+        Ok(inode_num)
+    }
+
     /// Read all file data (for small files like directories).
     fn read_file_data(&self, inode: &Inode) -> Result<Vec<u8>> {
         let size = inode.size() as usize;

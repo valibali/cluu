@@ -25,6 +25,7 @@ const FS_UNLINK: u32 = 0x307;
 const FS_MKDIR: u32 = 0x308;
 const FS_RMDIR: u32 = 0x309;
 const FS_RENAME: u32 = 0x30A;
+const FS_CREATE: u32 = 0x30B;
 const IPC_MESSAGE_MAX: usize = 256;
 
 /// Directory entry for readdir results.
@@ -70,6 +71,11 @@ pub trait MountBackend: Send + Sync {
 
     fn rename(&self, rel_old: &str, rel_new: &str) -> Result<()> {
         let _ = (rel_old, rel_new);
+        Err(Error::NotImplemented)
+    }
+
+    fn create_file(&self, rel_path: &str, mode: usize) -> Result<()> {
+        let _ = (rel_path, mode);
         Err(Error::NotImplemented)
     }
 }
@@ -253,6 +259,13 @@ impl MountBackend for RemoteBackend {
         call_with_payload(self.endpoint, &req, &payload, &mut reply)?;
         parse_status(reply.words[0])
     }
+
+    fn create_file(&self, rel_path: &str, mode: usize) -> Result<()> {
+        let req = Message::new(FS_CREATE, [rel_path.len(), 0, mode, 0, 0, 0], 3);
+        let mut reply = Message::new(0, [0; 6], 0);
+        call_with_payload(self.endpoint, &req, rel_path.as_bytes(), &mut reply)?;
+        parse_status(reply.words[0])
+    }
 }
 
 /// Virtual file content generator.
@@ -418,6 +431,11 @@ impl MountTable {
             return Err(Error::InvalidOperation);
         }
         old_mount.backend.rename(rel_old, rel_new)
+    }
+
+    pub fn create_file(&self, path: &str, mode: usize) -> Result<()> {
+        let (mount, rel_path) = self.resolve(path)?;
+        mount.backend.create_file(rel_path, mode)
     }
 
     /// Read file data (for remote/virtual backends).
