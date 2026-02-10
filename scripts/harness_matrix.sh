@@ -27,7 +27,7 @@ run_case() {
 if [[ "$RUN_BUILD_ONCE" -eq 1 ]]; then
     run_case "m1_recv" full env MARKER_MODE=m1_recv TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh
     run_case "m2_token_audit" no_build env MARKER_MODE=m2_token_audit TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh
-    run_case "m2_leakdiag" no_build env MARKER_MODE=m2_leakdiag TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh
+    run_case "m2_leakdiag" no_build env MARKER_MODE=m2_leakdiag TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 MAX_DELTA_SPACES=14 MAX_DELTA_TOKENS=180 MAX_DELTA_ENDPOINTS=80 MAX_DELTA_PMM_USED_FRAMES=46000 ./test_hello.sh
     run_case "m3_mapfail" no_build env MARKER_MODE=m3_mapfail TEST_COMMAND_REPEAT=1 ./test_hello.sh
     run_case "m3_mapcopyfail" no_build env MARKER_MODE=m3_mapcopyfail TEST_COMMAND_REPEAT=1 ./test_hello.sh
     run_case "m3_maperror" no_build env MARKER_MODE=m3_maperror TEST_COMMAND_REPEAT=1 ./test_hello.sh
@@ -40,7 +40,7 @@ if [[ "$RUN_BUILD_ONCE" -eq 1 ]]; then
 else
     run_case "m1_recv" no_build env MARKER_MODE=m1_recv TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh
     run_case "m2_token_audit" no_build env MARKER_MODE=m2_token_audit TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh
-    run_case "m2_leakdiag" no_build env MARKER_MODE=m2_leakdiag TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh
+    run_case "m2_leakdiag" no_build env MARKER_MODE=m2_leakdiag TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 MAX_DELTA_SPACES=14 MAX_DELTA_TOKENS=180 MAX_DELTA_ENDPOINTS=80 MAX_DELTA_PMM_USED_FRAMES=46000 ./test_hello.sh
     run_case "m3_mapfail" no_build env MARKER_MODE=m3_mapfail TEST_COMMAND_REPEAT=1 ./test_hello.sh
     run_case "m3_mapcopyfail" no_build env MARKER_MODE=m3_mapcopyfail TEST_COMMAND_REPEAT=1 ./test_hello.sh
     run_case "m3_maperror" no_build env MARKER_MODE=m3_maperror TEST_COMMAND_REPEAT=1 ./test_hello.sh
