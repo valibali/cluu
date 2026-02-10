@@ -519,6 +519,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::SpaceUnmap => invoke_space_unmap(&token, args),
         InvokeOp::SpaceGrant => invoke_space_grant(&token, args),
         InvokeOp::SpaceMapRange => invoke_space_map_range(&token, args),
+        InvokeOp::SpaceProtect => invoke_space_protect(&token, args),
 
         // Token operations
         InvokeOp::TokenDerive => invoke_token_derive(token_handle, &token, args),
@@ -1069,6 +1070,85 @@ fn invoke_space_unmap(token: &Token, args: SyscallArgs) -> SyscallResult {
 
     match result {
         Some(unmapped) => Ok(unmapped as usize),
+        None => Err(Error::NotFound),
+    }
+}
+
+fn invoke_space_protect(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::mm::{space_repository, PageFlags};
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::SPACE_MAP) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let virt_addr = args.arg3 as u64;
+    let num_pages = if args.arg4 == 0 { 1 } else { args.arg4 };
+    let perms = args.arg5 as u32;
+
+    if virt_addr & 0xFFF != 0 {
+        return Err(Error::InvalidArgument);
+    }
+    if (perms & !(0x01 | 0x02 | 0x04)) != 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let writable = (perms & 0x02) != 0;
+    let executable = (perms & 0x04) != 0;
+
+    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let result = space_repository::with_space_mut(space_id, |space| {
+        let physmap_base = x86_64::VirtAddr::new(crate::mm::physmap::PHYS_MAP_BASE);
+        let mut alloc = crate::mm::PmmPageAllocator;
+        let mut vmm = unsafe {
+            crate::mm::vmm::PageTableManager::for_page_table(
+                physmap_base,
+                space.page_table_root,
+                &mut alloc,
+            )
+        };
+
+        // Validate mapping presence first to avoid partial retagging.
+        for i in 0..num_pages {
+            let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
+            if vmm.translate(addr).is_none() {
+                return Err(Error::NotFound);
+            }
+        }
+
+        let flags = PageFlags {
+            present: true,
+            writable,
+            user: true,
+            write_through: false,
+            cache_disabled: false,
+            accessed: false,
+            dirty: false,
+            huge: false,
+            global: false,
+            no_execute: !executable,
+        };
+
+        for i in 0..num_pages {
+            let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
+            if vmm.protect(addr, flags).is_err() {
+                return Err(Error::InvalidAddress);
+            }
+        }
+        Ok(num_pages)
+    });
+
+    match result {
+        Some(Ok(changed)) => Ok(changed),
+        Some(Err(err)) => Err(err),
         None => Err(Error::NotFound),
     }
 }

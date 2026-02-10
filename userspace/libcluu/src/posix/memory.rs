@@ -340,6 +340,33 @@ pub extern "C" fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -> c_int
     }
 
     let aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let mut kern_flags: usize = 0;
+    if prot & PROT_READ != 0 {
+        kern_flags |= 0x01;
+    }
+    if prot & PROT_WRITE != 0 {
+        kern_flags |= 0x02;
+    }
+    if prot & PROT_EXEC != 0 {
+        kern_flags |= 0x04;
+    }
+    if prot == PROT_NONE {
+        // x86 user mappings do not currently support true PROT_NONE without guard-page support.
+        set_errno(ENOSYS);
+        return -1;
+    }
+
+    let space_token = crate::boot::space_token();
+    if space_token == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let num_pages = aligned_len / PAGE_SIZE;
+    if crate::syscall::space_protect(space_token, virt, num_pages, kern_flags).is_err() {
+        set_errno(EINVAL);
+        return -1;
+    }
+
     if MMAP_REGIONS
         .lock()
         .update_prot_exact(virt, aligned_len, prot)

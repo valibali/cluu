@@ -55,6 +55,7 @@ pub enum InvokeOp {
     SpaceUnmap = 13,
     SpaceGrant = 14,
     SpaceMapRange = 15, // Batch mapping for multiple pages
+    SpaceProtect = 16,  // Batch permission update for mapped pages
 
     // Token operations
     TokenDerive = 20,
@@ -674,6 +675,38 @@ pub fn space_unmap(space_token: usize, virt_addr: usize, num_pages: usize) -> Re
         )?;
     }
     Ok(())
+}
+
+/// Update page protection flags for mapped pages in an address space.
+///
+/// # Arguments
+///
+/// - `space_token`: Token for the target address space (SPACE_MAP right required)
+/// - `virt_addr`: Starting virtual address (must be page-aligned)
+/// - `num_pages`: Number of pages to retag
+/// - `flags`: Permission flags (0x01 read baseline, 0x02 writable, 0x04 executable)
+///
+/// # Returns
+///
+/// - `Ok(changed_pages)`: Number of pages updated
+/// - `Err(error)`: Permission denied, invalid address, or unmapped page
+#[inline]
+pub fn space_protect(
+    space_token: usize,
+    virt_addr: usize,
+    num_pages: usize,
+    flags: usize,
+) -> Result<usize> {
+    unsafe {
+        invoke(
+            space_token,
+            InvokeOp::SpaceProtect,
+            virt_addr,
+            num_pages,
+            flags,
+            0,
+        )
+    }
 }
 
 /// Grant a page from one address space to another (zero-copy sharing)

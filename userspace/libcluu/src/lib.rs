@@ -132,6 +132,7 @@ pub use syscall::{
     space_grant,
     space_map,
     space_map_range,
+    space_protect,
     space_unmap,
     thread_create,
     token_derive,
