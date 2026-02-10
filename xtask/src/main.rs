@@ -611,8 +611,19 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     let config_path = project_root().join("target/mkbootimg.json");
     fs::write(&config_path, mkbootimg_json)?;
 
-    // Create bootboot config file
-    let bootboot_config = "// BOOTBOOT configuration\nscreen=1024x768\nkernel=sys/core\n";
+    // Create bootboot config file. Optional extra BOOTBOOT environment lines
+    // can be injected via CLUU_BOOTBOOT_ENV (newline or ';' separated).
+    let mut bootboot_config = String::from("// BOOTBOOT configuration\nscreen=1024x768\nkernel=sys/core\n");
+    if let Ok(extra_env) = std::env::var("CLUU_BOOTBOOT_ENV") {
+        for line in extra_env
+            .split(['\n', ';'])
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            bootboot_config.push_str(line);
+            bootboot_config.push('\n');
+        }
+    }
     fs::write(
         project_root().join("target/bootboot_config"),
         bootboot_config,

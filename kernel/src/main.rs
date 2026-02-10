@@ -227,24 +227,30 @@ fn boot_env_bool(key: &str) -> Option<bool> {
     }
     let env_page = unsafe { core::slice::from_raw_parts(env_ptr, 4096) };
     let mut pos = 0usize;
-    while pos < env_page.len() {
-        if env_page[pos] == 0 {
-            break;
-        }
-        let mut end = pos;
-        while end < env_page.len() && env_page[end] != 0 {
-            end += 1;
-        }
-        if end == pos {
-            break;
-        }
-        let entry = &env_page[pos..end];
+    while let Some((entry, next)) = next_boot_env_entry(env_page, pos) {
         if let Some(value) = split_boot_env_entry(entry, key_bytes) {
             return parse_env_bool_value(value);
         }
-        pos = end.saturating_add(1);
+        pos = next;
     }
     None
+}
+
+fn next_boot_env_entry(page: &[u8], mut pos: usize) -> Option<(&[u8], usize)> {
+    while pos < page.len() && (page[pos] == 0 || page[pos] == b'\n' || page[pos] == b'\r') {
+        pos += 1;
+    }
+    if pos >= page.len() || page[pos] == 0 {
+        return None;
+    }
+    let start = pos;
+    while pos < page.len() && page[pos] != 0 && page[pos] != b'\n' && page[pos] != b'\r' {
+        pos += 1;
+    }
+    if start == pos {
+        return None;
+    }
+    Some((&page[start..pos], pos.saturating_add(1)))
 }
 
 fn split_boot_env_entry<'a>(entry: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
