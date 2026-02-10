@@ -6,17 +6,29 @@
 use crate::error::Error;
 use crate::sched::ThreadId;
 use crate::token::EndpointId;
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
 pub const IPC_MESSAGE_MAX: usize = 4096; // One page - reduces syscall overhead for large transfers
 
+const IPC_INLINE_MAX: usize = 64;
+
 #[derive(Clone)]
 pub struct EndpointMessage {
-    len: usize,
-    bytes: [u8; IPC_MESSAGE_MAX],
+    storage: EndpointMessageStorage,
+}
+
+#[derive(Clone)]
+enum EndpointMessageStorage {
+    Inline {
+        len: u16,
+        bytes: [u8; IPC_INLINE_MAX],
+    },
+    Heap(Box<[u8]>),
 }
 
 impl EndpointMessage {
@@ -24,28 +36,37 @@ impl EndpointMessage {
         if data.len() > IPC_MESSAGE_MAX {
             return Err(Error::InvalidParameter);
         }
-        let mut bytes = [0u8; IPC_MESSAGE_MAX];
-        bytes[..data.len()].copy_from_slice(data);
+        if data.len() <= IPC_INLINE_MAX {
+            let mut bytes = [0u8; IPC_INLINE_MAX];
+            bytes[..data.len()].copy_from_slice(data);
+            return Ok(Self {
+                storage: EndpointMessageStorage::Inline {
+                    len: data.len() as u16,
+                    bytes,
+                },
+            });
+        }
         Ok(Self {
-            len: data.len(),
-            bytes,
+            storage: EndpointMessageStorage::Heap(Box::<[u8]>::from(data)),
         })
     }
 
     pub fn len(&self) -> usize {
-        self.len
+        match &self.storage {
+            EndpointMessageStorage::Inline { len, .. } => *len as usize,
+            EndpointMessageStorage::Heap(bytes) => bytes.len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
 
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
-    }
-
-    pub fn raw_bytes(&self) -> &[u8; IPC_MESSAGE_MAX] {
-        &self.bytes
+        match &self.storage {
+            EndpointMessageStorage::Inline { len, bytes } => &bytes[..*len as usize],
+            EndpointMessageStorage::Heap(bytes) => bytes,
+        }
     }
 }
 
@@ -463,19 +484,34 @@ pub fn send_from_user(
         klibcluu::log_dec(klibcluu::LogLevel::Trace, "", msg_len as u64);
     }
     crate::syscall::userptr::validate_user_buffer(msg_ptr, msg_len)?;
-    let mut buffer = [0u8; IPC_MESSAGE_MAX];
-    if msg_len > buffer.len() {
+    if msg_len > IPC_MESSAGE_MAX {
         return Err(Error::InvalidParameter);
     }
-    // Safety: buffer is a valid kernel buffer of IPC_MESSAGE_MAX bytes.
-    unsafe {
-        crate::syscall::userptr::copy_from_user(
-            buffer.as_mut_ptr(),
-            msg_ptr,
-            msg_len,
-            page_table_root,
-        )?;
-    }
+    let payload = if msg_len <= IPC_INLINE_MAX {
+        let mut inline = [0u8; IPC_INLINE_MAX];
+        // Safety: inline points to a valid kernel buffer of msg_len bytes.
+        unsafe {
+            crate::syscall::userptr::copy_from_user(
+                inline.as_mut_ptr(),
+                msg_ptr,
+                msg_len,
+                page_table_root,
+            )?;
+        }
+        inline[..msg_len].to_vec()
+    } else {
+        let mut heap = vec![0u8; msg_len];
+        // Safety: heap points to a valid kernel buffer of msg_len bytes.
+        unsafe {
+            crate::syscall::userptr::copy_from_user(
+                heap.as_mut_ptr(),
+                msg_ptr,
+                msg_len,
+                page_table_root,
+            )?;
+        }
+        heap
+    };
     let sender = crate::sched::ThreadManager::current();
     // Try to send - if queue is full, block and return (will be retried from userspace when woken)
     let wake = {
@@ -489,7 +525,7 @@ pub fn send_from_user(
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
-        match guard.send(sender, &buffer[..msg_len]) {
+        match guard.send(sender, &payload) {
             Ok(wake) => wake, // Success
             Err(Error::WouldBlock) => {
                 // Queue is full - sender was added to waiting_senders, need to block
@@ -541,16 +577,17 @@ pub fn recv_to_user(
         klibcluu::trace("recv_to_user: endpoint_id=");
         klibcluu::log_dec(klibcluu::LogLevel::Trace, "", endpoint.as_u64());
     }
-    // Safety: msg.raw_bytes() points to a kernel buffer of msg.len() bytes.
+    let msg_bytes = received.message.bytes();
+    // Safety: msg_bytes points to a kernel buffer of msg_bytes.len() bytes.
     unsafe {
         crate::syscall::userptr::copy_to_user(
             buf_ptr,
-            received.message.raw_bytes().as_ptr(),
-            received.message.len(),
+            msg_bytes.as_ptr(),
+            msg_bytes.len(),
             page_table_root,
         )?;
     }
-    Ok((received.message.len(), received.sender))
+    Ok((msg_bytes.len(), received.sender))
 }
 
 pub fn recv_to_user_nonblocking(
@@ -576,16 +613,17 @@ pub fn recv_to_user_nonblocking(
         klibcluu::trace("recv_to_user_nonblocking: msg_len=");
         klibcluu::log_dec(klibcluu::LogLevel::Trace, "", received.message.len() as u64);
     }
-    // Safety: msg.raw_bytes() points to a kernel buffer of msg.len() bytes.
+    let msg_bytes = received.message.bytes();
+    // Safety: msg_bytes points to a kernel buffer of msg_bytes.len() bytes.
     unsafe {
         crate::syscall::userptr::copy_to_user(
             buf_ptr,
-            received.message.raw_bytes().as_ptr(),
-            received.message.len(),
+            msg_bytes.as_ptr(),
+            msg_bytes.len(),
             page_table_root,
         )?;
     }
-    Ok((received.message.len(), received.sender))
+    Ok((msg_bytes.len(), received.sender))
 }
 
 /// Send a call message from userspace with reply token injected
@@ -597,14 +635,14 @@ pub fn call_from_user_with_reply_token(
     reply_token: crate::token::TokenHandle,
 ) -> Result<(), Error> {
     crate::syscall::userptr::validate_user_buffer(msg_ptr, msg_len)?;
-    let mut buffer = [0u8; IPC_MESSAGE_MAX];
-    if msg_len > buffer.len() {
+    if msg_len > IPC_MESSAGE_MAX {
         return Err(Error::InvalidParameter);
     }
-    // Safety: buffer is a valid kernel buffer of IPC_MESSAGE_MAX bytes.
+    let mut payload = vec![0u8; msg_len];
+    // Safety: payload is a valid kernel buffer of msg_len bytes.
     unsafe {
         crate::syscall::userptr::copy_from_user(
-            buffer.as_mut_ptr(),
+            payload.as_mut_ptr(),
             msg_ptr,
             msg_len,
             page_table_root,
@@ -613,7 +651,7 @@ pub fn call_from_user_with_reply_token(
     let sender = crate::sched::ThreadManager::current();
 
     // Inject reply token handle into message
-    inject_reply_token(&mut buffer[..msg_len], reply_token);
+    inject_reply_token(&mut payload, reply_token);
 
     // Try to send - if queue is full, block and return (will be retried from userspace when woken)
     let wake = {
@@ -628,7 +666,7 @@ pub fn call_from_user_with_reply_token(
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
         // Just send as regular message - reply routing via token
-        match guard.send(sender, &buffer[..msg_len]) {
+        match guard.send(sender, &payload) {
             Ok(wake) => wake, // Success
             Err(Error::WouldBlock) => {
                 // Queue is full - sender was added to waiting_senders, need to block

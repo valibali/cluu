@@ -98,6 +98,9 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="spawn mmapprobe"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
             ;;
+        m6_ipc_compact)
+            TEST_COMMAND="repeat 8 spawn hello"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -318,6 +321,7 @@ fi
 # - l2_waitpid: libc wait queue + `WNOHANG` behavior via userspace probe
 # - l2_mmap: mmap/munmap reuse + strict mprotect region validation
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
+# - m6_ipc_compact: compact IPC queue storage regression smoke under spawn churn
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -437,6 +441,14 @@ case "$MARKER_MODE" in
             "ipc_wait_p95_ms="
             "ipc_wait_p99_ms="
             "ipc_scan_avg_steps_x100="
+        )
+        ;;
+    m6_ipc_compact)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: exit cookie"
+            "resource delta:"
         )
         ;;
     l2_ext2write)
