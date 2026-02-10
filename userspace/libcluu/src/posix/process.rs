@@ -3,18 +3,20 @@
 use super::{c_char, c_int, pid_t};
 use crate::errno::{set_errno, ECHILD, EINVAL, ENOSYS, ESRCH};
 use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
 const PROCMGR_SPAWN_LABEL: u32 = 2;
 const PROCMGR_EXIT_LABEL: u32 = 1;
+const WNOHANG: c_int = 1;
 
 struct WaitState {
     notify_endpoint: usize,
     cookie_to_pid: BTreeMap<usize, pid_t>,
     pid_to_cookie: BTreeMap<pid_t, usize>,
-    pending_exits: BTreeMap<pid_t, i32>,
+    pending_exit_events: VecDeque<(pid_t, i32)>,
 }
 
 impl WaitState {
@@ -23,8 +25,34 @@ impl WaitState {
             notify_endpoint: 0,
             cookie_to_pid: BTreeMap::new(),
             pid_to_cookie: BTreeMap::new(),
-            pending_exits: BTreeMap::new(),
+            pending_exit_events: VecDeque::new(),
         }
+    }
+
+    fn push_exit_event(&mut self, pid: pid_t, status: i32) {
+        self.pending_exit_events.push_back((pid, status));
+    }
+
+    fn pop_exit_event_for_pid(&mut self, target_pid: pid_t) -> Option<(pid_t, i32)> {
+        if target_pid == -1 {
+            return self.pending_exit_events.pop_front();
+        }
+        let index = self
+            .pending_exit_events
+            .iter()
+            .position(|(pid, _)| *pid == target_pid)?;
+        self.pending_exit_events.remove(index)
+    }
+
+    fn has_known_child(&self, pid: pid_t) -> bool {
+        if pid == -1 {
+            return !self.pid_to_cookie.is_empty() || !self.pending_exit_events.is_empty();
+        }
+        self.pid_to_cookie.contains_key(&pid)
+            || self
+                .pending_exit_events
+                .iter()
+                .any(|(event_pid, _)| *event_pid == pid)
     }
 }
 
@@ -164,7 +192,17 @@ pub extern "C" fn _wait(_status: *mut c_int) -> pid_t {
 /// # Returns
 /// Child PID on success, 0 if WNOHANG and no child exited, -1 on error.
 #[no_mangle]
-pub extern "C" fn waitpid(pid: pid_t, status: *mut c_int, _options: c_int) -> pid_t {
+pub extern "C" fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid_t {
+    let supported = WNOHANG;
+    if options & !supported != 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    if pid < -1 || pid == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+
     let mut state = WAIT_STATE.lock();
     if state.notify_endpoint == 0 {
         set_errno(ECHILD);
@@ -172,19 +210,22 @@ pub extern "C" fn waitpid(pid: pid_t, status: *mut c_int, _options: c_int) -> pi
     }
     let notify_endpoint = state.notify_endpoint;
 
-    if pid > 0 {
-        if let Some(exit_code) = state.pending_exits.remove(&pid) {
-            if !status.is_null() {
-                unsafe {
-                    *status = exit_code;
-                }
+    if let Some((done_pid, exit_code)) = state.pop_exit_event_for_pid(pid) {
+        if !status.is_null() {
+            unsafe {
+                *status = exit_code;
             }
-            return pid;
         }
-        if !state.pid_to_cookie.contains_key(&pid) {
-            set_errno(ECHILD);
-            return -1;
-        }
+        return done_pid;
+    }
+
+    if !state.has_known_child(pid) {
+        set_errno(ECHILD);
+        return -1;
+    }
+
+    if options & WNOHANG != 0 {
+        return 0;
     }
 
     drop(state);
@@ -213,21 +254,20 @@ pub extern "C" fn waitpid(pid: pid_t, status: *mut c_int, _options: c_int) -> pi
 
         let mut state = WAIT_STATE.lock();
         let child_pid = match state.cookie_to_pid.remove(&cookie) {
-            Some(pid) => pid,
+            Some(done_pid) => done_pid,
             None => continue,
         };
         state.pid_to_cookie.remove(&child_pid);
+        state.push_exit_event(child_pid, exit_code);
 
-        if pid == -1 || pid == child_pid {
+        if let Some((done_pid, done_status)) = state.pop_exit_event_for_pid(pid) {
             if !status.is_null() {
                 unsafe {
-                    *status = exit_code;
+                    *status = done_status;
                 }
             }
-            return child_pid;
+            return done_pid;
         }
-
-        state.pending_exits.insert(child_pid, exit_code);
     }
 }
 
