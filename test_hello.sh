@@ -157,6 +157,7 @@ fi
 # - legacy_p1: original timing/TSC fixture checks
 # - m0_boot: bootstrap telemetry/manifest checks
 # - m1_recv: recv/wakeup churn checks
+# - m2_token_audit: recv churn + token audit telemetry invariants
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -184,6 +185,16 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "procmgr: exit cookie"
+        )
+        ;;
+    m2_token_audit)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: exit cookie"
+            "token_audit_next_seq="
+            "token_audit_stored="
+            "token_audit_dropped="
         )
         ;;
     none)
@@ -220,6 +231,52 @@ if [ "$MARKER_MODE" = "m1_recv" ]; then
     exit_count=$(grep -c "procmgr: exit cookie" "$SERIAL_LOG" || true)
     if [ "$exit_count" -lt "$MIN_EXIT_COOKIES" ]; then
         echo "MISSING: expected at least $MIN_EXIT_COOKIES exit cookies, got $exit_count"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+fi
+
+if [ "$MARKER_MODE" = "m2_token_audit" ]; then
+    exit_count=$(grep -c "procmgr: exit cookie" "$SERIAL_LOG" || true)
+    if [ "$exit_count" -lt "$MIN_EXIT_COOKIES" ]; then
+        echo "MISSING: expected at least $MIN_EXIT_COOKIES exit cookies, got $exit_count"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+
+    extract_metric_value() {
+        local marker="$1"
+        awk -v marker="$marker" '
+            $0 ~ marker {
+                if (getline > 0) {
+                    gsub(/[^0-9]/, "", $0);
+                    if ($0 != "") {
+                        print $0;
+                        exit 0;
+                    }
+                }
+            }
+        ' "$SERIAL_LOG"
+    }
+
+    audit_next_seq="$(extract_metric_value "token_audit_next_seq=")"
+    audit_stored="$(extract_metric_value "token_audit_stored=")"
+    audit_dropped="$(extract_metric_value "token_audit_dropped=")"
+
+    if [ -z "$audit_next_seq" ] || [ -z "$audit_stored" ] || [ -z "$audit_dropped" ]; then
+        echo "MISSING: token audit telemetry metrics could not be parsed"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+
+    if [ "$audit_dropped" -ne 0 ]; then
+        echo "MISSING: expected token_audit_dropped=0, got $audit_dropped"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+
+    if [ "$audit_stored" -lt 2 ]; then
+        echo "MISSING: expected token_audit_stored>=2, got $audit_stored"
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
     fi
