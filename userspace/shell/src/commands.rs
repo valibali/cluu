@@ -181,6 +181,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(Ext2AppendBuiltin));
         registry.register(Box::new(Ext2MutateBuiltin));
         registry.register(Box::new(Ext2UnlinkBuiltin));
+        registry.register(Box::new(Ext2OwnerDenyBuiltin));
         registry.register(Box::new(CatBuiltin));
         registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(HeapBuiltin));
@@ -244,7 +245,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -1199,6 +1200,112 @@ impl BuiltinCommand for Ext2UnlinkBuiltin {
             }
         }
 
+        Ok(())
+    }
+}
+
+struct Ext2OwnerDenyBuiltin;
+
+impl BuiltinCommand for Ext2OwnerDenyBuiltin {
+    fn name(&self) -> &'static str {
+        "ext2ownerdeny"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let path = "/l2a_owner_probe";
+        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+            Ok(ep) => ep,
+            Err(err) => {
+                let line = format!("ext2ownerdeny: FAIL vfs unavailable {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+            Ok(client) => client,
+            Err(err) => {
+                let line = format!("ext2ownerdeny: FAIL client {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let created = match vfs.open_with(path, 0o100 | 2, 0o644) {
+            Ok(file) => file,
+            Err(err) => {
+                let line = format!("ext2ownerdeny: FAIL create/open {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+        let _ = vfs.close(created);
+
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
+        let payload = normalize_spawn_path("ownerprobe");
+        let mut msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
+        msg.words[0] = payload.len();
+        msg.words[1] = DEFAULT_PRIORITY;
+        msg.words[2] = 0;
+        msg.words[3] = notify_endpoint;
+        let mut reply = Message::new(0, [0; 6], 0);
+        if let Err(err) = call_with_payload(procmgr_endpoint, &msg, payload.as_bytes(), &mut reply)
+        {
+            let line = format!("ext2ownerdeny: FAIL spawn-call {:?}\n", err);
+            let _ = debug_print(line.as_str());
+            send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = vfs.unlink(path);
+            return Ok(());
+        }
+        if let Err(err) = parse_status(reply.words[0]) {
+            let line = format!("ext2ownerdeny: FAIL spawn-status {:?}\n", err);
+            let _ = debug_print(line.as_str());
+            send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = vfs.unlink(path);
+            return Ok(());
+        }
+
+        let mut exit_msg = Message::new(0, [0; 6], 0);
+        let _ = recv(notify_endpoint, &mut exit_msg, IpcFlags::empty());
+        if exit_msg.tag.words >= 2 && exit_msg.words[1] != 0 {
+            let line = format!(
+                "ext2ownerdeny: FAIL ownerprobe-exit {}\n",
+                exit_msg.words[1]
+            );
+            let _ = debug_print(line.as_str());
+            send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = vfs.unlink(path);
+            return Ok(());
+        }
+
+        let still_exists = match vfs.stat(path) {
+            Ok(_) => true,
+            Err(err) => {
+                let line = format!("ext2ownerdeny: FAIL stat-after {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                false
+            }
+        };
+        if !still_exists {
+            return Ok(());
+        }
+
+        match vfs.unlink(path) {
+            Ok(()) => {
+                let line = "ext2ownerdeny: PASS non-owner denied + owner cleanup\n";
+                let _ = debug_print(line);
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+            Err(err) => {
+                let line = format!("ext2ownerdeny: FAIL owner cleanup {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+        }
         Ok(())
     }
 }

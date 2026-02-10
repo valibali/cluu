@@ -52,6 +52,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="ext2unlink"
             SHELL_AUTOSTART_CMD_DEFAULT="ext2unlink"
             ;;
+        l2_owner_deny)
+            TEST_COMMAND="ext2ownerdeny"
+            SHELL_AUTOSTART_CMD_DEFAULT="ext2ownerdeny"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -239,6 +243,7 @@ fi
 # - l2_ext2append: append-past-EOF ext2 smoke test via shell builtin
 # - l2_ext2mutate: mkdir/rename/rmdir ext2 metadata mutation smoke test
 # - l2_ext2unlink: create+unlink verification smoke test
+# - l2_owner_deny: explicit non-owner mutation denial with second spawned client
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
 required_markers=()
@@ -387,6 +392,14 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "ext2unlink: PASS create+unlink+verify"
+        )
+        ;;
+    l2_owner_deny)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "ownerprobe: PASS permission denied"
+            "ext2ownerdeny: PASS non-owner denied + owner cleanup"
         )
         ;;
     none)
