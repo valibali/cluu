@@ -75,6 +75,7 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
 /// - arg3: buf_ptr (*mut u8)
 /// - arg4: buf_len (usize) - high bit is NONBLOCK_FLAG
 /// - arg5: timeout_ms (0 = block forever, >0 = timeout in milliseconds)
+/// - arg6: sender_out_ptr (*mut usize, optional) - authenticated sender thread id
 ///
 /// # Returns
 ///
@@ -89,6 +90,7 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     let buf_ptr = args.arg3;
     let buf_len = args.arg4;
     let timeout_ms = args.arg5 as u64;
+    let sender_out_ptr = args.arg6;
 
     // Timeout semantics:
     // - 0: non-blocking (return WouldBlock immediately if no message)
@@ -155,7 +157,26 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
                     buf_len,
                     page_table_root,
                 ) {
-                    Ok(len) => return Ok((i, len)),
+                    Ok((len, sender)) => {
+                        if sender_out_ptr != 0 {
+                            crate::syscall::userptr::validate_user_buffer(
+                                sender_out_ptr,
+                                core::mem::size_of::<usize>(),
+                            )?;
+                            let sender_raw = sender
+                                .map_or(0usize, |tid: crate::sched::ThreadId| tid.as_u64() as usize);
+                            // Safety: sender_out_ptr is a validated userspace buffer for usize.
+                            unsafe {
+                                crate::syscall::userptr::copy_to_user(
+                                    sender_out_ptr,
+                                    &sender_raw as *const usize as *const u8,
+                                    core::mem::size_of::<usize>(),
+                                    page_table_root,
+                                )?;
+                            }
+                        }
+                        return Ok((i, len));
+                    }
                     Err(Error::WouldBlock) => continue,
                     Err(err) => return Err(err),
                 }
@@ -1175,6 +1196,7 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
 
     const MAP_DEVICE: u32 = 0x100;
     const MAP_TEST_FAILPOINT: u32 = 0x8000_0000;
+    const MAP_TEST_FAIL_ON_MAP_STAGE: u32 = 0x4000_0000;
     const MAP_TEST_FAIL_AFTER_SHIFT: u32 = 16;
     const MAP_TEST_FAIL_AFTER_MASK: u32 = 0x00FF_0000;
 
@@ -1219,6 +1241,7 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     } else {
         None
     };
+    let fail_on_map_stage = (flags & MAP_TEST_FAIL_ON_MAP_STAGE) != 0;
 
     // For device mapping, data_ptr is a physical address base
     // For regular mapping, validate data buffer if provided
@@ -1294,6 +1317,7 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
                         executable,
                         caller_page_table_root.ok_or(Error::InvalidState)?,
                         fail_after_pages,
+                        fail_on_map_stage,
                     );
                 }
             };
@@ -1355,6 +1379,7 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
             executable,
             caller_page_table_root.ok_or(Error::InvalidState)?,
             fail_after_pages,
+            fail_on_map_stage,
         )
     }
 }
@@ -1370,6 +1395,7 @@ fn map_range_4kb(
     executable: bool,
     caller_page_table_root: x86_64::PhysAddr,
     fail_after_pages: Option<usize>,
+    fail_on_map_stage: bool,
 ) -> SyscallResult {
     use crate::elf;
     use crate::mm::{physmap, pmm, space_repository};
@@ -1379,7 +1405,7 @@ fn map_range_4kb(
     let mut bytes_copied = 0usize;
     let mut mapped_pages = 0usize;
     for page_idx in 0..num_pages {
-        if fail_after_pages.is_some_and(|limit| mapped_pages >= limit) {
+        if !fail_on_map_stage && fail_after_pages.is_some_and(|limit| mapped_pages >= limit) {
             rollback_mapped_4kb(space_id, virt_start, mapped_pages);
             klibcluu::warn("map_range_4kb: injected failpoint triggered");
             return Err(Error::OutOfMemory);
@@ -1428,6 +1454,13 @@ fn map_range_4kb(
             unsafe {
                 write_bytes(frame_virt, 0, PAGE_SIZE);
             }
+        }
+
+        if fail_on_map_stage && fail_after_pages.is_some_and(|limit| mapped_pages >= limit) {
+            pmm::free_frame(frame_phys);
+            rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+            klibcluu::warn("map_range_4kb: injected map-stage failpoint triggered");
+            return Err(Error::OutOfMemory);
         }
 
         // Map the page into the address space

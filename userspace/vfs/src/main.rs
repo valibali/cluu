@@ -128,13 +128,14 @@ fn run_vfs() -> Result<()> {
 
     loop {
         let tokens = [endpoint, registry_endpoint];
-        let (index, len) = libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX)?;
+        let (index, len, sender_tid) =
+            libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, u64::MAX)?;
         if let Some((msg, payload)) = parse_message(&buf[..len]) {
             if index == 1 {
                 let _ = registry::handle_incoming_message(&msg, payload);
                 continue;
             }
-            if let Err(err) = server.handle_message(&msg, payload) {
+            if let Err(err) = server.handle_message(&msg, payload, sender_tid) {
                 vfs_trace!("vfs: handler error {:?}", err);
             }
         }
@@ -399,30 +400,64 @@ impl VfsServer {
         }
     }
 
-    fn handle_message(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+    fn handle_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
             return Ok(());
         };
         let reply_token = extract_reply_token(msg).unwrap_or(self.endpoint);
+        let authenticated_client = (sender_tid != 0).then_some(sender_tid);
         vfs_trace!("vfs: handling {:?} reply_token={}", op, reply_token);
         let result = match op {
-            VfsOp::Open => self.handle_open(msg, payload, reply_token),
-            VfsOp::Close => self.handle_close(msg, reply_token),
-            VfsOp::ReadGrant => self.handle_read_grant(msg, payload, reply_token),
+            VfsOp::Open => self.handle_open(msg, payload, reply_token, authenticated_client),
+            VfsOp::Close => self.handle_close(msg, reply_token, authenticated_client),
+            VfsOp::ReadGrant => {
+                self.handle_read_grant(msg, payload, reply_token, authenticated_client)
+            }
             VfsOp::Readdir => self.handle_readdir(payload, reply_token),
-            VfsOp::MapElf => self.handle_map_elf(msg, reply_token),
-            VfsOp::Write => self.handle_write(msg, payload, reply_token),
+            VfsOp::MapElf => self.handle_map_elf(msg, reply_token, authenticated_client),
+            VfsOp::Write => self.handle_write(msg, payload, reply_token, authenticated_client),
             VfsOp::Stat => self.handle_stat(msg, payload, reply_token),
-            VfsOp::Fstat => self.handle_fstat(msg, reply_token),
+            VfsOp::Fstat => self.handle_fstat(msg, reply_token, authenticated_client),
         };
         vfs_trace!("vfs: handled {:?} result={:?}", op, result);
         result
     }
 
-    fn handle_open(&mut self, msg: &Message, payload: &[u8], reply_token: usize) -> Result<()> {
-        let client_id = msg.words[1];
+    fn resolve_client_id(
+        &self,
+        op_name: &str,
+        caller_client: Option<usize>,
+        claimed_client: usize,
+    ) -> Result<usize> {
+        let Some(client_id) = caller_client else {
+            let _ = debug_print(&format!("vfs: {} denied missing authenticated sender", op_name));
+            return Err(Error::PermissionDenied);
+        };
+        if claimed_client != 0 && claimed_client != client_id {
+            let _ = debug_print(&format!(
+                "vfs: {} ignoring claimed client_id={} authenticated={}",
+                op_name, claimed_client, client_id
+            ));
+        }
+        Ok(client_id)
+    }
+
+    fn handle_open(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_OPEN, [0; 6], 3);
+        let client_id = match self.resolve_client_id("open", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
 
         let path = match core::str::from_utf8(payload) {
             Ok(path) => path,
@@ -459,11 +494,22 @@ impl VfsServer {
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn handle_close(&mut self, msg: &Message, reply_token: usize) -> Result<()> {
-        let client_id = msg.words[1];
+    fn handle_close(
+        &mut self,
+        msg: &Message,
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
+        let mut reply_msg = Message::new(VFS_CLOSE, [0; 6], 1);
+        let client_id = match self.resolve_client_id("close", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
         let fd = msg.words[2];
         self.files.close(client_id, fd);
-        let mut reply_msg = Message::new(VFS_CLOSE, [0; 6], 1);
         reply_msg.words[0] = 0;
         if let Err(err) = ipc::reply(reply_token, &reply_msg, IpcFlags::empty()) {
             vfs_trace!("vfs: close reply failed {:?}", err);
@@ -471,12 +517,24 @@ impl VfsServer {
         Ok(())
     }
 
-    fn handle_write(&mut self, msg: &Message, payload: &[u8], reply_token: usize) -> Result<()> {
-        let client_id = msg.words[1];
+    fn handle_write(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
         let fd = msg.words[2];
         let offset = msg.words[3];
         let requested = msg.words[4];
         let mut reply_msg = Message::new(VFS_WRITE, [0; 6], 2);
+        let client_id = match self.resolve_client_id("write", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
 
         let Some(entry) = self.files.get_mut(client_id, fd) else {
             reply_msg.words[0] = Error::NotFound.to_errno() as usize;
@@ -535,10 +593,21 @@ impl VfsServer {
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn handle_fstat(&mut self, msg: &Message, reply_token: usize) -> Result<()> {
-        let client_id = msg.words[1];
+    fn handle_fstat(
+        &mut self,
+        msg: &Message,
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
         let fd = msg.words[2];
         let mut reply_msg = Message::new(VFS_FSTAT, [0; 6], 3);
+        let client_id = match self.resolve_client_id("fstat", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
 
         let Some(entry) = self.files.get(client_id, fd) else {
             reply_msg.words[0] = Error::NotFound.to_errno() as usize;
@@ -569,12 +638,19 @@ impl VfsServer {
         msg: &Message,
         payload: &[u8],
         reply_token: usize,
+        caller_client: Option<usize>,
     ) -> Result<()> {
-        let client_id = msg.words[1];
         let fd = msg.words[2];
         let offset = msg.words[3];
         let requested = msg.words[4];
         let mut reply_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
+        let client_id = match self.resolve_client_id("read_grant", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
         vfs_trace!(
             "vfs: read_grant start client={} fd={} off={} req={}",
             client_id,
@@ -1246,11 +1322,22 @@ impl VfsServer {
         }
     }
 
-    fn handle_map_elf(&mut self, msg: &Message, reply_token: usize) -> Result<()> {
-        let client_id = msg.words[1];
+    fn handle_map_elf(
+        &mut self,
+        msg: &Message,
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
         let fd = msg.words[2];
         let target_space = msg.words[3];
         let mut reply_msg = Message::new(VFS_MAP_ELF, [0; 6], 3);
+        let client_id = match self.resolve_client_id("map_elf", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
 
         let Some(file) = self.files.get(client_id, fd).cloned() else {
             reply_msg.words[0] = Error::NotFound.to_errno() as usize;

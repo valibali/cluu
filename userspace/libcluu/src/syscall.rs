@@ -295,17 +295,32 @@ pub fn ipc_send(endpoint_token: usize, msg: &[u8]) -> Result<()> {
 /// - `Err(error)`: Other errors (invalid token, buffer too small, etc.)
 #[inline]
 pub fn ipc_recv_any(tokens: &[usize], buf: &mut [u8], timeout_ms: u64) -> Result<(usize, usize)> {
+    let (index, len, _sender_tid) = ipc_recv_any_with_sender(tokens, buf, timeout_ms)?;
+    Ok((index, len))
+}
+
+/// Receive IPC message from any endpoint, returning authenticated sender thread id.
+///
+/// `sender_tid` is `0` when unavailable (for unauthenticated legacy sends).
+#[inline]
+pub fn ipc_recv_any_with_sender(
+    tokens: &[usize],
+    buf: &mut [u8],
+    timeout_ms: u64,
+) -> Result<(usize, usize, usize)> {
     let nonblocking = timeout_ms == 0;
+    let mut sender_tid: usize = 0;
 
     loop {
         let result = unsafe {
-            syscall5(
+            syscall6(
                 SyscallNumber::Recv,
                 tokens.as_ptr() as usize,
                 tokens.len(),
                 buf.as_mut_ptr() as usize,
                 buf.len(),
                 timeout_ms as usize,
+                (&mut sender_tid as *mut usize) as usize,
             )
         };
 
@@ -314,7 +329,7 @@ pub fn ipc_recv_any(tokens: &[usize], buf: &mut [u8], timeout_ms: u64) -> Result
                 // Result is (index << 32) | msg_len
                 let index = value >> 32;
                 let msg_len = value & 0xFFFFFFFF;
-                return Ok((index, msg_len));
+                return Ok((index, msg_len, sender_tid));
             }
             Err(Error::WouldBlock) if nonblocking => {
                 return Err(Error::WouldBlock);

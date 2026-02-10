@@ -6,7 +6,8 @@
 //!
 //! Request layout (common):
 //! - words[0] = payload length (bytes)
-//! - words[1] = client_id (registry control endpoint token)
+//! - words[1] = legacy client hint (ignored by hardened servers that bind
+//!   client identity from authenticated IPC sender metadata)
 //!
 //! OPEN:
 //! - payload: path bytes

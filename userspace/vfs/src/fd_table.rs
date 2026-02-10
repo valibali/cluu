@@ -1,7 +1,7 @@
 //! Per-client file descriptor table for VFS.
 //!
-//! Each client is identified by a caller-provided ID (typically its registry
-//! control endpoint token). This keeps FD namespaces isolated across processes.
+//! Each client is identified by authenticated IPC sender identity (thread id
+//! from kernel recv metadata). Any caller-provided client hint is ignored.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -89,7 +89,10 @@ impl FdTable {
     }
 
     pub fn open(&mut self, client_id: usize, file: OpenFile) -> usize {
-        let table = self.clients.entry(client_id).or_insert_with(ClientTable::new);
+        let table = self
+            .clients
+            .entry(client_id)
+            .or_insert_with(ClientTable::new);
         let fd = table.next_fd;
         table.next_fd += 1;
         table.entries.insert(fd, file);

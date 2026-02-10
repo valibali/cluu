@@ -57,10 +57,17 @@ pub struct CallMessage {
     pub cookie: u64,
 }
 
+/// Received IPC message paired with authenticated sender metadata.
+#[derive(Clone)]
+pub struct ReceivedMessage {
+    pub message: EndpointMessage,
+    pub sender: Option<ThreadId>,
+}
+
 pub trait ByteEndpoint: Send {
-    fn send(&mut self, data: &[u8]) -> Result<Option<ThreadId>, Error>;
-    fn recv(&mut self, receiver: ThreadId) -> Result<Option<EndpointMessage>, Error>;
-    fn recv_nonblocking(&mut self) -> Result<Option<EndpointMessage>, Error>;
+    fn send(&mut self, sender: Option<ThreadId>, data: &[u8]) -> Result<Option<ThreadId>, Error>;
+    fn recv(&mut self, receiver: ThreadId) -> Result<Option<ReceivedMessage>, Error>;
+    fn recv_nonblocking(&mut self) -> Result<Option<ReceivedMessage>, Error>;
     /// Send a call message (with caller ID for reply routing)
     fn send_call(
         &mut self,
@@ -77,7 +84,7 @@ pub trait ByteEndpoint: Send {
 
 pub struct QueueEndpoint {
     /// Regular message queue
-    queue: VecDeque<EndpointMessage>,
+    queue: VecDeque<ReceivedMessage>,
     /// Call message queue (messages from call() that expect reply)
     call_queue: VecDeque<CallMessage>,
     /// Threads waiting to receive
@@ -163,7 +170,7 @@ impl QueueEndpoint {
 }
 
 impl ByteEndpoint for QueueEndpoint {
-    fn send(&mut self, data: &[u8]) -> Result<Option<ThreadId>, Error> {
+    fn send(&mut self, sender: Option<ThreadId>, data: &[u8]) -> Result<Option<ThreadId>, Error> {
         // Check if queue is full - implement backpressure by blocking sender
         if self.queue.len() >= MAX_QUEUE_LEN {
             // Get current thread ID to block it
@@ -175,7 +182,10 @@ impl ByteEndpoint for QueueEndpoint {
             return Err(Error::Busy);
         }
         let msg = EndpointMessage::new(data)?;
-        self.queue.push_back(msg);
+        self.queue.push_back(ReceivedMessage {
+            message: msg,
+            sender,
+        });
 
         let receiver_to_wake = self.pop_next_receiver_to_wake();
 
@@ -187,13 +197,16 @@ impl ByteEndpoint for QueueEndpoint {
         Ok(receiver_to_wake)
     }
 
-    fn recv(&mut self, receiver: ThreadId) -> Result<Option<EndpointMessage>, Error> {
+    fn recv(&mut self, receiver: ThreadId) -> Result<Option<ReceivedMessage>, Error> {
         // First check call queue (call messages take priority)
         if let Some(call_msg) = self.call_queue.pop_front() {
             self.current_caller = Some(call_msg.caller);
             // Queue now has space - wake a waiting sender if any
             self.wake_one_waiting_sender();
-            return Ok(Some(call_msg.message));
+            return Ok(Some(ReceivedMessage {
+                message: call_msg.message,
+                sender: Some(call_msg.caller),
+            }));
         }
         // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
@@ -205,13 +218,16 @@ impl ByteEndpoint for QueueEndpoint {
         Err(Error::WouldBlock)
     }
 
-    fn recv_nonblocking(&mut self) -> Result<Option<EndpointMessage>, Error> {
+    fn recv_nonblocking(&mut self) -> Result<Option<ReceivedMessage>, Error> {
         // First check call queue
         if let Some(call_msg) = self.call_queue.pop_front() {
             self.current_caller = Some(call_msg.caller);
             // Queue now has space - wake a waiting sender if any
             self.wake_one_waiting_sender();
-            return Ok(Some(call_msg.message));
+            return Ok(Some(ReceivedMessage {
+                message: call_msg.message,
+                sender: Some(call_msg.caller),
+            }));
         }
         // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
@@ -255,7 +271,7 @@ impl ByteEndpoint for QueueEndpoint {
         }
         // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
-            return Ok(Some((msg, None)));
+            return Ok(Some((msg.message, msg.sender)));
         }
         self.enqueue_receiver_if_absent(receiver);
         Err(Error::WouldBlock)
@@ -322,7 +338,9 @@ impl EndpointStore for EndpointRepository {
         let id = EndpointId::new(NEXT_ENDPOINT_ID.fetch_add(1, Ordering::SeqCst));
         let shard = get_endpoint_shard(id);
         let mut shard_guard = shard.lock();
-        shard_guard.endpoints.insert(id, Mutex::new(QueueEndpoint::new()));
+        shard_guard
+            .endpoints
+            .insert(id, Mutex::new(QueueEndpoint::new()));
         id
     }
 
@@ -358,7 +376,9 @@ pub fn create_endpoint() -> EndpointId {
     let id = EndpointId::new(NEXT_ENDPOINT_ID.fetch_add(1, Ordering::SeqCst));
     let shard = get_endpoint_shard(id);
     let mut shard_guard = shard.lock();
-    shard_guard.endpoints.insert(id, Mutex::new(QueueEndpoint::new()));
+    shard_guard
+        .endpoints
+        .insert(id, Mutex::new(QueueEndpoint::new()));
     id
 }
 
@@ -376,9 +396,12 @@ pub fn send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, Error
 
     // Lock shard, then endpoint (allows concurrent access to endpoints in different shards)
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let endpoint_mutex = shard_guard
+        .endpoints
+        .get_mut(&endpoint)
+        .ok_or(Error::NotFound)?;
     let mut guard = endpoint_mutex.lock();
-    guard.send(data)
+    guard.send(None, data)
 }
 
 pub fn try_send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, Error> {
@@ -387,29 +410,38 @@ pub fn try_send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, E
 
     // Lock shard, then endpoint (non-blocking)
     let mut shard_guard = shard.try_lock().ok_or(Error::WouldBlock)?;
-    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let endpoint_mutex = shard_guard
+        .endpoints
+        .get_mut(&endpoint)
+        .ok_or(Error::NotFound)?;
     let mut guard = endpoint_mutex.try_lock().ok_or(Error::WouldBlock)?;
-    guard.send(data)
+    guard.send(None, data)
 }
 
-pub fn recv(endpoint: EndpointId, receiver: ThreadId) -> Result<Option<EndpointMessage>, Error> {
+pub fn recv(endpoint: EndpointId, receiver: ThreadId) -> Result<Option<ReceivedMessage>, Error> {
     // Get shard directly (static, no repository lock needed)
     let shard = get_endpoint_shard(endpoint);
 
     // Lock shard, then endpoint (allows concurrent access to endpoints in different shards)
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let endpoint_mutex = shard_guard
+        .endpoints
+        .get_mut(&endpoint)
+        .ok_or(Error::NotFound)?;
     let mut guard = endpoint_mutex.lock();
     guard.recv(receiver)
 }
 
-pub fn recv_nonblocking(endpoint: EndpointId) -> Result<Option<EndpointMessage>, Error> {
+pub fn recv_nonblocking(endpoint: EndpointId) -> Result<Option<ReceivedMessage>, Error> {
     // Get shard directly (static, no repository lock needed)
     let shard = get_endpoint_shard(endpoint);
 
     // Lock shard, then endpoint (allows concurrent access to endpoints in different shards)
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let endpoint_mutex = shard_guard
+        .endpoints
+        .get_mut(&endpoint)
+        .ok_or(Error::NotFound)?;
     let mut guard = endpoint_mutex.lock();
     guard.recv_nonblocking()
 }
@@ -444,6 +476,7 @@ pub fn send_from_user(
             page_table_root,
         )?;
     }
+    let sender = crate::sched::ThreadManager::current();
     // Try to send - if queue is full, block and return (will be retried from userspace when woken)
     let wake = {
         // Get shard directly (static, no repository lock needed)
@@ -451,9 +484,12 @@ pub fn send_from_user(
 
         // Lock shard, then endpoint
         let mut shard_guard = shard.lock();
-        let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+        let endpoint_mutex = shard_guard
+            .endpoints
+            .get_mut(&endpoint)
+            .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
-        match guard.send(&buffer[..msg_len]) {
+        match guard.send(sender, &buffer[..msg_len]) {
             Ok(wake) => wake, // Success
             Err(Error::WouldBlock) => {
                 // Queue is full - sender was added to waiting_senders, need to block
@@ -489,15 +525,15 @@ pub fn recv_to_user(
     buf_len: usize,
     page_table_root: x86_64::PhysAddr,
     receiver: ThreadId,
-) -> Result<usize, Error> {
+ ) -> Result<(usize, Option<ThreadId>), Error> {
     crate::syscall::userptr::validate_user_buffer(buf_ptr, buf_len)?;
-    let msg = match recv(endpoint, receiver) {
+    let received = match recv(endpoint, receiver) {
         Ok(Some(msg)) => msg,
-        Ok(None) => return Ok(0),
+        Ok(None) => return Ok((0, None)),
         Err(Error::WouldBlock) => return Err(Error::WouldBlock),
         Err(err) => return Err(err),
     };
-    if msg.len() > buf_len {
+    if received.message.len() > buf_len {
         return Err(Error::BufferTooSmall);
     }
     let mut logged = RECV_LOGGED.lock();
@@ -509,12 +545,12 @@ pub fn recv_to_user(
     unsafe {
         crate::syscall::userptr::copy_to_user(
             buf_ptr,
-            msg.raw_bytes().as_ptr(),
-            msg.len(),
+            received.message.raw_bytes().as_ptr(),
+            received.message.len(),
             page_table_root,
         )?;
     }
-    Ok(msg.len())
+    Ok((received.message.len(), received.sender))
 }
 
 pub fn recv_to_user_nonblocking(
@@ -522,15 +558,15 @@ pub fn recv_to_user_nonblocking(
     buf_ptr: usize,
     buf_len: usize,
     page_table_root: x86_64::PhysAddr,
-) -> Result<usize, Error> {
+) -> Result<(usize, Option<ThreadId>), Error> {
     crate::syscall::userptr::validate_user_buffer(buf_ptr, buf_len)?;
-    let msg = match recv_nonblocking(endpoint) {
+    let received = match recv_nonblocking(endpoint) {
         Ok(Some(msg)) => msg,
-        Ok(None) => return Ok(0),
+        Ok(None) => return Ok((0, None)),
         Err(Error::WouldBlock) => return Err(Error::WouldBlock),
         Err(err) => return Err(err),
     };
-    if msg.len() > buf_len {
+    if received.message.len() > buf_len {
         return Err(Error::BufferTooSmall);
     }
     let mut logged = RECV_LOGGED.lock();
@@ -538,18 +574,18 @@ pub fn recv_to_user_nonblocking(
         klibcluu::trace("recv_to_user_nonblocking: endpoint_id=");
         klibcluu::log_dec(klibcluu::LogLevel::Trace, "", endpoint.as_u64());
         klibcluu::trace("recv_to_user_nonblocking: msg_len=");
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", msg.len() as u64);
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", received.message.len() as u64);
     }
     // Safety: msg.raw_bytes() points to a kernel buffer of msg.len() bytes.
     unsafe {
         crate::syscall::userptr::copy_to_user(
             buf_ptr,
-            msg.raw_bytes().as_ptr(),
-            msg.len(),
+            received.message.raw_bytes().as_ptr(),
+            received.message.len(),
             page_table_root,
         )?;
     }
-    Ok(msg.len())
+    Ok((received.message.len(), received.sender))
 }
 
 /// Send a call message from userspace with reply token injected
@@ -574,6 +610,7 @@ pub fn call_from_user_with_reply_token(
             page_table_root,
         )?;
     }
+    let sender = crate::sched::ThreadManager::current();
 
     // Inject reply token handle into message
     inject_reply_token(&mut buffer[..msg_len], reply_token);
@@ -585,10 +622,13 @@ pub fn call_from_user_with_reply_token(
 
         // Lock shard, then endpoint
         let mut shard_guard = shard.lock();
-        let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+        let endpoint_mutex = shard_guard
+            .endpoints
+            .get_mut(&endpoint)
+            .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
         // Just send as regular message - reply routing via token
-        match guard.send(&buffer[..msg_len]) {
+        match guard.send(sender, &buffer[..msg_len]) {
             Ok(wake) => wake, // Success
             Err(Error::WouldBlock) => {
                 // Queue is full - sender was added to waiting_senders, need to block
@@ -653,7 +693,10 @@ pub fn take_current_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
 
     // Lock shard, then endpoint
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let endpoint_mutex = shard_guard
+        .endpoints
+        .get_mut(&endpoint)
+        .ok_or(Error::NotFound)?;
     let mut guard = endpoint_mutex.lock();
     guard.take_current_caller().ok_or(Error::InvalidState)
 }
@@ -665,7 +708,10 @@ pub fn take_caller_by_cookie(endpoint: EndpointId, cookie: u64) -> Result<Thread
 
     // Lock shard, then endpoint
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let endpoint_mutex = shard_guard
+        .endpoints
+        .get_mut(&endpoint)
+        .ok_or(Error::NotFound)?;
     let mut guard = endpoint_mutex.lock();
     guard
         .take_caller_by_cookie(cookie)
@@ -678,7 +724,10 @@ pub fn take_any_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
 
     // Lock shard, then endpoint
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard.endpoints.get_mut(&endpoint).ok_or(Error::NotFound)?;
+    let endpoint_mutex = shard_guard
+        .endpoints
+        .get_mut(&endpoint)
+        .ok_or(Error::NotFound)?;
     let mut guard = endpoint_mutex.lock();
     guard.take_any_caller().ok_or(Error::InvalidState)
 }
