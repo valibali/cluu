@@ -25,6 +25,9 @@ use cluu_lang::ast::{Assign, CmdElem, DqPart, Program, Stmt, Word, WordPart};
 const PROCMGR_SPAWN_LABEL: u32 = 2;
 const PROCMGR_KILL_LABEL: u32 = 3;
 const DEFAULT_PRIORITY: usize = 200;
+const SIGINT: usize = 2;
+const SIGCONT: usize = 18;
+const SIGSTOP: usize = 19;
 
 /// Execution result for a command handler.
 pub enum ExecResult {
@@ -42,6 +45,13 @@ pub struct CommandContext {
 struct BackgroundJob {
     notify_endpoint: usize,
     command: String,
+    state: JobState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JobState {
+    Running,
+    Stopped,
 }
 
 impl CommandContext {
@@ -90,6 +100,7 @@ impl CommandContext {
             BackgroundJob {
                 notify_endpoint,
                 command,
+                state: JobState::Running,
             },
         );
     }
@@ -102,8 +113,17 @@ impl CommandContext {
         self.bg_jobs.remove(&pid)
     }
 
-    fn contains_bg_job(&self, pid: usize) -> bool {
-        self.bg_jobs.contains_key(&pid)
+    fn bg_job_state(&self, pid: usize) -> Option<JobState> {
+        self.bg_jobs.get(&pid).map(|job| job.state)
+    }
+
+    fn set_bg_job_state(&mut self, pid: usize, state: JobState) -> bool {
+        if let Some(job) = self.bg_jobs.get_mut(&pid) {
+            job.state = state;
+            true
+        } else {
+            false
+        }
     }
 
     fn latest_bg_pid(&self) -> Option<usize> {
@@ -113,7 +133,11 @@ impl CommandContext {
     fn bg_job_lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (pid, job) in &self.bg_jobs {
-            out.push(format!("[{}] running {}", pid, job.command));
+            let state = match job.state {
+                JobState::Running => "running",
+                JobState::Stopped => "stopped",
+            };
+            out.push(format!("[{}] {} {}", pid, state, job.command));
         }
         out
     }
@@ -217,6 +241,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(SpawnBuiltin));
         registry.register(Box::new(SpawnBgBuiltin));
         registry.register(Box::new(JobsBuiltin));
+        registry.register(Box::new(StopBuiltin));
         registry.register(Box::new(ForegroundBuiltin));
         registry.register(Box::new(BackgroundBuiltin));
         registry.register(Box::new(KillDenyBuiltin));
@@ -292,7 +317,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -595,6 +620,7 @@ impl BuiltinCommand for LetBuiltin {
 struct SpawnBuiltin;
 struct SpawnBgBuiltin;
 struct JobsBuiltin;
+struct StopBuiltin;
 struct ForegroundBuiltin;
 struct BackgroundBuiltin;
 
@@ -708,6 +734,11 @@ impl BuiltinCommand for ForegroundBuiltin {
 
         let stdin_endpoint = process_info().tokens[libcluu::boot::TOKEN_STDIN];
         let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        if job.state == JobState::Stopped {
+            signal_process(procmgr_endpoint, pid, SIGCONT)?;
+            let line = format!("fg: continued pid={}\n", pid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        }
         wait_for_exit_or_sigint(
             procmgr_endpoint,
             job.notify_endpoint,
@@ -715,6 +746,36 @@ impl BuiltinCommand for ForegroundBuiltin {
             pid,
             stdout,
         )?;
+        Ok(())
+    }
+}
+
+impl BuiltinCommand for StopBuiltin {
+    fn name(&self) -> &'static str {
+        "stop"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let Some(pid) = resolve_job_pid(context, args.first()) else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"stop: no background jobs\n")?;
+            return Ok(());
+        };
+        let Some(state) = context.bg_job_state(pid) else {
+            let line = format!("stop: unknown pid={}\n", pid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
+        };
+        if state == JobState::Stopped {
+            let line = format!("stop: pid={} already stopped\n", pid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
+        }
+
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        signal_process(procmgr_endpoint, pid, SIGSTOP)?;
+        context.set_bg_job_state(pid, JobState::Stopped);
+        let line = format!("stop: pid={} stopped\n", pid);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         Ok(())
     }
 }
@@ -729,13 +790,21 @@ impl BuiltinCommand for BackgroundBuiltin {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"bg: no background jobs\n")?;
             return Ok(());
         };
-        if !context.contains_bg_job(pid) {
+        let Some(state) = context.bg_job_state(pid) else {
             let line = format!("bg: unknown pid={}\n", pid);
             send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
             return Ok(());
+        };
+        if state == JobState::Running {
+            let line = format!("bg: pid={} already running\n", pid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
         }
-        // Current job model has only running background state (no stop/continue yet).
-        let line = format!("bg: pid={} already running\n", pid);
+
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        signal_process(procmgr_endpoint, pid, SIGCONT)?;
+        context.set_bg_job_state(pid, JobState::Running);
+        let line = format!("bg: pid={} running\n", pid);
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         Ok(())
     }
@@ -800,10 +869,7 @@ fn wait_for_exit_or_sigint(
             continue;
         }
         if payload.contains(&0x03) {
-            let mut kill = Message::new(PROCMGR_KILL_LABEL, [0; 6], 2);
-            kill.words[0] = child_pid;
-            kill.words[1] = 2; // SIGINT
-            let _ = call(procmgr_endpoint, &mut kill, IpcFlags::empty());
+            let _ = signal_process(procmgr_endpoint, child_pid, SIGINT);
             let line = format!("spawn: SIGINT pid={}\n", child_pid);
             let _ = debug_print(line.trim_end());
             let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
@@ -1634,6 +1700,14 @@ fn parse_status(raw: usize) -> Result<()> {
         return Err(Error::from_errno(signed));
     }
     Ok(())
+}
+
+fn signal_process(procmgr_endpoint: usize, pid: usize, signal: usize) -> Result<()> {
+    let mut req = Message::new(PROCMGR_KILL_LABEL, [0; 6], 2);
+    req.words[0] = pid;
+    req.words[1] = signal;
+    call(procmgr_endpoint, &mut req, IpcFlags::empty())?;
+    parse_status(req.words[0])
 }
 
 fn div_op(stdout: usize, context: &mut CommandContext, lhs: &str, rhs: &str) -> Result<()> {

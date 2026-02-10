@@ -97,7 +97,9 @@ pub extern "C" fn _getpid() -> pid_t {
 /// Send signal to a process.
 ///
 /// In CLUU, this sends a PROC_KILL IPC message to procmgr.
-/// Only SIGKILL (9) and SIGTERM (15) actually terminate; others are no-ops.
+/// Supported signals currently include:
+/// - `SIGKILL`/`SIGTERM`/`SIGINT`: terminate target process thread
+/// - `SIGSTOP`/`SIGCONT`: suspend/resume target process thread
 ///
 /// # Arguments
 /// - `pid`: Target process ID

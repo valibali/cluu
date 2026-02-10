@@ -72,6 +72,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="fg"
             SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
             ;;
+        l2_stop)
+            TEST_COMMAND="stop"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
+            ;;
         l2_waitpid)
             TEST_COMMAND="spawn waitprobe"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn waitprobe"
@@ -276,6 +280,7 @@ fi
 # - l2_sigint: foreground spawn interrupted by Ctrl-C (minimal SIGINT path)
 # - l2_jobs: background spawn + async reap notification (`SIGCHLD`-style baseline)
 # - l2_fg: background spawn promoted to foreground wait path via `fg`
+# - l2_stop: background job transitions to stopped state via `stop`
 # - l2_waitpid: libc wait queue + `WNOHANG` behavior via userspace probe
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
@@ -440,7 +445,7 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "spawn: SIGINT pid="
-            "procmgr: killed pid"
+            "procmgr: signal 2 pid"
         )
         ;;
     l2_jobs)
@@ -458,6 +463,14 @@ case "$MARKER_MODE" in
             "spawnbg: started pid="
             "fg: pid="
             "procmgr: exit cookie"
+        )
+        ;;
+    l2_stop)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "spawnbg: started pid="
+            "procmgr: signal 19 pid"
         )
         ;;
     l2_waitpid)

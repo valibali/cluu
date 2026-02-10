@@ -27,7 +27,7 @@ use libcluu::elf::ElfFile;
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_token;
 use libcluu::registry;
-use libcluu::syscall::thread_destroy;
+use libcluu::syscall::{thread_destroy, thread_resume, thread_suspend};
 use libcluu::tar::find_member;
 use libcluu::*;
 
@@ -45,6 +45,11 @@ const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
 const PROCMGR_KILL_LABEL: u32 = 3;
 const DEFAULT_PRIORITY: usize = 200;
+const SIGINT: usize = 2;
+const SIGTERM: usize = 15;
+const SIGSTOP: usize = 19;
+const SIGCONT: usize = 18;
+const SIGKILL: usize = 9;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -775,7 +780,7 @@ impl ProcessManager {
         }
 
         let target_pid = msg.words[0];
-        let _signal = msg.words[1]; // Signal number (9 = SIGKILL, 15 = SIGTERM)
+        let signal = msg.words[1];
 
         let owner_tid = match self.pid_owner_tid.get(&target_pid) {
             Some(&owner) => owner,
@@ -823,22 +828,30 @@ impl ProcessManager {
             }
         };
 
-        // Destroy the thread
-        match thread_destroy(thread_token) {
+        let signal_result = match signal {
+            SIGSTOP => thread_suspend(thread_token),
+            SIGCONT => thread_resume(thread_token),
+            SIGINT | SIGTERM | SIGKILL => thread_destroy(thread_token),
+            _ => Err(Error::InvalidArgument),
+        };
+
+        // Execute signal action and update bookkeeping.
+        match signal_result {
             Ok(()) => {
-                // Clean up tracking
-                self.exit_table.remove(&cookie);
-                self.pid_to_cookie.remove(&target_pid);
-                self.cookie_to_pid.remove(&cookie);
-                if let Some(owner_tid) = self.pid_owner_tid.remove(&target_pid) {
-                    self.on_child_reaped(owner_tid);
+                if signal == SIGINT || signal == SIGTERM || signal == SIGKILL {
+                    self.exit_table.remove(&cookie);
+                    self.pid_to_cookie.remove(&target_pid);
+                    self.cookie_to_pid.remove(&cookie);
+                    if let Some(owner_tid) = self.pid_owner_tid.remove(&target_pid) {
+                        self.on_child_reaped(owner_tid);
+                    }
+                    self.exit_notify.remove(&cookie);
                 }
-                self.exit_notify.remove(&cookie);
 
                 reply_msg.words[0] = 0; // Success
                 let _ = debug_print(&format!(
-                    "procmgr: killed pid {} (cookie {})",
-                    target_pid, cookie
+                    "procmgr: signal {} pid {} (cookie {})",
+                    signal, target_pid, cookie
                 ));
             }
             Err(err) => {

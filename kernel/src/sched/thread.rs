@@ -128,6 +128,11 @@ impl ThreadFlags {
 
     /// Don't preempt in INITMODE (cooperative scheduling)
     pub const COOPERATIVE: Self = Self(1 << 0);
+    /// Thread is externally suspended (e.g., SIGSTOP/job control).
+    pub const SUSPENDED: Self = Self(1 << 1);
+    /// Thread was already blocked before suspend.
+    /// On resume, it should remain blocked instead of being woken immediately.
+    pub const SUSPENDED_WAS_BLOCKED: Self = Self(1 << 2);
 
     /// Create empty flags
     pub const fn empty() -> Self {
@@ -396,6 +401,34 @@ impl Thread {
     /// Check if thread can be preempted in INITMODE
     pub fn is_cooperative(&self) -> bool {
         self.flags.contains(ThreadFlags::COOPERATIVE)
+    }
+
+    /// Mark thread as suspended and remember whether it was already blocked.
+    pub fn mark_suspended(&mut self, was_blocked: bool) {
+        self.flags = self.flags.with(ThreadFlags::SUSPENDED);
+        self.flags = if was_blocked {
+            self.flags.with(ThreadFlags::SUSPENDED_WAS_BLOCKED)
+        } else {
+            self.flags.without(ThreadFlags::SUSPENDED_WAS_BLOCKED)
+        };
+    }
+
+    /// Clear suspended state bookkeeping.
+    pub fn clear_suspended(&mut self) {
+        self.flags = self
+            .flags
+            .without(ThreadFlags::SUSPENDED)
+            .without(ThreadFlags::SUSPENDED_WAS_BLOCKED);
+    }
+
+    /// Returns true if thread is externally suspended.
+    pub fn is_suspended(&self) -> bool {
+        self.flags.contains(ThreadFlags::SUSPENDED)
+    }
+
+    /// Returns true if thread was blocked when suspend was applied.
+    pub fn suspended_was_blocked(&self) -> bool {
+        self.flags.contains(ThreadFlags::SUSPENDED_WAS_BLOCKED)
     }
 
     /// Reset time slice

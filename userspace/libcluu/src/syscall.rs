@@ -765,6 +765,22 @@ pub fn thread_destroy(thread_token: usize) -> Result<()> {
     Ok(())
 }
 
+/// Suspend a thread without destroying it.
+pub fn thread_suspend(thread_token: usize) -> Result<()> {
+    unsafe {
+        invoke(thread_token, InvokeOp::ThreadSuspend, 0, 0, 0, 0)?;
+    }
+    Ok(())
+}
+
+/// Resume a previously suspended thread.
+pub fn thread_resume(thread_token: usize) -> Result<()> {
+    unsafe {
+        invoke(thread_token, InvokeOp::ThreadResume, 0, 0, 0, 0)?;
+    }
+    Ok(())
+}
+
 /// Create a new IPC endpoint.
 #[inline]
 pub fn endpoint_create(root_token: usize) -> Result<usize> {

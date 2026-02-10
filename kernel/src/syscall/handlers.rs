@@ -423,8 +423,8 @@ fn handle_fault_reply(fault_info: crate::sched::FaultReplyInfo, reply_data: &[u8
         // KILL: mark thread dead
         crate::sched::ThreadManager::with_thread_mut(thread_id, |t| {
             t.fault_state = None;
-            t.make_dead();
         });
+        let _ = crate::sched::ThreadManager::mark_thread_dead(thread_id);
         klibcluu::trace("Fault reply: KILL thread ");
         klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
     }
@@ -649,23 +649,56 @@ fn invoke_thread_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     };
 
-    crate::sched::ThreadManager::with_thread_mut(thread_id, |thread| {
-        thread.make_dead();
-    });
+    if !crate::sched::ThreadManager::mark_thread_dead(thread_id) {
+        return Err(Error::NotFound);
+    }
 
     crate::telemetry::log_resource_delta("thread_destroy");
 
     Ok(0)
 }
 
-fn invoke_thread_suspend(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    klibcluu::warn("invoke_thread_suspend not yet implemented");
-    Err(Error::NotImplemented)
+fn invoke_thread_suspend(token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::THREAD_SUSPEND) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let thread_ref = crate::token::resolve_token_object(token, ObjectType::Thread)
+        .map_err(|_| Error::InvalidArgument)?;
+    let thread_id = if let ObjectRef::Thread(id) = thread_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    if !crate::sched::ThreadManager::suspend_thread(thread_id) {
+        return Err(Error::NotFound);
+    }
+
+    Ok(0)
 }
 
-fn invoke_thread_resume(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    klibcluu::warn("invoke_thread_resume not yet implemented");
-    Err(Error::NotImplemented)
+fn invoke_thread_resume(token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::THREAD_SUSPEND) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let thread_ref = crate::token::resolve_token_object(token, ObjectType::Thread)
+        .map_err(|_| Error::InvalidArgument)?;
+    let thread_id = if let ObjectRef::Thread(id) = thread_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    match crate::sched::ThreadManager::resume_thread(thread_id) {
+        Some(_) => Ok(0),
+        None => Err(Error::InvalidState),
+    }
 }
 
 fn invoke_thread_set_priority(_token: &Token, _args: SyscallArgs) -> SyscallResult {

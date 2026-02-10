@@ -215,9 +215,25 @@ impl ThreadManager {
             Some(id) => id,
             None => return,
         };
-        Self::with_thread_mut(current, |thread| {
+        let _ = Self::mark_thread_dead(current);
+    }
+
+    /// Mark a thread as dead and remove it from scheduler queues.
+    pub fn mark_thread_dead(thread_id: ThreadId) -> bool {
+        let found = Self::with_thread_mut(thread_id, |thread| {
             thread.make_dead();
-        });
+            thread.clear_timeout_deadline();
+            thread.woke_from_timeout = false;
+            thread.disarm_recv_wait();
+            thread.clear_suspended();
+        })
+        .is_some();
+        if !found {
+            return false;
+        }
+        let mut scheduler = SCHEDULER.lock();
+        scheduler.remove(thread_id);
+        true
     }
 
     /// Allocate a new unique ReplyId
@@ -375,7 +391,7 @@ impl ThreadManager {
                 }
             };
             match repo.get_mut(thread_id) {
-                Some(thread) if !thread.is_dead() => {
+                Some(thread) if !thread.is_dead() && !thread.is_suspended() => {
                     thread.make_ready();
                     thread.clear_timeout_deadline(); // Clear any pending timeout
                     thread.woke_from_timeout = false; // Not a timeout wake
@@ -396,6 +412,73 @@ impl ThreadManager {
         } else {
             // Can't get scheduler lock, queue for later
             Self::queue_pending_wake(thread_id);
+        }
+    }
+
+    /// Suspend a thread and deschedule it without destroying resources.
+    /// Returns true if the thread exists and is now suspended.
+    pub fn suspend_thread(thread_id: ThreadId) -> bool {
+        let should_deschedule = {
+            let mut repo = THREAD_REPOSITORY.lock();
+            let Some(thread) = repo.get_mut(thread_id) else {
+                return false;
+            };
+            if thread.is_dead() {
+                return false;
+            }
+            if thread.is_suspended() {
+                return true;
+            }
+            let was_blocked = thread.is_blocked();
+            thread.mark_suspended(was_blocked);
+            if !was_blocked {
+                thread.make_blocked();
+                thread.clear_timeout_deadline();
+                thread.woke_from_timeout = false;
+                thread.disarm_recv_wait();
+            }
+            true
+        };
+
+        if should_deschedule {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.remove(thread_id);
+        }
+        true
+    }
+
+    /// Resume a previously suspended thread.
+    ///
+    /// Returns:
+    /// - `Some(true)` when resumed and made runnable
+    /// - `Some(false)` when resumed but stays blocked (was blocked before suspend)
+    /// - `None` when thread does not exist or is not suspended
+    pub fn resume_thread(thread_id: ThreadId) -> Option<bool> {
+        let wake_data = {
+            let mut repo = THREAD_REPOSITORY.lock();
+            let thread = repo.get_mut(thread_id)?;
+            if thread.is_dead() || !thread.is_suspended() {
+                return None;
+            }
+            let was_blocked_before_suspend = thread.suspended_was_blocked();
+            thread.clear_suspended();
+            if was_blocked_before_suspend {
+                None
+            } else {
+                thread.make_ready();
+                thread.clear_timeout_deadline();
+                thread.woke_from_timeout = false;
+                thread.disarm_recv_wait();
+                Some(thread.priority)
+            }
+        };
+
+        if let Some(priority) = wake_data {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.add(thread_id, priority);
+            Some(true)
+        } else {
+            Some(false)
         }
     }
 
@@ -567,6 +650,9 @@ impl ThreadManager {
             if let Some(thread) = repo.get_mut(thread_id) {
                 // Only wake if still blocked AND actual deadline has expired
                 if thread.is_blocked() && thread.is_timeout_expired(current_tick) {
+                    if thread.is_suspended() {
+                        continue;
+                    }
                     klibcluu::trace("check_timeouts: waking thread ");
                     klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
                     klibcluu::trace(" at tick ");
