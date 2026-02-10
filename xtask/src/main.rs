@@ -17,6 +17,46 @@ const NEWLIB_TARGET_TRIPLET: &str = "x86_64-unknown-elf";
 const NEWLIB_CLUU_TRIPLET: &str = "x86_64-cluu-elf";
 const CLUU_CLANG_TARGET: &str = "x86_64-unknown-none-elf";
 
+const RIGHT_READ: u32 = 1 << 0;
+const RIGHT_WRITE: u32 = 1 << 1;
+const RIGHT_EXECUTE: u32 = 1 << 2;
+const RIGHT_CREATE: u32 = 1 << 3;
+const RIGHT_DESTROY: u32 = 1 << 4;
+const RIGHT_GRANT: u32 = 1 << 5;
+const RIGHT_MAP: u32 = 1 << 6;
+const RIGHT_MANAGE: u32 = 1 << 7;
+const RIGHT_THREAD_CONTROL: u32 = 1 << 8;
+const RIGHT_THREAD_SUSPEND: u32 = 1 << 9;
+const RIGHT_SPACE_MAP: u32 = 1 << 16;
+const RIGHT_SPACE_UNMAP: u32 = 1 << 17;
+const RIGHT_SPACE_GRANT: u32 = 1 << 18;
+const RIGHT_IPC_SEND: u32 = 1 << 24;
+const RIGHT_IPC_RECV: u32 = 1 << 25;
+const RIGHT_IPC_CALL: u32 = 1 << 26;
+const RIGHT_IRQ_HANDLE: u32 = 1 << 28;
+const RIGHT_IRQ_ACK: u32 = 1 << 29;
+const RIGHT_PCI_ACCESS: u32 = 1 << 30;
+
+const ALL_RIGHTS_MASK: u32 = RIGHT_READ
+    | RIGHT_WRITE
+    | RIGHT_EXECUTE
+    | RIGHT_CREATE
+    | RIGHT_DESTROY
+    | RIGHT_GRANT
+    | RIGHT_MAP
+    | RIGHT_MANAGE
+    | RIGHT_THREAD_CONTROL
+    | RIGHT_THREAD_SUSPEND
+    | RIGHT_SPACE_MAP
+    | RIGHT_SPACE_UNMAP
+    | RIGHT_SPACE_GRANT
+    | RIGHT_IPC_SEND
+    | RIGHT_IPC_RECV
+    | RIGHT_IPC_CALL
+    | RIGHT_IRQ_HANDLE
+    | RIGHT_IRQ_ACK
+    | RIGHT_PCI_ACCESS;
+
 #[derive(Parser)]
 #[command(name = "xtask", about = "CLUU build system")]
 struct Cli {
@@ -344,14 +384,16 @@ fn create_initrd(profile: &str) -> Result<()> {
         "tty",
         "virtio-blk",
     ];
+    let mut copied_sys_paths = Vec::new();
     for prog in &sys_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("sys").join(prog);
         if src.exists() {
             fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
             println!("  Copied sys/{}", prog);
+            copied_sys_paths.push(format!("sys/{}", prog));
         } else {
-            println!("  Warning: {} not found, skipping", prog);
+            bail!("Required system binary '{}' not found at {:?}", prog, src);
         }
     }
 
@@ -374,8 +416,87 @@ fn create_initrd(profile: &str) -> Result<()> {
     // Create etc/motd
     fs::write(initrd_dir.join("etc/motd"), "Welcome to CLUU!\n")?;
 
+    // Create mandatory boot manifest for init policy checks.
+    let manifest = build_boot_manifest(&initrd_dir, &copied_sys_paths)?;
+    fs::write(initrd_dir.join("sys/boot.manifest"), manifest)?;
+    println!("  Wrote sys/boot.manifest");
+
     println!("  ✓ initrd directory created");
     Ok(())
+}
+
+fn build_boot_manifest(initrd_dir: &Path, service_paths: &[String]) -> Result<String> {
+    let mut out = String::from("# CLUU boot manifest\nmanifest_version=1\n");
+    for path in service_paths {
+        let data = fs::read(initrd_dir.join(path))
+            .with_context(|| format!("Failed to read service image '{}'", path))?;
+        let digest = legacy_hash_sha256(&data);
+        let digest_hex = to_lower_hex(&digest);
+        let rights_mask = manifest_rights_mask(path);
+        out.push_str(&format!(
+            "service path={} sha256={} rights=0x{:08x}\n",
+            path, digest_hex, rights_mask
+        ));
+    }
+    Ok(out)
+}
+
+fn manifest_rights_mask(path: &str) -> u32 {
+    match path {
+        // Mirrors userspace/init/src/services.rs
+        "sys/procmgr" => {
+            RIGHT_READ
+                | RIGHT_WRITE
+                | RIGHT_CREATE
+                | RIGHT_THREAD_CONTROL
+                | RIGHT_THREAD_SUSPEND
+                | RIGHT_DESTROY
+                | RIGHT_SPACE_MAP
+                | RIGHT_SPACE_UNMAP
+                | RIGHT_SPACE_GRANT
+                | RIGHT_IPC_SEND
+                | RIGHT_IPC_RECV
+                | RIGHT_IPC_CALL
+                | RIGHT_IRQ_HANDLE
+                | RIGHT_IRQ_ACK
+                | RIGHT_GRANT
+        }
+        "sys/virtio-blk" => {
+            RIGHT_PCI_ACCESS
+                | RIGHT_SPACE_MAP
+                | RIGHT_IPC_SEND
+                | RIGHT_IPC_RECV
+                | RIGHT_CREATE
+                | RIGHT_GRANT
+        }
+        _ => ALL_RIGHTS_MASK,
+    }
+}
+
+// Must stay in sync with klibcluu::crypto::hash_sha256 for now.
+fn legacy_hash_sha256(data: &[u8]) -> [u8; 32] {
+    let mut hash = [0u8; 32];
+    for (i, chunk) in data.chunks(32).enumerate() {
+        for (j, &byte) in chunk.iter().enumerate() {
+            hash[j] ^= byte.wrapping_add((i as u8).wrapping_mul(j as u8));
+        }
+    }
+    for i in 0..hash.len() {
+        hash[i] = hash[i]
+            .wrapping_add(hash[(i + 7) % hash.len()])
+            .wrapping_mul(17);
+    }
+    hash
+}
+
+fn to_lower_hex(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn create_disk_image(_profile: &str) -> Result<()> {

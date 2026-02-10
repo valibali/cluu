@@ -40,19 +40,15 @@ fn run() -> Result<()> {
     let boot = boot::capture_boot_snapshot()?;
     let initrd = boot::map_initrd_slice(boot.initrd_size);
     let manifest = boot::load_boot_manifest(initrd)?;
-    if let Some(manifest) = manifest.as_ref() {
-        if manifest.services.is_empty() {
-            return Err(libcluu::Error::InvalidOperation);
-        }
-        debug_print("init: boot manifest parsed")?;
-    } else {
-        debug_print("init: boot manifest not present (compat mode)")?;
+    if manifest.services.is_empty() {
+        return Err(libcluu::Error::InvalidOperation);
     }
+    debug_print("init: boot manifest parsed")?;
     let ctx = context::InitContext::new(boot, initrd)?;
 
     // Launch services in the declared order; wiring policy is in wiring.rs.
     for (index, service) in services::SERVICE_LIST.iter().enumerate() {
-        wiring::launch_service(&ctx, service, index, manifest.as_ref())?;
+        wiring::launch_service(&ctx, service, index, Some(&manifest))?;
     }
 
     debug_print("init: all critical services created; yielding to scheduler")?;

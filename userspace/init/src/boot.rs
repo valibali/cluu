@@ -53,13 +53,10 @@ pub fn map_initrd_slice(initrd_size: usize) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, initrd_size) }
 }
 
-/// Parse optional boot manifest from initrd.
+/// Parse mandatory boot manifest from initrd.
 ///
-/// If the manifest file is absent this returns `Ok(None)` so boot remains
-/// backward-compatible. If present, parsing is strict.
-pub fn load_boot_manifest(initrd: &[u8]) -> Result<Option<BootManifest>> {
-    let Some(data) = find_member(initrd, DEFAULT_BOOT_MANIFEST_PATH) else {
-        return Ok(None);
-    };
-    parse_boot_manifest(data).map(Some)
+/// Missing or malformed manifest is treated as boot policy failure.
+pub fn load_boot_manifest(initrd: &[u8]) -> Result<BootManifest> {
+    let data = find_member(initrd, DEFAULT_BOOT_MANIFEST_PATH).ok_or(libcluu::Error::NotFound)?;
+    parse_boot_manifest(data)
 }
