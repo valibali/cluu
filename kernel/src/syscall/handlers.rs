@@ -758,12 +758,49 @@ fn invoke_space_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     Err(Error::NotImplemented)
 }
 
+fn rollback_mapped_4kb(
+    space_id: crate::token::scope::AddressSpaceId,
+    virt_start: u64,
+    mapped_pages: usize,
+) {
+    use crate::mm::{frame_registry, pmm, space_repository};
+    use x86_64::VirtAddr;
+
+    if mapped_pages == 0 {
+        return;
+    }
+
+    let _ = space_repository::with_space_mut(space_id, |space| {
+        let physmap_base = x86_64::VirtAddr::new(crate::mm::physmap::PHYS_MAP_BASE);
+        let mut alloc = crate::mm::PmmPageAllocator;
+        let mut vmm = unsafe {
+            crate::mm::vmm::PageTableManager::for_page_table(
+                physmap_base,
+                space.page_table_root,
+                &mut alloc,
+            )
+        };
+
+        for i in 0..mapped_pages {
+            let addr = VirtAddr::new(virt_start + (i as u64) * 0x1000);
+            if let Ok(phys) = vmm.unmap(addr) {
+                let phys_addr = phys.as_u64();
+                if let Some(frame_id) = frame_registry::lookup_by_phys(phys_addr) {
+                    frame_registry::dec_map_count(frame_id);
+                } else {
+                    pmm::free_frame(phys_addr);
+                }
+            }
+        }
+    });
+}
+
 fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     use crate::elf;
     use crate::mm::{frame_registry, physmap, pmm, space_repository};
     use crate::syscall::userptr;
     use crate::token::{ObjectRef, ObjectType, Rights};
-    use core::ptr::{copy_nonoverlapping, write_bytes};
+    use core::ptr::write_bytes;
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
     const MAP_DEVICE: u32 = 0x100;
@@ -839,10 +876,16 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     };
 
     if !map_device && !map_frame_token {
+        let caller_page_table_root =
+            crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
         if copy_len > 0 {
             userptr::validate_user_buffer(data_ptr, copy_len)?;
-            unsafe {
-                copy_nonoverlapping(data_ptr as *const u8, frame_virt, copy_len);
+            let copy_res = unsafe {
+                userptr::copy_from_user(frame_virt, data_ptr, copy_len, caller_page_table_root)
+            };
+            if copy_res.is_err() {
+                pmm::free_frame(frame_phys);
+                return Err(Error::InvalidAddress);
             }
         }
 
@@ -865,8 +908,42 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
 
     match result {
         Some(Ok(())) => Ok(0),
-        Some(Err(_)) => Err(Error::OutOfMemory),
-        None => Err(Error::NotFound),
+        Some(Err(_)) => {
+            if map_frame_token {
+                if let Ok(frame_token) =
+                    crate::token::lookup_token(crate::token::TokenHandle::from_raw(copy_len))
+                {
+                    if let Ok(frame_ref) =
+                        crate::token::resolve_token_object(&frame_token, ObjectType::Frame)
+                    {
+                        if let ObjectRef::Frame(frame_id) = frame_ref {
+                            frame_registry::dec_map_count(frame_id);
+                        }
+                    }
+                }
+            } else if !map_device {
+                pmm::free_frame(frame_phys);
+            }
+            Err(Error::OutOfMemory)
+        }
+        None => {
+            if map_frame_token {
+                if let Ok(frame_token) =
+                    crate::token::lookup_token(crate::token::TokenHandle::from_raw(copy_len))
+                {
+                    if let Ok(frame_ref) =
+                        crate::token::resolve_token_object(&frame_token, ObjectType::Frame)
+                    {
+                        if let ObjectRef::Frame(frame_id) = frame_ref {
+                            frame_registry::dec_map_count(frame_id);
+                        }
+                    }
+                }
+            } else if !map_device {
+                pmm::free_frame(frame_phys);
+            }
+            Err(Error::NotFound)
+        }
     }
 }
 
@@ -1097,6 +1174,9 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
     const MAP_DEVICE: u32 = 0x100;
+    const MAP_TEST_FAILPOINT: u32 = 0x8000_0000;
+    const MAP_TEST_FAIL_AFTER_SHIFT: u32 = 16;
+    const MAP_TEST_FAIL_AFTER_MASK: u32 = 0x00FF_0000;
 
     if !token.has_right(Rights::SPACE_MAP) {
         klibcluu::warn("invoke_space_map_range: missing SPACE_MAP right");
@@ -1133,12 +1213,23 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     let executable = (flags & 0x04) != 0;
     let use_large_pages = (flags & MAP_LARGE_PAGES) != 0;
     let map_device = (flags & MAP_DEVICE) != 0;
+    let fail_after_pages = if (flags & MAP_TEST_FAILPOINT) != 0 {
+        let raw = ((flags & MAP_TEST_FAIL_AFTER_MASK) >> MAP_TEST_FAIL_AFTER_SHIFT) as usize;
+        Some(raw)
+    } else {
+        None
+    };
 
     // For device mapping, data_ptr is a physical address base
     // For regular mapping, validate data buffer if provided
     if !map_device && data_ptr != 0 && data_len > 0 {
         userptr::validate_user_buffer(data_ptr, data_len)?;
     }
+    let caller_page_table_root = if map_device {
+        None
+    } else {
+        Some(crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?)
+    };
 
     // Device mapping requires page-aligned physical address and no data copy
     if map_device {
@@ -1194,7 +1285,15 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
                     // Fall back to regular pages if large frame allocation fails
                     klibcluu::warn("Large frame allocation failed, falling back to 4KB pages");
                     return map_range_4kb(
-                        space_id, virt_start, data_ptr, data_len, num_pages, writable, executable,
+                        space_id,
+                        virt_start,
+                        data_ptr,
+                        data_len,
+                        num_pages,
+                        writable,
+                        executable,
+                        caller_page_table_root.ok_or(Error::InvalidState)?,
+                        fail_after_pages,
                     );
                 }
             };
@@ -1247,7 +1346,15 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
     } else {
         // Use regular 4KB pages
         map_range_4kb(
-            space_id, virt_start, data_ptr, data_len, num_pages, writable, executable,
+            space_id,
+            virt_start,
+            data_ptr,
+            data_len,
+            num_pages,
+            writable,
+            executable,
+            caller_page_table_root.ok_or(Error::InvalidState)?,
+            fail_after_pages,
         )
     }
 }
@@ -1261,18 +1368,33 @@ fn map_range_4kb(
     num_pages: usize,
     writable: bool,
     executable: bool,
+    caller_page_table_root: x86_64::PhysAddr,
+    fail_after_pages: Option<usize>,
 ) -> SyscallResult {
     use crate::elf;
     use crate::mm::{physmap, pmm, space_repository};
-    use core::ptr::{copy_nonoverlapping, write_bytes};
+    use core::ptr::write_bytes;
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
     let mut bytes_copied = 0usize;
+    let mut mapped_pages = 0usize;
     for page_idx in 0..num_pages {
+        if fail_after_pages.is_some_and(|limit| mapped_pages >= limit) {
+            rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+            klibcluu::warn("map_range_4kb: injected failpoint triggered");
+            return Err(Error::OutOfMemory);
+        }
+
         let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
 
         // Allocate physical frame
-        let frame_phys = pmm::alloc_frame().ok_or(Error::OutOfMemory)?;
+        let frame_phys = match pmm::alloc_frame() {
+            Some(frame) => frame,
+            None => {
+                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+                return Err(Error::OutOfMemory);
+            }
+        };
         let frame_virt = unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
 
         // Copy data if available, zero-fill the rest
@@ -1280,8 +1402,18 @@ fn map_range_4kb(
             let remaining_data = data_len - bytes_copied;
             let copy_len = remaining_data.min(PAGE_SIZE);
 
-            unsafe {
-                copy_nonoverlapping((data_ptr + bytes_copied) as *const u8, frame_virt, copy_len);
+            let copy_res = unsafe {
+                crate::syscall::userptr::copy_from_user(
+                    frame_virt,
+                    data_ptr + bytes_copied,
+                    copy_len,
+                    caller_page_table_root,
+                )
+            };
+            if copy_res.is_err() {
+                pmm::free_frame(frame_phys);
+                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+                return Err(Error::InvalidAddress);
             }
             bytes_copied += copy_len;
 
@@ -1310,13 +1442,19 @@ fn map_range_4kb(
         });
 
         match result {
-            Some(Ok(())) => {}
+            Some(Ok(())) => {
+                mapped_pages += 1;
+            }
             Some(Err(_)) => {
                 klibcluu::warn("map_range_4kb: map_user_page failed");
+                pmm::free_frame(frame_phys);
+                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
                 return Err(Error::OutOfMemory);
             }
             None => {
                 klibcluu::warn("map_range_4kb: space not found");
+                pmm::free_frame(frame_phys);
+                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
                 return Err(Error::NotFound);
             }
         }
@@ -1342,10 +1480,17 @@ fn map_remaining_4kb(
     use core::ptr::write_bytes;
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
+    let mut mapped_pages = 0usize;
     for page_idx in 0..num_pages {
         let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
 
-        let frame_phys = pmm::alloc_frame().ok_or(Error::OutOfMemory)?;
+        let frame_phys = match pmm::alloc_frame() {
+            Some(frame) => frame,
+            None => {
+                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+                return Err(Error::OutOfMemory);
+            }
+        };
         let frame_virt = unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
 
         unsafe {
@@ -1363,9 +1508,19 @@ fn map_remaining_4kb(
         });
 
         match result {
-            Some(Ok(())) => {}
-            Some(Err(_)) => return Err(Error::OutOfMemory),
-            None => return Err(Error::NotFound),
+            Some(Ok(())) => {
+                mapped_pages += 1;
+            }
+            Some(Err(_)) => {
+                pmm::free_frame(frame_phys);
+                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+                return Err(Error::OutOfMemory);
+            }
+            None => {
+                pmm::free_frame(frame_phys);
+                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+                return Err(Error::NotFound);
+            }
         }
     }
 
