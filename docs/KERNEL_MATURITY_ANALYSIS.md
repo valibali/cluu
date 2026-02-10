@@ -409,6 +409,7 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 | WP-M3.3 Copy/map error rollback matrix coverage | M3 | DONE (shell self-tests for `copy_from_user` and `map_user_page` error branches + harness marker modes + matrix integration) | `userspace/shell/src/commands.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `cargo xtask harness-matrix` runs `m3_mapcopyfail` + `m3_maperror` and fails on any `FAIL` marker |
 | WP-M4.1 Sender identity/badge hardening | M4 | DONE (kernel `sys_recv` sender metadata + VFS authenticated caller binding + procmgr PID-owner enforcement for `PROC_KILL` + procmgr reply-token + sender-auth notify routing for spawn replies) | `kernel/src/syscall/handlers.rs`, `kernel/src/ipc/endpoint.rs`, `userspace/libcluu/src/syscall.rs`, `userspace/vfs/src/main.rs`, `userspace/procmgr/src/main.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `cargo xtask harness-matrix` passes including `m4_sender_auth`; VFS logs `ignoring claimed client_id=... authenticated=...` during shell spawn churn |
 | WP-M4.2 Registry sender-bound control endpoint + ownership checks | M4 | DONE (registry subscribes/registers now consume authenticated sender metadata, bind sender->control endpoint, and enforce producer ownership on register/unregister) | `userspace/registry/src/main.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `cargo xtask harness-matrix` passes including `m4_registry_sender_auth`; registry logs include authenticated sender ids for subscribe flows |
+| WP-M4.3 Procmgr notify binding lifecycle cleanup | M4 | DONE (procmgr now tracks sender active-child counts and clears sender notify bindings when last owned child is reaped/killed) | `userspace/procmgr/src/main.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `cargo xtask harness-matrix` passes including `m4_notify_lifecycle`; logs contain `procmgr: cleared sender notify binding sender_tid=` |
 | WP-M5.1 Fairness + latency SLO instrumentation | M5 | TODO | scheduler + IPC telemetry/harness modules | P95/P99 thresholds met under mixed load |
 | WP-L2.1 Mutable FS operations + DAC checks | L2A | TODO | `userspace/vfs`, `userspace/ramfs`, libc POSIX wrappers | `create/write/read/rename/unlink` + permission-deny tests pass |
 | WP-L2.2 Minimal signals + shell job control | L2B | TODO | `userspace/procmgr`, `userspace/shell`, `userspace/libcluu` | interactive `SIGINT` + `SIGCHLD` behavior works in shell |
@@ -418,7 +419,7 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 
 1. Add numeric leak thresholds to matrix runs (`MAX_DELTA_*`) once stable bounds are measured.
 2. Extend token audit with optional userspace-drain endpoint once leak counters land.
-3. Tighten remaining notify endpoint policy surfaces (registry/procmgr) and add explicit regression markers for denial paths.
+3. Add explicit denial-path regression markers for sender-auth failures (`PermissionDenied` paths) in registry/procmgr control flows.
 
 ### Completion criteria by level
 

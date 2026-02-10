@@ -75,6 +75,7 @@ struct ProcessManager {
     exit_table: BTreeMap<usize, usize>,  // cookie -> thread_token
     exit_notify: BTreeMap<usize, usize>, // cookie -> notify_endpoint
     sender_notify_endpoint: BTreeMap<usize, usize>, // sender_tid -> notify_endpoint
+    sender_live_children: BTreeMap<usize, usize>, // sender_tid -> active child count
     pid_to_cookie: BTreeMap<usize, usize>, // pid -> cookie (for PROC_KILL)
     cookie_to_pid: BTreeMap<usize, usize>, // cookie -> pid (for exit handling)
     pid_owner_tid: BTreeMap<usize, usize>, // pid -> authenticated owner thread id
@@ -103,6 +104,7 @@ impl ProcessManager {
             exit_table: BTreeMap::new(),
             exit_notify: BTreeMap::new(),
             sender_notify_endpoint: BTreeMap::new(),
+            sender_live_children: BTreeMap::new(),
             pid_to_cookie: BTreeMap::new(),
             cookie_to_pid: BTreeMap::new(),
             pid_owner_tid: BTreeMap::new(),
@@ -210,7 +212,9 @@ impl ProcessManager {
         // Clean up PID tracking
         if let Some(pid) = self.cookie_to_pid.remove(&cookie) {
             self.pid_to_cookie.remove(&pid);
-            self.pid_owner_tid.remove(&pid);
+            if let Some(owner_tid) = self.pid_owner_tid.remove(&pid) {
+                self.on_child_reaped(owner_tid);
+            }
         }
 
         if let Some(notify_endpoint) = self.exit_notify.remove(&cookie) {
@@ -322,6 +326,10 @@ impl ProcessManager {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = pid; // Return PID instead of thread_token
                 reply_msg.words[2] = cookie; // Return cookie for _wait()
+                if sender_tid != 0 {
+                    let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
+                    *entry = entry.saturating_add(1);
+                }
                 if notify_endpoint != 0 {
                     self.exit_notify.insert(cookie, notify_endpoint);
                 }
@@ -367,6 +375,24 @@ impl ProcessManager {
         let pid = self.pid_next;
         self.pid_next = self.pid_next.wrapping_add(1);
         pid
+    }
+
+    fn on_child_reaped(&mut self, owner_tid: usize) {
+        if owner_tid == 0 {
+            return;
+        }
+        if let Some(active) = self.sender_live_children.get_mut(&owner_tid) {
+            *active = active.saturating_sub(1);
+            if *active == 0 {
+                self.sender_live_children.remove(&owner_tid);
+                if self.sender_notify_endpoint.remove(&owner_tid).is_some() {
+                    let _ = debug_print(&format!(
+                        "procmgr: cleared sender notify binding sender_tid={}",
+                        owner_tid
+                    ));
+                }
+            }
+        }
     }
 
     fn spawn_service(
@@ -795,7 +821,9 @@ impl ProcessManager {
                 self.exit_table.remove(&cookie);
                 self.pid_to_cookie.remove(&target_pid);
                 self.cookie_to_pid.remove(&cookie);
-                self.pid_owner_tid.remove(&target_pid);
+                if let Some(owner_tid) = self.pid_owner_tid.remove(&target_pid) {
+                    self.on_child_reaped(owner_tid);
+                }
                 self.exit_notify.remove(&cookie);
 
                 reply_msg.words[0] = 0; // Success

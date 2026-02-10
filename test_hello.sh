@@ -199,6 +199,7 @@ fi
 # - m3_maperror: map_user_page error branch rollback validation via shell builtin
 # - m4_sender_auth: authenticated sender binding in VFS (ignore caller-supplied client_id)
 # - m4_registry_sender_auth: authenticated sender binding in registry subscribe/register flows
+# - m4_notify_lifecycle: sender notify bindings are reclaimed after child lifecycle ends
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -284,6 +285,13 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "registry: subscribe"
             "sender"
+        )
+        ;;
+    m4_notify_lifecycle)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: cleared sender notify binding sender_tid="
         )
         ;;
     none)
