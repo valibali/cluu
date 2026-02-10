@@ -76,6 +76,7 @@ struct ProcessManager {
     exit_notify: BTreeMap<usize, usize>, // cookie -> notify_endpoint
     pid_to_cookie: BTreeMap<usize, usize>, // pid -> cookie (for PROC_KILL)
     cookie_to_pid: BTreeMap<usize, usize>, // cookie -> pid (for exit handling)
+    pid_owner_tid: BTreeMap<usize, usize>, // pid -> authenticated owner thread id
     tty_main: usize,
     requested_tty: bool,
     vfs_endpoint: usize,    // VFS service endpoint
@@ -102,6 +103,7 @@ impl ProcessManager {
             exit_notify: BTreeMap::new(),
             pid_to_cookie: BTreeMap::new(),
             cookie_to_pid: BTreeMap::new(),
+            pid_owner_tid: BTreeMap::new(),
             tty_main: 0,
             requested_tty: false,
             vfs_endpoint: 0,
@@ -144,6 +146,7 @@ impl ProcessManager {
             DEFAULT_PRIORITY,
             &shell_argv_payload,
             shell_argc,
+            0, // system-managed bootstrap spawn
         )?;
         debug_print("Service spawned; yielding to scheduler")?;
         yield_cpu()?;
@@ -164,7 +167,8 @@ impl ProcessManager {
         let registry_endpoint = registry::control_endpoint();
         let tokens = [self.exit_endpoint, self.spawn_endpoint, registry_endpoint];
         let mut buf = [0u8; 256];
-        let (index, len) = match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+        let (index, len, sender_tid) =
+            match libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, u64::MAX) {
             Ok(res) => res,
             Err(err) => {
                 let _ = debug_print(&format!("TRACE: exit recv failed {:?}", err));
@@ -179,7 +183,7 @@ impl ProcessManager {
         }
         if index == 1 {
             if let Some((msg, payload)) = parse_message(&buf[..len]) {
-                let _ = self.handle_spawn_or_kill_message(&msg, payload);
+                let _ = self.handle_spawn_or_kill_message(&msg, payload, sender_tid);
             }
             return Ok(());
         }
@@ -204,6 +208,7 @@ impl ProcessManager {
         // Clean up PID tracking
         if let Some(pid) = self.cookie_to_pid.remove(&cookie) {
             self.pid_to_cookie.remove(&pid);
+            self.pid_owner_tid.remove(&pid);
         }
 
         if let Some(notify_endpoint) = self.exit_notify.remove(&cookie) {
@@ -239,15 +244,20 @@ impl ProcessManager {
         Ok(())
     }
 
-    fn handle_spawn_or_kill_message(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+    fn handle_spawn_or_kill_message(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
         // Route to appropriate handler based on label
         if msg.tag.label == PROCMGR_KILL_LABEL {
-            return self.handle_kill_message(msg);
+            return self.handle_kill_message(msg, sender_tid);
         }
-        self.handle_spawn_message(msg, payload)
+        self.handle_spawn_message(msg, payload, sender_tid)
     }
 
-    fn handle_spawn_message(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+    fn handle_spawn_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
         let mut reply_msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 2);
         // Extract reply token for call messages (prefer this over legacy reply_endpoint)
         let reply_token = extract_reply_token(msg);
@@ -298,7 +308,7 @@ impl ProcessManager {
             }
         }
 
-        match self.spawn_service(path, priority, argv_data, argc) {
+        match self.spawn_service(path, priority, argv_data, argc, sender_tid) {
             Ok((thread_token, cookie, pid)) => {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = pid; // Return PID instead of thread_token
@@ -335,6 +345,7 @@ impl ProcessManager {
         priority: usize,
         argv_payload: &[u8],
         argc: usize,
+        owner_tid: usize,
     ) -> Result<(usize, usize, usize)> {
         debug_print("Creating address space...")?;
         let space_token = space_create(self.token)?;
@@ -436,6 +447,7 @@ impl ProcessManager {
         self.exit_table.insert(cookie, thread_token);
         self.pid_to_cookie.insert(pid, cookie);
         self.cookie_to_pid.insert(cookie, pid);
+        self.pid_owner_tid.insert(pid, owner_tid);
         Ok((thread_token, cookie, pid))
     }
 
@@ -685,7 +697,7 @@ impl ProcessManager {
         Ok(entry)
     }
 
-    fn handle_kill_message(&mut self, msg: &Message) -> Result<()> {
+    fn handle_kill_message(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
         let reply_token = extract_reply_token(msg);
         let mut reply_msg = Message::new(PROCMGR_KILL_LABEL, [0; 6], 1);
 
@@ -699,6 +711,28 @@ impl ProcessManager {
 
         let target_pid = msg.words[0];
         let _signal = msg.words[1]; // Signal number (9 = SIGKILL, 15 = SIGTERM)
+
+        let owner_tid = match self.pid_owner_tid.get(&target_pid) {
+            Some(&owner) => owner,
+            None => {
+                reply_msg.words[0] = (-3isize) as usize; // ESRCH - unknown ownership/pid
+                if let Some(token) = reply_token {
+                    let _ = reply(token, &reply_msg, IpcFlags::empty());
+                }
+                return Ok(());
+            }
+        };
+        if sender_tid == 0 || sender_tid != owner_tid {
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            let _ = debug_print(&format!(
+                "procmgr: deny kill pid {} sender_tid={} owner_tid={}",
+                target_pid, sender_tid, owner_tid
+            ));
+            if let Some(token) = reply_token {
+                let _ = reply(token, &reply_msg, IpcFlags::empty());
+            }
+            return Ok(());
+        }
 
         // Look up the process by PID
         let cookie = match self.pid_to_cookie.get(&target_pid) {
@@ -731,6 +765,7 @@ impl ProcessManager {
                 self.exit_table.remove(&cookie);
                 self.pid_to_cookie.remove(&target_pid);
                 self.cookie_to_pid.remove(&cookie);
+                self.pid_owner_tid.remove(&target_pid);
                 self.exit_notify.remove(&cookie);
 
                 reply_msg.words[0] = 0; // Success

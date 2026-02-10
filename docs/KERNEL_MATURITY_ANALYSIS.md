@@ -407,7 +407,7 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 | WP-M3.1 Mapping/copy failpoints + rollback checks | M3 | DONE (space_map rollback hardening + injectable map-range failpoint + harnessed shell self-test) | `kernel/src/syscall/handlers.rs`, `kernel/src/syscall/userptr.rs`, `userspace/shell/src/commands.rs`, `test_hello.sh` | `CLUU_SHELL_AUTOSTART_CMD='mapfail 12 4' MARKER_MODE=m3_mapfail TEST_COMMAND='' TEST_COMMAND_REPEAT=1 ./test_hello.sh` passes |
 | WP-M3.2 CI churn + leak detection harness | M3 | DONE (matrix script + xtask entrypoint + make target over harness marker modes) | `scripts/harness_matrix.sh`, `xtask/src/main.rs`, `Makefile`, `test_hello.sh` | `cargo xtask harness-matrix` (or `--no-build`) runs `m1_recv`/`m2_token_audit`/`m2_leakdiag`/`m3_mapfail` and hard-fails on regressions |
 | WP-M3.3 Copy/map error rollback matrix coverage | M3 | DONE (shell self-tests for `copy_from_user` and `map_user_page` error branches + harness marker modes + matrix integration) | `userspace/shell/src/commands.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `cargo xtask harness-matrix` runs `m3_mapcopyfail` + `m3_maperror` and fails on any `FAIL` marker |
-| WP-M4.1 Sender identity/badge hardening | M4 | IN PROGRESS (kernel `sys_recv` sender metadata + VFS authenticated caller binding; caller-supplied `client_id` now ignored in VFS) | `kernel/src/syscall/handlers.rs`, `kernel/src/ipc/endpoint.rs`, `userspace/libcluu/src/syscall.rs`, `userspace/vfs/src/main.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `cargo xtask harness-matrix` passes including `m4_sender_auth`; VFS logs `ignoring claimed client_id=... authenticated=...` during shell spawn churn |
+| WP-M4.1 Sender identity/badge hardening | M4 | IN PROGRESS (kernel `sys_recv` sender metadata + VFS authenticated caller binding + procmgr PID-owner enforcement for `PROC_KILL`) | `kernel/src/syscall/handlers.rs`, `kernel/src/ipc/endpoint.rs`, `userspace/libcluu/src/syscall.rs`, `userspace/vfs/src/main.rs`, `userspace/procmgr/src/main.rs`, `test_hello.sh`, `scripts/harness_matrix.sh` | `cargo xtask harness-matrix` passes including `m4_sender_auth`; VFS logs `ignoring claimed client_id=... authenticated=...` during shell spawn churn |
 | WP-M5.1 Fairness + latency SLO instrumentation | M5 | TODO | scheduler + IPC telemetry/harness modules | P95/P99 thresholds met under mixed load |
 | WP-L2.1 Mutable FS operations + DAC checks | L2A | TODO | `userspace/vfs`, `userspace/ramfs`, libc POSIX wrappers | `create/write/read/rename/unlink` + permission-deny tests pass |
 | WP-L2.2 Minimal signals + shell job control | L2B | TODO | `userspace/procmgr`, `userspace/shell`, `userspace/libcluu` | interactive `SIGINT` + `SIGCHLD` behavior works in shell |
@@ -417,7 +417,7 @@ This is the execution-oriented plan (what to code, where, and how to validate).
 
 1. Add numeric leak thresholds to matrix runs (`MAX_DELTA_*`) once stable bounds are measured.
 2. Extend token audit with optional userspace-drain endpoint once leak counters land.
-3. Extend WP-M4.1 sender identity/badge hardening from VFS to remaining service contracts that still consume caller-supplied identity fields.
+3. Extend WP-M4.1 sender identity/badge hardening to registry/procmgr reply/notify endpoint contracts (remove caller-controlled endpoint routing where practical).
 
 ### Completion criteria by level
 
