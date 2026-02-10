@@ -674,9 +674,11 @@ fn invoke_thread_suspend(token: &Token, _args: SyscallArgs) -> SyscallResult {
     };
 
     if !crate::sched::ThreadManager::suspend_thread(thread_id) {
+        crate::telemetry::record_thread_suspend(false);
         return Err(Error::NotFound);
     }
 
+    crate::telemetry::record_thread_suspend(true);
     Ok(0)
 }
 
@@ -696,8 +698,14 @@ fn invoke_thread_resume(token: &Token, _args: SyscallArgs) -> SyscallResult {
     };
 
     match crate::sched::ThreadManager::resume_thread(thread_id) {
-        Some(_) => Ok(0),
-        None => Err(Error::InvalidState),
+        Some(_) => {
+            crate::telemetry::record_thread_resume(true);
+            Ok(0)
+        }
+        None => {
+            crate::telemetry::record_thread_resume(false);
+            Err(Error::InvalidState)
+        }
     }
 }
 

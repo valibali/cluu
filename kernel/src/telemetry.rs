@@ -18,6 +18,10 @@ static IPC_RECV_SCAN_EVENTS: AtomicU64 = AtomicU64::new(0);
 static IPC_RECV_SCAN_TOTAL_STEPS: AtomicU64 = AtomicU64::new(0);
 static IPC_RECV_SCAN_MAX_STEPS: AtomicU64 = AtomicU64::new(0);
 static BOOT_TOKEN_GRANTS: AtomicU64 = AtomicU64::new(0);
+static THREAD_SUSPEND_CALLS: AtomicU64 = AtomicU64::new(0);
+static THREAD_SUSPEND_SUCCESS: AtomicU64 = AtomicU64::new(0);
+static THREAD_RESUME_CALLS: AtomicU64 = AtomicU64::new(0);
+static THREAD_RESUME_SUCCESS: AtomicU64 = AtomicU64::new(0);
 static RESOURCE_DELTA_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 const TOKEN_AUDIT_CAPACITY: usize = 256;
 const IPC_WAIT_HIST_BUCKETS: usize = 12;
@@ -138,6 +142,10 @@ pub struct Snapshot {
     pub ipc_recv_scan_avg_steps_x100: u64,
     pub ipc_recv_scan_max_steps: u64,
     pub boot_token_grants: u64,
+    pub thread_suspend_calls: u64,
+    pub thread_suspend_success: u64,
+    pub thread_resume_calls: u64,
+    pub thread_resume_success: u64,
     pub token_audit_next_seq: u64,
     pub token_audit_stored: usize,
     pub token_audit_dropped: u64,
@@ -208,6 +216,22 @@ pub fn record_boot_token_grant() {
     BOOT_TOKEN_GRANTS.fetch_add(1, Ordering::Relaxed);
 }
 
+#[inline(always)]
+pub fn record_thread_suspend(success: bool) {
+    THREAD_SUSPEND_CALLS.fetch_add(1, Ordering::Relaxed);
+    if success {
+        THREAD_SUSPEND_SUCCESS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[inline(always)]
+pub fn record_thread_resume(success: bool) {
+    THREAD_RESUME_CALLS.fetch_add(1, Ordering::Relaxed);
+    if success {
+        THREAD_RESUME_SUCCESS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 fn wait_percentile_ms(events: u64, percentile: u64) -> u64 {
     if events == 0 {
         return 0;
@@ -256,6 +280,10 @@ pub fn snapshot() -> Snapshot {
         },
         ipc_recv_scan_max_steps: IPC_RECV_SCAN_MAX_STEPS.load(Ordering::Relaxed),
         boot_token_grants: BOOT_TOKEN_GRANTS.load(Ordering::Relaxed),
+        thread_suspend_calls: THREAD_SUSPEND_CALLS.load(Ordering::Relaxed),
+        thread_suspend_success: THREAD_SUSPEND_SUCCESS.load(Ordering::Relaxed),
+        thread_resume_calls: THREAD_RESUME_CALLS.load(Ordering::Relaxed),
+        thread_resume_success: THREAD_RESUME_SUCCESS.load(Ordering::Relaxed),
         token_audit_next_seq: audit.next_seq,
         token_audit_stored: audit.stored,
         token_audit_dropped: audit.dropped,
@@ -358,6 +386,14 @@ pub fn log_resource_delta(reason: &str) {
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_avg_steps_x100);
     klibcluu::info("  ipc_scan_max_steps=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_max_steps);
+    klibcluu::info("  thread_suspend_calls=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_suspend_calls);
+    klibcluu::info("  thread_suspend_success=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_suspend_success);
+    klibcluu::info("  thread_resume_calls=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_resume_calls);
+    klibcluu::info("  thread_resume_success=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_resume_success);
 }
 
 #[inline(always)]
@@ -475,6 +511,14 @@ pub fn log_bootstrap_snapshot(stage: &str) {
 
     klibcluu::info("  boot_token_grants=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.boot_token_grants);
+    klibcluu::info("  thread_suspend_calls=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_suspend_calls);
+    klibcluu::info("  thread_suspend_success=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_suspend_success);
+    klibcluu::info("  thread_resume_calls=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_resume_calls);
+    klibcluu::info("  thread_resume_success=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_resume_success);
 
     klibcluu::info("  token_audit_next_seq=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.token_audit_next_seq);
@@ -522,6 +566,10 @@ pub fn reset_for_tests() {
     IPC_RECV_SCAN_TOTAL_STEPS.store(0, Ordering::Relaxed);
     IPC_RECV_SCAN_MAX_STEPS.store(0, Ordering::Relaxed);
     BOOT_TOKEN_GRANTS.store(0, Ordering::Relaxed);
+    THREAD_SUSPEND_CALLS.store(0, Ordering::Relaxed);
+    THREAD_SUSPEND_SUCCESS.store(0, Ordering::Relaxed);
+    THREAD_RESUME_CALLS.store(0, Ordering::Relaxed);
+    THREAD_RESUME_SUCCESS.store(0, Ordering::Relaxed);
     RESOURCE_DELTA_LOG_SEQ.store(0, Ordering::Relaxed);
     for bucket in IPC_RECV_WAIT_HISTOGRAM.iter() {
         bucket.store(0, Ordering::Relaxed);

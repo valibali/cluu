@@ -241,6 +241,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(SpawnBuiltin));
         registry.register(Box::new(SpawnBgBuiltin));
         registry.register(Box::new(JobsBuiltin));
+        registry.register(Box::new(JobChurnBuiltin));
         registry.register(Box::new(StopBuiltin));
         registry.register(Box::new(ForegroundBuiltin));
         registry.register(Box::new(BackgroundBuiltin));
@@ -317,7 +318,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, jobchurn, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -620,6 +621,7 @@ impl BuiltinCommand for LetBuiltin {
 struct SpawnBuiltin;
 struct SpawnBgBuiltin;
 struct JobsBuiltin;
+struct JobChurnBuiltin;
 struct StopBuiltin;
 struct ForegroundBuiltin;
 struct BackgroundBuiltin;
@@ -776,6 +778,61 @@ impl BuiltinCommand for StopBuiltin {
         context.set_bg_job_state(pid, JobState::Stopped);
         let line = format!("stop: pid={} stopped\n", pid);
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        Ok(())
+    }
+}
+
+impl BuiltinCommand for JobChurnBuiltin {
+    fn name(&self) -> &'static str {
+        "jobchurn"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let iterations = args
+            .first()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(3);
+        if iterations == 0 {
+            send_with_payload(
+                stdout,
+                TTY_WRITE_LABEL,
+                b"jobchurn: iterations must be >= 1\n",
+            )?;
+            return Ok(());
+        }
+
+        let stdin_endpoint = process_info().tokens[libcluu::boot::TOKEN_STDIN];
+        for _ in 0..iterations {
+            let spawn = spawn_process(context, "sleepy", DEFAULT_PRIORITY)?;
+            parse_status(spawn.status_word)?;
+
+            let pid = spawn.pid;
+            context.add_bg_job(pid, spawn.notify_endpoint, normalize_spawn_path("sleepy"));
+
+            signal_process(spawn.procmgr_endpoint, pid, SIGSTOP)?;
+            context.set_bg_job_state(pid, JobState::Stopped);
+
+            signal_process(spawn.procmgr_endpoint, pid, SIGCONT)?;
+            context.set_bg_job_state(pid, JobState::Running);
+
+            let Some(job) = context.take_bg_job(pid) else {
+                let line = format!("jobchurn: FAIL missing job pid={}\n", pid);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            };
+
+            wait_for_exit_or_sigint(
+                spawn.procmgr_endpoint,
+                job.notify_endpoint,
+                stdin_endpoint,
+                pid,
+                stdout,
+            )?;
+        }
+
+        let line = format!("jobchurn: PASS iterations={}\n", iterations);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        let _ = debug_print(line.trim_end());
         Ok(())
     }
 }
