@@ -40,6 +40,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="ext2write"
             SHELL_AUTOSTART_CMD_DEFAULT="ext2write"
             ;;
+        l2_ext2append)
+            TEST_COMMAND="ext2append"
+            SHELL_AUTOSTART_CMD_DEFAULT="ext2append"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -224,6 +228,7 @@ fi
 # - m4_deny_paths: explicit sender-auth denial path regressions (PermissionDenied flows)
 # - m4_registry_deny_paths: explicit registry ownership denial path regressions
 # - l2_ext2write: end-to-end ext2 write smoke test via shell builtin
+# - l2_ext2append: append-past-EOF ext2 smoke test via shell builtin
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
 required_markers=()
@@ -351,6 +356,13 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "ext2write: PASS path=/bin/hello"
+        )
+        ;;
+    l2_ext2append)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "ext2append: PASS path=/bin/hello"
         )
         ;;
     none)
@@ -594,6 +606,14 @@ fi
 if [ "$MARKER_MODE" = "l2_ext2write" ]; then
     if grep -Fq "ext2write: FAIL" "$SERIAL_LOG"; then
         echo "MISSING: ext2write reported failure"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+fi
+
+if [ "$MARKER_MODE" = "l2_ext2append" ]; then
+    if grep -Fq "ext2append: FAIL" "$SERIAL_LOG"; then
+        echo "MISSING: ext2append reported failure"
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
     fi

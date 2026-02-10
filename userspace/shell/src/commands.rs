@@ -178,6 +178,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(MapCopyFailBuiltin));
         registry.register(Box::new(MapErrorBuiltin));
         registry.register(Box::new(Ext2WriteBuiltin));
+        registry.register(Box::new(Ext2AppendBuiltin));
         registry.register(Box::new(CatBuiltin));
         registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(HeapBuiltin));
@@ -241,7 +242,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -1000,6 +1001,70 @@ impl BuiltinCommand for Ext2WriteBuiltin {
             }
             Err(err) => {
                 let line = format!("ext2write: FAIL write {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+        }
+
+        let _ = vfs.close(file);
+        Ok(())
+    }
+}
+
+struct Ext2AppendBuiltin;
+
+impl BuiltinCommand for Ext2AppendBuiltin {
+    fn name(&self) -> &'static str {
+        "ext2append"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let path = args.first().map(|s| s.as_str()).unwrap_or("/bin/hello");
+
+        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+            Ok(ep) => ep,
+            Err(err) => {
+                let line = format!("ext2append: FAIL vfs unavailable {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+            Ok(client) => client,
+            Err(err) => {
+                let line = format!("ext2append: FAIL client {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let file = match vfs.open(path) {
+            Ok(file) => file,
+            Err(err) => {
+                let line = format!("ext2append: FAIL open {} {:?}\n", path, err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let append_offset = file.size;
+        match vfs.write(file, append_offset, &[0]) {
+            Ok(1) => {
+                let line = format!("ext2append: PASS path={} offset={}\n", path, append_offset);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+            Ok(written) => {
+                let line = format!("ext2append: FAIL short-write {}\n", written);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+            Err(err) => {
+                let line = format!("ext2append: FAIL write {:?}\n", err);
                 let _ = debug_print(line.as_str());
                 send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
             }

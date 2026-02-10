@@ -90,6 +90,45 @@ impl Inode {
             self.size_lo as u64
         }
     }
+
+    /// Update inode size fields.
+    pub fn set_size(&mut self, size: u64) {
+        self.size_lo = size as u32;
+        self.size_hi = (size >> 32) as u32;
+    }
+
+    /// Serialize inode fields back to raw bytes.
+    pub fn write_to(&self, data: &mut [u8]) {
+        write_u16(data, 0, self.mode);
+        write_u16(data, 2, self.uid);
+        write_u32(data, 4, self.size_lo);
+        write_u32(data, 8, self.atime);
+        write_u32(data, 12, self.ctime);
+        write_u32(data, 16, self.mtime);
+        write_u32(data, 20, self.dtime);
+        write_u16(data, 24, self.gid);
+        write_u16(data, 26, self.links_count);
+        write_u32(data, 28, self.blocks);
+        write_u32(data, 32, self.flags);
+        write_u32(data, 40, self.direct_blocks[0]);
+        write_u32(data, 44, self.direct_blocks[1]);
+        write_u32(data, 48, self.direct_blocks[2]);
+        write_u32(data, 52, self.direct_blocks[3]);
+        write_u32(data, 56, self.direct_blocks[4]);
+        write_u32(data, 60, self.direct_blocks[5]);
+        write_u32(data, 64, self.direct_blocks[6]);
+        write_u32(data, 68, self.direct_blocks[7]);
+        write_u32(data, 72, self.direct_blocks[8]);
+        write_u32(data, 76, self.direct_blocks[9]);
+        write_u32(data, 80, self.direct_blocks[10]);
+        write_u32(data, 84, self.direct_blocks[11]);
+        write_u32(data, 88, self.indirect_block);
+        write_u32(data, 92, self.double_indirect);
+        write_u32(data, 96, self.triple_indirect);
+        if data.len() > 108 {
+            write_u32(data, 108, self.size_hi);
+        }
+    }
 }
 
 fn read_u16(data: &[u8], offset: usize) -> u16 {
@@ -103,4 +142,12 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
         data[offset + 2],
         data[offset + 3],
     ])
+}
+
+fn write_u16(data: &mut [u8], offset: usize, value: u16) {
+    data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(data: &mut [u8], offset: usize, value: u32) {
+    data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
