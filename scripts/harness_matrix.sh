@@ -38,6 +38,7 @@ if [[ "$RUN_BUILD_ONCE" -eq 1 ]]; then
     run_case "m4_registry_deny_paths" full env MARKER_MODE=m4_registry_deny_paths TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "l2_owner_deny" full env MARKER_MODE=l2_owner_deny TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "l2_sigint" full env MARKER_MODE=l2_sigint TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
+    run_case "l2_jobs" full env MARKER_MODE=l2_jobs TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "m5_fairness" full env MARKER_MODE=m5_fairness TEST_COMMAND_REPEAT=1 RUN_WAIT=16 MIN_EXIT_COOKIES=6 MAX_IPC_WAIT_P95_MS=16 MAX_IPC_WAIT_P99_MS=16 MAX_IPC_SCAN_AVG_STEPS_X100=250 ./test_hello.sh
 else
     run_case "m1_recv" no_build env MARKER_MODE=m1_recv TEST_COMMAND_REPEAT=3 MIN_EXIT_COOKIES=3 ./test_hello.sh
@@ -53,6 +54,7 @@ else
     run_case "m4_registry_deny_paths" full env MARKER_MODE=m4_registry_deny_paths TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "l2_owner_deny" full env MARKER_MODE=l2_owner_deny TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "l2_sigint" full env MARKER_MODE=l2_sigint TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
+    run_case "l2_jobs" full env MARKER_MODE=l2_jobs TEST_COMMAND_REPEAT=1 RUN_WAIT=12 ./test_hello.sh
     run_case "m5_fairness" full env MARKER_MODE=m5_fairness TEST_COMMAND_REPEAT=1 RUN_WAIT=16 MIN_EXIT_COOKIES=6 MAX_IPC_WAIT_P95_MS=16 MAX_IPC_WAIT_P99_MS=16 MAX_IPC_SCAN_AVG_STEPS_X100=250 ./test_hello.sh
 fi
 

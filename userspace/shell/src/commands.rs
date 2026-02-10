@@ -36,6 +36,12 @@ pub enum ExecResult {
 pub struct CommandContext {
     vars: BTreeMap<String, String>,
     procmgr_spawn: usize,
+    bg_jobs: BTreeMap<usize, BackgroundJob>,
+}
+
+struct BackgroundJob {
+    notify_endpoint: usize,
+    command: String,
 }
 
 impl CommandContext {
@@ -44,6 +50,7 @@ impl CommandContext {
         Self {
             vars: BTreeMap::new(),
             procmgr_spawn: 0,
+            bg_jobs: BTreeMap::new(),
         }
     }
 
@@ -75,6 +82,28 @@ impl CommandContext {
             self.procmgr_spawn = registry::subscribe_output("procmgr", "spawn")?;
         }
         Ok(self.procmgr_spawn)
+    }
+
+    fn add_bg_job(&mut self, pid: usize, notify_endpoint: usize, command: String) {
+        self.bg_jobs.insert(
+            pid,
+            BackgroundJob {
+                notify_endpoint,
+                command,
+            },
+        );
+    }
+
+    fn remove_bg_job(&mut self, pid: usize) {
+        self.bg_jobs.remove(&pid);
+    }
+
+    fn bg_job_lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (pid, job) in &self.bg_jobs {
+            out.push(format!("[{}] running {}", pid, job.command));
+        }
+        out
     }
 }
 
@@ -174,6 +203,8 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(ExprBuiltin));
         registry.register(Box::new(LetBuiltin));
         registry.register(Box::new(SpawnBuiltin));
+        registry.register(Box::new(SpawnBgBuiltin));
+        registry.register(Box::new(JobsBuiltin));
         registry.register(Box::new(KillDenyBuiltin));
         registry.register(Box::new(RegistryDenyBuiltin));
         registry.register(Box::new(MapFailBuiltin));
@@ -247,7 +278,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -548,6 +579,8 @@ impl BuiltinCommand for LetBuiltin {
 }
 
 struct SpawnBuiltin;
+struct SpawnBgBuiltin;
+struct JobsBuiltin;
 
 impl BuiltinCommand for SpawnBuiltin {
     fn name(&self) -> &'static str {
@@ -563,24 +596,14 @@ impl BuiltinCommand for SpawnBuiltin {
             .get(1)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(DEFAULT_PRIORITY);
-        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-        let initrd_path = normalize_spawn_path(path);
-        let payload = initrd_path.as_bytes();
-        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
-        let mut msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
-        msg.words[0] = payload.len();
-        msg.words[1] = priority;
-        msg.words[2] = 0;
-        msg.words[3] = notify_endpoint;
-        let mut reply = Message::new(0, [0; 6], 0);
-        call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
-        match parse_status(reply.words[0]) {
+        let spawn = spawn_process(context, path, priority)?;
+        match parse_status(spawn.status_word) {
             Ok(()) => {
-                let child_pid = reply.words[1];
+                let child_pid = spawn.pid;
                 let stdin_endpoint = process_info().tokens[libcluu::boot::TOKEN_STDIN];
                 wait_for_exit_or_sigint(
-                    procmgr_endpoint,
-                    notify_endpoint,
+                    spawn.procmgr_endpoint,
+                    spawn.notify_endpoint,
                     stdin_endpoint,
                     child_pid,
                     stdout,
@@ -594,6 +617,84 @@ impl BuiltinCommand for SpawnBuiltin {
             }
         }
     }
+}
+
+impl BuiltinCommand for SpawnBgBuiltin {
+    fn name(&self) -> &'static str {
+        "spawnbg"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let Some(path) = args.first() else {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"spawnbg: missing path\n")?;
+            return Ok(());
+        };
+        let priority = args
+            .get(1)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_PRIORITY);
+
+        let spawn = spawn_process(context, path, priority)?;
+        match parse_status(spawn.status_word) {
+            Ok(()) => {
+                context.add_bg_job(spawn.pid, spawn.notify_endpoint, normalize_spawn_path(path));
+                let line = format!("spawnbg: started pid={}\n", spawn.pid);
+                let _ = debug_print(line.trim_end());
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+            Err(err) => {
+                let line = format!("spawnbg: {:?}\n", err);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BuiltinCommand for JobsBuiltin {
+    fn name(&self) -> &'static str {
+        "jobs"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let lines = context.bg_job_lines();
+        if lines.is_empty() {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"jobs: none\n")?;
+            return Ok(());
+        }
+        for line in lines {
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
+        }
+        Ok(())
+    }
+}
+
+struct SpawnResult {
+    procmgr_endpoint: usize,
+    notify_endpoint: usize,
+    status_word: usize,
+    pid: usize,
+}
+
+fn spawn_process(context: &mut CommandContext, path: &str, priority: usize) -> Result<SpawnResult> {
+    let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+    let initrd_path = normalize_spawn_path(path);
+    let payload = initrd_path.as_bytes();
+    let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
+    let mut msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
+    msg.words[0] = payload.len();
+    msg.words[1] = priority;
+    msg.words[2] = 0;
+    msg.words[3] = notify_endpoint;
+    let mut reply = Message::new(0, [0; 6], 0);
+    call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
+    Ok(SpawnResult {
+        procmgr_endpoint,
+        notify_endpoint,
+        status_word: reply.words[0],
+        pid: reply.words[1],
+    })
 }
 
 fn wait_for_exit_or_sigint(
@@ -638,6 +739,34 @@ fn wait_for_exit_or_sigint(
             return Ok(());
         }
     }
+}
+
+/// Poll background job notify endpoints and emit async completion markers.
+pub fn poll_background_jobs(stdout: usize, context: &mut CommandContext) -> Result<()> {
+    let mut finished: Vec<(usize, i32)> = Vec::new();
+    let mut buf = [0u8; 128];
+
+    for (pid, job) in &context.bg_jobs {
+        match syscall::ipc_recv_nonblocking(job.notify_endpoint, &mut buf) {
+            Ok(len) => {
+                if let Some((msg, _payload)) = parse_ipc_message(&buf[..len]) {
+                    if msg.tag.label == 1 && msg.tag.words >= 2 {
+                        finished.push((*pid, msg.words[1] as i32));
+                    }
+                }
+            }
+            Err(Error::WouldBlock) => {}
+            Err(_) => {}
+        }
+    }
+
+    for (pid, code) in finished {
+        context.remove_bg_job(pid);
+        let line = format!("shell: bg done pid={} code={}\n", pid, code);
+        let _ = debug_print(line.trim_end());
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+    }
+    Ok(())
 }
 
 fn parse_ipc_message(buf: &[u8]) -> Option<(Message, &[u8])> {

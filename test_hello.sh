@@ -64,6 +64,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             SHELL_AUTOSTART_CMD_DEFAULT="spawn sleepy"
             POST_SENDKEY_DEFAULT="ctrl-c"
             ;;
+        l2_jobs)
+            TEST_COMMAND="spawnbg sleepy"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -262,6 +266,7 @@ fi
 # - l2_ext2unlink: create+unlink verification smoke test
 # - l2_owner_deny: explicit non-owner mutation denial with second spawned client
 # - l2_sigint: foreground spawn interrupted by Ctrl-C (minimal SIGINT path)
+# - l2_jobs: background spawn + async reap notification (`SIGCHLD`-style baseline)
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
 required_markers=()
@@ -426,6 +431,14 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "spawn: SIGINT pid="
             "procmgr: killed pid"
+        )
+        ;;
+    l2_jobs)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "spawnbg: started pid="
+            "shell: bg done pid="
         )
         ;;
     none)

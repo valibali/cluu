@@ -14,7 +14,7 @@ use alloc::string::ToString;
 #[cfg(feature = "lang-parser")]
 use alloc::vec::Vec;
 #[cfg(feature = "lang-parser")]
-use commands::{BuiltinFactory, CommandContext, CommandExecutor, ExecResult};
+use commands::{poll_background_jobs, BuiltinFactory, CommandContext, CommandExecutor, ExecResult};
 use core::mem::size_of;
 use libcluu::boot::{
     process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG,
@@ -92,7 +92,7 @@ fn run() -> Result<()> {
     loop {
         // Wait for either keyboard input via stdin or registry control traffic.
         let tokens = [stdin, registry_endpoint];
-        match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+        match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, 250) {
             Ok((index, len)) => {
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
                     if index == 1 {
@@ -109,6 +109,13 @@ fn run() -> Result<()> {
                         }
                     }
                 }
+            }
+            Err(Error::Timeout) => {
+                #[cfg(feature = "lang-parser")]
+                {
+                    let _ = poll_background_jobs(stdout, &mut command_context);
+                }
+                let _ = yield_cpu();
             }
             Err(Error::WouldBlock) => {
                 let _ = yield_cpu();
