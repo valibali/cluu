@@ -72,6 +72,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="fg"
             SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
             ;;
+        l2_waitpid)
+            TEST_COMMAND="spawn waitprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn waitprobe"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -272,6 +276,7 @@ fi
 # - l2_sigint: foreground spawn interrupted by Ctrl-C (minimal SIGINT path)
 # - l2_jobs: background spawn + async reap notification (`SIGCHLD`-style baseline)
 # - l2_fg: background spawn promoted to foreground wait path via `fg`
+# - l2_waitpid: libc wait queue + `WNOHANG` behavior via userspace probe
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - none: no required marker checks
 required_markers=()
@@ -452,6 +457,15 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "spawnbg: started pid="
             "fg: pid="
+            "procmgr: exit cookie"
+        )
+        ;;
+    l2_waitpid)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "waitprobe: PASS wnohang no-exit"
+            "waitprobe: PASS waitpid queue+wnohang"
             "procmgr: exit cookie"
         )
         ;;

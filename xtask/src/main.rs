@@ -643,7 +643,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
     }
 
     // Also add any C programs (built via cargo xtask build-c)
-    let c_programs = ["hello", "ownerprobe", "sleepy"];
+    let c_programs = ["hello", "ownerprobe", "sleepy", "waitprobe"];
     for prog in &c_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = bin_dir.join(prog);
@@ -670,7 +670,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
             "-b",
             "1024",
             disk_path.to_str().unwrap(),
-            "32768", // 32MB image (32768 blocks * 1KiB)
+            "65536", // 64MB image (65536 blocks * 1KiB)
         ])
         .status()
         .context("Failed to run mke2fs for user disk")?;
@@ -1015,6 +1015,7 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("hello", "userspace/c_hello/minimal.c"),
         ("ownerprobe", "userspace/c_hello/ownerprobe.c"),
         ("sleepy", "userspace/c_hello/sleepy.c"),
+        ("waitprobe", "userspace/c_hello/waitprobe.c"),
     ];
 
     for (name, source) in c_programs {
