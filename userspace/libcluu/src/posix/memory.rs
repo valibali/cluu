@@ -29,7 +29,7 @@ const MMAP_REGION_START: usize = 0x4100_0000;
 const MMAP_REGION_END: usize = 0x5000_0000;
 
 /// Next free address in the mmap region (bump allocator).
-static MMAP_NEXT: AtomicUsize = AtomicUsize::new(MMAP_REGION_START);
+// Allocation now uses first-fit over tracked regions so freed holes are reused.
 
 /// Maximum tracked mmap regions.
 const MAX_MMAP_REGIONS: usize = 64;
@@ -39,6 +39,7 @@ const MAX_MMAP_REGIONS: usize = 64;
 struct MmapRegion {
     addr: usize,
     len: usize,
+    prot: c_int,
 }
 
 /// Active mmap allocations.
@@ -72,6 +73,53 @@ impl MmapRegionTable {
                     return slot.take();
                 }
             }
+        }
+        None
+    }
+
+    fn find_exact(&self, addr: usize, len: usize) -> Option<MmapRegion> {
+        for slot in self.entries.iter() {
+            if let Some(r) = slot {
+                if r.addr == addr && r.len == len {
+                    return Some(*r);
+                }
+            }
+        }
+        None
+    }
+
+    fn update_prot_exact(&mut self, addr: usize, len: usize, prot: c_int) -> bool {
+        for slot in self.entries.iter_mut() {
+            if let Some(r) = slot {
+                if r.addr == addr && r.len == len {
+                    r.prot = prot;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn overlaps(&self, start: usize, end: usize) -> bool {
+        for slot in self.entries.iter() {
+            if let Some(r) = slot {
+                let r_end = r.addr.saturating_add(r.len);
+                if start < r_end && r.addr < end {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn find_first_fit(&self, len: usize) -> Option<usize> {
+        let mut cursor = MMAP_REGION_START;
+        while cursor <= MMAP_REGION_END.saturating_sub(len) {
+            let end = cursor + len;
+            if !self.overlaps(cursor, end) {
+                return Some(cursor);
+            }
+            cursor = cursor.saturating_add(PAGE_SIZE);
         }
         None
     }
@@ -173,17 +221,22 @@ pub extern "C" fn _mmap(
             set_errno(EINVAL);
             return MAP_FAILED;
         }
-        a
-    } else {
-        // Bump allocate from mmap region
-        let current = MMAP_NEXT.load(Ordering::SeqCst);
-        let end = current + aligned_len;
-        if end > MMAP_REGION_END {
-            set_errno(ENOMEM);
+        let end = a.saturating_add(aligned_len);
+        if a < MMAP_REGION_START || end > MMAP_REGION_END {
+            set_errno(EINVAL);
             return MAP_FAILED;
         }
-        MMAP_NEXT.store(end, Ordering::SeqCst);
-        current
+        if MMAP_REGIONS.lock().overlaps(a, end) {
+            set_errno(EINVAL);
+            return MAP_FAILED;
+        }
+        a
+    } else {
+        let Some(fit) = MMAP_REGIONS.lock().find_first_fit(aligned_len) else {
+            set_errno(ENOMEM);
+            return MAP_FAILED;
+        };
+        fit
     };
 
     // Map pages via kernel
@@ -199,8 +252,14 @@ pub extern "C" fn _mmap(
     let region = MmapRegion {
         addr: virt_addr,
         len: aligned_len,
+        prot,
     };
-    MMAP_REGIONS.lock().insert(region);
+    if !MMAP_REGIONS.lock().insert(region) {
+        // Rollback mapping if local bookkeeping is exhausted.
+        let _ = crate::syscall::space_unmap(space_token, virt_addr, num_pages);
+        set_errno(ENOMEM);
+        return MAP_FAILED;
+    }
 
     virt_addr as *mut c_void
 }
@@ -234,9 +293,6 @@ pub extern "C" fn _munmap(addr: *mut c_void, length: size_t) -> c_int {
     let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let num_pages = aligned_len / PAGE_SIZE;
 
-    // Remove from tracking
-    MMAP_REGIONS.lock().remove(virt);
-
     // Unmap via kernel
     let space_token = crate::boot::space_token();
     if space_token == 0 {
@@ -244,24 +300,96 @@ pub extern "C" fn _munmap(addr: *mut c_void, length: size_t) -> c_int {
         return -1;
     }
 
+    // Require exact region tracking for now to keep lifecycle strict.
+    if MMAP_REGIONS.lock().find_exact(virt, aligned_len).is_none() {
+        set_errno(EINVAL);
+        return -1;
+    }
+
     match crate::syscall::space_unmap(space_token, virt, num_pages) {
-        Ok(()) => 0,
-        Err(_) => {
-            // Unmap may partially fail but we still report success
-            // (POSIX allows this for partial unmaps)
+        Ok(()) => {
+            let _ = MMAP_REGIONS.lock().remove(virt);
             0
+        }
+        Err(_) => {
+            set_errno(ENOMEM);
+            -1
         }
     }
 }
 
-/// Change protection on a region of memory.
+/// Change protection on a tracked mmap region.
 ///
-/// Stub — currently does nothing (pages keep original permissions).
+/// Current limitation: kernel PTE retagging is not exposed yet, so this updates
+/// userspace bookkeeping only after strict validation.
 #[no_mangle]
-pub extern "C" fn mprotect(_addr: *mut c_void, _len: size_t, _prot: c_int) -> c_int {
-    // Stub: silently succeed. Kernel doesn't support changing page perms
-    // after mapping, but callers rarely depend on this working.
-    0
+pub extern "C" fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -> c_int {
+    if addr.is_null() || len == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    let virt = addr as usize;
+    if virt & (PAGE_SIZE - 1) != 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    if prot & !(PROT_NONE | PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    let aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    if MMAP_REGIONS
+        .lock()
+        .update_prot_exact(virt, aligned_len, prot)
+    {
+        return 0;
+    }
+    set_errno(EINVAL);
+    -1
+}
+
+#[cfg(test)]
+fn reset_mmap_state_for_tests() {
+    let mut table = MMAP_REGIONS.lock();
+    *table = MmapRegionTable::new();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_fit_reuses_freed_slot() {
+        reset_mmap_state_for_tests();
+        let mut table = MMAP_REGIONS.lock();
+        assert!(table.insert(MmapRegion {
+            addr: MMAP_REGION_START,
+            len: PAGE_SIZE,
+            prot: PROT_READ,
+        }));
+        assert!(table.insert(MmapRegion {
+            addr: MMAP_REGION_START + PAGE_SIZE * 2,
+            len: PAGE_SIZE,
+            prot: PROT_READ,
+        }));
+        let _ = table.remove(MMAP_REGION_START);
+        assert_eq!(table.find_first_fit(PAGE_SIZE), Some(MMAP_REGION_START));
+    }
+
+    #[test]
+    fn update_prot_requires_exact_region() {
+        reset_mmap_state_for_tests();
+        let mut table = MMAP_REGIONS.lock();
+        assert!(table.insert(MmapRegion {
+            addr: MMAP_REGION_START,
+            len: PAGE_SIZE * 2,
+            prot: PROT_READ,
+        }));
+        assert!(table.update_prot_exact(MMAP_REGION_START, PAGE_SIZE * 2, PROT_READ | PROT_WRITE));
+        assert!(!table.update_prot_exact(MMAP_REGION_START, PAGE_SIZE, PROT_EXEC));
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
