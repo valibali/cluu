@@ -103,6 +103,21 @@ No new syscall numbers are introduced. The syscall ABI remains:
   - New marker mode: `b_teardown_churn`.
   - Leak deltas bounded and stable across repeated runs.
 
+#### B.3 Spawn hot-path performance (shell responsiveness)
+- Goal: reduce spawn+wait latency for interactive shell/process-heavy workflows.
+- Changes:
+  - Add spawn-path telemetry stamps in procmgr/VFS (`spawn_request`, `elf_fetch`, `map_segments`, `stack_map`, `thread_start`, `first_user_ipc`).
+  - Introduce warm-path optimizations:
+    - cache parsed ELF metadata for hot binaries (`/bin/noop`, `/bin/hello`, shell utilities),
+    - reduce repeated mapping/setup overhead for short-lived children,
+    - avoid unnecessary control-plane IPC roundtrips on spawn completion path.
+  - Keep process model userspace-owned (no kernel process object); optimize procmgr/VFS orchestration only.
+- Validation:
+  - New marker mode: `b_spawn_perf`.
+  - `benchprobe` spawn metric target:
+    - initial objective: at least 2x improvement vs current baseline.
+  - Shell-ready SLO remains <= 15s with full rebuild harness.
+
 ### C: Threading enablement
 
 #### C.1 Futex primitive via `Invoke`
@@ -150,4 +165,5 @@ For each sub-milestone (`P0.1`, `P0.2`, ...):
 2. Then `P0.2` (rendezvous direct-transfer fast path).
 3. Then `P0.3` (shared ring bulk path for VFS).
 4. Then `P0.4` (SLO rebaseline and CI thresholds).
-5. Enter Phase A.
+5. Enter Phase A (`A.1` first).
+6. After `A.1/A.2`, execute `B.1/B.2`, then `B.3` as a dedicated performance pass.

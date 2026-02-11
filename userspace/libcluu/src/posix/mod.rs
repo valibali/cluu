@@ -25,9 +25,11 @@
 
 mod dir;
 mod env;
+mod fcntl;
 mod file;
 mod memory;
 mod process;
+mod signal;
 mod stat;
 pub mod termios;
 mod time;
@@ -187,6 +189,11 @@ pub extern "C" fn kill(pid: pid_t, sig: c_int) -> c_int {
 }
 
 #[no_mangle]
+pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
+    fcntl::fcntl_impl(fd, cmd, arg)
+}
+
+#[no_mangle]
 pub extern "C" fn sbrk(increment: isize) -> *mut c_void {
     _sbrk(increment)
 }
@@ -281,6 +288,11 @@ pub extern "C" fn _getpid_r(_r: *mut c_void) -> pid_t {
 #[no_mangle]
 pub extern "C" fn _kill_r(_r: *mut c_void, pid: pid_t, sig: c_int) -> c_int {
     _kill(pid, sig)
+}
+
+#[no_mangle]
+pub extern "C" fn _fcntl_r(_r: *mut c_void, fd: c_int, cmd: c_int, arg: c_int) -> c_int {
+    fcntl::fcntl_impl(fd, cmd, arg)
 }
 
 #[no_mangle]
