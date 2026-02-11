@@ -101,9 +101,17 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="spawn mmapprobe"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
             ;;
+        a_poll)
+            TEST_COMMAND="spawn pollprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn pollprobe"
+            ;;
         perf_benchprobe)
             TEST_COMMAND="spawn benchprobe"
-            SHELL_AUTOSTART_CMD_DEFAULT="spawn benchprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT=""
+            ;;
+        b_spawn_perf)
+            TEST_COMMAND="spawn benchprobe spawnonly"
+            SHELL_AUTOSTART_CMD_DEFAULT=""
             ;;
         m6_ipc_compact)
             TEST_COMMAND="repeat 8 spawn hello"
@@ -398,6 +406,7 @@ fi
 # - l2_jobmix: deterministic two-job stop/bg/fg-style interleaving stress
 # - l2_waitpid: libc wait queue + `WNOHANG` behavior via userspace probe
 # - l2_mmap: mmap/munmap reuse + strict mprotect region validation
+# - a_poll: poll(2) compatibility probe over fd table semantics
 # - perf_benchprobe: process/thread-control/IPC benchmark probe
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - m6_ipc_compact: compact IPC queue storage regression smoke under spawn churn
@@ -675,6 +684,13 @@ case "$MARKER_MODE" in
             "mmapprobe: PASS complete"
         )
         ;;
+    a_poll)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pollprobe: PASS"
+        )
+        ;;
     perf_benchprobe)
         required_markers=(
             "TSC calibrated"
@@ -683,6 +699,14 @@ case "$MARKER_MODE" in
             "benchprobe: spawn_wait"
             "benchprobe: thread_ctl"
             "benchprobe: PASS"
+        )
+        ;;
+    b_spawn_perf)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "benchprobe: ipc_clock"
+            "benchprobe: spawn_wait"
         )
         ;;
     none)

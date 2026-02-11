@@ -43,6 +43,8 @@ struct RegistryState {
     control_endpoint: usize,
     /// Outputs owned by this process: name -> endpoint token.
     outputs: BTreeMap<String, usize>,
+    /// Service lookup cache: "service:endpoint" -> granted token.
+    lookup_cache: BTreeMap<String, usize>,
 }
 
 lazy_static::lazy_static! {
@@ -82,6 +84,13 @@ pub fn control_endpoint() -> usize {
 /// - `Some(token)`: Endpoint token for the service
 /// - `None`: Service not found or lookup failed
 pub fn lookup_service(full_name: &str) -> Option<usize> {
+    {
+        let state = REGISTRY_STATE.lock();
+        if let Some(token) = state.lookup_cache.get(full_name) {
+            return Some(*token);
+        }
+    }
+
     // Parse "service:output" format
     let parts: Vec<&str> = full_name.splitn(2, ':').collect();
     if parts.len() != 2 {
@@ -91,7 +100,10 @@ pub fn lookup_service(full_name: &str) -> Option<usize> {
     let endpoint_name = parts[1];
 
     // Subscribe and get the token
-    subscribe_output(service_name, endpoint_name).ok()
+    let token = subscribe_output(service_name, endpoint_name).ok()?;
+    let mut state = REGISTRY_STATE.lock();
+    state.lookup_cache.insert(full_name.to_string(), token);
+    Some(token)
 }
 
 /// Register an output endpoint with the registry.
@@ -261,11 +273,21 @@ fn wait_for_grant(endpoint_name: &str) -> Result<usize> {
             if let Some(event) = handle_incoming_message(&msg, payload)? {
                 match event {
                     RegistryEvent::Grant { name, token } => {
+                        let _ = crate::debug_print(&alloc::format!(
+                            "registry-client: grant {} token {}",
+                            name,
+                            token
+                        ));
                         if name == endpoint_name {
                             return Ok(token);
                         }
                     }
                     RegistryEvent::SubscribeStatus { code } => {
+                        let _ = crate::debug_print(&alloc::format!(
+                            "registry-client: subscribe status {} for {}",
+                            code,
+                            endpoint_name
+                        ));
                         if code != 0 {
                             return Err(error_from_code(code));
                         }
@@ -283,23 +305,43 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
     }
     // Payload encodes the output name being requested.
     let endpoint_name = decode_single_name(payload).ok_or(Error::InvalidArgument)?;
+    let _ = crate::debug_print(&alloc::format!(
+        "registry-client: grant request endpoint={} requester={}",
+        endpoint_name,
+        requester_endpoint
+    ));
     // Look up the local output token so we can derive a send-only grant.
     let endpoint_token = {
         let state = REGISTRY_STATE.lock();
         state.outputs.get(&endpoint_name).copied().unwrap_or(0)
     };
     if endpoint_token == 0 {
+        let _ = crate::debug_print(&alloc::format!(
+            "registry-client: missing output {}",
+            endpoint_name
+        ));
         return Ok(());
     }
     // Mint a least-privilege token that only allows IPC_SEND.
     let send_rights = (Rights::IPC_SEND | Rights::IPC_CALL).bits() as usize;
     let derived = token_derive(endpoint_token, send_rights, u64::MAX)?;
+    let _ = crate::debug_print(&alloc::format!(
+        "registry-client: derived grant {} for {}",
+        derived,
+        endpoint_name
+    ));
     let payload = encode_single_name(&endpoint_name);
     // Reply directly to the requester with the derived token.
     let reply = make_payload_message(REGISTRY_GRANT_DELIVER_LABEL, payload.len(), &[derived]);
     match send_with_payload(requester_endpoint, &reply, &payload) {
         Ok(()) => Ok(()),
-        Err(err) => Err(err),
+        Err(err) => {
+            let _ = crate::debug_print(&alloc::format!(
+                "registry-client: grant deliver failed {:?}",
+                err
+            ));
+            Err(err)
+        }
     }
 }
 

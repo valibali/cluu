@@ -9,11 +9,13 @@ use lazy_static::lazy_static;
 use spin::Mutex;
 
 const PROCMGR_SPAWN_LABEL: u32 = 2;
+const PROCMGR_KILL_LABEL: u32 = 3;
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const WNOHANG: c_int = 1;
 
 struct WaitState {
     notify_endpoint: usize,
+    procmgr_endpoint: usize,
     cookie_to_pid: BTreeMap<usize, pid_t>,
     pid_to_cookie: BTreeMap<pid_t, usize>,
     pending_exit_events: VecDeque<(pid_t, i32)>,
@@ -23,6 +25,7 @@ impl WaitState {
     fn new() -> Self {
         Self {
             notify_endpoint: 0,
+            procmgr_endpoint: 0,
             cookie_to_pid: BTreeMap::new(),
             pid_to_cookie: BTreeMap::new(),
             pending_exit_events: VecDeque::new(),
@@ -58,6 +61,25 @@ impl WaitState {
 
 lazy_static! {
     static ref WAIT_STATE: Mutex<WaitState> = Mutex::new(WaitState::new());
+}
+
+fn clear_cached_procmgr_endpoint() {
+    let mut state = WAIT_STATE.lock();
+    state.procmgr_endpoint = 0;
+}
+
+fn get_cached_or_lookup_procmgr_endpoint() -> Option<usize> {
+    {
+        let state = WAIT_STATE.lock();
+        if state.procmgr_endpoint != 0 {
+            return Some(state.procmgr_endpoint);
+        }
+    }
+
+    let endpoint = crate::registry::lookup_service("procmgr:spawn")?;
+    let mut state = WAIT_STATE.lock();
+    state.procmgr_endpoint = endpoint;
+    Some(endpoint)
 }
 
 /// Exit the current process.
@@ -114,8 +136,8 @@ pub extern "C" fn _kill(pid: pid_t, sig: c_int) -> c_int {
         return -1;
     }
 
-    // Get procmgr endpoint from registry
-    let procmgr_ep = match crate::registry::lookup_service("procmgr:spawn") {
+    // Get procmgr endpoint from cache/registry
+    let procmgr_ep = match get_cached_or_lookup_procmgr_endpoint() {
         Some(ep) => ep,
         None => {
             set_errno(ESRCH);
@@ -124,22 +146,37 @@ pub extern "C" fn _kill(pid: pid_t, sig: c_int) -> c_int {
     };
 
     // Send PROC_KILL message
-    // Label = 2 (PROC_KILL), words[0] = pid, words[1] = signal
-    let mut msg = crate::types::Message::new(2, [pid as usize, sig as usize, 0, 0, 0, 0], 2);
-
-    match crate::ipc::call(procmgr_ep, &mut msg, crate::IpcFlags::empty()) {
-        Ok(()) => {
-            // Check reply status
-            let status = msg.words[0] as isize;
-            if status < 0 {
-                set_errno((-status) as i32);
-                -1
-            } else {
-                0
+    // Label = 3 (PROC_KILL), words[0] = pid, words[1] = signal
+    let do_call = |endpoint: usize| {
+        let mut msg = crate::types::Message::new(
+            PROCMGR_KILL_LABEL,
+            [pid as usize, sig as usize, 0, 0, 0, 0],
+            2,
+        );
+        match crate::ipc::call(endpoint, &mut msg, crate::IpcFlags::empty()) {
+            Ok(()) => {
+                let status = msg.words[0] as isize;
+                if status < 0 {
+                    set_errno((-status) as i32);
+                    -1
+                } else {
+                    0
+                }
             }
+            Err(err) => crate::errno::return_error_i32(err),
         }
-        Err(e) => crate::errno::return_error_i32(e),
+    };
+
+    let rc = do_call(procmgr_ep);
+    if rc == -1 {
+        // Refresh endpoint once in case procmgr endpoint token was rotated.
+        clear_cached_procmgr_endpoint();
+        if let Some(ep) = get_cached_or_lookup_procmgr_endpoint() {
+            return do_call(ep);
+        }
     }
+
+    rc
 }
 
 /// Fork the current process.
@@ -332,7 +369,7 @@ pub extern "C" fn posix_spawn(
     };
 
     // Get procmgr endpoint
-    let procmgr_ep = match crate::registry::lookup_service("procmgr:spawn") {
+    let procmgr_ep = match get_cached_or_lookup_procmgr_endpoint() {
         Some(ep) => ep,
         None => return ENOSYS,
     };
@@ -375,7 +412,22 @@ pub extern "C" fn posix_spawn(
     msg.words[3] = notify_endpoint;
 
     let mut reply = crate::types::Message::new(0, [0; 6], 0);
-    match crate::ipc::call_with_payload(procmgr_ep, &msg, &payload, &mut reply) {
+    let mut try_call = |endpoint: usize| crate::ipc::call_with_payload(endpoint, &msg, &payload, &mut reply);
+
+    let result = match try_call(procmgr_ep) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Refresh endpoint once in case procmgr endpoint token was rotated.
+            clear_cached_procmgr_endpoint();
+            if let Some(ep) = get_cached_or_lookup_procmgr_endpoint() {
+                try_call(ep)
+            } else {
+                Err(crate::Error::NotFound)
+            }
+        }
+    };
+
+    match result {
         Ok(()) => {
             let status = reply.words[0] as isize;
             if status < 0 {

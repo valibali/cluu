@@ -264,15 +264,20 @@ int main(int argc, char **argv) {
     int ipc_iters = 256;
     int spawn_iters = 32;
     int thread_loops = 256;
+    int spawn_only = 0;
 
     if (argc >= 2) {
-        ipc_iters = atoi(argv[1]);
-    }
-    if (argc >= 3) {
-        spawn_iters = atoi(argv[2]);
-    }
-    if (argc >= 4) {
-        thread_loops = atoi(argv[3]);
+        if (strcmp(argv[1], "spawnonly") == 0) {
+            spawn_only = 1;
+        } else {
+            ipc_iters = atoi(argv[1]);
+            if (argc >= 3) {
+                spawn_iters = atoi(argv[2]);
+            }
+            if (argc >= 4) {
+                thread_loops = atoi(argv[3]);
+            }
+        }
     }
 
     log_line("benchprobe: start");
@@ -280,7 +285,7 @@ int main(int argc, char **argv) {
 
     int rc1 = bench_ipc_waitpoll(ipc_iters);
     int rc2 = bench_spawn_wait(spawn_iters);
-    int rc3 = bench_thread_control(thread_loops);
+    int rc3 = spawn_only ? 0 : bench_thread_control(thread_loops);
 
     if (rc1 == 0 && rc2 == 0 && rc3 == 0) {
         log_line("benchprobe: PASS");

@@ -116,6 +116,7 @@ No new syscall numbers are introduced. The syscall ABI remains:
   - New marker mode: `b_spawn_perf`.
   - `benchprobe` spawn metric target:
     - initial objective: at least 2x improvement vs current baseline.
+  - Use `benchprobe` spawn-focused mode for this gate first, then keep full mixed probe as secondary check.
   - Shell-ready SLO remains <= 15s with full rebuild harness.
 
 ### C: Threading enablement
