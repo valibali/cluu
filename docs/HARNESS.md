@@ -22,6 +22,17 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
    - M6 IPC SLO env gates:
      - `MAX_IPC_WAIT_P95_MS`, `MAX_IPC_WAIT_P99_MS`, `MAX_IPC_SCAN_AVG_STEPS_X100`
      - `MAX_IPC_QUEUE_BYTES_PEAK`, `MAX_IPC_QUEUE_MESSAGES_PEAK`
+   - Warm-cache spawn SLO mode (`MARKER_MODE=b_spawn_warm`):
+     - Parses `/bin/noop` `procmgr: spawn_trace ... stage=reply_sent ... dt=...` samples.
+     - Parses `/bin/noop` `vfs: map_elf_trace ... stage=reply ... dt=...` samples.
+     - Emits inline metrics:
+       - `HARNESS noop_spawn_reply_samples=...`
+       - `HARNESS noop_map_elf_reply_samples=...`
+       - `HARNESS noop_spawn_reply_p95_cycles=...`
+       - `HARNESS noop_map_elf_reply_p95_cycles=...`
+     - Optional SLO gates:
+       - `MIN_NOOP_SPAWN_SAMPLES`, `MIN_NOOP_MAP_ELF_SAMPLES`
+       - `MAX_NOOP_SPAWN_REPLY_P95_CYCLES`, `MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES`
 
 2. `scripts/harness_cases.conf`
    - Central case catalog (`name|build_mode|env_assignments`).
@@ -46,6 +57,7 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
      - IPC fairness metrics (`p95`, `p99`, scan average)
      - IPC queue pressure metrics (`ipc_queue_bytes_peak`, `ipc_queue_messages_peak`) when present in logs
      - shell readiness latency (`shell_ready_s`, default max 15s)
+     - warm-cache `/bin/noop` sample counts and p95 cycle metrics
    - `test_hello.sh` also appends:
      - `HARNESS build_s=...`
      - `HARNESS qemu_to_shell_ready_s=...`
@@ -68,6 +80,11 @@ cargo xtask harness-matrix --no-build
 scripts/harness_suite.sh --case m5_fairness --no-build
 
 # Fairness SLO sweep
+cargo xtask harness-slo --no-build --repeats 5
+
+# Warm-cache spawn/map_elf sweep
+SLO_MODE=b_spawn_warm MIN_NOOP_SPAWN_SAMPLES=8 MIN_NOOP_MAP_ELF_SAMPLES=8 \
+MAX_NOOP_SPAWN_REPLY_P95_CYCLES=120000000 MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES=30000000 \
 cargo xtask harness-slo --no-build --repeats 5
 
 # Parse/enforce SLOs from an existing log

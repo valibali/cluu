@@ -13,6 +13,10 @@ MAX_IPC_SCAN_AVG_STEPS_X100="${MAX_IPC_SCAN_AVG_STEPS_X100:-}"
 MAX_IPC_QUEUE_BYTES_PEAK="${MAX_IPC_QUEUE_BYTES_PEAK:-}"
 MAX_IPC_QUEUE_MESSAGES_PEAK="${MAX_IPC_QUEUE_MESSAGES_PEAK:-}"
 MAX_SHELL_READY_S="${MAX_SHELL_READY_S:-15}"
+MIN_NOOP_SPAWN_SAMPLES="${MIN_NOOP_SPAWN_SAMPLES:-0}"
+MIN_NOOP_MAP_ELF_SAMPLES="${MIN_NOOP_MAP_ELF_SAMPLES:-0}"
+MAX_NOOP_SPAWN_REPLY_P95_CYCLES="${MAX_NOOP_SPAWN_REPLY_P95_CYCLES:-}"
+MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES="${MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES:-}"
 
 usage() {
     cat <<'EOF'
@@ -30,6 +34,10 @@ Threshold options can be provided either as CLI args or env vars:
   --max-ipc-queue-bytes-peak N
   --max-ipc-queue-messages-peak N
   --max-shell-ready-s N
+  --min-noop-spawn-samples N
+  --min-noop-map-elf-samples N
+  --max-noop-spawn-reply-p95-cycles N
+  --max-noop-map-elf-reply-p95-cycles N
 EOF
 }
 
@@ -81,6 +89,22 @@ while [[ $# -gt 0 ]]; do
             ;;
         --max-shell-ready-s)
             MAX_SHELL_READY_S="${2:-}"
+            shift 2
+            ;;
+        --min-noop-spawn-samples)
+            MIN_NOOP_SPAWN_SAMPLES="${2:-}"
+            shift 2
+            ;;
+        --min-noop-map-elf-samples)
+            MIN_NOOP_MAP_ELF_SAMPLES="${2:-}"
+            shift 2
+            ;;
+        --max-noop-spawn-reply-p95-cycles)
+            MAX_NOOP_SPAWN_REPLY_P95_CYCLES="${2:-}"
+            shift 2
+            ;;
+        --max-noop-map-elf-reply-p95-cycles)
+            MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES="${2:-}"
             shift 2
             ;;
         -h|--help)
@@ -176,6 +200,10 @@ last_ipc_scan_avg_steps_x100="$(parse_last_numeric_after_marker "ipc_scan_avg_st
 last_ipc_queue_bytes_peak="$(parse_last_numeric_after_marker "ipc_queue_bytes_peak=")"
 last_ipc_queue_messages_peak="$(parse_last_numeric_after_marker "ipc_queue_messages_peak=")"
 last_shell_ready_s="$(parse_last_inline_numeric_value "HARNESS shell_ready_s=")"
+last_noop_spawn_samples="$(parse_last_inline_numeric_value "HARNESS noop_spawn_reply_samples=")"
+last_noop_map_elf_samples="$(parse_last_inline_numeric_value "HARNESS noop_map_elf_reply_samples=")"
+last_noop_spawn_reply_p95_cycles="$(parse_last_inline_numeric_value "HARNESS noop_spawn_reply_p95_cycles=")"
+last_noop_map_elf_reply_p95_cycles="$(parse_last_inline_numeric_value "HARNESS noop_map_elf_reply_p95_cycles=")"
 
 echo "=== Harness SLO Summary ==="
 echo "log=$LOG_FILE"
@@ -190,6 +218,10 @@ echo "ipc_scan_avg_steps_x100=${last_ipc_scan_avg_steps_x100:-na}"
 echo "ipc_queue_bytes_peak=${last_ipc_queue_bytes_peak:-na}"
 echo "ipc_queue_messages_peak=${last_ipc_queue_messages_peak:-na}"
 echo "shell_ready_s=${last_shell_ready_s:-na}"
+echo "noop_spawn_reply_samples=${last_noop_spawn_samples:-na}"
+echo "noop_map_elf_reply_samples=${last_noop_map_elf_samples:-na}"
+echo "noop_spawn_reply_p95_cycles=${last_noop_spawn_reply_p95_cycles:-na}"
+echo "noop_map_elf_reply_p95_cycles=${last_noop_map_elf_reply_p95_cycles:-na}"
 
 failed=0
 if ! [[ "$MIN_EXIT_COOKIES" =~ ^[0-9]+$ ]]; then
@@ -199,6 +231,32 @@ fi
 if (( exit_cookie_count < MIN_EXIT_COOKIES )); then
     echo "SLO FAIL: exit_cookie_count value=$exit_cookie_count minimum=$MIN_EXIT_COOKIES"
     failed=1
+fi
+if ! [[ "$MIN_NOOP_SPAWN_SAMPLES" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: MIN_NOOP_SPAWN_SAMPLES must be a non-negative integer, got '$MIN_NOOP_SPAWN_SAMPLES'"
+    exit 1
+fi
+if ! [[ "$MIN_NOOP_MAP_ELF_SAMPLES" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: MIN_NOOP_MAP_ELF_SAMPLES must be a non-negative integer, got '$MIN_NOOP_MAP_ELF_SAMPLES'"
+    exit 1
+fi
+if (( MIN_NOOP_SPAWN_SAMPLES > 0 )); then
+    if [[ -z "${last_noop_spawn_samples:-}" ]]; then
+        echo "SLO FAIL: missing metric 'noop_spawn_reply_samples'"
+        failed=1
+    elif (( last_noop_spawn_samples < MIN_NOOP_SPAWN_SAMPLES )); then
+        echo "SLO FAIL: noop_spawn_reply_samples value=$last_noop_spawn_samples minimum=$MIN_NOOP_SPAWN_SAMPLES"
+        failed=1
+    fi
+fi
+if (( MIN_NOOP_MAP_ELF_SAMPLES > 0 )); then
+    if [[ -z "${last_noop_map_elf_samples:-}" ]]; then
+        echo "SLO FAIL: missing metric 'noop_map_elf_reply_samples'"
+        failed=1
+    elif (( last_noop_map_elf_samples < MIN_NOOP_MAP_ELF_SAMPLES )); then
+        echo "SLO FAIL: noop_map_elf_reply_samples value=$last_noop_map_elf_samples minimum=$MIN_NOOP_MAP_ELF_SAMPLES"
+        failed=1
+    fi
 fi
 
 check_upper_bound "${last_delta_spaces:-}" "$MAX_DELTA_SPACES" "delta_spaces" || failed=1
@@ -211,6 +269,8 @@ check_upper_bound "${last_ipc_scan_avg_steps_x100:-}" "$MAX_IPC_SCAN_AVG_STEPS_X
 check_upper_bound "${last_ipc_queue_bytes_peak:-}" "$MAX_IPC_QUEUE_BYTES_PEAK" "ipc_queue_bytes_peak" || failed=1
 check_upper_bound "${last_ipc_queue_messages_peak:-}" "$MAX_IPC_QUEUE_MESSAGES_PEAK" "ipc_queue_messages_peak" || failed=1
 check_upper_bound "${last_shell_ready_s:-}" "$MAX_SHELL_READY_S" "shell_ready_s" || failed=1
+check_upper_bound "${last_noop_spawn_reply_p95_cycles:-}" "$MAX_NOOP_SPAWN_REPLY_P95_CYCLES" "noop_spawn_reply_p95_cycles" || failed=1
+check_upper_bound "${last_noop_map_elf_reply_p95_cycles:-}" "$MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES" "noop_map_elf_reply_p95_cycles" || failed=1
 
 if [[ "$failed" -ne 0 ]]; then
     exit 1

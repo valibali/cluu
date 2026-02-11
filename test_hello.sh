@@ -113,6 +113,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="spawn benchprobe spawnonly"
             SHELL_AUTOSTART_CMD_DEFAULT=""
             ;;
+        b_spawn_warm)
+            TEST_COMMAND="spawn benchprobe spawnonly"
+            SHELL_AUTOSTART_CMD_DEFAULT=""
+            ;;
         m6_ipc_compact)
             TEST_COMMAND="repeat 8 spawn hello"
             ;;
@@ -145,6 +149,10 @@ MAX_IPC_WAIT_P99_MS="${MAX_IPC_WAIT_P99_MS:-}"
 MAX_IPC_SCAN_AVG_STEPS_X100="${MAX_IPC_SCAN_AVG_STEPS_X100:-}"
 MAX_IPC_QUEUE_BYTES_PEAK="${MAX_IPC_QUEUE_BYTES_PEAK:-}"
 MAX_IPC_QUEUE_MESSAGES_PEAK="${MAX_IPC_QUEUE_MESSAGES_PEAK:-}"
+MIN_NOOP_SPAWN_SAMPLES="${MIN_NOOP_SPAWN_SAMPLES:-8}"
+MIN_NOOP_MAP_ELF_SAMPLES="${MIN_NOOP_MAP_ELF_SAMPLES:-8}"
+MAX_NOOP_SPAWN_REPLY_P95_CYCLES="${MAX_NOOP_SPAWN_REPLY_P95_CYCLES:-}"
+MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES="${MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES:-}"
 HARNESS_START_SECS=$SECONDS
 QEMU_START_SECS=0
 BUILD_ELAPSED=""
@@ -408,6 +416,7 @@ fi
 # - l2_mmap: mmap/munmap reuse + strict mprotect region validation
 # - a_poll: poll(2) compatibility probe over fd table semantics
 # - perf_benchprobe: process/thread-control/IPC benchmark probe
+# - b_spawn_warm: spawn warm-cache benchmark + per-run noop spawn/map_elf p95 SLO checks
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - m6_ipc_compact: compact IPC queue storage regression smoke under spawn churn
 # - m6_ipc_rendezvous: direct sender->waiting-receiver transfer path under churn
@@ -709,6 +718,17 @@ case "$MARKER_MODE" in
             "benchprobe: spawn_wait"
         )
         ;;
+    b_spawn_warm)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "benchprobe: ipc_clock"
+            "benchprobe: spawn_wait"
+            "procmgr: spawn path /bin/noop"
+            "vfs: open '/bin/noop'"
+            "vfs: map_elf_trace"
+        )
+        ;;
     none)
         required_markers=()
         ;;
@@ -780,6 +800,38 @@ check_metric_limit() {
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
     fi
+}
+
+check_minimum_count() {
+    local value="$1"
+    local minimum="$2"
+    local name="$3"
+    if ! [[ "$minimum" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: $name minimum must be a non-negative integer, got '$minimum'"
+        exit 1
+    fi
+    if [ -z "$value" ]; then
+        echo "MISSING: could not parse $name"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+    if [ "$value" -lt "$minimum" ]; then
+        echo "MISSING: $name below minimum (value=$value minimum=$minimum)"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+}
+
+percentile_p95_from_values() {
+    if [ "$#" -eq 0 ]; then
+        return 0
+    fi
+    local count="$#"
+    local rank=$(((95 * count + 99) / 100))
+    if [ "$rank" -lt 1 ]; then
+        rank=1
+    fi
+    printf '%s\n' "$@" | sort -n | sed -n "${rank}p"
 }
 
 if [ "$MARKER_MODE" = "m1_recv" ]; then
@@ -956,6 +1008,69 @@ if [ "$MARKER_MODE" = "m6_ipc_rendezvous" ]; then
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
     fi
+fi
+
+if [ "$MARKER_MODE" = "b_spawn_warm" ]; then
+    mapfile -t noop_spawn_reply_dts < <(
+        awk '
+            match($0, /procmgr: spawn_trace seq=([0-9]+) stage=spawn_request/, m) {
+                current_spawn_seq = m[1]
+            }
+            /procmgr: spawn path \/bin\/noop/ {
+                if (current_spawn_seq != "") {
+                    noop_seq[current_spawn_seq] = 1
+                }
+            }
+            match($0, /procmgr: spawn_trace seq=([0-9]+) stage=reply_sent .* dt=([0-9]+)/, m) {
+                seq = m[1]
+                if (seq in noop_seq) {
+                    print m[2]
+                }
+            }
+        ' "$SERIAL_LOG"
+    )
+
+    mapfile -t noop_map_reply_dts < <(
+        awk '
+            /vfs: open '\''\/bin\/noop'\''/ {
+                pending_noop_open = 1
+                next
+            }
+            pending_noop_open && match($0, /vfs: open OK fd=([0-9]+)/, m) {
+                noop_fd[m[1]] = 1
+                pending_noop_open = 0
+                next
+            }
+            match($0, /vfs: map_elf_trace fd=([0-9]+) stage=reply .* dt=([0-9]+)/, m) {
+                fd = m[1]
+                if (fd in noop_fd) {
+                    print m[2]
+                }
+            }
+        ' "$SERIAL_LOG"
+    )
+
+    noop_spawn_count="${#noop_spawn_reply_dts[@]}"
+    noop_map_count="${#noop_map_reply_dts[@]}"
+    check_minimum_count "$noop_spawn_count" "$MIN_NOOP_SPAWN_SAMPLES" "noop_spawn_reply_samples"
+    check_minimum_count "$noop_map_count" "$MIN_NOOP_MAP_ELF_SAMPLES" "noop_map_elf_reply_samples"
+
+    noop_spawn_p95="$(percentile_p95_from_values "${noop_spawn_reply_dts[@]}")"
+    noop_map_p95="$(percentile_p95_from_values "${noop_map_reply_dts[@]}")"
+
+    if [ -z "$noop_spawn_p95" ] || [ -z "$noop_map_p95" ]; then
+        echo "MISSING: could not compute noop warm-cache p95 metrics"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+
+    echo "HARNESS noop_spawn_reply_samples=${noop_spawn_count}" >> "$SERIAL_LOG"
+    echo "HARNESS noop_map_elf_reply_samples=${noop_map_count}" >> "$SERIAL_LOG"
+    echo "HARNESS noop_spawn_reply_p95_cycles=${noop_spawn_p95}" >> "$SERIAL_LOG"
+    echo "HARNESS noop_map_elf_reply_p95_cycles=${noop_map_p95}" >> "$SERIAL_LOG"
+
+    check_metric_limit "$noop_spawn_p95" "$MAX_NOOP_SPAWN_REPLY_P95_CYCLES" "noop_spawn_reply_p95_cycles"
+    check_metric_limit "$noop_map_p95" "$MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES" "noop_map_elf_reply_p95_cycles"
 fi
 
 if [ "$MARKER_MODE" = "m3_mapfail" ]; then
