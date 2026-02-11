@@ -64,6 +64,8 @@ pub enum InvokeOp {
     SpaceGrant = 14,
     SpaceMapRange = 15, // Batch mapping for multiple pages
     SpaceProtect = 16,  // Batch permission update for mapped pages
+    FutexWait = 17,
+    FutexWake = 18,
 
     // Token operations
     TokenDerive = 20,
@@ -798,6 +800,42 @@ pub fn space_protect(
     }
 }
 
+/// Futex wait: block until a wake on `(space_token, user_addr)` or timeout.
+///
+/// The kernel first checks the 32-bit value at `user_addr`. If it does not
+/// match `expected`, this returns `Error::WouldBlock` immediately.
+///
+/// Timeout semantics:
+/// - `timeout_ms == 0`: wait indefinitely
+/// - `timeout_ms > 0`: bounded wait
+#[inline]
+pub fn futex_wait(
+    space_token: usize,
+    user_addr: usize,
+    expected: u32,
+    timeout_ms: u64,
+) -> Result<()> {
+    unsafe {
+        invoke(
+            space_token,
+            InvokeOp::FutexWait,
+            user_addr,
+            expected as usize,
+            timeout_ms as usize,
+            (timeout_ms >> 32) as usize,
+        )?;
+    }
+    Ok(())
+}
+
+/// Futex wake: wake up to `max_count` waiters blocked on `(space_token, user_addr)`.
+///
+/// If `max_count` is 0, the kernel treats it as 1.
+#[inline]
+pub fn futex_wake(space_token: usize, user_addr: usize, max_count: usize) -> Result<usize> {
+    unsafe { invoke(space_token, InvokeOp::FutexWake, user_addr, max_count, 0, 0) }
+}
+
 /// Grant a page from one address space to another (zero-copy sharing)
 ///
 /// This syscall shares a physical page between two address spaces without
@@ -1208,6 +1246,8 @@ mod tests {
     fn test_invoke_ops() {
         assert_eq!(InvokeOp::ThreadCreate as usize, 0);
         assert_eq!(InvokeOp::SpaceMap as usize, 12);
+        assert_eq!(InvokeOp::FutexWait as usize, 17);
+        assert_eq!(InvokeOp::FutexWake as usize, 18);
         assert_eq!(InvokeOp::TokenDerive as usize, 20);
         assert_eq!(InvokeOp::IrqAttach as usize, 30);
         assert_eq!(InvokeOp::EndpointCreate as usize, 40);

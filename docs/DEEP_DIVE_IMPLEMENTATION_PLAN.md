@@ -158,6 +158,16 @@ No new syscall numbers are introduced. The syscall ABI remains:
 #### C.1 Futex primitive via `Invoke`
 - Add futex wait/wake operation(s) under `Invoke`.
 - Kernel holds wait queues keyed by `(space_id, user_address)`.
+- Status update:
+  - Added `InvokeOp::FutexWait`/`InvokeOp::FutexWake` in kernel and userspace syscall ABI.
+  - Implemented kernel futex wait-queue manager (`kernel/src/sync/futex.rs`) keyed by `(space_id, user_addr)` with bounded wake count.
+  - Implemented `invoke_futex_wait`/`invoke_futex_wake` handlers with:
+    - space-token rights check (`SPACE_MAP`),
+    - caller-space ownership check (caller must match token space),
+    - value-compare gate (`WouldBlock` on mismatch),
+    - timeout path (`Timeout`) and waiter cleanup.
+  - Added userspace wrappers in `libcluu::syscall` (`futex_wait`, `futex_wake`).
+  - Full-build regression check (`scripts/harness_suite.sh --case b_spawn_warm`): `shell_ready_s=10`, `noop_spawn_reply_p95_cycles=49,203,336`, `noop_map_elf_reply_p95_cycles=14,227,948` (`SLO PASS`).
 - Validation:
   - New marker mode: `c_futex`.
   - Wait/wake race probes pass.
@@ -199,4 +209,4 @@ For each sub-milestone (`P0.1`, `P0.2`, ...):
 1. Lock warm-cache baseline with full-build harness (`b_spawn_warm`, repeated sweep).
 2. Re-baseline M6 + warm-cache SLOs and gate via CI harness cases.
 3. Enter `B.3` spawn hot-path performance pass (roundtrip cuts + hot ELF metadata path).
-4. Then Phase A (`A.1`, `A.2`), then `B.1/B.2`, then `C`, then `D`.
+4. Complete `C.1` validation harness (`c_futex`) and race probes, then continue with `C.2`.

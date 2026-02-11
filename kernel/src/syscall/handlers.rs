@@ -645,6 +645,8 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::SpaceGrant => invoke_space_grant(&token, args),
         InvokeOp::SpaceMapRange => invoke_space_map_range(&token, args),
         InvokeOp::SpaceProtect => invoke_space_protect(&token, args),
+        InvokeOp::FutexWait => invoke_futex_wait(&token, args),
+        InvokeOp::FutexWake => invoke_futex_wake(&token, args),
 
         // Token operations
         InvokeOp::TokenDerive => invoke_token_derive(token_handle, &token, args),
@@ -1276,6 +1278,106 @@ fn invoke_space_protect(token: &Token, args: SyscallArgs) -> SyscallResult {
         Some(Err(err)) => Err(err),
         None => Err(Error::NotFound),
     }
+}
+
+fn resolve_space_for_futex(token: &Token) -> Result<crate::token::scope::AddressSpaceId, Error> {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::SPACE_MAP) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+    Ok(space_id)
+}
+
+fn validate_futex_address(addr: usize) -> Result<(), Error> {
+    if (addr & 0x3) != 0 {
+        return Err(Error::InvalidArgument);
+    }
+    crate::syscall::userptr::validate_user_buffer(addr, core::mem::size_of::<u32>())
+}
+
+fn current_thread_matches_space(
+    space_id: crate::token::scope::AddressSpaceId,
+) -> Result<(), Error> {
+    let current_root =
+        crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
+    let space_root =
+        crate::mm::space_repository::with_space(space_id, |space| space.page_table_root)
+            .ok_or(Error::NotFound)?;
+    if current_root != space_root {
+        return Err(Error::PermissionDenied);
+    }
+    Ok(())
+}
+
+fn read_user_u32(page_table_root: x86_64::PhysAddr, user_addr: usize) -> Result<u32, Error> {
+    let mut value = 0u32;
+    // Safety: destination is a kernel stack variable with exact size.
+    unsafe {
+        crate::syscall::userptr::copy_from_user(
+            &mut value as *mut u32 as *mut u8,
+            user_addr,
+            core::mem::size_of::<u32>(),
+            page_table_root,
+        )?;
+    }
+    Ok(value)
+}
+
+fn invoke_futex_wait(token: &Token, args: SyscallArgs) -> SyscallResult {
+    let space_id = resolve_space_for_futex(token)?;
+    let user_addr = args.arg3;
+    let expected = args.arg4 as u32;
+    let timeout_ms = (args.arg5 as u64) | ((args.arg6 as u64) << 32);
+
+    validate_futex_address(user_addr)?;
+    current_thread_matches_space(space_id)?;
+
+    let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
+    let page_table_root =
+        crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
+
+    let current_value = read_user_u32(page_table_root, user_addr)?;
+    if current_value != expected {
+        return Err(Error::WouldBlock);
+    }
+
+    crate::sync::futex::enqueue_waiter(space_id, user_addr, current);
+
+    if timeout_ms == 0 {
+        crate::sched::ThreadManager::block_current();
+    } else {
+        let deadline = crate::sched::ThreadManager::ms_to_deadline(timeout_ms);
+        crate::sched::ThreadManager::block_current_with_timeout(deadline);
+    }
+    crate::architecture::x86_64::syscall::request_resched();
+
+    if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
+        crate::sync::futex::remove_waiter(space_id, user_addr, current);
+        return Err(Error::Timeout);
+    }
+
+    crate::sync::futex::remove_waiter(space_id, user_addr, current);
+    Ok(0)
+}
+
+fn invoke_futex_wake(token: &Token, args: SyscallArgs) -> SyscallResult {
+    let space_id = resolve_space_for_futex(token)?;
+    let user_addr = args.arg3;
+    let max_count = if args.arg4 == 0 { 1 } else { args.arg4 };
+
+    validate_futex_address(user_addr)?;
+    current_thread_matches_space(space_id)?;
+
+    Ok(crate::sync::futex::wake(space_id, user_addr, max_count))
 }
 
 /// Grant a page from one address space to another (zero-copy sharing)

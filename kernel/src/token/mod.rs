@@ -358,6 +358,8 @@ pub enum InvokeOp {
     SpaceGrant = 14,
     SpaceMapRange = 15, // Batch mapping for multiple pages
     SpaceProtect = 16,  // Batch permission update for mapped pages
+    FutexWait = 17,
+    FutexWake = 18,
 
     // Token operations
     TokenDerive = 20,
@@ -412,6 +414,8 @@ impl InvokeOp {
             14 => Some(Self::SpaceGrant),
             15 => Some(Self::SpaceMapRange),
             16 => Some(Self::SpaceProtect),
+            17 => Some(Self::FutexWait),
+            18 => Some(Self::FutexWake),
             20 => Some(Self::TokenDerive),
             21 => Some(Self::TokenRevoke),
             30 => Some(Self::IrqAttach),
@@ -468,6 +472,8 @@ mod tests {
     fn test_invoke_op_conversion() {
         assert_eq!(InvokeOp::from_usize(0), Some(InvokeOp::ThreadCreate));
         assert_eq!(InvokeOp::from_usize(12), Some(InvokeOp::SpaceMap));
+        assert_eq!(InvokeOp::from_usize(17), Some(InvokeOp::FutexWait));
+        assert_eq!(InvokeOp::from_usize(18), Some(InvokeOp::FutexWake));
         assert_eq!(InvokeOp::from_usize(999), None);
     }
 }

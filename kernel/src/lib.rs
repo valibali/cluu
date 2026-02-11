@@ -22,6 +22,7 @@ pub mod error;
 pub mod ipc;
 pub mod mm;
 pub mod sched;
+pub mod sync;
 pub mod syscall;
 pub mod telemetry;
 pub mod token;
