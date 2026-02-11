@@ -41,8 +41,8 @@ const TWO_USIZE_BYTES: usize = size_of::<usize>() * 2;
 /// Buffer base for file data reads (shared grant window).
 const READ_BUF_BASE: usize = 0x60000000;
 /// Size of the shared grant window in the VFS address space.
-/// 1MB for good throughput - reduces IPC round-trips for large files.
-const GRANT_BUF_SIZE: usize = 1024 * 1024;
+/// 4MB to reduce IPC round-trips for cold ELF cache fills.
+const GRANT_BUF_SIZE: usize = 4 * 1024 * 1024;
 /// Buffer base for the VFS read cache region.
 const CACHE_BUF_BASE: usize = 0x64000000;
 /// Size of the VFS read cache region.
