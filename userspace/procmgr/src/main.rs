@@ -26,6 +26,7 @@ use libcluu::boot::{
 use libcluu::elf::ElfFile;
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_token;
+use libcluu::ipc::SharedRing;
 use libcluu::registry;
 use libcluu::syscall::{thread_destroy, thread_resume, thread_suspend};
 use libcluu::tar::find_member;
@@ -656,6 +657,11 @@ impl ProcessManager {
             return None;
         }
 
+        if let Some(data) = self.load_from_vfs_ring(&client, file) {
+            let _ = client.close(file);
+            return Some(data);
+        }
+
         // Use a full-file read for cacheable sizes, otherwise chunked reads.
         const FILE_CACHE_MAX_SIZE: usize = 8 * 1024 * 1024;
         let use_full_read = file.size <= FILE_CACHE_MAX_SIZE;
@@ -789,6 +795,101 @@ impl ProcessManager {
         }
 
         let _ = client.close(file);
+        Some(data)
+    }
+
+    fn load_from_vfs_ring(
+        &mut self,
+        client: &VfsClient,
+        file: libcluu::fs::client::VfsFile,
+    ) -> Option<Vec<u8>> {
+        const RING_BYTES: usize = 64 * 1024;
+        let _ = debug_print(&format!(
+            "procmgr: load_from_vfs_ring fd={} size={}",
+            file.fd, file.size
+        ));
+
+        let region = match libcluu::ipc::alloc_shared_ring_region(
+            self.space_token,
+            RING_BYTES,
+            libcluu::ipc::SHARED_RING_DEFAULT_MAP_FLAGS,
+        ) {
+            Ok(region) => region,
+            Err(err) => {
+                let _ = debug_print(&format!("procmgr: ring alloc failed {:?}", err));
+                return None;
+            }
+        };
+
+        let ring_meta = match client.setup_read_ring(self.space_token, region.base, region.bytes) {
+            Ok(meta) => meta,
+            Err(err) => {
+                let _ = debug_print(&format!("procmgr: ring setup failed {:?}", err));
+                let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
+                return None;
+            }
+        };
+
+        if ring_meta.bytes > region.bytes {
+            let _ = debug_print("procmgr: ring invalid bytes from vfs");
+            let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
+            return None;
+        }
+
+        let backing =
+            unsafe { core::slice::from_raw_parts_mut(region.base as *mut u8, ring_meta.bytes) };
+        let mut ring = match SharedRing::attach(backing) {
+            Ok(ring) => ring,
+            Err(err) => {
+                let _ = debug_print(&format!("procmgr: ring attach failed {:?}", err));
+                let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
+                return None;
+            }
+        };
+
+        let mut data = Vec::with_capacity(file.size);
+        let mut offset = 0usize;
+        let req_chunk = ring_meta.capacity.saturating_sub(1).min(1024 * 1024);
+
+        while offset < file.size {
+            let req = (file.size - offset).min(req_chunk);
+            if req == 0 {
+                break;
+            }
+            let chunk = match client.read_ring(file, offset, req) {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    let _ = debug_print(&format!("procmgr: ring read failed {:?}", err));
+                    let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
+                    return None;
+                }
+            };
+            if chunk.len == 0 {
+                break;
+            }
+
+            let start_len = data.len();
+            data.resize(start_len + chunk.len, 0);
+            let popped = ring.pop(&mut data[start_len..start_len + chunk.len]);
+            if popped != chunk.len {
+                let _ = debug_print(&format!(
+                    "procmgr: ring pop mismatch expected={} got={}",
+                    chunk.len, popped
+                ));
+                let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
+                return None;
+            }
+
+            offset += popped;
+            if chunk.eof {
+                break;
+            }
+        }
+
+        let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
+        if data.is_empty() {
+            return None;
+        }
         Some(data)
     }
 
