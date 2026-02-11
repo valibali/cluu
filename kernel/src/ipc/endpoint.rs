@@ -160,6 +160,10 @@ const IPC_DIRECT_DEBUG_LIMIT: u64 = 128;
 ///
 /// Defaults to disabled until explicitly enabled by boot configuration.
 static IPC_RENDEZVOUS_DIRECT_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Runtime gate for register-only small-message IPC fast path.
+///
+/// Defaults to disabled until explicitly enabled by boot configuration.
+static IPC_REGISTER_FAST_ENABLED: AtomicBool = AtomicBool::new(false);
 static IPC_DIRECT_DEBUG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Copy, Clone)]
@@ -947,6 +951,16 @@ pub fn set_rendezvous_direct_enabled(enabled: bool) {
 #[inline(always)]
 pub fn rendezvous_direct_enabled() -> bool {
     IPC_RENDEZVOUS_DIRECT_ENABLED.load(Ordering::Relaxed)
+}
+
+#[inline(always)]
+pub fn set_register_fast_enabled(enabled: bool) {
+    IPC_REGISTER_FAST_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+#[inline(always)]
+pub fn register_fast_enabled() -> bool {
+    IPC_REGISTER_FAST_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Get the current caller for an endpoint (used by reply)

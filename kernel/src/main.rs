@@ -151,6 +151,10 @@ pub extern "C" fn kstart() -> ! {
     cluu_kernel::ipc::endpoint::set_rendezvous_direct_enabled(ipc_direct_enabled);
     klibcluu::info("ipc direct rendezvous=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", u64::from(ipc_direct_enabled));
+    let ipc_reg_fast_enabled = boot_env_bool("cluu.ipc_reg_fast").unwrap_or(false);
+    cluu_kernel::ipc::endpoint::set_register_fast_enabled(ipc_reg_fast_enabled);
+    klibcluu::info("ipc register fast path=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", u64::from(ipc_reg_fast_enabled));
 
     // Phase 3: Memory Management Setup
     // Create bootloader adapter (abstraction layer)
