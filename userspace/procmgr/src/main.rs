@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, format, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use core::mem::size_of;
 use libcluu::boot::{
     process_info,
@@ -51,6 +51,7 @@ const SIGTERM: usize = 15;
 const SIGSTOP: usize = 19;
 const SIGCONT: usize = 18;
 const SIGKILL: usize = 9;
+const MAX_VFS_FILE_CACHE_ENTRIES: usize = 16;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -92,6 +93,7 @@ struct ProcessManager {
     grant_base_next: usize, // Reused base address for grant buffer
     clock_token: usize,
     spawn_seq_next: usize,
+    vfs_file_cache: BTreeMap<String, libcluu::fs::client::VfsFile>,
 }
 
 impl ProcessManager {
@@ -122,6 +124,7 @@ impl ProcessManager {
             grant_base_next: 0x50100000, // Start after virtqueue region
             clock_token: info.tokens[TOKEN_CLOCK],
             spawn_seq_next: 1,
+            vfs_file_cache: BTreeMap::new(),
         })
     }
 
@@ -908,22 +911,58 @@ impl ProcessManager {
         }
 
         let client = VfsClient::new(self.vfs_endpoint, client_id);
-        let file = match client.open(path) {
+        let file = match self.cached_vfs_file(&client, path) {
             Ok(file) => file,
             Err(_) => return Ok(None),
         };
 
         let map_token = token_derive(space_token, Rights::SPACE_MAP.bits() as usize, u64::MAX)?;
-        let entry = match client.map_elf(file, map_token) {
+        let first_attempt = client.map_elf(file, map_token);
+        let entry = match first_attempt {
             Ok(entry) => Some(entry),
             Err(err) => {
                 let _ = debug_print(&format!("procmgr: map_elf failed {:?}", err));
-                None
+                // Likely stale fd or VFS-side eviction: refresh once and retry.
+                self.invalidate_cached_vfs_file(&client, path);
+                match self.cached_vfs_file(&client, path) {
+                    Ok(refreshed_file) => client.map_elf(refreshed_file, map_token).ok(),
+                    Err(_) => None,
+                }
             }
         };
-
-        let _ = client.close(file);
         Ok(entry)
+    }
+
+    fn cached_vfs_file(
+        &mut self,
+        client: &VfsClient,
+        path: &str,
+    ) -> Result<libcluu::fs::client::VfsFile> {
+        if let Some(file) = self.vfs_file_cache.get(path).copied() {
+            return Ok(file);
+        }
+
+        let file = client.open(path)?;
+        if self.vfs_file_cache.len() >= MAX_VFS_FILE_CACHE_ENTRIES {
+            self.evict_one_cached_vfs_file(client);
+        }
+        self.vfs_file_cache.insert(String::from(path), file);
+        Ok(file)
+    }
+
+    fn invalidate_cached_vfs_file(&mut self, client: &VfsClient, path: &str) {
+        if let Some(stale) = self.vfs_file_cache.remove(path) {
+            let _ = client.close(stale);
+        }
+    }
+
+    fn evict_one_cached_vfs_file(&mut self, client: &VfsClient) {
+        let Some(evict_key) = self.vfs_file_cache.keys().next().cloned() else {
+            return;
+        };
+        if let Some(file) = self.vfs_file_cache.remove(&evict_key) {
+            let _ = client.close(file);
+        }
     }
 
     fn handle_kill_message(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {

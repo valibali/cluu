@@ -141,6 +141,9 @@ No new syscall numbers are introduced. The syscall ABI remains:
     - reduce repeated mapping/setup overhead for short-lived children,
     - avoid unnecessary control-plane IPC roundtrips on spawn completion path.
   - Keep process model userspace-owned (no kernel process object); optimize procmgr/VFS orchestration only.
+- Status update:
+  - Implemented bounded procmgr VFS file-handle cache for `map_elf` hot paths with stale-handle invalidate/retry.
+  - Validation (`scripts/harness_suite.sh --case b_spawn_warm`, full build): `noop_spawn_reply_p95_cycles=66,427,414`, `noop_map_elf_reply_p95_cycles=17,456,814`, `shell_ready_s=9`.
 - Validation:
   - New marker mode: `b_spawn_perf`.
   - `benchprobe` spawn metric target:
