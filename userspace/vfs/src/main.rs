@@ -205,6 +205,8 @@ fn map_initrd_slice(initrd_size: usize) -> &'static [u8] {
 struct FileCache {
     /// Map from (inode, size) to cached entry.
     entries: BTreeMap<(u32, usize), CacheEntry>,
+    /// Optional parsed ELF metadata for cached files keyed by (inode, size).
+    elf_meta: BTreeMap<(u32, usize), CachedElfMeta>,
     /// Total bytes currently cached.
     total_size: usize,
     /// Access counter for LRU ordering.
@@ -220,6 +222,21 @@ struct CacheEntry {
     inode: u32,
     size: usize,
     last_access: usize,
+}
+
+#[derive(Clone)]
+struct CachedElfMeta {
+    entry_point: usize,
+    segments: Vec<CachedElfSegment>,
+}
+
+#[derive(Clone, Copy)]
+struct CachedElfSegment {
+    vaddr: usize,
+    mem_size: usize,
+    file_offset: usize,
+    file_size: usize,
+    page_flags: usize,
 }
 
 struct CacheRegion {
@@ -238,6 +255,7 @@ impl FileCache {
     fn new(base: usize, size: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
+            elf_meta: BTreeMap::new(),
             total_size: 0,
             access_counter: 0,
             region: CacheRegion::new(base, size),
@@ -302,6 +320,38 @@ impl FileCache {
             self.total_size = self.total_size.saturating_sub(entry.len);
             self.region.free(entry.base, entry.len);
         }
+        self.elf_meta.remove(&key);
+    }
+
+    fn get_or_build_elf_meta(
+        &mut self,
+        inode: u32,
+        size: usize,
+        data: &[u8],
+    ) -> Result<CachedElfMeta> {
+        let key = (inode, size);
+        if let Some(meta) = self.elf_meta.get(&key) {
+            return Ok(meta.clone());
+        }
+
+        let elf = ElfFile::parse(data).map_err(|_| Error::InvalidArgument)?;
+        let mut segments = Vec::new();
+        for segment in elf.segments_iter() {
+            segments.push(CachedElfSegment {
+                vaddr: segment.vaddr as usize,
+                mem_size: segment.mem_size as usize,
+                file_offset: segment.file_offset as usize,
+                file_size: segment.file_size as usize,
+                page_flags: segment.page_flags() as usize,
+            });
+        }
+
+        let meta = CachedElfMeta {
+            entry_point: elf.entry_point as usize,
+            segments,
+        };
+        self.elf_meta.insert(key, meta.clone());
+        Ok(meta)
     }
 
     fn evict_lru(&mut self) {
@@ -317,6 +367,7 @@ impl FileCache {
                 self.total_size = self.total_size.saturating_sub(entry.len);
                 self.region.free(entry.base, entry.len);
             }
+            self.elf_meta.remove(&path);
         }
     }
 }
@@ -2054,18 +2105,20 @@ impl VfsServer {
                     core::slice::from_raw_parts(cache_entry.base as *const u8, cache_entry.len)
                 };
                 self.log_map_elf_stage(fd, "elf_cached", map_start);
-                let elf = match ElfFile::parse(data) {
-                    Ok(elf) => elf,
-                    Err(_) => {
-                        reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                let elf_meta = match self
+                    .cache
+                    .get_or_build_elf_meta(entry.inode, entry.size, data)
+                {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        reply_msg.words[0] = err.to_errno() as usize;
                         return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                     }
                 };
-
-                self.map_elf_segments(target_space, &elf, data)?;
+                self.map_cached_elf_segments(target_space, &elf_meta, data)?;
                 self.log_map_elf_stage(fd, "segments_mapped", map_start);
                 reply_msg.words[0] = 0;
-                reply_msg.words[1] = elf.entry_point as usize;
+                reply_msg.words[1] = elf_meta.entry_point;
                 reply_msg.words[2] = cache_entry.len;
             }
             OpenFile::Memory(entry) => {
@@ -2104,6 +2157,18 @@ impl VfsServer {
         Ok(())
     }
 
+    fn map_cached_elf_segments(
+        &self,
+        target_space: usize,
+        elf_meta: &CachedElfMeta,
+        data: &[u8],
+    ) -> Result<()> {
+        for segment in &elf_meta.segments {
+            self.map_cached_elf_segment(target_space, *segment, data)?;
+        }
+        Ok(())
+    }
+
     fn map_elf_segment(
         &self,
         target_space: usize,
@@ -2138,6 +2203,37 @@ impl VfsServer {
             file_size,
         )?;
 
+        Ok(())
+    }
+
+    fn map_cached_elf_segment(
+        &self,
+        target_space: usize,
+        segment: CachedElfSegment,
+        data: &[u8],
+    ) -> Result<()> {
+        if !segment.vaddr.is_multiple_of(PAGE_SIZE) {
+            return Err(Error::InvalidArgument);
+        }
+
+        if segment.mem_size == 0 {
+            return Ok(());
+        }
+
+        if segment.file_offset + segment.file_size > data.len() {
+            return Err(Error::InvalidArgument);
+        }
+
+        let num_pages = segment.mem_size.div_ceil(PAGE_SIZE);
+        let data_ptr = data.as_ptr() as usize + segment.file_offset;
+        syscall::space_map_range(
+            target_space,
+            segment.vaddr,
+            data_ptr,
+            segment.page_flags,
+            num_pages,
+            segment.file_size,
+        )?;
         Ok(())
     }
 }

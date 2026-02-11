@@ -144,6 +144,8 @@ No new syscall numbers are introduced. The syscall ABI remains:
 - Status update:
   - Implemented bounded procmgr VFS file-handle cache for `map_elf` hot paths with stale-handle invalidate/retry.
   - Validation (`scripts/harness_suite.sh --case b_spawn_warm`, full build): `noop_spawn_reply_p95_cycles=66,427,414`, `noop_map_elf_reply_p95_cycles=17,456,814`, `shell_ready_s=9`.
+  - Implemented VFS cached ELF metadata reuse (`entry_point` + segment descriptors) for hot `map_elf` paths, avoiding repeated ELF parse on warm cache hits.
+  - Validation (`scripts/harness_suite.sh --case b_spawn_warm`, full build): `noop_spawn_reply_p95_cycles=43,351,902`, `noop_map_elf_reply_p95_cycles=14,803,132`, `shell_ready_s=10`.
 - Validation:
   - New marker mode: `b_spawn_perf`.
   - `benchprobe` spawn metric target:
