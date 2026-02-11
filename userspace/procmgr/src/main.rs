@@ -1209,7 +1209,7 @@ fn derive_self_cap(token: usize) -> Result<usize> {
 /// Derive a space token with SPACE_MAP rights for child processes.
 /// This allows the child's allocator to map heap pages and allocate frames.
 fn derive_space_token(space_token: usize) -> Result<usize> {
-    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT | Rights::CREATE;
+    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT | Rights::CREATE | Rights::THREAD_CONTROL;
     token_derive(space_token, rights.bits() as usize, u64::MAX)
 }
 

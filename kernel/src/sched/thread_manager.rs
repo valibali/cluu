@@ -317,11 +317,11 @@ impl ThreadManager {
             thread.make_blocked();
         });
 
-        // Add to timeout heap for efficient expiry checking
-        if let Some(mut heap) = TIMEOUT_HEAP.try_lock() {
-            heap.push(Reverse((deadline, current.as_u64())));
-        }
-        // If lock unavailable, timeout will still work via lazy check in check_timeouts
+        // Add to timeout heap for efficient expiry checking.
+        // This runs in syscall/thread context, so we must not drop timeout registration.
+        TIMEOUT_HEAP
+            .lock()
+            .push(Reverse((deadline, current.as_u64())));
     }
 
     /// Convert milliseconds to tick deadline from now

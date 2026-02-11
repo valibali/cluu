@@ -349,7 +349,7 @@ fn derive_ipc_cap(token: usize) -> Result<usize> {
 
 /// Derive a space token for the child so services can accept grants.
 fn derive_space_token(space_token: usize) -> Result<usize> {
-    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT;
+    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT | Rights::THREAD_CONTROL;
     token_derive(space_token, rights.bits() as usize, u64::MAX)
 }
 
@@ -358,7 +358,7 @@ fn derive_space_token(space_token: usize) -> Result<usize> {
 /// Needed by services like VFS that must mint SPACE_MAP tokens to share
 /// their address space window with other services.
 fn derive_space_token_with_grant(space_token: usize) -> Result<usize> {
-    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT | Rights::GRANT;
+    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT | Rights::GRANT | Rights::THREAD_CONTROL;
     token_derive(space_token, rights.bits() as usize, u64::MAX)
 }
 

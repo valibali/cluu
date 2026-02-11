@@ -92,19 +92,26 @@ pub fn remove_waiter(space_id: AddressSpaceId, user_addr: usize, thread_id: Thre
 }
 
 pub fn wake(space_id: AddressSpaceId, user_addr: usize, max_count: usize) -> usize {
-    let candidates = FUTEX_QUEUES
-        .lock()
-        .pop_wake_candidates(FutexKey::new(space_id, user_addr), max_count);
+    let key = FutexKey::new(space_id, user_addr);
+    let candidates = FUTEX_QUEUES.lock().pop_wake_candidates(key, max_count);
 
     let mut woken = 0usize;
+    let mut requeue = Vec::new();
     for thread_id in candidates {
         let blocked =
             ThreadManager::with_thread(thread_id, |thread| thread.is_blocked()).unwrap_or(false);
         if !blocked {
+            requeue.push(thread_id);
             continue;
         }
         ThreadManager::wake_thread(thread_id);
         woken += 1;
+    }
+    if !requeue.is_empty() {
+        let mut queues = FUTEX_QUEUES.lock();
+        for thread_id in requeue {
+            queues.enqueue(key, thread_id);
+        }
     }
     woken
 }

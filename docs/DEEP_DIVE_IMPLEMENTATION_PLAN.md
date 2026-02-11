@@ -171,7 +171,8 @@ No new syscall numbers are introduced. The syscall ABI remains:
 - Validation:
   - New marker mode: `c_futex`.
   - Harness case `c_futex` (full build) passes with required marker `futexprobe: PASS` and shell-ready within policy.
-  - Next: extend to explicit wake-race coverage (two-thread shared futex word path) before closing `C.1`.
+  - Added race marker mode `c_futex_race` (in-process waiter/waker ordering with `ThreadCreate`).
+  - `TOKEN_SPACE` policy now carries `THREAD_CONTROL` so user processes can create threads needed by futex wait/wake race probes.
 
 #### C.2 pthread subset in userspace
 - Add pthread create/join/mutex/cond subset over thread create + futex.

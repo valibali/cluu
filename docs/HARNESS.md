@@ -37,6 +37,10 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
      - Runs `spawn futexprobe`.
      - Validates `Invoke`-based futex mismatch/wake/timeout-or-spurious path.
      - Required marker: `futexprobe: PASS`.
+   - Futex race mode (`MARKER_MODE=c_futex_race`):
+     - Runs `spawn futexrace`.
+     - Validates waiter-then-waker ordering with in-process `ThreadCreate` + futex wake.
+     - Required marker: `futexrace: PASS`.
 
 2. `scripts/harness_cases.conf`
    - Central case catalog (`name|build_mode|env_assignments`).
