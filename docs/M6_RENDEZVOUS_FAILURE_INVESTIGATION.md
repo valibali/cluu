@@ -87,6 +87,5 @@ This points to a rendezvous/control-message delivery problem rather than storage
 
 ## Remaining Follow-Ups
 
-1. Reduce direct-path INFO log volume (convert routine debug traces to TRACE).
-2. Keep direct rendezvous default kill-switch behavior conservative until more soak data.
-3. Add dedicated long-soak rendezvous case to CI matrix with SLO gating.
+1. Keep direct rendezvous default kill-switch behavior conservative until more soak data.
+2. Add dedicated long-soak rendezvous case to CI matrix with SLO gating.
