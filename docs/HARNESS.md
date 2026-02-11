@@ -9,6 +9,8 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
 1. `test_hello.sh`
    - Single-run QEMU harness executor.
    - Boots CLUU, injects command(s), validates markers/faults.
+   - Shell readiness policy: default `SHELL_READY_WAIT=15` and hard max `SHELL_READY_WAIT_MAX=15`.
+   - Override only for explicit debugging with `ALLOW_SLOW_SHELL_WAIT=1`.
    - Supports overrides for paths and debug:
      - `SERIAL_LOG`, `MONITOR_SOCK`, `IMG`, `USER_DISK`, `OVMF`
      - `QEMU_GDB=1` to start QEMU with `-S -s`

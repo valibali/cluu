@@ -14,7 +14,9 @@ QEMU_GDB="${QEMU_GDB:-0}"
 QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
 QEMU_PID=""
 BOOT_WAIT="${BOOT_WAIT:-8}"
-SHELL_READY_WAIT="${SHELL_READY_WAIT:-25}"
+SHELL_READY_WAIT="${SHELL_READY_WAIT:-15}"
+SHELL_READY_WAIT_MAX="${SHELL_READY_WAIT_MAX:-15}"
+ALLOW_SLOW_SHELL_WAIT="${ALLOW_SLOW_SHELL_WAIT:-0}"
 RUN_WAIT="${RUN_WAIT:-5}"
 POST_SENDKEY="${POST_SENDKEY:-}"
 POST_SENDKEY_DELAY="${POST_SENDKEY_DELAY:-1}"
@@ -125,6 +127,20 @@ MAX_IPC_WAIT_P95_MS="${MAX_IPC_WAIT_P95_MS:-}"
 MAX_IPC_WAIT_P99_MS="${MAX_IPC_WAIT_P99_MS:-}"
 MAX_IPC_SCAN_AVG_STEPS_X100="${MAX_IPC_SCAN_AVG_STEPS_X100:-}"
 
+if ! [[ "$SHELL_READY_WAIT" =~ ^[0-9]+$ ]] || [ "$SHELL_READY_WAIT" -lt 1 ]; then
+    echo "ERROR: SHELL_READY_WAIT must be a positive integer"
+    exit 1
+fi
+if ! [[ "$SHELL_READY_WAIT_MAX" =~ ^[0-9]+$ ]] || [ "$SHELL_READY_WAIT_MAX" -lt 1 ]; then
+    echo "ERROR: SHELL_READY_WAIT_MAX must be a positive integer"
+    exit 1
+fi
+if [ "$ALLOW_SLOW_SHELL_WAIT" != "1" ] && [ "$SHELL_READY_WAIT" -gt "$SHELL_READY_WAIT_MAX" ]; then
+    echo "ERROR: SHELL_READY_WAIT=${SHELL_READY_WAIT}s exceeds policy max ${SHELL_READY_WAIT_MAX}s"
+    echo "Set ALLOW_SLOW_SHELL_WAIT=1 only for explicit debug sessions."
+    exit 1
+fi
+
 cleanup() {
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
         echo "Killing QEMU (pid $QEMU_PID)..."
@@ -202,9 +218,11 @@ echo "Waiting ${BOOT_WAIT}s for CLUU to boot..."
 sleep "$BOOT_WAIT"
 
 wait_for_shell_ready() {
+    local start=$SECONDS
     local deadline=$((SECONDS + SHELL_READY_WAIT))
     while [ "$SECONDS" -lt "$deadline" ]; do
         if grep -Fq "[USER] shell: ready" "$SERIAL_LOG"; then
+            SHELL_READY_ELAPSED=$((SECONDS - start))
             return 0
         fi
         sleep 1
@@ -221,6 +239,7 @@ if [ -n "$TEST_COMMAND" ]; then
         echo "----------------------------------------"
         exit 1
     fi
+    echo "Shell readiness observed in ${SHELL_READY_ELAPSED}s"
 fi
 
 # --- Step 5: Type test command(s) via QEMU monitor ---
