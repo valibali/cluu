@@ -24,7 +24,7 @@ use crate::syscall::{SyscallArgs, SyscallResult};
 use crate::token::{lookup_token, InvokeOp, TokenHandle};
 
 const IPC_REG_INLINE_FLAG: usize = 1usize << (usize::BITS - 1);
-const IPC_REG_INLINE_MAX_REPLY: usize = 32;
+const IPC_REG_INLINE_MAX_PAYLOAD: usize = 32;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // IPC Syscalls
@@ -63,9 +63,33 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     };
 
-    let page_table_root =
-        crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
-    crate::ipc::endpoint::send_from_user(endpoint_id, msg_ptr, msg_len, page_table_root)?;
+    let inline_flag_set = (msg_len & IPC_REG_INLINE_FLAG) != 0;
+    if inline_flag_set {
+        if !crate::ipc::endpoint::register_fast_enabled() {
+            return Err(Error::InvalidParameter);
+        }
+        let inline_len = msg_len & !IPC_REG_INLINE_FLAG;
+        if inline_len > IPC_REG_INLINE_MAX_PAYLOAD {
+            return Err(Error::InvalidParameter);
+        }
+        let mut buffer = [0u8; IPC_REG_INLINE_MAX_PAYLOAD];
+        let chunks = [args.arg2, args.arg4, args.arg5, args.arg6];
+        let mut copied = 0usize;
+        for chunk in chunks {
+            if copied >= inline_len {
+                break;
+            }
+            let bytes = chunk.to_ne_bytes();
+            let chunk_len = core::cmp::min(bytes.len(), inline_len - copied);
+            buffer[copied..copied + chunk_len].copy_from_slice(&bytes[..chunk_len]);
+            copied += chunk_len;
+        }
+        crate::ipc::endpoint::send_from_kernel(endpoint_id, &buffer[..inline_len])?;
+    } else {
+        let page_table_root =
+            crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
+        crate::ipc::endpoint::send_from_user(endpoint_id, msg_ptr, msg_len, page_table_root)?;
+    }
     Ok(0)
 }
 
@@ -443,7 +467,7 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
             return Err(Error::InvalidParameter);
         }
         let inline_len = msg_len & !IPC_REG_INLINE_FLAG;
-        if inline_len > IPC_REG_INLINE_MAX_REPLY {
+        if inline_len > IPC_REG_INLINE_MAX_PAYLOAD {
             return Err(Error::InvalidParameter);
         }
         let chunks = [args.arg2, args.arg4, args.arg5, args.arg6];
@@ -2265,7 +2289,7 @@ fn invoke_clock_frequency(token: &Token, _args: SyscallArgs) -> SyscallResult {
 fn invoke_frame_allocate(token: &Token, _args: SyscallArgs) -> SyscallResult {
     use crate::mm::frame_registry;
     use crate::token::{
-        create_token, scope::OpaqueScope, FrameId, Issuer, ObjectRef, ObjectType, Rights, Timestamp,
+        create_token, scope::OpaqueScope, Issuer, ObjectRef, ObjectType, Rights, Timestamp,
     };
 
     if !token.has_right(Rights::CREATE) {

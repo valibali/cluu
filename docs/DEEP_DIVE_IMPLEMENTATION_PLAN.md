@@ -70,8 +70,8 @@ No new syscall numbers are introduced. The syscall ABI remains:
   - Keep existing pointer/length path as fallback for larger payloads and compatibility.
   - Feature-gate runtime selection to allow A/B validation (`cluu.ipc_reg_fast=0|1`).
 - Implementation order:
-  - `P0.5.a`: `Call/Reply` register fast path first. (Status: in progress; `Reply` fast-path landed and runtime-gated)
-  - `P0.5.b`: `Send/Recv` register fast path.
+  - `P0.5.a`: `Call/Reply` register fast path first. (Status: complete; `Reply` fast-path runtime-gated and validated)
+  - `P0.5.b`: `Send/Recv` register fast path. (Status: complete; `Send` fast-path runtime-gated and validated)
   - Preserve existing sender-auth metadata and endpoint rights model.
 - Validation:
   - New harness cases: `m6_ipc_reg_off`, `m6_ipc_reg_on`.
@@ -80,11 +80,15 @@ No new syscall numbers are introduced. The syscall ABI remains:
     - `noop_map_elf_reply_p95_cycles`
     - `ipc_queue_bytes_peak` / `ipc_queue_messages_peak`
   - Require no regression in existing M6 modes and shell-ready SLO (`<=15s`).
-  - Current A/B snapshot (`b_spawn_warm`, full build, 2 runs each):
+  - Current A/B snapshot (`b_spawn_warm`, full build):
     - `ipc_reg_fast=0` avg: `noop_spawn_reply_p95_cycles=80,297,410`, `noop_map_elf_reply_p95_cycles=17,959,514`.
     - `ipc_reg_fast=1` avg: `noop_spawn_reply_p95_cycles=67,147,413`, `noop_map_elf_reply_p95_cycles=14,878,020`.
     - Shell ready stayed `10s` in all runs; queue peaks unchanged (`2671` bytes, `30` messages).
     - Note: variance is still high; keep per-run ceiling looser for `m6_ipc_reg_on` while we finish `P0.5.b`.
+  - Post-`P0.5.b` A/B snapshot (`REPEATS=1`, full build):
+    - `ipc_reg_fast=0`: `noop_spawn_reply_p95_cycles=260,340,092`, `noop_map_elf_reply_p95_cycles=28,799,696`, `shell_ready_s=10`.
+    - `ipc_reg_fast=1`: `noop_spawn_reply_p95_cycles=87,360,696`, `noop_map_elf_reply_p95_cycles=19,815,638`, `shell_ready_s=11`.
+    - Net effect on this run pair: strong spawn-path p95 improvement with reg-fast enabled and no queue-peak regression.
 
 ### A: Portability unblockers (`poll`, `signal`, `fcntl`)
 
@@ -188,8 +192,6 @@ For each sub-milestone (`P0.1`, `P0.2`, ...):
 ## 4. Immediate Execution Queue
 
 1. Lock warm-cache baseline with full-build harness (`b_spawn_warm`, repeated sweep).
-2. Execute `P0.5.a` (register fast path for `Call/Reply`, feature-gated).
-3. Execute `P0.5.b` (register fast path for `Send/Recv`, feature-gated).
-4. Re-baseline M6 + warm-cache SLOs and gate via CI harness cases.
-5. Enter `B.3` spawn hot-path performance pass (roundtrip cuts + hot ELF metadata path).
-6. Then Phase A (`A.1`, `A.2`), then `B.1/B.2`, then `C`, then `D`.
+2. Re-baseline M6 + warm-cache SLOs and gate via CI harness cases.
+3. Enter `B.3` spawn hot-path performance pass (roundtrip cuts + hot ELF metadata path).
+4. Then Phase A (`A.1`, `A.2`), then `B.1/B.2`, then `C`, then `D`.

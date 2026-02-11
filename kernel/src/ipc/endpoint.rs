@@ -599,52 +599,14 @@ pub fn send_from_user(
         return Err(Error::InvalidParameter);
     }
     let payload = copy_user_payload(msg_ptr, msg_len, page_table_root)?;
-    let sender = crate::sched::ThreadManager::current();
-    // Try to send - if queue is full, block and return (will be retried from userspace when woken)
-    let wake = {
-        // Get shard directly (static, no repository lock needed)
-        let shard = get_endpoint_shard(endpoint);
+    send_payload(endpoint, payload.as_slice(), first_send)
+}
 
-        // Lock shard, then endpoint
-        let mut shard_guard = shard.lock();
-        let endpoint_mutex = shard_guard
-            .endpoints
-            .get_mut(&endpoint)
-            .ok_or(Error::NotFound)?;
-        let mut guard = endpoint_mutex.lock();
-        let payload_bytes = payload.as_slice();
-        match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, payload_bytes)? {
-            DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
-            DirectDelivery::DeliveredNoWake => None,
-            DirectDelivery::NotDelivered => match guard.send(sender, payload_bytes) {
-                Ok(wake) => wake, // Success
-                Err(Error::WouldBlock) => {
-                    // Queue is full - sender was added to waiting_senders, need to block
-                    // Return WouldBlock so syscall returns and context switch can happen
-                    // When woken, userspace will retry the syscall
-                    crate::sched::ThreadManager::block_current();
-                    crate::architecture::x86_64::syscall::request_resched();
-                    return Err(Error::WouldBlock);
-                }
-                Err(Error::Busy) => {
-                    // Fallback for edge cases (shouldn't happen with backpressure)
-                    log_endpoint_busy(endpoint, guard.stats(), false);
-                    return Err(Error::Busy);
-                }
-                Err(err) => return Err(err),
-            },
-        }
-    };
-
-    // Success - wake receiver if any
-    if let Some(thread_id) = wake {
-        if first_send {
-            klibcluu::trace("send_from_user: wake_thread_id=");
-            klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
-        }
-        crate::sched::ThreadManager::wake_thread(thread_id);
+pub fn send_from_kernel(endpoint: EndpointId, payload: &[u8]) -> Result<(), Error> {
+    if payload.len() > IPC_MESSAGE_MAX {
+        return Err(Error::InvalidParameter);
     }
-    Ok(())
+    send_payload(endpoint, payload, false)
 }
 
 pub fn recv_to_user(
@@ -808,6 +770,52 @@ fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
         "  callers_by_cookie=",
         stats.callers_len as u64,
     );
+}
+
+fn send_payload(endpoint: EndpointId, payload: &[u8], log_send: bool) -> Result<(), Error> {
+    let sender = crate::sched::ThreadManager::current();
+    // Try to send - if queue is full, block and return (will be retried from userspace when woken)
+    let wake = {
+        // Get shard directly (static, no repository lock needed)
+        let shard = get_endpoint_shard(endpoint);
+
+        // Lock shard, then endpoint
+        let mut shard_guard = shard.lock();
+        let endpoint_mutex = shard_guard
+            .endpoints
+            .get_mut(&endpoint)
+            .ok_or(Error::NotFound)?;
+        let mut guard = endpoint_mutex.lock();
+        match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, payload)? {
+            DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
+            DirectDelivery::DeliveredNoWake => None,
+            DirectDelivery::NotDelivered => match guard.send(sender, payload) {
+                Ok(wake) => wake, // Success
+                Err(Error::WouldBlock) => {
+                    // Queue is full - sender was added to waiting_senders, need to block.
+                    crate::sched::ThreadManager::block_current();
+                    crate::architecture::x86_64::syscall::request_resched();
+                    return Err(Error::WouldBlock);
+                }
+                Err(Error::Busy) => {
+                    // Fallback for edge cases (shouldn't happen with backpressure)
+                    log_endpoint_busy(endpoint, guard.stats(), false);
+                    return Err(Error::Busy);
+                }
+                Err(err) => return Err(err),
+            },
+        }
+    };
+
+    // Success - wake receiver if any
+    if let Some(thread_id) = wake {
+        if log_send {
+            klibcluu::trace("send_from_user: wake_thread_id=");
+            klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+        }
+        crate::sched::ThreadManager::wake_thread(thread_id);
+    }
+    Ok(())
 }
 
 fn try_direct_deliver_to_waiting_receiver(

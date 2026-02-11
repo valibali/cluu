@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 use core::sync::atomic::{AtomicU8, Ordering};
 
 const IPC_REG_INLINE_FLAG: usize = 1usize << (usize::BITS - 1);
-const IPC_REG_INLINE_MAX_REPLY: usize = 32;
+const IPC_REG_INLINE_MAX_PAYLOAD: usize = 32;
 const IPC_REG_FAST_UNKNOWN: u8 = 0;
 const IPC_REG_FAST_ENABLED: u8 = 1;
 const IPC_REG_FAST_DISABLED: u8 = 2;
@@ -268,6 +268,42 @@ unsafe fn syscall6(
 /// - `Err(error)`: Send failed (invalid token, endpoint full, etc.)
 #[inline]
 pub fn ipc_send(endpoint_token: usize, msg: &[u8]) -> Result<()> {
+    if msg.len() <= IPC_REG_INLINE_MAX_PAYLOAD
+        && IPC_REG_FAST_STATE.load(Ordering::Relaxed) != IPC_REG_FAST_DISABLED
+    {
+        let mut chunk0 = [0u8; 8];
+        let mut chunk1 = [0u8; 8];
+        let mut chunk2 = [0u8; 8];
+        let mut chunk3 = [0u8; 8];
+        copy_inline_chunk(msg, 0, &mut chunk0);
+        copy_inline_chunk(msg, 8, &mut chunk1);
+        copy_inline_chunk(msg, 16, &mut chunk2);
+        copy_inline_chunk(msg, 24, &mut chunk3);
+
+        let fast = unsafe {
+            syscall6(
+                SyscallNumber::Send,
+                endpoint_token,
+                usize::from_ne_bytes(chunk0),
+                IPC_REG_INLINE_FLAG | msg.len(),
+                usize::from_ne_bytes(chunk1),
+                usize::from_ne_bytes(chunk2),
+                usize::from_ne_bytes(chunk3),
+            )
+        };
+
+        match fast {
+            Ok(_) => {
+                IPC_REG_FAST_STATE.store(IPC_REG_FAST_ENABLED, Ordering::Relaxed);
+                return Ok(());
+            }
+            Err(Error::InvalidParameter) | Err(Error::InvalidArgument) => {
+                IPC_REG_FAST_STATE.store(IPC_REG_FAST_DISABLED, Ordering::Relaxed);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
     unsafe {
         syscall3(
             SyscallNumber::Send,
@@ -453,7 +489,7 @@ pub fn ipc_call(endpoint_token: usize, msg: &[u8], reply_buf: &mut [u8]) -> Resu
 /// - `Err(error)`: No pending call or send failed
 #[inline]
 pub fn ipc_reply(endpoint_token: usize, msg: &[u8]) -> Result<usize> {
-    if msg.len() <= IPC_REG_INLINE_MAX_REPLY
+    if msg.len() <= IPC_REG_INLINE_MAX_PAYLOAD
         && IPC_REG_FAST_STATE.load(Ordering::Relaxed) != IPC_REG_FAST_DISABLED
     {
         let mut chunk0 = [0u8; 8];
