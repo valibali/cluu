@@ -170,7 +170,8 @@ No new syscall numbers are introduced. The syscall ABI remains:
   - Full-build regression check (`scripts/harness_suite.sh --case b_spawn_warm`): `shell_ready_s=10`, `noop_spawn_reply_p95_cycles=49,203,336`, `noop_map_elf_reply_p95_cycles=14,227,948` (`SLO PASS`).
 - Validation:
   - New marker mode: `c_futex`.
-  - Wait/wake race probes pass.
+  - Harness case `c_futex` (full build) passes with required marker `futexprobe: PASS` and shell-ready within policy.
+  - Next: extend to explicit wake-race coverage (two-thread shared futex word path) before closing `C.1`.
 
 #### C.2 pthread subset in userspace
 - Add pthread create/join/mutex/cond subset over thread create + futex.

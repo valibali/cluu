@@ -117,6 +117,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="spawn benchprobe spawnonly"
             SHELL_AUTOSTART_CMD_DEFAULT=""
             ;;
+        c_futex)
+            TEST_COMMAND="spawn futexprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn futexprobe"
+            ;;
         m6_ipc_compact)
             TEST_COMMAND="repeat 8 spawn hello"
             ;;
@@ -417,6 +421,7 @@ fi
 # - a_poll: poll(2) compatibility probe over fd table semantics
 # - perf_benchprobe: process/thread-control/IPC benchmark probe
 # - b_spawn_warm: spawn warm-cache benchmark + per-run noop spawn/map_elf p95 SLO checks
+# - c_futex: futex invoke wait/wake/timeout smoke probe
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - m6_ipc_compact: compact IPC queue storage regression smoke under spawn churn
 # - m6_ipc_rendezvous: direct sender->waiting-receiver transfer path under churn
@@ -727,6 +732,13 @@ case "$MARKER_MODE" in
             "procmgr: spawn path /bin/noop"
             "vfs: open '/bin/noop'"
             "vfs: map_elf_trace"
+        )
+        ;;
+    c_futex)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "futexprobe: PASS"
         )
         ;;
     none)

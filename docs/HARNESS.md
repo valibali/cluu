@@ -33,6 +33,10 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
      - Optional SLO gates:
        - `MIN_NOOP_SPAWN_SAMPLES`, `MIN_NOOP_MAP_ELF_SAMPLES`
        - `MAX_NOOP_SPAWN_REPLY_P95_CYCLES`, `MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES`
+   - Futex smoke mode (`MARKER_MODE=c_futex`):
+     - Runs `spawn futexprobe`.
+     - Validates `Invoke`-based futex mismatch/wake/timeout-or-spurious path.
+     - Required marker: `futexprobe: PASS`.
 
 2. `scripts/harness_cases.conf`
    - Central case catalog (`name|build_mode|env_assignments`).
