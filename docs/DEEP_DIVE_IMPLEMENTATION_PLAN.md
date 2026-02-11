@@ -63,6 +63,24 @@ No new syscall numbers are introduced. The syscall ABI remains:
   - `scripts/harness_suite.sh --case m6_ipc_compact` passes with SLO gates (`ipc_queue_bytes_peak=3298`, `ipc_queue_messages_peak=40` in latest run).
   - `scripts/harness_suite.sh --case m6_ipc_rendezvous` passes with SLO gates and direct delivery check (`ipc_direct_deliveries=215`, `ipc_queue_bytes_peak=2952` in latest run).
 
+#### P0.5 Register IPC fast path (small-message ABI path)
+- Goal: remove user-memory copies for common small IPC messages by using syscall register payload lanes.
+- Constraints:
+  - No new syscall numbers.
+  - Keep existing pointer/length path as fallback for larger payloads and compatibility.
+  - Feature-gate runtime selection to allow A/B validation (`cluu.ipc_reg_fast=0|1`).
+- Implementation order:
+  - `P0.5.a`: `Call/Reply` register fast path first.
+  - `P0.5.b`: `Send/Recv` register fast path.
+  - Preserve existing sender-auth metadata and endpoint rights model.
+- Validation:
+  - New harness cases: `m6_ipc_reg_off`, `m6_ipc_reg_on`.
+  - Compare against `b_spawn_warm`/M6 baseline:
+    - `noop_spawn_reply_p95_cycles`
+    - `noop_map_elf_reply_p95_cycles`
+    - `ipc_queue_bytes_peak` / `ipc_queue_messages_peak`
+  - Require no regression in existing M6 modes and shell-ready SLO (`<=15s`).
+
 ### A: Portability unblockers (`poll`, `signal`, `fcntl`)
 
 #### A.1 `signal` and `fcntl` compatibility stubs
@@ -164,9 +182,9 @@ For each sub-milestone (`P0.1`, `P0.2`, ...):
 
 ## 4. Immediate Execution Queue
 
-1. Start `P0.1` (compact IPC message storage).
-2. Then `P0.2` (rendezvous direct-transfer fast path).
-3. Then `P0.3` (shared ring bulk path for VFS).
-4. Then `P0.4` (SLO rebaseline and CI thresholds).
-5. Enter Phase A (`A.1` first).
-6. After `A.1/A.2`, execute `B.1/B.2`, then `B.3` as a dedicated performance pass.
+1. Lock warm-cache baseline with full-build harness (`b_spawn_warm`, repeated sweep).
+2. Execute `P0.5.a` (register fast path for `Call/Reply`, feature-gated).
+3. Execute `P0.5.b` (register fast path for `Send/Recv`, feature-gated).
+4. Re-baseline M6 + warm-cache SLOs and gate via CI harness cases.
+5. Enter `B.3` spawn hot-path performance pass (roundtrip cuts + hot ELF metadata path).
+6. Then Phase A (`A.1`, `A.2`), then `B.1/B.2`, then `C`, then `D`.
