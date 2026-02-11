@@ -1059,39 +1059,45 @@ impl VfsServer {
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
 
-        let mut allocated_slot: Option<usize> = None;
-        let mut session = if let Some(existing) = self.read_rings.get(&client_id).copied() {
-            existing
-        } else {
-            let Some(slot) = self.free_ring_slots.pop() else {
+        if let Some(existing) = self.read_rings.get(&client_id).copied() {
+            if existing.target_base != target_base || existing.target_space != target_space {
                 reply_msg.words[0] = Error::Busy.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-            };
-            allocated_slot = Some(slot);
-            ReadRingSession {
-                source_base: self.ring_pool_base + slot * RING_SLOT_BYTES,
-                target_base,
-                target_space,
-                bytes: RING_SLOT_BYTES,
-                capacity: RING_SLOT_CAPACITY,
-                slot,
             }
-        };
-
-        session.target_base = target_base;
-        session.target_space = target_space;
-
-        {
             let backing = unsafe {
-                core::slice::from_raw_parts_mut(session.source_base as *mut u8, session.bytes)
+                core::slice::from_raw_parts_mut(existing.source_base as *mut u8, existing.bytes)
             };
             if SharedRing::initialize(backing).is_err() {
-                if let Some(slot) = allocated_slot {
-                    self.free_ring_slots.push(slot);
-                }
                 reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
+            reply_msg.words[0] = 0;
+            reply_msg.words[1] = existing.bytes;
+            reply_msg.words[2] = requested.min(existing.capacity);
+            reply_msg.words[3] = existing.slot;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+
+        let Some(slot) = self.free_ring_slots.pop() else {
+            reply_msg.words[0] = Error::Busy.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        };
+        let session = ReadRingSession {
+            source_base: self.ring_pool_base + slot * RING_SLOT_BYTES,
+            target_base,
+            target_space,
+            bytes: RING_SLOT_BYTES,
+            capacity: RING_SLOT_CAPACITY,
+            slot,
+        };
+
+        let backing = unsafe {
+            core::slice::from_raw_parts_mut(session.source_base as *mut u8, session.bytes)
+        };
+        if SharedRing::initialize(backing).is_err() {
+            self.free_ring_slots.push(slot);
+            reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
 
         let pages = session.bytes.div_ceil(PAGE_SIZE);
@@ -1099,9 +1105,7 @@ impl VfsServer {
             let src = session.source_base + page_idx * PAGE_SIZE;
             let dst = session.target_base + page_idx * PAGE_SIZE;
             if let Err(err) = space_grant(self.space_token, session.target_space, src, dst, 0x02) {
-                if let Some(slot) = allocated_slot {
-                    self.free_ring_slots.push(slot);
-                }
+                self.free_ring_slots.push(slot);
                 reply_msg.words[0] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
