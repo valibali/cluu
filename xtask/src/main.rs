@@ -613,7 +613,8 @@ fn create_disk_image(_profile: &str) -> Result<()> {
 
     // Create bootboot config file. Optional extra BOOTBOOT environment lines
     // can be injected via CLUU_BOOTBOOT_ENV (newline or ';' separated).
-    let mut bootboot_config = String::from("// BOOTBOOT configuration\nscreen=1024x768\nkernel=sys/core\n");
+    let mut bootboot_config =
+        String::from("// BOOTBOOT configuration\nscreen=1024x768\nkernel=sys/core\n");
     if let Ok(extra_env) = std::env::var("CLUU_BOOTBOOT_ENV") {
         for line in extra_env
             .split(['\n', ';'])
@@ -686,7 +687,15 @@ fn create_user_block_image(profile: &str) -> Result<()> {
     }
 
     // Also add any C programs (built via cargo xtask build-c)
-    let c_programs = ["hello", "ownerprobe", "sleepy", "waitprobe", "mmapprobe"];
+    let c_programs = [
+        "hello",
+        "noop",
+        "ownerprobe",
+        "sleepy",
+        "waitprobe",
+        "mmapprobe",
+        "benchprobe",
+    ];
     for prog in &c_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = bin_dir.join(prog);
@@ -1056,10 +1065,12 @@ fn build_c_programs(profile: &str) -> Result<()> {
     // List of C programs to build: (name, source_path)
     let c_programs: &[(&str, &str)] = &[
         ("hello", "userspace/c_hello/minimal.c"),
+        ("noop", "userspace/c_hello/noop.c"),
         ("ownerprobe", "userspace/c_hello/ownerprobe.c"),
         ("sleepy", "userspace/c_hello/sleepy.c"),
         ("waitprobe", "userspace/c_hello/waitprobe.c"),
         ("mmapprobe", "userspace/c_hello/mmapprobe.c"),
+        ("benchprobe", "userspace/c_hello/benchprobe.c"),
     ];
 
     for (name, source) in c_programs {

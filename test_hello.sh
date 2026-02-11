@@ -101,6 +101,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="spawn mmapprobe"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
             ;;
+        perf_benchprobe)
+            TEST_COMMAND="spawn benchprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn benchprobe"
+            ;;
         m6_ipc_compact)
             TEST_COMMAND="repeat 8 spawn hello"
             ;;
@@ -394,6 +398,7 @@ fi
 # - l2_jobmix: deterministic two-job stop/bg/fg-style interleaving stress
 # - l2_waitpid: libc wait queue + `WNOHANG` behavior via userspace probe
 # - l2_mmap: mmap/munmap reuse + strict mprotect region validation
+# - perf_benchprobe: process/thread-control/IPC benchmark probe
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - m6_ipc_compact: compact IPC queue storage regression smoke under spawn churn
 # - m6_ipc_rendezvous: direct sender->waiting-receiver transfer path under churn
@@ -668,6 +673,16 @@ case "$MARKER_MODE" in
             "mmapprobe: PASS mprotect restore rw"
             "mmapprobe: PASS reuse hole"
             "mmapprobe: PASS complete"
+        )
+        ;;
+    perf_benchprobe)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "benchprobe: ipc_clock"
+            "benchprobe: spawn_wait"
+            "benchprobe: thread_ctl"
+            "benchprobe: PASS"
         )
         ;;
     none)
