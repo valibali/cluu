@@ -216,6 +216,9 @@ if [ -n "$TEST_COMMAND" ]; then
     echo "Waiting up to ${SHELL_READY_WAIT}s for shell readiness marker..."
     if ! wait_for_shell_ready; then
         echo "ERROR: shell readiness marker not observed before command injection"
+        echo "----- serial tail (last 200 lines) -----"
+        tail -n 200 "$SERIAL_LOG" || true
+        echo "----------------------------------------"
         exit 1
     fi
 fi
