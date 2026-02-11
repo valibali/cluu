@@ -118,19 +118,24 @@ pub struct QueueEndpoint {
     callers_by_cookie: BTreeMap<u64, ThreadId>,
 }
 
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone)]
 struct RecvWaiter {
     thread_id: ThreadId,
     ticket: u64,
+    buf_ptr: usize,
+    buf_len: usize,
+    page_table_root: x86_64::PhysAddr,
 }
 
 const MAX_QUEUE_LEN: usize = 1024;
 const MAX_CALL_QUEUE_LEN: usize = 256;
 const BUSY_LOG_EVERY: u64 = 64;
+const IPC_DIRECT_DEBUG_LIMIT: u64 = 128;
 /// Runtime kill-switch for rendezvous direct delivery.
 ///
 /// Defaults to disabled until explicitly enabled by boot configuration.
 static IPC_RENDEZVOUS_DIRECT_ENABLED: AtomicBool = AtomicBool::new(false);
+static IPC_DIRECT_DEBUG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Copy, Clone)]
 struct QueueStats {
@@ -178,14 +183,31 @@ impl QueueEndpoint {
         }
     }
 
-    fn enqueue_receiver_if_absent(&mut self, receiver: ThreadId, ticket: u64) {
-        let waiter = RecvWaiter {
+    fn enqueue_receiver_if_absent(
+        &mut self,
+        receiver: ThreadId,
+        ticket: u64,
+        buf_ptr: usize,
+        buf_len: usize,
+        page_table_root: x86_64::PhysAddr,
+    ) {
+        if let Some(waiter) = self
+            .waiting_receivers
+            .iter_mut()
+            .find(|waiter| waiter.thread_id == receiver && waiter.ticket == ticket)
+        {
+            waiter.buf_ptr = buf_ptr;
+            waiter.buf_len = buf_len;
+            waiter.page_table_root = page_table_root;
+            return;
+        }
+        self.waiting_receivers.push_back(RecvWaiter {
             thread_id: receiver,
             ticket,
-        };
-        if !self.waiting_receivers.contains(&waiter) {
-            self.waiting_receivers.push_back(waiter);
-        }
+            buf_ptr,
+            buf_len,
+            page_table_root,
+        });
     }
 
     fn wake_one_waiting_sender(&mut self) {
@@ -207,8 +229,15 @@ impl QueueEndpoint {
         None
     }
 
-    fn register_receiver_wait(&mut self, receiver: ThreadId, ticket: u64) {
-        self.enqueue_receiver_if_absent(receiver, ticket);
+    fn register_receiver_wait(
+        &mut self,
+        receiver: ThreadId,
+        ticket: u64,
+        buf_ptr: usize,
+        buf_len: usize,
+        page_table_root: x86_64::PhysAddr,
+    ) {
+        self.enqueue_receiver_if_absent(receiver, ticket, buf_ptr, buf_len, page_table_root);
     }
 }
 
@@ -258,7 +287,7 @@ impl ByteEndpoint for QueueEndpoint {
             return Ok(Some(msg));
         }
         let ticket = crate::sched::ThreadManager::current_recv_wait_ticket().unwrap_or(0);
-        self.enqueue_receiver_if_absent(receiver, ticket);
+        self.enqueue_receiver_if_absent(receiver, ticket, 0, 0, x86_64::PhysAddr::new(0));
         Err(Error::WouldBlock)
     }
 
@@ -318,7 +347,7 @@ impl ByteEndpoint for QueueEndpoint {
             return Ok(Some((msg.message, msg.sender)));
         }
         let ticket = crate::sched::ThreadManager::current_recv_wait_ticket().unwrap_or(0);
-        self.enqueue_receiver_if_absent(receiver, ticket);
+        self.enqueue_receiver_if_absent(receiver, ticket, 0, 0, x86_64::PhysAddr::new(0));
         Err(Error::WouldBlock)
     }
 }
@@ -477,7 +506,14 @@ pub fn recv(endpoint: EndpointId, receiver: ThreadId) -> Result<Option<ReceivedM
     guard.recv(receiver)
 }
 
-pub fn register_wait(endpoint: EndpointId, receiver: ThreadId, ticket: u64) -> Result<(), Error> {
+pub fn register_wait(
+    endpoint: EndpointId,
+    receiver: ThreadId,
+    ticket: u64,
+    buf_ptr: usize,
+    buf_len: usize,
+    page_table_root: x86_64::PhysAddr,
+) -> Result<(), Error> {
     let shard = get_endpoint_shard(endpoint);
     let mut shard_guard = shard.lock();
     let endpoint_mutex = shard_guard
@@ -485,7 +521,7 @@ pub fn register_wait(endpoint: EndpointId, receiver: ThreadId, ticket: u64) -> R
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
     let mut guard = endpoint_mutex.lock();
-    guard.register_receiver_wait(receiver, ticket);
+    guard.register_receiver_wait(receiver, ticket, buf_ptr, buf_len, page_table_root);
     Ok(())
 }
 
@@ -561,28 +597,26 @@ pub fn send_from_user(
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
-        if let Some(receiver_id) =
-            try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, &payload)?
-        {
-            Some(receiver_id)
-        } else {
-        match guard.send(sender, &payload) {
-            Ok(wake) => wake, // Success
-            Err(Error::WouldBlock) => {
-                // Queue is full - sender was added to waiting_senders, need to block
-                // Return WouldBlock so syscall returns and context switch can happen
-                // When woken, userspace will retry the syscall
-                crate::sched::ThreadManager::block_current();
-                crate::architecture::x86_64::syscall::request_resched();
-                return Err(Error::WouldBlock);
-            }
-            Err(Error::Busy) => {
-                // Fallback for edge cases (shouldn't happen with backpressure)
-                log_endpoint_busy(endpoint, guard.stats(), false);
-                return Err(Error::Busy);
-            }
-            Err(err) => return Err(err),
-        }
+        match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, &payload)? {
+            DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
+            DirectDelivery::DeliveredNoWake => None,
+            DirectDelivery::NotDelivered => match guard.send(sender, &payload) {
+                Ok(wake) => wake, // Success
+                Err(Error::WouldBlock) => {
+                    // Queue is full - sender was added to waiting_senders, need to block
+                    // Return WouldBlock so syscall returns and context switch can happen
+                    // When woken, userspace will retry the syscall
+                    crate::sched::ThreadManager::block_current();
+                    crate::architecture::x86_64::syscall::request_resched();
+                    return Err(Error::WouldBlock);
+                }
+                Err(Error::Busy) => {
+                    // Fallback for edge cases (shouldn't happen with backpressure)
+                    log_endpoint_busy(endpoint, guard.stats(), false);
+                    return Err(Error::Busy);
+                }
+                Err(err) => return Err(err),
+            },
         }
     };
 
@@ -707,28 +741,28 @@ pub fn call_from_user_with_reply_token(
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
-        if let Some(receiver_id) =
-            try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, &payload)?
-        {
-            Some(receiver_id)
-        } else {
-            // Just send as regular message - reply routing via token
-            match guard.send(sender, &payload) {
-                Ok(wake) => wake, // Success
-                Err(Error::WouldBlock) => {
-                    // Queue is full - sender was added to waiting_senders, need to block
-                    // Return WouldBlock so syscall returns and context switch can happen
-                    // When woken, userspace will retry the syscall
-                    crate::sched::ThreadManager::block_current();
-                    crate::architecture::x86_64::syscall::request_resched();
-                    return Err(Error::WouldBlock);
+        match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, &payload)? {
+            DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
+            DirectDelivery::DeliveredNoWake => None,
+            DirectDelivery::NotDelivered => {
+                // Just send as regular message - reply routing via token.
+                match guard.send(sender, &payload) {
+                    Ok(wake) => wake, // Success
+                    Err(Error::WouldBlock) => {
+                        // Queue is full - sender was added to waiting_senders, need to block
+                        // Return WouldBlock so syscall returns and context switch can happen
+                        // When woken, userspace will retry the syscall
+                        crate::sched::ThreadManager::block_current();
+                        crate::architecture::x86_64::syscall::request_resched();
+                        return Err(Error::WouldBlock);
+                    }
+                    Err(Error::Busy) => {
+                        // Fallback for edge cases (shouldn't happen with backpressure)
+                        log_endpoint_busy(endpoint, guard.stats(), true);
+                        return Err(Error::Busy);
+                    }
+                    Err(err) => return Err(err),
                 }
-                Err(Error::Busy) => {
-                    // Fallback for edge cases (shouldn't happen with backpressure)
-                    log_endpoint_busy(endpoint, guard.stats(), true);
-                    return Err(Error::Busy);
-                }
-                Err(err) => return Err(err),
             }
         }
     };
@@ -777,36 +811,39 @@ fn try_direct_deliver_to_waiting_receiver(
     endpoint_id: EndpointId,
     sender: Option<ThreadId>,
     data: &[u8],
-) -> Result<Option<ThreadId>, Error> {
+) -> Result<DirectDelivery, Error> {
     if !rendezvous_direct_enabled() {
-        return Ok(None);
+        return Ok(DirectDelivery::NotDelivered);
     }
 
     while let Some(waiter) = endpoint.pop_next_receiver_to_wake() {
+        direct_debug("attempt", endpoint_id, Some(waiter), data.len());
         let receiver_id = waiter.thread_id;
-        let Some((receiver_buf_ptr, receiver_buf_len, receiver_pt_root)) =
-            crate::sched::ThreadManager::recv_wait_buffer(receiver_id)
-        else {
+        if waiter.buf_len == 0 || waiter.buf_ptr == 0 || waiter.page_table_root.is_null() {
+            direct_debug("no-recv-buffer", endpoint_id, Some(waiter), data.len());
+            crate::telemetry::record_ipc_stale_waiter();
             continue;
-        };
-
-        if data.len() > receiver_buf_len {
-            endpoint.waiting_receivers.push_front(waiter);
-            return Ok(None);
         }
 
-        // Safety: receiver buffer metadata is captured from the blocked receiver thread state.
+        if data.len() > waiter.buf_len {
+            direct_debug("buffer-too-small", endpoint_id, Some(waiter), data.len());
+            endpoint.waiting_receivers.push_front(waiter);
+            return Ok(DirectDelivery::NotDelivered);
+        }
+
+        // Safety: waiter metadata was captured from validated syscall arguments at register_wait.
         let copy_result = unsafe {
             crate::syscall::userptr::copy_to_user(
-                receiver_buf_ptr,
+                waiter.buf_ptr,
                 data.as_ptr(),
                 data.len(),
-                receiver_pt_root,
+                waiter.page_table_root,
             )
         };
         if copy_result.is_err() {
+            direct_debug("copy-fail", endpoint_id, Some(waiter), data.len());
             endpoint.waiting_receivers.push_front(waiter);
-            return Ok(None);
+            return Ok(DirectDelivery::NotDelivered);
         }
 
         let stored = crate::sched::ThreadManager::set_recv_wait_delivery(
@@ -816,14 +853,47 @@ fn try_direct_deliver_to_waiting_receiver(
             sender,
         );
         if !stored {
+            direct_debug("store-fail", endpoint_id, Some(waiter), data.len());
             endpoint.waiting_receivers.push_front(waiter);
-            return Ok(None);
+            return Ok(DirectDelivery::NotDelivered);
         }
         crate::telemetry::record_ipc_direct_delivery();
-        return Ok(Some(receiver_id));
+        if crate::sched::ThreadManager::is_thread_blocked(receiver_id) {
+            direct_debug("delivered-wake", endpoint_id, Some(waiter), data.len());
+            return Ok(DirectDelivery::DeliveredWake(receiver_id));
+        }
+        direct_debug("delivered-nowake", endpoint_id, Some(waiter), data.len());
+        return Ok(DirectDelivery::DeliveredNoWake);
     }
 
-    Ok(None)
+    direct_debug("no-waiter", endpoint_id, None, data.len());
+    Ok(DirectDelivery::NotDelivered)
+}
+
+enum DirectDelivery {
+    NotDelivered,
+    DeliveredWake(ThreadId),
+    DeliveredNoWake,
+}
+
+fn direct_debug(event: &str, endpoint: EndpointId, waiter: Option<RecvWaiter>, len: usize) {
+    let n = IPC_DIRECT_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if n >= IPC_DIRECT_DEBUG_LIMIT {
+        return;
+    }
+    klibcluu::trace("ipc-direct");
+    klibcluu::trace("  event=");
+    klibcluu::trace(event);
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "  endpoint=", endpoint.as_u64());
+    if let Some(waiter) = waiter {
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Trace,
+            "  waiter_thread=",
+            waiter.thread_id.as_u64(),
+        );
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  waiter_ticket=", waiter.ticket);
+    }
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "  len=", len as u64);
 }
 
 #[inline(always)]

@@ -1,6 +1,7 @@
 # M6 Rendezvous IPC Failure Investigation
 
 Date: 2026-02-11
+Status: Fixed in current branch (validated by harness).
 
 ## Scope
 
@@ -60,29 +61,32 @@ This points to a rendezvous/control-message delivery problem rather than storage
 - `m6_ipc_rendezvous` case previously did not force `cluu.ipc_direct=1`, allowing accidental stale-image outcomes.
 - This investigation adds explicit per-case BOOTBOOT env toggles in `scripts/harness_cases.conf`.
 
-## Investigation Conclusion
+## Resolution Implemented
 
-Rendezvous direct-delivery is currently not safe to enable globally during bootstrap/service discovery. It introduces a liveness regression in control-plane IPC before shell readiness.
+1. Persist recv waiter buffer metadata in endpoint wait queues:
+- store `(buf_ptr, buf_len, page_table_root)` at registration time
+- use stored metadata in rendezvous copy instead of transient thread state
 
-## Immediate Next Steps
+2. Preserve direct-delivery completion across `sys_recv` retry model:
+- consume pending direct delivery before re-arming wait on retry
+- treat stale endpoint deliveries as spurious and continue queue probing
 
-1. Add reason-coded telemetry in direct path:
-- attempted
-- no_waiter
-- waiter_armed_not_blocked
-- copy_fail
-- delivery_store_fail
-- delivered
+3. Add explicit direct-delivery outcomes/telemetry paths:
+- `delivered-wake`, `delivered-nowake`, `no-waiter`, `copy-fail`, `store-fail`, etc.
 
-2. Tighten direct-delivery eligibility:
-- Require receiver to be truly blocked on current ticket before direct consume.
-- Keep queue path as fallback for armed-only waiters.
+## Current Validation
 
-3. Reduce blast radius while validating:
-- Keep global kill-switch default-off.
-- Add scoped enablement only for targeted endpoints/workloads during test phases.
+1. `MARKER_MODE=m6_ipc_rendezvous` with `CLUU_BOOTBOOT_ENV=cluu.ipc_direct=1`:
+- PASS (required markers found)
+- `ipc_direct_deliveries` observed > 0 (e.g., 96+)
+- shell readiness within policy (`HARNESS shell_ready_s=9`)
 
-4. Re-run deterministic matrix:
-- `m6_ipc_compact` with direct off
-- `m6_ipc_rendezvous` with direct on
-- long soak and SLO checks after each candidate fix
+2. Baseline `m1_recv` re-check:
+- PASS
+- shell readiness within policy (`HARNESS shell_ready_s=8`)
+
+## Remaining Follow-Ups
+
+1. Reduce direct-path INFO log volume (convert routine debug traces to TRACE).
+2. Keep direct rendezvous default kill-switch behavior conservative until more soak data.
+3. Add dedicated long-soak rendezvous case to CI matrix with SLO gating.

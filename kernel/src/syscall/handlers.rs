@@ -146,6 +146,46 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     })
     .unwrap_or(0);
 
+    let write_sender_tid = |sender: Option<crate::sched::ThreadId>| -> Result<(), Error> {
+        if sender_out_ptr == 0 {
+            return Ok(());
+        }
+        crate::syscall::userptr::validate_user_buffer(
+            sender_out_ptr,
+            core::mem::size_of::<usize>(),
+        )?;
+        let sender_raw = sender.map_or(0usize, |tid: crate::sched::ThreadId| tid.as_u64() as usize);
+        // Safety: sender_out_ptr is a validated userspace buffer for usize.
+        unsafe {
+            crate::syscall::userptr::copy_to_user(
+                sender_out_ptr,
+                &sender_raw as *const usize as *const u8,
+                core::mem::size_of::<usize>(),
+                page_table_root,
+            )?;
+        }
+        Ok(())
+    };
+
+    let find_endpoint_index = |endpoint: EndpointId| -> Option<usize> {
+        endpoint_ids
+            .iter()
+            .take(tokens_count)
+            .position(|id| *id == Some(endpoint))
+    };
+
+    // Fast completion for direct deliveries that woke us from a previous blocked recv syscall.
+    // The current userspace wrapper retries recv_any after WouldBlock, so consume the pending
+    // delivery before re-arming wait state.
+    if let Some((delivered_endpoint, delivered_len, delivered_sender)) =
+        crate::sched::ThreadManager::take_current_recv_wait_delivery()
+    {
+        if let Some(index) = find_endpoint_index(delivered_endpoint) {
+            write_sender_tid(delivered_sender)?;
+            return Ok((index << 32) | delivered_len);
+        }
+    }
+
     // Try to receive from each endpoint in round-robin order
     let try_recv_any = || -> Result<(usize, usize), Error> {
         for offset in 0..tokens_count {
@@ -159,25 +199,7 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
                 ) {
                     Ok((len, sender)) => {
                         crate::telemetry::record_ipc_recv_scan_steps(offset + 1);
-                        if sender_out_ptr != 0 {
-                            crate::syscall::userptr::validate_user_buffer(
-                                sender_out_ptr,
-                                core::mem::size_of::<usize>(),
-                            )?;
-                            let sender_raw = sender
-                                .map_or(0usize, |tid: crate::sched::ThreadId| {
-                                    tid.as_u64() as usize
-                                });
-                            // Safety: sender_out_ptr is a validated userspace buffer for usize.
-                            unsafe {
-                                crate::syscall::userptr::copy_to_user(
-                                    sender_out_ptr,
-                                    &sender_raw as *const usize as *const u8,
-                                    core::mem::size_of::<usize>(),
-                                    page_table_root,
-                                )?;
-                            }
-                        }
+                        write_sender_tid(sender)?;
                         return Ok((i, len));
                     }
                     Err(Error::WouldBlock) => continue,
@@ -206,7 +228,41 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
 
     // Register as waiter on all endpoints
     for endpoint_id in endpoint_ids.iter().take(tokens_count).filter_map(|id| *id) {
-        crate::ipc::endpoint::register_wait(endpoint_id, current, recv_wait_ticket)?;
+        if let Err(err) = crate::ipc::endpoint::register_wait(
+            endpoint_id,
+            current,
+            recv_wait_ticket,
+            buf_ptr,
+            buf_len,
+            page_table_root,
+        ) {
+            crate::sched::ThreadManager::disarm_current_recv_wait();
+            return Err(err);
+        }
+    }
+
+    // Re-check once after wait registration and before blocking. This closes the
+    // "registered but not yet blocked" window and prevents missed wakeups.
+    match try_recv_any() {
+        Ok((index, len)) => {
+            crate::sched::ThreadManager::disarm_current_recv_wait();
+            return Ok((index << 32) | len);
+        }
+        Err(Error::WouldBlock) => {}
+        Err(err) => {
+            crate::sched::ThreadManager::disarm_current_recv_wait();
+            return Err(err);
+        }
+    }
+
+    if let Some((delivered_endpoint, delivered_len, delivered_sender)) =
+        crate::sched::ThreadManager::take_current_recv_wait_delivery()
+    {
+        if let Some(index) = find_endpoint_index(delivered_endpoint) {
+            write_sender_tid(delivered_sender)?;
+            crate::sched::ThreadManager::disarm_current_recv_wait();
+            return Ok((index << 32) | delivered_len);
+        }
     }
 
     // Block with or without timeout
@@ -233,14 +289,7 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
         if let Some((delivered_endpoint, delivered_len, delivered_sender)) =
             crate::sched::ThreadManager::take_current_recv_wait_delivery()
         {
-            let mut delivered_index: Option<usize> = None;
-            for (i, endpoint_id) in endpoint_ids.iter().enumerate().take(tokens_count) {
-                if *endpoint_id == Some(delivered_endpoint) {
-                    delivered_index = Some(i);
-                    break;
-                }
-            }
-            let Some(index) = delivered_index else {
+            let Some(index) = find_endpoint_index(delivered_endpoint) else {
                 // A direct delivery may target a stale wait registration from an older recv_any
                 // call. Treat this as a spurious wake and continue with normal queue probing.
                 return match try_recv_any() {
@@ -252,23 +301,7 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
                     Err(err) => Err(err),
                 };
             };
-            if sender_out_ptr != 0 {
-                crate::syscall::userptr::validate_user_buffer(
-                    sender_out_ptr,
-                    core::mem::size_of::<usize>(),
-                )?;
-                let sender_raw = delivered_sender
-                    .map_or(0usize, |tid: crate::sched::ThreadId| tid.as_u64() as usize);
-                // Safety: sender_out_ptr is a validated userspace buffer for usize.
-                unsafe {
-                    crate::syscall::userptr::copy_to_user(
-                        sender_out_ptr,
-                        &sender_raw as *const usize as *const u8,
-                        core::mem::size_of::<usize>(),
-                        page_table_root,
-                    )?;
-                }
-            }
+            write_sender_tid(delivered_sender)?;
             return Ok((index << 32) | delivered_len);
         }
 

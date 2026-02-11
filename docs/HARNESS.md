@@ -10,7 +10,11 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
    - Single-run QEMU harness executor.
    - Boots CLUU, injects command(s), validates markers/faults.
    - Shell readiness policy: default `SHELL_READY_WAIT=15` and hard max `SHELL_READY_WAIT_MAX=15`.
+   - Shell-ready timeout is measured from QEMU launch (not from command injection phase).
    - Override only for explicit debugging with `ALLOW_SLOW_SHELL_WAIT=1`.
+   - Build modes:
+     - Default full mode is incremental and runs `cargo xtask build` (plus toolchain prep only if missing).
+     - `HARNESS_CLEAN_REBUILD=1` forces clean toolchain/image rebuild (`make clean` + newlib/syscalls/crt0 + full build).
    - Supports overrides for paths and debug:
      - `SERIAL_LOG`, `MONITOR_SOCK`, `IMG`, `USER_DISK`, `OVMF`
      - `QEMU_GDB=1` to start QEMU with `-S -s`
@@ -38,6 +42,10 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
      - delta resource metrics
      - IPC fairness metrics (`p95`, `p99`, scan average)
      - shell readiness latency (`shell_ready_s`, default max 15s)
+   - `test_hello.sh` also appends:
+     - `HARNESS build_s=...`
+     - `HARNESS qemu_to_shell_ready_s=...`
+     - `HARNESS total_s=...`
 
 6. `scripts/harness_slo_sweep.sh`
    - Repeated fairness runs + per-run SLO report.

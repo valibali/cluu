@@ -391,9 +391,23 @@ impl ThreadManager {
 
     pub fn is_thread_recv_waiting_ticket(thread_id: ThreadId, ticket: u64) -> bool {
         Self::with_thread(thread_id, |thread| {
-            thread.recv_wait_ticket() == ticket && (thread.is_blocked() || thread.is_recv_wait_armed())
+            thread.recv_wait_ticket() == ticket
+                && (thread.is_blocked() || thread.is_recv_wait_armed())
         })
         .unwrap_or(false)
+    }
+
+    pub fn is_thread_recv_wait_active_ticket(thread_id: ThreadId, ticket: u64) -> bool {
+        Self::with_thread(thread_id, |thread| {
+            thread.recv_wait_ticket() == ticket
+                && thread.is_recv_wait_armed()
+                && thread.is_blocked()
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn is_thread_blocked(thread_id: ThreadId) -> bool {
+        Self::with_thread(thread_id, |thread| thread.is_blocked()).unwrap_or(false)
     }
 
     pub fn current_recv_wait_ticket() -> Option<u64> {
@@ -401,9 +415,7 @@ impl ThreadManager {
         Self::with_thread(current, |thread| thread.recv_wait_ticket())
     }
 
-    pub fn recv_wait_buffer(
-        thread_id: ThreadId,
-    ) -> Option<(usize, usize, PhysAddr)> {
+    pub fn recv_wait_buffer(thread_id: ThreadId) -> Option<(usize, usize, PhysAddr)> {
         Self::with_thread(thread_id, |thread| {
             let (buf_ptr, buf_len) = thread.recv_wait_buffer()?;
             Some((buf_ptr, buf_len, thread.page_table_root))

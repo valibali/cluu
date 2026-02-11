@@ -13,10 +13,11 @@ USER_DISK="${USER_DISK:-$PROJECT_ROOT/target/userdisk.img}"
 QEMU_GDB="${QEMU_GDB:-0}"
 QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
 QEMU_PID=""
-BOOT_WAIT="${BOOT_WAIT:-8}"
+BOOT_WAIT="${BOOT_WAIT:-0}"
 SHELL_READY_WAIT="${SHELL_READY_WAIT:-15}"
 SHELL_READY_WAIT_MAX="${SHELL_READY_WAIT_MAX:-15}"
 ALLOW_SLOW_SHELL_WAIT="${ALLOW_SLOW_SHELL_WAIT:-0}"
+HARNESS_CLEAN_REBUILD="${HARNESS_CLEAN_REBUILD:-0}"
 RUN_WAIT="${RUN_WAIT:-5}"
 POST_SENDKEY="${POST_SENDKEY:-}"
 POST_SENDKEY_DELAY="${POST_SENDKEY_DELAY:-1}"
@@ -126,6 +127,9 @@ MAX_DELTA_PMM_USED_FRAMES="${MAX_DELTA_PMM_USED_FRAMES:-}"
 MAX_IPC_WAIT_P95_MS="${MAX_IPC_WAIT_P95_MS:-}"
 MAX_IPC_WAIT_P99_MS="${MAX_IPC_WAIT_P99_MS:-}"
 MAX_IPC_SCAN_AVG_STEPS_X100="${MAX_IPC_SCAN_AVG_STEPS_X100:-}"
+HARNESS_START_SECS=$SECONDS
+QEMU_START_SECS=0
+BUILD_ELAPSED=""
 
 if ! [[ "$SHELL_READY_WAIT" =~ ^[0-9]+$ ]] || [ "$SHELL_READY_WAIT" -lt 1 ]; then
     echo "ERROR: SHELL_READY_WAIT must be a positive integer"
@@ -150,20 +154,54 @@ cleanup() {
     if [ -n "${SHELL_READY_ELAPSED:-}" ]; then
         echo "HARNESS shell_ready_s=${SHELL_READY_ELAPSED}" >> "$SERIAL_LOG"
     fi
+    if [ -n "${BUILD_ELAPSED:-}" ]; then
+        echo "HARNESS build_s=${BUILD_ELAPSED}" >> "$SERIAL_LOG"
+    fi
+    if [ "$QEMU_START_SECS" -gt 0 ] && [ -n "${SHELL_READY_ELAPSED:-}" ]; then
+        echo "HARNESS qemu_to_shell_ready_s=${SHELL_READY_ELAPSED}" >> "$SERIAL_LOG"
+    fi
+    echo "HARNESS total_s=$((SECONDS - HARNESS_START_SECS))" >> "$SERIAL_LOG"
     rm -f "$MONITOR_SOCK"
 }
 trap cleanup EXIT
 
+ensure_toolchain_prereqs() {
+    local need_prep=0
+    if [ ! -f "$PROJECT_ROOT/target/sysroot/lib/libcluu_syscalls.a" ]; then
+        need_prep=1
+    fi
+    if [ ! -f "$PROJECT_ROOT/target/sysroot/lib/crt0.o" ]; then
+        need_prep=1
+    fi
+    if [ ! -f "$PROJECT_ROOT/target/sysroot/x86_64-cluu-elf/lib/libc.a" ]; then
+        need_prep=1
+    fi
+
+    if [ "$need_prep" -eq 1 ]; then
+        echo "=== Preparing toolchain/sysroot artifacts ==="
+        cargo xtask build-newlib
+        cargo xtask build-syscalls
+        cargo xtask build-crt0
+    fi
+}
+
 # --- Step 1: Build (skip if --no-build) ---
 if [ "$1" != "--no-build" ]; then
-    echo "=== Full rebuild of CLUU ==="
-    rm -rf target/newlib-build target/sysroot/x86_64-cluu-elf
-    make clean
-    cargo xtask build-newlib
-    cargo xtask build-syscalls
-    cargo xtask build-crt0
+    build_start=$SECONDS
+    if [ "$HARNESS_CLEAN_REBUILD" = "1" ]; then
+        echo "=== Clean rebuild of CLUU ==="
+        rm -rf target/newlib-build target/sysroot/x86_64-cluu-elf
+        make clean
+        cargo xtask build-newlib
+        cargo xtask build-syscalls
+        cargo xtask build-crt0
+    else
+        echo "=== Incremental full build of CLUU ==="
+        ensure_toolchain_prereqs
+    fi
     cargo xtask build
-    echo "=== Build complete ==="
+    BUILD_ELAPSED=$((SECONDS - build_start))
+    echo "=== Build complete (${BUILD_ELAPSED}s) ==="
 fi
 
 if [ ! -f "$IMG" ]; then
@@ -206,6 +244,7 @@ fi
 
 qemu-system-x86_64 "${qemu_args[@]}" &
 QEMU_PID=$!
+QEMU_START_SECS=$SECONDS
 echo "QEMU PID: $QEMU_PID"
 
 # Wait for QEMU to start and the monitor socket to appear
@@ -217,15 +256,16 @@ if ! kill -0 "$QEMU_PID" 2>/dev/null; then
 fi
 
 # --- Step 4: Wait for boot ---
-echo "Waiting ${BOOT_WAIT}s for CLUU to boot..."
-sleep "$BOOT_WAIT"
+if [ "$BOOT_WAIT" -gt 0 ]; then
+    echo "Waiting ${BOOT_WAIT}s before shell marker polling..."
+    sleep "$BOOT_WAIT"
+fi
 
 wait_for_shell_ready() {
-    local start=$SECONDS
-    local deadline=$((SECONDS + SHELL_READY_WAIT))
+    local deadline=$((QEMU_START_SECS + SHELL_READY_WAIT))
     while [ "$SECONDS" -lt "$deadline" ]; do
         if grep -Fq "[USER] shell: ready" "$SERIAL_LOG"; then
-            SHELL_READY_ELAPSED=$((SECONDS - start))
+            SHELL_READY_ELAPSED=$((SECONDS - QEMU_START_SECS))
             return 0
         fi
         sleep 1
@@ -234,15 +274,15 @@ wait_for_shell_ready() {
 }
 
 if [ -n "$TEST_COMMAND" ]; then
-    echo "Waiting up to ${SHELL_READY_WAIT}s for shell readiness marker..."
+    echo "Waiting up to ${SHELL_READY_WAIT}s from QEMU launch for shell readiness marker..."
     if ! wait_for_shell_ready; then
-        echo "ERROR: shell readiness marker not observed before command injection"
+        echo "ERROR: shell readiness marker not observed within ${SHELL_READY_WAIT}s from QEMU launch"
         echo "----- serial tail (last 200 lines) -----"
         tail -n 200 "$SERIAL_LOG" || true
         echo "----------------------------------------"
         exit 1
     fi
-    echo "Shell readiness observed in ${SHELL_READY_ELAPSED}s"
+    echo "Shell readiness observed in ${SHELL_READY_ELAPSED}s from QEMU launch"
 fi
 
 # --- Step 5: Type test command(s) via QEMU monitor ---
