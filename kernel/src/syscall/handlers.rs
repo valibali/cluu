@@ -23,6 +23,9 @@ use crate::error::Error;
 use crate::syscall::{SyscallArgs, SyscallResult};
 use crate::token::{lookup_token, InvokeOp, TokenHandle};
 
+const IPC_REG_INLINE_FLAG: usize = 1usize << (usize::BITS - 1);
+const IPC_REG_INLINE_MAX_REPLY: usize = 32;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // IPC Syscalls
 // ═══════════════════════════════════════════════════════════════════════════
@@ -432,27 +435,49 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     };
 
-    // 3. Get page table root for copying from userspace
-    let page_table_root =
-        crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
-
-    // 4. Copy reply message from userspace
-    crate::syscall::userptr::validate_user_buffer(msg_ptr, msg_len)?;
+    // 3. Copy reply payload from registers (fast path) or userspace memory (legacy path)
     let mut buffer = [0u8; crate::ipc::endpoint::IPC_MESSAGE_MAX];
-    if msg_len > buffer.len() {
-        return Err(Error::InvalidParameter);
-    }
-    unsafe {
-        crate::syscall::userptr::copy_from_user(
-            buffer.as_mut_ptr(),
-            msg_ptr,
-            msg_len,
-            page_table_root,
-        )?;
-    }
+    let inline_flag_set = (msg_len & IPC_REG_INLINE_FLAG) != 0;
+    let reply_len = if inline_flag_set {
+        if !crate::ipc::endpoint::register_fast_enabled() {
+            return Err(Error::InvalidParameter);
+        }
+        let inline_len = msg_len & !IPC_REG_INLINE_FLAG;
+        if inline_len > IPC_REG_INLINE_MAX_REPLY {
+            return Err(Error::InvalidParameter);
+        }
+        let chunks = [args.arg2, args.arg4, args.arg5, args.arg6];
+        let mut copied = 0usize;
+        for chunk in chunks {
+            if copied >= inline_len {
+                break;
+            }
+            let bytes = chunk.to_ne_bytes();
+            let chunk_len = core::cmp::min(bytes.len(), inline_len - copied);
+            buffer[copied..copied + chunk_len].copy_from_slice(&bytes[..chunk_len]);
+            copied += chunk_len;
+        }
+        inline_len
+    } else {
+        let page_table_root =
+            crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
+        crate::syscall::userptr::validate_user_buffer(msg_ptr, msg_len)?;
+        if msg_len > buffer.len() {
+            return Err(Error::InvalidParameter);
+        }
+        unsafe {
+            crate::syscall::userptr::copy_from_user(
+                buffer.as_mut_ptr(),
+                msg_ptr,
+                msg_len,
+                page_table_root,
+            )?;
+        }
+        msg_len
+    };
 
     // 5. Try to deliver as regular IPC call reply
-    match crate::ipc::endpoint::deliver_reply_by_id(reply_id, &buffer[..msg_len]) {
+    match crate::ipc::endpoint::deliver_reply_by_id(reply_id, &buffer[..reply_len]) {
         Ok(bytes_sent) => {
             let _ = crate::token::revoke_token(reply_token_handle);
             Ok(bytes_sent)
@@ -460,7 +485,7 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
         Err(Error::InvalidState) => {
             // Not a call reply — check if it's a fault reply
             if let Some(fault_info) = crate::sched::ThreadManager::take_fault_reply_info(reply_id) {
-                handle_fault_reply(fault_info, &buffer[..msg_len]);
+                handle_fault_reply(fault_info, &buffer[..reply_len]);
                 let _ = crate::token::revoke_token(reply_token_handle);
                 Ok(0)
             } else {

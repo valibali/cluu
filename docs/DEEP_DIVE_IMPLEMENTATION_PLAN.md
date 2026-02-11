@@ -70,7 +70,7 @@ No new syscall numbers are introduced. The syscall ABI remains:
   - Keep existing pointer/length path as fallback for larger payloads and compatibility.
   - Feature-gate runtime selection to allow A/B validation (`cluu.ipc_reg_fast=0|1`).
 - Implementation order:
-  - `P0.5.a`: `Call/Reply` register fast path first.
+  - `P0.5.a`: `Call/Reply` register fast path first. (Status: in progress; `Reply` fast-path landed and runtime-gated)
   - `P0.5.b`: `Send/Recv` register fast path.
   - Preserve existing sender-auth metadata and endpoint rights model.
 - Validation:
@@ -80,6 +80,11 @@ No new syscall numbers are introduced. The syscall ABI remains:
     - `noop_map_elf_reply_p95_cycles`
     - `ipc_queue_bytes_peak` / `ipc_queue_messages_peak`
   - Require no regression in existing M6 modes and shell-ready SLO (`<=15s`).
+  - Current A/B snapshot (`b_spawn_warm`, full build, 2 runs each):
+    - `ipc_reg_fast=0` avg: `noop_spawn_reply_p95_cycles=80,297,410`, `noop_map_elf_reply_p95_cycles=17,959,514`.
+    - `ipc_reg_fast=1` avg: `noop_spawn_reply_p95_cycles=67,147,413`, `noop_map_elf_reply_p95_cycles=14,878,020`.
+    - Shell ready stayed `10s` in all runs; queue peaks unchanged (`2671` bytes, `30` messages).
+    - Note: variance is still high; keep per-run ceiling looser for `m6_ipc_reg_on` while we finish `P0.5.b`.
 
 ### A: Portability unblockers (`poll`, `signal`, `fcntl`)
 
