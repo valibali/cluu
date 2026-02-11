@@ -412,7 +412,8 @@ pub extern "C" fn posix_spawn(
     msg.words[3] = notify_endpoint;
 
     let mut reply = crate::types::Message::new(0, [0; 6], 0);
-    let mut try_call = |endpoint: usize| crate::ipc::call_with_payload(endpoint, &msg, &payload, &mut reply);
+    let mut try_call =
+        |endpoint: usize| crate::ipc::call_with_payload(endpoint, &msg, &payload, &mut reply);
 
     let result = match try_call(procmgr_ep) {
         Ok(()) => Ok(()),

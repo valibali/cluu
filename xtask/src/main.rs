@@ -694,6 +694,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         "sleepy",
         "waitprobe",
         "mmapprobe",
+        "pollprobe",
         "benchprobe",
     ];
     for prog in &c_programs {
@@ -722,7 +723,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
             "-b",
             "1024",
             disk_path.to_str().unwrap(),
-            "65536", // 64MB image (65536 blocks * 1KiB)
+            "131072", // 128MB image (131072 blocks * 1KiB)
         ])
         .status()
         .context("Failed to run mke2fs for user disk")?;
@@ -1070,6 +1071,7 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("sleepy", "userspace/c_hello/sleepy.c"),
         ("waitprobe", "userspace/c_hello/waitprobe.c"),
         ("mmapprobe", "userspace/c_hello/mmapprobe.c"),
+        ("pollprobe", "userspace/c_hello/pollprobe.c"),
         ("benchprobe", "userspace/c_hello/benchprobe.c"),
     ];
 

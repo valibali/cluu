@@ -132,6 +132,7 @@ fn run_vfs() -> Result<()> {
         endpoint,
         space_token,
         vfs_space_map_token,
+        info.tokens[TOKEN_CLOCK],
         grant_buf_base,
         GRANT_BUF_SIZE,
         cache_buf_base,
@@ -408,6 +409,7 @@ struct VfsServer {
     path_owners: BTreeMap<alloc::string::String, usize>,
     read_rings: BTreeMap<usize, ReadRingSession>,
     free_ring_slots: Vec<usize>,
+    clock_token: usize,
 }
 
 impl VfsServer {
@@ -415,6 +417,7 @@ impl VfsServer {
         endpoint: usize,
         space_token: usize,
         vfs_space_map_token: usize,
+        clock_token: usize,
         grant_buf_base: usize,
         grant_buf_size: usize,
         cache_buf_base: usize,
@@ -442,7 +445,24 @@ impl VfsServer {
             path_owners: BTreeMap::new(),
             read_rings: BTreeMap::new(),
             free_ring_slots,
+            clock_token,
         }
+    }
+
+    fn clock_sample(&self) -> u64 {
+        if self.clock_token == 0 {
+            return 0;
+        }
+        clock_now(self.clock_token).unwrap_or(0)
+    }
+
+    fn log_map_elf_stage(&self, fd: usize, stage: &str, start_ts: u64) {
+        let now = self.clock_sample();
+        let delta = now.saturating_sub(start_ts);
+        let _ = debug_print(&format!(
+            "vfs: map_elf_trace fd={} stage={} ts={} dt={}",
+            fd, stage, now, delta
+        ));
     }
 
     fn handle_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
@@ -1999,7 +2019,9 @@ impl VfsServer {
     ) -> Result<()> {
         let fd = msg.words[2];
         let target_space = msg.words[3];
+        let map_start = self.clock_sample();
         let mut reply_msg = Message::new(VFS_MAP_ELF, [0; 6], 3);
+        self.log_map_elf_stage(fd, "request", map_start);
         let client_id = match self.resolve_client_id("map_elf", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
@@ -2031,6 +2053,7 @@ impl VfsServer {
                 let data = unsafe {
                     core::slice::from_raw_parts(cache_entry.base as *const u8, cache_entry.len)
                 };
+                self.log_map_elf_stage(fd, "elf_cached", map_start);
                 let elf = match ElfFile::parse(data) {
                     Ok(elf) => elf,
                     Err(_) => {
@@ -2040,6 +2063,7 @@ impl VfsServer {
                 };
 
                 self.map_elf_segments(target_space, &elf, data)?;
+                self.log_map_elf_stage(fd, "segments_mapped", map_start);
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = elf.entry_point as usize;
                 reply_msg.words[2] = cache_entry.len;
@@ -2059,6 +2083,7 @@ impl VfsServer {
                     }
                 };
                 self.map_elf_segments(target_space, &elf, data)?;
+                self.log_map_elf_stage(fd, "segments_mapped", map_start);
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = elf.entry_point as usize;
                 reply_msg.words[2] = entry.size;
@@ -2068,6 +2093,7 @@ impl VfsServer {
             }
         }
 
+        self.log_map_elf_stage(fd, "reply", map_start);
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 

@@ -90,6 +90,7 @@ struct ProcessManager {
     space_token: usize,     // Our address space token for grants
     grant_base_next: usize, // Reused base address for grant buffer
     clock_token: usize,
+    spawn_seq_next: usize,
 }
 
 impl ProcessManager {
@@ -119,7 +120,30 @@ impl ProcessManager {
             space_token: info.tokens[TOKEN_SPACE],
             grant_base_next: 0x50100000, // Start after virtqueue region
             clock_token: info.tokens[TOKEN_CLOCK],
+            spawn_seq_next: 1,
         })
+    }
+
+    fn clock_sample(&self) -> u64 {
+        if self.clock_token == 0 {
+            return 0;
+        }
+        clock_now(self.clock_token).unwrap_or(0)
+    }
+
+    fn next_spawn_seq(&mut self) -> usize {
+        let seq = self.spawn_seq_next;
+        self.spawn_seq_next = self.spawn_seq_next.wrapping_add(1);
+        seq
+    }
+
+    fn log_spawn_stage(&self, seq: usize, stage: &str, start_ts: u64) {
+        let now = self.clock_sample();
+        let delta = now.saturating_sub(start_ts);
+        let _ = debug_print(&format!(
+            "procmgr: spawn_trace seq={} stage={} ts={} dt={}",
+            seq, stage, now, delta
+        ));
     }
 
     fn init(&mut self) -> Result<()> {
@@ -153,6 +177,8 @@ impl ProcessManager {
             SHELL_AUTOSTART_CMD
         ))?;
 
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
         let _ = self.spawn_service(
             SERVICE_PATH,
@@ -160,6 +186,8 @@ impl ProcessManager {
             &shell_argv_payload,
             shell_argc,
             0, // system-managed bootstrap spawn
+            spawn_seq,
+            spawn_start,
         )?;
         debug_print("Service spawned; yielding to scheduler")?;
         yield_cpu()?;
@@ -278,7 +306,14 @@ impl ProcessManager {
         payload: &[u8],
         sender_tid: usize,
     ) -> Result<()> {
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
         let mut reply_msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 2);
+        self.log_spawn_stage(spawn_seq, "spawn_request", spawn_start);
+        let _ = debug_print(&format!(
+            "procmgr: spawn request sender_tid={} words={}",
+            sender_tid, msg.tag.words
+        ));
         // Spawn must come via ipc_call; do not trust caller-routed reply endpoints.
         let reply_token = extract_reply_token(msg);
         let notify_endpoint = if msg.tag.words >= 4 { msg.words[3] } else { 0 };
@@ -299,11 +334,13 @@ impl ProcessManager {
         let path = match parse_cstr(payload) {
             Some(value) => value,
             None => {
+                let _ = debug_print("procmgr: spawn request missing path");
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
                 let _ = self.send_spawn_reply(reply_token, &reply_msg);
                 return Ok(());
             }
         };
+        let _ = debug_print(&format!("procmgr: spawn path {}", path));
 
         // Require absolute paths (must start with '/')
         if !path.starts_with('/') {
@@ -335,7 +372,15 @@ impl ProcessManager {
             }
         }
 
-        match self.spawn_service(path, priority, argv_data, argc, sender_tid) {
+        match self.spawn_service(
+            path,
+            priority,
+            argv_data,
+            argc,
+            sender_tid,
+            spawn_seq,
+            spawn_start,
+        ) {
             Ok((_thread_token, cookie, pid)) => {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = pid; // Return PID instead of thread_token
@@ -354,6 +399,8 @@ impl ProcessManager {
         }
         if let Err(err) = self.send_spawn_reply(reply_token, &reply_msg) {
             let _ = debug_print(&format!("procmgr: spawn reply failed {:?}", err));
+        } else {
+            self.log_spawn_stage(spawn_seq, "reply_sent", spawn_start);
         }
         Ok(())
     }
@@ -416,24 +463,30 @@ impl ProcessManager {
         argv_payload: &[u8],
         argc: usize,
         owner_tid: usize,
+        spawn_seq: usize,
+        spawn_start: u64,
     ) -> Result<(usize, usize, usize)> {
         debug_print("Creating address space...")?;
         let space_token = space_create(self.token)?;
         debug_print(&format!("Address space created: {}", space_token))?;
+        self.log_spawn_stage(spawn_seq, "space_create_done", spawn_start);
 
         let mut entry_point = 0usize;
         let mut mapped = false;
 
         if !path.starts_with("/dev/initrd/") {
+            self.log_spawn_stage(spawn_seq, "elf_fetch_start", spawn_start);
             if let Ok(Some(entry)) = self.map_elf_from_vfs(path, space_token) {
                 entry_point = entry;
                 mapped = true;
                 debug_print(&format!("Mapped ELF from VFS (entry=0x{:x})", entry_point))?;
+                self.log_spawn_stage(spawn_seq, "elf_fetch_done", spawn_start);
             }
         }
 
         if !mapped {
             // Fall back to loading bytes in-process.
+            self.log_spawn_stage(spawn_seq, "elf_fetch_start", spawn_start);
             let (elf_data, from_vfs) = self.load_elf(path)?;
             let service_bytes: &[u8] = &elf_data;
 
@@ -449,8 +502,11 @@ impl ProcessManager {
             debug_print("Mapping ELF segments...")?;
             libcluu::map_segments(space_token, &elf, service_bytes)?;
             debug_print("ELF segments mapped")?;
+            self.log_spawn_stage(spawn_seq, "elf_fetch_done", spawn_start);
+            self.log_spawn_stage(spawn_seq, "map_segments_done", spawn_start);
         } else {
             debug_print("ELF segments mapped")?;
+            self.log_spawn_stage(spawn_seq, "map_segments_done", spawn_start);
         }
 
         debug_print("Mapping stack...")?;
@@ -461,6 +517,7 @@ impl ProcessManager {
             STACK_FLAGS,
         )?;
         debug_print("Stack mapped")?;
+        self.log_spawn_stage(spawn_seq, "stack_map_done", spawn_start);
 
         let send_rights = Rights::IPC_SEND.bits() as usize;
         let child_endpoint = token_derive(self.exit_endpoint, send_rights, u64::MAX)?;
@@ -513,6 +570,7 @@ impl ProcessManager {
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
+        self.log_spawn_stage(spawn_seq, "thread_start_done", spawn_start);
 
         self.exit_table.insert(cookie, thread_token);
         self.pid_to_cookie.insert(pid, cookie);
