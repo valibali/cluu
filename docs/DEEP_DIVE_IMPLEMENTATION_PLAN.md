@@ -41,6 +41,8 @@ No new syscall numbers are introduced. The syscall ABI remains:
 - Validation:
   - New marker mode: `m6_ipc_rendezvous`.
   - SLO deltas better than M5 baseline (`ipc_wait_p95_ms`, `ipc_scan_avg_steps_x100`).
+  - Incremental hardening target: direct-delivery waiter scan must not head-of-line block on one incompatible waiter; keep scanning boundedly and rotate retryable waiters.
+  - Incremental hot-path target: avoid heap allocation for small (`<=64B`) `send/call` user payload staging before direct-delivery/queue handoff.
 
 #### P0.3 Shared-ring bulk data path (library-first)
 - Goal: stop pushing large VFS/console payloads through queue copies.

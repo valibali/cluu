@@ -9,6 +9,7 @@ use crate::token::EndpointId;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -16,6 +17,30 @@ use spin::Mutex;
 pub const IPC_MESSAGE_MAX: usize = 4096; // One page - reduces syscall overhead for large transfers
 
 const IPC_INLINE_MAX: usize = 64;
+
+enum UserPayloadBuffer {
+    Inline {
+        len: usize,
+        bytes: [u8; IPC_INLINE_MAX],
+    },
+    Heap(Vec<u8>),
+}
+
+impl UserPayloadBuffer {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..*len],
+            Self::Heap(bytes) => bytes.as_slice(),
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Inline { len, bytes } => &mut bytes[..*len],
+            Self::Heap(bytes) => bytes.as_mut_slice(),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct EndpointMessage {
@@ -569,31 +594,7 @@ pub fn send_from_user(
     if msg_len > IPC_MESSAGE_MAX {
         return Err(Error::InvalidParameter);
     }
-    let payload = if msg_len <= IPC_INLINE_MAX {
-        let mut inline = [0u8; IPC_INLINE_MAX];
-        // Safety: inline points to a valid kernel buffer of msg_len bytes.
-        unsafe {
-            crate::syscall::userptr::copy_from_user(
-                inline.as_mut_ptr(),
-                msg_ptr,
-                msg_len,
-                page_table_root,
-            )?;
-        }
-        inline[..msg_len].to_vec()
-    } else {
-        let mut heap = vec![0u8; msg_len];
-        // Safety: heap points to a valid kernel buffer of msg_len bytes.
-        unsafe {
-            crate::syscall::userptr::copy_from_user(
-                heap.as_mut_ptr(),
-                msg_ptr,
-                msg_len,
-                page_table_root,
-            )?;
-        }
-        heap
-    };
+    let payload = copy_user_payload(msg_ptr, msg_len, page_table_root)?;
     let sender = crate::sched::ThreadManager::current();
     // Try to send - if queue is full, block and return (will be retried from userspace when woken)
     let wake = {
@@ -607,10 +608,11 @@ pub fn send_from_user(
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
-        match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, &payload)? {
+        let payload_bytes = payload.as_slice();
+        match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, payload_bytes)? {
             DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
             DirectDelivery::DeliveredNoWake => None,
-            DirectDelivery::NotDelivered => match guard.send(sender, &payload) {
+            DirectDelivery::NotDelivered => match guard.send(sender, payload_bytes) {
                 Ok(wake) => wake, // Success
                 Err(Error::WouldBlock) => {
                     // Queue is full - sender was added to waiting_senders, need to block
@@ -720,24 +722,11 @@ pub fn call_from_user_with_reply_token(
     page_table_root: x86_64::PhysAddr,
     reply_token: crate::token::TokenHandle,
 ) -> Result<(), Error> {
-    crate::syscall::userptr::validate_user_buffer(msg_ptr, msg_len)?;
-    if msg_len > IPC_MESSAGE_MAX {
-        return Err(Error::InvalidParameter);
-    }
-    let mut payload = vec![0u8; msg_len];
-    // Safety: payload is a valid kernel buffer of msg_len bytes.
-    unsafe {
-        crate::syscall::userptr::copy_from_user(
-            payload.as_mut_ptr(),
-            msg_ptr,
-            msg_len,
-            page_table_root,
-        )?;
-    }
+    let mut payload = copy_user_payload(msg_ptr, msg_len, page_table_root)?;
     let sender = crate::sched::ThreadManager::current();
 
     // Inject reply token handle into message
-    inject_reply_token(&mut payload, reply_token);
+    inject_reply_token(payload.as_mut_slice(), reply_token);
 
     // Try to send - if queue is full, block and return (will be retried from userspace when woken)
     let wake = {
@@ -751,12 +740,13 @@ pub fn call_from_user_with_reply_token(
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
-        match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, &payload)? {
+        let payload_bytes = payload.as_slice();
+        match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, payload_bytes)? {
             DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
             DirectDelivery::DeliveredNoWake => None,
             DirectDelivery::NotDelivered => {
                 // Just send as regular message - reply routing via token.
-                match guard.send(sender, &payload) {
+                match guard.send(sender, payload_bytes) {
                     Ok(wake) => wake, // Success
                     Err(Error::WouldBlock) => {
                         // Queue is full - sender was added to waiting_senders, need to block
@@ -826,7 +816,11 @@ fn try_direct_deliver_to_waiting_receiver(
         return Ok(DirectDelivery::NotDelivered);
     }
 
-    while let Some(waiter) = endpoint.pop_next_receiver_to_wake() {
+    let max_scan = endpoint.waiting_receivers.len();
+    for _ in 0..max_scan {
+        let Some(waiter) = endpoint.pop_next_receiver_to_wake() else {
+            break;
+        };
         direct_debug("attempt", endpoint_id, Some(waiter), data.len());
         let receiver_id = waiter.thread_id;
         if waiter.buf_len == 0 || waiter.buf_ptr == 0 || waiter.page_table_root.is_null() {
@@ -837,8 +831,8 @@ fn try_direct_deliver_to_waiting_receiver(
 
         if data.len() > waiter.buf_len {
             direct_debug("buffer-too-small", endpoint_id, Some(waiter), data.len());
-            endpoint.waiting_receivers.push_front(waiter);
-            return Ok(DirectDelivery::NotDelivered);
+            endpoint.waiting_receivers.push_back(waiter);
+            continue;
         }
 
         // Safety: waiter metadata was captured from validated syscall arguments at register_wait.
@@ -852,8 +846,8 @@ fn try_direct_deliver_to_waiting_receiver(
         };
         if copy_result.is_err() {
             direct_debug("copy-fail", endpoint_id, Some(waiter), data.len());
-            endpoint.waiting_receivers.push_front(waiter);
-            return Ok(DirectDelivery::NotDelivered);
+            endpoint.waiting_receivers.push_back(waiter);
+            continue;
         }
 
         let stored = crate::sched::ThreadManager::set_recv_wait_delivery(
@@ -864,8 +858,8 @@ fn try_direct_deliver_to_waiting_receiver(
         );
         if !stored {
             direct_debug("store-fail", endpoint_id, Some(waiter), data.len());
-            endpoint.waiting_receivers.push_front(waiter);
-            return Ok(DirectDelivery::NotDelivered);
+            endpoint.waiting_receivers.push_back(waiter);
+            continue;
         }
         crate::telemetry::record_ipc_direct_delivery();
         if crate::sched::ThreadManager::is_thread_blocked(receiver_id) {
@@ -878,6 +872,45 @@ fn try_direct_deliver_to_waiting_receiver(
 
     direct_debug("no-waiter", endpoint_id, None, data.len());
     Ok(DirectDelivery::NotDelivered)
+}
+
+fn copy_user_payload(
+    msg_ptr: usize,
+    msg_len: usize,
+    page_table_root: x86_64::PhysAddr,
+) -> Result<UserPayloadBuffer, Error> {
+    crate::syscall::userptr::validate_user_buffer(msg_ptr, msg_len)?;
+    if msg_len > IPC_MESSAGE_MAX {
+        return Err(Error::InvalidParameter);
+    }
+    if msg_len <= IPC_INLINE_MAX {
+        let mut bytes = [0u8; IPC_INLINE_MAX];
+        // Safety: bytes points to a valid kernel buffer of msg_len bytes.
+        unsafe {
+            crate::syscall::userptr::copy_from_user(
+                bytes.as_mut_ptr(),
+                msg_ptr,
+                msg_len,
+                page_table_root,
+            )?;
+        }
+        return Ok(UserPayloadBuffer::Inline {
+            len: msg_len,
+            bytes,
+        });
+    }
+
+    let mut bytes = vec![0u8; msg_len];
+    // Safety: bytes points to a valid kernel buffer of msg_len bytes.
+    unsafe {
+        crate::syscall::userptr::copy_from_user(
+            bytes.as_mut_ptr(),
+            msg_ptr,
+            msg_len,
+            page_table_root,
+        )?;
+    }
+    Ok(UserPayloadBuffer::Heap(bytes))
 }
 
 enum DirectDelivery {
