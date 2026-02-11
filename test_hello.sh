@@ -147,6 +147,9 @@ cleanup() {
         kill "$QEMU_PID" 2>/dev/null || true
         wait "$QEMU_PID" 2>/dev/null || true
     fi
+    if [ -n "${SHELL_READY_ELAPSED:-}" ]; then
+        echo "HARNESS shell_ready_s=${SHELL_READY_ELAPSED}" >> "$SERIAL_LOG"
+    fi
     rm -f "$MONITOR_SOCK"
 }
 trap cleanup EXIT

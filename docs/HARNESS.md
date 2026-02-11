@@ -37,6 +37,7 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
      - exit cookie count
      - delta resource metrics
      - IPC fairness metrics (`p95`, `p99`, scan average)
+     - shell readiness latency (`shell_ready_s`, default max 15s)
 
 6. `scripts/harness_slo_sweep.sh`
    - Repeated fairness runs + per-run SLO report.
@@ -58,7 +59,7 @@ scripts/harness_suite.sh --case m5_fairness --no-build
 cargo xtask harness-slo --no-build --repeats 5
 
 # Parse/enforce SLOs from an existing log
-scripts/harness_slo_report.sh --log /tmp/cluu-serial-com2.log --min-exit-cookies 6 --max-ipc-wait-p95-ms 16
+scripts/harness_slo_report.sh --log /tmp/cluu-serial-com2.log --min-exit-cookies 6 --max-ipc-wait-p95-ms 16 --max-shell-ready-s 15
 ```
 
 ## CI Extension Workflow

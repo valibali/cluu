@@ -51,7 +51,7 @@ fi
 
 mkdir -p "$OUT_DIR"
 summary_csv="$OUT_DIR/summary.csv"
-echo "run,exit_cookie_count,delta_spaces,delta_tokens,delta_endpoints,delta_pmm_used_frames,ipc_wait_p95_ms,ipc_wait_p99_ms,ipc_scan_avg_steps_x100" > "$summary_csv"
+echo "run,exit_cookie_count,delta_spaces,delta_tokens,delta_endpoints,delta_pmm_used_frames,ipc_wait_p95_ms,ipc_wait_p99_ms,ipc_scan_avg_steps_x100,shell_ready_s" > "$summary_csv"
 
 extract_kv() {
     local key="$1"
@@ -86,6 +86,7 @@ for ((run = 1; run <= REPEATS; run++)); do
         ${MAX_IPC_WAIT_P95_MS:+--max-ipc-wait-p95-ms "$MAX_IPC_WAIT_P95_MS"} \
         ${MAX_IPC_WAIT_P99_MS:+--max-ipc-wait-p99-ms "$MAX_IPC_WAIT_P99_MS"} \
         ${MAX_IPC_SCAN_AVG_STEPS_X100:+--max-ipc-scan-avg-steps-x100 "$MAX_IPC_SCAN_AVG_STEPS_X100"} \
+        ${MAX_SHELL_READY_S:+--max-shell-ready-s "$MAX_SHELL_READY_S"} \
         | tee "$report_log"
 
     exit_cookie_count="$(extract_kv "exit_cookie_count" "$report_log")"
@@ -96,8 +97,9 @@ for ((run = 1; run <= REPEATS; run++)); do
     ipc_wait_p95_ms="$(extract_kv "ipc_wait_p95_ms" "$report_log")"
     ipc_wait_p99_ms="$(extract_kv "ipc_wait_p99_ms" "$report_log")"
     ipc_scan_avg_steps_x100="$(extract_kv "ipc_scan_avg_steps_x100" "$report_log")"
+    shell_ready_s="$(extract_kv "shell_ready_s" "$report_log")"
 
-    echo "${run},${exit_cookie_count:-na},${delta_spaces:-na},${delta_tokens:-na},${delta_endpoints:-na},${delta_pmm_used_frames:-na},${ipc_wait_p95_ms:-na},${ipc_wait_p99_ms:-na},${ipc_scan_avg_steps_x100:-na}" >> "$summary_csv"
+    echo "${run},${exit_cookie_count:-na},${delta_spaces:-na},${delta_tokens:-na},${delta_endpoints:-na},${delta_pmm_used_frames:-na},${ipc_wait_p95_ms:-na},${ipc_wait_p99_ms:-na},${ipc_scan_avg_steps_x100:-na},${shell_ready_s:-na}" >> "$summary_csv"
 done
 
 echo "=== SLO sweep complete ==="

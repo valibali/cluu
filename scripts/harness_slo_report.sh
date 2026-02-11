@@ -10,6 +10,7 @@ MAX_DELTA_PMM_USED_FRAMES="${MAX_DELTA_PMM_USED_FRAMES:-}"
 MAX_IPC_WAIT_P95_MS="${MAX_IPC_WAIT_P95_MS:-}"
 MAX_IPC_WAIT_P99_MS="${MAX_IPC_WAIT_P99_MS:-}"
 MAX_IPC_SCAN_AVG_STEPS_X100="${MAX_IPC_SCAN_AVG_STEPS_X100:-}"
+MAX_SHELL_READY_S="${MAX_SHELL_READY_S:-15}"
 
 usage() {
     cat <<'EOF'
@@ -24,6 +25,7 @@ Threshold options can be provided either as CLI args or env vars:
   --max-ipc-wait-p95-ms N
   --max-ipc-wait-p99-ms N
   --max-ipc-scan-avg-steps-x100 N
+  --max-shell-ready-s N
 EOF
 }
 
@@ -63,6 +65,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --max-ipc-scan-avg-steps-x100)
             MAX_IPC_SCAN_AVG_STEPS_X100="${2:-}"
+            shift 2
+            ;;
+        --max-shell-ready-s)
+            MAX_SHELL_READY_S="${2:-}"
             shift 2
             ;;
         -h|--help)
@@ -106,6 +112,25 @@ parse_last_numeric_after_marker() {
     ' "$LOG_FILE"
 }
 
+parse_last_inline_numeric_value() {
+    local marker="$1"
+    awk -v marker="$marker" '
+        index($0, marker) > 0 {
+            line = $0
+            sub(/^.*=/, "", line)
+            gsub(/[^0-9-]/, "", line)
+            if (line != "") {
+                last = line
+            }
+        }
+        END {
+            if (last != "") {
+                print last
+            }
+        }
+    ' "$LOG_FILE"
+}
+
 check_upper_bound() {
     local value="$1"
     local limit="$2"
@@ -136,6 +161,7 @@ last_delta_pmm_frames="$(parse_last_numeric_after_marker "delta_pmm_used_frames=
 last_ipc_wait_p95_ms="$(parse_last_numeric_after_marker "ipc_wait_p95_ms=")"
 last_ipc_wait_p99_ms="$(parse_last_numeric_after_marker "ipc_wait_p99_ms=")"
 last_ipc_scan_avg_steps_x100="$(parse_last_numeric_after_marker "ipc_scan_avg_steps_x100=")"
+last_shell_ready_s="$(parse_last_inline_numeric_value "HARNESS shell_ready_s=")"
 
 echo "=== Harness SLO Summary ==="
 echo "log=$LOG_FILE"
@@ -147,6 +173,7 @@ echo "delta_pmm_used_frames=${last_delta_pmm_frames:-na}"
 echo "ipc_wait_p95_ms=${last_ipc_wait_p95_ms:-na}"
 echo "ipc_wait_p99_ms=${last_ipc_wait_p99_ms:-na}"
 echo "ipc_scan_avg_steps_x100=${last_ipc_scan_avg_steps_x100:-na}"
+echo "shell_ready_s=${last_shell_ready_s:-na}"
 
 failed=0
 if ! [[ "$MIN_EXIT_COOKIES" =~ ^[0-9]+$ ]]; then
@@ -165,6 +192,7 @@ check_upper_bound "${last_delta_pmm_frames:-}" "$MAX_DELTA_PMM_USED_FRAMES" "del
 check_upper_bound "${last_ipc_wait_p95_ms:-}" "$MAX_IPC_WAIT_P95_MS" "ipc_wait_p95_ms" || failed=1
 check_upper_bound "${last_ipc_wait_p99_ms:-}" "$MAX_IPC_WAIT_P99_MS" "ipc_wait_p99_ms" || failed=1
 check_upper_bound "${last_ipc_scan_avg_steps_x100:-}" "$MAX_IPC_SCAN_AVG_STEPS_X100" "ipc_scan_avg_steps_x100" || failed=1
+check_upper_bound "${last_shell_ready_s:-}" "$MAX_SHELL_READY_S" "shell_ready_s" || failed=1
 
 if [[ "$failed" -ne 0 ]]; then
     exit 1
