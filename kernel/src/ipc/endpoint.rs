@@ -254,10 +254,12 @@ impl ByteEndpoint for QueueEndpoint {
             return Err(Error::Busy);
         }
         let msg = EndpointMessage::new(data)?;
+        let msg_len = msg.len();
         self.queue.push_back(ReceivedMessage {
             message: msg,
             sender,
         });
+        crate::telemetry::record_ipc_queue_enqueue(msg_len);
 
         let receiver_to_wake = self.pop_next_receiver_to_wake().map(|w| w.thread_id);
 
@@ -273,6 +275,7 @@ impl ByteEndpoint for QueueEndpoint {
         // First check call queue (call messages take priority)
         if let Some(call_msg) = self.call_queue.pop_front() {
             self.current_caller = Some(call_msg.caller);
+            crate::telemetry::record_ipc_queue_dequeue(call_msg.message.len());
             // Queue now has space - wake a waiting sender if any
             self.wake_one_waiting_sender();
             return Ok(Some(ReceivedMessage {
@@ -282,6 +285,7 @@ impl ByteEndpoint for QueueEndpoint {
         }
         // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
+            crate::telemetry::record_ipc_queue_dequeue(msg.message.len());
             // Queue now has space - wake a waiting sender if any
             self.wake_one_waiting_sender();
             return Ok(Some(msg));
@@ -295,6 +299,7 @@ impl ByteEndpoint for QueueEndpoint {
         // First check call queue
         if let Some(call_msg) = self.call_queue.pop_front() {
             self.current_caller = Some(call_msg.caller);
+            crate::telemetry::record_ipc_queue_dequeue(call_msg.message.len());
             // Queue now has space - wake a waiting sender if any
             self.wake_one_waiting_sender();
             return Ok(Some(ReceivedMessage {
@@ -304,6 +309,7 @@ impl ByteEndpoint for QueueEndpoint {
         }
         // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
+            crate::telemetry::record_ipc_queue_dequeue(msg.message.len());
             // Queue now has space - wake a waiting sender if any
             self.wake_one_waiting_sender();
             return Ok(Some(msg));
@@ -324,12 +330,14 @@ impl ByteEndpoint for QueueEndpoint {
             return Err(Error::WouldBlock); // This will block the caller thread
         }
         let msg = EndpointMessage::new(data)?;
+        let msg_len = msg.len();
         self.callers_by_cookie.insert(cookie, caller);
         self.call_queue.push_back(CallMessage {
             caller,
             message: msg,
             cookie,
         });
+        crate::telemetry::record_ipc_queue_enqueue(msg_len);
         Ok(self.pop_next_receiver_to_wake().map(|w| w.thread_id))
     }
 
@@ -340,10 +348,12 @@ impl ByteEndpoint for QueueEndpoint {
         // First check call queue
         if let Some(call_msg) = self.call_queue.pop_front() {
             self.current_caller = Some(call_msg.caller);
+            crate::telemetry::record_ipc_queue_dequeue(call_msg.message.len());
             return Ok(Some((call_msg.message, Some(call_msg.caller))));
         }
         // Then check regular queue
         if let Some(msg) = self.queue.pop_front() {
+            crate::telemetry::record_ipc_queue_dequeue(msg.message.len());
             return Ok(Some((msg.message, msg.sender)));
         }
         let ticket = crate::sched::ThreadManager::current_recv_wait_ticket().unwrap_or(0);

@@ -47,18 +47,19 @@ No new syscall numbers are introduced. The syscall ABI remains:
 - Userspace-first changes:
   - Add shared ring abstraction in `userspace/libcluu/src/ipc.rs`. (Status: foundation landed)
   - Use `SpaceGrant` for shared page setup; IPC carries ring notifications/indices.
-  - Integrate first with VFS read/write data plane. (Status: partial integration landed via `VFS_RING_SETUP` + `VFS_READ_RING`, shell `ringio` probe, and `m6_ring_io` harness gate)
+  - Integrate first with VFS read/write data plane. (Status: partial integration landed via `VFS_RING_SETUP` + `VFS_READ_RING`, shell `ringio` probe, and `m6_ring_io` harness gate; ring setup now rejects remap/regrant attempts to different targets for an already-bound client)
 - Validation:
   - New marker mode: `m6_ring_io`.
-  - Latest gate: `env -u CLUU_SHELL_AUTOSTART_CMD MARKER_MODE=m6_ring_io RUN_WAIT=12 ./test_hello.sh` (full rebuild) passes with `ringio: PASS`.
+  - Latest gate: `MARKER_MODE=m6_ring_io CLUU_SHELL_AUTOSTART_CMD=ringio CLUU_BOOTBOOT_ENV=cluu.ipc_direct=1 RUN_WAIT=20 ./test_hello.sh` (full rebuild) passes with `ringio: PASS`.
 
 #### P0.4 IPC SLO re-baseline and enforcement
 - Goal: make IPC gains durable through CI guardrails.
 - Changes:
-  - Extend `kernel/src/telemetry.rs` with queue-bytes/direct-path counters.
-  - Add threshold checks in `test_hello.sh` and `scripts/harness_matrix.sh`.
+  - Extend `kernel/src/telemetry.rs` with queue-bytes/messages current+peak counters in addition to direct-path counters. (Status: landed)
+  - Add threshold checks in `test_hello.sh` and case defaults in `scripts/harness_cases.conf` for `m6_ipc_compact` and `m6_ipc_rendezvous` (wait/scan + queue peak thresholds). (Status: landed)
 - Validation:
-  - `cargo xtask harness-matrix` includes `m6_*` gates and fails on regression.
+  - `scripts/harness_suite.sh --case m6_ipc_compact` passes with SLO gates (`ipc_queue_bytes_peak=3298`, `ipc_queue_messages_peak=40` in latest run).
+  - `scripts/harness_suite.sh --case m6_ipc_rendezvous` passes with SLO gates and direct delivery check (`ipc_direct_deliveries=215`, `ipc_queue_bytes_peak=2952` in latest run).
 
 ### A: Portability unblockers (`poll`, `signal`, `fcntl`)
 

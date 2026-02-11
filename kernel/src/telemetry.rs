@@ -19,6 +19,10 @@ static IPC_RECV_SCAN_TOTAL_STEPS: AtomicU64 = AtomicU64::new(0);
 static IPC_RECV_SCAN_MAX_STEPS: AtomicU64 = AtomicU64::new(0);
 static IPC_STALE_WAITERS: AtomicU64 = AtomicU64::new(0);
 static IPC_DIRECT_DELIVERIES: AtomicU64 = AtomicU64::new(0);
+static IPC_QUEUE_CUR_BYTES: AtomicU64 = AtomicU64::new(0);
+static IPC_QUEUE_PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
+static IPC_QUEUE_CUR_MESSAGES: AtomicU64 = AtomicU64::new(0);
+static IPC_QUEUE_PEAK_MESSAGES: AtomicU64 = AtomicU64::new(0);
 static BOOT_TOKEN_GRANTS: AtomicU64 = AtomicU64::new(0);
 static THREAD_SUSPEND_CALLS: AtomicU64 = AtomicU64::new(0);
 static THREAD_SUSPEND_SUCCESS: AtomicU64 = AtomicU64::new(0);
@@ -145,6 +149,10 @@ pub struct Snapshot {
     pub ipc_recv_scan_max_steps: u64,
     pub ipc_stale_waiters: u64,
     pub ipc_direct_deliveries: u64,
+    pub ipc_queue_bytes_current: u64,
+    pub ipc_queue_bytes_peak: u64,
+    pub ipc_queue_messages_current: u64,
+    pub ipc_queue_messages_peak: u64,
     pub boot_token_grants: u64,
     pub thread_suspend_calls: u64,
     pub thread_suspend_success: u64,
@@ -231,6 +239,38 @@ pub fn record_ipc_direct_delivery() {
 }
 
 #[inline(always)]
+fn saturating_sub_atomic(target: &AtomicU64, amount: u64) {
+    let mut current = target.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_sub(amount);
+        match target.compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[inline(always)]
+pub fn record_ipc_queue_enqueue(bytes: usize) {
+    let added_bytes = bytes as u64;
+    let current_bytes = IPC_QUEUE_CUR_BYTES
+        .fetch_add(added_bytes, Ordering::Relaxed)
+        .saturating_add(added_bytes);
+    update_max_atomic(&IPC_QUEUE_PEAK_BYTES, current_bytes);
+
+    let current_messages = IPC_QUEUE_CUR_MESSAGES
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    update_max_atomic(&IPC_QUEUE_PEAK_MESSAGES, current_messages);
+}
+
+#[inline(always)]
+pub fn record_ipc_queue_dequeue(bytes: usize) {
+    saturating_sub_atomic(&IPC_QUEUE_CUR_BYTES, bytes as u64);
+    saturating_sub_atomic(&IPC_QUEUE_CUR_MESSAGES, 1);
+}
+
+#[inline(always)]
 pub fn record_thread_suspend(success: bool) {
     THREAD_SUSPEND_CALLS.fetch_add(1, Ordering::Relaxed);
     if success {
@@ -295,6 +335,10 @@ pub fn snapshot() -> Snapshot {
         ipc_recv_scan_max_steps: IPC_RECV_SCAN_MAX_STEPS.load(Ordering::Relaxed),
         ipc_stale_waiters: IPC_STALE_WAITERS.load(Ordering::Relaxed),
         ipc_direct_deliveries: IPC_DIRECT_DELIVERIES.load(Ordering::Relaxed),
+        ipc_queue_bytes_current: IPC_QUEUE_CUR_BYTES.load(Ordering::Relaxed),
+        ipc_queue_bytes_peak: IPC_QUEUE_PEAK_BYTES.load(Ordering::Relaxed),
+        ipc_queue_messages_current: IPC_QUEUE_CUR_MESSAGES.load(Ordering::Relaxed),
+        ipc_queue_messages_peak: IPC_QUEUE_PEAK_MESSAGES.load(Ordering::Relaxed),
         boot_token_grants: BOOT_TOKEN_GRANTS.load(Ordering::Relaxed),
         thread_suspend_calls: THREAD_SUSPEND_CALLS.load(Ordering::Relaxed),
         thread_suspend_success: THREAD_SUSPEND_SUCCESS.load(Ordering::Relaxed),
@@ -406,6 +450,14 @@ pub fn log_resource_delta(reason: &str) {
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_stale_waiters);
     klibcluu::info("  ipc_direct_deliveries=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_direct_deliveries);
+    klibcluu::info("  ipc_queue_bytes_current=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_bytes_current);
+    klibcluu::info("  ipc_queue_bytes_peak=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_bytes_peak);
+    klibcluu::info("  ipc_queue_messages_current=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_messages_current);
+    klibcluu::info("  ipc_queue_messages_peak=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_messages_peak);
     klibcluu::info("  thread_suspend_calls=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_suspend_calls);
     klibcluu::info("  thread_suspend_success=");
@@ -532,6 +584,14 @@ pub fn log_bootstrap_snapshot(stage: &str) {
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_stale_waiters);
     klibcluu::info("  ipc_direct_deliveries=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_direct_deliveries);
+    klibcluu::info("  ipc_queue_bytes_current=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_bytes_current);
+    klibcluu::info("  ipc_queue_bytes_peak=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_bytes_peak);
+    klibcluu::info("  ipc_queue_messages_current=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_messages_current);
+    klibcluu::info("  ipc_queue_messages_peak=");
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_messages_peak);
 
     klibcluu::info("  boot_token_grants=");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.boot_token_grants);
@@ -589,6 +649,12 @@ pub fn reset_for_tests() {
     IPC_RECV_SCAN_EVENTS.store(0, Ordering::Relaxed);
     IPC_RECV_SCAN_TOTAL_STEPS.store(0, Ordering::Relaxed);
     IPC_RECV_SCAN_MAX_STEPS.store(0, Ordering::Relaxed);
+    IPC_STALE_WAITERS.store(0, Ordering::Relaxed);
+    IPC_DIRECT_DELIVERIES.store(0, Ordering::Relaxed);
+    IPC_QUEUE_CUR_BYTES.store(0, Ordering::Relaxed);
+    IPC_QUEUE_PEAK_BYTES.store(0, Ordering::Relaxed);
+    IPC_QUEUE_CUR_MESSAGES.store(0, Ordering::Relaxed);
+    IPC_QUEUE_PEAK_MESSAGES.store(0, Ordering::Relaxed);
     BOOT_TOKEN_GRANTS.store(0, Ordering::Relaxed);
     THREAD_SUSPEND_CALLS.store(0, Ordering::Relaxed);
     THREAD_SUSPEND_SUCCESS.store(0, Ordering::Relaxed);

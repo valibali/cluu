@@ -19,6 +19,9 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
      - `SERIAL_LOG`, `MONITOR_SOCK`, `IMG`, `USER_DISK`, `OVMF`
      - `QEMU_GDB=1` to start QEMU with `-S -s`
      - `QEMU_EXTRA_ARGS` for additional QEMU flags
+   - M6 IPC SLO env gates:
+     - `MAX_IPC_WAIT_P95_MS`, `MAX_IPC_WAIT_P99_MS`, `MAX_IPC_SCAN_AVG_STEPS_X100`
+     - `MAX_IPC_QUEUE_BYTES_PEAK`, `MAX_IPC_QUEUE_MESSAGES_PEAK`
 
 2. `scripts/harness_cases.conf`
    - Central case catalog (`name|build_mode|env_assignments`).
@@ -41,6 +44,7 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
      - exit cookie count
      - delta resource metrics
      - IPC fairness metrics (`p95`, `p99`, scan average)
+     - IPC queue pressure metrics (`ipc_queue_bytes_peak`, `ipc_queue_messages_peak`) when present in logs
      - shell readiness latency (`shell_ready_s`, default max 15s)
    - `test_hello.sh` also appends:
      - `HARNESS build_s=...`

@@ -131,6 +131,8 @@ MAX_DELTA_PMM_USED_FRAMES="${MAX_DELTA_PMM_USED_FRAMES:-}"
 MAX_IPC_WAIT_P95_MS="${MAX_IPC_WAIT_P95_MS:-}"
 MAX_IPC_WAIT_P99_MS="${MAX_IPC_WAIT_P99_MS:-}"
 MAX_IPC_SCAN_AVG_STEPS_X100="${MAX_IPC_SCAN_AVG_STEPS_X100:-}"
+MAX_IPC_QUEUE_BYTES_PEAK="${MAX_IPC_QUEUE_BYTES_PEAK:-}"
+MAX_IPC_QUEUE_MESSAGES_PEAK="${MAX_IPC_QUEUE_MESSAGES_PEAK:-}"
 HARNESS_START_SECS=$SECONDS
 QEMU_START_SECS=0
 BUILD_ELAPSED=""
@@ -523,6 +525,8 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "procmgr: exit cookie"
             "resource delta:"
+            "ipc_queue_bytes_peak="
+            "ipc_queue_messages_peak="
         )
         ;;
     m6_ipc_rendezvous)
@@ -532,6 +536,8 @@ case "$MARKER_MODE" in
             "procmgr: exit cookie"
             "resource delta:"
             "ipc_direct_deliveries="
+            "ipc_queue_bytes_peak="
+            "ipc_queue_messages_peak="
         )
         ;;
     m6_ring_io)
@@ -694,6 +700,49 @@ if [ "${#required_markers[@]}" -gt 0 ]; then
     fi
 fi
 
+parse_last_metric() {
+    local marker="$1"
+    awk -v marker="$marker" '
+        $0 ~ marker {
+            if (getline > 0) {
+                v = $0
+                gsub(/[^0-9-]/, "", v)
+                if (v != "") {
+                    last = v
+                }
+            }
+        }
+        END {
+            if (last != "") {
+                print last
+            }
+        }
+    ' "$SERIAL_LOG"
+}
+
+check_metric_limit() {
+    local value="$1"
+    local limit="$2"
+    local name="$3"
+    if [ -z "$limit" ]; then
+        return 0
+    fi
+    if ! [[ "$limit" =~ ^-?[0-9]+$ ]]; then
+        echo "ERROR: $name limit must be an integer, got '$limit'"
+        exit 1
+    fi
+    if [ -z "$value" ]; then
+        echo "MISSING: could not parse $name"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+    if [ "$value" -gt "$limit" ]; then
+        echo "MISSING: $name exceeded limit (value=$value limit=$limit)"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+}
+
 if [ "$MARKER_MODE" = "m1_recv" ]; then
     exit_count=$(grep -c "procmgr: exit cookie" "$SERIAL_LOG" || true)
     if [ "$exit_count" -lt "$MIN_EXIT_COOKIES" ]; then
@@ -826,79 +875,37 @@ if [ "$MARKER_MODE" = "m5_fairness" ]; then
         exit 1
     fi
 
-    parse_last_metric() {
-        local marker="$1"
-        awk -v marker="$marker" '
-            $0 ~ marker {
-                if (getline > 0) {
-                    v = $0
-                    gsub(/[^0-9-]/, "", v)
-                    if (v != "") {
-                        last = v
-                    }
-                }
-            }
-            END {
-                if (last != "") {
-                    print last
-                }
-            }
-        ' "$SERIAL_LOG"
-    }
-
     last_wait_p95_ms="$(parse_last_metric "ipc_wait_p95_ms=")"
     last_wait_p99_ms="$(parse_last_metric "ipc_wait_p99_ms=")"
     last_scan_avg_steps_x100="$(parse_last_metric "ipc_scan_avg_steps_x100=")"
-
-    check_metric_limit() {
-        local value="$1"
-        local limit="$2"
-        local name="$3"
-        if [ -z "$limit" ]; then
-            return 0
-        fi
-        if ! [[ "$limit" =~ ^-?[0-9]+$ ]]; then
-            echo "ERROR: $name limit must be an integer, got '$limit'"
-            exit 1
-        fi
-        if [ -z "$value" ]; then
-            echo "MISSING: could not parse $name"
-            echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
-            exit 1
-        fi
-        if [ "$value" -gt "$limit" ]; then
-            echo "MISSING: $name exceeded limit (value=$value limit=$limit)"
-            echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
-            exit 1
-        fi
-    }
 
     check_metric_limit "$last_wait_p95_ms" "$MAX_IPC_WAIT_P95_MS" "ipc_wait_p95_ms"
     check_metric_limit "$last_wait_p99_ms" "$MAX_IPC_WAIT_P99_MS" "ipc_wait_p99_ms"
     check_metric_limit "$last_scan_avg_steps_x100" "$MAX_IPC_SCAN_AVG_STEPS_X100" "ipc_scan_avg_steps_x100"
 fi
 
-if [ "$MARKER_MODE" = "m6_ipc_rendezvous" ]; then
-    parse_last_metric() {
-        local marker="$1"
-        awk -v marker="$marker" '
-            $0 ~ marker {
-                if (getline > 0) {
-                    v = $0
-                    gsub(/[^0-9-]/, "", v)
-                    if (v != "") {
-                        last = v
-                    }
-                }
-            }
-            END {
-                if (last != "") {
-                    print last
-                }
-            }
-        ' "$SERIAL_LOG"
-    }
+if [ "$MARKER_MODE" = "m6_ipc_compact" ] || [ "$MARKER_MODE" = "m6_ipc_rendezvous" ]; then
+    exit_count=$(grep -c "procmgr: exit cookie" "$SERIAL_LOG" || true)
+    if [ "$exit_count" -lt "$MIN_EXIT_COOKIES" ]; then
+        echo "MISSING: expected at least $MIN_EXIT_COOKIES exit cookies, got $exit_count"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
 
+    last_wait_p95_ms="$(parse_last_metric "ipc_wait_p95_ms=")"
+    last_wait_p99_ms="$(parse_last_metric "ipc_wait_p99_ms=")"
+    last_scan_avg_steps_x100="$(parse_last_metric "ipc_scan_avg_steps_x100=")"
+    last_queue_bytes_peak="$(parse_last_metric "ipc_queue_bytes_peak=")"
+    last_queue_messages_peak="$(parse_last_metric "ipc_queue_messages_peak=")"
+
+    check_metric_limit "$last_wait_p95_ms" "$MAX_IPC_WAIT_P95_MS" "ipc_wait_p95_ms"
+    check_metric_limit "$last_wait_p99_ms" "$MAX_IPC_WAIT_P99_MS" "ipc_wait_p99_ms"
+    check_metric_limit "$last_scan_avg_steps_x100" "$MAX_IPC_SCAN_AVG_STEPS_X100" "ipc_scan_avg_steps_x100"
+    check_metric_limit "$last_queue_bytes_peak" "$MAX_IPC_QUEUE_BYTES_PEAK" "ipc_queue_bytes_peak"
+    check_metric_limit "$last_queue_messages_peak" "$MAX_IPC_QUEUE_MESSAGES_PEAK" "ipc_queue_messages_peak"
+fi
+
+if [ "$MARKER_MODE" = "m6_ipc_rendezvous" ]; then
     direct_deliveries="$(parse_last_metric "ipc_direct_deliveries=")"
     if [ -z "$direct_deliveries" ]; then
         echo "MISSING: could not parse ipc_direct_deliveries"
