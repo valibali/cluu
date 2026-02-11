@@ -53,6 +53,10 @@ pub const VFS_MKDIR: u32 = 0x209;
 pub const VFS_RMDIR: u32 = 0x20A;
 /// Rename/move a path.
 pub const VFS_RENAME: u32 = 0x20B;
+/// Setup a per-client shared ring for bulk reads.
+pub const VFS_RING_SETUP: u32 = 0x20C;
+/// Read into an established shared ring.
+pub const VFS_READ_RING: u32 = 0x20D;
 
 /// Structured enum for protocol routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +73,8 @@ pub enum VfsOp {
     Mkdir,
     Rmdir,
     Rename,
+    RingSetup,
+    ReadRing,
 }
 
 impl VfsOp {
@@ -86,6 +92,8 @@ impl VfsOp {
             VFS_MKDIR => Some(Self::Mkdir),
             VFS_RMDIR => Some(Self::Rmdir),
             VFS_RENAME => Some(Self::Rename),
+            VFS_RING_SETUP => Some(Self::RingSetup),
+            VFS_READ_RING => Some(Self::ReadRing),
             _ => None,
         }
     }

@@ -8,6 +8,9 @@ use crate::syscall;
 use crate::types::*;
 use crate::Error;
 use alloc::vec::Vec;
+use core::cmp;
+use core::mem::{align_of, size_of};
+use core::sync::atomic::{fence, Ordering};
 
 pub const PROC_EXIT_LABEL: u32 = 1;
 pub const CONSOLE_WRITE_LABEL: u32 = 1;
@@ -30,17 +33,357 @@ pub const TTY_READ_REQUEST_LABEL: u32 = 6;
 pub const TTY_CTL_SYNC: u32 = 1;
 pub const CALL_COOKIE_TAG: u8 = 1;
 pub const CALL_COOKIE_WORD: usize = 5;
+pub const SHARED_RING_MAGIC: u32 = 0x434c_5555; // "CLUU"
+pub const SHARED_RING_VERSION: u16 = 1;
+pub const SHARED_RING_DEFAULT_MAP_FLAGS: usize = 0x03; // readable + writable
+pub const SHARED_RING_DEFAULT_GRANT_FLAGS: usize = 0x02; // writable
+const SHARED_RING_MIN_CAPACITY: usize = 2;
 
 /// Tag indicating the message contains a reply token (new system)
 pub const REPLY_TOKEN_TAG: u8 = 2;
 /// Word index where reply token handle is stored
 pub const REPLY_TOKEN_WORD: usize = 5;
 
+/// Shared-ring metadata stored in the first bytes of the shared region.
+///
+/// This is a single-producer/single-consumer ring with one reserved slot to
+/// distinguish full/empty states.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SharedRingHeader {
+    pub magic: u32,
+    pub version: u16,
+    pub reserved: u16,
+    pub capacity: u32,
+    pub read_idx: u32,
+    pub write_idx: u32,
+    pub notify_seq: u32,
+    pub reserved2: u32,
+}
+
+impl SharedRingHeader {
+    pub const fn bytes() -> usize {
+        size_of::<SharedRingHeader>()
+    }
+}
+
+/// Virtual region backing a shared ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SharedRingRegion {
+    pub base: usize,
+    pub bytes: usize,
+    pub pages: usize,
+}
+
+/// Single-producer/single-consumer shared ring view over a mapped region.
+pub struct SharedRing<'a> {
+    header: &'a mut SharedRingHeader,
+    data: &'a mut [u8],
+    capacity: usize,
+}
+
+impl<'a> SharedRing<'a> {
+    /// Return total bytes required for a ring with `capacity` payload bytes.
+    pub fn bytes_for_capacity(capacity: usize) -> Result<usize> {
+        if capacity < SHARED_RING_MIN_CAPACITY {
+            return Err(Error::InvalidArgument);
+        }
+        SharedRingHeader::bytes()
+            .checked_add(capacity)
+            .ok_or(Error::Overflow)
+    }
+
+    /// Initialize a shared ring in `backing`.
+    pub fn initialize(backing: &'a mut [u8]) -> Result<Self> {
+        let (header, data) = split_shared_ring_backing(backing)?;
+        if data.len() < SHARED_RING_MIN_CAPACITY {
+            return Err(Error::BufferTooSmall);
+        }
+        let capacity = data.len().min(u32::MAX as usize);
+        *header = SharedRingHeader {
+            magic: SHARED_RING_MAGIC,
+            version: SHARED_RING_VERSION,
+            reserved: 0,
+            capacity: capacity as u32,
+            read_idx: 0,
+            write_idx: 0,
+            notify_seq: 0,
+            reserved2: 0,
+        };
+        Ok(Self {
+            header,
+            data: &mut data[..capacity],
+            capacity,
+        })
+    }
+
+    /// Attach to an already initialized shared ring.
+    pub fn attach(backing: &'a mut [u8]) -> Result<Self> {
+        let (header, data) = split_shared_ring_backing(backing)?;
+        if header.magic != SHARED_RING_MAGIC || header.version != SHARED_RING_VERSION {
+            return Err(Error::InvalidState);
+        }
+        let capacity = header.capacity as usize;
+        if capacity < SHARED_RING_MIN_CAPACITY || capacity > data.len() {
+            return Err(Error::InvalidState);
+        }
+        Ok(Self {
+            header,
+            data: &mut data[..capacity],
+            capacity,
+        })
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    #[inline]
+    pub fn available_read(&self) -> usize {
+        let read = self.read_idx();
+        let write = self.write_idx();
+        if write >= read {
+            write - read
+        } else {
+            self.capacity - read + write
+        }
+    }
+
+    #[inline]
+    pub fn available_write(&self) -> usize {
+        self.capacity
+            .saturating_sub(self.available_read())
+            .saturating_sub(1)
+    }
+
+    /// Push as many bytes as possible from `src`. Returns bytes written.
+    pub fn push(&mut self, src: &[u8]) -> usize {
+        if src.is_empty() {
+            return 0;
+        }
+        let to_write = cmp::min(src.len(), self.available_write());
+        if to_write == 0 {
+            return 0;
+        }
+        let write = self.write_idx();
+        let first = cmp::min(to_write, self.capacity - write);
+        self.data[write..write + first].copy_from_slice(&src[..first]);
+        if to_write > first {
+            let second = to_write - first;
+            self.data[..second].copy_from_slice(&src[first..first + second]);
+        }
+        fence(Ordering::Release);
+        self.set_write_idx((write + to_write) % self.capacity);
+        to_write
+    }
+
+    /// Pop as many bytes as possible into `dst`. Returns bytes read.
+    pub fn pop(&mut self, dst: &mut [u8]) -> usize {
+        if dst.is_empty() {
+            return 0;
+        }
+        let to_read = cmp::min(dst.len(), self.available_read());
+        if to_read == 0 {
+            return 0;
+        }
+        let read = self.read_idx();
+        let first = cmp::min(to_read, self.capacity - read);
+        dst[..first].copy_from_slice(&self.data[read..read + first]);
+        if to_read > first {
+            let second = to_read - first;
+            dst[first..first + second].copy_from_slice(&self.data[..second]);
+        }
+        fence(Ordering::Release);
+        self.set_read_idx((read + to_read) % self.capacity);
+        to_read
+    }
+
+    /// Reset read/write cursors.
+    pub fn reset(&mut self) {
+        self.set_read_idx(0);
+        self.set_write_idx(0);
+    }
+
+    /// Increment notify sequence to signal peer after data movement.
+    pub fn bump_notify_seq(&mut self) -> u32 {
+        let next = self.notify_seq().wrapping_add(1);
+        unsafe {
+            core::ptr::write_volatile(&mut self.header.notify_seq, next);
+        }
+        next
+    }
+
+    #[inline]
+    pub fn notify_seq(&self) -> u32 {
+        unsafe { core::ptr::read_volatile(&self.header.notify_seq) }
+    }
+
+    #[inline]
+    fn read_idx(&self) -> usize {
+        let raw = unsafe { core::ptr::read_volatile(&self.header.read_idx) } as usize;
+        if self.capacity == 0 {
+            0
+        } else {
+            raw % self.capacity
+        }
+    }
+
+    #[inline]
+    fn write_idx(&self) -> usize {
+        let raw = unsafe { core::ptr::read_volatile(&self.header.write_idx) } as usize;
+        if self.capacity == 0 {
+            0
+        } else {
+            raw % self.capacity
+        }
+    }
+
+    #[inline]
+    fn set_read_idx(&mut self, idx: usize) {
+        unsafe {
+            core::ptr::write_volatile(&mut self.header.read_idx, idx as u32);
+        }
+    }
+
+    #[inline]
+    fn set_write_idx(&mut self, idx: usize) {
+        unsafe {
+            core::ptr::write_volatile(&mut self.header.write_idx, idx as u32);
+        }
+    }
+}
+
+fn split_shared_ring_backing(backing: &mut [u8]) -> Result<(&mut SharedRingHeader, &mut [u8])> {
+    if backing.len() < SharedRingHeader::bytes() {
+        return Err(Error::BufferTooSmall);
+    }
+    let align = align_of::<SharedRingHeader>();
+    if !(backing.as_ptr() as usize).is_multiple_of(align) {
+        return Err(Error::InvalidArgument);
+    }
+    let (header_bytes, data) = backing.split_at_mut(SharedRingHeader::bytes());
+    let header = unsafe { &mut *(header_bytes.as_mut_ptr() as *mut SharedRingHeader) };
+    Ok((header, data))
+}
+
+/// Allocate and map a local shared-ring region in the caller address space.
+pub fn alloc_shared_ring_region(
+    space_token: usize,
+    capacity: usize,
+    map_flags: usize,
+) -> Result<SharedRingRegion> {
+    let min_bytes = SharedRing::bytes_for_capacity(capacity)?;
+    let pages = crate::mem::pages_for_size(min_bytes);
+    let bytes = pages
+        .checked_mul(crate::mem::PAGE_SIZE)
+        .ok_or(Error::Overflow)?;
+    let base = {
+        let mut vspace = crate::vspace::VSPACE.lock();
+        vspace.alloc(bytes)?
+    };
+    match crate::syscall::space_map_range(space_token, base, 0, map_flags, pages, 0) {
+        Ok(_) => Ok(SharedRingRegion { base, bytes, pages }),
+        Err(err) => {
+            let mut vspace = crate::vspace::VSPACE.lock();
+            let _ = vspace.free(base, bytes);
+            Err(err)
+        }
+    }
+}
+
+/// Unmap and release a previously allocated shared-ring region.
+pub fn free_shared_ring_region(space_token: usize, region: SharedRingRegion) -> Result<()> {
+    crate::syscall::space_unmap(space_token, region.base, region.pages)?;
+    let mut vspace = crate::vspace::VSPACE.lock();
+    vspace.free(region.base, region.bytes)?;
+    Ok(())
+}
+
+/// Grant a mapped ring region to another address space page-by-page.
+///
+/// Returns the number of pages granted.
+pub fn grant_shared_ring_region(
+    source_space_token: usize,
+    target_space_token: usize,
+    source_base: usize,
+    target_base: usize,
+    bytes: usize,
+    grant_flags: usize,
+) -> Result<usize> {
+    if bytes == 0 {
+        return Err(Error::InvalidArgument);
+    }
+    if !source_base.is_multiple_of(crate::mem::PAGE_SIZE)
+        || !target_base.is_multiple_of(crate::mem::PAGE_SIZE)
+    {
+        return Err(Error::InvalidArgument);
+    }
+    let pages = crate::mem::pages_for_size(bytes);
+    for page_idx in 0..pages {
+        let src = source_base + page_idx * crate::mem::PAGE_SIZE;
+        let dst = target_base + page_idx * crate::mem::PAGE_SIZE;
+        crate::syscall::space_grant(
+            source_space_token,
+            target_space_token,
+            src,
+            dst,
+            grant_flags,
+        )?;
+    }
+    Ok(pages)
+}
+
 /// Send a message (one-way)
 pub fn send(endpoint_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()> {
     // Convert Message to bytes and call syscall::ipc_send
     let msg_bytes = msg.as_bytes();
     syscall::ipc_send(endpoint_token, msg_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_ring_roundtrip_wraps() {
+        let mut backing = [0u8; 96];
+        let mut ring = SharedRing::initialize(&mut backing).expect("init");
+        assert_eq!(ring.capacity(), 64); // 32-byte header + 64-byte data
+
+        let first = [1u8; 40];
+        assert_eq!(ring.push(&first), 40);
+        assert_eq!(ring.available_read(), 40);
+
+        let mut out = [0u8; 24];
+        assert_eq!(ring.pop(&mut out), 24);
+        assert_eq!(out, [1u8; 24]);
+
+        let second = [2u8; 30];
+        assert_eq!(ring.push(&second), 30);
+
+        let mut drain = [0u8; 46];
+        assert_eq!(ring.pop(&mut drain), 46);
+        assert_eq!(&drain[..16], [1u8; 16].as_slice());
+        assert_eq!(&drain[16..], [2u8; 30].as_slice());
+    }
+
+    #[test]
+    fn shared_ring_attach_rejects_uninitialized() {
+        let mut backing = [0u8; 128];
+        assert_eq!(
+            SharedRing::attach(&mut backing).err(),
+            Some(Error::InvalidState)
+        );
+    }
+
+    #[test]
+    fn shared_ring_bytes_overflow_guard() {
+        assert_eq!(
+            SharedRing::bytes_for_capacity(usize::MAX).err(),
+            Some(Error::Overflow)
+        );
+    }
 }
 
 /// Send a message with an inline payload appended after the Message header.

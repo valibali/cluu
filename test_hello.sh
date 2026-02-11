@@ -107,6 +107,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         m6_ipc_rendezvous)
             TEST_COMMAND="repeat 8 spawn hello"
             ;;
+        m6_ring_io)
+            TEST_COMMAND="echo ringio-marker"
+            SHELL_AUTOSTART_CMD_DEFAULT="ringio"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -391,6 +395,7 @@ fi
 # - m5_fairness: mixed-load fairness/latency telemetry SLO checks
 # - m6_ipc_compact: compact IPC queue storage regression smoke under spawn churn
 # - m6_ipc_rendezvous: direct sender->waiting-receiver transfer path under churn
+# - m6_ring_io: shared-ring bulk read path for VFS
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -527,6 +532,13 @@ case "$MARKER_MODE" in
             "procmgr: exit cookie"
             "resource delta:"
             "ipc_direct_deliveries="
+        )
+        ;;
+    m6_ring_io)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "ringio: PASS path=/bin/hello"
         )
         ;;
     l2_ext2write)

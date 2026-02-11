@@ -12,7 +12,7 @@ use core::mem::size_of;
 use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
-    call, call_with_payload, recv, send_with_payload, send_with_retry, TTY_READ_LABEL,
+    call, call_with_payload, recv, send_with_payload, send_with_retry, SharedRing, TTY_READ_LABEL,
     TTY_WRITE_LABEL,
 };
 use libcluu::registry;
@@ -256,6 +256,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(Ext2MutateBuiltin));
         registry.register(Box::new(Ext2UnlinkBuiltin));
         registry.register(Box::new(Ext2OwnerDenyBuiltin));
+        registry.register(Box::new(RingIoBuiltin));
         registry.register(Box::new(CatBuiltin));
         registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(HeapBuiltin));
@@ -319,7 +320,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, jobchurn, jobmix, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, repeat, cat, ls, heap\n",
+            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, jobchurn, jobmix, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, ringio, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -955,7 +956,15 @@ fn spawn_process(context: &mut CommandContext, path: &str, priority: usize) -> R
     msg.words[2] = 0;
     msg.words[3] = notify_endpoint;
     let mut reply = Message::new(0, [0; 6], 0);
+    let _ = debug_print(&format!(
+        "shell: spawn call begin path={} ep={} notify={}",
+        initrd_path, procmgr_endpoint, notify_endpoint
+    ));
     call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
+    let _ = debug_print(&format!(
+        "shell: spawn call done status={} pid={}",
+        reply.words[0], reply.words[1]
+    ));
     Ok(SpawnResult {
         procmgr_endpoint,
         notify_endpoint,
@@ -1782,6 +1791,180 @@ impl BuiltinCommand for Ext2OwnerDenyBuiltin {
                 send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
             }
         }
+        Ok(())
+    }
+}
+
+struct RingIoBuiltin;
+
+impl BuiltinCommand for RingIoBuiltin {
+    fn name(&self) -> &'static str {
+        "ringio"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let path = args.first().map(|s| s.as_str()).unwrap_or("/bin/hello");
+        let max_rounds = args
+            .get(1)
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(16)
+            .max(1);
+        let chunk = args
+            .get(2)
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(16 * 1024)
+            .max(512);
+
+        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+            Ok(ep) => ep,
+            Err(err) => {
+                let line = format!("ringio: FAIL vfs unavailable {:?}\n", err);
+                let _ = debug_print(line.trim_end());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+            Ok(client) => client,
+            Err(err) => {
+                let line = format!("ringio: FAIL client {:?}\n", err);
+                let _ = debug_print(line.trim_end());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+        let file = match vfs.open(path) {
+            Ok(file) => file,
+            Err(err) => {
+                let line = format!("ringio: FAIL open {} {:?}\n", path, err);
+                let _ = debug_print(line.trim_end());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let space_token = process_info().tokens[TOKEN_SPACE];
+        if space_token == 0 {
+            let _ = vfs.close(file);
+            let _ = debug_print("ringio: FAIL missing space token");
+            send_with_retry(
+                stdout,
+                TTY_WRITE_LABEL,
+                b"ringio: FAIL missing space token\n",
+            )?;
+            return Ok(());
+        }
+
+        let region = match libcluu::ipc::alloc_shared_ring_region(
+            space_token,
+            64 * 1024,
+            libcluu::ipc::SHARED_RING_DEFAULT_MAP_FLAGS,
+        ) {
+            Ok(region) => region,
+            Err(err) => {
+                let _ = vfs.close(file);
+                let line = format!("ringio: FAIL alloc_shared_ring {:?}\n", err);
+                let _ = debug_print(line.trim_end());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let ring_meta = match vfs.setup_read_ring(space_token, region.base, region.bytes) {
+            Ok(meta) => meta,
+            Err(err) => {
+                let _ = libcluu::ipc::free_shared_ring_region(space_token, region);
+                let _ = vfs.close(file);
+                let line = format!("ringio: FAIL ring setup {:?}\n", err);
+                let _ = debug_print(line.trim_end());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+        if ring_meta.bytes > region.bytes {
+            let _ = libcluu::ipc::free_shared_ring_region(space_token, region);
+            let _ = vfs.close(file);
+            let _ = debug_print("ringio: FAIL invalid ring bytes");
+            send_with_retry(
+                stdout,
+                TTY_WRITE_LABEL,
+                b"ringio: FAIL invalid ring bytes\n",
+            )?;
+            return Ok(());
+        }
+
+        let backing =
+            unsafe { core::slice::from_raw_parts_mut(region.base as *mut u8, ring_meta.bytes) };
+        let mut ring = match SharedRing::attach(backing) {
+            Ok(ring) => ring,
+            Err(err) => {
+                let _ = libcluu::ipc::free_shared_ring_region(space_token, region);
+                let _ = vfs.close(file);
+                let line = format!("ringio: FAIL ring attach {:?}\n", err);
+                let _ = debug_print(line.trim_end());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let mut total = 0usize;
+        let mut offset = 0usize;
+        let mut rounds = 0usize;
+        let mut notify_seq = ring.notify_seq();
+        loop {
+            if rounds >= max_rounds {
+                break;
+            }
+            let req = chunk.min(ring_meta.capacity.saturating_sub(1));
+            if req == 0 {
+                break;
+            }
+            let ring_chunk = match vfs.read_ring(file, offset, req) {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    let line = format!("ringio: FAIL read_ring {:?}\n", err);
+                    let _ = debug_print(line.trim_end());
+                    send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                    let _ = libcluu::ipc::free_shared_ring_region(space_token, region);
+                    let _ = vfs.close(file);
+                    return Ok(());
+                }
+            };
+            if ring_chunk.len == 0 {
+                break;
+            }
+
+            let mut drain = alloc::vec![0u8; ring_chunk.len];
+            let popped = ring.pop(&mut drain);
+            if popped != ring_chunk.len {
+                let line = format!(
+                    "ringio: FAIL ring pop mismatch expected={} got={}\n",
+                    ring_chunk.len, popped
+                );
+                let _ = debug_print(line.trim_end());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = libcluu::ipc::free_shared_ring_region(space_token, region);
+                let _ = vfs.close(file);
+                return Ok(());
+            }
+
+            total += popped;
+            offset += popped;
+            rounds += 1;
+            notify_seq = ring_chunk.notify_seq;
+            if ring_chunk.eof {
+                break;
+            }
+        }
+
+        let _ = libcluu::ipc::free_shared_ring_region(space_token, region);
+        let _ = vfs.close(file);
+        let line = format!(
+            "ringio: PASS path={} bytes={} rounds={} notify_seq={}\n",
+            path, total, rounds, notify_seq
+        );
+        let _ = debug_print(line.as_str());
+        send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         Ok(())
     }
 }

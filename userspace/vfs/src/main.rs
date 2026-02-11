@@ -11,13 +11,14 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::vec::Vec;
+use core::cmp;
 use core::mem::size_of;
 use libcluu::elf::{ElfFile, LoadableSegment};
 use libcluu::fs::protocol::{
     VfsOp, VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT,
-    VFS_RENAME, VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
+    VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
 };
-use libcluu::ipc::{self, extract_reply_token, reply_with_payload};
+use libcluu::ipc::{self, extract_reply_token, reply_with_payload, SharedRing, SharedRingHeader};
 use libcluu::types::Message;
 use libcluu::*;
 
@@ -46,6 +47,13 @@ const GRANT_BUF_SIZE: usize = 1024 * 1024;
 const CACHE_BUF_BASE: usize = 0x64000000;
 /// Size of the VFS read cache region.
 const CACHE_BUF_SIZE: usize = 32 * 1024 * 1024;
+/// Dedicated per-client shared-ring pool (for ring bulk reads).
+const RING_POOL_BASE: usize = 0x68000000;
+const RING_SLOT_BYTES: usize = 64 * 1024;
+const RING_SLOT_COUNT: usize = 4;
+const RING_POOL_SIZE: usize = RING_SLOT_BYTES * RING_SLOT_COUNT;
+const RING_SLOT_CAPACITY: usize = RING_SLOT_BYTES - SharedRingHeader::bytes();
+const RING_MIN_REQUESTED_BYTES: usize = 8 * 1024;
 /// Cap for remote grant reads to avoid large transient allocations.
 const REMOTE_READ_CAP: usize = GRANT_BUF_SIZE;
 /// Maximum size of file to cache (8MB - covers most executables).
@@ -113,6 +121,11 @@ fn run_vfs() -> Result<()> {
         "vfs: cache buffer mapped base={:#x} size={}",
         cache_buf_base, CACHE_BUF_SIZE
     ));
+    let ring_pool_base = map_ring_pool(space_token)?;
+    let _ = debug_print(&format!(
+        "vfs: ring pool mapped base={:#x} size={}",
+        ring_pool_base, RING_POOL_SIZE
+    ));
     let vfs_space_map_token =
         token_derive(space_token, Rights::SPACE_MAP.bits() as usize, u64::MAX)?;
     let mut server = VfsServer::new(
@@ -123,6 +136,8 @@ fn run_vfs() -> Result<()> {
         GRANT_BUF_SIZE,
         cache_buf_base,
         CACHE_BUF_SIZE,
+        ring_pool_base,
+        RING_POOL_SIZE,
         mounts,
     );
     let registry_endpoint = registry::control_endpoint();
@@ -370,16 +385,29 @@ fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }
 
+#[derive(Clone, Copy)]
+struct ReadRingSession {
+    source_base: usize,
+    target_base: usize,
+    target_space: usize,
+    bytes: usize,
+    capacity: usize,
+    slot: usize,
+}
+
 struct VfsServer {
     endpoint: usize,
     space_token: usize,
     vfs_space_map_token: usize,
     grant_buf_base: usize,
     grant_buf_size: usize,
+    ring_pool_base: usize,
     mounts: MountTable,
     files: FdTable,
     cache: FileCache,
     path_owners: BTreeMap<alloc::string::String, usize>,
+    read_rings: BTreeMap<usize, ReadRingSession>,
+    free_ring_slots: Vec<usize>,
 }
 
 impl VfsServer {
@@ -391,18 +419,29 @@ impl VfsServer {
         grant_buf_size: usize,
         cache_buf_base: usize,
         cache_buf_size: usize,
+        ring_pool_base: usize,
+        ring_pool_size: usize,
         mounts: MountTable,
     ) -> Self {
+        let mut free_ring_slots = Vec::new();
+        let ring_slots = ring_pool_size / RING_SLOT_BYTES;
+        for slot in 0..ring_slots {
+            free_ring_slots.push(slot);
+        }
+        free_ring_slots.reverse();
         Self {
             endpoint,
             space_token,
             vfs_space_map_token,
             grant_buf_base,
             grant_buf_size,
+            ring_pool_base,
             mounts,
             files: FdTable::new(),
             cache: FileCache::new(cache_buf_base, cache_buf_size),
             path_owners: BTreeMap::new(),
+            read_rings: BTreeMap::new(),
+            free_ring_slots,
         }
     }
 
@@ -429,6 +468,10 @@ impl VfsServer {
             VfsOp::Mkdir => self.handle_mkdir(msg, payload, reply_token, authenticated_client),
             VfsOp::Rmdir => self.handle_rmdir(msg, payload, reply_token, authenticated_client),
             VfsOp::Rename => self.handle_rename(msg, payload, reply_token, authenticated_client),
+            VfsOp::RingSetup => {
+                self.handle_ring_setup(msg, payload, reply_token, authenticated_client)
+            }
+            VfsOp::ReadRing => self.handle_read_ring(msg, reply_token, authenticated_client),
         };
         vfs_trace!("vfs: handled {:?} result={:?}", op, result);
         result
@@ -980,6 +1023,279 @@ impl VfsServer {
         for (_, new, owner) in updates {
             self.path_owners.insert(new, owner);
         }
+    }
+
+    fn handle_ring_setup(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
+        let mut reply_msg = Message::new(VFS_RING_SETUP, [0; 6], 4);
+        let client_id = match self.resolve_client_id("ring_setup", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let Some(target_base) = parse_single_usize(payload) else {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        };
+        let target_space = msg.words[2];
+        if target_space == 0 || !target_base.is_multiple_of(PAGE_SIZE) {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+
+        let requested = msg.words[3];
+        let requested = requested
+            .max(RING_MIN_REQUESTED_BYTES)
+            .min(RING_SLOT_CAPACITY);
+        if requested < RING_MIN_REQUESTED_BYTES {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+
+        let mut allocated_slot: Option<usize> = None;
+        let mut session = if let Some(existing) = self.read_rings.get(&client_id).copied() {
+            existing
+        } else {
+            let Some(slot) = self.free_ring_slots.pop() else {
+                reply_msg.words[0] = Error::Busy.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            };
+            allocated_slot = Some(slot);
+            ReadRingSession {
+                source_base: self.ring_pool_base + slot * RING_SLOT_BYTES,
+                target_base,
+                target_space,
+                bytes: RING_SLOT_BYTES,
+                capacity: RING_SLOT_CAPACITY,
+                slot,
+            }
+        };
+
+        session.target_base = target_base;
+        session.target_space = target_space;
+
+        {
+            let backing = unsafe {
+                core::slice::from_raw_parts_mut(session.source_base as *mut u8, session.bytes)
+            };
+            if SharedRing::initialize(backing).is_err() {
+                if let Some(slot) = allocated_slot {
+                    self.free_ring_slots.push(slot);
+                }
+                reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
+
+        let pages = session.bytes.div_ceil(PAGE_SIZE);
+        for page_idx in 0..pages {
+            let src = session.source_base + page_idx * PAGE_SIZE;
+            let dst = session.target_base + page_idx * PAGE_SIZE;
+            if let Err(err) = space_grant(self.space_token, session.target_space, src, dst, 0x02) {
+                if let Some(slot) = allocated_slot {
+                    self.free_ring_slots.push(slot);
+                }
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
+
+        self.read_rings.insert(client_id, session);
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = session.bytes;
+        reply_msg.words[2] = requested.min(session.capacity);
+        reply_msg.words[3] = session.slot;
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn handle_read_ring(
+        &mut self,
+        msg: &Message,
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
+        let mut reply_msg = Message::new(VFS_READ_RING, [0; 6], 4);
+        let client_id = match self.resolve_client_id("read_ring", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let fd = msg.words[2];
+        let offset = msg.words[3];
+        let requested = msg.words[4];
+        if requested == 0 {
+            reply_msg.words[0] = 0;
+            reply_msg.words[1] = 0;
+            reply_msg.words[2] = 0;
+            reply_msg.words[3] = 1;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+
+        let Some(session) = self.read_rings.get(&client_id).copied() else {
+            reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        };
+        let Some(file) = self.files.get(client_id, fd).cloned() else {
+            reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        };
+
+        let backing = unsafe {
+            core::slice::from_raw_parts_mut(session.source_base as *mut u8, session.bytes)
+        };
+        let mut ring = match SharedRing::attach(backing) {
+            Ok(ring) => ring,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        let max_fill = cmp::min(requested, ring.available_write());
+        if max_fill == 0 {
+            reply_msg.words[0] = 0;
+            reply_msg.words[1] = 0;
+            reply_msg.words[2] = ring.notify_seq() as usize;
+            reply_msg.words[3] = 0;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+
+        let data = self.read_file_chunk(&file, offset, max_fill)?;
+        let pushed = ring.push(&data);
+        let notify_seq = if pushed > 0 {
+            ring.bump_notify_seq()
+        } else {
+            ring.notify_seq()
+        };
+        let eof = data.len() < max_fill;
+
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = pushed;
+        reply_msg.words[2] = notify_seq as usize;
+        reply_msg.words[3] = if eof { 1 } else { 0 };
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn read_file_chunk(
+        &mut self,
+        file: &OpenFile,
+        offset: usize,
+        requested: usize,
+    ) -> Result<Vec<u8>> {
+        if requested == 0 {
+            return Ok(Vec::new());
+        }
+        match file {
+            OpenFile::Memory(entry) => {
+                let available = entry.size.saturating_sub(offset);
+                let len = requested.min(available);
+                if len == 0 {
+                    return Ok(Vec::new());
+                }
+                let src = unsafe {
+                    core::slice::from_raw_parts(
+                        (entry.base + entry.offset + offset) as *const u8,
+                        len,
+                    )
+                };
+                Ok(src.to_vec())
+            }
+            OpenFile::Virtual(vfile) => {
+                let available = vfile.data.len().saturating_sub(offset);
+                let len = requested.min(available);
+                if len == 0 {
+                    return Ok(Vec::new());
+                }
+                Ok(vfile.data[offset..offset + len].to_vec())
+            }
+            OpenFile::Ext2(entry) => {
+                let available = entry.size.saturating_sub(offset);
+                let len = requested.min(available).min(REMOTE_READ_CAP);
+                if len == 0 {
+                    return Ok(Vec::new());
+                }
+                if let Some(cache_entry) = self.cache.get(entry.inode, entry.size) {
+                    let cached = unsafe {
+                        core::slice::from_raw_parts(cache_entry.base as *const u8, cache_entry.len)
+                    };
+                    let cached_len = cached.len().saturating_sub(offset).min(len);
+                    return Ok(cached[offset..offset + cached_len].to_vec());
+                }
+                if offset == 0 && requested >= entry.size {
+                    if let Some(cache_entry) = self.cache_ext2_file(entry) {
+                        let cached = unsafe {
+                            core::slice::from_raw_parts(
+                                cache_entry.base as *const u8,
+                                cache_entry.len,
+                            )
+                        };
+                        let cached_len = cached.len().min(len);
+                        return Ok(cached[..cached_len].to_vec());
+                    }
+                }
+
+                let mut out = alloc::vec![0u8; len];
+                let read =
+                    self.read_remote_chunk_into(entry.endpoint, entry.inode, offset, &mut out)?;
+                out.truncate(read);
+                Ok(out)
+            }
+        }
+    }
+
+    fn read_remote_chunk_into(
+        &self,
+        endpoint: usize,
+        inode: u32,
+        offset: usize,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        let req = Message::new(
+            FS_READ_GRANT,
+            [0, 0, inode as usize, offset, out.len(), 0],
+            5,
+        );
+        let mut reply = Message::new(0, [0; 6], 0);
+        let mut payload = [0u8; TWO_USIZE_BYTES];
+        payload[..USIZE_BYTES].copy_from_slice(&self.grant_buf_base.to_ne_bytes());
+        payload[USIZE_BYTES..TWO_USIZE_BYTES]
+            .copy_from_slice(&self.vfs_space_map_token.to_ne_bytes());
+        ipc::call_with_payload(endpoint, &req, &payload, &mut reply)?;
+
+        let status = reply.words[0] as isize;
+        if status < 0 {
+            return Err(Error::from_errno(status));
+        }
+
+        let bytes_read = reply.words[1].min(out.len());
+        let page_offset = reply.words[2];
+        if page_offset >= self.grant_buf_size {
+            return Err(Error::InvalidState);
+        }
+        let available = self.grant_buf_size - page_offset;
+        if bytes_read > available {
+            return Err(Error::InvalidState);
+        }
+        let src = unsafe {
+            core::slice::from_raw_parts(
+                (self.grant_buf_base + page_offset) as *const u8,
+                bytes_read,
+            )
+        };
+        out[..bytes_read].copy_from_slice(src);
+        Ok(bytes_read)
     }
 
     fn handle_read_grant(
@@ -1845,6 +2161,15 @@ fn parse_usize_pair(payload: &[u8]) -> Option<(usize, usize)> {
     Some((first, second))
 }
 
+fn parse_single_usize(payload: &[u8]) -> Option<usize> {
+    if payload.len() < USIZE_BYTES {
+        return None;
+    }
+    let mut bytes = [0u8; USIZE_BYTES];
+    bytes.copy_from_slice(&payload[..USIZE_BYTES]);
+    Some(usize::from_ne_bytes(bytes))
+}
+
 fn map_grant_buffer(space_token: usize) -> Result<usize> {
     let pages = (GRANT_BUF_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
     if pages == 0 {
@@ -1884,6 +2209,28 @@ fn map_cache_buffer(space_token: usize) -> Result<usize> {
         }
         Err(err) => {
             let _ = debug_print(&format!("vfs: cache buffer map failed {:?}", err));
+            Err(err)
+        }
+    }
+}
+
+fn map_ring_pool(space_token: usize) -> Result<usize> {
+    let pages = (RING_POOL_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+    if pages == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    match syscall::space_map_range(space_token, RING_POOL_BASE, 0, 0x03, pages, 0) {
+        Ok(_) => {
+            let _ = debug_print("vfs: ring pool space_map_range ok");
+            Ok(RING_POOL_BASE)
+        }
+        Err(Error::AlreadyExists) => {
+            let _ = debug_print("vfs: ring pool already mapped");
+            Ok(RING_POOL_BASE)
+        }
+        Err(err) => {
+            let _ = debug_print(&format!("vfs: ring pool map failed {:?}", err));
             Err(err)
         }
     }

@@ -45,12 +45,12 @@ No new syscall numbers are introduced. The syscall ABI remains:
 #### P0.3 Shared-ring bulk data path (library-first)
 - Goal: stop pushing large VFS/console payloads through queue copies.
 - Userspace-first changes:
-  - Add shared ring abstraction in `userspace/libcluu/src/ipc.rs`.
+  - Add shared ring abstraction in `userspace/libcluu/src/ipc.rs`. (Status: foundation landed)
   - Use `SpaceGrant` for shared page setup; IPC carries ring notifications/indices.
-  - Integrate first with VFS read/write data plane.
+  - Integrate first with VFS read/write data plane. (Status: partial integration landed via `VFS_RING_SETUP` + `VFS_READ_RING`, shell `ringio` probe, and `m6_ring_io` harness gate)
 - Validation:
   - New marker mode: `m6_ring_io`.
-  - Throughput and copy-count telemetry show clear bulk-path usage.
+  - Latest gate: `env -u CLUU_SHELL_AUTOSTART_CMD MARKER_MODE=m6_ring_io RUN_WAIT=12 ./test_hello.sh` (full rebuild) passes with `ringio: PASS`.
 
 #### P0.4 IPC SLO re-baseline and enforcement
 - Goal: make IPC gains durable through CI guardrails.
@@ -150,4 +150,3 @@ For each sub-milestone (`P0.1`, `P0.2`, ...):
 3. Then `P0.3` (shared ring bulk path for VFS).
 4. Then `P0.4` (SLO rebaseline and CI thresholds).
 5. Enter Phase A.
-

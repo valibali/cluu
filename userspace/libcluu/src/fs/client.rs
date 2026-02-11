@@ -6,7 +6,7 @@
 use crate::error::{Error, Result};
 use crate::fs::protocol::{
     VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT,
-    VFS_RENAME, VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
+    VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
 };
 use crate::ipc;
 use crate::types::Message;
@@ -29,6 +29,22 @@ pub struct VfsGrant {
     pub offset: usize,
     /// Length of valid data.
     pub len: usize,
+}
+
+/// Shared-ring metadata returned by VFS ring setup.
+#[derive(Debug, Clone, Copy)]
+pub struct VfsReadRing {
+    pub base: usize,
+    pub bytes: usize,
+    pub capacity: usize,
+}
+
+/// Result of one VFS ring read request.
+#[derive(Debug, Clone, Copy)]
+pub struct VfsReadRingChunk {
+    pub len: usize,
+    pub notify_seq: u32,
+    pub eof: bool,
 }
 
 /// File metadata returned by stat/fstat.
@@ -130,6 +146,48 @@ impl VfsClient {
             base: target_base,
             offset: reply.words[2],
             len: reply.words[1],
+        })
+    }
+
+    /// Establish (or refresh) a shared-ring mapping for this client.
+    ///
+    /// The caller provides a mapped local virtual window and its own space token.
+    pub fn setup_read_ring(
+        &self,
+        target_space_token: usize,
+        target_base: usize,
+        requested_bytes: usize,
+    ) -> Result<VfsReadRing> {
+        let payload = target_base.to_ne_bytes();
+        let msg = make_payload_message(
+            VFS_RING_SETUP,
+            payload.len(),
+            &[self.client_id, target_space_token, requested_bytes],
+        );
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, &payload, &mut reply)?;
+        parse_status(reply.words[0])?;
+        Ok(VfsReadRing {
+            base: target_base,
+            bytes: reply.words[1],
+            capacity: reply.words[2],
+        })
+    }
+
+    /// Request the server to fill bytes into the established shared ring.
+    pub fn read_ring(&self, file: VfsFile, offset: usize, len: usize) -> Result<VfsReadRingChunk> {
+        let mut msg = Message::new(VFS_READ_RING, [0; 6], 5);
+        msg.words[0] = 0;
+        msg.words[1] = self.client_id;
+        msg.words[2] = file.fd;
+        msg.words[3] = offset;
+        msg.words[4] = len;
+        ipc::call(self.endpoint, &mut msg, crate::IpcFlags::empty())?;
+        parse_status(msg.words[0])?;
+        Ok(VfsReadRingChunk {
+            len: msg.words[1],
+            notify_seq: msg.words[2] as u32,
+            eof: msg.words[3] != 0,
         })
     }
 
