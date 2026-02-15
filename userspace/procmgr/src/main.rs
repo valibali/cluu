@@ -1226,15 +1226,22 @@ fn map_process_info_page(
     let info_size = size_of::<ProcessInfo>();
     let argv_data_offset = info_offset + info_size; // byte offset within page
 
-    // Store argc and argv data offset in params
-    if argc > 0 && !argv_payload.is_empty() {
+    // Compute data offsets and validate bounds before setting params.
+    // argv and env data are packed after the ProcessInfo struct in the same page.
+    // If either would overflow the page, its params are left at 0 (child sees no data).
+    let env_data_offset = argv_data_offset + argv_payload.len();
+    let argv_end = argv_data_offset + argv_payload.len();
+    let env_end = env_data_offset + env_data.len();
+
+    let argv_fits = argc > 0 && !argv_payload.is_empty() && argv_end <= PAGE_SIZE;
+    let env_fits = envc > 0 && !env_data.is_empty() && env_end <= PAGE_SIZE;
+
+    // Only set params if the data actually fits — prevents child from reading garbage
+    if argv_fits {
         params[PARAM_ARGC] = argc as u64;
         params[PARAM_ARGV_OFFSET] = argv_data_offset as u64;
     }
-
-    // Compute env data offset (after argv data)
-    let env_data_offset = argv_data_offset + argv_payload.len();
-    if envc > 0 && !env_data.is_empty() {
+    if env_fits {
         params[PARAM_ENVC] = envc as u64;
         params[PARAM_ENV_OFFSET] = env_data_offset as u64;
     }
@@ -1257,20 +1264,13 @@ fn map_process_info_page(
     page[info_offset..end].copy_from_slice(bytes);
 
     // Write argv data after ProcessInfo (null-terminated strings packed contiguously)
-    // The payload format from posix_spawn is: [path\0, arg0\0, arg1\0, ...]
-    if argc > 0 && !argv_payload.is_empty() {
-        let argv_end = argv_data_offset + argv_payload.len();
-        if argv_end <= PAGE_SIZE {
-            page[argv_data_offset..argv_end].copy_from_slice(argv_payload);
-        }
+    if argv_fits {
+        page[argv_data_offset..argv_end].copy_from_slice(argv_payload);
     }
 
     // Write env data after argv data (packed "KEY=VALUE\0" strings)
-    if envc > 0 && !env_data.is_empty() {
-        let env_end = env_data_offset + env_data.len();
-        if env_end <= PAGE_SIZE {
-            page[env_data_offset..env_end].copy_from_slice(env_data);
-        }
+    if env_fits {
+        page[env_data_offset..env_end].copy_from_slice(env_data);
     }
 
     space_map(

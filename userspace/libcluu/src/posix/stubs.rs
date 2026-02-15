@@ -116,6 +116,7 @@ pub struct Passwd {
     pub pw_passwd: *mut c_char,
     pub pw_uid: uid_t,
     pub pw_gid: gid_t,
+    pub pw_comment: *mut c_char,
     pub pw_gecos: *mut c_char,
     pub pw_dir: *mut c_char,
     pub pw_shell: *mut c_char,
@@ -123,6 +124,7 @@ pub struct Passwd {
 
 static ROOT_NAME: &[u8] = b"root\0";
 static ROOT_PASSWD: &[u8] = b"\0";
+static ROOT_COMMENT: &[u8] = b"\0";
 static ROOT_GECOS: &[u8] = b"root\0";
 static ROOT_DIR: &[u8] = b"/\0";
 static ROOT_SHELL: &[u8] = b"/bin/shell\0";
@@ -132,6 +134,7 @@ static mut ROOT_PASSWD_STRUCT: Passwd = Passwd {
     pw_passwd: ptr::null_mut(),
     pw_uid: 0,
     pw_gid: 0,
+    pw_comment: ptr::null_mut(),
     pw_gecos: ptr::null_mut(),
     pw_dir: ptr::null_mut(),
     pw_shell: ptr::null_mut(),
@@ -143,6 +146,7 @@ fn init_root_passwd() -> *mut Passwd {
         ROOT_PASSWD_STRUCT.pw_passwd = ROOT_PASSWD.as_ptr() as *mut c_char;
         ROOT_PASSWD_STRUCT.pw_uid = 0;
         ROOT_PASSWD_STRUCT.pw_gid = 0;
+        ROOT_PASSWD_STRUCT.pw_comment = ROOT_COMMENT.as_ptr() as *mut c_char;
         ROOT_PASSWD_STRUCT.pw_gecos = ROOT_GECOS.as_ptr() as *mut c_char;
         ROOT_PASSWD_STRUCT.pw_dir = ROOT_DIR.as_ptr() as *mut c_char;
         ROOT_PASSWD_STRUCT.pw_shell = ROOT_SHELL.as_ptr() as *mut c_char;

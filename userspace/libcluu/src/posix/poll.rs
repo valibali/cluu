@@ -183,6 +183,9 @@ pub extern "C" fn select(
     exceptfds: *mut fd_set,
     timeout: *mut timeval,
 ) -> c_int {
+    // Max pollfd array size; reject if more fds are active than we can handle
+    const MAX_POLL_FDS: usize = 64;
+
     if nfds < 0 || nfds as usize > FD_SETSIZE {
         set_errno(EINVAL);
         return -1;
@@ -197,7 +200,7 @@ pub extern "C" fn select(
             set_errno(EINVAL);
             return -1;
         }
-        let ms = tv.tv_sec.saturating_mul(1000) + tv.tv_usec / 1000;
+        let ms = tv.tv_sec.saturating_mul(1000).saturating_add(tv.tv_usec / 1000);
         if ms > i32::MAX as i64 {
             i32::MAX
         } else {
@@ -206,11 +209,11 @@ pub extern "C" fn select(
     };
 
     // Build pollfd array from fd_sets
-    let mut poll_fds: [pollfd; 64] = [pollfd {
+    let mut poll_fds: [pollfd; MAX_POLL_FDS] = [pollfd {
         fd: -1,
         events: 0,
         revents: 0,
-    }; 64];
+    }; MAX_POLL_FDS];
     let mut npoll = 0usize;
 
     for fd in 0..nfds {
@@ -226,7 +229,11 @@ pub extern "C" fn select(
             events |= POLLERR;
         }
 
-        if events != 0 && npoll < 64 {
+        if events != 0 {
+            if npoll >= MAX_POLL_FDS {
+                set_errno(EINVAL);
+                return -1;
+            }
             poll_fds[npoll] = pollfd {
                 fd,
                 events,
