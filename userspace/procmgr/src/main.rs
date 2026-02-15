@@ -355,6 +355,8 @@ impl ProcessManager {
         }
 
         let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
+        let envc = if msg.tag.words >= 5 { msg.words[4] } else { 0 };
+        let env_payload_offset = if msg.tag.words >= 6 { msg.words[5] } else { 0 };
         let priority = DEFAULT_PRIORITY;
 
         // Extract argv data: payload is [path\0, argv[0]\0, argv[1]\0, ...]
@@ -370,17 +372,27 @@ impl ProcessManager {
             &[]
         };
 
+        // Extract env data from payload (after argv data)
+        let env_data = if envc > 0 && env_payload_offset > 0 && env_payload_offset < payload.len()
+        {
+            &payload[env_payload_offset..]
+        } else {
+            &[]
+        };
+
         if self.tty_main == 0 {
             if let Ok(token) = registry::subscribe_output("tty:0", "main") {
                 self.tty_main = token;
             }
         }
 
-        match self.spawn_service(
+        match self.spawn_service_with_env(
             path,
             priority,
             argv_data,
             argc,
+            env_data,
+            envc,
             sender_tid,
             spawn_seq,
             spawn_start,
@@ -460,6 +472,7 @@ impl ProcessManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_service(
         &mut self,
         path: &str,
@@ -470,6 +483,42 @@ impl ProcessManager {
         spawn_seq: usize,
         spawn_start: u64,
     ) -> Result<(usize, usize, usize)> {
+        self.spawn_service_with_env(
+            path,
+            priority,
+            argv_payload,
+            argc,
+            &[],
+            0,
+            owner_tid,
+            spawn_seq,
+            spawn_start,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_service_with_env(
+        &mut self,
+        path: &str,
+        priority: usize,
+        argv_payload: &[u8],
+        argc: usize,
+        caller_env_data: &[u8],
+        caller_envc: usize,
+        owner_tid: usize,
+        spawn_seq: usize,
+        spawn_start: u64,
+    ) -> Result<(usize, usize, usize)> {
+        // Build env data: for bootstrap (owner_tid==0) use defaults,
+        // otherwise use caller-provided env (from posix_spawn)
+        let (env_data, envc) = if owner_tid == 0 {
+            build_default_env_payload()
+        } else if caller_envc > 0 && !caller_env_data.is_empty() {
+            (caller_env_data.to_vec(), caller_envc)
+        } else {
+            // Inherit default env if caller didn't provide any
+            build_default_env_payload()
+        };
         debug_print("Creating address space...")?;
         let space_token = space_create(self.token)?;
         debug_print(&format!("Address space created: {}", space_token))?;
@@ -571,6 +620,8 @@ impl ProcessManager {
             self.clock_token,
             argv_payload,
             argc,
+            &env_data,
+            envc,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
@@ -1073,6 +1124,17 @@ impl ProcessManager {
     }
 }
 
+/// Build the default environment variable payload for bootstrap processes.
+/// Returns (packed_data, count) where packed_data is "KEY=VALUE\0KEY=VALUE\0...".
+fn build_default_env_payload() -> (Vec<u8>, usize) {
+    let mut payload = Vec::new();
+    for entry in DEFAULT_ENV {
+        payload.extend_from_slice(entry.as_bytes());
+        payload.push(0);
+    }
+    (payload, DEFAULT_ENV.len())
+}
+
 fn build_shell_argv_payload(command: &str) -> (Vec<u8>, usize) {
     let mut payload = Vec::new();
     payload.extend_from_slice(b"shell\0");
@@ -1107,6 +1169,19 @@ fn parse_cstr(payload: &[u8]) -> Option<&str> {
 const PARAM_ARGC: usize = 6;
 /// Param index for the byte offset within the info page where argv data starts.
 const PARAM_ARGV_OFFSET: usize = 7;
+/// Param index for environment variable count.
+const PARAM_ENVC: usize = 8;
+/// Param index for the byte offset within the info page where env data starts.
+const PARAM_ENV_OFFSET: usize = 9;
+
+/// Default environment variables for the initial shell process.
+const DEFAULT_ENV: &[&str] = &[
+    "PATH=/bin",
+    "HOME=/",
+    "SHELL=/bin/shell",
+    "USER=root",
+    "TERM=cluu",
+];
 
 #[allow(clippy::too_many_arguments)]
 fn map_process_info_page(
@@ -1125,6 +1200,8 @@ fn map_process_info_page(
     clock_token: usize,
     argv_payload: &[u8],
     argc: usize,
+    env_data: &[u8],
+    envc: usize,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -1144,7 +1221,7 @@ fn map_process_info_page(
     tokens[TOKEN_REGISTRY] = registry_token;
     // Slots 9-15: Contextual (empty for regular programs)
 
-    let mut params = [0u64; 8];
+    let mut params = [0u64; 10];
     let info_offset = PROCESS_INFO_ADDR - page_base;
     let info_size = size_of::<ProcessInfo>();
     let argv_data_offset = info_offset + info_size; // byte offset within page
@@ -1153,6 +1230,13 @@ fn map_process_info_page(
     if argc > 0 && !argv_payload.is_empty() {
         params[PARAM_ARGC] = argc as u64;
         params[PARAM_ARGV_OFFSET] = argv_data_offset as u64;
+    }
+
+    // Compute env data offset (after argv data)
+    let env_data_offset = argv_data_offset + argv_payload.len();
+    if envc > 0 && !env_data.is_empty() {
+        params[PARAM_ENVC] = envc as u64;
+        params[PARAM_ENV_OFFSET] = env_data_offset as u64;
     }
 
     let info = ProcessInfo {
@@ -1178,6 +1262,14 @@ fn map_process_info_page(
         let argv_end = argv_data_offset + argv_payload.len();
         if argv_end <= PAGE_SIZE {
             page[argv_data_offset..argv_end].copy_from_slice(argv_payload);
+        }
+    }
+
+    // Write env data after argv data (packed "KEY=VALUE\0" strings)
+    if envc > 0 && !env_data.is_empty() {
+        let env_end = env_data_offset + env_data.len();
+        if env_end <= PAGE_SIZE {
+            page[env_data_offset..env_end].copy_from_slice(env_data);
         }
     }
 

@@ -135,6 +135,18 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="echo ringio-marker"
             SHELL_AUTOSTART_CMD_DEFAULT="ringio"
             ;;
+        p1_setjmp)
+            TEST_COMMAND="spawn setjmpprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn setjmpprobe"
+            ;;
+        p1_env)
+            TEST_COMMAND="spawn envprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn envprobe"
+            ;;
+        p1_stubs)
+            TEST_COMMAND="spawn stubsprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn stubsprobe"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -232,6 +244,9 @@ if [ "$1" != "--no-build" ]; then
     else
         echo "=== Incremental full build of CLUU ==="
         ensure_toolchain_prereqs
+        # Always rebuild syscalls/crt0 to pick up libcluu changes
+        cargo xtask build-syscalls
+        cargo xtask build-crt0
     fi
     cargo xtask build
     BUILD_ELAPSED=$((SECONDS - build_start))
@@ -753,6 +768,27 @@ case "$MARKER_MODE" in
             "futexrace: PASS"
         )
         ;;
+    p1_setjmp)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "setjmpprobe: PASS"
+        )
+        ;;
+    p1_env)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "envprobe: PASS"
+        )
+        ;;
+    p1_stubs)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "stubsprobe: PASS"
+        )
+        ;;
     none)
         required_markers=()
         ;;
@@ -857,6 +893,15 @@ percentile_p95_from_values() {
     fi
     printf '%s\n' "$@" | sort -n | sed -n "${rank}p"
 }
+
+if [[ "$MARKER_MODE" == p1_* ]]; then
+    exit_count=$(grep -c "procmgr: exit cookie" "$SERIAL_LOG" || true)
+    if [ "$exit_count" -lt "$MIN_EXIT_COOKIES" ]; then
+        echo "MISSING: expected at least $MIN_EXIT_COOKIES exit cookies, got $exit_count"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+fi
 
 if [ "$MARKER_MODE" = "m1_recv" ]; then
     exit_count=$(grep -c "procmgr: exit cookie" "$SERIAL_LOG" || true)

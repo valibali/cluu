@@ -32,6 +32,7 @@ mod poll;
 mod process;
 mod signal;
 mod stat;
+mod stubs;
 pub mod termios;
 mod time;
 
@@ -103,6 +104,7 @@ pub extern "C" fn __cluu_init() {
     // The name is only used for service registration, not lookups.
     let _ = crate::registry::init("app");
     dir::init_cwd();
+    env::init_env();
 }
 
 // -------------------------------------------------------------------------

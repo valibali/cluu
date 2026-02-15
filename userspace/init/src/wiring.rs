@@ -55,7 +55,7 @@ trait ServiceWiring {
         child_token: usize,
         instance_id: Option<u64>,
         tokens: &mut [usize; 16],
-        params: &mut [u64; 8],
+        params: &mut [u64; 10],
     ) -> Result<()>;
 
     /// Map additional resources required by the service kind.
@@ -65,7 +65,7 @@ trait ServiceWiring {
         &self,
         ctx: &InitContext<'_>,
         space_token: usize,
-        params: &[u64; 8],
+        params: &[u64; 10],
     ) -> Result<()>;
 }
 
@@ -76,7 +76,7 @@ impl ServiceWiring for ServiceKind {
         child_token: usize,
         instance_id: Option<u64>,
         tokens: &mut [usize; 16],
-        params: &mut [u64; 8],
+        params: &mut [u64; 10],
     ) -> Result<()> {
         // New token layout:
         // - Slots 0-8: Universal (set in launch_service)
@@ -144,7 +144,7 @@ impl ServiceWiring for ServiceKind {
         &self,
         ctx: &InitContext<'_>,
         space_token: usize,
-        params: &[u64; 8],
+        params: &[u64; 10],
     ) -> Result<()> {
         match self {
             ServiceKind::Console => {
@@ -199,7 +199,7 @@ pub fn launch_service(
 
     // Assemble process info payload (tokens + params) before mapping it into the child.
     let mut tokens = [0usize; 16];
-    let mut params = [0u64; 8];
+    let mut params = [0u64; 10];
 
     // Universal token slots (0-8) - every process gets these
     // Slots 0-3: Standard I/O (filled by fill_default_endpoints)

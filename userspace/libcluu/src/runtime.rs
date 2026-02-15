@@ -70,6 +70,16 @@ pub extern "C" fn _start() -> ! {
 
     allocator::init();
 
+    // When the posix feature is enabled, do full unified init (fd table + registry + cwd + env).
+    // This mirrors __cluu_init() used by C programs via crt0.S.
+    #[cfg(feature = "posix")]
+    {
+        crate::fd_table::init_stdio();
+        let _ = crate::registry::init("app");
+        crate::posix::init_cwd();
+        crate::posix::init_env();
+    }
+
     let exit_code = unsafe { main() };
     if exit_code != 0 {
         let _ = debug_print("userspace: exiting with error");

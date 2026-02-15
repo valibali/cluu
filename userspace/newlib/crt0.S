@@ -19,7 +19,7 @@
  *
  * ProcessInfo page layout:
  *   0x7FE00000 - Page base
- *   0x7FE00100 - ProcessInfo struct (216 bytes)
+ *   0x7FE00100 - ProcessInfo struct (232 bytes)
  *     +200: params[6] = argc (u64)
  *     +208: params[7] = argv data byte offset within page (u64)
  *   argv data: null-terminated strings packed contiguously after ProcessInfo

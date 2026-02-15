@@ -405,11 +405,35 @@ pub extern "C" fn posix_spawn(
         }
     }
 
-    let mut msg = crate::types::Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
+    // Serialize environment variables into payload after argv data
+    let env_payload_offset = payload.len();
+    let mut envc = 0usize;
+
+    // Use envp parameter if provided, otherwise use current environ
+    let envp_to_use = if !_envp.is_null() {
+        _envp
+    } else {
+        unsafe { super::env::environ as *const *const c_char }
+    };
+
+    if !envp_to_use.is_null() {
+        unsafe {
+            let mut p = envp_to_use;
+            while !(*p).is_null() {
+                push_cstr(*p, &mut payload);
+                envc += 1;
+                p = p.add(1);
+            }
+        }
+    }
+
+    let mut msg = crate::types::Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 6);
     msg.words[0] = payload.len();
     msg.words[1] = argc;
     msg.words[2] = 0; // reply endpoint (legacy)
     msg.words[3] = notify_endpoint;
+    msg.words[4] = envc;
+    msg.words[5] = if envc > 0 { env_payload_offset } else { 0 };
 
     let mut reply = crate::types::Message::new(0, [0; 6], 0);
     let mut try_call =

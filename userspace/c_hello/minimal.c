@@ -78,20 +78,26 @@ int main(int argc, char *argv[])
 
     /* ── Test 2: getenv ────────────────────────────────────────────── */
     char *home = getenv("HOME");
-    if (home == NULL) {
-        printf("[OK] getenv(\"HOME\") = NULL (expected stub)\n");
+    if (home != NULL && strcmp(home, "/") == 0) {
+        printf("[OK] getenv(\"HOME\") = \"%s\"\n", home);
+        pass++;
+    } else if (home != NULL) {
+        printf("[WARN] getenv(\"HOME\") = \"%s\" (expected \"/\")\n", home);
         pass++;
     } else {
-        printf("[FAIL] getenv(\"HOME\") returned non-NULL\n");
+        printf("[FAIL] getenv(\"HOME\") returned NULL\n");
         fail++;
     }
 
-    char *path = getenv("MICROPYPATH");
-    if (path == NULL) {
-        printf("[OK] getenv(\"MICROPYPATH\") = NULL\n");
+    char *path = getenv("PATH");
+    if (path != NULL && strcmp(path, "/bin") == 0) {
+        printf("[OK] getenv(\"PATH\") = \"%s\"\n", path);
+        pass++;
+    } else if (path != NULL) {
+        printf("[WARN] getenv(\"PATH\") = \"%s\" (expected \"/bin\")\n", path);
         pass++;
     } else {
-        printf("[FAIL] getenv(\"MICROPYPATH\") returned non-NULL\n");
+        printf("[FAIL] getenv(\"PATH\") returned NULL\n");
         fail++;
     }
 

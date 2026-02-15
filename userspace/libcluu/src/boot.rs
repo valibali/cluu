@@ -61,7 +61,7 @@ pub struct ProcessInfo {
     pub tokens: [usize; 16],
 
     /// Generic parameters (service-specific data)
-    pub params: [u64; 8],
+    pub params: [u64; 10],
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -173,6 +173,10 @@ pub const PARAM_TTY_INSTANCE: usize = 0;
 // Well-known param indices for argv (shared by procmgr + crt0)
 pub const PARAM_ARGC: usize = 6;
 pub const PARAM_ARGV_OFFSET: usize = 7;
+
+// Well-known param indices for environment (shared by procmgr + libcluu env init)
+pub const PARAM_ENVC: usize = 8;
+pub const PARAM_ENV_OFFSET: usize = 9;
 
 /// Read the process info structure.
 pub fn process_info() -> &'static ProcessInfo {
