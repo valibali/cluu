@@ -928,6 +928,11 @@ pub fn token_derive(token_handle: usize, new_rights: usize, expire_at: u64) -> R
     }
 }
 
+/// Revoke a token, invalidating it and all tokens derived from it.
+pub fn token_revoke(token_handle: usize) -> Result<usize> {
+    unsafe { invoke(token_handle, InvokeOp::TokenRevoke, 0, 0, 0, 0) }
+}
+
 /// Destroy a thread
 ///
 /// # Arguments

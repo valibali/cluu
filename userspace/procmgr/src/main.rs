@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 use core::mem::size_of;
 use libcluu::boot::{
     process_info,
@@ -28,7 +28,7 @@ use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_token;
 use libcluu::ipc::SharedRing;
 use libcluu::registry;
-use libcluu::syscall::{space_destroy, thread_destroy, thread_resume, thread_suspend};
+use libcluu::syscall::{space_destroy, thread_destroy, thread_resume, thread_suspend, token_revoke};
 use libcluu::tar::find_member;
 use libcluu::*;
 
@@ -87,6 +87,7 @@ struct ProcessManager {
     cookie_to_pid: BTreeMap<usize, usize>, // cookie -> pid (for exit handling)
     pid_owner_tid: BTreeMap<usize, usize>, // pid -> authenticated owner thread id
     cookie_to_space: BTreeMap<usize, usize>, // cookie -> space_token (for space_destroy on exit/kill)
+    cookie_to_tokens: BTreeMap<usize, Vec<usize>>, // cookie -> derived tokens/endpoints to revoke on exit
     tty_main: usize,
     requested_tty: bool,
     vfs_endpoint: usize,    // VFS service endpoint
@@ -119,6 +120,7 @@ impl ProcessManager {
             cookie_to_pid: BTreeMap::new(),
             pid_owner_tid: BTreeMap::new(),
             cookie_to_space: BTreeMap::new(),
+            cookie_to_tokens: BTreeMap::new(),
             tty_main: 0,
             requested_tty: false,
             vfs_endpoint: 0,
@@ -276,6 +278,12 @@ impl ProcessManager {
         }
         if let Some(st) = self.cookie_to_space.remove(&cookie) {
             let _ = space_destroy(st);
+        }
+        // Revoke all derived tokens/endpoints created for this child
+        if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
+            for tok in tokens {
+                let _ = token_revoke(tok);
+            }
         }
         Ok(())
     }
@@ -701,6 +709,10 @@ impl ProcessManager {
         self.cookie_to_pid.insert(cookie, pid);
         self.pid_owner_tid.insert(pid, owner_tid);
         self.cookie_to_space.insert(cookie, space_token);
+        // Track derived tokens/endpoints for cleanup on exit
+        self.cookie_to_tokens.insert(cookie, vec![
+            child_endpoint, stdin_ep, proc_cap, self_cap, child_space_token,
+        ]);
         Ok((thread_token, cookie, pid))
     }
 
@@ -1164,9 +1176,21 @@ impl ProcessManager {
                     if let Some(owner_tid) = self.pid_owner_tid.remove(&target_pid) {
                         self.on_child_reaped(owner_tid);
                     }
-                    self.exit_notify.remove(&cookie);
+                    // Notify parent so waitpid() unblocks (exit code = 128+signal per POSIX)
+                    if let Some(notify_ep) = self.exit_notify.remove(&cookie) {
+                        let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+                        notify_msg.words[0] = cookie;
+                        notify_msg.words[1] = (128 + signal) as usize;
+                        let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
+                    }
                     if let Some(st) = self.cookie_to_space.remove(&cookie) {
                         let _ = space_destroy(st);
+                    }
+                    // Revoke all derived tokens/endpoints created for this child
+                    if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
+                        for tok in tokens {
+                            let _ = token_revoke(tok);
+                        }
                     }
                 }
 
