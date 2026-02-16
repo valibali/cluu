@@ -156,6 +156,10 @@ pub const TOKEN_EXTRA_START: usize = 9;
 /// Last contextual/extra slot
 pub const TOKEN_EXTRA_END: usize = 15;
 
+// Well-known param indices for fd pipe mask (regular processes)
+// Shares slot 0 with PARAM_FB_BASE (console-only, which never calls init_stdio pipe path)
+pub const PARAM_FD_PIPE_MASK: usize = 0;
+
 // Well-known param indices for console service
 pub const PARAM_FB_BASE: usize = 0;
 pub const PARAM_FB_SIZE: usize = 1;

@@ -28,6 +28,7 @@ mod env;
 mod fcntl;
 mod file;
 mod memory;
+pub mod pipe;
 mod poll;
 mod process;
 mod signal;

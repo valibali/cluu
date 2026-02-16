@@ -672,6 +672,21 @@ pub fn space_create(root_token: usize) -> Result<usize> {
     unsafe { invoke(root_token, InvokeOp::SpaceCreate, 0, 0, 0, 0) }
 }
 
+/// Destroy an address space, freeing all its user page tables and frames.
+///
+/// # Arguments
+///
+/// - `space_token`: Address space token with DESTROY right
+///
+/// # Returns
+///
+/// - `Ok(())`: Address space destroyed
+/// - `Err(error)`: Destruction failed (invalid token, active CR3, etc.)
+pub fn space_destroy(space_token: usize) -> Result<()> {
+    unsafe { invoke(space_token, InvokeOp::SpaceDestroy, 0, 0, 0, 0)?; }
+    Ok(())
+}
+
 /// Map page in address space
 ///
 /// # Arguments

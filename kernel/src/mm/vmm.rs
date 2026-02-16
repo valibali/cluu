@@ -68,6 +68,10 @@ pub mod pte_flags {
 
     /// No execute (bit 63) - requires NX support
     pub const NO_EXECUTE: u64 = 1 << 63;
+
+    /// Mask to extract the physical address from a page table entry (bits 12-51).
+    /// Strips flag bits (0-11) and reserved/NX bits (52-63).
+    pub const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 }
 
 // Common flag combinations for convenience
@@ -1054,7 +1058,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
             continue;
         }
 
-        let pdpt_phys = pml4e & !0xFFF;
+        let pdpt_phys = pml4e & pte_flags::ADDR_MASK;
         let pdpt_virt = super::physmap::phys_to_virt_u64(pdpt_phys);
         let pdpt = &mut *(pdpt_virt as *mut [u64; 512]);
 
@@ -1070,7 +1074,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                 continue;
             }
 
-            let pd_phys = pdpte & !0xFFF;
+            let pd_phys = pdpte & pte_flags::ADDR_MASK;
             let pd_virt = super::physmap::phys_to_virt_u64(pd_phys);
             let pd = &mut *(pd_virt as *mut [u64; 512]);
 
@@ -1082,14 +1086,14 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
 
                 // 2MB huge page
                 if pde & pte_flags::HUGE != 0 {
-                    let frame_phys = pde & !0x1FFFFF; // 2MB aligned
+                    let frame_phys = pde & 0x000F_FFFF_FFE0_0000; // 2MB aligned, strip flags
                     crate::mm::pmm::free_large_frame(frame_phys);
                     freed_frames += 512; // 512 x 4KB equivalent
                     continue;
                 }
 
                 // Regular PD entry → points to PT
-                let pt_phys = pde & !0xFFF;
+                let pt_phys = pde & pte_flags::ADDR_MASK;
                 let pt_virt = super::physmap::phys_to_virt_u64(pt_phys);
                 let pt = &mut *(pt_virt as *mut [u64; 512]);
 
@@ -1099,7 +1103,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                         continue;
                     }
 
-                    let frame_phys = pte & !0xFFF;
+                    let frame_phys = pte & pte_flags::ADDR_MASK;
                     crate::mm::pmm::free_frame(frame_phys);
                     freed_frames += 1;
                 }

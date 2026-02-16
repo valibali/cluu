@@ -701,6 +701,9 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         "setjmpprobe",
         "envprobe",
         "stubsprobe",
+        "pipeprobe",
+        "pipecat",
+        "spawnpipeprobe",
     ];
     for prog in &c_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
@@ -728,7 +731,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
             "-b",
             "1024",
             disk_path.to_str().unwrap(),
-            "131072", // 128MB image (131072 blocks * 1KiB)
+            "196608", // 192MB image (196608 blocks * 1KiB)
         ])
         .status()
         .context("Failed to run mke2fs for user disk")?;
@@ -1083,6 +1086,9 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("setjmpprobe", "userspace/c_hello/setjmpprobe.c"),
         ("envprobe", "userspace/c_hello/envprobe.c"),
         ("stubsprobe", "userspace/c_hello/stubsprobe.c"),
+        ("pipeprobe", "userspace/c_hello/pipeprobe.c"),
+        ("pipecat", "userspace/c_hello/pipecat.c"),
+        ("spawnpipeprobe", "userspace/c_hello/spawnpipeprobe.c"),
     ];
 
     for (name, source) in c_programs {

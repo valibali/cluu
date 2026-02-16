@@ -113,6 +113,11 @@ pub extern "C" fn _close(fd: c_int) -> c_int {
         }
     };
 
+    // If it's a pipe write-end, send EOF marker before closing
+    if entry.caps.contains(FdCaps::IS_PIPE) && entry.caps.contains(FdCaps::WRITE) {
+        super::pipe::close_pipe_write(entry.endpoint);
+    }
+
     // If it's a VFS file, close it on the server
     if let Some(remote_fd) = entry.remote_fd {
         let vfs_client = crate::fs::client::VfsClient::new(entry.endpoint, entry.client_id);
@@ -193,6 +198,8 @@ pub extern "C" fn _read(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
     if entry.is_tty() {
         // TTY read via IPC
         read_tty(entry.endpoint, buffer)
+    } else if entry.is_pipe() {
+        super::pipe::read_pipe(entry.endpoint, buffer)
     } else if let Some(_remote_fd) = entry.remote_fd {
         read_vfs(fd, &entry, buffer)
     } else {
@@ -237,6 +244,8 @@ pub extern "C" fn _write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_
     if entry.is_tty() {
         // TTY write via IPC
         write_tty(entry.endpoint, buffer)
+    } else if entry.is_pipe() {
+        super::pipe::write_pipe(entry.endpoint, buffer)
     } else if let Some(_remote_fd) = entry.remote_fd {
         write_vfs(fd, &entry, buffer)
     } else {

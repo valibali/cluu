@@ -28,7 +28,7 @@ use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_token;
 use libcluu::ipc::SharedRing;
 use libcluu::registry;
-use libcluu::syscall::{thread_destroy, thread_resume, thread_suspend};
+use libcluu::syscall::{space_destroy, thread_destroy, thread_resume, thread_suspend};
 use libcluu::tar::find_member;
 use libcluu::*;
 
@@ -86,6 +86,7 @@ struct ProcessManager {
     pid_to_cookie: BTreeMap<usize, usize>, // pid -> cookie (for PROC_KILL)
     cookie_to_pid: BTreeMap<usize, usize>, // cookie -> pid (for exit handling)
     pid_owner_tid: BTreeMap<usize, usize>, // pid -> authenticated owner thread id
+    cookie_to_space: BTreeMap<usize, usize>, // cookie -> space_token (for space_destroy on exit/kill)
     tty_main: usize,
     requested_tty: bool,
     vfs_endpoint: usize,    // VFS service endpoint
@@ -117,6 +118,7 @@ impl ProcessManager {
             pid_to_cookie: BTreeMap::new(),
             cookie_to_pid: BTreeMap::new(),
             pid_owner_tid: BTreeMap::new(),
+            cookie_to_space: BTreeMap::new(),
             tty_main: 0,
             requested_tty: false,
             vfs_endpoint: 0,
@@ -272,6 +274,9 @@ impl ProcessManager {
         if thread_destroy(thread_token).is_ok() {
             let _ = debug_print(&format!("TRACE: reaped thread token {}", thread_token));
         }
+        if let Some(st) = self.cookie_to_space.remove(&cookie) {
+            let _ = space_destroy(st);
+        }
         Ok(())
     }
 
@@ -355,6 +360,7 @@ impl ProcessManager {
         }
 
         let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
+        let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
         let envc = if msg.tag.words >= 5 { msg.words[4] } else { 0 };
         let env_payload_offset = if msg.tag.words >= 6 { msg.words[5] } else { 0 };
         let priority = DEFAULT_PRIORITY;
@@ -372,10 +378,21 @@ impl ProcessManager {
             &[]
         };
 
-        // Extract env data from payload (after argv data)
-        let env_data = if envc > 0 && env_payload_offset > 0 && env_payload_offset < payload.len()
-        {
-            &payload[env_payload_offset..]
+        // Extract env data from payload (between env_payload_offset and fdac_offset)
+        let env_end = if fdac_offset > 0 && fdac_offset <= payload.len() {
+            fdac_offset
+        } else {
+            payload.len()
+        };
+        let env_data = if envc > 0 && env_payload_offset > 0 && env_payload_offset < env_end {
+            &payload[env_payload_offset..env_end]
+        } else {
+            &[]
+        };
+
+        // Extract FDAC (fd actions) from payload
+        let fdac_data = if fdac_offset > 0 && fdac_offset < payload.len() {
+            &payload[fdac_offset..]
         } else {
             &[]
         };
@@ -396,6 +413,7 @@ impl ProcessManager {
             sender_tid,
             spawn_seq,
             spawn_start,
+            fdac_data,
         ) {
             Ok((_thread_token, cookie, pid)) => {
                 reply_msg.words[0] = 0;
@@ -493,6 +511,7 @@ impl ProcessManager {
             owner_tid,
             spawn_seq,
             spawn_start,
+            &[],
         )
     }
 
@@ -508,6 +527,7 @@ impl ProcessManager {
         owner_tid: usize,
         spawn_seq: usize,
         spawn_start: u64,
+        fdac_data: &[u8],
     ) -> Result<(usize, usize, usize)> {
         // Build env data: for bootstrap (owner_tid==0) use defaults,
         // otherwise use caller-provided env (from posix_spawn)
@@ -604,15 +624,63 @@ impl ProcessManager {
                 return Err(e);
             }
         };
+        // Parse FDAC (fd actions) to override child stdio endpoints
+        let mut pipe_mask: u8 = 0;
+        let mut stdin_ep = stdin_endpoint;
+        let mut stdout_ep = stdout_endpoint;
+        let mut stderr_ep = stderr_endpoint;
+        let mut stdlog_ep = stdlog_endpoint;
+
+        if fdac_data.len() >= 8 {
+            let magic = u32::from_le_bytes([fdac_data[0], fdac_data[1], fdac_data[2], fdac_data[3]]);
+            let count = u32::from_le_bytes([fdac_data[4], fdac_data[5], fdac_data[6], fdac_data[7]]) as usize;
+            if magic == 0x46444143 && count <= 4 {
+                // Each FdAction is 16 bytes: u32 target_fd + u32 flags + usize endpoint
+                for i in 0..count {
+                    let base = 8 + i * 16;
+                    if base + 16 > fdac_data.len() {
+                        break;
+                    }
+                    let target_fd = u32::from_le_bytes([
+                        fdac_data[base], fdac_data[base + 1],
+                        fdac_data[base + 2], fdac_data[base + 3],
+                    ]);
+                    let flags = u32::from_le_bytes([
+                        fdac_data[base + 4], fdac_data[base + 5],
+                        fdac_data[base + 6], fdac_data[base + 7],
+                    ]);
+                    let endpoint = usize::from_le_bytes([
+                        fdac_data[base + 8], fdac_data[base + 9],
+                        fdac_data[base + 10], fdac_data[base + 11],
+                        fdac_data[base + 12], fdac_data[base + 13],
+                        fdac_data[base + 14], fdac_data[base + 15],
+                    ]);
+
+                    let is_pipe = (flags & 0x01) != 0;
+                    match target_fd {
+                        0 => { stdin_ep = endpoint; if is_pipe { pipe_mask |= 1 << 0; } }
+                        1 => { stdout_ep = endpoint; if is_pipe { pipe_mask |= 1 << 1; } }
+                        2 => { stderr_ep = endpoint; if is_pipe { pipe_mask |= 1 << 2; } }
+                        3 => { stdlog_ep = endpoint; if is_pipe { pipe_mask |= 1 << 3; } }
+                        _ => {}
+                    }
+                }
+                let _ = debug_print(&format!(
+                    "procmgr: FDAC parsed {} actions, pipe_mask=0x{:02x}",
+                    count, pipe_mask
+                ));
+            }
+        }
+
         map_process_info_page(
             space_token,
             child_endpoint,
             cookie,
             pid,
-            stdin_endpoint,
-            stdout_endpoint,
-            stderr_endpoint,
-            stdlog_endpoint,
+            stdin_ep,
+            stdout_ep,
+            stderr_ep,
+            stdlog_ep,
             self.registry_send,
             proc_cap,
             self_cap,
@@ -622,6 +690,7 @@ impl ProcessManager {
             argc,
             &env_data,
             envc,
+            pipe_mask,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
@@ -631,6 +700,7 @@ impl ProcessManager {
         self.pid_to_cookie.insert(pid, cookie);
         self.cookie_to_pid.insert(cookie, pid);
         self.pid_owner_tid.insert(pid, owner_tid);
+        self.cookie_to_space.insert(cookie, space_token);
         Ok((thread_token, cookie, pid))
     }
 
@@ -1095,6 +1165,9 @@ impl ProcessManager {
                         self.on_child_reaped(owner_tid);
                     }
                     self.exit_notify.remove(&cookie);
+                    if let Some(st) = self.cookie_to_space.remove(&cookie) {
+                        let _ = space_destroy(st);
+                    }
                 }
 
                 reply_msg.words[0] = 0; // Success
@@ -1202,6 +1275,7 @@ fn map_process_info_page(
     argc: usize,
     env_data: &[u8],
     envc: usize,
+    pipe_mask: u8,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -1222,6 +1296,9 @@ fn map_process_info_page(
     // Slots 9-15: Contextual (empty for regular programs)
 
     let mut params = [0u64; 10];
+    // params[0] = pipe_mask for regular processes (shared with PARAM_FB_BASE for console)
+    params[0] = pipe_mask as u64;
+
     let info_offset = PROCESS_INFO_ADDR - page_base;
     let info_size = size_of::<ProcessInfo>();
     let argv_data_offset = info_offset + info_size; // byte offset within page

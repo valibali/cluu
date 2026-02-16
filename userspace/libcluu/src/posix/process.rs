@@ -314,16 +314,17 @@ pub extern "C" fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid
 // posix_spawn - The preferred process creation API for CLUU
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Opaque type for spawn file actions (fd redirections).
+/// Heap-allocated backing storage for posix_spawn_file_actions_t.
+///
+/// Newlib defines `posix_spawn_file_actions_t` as a *pointer* type
+/// (`struct __posix_spawn_file_actions *`), so the C ABI passes
+/// `posix_spawn_file_actions_t *` == `**FileActionsInner` across FFI.
+/// We heap-allocate this in _init and free it in _destroy.
 #[repr(C)]
-pub struct posix_spawn_file_actions_t {
-    _opaque: [u8; 64],
-}
-
-/// Opaque type for spawn attributes.
-#[repr(C)]
-pub struct posix_spawnattr_t {
-    _opaque: [u8; 64],
+struct FileActionsInner {
+    count: u8,
+    _pad: [u8; 7],
+    actions: [FdAction; MAX_FD_ACTIONS],
 }
 
 /// Spawn a new process.
@@ -345,8 +346,8 @@ pub struct posix_spawnattr_t {
 pub extern "C" fn posix_spawn(
     pid: *mut pid_t,
     path: *const c_char,
-    _file_actions: *const posix_spawn_file_actions_t,
-    _attrp: *const posix_spawnattr_t,
+    _file_actions: *const *const FileActionsInner,
+    _attrp: *const core::ffi::c_void,
     _argv: *const *const c_char,
     _envp: *const *const c_char,
 ) -> c_int {
@@ -427,10 +428,13 @@ pub extern "C" fn posix_spawn(
         }
     }
 
+    // Serialize fd actions (FDAC) after env data
+    let fdac_offset = serialize_fd_actions(_file_actions, &mut payload);
+
     let mut msg = crate::types::Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 6);
     msg.words[0] = payload.len();
     msg.words[1] = argc;
-    msg.words[2] = 0; // reply endpoint (legacy)
+    msg.words[2] = fdac_offset; // FDAC payload offset (0 = no fd actions)
     msg.words[3] = notify_endpoint;
     msg.words[4] = envc;
     msg.words[5] = if envc > 0 { env_payload_offset } else { 0 };
@@ -474,6 +478,150 @@ pub extern "C" fn posix_spawn(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// File actions for fd inheritance across posix_spawn
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MAX_FD_ACTIONS: usize = 4;
+/// Magic marker for fd actions in spawn payload.
+const FDAC_MAGIC: u32 = 0x46444143; // "FDAC"
+const FDAC_FLAG_PIPE: u32 = 0x01;
+
+/// A single fd redirection action.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FdAction {
+    target_fd: u32,
+    flags: u32,
+    endpoint: usize,
+}
+
+/// Initialize file actions — heap-allocates the inner struct.
+///
+/// C passes `posix_spawn_file_actions_t *` which is `**FileActionsInner`.
+#[no_mangle]
+pub extern "C" fn posix_spawn_file_actions_init(
+    actions: *mut *mut FileActionsInner,
+) -> c_int {
+    if actions.is_null() {
+        return EINVAL;
+    }
+    let inner = alloc::boxed::Box::new(FileActionsInner {
+        count: 0,
+        _pad: [0; 7],
+        actions: [FdAction { target_fd: 0, flags: 0, endpoint: 0 }; MAX_FD_ACTIONS],
+    });
+    unsafe {
+        *actions = alloc::boxed::Box::into_raw(inner);
+    }
+    0
+}
+
+/// Destroy file actions — frees the heap-allocated inner struct.
+#[no_mangle]
+pub extern "C" fn posix_spawn_file_actions_destroy(
+    actions: *mut *mut FileActionsInner,
+) -> c_int {
+    if actions.is_null() {
+        return EINVAL;
+    }
+    unsafe {
+        let inner = *actions;
+        if !inner.is_null() {
+            drop(alloc::boxed::Box::from_raw(inner));
+            *actions = core::ptr::null_mut();
+        }
+    }
+    0
+}
+
+/// Add a dup2 action: child's `newfd` will be redirected to the endpoint backing `fd`.
+///
+/// The source `fd` is looked up in the current process's fd table to extract
+/// the IPC endpoint token and pipe flag.
+#[no_mangle]
+pub extern "C" fn posix_spawn_file_actions_adddup2(
+    actions: *mut *mut FileActionsInner,
+    fd: c_int,
+    newfd: c_int,
+) -> c_int {
+    if actions.is_null() || newfd < 0 || newfd > 3 {
+        return EINVAL;
+    }
+
+    let inner = unsafe {
+        let ptr = *actions;
+        if ptr.is_null() {
+            return EINVAL;
+        }
+        &mut *ptr
+    };
+    let count = inner.count as usize;
+    if count >= MAX_FD_ACTIONS {
+        return EINVAL;
+    }
+
+    // Look up source fd to get endpoint and pipe flag
+    let table = crate::fd_table::FD_TABLE.lock();
+    let entry = match table.get(fd) {
+        Some(e) => e,
+        None => return crate::errno::EBADF,
+    };
+
+    let mut flags: u32 = 0;
+    if entry.is_pipe() {
+        flags |= FDAC_FLAG_PIPE;
+    }
+    let endpoint = entry.endpoint;
+    drop(table);
+
+    inner.actions[count] = FdAction {
+        target_fd: newfd as u32,
+        flags,
+        endpoint,
+    };
+    inner.count = (count + 1) as u8;
+    0
+}
+
+/// Serialize fd actions into the spawn payload. Returns the offset where FDAC starts.
+fn serialize_fd_actions(
+    file_actions: *const *const FileActionsInner,
+    payload: &mut Vec<u8>,
+) -> usize {
+    if file_actions.is_null() {
+        return 0;
+    }
+    let inner_ptr = unsafe { *file_actions };
+    if inner_ptr.is_null() {
+        return 0;
+    }
+    let inner = unsafe { &*inner_ptr };
+    let count = inner.count as usize;
+    if count == 0 {
+        return 0;
+    }
+
+    let fdac_offset = payload.len();
+
+    // Write FDAC magic + count
+    payload.extend_from_slice(&FDAC_MAGIC.to_le_bytes());
+    payload.extend_from_slice(&(count as u32).to_le_bytes());
+
+    // Write FdAction array
+    for i in 0..count {
+        let action_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &inner.actions[i] as *const FdAction as *const u8,
+                core::mem::size_of::<FdAction>(),
+            )
+        };
+        payload.extend_from_slice(action_bytes);
+    }
+
+    fdac_offset
+}
+
 fn push_cstr(ptr: *const c_char, out: &mut Vec<u8>) {
     if ptr.is_null() {
         return;
@@ -495,8 +643,8 @@ fn push_cstr(ptr: *const c_char, out: &mut Vec<u8>) {
 pub extern "C" fn posix_spawnp(
     pid: *mut pid_t,
     file: *const c_char,
-    file_actions: *const posix_spawn_file_actions_t,
-    attrp: *const posix_spawnattr_t,
+    file_actions: *const *const FileActionsInner,
+    attrp: *const core::ffi::c_void,
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {

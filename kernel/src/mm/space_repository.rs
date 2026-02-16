@@ -47,6 +47,10 @@ impl Repository {
     fn get_mut(&mut self, id: AddressSpaceId) -> Option<&mut AddressSpace> {
         self.spaces.get_mut(&id)
     }
+
+    fn remove(&mut self, id: AddressSpaceId) -> Option<AddressSpace> {
+        self.spaces.remove(&id)
+    }
 }
 
 static REPOSITORY: Mutex<Repository> = Mutex::new(Repository::new());
@@ -78,6 +82,12 @@ where
 {
     let repo = REPOSITORY.lock();
     repo.spaces.get(&id).map(f)
+}
+
+/// Remove an address space from the repository, returning it if it existed.
+pub fn remove(id: AddressSpaceId) -> Option<AddressSpace> {
+    let mut repo = REPOSITORY.lock();
+    repo.remove(id)
 }
 
 /// Number of address spaces currently tracked by the repository.

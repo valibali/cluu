@@ -950,8 +950,40 @@ fn invoke_space_create(token: &Token, _args: SyscallArgs) -> SyscallResult {
 }
 
 fn invoke_space_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    klibcluu::warn("invoke_space_destroy not yet implemented");
-    Err(Error::NotImplemented)
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !_token.has_right(Rights::DESTROY) {
+        klibcluu::warn("invoke_space_destroy: missing DESTROY right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let space_ref = crate::token::resolve_token_object(_token, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    // Get page_table_root while space is still in repo (for CR3 safety check)
+    let pml4_phys = crate::mm::space_repository::with_space(space_id, |s| s.page_table_root)
+        .ok_or(Error::NotFound)?;
+
+    // Must not destroy the currently active address space
+    let current_cr3 = x86_64::registers::control::Cr3::read().0.start_address();
+    if pml4_phys == current_cr3 {
+        return Err(Error::InvalidState);
+    }
+
+    // Remove from repository (if another thread raced us, we get None)
+    let _space = crate::mm::space_repository::remove(space_id)
+        .ok_or(Error::NotFound)?;
+
+    // Tear down all user page tables and frames
+    unsafe { crate::mm::vmm::teardown_user_pages(pml4_phys); }
+
+    crate::telemetry::log_resource_delta("space_destroy");
+    Ok(0)
 }
 
 fn rollback_mapped_4kb(

@@ -147,6 +147,14 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="spawn stubsprobe"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn stubsprobe"
             ;;
+        p2_pipe)
+            TEST_COMMAND="spawn pipeprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn pipeprobe"
+            ;;
+        p2_spawn_pipe)
+            TEST_COMMAND="spawn spawnpipeprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn spawnpipeprobe"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -787,6 +795,20 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "stubsprobe: PASS"
+        )
+        ;;
+    p2_pipe)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pipeprobe: PASS"
+        )
+        ;;
+    p2_spawn_pipe)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "spawnpipeprobe: PASS"
         )
         ;;
     none)

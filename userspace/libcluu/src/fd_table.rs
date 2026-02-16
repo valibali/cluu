@@ -27,6 +27,8 @@ bitflags! {
         const SEEK = 0b0100;
         /// Is a terminal (for _isatty)
         const IS_TTY = 0b1000;
+        /// Is a pipe endpoint
+        const IS_PIPE = 0b0001_0000;
     }
 }
 
@@ -115,6 +117,37 @@ impl FdEntry {
     pub fn is_seekable(&self) -> bool {
         self.caps.contains(FdCaps::SEEK)
     }
+
+    /// Check if this fd is a pipe endpoint.
+    pub fn is_pipe(&self) -> bool {
+        self.caps.contains(FdCaps::IS_PIPE)
+    }
+
+    /// Create a pipe read-end fd entry.
+    pub fn pipe_read(endpoint: usize) -> Self {
+        Self {
+            endpoint,
+            caps: FdCaps::READ | FdCaps::IS_PIPE,
+            position: 0,
+            remote_fd: None,
+            client_id: 0,
+            file_size: None,
+            file_mode: None,
+        }
+    }
+
+    /// Create a pipe write-end fd entry.
+    pub fn pipe_write(endpoint: usize) -> Self {
+        Self {
+            endpoint,
+            caps: FdCaps::WRITE | FdCaps::IS_PIPE,
+            position: 0,
+            remote_fd: None,
+            client_id: 0,
+            file_size: None,
+            file_mode: None,
+        }
+    }
 }
 
 /// Process-local file descriptor table.
@@ -134,16 +167,36 @@ impl FdTable {
 
     /// Initialize stdio fds from boot tokens.
     ///
-    /// Call this once at process startup.
-    pub fn init_stdio(&mut self, stdin: usize, stdout: usize, stderr: usize, stdlog: usize) {
-        // fd 0: stdin - readable TTY
-        self.entries.insert(0, FdEntry::tty(stdin, true, false));
-        // fd 1: stdout - writable TTY
-        self.entries.insert(1, FdEntry::tty(stdout, false, true));
-        // fd 2: stderr - writable TTY
-        self.entries.insert(2, FdEntry::tty(stderr, false, true));
-        // fd 3: stdlog - writable TTY (kernel debug log)
-        self.entries.insert(3, FdEntry::tty(stdlog, false, true));
+    /// Call this once at process startup. `pipe_mask` indicates which fds
+    /// are pipe endpoints (bit 0 = stdin, bit 1 = stdout, etc).
+    pub fn init_stdio(
+        &mut self,
+        stdin: usize,
+        stdout: usize,
+        stderr: usize,
+        stdlog: usize,
+        pipe_mask: u8,
+    ) {
+        let fds: [(i32, usize, bool, bool); 4] = [
+            (0, stdin, true, false),   // stdin: readable
+            (1, stdout, false, true),  // stdout: writable
+            (2, stderr, false, true),  // stderr: writable
+            (3, stdlog, false, true),  // stdlog: writable
+        ];
+
+        for &(fd_num, token, readable, writable) in &fds {
+            if pipe_mask & (1 << fd_num) != 0 {
+                // This fd is a pipe endpoint
+                let entry = if readable {
+                    FdEntry::pipe_read(token)
+                } else {
+                    FdEntry::pipe_write(token)
+                };
+                self.entries.insert(fd_num, entry);
+            } else {
+                self.entries.insert(fd_num, FdEntry::tty(token, readable, writable));
+            }
+        }
         self.next_fd = 4;
     }
 
@@ -233,13 +286,16 @@ pub static FD_TABLE: Mutex<FdTable> = Mutex::new(FdTable::new());
 /// Initialize the global fd table with stdio endpoints.
 ///
 /// This should be called once at process startup from `__cluu_init()`.
+/// Reads pipe_mask from PARAM_FD_PIPE_MASK to detect pipe-backed fds.
 pub fn init_stdio() {
     let info = crate::boot::process_info();
+    let pipe_mask = info.params[crate::boot::PARAM_FD_PIPE_MASK] as u8;
     FD_TABLE.lock().init_stdio(
         info.tokens[crate::boot::TOKEN_STDIN],
         info.tokens[crate::boot::TOKEN_STDOUT],
         info.tokens[crate::boot::TOKEN_STDERR],
         info.tokens[crate::boot::TOKEN_STDLOG],
+        pipe_mask,
     );
 }
 
@@ -250,7 +306,7 @@ mod tests {
     #[test]
     fn test_fd_table_basic() {
         let mut table = FdTable::new();
-        table.init_stdio(100, 101, 102, 103);
+        table.init_stdio(100, 101, 102, 103, 0);
 
         assert!(table.contains(0));
         assert!(table.contains(1));
@@ -288,7 +344,7 @@ mod tests {
     #[test]
     fn test_fd_dup() {
         let mut table = FdTable::new();
-        table.init_stdio(100, 101, 102, 103);
+        table.init_stdio(100, 101, 102, 103, 0);
 
         let new_fd = table.dup(1).unwrap();
         assert_eq!(new_fd, 4);
@@ -302,7 +358,7 @@ mod tests {
     #[test]
     fn test_fd_dup2() {
         let mut table = FdTable::new();
-        table.init_stdio(100, 101, 102, 103);
+        table.init_stdio(100, 101, 102, 103, 0);
 
         // dup stdout to fd 10
         let result = table.dup2(1, 10).unwrap();
