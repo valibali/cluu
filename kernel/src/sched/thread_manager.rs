@@ -1028,12 +1028,17 @@ unsafe fn enter_userspace(context: &Context) -> ! {
     klibcluu::log_hex(klibcluu::LogLevel::Info, "Entry CS=", context.cs);
     klibcluu::log_hex(klibcluu::LogLevel::Info, "Entry SS=", context.ss);
 
+    // Set FS base (TLS) via MSR before entering userspace.
+    // Must happen before the asm block since wrmsr clobbers rax/rcx/rdx
+    // which the compiler may have assigned for iretq frame operands.
+    x86_64::registers::model_specific::Msr::new(0xC000_0100).write(context.fs_base);
+
     core::arch::asm!(
-        // Initialize userspace segment registers (DS, ES, FS)
+        // Initialize userspace segment registers (DS, ES)
+        // NOTE: Do NOT set FS — would zero the FS base we just set via wrmsr.
         "mov ax, 0x2b",
         "mov ds, ax",
         "mov es, ax",
-        "mov fs, ax",
         // Build iretq frame
         "push {0}",      // SS
         "push {1}",      // RSP

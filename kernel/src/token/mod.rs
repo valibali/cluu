@@ -349,6 +349,7 @@ pub enum InvokeOp {
     ThreadResume = 3,
     ThreadSetPriority = 4,
     ThreadSetFaultEndpoint = 5,
+    ThreadSetFSBase = 6,
 
     // Space operations
     SpaceCreate = 10,
@@ -407,6 +408,7 @@ impl InvokeOp {
             3 => Some(Self::ThreadResume),
             4 => Some(Self::ThreadSetPriority),
             5 => Some(Self::ThreadSetFaultEndpoint),
+            6 => Some(Self::ThreadSetFSBase),
             10 => Some(Self::SpaceCreate),
             11 => Some(Self::SpaceDestroy),
             12 => Some(Self::SpaceMap),

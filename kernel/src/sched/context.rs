@@ -31,13 +31,16 @@
 //! %define CONTEXT_CS      0x90
 //! %define CONTEXT_SS      0x98
 //! %define CONTEXT_CR3     0xA0
+//! %define CONTEXT_FS_BASE 0xA8
+//! %define CONTEXT_PAD     0xB0
 //! ```
 //!
 //! # Important
 //!
 //! - The struct must be `#[repr(C)]` to match NASM layout
 //! - Field order matters - it must match the NASM offsets exactly
-//! - Total size: 96 bytes (0x60)
+//! - Total size: 184 bytes (0xB8)
+//! - Size MUST be ≡ 8 mod 16 for stack alignment (interrupt frame = 40 bytes)
 
 /// CPU context for context switching
 ///
@@ -88,6 +91,14 @@ pub struct Context {
 
     // Page table base
     pub cr3: u64, // 0xA0 - Page table root (physical address)
+
+    // Thread-local storage
+    pub fs_base: u64, // 0xA8 - FS base for TLS (MSR 0xC0000100)
+
+    // Padding to keep Context size ≡ 8 mod 16 (0xB8 = 184 bytes).
+    // The assembly paths rely on this property for stack alignment:
+    // interrupt frame (40 bytes) + CONTEXT_SIZE must be 0 mod 16.
+    pub _pad: u64, // 0xB0
 }
 
 impl Context {
@@ -115,6 +126,8 @@ impl Context {
             cs: 0,
             ss: 0,
             cr3: 0,
+            fs_base: 0,
+            _pad: 0,
         }
     }
 
@@ -155,6 +168,8 @@ impl Context {
             cs: 0x08,      // Kernel code segment (placeholder until GDT setup)
             ss: 0x10,      // Kernel data segment (placeholder until GDT setup)
             cr3,
+            fs_base: 0,
+            _pad: 0,
         }
     }
 
@@ -173,8 +188,8 @@ impl Default for Context {
 // Verify size and alignment
 #[cfg(test)]
 const _: () = {
-    // Context should be 168 bytes (0xA8)
-    assert!(core::mem::size_of::<Context>() == 168);
+    // Context should be 184 bytes (0xB8)
+    assert!(core::mem::size_of::<Context>() == 184);
 
     // Context should be 8-byte aligned
     assert!(core::mem::align_of::<Context>() == 8);
@@ -187,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_context_size() {
-        assert_eq!(mem::size_of::<Context>(), 168);
+        assert_eq!(mem::size_of::<Context>(), 184);
         assert_eq!(mem::align_of::<Context>(), 8);
     }
 
@@ -217,6 +232,7 @@ mod tests {
         assert_eq!(offset_of!(Context, cs), 0x90);
         assert_eq!(offset_of!(Context, ss), 0x98);
         assert_eq!(offset_of!(Context, cr3), 0xA0);
+        assert_eq!(offset_of!(Context, fs_base), 0xA8);
     }
 
     #[test]

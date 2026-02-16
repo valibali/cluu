@@ -2115,7 +2115,10 @@ impl VfsServer {
                         return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                     }
                 };
-                self.map_cached_elf_segments(target_space, &elf_meta, data)?;
+                if let Err(err) = self.map_cached_elf_segments(target_space, &elf_meta, data) {
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
                 self.log_map_elf_stage(fd, "segments_mapped", map_start);
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = elf_meta.entry_point;
@@ -2135,7 +2138,10 @@ impl VfsServer {
                         return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                     }
                 };
-                self.map_elf_segments(target_space, &elf, data)?;
+                if let Err(err) = self.map_elf_segments(target_space, &elf, data) {
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
                 self.log_map_elf_stage(fd, "segments_mapped", map_start);
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = elf.entry_point as usize;
@@ -2175,11 +2181,7 @@ impl VfsServer {
         segment: &LoadableSegment,
         data: &[u8],
     ) -> Result<()> {
-        let start = segment.vaddr as usize;
-        if !start.is_multiple_of(PAGE_SIZE) {
-            return Err(Error::InvalidArgument);
-        }
-
+        let vaddr = segment.vaddr as usize;
         let mem_size = segment.mem_size as usize;
         if mem_size == 0 {
             return Ok(());
@@ -2191,12 +2193,41 @@ impl VfsServer {
             return Err(Error::InvalidArgument);
         }
 
+        // Handle non-page-aligned segments (e.g., .bss after .tdata/.tbss).
+        // The first partial page was already mapped by the previous segment,
+        // so skip it and only map from the next page boundary onward.
+        let page_offset = vaddr & (PAGE_SIZE - 1);
+        if page_offset != 0 {
+            let next_page = (vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let end = vaddr + mem_size;
+            if end <= next_page {
+                // Entire segment fits within the already-mapped page.
+                return Ok(());
+            }
+            let remaining = end - next_page;
+            let num_pages = remaining.div_ceil(PAGE_SIZE);
+            let skip = next_page - vaddr;
+            let adj_file_size = file_size.saturating_sub(skip);
+            let adj_file_offset = file_offset + file_size - adj_file_size;
+            let data_ptr = data.as_ptr() as usize + adj_file_offset;
+            return syscall::space_map_range(
+                target_space,
+                next_page,
+                data_ptr,
+                segment.page_flags() as usize,
+                num_pages,
+                adj_file_size,
+            )
+            .map(|_| ());
+        }
+
+        // Page-aligned case (common path).
         let num_pages = mem_size.div_ceil(PAGE_SIZE);
         let data_ptr = data.as_ptr() as usize + file_offset;
 
         syscall::space_map_range(
             target_space,
-            start,
+            vaddr,
             data_ptr,
             segment.page_flags() as usize,
             num_pages,
@@ -2212,27 +2243,52 @@ impl VfsServer {
         segment: CachedElfSegment,
         data: &[u8],
     ) -> Result<()> {
-        if !segment.vaddr.is_multiple_of(PAGE_SIZE) {
-            return Err(Error::InvalidArgument);
-        }
-
-        if segment.mem_size == 0 {
+        let vaddr = segment.vaddr;
+        let mem_size = segment.mem_size;
+        if mem_size == 0 {
             return Ok(());
         }
 
-        if segment.file_offset + segment.file_size > data.len() {
+        let file_offset = segment.file_offset;
+        let file_size = segment.file_size;
+        if file_offset + file_size > data.len() {
             return Err(Error::InvalidArgument);
         }
 
-        let num_pages = segment.mem_size.div_ceil(PAGE_SIZE);
-        let data_ptr = data.as_ptr() as usize + segment.file_offset;
+        // Handle non-page-aligned segments (e.g., .bss after .tdata/.tbss).
+        let page_offset = vaddr & (PAGE_SIZE - 1);
+        if page_offset != 0 {
+            let next_page = (vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let end = vaddr + mem_size;
+            if end <= next_page {
+                return Ok(());
+            }
+            let remaining = end - next_page;
+            let num_pages = remaining.div_ceil(PAGE_SIZE);
+            let skip = next_page - vaddr;
+            let adj_file_size = file_size.saturating_sub(skip);
+            let adj_file_offset = file_offset + file_size - adj_file_size;
+            let data_ptr = data.as_ptr() as usize + adj_file_offset;
+            return syscall::space_map_range(
+                target_space,
+                next_page,
+                data_ptr,
+                segment.page_flags,
+                num_pages,
+                adj_file_size,
+            )
+            .map(|_| ());
+        }
+
+        let num_pages = mem_size.div_ceil(PAGE_SIZE);
+        let data_ptr = data.as_ptr() as usize + file_offset;
         syscall::space_map_range(
             target_space,
-            segment.vaddr,
+            vaddr,
             data_ptr,
             segment.page_flags,
             num_pages,
-            segment.file_size,
+            file_size,
         )?;
         Ok(())
     }

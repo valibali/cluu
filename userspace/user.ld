@@ -31,6 +31,23 @@ SECTIONS
         *(.data .data.*)
     }
 
+    /* Thread-local storage (TLS) template — variant II (x86_64).
+     * The linker generates TPOFF relocations relative to these sections.
+     * At runtime, init_tls() copies .tdata and zeroes .tbss into a per-thread block. */
+    .tdata : ALIGN(16)
+    {
+        __tdata_start = .;
+        *(.tdata .tdata.*)
+        __tdata_end = .;
+    }
+
+    .tbss : ALIGN(16)
+    {
+        __tbss_start = .;
+        *(.tbss .tbss.*)
+        __tbss_end = .;
+    }
+
     .bss : ALIGN(4K)
     {
         __bss_start = .;

@@ -38,7 +38,8 @@ extern pf_with_regs
 %define CONTEXT_CS      0x90
 %define CONTEXT_SS      0x98
 %define CONTEXT_CR3     0xA0
-%define CONTEXT_SIZE    0xA8
+%define CONTEXT_FS_BASE 0xA8
+%define CONTEXT_SIZE    0xB8
 
 %define GPF_RAX     0x00
 %define GPF_RBX     0x08
@@ -193,7 +194,13 @@ gpf_interrupt_entry:
     mov ax, 0x2b
     mov ds, ax
     mov es, ax
-    mov fs, ax
+
+    ; Restore FS base (TLS) via wrmsr
+    mov rax, [r10 + CONTEXT_FS_BASE]
+    mov rdx, rax
+    shr rdx, 32
+    mov ecx, 0xC0000100                 ; MSR_FS_BASE
+    wrmsr
 
     mov rax, [r10 + CONTEXT_RAX]
     mov rbx, [r10 + CONTEXT_RBX]
@@ -323,7 +330,13 @@ pf_interrupt_entry:
     mov ax, 0x2b
     mov ds, ax
     mov es, ax
-    mov fs, ax
+
+    ; Restore FS base (TLS) via wrmsr
+    mov rax, [r10 + CONTEXT_FS_BASE]
+    mov rdx, rax
+    shr rdx, 32
+    mov ecx, 0xC0000100                 ; MSR_FS_BASE
+    wrmsr
 
     mov rax, [r10 + CONTEXT_RAX]
     mov rbx, [r10 + CONTEXT_RBX]
@@ -432,6 +445,13 @@ timer_interrupt_entry:
     ; CR3
     mov rax, cr3
     mov [rsp + CONTEXT_CR3], rax
+
+    ; FS base (TLS) — save via rdmsr(MSR_FS_BASE)
+    mov ecx, 0xC0000100                     ; MSR_FS_BASE
+    rdmsr                                   ; EDX:EAX = FS base
+    shl rdx, 32
+    or  rax, rdx
+    mov [rsp + CONTEXT_FS_BASE], rax
 
     ; If the interrupt happened in kernel mode, only schedule when idle runs.
     test r11d, r11d
@@ -544,12 +564,17 @@ timer_interrupt_entry:
     push qword [r10 + CONTEXT_RIP]
 
 .restore_regs:
-    ; ALWAYS set userspace segment registers (DS, ES, FS)
-    ; This is safe even for kernel threads as they don't use segment-relative addressing
+    ; Set userspace segment registers (DS, ES)
     mov ax, 0x2b
     mov ds, ax
     mov es, ax
-    mov fs, ax
+
+    ; Restore FS base (TLS) via wrmsr
+    mov rax, [r10 + CONTEXT_FS_BASE]
+    mov rdx, rax
+    shr rdx, 32
+    mov ecx, 0xC0000100                     ; MSR_FS_BASE
+    wrmsr
 
     ; Restore general-purpose registers
     mov rax, [r10 + CONTEXT_RAX]

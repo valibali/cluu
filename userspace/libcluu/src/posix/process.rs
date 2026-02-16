@@ -255,6 +255,8 @@ pub extern "C" fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid
                 *status = exit_code;
             }
         }
+        drop(state);
+        super::signal::raise(super::signal::SIGCHLD);
         return done_pid;
     }
 
@@ -305,6 +307,8 @@ pub extern "C" fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid
                     *status = done_status;
                 }
             }
+            drop(state);
+            super::signal::raise(super::signal::SIGCHLD);
             return done_pid;
         }
     }

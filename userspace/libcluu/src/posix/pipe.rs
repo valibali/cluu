@@ -75,6 +75,8 @@ pub fn read_pipe(endpoint: usize, buffer: &mut [u8]) -> isize {
 /// Write data to a pipe endpoint, chunking as needed.
 ///
 /// Returns total bytes written, or -1 on error.
+/// If the read end is closed (ipc_send fails), sets errno=EPIPE and
+/// raises SIGPIPE (unless SIGPIPE is SIG_IGN).
 pub fn write_pipe(endpoint: usize, buffer: &[u8]) -> isize {
     let mut sent = 0usize;
     while sent < buffer.len() {
@@ -85,7 +87,10 @@ pub fn write_pipe(endpoint: usize, buffer: &[u8]) -> isize {
         msg_buf[4..4 + chunk].copy_from_slice(&buffer[sent..sent + chunk]);
 
         if crate::syscall::ipc_send(endpoint, &msg_buf[..4 + chunk]).is_err() {
-            return if sent > 0 { sent as isize } else { -1 };
+            // Broken pipe: raise SIGPIPE then return EPIPE.
+            crate::errno::set_errno(crate::errno::EPIPE);
+            super::signal::raise(super::signal::SIGPIPE);
+            return -1;
         }
         sent += chunk;
     }

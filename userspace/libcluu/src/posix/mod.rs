@@ -30,6 +30,7 @@ mod file;
 mod memory;
 pub mod pipe;
 mod poll;
+pub mod pthread;
 mod process;
 mod signal;
 mod stat;
@@ -42,6 +43,7 @@ pub use env::*;
 pub use file::*;
 pub use memory::*;
 pub use process::*;
+pub use pthread::*;
 pub use stat::*;
 pub use termios::*;
 pub use time::*;
@@ -99,6 +101,7 @@ pub extern "C" fn debug_print(msg: *const c_char) {
 #[no_mangle]
 pub extern "C" fn __cluu_init() {
     crate::allocator::init();
+    init_tls();
     crate::fd_table::init_stdio();
     // Initialize registry client so C programs can use VFS lookups
     // (opendir, open, stat, etc. all need registry::lookup_service).
@@ -106,6 +109,31 @@ pub extern "C" fn __cluu_init() {
     let _ = crate::registry::init("app");
     dir::init_cwd();
     env::init_env();
+}
+
+/// Set up TLS block for the main thread.
+///
+/// Uses the shared `pthread::alloc_tls_block()` which copies .tdata, zeroes
+/// .tbss, and writes the TCB self-pointer. Then sets FS base via
+/// ThreadSetFSBase so `__thread` / `_Thread_local` variables work.
+pub fn init_tls() {
+    let (_block_addr, tcb_addr) = match pthread::alloc_tls_block() {
+        Some(t) => t,
+        None => return, // Can't set up TLS — continue without it
+    };
+
+    // Set FS base to point to the TCB.  Use the space token rather than
+    // TOKEN_SELF because procmgr's TOKEN_SELF may not reference a Thread
+    // object (it's derived from the IPC capability).  The kernel accepts a
+    // Space token as authorization to set FS base for the current thread.
+    let space_token = crate::boot::space_token();
+    let _ = crate::syscall::thread_set_fs_base(space_token, tcb_addr);
+
+    // Store main thread token at FS:8 so pthread_self() works
+    let self_token = crate::boot::token_self();
+    unsafe {
+        core::ptr::write((tcb_addr + 8) as *mut usize, self_token);
+    }
 }
 
 // -------------------------------------------------------------------------

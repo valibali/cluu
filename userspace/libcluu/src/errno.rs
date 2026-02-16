@@ -98,7 +98,7 @@ lazy_static! {
     /// Per-thread errno cells keyed by current thread token.
     ///
     /// In CLUU userspace, `token_self()` uniquely identifies the current thread.
-    static ref ERRNO_BY_THREAD: Mutex<BTreeMap<usize, Box<i32>>> = Mutex::new(BTreeMap::new());
+    pub(crate) static ref ERRNO_BY_THREAD: Mutex<BTreeMap<usize, Box<i32>>> = Mutex::new(BTreeMap::new());
 }
 
 #[inline]

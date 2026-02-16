@@ -636,6 +636,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::ThreadResume => invoke_thread_resume(&token, args),
         InvokeOp::ThreadSetPriority => invoke_thread_set_priority(&token, args),
         InvokeOp::ThreadSetFaultEndpoint => invoke_thread_set_fault_endpoint(&token, args),
+        InvokeOp::ThreadSetFSBase => invoke_thread_set_fs_base(&token, args),
 
         // Space operations
         InvokeOp::SpaceCreate => invoke_space_create(&token, args),
@@ -883,6 +884,71 @@ fn invoke_thread_set_fault_endpoint(token: &Token, args: SyscallArgs) -> Syscall
         thread.fault_endpoint = endpoint_id;
     })
     .ok_or(Error::NotFound)?;
+
+    Ok(0)
+}
+
+fn invoke_thread_set_fs_base(token: &Token, args: SyscallArgs) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::THREAD_CONTROL) {
+        return Err(Error::PermissionDenied);
+    }
+
+    // Resolve the target thread: accept a Thread token directly, or a Space
+    // token as authorization to set FS base for the *current* thread running
+    // in that space (avoids chicken-and-egg when TOKEN_SELF isn't a Thread).
+    let thread_id = match crate::token::resolve_token_object(token, ObjectType::Thread) {
+        Ok(ObjectRef::Thread(id)) => id,
+        _ => {
+            // Fall back: Space token → set FS base for current thread
+            let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+                .map_err(|_| Error::InvalidArgument)?;
+            let space_id = if let ObjectRef::Space(id) = space_ref {
+                id
+            } else {
+                return Err(Error::InvalidArgument);
+            };
+
+            let current_id = crate::sched::ThreadManager::current()
+                .ok_or(Error::InvalidArgument)?;
+
+            // Verify the calling thread actually belongs to this space
+            let space_root = crate::mm::space_repository::with_space(space_id, |s| s.page_table_root)
+                .ok_or(Error::NotFound)?;
+            let thread_root = crate::sched::ThreadManager::with_thread(current_id, |t| t.page_table_root)
+                .ok_or(Error::NotFound)?;
+
+            if space_root != thread_root {
+                return Err(Error::PermissionDenied);
+            }
+
+            current_id
+        }
+    };
+
+    let fs_base = args.arg3 as u64;
+
+    // Security: FS base must be in low userspace range to prevent
+    // FS-relative reads from reaching kernel memory via large offsets.
+    if fs_base >= 0x0000_7000_0000_0000 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let is_current = crate::sched::ThreadManager::current() == Some(thread_id);
+
+    crate::sched::ThreadManager::with_thread_mut(thread_id, |thread| {
+        thread.context.fs_base = fs_base;
+    })
+    .ok_or(Error::NotFound)?;
+
+    // If setting for the currently running thread, write MSR immediately
+    // so the new FS base takes effect without waiting for a context switch.
+    if is_current {
+        unsafe {
+            x86_64::registers::model_specific::Msr::new(0xC000_0100).write(fs_base);
+        }
+    }
 
     Ok(0)
 }
@@ -1392,12 +1458,12 @@ fn invoke_futex_wait(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
     crate::architecture::x86_64::syscall::request_resched();
 
-    if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
-        crate::sync::futex::remove_waiter(space_id, user_addr, current);
-        return Err(Error::Timeout);
-    }
-
-    crate::sync::futex::remove_waiter(space_id, user_addr, current);
+    // NOTE: request_resched() only sets a flag — the actual context switch happens
+    // on the syscall return path. Any code here runs BEFORE the thread yields,
+    // so we must NOT remove ourselves from the futex queue. The wake() function
+    // handles removal via pop_wake_candidates() when it wakes us.
+    // For timeout wakeups, the stale queue entry is harmless: wake() checks
+    // is_blocked() and requeues non-blocked threads.
     Ok(0)
 }
 

@@ -400,6 +400,8 @@ fn gpf_frame_to_context(f: &GpfDebugFrame) -> Context {
         .0
         .start_address()
         .as_u64();
+    // Read the faulting thread's FS base (TLS) from MSR before it's clobbered
+    let fs_base = unsafe { x86_64::registers::model_specific::Msr::new(0xC000_0100).read() };
     Context {
         rax: f.rax,
         rbx: f.rbx,
@@ -422,6 +424,8 @@ fn gpf_frame_to_context(f: &GpfDebugFrame) -> Context {
         cs: f.cs,
         ss: f.ss,
         cr3,
+        fs_base,
+        _pad: 0,
     }
 }
 
@@ -431,6 +435,8 @@ fn pf_frame_to_context(f: &PfDebugFrame) -> Context {
         .0
         .start_address()
         .as_u64();
+    // Read the faulting thread's FS base (TLS) from MSR before it's clobbered
+    let fs_base = unsafe { x86_64::registers::model_specific::Msr::new(0xC000_0100).read() };
     Context {
         rax: f.rax,
         rbx: f.rbx,
@@ -453,6 +459,8 @@ fn pf_frame_to_context(f: &PfDebugFrame) -> Context {
         cs: f.cs,
         ss: f.ss,
         cr3,
+        fs_base,
+        _pad: 0,
     }
 }
 

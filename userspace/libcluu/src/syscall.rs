@@ -55,6 +55,7 @@ pub enum InvokeOp {
     ThreadSuspend = 2,
     ThreadResume = 3,
     ThreadSetPriority = 4,
+    ThreadSetFSBase = 6,
 
     // Space operations
     SpaceCreate = 10,
@@ -957,6 +958,25 @@ pub fn thread_suspend(thread_token: usize) -> Result<()> {
 pub fn thread_resume(thread_token: usize) -> Result<()> {
     unsafe {
         invoke(thread_token, InvokeOp::ThreadResume, 0, 0, 0, 0)?;
+    }
+    Ok(())
+}
+
+/// Set the FS base register for a thread (used for TLS).
+///
+/// If the target is the currently running thread, the MSR is updated
+/// immediately. Otherwise it takes effect on the next context switch
+/// to that thread.
+pub fn thread_set_fs_base(thread_token: usize, fs_base: usize) -> Result<()> {
+    unsafe {
+        invoke(
+            thread_token,
+            InvokeOp::ThreadSetFSBase,
+            fs_base,
+            0,
+            0,
+            0,
+        )?;
     }
     Ok(())
 }

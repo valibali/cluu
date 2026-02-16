@@ -17,6 +17,10 @@ pub const NSIG: usize = 64;
 pub const SIG_DFL: sighandler_t = 0;
 pub const SIG_IGN: sighandler_t = 1;
 
+// Signal numbers (matching newlib's sys/signal.h for generic targets)
+pub const SIGPIPE: c_int = 13;
+pub const SIGCHLD: c_int = 20;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct sigaction {

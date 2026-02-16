@@ -53,7 +53,8 @@ extern schedule_and_switch
 %define CONTEXT_CS      0x90
 %define CONTEXT_SS      0x98
 %define CONTEXT_CR3     0xA0
-%define CONTEXT_SIZE    0xA8
+%define CONTEXT_FS_BASE 0xA8
+%define CONTEXT_SIZE    0xB8
 
 ; ═══════════════════════════════════════════════════════════════════════════
 ; Syscall Entry Point
@@ -196,12 +197,13 @@ syscall_entry:
     ; Restore user stack
     mov rsp, [gs:PERCPU_USER_RSP]
 
-    ; Initialize userspace segment registers (DS, ES, FS)
-    ; SYSRET sets CS/SS automatically, but DS/ES/FS need manual init
+    ; Initialize userspace segment registers (DS, ES)
+    ; SYSRET sets CS/SS automatically, but DS/ES need manual init
+    ; NOTE: Do NOT set FS here — it would zero the FS base (MSR 0xC0000100)
+    ; used for TLS. No context switch occurred, so FS base is still correct.
     mov r10w, 0x2b
     mov ds, r10w
     mov es, r10w
-    mov fs, r10w
 
     ; Return to userspace via fast SYSRET
     swapgs
@@ -218,11 +220,11 @@ syscall_entry:
     push 0x33                           ; User CS (0x30 | RPL 3)
     push rcx                            ; User RIP (possibly non-canonical)
 
-    ; Initialize userspace segment registers (DS, ES, FS)
+    ; Initialize userspace segment registers (DS, ES)
+    ; NOTE: Do NOT set FS — would zero FS base used for TLS.
     mov r10w, 0x2b
     mov ds, r10w
     mov es, r10w
-    mov fs, r10w
 
     swapgs
     iretq                               ; IRETQ safely handles non-canonical RIP
@@ -302,6 +304,13 @@ syscall_entry:
     mov rax, cr3
     mov [rsp + CONTEXT_CR3], rax
 
+    ; FS base (TLS) — save via rdmsr(MSR_FS_BASE)
+    mov ecx, 0xC0000100                 ; MSR_FS_BASE
+    rdmsr                               ; EDX:EAX = FS base
+    shl rdx, 32
+    or  rax, rdx
+    mov [rsp + CONTEXT_FS_BASE], rax
+
     ; ─────────────────────────────────────────────────────────────────────────
     ; Call scheduler
     ; ─────────────────────────────────────────────────────────────────────────
@@ -362,11 +371,18 @@ syscall_entry:
     push rdx                            ; CS
     push rsi                            ; RIP
 
-    ; ALWAYS set userspace segment registers (DS, ES, FS)
+    ; Set userspace segment registers (DS, ES)
     mov ax, 0x2b
     mov ds, ax
     mov es, ax
-    mov fs, ax
+
+    ; Restore FS base (TLS) via wrmsr — must happen BEFORE GPR restore
+    ; (mov fs, ax would zero the base, so we skip it and just set MSR directly)
+    mov rax, [r10 + CONTEXT_FS_BASE]
+    mov rdx, rax
+    shr rdx, 32
+    mov ecx, 0xC0000100                 ; MSR_FS_BASE
+    wrmsr
 
     ; Restore all general-purpose registers
     mov rax, [r10 + CONTEXT_RAX]
