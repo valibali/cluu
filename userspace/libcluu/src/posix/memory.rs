@@ -1,7 +1,7 @@
 //! Memory-related syscall stubs.
 
 use super::{c_int, c_void, off_t, size_t};
-use crate::errno::{set_errno, EINVAL, ENOMEM, ENOSYS};
+use crate::errno::{set_errno, EBADF, EINVAL, ENOMEM, ENOSYS};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -143,8 +143,8 @@ const MAP_FAILED: *mut c_void = (-1isize) as *mut c_void;
 
 /// Map pages into the calling process's address space.
 ///
-/// Supports `MAP_ANONYMOUS` mappings (not backed by a file).
-/// File-backed mappings return `ENOSYS`.
+/// Supports `MAP_ANONYMOUS` and `MAP_PRIVATE` file-backed mappings.
+/// `MAP_SHARED` file-backed mappings return `ENOSYS`.
 ///
 /// # Arguments
 /// - `addr`: Hint address (ignored unless MAP_FIXED)
@@ -175,17 +175,40 @@ pub extern "C" fn _mmap(
     prot: c_int,
     flags: c_int,
     fd: c_int,
-    _offset: off_t,
+    offset: off_t,
 ) -> *mut c_void {
     if length == 0 {
         set_errno(EINVAL);
         return MAP_FAILED;
     }
 
-    // Only anonymous mappings supported
-    if (flags & MAP_ANONYMOUS) == 0 || fd != -1 {
+    // Determine mapping type
+    let is_anonymous = (flags & MAP_ANONYMOUS) != 0 || fd == -1;
+    let is_file_backed = !is_anonymous;
+
+    // MAP_SHARED with file descriptor: not supported (requires write-back)
+    if is_file_backed && (flags & MAP_SHARED) != 0 {
         set_errno(ENOSYS);
         return MAP_FAILED;
+    }
+
+    // Validate offset alignment for file-backed mappings
+    if is_file_backed && (offset as usize) & (PAGE_SIZE - 1) != 0 {
+        set_errno(EINVAL);
+        return MAP_FAILED;
+    }
+
+    // Validate fd capabilities: must be readable and seekable
+    if is_file_backed {
+        let table = crate::fd_table::FD_TABLE.lock();
+        match table.get(fd) {
+            Some(entry) if entry.is_readable() && entry.is_seekable() => {}
+            _ => {
+                set_errno(EBADF);
+                return MAP_FAILED;
+            }
+        }
+        // Lock dropped here — must NOT hold across file I/O below
     }
 
     // Round length up to page boundary
@@ -259,6 +282,42 @@ pub extern "C" fn _mmap(
         let _ = crate::syscall::space_unmap(space_token, virt_addr, num_pages);
         set_errno(ENOMEM);
         return MAP_FAILED;
+    }
+
+    // For file-backed mappings, populate pages from the file
+    if is_file_backed {
+        use super::file::{_lseek, _read, SEEK_CUR, SEEK_SET};
+
+        // Save current fd position
+        let saved_pos = _lseek(fd, 0, SEEK_CUR);
+        if saved_pos < 0 {
+            // Non-seekable fd — shouldn't happen (validated above), but be safe.
+            // Region is tracked; caller can munmap. Return the valid zero-filled mapping.
+            return virt_addr as *mut c_void;
+        }
+
+        // Seek to requested offset
+        if _lseek(fd, offset, SEEK_SET) < 0 {
+            let _ = _lseek(fd, saved_pos, SEEK_SET);
+            return virt_addr as *mut c_void;
+        }
+
+        // Read file data into mapped pages in a loop.
+        // _read may return < requested (VFS grant buffer is 64KB).
+        let mut total_read: usize = 0;
+        let target = length; // original length, not aligned_len
+        while total_read < target {
+            let remaining = target - total_read;
+            let ptr = (virt_addr + total_read) as *mut c_void;
+            let n = _read(fd, ptr, remaining);
+            if n <= 0 {
+                break; // EOF or error — remaining bytes stay zero
+            }
+            total_read += n as usize;
+        }
+
+        // Restore original fd position
+        let _ = _lseek(fd, saved_pos, SEEK_SET);
     }
 
     virt_addr as *mut c_void
@@ -375,6 +434,12 @@ pub extern "C" fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -> c_int
     }
     set_errno(EINVAL);
     -1
+}
+
+/// msync — no-op for MAP_PRIVATE mappings.
+#[no_mangle]
+pub extern "C" fn msync(_addr: *mut c_void, _length: size_t, _flags: c_int) -> c_int {
+    0
 }
 
 #[cfg(test)]

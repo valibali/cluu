@@ -1,6 +1,9 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifndef MAP_FAILED
 #define MAP_FAILED ((void *)-1)
@@ -125,6 +128,69 @@ int main(void) {
     if (munmap(c, page) != 0) {
         return fail("mmapprobe: FAIL munmap c", 16);
     }
+
+    /* ── File-backed mmap tests ── */
+
+    int fd = open("/bin/noop", O_RDONLY, 0);
+    if (fd < 0) {
+        return fail("mmapprobe: FAIL open /bin/noop", 20);
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        close(fd);
+        return fail("mmapprobe: FAIL fstat", 21);
+    }
+
+    size_t fsize = (size_t)st.st_size;
+    if (fsize == 0) {
+        close(fd);
+        return fail("mmapprobe: FAIL size=0", 22);
+    }
+
+    void *fmap = mmap(NULL, fsize, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    if (fmap == MAP_FAILED) {
+        close(fd);
+        return fail("mmapprobe: FAIL file mmap", 23);
+    }
+
+    /* Verify content matches read() */
+    lseek(fd, 0, SEEK_SET);
+    unsigned char readbuf[128];
+    size_t cmp_len = fsize < sizeof(readbuf) ? fsize : sizeof(readbuf);
+    ssize_t nr = read(fd, readbuf, cmp_len);
+    if (nr < 0 || (size_t)nr < cmp_len) {
+        munmap(fmap, fsize);
+        close(fd);
+        return fail("mmapprobe: FAIL file read", 24);
+    }
+
+    if (memcmp(fmap, readbuf, cmp_len) != 0) {
+        munmap(fmap, fsize);
+        close(fd);
+        return fail("mmapprobe: FAIL file compare", 25);
+    }
+    debug_print("mmapprobe: PASS file mmap content");
+    printf("mmapprobe: PASS file mmap content size=%zu cmp=%zu\n", fsize, cmp_len);
+
+    /* Verify MAP_PRIVATE: write to mapping, file should be unmodified */
+    unsigned char *fp = (unsigned char *)fmap;
+    unsigned char orig = fp[0];
+    fp[0] = ~orig;
+
+    lseek(fd, 0, SEEK_SET);
+    unsigned char check;
+    nr = read(fd, &check, 1);
+    if (nr != 1 || check != orig) {
+        munmap(fmap, fsize);
+        close(fd);
+        return fail("mmapprobe: FAIL cow semantics", 26);
+    }
+    debug_print("mmapprobe: PASS cow semantics");
+    printf("mmapprobe: PASS cow semantics orig=0x%02x\n", orig);
+
+    munmap(fmap, fsize);
+    close(fd);
 
     debug_print("mmapprobe: PASS complete");
     printf("mmapprobe: PASS complete\n");

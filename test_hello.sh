@@ -171,6 +171,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="spawn fbprobe"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn fbprobe"
             ;;
+        p4_mmap)
+            TEST_COMMAND="spawn mmapprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -853,6 +857,13 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "fbprobe: PASS"
+        )
+        ;;
+    p4_mmap)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "mmapprobe: PASS complete"
         )
         ;;
     none)
