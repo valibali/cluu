@@ -30,7 +30,8 @@
 use super::scope::ObjectRef;
 use super::{OpaqueScope, Token, TokenHandle};
 use alloc::collections::BTreeMap;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -142,21 +143,36 @@ static REVOCATION_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Global handle allocator (atomic for lock-free allocation)
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1); // 0 is reserved as invalid handle
 
+/// Global live-token counter (incremented on create, decremented on revoke).
+static TOTAL_TOKEN_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Hard cap on the total number of live tokens system-wide.
+/// Prevents unbounded growth from misbehaving userspace processes.
+const MAX_TOTAL_TOKENS: u64 = 65536;
+
 /// Get the shard for a given handle
 #[inline(always)]
 fn get_shard(handle: TokenHandle) -> &'static Mutex<TokenTableShard> {
     &TOKEN_TABLE_SHARDS[hash_handle(handle)]
 }
 
-/// Kernel secret for HMAC signatures
+/// Lock-free init-once container for the kernel HMAC secret.
 ///
-/// In production, this should be:
-/// - Generated at boot from hardware RNG
-/// - Stored in protected memory (write-once)
-/// - Never exposed to userspace
-///
-/// For now, we use a static key (should be replaced with proper initialization).
-static KERNEL_SECRET: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+/// Written exactly once during `init()` and read on every token operation.
+/// Using an init-once pattern avoids Mutex contention on the hot path.
+struct OnceSecret {
+    init: AtomicBool,
+    data: UnsafeCell<[u8; 32]>,
+}
+
+// SAFETY: `data` is written exactly once (before `init` is set to true with Release),
+// and only read after `init` is observed as true (with Acquire). No data race.
+unsafe impl Sync for OnceSecret {}
+
+static KERNEL_SECRET: OnceSecret = OnceSecret {
+    init: AtomicBool::new(false),
+    data: UnsafeCell::new([0u8; 32]),
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Public API
@@ -171,7 +187,11 @@ pub fn init() {
     let mut secret = [0u8; 32];
     klibcluu::crypto::fill_random(&mut secret);
 
-    *KERNEL_SECRET.lock() = Some(secret);
+    // SAFETY: No other thread can read `data` yet because `init` is still false.
+    unsafe {
+        KERNEL_SECRET.data.get().write(secret);
+    }
+    KERNEL_SECRET.init.store(true, Ordering::Release);
 
     klibcluu::info("Token system initialized");
 }
@@ -180,7 +200,12 @@ pub fn init() {
 ///
 /// Panics if token system hasn't been initialized.
 pub(super) fn kernel_secret() -> [u8; 32] {
-    KERNEL_SECRET.lock().expect("Token system not initialized")
+    assert!(
+        KERNEL_SECRET.init.load(Ordering::Acquire),
+        "Token system not initialized"
+    );
+    // SAFETY: `init` is true with Acquire ordering, so the write in `init()` is visible.
+    unsafe { *KERNEL_SECRET.data.get() }
 }
 
 /// Create a new token and return its handle
@@ -225,6 +250,36 @@ fn create_token_with_kind(
     object_ref: ObjectRef,
     derived: bool,
 ) -> TokenHandle {
+    // Kernel-internal creation: should never hit the limit during boot.
+    try_create_token_with_kind(scope, role, issuer, expire_at, object_ref, derived)
+        .expect("kernel token creation exceeded global limit")
+}
+
+/// Fallible token creation that enforces the global token limit.
+///
+/// Returns `Err` if the system already has `MAX_TOTAL_TOKENS` live tokens.
+fn try_create_token_with_kind(
+    scope: OpaqueScope,
+    role: super::Rights,
+    issuer: super::Issuer,
+    expire_at: super::Timestamp,
+    object_ref: ObjectRef,
+    derived: bool,
+) -> Result<TokenHandle, &'static str> {
+    // Atomically check-and-increment the global counter.
+    loop {
+        let current = TOTAL_TOKEN_COUNT.load(Ordering::Relaxed);
+        if current >= MAX_TOTAL_TOKENS {
+            return Err("Global token limit reached");
+        }
+        if TOTAL_TOKEN_COUNT
+            .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            break;
+        }
+    }
+
     let secret = kernel_secret();
     let token = Token::new(scope, role, issuer, expire_at, &secret);
 
@@ -238,7 +293,18 @@ fn create_token_with_kind(
     crate::telemetry::record_token_created();
     crate::telemetry::record_token_audit_create(handle, &telemetry_token, object_ref, derived);
 
-    handle
+    Ok(handle)
+}
+
+/// Fallible derived-token creation for the syscall path.
+pub(crate) fn try_create_derived_token(
+    scope: OpaqueScope,
+    role: super::Rights,
+    issuer: super::Issuer,
+    expire_at: super::Timestamp,
+    object_ref: ObjectRef,
+) -> Result<TokenHandle, &'static str> {
+    try_create_token_with_kind(scope, role, issuer, expire_at, object_ref, true)
 }
 
 /// Lookup and validate a token (with thread-local caching)
@@ -307,7 +373,7 @@ pub fn lookup_token(handle: TokenHandle) -> Result<Token, &'static str> {
 ///
 /// Returns cached token if:
 /// - Cache entry exists for this handle
-/// - Generation matches (token not revoked)
+/// - Generation matches (token not revoked since caching)
 /// - Token not expired
 /// - Token still exists in table
 fn try_cache_lookup(
@@ -316,50 +382,43 @@ fn try_cache_lookup(
 ) -> Option<Token> {
     use crate::sched::thread_manager::ThreadManager;
 
-    // Get cached entry (if any)
-    let cache = ThreadManager::with_thread(thread_id, |thread| thread.token_cache.clone())??; // Unwrap Option<Option<TokenCacheEntry>>
+    ThreadManager::with_thread_mut(thread_id, |thread| {
+        // Check generation first — a mismatch means *any* token was revoked
+        // since the cache was populated, so all entries are potentially stale.
+        let current_generation = revocation_generation();
 
-    // Check if cache entry matches this handle
-    if cache.handle != handle {
-        return None; // Cache miss
-    }
+        // Look up in the multi-entry LRU cache
+        let entry = thread.token_cache.lookup(handle)?;
 
-    // Check generation (detects revocation)
-    let current_generation = revocation_generation();
-    if cache.cached_generation != current_generation {
-        // Cache invalid - token was revoked, clear it
-        ThreadManager::with_thread_mut(thread_id, |thread| {
-            thread.token_cache = None;
-        });
-        return None;
-    }
-
-    // Check expiration (always check - can't cache expiration check)
-    let now = current_timestamp();
-    if cache.token.is_expired(now) {
-        // Cache invalid - token expired, clear it
-        ThreadManager::with_thread_mut(thread_id, |thread| {
-            thread.token_cache = None;
-        });
-        return None;
-    }
-
-    // Verify token still exists in table (defense in depth)
-    {
-        // Lock only the shard for this handle
-        let shard = get_shard(handle);
-        let table = shard.lock();
-        if table.get(handle).is_none() {
-            // Token was removed - invalidate cache
-            ThreadManager::with_thread_mut(thread_id, |thread| {
-                thread.token_cache = None;
-            });
+        // Generation mismatch → invalidate entire cache (global revocation counter)
+        if entry.cached_generation != current_generation {
+            thread.token_cache.invalidate_all();
             return None;
         }
-    }
 
-    // Cache hit! Return cached token (skip HMAC verification)
-    Some(cache.token.clone())
+        // Check expiration (always — can't cache time)
+        let now = current_timestamp();
+        if entry.token.is_expired(now) {
+            thread.token_cache.clear_handle(handle);
+            return None;
+        }
+
+        // Clone token before releasing borrow for table check
+        let cached_token = entry.token.clone();
+
+        // Verify token still exists in table (defense in depth)
+        {
+            let shard = get_shard(handle);
+            let table = shard.lock();
+            if table.get(handle).is_none() {
+                thread.token_cache.clear_handle(handle);
+                return None;
+            }
+        }
+
+        // Cache hit!
+        Some(cached_token)
+    })?
 }
 
 /// Update thread-local token cache
@@ -374,7 +433,7 @@ fn update_cache(
     use crate::sched::thread_manager::ThreadManager;
 
     ThreadManager::with_thread_mut(thread_id, |thread| {
-        thread.token_cache = Some(TokenCacheEntry {
+        thread.token_cache.insert(TokenCacheEntry {
             handle,
             token: token.clone(),
             object_ref,
@@ -456,6 +515,8 @@ pub fn revoke_token(handle: TokenHandle) -> Result<(), &'static str> {
     let removed = shard.lock().remove(handle);
 
     if let Some(removed) = removed {
+        // Decrement global token counter
+        TOTAL_TOKEN_COUNT.fetch_sub(1, Ordering::Relaxed);
         // Increment generation counter atomically (invalidates all thread-local caches)
         REVOCATION_GENERATION.fetch_add(1, Ordering::SeqCst);
         crate::telemetry::record_token_revoked(1);
@@ -506,12 +567,13 @@ pub fn revoke_tokens_for_object(target: ObjectRef) -> usize {
                     Some(&removed.token),
                     removed.object_ref,
                 );
+                revoked += 1;
             }
-            revoked += 1;
         }
     }
 
     if revoked > 0 {
+        TOTAL_TOKEN_COUNT.fetch_sub(revoked as u64, Ordering::Relaxed);
         REVOCATION_GENERATION.fetch_add(1, Ordering::SeqCst);
         crate::telemetry::record_token_revoked(revoked as u64);
     }

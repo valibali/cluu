@@ -74,17 +74,20 @@ syscall_entry:
     ; ─────────────────────────────────────────────────────────────────────────
     swapgs                              ; Switch GS to kernel PerCpuData
 
+    ; User RBX is required by the fast return path (SYSRET restores it)
+    mov [gs:PERCPU_LAST_RBX], rbx
+%ifdef DEBUG
     ; Debug trace: capture last syscall context (user values)
     mov [gs:PERCPU_LAST_SYSNO], rax     ; Syscall number
     mov [gs:PERCPU_LAST_RIP], rcx       ; User RIP (from SYSCALL)
     mov [gs:PERCPU_LAST_RSP], rsp       ; User RSP (still in RSP)
-    mov [gs:PERCPU_LAST_RBX], rbx       ; User RBX
     mov [gs:PERCPU_LAST_ARG1], rdi      ; Arg1 (RDI)
     mov [gs:PERCPU_LAST_ARG2], rsi      ; Arg2 (RSI)
     mov [gs:PERCPU_LAST_ARG3], rdx      ; Arg3 (RDX)
     mov [gs:PERCPU_LAST_ARG4], r10      ; Arg4 (R10)
     mov [gs:PERCPU_LAST_ARG5], r8       ; Arg5 (R8)
     mov [gs:PERCPU_LAST_ARG6], r9       ; Arg6 (R9)
+%endif
 
     mov [gs:PERCPU_USER_RSP], rsp       ; Save user RSP
     mov rsp, [gs:PERCPU_KERNEL_RSP]     ; Load kernel RSP (already aligned)
@@ -164,7 +167,9 @@ syscall_entry:
     ; Restore user RBX directly from PerCpuData capture, then drop saved slot
     mov rbx, [gs:PERCPU_LAST_RBX]
     add rsp, 8                          ; Drop saved RBX slot
+%ifdef DEBUG
     mov [gs:PERCPU_LAST_RBX_RET], rbx
+%endif
 
     ; Skip saved syscall number (we don't need it)
     add rsp, 8
@@ -249,7 +254,9 @@ syscall_entry:
     pop rbx
     ; Restore user RBX directly from PerCpuData capture
     mov rbx, [gs:PERCPU_LAST_RBX]
+%ifdef DEBUG
     mov [gs:PERCPU_LAST_RBX_RET], rbx
+%endif
 
     ; Now stack has: syscall_num, r11 (rflags), rcx (rip)
     ; And we have the callee-saved values in registers

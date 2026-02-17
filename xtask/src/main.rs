@@ -314,7 +314,7 @@ fn build_kernel(profile: &str) -> Result<()> {
     fs::create_dir_all(&tmp_dir)?;
 
     // First, assemble NASM files if they exist
-    let _ = assemble_nasm();
+    let _ = assemble_nasm(profile);
 
     let mut cmd = Command::new("cargo");
     cmd.current_dir(project_root()).args([
@@ -344,7 +344,7 @@ fn build_kernel(profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn assemble_nasm() -> Result<()> {
+fn assemble_nasm(profile: &str) -> Result<()> {
     println!("  Assembling NASM files...");
 
     let asm_dir = project_root().join("kernel/src/architecture/x86_64");
@@ -368,17 +368,28 @@ fn assemble_nasm() -> Result<()> {
         let obj_name = asm_file.replace(".asm", ".o");
         let obj = out_dir.join(&obj_name);
 
-        let status = Command::new("nasm")
-            .args([
-                "-f",
-                "elf64",
-                "-g",
-                "-F",
-                "dwarf",
-                "-o",
-                obj.to_str().unwrap(),
-                src.to_str().unwrap(),
-            ])
+        let mut cmd = Command::new("nasm");
+        cmd.args([
+            "-f",
+            "elf64",
+            "-g",
+            "-F",
+            "dwarf",
+        ]);
+
+        // Define DEBUG symbol for non-release builds so %ifdef DEBUG
+        // sections (e.g. telemetry stores in syscall_entry.asm) are active.
+        if profile != "release" {
+            cmd.arg("-dDEBUG");
+        }
+
+        cmd.args([
+            "-o",
+            obj.to_str().unwrap(),
+            src.to_str().unwrap(),
+        ]);
+
+        let status = cmd
             .status()
             .context("Failed to run NASM")?;
 

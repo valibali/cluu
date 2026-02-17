@@ -149,6 +149,25 @@ pub unsafe fn unmask(irq: u8) {
     }
 }
 
+/// Send End-Of-Interrupt for a specific IRQ line.
+///
+/// For IRQs 8-15 (slave PIC), sends EOI to both slave and master.
+/// For IRQs 0-7 (master PIC), sends EOI to master only.
+///
+/// # Safety
+///
+/// The caller must ensure the IRQ was actually raised and the handler has
+/// completed processing before sending EOI.
+pub unsafe fn send_eoi(irq: u8) {
+    if irq >= 16 {
+        return;
+    }
+    if irq >= 8 {
+        Port::<u8>::new(PIC2_COMMAND).write(0x20);
+    }
+    Port::<u8>::new(PIC1_COMMAND).write(0x20);
+}
+
 /// I/O wait - small delay for PIC to process commands
 ///
 /// Some systems need a small delay between PIC I/O operations.

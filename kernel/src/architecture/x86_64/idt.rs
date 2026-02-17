@@ -47,19 +47,12 @@ extern "C" {
     fn pf_interrupt_entry();
 }
 
-/// Send End of Interrupt (EOI) signal to PIC
+/// Send End of Interrupt (EOI) signal to PIC.
 ///
-/// This function properly handles EOI for both master and slave PIC.
-/// For IRQs 0-7 (master PIC), only master EOI is needed.
-/// For IRQs 8-15 (slave PIC), both slave and master EOI are needed.
+/// Thin wrapper around `pic::send_eoi` for local use.
+#[inline(always)]
 unsafe fn pic_eoi(irq: u8) {
-    use x86_64::instructions::port::Port;
-
-    // If the IRQ came from the slave (>=8), EOI slave first
-    if irq >= 8 {
-        unsafe { Port::<u8>::new(0xA0).write(0x20) };
-    }
-    unsafe { Port::<u8>::new(0x20).write(0x20) };
+    crate::architecture::x86_64::pic::send_eoi(irq);
 }
 
 lazy_static! {

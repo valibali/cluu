@@ -74,6 +74,29 @@ pub fn derive_token(
     ))
 }
 
+/// Fallible derive: enforces the global token limit.
+/// Returns `Err` if the limit is reached or derivation fails.
+pub fn try_derive_token(
+    parent: &Token,
+    new_rights: Rights,
+    new_expire: Timestamp,
+    issuer: Issuer,
+    object_ref: scope::ObjectRef,
+) -> Result<TokenHandle, &'static str> {
+    let secret = table::kernel_secret();
+    let derived = parent
+        .derive(new_rights, new_expire, issuer, &secret)
+        .ok_or("Token derivation failed")?;
+
+    table::try_create_derived_token(
+        derived.scope,
+        derived.role,
+        derived.issuer,
+        derived.expire_at,
+        object_ref,
+    )
+}
+
 /// Initialize the token subsystem.
 pub fn init() {
     table::init();

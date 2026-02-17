@@ -172,7 +172,9 @@ impl ThreadFlags {
 ///
 /// Uses #[repr(C)] to ensure predictable field ordering.
 /// The `context` field is accessed by assembly code via save_context.
-#[repr(C)]
+/// Cache-line aligned (64 bytes) to avoid false sharing when the
+/// scheduler accesses different Thread structs on the hot path.
+#[repr(C, align(64))]
 #[derive(Debug)]
 pub struct Thread {
     /// Unique thread identifier
@@ -225,7 +227,7 @@ pub struct Thread {
 
     /// Thread-local token cache (for performance optimization)
     /// Caches recently looked-up tokens to avoid repeated HMAC verification
-    pub token_cache: Option<TokenCacheEntry>,
+    pub token_cache: TokenCache,
 
     /// Endpoint to receive fault notifications (None = kill on fault)
     pub fault_endpoint: Option<EndpointId>,
@@ -251,6 +253,85 @@ pub struct TokenCacheEntry {
     pub object_ref: crate::token::scope::ObjectRef,
     /// Generation when cached (for revocation detection)
     pub cached_generation: u64,
+}
+
+/// Number of entries in the per-thread token cache.
+const TOKEN_CACHE_SIZE: usize = 4;
+
+/// Per-thread 4-entry LRU token cache.
+///
+/// `recv_any` with multiple endpoints benefits from caching more than one token.
+/// The LRU order is tracked in `lru_order`: index 0 = most recently used.
+#[derive(Clone, Debug)]
+pub struct TokenCache {
+    entries: [Option<TokenCacheEntry>; TOKEN_CACHE_SIZE],
+    /// LRU order: lru_order[0] = most recently used slot index
+    lru_order: [u8; TOKEN_CACHE_SIZE],
+}
+
+impl TokenCache {
+    /// Create an empty cache.
+    pub const fn new() -> Self {
+        Self {
+            entries: [None, None, None, None],
+            lru_order: [0, 1, 2, 3],
+        }
+    }
+
+    /// Look up a handle in the cache. On hit, promotes the entry to MRU.
+    pub fn lookup(&mut self, handle: crate::token::TokenHandle) -> Option<&TokenCacheEntry> {
+        // Linear scan to find the handle
+        for i in 0..TOKEN_CACHE_SIZE {
+            let slot = self.lru_order[i] as usize;
+            if let Some(ref entry) = self.entries[slot] {
+                if entry.handle == handle {
+                    // Promote to MRU by shifting entries before it
+                    if i > 0 {
+                        let hit_slot = self.lru_order[i];
+                        // Shift [0..i] right by 1
+                        for j in (1..=i).rev() {
+                            self.lru_order[j] = self.lru_order[j - 1];
+                        }
+                        self.lru_order[0] = hit_slot;
+                    }
+                    return self.entries[self.lru_order[0] as usize].as_ref();
+                }
+            }
+        }
+        None
+    }
+
+    /// Insert a new entry, evicting the LRU slot.
+    pub fn insert(&mut self, entry: TokenCacheEntry) {
+        // Evict the LRU slot (last in lru_order)
+        let evict_slot = self.lru_order[TOKEN_CACHE_SIZE - 1] as usize;
+        self.entries[evict_slot] = Some(entry);
+        // Promote evicted slot to MRU
+        let evict_val = self.lru_order[TOKEN_CACHE_SIZE - 1];
+        for j in (1..TOKEN_CACHE_SIZE).rev() {
+            self.lru_order[j] = self.lru_order[j - 1];
+        }
+        self.lru_order[0] = evict_val;
+    }
+
+    /// Invalidate all entries (e.g., on revocation generation mismatch).
+    pub fn invalidate_all(&mut self) {
+        for entry in &mut self.entries {
+            *entry = None;
+        }
+    }
+
+    /// Remove a specific handle from the cache.
+    pub fn clear_handle(&mut self, handle: crate::token::TokenHandle) {
+        for entry in &mut self.entries {
+            if let Some(ref e) = entry {
+                if e.handle == handle {
+                    *entry = None;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl Thread {
@@ -323,7 +404,7 @@ impl Thread {
             recv_wait_buf_len: 0,
             recv_wait_delivery: None,
             recv_scan_hint: 0,
-            token_cache: None,
+            token_cache: TokenCache::new(),
             fault_endpoint: None,
             fault_state: None,
         }
@@ -363,7 +444,7 @@ impl Thread {
             recv_wait_buf_len: 0,
             recv_wait_delivery: None,
             recv_scan_hint: 0,
-            token_cache: None,
+            token_cache: TokenCache::new(),
             fault_endpoint: None,
             fault_state: None,
         }

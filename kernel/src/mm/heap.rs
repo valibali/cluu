@@ -161,15 +161,15 @@ unsafe impl GlobalAlloc for LoggingAllocator {
 /// - Kernel:     0xffff_ffff_ffe0_0000 - ...
 pub const HEAP_START: u64 = 0xffff_ffff_c000_0000;
 
-/// Size of the kernel heap in bytes (16 MiB)
+/// Size of the kernel heap in bytes (32 MiB)
 ///
 /// Size rationale:
 /// - Limited by BOOTBOOT's kernel virtual address space
-/// - 16 MiB = 8 huge pages, still efficient mapping
-/// - Increased from 8MB to handle BTreeMap growth in space_repository
-/// - Linux kernels typically use 32-128MB, this is still conservative
+/// - 32 MiB = 16 huge pages, still efficient mapping
+/// - Increased from 16MB to accommodate token table growth and multi-process workloads
+/// - Linux kernels typically use 32-128MB, this is reasonable for a microkernel
 /// - Can be increased further when we implement our own address space management
-pub const HEAP_SIZE: u64 = 16 * 1024 * 1024; // 16 MiB
+pub const HEAP_SIZE: u64 = 32 * 1024 * 1024; // 32 MiB
 
 /// Inner allocator (wrapped for logging)
 static INNER_ALLOCATOR: LockedHeap = LockedHeap::empty();

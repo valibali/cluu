@@ -2071,8 +2071,8 @@ fn invoke_token_derive(handle: TokenHandle, token: &Token, args: SyscallArgs) ->
     let issuer = Issuer::Authority(AuthorityId::new(handle.as_raw() as u64));
     let object_ref = crate::token::resolve_scope(&token.scope).ok_or(Error::InvalidArgument)?;
 
-    let derived = crate::token::derive_token(token, new_rights, expire, issuer, object_ref)
-        .ok_or(Error::InvalidArgument)?;
+    let derived = crate::token::try_derive_token(token, new_rights, expire, issuer, object_ref)
+        .map_err(|_| Error::OutOfMemory)?;
 
     Ok(derived.as_usize())
 }
@@ -2128,9 +2128,40 @@ fn invoke_irq_attach(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     Ok(0)
 }
 
-fn invoke_irq_ack(_token: &Token, _args: SyscallArgs) -> SyscallResult {
-    klibcluu::warn("invoke_irq_ack not yet implemented");
-    Err(Error::NotImplemented)
+fn invoke_irq_ack(token: &Token, _args: SyscallArgs) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::IRQ_ACK) {
+        klibcluu::warn("invoke_irq_ack: missing IRQ_ACK right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let irq_ref = crate::token::resolve_token_object(token, ObjectType::Irq)
+        .map_err(|_| {
+            klibcluu::warn("invoke_irq_ack: failed to resolve IRQ object");
+            Error::InvalidArgument
+        })?;
+
+    let irq_number = if let ObjectRef::Irq(n) = irq_ref {
+        n
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    if irq_number >= 16 {
+        klibcluu::warn("invoke_irq_ack: IRQ number out of range");
+        return Err(Error::InvalidArgument);
+    }
+
+    // Send EOI: APIC first if enabled, then PIC
+    if crate::architecture::x86_64::apic::is_enabled() {
+        crate::architecture::x86_64::apic::eoi();
+    }
+    unsafe {
+        crate::architecture::x86_64::pic::send_eoi(irq_number as u8);
+    }
+
+    Ok(0)
 }
 
 // PCI operations

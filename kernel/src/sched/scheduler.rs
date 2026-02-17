@@ -68,6 +68,7 @@ impl PriorityArray {
     }
 
     /// Find highest priority with ready threads
+    #[inline(always)]
     fn find_highest_priority(&self) -> Option<u8> {
         for word_idx in (0..4).rev() {
             let word = self.bitmap[word_idx];
@@ -86,6 +87,7 @@ impl PriorityArray {
     }
 
     /// Set a bit in the bitmap
+    #[inline(always)]
     fn set_bit(&mut self, priority: u8) {
         let word_idx = (priority / 64) as usize;
         let bit_idx = priority % 64;
@@ -93,6 +95,7 @@ impl PriorityArray {
     }
 
     /// Clear a bit in the bitmap
+    #[inline(always)]
     fn clear_bit(&mut self, priority: u8) {
         let word_idx = (priority / 64) as usize;
         let bit_idx = priority % 64;

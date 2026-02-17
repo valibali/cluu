@@ -219,6 +219,8 @@ impl ThreadManager {
     }
 
     /// Mark a thread as dead and remove it from scheduler queues.
+    ///
+    /// Also revokes all tokens that reference this thread (cleanup hook).
     pub fn mark_thread_dead(thread_id: ThreadId) -> bool {
         let found = Self::with_thread_mut(thread_id, |thread| {
             thread.make_dead();
@@ -231,8 +233,15 @@ impl ThreadManager {
         if !found {
             return false;
         }
-        let mut scheduler = SCHEDULER.lock();
-        scheduler.remove(thread_id);
+        {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.remove(thread_id);
+        }
+        // Outside scheduler lock: revoke tokens referencing the dead thread.
+        // This prevents dangling token references to destroyed objects.
+        crate::token::table::revoke_tokens_for_object(
+            crate::token::scope::ObjectRef::Thread(thread_id),
+        );
         true
     }
 
