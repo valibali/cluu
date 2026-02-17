@@ -24,6 +24,37 @@ pub struct pollfd {
     pub revents: i16,
 }
 
+/// Maximum number of TTY file descriptors tracked per poll() call.
+const MAX_TTY_POLL_FDS: usize = 4;
+
+/// Query the TTY service for input data readiness.
+///
+/// Uses the TTY endpoint cached from fd 1 (stdout), NOT fd 0's endpoint,
+/// because fd 0's endpoint is the process's own receive endpoint — calling
+/// ipc_call on it would deadlock.
+///
+/// Returns `true` if the TTY reports data in its input queue.
+/// Returns `false` on any error (TTY not started, IPC failure, etc.).
+fn query_tty_readiness() -> bool {
+    use crate::ipc::TTY_POLL_QUERY_LABEL;
+    use crate::types::Message;
+
+    let tty_ep = match super::file::get_tty_endpoint() {
+        Some(ep) => ep,
+        None => return false,
+    };
+
+    let msg = Message::new(TTY_POLL_QUERY_LABEL, [0; 6], 0);
+    let mut reply_buf = [0u8; 512];
+    match crate::syscall::ipc_call(tty_ep, msg.as_bytes(), &mut reply_buf) {
+        Ok(bytes) if bytes >= core::mem::size_of::<Message>() => {
+            let reply_msg = unsafe { (reply_buf.as_ptr() as *const Message).read_unaligned() };
+            reply_msg.words[0] != 0
+        }
+        _ => false,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn poll(fds: *mut pollfd, nfds: nfds_t, timeout: c_int) -> c_int {
     if timeout < -1 {
@@ -39,10 +70,15 @@ pub extern "C" fn poll(fds: *mut pollfd, nfds: nfds_t, timeout: c_int) -> c_int 
     loop {
         let mut ready: c_int = 0;
 
+        // Phase 1: Check non-IPC readiness under FD_TABLE lock.
+        // Collect indices of TTY fds that need a readiness IPC query.
+        let mut tty_pollin_indices = [0usize; MAX_TTY_POLL_FDS];
+        let mut n_tty = 0usize;
+
         if nfds > 0 {
             let entries = unsafe { core::slice::from_raw_parts_mut(fds, nfds) };
             let table = FD_TABLE.lock();
-            for pfd in entries.iter_mut() {
+            for (i, pfd) in entries.iter_mut().enumerate() {
                 pfd.revents = 0;
 
                 // poll ignores negative fds
@@ -60,9 +96,12 @@ pub extern "C" fn poll(fds: *mut pollfd, nfds: nfds_t, timeout: c_int) -> c_int 
                 };
 
                 if (pfd.events & POLLIN) != 0 {
-                    // Conservative model: regular seekable file descriptors are readable.
+                    // Regular seekable file descriptors are always readable.
                     if entry.is_seekable() {
                         pfd.revents |= POLLIN;
+                    } else if entry.is_tty() && entry.is_readable() && n_tty < MAX_TTY_POLL_FDS {
+                        tty_pollin_indices[n_tty] = i;
+                        n_tty += 1;
                     }
                 }
                 if (pfd.events & POLLOUT) != 0 && entry.is_writable() {
@@ -70,6 +109,18 @@ pub extern "C" fn poll(fds: *mut pollfd, nfds: nfds_t, timeout: c_int) -> c_int 
                 }
                 if pfd.revents != 0 {
                     ready += 1;
+                }
+            }
+            drop(table); // Must drop FD_TABLE lock before Phase 2 IPC calls
+
+            // Phase 2: Query TTY readiness via IPC (outside lock).
+            if n_tty > 0 && query_tty_readiness() {
+                for j in 0..n_tty {
+                    let pfd = &mut entries[tty_pollin_indices[j]];
+                    if pfd.revents == 0 {
+                        ready += 1;
+                    }
+                    pfd.revents |= POLLIN;
                 }
             }
         }

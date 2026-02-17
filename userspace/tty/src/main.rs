@@ -14,8 +14,9 @@ mod protocol;
 
 use context::TtyContext;
 use libcluu::ipc::{
-    extract_reply_token, reply, KBD_EVENT_LABEL, TTY_CTL_LABEL, TTY_READ_LABEL,
-    TTY_READ_REQUEST_LABEL, TTY_REGISTER_LABEL, TTY_WRITE_LABEL, TTY_WRITE_SYNC_LABEL,
+    extract_reply_token, reply, KBD_EVENT_LABEL, TTY_CTL_LABEL, TTY_POLL_QUERY_LABEL,
+    TTY_READ_LABEL, TTY_READ_REQUEST_LABEL, TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
+    TTY_WRITE_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{yield_cpu, Error, Result};
@@ -121,6 +122,22 @@ fn run() -> Result<()> {
                         TTY_REGISTER_LABEL => {
                             // Legacy path: a process can register stdin directly.
                             ctx.shell_stdin = msg.words[0];
+                        }
+                        TTY_POLL_QUERY_LABEL => {
+                            // Readiness query from poll(): reply with 1 if input available, 0 otherwise.
+                            if let Some(reply_token) = extract_reply_token(&msg) {
+                                let has_data = if ctx.input_queue.is_empty() {
+                                    0usize
+                                } else {
+                                    1usize
+                                };
+                                let reply_msg = Message::new(
+                                    TTY_POLL_QUERY_LABEL,
+                                    [has_data, 0, 0, 0, 0, 0],
+                                    1,
+                                );
+                                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                            }
                         }
                         _ => {}
                     }
