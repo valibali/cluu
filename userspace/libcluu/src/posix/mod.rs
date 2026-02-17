@@ -27,6 +27,7 @@ mod dir;
 mod env;
 mod fcntl;
 mod file;
+mod framebuffer;
 mod memory;
 pub mod pipe;
 mod poll;

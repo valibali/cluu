@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use crate::backend::ConsoleBackend;
 use libcluu::ipc::{
     extract_reply_token, reply, CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL,
-    CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
+    CONSOLE_FB_INFO_LABEL, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::Result;
@@ -58,6 +58,10 @@ pub struct Console<B: ConsoleBackend> {
     backend: B,
     width: usize,
     height: usize,
+    /// Framebuffer physical address (for serving to apps).
+    fb_phys: u64,
+    /// Framebuffer size in bytes.
+    fb_size: u64,
     cols: usize,
     rows: usize,
     cursor_x: usize,
@@ -83,7 +87,7 @@ pub struct Console<B: ConsoleBackend> {
 
 impl<B: ConsoleBackend> Console<B> {
     /// Create a new console renderer and clear its contents.
-    pub fn new(backend: B) -> Self {
+    pub fn new(backend: B, fb_phys: u64, fb_size: u64) -> Self {
         let width = backend.width();
         let height = backend.height();
         let cols = width / GLYPH_W;
@@ -92,6 +96,8 @@ impl<B: ConsoleBackend> Console<B> {
             backend,
             width,
             height,
+            fb_phys,
+            fb_size,
             cols,
             rows,
             cursor_x: 0,
@@ -144,6 +150,23 @@ impl<B: ConsoleBackend> Console<B> {
                     self.cursor_visible = true;
                 }
                 self.redraw_cursor();
+            }
+            CONSOLE_FB_INFO_LABEL => {
+                if let Some(reply_token) = extract_reply_token(msg) {
+                    let reply_msg = Message::new(
+                        CONSOLE_FB_INFO_LABEL,
+                        [
+                            self.fb_phys as usize,
+                            self.fb_size as usize,
+                            self.width,
+                            self.height,
+                            self.backend.pitch(),
+                            4, // bytes per pixel (BGRA32)
+                        ],
+                        6,
+                    );
+                    let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
             }
             _ => {}
         }

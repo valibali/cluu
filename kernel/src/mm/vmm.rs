@@ -66,6 +66,9 @@ pub mod pte_flags {
     /// In PDE: 1 = 2MB page, 0 = points to PT
     pub const HUGE: u64 = 1 << 7;
 
+    /// Page-level cache disable (bit 4) — set for device/MMIO mappings
+    pub const NO_CACHE: u64 = 1 << 4;
+
     /// No execute (bit 63) - requires NX support
     pub const NO_EXECUTE: u64 = 1 << 63;
 
@@ -1086,6 +1089,9 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
 
                 // 2MB huge page
                 if pde & pte_flags::HUGE != 0 {
+                    if pde & pte_flags::NO_CACHE != 0 {
+                        continue; // Device-mapped huge page — skip PMM free
+                    }
                     let frame_phys = pde & 0x000F_FFFF_FFE0_0000; // 2MB aligned, strip flags
                     crate::mm::pmm::free_large_frame(frame_phys);
                     freed_frames += 512; // 512 x 4KB equivalent
@@ -1100,6 +1106,11 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                 for pt_idx in 0..512 {
                     let pte = pt[pt_idx];
                     if pte & pte_flags::PRESENT == 0 {
+                        continue;
+                    }
+
+                    // Skip device-mapped pages (MMIO) — they are not PMM-owned
+                    if pte & pte_flags::NO_CACHE != 0 {
                         continue;
                     }
 

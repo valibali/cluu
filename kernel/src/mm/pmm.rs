@@ -62,6 +62,9 @@ struct BuddyAllocator {
     buddy_ready: bool,
     total_frames: usize,
     free_frames: usize,
+    /// Highest frame index that was ever part of usable memory (exclusive upper bound).
+    /// Frames at or above this index are device MMIO / non-RAM and must never be freed.
+    max_managed_frame: usize,
 }
 
 impl BuddyAllocator {
@@ -72,6 +75,7 @@ impl BuddyAllocator {
             buddy_ready: false,
             total_frames: 0,
             free_frames: 0,
+            max_managed_frame: 0,
         }
     }
 
@@ -306,11 +310,16 @@ impl BuddyAllocator {
     }
 
     fn free_order(&mut self, phys_addr: u64, order: usize) {
+        let frame = (phys_addr / PAGE_SIZE as u64) as usize;
+        // Skip addresses outside the managed physical memory range.
+        // Device MMIO pages (e.g. framebuffer) are not PMM-owned.
+        if frame >= self.max_managed_frame || frame >= MAX_FRAMES {
+            return;
+        }
         if self.buddy_ready {
             self.buddy_free(phys_addr, order);
         } else {
             // Fallback: just mark bitmap bits
-            let frame = (phys_addr / PAGE_SIZE as u64) as usize;
             let count = 1usize << order;
             for f in frame..frame + count {
                 self.bitmap_set_free(f);
@@ -425,6 +434,7 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
     let mmap_entries = bootboot.size as usize / 16;
     let mmap_ptr = &bootboot.mmap as *const MMapEnt;
     let mut total_free_frames = 0;
+    let mut max_managed_frame: usize = 0;
 
     for i in 0..mmap_entries {
         let entry = unsafe { &*mmap_ptr.add(i) };
@@ -437,15 +447,20 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
             let start_frame = ((start_addr / 4096) as usize).max(1);
             let end_frame = end_addr.div_ceil(4096) as usize;
 
-            for frame in start_frame..end_frame.min(MAX_FRAMES) {
+            let clamped_end = end_frame.min(MAX_FRAMES);
+            for frame in start_frame..clamped_end {
                 pmm.bitmap_set_free(frame);
                 total_free_frames += 1;
+            }
+            if clamped_end > max_managed_frame {
+                max_managed_frame = clamped_end;
             }
         }
     }
 
     pmm.total_frames = total_free_frames;
     pmm.free_frames = total_free_frames;
+    pmm.max_managed_frame = max_managed_frame;
 
     // Reserve system regions
     let reserve = |pmm: &mut BuddyAllocator, start: u64, end: u64| {

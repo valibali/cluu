@@ -707,6 +707,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         "tlsprobe",
         "pthreadprobe",
         "devprobe",
+        "fbprobe",
     ];
     for prog in &c_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
@@ -1095,6 +1096,7 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("tlsprobe", "userspace/c_hello/tlsprobe.c"),
         ("pthreadprobe", "userspace/c_hello/pthreadprobe.c"),
         ("devprobe", "userspace/c_hello/devprobe.c"),
+        ("fbprobe", "userspace/c_hello/fbprobe.c"),
     ];
 
     for (name, source) in c_programs {

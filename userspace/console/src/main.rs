@@ -26,7 +26,10 @@ use crate::backend::{ConsoleBackend, DoubleBufferBackend, FramebufferBackend};
 use crate::context::ConsoleContext;
 use crate::protocol::parse_message;
 use crate::renderer::Console;
-use libcluu::boot::{process_info, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PITCH, PARAM_FB_WIDTH};
+use libcluu::boot::{
+    process_info, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PHYS, PARAM_FB_PITCH, PARAM_FB_SIZE,
+    PARAM_FB_WIDTH,
+};
 use libcluu::{debug_print, registry, syscall, Error, Result};
 
 /// Cursor blink timeout in milliseconds (used for both modes).
@@ -48,21 +51,23 @@ fn run() -> Result<()> {
     let width = info.params[PARAM_FB_WIDTH] as usize;
     let height = info.params[PARAM_FB_HEIGHT] as usize;
     let pitch = info.params[PARAM_FB_PITCH] as usize;
+    let fb_phys = info.params[PARAM_FB_PHYS];
+    let fb_size = info.params[PARAM_FB_SIZE];
 
     // Try double buffering first, fall back to direct framebuffer if heap too small
     if let Some(backend) = DoubleBufferBackend::try_new(fb, width, height, pitch) {
         let _ = debug_print("console: using double buffering");
-        run_with_backend(backend)
+        run_with_backend(backend, fb_phys, fb_size)
     } else {
         let _ = debug_print("console: using direct framebuffer (heap too small for backbuffer)");
         let backend = FramebufferBackend::new(fb, width, height, pitch);
-        run_with_backend(backend)
+        run_with_backend(backend, fb_phys, fb_size)
     }
 }
 
 /// Run the console event loop with the given backend.
-fn run_with_backend<B: ConsoleBackend>(backend: B) -> Result<()> {
-    let mut console = Console::new(backend);
+fn run_with_backend<B: ConsoleBackend>(backend: B, fb_phys: u64, fb_size: u64) -> Result<()> {
+    let mut console = Console::new(backend, fb_phys, fb_size);
 
     let context = ConsoleContext::new()?;
 

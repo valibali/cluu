@@ -10,6 +10,7 @@ use libcluu::boot::{
     PARAM_CONSOLE_INSTANCE,
     PARAM_FB_BASE,
     PARAM_FB_HEIGHT,
+    PARAM_FB_PHYS,
     PARAM_FB_PITCH,
     PARAM_FB_SIZE,
     PARAM_FB_WIDTH,
@@ -105,6 +106,7 @@ impl ServiceWiring for ServiceKind {
                 params[PARAM_FB_WIDTH] = ctx.boot.fb_width as u64;
                 params[PARAM_FB_HEIGHT] = ctx.boot.fb_height as u64;
                 params[PARAM_FB_PITCH] = ctx.boot.fb_pitch as u64;
+                params[PARAM_FB_PHYS] = ctx.boot.fb_phys;
                 params[PARAM_CONSOLE_INSTANCE] = instance_id.unwrap_or(0);
             }
             ServiceKind::Kbd => {

@@ -108,6 +108,8 @@ pub trait ConsoleBackend {
     fn width(&self) -> usize;
     /// Return the pixel height of the output surface.
     fn height(&self) -> usize;
+    /// Return the scanline pitch in bytes.
+    fn pitch(&self) -> usize;
     /// Write a single pixel into the output surface.
     fn put_pixel(&mut self, x: usize, y: usize, color: u32);
     /// Write a horizontal row of pixels (optimized bulk operation).
@@ -203,6 +205,10 @@ impl ConsoleBackend for FramebufferBackend {
 
     fn height(&self) -> usize {
         self.height
+    }
+
+    fn pitch(&self) -> usize {
+        self.pitch
     }
 
     fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
@@ -618,6 +624,10 @@ impl ConsoleBackend for DoubleBufferBackend {
 
     fn height(&self) -> usize {
         self.height
+    }
+
+    fn pitch(&self) -> usize {
+        self.pitch
     }
 
     fn flush(&mut self) {

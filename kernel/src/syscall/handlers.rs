@@ -2029,11 +2029,10 @@ fn map_device_range(
         let phys_addr = phys_start + (page_idx * PAGE_SIZE) as u64;
 
         let result = space_repository::with_space_mut(space_id, |space| unsafe {
-            elf::map_user_page(
+            elf::map_device_page(
                 virt_addr,
                 phys_addr,
                 writable,
-                false, // device memory not executable
                 space.page_table_root,
             )
         });
@@ -2041,7 +2040,7 @@ fn map_device_range(
         match result {
             Some(Ok(())) => {}
             Some(Err(_)) => {
-                klibcluu::warn("map_device_range: map_user_page failed");
+                klibcluu::warn("map_device_range: map_device_page failed");
                 return Err(Error::OutOfMemory);
             }
             None => {

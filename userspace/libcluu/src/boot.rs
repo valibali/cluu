@@ -167,6 +167,10 @@ pub const PARAM_FB_WIDTH: usize = 2;
 pub const PARAM_FB_HEIGHT: usize = 3;
 pub const PARAM_FB_PITCH: usize = 4;
 pub const PARAM_CONSOLE_INSTANCE: usize = 5;
+pub const PARAM_FB_PHYS: usize = 6;
+
+/// Fixed virtual address where apps map the framebuffer for direct access.
+pub const APP_FB_BASE: usize = 0xA000_0000;
 
 // Well-known param indices for procmgr
 pub const PARAM_INITRD_SIZE: usize = 0;
