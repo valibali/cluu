@@ -6,6 +6,11 @@
 //!
 //! - **INITMODE**: Cooperative scheduling for critical processes during boot
 //! - **NORMALMODE**: Preemptive scheduling for normal operation
+//!
+//! # Lock ordering
+//!
+//! THREAD_REPOSITORY → SCHEDULER → ENDPOINT_SHARDS / TOKEN_TABLE_SHARDS
+//! (ENDPOINT_SHARDS and TOKEN_TABLE_SHARDS are independent — never nested with each other)
 
 use crate::architecture::x86_64::gdt::set_tss_rsp0;
 use crate::sched::{
@@ -77,6 +82,12 @@ static SCHEDULER_MODE: AtomicBool = AtomicBool::new(false); // false = INIT, tru
 /// Number of critical processes still initializing
 static CRITICAL_PROCESS_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_THREAD_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Global live-thread counter (incremented on create, decremented on death).
+static TOTAL_THREAD_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Hard cap on total live threads system-wide.
+const MAX_TOTAL_THREADS: u64 = 4096;
 
 /// Global scheduler tick counter (incremented by timer interrupt)
 static SCHEDULER_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -151,6 +162,11 @@ impl ThreadManager {
         THREAD_REPOSITORY.lock().len()
     }
 
+    /// Global thread count from atomic counter.
+    pub fn thread_count_global() -> u64 {
+        TOTAL_THREAD_COUNT.load(Ordering::Relaxed)
+    }
+
     /// Number of threads that are not in Dead state.
     pub fn thread_count_live() -> usize {
         THREAD_REPOSITORY
@@ -160,10 +176,27 @@ impl ThreadManager {
             .count()
     }
 
+    /// Fallible thread ID allocation with global limit enforcement.
+    pub fn try_alloc_thread_id() -> Result<ThreadId, &'static str> {
+        loop {
+            let current = TOTAL_THREAD_COUNT.load(Ordering::Relaxed);
+            if current >= MAX_TOTAL_THREADS {
+                return Err("Global thread limit reached");
+            }
+            if TOTAL_THREAD_COUNT
+                .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
+        let mut repo = THREAD_REPOSITORY.lock();
+        Ok(repo.alloc_id())
+    }
+
     /// Allocate a new ThreadId
     pub fn alloc_thread_id() -> ThreadId {
-        let mut repo = THREAD_REPOSITORY.lock();
-        repo.alloc_id()
+        Self::try_alloc_thread_id().expect("Thread limit reached during boot")
     }
 
     /// Pick the next thread to run
@@ -233,6 +266,8 @@ impl ThreadManager {
         if !found {
             return false;
         }
+        // Decrement global thread count
+        TOTAL_THREAD_COUNT.fetch_sub(1, Ordering::Relaxed);
         {
             let mut scheduler = SCHEDULER.lock();
             scheduler.remove(thread_id);

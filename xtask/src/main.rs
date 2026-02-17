@@ -8,6 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use sha2::{Sha256, Digest};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -505,7 +506,7 @@ fn build_boot_manifest(initrd_dir: &Path, service_paths: &[String]) -> Result<St
     for path in service_paths {
         let data = fs::read(initrd_dir.join(path))
             .with_context(|| format!("Failed to read service image '{}'", path))?;
-        let digest = legacy_hash_sha256(&data);
+        let digest = hash_sha256(&data);
         let digest_hex = to_lower_hex(&digest);
         let rights_mask = manifest_rights_mask(path);
         canonical.push_str(&format!(
@@ -556,20 +557,10 @@ fn manifest_rights_mask(path: &str) -> u32 {
     }
 }
 
-// Must stay in sync with klibcluu::crypto::hash_sha256 for now.
-fn legacy_hash_sha256(data: &[u8]) -> [u8; 32] {
-    let mut hash = [0u8; 32];
-    for (i, chunk) in data.chunks(32).enumerate() {
-        for (j, &byte) in chunk.iter().enumerate() {
-            hash[j] ^= byte.wrapping_add((i as u8).wrapping_mul(j as u8));
-        }
-    }
-    for i in 0..hash.len() {
-        hash[i] = hash[i]
-            .wrapping_add(hash[(i + 7) % hash.len()])
-            .wrapping_mul(17);
-    }
-    hash
+fn hash_sha256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
 }
 
 fn hmac_sha256_fixed(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
@@ -585,14 +576,14 @@ fn hmac_sha256_fixed(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
         inner.push(*b ^ IPAD);
     }
     inner.extend_from_slice(data);
-    let inner_hash = legacy_hash_sha256(&inner);
+    let inner_hash = hash_sha256(&inner);
 
     let mut outer = [0u8; BLOCK_SIZE + 32];
     for (i, b) in key_block.iter().enumerate().take(BLOCK_SIZE) {
         outer[i] = *b ^ OPAD;
     }
     outer[BLOCK_SIZE..BLOCK_SIZE + 32].copy_from_slice(&inner_hash);
-    legacy_hash_sha256(&outer)
+    hash_sha256(&outer)
 }
 
 fn to_lower_hex(bytes: &[u8; 32]) -> String {

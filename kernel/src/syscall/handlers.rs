@@ -50,12 +50,12 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
     let msg_ptr = args.arg2;
     let msg_len = args.arg3;
 
-    let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
+    let (token, obj_ref) = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
     if !token.has_right(Rights::IPC_SEND) {
         return Err(Error::PermissionDenied);
     }
 
-    let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+    let endpoint_ref = crate::token::check_object_type(obj_ref, ObjectType::Endpoint)
         .map_err(|_| Error::InvalidArgument)?;
     let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
         id
@@ -153,12 +153,12 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
         }
 
         let token_handle = TokenHandle::from_raw(token_raw);
-        let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
+        let (token, obj_ref) = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
         if !token.has_right(Rights::IPC_RECV) {
             return Err(Error::PermissionDenied);
         }
 
-        let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+        let endpoint_ref = crate::token::check_object_type(obj_ref, ObjectType::Endpoint)
             .map_err(|_| Error::InvalidArgument)?;
         if let ObjectRef::Endpoint(id) = endpoint_ref {
             *endpoint_slot = Some(id);
@@ -229,7 +229,7 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
                         write_sender_tid(sender)?;
                         return Ok((i, len));
                     }
-                    Err(Error::WouldBlock) => continue,
+                    Err(Error::WouldBlock) | Err(Error::NotFound) => continue,
                     Err(err) => return Err(err),
                 }
             }
@@ -369,12 +369,12 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     let reply_len = args.arg5;
 
     // 1. Validate token and check IPC_CALL right
-    let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
+    let (token, obj_ref) = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
     if !token.has_right(Rights::IPC_CALL) {
         return Err(Error::PermissionDenied);
     }
 
-    let endpoint_ref = crate::token::resolve_token_object(&token, ObjectType::Endpoint)
+    let endpoint_ref = crate::token::check_object_type(obj_ref, ObjectType::Endpoint)
         .map_err(|_| Error::InvalidArgument)?;
     let endpoint_id = if let ObjectRef::Endpoint(id) = endpoint_ref {
         id
@@ -445,13 +445,13 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
     let msg_len = args.arg3;
 
     // 1. Validate reply token and check IPC_REPLY right
-    let token = lookup_token(reply_token_handle).map_err(|_| Error::InvalidArgument)?;
+    let (token, obj_ref) = lookup_token(reply_token_handle).map_err(|_| Error::InvalidArgument)?;
     if !token.has_right(Rights::IPC_REPLY) {
         return Err(Error::PermissionDenied);
     }
 
     // 2. Extract ReplyId from token
-    let reply_ref = crate::token::resolve_token_object(&token, ObjectType::Reply)
+    let reply_ref = crate::token::check_object_type(obj_ref, ObjectType::Reply)
         .map_err(|_| Error::InvalidArgument)?;
     let reply_id = if let ObjectRef::Reply(id) = reply_ref {
         id
@@ -622,7 +622,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
     let operation = InvokeOp::from_usize(args.arg2).ok_or(Error::InvalidArgument)?;
 
     // Validate and lookup token
-    let token = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
+    let (token, _obj_ref) = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
 
     //klibcluu::trace("sys_invoke: operation = ");
     //klibcluu::log_dec(klibcluu::LogLevel::Trace, "", args.arg2 as u64);
@@ -728,7 +728,8 @@ fn invoke_thread_create(token: &Token, args: SyscallArgs) -> SyscallResult {
         crate::mm::space_repository::with_space(space_id, |space| space.page_table_root)
             .ok_or(Error::NotFound)?;
 
-    let thread_id = ThreadManager::alloc_thread_id();
+    let thread_id = ThreadManager::try_alloc_thread_id()
+        .map_err(|_| Error::OutOfMemory)?;
     let flags = if ThreadManager::is_init_mode() {
         ThreadFlags::COOPERATIVE
     } else {
@@ -867,11 +868,11 @@ fn invoke_thread_set_fault_endpoint(token: &Token, args: SyscallArgs) -> Syscall
         None
     } else {
         let ep_handle = TokenHandle::from_raw(args.arg3);
-        let ep_token = lookup_token(ep_handle).map_err(|_| Error::InvalidArgument)?;
+        let (ep_token, ep_obj_ref) = lookup_token(ep_handle).map_err(|_| Error::InvalidArgument)?;
         if !ep_token.has_right(Rights::IPC_SEND) {
             return Err(Error::PermissionDenied);
         }
-        let ep_ref = crate::token::resolve_token_object(&ep_token, ObjectType::Endpoint)
+        let ep_ref = crate::token::check_object_type(ep_obj_ref, ObjectType::Endpoint)
             .map_err(|_| Error::InvalidArgument)?;
         if let ObjectRef::Endpoint(id) = ep_ref {
             Some(id)
@@ -961,7 +962,7 @@ fn invoke_endpoint_create(token: &Token, _args: SyscallArgs) -> SyscallResult {
         return Err(Error::PermissionDenied);
     }
 
-    let endpoint_id = crate::ipc::endpoint::create_endpoint();
+    let endpoint_id = crate::ipc::endpoint::try_create_endpoint()?;
     let scope = crate::token::OpaqueScope::random();
     let endpoint_token = crate::token::create_token(
         scope,
@@ -1133,12 +1134,12 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     let frame_phys = if map_frame_token {
         // Frame token path: arg6 = frame token handle
         let frame_token_handle = crate::token::TokenHandle::from_raw(copy_len);
-        let frame_token =
+        let (frame_token, frame_obj_ref) =
             crate::token::lookup_token(frame_token_handle).map_err(|_| Error::InvalidArgument)?;
         if !frame_token.has_right(Rights::MAP) {
             return Err(Error::PermissionDenied);
         }
-        let frame_ref = crate::token::resolve_token_object(&frame_token, ObjectType::Frame)
+        let frame_ref = crate::token::check_object_type(frame_obj_ref, ObjectType::Frame)
             .map_err(|_| Error::InvalidArgument)?;
         let frame_id = if let ObjectRef::Frame(id) = frame_ref {
             id
@@ -1204,11 +1205,11 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
         Some(Ok(())) => Ok(0),
         Some(Err(_)) => {
             if map_frame_token {
-                if let Ok(frame_token) =
+                if let Ok((_frame_token, frame_obj_ref)) =
                     crate::token::lookup_token(crate::token::TokenHandle::from_raw(copy_len))
                 {
                     if let Ok(frame_ref) =
-                        crate::token::resolve_token_object(&frame_token, ObjectType::Frame)
+                        crate::token::check_object_type(frame_obj_ref, ObjectType::Frame)
                     {
                         if let ObjectRef::Frame(frame_id) = frame_ref {
                             frame_registry::dec_map_count(frame_id);
@@ -1222,11 +1223,11 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
         }
         None => {
             if map_frame_token {
-                if let Ok(frame_token) =
+                if let Ok((_frame_token, frame_obj_ref)) =
                     crate::token::lookup_token(crate::token::TokenHandle::from_raw(copy_len))
                 {
                     if let Ok(frame_ref) =
-                        crate::token::resolve_token_object(&frame_token, ObjectType::Frame)
+                        crate::token::check_object_type(frame_obj_ref, ObjectType::Frame)
                     {
                         if let ObjectRef::Frame(frame_id) = frame_ref {
                             frame_registry::dec_map_count(frame_id);
@@ -1540,14 +1541,14 @@ fn invoke_space_grant(token: &Token, args: SyscallArgs) -> SyscallResult {
     };
 
     // Lookup and validate target token
-    let target_token = lookup_token(target_token_handle).map_err(|_| Error::InvalidArgument)?;
+    let (target_token, target_obj_ref) = lookup_token(target_token_handle).map_err(|_| Error::InvalidArgument)?;
     if !target_token.has_right(Rights::SPACE_MAP) {
         klibcluu::warn("invoke_space_grant: missing SPACE_MAP right on target token");
         return Err(Error::PermissionDenied);
     }
 
     // Resolve target address space
-    let target_space_ref = crate::token::resolve_token_object(&target_token, ObjectType::Space)
+    let target_space_ref = crate::token::check_object_type(target_obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
     let target_space_id = if let ObjectRef::Space(id) = target_space_ref {
         id
@@ -2101,11 +2102,11 @@ fn invoke_irq_attach(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     let endpoint_handle = TokenHandle::from_raw(_args.arg3);
     let irq_number = _args.arg4 as u8;
 
-    let endpoint_token = lookup_token(endpoint_handle).map_err(|_| {
+    let (_endpoint_token, ep_obj_ref) = lookup_token(endpoint_handle).map_err(|_| {
         klibcluu::warn("invoke_irq_attach: invalid endpoint token");
         Error::InvalidArgument
     })?;
-    let endpoint_ref = crate::token::resolve_token_object(&endpoint_token, ObjectType::Endpoint)
+    let endpoint_ref = crate::token::check_object_type(ep_obj_ref, ObjectType::Endpoint)
         .map_err(|_| {
             klibcluu::warn("invoke_irq_attach: endpoint resolve failed");
             Error::InvalidArgument

@@ -485,14 +485,111 @@ lazy_static! {
 
 static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
-pub fn create_endpoint() -> EndpointId {
+/// Global live-endpoint counter.
+static TOTAL_ENDPOINT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Hard cap on total live endpoints system-wide.
+const MAX_TOTAL_ENDPOINTS: u64 = 4096;
+
+pub fn try_create_endpoint() -> Result<EndpointId, crate::error::Error> {
+    loop {
+        let current = TOTAL_ENDPOINT_COUNT.load(Ordering::Relaxed);
+        if current >= MAX_TOTAL_ENDPOINTS {
+            return Err(crate::error::Error::OutOfMemory);
+        }
+        if TOTAL_ENDPOINT_COUNT
+            .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            break;
+        }
+    }
     let id = EndpointId::new(NEXT_ENDPOINT_ID.fetch_add(1, Ordering::SeqCst));
     let shard = get_endpoint_shard(id);
     let mut shard_guard = shard.lock();
     shard_guard
         .endpoints
         .insert(id, Mutex::new(QueueEndpoint::new()));
-    id
+    Ok(id)
+}
+
+pub fn create_endpoint() -> EndpointId {
+    try_create_endpoint().expect("Endpoint limit reached during boot")
+}
+
+/// Remove an endpoint from the repository and decrement the global counter.
+///
+/// WARNING: This does NOT drain message queues or wake blocked threads.
+/// Callers must pair with full cleanup logic (Task #5) to avoid
+/// permanently stuck threads.
+pub fn destroy_endpoint(id: EndpointId) -> bool {
+    let shard = get_endpoint_shard(id);
+    let mut shard_guard = shard.lock();
+    let removed = shard_guard.endpoints.remove(&id).is_some();
+    if removed {
+        TOTAL_ENDPOINT_COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
+    removed
+}
+
+pub fn endpoint_count_global() -> u64 {
+    TOTAL_ENDPOINT_COUNT.load(Ordering::Relaxed)
+}
+
+/// Destroy an endpoint, wake all blocked threads, and drop queued messages.
+///
+/// Called when the last token referencing this endpoint is revoked.
+/// After this call, the endpoint no longer exists and any subsequent
+/// IPC operations on it will return Error::NotFound.
+///
+/// Idempotent: returns silently if endpoint was already destroyed.
+pub fn destroy_endpoint_full(id: EndpointId) {
+    let shard = get_endpoint_shard(id);
+    let mut shard_guard = shard.lock();
+
+    let endpoint_mutex = match shard_guard.endpoints.remove(&id) {
+        Some(ep) => ep,
+        None => return, // Already destroyed
+    };
+    TOTAL_ENDPOINT_COUNT.fetch_sub(1, Ordering::Relaxed);
+
+    // Consume the mutex to get owned QueueEndpoint
+    let endpoint = endpoint_mutex.into_inner();
+
+    // Collect ALL threads that need to be woken
+    let receivers: alloc::vec::Vec<crate::sched::ThreadId> = endpoint
+        .waiting_receivers
+        .into_iter()
+        .map(|w| w.thread_id)
+        .collect();
+    let senders: alloc::vec::Vec<crate::sched::ThreadId> = endpoint
+        .waiting_senders
+        .into_iter()
+        .collect();
+    let callers: alloc::vec::Vec<crate::sched::ThreadId> = endpoint
+        .callers_by_cookie
+        .into_values()
+        .collect();
+    let current = endpoint.current_caller;
+
+    // Messages in queue and call_queue are dropped here (VecDeque Drop impl frees memory)
+
+    // Release shard lock BEFORE waking threads (lock ordering compliance)
+    drop(shard_guard);
+
+    // Wake all blocked threads — they'll retry and get Error::NotFound
+    for tid in receivers {
+        crate::sched::ThreadManager::wake_thread(tid);
+    }
+    for tid in senders {
+        crate::sched::ThreadManager::wake_thread(tid);
+    }
+    for tid in callers {
+        crate::sched::ThreadManager::wake_thread(tid);
+    }
+    if let Some(tid) = current {
+        crate::sched::ThreadManager::wake_thread(tid);
+    }
 }
 
 /// Number of endpoints currently tracked across all shards.

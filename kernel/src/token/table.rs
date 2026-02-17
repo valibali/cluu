@@ -325,7 +325,7 @@ pub(crate) fn try_create_derived_token(
 ///
 /// * `Ok(Token)` - Valid token
 /// * `Err(&str)` - Error reason
-pub fn lookup_token(handle: TokenHandle) -> Result<Token, &'static str> {
+pub fn lookup_token(handle: TokenHandle) -> Result<(Token, crate::token::scope::ObjectRef), &'static str> {
     // Try to use thread-local cache if available
     if let Some(current_thread_id) = crate::sched::ThreadManager::current() {
         if let Some(cached) = try_cache_lookup(handle, current_thread_id) {
@@ -366,7 +366,7 @@ pub fn lookup_token(handle: TokenHandle) -> Result<Token, &'static str> {
         update_cache(current_thread_id, handle, &token, object_ref, generation);
     }
 
-    Ok(token)
+    Ok((token, object_ref))
 }
 
 /// Try to lookup token from thread-local cache
@@ -379,7 +379,7 @@ pub fn lookup_token(handle: TokenHandle) -> Result<Token, &'static str> {
 fn try_cache_lookup(
     handle: TokenHandle,
     thread_id: crate::sched::thread::ThreadId,
-) -> Option<Token> {
+) -> Option<(Token, crate::token::scope::ObjectRef)> {
     use crate::sched::thread_manager::ThreadManager;
 
     ThreadManager::with_thread_mut(thread_id, |thread| {
@@ -403,8 +403,9 @@ fn try_cache_lookup(
             return None;
         }
 
-        // Clone token before releasing borrow for table check
+        // Clone token and object_ref before releasing borrow for table check
         let cached_token = entry.token.clone();
+        let cached_obj_ref = entry.object_ref;
 
         // Verify token still exists in table (defense in depth)
         {
@@ -417,7 +418,7 @@ fn try_cache_lookup(
         }
 
         // Cache hit!
-        Some(cached_token)
+        Some((cached_token, cached_obj_ref))
     })?
 }
 
@@ -496,6 +497,26 @@ pub fn resolve_token_object(
     }
 }
 
+/// Check that an ObjectRef matches the expected type.
+///
+/// Use instead of `resolve_token_object` when you already have the ObjectRef
+/// (e.g., from `lookup_token` which returns it on both cache hit and miss paths).
+pub fn check_object_type(
+    obj_ref: ObjectRef,
+    expected_type: ObjectType,
+) -> Result<ObjectRef, &'static str> {
+    match (&obj_ref, expected_type) {
+        (ObjectRef::Thread(_), ObjectType::Thread) => Ok(obj_ref),
+        (ObjectRef::Space(_), ObjectType::Space) => Ok(obj_ref),
+        (ObjectRef::Endpoint(_), ObjectType::Endpoint) => Ok(obj_ref),
+        (ObjectRef::Irq(_), ObjectType::Irq) => Ok(obj_ref),
+        (ObjectRef::Reply(_), ObjectType::Reply) => Ok(obj_ref),
+        (ObjectRef::Clock, ObjectType::Clock) => Ok(obj_ref),
+        (ObjectRef::Frame(_), ObjectType::Frame) => Ok(obj_ref),
+        _ => Err("Object type mismatch"),
+    }
+}
+
 /// Revoke a token
 ///
 /// Removes token from table, making handle invalid.
@@ -525,6 +546,14 @@ pub fn revoke_token(handle: TokenHandle) -> Result<(), &'static str> {
             Some(&removed.token),
             removed.object_ref,
         );
+
+        // Check if an endpoint became unreferenced
+        if let Some(crate::token::scope::ObjectRef::Endpoint(ep_id)) = removed.object_ref {
+            if count_tokens_for_object(crate::token::scope::ObjectRef::Endpoint(ep_id)) == 0 {
+                crate::ipc::endpoint::destroy_endpoint_full(ep_id);
+            }
+        }
+
         Ok(())
     } else {
         Err("Token not found")
@@ -576,6 +605,13 @@ pub fn revoke_tokens_for_object(target: ObjectRef) -> usize {
         TOTAL_TOKEN_COUNT.fetch_sub(revoked as u64, Ordering::Relaxed);
         REVOCATION_GENERATION.fetch_add(1, Ordering::SeqCst);
         crate::telemetry::record_token_revoked(revoked as u64);
+
+        // If we revoked endpoint tokens, check for zero-reference cleanup
+        if let crate::token::scope::ObjectRef::Endpoint(ep_id) = target {
+            if count_tokens_for_object(target) == 0 {
+                crate::ipc::endpoint::destroy_endpoint_full(ep_id);
+            }
+        }
     }
 
     revoked
@@ -648,7 +684,7 @@ mod tests {
 
         let handle = create_token(scope, role, issuer, expire_at, object_ref);
 
-        let token = lookup_token(handle).expect("Token lookup failed");
+        let (token, _obj_ref) = lookup_token(handle).expect("Token lookup failed");
         assert_eq!(token.scope, scope);
         assert_eq!(token.role, role);
     }
