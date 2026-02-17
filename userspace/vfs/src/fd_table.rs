@@ -33,6 +33,21 @@ pub struct VirtualEntry {
     pub path: String,
 }
 
+/// Device type for special device files.
+#[derive(Clone, Copy, PartialEq)]
+pub enum DeviceType {
+    Null,
+    Zero,
+    Urandom,
+}
+
+/// A device file handle.
+#[derive(Clone)]
+pub struct DeviceFile {
+    pub device_type: DeviceType,
+    pub path: String,
+}
+
 /// Open file handle.
 #[derive(Clone)]
 pub enum OpenFile {
@@ -42,6 +57,8 @@ pub enum OpenFile {
     Ext2(Ext2Entry),
     /// Virtual file with generated content
     Virtual(crate::mount::VirtualFile),
+    /// Special device file (/dev/null, /dev/zero, /dev/urandom)
+    Device(DeviceFile),
 }
 
 impl OpenFile {
@@ -50,6 +67,7 @@ impl OpenFile {
             OpenFile::Memory(e) => e.size,
             OpenFile::Ext2(e) => e.size,
             OpenFile::Virtual(v) => v.data.len(),
+            OpenFile::Device(_) => 0,
         }
     }
 
@@ -59,6 +77,7 @@ impl OpenFile {
             OpenFile::Ext2(_) => Some("/mnt/disk"),
             OpenFile::Virtual(v) => Some(v.path.as_str()),
             OpenFile::Memory(_) => None,
+            OpenFile::Device(d) => Some(d.path.as_str()),
         }
     }
 }

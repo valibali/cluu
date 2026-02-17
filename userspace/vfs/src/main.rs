@@ -66,6 +66,7 @@ const VFS_TRACE: bool = false;
 const S_IFREG: usize = 0o100000;
 const S_IFDIR: usize = 0o040000;
 const MODE_FILE: usize = S_IFREG | 0o644;
+const S_IFCHR: usize = 0o020000;
 const MODE_DIR: usize = S_IFDIR | 0o755;
 const O_CREAT: usize = 0o100;
 const O_EXCL: usize = 0o200;
@@ -185,6 +186,10 @@ fn setup_mounts(initrd: &'static [u8]) -> Result<MountTable> {
     // Procfs: virtual filesystem with system information
     mounts.mount_virtual("/proc", "procfs", procfs::ENTRIES);
     debug_print("vfs: mounted /proc (procfs)")?;
+
+    // Device files: /dev/null, /dev/zero, /dev/urandom
+    mounts.mount("/dev", alloc::boxed::Box::new(mount::DeviceBackend));
+    debug_print("vfs: mounted /dev (devfs)")?;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Future mount points can be added here:
@@ -720,6 +725,11 @@ impl VfsServer {
                 reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
                 reply_msg.words[1] = 0;
             }
+            OpenFile::Device(_) => {
+                // Device writes: accept and discard (null/zero/urandom all ignore writes)
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = data.len();
+            }
             OpenFile::Ext2(ext2) => {
                 let endpoint = ext2.endpoint;
                 let inode = ext2.inode;
@@ -807,7 +817,10 @@ impl VfsServer {
 
         reply_msg.words[0] = 0;
         reply_msg.words[1] = entry.size();
-        reply_msg.words[2] = MODE_FILE;
+        reply_msg.words[2] = match entry {
+            OpenFile::Device(_) => S_IFCHR | 0o666,
+            _ => MODE_FILE,
+        };
 
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
@@ -979,7 +992,11 @@ impl VfsServer {
 
     fn stat_path(&self, path: &str) -> Result<(usize, usize)> {
         if let Ok(file) = self.mounts.open(path) {
-            return Ok((file.size(), MODE_FILE));
+            let mode = match &file {
+                OpenFile::Device(_) => S_IFCHR | 0o666,
+                _ => MODE_FILE,
+            };
+            return Ok((file.size(), mode));
         }
 
         if self.mounts.readdir(path).is_ok() {
@@ -1324,6 +1341,22 @@ impl VfsServer {
                 out.truncate(read);
                 Ok(out)
             }
+            OpenFile::Device(device) => {
+                use fd_table::DeviceType;
+                match device.device_type {
+                    DeviceType::Null => Ok(Vec::new()),
+                    DeviceType::Zero => {
+                        let len = requested.min(REMOTE_READ_CAP);
+                        Ok(alloc::vec![0u8; len])
+                    }
+                    DeviceType::Urandom => {
+                        let len = requested.min(REMOTE_READ_CAP);
+                        let mut buf = alloc::vec![0u8; len];
+                        unsafe { fill_random(buf.as_mut_ptr(), len) };
+                        Ok(buf)
+                    }
+                }
+            }
         }
     }
 
@@ -1527,6 +1560,15 @@ impl VfsServer {
                 self.read_grant_virtual(
                     &vfile.data,
                     offset,
+                    requested,
+                    target_base,
+                    target_space,
+                    &mut reply_msg,
+                )?;
+            }
+            OpenFile::Device(device) => {
+                self.read_grant_device(
+                    &device,
                     requested,
                     target_base,
                     target_space,
@@ -1958,6 +2000,82 @@ impl VfsServer {
         self.grant_data_to_caller(slice, target_base, target_space, reply_msg)
     }
 
+    fn read_grant_device(
+        &self,
+        device: &fd_table::DeviceFile,
+        requested: usize,
+        target_base: usize,
+        target_space: usize,
+        reply_msg: &mut Message,
+    ) -> Result<()> {
+        use fd_table::DeviceType;
+
+        match device.device_type {
+            DeviceType::Null => {
+                // /dev/null: always EOF
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = 0;
+                reply_msg.words[2] = 0;
+                Ok(())
+            }
+            DeviceType::Zero => {
+                // /dev/zero: fill grant buffer with zeroes, then grant in-place
+                let len = requested.min(REMOTE_READ_CAP).min(self.grant_buf_size);
+                if len == 0 {
+                    reply_msg.words[0] = 0;
+                    reply_msg.words[1] = 0;
+                    reply_msg.words[2] = 0;
+                    return Ok(());
+                }
+                unsafe {
+                    core::ptr::write_bytes(self.grant_buf_base as *mut u8, 0, len);
+                }
+                self.grant_buf_to_caller(len, target_base, target_space, reply_msg)
+            }
+            DeviceType::Urandom => {
+                // /dev/urandom: fill grant buffer with random bytes, then grant in-place
+                let len = requested.min(REMOTE_READ_CAP).min(self.grant_buf_size);
+                if len == 0 {
+                    reply_msg.words[0] = 0;
+                    reply_msg.words[1] = 0;
+                    reply_msg.words[2] = 0;
+                    return Ok(());
+                }
+                unsafe {
+                    fill_random(self.grant_buf_base as *mut u8, len);
+                }
+                self.grant_buf_to_caller(len, target_base, target_space, reply_msg)
+            }
+        }
+    }
+
+    /// Grant pages from the pre-filled grant buffer to the caller's address space.
+    /// Unlike `grant_data_to_caller`, this skips the copy step — data must already
+    /// be written to `self.grant_buf_base`.
+    fn grant_buf_to_caller(
+        &self,
+        len: usize,
+        target_base: usize,
+        target_space: usize,
+        reply_msg: &mut Message,
+    ) -> Result<()> {
+        let pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+        for page_idx in 0..pages {
+            let src = self.grant_buf_base + page_idx * PAGE_SIZE;
+            let dst = target_base + page_idx * PAGE_SIZE;
+            if let Err(err) = space_grant(self.space_token, target_space, src, dst, 0) {
+                reply_msg.words[0] = err.to_errno() as usize;
+                reply_msg.words[1] = 0;
+                reply_msg.words[2] = 0;
+                return Ok(());
+            }
+        }
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = len;
+        reply_msg.words[2] = 0;
+        Ok(())
+    }
+
     fn grant_data_to_caller(
         &self,
         data: &[u8],
@@ -2147,7 +2265,7 @@ impl VfsServer {
                 reply_msg.words[1] = elf.entry_point as usize;
                 reply_msg.words[2] = entry.size;
             }
-            OpenFile::Virtual(_) => {
+            OpenFile::Virtual(_) | OpenFile::Device(_) => {
                 reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
             }
         }
@@ -2315,6 +2433,85 @@ fn parent_path(path: &str) -> Option<alloc::string::String> {
         return Some(alloc::string::String::from(&norm[..pos]));
     }
     None
+}
+
+/// Try to get a random u64 from the RDRAND instruction.
+/// Returns `Some(value)` on success, `None` if RDRAND fails after retries.
+fn rdrand64() -> Option<u64> {
+    for _ in 0..10 {
+        let value: u64;
+        let ok: u8;
+        unsafe {
+            core::arch::asm!(
+                "rdrand {val}",
+                "setc {ok}",
+                val = out(reg) value,
+                ok = out(reg_byte) ok,
+                options(nostack),
+            );
+        }
+        if ok != 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Xorshift64 fallback PRNG for when RDRAND is unavailable.
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
+/// Fill a buffer with random bytes, using RDRAND where available
+/// and falling back to xorshift64.
+///
+/// # Safety
+/// `buf` must point to at least `len` bytes of writable memory.
+unsafe fn fill_random(buf: *mut u8, len: usize) {
+    let mut offset = 0;
+    // Try RDRAND for 8-byte chunks
+    while offset + 8 <= len {
+        let val = match rdrand64() {
+            Some(v) => v,
+            None => break,
+        };
+        core::ptr::write_unaligned(buf.add(offset) as *mut u64, val);
+        offset += 8;
+    }
+    // If RDRAND worked for at least something, handle remaining bytes
+    if offset > 0 && offset < len {
+        if let Some(val) = rdrand64() {
+            let remaining = len - offset;
+            let bytes = val.to_ne_bytes();
+            for i in 0..remaining {
+                *buf.add(offset + i) = bytes[i];
+            }
+            return;
+        }
+    }
+    // Fallback: use xorshift64 for anything RDRAND didn't cover
+    if offset < len {
+        let seed = rdrand64().unwrap_or(0xDEAD_BEEF_CAFE_BABEu64);
+        let mut state = seed;
+        while offset + 8 <= len {
+            let val = xorshift64(&mut state);
+            core::ptr::write_unaligned(buf.add(offset) as *mut u64, val);
+            offset += 8;
+        }
+        if offset < len {
+            let val = xorshift64(&mut state);
+            let bytes = val.to_ne_bytes();
+            let remaining = len - offset;
+            for i in 0..remaining {
+                *buf.add(offset + i) = bytes[i];
+            }
+        }
+    }
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {

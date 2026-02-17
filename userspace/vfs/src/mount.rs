@@ -268,6 +268,46 @@ impl MountBackend for RemoteBackend {
     }
 }
 
+/// Device backend - special device files (/dev/null, /dev/zero, /dev/urandom).
+pub struct DeviceBackend;
+
+impl MountBackend for DeviceBackend {
+    fn name(&self) -> &'static str {
+        "devfs"
+    }
+
+    fn open(&self, rel_path: &str, full_path: &str) -> Result<OpenFile> {
+        use crate::fd_table::{DeviceFile, DeviceType};
+
+        let rel = rel_path.trim_start_matches('/');
+        let device_type = match rel {
+            "null" => DeviceType::Null,
+            "zero" => DeviceType::Zero,
+            "urandom" | "random" => DeviceType::Urandom,
+            _ => return Err(Error::NotFound),
+        };
+
+        Ok(OpenFile::Device(DeviceFile {
+            device_type,
+            path: String::from(full_path),
+        }))
+    }
+
+    fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>> {
+        let rel = rel_path.trim_start_matches('/');
+        if !rel.is_empty() {
+            return Err(Error::NotFound);
+        }
+
+        Ok(alloc::vec![
+            DirEntry { name: String::from("null"), is_dir: false },
+            DirEntry { name: String::from("zero"), is_dir: false },
+            DirEntry { name: String::from("urandom"), is_dir: false },
+            DirEntry { name: String::from("random"), is_dir: false },
+        ])
+    }
+}
+
 /// Virtual file content generator.
 pub type VirtualFileGenerator = fn() -> Result<Vec<u8>>;
 

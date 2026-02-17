@@ -163,6 +163,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="spawn pthreadprobe"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn pthreadprobe"
             ;;
+        p4_dev)
+            TEST_COMMAND="spawn devprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn devprobe"
+            ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
@@ -831,6 +835,13 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "pthreadprobe: PASS"
+        )
+        ;;
+    p4_dev)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "devprobe: PASS"
         )
         ;;
     none)
