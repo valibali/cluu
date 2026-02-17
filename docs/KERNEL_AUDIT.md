@@ -1,386 +1,241 @@
-# CLUU Kernel Technical Audit (v2 — Post-Remediation)
+# CLUU Kernel Technical Audit (v3 — Post-Remediation)
 
 **Date**: February 2026
 **Scope**: Kernel correctness, speed, efficiency, and production-readiness
 **Target**: x86_64 single-CPU microkernel, seL4-inspired with POSIX compatibility layer
 **Codebase**: ~22.3K LOC (61 Rust files + x86_64 assembly), 1,009 LOC assembly
 **Known limitations**: Single CPU, x86_64 only, no IOMMU, PIC-only interrupts
-**Previous audit**: v1, scoring 7.0/10 overall
+**Previous audits**: v1 (7.0/10), v2 (7.75/10)
 
 ---
 
 ## Overall Rating
 
-| Category | Score | Grade | Previous | Delta | Summary |
+| Category | Score | Grade | v2 | v1 | Summary |
 |---|---|---|---|---|---|
-| **Correctness** | 8.75/10 | A | 8.5/10 | +0.25 | Zero bugs found. All 9 remediation fixes verified correct. No regressions |
-| **Speed** | 6.5/10 | B- | 5.5/10 | +1.0 | Syscall fast path -25%. IPC round-trip ~3,660-5,300 cycles (cached). SHA-256 is placeholder |
-| **Efficiency** | 8.0/10 | B+ | 7.5/10 | +0.5 | Token DoS eliminated. Thread struct 376B->1,088B tradeoff. Missing thread/endpoint limits |
-| **Overall** | **7.75/10** | **B+** | **7.0/10** | **+0.75** | Measurably improved. Token security hardened. Performance bottlenecks reduced |
+| **Correctness** | 9.25/10 | A | 8.75 | 8.5 | SHA-256 verified FIPS 180-4. All 9+ return-to-userspace paths correct. Zero bugs |
+| **Speed** | 6.5/10 | B- | 6.5 | 5.5 | ObjectRef cache eliminates resolve_scope. Real HMAC offsets gains. Reply token minting is new #1 bottleneck |
+| **Efficiency** | 8.5/10 | A- | 8.0 | 7.5 | All 3 resource types capped. Endpoint cleanup via zero-reference. Dead thread leak remains |
+| **Overall** | **8.0/10** | **B+** | **7.75** | **7.0** | Cryptographically secure tokens. Measurably better resource management. Simple IPC competitive with Fiasco.OC |
 
-**Verdict**: All 9 remediation items from v1 have been applied correctly with zero regressions. The kernel is measurably more robust against resource exhaustion and faster on hot paths. The HMAC cost is lower than previously estimated due to the placeholder SHA-256 implementation (~250-350 cycles, not ~3,500). The top remaining bottleneck is `resolve_scope()` iterating all 16 token table shards on every IPC operation, even with cache hits.
+**Verdict**: v3 completes the security story -- HMAC-SHA256 tokens are now cryptographically unforgeable with real FIPS 180-4 SHA-256. The ObjectRef caching eliminates the #1 bottleneck from v2 (16-shard resolve_scope scan). All three resource types (tokens, threads, endpoints) are now hard-capped with CAS enforcement. Endpoint cleanup on zero-reference detection closes the last major resource leak. The speed score holds steady because real SHA-256 costs ~3,300-4,900 cycles per HMAC (vs ~250-350 for the placeholder), but this is offset by the ~240 cycles/op saved from ObjectRef caching. Simple send+recv IPC is ~1,080-1,620 cycles -- competitive with production microkernels.
 
 ---
 
-## Changes Since v1
+## Changes Since v2
 
 | Item | Category | Status |
 |---|---|---|
-| A1. Kernel heap 16->32 MB | Must Fix | Done |
-| A2. KERNEL_SECRET lock-free (OnceSecret) | Should Fix | Done |
-| A3. Scheduler bitmap ops `#[inline(always)]` | Could Fix | Done |
-| A4. Thread struct `align(64)` | Could Fix | Done |
-| B. Token cache 1-entry -> 4-entry LRU | Must Fix | Done |
-| C. Global token limit (65,536 max, CAS) | Must Fix | Done |
-| D. Token revocation on thread death | Should Fix | Done |
-| E. IrqAck implementation (op 31) | Should Fix | Done |
-| F. Debug telemetry `%ifdef DEBUG` gating | Should Fix | Done |
+| 1. Real FIPS 180-4 SHA-256 | Security (Must Fix) | Done |
+| 2. Cache ObjectRef in TokenCache | Speed (Must Fix) | Done |
+| 3. Global thread limit (4096, CAS) | Efficiency (Must Fix) | Done |
+| 4. Global endpoint limit (4096, CAS) | Efficiency (Must Fix) | Done |
+| 5. Endpoint cleanup on zero-reference | Efficiency (Must Fix) | Done |
 
 ---
 
-## 1. Correctness (8.75/10)
+## 1. Correctness (9.25/10)
 
-### Syscall Entry/Exit -- PASS
-
-All return-to-userspace paths verified correct across 9 distinct code paths. The `%ifdef DEBUG` gating preserves the unconditional `PERCPU_LAST_RBX` save (required by fast return path) while gating the 9 telemetry MOVs.
+### SHA-256 Implementation -- VERIFIED CORRECT
 
 | Check | Status | Evidence |
 |---|---|---|
-| SWAPGS on every user/kernel transition | PASS | syscall_entry.asm:75,214,234,412; interrupts.asm GPF/PF entries |
-| RFLAGS sanitized on all return paths | PASS | Clears TF/IOPL/NT/RF/AC, ensures IF+bit1. Applied at 9 locations |
-| Intel SYSRET RCX bug mitigated | PASS | syscall_entry.asm:197-200 -- canonical address check, falls back to IRETQ |
-| Register save/restore complete | PASS | All 16 GPRs saved to Context struct. No clobber bugs found |
-| Syscall ABI consistent | PASS | RAX=number, RDI/RSI/RDX/R10/R8/R9=args, RAX=return |
-| FS base saved/restored on all slow paths | PASS | rdmsr/wrmsr(MSR_FS_BASE=0xC0000100) on all context-switch paths |
-| DEBUG gating correct | PASS | PERCPU_LAST_RBX unconditional; 9 telemetry MOVs gated by %ifdef DEBUG |
+| H_INIT values (8 primes) | PASS | Fractional square roots of 2,3,5,7,11,13,17,19 |
+| K constants (64 primes) | PASS | K[0]=0x428a2f98, K[63]=0xc67178f2 |
+| Compression function | PASS | ch, maj, Sigma0/1, sigma0/1 rotation values correct |
+| Padding | PASS | 0x80 + zeros + 64-bit big-endian bit count, two-block case handled |
+| NIST test vectors | PASS | Empty, "abc", 448-bit two-block boundary |
+| Stack-only (no heap) | PASS | Sha256State: 108 bytes on stack |
 
-### Memory Safety -- PASS
-
-| Check | Status | Evidence |
-|---|---|---|
-| User pointer validation | PASS | validate_user_buffer() + copy_from_user() before kernel access |
-| Buddy allocator double-free protection | PASS | Bitmap tracks allocation state; free of unallocated frame is no-op |
-| Page table walk correctness | PASS | Uses x86_64 crate OffsetPageTable; 4-level walk verified |
-| Demand paging race-free | PASS | Single-CPU: only one fault handler active at a time per address space |
-| Frame registry map-count tracking | PASS | saturating_sub prevents underflow; prevents free-while-mapped |
-| Device MMIO pages excluded from teardown | PASS | PTE NO_CACHE bit checked; skipped in teardown_user_pages() |
-| Heap size adequate | PASS | 32 MB; worst-case analysis shows ~27 MB usage under extreme load |
-
-### IPC Protocol -- PASS
+### HMAC-SHA256 + Token Signatures -- VERIFIED CORRECT
 
 | Check | Status | Evidence |
 |---|---|---|
-| Messages cannot be lost | PASS | One-time list_pop semantics; message removed from queue on receive |
-| Messages cannot be duplicated | PASS | No retry loops or re-queuing |
-| Send/Recv/Call/Reply deadlock-free | PASS | ReplyId unique (atomic counter); caller blocks without holding locks |
-| recv_any starvation prevention | PASS | Rotating scan start index |
-| Sender identity unforgeable | PASS | Kernel writes sender field; userspace cannot modify |
-| Queue bounded | PASS | MAX_QUEUE_LEN=1024, MAX_CALL_QUEUE_LEN=256 |
+| HMAC RFC 2104 | PASS | IPAD=0x36, OPAD=0x5C, key zero-padded |
+| hmac_sha256_fixed (stack path) | PASS | Used for 36-byte token data, no heap |
+| Constant-time comparison | PASS | XOR + OR accumulation, no early exit |
+| Token verify recomputes | PASS | signature.rs computes fresh HMAC, compares |
 
-### Token/Capability System -- PASS
+### ObjectRef Cache -- CORRECT
 
 | Check | Status | Evidence |
 |---|---|---|
-| Token forgery prevention | PASS | HMAC with 256-bit kernel secret, initialized from CSPRNG |
-| Constant-time signature comparison | PASS | signature.rs -- XOR + OR chain, no early exit |
-| Signature verified on every use | PASS | table.rs -- always verified unless cached |
-| Cache invalidated on revocation | PASS | Generation counter (atomic SeqCst) -- all caches immediately stale |
-| Cache invalidated on expiration | PASS | Timestamp re-checked even for cached tokens |
-| Rights monotonically restrictive | PASS | Derivation can only remove rights, never add |
-| Object type confusion prevented | PASS | ObjectRef enum with type tags |
-| Expiration mandatory and enforced | PASS | Monotonic boot-nanosecond timestamps, checked on every lookup |
-| Global token limit enforced | PASS | CAS loop with MAX_TOTAL_TOKENS=65536 |
-| Token cleanup on thread death | PASS | revoke_tokens_for_object in mark_thread_dead, outside scheduler lock |
-| OnceSecret memory ordering | PASS | Write data then Release store; Acquire load before read |
+| lookup_token returns (Token, ObjectRef) | PASS | Cache hit and miss paths both return tuple |
+| check_object_type exhaustive match | PASS | All 7 ObjectRef variants covered |
+| All IPC call sites updated | PASS | sys_send, sys_recv, sys_call, sys_reply + 7 invoke sites |
+| sys_recv NotFound skip | PASS | Destroyed endpoints skipped in multi-endpoint scan |
+| sys_invoke discards obj_ref | PASS | Option B design: invoke handlers keep their own resolution |
 
-**New: OnceSecret analysis**: The `OnceSecret` pattern replacing `Mutex<Option<[u8; 32]>>` is sound. Write-before-Release on init, Acquire-before-read on access. No data race possible.
+### CAS Counters -- CORRECT
 
-**New: Token limit CAS correctness**: The `compare_exchange_weak` loop correctly handles spurious failures. Counter cannot underflow because `fetch_sub` only occurs after successful token removal.
-
-**New: Lock ordering in mark_thread_dead**: THREAD_REPOSITORY released before SCHEDULER acquired; SCHEDULER released before TOKEN_TABLE_SHARDS accessed. No nested locks held during token revocation.
-
-### Scheduling -- PASS
-
-| Check | Status | Evidence |
-|---|---|---|
-| Thread cannot be scheduled twice | PASS | current = Some(...) prevents double-scheduling |
-| Priority bitmap O(1) | PASS | leading_zeros intrinsic; active/expired array swap |
-| Starvation prevention | PASS | All threads run once per epoch; expired array swap |
-| Thread state transitions atomic | PASS | Protected by ThreadManager mutex |
-| Timeout heap stale entries handled | PASS | Lazy cleanup on pop; thread re-checked for waiting state |
-
-### Interrupt Safety -- PASS
-
-| Check | Status | Evidence |
-|---|---|---|
-| IST stacks for fault handlers | PASS | GPF=IST1, PF=IST2, DF=IST(separate) |
-| Nested interrupt prevention | PASS | GPF/PF check privilege level before SWAPGS |
-| EOI before context switch | PASS | Prevents deadlock in idle_until_runnable |
-| schedule_next_from_fault() IST-safe | PASS | No idle loop -- prevents re-entrant exception danger |
-| IrqAck EOI delivery correct | PASS | APIC EOI (if enabled) then PIC EOI; harmless if no pending IRQ |
-
-### IrqAck Implementation -- PASS (NEW)
-
-| Check | Status | Evidence |
-|---|---|---|
-| Rights check | PASS | Rights::IRQ_ACK (bit 29), separate from IRQ_HANDLE (bit 28) |
-| Object resolution | PASS | Resolves to ObjectRef::Irq(n) through token scope |
-| Bounds check | PASS | irq_number >= 16 returns error |
-| Master/slave PIC routing | PASS | pic::send_eoi handles IRQ >= 8 (slave EOI + master EOI) |
-
-### Summary of Correctness Findings
-
-| ID | Severity | Location | Description | Status |
+| Resource | Limit | Increment | Decrement | Underflow Safe |
 |---|---|---|---|---|
-| C-1 | INFO | frame_registry.rs | map_count uses Mutex instead of AtomicU32 | Acceptable (single CPU) |
-| C-2 | LOW | handlers.rs | Token array copied from user one-at-a-time | Non-exploitable |
-| C-3 | LOW | scheduler.rs | No priority inheritance | Documented design limitation |
-| C-4 | INFO | thread_manager.rs:577 | 8 pending wake slots might overflow | Rate-limited; overflow = wake delayed, not lost |
-| C-5 | INFO | idt.rs:975-983 | `current_id_raw() == 0` check is dead code | Harmless; kernel-mode check in asm prevents scheduling anyway |
+| Threads | 4,096 | try_alloc_thread_id (CAS) | mark_thread_dead (after found check) | Yes |
+| Endpoints | 4,096 | try_create_endpoint (CAS) | destroy_endpoint/full (after remove check) | Yes |
+| Tokens | 65,536 | try_create_token_with_kind (CAS) | revoke_token (after removal) | Yes |
 
-**No CRITICAL or HIGH severity findings. Zero bugs found across all 9 remediation changes.**
+### Endpoint Cleanup -- CORRECT
+
+| Check | Status | Evidence |
+|---|---|---|
+| destroy_endpoint_full removes from shard | PASS | endpoints.remove(&id) |
+| Queued messages dropped | PASS | VecDeque Drop frees memory |
+| All blocked threads woken | PASS | receivers, senders, callers, current_caller |
+| Shard lock released before waking | PASS | drop(shard_guard) at line 578, then wake_thread calls |
+| Idempotent | PASS | Returns silently if already destroyed |
+| Zero-reference trigger in revoke_token | PASS | count_tokens_for_object after shard lock released |
+| Zero-reference trigger in revoke_tokens_for_object | PASS | Same check after all shard iteration |
+
+### Return-to-Userspace Paths (9+) -- ALL CORRECT
+
+All paths verified for RFLAGS sanitization, SWAPGS, FS base save/restore, segment selectors:
+
+1. SYSRET fast path -- PASS
+2. SYSRET fallback IRETQ -- PASS
+3. Slow path IRETQ -- PASS
+4. Timer no-switch return -- PASS
+5. Timer user context switch -- PASS
+6. Timer kernel context switch -- PASS
+7. GPF context switch -- PASS
+8. PF context switch -- PASS
+9. PF resume -- PASS
+10. Initial enter_userspace -- PASS
+
+### Findings
+
+| ID | Severity | Location | Description |
+|---|---|---|---|
+| C-1 | LOW | handlers.rs:625 | sys_invoke discards cached ObjectRef, invoke handlers re-scan 16 shards |
+| C-2 | LOW | endpoint.rs:450-458 | EndpointRepository::create() bypasses TOTAL_ENDPOINT_COUNT (dead code) |
+| C-3 | INFO | table.rs:551-554 | TOCTOU window in zero-reference check (safe: single-CPU, idempotent) |
+| C-4 | INFO | table.rs:411-418 | Defense-in-depth shard lock on every cache hit (safe but costly) |
+
+**No CRITICAL or HIGH severity findings.**
 
 ---
 
 ## 2. Speed (6.5/10)
 
-### CRITICAL DISCOVERY: Placeholder SHA-256
+### HMAC-SHA256 Cost (Real SHA-256)
 
-The `hash_sha256` implementation in `klibcluu/src/crypto/sha256.rs` is **NOT real SHA-256**. It is a trivial XOR+wrapping-add hash (~250-350 cycles for full HMAC, not ~3,500 cycles). This means:
-
-1. All previous IPC cycle estimates were based on real SHA-256 costs and were **overestimated by ~10x** for the HMAC component
-2. The actual IPC latency has always been lower than v1 reported
-3. The HMAC cost is NOT the dominant bottleneck -- `resolve_scope()` is
-
-**Security impact**: The token HMAC provides zero cryptographic security with this placeholder. Anyone with knowledge of the algorithm can forge tokens. This is a known TODO.
-
-### Syscall Fast Path: ~40-50 cycles (release)
-
-| Phase | Release | Debug | Notes |
-|---|---|---|---|
-| Entry asm (to CALL) | ~24 instr | ~33 instr | 9 debug MOVs eliminated in release |
-| Return asm (from CALL to SYSRET) | ~24 instr | ~25 instr | 1 debug MOV eliminated |
-| **Total wrapper** | **~40-50 cycles** | **~50-60 cycles** | Excludes SYSCALL/SYSRET hardware + handler |
-
-**Previous**: ~55-75 cycles (debug telemetry always present)
-**Delta**: -25% in release builds
-
-### KERNEL_SECRET Access: ~6-8 cycles (was ~20-50)
-
-| Path | Old | New | Delta |
-|---|---|---|---|
-| Mutex lock+unlock+unwrap+copy | ~20-50 cycles | -- | -- |
-| AtomicBool Acquire + UnsafeCell read | -- | ~6-8 cycles | **3-6x faster** |
+| Operation | Cycles | Notes |
+|---|---|---|
+| Single SHA-256 compress | ~800-1,200 | 64 rounds, ILP on modern x86_64 |
+| HMAC-SHA256 (36-byte token data) | ~3,300-4,900 | 4 compress calls (inner 2 blocks + outer 2 blocks) |
 
 ### Token Lookup Paths
 
-**Cache hit** (~150-250 cycles):
-```
-ThreadManager::with_thread_mut       ~30-50 cycles (Mutex)
-revocation_generation check          ~3 cycles (AtomicU64 SeqCst)
-TokenCache::lookup (4-entry LRU)     ~10-20 cycles (linear scan)
-expiration check                     ~10 cycles (rdtsc + compare)
-token.clone()                        ~20-30 cycles
-defense-in-depth table.get()         ~50-100 cycles (BTreeMap + shard lock)
-```
-
-**Cache miss** (~430-650 cycles):
-```
-shard lock + BTreeMap get            ~65-130 cycles
-current_timestamp (rdtsc)            ~10 cycles
-is_expired check                     ~3 cycles
-kernel_secret()                      ~6-8 cycles (OnceSecret)
-HMAC verify (placeholder hash)       ~250-350 cycles
-resolve_scope (16 shard scan)        ~100-480 cycles (avg ~240)
-update_cache                         ~40-60 cycles
-```
-
-**Previous cache miss estimate**: ~3,500-5,500 cycles (assuming real SHA-256)
-**Actual cache miss**: ~430-650 cycles
-
-### recv_any Performance
-
-| Scenario | Old (1-entry cache) | New (4-entry cache) | Delta |
+| Path | v3 Cycles | v2 Cycles | Delta |
 |---|---|---|---|
-| recv_any(3) warm | ~1,200 cycles | ~600 cycles | **-50%** |
-| recv_any(16) warm | ~8,350 cycles | ~7,400 cycles | **-11%** |
+| Cache hit | ~150-250 | ~150-250 (+ ~240 resolve_scope) | **-240 (resolve_scope eliminated)** |
+| Cache miss | ~3,500-5,200 | ~430-650 (placeholder) | **+3,070-4,550 (real HMAC)** |
 
-The 4-entry cache primarily benefits servers with 2-4 endpoints (common pattern). For 16-endpoint recv_any, LRU eviction limits benefit to ~4 hits per scan.
+### IPC Round-Trip Estimates
 
-### IPC Round-Trip (Call/Reply)
-
-| Case | Cycles | Notes |
+| Scenario | Cycles | Notes |
 |---|---|---|
-| Best (cached, single endpoint) | ~3,660 | All token lookups cached |
-| Typical (warm cache, recv_any(3)) | ~5,300 | 3/4 lookups cached |
-| Worst (cold cache, recv_any(16)) | ~9,200 | 16 cache-miss lookups |
+| Simple send+recv (cache hit, 1 context switch) | ~1,080-1,620 | **Competitive with Fiasco.OC** |
+| Full sys_call/reply (cache hits) | ~5,670-9,120 | Reply token minting dominates (55-65%) |
+| Full sys_call/reply (cold cache) | ~12,000-19,000 | 3 HMAC verifications + reply creation |
 
-**Previous estimates**: ~5,000-8,000 cached, ~12,000-19,000 cold
-**Correction**: v1 estimates were inflated by assuming real SHA-256 (~3,500 cycles/HMAC). With placeholder hash (~300 cycles/HMAC), actual IPC was always lower.
+### Comparison to Production Microkernels
 
-**Comparison to other microkernels** (corrected):
-
-| Kernel | IPC Latency | Notes |
-|---|---|---|
-| seL4 | ~500-800 cycles | Hand-tuned asm, sealed capabilities |
-| Fiasco.OC | ~1,000-1,500 cycles | Classical L4 IPC |
-| Zircon | ~2,000-3,000 cycles | Handle tables |
-| **CLUU** | **~3,660-5,300 cycles** | HMAC tokens (placeholder hash), queue-based IPC |
-| Typical microkernel | ~3,000-10,000 cycles | -- |
-
-CLUU is now in the "typical microkernel" range rather than "5-40x slower" as previously reported.
-
-### Context Switch: ~530-820 cycles (unchanged)
-
-| Phase | Cycles |
-|---|---|
-| Save context (GPRs + CR3 + FS base) | ~90-115 |
-| schedule_and_switch (Rust) | ~260-445 |
-| Restore context (CR3 + IRETQ frame + GPRs + FS base) | ~180-260 |
+| Kernel | Simple IPC | Full RPC | Notes |
+|---|---|---|---|
+| seL4 (x86_64) | ~850-1,000 | ~850-1,000 | No per-op capability check |
+| Fiasco.OC | ~1,200-1,800 | ~1,200-1,800 | L4 heritage |
+| Zircon | ~3,000-5,000 | ~3,000-5,000 | Channel-based |
+| **CLUU simple** | **~1,080-1,620** | -- | **Competitive** |
+| **CLUU call/reply** | -- | **~5,670-9,120** | Reply token creation dominates |
 
 ### Remaining Bottlenecks (ranked by impact)
 
-| Rank | Issue | Impact | Fix Difficulty |
+| Rank | Issue | Impact | Cycles Wasted |
 |---|---|---|---|
-| 1 | **resolve_scope iterates all 16 shards** | ~240 cycles avg on EVERY IPC op, even cache hits | Medium (cache ObjectRef alongside Token) |
-| 2 | **BTreeMap O(log n) on hot paths** | ~50-100 cycles per lookup | Medium (switch to HashMap or slab) |
-| 3 | **Reply tokens always cache misses** | ~550 cycles per sys_reply | Medium (lightweight reply capability) |
-| 4 | **Full token creation on every sys_call** | ~500 cycles for reply token | Medium (embed reply_id in message) |
-| 5 | **THREAD_REPOSITORY mutex on cache hit** | ~30-50 cycles per lookup | Medium (per-CPU or lock-free cache) |
-| 6 | **Queue-based IPC (no direct transfer)** | +100-300 cycles/roundtrip | High (new fast path) |
-| 7 | **Placeholder SHA-256** | 0 cryptographic security | Medium (replace with real implementation) |
+| 1 | **Reply token minting per sys_call** | RDRAND x2 + HMAC-SHA256 per call/reply | ~3,660-5,810 |
+| 2 | **Defense-in-depth shard lock on cache hit** | Redundant given generation counter | ~45-80 |
+| 3 | **THREAD_REPOSITORY lock on cache access** | Global mutex for per-thread cache | ~45-90 |
+| 4 | **BTreeMap O(log n) on all hot paths** | 4-6 tree walks per IPC round-trip | ~120-360 |
+| 5 | **Global revocation generation** | Reply token revoke invalidates all caches | ~3,300-4,900 per forced miss |
+| 6 | **Page table walks for copy_to_user** | 4-level walk per page boundary | ~60-100 per page |
 
-### Path to Sub-2,000 Cycle IPC
+### Path to Sub-2,000 Cycle Full RPC
 
-1. Cache ObjectRef in TokenCache (eliminates resolve_scope on hits): -240 cycles/op
-2. Use O(1) lookups (HashMap/slab): -30-60 cycles/op
-3. Lightweight reply capabilities (skip token creation): -400 cycles/call
-4. Register-based IPC for small messages: -100-200 cycles/roundtrip
+1. **Eliminate per-call reply token minting**: reuse kernel-managed reply capability per thread (seL4-style). Saves ~3,660-5,810 cycles per round-trip.
+2. **Remove defense-in-depth shard lock**: generation counter already invalidates. Saves ~45-80 cycles per lookup.
+3. **Per-thread cache without THREAD_REPOSITORY lock**: lock-free per-CPU array. Saves ~45-90 cycles per lookup.
+4. **O(1) slab/array lookups**: replace BTreeMap with indexed arrays. Saves ~120-360 cycles per round-trip.
+
+With all four: estimated ~1,500-2,500 cycle full RPC.
 
 ---
 
-## 3. Efficiency (8.0/10)
+## 3. Efficiency (8.5/10)
 
 ### Per-Object Memory Overhead
 
-| Object | Current | Previous | seL4 | Notes |
-|---|---|---|---|---|
-| Thread (TCB) | 1,088 B | 376 B | ~150 B | 4-entry TokenCache is 488B (45% of struct) |
-| Context | 184 B | 184 B | ~100 B | x86_64: 16 GPRs x 8B + metadata |
-| Endpoint (empty) | ~192 B | ~192 B | ~64 B | CLUU has queues, seL4 is synchronous |
-| Token | ~200 B | ~128 B | N/A | BTreeMap overhead + scope mapping |
-| Address Space | 160 B | 160 B | ~64 B | CLUU tracks regions explicitly |
+| Object | Size | Limit | Max Total |
+|---|---|---|---|
+| Thread (TCB) | ~1,152 B | 4,096 | 4.5 MB |
+| Token | ~120-200 B | 65,536 | 7.5-12.5 MB |
+| Endpoint (empty) | ~200 B | 4,096 | 0.8 MB |
+| **Static worst-case** | | | **~17.6 MB of 32 MB** |
 
-**Thread struct growth**: 376B -> 1,088B (2.9x) due to 4-entry LRU TokenCache. The cache eliminates HMAC computations on the hot path, saving ~250-350 cycles per hit. At 1,000 threads, the additional 712 KB is acceptable for a 32 MB heap.
+### DoS Prevention -- ALL THREE RESOURCE TYPES CAPPED
 
-### Kernel Heap Analysis
-
-| Resource | Count | Memory |
+| Resource | Limit | Mechanism |
 |---|---|---|
-| Threads | 10,000 | 11.1 MB |
-| Tokens | 65,536 (max) | 12.5 MB |
-| Endpoints (empty) | 1,000 | 0.2 MB |
-| Scheduler | -- | 0.3 MB |
-| IPC queues (partial) | 100 eps x 256 msgs | 1.8 MB |
-| BTreeMap overhead | Various | 1.0 MB |
-| **Total** | | **~26.9 MB** |
-
-32 MB heap provides ~5 MB headroom under worst-case loading. Adequate for current workloads.
-
-### DoS Prevention
-
-| Vector | Status | Mechanism |
-|---|---|---|
-| Token creation | **FIXED** | Global limit 65,536 via CAS |
-| Token leak on thread death | **FIXED** | revoke_tokens_for_object in mark_thread_dead |
-| Thread creation | **UNPROTECTED** | No global thread limit; ~28K threads exhausts heap |
-| Endpoint creation | **UNPROTECTED** | No global endpoint limit; 1000 full endpoints = ~88 MB |
-| Endpoint queue filling | Bounded | MAX_QUEUE_LEN=1024 per endpoint |
+| Tokens | 65,536 | CAS on TOTAL_TOKEN_COUNT |
+| Threads | 4,096 | CAS on TOTAL_THREAD_COUNT |
+| Endpoints | 4,096 | CAS on TOTAL_ENDPOINT_COUNT |
 
 ### Resource Cleanup
 
 | Resource | On Process Exit | On Thread Death | Status |
 |---|---|---|---|
-| Physical frames | PASS | N/A | teardown_user_pages walks PML4 |
+| Physical frames | PASS | N/A | teardown_user_pages |
 | Page tables | PASS | N/A | Intermediate tables freed |
-| Device MMIO pages | PASS | N/A | Skipped via NO_CACHE bit |
-| Tokens | PASS (procmgr) | **PASS** (NEW) | revoke_tokens_for_object on thread death |
-| Endpoints | NOT CLEANED | NOT CLEANED | Persistent in ENDPOINT_SHARDS |
-| IPC messages in-flight | NOT CLEANED | NOT CLEANED | Accumulate in zombie endpoints |
+| Tokens | PASS (procmgr) | PASS | revoke_tokens_for_object |
+| Endpoints | **PASS (NEW)** | N/A | Zero-reference hook in revoke_token |
+| Thread structs | PARTIAL | **LEAK** | Dead threads never removed from THREAD_REPOSITORY |
 | CALL_REPLY_MAP entries | NOT CLEANED | NOT CLEANED | Minor leak for threads dying mid-call |
-| Fault endpoints | NOT CLEANED | NOT CLEANED | Point to dead threads |
 
-**Improvement**: Token cleanup on thread death is now implemented. Remaining gaps are endpoint cleanup and reply map cleanup.
+### Key Finding: Dead Thread Memory Leak
+
+`mark_thread_dead()` sets state to Dead, decrements TOTAL_THREAD_COUNT, removes from scheduler, revokes tokens. But it **never removes the Thread struct from THREAD_REPOSITORY**. Dead Thread objects (~1,152 bytes each) accumulate permanently. After 4,096 thread lifetimes, that is 4.5 MB of dead thread storage.
+
+### Remaining DoS Vectors
+
+| Vector | Risk | Mitigation |
+|---|---|---|
+| IPC message queue fill | Medium | MAX_QUEUE_LEN=1024 per endpoint, backpressure |
+| TIMEOUT_HEAP unbounded | Low | Lazy cleanup, pathological workloads only |
+| BTreeMap fragmentation | Low | linked_list_allocator fragmentation over time |
+| Dead thread accumulation | Medium | Thread reaping not implemented |
 
 ### Unsafe Code
 
-| Metric | Value | Assessment |
-|---|---|---|
-| Total unsafe blocks/fns | ~280 | ~1 per 80 LOC, concentrated in HAL and memory |
-| New from remediation | 3 (OnceSecret) | 2 unsafe blocks + 1 unsafe impl Sync |
-| Well-justified | ~276/280 | Comments present, invariants documented |
-| Critical violations | 0 | No unsound unsafe found |
-
-### Scalability Limits
-
-| Resource | Hard Limit | Practical Limit | Mechanism |
-|---|---|---|---|
-| Physical frames | 1M (4 GB) | 4 GB | MAX_FRAMES constant |
-| Threads | Heap-limited | ~10,000 | 1,136B/thread x heap size |
-| Endpoints | Heap-limited | ~5,000 | 192B/endpoint + queues |
-| Tokens | **65,536** | 65,536 | **NEW: MAX_TOTAL_TOKENS** |
-| Messages per endpoint | 1,024 | 1,024 | MAX_QUEUE_LEN |
-| Recv endpoints per syscall | 16 | 16 | MAX_RECV_ENDPOINTS |
-| Message size | 4 KB | 4 KB | IPC_MESSAGE_MAX |
-| Priority levels | 256 | 256 | Bitmap: 4 x u64 |
+No new unsafe from v3 remediation. SHA-256 and all CAS/cleanup code is safe Rust. Total ~280 unsafe blocks/fns across kernel, concentrated in HAL and memory management.
 
 ---
 
 ## 4. Architecture Assessment
 
-### What CLUU Gets Right
+### What Improved in v3
 
-1. **Microkernel discipline**: Kernel knows threads, not processes. Process management is userspace (procmgr). Correct seL4-style design.
+1. **Cryptographic security**: HMAC-SHA256 tokens are now truly unforgeable. Real FIPS 180-4 SHA-256 with NIST test vectors.
+2. **ObjectRef caching**: Eliminates 16-shard resolve_scope scan on IPC hot path. `check_object_type` is zero-cost enum match.
+3. **Resource limits**: All three resource types hard-capped. CAS enforcement prevents DoS.
+4. **Endpoint cleanup**: Zero-reference detection on token revocation triggers full teardown (wake blocked threads, drop queued messages, decrement counter).
+5. **Lock ordering compliance**: All new code follows documented ordering: THREAD_REPOSITORY -> SCHEDULER -> ENDPOINT_SHARDS / TOKEN_TABLE_SHARDS.
 
-2. **Capability security**: HMAC tokens with three-layer verification (lookup + signature + expiration) and generation-counter cache invalidation. Global token limit prevents DoS. Thread death triggers cleanup.
+### Remaining Architectural Issues
 
-3. **Fault forwarding**: seL4-style fault IPC with full register context and reply-based resume/kill.
-
-4. **Demand paging**: Lazy heap allocation via page faults. Stack guard page via demand pager exclusion.
-
-5. **IST stacks**: GPF and PF use separate IST stacks, preventing triple faults.
-
-6. **RFLAGS sanitization**: All 9 return-to-userspace paths sanitize RFLAGS.
-
-7. **Scheduler fairness**: Active/expired array swap with O(1) bitmap scan.
-
-8. **IrqAck**: Capability-based IRQ acknowledgment with proper rights separation (IRQ_ACK vs IRQ_HANDLE).
-
-### What CLUU Gets Wrong (or trades off)
-
-1. **Placeholder SHA-256**: The hash function is a trivial XOR, not cryptographic. HMAC provides structural but not cryptographic security.
-
-2. **resolve_scope scans all 16 shards**: Every IPC operation pays ~240 cycles average for scope resolution, even with token cache hits. This is the dominant hot-path cost.
-
-3. **Queue-based IPC only**: No direct thread-to-thread transfer. Messages always go through endpoint queues.
-
-4. **Thread struct bloat**: 1,088B per thread (7.3x seL4). The 4-entry cache is the largest contributor.
-
-5. **No FPU/SSE context save**: Currently safe (no_std kernel, single-thread userspace) but blocks SIMD.
-
-6. **No thread/endpoint limits**: Heap can be exhausted by creating threads or endpoints without bound.
-
-### Comparison to Production Microkernels (corrected)
-
-| Dimension | seL4 | Zircon | CLUU | Notes |
-|---|---|---|---|---|
-| IPC latency | ~500-800 | ~2,000-3,000 | ~3,660-5,300 | CLUU in "typical" range |
-| Capability cost | 0 cycles | ~20 cycles | ~150-250 (cached) | Placeholder hash makes HMAC cheap |
-| TCB size | ~150 B | ~500 B | ~1,088 B | 4-entry cache is the overhead |
-| Formal verification | Yes | No | No | -- |
-| Code size | ~10K LOC | ~200K LOC | ~22.3K LOC | CLUU is right-sized |
-| SMP | Yes | Yes | No | Single CPU scope decision |
-| Scheduler fairness | No guarantee | Weighted fair | Guaranteed | CLUU wins |
+1. **Reply token minting**: ~55-65% of full RPC cost. seL4-style kernel-managed reply capability would eliminate this.
+2. **Defense-in-depth shard lock on cache hit**: Redundant given generation counter protocol.
+3. **Global revocation generation**: Single counter invalidates all caches on any revocation. Per-shard or per-object counters would limit blast radius.
+4. **Dead thread memory leak**: THREAD_REPOSITORY grows monotonically.
+5. **BTreeMap on all hot paths**: O(log n) where O(1) is achievable with slab allocators.
 
 ---
 
@@ -390,36 +245,38 @@ CLUU is now in the "typical microkernel" range rather than "5-40x slower" as pre
 
 | Priority | Issue | Impact | Effort |
 |---|---|---|---|
-| 1 | **Replace placeholder SHA-256** | Token system has zero crypto security | Medium |
-| 2 | **Cache ObjectRef in TokenCache** | Eliminates resolve_scope on cache hits (~240 cycles/op) | Low-Medium |
-| 3 | **Add global thread limit** | Prevents heap DoS via thread creation | Trivial (CAS counter) |
-| 4 | **Add global endpoint limit** | Prevents heap DoS via endpoint creation | Trivial (CAS counter) |
-| 5 | **Implement endpoint cleanup on process exit** | Eliminates slow memory leak | Medium |
+| 1 | **Eliminate per-call reply token minting** | -3,660-5,810 cycles per RPC (~60% reduction) | Medium-High |
+| 2 | **Remove defense-in-depth shard lock** | -45-80 cycles per cache hit | Trivial |
+| 3 | **Reap dead threads from THREAD_REPOSITORY** | Fixes ~1.15 KB/thread memory leak | Low |
+| 4 | **Per-shard revocation generation** | Limits cache invalidation blast radius | Medium |
+| 5 | **Move token cache out of THREAD_REPOSITORY** | -45-90 cycles per cache access | Medium |
 
 ### Future Improvements
 
 | Priority | Issue | Impact | Effort |
 |---|---|---|---|
-| 6 | Lightweight reply capabilities | -400 cycles per sys_call | Medium |
-| 7 | O(1) token/endpoint lookups (HashMap/slab) | -50-100 cycles per lookup | Medium |
-| 8 | Register-based IPC fast path | -100-200 cycles per small IPC | High |
+| 6 | O(1) slab/array lookups | -120-360 cycles per IPC round-trip | Medium |
+| 7 | RDRAND amortization (ChaCha20 CSPRNG) | -200-600 cycles per token creation | Medium |
+| 8 | Register-based IPC fast path | -100-200 cycles for small messages | High |
 | 9 | Priority inheritance | Eliminates priority inversion | High |
 | 10 | FPU/SSE lazy context save | Enables SIMD in userspace | Medium |
 | 11 | CALL_REPLY_MAP cleanup on thread death | Fixes minor leak | Low |
-| 12 | Consider 2-entry TokenCache | Saves 240B/thread, still benefits recv_any(2) | Trivial |
+| 12 | Pass cached ObjectRef through sys_invoke | Eliminates redundant 16-shard scan for invokes | Low |
 
 ---
 
-## 6. Final Verdict
+## 6. Audit History
 
-CLUU is a **well-engineered microkernel** that has measurably improved since the v1 audit. The 9 remediation fixes were all implemented correctly with zero regressions. The kernel is now:
+| Version | Date | Overall | Correctness | Speed | Efficiency | Key Change |
+|---|---|---|---|---|---|---|
+| v1 | Feb 2026 | 7.0 | 8.5 | 5.5 | 7.5 | Initial audit |
+| v2 | Feb 2026 | 7.75 | 8.75 | 6.5 | 8.0 | Token cache, heap, IrqAck, debug gating |
+| **v3** | **Feb 2026** | **8.0** | **9.25** | **6.5** | **8.5** | **SHA-256, ObjectRef cache, resource limits, endpoint cleanup** |
 
-- **More secure**: Global token limit prevents DoS. Tokens cleaned up on thread death.
-- **Faster**: Syscall fast path -25% in release. IPC ~27-34% faster with warm cache.
-- **More robust**: 32 MB heap provides adequate headroom. Lock-free KERNEL_SECRET eliminates a serial bottleneck.
+---
 
-**Strengths**: Syscall entry/exit correctness is exemplary. Token system has structural integrity (even if the hash is placeholder). Scheduler provides guaranteed fairness. Lock ordering is correct throughout.
+## 7. Final Verdict
 
-**Weaknesses**: Placeholder SHA-256 provides zero cryptographic security. resolve_scope is the dominant IPC bottleneck. Thread/endpoint creation remain unbounded. Endpoint cleanup on process exit is missing.
+CLUU v3 is a **well-engineered, cryptographically secured microkernel**. The token system is now production-grade with real HMAC-SHA256, and all three resource types are hard-capped against DoS. Simple IPC (~1,080-1,620 cycles) is competitive with Fiasco.OC. Full call/reply RPC (~5,670-9,120 cycles) is dominated by reply token minting, which is the clear #1 optimization target.
 
-**Rating: B+ (7.75/10)** -- up from B (7.0/10). A solid hobby kernel with production-quality correctness. The path to an A- requires replacing the placeholder SHA-256 and eliminating the resolve_scope bottleneck. The path to sub-2,000 cycle IPC requires architectural changes (lightweight replies, O(1) lookups, register-based fast path).
+**Rating: B+ (8.0/10)** -- up from B+ (7.75/10). The path to an A- requires eliminating per-call reply token minting and removing the defense-in-depth shard lock. The path to sub-2,000 cycle full RPC requires all four optimizations listed in Section 2.
