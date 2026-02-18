@@ -25,7 +25,7 @@ use libcluu::boot::{
 };
 use libcluu::elf::ElfFile;
 use libcluu::fs::client::VfsClient;
-use libcluu::ipc::extract_reply_token;
+use libcluu::ipc::extract_reply_id;
 use libcluu::ipc::SharedRing;
 use libcluu::registry;
 use libcluu::syscall::{space_destroy, thread_destroy, thread_resume, thread_suspend, token_revoke};
@@ -332,7 +332,7 @@ impl ProcessManager {
             sender_tid, msg.tag.words
         ));
         // Spawn must come via ipc_call; do not trust caller-routed reply endpoints.
-        let reply_token = extract_reply_token(msg);
+        let reply_token = extract_reply_id(msg);
         let notify_endpoint = if msg.tag.words >= 4 { msg.words[3] } else { 0 };
         let notify_endpoint = match self.resolve_notify_endpoint(sender_tid, notify_endpoint) {
             Ok(endpoint) => endpoint,
@@ -1099,7 +1099,7 @@ impl ProcessManager {
     }
 
     fn handle_kill_message(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
-        let reply_token = extract_reply_token(msg);
+        let reply_token = extract_reply_id(msg);
         let mut reply_msg = Message::new(PROCMGR_KILL_LABEL, [0; 6], 1);
 
         if msg.tag.words < 2 {

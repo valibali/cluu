@@ -41,10 +41,10 @@ pub const SHARED_RING_DEFAULT_MAP_FLAGS: usize = 0x03; // readable + writable
 pub const SHARED_RING_DEFAULT_GRANT_FLAGS: usize = 0x02; // writable
 const SHARED_RING_MIN_CAPACITY: usize = 2;
 
-/// Tag indicating the message contains a reply token (new system)
-pub const REPLY_TOKEN_TAG: u8 = 2;
-/// Word index where reply token handle is stored
-pub const REPLY_TOKEN_WORD: usize = 5;
+/// Tag indicating the message contains a reply ID
+pub const REPLY_ID_TAG: u8 = 2;
+/// Word index where reply ID is stored
+pub const REPLY_ID_WORD: usize = 5;
 
 /// Shared-ring metadata stored in the first bytes of the shared region.
 ///
@@ -509,12 +509,12 @@ pub fn call(endpoint_token: usize, msg: &mut Message, _flags: IpcFlags) -> Resul
     Ok(())
 }
 
-/// Extract reply token from a received call message
+/// Extract reply ID from a received call message
 ///
-/// Returns the reply token handle if the message was from a call, None otherwise.
-pub fn extract_reply_token(msg: &Message) -> Option<usize> {
-    if msg.tag.extra == REPLY_TOKEN_TAG {
-        Some(msg.words[REPLY_TOKEN_WORD])
+/// Returns the reply ID if the message was from a call, None otherwise.
+pub fn extract_reply_id(msg: &Message) -> Option<usize> {
+    if msg.tag.extra == REPLY_ID_TAG {
+        Some(msg.words[REPLY_ID_WORD])
     } else {
         None
     }

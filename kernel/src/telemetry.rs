@@ -475,7 +475,6 @@ fn object_fields(object_ref: ObjectRef) -> (u8, u64) {
         ObjectRef::Space(id) => (2, id.as_u64()),
         ObjectRef::Endpoint(id) => (3, id.as_u64()),
         ObjectRef::Irq(irq) => (4, irq as u64),
-        ObjectRef::Reply(id) => (5, id.as_u64()),
         ObjectRef::Clock => (6, 0),
         ObjectRef::Frame(id) => (7, id.as_u64()),
     }

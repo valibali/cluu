@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use crate::backend::ConsoleBackend;
 use libcluu::ipc::{
-    extract_reply_token, reply, CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL,
+    extract_reply_id, reply, CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL,
     CONSOLE_FB_INFO_LABEL, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
@@ -131,7 +131,7 @@ impl<B: ConsoleBackend> Console<B> {
             CONSOLE_WRITE_SYNC_LABEL => {
                 // Sync write: render, then reply
                 self.write_utf8_bytes(payload);
-                if let Some(reply_token) = extract_reply_token(msg) {
+                if let Some(reply_token) = extract_reply_id(msg) {
                     let reply_msg = Message::new(CONSOLE_WRITE_SYNC_LABEL, [0; 6], 0);
                     let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
                 }
@@ -152,7 +152,7 @@ impl<B: ConsoleBackend> Console<B> {
                 self.redraw_cursor();
             }
             CONSOLE_FB_INFO_LABEL => {
-                if let Some(reply_token) = extract_reply_token(msg) {
+                if let Some(reply_token) = extract_reply_id(msg) {
                     let reply_msg = Message::new(
                         CONSOLE_FB_INFO_LABEL,
                         [

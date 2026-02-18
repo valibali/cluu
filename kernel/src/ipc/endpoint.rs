@@ -108,6 +108,8 @@ pub struct CallMessage {
 pub struct ReceivedMessage {
     pub message: EndpointMessage,
     pub sender: Option<ThreadId>,
+    /// Kernel-tracked reply_id. Only set by kernel code paths (sys_call, fault forwarding).
+    pub reply_id: Option<crate::token::ReplyId>,
 }
 
 pub trait ByteEndpoint: Send {
@@ -270,16 +272,18 @@ impl QueueEndpoint {
     }
 }
 
-impl ByteEndpoint for QueueEndpoint {
-    fn send(&mut self, sender: Option<ThreadId>, data: &[u8]) -> Result<Option<ThreadId>, Error> {
-        // Check if queue is full - implement backpressure by blocking sender
+impl QueueEndpoint {
+    fn send_inner(
+        &mut self,
+        sender: Option<ThreadId>,
+        data: &[u8],
+        reply_id: Option<crate::token::ReplyId>,
+    ) -> Result<Option<ThreadId>, Error> {
         if self.queue.len() >= MAX_QUEUE_LEN {
-            // Get current thread ID to block it
             if let Some(sender_id) = crate::sched::ThreadManager::current() {
                 self.waiting_senders.push_back(sender_id);
-                return Err(Error::WouldBlock); // This will block the sender thread
+                return Err(Error::WouldBlock);
             }
-            // Fallback if no current thread (shouldn't happen in normal operation)
             return Err(Error::Busy);
         }
         let msg = EndpointMessage::new(data)?;
@@ -287,17 +291,29 @@ impl ByteEndpoint for QueueEndpoint {
         self.queue.push_back(ReceivedMessage {
             message: msg,
             sender,
+            reply_id,
         });
         crate::telemetry::record_ipc_queue_enqueue(msg_len);
-
         let receiver_to_wake = self.pop_next_receiver_to_wake().map(|w| w.thread_id);
-
-        // Also wake a waiting sender if queue now has space.
         if !self.waiting_senders.is_empty() && self.queue.len() < MAX_QUEUE_LEN {
             self.wake_one_waiting_sender();
         }
-
         Ok(receiver_to_wake)
+    }
+
+    pub fn send_with_reply_id(
+        &mut self,
+        sender: Option<ThreadId>,
+        data: &[u8],
+        reply_id: crate::token::ReplyId,
+    ) -> Result<Option<ThreadId>, Error> {
+        self.send_inner(sender, data, Some(reply_id))
+    }
+}
+
+impl ByteEndpoint for QueueEndpoint {
+    fn send(&mut self, sender: Option<ThreadId>, data: &[u8]) -> Result<Option<ThreadId>, Error> {
+        self.send_inner(sender, data, None)
     }
 
     fn recv(&mut self, receiver: ThreadId) -> Result<Option<ReceivedMessage>, Error> {
@@ -310,6 +326,7 @@ impl ByteEndpoint for QueueEndpoint {
             return Ok(Some(ReceivedMessage {
                 message: call_msg.message,
                 sender: Some(call_msg.caller),
+                reply_id: None,
             }));
         }
         // Then check regular queue
@@ -334,6 +351,7 @@ impl ByteEndpoint for QueueEndpoint {
             return Ok(Some(ReceivedMessage {
                 message: call_msg.message,
                 sender: Some(call_msg.caller),
+                reply_id: None,
             }));
         }
         // Then check regular queue
@@ -391,13 +409,6 @@ impl ByteEndpoint for QueueEndpoint {
     }
 }
 
-pub trait EndpointStore: Send {
-    fn create(&mut self) -> EndpointId;
-    fn with_endpoint<F, R>(&mut self, id: EndpointId, f: F) -> Result<R, Error>
-    where
-        F: FnOnce(&mut dyn ByteEndpoint) -> Result<R, Error>;
-}
-
 /// Sharded endpoint repository to reduce lock contention and avoid Arc heap allocations
 /// Each shard has its own mutex, endpoints distributed by ID hash
 const NUM_ENDPOINT_SHARDS: usize = 16;
@@ -434,44 +445,6 @@ fn get_endpoint_shard(id: EndpointId) -> &'static Mutex<EndpointShard> {
     &ENDPOINT_SHARDS[hash_endpoint_id(id)]
 }
 
-pub struct EndpointRepository {
-    // Empty - kept for compatibility with EndpointStore trait
-    // Actual storage is in static ENDPOINT_SHARDS
-}
-
-impl EndpointRepository {
-    #[allow(dead_code)]
-    fn new() -> Self {
-        Self {}
-    }
-}
-
-impl EndpointStore for EndpointRepository {
-    fn create(&mut self) -> EndpointId {
-        let id = EndpointId::new(NEXT_ENDPOINT_ID.fetch_add(1, Ordering::SeqCst));
-        let shard = get_endpoint_shard(id);
-        let mut shard_guard = shard.lock();
-        shard_guard
-            .endpoints
-            .insert(id, Mutex::new(QueueEndpoint::new()));
-        id
-    }
-
-    fn with_endpoint<F, R>(&mut self, id: EndpointId, f: F) -> Result<R, Error>
-    where
-        F: FnOnce(&mut dyn ByteEndpoint) -> Result<R, Error>,
-    {
-        let shard = get_endpoint_shard(id);
-        let mut shard_guard = shard.lock();
-        let endpoint = shard_guard.endpoints.get_mut(&id).ok_or(Error::NotFound)?;
-        let mut guard = endpoint.lock();
-        f(&mut *guard)
-    }
-}
-
-lazy_static! {
-    static ref ENDPOINTS: Mutex<EndpointRepository> = Mutex::new(EndpointRepository::new());
-}
 
 lazy_static! {
     static ref RECV_LOGGED: Mutex<BTreeSet<EndpointId>> = Mutex::new(BTreeSet::new());
@@ -628,6 +601,21 @@ pub fn try_send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, E
     guard.send(None, data)
 }
 
+pub fn try_send_with_reply_id(
+    endpoint: EndpointId,
+    data: &[u8],
+    reply_id: crate::token::ReplyId,
+) -> Result<Option<ThreadId>, Error> {
+    let shard = get_endpoint_shard(endpoint);
+    let mut shard_guard = shard.try_lock().ok_or(Error::WouldBlock)?;
+    let endpoint_mutex = shard_guard
+        .endpoints
+        .get_mut(&endpoint)
+        .ok_or(Error::NotFound)?;
+    let mut guard = endpoint_mutex.try_lock().ok_or(Error::WouldBlock)?;
+    guard.send_with_reply_id(None, data, reply_id)
+}
+
 pub fn recv(endpoint: EndpointId, receiver: ThreadId) -> Result<Option<ReceivedMessage>, Error> {
     // Get shard directly (static, no repository lock needed)
     let shard = get_endpoint_shard(endpoint);
@@ -706,41 +694,6 @@ pub fn send_from_kernel(endpoint: EndpointId, payload: &[u8]) -> Result<(), Erro
     send_payload(endpoint, payload, false)
 }
 
-pub fn recv_to_user(
-    endpoint: EndpointId,
-    buf_ptr: usize,
-    buf_len: usize,
-    page_table_root: x86_64::PhysAddr,
-    receiver: ThreadId,
-) -> Result<(usize, Option<ThreadId>), Error> {
-    crate::syscall::userptr::validate_user_buffer(buf_ptr, buf_len)?;
-    let received = match recv(endpoint, receiver) {
-        Ok(Some(msg)) => msg,
-        Ok(None) => return Ok((0, None)),
-        Err(Error::WouldBlock) => return Err(Error::WouldBlock),
-        Err(err) => return Err(err),
-    };
-    if received.message.len() > buf_len {
-        return Err(Error::BufferTooSmall);
-    }
-    let mut logged = RECV_LOGGED.lock();
-    if logged.insert(endpoint) {
-        klibcluu::trace("recv_to_user: endpoint_id=");
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", endpoint.as_u64());
-    }
-    let msg_bytes = received.message.bytes();
-    // Safety: msg_bytes points to a kernel buffer of msg_bytes.len() bytes.
-    unsafe {
-        crate::syscall::userptr::copy_to_user(
-            buf_ptr,
-            msg_bytes.as_ptr(),
-            msg_bytes.len(),
-            page_table_root,
-        )?;
-    }
-    Ok((msg_bytes.len(), received.sender))
-}
-
 pub fn recv_to_user_nonblocking(
     endpoint: EndpointId,
     buf_ptr: usize,
@@ -774,29 +727,34 @@ pub fn recv_to_user_nonblocking(
             page_table_root,
         )?;
     }
+
+    // Bind reply_id to current (receiving) thread using kernel metadata
+    if let Some(reply_id) = received.reply_id {
+        if let Some(current) = crate::sched::ThreadManager::current() {
+            crate::sched::ThreadManager::bind_call_reply_to_server(reply_id, current);
+            crate::sched::ThreadManager::bind_fault_reply_to_server(reply_id, current);
+        }
+    }
+
     Ok((msg_bytes.len(), received.sender))
 }
 
-/// Send a call message from userspace with reply token injected
-pub fn call_from_user_with_reply_token(
+/// Send a call message from userspace with reply_id injected
+pub fn call_from_user_with_reply_id(
     endpoint: EndpointId,
     msg_ptr: usize,
     msg_len: usize,
     page_table_root: x86_64::PhysAddr,
-    reply_token: crate::token::TokenHandle,
+    reply_id: crate::token::ReplyId,
 ) -> Result<(), Error> {
     let mut payload = copy_user_payload(msg_ptr, msg_len, page_table_root)?;
     let sender = crate::sched::ThreadManager::current();
 
-    // Inject reply token handle into message
-    inject_reply_token(payload.as_mut_slice(), reply_token);
+    // Inject reply_id into message
+    inject_reply_id(payload.as_mut_slice(), reply_id);
 
-    // Try to send - if queue is full, block and return (will be retried from userspace when woken)
-    let wake = {
-        // Get shard directly (static, no repository lock needed)
+    let (wake, direct_receiver) = {
         let shard = get_endpoint_shard(endpoint);
-
-        // Lock shard, then endpoint
         let mut shard_guard = shard.lock();
         let endpoint_mutex = shard_guard
             .endpoints
@@ -805,22 +763,17 @@ pub fn call_from_user_with_reply_token(
         let mut guard = endpoint_mutex.lock();
         let payload_bytes = payload.as_slice();
         match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, payload_bytes)? {
-            DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
-            DirectDelivery::DeliveredNoWake => None,
+            DirectDelivery::DeliveredWake(receiver_id) => (Some(receiver_id), Some(receiver_id)),
+            DirectDelivery::DeliveredNoWake(receiver_id) => (None, Some(receiver_id)),
             DirectDelivery::NotDelivered => {
-                // Just send as regular message - reply routing via token.
-                match guard.send(sender, payload_bytes) {
-                    Ok(wake) => wake, // Success
+                match guard.send_with_reply_id(sender, payload_bytes, reply_id) {
+                    Ok(wake) => (wake, None),
                     Err(Error::WouldBlock) => {
-                        // Queue is full - sender was added to waiting_senders, need to block
-                        // Return WouldBlock so syscall returns and context switch can happen
-                        // When woken, userspace will retry the syscall
                         crate::sched::ThreadManager::block_current();
                         crate::architecture::x86_64::syscall::request_resched();
                         return Err(Error::WouldBlock);
                     }
                     Err(Error::Busy) => {
-                        // Fallback for edge cases (shouldn't happen with backpressure)
                         log_endpoint_busy(endpoint, guard.stats(), true);
                         return Err(Error::Busy);
                     }
@@ -830,7 +783,11 @@ pub fn call_from_user_with_reply_token(
         }
     };
 
-    // Success - wake receiver if any
+    // Bind reply_id to receiver for direct deliveries (outside endpoint lock)
+    if let Some(receiver_id) = direct_receiver {
+        crate::sched::ThreadManager::bind_call_reply_to_server(reply_id, receiver_id);
+    }
+
     if let Some(thread_id) = wake {
         crate::sched::ThreadManager::wake_thread(thread_id);
     }
@@ -885,7 +842,7 @@ fn send_payload(endpoint: EndpointId, payload: &[u8], log_send: bool) -> Result<
         let mut guard = endpoint_mutex.lock();
         match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, payload)? {
             DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
-            DirectDelivery::DeliveredNoWake => None,
+            DirectDelivery::DeliveredNoWake(_) => None,
             DirectDelivery::NotDelivered => match guard.send(sender, payload) {
                 Ok(wake) => wake, // Success
                 Err(Error::WouldBlock) => {
@@ -976,7 +933,7 @@ fn try_direct_deliver_to_waiting_receiver(
             return Ok(DirectDelivery::DeliveredWake(receiver_id));
         }
         direct_debug("delivered-nowake", endpoint_id, Some(waiter), data.len());
-        return Ok(DirectDelivery::DeliveredNoWake);
+        return Ok(DirectDelivery::DeliveredNoWake(receiver_id));
     }
 
     direct_debug("no-waiter", endpoint_id, None, data.len());
@@ -1025,7 +982,7 @@ fn copy_user_payload(
 enum DirectDelivery {
     NotDelivered,
     DeliveredWake(ThreadId),
-    DeliveredNoWake,
+    DeliveredNoWake(ThreadId),
 }
 
 fn direct_debug(event: &str, endpoint: EndpointId, waiter: Option<RecvWaiter>, len: usize) {
@@ -1114,10 +1071,10 @@ pub fn take_any_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
     guard.take_any_caller().ok_or(Error::InvalidState)
 }
 
-/// Tag indicating the message contains a reply token
-pub const REPLY_TOKEN_TAG: u8 = 2;
-/// Word index where reply token handle is stored
-pub const REPLY_TOKEN_WORD: usize = 5;
+/// Tag indicating the message contains a reply ID
+pub const REPLY_ID_TAG: u8 = 2;
+/// Word index where reply ID is stored
+pub const REPLY_ID_WORD: usize = 5;
 
 #[repr(C)]
 pub struct UserMessageTag {
@@ -1133,40 +1090,24 @@ pub struct UserMessage {
     pub words: [usize; 6],
 }
 
-/// Inject reply token handle into message
-fn inject_reply_token(buffer: &mut [u8], token_handle: crate::token::TokenHandle) {
+/// Inject reply_id into message
+fn inject_reply_id(buffer: &mut [u8], reply_id: crate::token::ReplyId) {
     if buffer.len() < core::mem::size_of::<UserMessage>() {
         return;
     }
     let msg = unsafe { &mut *(buffer.as_mut_ptr() as *mut UserMessage) };
-    msg.tag.extra = REPLY_TOKEN_TAG;
-    msg.words[REPLY_TOKEN_WORD] = token_handle.as_usize();
+    msg.tag.extra = REPLY_ID_TAG;
+    msg.words[REPLY_ID_WORD] = reply_id.as_u64() as usize;
 }
 
-/// Extract reply token handle from message
-pub fn extract_reply_token(buffer: &[u8]) -> Option<crate::token::TokenHandle> {
-    if buffer.len() < core::mem::size_of::<UserMessage>() {
-        return None;
-    }
-    let msg = unsafe { &*(buffer.as_ptr() as *const UserMessage) };
-    if msg.tag.extra != REPLY_TOKEN_TAG {
-        return None;
-    }
-    Some(crate::token::TokenHandle::new(msg.words[REPLY_TOKEN_WORD]))
-}
-
-/// Deliver a reply using a ReplyId (one-time use)
+/// Deliver a reply using pre-verified CallReplyInfo.
 ///
 /// Copies the reply data directly to the caller's reply buffer and wakes them.
-pub fn deliver_reply_by_id(
-    reply_id: crate::token::ReplyId,
+pub fn deliver_reply(
+    reply_info: crate::sched::CallReplyInfo,
     reply_data: &[u8],
 ) -> Result<usize, Error> {
-    use crate::sched::{CallReplyInfo, ThreadManager};
-
-    // Take the reply info (removes from map - one-time use)
-    let reply_info: CallReplyInfo =
-        ThreadManager::take_call_reply_info(reply_id).ok_or(Error::InvalidState)?;
+    use crate::sched::ThreadManager;
 
     let caller = reply_info.caller;
 
@@ -1178,7 +1119,6 @@ pub fn deliver_reply_by_id(
         return Err(Error::BufferTooSmall);
     }
 
-    // Safety: reply_data points to a kernel buffer for reply_data.len() bytes.
     unsafe {
         crate::syscall::userptr::copy_to_user(
             reply_info.reply_buf_ptr,
@@ -1188,14 +1128,11 @@ pub fn deliver_reply_by_id(
         )?;
     }
 
-    // Set the return value in the caller's saved context (RAX).
     let bytes_received = reply_data.len();
     ThreadManager::with_thread_mut(caller, |thread| {
         thread.context.rax = bytes_received as u64;
     });
 
-    // Wake the caller
     ThreadManager::wake_thread(caller);
-
     Ok(bytes_received)
 }

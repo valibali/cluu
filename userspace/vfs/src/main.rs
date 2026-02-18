@@ -18,7 +18,7 @@ use libcluu::fs::protocol::{
     VfsOp, VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT,
     VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
 };
-use libcluu::ipc::{self, extract_reply_token, reply_with_payload, SharedRing, SharedRingHeader};
+use libcluu::ipc::{self, extract_reply_id, reply_with_payload, SharedRing, SharedRingHeader};
 use libcluu::types::Message;
 use libcluu::*;
 
@@ -526,7 +526,7 @@ impl VfsServer {
             vfs_trace!("vfs: unknown op");
             return Ok(());
         };
-        let reply_token = extract_reply_token(msg).unwrap_or(self.endpoint);
+        let reply_token = extract_reply_id(msg).unwrap_or(self.endpoint);
         let authenticated_client = (sender_tid != 0).then_some(sender_tid);
         vfs_trace!("vfs: handling {:?} reply_token={}", op, reply_token);
         let result = match op {

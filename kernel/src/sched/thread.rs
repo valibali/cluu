@@ -100,6 +100,8 @@ pub struct CallReplyInfo {
     pub reply_buf_len: usize,
     /// Page table root for copying reply to userspace
     pub page_table_root: PhysAddr,
+    /// Server thread authorized to reply. Set when message is delivered.
+    pub server_thread_id: Option<ThreadId>,
 }
 
 /// Result metadata for a direct recv delivery while blocked/armed.

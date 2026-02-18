@@ -89,10 +89,6 @@ impl OpaqueScope {
                 input[0] = 0x04;
                 input[8..12].copy_from_slice(&num.to_le_bytes());
             }
-            ObjectRef::Reply(id) => {
-                input[0] = 0x05;
-                input[8..16].copy_from_slice(&id.as_u64().to_le_bytes());
-            }
             ObjectRef::Clock => {
                 input[0] = 0x06;
             }
@@ -154,8 +150,6 @@ pub enum ObjectRef {
     Space(AddressSpaceId),
     Endpoint(EndpointId),
     Irq(u32),
-    /// One-time reply capability for IPC call/reply
-    Reply(ReplyId),
     /// Clock/time source
     Clock,
     /// Physical memory frame

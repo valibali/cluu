@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use libcluu::boot::{process_info, TOKEN_EXTRA_0};
 use libcluu::ipc::send;
-use libcluu::ipc::{extract_reply_token, reply};
+use libcluu::ipc::{extract_reply_id, reply};
 use libcluu::registry::{
     self, REGISTRY_GRANT_REQUEST_LABEL, REGISTRY_LIST_LABEL, REGISTRY_REGISTER_LABEL,
     REGISTRY_SUBSCRIBE_LABEL, REGISTRY_SUBSCRIBE_REPLY_LABEL, REGISTRY_UNREGISTER_LABEL,
@@ -59,7 +59,7 @@ fn run() -> Result<()> {
                         let _ = registry::handle_incoming_message(&msg, payload);
                         continue;
                     }
-                    let reply_token = extract_reply_token(&msg);
+                    let reply_token = extract_reply_id(&msg);
                     match msg.tag.label {
                         REGISTRY_REGISTER_LABEL => {
                             // Producer registers an output: store metadata -> grant endpoint.

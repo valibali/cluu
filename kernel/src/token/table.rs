@@ -348,11 +348,8 @@ pub fn lookup_token(handle: TokenHandle) -> Result<(Token, crate::token::scope::
             return Err("Token expired");
         }
 
-        // Verify signature (expensive operation - this is what we're caching)
-        let secret = kernel_secret();
-        if !token.verify(&secret) {
-            return Err("Invalid token signature");
-        }
+        // BTreeMap entry IS the authority — no HMAC re-verification needed.
+        // (seL4 principle: the capability table entry is the authority.)
 
         // Get object ref and generation for caching
         let object_ref = table.resolve_scope(&token.scope).ok_or("Unknown scope")?;
@@ -375,7 +372,6 @@ pub fn lookup_token(handle: TokenHandle) -> Result<(Token, crate::token::scope::
 /// - Cache entry exists for this handle
 /// - Generation matches (token not revoked since caching)
 /// - Token not expired
-/// - Token still exists in table
 fn try_cache_lookup(
     handle: TokenHandle,
     thread_id: crate::sched::thread::ThreadId,
@@ -383,42 +379,22 @@ fn try_cache_lookup(
     use crate::sched::thread_manager::ThreadManager;
 
     ThreadManager::with_thread_mut(thread_id, |thread| {
-        // Check generation first — a mismatch means *any* token was revoked
-        // since the cache was populated, so all entries are potentially stale.
         let current_generation = revocation_generation();
-
-        // Look up in the multi-entry LRU cache
         let entry = thread.token_cache.lookup(handle)?;
 
-        // Generation mismatch → invalidate entire cache (global revocation counter)
         if entry.cached_generation != current_generation {
             thread.token_cache.invalidate_all();
             return None;
         }
 
-        // Check expiration (always — can't cache time)
         let now = current_timestamp();
         if entry.token.is_expired(now) {
             thread.token_cache.clear_handle(handle);
             return None;
         }
 
-        // Clone token and object_ref before releasing borrow for table check
-        let cached_token = entry.token.clone();
-        let cached_obj_ref = entry.object_ref;
-
-        // Verify token still exists in table (defense in depth)
-        {
-            let shard = get_shard(handle);
-            let table = shard.lock();
-            if table.get(handle).is_none() {
-                thread.token_cache.clear_handle(handle);
-                return None;
-            }
-        }
-
-        // Cache hit!
-        Some((cached_token, cached_obj_ref))
+        // Cache hit — generation match guarantees token is still valid
+        Some((entry.token.clone(), entry.object_ref))
     })?
 }
 
@@ -453,6 +429,7 @@ fn update_cache(
 ///
 /// * `Some(ObjectRef)` - Kernel object this scope refers to
 /// * `None` - Unknown scope
+#[allow(dead_code)]
 pub fn resolve_scope(scope: &OpaqueScope) -> Option<ObjectRef> {
     // Check all shards (scopes are replicated across shards for simplicity)
     // In practice, we could optimize this by storing scopes separately
@@ -478,6 +455,7 @@ pub fn resolve_scope(scope: &OpaqueScope) -> Option<ObjectRef> {
 ///
 /// * `Ok(ObjectRef)` - Matching object reference
 /// * `Err(&str)` - Error (wrong type or not found)
+#[allow(dead_code)]
 pub fn resolve_token_object(
     token: &Token,
     expected_type: ObjectType,
@@ -490,7 +468,6 @@ pub fn resolve_token_object(
         (ObjectRef::Space(_), ObjectType::Space) => Ok(obj_ref),
         (ObjectRef::Endpoint(_), ObjectType::Endpoint) => Ok(obj_ref),
         (ObjectRef::Irq(_), ObjectType::Irq) => Ok(obj_ref),
-        (ObjectRef::Reply(_), ObjectType::Reply) => Ok(obj_ref),
         (ObjectRef::Clock, ObjectType::Clock) => Ok(obj_ref),
         (ObjectRef::Frame(_), ObjectType::Frame) => Ok(obj_ref),
         _ => Err("Object type mismatch"),
@@ -510,7 +487,6 @@ pub fn check_object_type(
         (ObjectRef::Space(_), ObjectType::Space) => Ok(obj_ref),
         (ObjectRef::Endpoint(_), ObjectType::Endpoint) => Ok(obj_ref),
         (ObjectRef::Irq(_), ObjectType::Irq) => Ok(obj_ref),
-        (ObjectRef::Reply(_), ObjectType::Reply) => Ok(obj_ref),
         (ObjectRef::Clock, ObjectType::Clock) => Ok(obj_ref),
         (ObjectRef::Frame(_), ObjectType::Frame) => Ok(obj_ref),
         _ => Err("Object type mismatch"),
@@ -644,7 +620,6 @@ pub enum ObjectType {
     Space,
     Endpoint,
     Irq,
-    Reply,
     Clock,
     Frame,
 }

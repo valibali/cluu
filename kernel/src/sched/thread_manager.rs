@@ -23,6 +23,7 @@ use crate::token::ReplyId;
 #[derive(Debug, Clone, Copy)]
 pub struct FaultReplyInfo {
     pub faulted_thread: ThreadId,
+    pub server_thread_id: Option<ThreadId>,
 }
 use alloc::collections::{BTreeMap, BinaryHeap};
 use core::cmp::Reverse;
@@ -277,6 +278,51 @@ impl ThreadManager {
         crate::token::table::revoke_tokens_for_object(
             crate::token::scope::ObjectRef::Thread(thread_id),
         );
+
+        // Clean up CALL_REPLY_MAP entries involving this thread.
+        // - Dead caller: remove the entry (no one to receive the reply).
+        // - Dead server: wake the blocked caller with an error.
+        {
+            let mut map = CALL_REPLY_MAP.lock();
+            let mut callers_to_wake = alloc::vec::Vec::new();
+            map.retain(|_reply_id, info| {
+                if info.caller == thread_id {
+                    // Caller died mid-call — discard entry
+                    return false;
+                }
+                if info.server_thread_id == Some(thread_id) {
+                    // Server died — wake caller with error
+                    callers_to_wake.push(info.caller);
+                    return false;
+                }
+                true
+            });
+            drop(map);
+            for caller in callers_to_wake {
+                // Encode as negative errno in rax (same convention as syscall return path).
+                // deliver_reply would normally overwrite rax with byte count.
+                Self::with_thread_mut(caller, |t| {
+                    t.context.rax = crate::Error::NotFound.to_errno() as u64;
+                });
+                Self::wake_thread(caller);
+            }
+        }
+
+        // Clean up FAULT_REPLY_MAP entries involving this thread.
+        // Dead faulted_thread: remove the entry (thread is gone).
+        // Dead server: the faulted thread stays blocked (no good recovery).
+        {
+            let mut map = FAULT_REPLY_MAP.lock();
+            map.retain(|_reply_id, info| info.faulted_thread != thread_id);
+        }
+
+        // LAST: remove the Thread struct from the repository.
+        // All cleanup above is done; no references remain.
+        {
+            let mut repo = THREAD_REPOSITORY.lock();
+            repo.remove(thread_id);
+        }
+
         true
     }
 
@@ -308,6 +354,47 @@ impl ThreadManager {
     /// Take and remove fault reply info for a reply ID (one-time use)
     pub fn take_fault_reply_info(reply_id: ReplyId) -> Option<FaultReplyInfo> {
         FAULT_REPLY_MAP.lock().remove(&reply_id)
+    }
+
+    /// Bind a reply_id to the server thread that received the call message.
+    pub fn bind_call_reply_to_server(reply_id: ReplyId, server: ThreadId) -> bool {
+        if let Some(info) = CALL_REPLY_MAP.lock().get_mut(&reply_id) {
+            info.server_thread_id = Some(server);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Bind a fault reply_id to the server thread that received the fault message.
+    pub fn bind_fault_reply_to_server(reply_id: ReplyId, server: ThreadId) -> bool {
+        if let Some(info) = FAULT_REPLY_MAP.lock().get_mut(&reply_id) {
+            info.server_thread_id = Some(server);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Take call reply info, verifying the server thread matches.
+    /// Returns None if reply_id not found OR server_thread_id doesn't match.
+    pub fn take_call_reply_info_verified(reply_id: ReplyId, server: ThreadId) -> Option<CallReplyInfo> {
+        let mut map = CALL_REPLY_MAP.lock();
+        let info = map.get(&reply_id)?;
+        match info.server_thread_id {
+            Some(bound) if bound == server => map.remove(&reply_id),
+            _ => None,
+        }
+    }
+
+    /// Take fault reply info, verifying the server thread matches.
+    pub fn take_fault_reply_info_verified(reply_id: ReplyId, server: ThreadId) -> Option<FaultReplyInfo> {
+        let mut map = FAULT_REPLY_MAP.lock();
+        let info = map.get(&reply_id)?;
+        match info.server_thread_id {
+            Some(bound) if bound == server => map.remove(&reply_id),
+            _ => None,
+        }
     }
 
     /// Schedule next thread after a fault (safe for IST context)

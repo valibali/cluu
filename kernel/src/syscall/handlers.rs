@@ -386,17 +386,8 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
         crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
     let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
 
-    // 2. Create a one-time reply token
+    // 2. Allocate reply ID and store reply buffer info
     let reply_id = crate::sched::ThreadManager::alloc_reply_id();
-    let reply_token_handle = crate::token::create_token(
-        crate::token::OpaqueScope::random(),
-        crate::token::Rights::IPC_REPLY,
-        crate::token::Issuer::Kernel,
-        crate::token::Timestamp::NEVER,
-        crate::token::ObjectRef::Reply(reply_id),
-    );
-
-    // 3. Store reply buffer info keyed by ReplyId
     crate::sched::ThreadManager::set_call_reply_info(
         reply_id,
         CallReplyInfo {
@@ -404,17 +395,23 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
             reply_buf_ptr: reply_buf,
             reply_buf_len: reply_len,
             page_table_root,
+            server_thread_id: None,
         },
     );
 
-    // 4. Send call message with reply token handle injected
-    crate::ipc::endpoint::call_from_user_with_reply_token(
+    // 3. Send call message with reply_id injected
+    if let Err(e) = crate::ipc::endpoint::call_from_user_with_reply_id(
         endpoint_id,
         msg_ptr,
         msg_len,
         page_table_root,
-        reply_token_handle,
-    )?;
+        reply_id,
+    ) {
+        // Rollback: remove orphaned CALL_REPLY_MAP entry on any send error
+        // (prevents leak when caller retries after WouldBlock backpressure)
+        let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
+        return Err(e);
+    }
 
     // 5. Block waiting for reply
     crate::sched::ThreadManager::block_current();
@@ -428,38 +425,23 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
 ///
 /// # Arguments
 ///
-/// - arg1: reply_token (TokenHandle) - one-time reply token from received message
+/// - arg1: reply_id (u64) - implicit reply ID from received message header
 /// - arg2: msg_ptr (*const u8) - reply message
 /// - arg3: msg_len (usize) - reply length
-/// - arg4-arg6: unused
+/// - arg4-arg6: unused (or inline payload when IPC_REG_INLINE_FLAG set)
 ///
 /// # Returns
 ///
 /// - Ok(bytes_sent): Number of bytes in reply
-/// - Err(Error): Invalid token or IPC error
+/// - Err(Error): Invalid reply ID or IPC error
 pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
-    use crate::token::{ObjectRef, ObjectType, Rights};
-
-    let reply_token_handle = TokenHandle::from_raw(args.arg1);
+    let reply_id = crate::token::ReplyId::new(args.arg1 as u64);
     let msg_ptr = args.arg2;
     let msg_len = args.arg3;
 
-    // 1. Validate reply token and check IPC_REPLY right
-    let (token, obj_ref) = lookup_token(reply_token_handle).map_err(|_| Error::InvalidArgument)?;
-    if !token.has_right(Rights::IPC_REPLY) {
-        return Err(Error::PermissionDenied);
-    }
+    let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
 
-    // 2. Extract ReplyId from token
-    let reply_ref = crate::token::check_object_type(obj_ref, ObjectType::Reply)
-        .map_err(|_| Error::InvalidArgument)?;
-    let reply_id = if let ObjectRef::Reply(id) = reply_ref {
-        id
-    } else {
-        return Err(Error::InvalidArgument);
-    };
-
-    // 3. Copy reply payload from registers (fast path) or userspace memory (legacy path)
+    // Copy reply payload from registers (fast path) or userspace memory (legacy path)
     let mut buffer = [0u8; crate::ipc::endpoint::IPC_MESSAGE_MAX];
     let inline_flag_set = (msg_len & IPC_REG_INLINE_FLAG) != 0;
     let reply_len = if inline_flag_set {
@@ -500,23 +482,20 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
         msg_len
     };
 
-    // 5. Try to deliver as regular IPC call reply
-    match crate::ipc::endpoint::deliver_reply_by_id(reply_id, &buffer[..reply_len]) {
-        Ok(bytes_sent) => {
-            let _ = crate::token::revoke_token(reply_token_handle);
-            Ok(bytes_sent)
+    // Try call reply first, then fault reply
+    match crate::sched::ThreadManager::take_call_reply_info_verified(reply_id, current) {
+        Some(call_info) => {
+            crate::ipc::endpoint::deliver_reply(call_info, &buffer[..reply_len])
         }
-        Err(Error::InvalidState) => {
-            // Not a call reply — check if it's a fault reply
-            if let Some(fault_info) = crate::sched::ThreadManager::take_fault_reply_info(reply_id) {
-                handle_fault_reply(fault_info, &buffer[..reply_len]);
-                let _ = crate::token::revoke_token(reply_token_handle);
-                Ok(0)
-            } else {
-                Err(Error::InvalidState)
+        None => {
+            match crate::sched::ThreadManager::take_fault_reply_info_verified(reply_id, current) {
+                Some(fault_info) => {
+                    handle_fault_reply(fault_info, &buffer[..reply_len]);
+                    Ok(0)
+                }
+                None => Err(Error::PermissionDenied),
             }
         }
-        Err(e) => Err(e),
     }
 }
 
@@ -622,7 +601,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
     let operation = InvokeOp::from_usize(args.arg2).ok_or(Error::InvalidArgument)?;
 
     // Validate and lookup token
-    let (token, _obj_ref) = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
+    let (token, obj_ref) = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
 
     //klibcluu::trace("sys_invoke: operation = ");
     //klibcluu::log_dec(klibcluu::LogLevel::Trace, "", args.arg2 as u64);
@@ -630,56 +609,56 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
     // Dispatch based on operation
     match operation {
         // Thread operations
-        InvokeOp::ThreadCreate => invoke_thread_create(&token, args),
-        InvokeOp::ThreadDestroy => invoke_thread_destroy(&token, args),
-        InvokeOp::ThreadSuspend => invoke_thread_suspend(&token, args),
-        InvokeOp::ThreadResume => invoke_thread_resume(&token, args),
-        InvokeOp::ThreadSetPriority => invoke_thread_set_priority(&token, args),
-        InvokeOp::ThreadSetFaultEndpoint => invoke_thread_set_fault_endpoint(&token, args),
-        InvokeOp::ThreadSetFSBase => invoke_thread_set_fs_base(&token, args),
+        InvokeOp::ThreadCreate => invoke_thread_create(&token, obj_ref, args),
+        InvokeOp::ThreadDestroy => invoke_thread_destroy(&token, obj_ref, args),
+        InvokeOp::ThreadSuspend => invoke_thread_suspend(&token, obj_ref, args),
+        InvokeOp::ThreadResume => invoke_thread_resume(&token, obj_ref, args),
+        InvokeOp::ThreadSetPriority => invoke_thread_set_priority(&token, obj_ref, args),
+        InvokeOp::ThreadSetFaultEndpoint => invoke_thread_set_fault_endpoint(&token, obj_ref, args),
+        InvokeOp::ThreadSetFSBase => invoke_thread_set_fs_base(&token, obj_ref, args),
 
         // Space operations
-        InvokeOp::SpaceCreate => invoke_space_create(&token, args),
-        InvokeOp::SpaceDestroy => invoke_space_destroy(&token, args),
-        InvokeOp::SpaceMap => invoke_space_map(&token, args),
-        InvokeOp::SpaceUnmap => invoke_space_unmap(&token, args),
-        InvokeOp::SpaceGrant => invoke_space_grant(&token, args),
-        InvokeOp::SpaceMapRange => invoke_space_map_range(&token, args),
-        InvokeOp::SpaceProtect => invoke_space_protect(&token, args),
-        InvokeOp::FutexWait => invoke_futex_wait(&token, args),
-        InvokeOp::FutexWake => invoke_futex_wake(&token, args),
+        InvokeOp::SpaceCreate => invoke_space_create(&token, obj_ref, args),
+        InvokeOp::SpaceDestroy => invoke_space_destroy(&token, obj_ref, args),
+        InvokeOp::SpaceMap => invoke_space_map(&token, obj_ref, args),
+        InvokeOp::SpaceUnmap => invoke_space_unmap(&token, obj_ref, args),
+        InvokeOp::SpaceGrant => invoke_space_grant(&token, obj_ref, args),
+        InvokeOp::SpaceMapRange => invoke_space_map_range(&token, obj_ref, args),
+        InvokeOp::SpaceProtect => invoke_space_protect(&token, obj_ref, args),
+        InvokeOp::FutexWait => invoke_futex_wait(&token, obj_ref, args),
+        InvokeOp::FutexWake => invoke_futex_wake(&token, obj_ref, args),
 
         // Token operations
-        InvokeOp::TokenDerive => invoke_token_derive(token_handle, &token, args),
-        InvokeOp::TokenRevoke => invoke_token_revoke(token_handle, &token, args),
+        InvokeOp::TokenDerive => invoke_token_derive(token_handle, &token, obj_ref, args),
+        InvokeOp::TokenRevoke => invoke_token_revoke(token_handle, &token, obj_ref, args),
 
         // IRQ operations
-        InvokeOp::IrqAttach => invoke_irq_attach(&token, args),
-        InvokeOp::IrqAck => invoke_irq_ack(&token, args),
+        InvokeOp::IrqAttach => invoke_irq_attach(&token, obj_ref, args),
+        InvokeOp::IrqAck => invoke_irq_ack(&token, obj_ref, args),
 
         // IPC operations
-        InvokeOp::EndpointCreate => invoke_endpoint_create(&token, args),
+        InvokeOp::EndpointCreate => invoke_endpoint_create(&token, obj_ref, args),
 
         // PCI operations
-        InvokeOp::PciConfigRead => invoke_pci_config_read(&token, args),
-        InvokeOp::PciConfigWrite => invoke_pci_config_write(&token, args),
+        InvokeOp::PciConfigRead => invoke_pci_config_read(&token, obj_ref, args),
+        InvokeOp::PciConfigWrite => invoke_pci_config_write(&token, obj_ref, args),
 
         // I/O port operations
-        InvokeOp::PortIn8 => invoke_port_in8(&token, args),
-        InvokeOp::PortIn16 => invoke_port_in16(&token, args),
-        InvokeOp::PortIn32 => invoke_port_in32(&token, args),
-        InvokeOp::PortOut8 => invoke_port_out8(&token, args),
-        InvokeOp::PortOut16 => invoke_port_out16(&token, args),
-        InvokeOp::PortOut32 => invoke_port_out32(&token, args),
-        InvokeOp::VirtToPhys => invoke_virt_to_phys(&token, args),
-        InvokeOp::PmmAllocLarge => invoke_pmm_alloc_large(&token, args),
-        InvokeOp::ClockNow => invoke_clock_now(&token, args),
-        InvokeOp::ClockFrequency => invoke_clock_frequency(&token, args),
+        InvokeOp::PortIn8 => invoke_port_in8(&token, obj_ref, args),
+        InvokeOp::PortIn16 => invoke_port_in16(&token, obj_ref, args),
+        InvokeOp::PortIn32 => invoke_port_in32(&token, obj_ref, args),
+        InvokeOp::PortOut8 => invoke_port_out8(&token, obj_ref, args),
+        InvokeOp::PortOut16 => invoke_port_out16(&token, obj_ref, args),
+        InvokeOp::PortOut32 => invoke_port_out32(&token, obj_ref, args),
+        InvokeOp::VirtToPhys => invoke_virt_to_phys(&token, obj_ref, args),
+        InvokeOp::PmmAllocLarge => invoke_pmm_alloc_large(&token, obj_ref, args),
+        InvokeOp::ClockNow => invoke_clock_now(&token, obj_ref, args),
+        InvokeOp::ClockFrequency => invoke_clock_frequency(&token, obj_ref, args),
 
         // Frame operations
-        InvokeOp::FrameAllocate => invoke_frame_allocate(&token, args),
-        InvokeOp::FrameFree => invoke_frame_free(token_handle, &token, args),
-        InvokeOp::FrameGetPhys => invoke_frame_get_phys(&token, args),
+        InvokeOp::FrameAllocate => invoke_frame_allocate(&token, obj_ref, args),
+        InvokeOp::FrameFree => invoke_frame_free(token_handle, &token, obj_ref, args),
+        InvokeOp::FrameGetPhys => invoke_frame_get_phys(&token, obj_ref, args),
     }
 }
 
@@ -688,10 +667,11 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
 // ═══════════════════════════════════════════════════════════════════════════
 
 use crate::token::Token;
+use crate::token::scope::ObjectRef;
 
 // Thread operations
 
-fn invoke_thread_create(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_create(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::sched::{Priority, Thread, ThreadFlags, ThreadManager};
     use crate::token::{Issuer, ObjectRef, ObjectType, OpaqueScope, Rights, Timestamp};
     use x86_64::VirtAddr;
@@ -715,7 +695,7 @@ fn invoke_thread_create(token: &Token, args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     }
 
-    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
 
     let space_id = if let ObjectRef::Space(id) = space_ref {
@@ -763,7 +743,7 @@ fn invoke_thread_create(token: &Token, args: SyscallArgs) -> SyscallResult {
     Ok(thread_token.as_usize())
 }
 
-fn invoke_thread_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_destroy(_token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !_token.has_right(Rights::DESTROY) {
@@ -771,7 +751,7 @@ fn invoke_thread_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
         return Err(Error::PermissionDenied);
     }
 
-    let thread_ref = crate::token::resolve_token_object(_token, ObjectType::Thread)
+    let thread_ref = crate::token::check_object_type(obj_ref, ObjectType::Thread)
         .map_err(|_| Error::InvalidArgument)?;
     let thread_id = if let ObjectRef::Thread(id) = thread_ref {
         id
@@ -788,14 +768,14 @@ fn invoke_thread_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     Ok(0)
 }
 
-fn invoke_thread_suspend(token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_suspend(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::THREAD_SUSPEND) {
         return Err(Error::PermissionDenied);
     }
 
-    let thread_ref = crate::token::resolve_token_object(token, ObjectType::Thread)
+    let thread_ref = crate::token::check_object_type(obj_ref, ObjectType::Thread)
         .map_err(|_| Error::InvalidArgument)?;
     let thread_id = if let ObjectRef::Thread(id) = thread_ref {
         id
@@ -812,14 +792,14 @@ fn invoke_thread_suspend(token: &Token, _args: SyscallArgs) -> SyscallResult {
     Ok(0)
 }
 
-fn invoke_thread_resume(token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_resume(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::THREAD_SUSPEND) {
         return Err(Error::PermissionDenied);
     }
 
-    let thread_ref = crate::token::resolve_token_object(token, ObjectType::Thread)
+    let thread_ref = crate::token::check_object_type(obj_ref, ObjectType::Thread)
         .map_err(|_| Error::InvalidArgument)?;
     let thread_id = if let ObjectRef::Thread(id) = thread_ref {
         id
@@ -839,7 +819,7 @@ fn invoke_thread_resume(token: &Token, _args: SyscallArgs) -> SyscallResult {
     }
 }
 
-fn invoke_thread_set_priority(_token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_set_priority(_token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     klibcluu::warn("invoke_thread_set_priority not yet implemented");
     Err(Error::NotImplemented)
 }
@@ -849,14 +829,14 @@ fn invoke_thread_set_priority(_token: &Token, _args: SyscallArgs) -> SyscallResu
 /// # Arguments
 /// - token: Thread token (requires THREAD_CONTROL right)
 /// - arg3: Endpoint token handle (or 0 to clear)
-fn invoke_thread_set_fault_endpoint(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_set_fault_endpoint(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::THREAD_CONTROL) {
         return Err(Error::PermissionDenied);
     }
 
-    let thread_ref = crate::token::resolve_token_object(token, ObjectType::Thread)
+    let thread_ref = crate::token::check_object_type(obj_ref, ObjectType::Thread)
         .map_err(|_| Error::InvalidArgument)?;
     let thread_id = if let ObjectRef::Thread(id) = thread_ref {
         id
@@ -889,7 +869,7 @@ fn invoke_thread_set_fault_endpoint(token: &Token, args: SyscallArgs) -> Syscall
     Ok(0)
 }
 
-fn invoke_thread_set_fs_base(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_set_fs_base(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::THREAD_CONTROL) {
@@ -899,11 +879,11 @@ fn invoke_thread_set_fs_base(token: &Token, args: SyscallArgs) -> SyscallResult 
     // Resolve the target thread: accept a Thread token directly, or a Space
     // token as authorization to set FS base for the *current* thread running
     // in that space (avoids chicken-and-egg when TOKEN_SELF isn't a Thread).
-    let thread_id = match crate::token::resolve_token_object(token, ObjectType::Thread) {
+    let thread_id = match crate::token::check_object_type(obj_ref, ObjectType::Thread) {
         Ok(ObjectRef::Thread(id)) => id,
         _ => {
             // Fall back: Space token → set FS base for current thread
-            let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+            let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
                 .map_err(|_| Error::InvalidArgument)?;
             let space_id = if let ObjectRef::Space(id) = space_ref {
                 id
@@ -954,7 +934,7 @@ fn invoke_thread_set_fs_base(token: &Token, args: SyscallArgs) -> SyscallResult 
     Ok(0)
 }
 
-fn invoke_endpoint_create(token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_endpoint_create(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::token::{Issuer, ObjectRef, Rights, Timestamp};
 
     if !token.has_right(Rights::CREATE) {
@@ -977,7 +957,7 @@ fn invoke_endpoint_create(token: &Token, _args: SyscallArgs) -> SyscallResult {
 
 // Space operations
 
-fn invoke_space_create(token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_space_create(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::mm::{space_repository, AddressSpace};
     use crate::token::{Issuer, ObjectRef, OpaqueScope, Rights, Timestamp};
 
@@ -1016,7 +996,7 @@ fn invoke_space_create(token: &Token, _args: SyscallArgs) -> SyscallResult {
     Ok(space_token.as_usize())
 }
 
-fn invoke_space_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_space_destroy(_token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !_token.has_right(Rights::DESTROY) {
@@ -1024,7 +1004,7 @@ fn invoke_space_destroy(_token: &Token, _args: SyscallArgs) -> SyscallResult {
         return Err(Error::PermissionDenied);
     }
 
-    let space_ref = crate::token::resolve_token_object(_token, ObjectType::Space)
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
     let space_id = if let ObjectRef::Space(id) = space_ref {
         id
@@ -1090,7 +1070,7 @@ fn rollback_mapped_4kb(
     });
 }
 
-fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::elf;
     use crate::mm::{frame_registry, physmap, pmm, space_repository};
     use crate::syscall::userptr;
@@ -1122,7 +1102,7 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     let map_device = (perms & MAP_DEVICE) != 0;
     let map_frame_token = (perms & MAP_FRAME_TOKEN) != 0;
 
-    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
 
     let space_id = if let ObjectRef::Space(id) = space_ref {
@@ -1242,7 +1222,7 @@ fn invoke_space_map(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
 }
 
-fn invoke_space_unmap(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_space_unmap(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::mm::{frame_registry, pmm, space_repository};
     use crate::token::{ObjectRef, ObjectType, Rights};
 
@@ -1257,7 +1237,7 @@ fn invoke_space_unmap(token: &Token, args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     }
 
-    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
 
     let space_id = if let ObjectRef::Space(id) = space_ref {
@@ -1300,7 +1280,7 @@ fn invoke_space_unmap(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
 }
 
-fn invoke_space_protect(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::mm::{space_repository, PageFlags};
     use crate::token::{ObjectRef, ObjectType, Rights};
 
@@ -1322,7 +1302,7 @@ fn invoke_space_protect(token: &Token, args: SyscallArgs) -> SyscallResult {
     let writable = (perms & 0x02) != 0;
     let executable = (perms & 0x04) != 0;
 
-    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
 
     let space_id = if let ObjectRef::Space(id) = space_ref {
@@ -1379,14 +1359,14 @@ fn invoke_space_protect(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
 }
 
-fn resolve_space_for_futex(token: &Token) -> Result<crate::token::scope::AddressSpaceId, Error> {
+fn resolve_space_for_futex(token: &Token, obj_ref: ObjectRef) -> Result<crate::token::scope::AddressSpaceId, Error> {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::SPACE_MAP) {
         return Err(Error::PermissionDenied);
     }
 
-    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
     let space_id = if let ObjectRef::Space(id) = space_ref {
         id
@@ -1431,8 +1411,8 @@ fn read_user_u32(page_table_root: x86_64::PhysAddr, user_addr: usize) -> Result<
     Ok(value)
 }
 
-fn invoke_futex_wait(token: &Token, args: SyscallArgs) -> SyscallResult {
-    let space_id = resolve_space_for_futex(token)?;
+fn invoke_futex_wait(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
+    let space_id = resolve_space_for_futex(token, obj_ref)?;
     let user_addr = args.arg3;
     let expected = args.arg4 as u32;
     let timeout_ms = (args.arg5 as u64) | ((args.arg6 as u64) << 32);
@@ -1468,8 +1448,8 @@ fn invoke_futex_wait(token: &Token, args: SyscallArgs) -> SyscallResult {
     Ok(0)
 }
 
-fn invoke_futex_wake(token: &Token, args: SyscallArgs) -> SyscallResult {
-    let space_id = resolve_space_for_futex(token)?;
+fn invoke_futex_wake(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
+    let space_id = resolve_space_for_futex(token, obj_ref)?;
     let user_addr = args.arg3;
     let max_count = if args.arg4 == 0 { 1 } else { args.arg4 };
 
@@ -1493,7 +1473,7 @@ fn invoke_futex_wake(token: &Token, args: SyscallArgs) -> SyscallResult {
 ///
 /// - Ok(0): Success
 /// - Err(Error): Permission denied, invalid address, or mapping failure
-fn invoke_space_grant(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::elf;
     use crate::mm::space::layout;
     use crate::mm::{space_repository, vmm::pte_flags};
@@ -1532,7 +1512,7 @@ fn invoke_space_grant(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
 
     // Resolve source address space
-    let source_space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+    let source_space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
     let source_space_id = if let ObjectRef::Space(id) = source_space_ref {
         id
@@ -1639,7 +1619,7 @@ const PAGES_PER_LARGE_PAGE: usize = 512;
 /// Size of a large page (2MB)
 const LARGE_PAGE_SIZE: usize = 2 * 1024 * 1024;
 
-fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::elf;
     use crate::mm::{physmap, pmm, space_repository};
     use crate::syscall::userptr;
@@ -1719,7 +1699,7 @@ fn invoke_space_map_range(token: &Token, args: SyscallArgs) -> SyscallResult {
         }
     }
 
-    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
     let space_id = if let ObjectRef::Space(id) = space_ref {
         id
@@ -2056,7 +2036,7 @@ fn map_device_range(
 
 // Token operations
 
-fn invoke_token_derive(handle: TokenHandle, token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_token_derive(handle: TokenHandle, token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::{AuthorityId, Issuer, Rights, Timestamp};
 
     klibcluu::trace("invoke_token_derive");
@@ -2070,15 +2050,14 @@ fn invoke_token_derive(handle: TokenHandle, token: &Token, args: SyscallArgs) ->
     let expire = Timestamp::new(args.arg4 as u64);
 
     let issuer = Issuer::Authority(AuthorityId::new(handle.as_raw() as u64));
-    let object_ref = crate::token::resolve_scope(&token.scope).ok_or(Error::InvalidArgument)?;
 
-    let derived = crate::token::try_derive_token(token, new_rights, expire, issuer, object_ref)
+    let derived = crate::token::try_derive_token(token, new_rights, expire, issuer, obj_ref)
         .map_err(|_| Error::OutOfMemory)?;
 
     Ok(derived.as_usize())
 }
 
-fn invoke_token_revoke(handle: TokenHandle, _token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_token_revoke(handle: TokenHandle, _token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     klibcluu::trace("invoke_token_revoke");
 
     crate::token::revoke_token(handle).map_err(|_| {
@@ -2091,7 +2070,7 @@ fn invoke_token_revoke(handle: TokenHandle, _token: &Token, _args: SyscallArgs) 
 
 // IRQ operations
 
-fn invoke_irq_attach(_token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_irq_attach(_token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights, TokenHandle};
 
     if !_token.has_right(Rights::IRQ_HANDLE) {
@@ -2129,7 +2108,7 @@ fn invoke_irq_attach(_token: &Token, _args: SyscallArgs) -> SyscallResult {
     Ok(0)
 }
 
-fn invoke_irq_ack(token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_irq_ack(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::IRQ_ACK) {
@@ -2137,7 +2116,7 @@ fn invoke_irq_ack(token: &Token, _args: SyscallArgs) -> SyscallResult {
         return Err(Error::PermissionDenied);
     }
 
-    let irq_ref = crate::token::resolve_token_object(token, ObjectType::Irq)
+    let irq_ref = crate::token::check_object_type(obj_ref, ObjectType::Irq)
         .map_err(|_| {
             klibcluu::warn("invoke_irq_ack: failed to resolve IRQ object");
             Error::InvalidArgument
@@ -2176,7 +2155,7 @@ fn invoke_irq_ack(token: &Token, _args: SyscallArgs) -> SyscallResult {
 ///
 /// # Returns
 /// - Ok(value): 32-bit value read from PCI config space
-fn invoke_pci_config_read(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_pci_config_read(token: &Token, _obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::Rights;
 
     if !token.has_right(Rights::PCI_ACCESS) {
@@ -2207,7 +2186,7 @@ fn invoke_pci_config_read(token: &Token, args: SyscallArgs) -> SyscallResult {
 ///
 /// # Returns
 /// - Ok(0): Write successful
-fn invoke_pci_config_write(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_pci_config_write(token: &Token, _obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::Rights;
 
     if !token.has_right(Rights::PCI_ACCESS) {
@@ -2278,7 +2257,7 @@ fn pci_config_write_u32(bus: u8, device: u8, function: u8, offset: u8, value: u3
 ///
 /// # Returns
 /// - Ok(value): 8-bit value read from port
-fn invoke_port_in8(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_port_in8(token: &Token, _obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::Rights;
 
     if !token.has_right(Rights::PCI_ACCESS) {
@@ -2302,7 +2281,7 @@ fn invoke_port_in8(token: &Token, args: SyscallArgs) -> SyscallResult {
 ///
 /// # Returns
 /// - Ok(value): 16-bit value read from port
-fn invoke_port_in16(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_port_in16(token: &Token, _obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::Rights;
 
     if !token.has_right(Rights::PCI_ACCESS) {
@@ -2326,7 +2305,7 @@ fn invoke_port_in16(token: &Token, args: SyscallArgs) -> SyscallResult {
 ///
 /// # Returns
 /// - Ok(value): 32-bit value read from port
-fn invoke_port_in32(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_port_in32(token: &Token, _obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::Rights;
 
     if !token.has_right(Rights::PCI_ACCESS) {
@@ -2351,7 +2330,7 @@ fn invoke_port_in32(token: &Token, args: SyscallArgs) -> SyscallResult {
 ///
 /// # Returns
 /// - Ok(0): Write successful
-fn invoke_port_out8(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_port_out8(token: &Token, _obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::Rights;
 
     if !token.has_right(Rights::PCI_ACCESS) {
@@ -2378,7 +2357,7 @@ fn invoke_port_out8(token: &Token, args: SyscallArgs) -> SyscallResult {
 ///
 /// # Returns
 /// - Ok(0): Write successful
-fn invoke_port_out16(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_port_out16(token: &Token, _obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::Rights;
 
     if !token.has_right(Rights::PCI_ACCESS) {
@@ -2405,7 +2384,7 @@ fn invoke_port_out16(token: &Token, args: SyscallArgs) -> SyscallResult {
 ///
 /// # Returns
 /// - Ok(0): Write successful
-fn invoke_port_out32(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_port_out32(token: &Token, _obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::Rights;
 
     if !token.has_right(Rights::PCI_ACCESS) {
@@ -2432,7 +2411,7 @@ fn invoke_port_out32(token: &Token, args: SyscallArgs) -> SyscallResult {
 ///
 /// # Returns
 /// - Ok(phys_addr): Physical address, or 0 if not mapped
-fn invoke_virt_to_phys(token: &Token, args: SyscallArgs) -> SyscallResult {
+fn invoke_virt_to_phys(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::elf::translate_vaddr;
     use crate::mm::space_repository;
     use crate::token::{ObjectRef, ObjectType, Rights};
@@ -2444,7 +2423,7 @@ fn invoke_virt_to_phys(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
 
     // Get the space ID from the token
-    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
 
     let space_id = if let ObjectRef::Space(id) = space_ref {
@@ -2467,7 +2446,7 @@ fn invoke_virt_to_phys(token: &Token, args: SyscallArgs) -> SyscallResult {
     }
 }
 
-fn invoke_pmm_alloc_large(token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_pmm_alloc_large(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::mm::pmm;
     use crate::token::Rights;
 
@@ -2482,7 +2461,7 @@ fn invoke_pmm_alloc_large(token: &Token, _args: SyscallArgs) -> SyscallResult {
     Ok(phys as usize)
 }
 
-fn invoke_clock_now(token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_clock_now(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::token::Rights;
 
     if !token.has_right(Rights::READ) {
@@ -2493,7 +2472,7 @@ fn invoke_clock_now(token: &Token, _args: SyscallArgs) -> SyscallResult {
     Ok(tsc as usize)
 }
 
-fn invoke_clock_frequency(token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_clock_frequency(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::token::Rights;
 
     if !token.has_right(Rights::READ) {
@@ -2517,7 +2496,7 @@ fn invoke_clock_frequency(token: &Token, _args: SyscallArgs) -> SyscallResult {
 /// - Ok(frame_token_handle): Token handle for the new frame
 ///   The physical address is returned packed: upper 32 bits in arg4 style
 ///   Actually we return frame_token in rax and caller can use FrameGetPhys.
-fn invoke_frame_allocate(token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_frame_allocate(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::mm::frame_registry;
     use crate::token::{
         create_token, scope::OpaqueScope, Issuer, ObjectRef, ObjectType, Rights, Timestamp,
@@ -2528,7 +2507,7 @@ fn invoke_frame_allocate(token: &Token, _args: SyscallArgs) -> SyscallResult {
     }
 
     // Resolve space to get owner
-    let space_ref = crate::token::resolve_token_object(token, ObjectType::Space)
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
     let space_id = if let ObjectRef::Space(id) = space_ref {
         id
@@ -2559,6 +2538,7 @@ fn invoke_frame_allocate(token: &Token, _args: SyscallArgs) -> SyscallResult {
 fn invoke_frame_free(
     token_handle: TokenHandle,
     token: &Token,
+    obj_ref: ObjectRef,
     _args: SyscallArgs,
 ) -> SyscallResult {
     use crate::mm::frame_registry;
@@ -2568,7 +2548,7 @@ fn invoke_frame_free(
         return Err(Error::PermissionDenied);
     }
 
-    let frame_ref = crate::token::resolve_token_object(token, ObjectType::Frame)
+    let frame_ref = crate::token::check_object_type(obj_ref, ObjectType::Frame)
         .map_err(|_| Error::InvalidArgument)?;
     let frame_id = if let ObjectRef::Frame(id) = frame_ref {
         id
@@ -2591,7 +2571,7 @@ fn invoke_frame_free(
 ///
 /// # Returns
 /// - Ok(phys_addr)
-fn invoke_frame_get_phys(token: &Token, _args: SyscallArgs) -> SyscallResult {
+fn invoke_frame_get_phys(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
     use crate::mm::frame_registry;
     use crate::token::{ObjectRef, ObjectType, Rights};
 
@@ -2599,7 +2579,7 @@ fn invoke_frame_get_phys(token: &Token, _args: SyscallArgs) -> SyscallResult {
         return Err(Error::PermissionDenied);
     }
 
-    let frame_ref = crate::token::resolve_token_object(token, ObjectType::Frame)
+    let frame_ref = crate::token::check_object_type(obj_ref, ObjectType::Frame)
         .map_err(|_| Error::InvalidArgument)?;
     let frame_id = if let ObjectRef::Frame(id) = frame_ref {
         id

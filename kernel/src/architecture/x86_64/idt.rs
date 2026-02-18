@@ -469,7 +469,6 @@ fn try_forward_fault(
 ) -> bool {
     use crate::sched::thread::FaultState;
     use crate::sched::FaultReplyInfo;
-    use crate::token::{self, Issuer, OpaqueScope, Rights, Timestamp};
 
     let current_id = match ThreadManager::current() {
         Some(id) => id,
@@ -488,39 +487,31 @@ fn try_forward_fault(
         _ => return false,
     };
 
-    // Allocate reply ID and create one-time reply token
+    // Allocate reply ID (no token minting — implicit reply cap)
     let reply_id = ThreadManager::alloc_reply_id();
-    let reply_token_handle = token::create_token(
-        OpaqueScope::random(),
-        Rights::IPC_REPLY,
-        Issuer::Kernel,
-        Timestamp::NEVER,
-        token::ObjectRef::Reply(reply_id),
-    );
 
-    // Build fault message: label=0xFA017, words=[type, addr, err, rip, tid, reply_tok]
+    // Build fault message: label=0xFA017, words=[type, addr, err, rip, tid, reply_id]
     let mut msg_bytes = [0u8; core::mem::size_of::<endpoint::UserMessage>()];
     let msg = unsafe { &mut *(msg_bytes.as_mut_ptr() as *mut endpoint::UserMessage) };
     msg.tag.label = 0xFA017;
     msg.tag.words = 6;
-    msg.tag.extra = endpoint::REPLY_TOKEN_TAG;
+    msg.tag.extra = endpoint::REPLY_ID_TAG;
     msg.tag._pad = 0;
     msg.words[0] = fault_type as usize;
     msg.words[1] = fault_addr as usize;
     msg.words[2] = error_code as usize;
     msg.words[3] = saved_context.rip as usize;
     msg.words[4] = current_id.as_u64() as usize;
-    msg.words[5] = reply_token_handle.as_usize();
+    msg.words[5] = reply_id.as_u64() as usize;
 
-    // Non-blocking send (safe from IST context — uses try_lock)
-    match endpoint::try_send(fault_ep, &msg_bytes) {
+    // Non-blocking send with reply_id (safe from IST context — uses try_lock)
+    match endpoint::try_send_with_reply_id(fault_ep, &msg_bytes, reply_id) {
         Ok(receiver_to_wake) => {
             if let Some(thread_id) = receiver_to_wake {
                 ThreadManager::wake_thread(thread_id);
             }
         }
         Err(_) => {
-            let _ = token::revoke_token(reply_token_handle);
             return false;
         }
     }
@@ -530,6 +521,7 @@ fn try_forward_fault(
         reply_id,
         FaultReplyInfo {
             faulted_thread: current_id,
+            server_thread_id: None,
         },
     );
 

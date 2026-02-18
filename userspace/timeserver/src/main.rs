@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use libcluu::boot::{process_info, TOKEN_CLOCK, TOKEN_EXTRA_0, TOKEN_IPC, TOKEN_REGISTRY};
-use libcluu::ipc::extract_reply_token;
+use libcluu::ipc::extract_reply_id;
 use libcluu::time::{TIME_GETCLOCK, TIME_GETTIMEOFDAY};
 use libcluu::types::Message;
 use libcluu::{clock_frequency, clock_now, debug_print, registry, Result};
@@ -40,7 +40,7 @@ fn run() -> Result<()> {
         }
 
         let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
-        let reply_token = extract_reply_token(&msg).unwrap_or(endpoint);
+        let reply_token = extract_reply_id(&msg).unwrap_or(endpoint);
 
         match msg.tag.label {
             TIME_GETTIMEOFDAY => reply_time(reply_token, clock_token, ticks_per_sec, false)?,

@@ -18,7 +18,7 @@ use cluu_ext2::Ext2Fs;
 use cluu_virtio_blk::{pci, VirtioBlkAdapter, VirtioBlkDevice};
 use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_SPACE};
 use libcluu::fs::{BlockDevice, Filesystem};
-use libcluu::ipc::{extract_reply_token, reply, reply_with_payload};
+use libcluu::ipc::{extract_reply_id, reply, reply_with_payload};
 use libcluu::registry;
 use libcluu::syscall::{endpoint_create, ipc_recv_any, space_map_range};
 use libcluu::types::{IpcFlags, Message};
@@ -186,7 +186,7 @@ fn handle_fs_request(
     msg: &Message,
     payload: &[u8],
 ) {
-    let reply_token = extract_reply_token(msg);
+    let reply_token = extract_reply_id(msg);
 
     match msg.tag.label {
         FS_OPEN => {
@@ -512,7 +512,7 @@ fn parse_usize_pair(payload: &[u8]) -> Option<(usize, usize)> {
 }
 
 fn handle_block_request(blk: &VirtioBlkAdapter, msg: &Message) {
-    let reply_token = extract_reply_token(msg);
+    let reply_token = extract_reply_id(msg);
 
     match msg.tag.label {
         BLK_INFO_LABEL => {

@@ -14,7 +14,7 @@ mod protocol;
 
 use context::TtyContext;
 use libcluu::ipc::{
-    extract_reply_token, reply, KBD_EVENT_LABEL, TTY_CTL_LABEL, TTY_POLL_QUERY_LABEL,
+    extract_reply_id, reply, KBD_EVENT_LABEL, TTY_CTL_LABEL, TTY_POLL_QUERY_LABEL,
     TTY_READ_LABEL, TTY_READ_REQUEST_LABEL, TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
     TTY_WRITE_SYNC_LABEL,
 };
@@ -60,7 +60,7 @@ fn run() -> Result<()> {
                         }
                         TTY_READ_REQUEST_LABEL => {
                             // A process called read(0, buf, n) — enqueue the request
-                            if let Some(reply_token) = extract_reply_token(&msg) {
+                            if let Some(reply_token) = extract_reply_id(&msg) {
                                 let max_bytes = msg.words[0];
                                 ctx.pending_reads.push_back(context::PendingRead {
                                     reply_token,
@@ -75,7 +75,7 @@ fn run() -> Result<()> {
                         TTY_WRITE_SYNC_LABEL => {
                             // Synchronous write: forward to console, then reply
                             // If console not ready, defer reply until flush
-                            if let Some(reply_token) = extract_reply_token(&msg) {
+                            if let Some(reply_token) = extract_reply_id(&msg) {
                                 if ctx.forward_to_console_sync(payload, reply_token) {
                                     // Output sent immediately, reply now
                                     let reply_msg = Message::new(TTY_WRITE_SYNC_LABEL, [0; 6], 0);
@@ -89,7 +89,7 @@ fn run() -> Result<()> {
                         }
                         TTY_CTL_LABEL => {
                             // Terminal control: get/set mode
-                            if let Some(reply_token) = extract_reply_token(&msg) {
+                            if let Some(reply_token) = extract_reply_id(&msg) {
                                 let subcmd = msg.words[0];
                                 match subcmd {
                                     0 => {
@@ -125,7 +125,7 @@ fn run() -> Result<()> {
                         }
                         TTY_POLL_QUERY_LABEL => {
                             // Readiness query from poll(): reply with 1 if input available, 0 otherwise.
-                            if let Some(reply_token) = extract_reply_token(&msg) {
+                            if let Some(reply_token) = extract_reply_id(&msg) {
                                 let has_data = if ctx.input_queue.is_empty() {
                                     0usize
                                 } else {
