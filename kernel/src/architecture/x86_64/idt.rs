@@ -517,13 +517,18 @@ fn try_forward_fault(
     }
 
     // Store fault reply info and save fault state on thread
-    ThreadManager::set_fault_reply_info(
+    if !ThreadManager::set_fault_reply_info(
         reply_id,
         FaultReplyInfo {
             faulted_thread: current_id,
             server_thread_id: None,
         },
-    );
+    ) {
+        // Reply map full — can't track the fault reply; kill the thread instead.
+        klibcluu::error("set_fault_reply_info failed (reply map full), killing thread");
+        ThreadManager::mark_thread_dead(current_id);
+        return false;
+    }
 
     ThreadManager::with_thread_mut(current_id, |t| {
         t.fault_state = Some(FaultState {

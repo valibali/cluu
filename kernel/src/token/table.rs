@@ -196,6 +196,124 @@ pub fn init() {
     klibcluu::info("Token system initialized");
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-CPU Token Cache (lock-free on cache hit)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Thread-local token cache entry
+///
+/// Caches a verified token to avoid repeated expensive operations.
+/// Cache is invalidated when:
+/// - Token expires (checked on every lookup)
+/// - Token is revoked (generation counter changes)
+/// - Token is removed from table (checked on every lookup)
+#[derive(Clone, Debug)]
+struct TokenCacheEntry {
+    /// Cached token handle
+    handle: super::TokenHandle,
+    /// Cached token (already verified)
+    token: super::Token,
+    /// Cached object reference
+    object_ref: crate::token::scope::ObjectRef,
+    /// Generation when cached (for revocation detection)
+    cached_generation: u64,
+}
+
+/// Number of entries in the per-CPU token cache.
+const TOKEN_CACHE_SIZE: usize = 4;
+
+/// Per-CPU 4-entry LRU token cache.
+///
+/// `recv_any` with multiple endpoints benefits from caching more than one token.
+/// The LRU order is tracked in `lru_order`: index 0 = most recently used.
+#[derive(Clone, Debug)]
+struct TokenCache {
+    entries: [Option<TokenCacheEntry>; TOKEN_CACHE_SIZE],
+    /// LRU order: lru_order[0] = most recently used slot index
+    lru_order: [u8; TOKEN_CACHE_SIZE],
+}
+
+impl TokenCache {
+    /// Create an empty cache.
+    const fn new() -> Self {
+        Self {
+            entries: [None, None, None, None],
+            lru_order: [0, 1, 2, 3],
+        }
+    }
+
+    /// Look up a handle in the cache. On hit, promotes the entry to MRU.
+    fn lookup(&mut self, handle: super::TokenHandle) -> Option<&TokenCacheEntry> {
+        // Linear scan to find the handle
+        for i in 0..TOKEN_CACHE_SIZE {
+            let slot = self.lru_order[i] as usize;
+            if let Some(ref entry) = self.entries[slot] {
+                if entry.handle == handle {
+                    // Promote to MRU by shifting entries before it
+                    if i > 0 {
+                        let hit_slot = self.lru_order[i];
+                        // Shift [0..i] right by 1
+                        for j in (1..=i).rev() {
+                            self.lru_order[j] = self.lru_order[j - 1];
+                        }
+                        self.lru_order[0] = hit_slot;
+                    }
+                    return self.entries[self.lru_order[0] as usize].as_ref();
+                }
+            }
+        }
+        None
+    }
+
+    /// Insert a new entry, evicting the LRU slot.
+    fn insert(&mut self, entry: TokenCacheEntry) {
+        // Evict the LRU slot (last in lru_order)
+        let evict_slot = self.lru_order[TOKEN_CACHE_SIZE - 1] as usize;
+        self.entries[evict_slot] = Some(entry);
+        // Promote evicted slot to MRU
+        let evict_val = self.lru_order[TOKEN_CACHE_SIZE - 1];
+        for j in (1..TOKEN_CACHE_SIZE).rev() {
+            self.lru_order[j] = self.lru_order[j - 1];
+        }
+        self.lru_order[0] = evict_val;
+    }
+
+    /// Invalidate all entries (e.g., on revocation generation mismatch).
+    fn invalidate_all(&mut self) {
+        for entry in &mut self.entries {
+            *entry = None;
+        }
+    }
+
+    /// Remove a specific handle from the cache.
+    fn clear_handle(&mut self, handle: super::TokenHandle) {
+        for entry in &mut self.entries {
+            if let Some(ref e) = entry {
+                if e.handle == handle {
+                    *entry = None;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Per-CPU token cache — bypasses THREAD_REPOSITORY lock entirely.
+///
+/// SAFETY invariant: accessed only from syscall handlers, which are
+/// non-reentrant on this single-CPU kernel. Interrupt handlers (timer,
+/// GPF, PF) never call lookup_token.
+struct PerCpuTokenCache {
+    inner: UnsafeCell<TokenCache>,
+}
+
+// SAFETY: Single-CPU kernel. Only accessed from non-reentrant syscall context.
+unsafe impl Sync for PerCpuTokenCache {}
+
+static PERCPU_TOKEN_CACHE: PerCpuTokenCache = PerCpuTokenCache {
+    inner: UnsafeCell::new(TokenCache::new()),
+};
+
 /// Get kernel secret (for token signing)
 ///
 /// Panics if token system hasn't been initialized.
@@ -326,47 +444,36 @@ pub(crate) fn try_create_derived_token(
 /// * `Ok(Token)` - Valid token
 /// * `Err(&str)` - Error reason
 pub fn lookup_token(handle: TokenHandle) -> Result<(Token, crate::token::scope::ObjectRef), &'static str> {
-    // Try to use thread-local cache if available
-    if let Some(current_thread_id) = crate::sched::ThreadManager::current() {
-        if let Some(cached) = try_cache_lookup(handle, current_thread_id) {
-            return Ok(cached);
-        }
+    // Try per-CPU cache first (no lock needed)
+    if let Some(cached) = try_cache_lookup(handle) {
+        return Ok(cached);
     }
 
-    // Cache miss or no current thread - do full lookup
+    // Cache miss — full lookup (locks only the relevant token shard)
     let (token, object_ref, generation) = {
-        // Lock only the shard for this handle
         let shard = get_shard(handle);
         let table = shard.lock();
 
-        // Lookup token
         let token = table.get(handle).ok_or("Invalid token handle")?;
 
-        // Check expiration (always check - can't cache expiration)
         let now = current_timestamp();
         if token.is_expired(now) {
             return Err("Token expired");
         }
 
-        // BTreeMap entry IS the authority — no HMAC re-verification needed.
-        // (seL4 principle: the capability table entry is the authority.)
-
-        // Get object ref and generation for caching
         let object_ref = table.resolve_scope(&token.scope).ok_or("Unknown scope")?;
         let generation = revocation_generation();
 
         (token.clone(), object_ref, generation)
     };
 
-    // Update thread-local cache
-    if let Some(current_thread_id) = crate::sched::ThreadManager::current() {
-        update_cache(current_thread_id, handle, &token, object_ref, generation);
-    }
+    // Update per-CPU cache (no lock needed)
+    update_cache(handle, &token, object_ref, generation);
 
     Ok((token, object_ref))
 }
 
-/// Try to lookup token from thread-local cache
+/// Try to lookup token from per-CPU cache
 ///
 /// Returns cached token if:
 /// - Cache entry exists for this handle
@@ -374,48 +481,40 @@ pub fn lookup_token(handle: TokenHandle) -> Result<(Token, crate::token::scope::
 /// - Token not expired
 fn try_cache_lookup(
     handle: TokenHandle,
-    thread_id: crate::sched::thread::ThreadId,
 ) -> Option<(Token, crate::token::scope::ObjectRef)> {
-    use crate::sched::thread_manager::ThreadManager;
+    // SAFETY: only called from syscall context, non-reentrant on single CPU
+    let cache = unsafe { &mut *PERCPU_TOKEN_CACHE.inner.get() };
+    let current_generation = revocation_generation();
+    let entry = cache.lookup(handle)?;
 
-    ThreadManager::with_thread_mut(thread_id, |thread| {
-        let current_generation = revocation_generation();
-        let entry = thread.token_cache.lookup(handle)?;
+    if entry.cached_generation != current_generation {
+        cache.invalidate_all();
+        return None;
+    }
 
-        if entry.cached_generation != current_generation {
-            thread.token_cache.invalidate_all();
-            return None;
-        }
+    let now = current_timestamp();
+    if entry.token.is_expired(now) {
+        cache.clear_handle(handle);
+        return None;
+    }
 
-        let now = current_timestamp();
-        if entry.token.is_expired(now) {
-            thread.token_cache.clear_handle(handle);
-            return None;
-        }
-
-        // Cache hit — generation match guarantees token is still valid
-        Some((entry.token.clone(), entry.object_ref))
-    })?
+    Some((entry.token.clone(), entry.object_ref))
 }
 
-/// Update thread-local token cache
+/// Update per-CPU token cache
 fn update_cache(
-    thread_id: crate::sched::thread::ThreadId,
     handle: TokenHandle,
     token: &Token,
     object_ref: crate::token::scope::ObjectRef,
     generation: u64,
 ) {
-    use crate::sched::thread::TokenCacheEntry;
-    use crate::sched::thread_manager::ThreadManager;
-
-    ThreadManager::with_thread_mut(thread_id, |thread| {
-        thread.token_cache.insert(TokenCacheEntry {
-            handle,
-            token: token.clone(),
-            object_ref,
-            cached_generation: generation,
-        });
+    // SAFETY: only called from syscall context, non-reentrant on single CPU
+    let cache = unsafe { &mut *PERCPU_TOKEN_CACHE.inner.get() };
+    cache.insert(TokenCacheEntry {
+        handle,
+        token: token.clone(),
+        object_ref,
+        cached_generation: generation,
     });
 }
 

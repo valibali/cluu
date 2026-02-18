@@ -25,7 +25,114 @@ pub struct FaultReplyInfo {
     pub faulted_thread: ThreadId,
     pub server_thread_id: Option<ThreadId>,
 }
-use alloc::collections::{BTreeMap, BinaryHeap};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// O(1) Reply Map — Open-Addressing Hash Table
+// ═══════════════════════════════════════════════════════════════════════════
+
+const REPLY_MAP_SLOTS: usize = 256;
+const REPLY_MAP_MASK: usize = REPLY_MAP_SLOTS - 1;
+
+/// Fixed-size open-addressing hash map for O(1) reply lookups.
+/// Uses linear probing with ReplyId as hash key.
+/// 50% load cap (max 128 entries) ensures O(1) amortized performance.
+struct ReplyMap<T: Copy> {
+    slots: [Option<(ReplyId, T)>; REPLY_MAP_SLOTS],
+    count: usize,
+}
+
+impl<T: Copy> ReplyMap<T> {
+    const fn new() -> Self {
+        Self {
+            slots: [None; REPLY_MAP_SLOTS],
+            count: 0,
+        }
+    }
+
+    /// Insert entry. Returns false if table >50% full or duplicate key.
+    fn insert(&mut self, reply_id: ReplyId, data: T) -> bool {
+        if self.count >= REPLY_MAP_SLOTS / 2 {
+            return false;
+        }
+        let mut idx = reply_id.as_u64() as usize & REPLY_MAP_MASK;
+        for _ in 0..REPLY_MAP_SLOTS {
+            match &self.slots[idx] {
+                None => {
+                    self.slots[idx] = Some((reply_id, data));
+                    self.count += 1;
+                    return true;
+                }
+                Some((rid, _)) if *rid == reply_id => return false,
+                _ => idx = (idx + 1) & REPLY_MAP_MASK,
+            }
+        }
+        false
+    }
+
+    /// Lookup by ReplyId. O(1) amortized.
+    fn get(&self, reply_id: ReplyId) -> Option<&T> {
+        let mut idx = reply_id.as_u64() as usize & REPLY_MAP_MASK;
+        for _ in 0..REPLY_MAP_SLOTS {
+            match &self.slots[idx] {
+                Some((rid, data)) if *rid == reply_id => return Some(data),
+                None => return None,
+                _ => idx = (idx + 1) & REPLY_MAP_MASK,
+            }
+        }
+        None
+    }
+
+    /// Mutable lookup by ReplyId. O(1) amortized.
+    fn get_mut(&mut self, reply_id: ReplyId) -> Option<&mut T> {
+        let mut idx = reply_id.as_u64() as usize & REPLY_MAP_MASK;
+        let found = loop {
+            match &self.slots[idx] {
+                Some((rid, _)) if *rid == reply_id => break Some(idx),
+                None => break None,
+                _ => idx = (idx + 1) & REPLY_MAP_MASK,
+            }
+        };
+        found.and_then(move |i| self.slots[i].as_mut().map(|(_, data)| data))
+    }
+
+    /// Remove entry. O(1) amortized. Uses backward-shift deletion.
+    fn remove(&mut self, reply_id: ReplyId) -> Option<T> {
+        // Find the entry
+        let mut idx = reply_id.as_u64() as usize & REPLY_MAP_MASK;
+        loop {
+            match &self.slots[idx] {
+                Some((rid, _)) if *rid == reply_id => break,
+                None => return None,
+                _ => idx = (idx + 1) & REPLY_MAP_MASK,
+            }
+        }
+        let data = self.slots[idx].take().unwrap().1;
+        self.count -= 1;
+
+        // Backward-shift: independent scan variable j always advances
+        let mut empty = idx;
+        let mut j = (idx + 1) & REPLY_MAP_MASK;
+        loop {
+            if self.slots[j].is_none() {
+                break;
+            }
+            let natural = self.slots[j].as_ref().unwrap().0.as_u64() as usize & REPLY_MAP_MASK;
+            let should_move = if j >= empty {
+                natural <= empty || natural > j
+            } else {
+                natural <= empty && natural > j
+            };
+            if should_move {
+                self.slots[empty] = self.slots[j].take();
+                empty = j;
+            }
+            j = (j + 1) & REPLY_MAP_MASK;
+        }
+        Some(data)
+    }
+}
+
+use alloc::collections::BinaryHeap;
 use core::cmp::Reverse;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
@@ -65,13 +172,13 @@ lazy_static! {
     static ref TIMEOUT_HEAP: Mutex<BinaryHeap<Reverse<(u64, u64)>>> =
         Mutex::new(BinaryHeap::new());
 
-    /// Map from ReplyId to CallReplyInfo for IPC call/reply
-    static ref CALL_REPLY_MAP: Mutex<BTreeMap<ReplyId, CallReplyInfo>> =
-        Mutex::new(BTreeMap::new());
+    /// Map from ReplyId to CallReplyInfo for IPC call/reply (O(1) hash map)
+    static ref CALL_REPLY_MAP: Mutex<ReplyMap<CallReplyInfo>> =
+        Mutex::new(ReplyMap::new());
 
-    /// Map from ReplyId to FaultReplyInfo for fault IPC
-    static ref FAULT_REPLY_MAP: Mutex<BTreeMap<ReplyId, FaultReplyInfo>> =
-        Mutex::new(BTreeMap::new());
+    /// Map from ReplyId to FaultReplyInfo for fault IPC (O(1) hash map)
+    static ref FAULT_REPLY_MAP: Mutex<ReplyMap<FaultReplyInfo>> =
+        Mutex::new(ReplyMap::new());
 }
 
 /// Counter for generating unique ReplyIds
@@ -285,18 +392,21 @@ impl ThreadManager {
         {
             let mut map = CALL_REPLY_MAP.lock();
             let mut callers_to_wake = alloc::vec::Vec::new();
-            map.retain(|_reply_id, info| {
-                if info.caller == thread_id {
-                    // Caller died mid-call — discard entry
-                    return false;
+            let mut to_remove = alloc::vec::Vec::new();
+
+            for i in 0..REPLY_MAP_SLOTS {
+                if let Some((_rid, info)) = &map.slots[i] {
+                    if info.caller == thread_id {
+                        to_remove.push(map.slots[i].as_ref().unwrap().0);
+                    } else if info.server_thread_id == Some(thread_id) {
+                        callers_to_wake.push(info.caller);
+                        to_remove.push(map.slots[i].as_ref().unwrap().0);
+                    }
                 }
-                if info.server_thread_id == Some(thread_id) {
-                    // Server died — wake caller with error
-                    callers_to_wake.push(info.caller);
-                    return false;
-                }
-                true
-            });
+            }
+            for rid in to_remove {
+                map.remove(rid);
+            }
             drop(map);
             for caller in callers_to_wake {
                 // Encode as negative errno in rax (same convention as syscall return path).
@@ -313,7 +423,17 @@ impl ThreadManager {
         // Dead server: the faulted thread stays blocked (no good recovery).
         {
             let mut map = FAULT_REPLY_MAP.lock();
-            map.retain(|_reply_id, info| info.faulted_thread != thread_id);
+            let mut to_remove = alloc::vec::Vec::new();
+            for i in 0..REPLY_MAP_SLOTS {
+                if let Some((_rid, info)) = &map.slots[i] {
+                    if info.faulted_thread == thread_id {
+                        to_remove.push(map.slots[i].as_ref().unwrap().0);
+                    }
+                }
+            }
+            for rid in to_remove {
+                map.remove(rid);
+            }
         }
 
         // LAST: remove the Thread struct from the repository.
@@ -331,34 +451,34 @@ impl ThreadManager {
         ReplyId::new(NEXT_REPLY_ID.fetch_add(1, Ordering::SeqCst))
     }
 
-    /// Store call reply info for a reply ID
-    pub fn set_call_reply_info(reply_id: ReplyId, info: CallReplyInfo) {
-        CALL_REPLY_MAP.lock().insert(reply_id, info);
+    /// Store call reply info for a reply ID. Returns false if map is full.
+    pub fn set_call_reply_info(reply_id: ReplyId, info: CallReplyInfo) -> bool {
+        CALL_REPLY_MAP.lock().insert(reply_id, info)
     }
 
     /// Take and remove call reply info for a reply ID (one-time use)
     pub fn take_call_reply_info(reply_id: ReplyId) -> Option<CallReplyInfo> {
-        CALL_REPLY_MAP.lock().remove(&reply_id)
+        CALL_REPLY_MAP.lock().remove(reply_id)
     }
 
     /// Check if call reply info exists for a reply ID
     pub fn has_call_reply_info(reply_id: ReplyId) -> bool {
-        CALL_REPLY_MAP.lock().contains_key(&reply_id)
+        CALL_REPLY_MAP.lock().get(reply_id).is_some()
     }
 
-    /// Store fault reply info for a reply ID
-    pub fn set_fault_reply_info(reply_id: ReplyId, info: FaultReplyInfo) {
-        FAULT_REPLY_MAP.lock().insert(reply_id, info);
+    /// Store fault reply info for a reply ID. Returns false if map is full.
+    pub fn set_fault_reply_info(reply_id: ReplyId, info: FaultReplyInfo) -> bool {
+        FAULT_REPLY_MAP.lock().insert(reply_id, info)
     }
 
     /// Take and remove fault reply info for a reply ID (one-time use)
     pub fn take_fault_reply_info(reply_id: ReplyId) -> Option<FaultReplyInfo> {
-        FAULT_REPLY_MAP.lock().remove(&reply_id)
+        FAULT_REPLY_MAP.lock().remove(reply_id)
     }
 
     /// Bind a reply_id to the server thread that received the call message.
     pub fn bind_call_reply_to_server(reply_id: ReplyId, server: ThreadId) -> bool {
-        if let Some(info) = CALL_REPLY_MAP.lock().get_mut(&reply_id) {
+        if let Some(info) = CALL_REPLY_MAP.lock().get_mut(reply_id) {
             info.server_thread_id = Some(server);
             true
         } else {
@@ -368,7 +488,7 @@ impl ThreadManager {
 
     /// Bind a fault reply_id to the server thread that received the fault message.
     pub fn bind_fault_reply_to_server(reply_id: ReplyId, server: ThreadId) -> bool {
-        if let Some(info) = FAULT_REPLY_MAP.lock().get_mut(&reply_id) {
+        if let Some(info) = FAULT_REPLY_MAP.lock().get_mut(reply_id) {
             info.server_thread_id = Some(server);
             true
         } else {
@@ -380,9 +500,9 @@ impl ThreadManager {
     /// Returns None if reply_id not found OR server_thread_id doesn't match.
     pub fn take_call_reply_info_verified(reply_id: ReplyId, server: ThreadId) -> Option<CallReplyInfo> {
         let mut map = CALL_REPLY_MAP.lock();
-        let info = map.get(&reply_id)?;
+        let info = map.get(reply_id)?;
         match info.server_thread_id {
-            Some(bound) if bound == server => map.remove(&reply_id),
+            Some(bound) if bound == server => map.remove(reply_id),
             _ => None,
         }
     }
@@ -390,9 +510,9 @@ impl ThreadManager {
     /// Take fault reply info, verifying the server thread matches.
     pub fn take_fault_reply_info_verified(reply_id: ReplyId, server: ThreadId) -> Option<FaultReplyInfo> {
         let mut map = FAULT_REPLY_MAP.lock();
-        let info = map.get(&reply_id)?;
+        let info = map.get(reply_id)?;
         match info.server_thread_id {
-            Some(bound) if bound == server => map.remove(&reply_id),
+            Some(bound) if bound == server => map.remove(reply_id),
             _ => None,
         }
     }

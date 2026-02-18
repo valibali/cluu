@@ -165,7 +165,7 @@ static IPC_RENDEZVOUS_DIRECT_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Runtime gate for register-only small-message IPC fast path.
 ///
 /// Defaults to disabled until explicitly enabled by boot configuration.
-static IPC_REGISTER_FAST_ENABLED: AtomicBool = AtomicBool::new(false);
+static IPC_REGISTER_FAST_ENABLED: AtomicBool = AtomicBool::new(true);
 static IPC_DIRECT_DEBUG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Copy, Clone)]
@@ -740,18 +740,16 @@ pub fn recv_to_user_nonblocking(
 }
 
 /// Send a call message from userspace with reply_id injected
-pub fn call_from_user_with_reply_id(
+/// Inner call logic: takes an already-filled mutable buffer, injects reply_id, delivers.
+fn call_with_reply_id_inner(
     endpoint: EndpointId,
-    msg_ptr: usize,
-    msg_len: usize,
-    page_table_root: x86_64::PhysAddr,
+    buffer: &mut [u8],
+    payload_len: usize,
     reply_id: crate::token::ReplyId,
 ) -> Result<(), Error> {
-    let mut payload = copy_user_payload(msg_ptr, msg_len, page_table_root)?;
     let sender = crate::sched::ThreadManager::current();
 
-    // Inject reply_id into message
-    inject_reply_id(payload.as_mut_slice(), reply_id);
+    inject_reply_id(buffer, reply_id);
 
     let (wake, direct_receiver) = {
         let shard = get_endpoint_shard(endpoint);
@@ -761,7 +759,7 @@ pub fn call_from_user_with_reply_id(
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
-        let payload_bytes = payload.as_slice();
+        let payload_bytes = &buffer[..payload_len];
         match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, payload_bytes)? {
             DirectDelivery::DeliveredWake(receiver_id) => (Some(receiver_id), Some(receiver_id)),
             DirectDelivery::DeliveredNoWake(receiver_id) => (None, Some(receiver_id)),
@@ -783,15 +781,39 @@ pub fn call_from_user_with_reply_id(
         }
     };
 
-    // Bind reply_id to receiver for direct deliveries (outside endpoint lock)
     if let Some(receiver_id) = direct_receiver {
         crate::sched::ThreadManager::bind_call_reply_to_server(reply_id, receiver_id);
     }
-
     if let Some(thread_id) = wake {
         crate::sched::ThreadManager::wake_thread(thread_id);
     }
     Ok(())
+}
+
+/// Send a call message from userspace with reply_id injected
+pub fn call_from_user_with_reply_id(
+    endpoint: EndpointId,
+    msg_ptr: usize,
+    msg_len: usize,
+    page_table_root: x86_64::PhysAddr,
+    reply_id: crate::token::ReplyId,
+) -> Result<(), Error> {
+    let mut payload = copy_user_payload(msg_ptr, msg_len, page_table_root)?;
+    let payload_len = payload.as_slice().len();
+    call_with_reply_id_inner(endpoint, payload.as_mut_slice(), payload_len, reply_id)
+}
+
+/// Send a call message from a kernel buffer with reply_id injected
+pub fn call_from_kernel_with_reply_id(
+    endpoint: EndpointId,
+    buffer: &mut [u8],
+    payload_len: usize,
+    reply_id: crate::token::ReplyId,
+) -> Result<(), Error> {
+    if payload_len > IPC_MESSAGE_MAX {
+        return Err(Error::InvalidParameter);
+    }
+    call_with_reply_id_inner(endpoint, buffer, payload_len, reply_id)
 }
 
 fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
@@ -1089,6 +1111,10 @@ pub struct UserMessage {
     pub tag: UserMessageTag,
     pub words: [usize; 6],
 }
+
+/// Size of a UserMessage in bytes (tag + 6 words).
+pub const USER_MESSAGE_SIZE: usize = core::mem::size_of::<UserMessage>();
+const _: () = assert!(USER_MESSAGE_SIZE == 56);
 
 /// Inject reply_id into message
 fn inject_reply_id(buffer: &mut [u8], reply_id: crate::token::ReplyId) {

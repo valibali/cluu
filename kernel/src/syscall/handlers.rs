@@ -25,6 +25,7 @@ use crate::token::{lookup_token, InvokeOp, TokenHandle};
 
 const IPC_REG_INLINE_FLAG: usize = 1usize << (usize::BITS - 1);
 const IPC_REG_INLINE_MAX_PAYLOAD: usize = 32;
+const IPC_REG_INLINE_MAX_CALL_PAYLOAD: usize = 16;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // IPC Syscalls
@@ -382,13 +383,68 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     };
 
+    let inline_flag_set = (msg_len & IPC_REG_INLINE_FLAG) != 0;
+    if inline_flag_set {
+        if !crate::ipc::endpoint::register_fast_enabled() {
+            return Err(Error::InvalidParameter);
+        }
+        let inline_len = msg_len & !IPC_REG_INLINE_FLAG;
+        if inline_len > IPC_REG_INLINE_MAX_CALL_PAYLOAD {
+            return Err(Error::InvalidParameter);
+        }
+
+        let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
+        let page_table_root =
+            crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
+        let reply_id = crate::sched::ThreadManager::alloc_reply_id();
+        if !crate::sched::ThreadManager::set_call_reply_info(
+            reply_id,
+            CallReplyInfo {
+                caller: current,
+                reply_buf_ptr: reply_buf,
+                reply_buf_len: reply_len,
+                page_table_root,
+                server_thread_id: None,
+            },
+        ) {
+            return Err(Error::Overflow);
+        }
+
+        // Build 56-byte UserMessage buffer (required by inject_reply_id)
+        let mut buffer = [0u8; crate::ipc::endpoint::USER_MESSAGE_SIZE];
+        let a2_bytes = args.arg2.to_ne_bytes();
+        let a6_bytes = args.arg6.to_ne_bytes();
+        let copy_a2 = core::cmp::min(8, inline_len);
+        buffer[..copy_a2].copy_from_slice(&a2_bytes[..copy_a2]);
+        if inline_len > 8 {
+            let copy_a6 = core::cmp::min(8, inline_len - 8);
+            buffer[8..8 + copy_a6].copy_from_slice(&a6_bytes[..copy_a6]);
+        }
+
+        // Pass buffer.len() (56) as payload_len — NOT inline_len
+        // inject_reply_id writes at offset 48 (words[5]), so the full 56 bytes
+        // must be delivered to the receiver
+        let payload_len = buffer.len();
+        if let Err(e) = crate::ipc::endpoint::call_from_kernel_with_reply_id(
+            endpoint_id, &mut buffer, payload_len, reply_id,
+        ) {
+            let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
+            return Err(e);
+        }
+
+        crate::sched::ThreadManager::block_current();
+        crate::architecture::x86_64::syscall::request_resched();
+        return Ok(0);
+    }
+    // --- existing slow path follows unchanged below ---
+
     let page_table_root =
         crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
     let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
 
     // 2. Allocate reply ID and store reply buffer info
     let reply_id = crate::sched::ThreadManager::alloc_reply_id();
-    crate::sched::ThreadManager::set_call_reply_info(
+    if !crate::sched::ThreadManager::set_call_reply_info(
         reply_id,
         CallReplyInfo {
             caller: current,
@@ -397,7 +453,9 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
             page_table_root,
             server_thread_id: None,
         },
-    );
+    ) {
+        return Err(Error::Overflow);
+    }
 
     // 3. Send call message with reply_id injected
     if let Err(e) = crate::ipc::endpoint::call_from_user_with_reply_id(
