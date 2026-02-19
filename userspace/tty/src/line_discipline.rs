@@ -85,16 +85,42 @@ impl LineDiscipline {
                 // marker byte so foreground consumers can interrupt promptly.
                 self.buffer.clear();
                 LineEffect {
-                    echo: EchoAction::Bytes(b"^C\n"),
+                    echo: if self.mode.echo {
+                        EchoAction::Bytes(b"^C\n")
+                    } else {
+                        EchoAction::None
+                    },
                     line_ready: Some(alloc::vec![0x03]),
                     raw_byte: None,
+                }
+            }
+            0x04 => {
+                // Ctrl-D (EOT): forward directly so foreground REPLs can exit on EOF.
+                // If there is buffered input, flush that partial line first.
+                if self.buffer.is_empty() {
+                    LineEffect {
+                        echo: EchoAction::None,
+                        line_ready: Some(alloc::vec![0x04]),
+                        raw_byte: None,
+                    }
+                } else {
+                    let line = core::mem::take(&mut self.buffer);
+                    LineEffect {
+                        echo: EchoAction::None,
+                        line_ready: Some(line),
+                        raw_byte: None,
+                    }
                 }
             }
             b'\n' => {
                 self.buffer.push(byte);
                 let line = core::mem::take(&mut self.buffer);
                 LineEffect {
-                    echo: EchoAction::Bytes(b"\n"),
+                    echo: if self.mode.echo {
+                        EchoAction::Bytes(b"\n")
+                    } else {
+                        EchoAction::None
+                    },
                     line_ready: Some(line),
                     raw_byte: None,
                 }
@@ -103,7 +129,11 @@ impl LineDiscipline {
                 if !self.buffer.is_empty() {
                     self.buffer.pop();
                     LineEffect {
-                        echo: EchoAction::Bytes(BACKSPACE_SEQ),
+                        echo: if self.mode.echo {
+                            EchoAction::Bytes(BACKSPACE_SEQ)
+                        } else {
+                            EchoAction::None
+                        },
                         line_ready: None,
                         raw_byte: None,
                     }
@@ -118,7 +148,11 @@ impl LineDiscipline {
             _ => {
                 self.buffer.push(byte);
                 LineEffect {
-                    echo: EchoAction::Byte(byte),
+                    echo: if self.mode.echo {
+                        EchoAction::Byte(byte)
+                    } else {
+                        EchoAction::None
+                    },
                     line_ready: None,
                     raw_byte: None,
                 }

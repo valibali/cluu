@@ -12,8 +12,9 @@ use core::mem::size_of;
 use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
-    call, call_with_payload, recv, send_with_payload, send_with_retry, SharedRing, TTY_READ_LABEL,
-    TTY_WRITE_LABEL,
+    call, call_with_payload, recv, send_with_payload, send_with_retry, SharedRing,
+    CONSOLE_CLEAR_LABEL, TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C,
+    TTY_READ_LABEL, TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
 };
 use libcluu::registry;
 use libcluu::syscall;
@@ -28,6 +29,9 @@ const DEFAULT_PRIORITY: usize = 200;
 const SIGINT: usize = 2;
 const SIGCONT: usize = 18;
 const SIGSTOP: usize = 19;
+const TTY_LFLAG_ICANON: usize = 0x02;
+const TTY_LFLAG_ECHO: usize = 0x08;
+const TTY_LFLAG_DEFAULT: usize = TTY_LFLAG_ICANON | TTY_LFLAG_ECHO;
 
 /// Execution result for a command handler.
 pub enum ExecResult {
@@ -39,13 +43,16 @@ pub enum ExecResult {
 pub struct CommandContext {
     vars: BTreeMap<String, String>,
     procmgr_spawn: usize,
+    console_write: usize,
     bg_jobs: BTreeMap<usize, BackgroundJob>,
 }
 
 struct BackgroundJob {
     notify_endpoint: usize,
+    stdin_endpoint: usize,
     command: String,
     state: JobState,
+    fg_mode: ForegroundMode,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,12 +61,19 @@ enum JobState {
     Stopped,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ForegroundMode {
+    SignalOnCtrlC,
+    PassCtrlCToChild,
+}
+
 impl CommandContext {
     /// Create a fresh shell context.
     pub fn new() -> Self {
         Self {
             vars: BTreeMap::new(),
             procmgr_spawn: 0,
+            console_write: 0,
             bg_jobs: BTreeMap::new(),
         }
     }
@@ -94,13 +108,29 @@ impl CommandContext {
         Ok(self.procmgr_spawn)
     }
 
-    fn add_bg_job(&mut self, pid: usize, notify_endpoint: usize, command: String) {
+    fn console_write_endpoint(&mut self) -> Result<usize> {
+        if self.console_write == 0 {
+            self.console_write = registry::subscribe_output("console:0", "write")?;
+        }
+        Ok(self.console_write)
+    }
+
+    fn add_bg_job(
+        &mut self,
+        pid: usize,
+        notify_endpoint: usize,
+        stdin_endpoint: usize,
+        command: String,
+        fg_mode: ForegroundMode,
+    ) {
         self.bg_jobs.insert(
             pid,
             BackgroundJob {
                 notify_endpoint,
+                stdin_endpoint,
                 command,
                 state: JobState::Running,
+                fg_mode,
             },
         );
     }
@@ -231,6 +261,7 @@ struct DefaultBuiltins;
 impl BuiltinProvider for DefaultBuiltins {
     fn register(&self, registry: &mut BuiltinRegistry) {
         registry.register(Box::new(HelpBuiltin));
+        registry.register(Box::new(ClearBuiltin));
         registry.register(Box::new(EchoBuiltin));
         registry.register(Box::new(ExitBuiltin));
         registry.register(Box::new(SetBuiltin));
@@ -320,8 +351,22 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, jobchurn, jobmix, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, ringio, repeat, cat, ls, heap\n",
+            b"builtins: help, clear, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, jobchurn, jobmix, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, ringio, repeat, cat, ls, heap\n",
         )?;
+        Ok(())
+    }
+}
+
+struct ClearBuiltin;
+
+impl BuiltinCommand for ClearBuiltin {
+    fn name(&self) -> &'static str {
+        "clear"
+    }
+
+    fn run(&self, _stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let console = context.console_write_endpoint()?;
+        send_with_payload(console, CONSOLE_CLEAR_LABEL, &[])?;
         Ok(())
     }
 }
@@ -629,31 +674,73 @@ struct StopBuiltin;
 struct ForegroundBuiltin;
 struct BackgroundBuiltin;
 
+fn infer_foreground_mode(path: &str) -> ForegroundMode {
+    let path = path.trim();
+    if path.ends_with("/mp")
+        || path.ends_with("/micropython")
+        || path == "mp"
+        || path == "micropython"
+    {
+        return ForegroundMode::PassCtrlCToChild;
+    }
+    ForegroundMode::SignalOnCtrlC
+}
+
+fn parse_spawn_args(args: &[String]) -> Option<(String, usize, ForegroundMode)> {
+    if args.is_empty() {
+        return None;
+    }
+    let mut idx = 0usize;
+    let mut mode = ForegroundMode::SignalOnCtrlC;
+    let mut mode_explicit = false;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "-i" | "--interactive" => {
+                mode = ForegroundMode::PassCtrlCToChild;
+                mode_explicit = true;
+                idx += 1;
+            }
+            "-s" | "--signal" => {
+                mode = ForegroundMode::SignalOnCtrlC;
+                mode_explicit = true;
+                idx += 1;
+            }
+            _ => break,
+        }
+    }
+    let path = args.get(idx)?.clone();
+    let priority = args
+        .get(idx + 1)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PRIORITY);
+    if !mode_explicit {
+        mode = infer_foreground_mode(path.as_str());
+    }
+    Some((path, priority, mode))
+}
+
 impl BuiltinCommand for SpawnBuiltin {
     fn name(&self) -> &'static str {
         "spawn"
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(path) = args.first() else {
+        let Some((path, priority, fg_mode)) = parse_spawn_args(args) else {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"spawn: missing path\n")?;
             return Ok(());
         };
-        let priority = args
-            .get(1)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_PRIORITY);
-        let spawn = spawn_process(context, path, priority)?;
+        let spawn = spawn_process(context, path.as_str(), priority)?;
         match parse_status(spawn.status_word) {
             Ok(()) => {
                 let child_pid = spawn.pid;
-                let stdin_endpoint = process_info().tokens[libcluu::boot::TOKEN_STDIN];
                 wait_for_exit_or_sigint(
                     spawn.procmgr_endpoint,
+                    stdout,
                     spawn.notify_endpoint,
-                    stdin_endpoint,
+                    spawn.stdin_endpoint,
                     child_pid,
                     stdout,
+                    fg_mode,
                 )?;
                 Ok(())
             }
@@ -672,19 +759,21 @@ impl BuiltinCommand for SpawnBgBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(path) = args.first() else {
+        let Some((path, priority, fg_mode)) = parse_spawn_args(args) else {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"spawnbg: missing path\n")?;
             return Ok(());
         };
-        let priority = args
-            .get(1)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_PRIORITY);
 
-        let spawn = spawn_process(context, path, priority)?;
+        let spawn = spawn_process(context, path.as_str(), priority)?;
         match parse_status(spawn.status_word) {
             Ok(()) => {
-                context.add_bg_job(spawn.pid, spawn.notify_endpoint, normalize_spawn_path(path));
+                context.add_bg_job(
+                    spawn.pid,
+                    spawn.notify_endpoint,
+                    spawn.stdin_endpoint,
+                    normalize_spawn_path(path.as_str()),
+                    fg_mode,
+                );
                 let line = format!("spawnbg: started pid={}\n", spawn.pid);
                 let _ = debug_print(line.trim_end());
                 send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
@@ -737,7 +826,6 @@ impl BuiltinCommand for ForegroundBuiltin {
         let _ = debug_print(line.trim_end());
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
 
-        let stdin_endpoint = process_info().tokens[libcluu::boot::TOKEN_STDIN];
         let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
         if job.state == JobState::Stopped {
             signal_process(procmgr_endpoint, pid, SIGCONT)?;
@@ -746,10 +834,12 @@ impl BuiltinCommand for ForegroundBuiltin {
         }
         wait_for_exit_or_sigint(
             procmgr_endpoint,
+            stdout,
             job.notify_endpoint,
-            stdin_endpoint,
+            job.stdin_endpoint,
             pid,
             stdout,
+            job.fg_mode,
         )?;
         Ok(())
     }
@@ -804,13 +894,18 @@ impl BuiltinCommand for JobChurnBuiltin {
             return Ok(());
         }
 
-        let stdin_endpoint = process_info().tokens[libcluu::boot::TOKEN_STDIN];
         for _ in 0..iterations {
             let spawn = spawn_process(context, "sleepy", DEFAULT_PRIORITY)?;
             parse_status(spawn.status_word)?;
 
             let pid = spawn.pid;
-            context.add_bg_job(pid, spawn.notify_endpoint, normalize_spawn_path("sleepy"));
+            context.add_bg_job(
+                pid,
+                spawn.notify_endpoint,
+                spawn.stdin_endpoint,
+                normalize_spawn_path("sleepy"),
+                ForegroundMode::SignalOnCtrlC,
+            );
 
             signal_process(spawn.procmgr_endpoint, pid, SIGSTOP)?;
             ensure_bg_job_state(context, pid, JobState::Stopped)?;
@@ -826,10 +921,12 @@ impl BuiltinCommand for JobChurnBuiltin {
 
             wait_for_exit_or_sigint(
                 spawn.procmgr_endpoint,
+                stdout,
                 job.notify_endpoint,
-                stdin_endpoint,
+                job.stdin_endpoint,
                 pid,
                 stdout,
+                job.fg_mode,
             )?;
         }
 
@@ -846,14 +943,15 @@ impl BuiltinCommand for JobMixBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
-        let stdin_endpoint = process_info().tokens[libcluu::boot::TOKEN_STDIN];
         let spawn_a = spawn_process(context, "sleepy", DEFAULT_PRIORITY)?;
         parse_status(spawn_a.status_word)?;
         let pid_a = spawn_a.pid;
         context.add_bg_job(
             pid_a,
             spawn_a.notify_endpoint,
+            spawn_a.stdin_endpoint,
             normalize_spawn_path("sleepy"),
+            ForegroundMode::SignalOnCtrlC,
         );
 
         let spawn_b = spawn_process(context, "sleepy", DEFAULT_PRIORITY)?;
@@ -862,7 +960,9 @@ impl BuiltinCommand for JobMixBuiltin {
         context.add_bg_job(
             pid_b,
             spawn_b.notify_endpoint,
+            spawn_b.stdin_endpoint,
             normalize_spawn_path("sleepy"),
+            ForegroundMode::SignalOnCtrlC,
         );
 
         signal_process(spawn_a.procmgr_endpoint, pid_a, SIGSTOP)?;
@@ -882,10 +982,12 @@ impl BuiltinCommand for JobMixBuiltin {
         signal_process(spawn_b.procmgr_endpoint, pid_b, SIGCONT)?;
         wait_for_exit_or_sigint(
             spawn_b.procmgr_endpoint,
+            stdout,
             job_b.notify_endpoint,
-            stdin_endpoint,
+            job_b.stdin_endpoint,
             pid_b,
             stdout,
+            job_b.fg_mode,
         )?;
 
         let Some(job_a) = context.take_bg_job(pid_a) else {
@@ -895,10 +997,12 @@ impl BuiltinCommand for JobMixBuiltin {
         };
         wait_for_exit_or_sigint(
             spawn_a.procmgr_endpoint,
+            stdout,
             job_a.notify_endpoint,
-            stdin_endpoint,
+            job_a.stdin_endpoint,
             pid_a,
             stdout,
+            job_a.fg_mode,
         )?;
 
         let line = format!("jobmix: PASS pids={},{}\n", pid_a, pid_b);
@@ -943,6 +1047,7 @@ struct SpawnResult {
     notify_endpoint: usize,
     status_word: usize,
     pid: usize,
+    stdin_endpoint: usize,
 }
 
 fn spawn_process(context: &mut CommandContext, path: &str, priority: usize) -> Result<SpawnResult> {
@@ -962,32 +1067,81 @@ fn spawn_process(context: &mut CommandContext, path: &str, priority: usize) -> R
     ));
     call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
     let _ = debug_print(&format!(
-        "shell: spawn call done status={} pid={}",
-        reply.words[0], reply.words[1]
+        "shell: spawn call done status={} pid={} stdin={}",
+        reply.words[0], reply.words[1], reply.words[3]
     ));
     Ok(SpawnResult {
         procmgr_endpoint,
         notify_endpoint,
         status_word: reply.words[0],
         pid: reply.words[1],
+        stdin_endpoint: reply.words[3],
     })
 }
 
 fn wait_for_exit_or_sigint(
     procmgr_endpoint: usize,
+    tty_endpoint: usize,
     notify_endpoint: usize,
-    stdin_endpoint: usize,
+    child_stdin_endpoint: usize,
     child_pid: usize,
     stdout: usize,
+    mode: ForegroundMode,
 ) -> Result<()> {
-    let mut buf = [0u8; 256];
-    let tokens = [notify_endpoint, stdin_endpoint];
+    if child_stdin_endpoint == 0 {
+        let _ = send_with_payload(
+            stdout,
+            TTY_WRITE_LABEL,
+            b"spawn: invalid child stdin route\n",
+        );
+        return Err(Error::InvalidState);
+    }
 
-    loop {
-        let (index, len) = match syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+    let mut ctrl_c_notify_endpoint = 0usize;
+    let mut ctrl_c_flags = TTY_FG_FLAG_FORWARD_CTRL_C;
+    if mode == ForegroundMode::SignalOnCtrlC {
+        ctrl_c_notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
+        ctrl_c_flags = TTY_FG_FLAG_NOTIFY_CTRL_C;
+    }
+
+    // Transfer tty foreground routing to the child while it runs.
+    set_tty_foreground(
+        tty_endpoint,
+        child_stdin_endpoint,
+        ctrl_c_notify_endpoint,
+        ctrl_c_flags,
+    )?;
+    let saved_lflag = match tty_get_lflag(tty_endpoint) {
+        Ok(lflag) => lflag,
+        Err(err) => {
+            let _ = debug_print(&format!("shell: tty_get_lflag failed {:?}", err));
+            TTY_LFLAG_DEFAULT
+        }
+    };
+    let mut lflag_switched = false;
+    if mode == ForegroundMode::PassCtrlCToChild {
+        let target_lflag = saved_lflag & !(TTY_LFLAG_ECHO | TTY_LFLAG_ICANON);
+        match tty_set_lflag(tty_endpoint, target_lflag) {
+            Ok(()) => lflag_switched = true,
+            Err(err) => {
+                let _ = debug_print(&format!("shell: tty_set_lflag(raw) failed {:?}", err));
+            }
+        }
+    }
+
+    let mut buf = [0u8; 256];
+    let tokens = [notify_endpoint, ctrl_c_notify_endpoint];
+    let active_tokens = if ctrl_c_notify_endpoint != 0 {
+        &tokens[..2]
+    } else {
+        &tokens[..1]
+    };
+
+    let mut result = loop {
+        let (index, len) = match syscall::ipc_recv_any(active_tokens, &mut buf, u64::MAX) {
             Ok(v) => v,
             Err(Error::WouldBlock) => continue,
-            Err(err) => return Err(err),
+            Err(err) => break Err(err),
         };
         let Some((msg, payload)) = parse_ipc_message(&buf[..len]) else {
             continue;
@@ -995,12 +1149,12 @@ fn wait_for_exit_or_sigint(
         if index == 0 {
             // Exit notification from procmgr.
             if msg.tag.words >= 2 {
-                return Ok(());
+                break Ok(());
             }
             continue;
         }
 
-        // TTY input while child is foreground.
+        // Ctrl-C notification from tty while child is foreground.
         if msg.tag.label != TTY_READ_LABEL {
             continue;
         }
@@ -1009,9 +1163,76 @@ fn wait_for_exit_or_sigint(
             let line = format!("spawn: SIGINT pid={}\n", child_pid);
             let _ = debug_print(line.trim_end());
             let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
-            return Ok(());
+        }
+    };
+
+    // Restore normal shell stdin routing once the foreground child finishes.
+    if lflag_switched {
+        if let Err(err) = tty_set_lflag(tty_endpoint, saved_lflag) {
+            let _ = debug_print(&format!("shell: tty_set_lflag(restore) failed {:?}", err));
+            if result.is_ok() {
+                result = Err(err);
+            }
         }
     }
+    if let Err(err) = set_tty_foreground(tty_endpoint, 0, 0, TTY_FG_FLAG_FORWARD_CTRL_C) {
+        let _ = debug_print(&format!("shell: tty foreground restore failed {:?}", err));
+        if result.is_ok() {
+            result = Err(err);
+        }
+    }
+    result
+}
+
+fn set_tty_foreground(
+    tty_endpoint: usize,
+    foreground_endpoint: usize,
+    ctrl_c_notify_endpoint: usize,
+    flags: usize,
+) -> Result<()> {
+    const RETRIES: usize = 64;
+    for _ in 0..RETRIES {
+        let mut msg = Message::new(TTY_REGISTER_LABEL, [0; 6], 3);
+        msg.words[0] = foreground_endpoint;
+        msg.words[1] = ctrl_c_notify_endpoint;
+        msg.words[2] = flags;
+        match call(tty_endpoint, &mut msg, IpcFlags::empty()) {
+            Ok(()) => return Ok(()),
+            Err(Error::WouldBlock) | Err(Error::Busy) => {
+                let _ = syscall::yield_cpu();
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(Error::Busy)
+}
+
+fn tty_get_lflag(tty_endpoint: usize) -> Result<usize> {
+    let mut msg = Message::new(TTY_CTL_LABEL, [0; 6], 1);
+    msg.words[0] = 0; // getattr
+    tty_ctl_call_with_retry(tty_endpoint, &mut msg)?;
+    Ok(msg.words[4])
+}
+
+fn tty_set_lflag(tty_endpoint: usize, lflag: usize) -> Result<()> {
+    let mut msg = Message::new(TTY_CTL_LABEL, [0; 6], 5);
+    msg.words[0] = 1; // setattr
+    msg.words[4] = lflag;
+    tty_ctl_call_with_retry(tty_endpoint, &mut msg)
+}
+
+fn tty_ctl_call_with_retry(tty_endpoint: usize, msg: &mut Message) -> Result<()> {
+    const RETRIES: usize = 128;
+    for _ in 0..RETRIES {
+        match call(tty_endpoint, msg, IpcFlags::empty()) {
+            Ok(()) => return Ok(()),
+            Err(Error::WouldBlock) | Err(Error::Busy) => {
+                let _ = syscall::yield_cpu();
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(Error::Busy)
 }
 
 /// Poll background job notify endpoints and emit async completion markers.

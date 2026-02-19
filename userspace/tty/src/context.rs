@@ -11,7 +11,8 @@ use alloc::vec::Vec;
 use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::ipc::{
     call_with_payload, send_with_retry_timeout, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
-    IPC_CHUNK_BYTES_DEFAULT, IPC_SEND_RETRIES_DEFAULT,
+    IPC_CHUNK_BYTES_DEFAULT, IPC_SEND_RETRIES_DEFAULT, TTY_FG_FLAG_FORWARD_CTRL_C,
+    TTY_FG_FLAG_NOTIFY_CTRL_C,
 };
 use libcluu::registry;
 use libcluu::types::Message;
@@ -28,7 +29,12 @@ pub struct TtyContext {
     pub endpoint: usize,
     pub registry_endpoint: usize,
     pub console_endpoint: usize,
+    /// Current routing target for line-delivery fallback (legacy shell path).
     pub shell_stdin: usize,
+    /// Last granted shell stdin endpoint discovered via registry subscription.
+    /// Kept separate from `shell_stdin` so foreground handoff can set
+    /// `shell_stdin=0` without triggering auto re-binding.
+    shell_registered_stdin: usize,
     requested_console: bool,
     requested_shell: bool,
     pending_console_output: Vec<u8>,
@@ -39,6 +45,10 @@ pub struct TtyContext {
     pub pending_reads: VecDeque<PendingRead>,
     /// Input bytes queued for pending readers (raw mode or canonical leftovers).
     pub input_queue: VecDeque<u8>,
+    /// Optional endpoint notified when Ctrl-C is pressed while a foreground route is active.
+    pub ctrl_c_notify: usize,
+    /// Whether Ctrl-C should be forwarded to the current foreground input route.
+    pub forward_ctrl_c: bool,
 }
 
 impl TtyContext {
@@ -77,6 +87,7 @@ impl TtyContext {
             registry_endpoint,
             console_endpoint: 0,
             shell_stdin: 0,
+            shell_registered_stdin: 0,
             requested_console: false,
             requested_shell: false,
             pending_console_output: Vec::new(),
@@ -84,6 +95,8 @@ impl TtyContext {
             console_credit: CONSOLE_CREDIT_WINDOW,
             pending_reads: VecDeque::new(),
             input_queue: VecDeque::new(),
+            ctrl_c_notify: 0,
+            forward_ctrl_c: true,
         })
     }
 
@@ -95,7 +108,7 @@ impl TtyContext {
         {
             self.requested_console = true;
         }
-        if self.shell_stdin == 0
+        if self.shell_registered_stdin == 0
             && !self.requested_shell
             && registry::request_subscription("shell", "stdin").is_ok()
         {
@@ -113,18 +126,65 @@ impl TtyContext {
                         let _ = debug_print("tty: console subscribed");
                         self.flush_pending_console();
                     } else if name == "stdin" {
-                        self.shell_stdin = token;
-                        let _ = debug_print("tty: shell stdin subscribed");
+                        // Keep a stable "registered shell route" from registry grants.
+                        // If we are currently routing to that route (or have no route),
+                        // follow updates; otherwise preserve explicit foreground handoff.
+                        let previous = self.shell_registered_stdin;
+                        self.shell_registered_stdin = token;
+                        if previous == 0 || self.shell_stdin == 0 || self.shell_stdin == previous {
+                            self.shell_stdin = token;
+                            let _ = debug_print("tty: shell stdin subscribed");
+                        }
                     }
                 }
                 registry::RegistryEvent::SubscribeStatus { code } => {
                     if code != 0 {
                         self.requested_console = false;
-                        self.requested_shell = false;
+                        if self.shell_registered_stdin == 0 {
+                            self.requested_shell = false;
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// Override shell stdin route for foreground handoff.
+    ///
+    /// Passing `0` disables legacy shell delivery and leaves input queued for
+    /// pending readers (foreground process path). Passing a non-zero endpoint
+    /// only updates the active route.
+    pub fn set_shell_stdin_route(&mut self, endpoint: usize) {
+        self.shell_stdin = endpoint;
+    }
+
+    /// Configure foreground route and Ctrl-C policy.
+    ///
+    /// `endpoint` is the active stdin delivery route.
+    /// Passing 0 restores the registered shell stdin route.
+    /// `ctrl_c_notify` receives an out-of-band Ctrl-C marker when enabled.
+    /// `flags` controls whether Ctrl-C is forwarded to the route and/or notified.
+    pub fn configure_foreground(&mut self, endpoint: usize, ctrl_c_notify: usize, flags: usize) {
+        // Foreground switches define a new input session boundary. Drop stale
+        // read waiters/buffered bytes from the previous foreground owner.
+        self.pending_reads.clear();
+        self.input_queue.clear();
+
+        if endpoint == 0 {
+            if self.shell_registered_stdin != 0 {
+                self.set_shell_stdin_route(self.shell_registered_stdin);
+            } else {
+                self.set_shell_stdin_route(0);
+            }
+        } else {
+            self.set_shell_stdin_route(endpoint);
+        }
+        self.ctrl_c_notify = if (flags & TTY_FG_FLAG_NOTIFY_CTRL_C) != 0 {
+            ctrl_c_notify
+        } else {
+            0
+        };
+        self.forward_ctrl_c = (flags & TTY_FG_FLAG_FORWARD_CTRL_C) != 0;
     }
 
     /// Forward output to the console or buffer it until the console is ready.
@@ -185,15 +245,64 @@ impl TtyContext {
     /// replies via `reply_with_payload`, and removes the satisfied request.
     pub fn try_satisfy_reads(&mut self) {
         while !self.pending_reads.is_empty() && !self.input_queue.is_empty() {
-            let pending = &self.pending_reads[0];
+            let pending = match self.pending_reads.front() {
+                Some(p) => p,
+                None => break,
+            };
             let n = pending.max_bytes.min(self.input_queue.len());
             if n == 0 {
-                break;
+                let _ = self.pending_reads.pop_front();
+                continue;
             }
-            let data: Vec<u8> = self.input_queue.drain(..n).collect();
-            let reply_token = self.pending_reads.pop_front().unwrap().reply_token;
+
+            // Keep bytes in the queue until reply succeeds; stale reply tokens
+            // must not consume fresh keyboard input.
+            let data: Vec<u8> = self.input_queue.iter().take(n).copied().collect();
+            let reply_token = pending.reply_token;
             let reply_msg = Message::new(libcluu::ipc::TTY_READ_REQUEST_LABEL, [0; 6], 0);
-            let _ = libcluu::ipc::reply_with_payload(reply_token, &reply_msg, &data);
+
+            match libcluu::ipc::reply_with_payload(reply_token, &reply_msg, &data) {
+                Ok(()) => {
+                    let _ = self.pending_reads.pop_front();
+                    self.input_queue.drain(..n);
+                }
+                Err(_) => {
+                    // Reader likely died before consuming; drop waiter only.
+                    let _ = self.pending_reads.pop_front();
+                }
+            }
+        }
+    }
+
+    /// Deliver a line to the current shell route, with self-healing fallback.
+    pub fn deliver_shell_line(&mut self, line: &[u8]) {
+        if self.shell_stdin == 0 {
+            return;
+        }
+
+        if send_with_retry_timeout(
+            self.shell_stdin,
+            libcluu::ipc::TTY_READ_LABEL,
+            line,
+            IPC_SEND_RETRIES_DEFAULT,
+        )
+        .is_ok()
+        {
+            return;
+        }
+
+        if self.shell_registered_stdin != 0 && self.shell_registered_stdin != self.shell_stdin {
+            if send_with_retry_timeout(
+                self.shell_registered_stdin,
+                libcluu::ipc::TTY_READ_LABEL,
+                line,
+                IPC_SEND_RETRIES_DEFAULT,
+            )
+            .is_ok()
+            {
+                self.shell_stdin = self.shell_registered_stdin;
+                let _ = debug_print("tty: repaired shell stdin route");
+            }
         }
     }
 

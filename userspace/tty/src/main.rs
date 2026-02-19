@@ -14,9 +14,9 @@ mod protocol;
 
 use context::TtyContext;
 use libcluu::ipc::{
-    extract_reply_id, reply, KBD_EVENT_LABEL, TTY_CTL_LABEL, TTY_POLL_QUERY_LABEL,
-    TTY_READ_LABEL, TTY_READ_REQUEST_LABEL, TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
-    TTY_WRITE_SYNC_LABEL,
+    extract_reply_id, reply, KBD_EVENT_LABEL, TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C,
+    TTY_POLL_QUERY_LABEL, TTY_READ_LABEL, TTY_READ_REQUEST_LABEL, TTY_REGISTER_LABEL,
+    TTY_WRITE_LABEL, TTY_WRITE_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{yield_cpu, Error, Result};
@@ -120,8 +120,31 @@ fn run() -> Result<()> {
                             }
                         }
                         TTY_REGISTER_LABEL => {
-                            // Legacy path: a process can register stdin directly.
-                            ctx.shell_stdin = msg.words[0];
+                            // words=1 legacy: set active stdin route.
+                            // words>=3: set route + Ctrl-C notify endpoint + policy flags.
+                            let foreground_endpoint = msg.words[0];
+                            if msg.tag.words >= 3 {
+                                ctx.configure_foreground(
+                                    foreground_endpoint,
+                                    msg.words[1],
+                                    msg.words[2],
+                                );
+                            } else {
+                                ctx.configure_foreground(
+                                    foreground_endpoint,
+                                    0,
+                                    TTY_FG_FLAG_FORWARD_CTRL_C,
+                                );
+                            }
+                            if foreground_endpoint == 0 {
+                                // Foreground returned to shell: force canonical+echo so
+                                // shell input cannot get stuck in child raw mode.
+                                discipline.set_mode(line_discipline::TermMode::default());
+                            }
+                            if let Some(reply_token) = extract_reply_id(&msg) {
+                                let reply_msg = Message::new(TTY_REGISTER_LABEL, [0; 6], 0);
+                                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                            }
                         }
                         TTY_POLL_QUERY_LABEL => {
                             // Readiness query from poll(): reply with 1 if input available, 0 otherwise.
@@ -193,6 +216,15 @@ fn apply_effect(ctx: &mut TtyContext, effect: line_discipline::LineEffect) {
     }
 
     if let Some(line) = effect.line_ready {
+        let is_ctrl_c = line.len() == 1 && line[0] == 0x03;
+        if is_ctrl_c {
+            if ctx.ctrl_c_notify != 0 {
+                let _ = libcluu::ipc::send_with_payload(ctx.ctrl_c_notify, TTY_READ_LABEL, &[0x03]);
+            }
+            if !ctx.forward_ctrl_c {
+                return;
+            }
+        }
         deliver_line(ctx, &line);
     }
 }
@@ -205,12 +237,25 @@ fn deliver_line(ctx: &mut TtyContext, line: &[u8]) {
             ctx.input_queue.push_back(b);
         }
         ctx.try_satisfy_reads();
+        // If pending readers were stale and dropped, hand remaining bytes back
+        // to shell delivery so input does not disappear after foreground exit.
+        if ctx.pending_reads.is_empty() && ctx.shell_stdin != 0 && !ctx.input_queue.is_empty() {
+            let buffered: alloc::vec::Vec<u8> = ctx.input_queue.drain(..).collect();
+            ctx.deliver_shell_line(&buffered);
+        }
         return;
     }
 
-    // Otherwise push to the shell (backward compat)
+    // If shell stdin routing is disabled (foreground child handover),
+    // keep bytes queued until a reader calls TTY_READ_REQUEST.
     if ctx.shell_stdin == 0 {
+        for &b in line {
+            ctx.input_queue.push_back(b);
+        }
+        ctx.try_satisfy_reads();
         return;
     }
-    let _ = libcluu::ipc::send_with_payload(ctx.shell_stdin, TTY_READ_LABEL, line);
+
+    // Otherwise push to the shell (backward compat), with route repair.
+    ctx.deliver_shell_line(line);
 }
