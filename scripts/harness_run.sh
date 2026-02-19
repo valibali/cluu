@@ -1,5 +1,5 @@
 #!/bin/bash
-# Automated CLUU test harness: build, launch QEMU, type test command(s), capture serial output
+# CLUU harness runner: build, launch QEMU, inject shell commands, capture serial output
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,7 +13,24 @@ IMG="${IMG:-$PROJECT_ROOT/target/cluu.img}"
 USER_DISK="${USER_DISK:-$PROJECT_ROOT/target/userdisk.img}"
 QEMU_GDB="${QEMU_GDB:-0}"
 QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
-HARNESS_AUTOSTART_CMD="${HARNESS_AUTOSTART_CMD:-}"
+# Preferred autostart command env name; HARNESS_AUTOSTART_CMD kept as compatibility alias.
+HARNESS_AUTOEXEC_CMD="${HARNESS_AUTOEXEC_CMD:-${HARNESS_AUTOSTART_CMD:-}}"
+HARNESS_AUTOEXEC_CMD_FILE="${HARNESS_AUTOEXEC_CMD_FILE:-}"
+# Extra shell keystroke injection path (one command per line).
+KEYSTROKE_COMMANDS="${KEYSTROKE_COMMANDS:-}"
+KEYSTROKE_COMMANDS_FILE="${KEYSTROKE_COMMANDS_FILE:-}"
+# GDB integration:
+# - manual: user attaches and resumes target manually
+# - auto-continue: harness attaches gdb then detaches to resume execution
+# - script: harness runs gdb with HARNESS_GDB_SCRIPT
+HARNESS_GDB_MODE="${HARNESS_GDB_MODE:-manual}"
+HARNESS_GDB_BIN="${HARNESS_GDB_BIN:-gdb}"
+HARNESS_GDB_TARGET="${HARNESS_GDB_TARGET:-localhost:1234}"
+HARNESS_GDB_TIMEOUT="${HARNESS_GDB_TIMEOUT:-20}"
+HARNESS_GDB_MANUAL_TIMEOUT="${HARNESS_GDB_MANUAL_TIMEOUT:-120}"
+HARNESS_GDB_SCRIPT="${HARNESS_GDB_SCRIPT:-}"
+HARNESS_GDB_SYMBOL="${HARNESS_GDB_SYMBOL:-}"
+HARNESS_GDB_BATCH="${HARNESS_GDB_BATCH:-1}"
 QEMU_PID=""
 BOOT_WAIT="${BOOT_WAIT:-0}"
 SHELL_READY_WAIT="${SHELL_READY_WAIT:-15}"
@@ -188,16 +205,33 @@ fi
 # typed command, autostart MicroPython from procmgr and avoid injecting spawn hello.
 if [ "$MARKER_MODE" = "none" ] \
     && [ "$TEST_COMMAND_WAS_UNSET" = "1" ] \
-    && [ -z "$HARNESS_AUTOSTART_CMD" ]; then
-    HARNESS_AUTOSTART_CMD="spawn micropython"
+    && [ -z "$HARNESS_AUTOEXEC_CMD" ]; then
+    HARNESS_AUTOEXEC_CMD="spawn micropython"
     TEST_COMMAND=""
+fi
+
+# Optional autostart command from file: first non-empty, non-comment line.
+if [ -n "$HARNESS_AUTOEXEC_CMD_FILE" ] && [ -z "$HARNESS_AUTOEXEC_CMD" ]; then
+    if [ ! -f "$HARNESS_AUTOEXEC_CMD_FILE" ]; then
+        echo "ERROR: HARNESS_AUTOEXEC_CMD_FILE not found: $HARNESS_AUTOEXEC_CMD_FILE"
+        exit 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        [ -z "$line" ] && continue
+        case "$line" in
+            \#*) continue ;;
+        esac
+        HARNESS_AUTOEXEC_CMD="$line"
+        break
+    done < "$HARNESS_AUTOEXEC_CMD_FILE"
 fi
 
 if [ -z "${CLUU_SHELL_AUTOSTART_CMD:-}" ]; then
     if [ -n "$SHELL_AUTOSTART_CMD_DEFAULT" ]; then
         export CLUU_SHELL_AUTOSTART_CMD="$SHELL_AUTOSTART_CMD_DEFAULT"
-    elif [ -n "$HARNESS_AUTOSTART_CMD" ]; then
-        export CLUU_SHELL_AUTOSTART_CMD="$HARNESS_AUTOSTART_CMD"
+    elif [ -n "$HARNESS_AUTOEXEC_CMD" ]; then
+        export CLUU_SHELL_AUTOSTART_CMD="$HARNESS_AUTOEXEC_CMD"
     fi
 fi
 if [ -n "$POST_SENDKEY_DEFAULT" ] && [ -z "$POST_SENDKEY" ]; then
@@ -220,6 +254,7 @@ MAX_NOOP_SPAWN_REPLY_P95_CYCLES="${MAX_NOOP_SPAWN_REPLY_P95_CYCLES:-}"
 MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES="${MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES:-}"
 HARNESS_START_SECS=$SECONDS
 QEMU_START_SECS=0
+SHELL_READY_BASE_SECS=0
 BUILD_ELAPSED=""
 
 if ! [[ "$SHELL_READY_WAIT" =~ ^[0-9]+$ ]] || [ "$SHELL_READY_WAIT" -lt 1 ]; then
@@ -228,6 +263,14 @@ if ! [[ "$SHELL_READY_WAIT" =~ ^[0-9]+$ ]] || [ "$SHELL_READY_WAIT" -lt 1 ]; the
 fi
 if ! [[ "$SHELL_READY_WAIT_MAX" =~ ^[0-9]+$ ]] || [ "$SHELL_READY_WAIT_MAX" -lt 1 ]; then
     echo "ERROR: SHELL_READY_WAIT_MAX must be a positive integer"
+    exit 1
+fi
+if ! [[ "$HARNESS_GDB_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$HARNESS_GDB_TIMEOUT" -lt 1 ]; then
+    echo "ERROR: HARNESS_GDB_TIMEOUT must be a positive integer"
+    exit 1
+fi
+if ! [[ "$HARNESS_GDB_MANUAL_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$HARNESS_GDB_MANUAL_TIMEOUT" -lt 1 ]; then
+    echo "ERROR: HARNESS_GDB_MANUAL_TIMEOUT must be a positive integer"
     exit 1
 fi
 if [ "$ALLOW_SLOW_SHELL_WAIT" != "1" ] && [ "$SHELL_READY_WAIT" -gt "$SHELL_READY_WAIT_MAX" ]; then
@@ -249,7 +292,8 @@ cleanup() {
         echo "HARNESS build_s=${BUILD_ELAPSED}" >> "$SERIAL_LOG"
     fi
     if [ "$QEMU_START_SECS" -gt 0 ] && [ -n "${SHELL_READY_ELAPSED:-}" ]; then
-        echo "HARNESS qemu_to_shell_ready_s=${SHELL_READY_ELAPSED}" >> "$SERIAL_LOG"
+        echo "HARNESS shell_ready_from_resume_s=${SHELL_READY_ELAPSED}" >> "$SERIAL_LOG"
+        echo "HARNESS qemu_to_shell_ready_s=$((SHELL_READY_BASE_SECS - QEMU_START_SECS + SHELL_READY_ELAPSED))" >> "$SERIAL_LOG"
     fi
     echo "HARNESS total_s=$((SECONDS - HARNESS_START_SECS))" >> "$SERIAL_LOG"
     rm -f "$MONITOR_SOCK"
@@ -275,6 +319,149 @@ ensure_toolchain_prereqs() {
         cargo xtask build-crt0
     fi
 }
+
+wait_for_tcp_port() {
+    local target="$1"
+    local timeout_s="$2"
+    local host="${target%:*}"
+    local port="${target##*:}"
+    local deadline=$((SECONDS + timeout_s))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if nc -z "$host" "$port" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+wait_for_serial_activity() {
+    local timeout_s="$1"
+    local deadline=$((SECONDS + timeout_s))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if [ -s "$SERIAL_LOG" ]; then
+            return 0
+        fi
+        if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+            return 1
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+run_gdb_control() {
+    if [ "$QEMU_GDB" != "1" ]; then
+        return 0
+    fi
+
+    if ! command -v "$HARNESS_GDB_BIN" >/dev/null 2>&1; then
+        echo "ERROR: HARNESS_GDB_BIN not found: $HARNESS_GDB_BIN"
+        exit 1
+    fi
+
+    if ! wait_for_tcp_port "$HARNESS_GDB_TARGET" "$HARNESS_GDB_TIMEOUT"; then
+        echo "ERROR: GDB stub $HARNESS_GDB_TARGET was not reachable within ${HARNESS_GDB_TIMEOUT}s"
+        exit 1
+    fi
+
+    case "$HARNESS_GDB_MODE" in
+        manual)
+            echo "QEMU is paused for GDB at $HARNESS_GDB_TARGET."
+            echo "Attach manually and resume execution (example):"
+            echo "  $HARNESS_GDB_BIN -q ${HARNESS_GDB_SYMBOL:+$HARNESS_GDB_SYMBOL }-ex 'target remote $HARNESS_GDB_TARGET'"
+            echo "Waiting up to ${HARNESS_GDB_MANUAL_TIMEOUT}s for serial activity after resume..."
+            if ! wait_for_serial_activity "$HARNESS_GDB_MANUAL_TIMEOUT"; then
+                echo "ERROR: no serial activity observed after waiting for manual GDB resume"
+                exit 1
+            fi
+            ;;
+        auto-continue)
+            echo "Auto-resuming paused QEMU via GDB detach ($HARNESS_GDB_TARGET)..."
+            gdb_cmd=("$HARNESS_GDB_BIN" -q --batch -ex "set pagination off")
+            if [ -n "$HARNESS_GDB_SYMBOL" ]; then
+                gdb_cmd+=("$HARNESS_GDB_SYMBOL")
+            fi
+            gdb_cmd+=(
+                -ex "target remote $HARNESS_GDB_TARGET"
+                -ex "detach"
+                -ex "quit"
+            )
+            "${gdb_cmd[@]}"
+            ;;
+        script)
+            if [ -z "$HARNESS_GDB_SCRIPT" ]; then
+                echo "ERROR: HARNESS_GDB_MODE=script requires HARNESS_GDB_SCRIPT"
+                exit 1
+            fi
+            if [ ! -f "$HARNESS_GDB_SCRIPT" ]; then
+                echo "ERROR: HARNESS_GDB_SCRIPT not found: $HARNESS_GDB_SCRIPT"
+                exit 1
+            fi
+            echo "Running GDB script: $HARNESS_GDB_SCRIPT"
+            gdb_cmd=("$HARNESS_GDB_BIN" -q -ex "set pagination off")
+            if [ "$HARNESS_GDB_BATCH" = "1" ]; then
+                gdb_cmd+=(--batch)
+            fi
+            if [ -n "$HARNESS_GDB_SYMBOL" ]; then
+                gdb_cmd+=("$HARNESS_GDB_SYMBOL")
+            fi
+            gdb_cmd+=(
+                -ex "target remote $HARNESS_GDB_TARGET"
+                -x "$HARNESS_GDB_SCRIPT"
+            )
+            "${gdb_cmd[@]}"
+            ;;
+        *)
+            echo "ERROR: unsupported HARNESS_GDB_MODE '$HARNESS_GDB_MODE' (manual|auto-continue|script)"
+            exit 1
+            ;;
+    esac
+}
+
+declare -a TYPED_COMMANDS=()
+
+append_keystroke_command() {
+    local line="$1"
+    line="${line%$'\r'}"
+    [ -z "$line" ] && return 0
+    case "$line" in
+        \#*) return 0 ;;
+    esac
+    TYPED_COMMANDS+=("$line")
+}
+
+load_keystroke_commands_from_file() {
+    local path="$1"
+    if [ ! -f "$path" ]; then
+        echo "ERROR: KEYSTROKE_COMMANDS_FILE not found: $path"
+        exit 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        append_keystroke_command "$line"
+    done < "$path"
+}
+
+if [ -n "$KEYSTROKE_COMMANDS_FILE" ]; then
+    load_keystroke_commands_from_file "$KEYSTROKE_COMMANDS_FILE"
+fi
+if [ -n "$KEYSTROKE_COMMANDS" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        append_keystroke_command "$line"
+    done <<< "$KEYSTROKE_COMMANDS"
+fi
+
+if ! [[ "$TEST_COMMAND_REPEAT" =~ ^[0-9]+$ ]] || [ "$TEST_COMMAND_REPEAT" -lt 1 ]; then
+    echo "ERROR: TEST_COMMAND_REPEAT must be a positive integer"
+    exit 1
+fi
+
+# Backward-compatible path: TEST_COMMAND(+REPEAT) is appended after explicit KEYSTROKE_COMMANDS.
+if [ -n "$TEST_COMMAND" ]; then
+    for ((i = 1; i <= TEST_COMMAND_REPEAT; i++)); do
+        TYPED_COMMANDS+=("$TEST_COMMAND")
+    done
+fi
 
 # --- Step 1: Build (skip if --no-build) ---
 if [ "$1" != "--no-build" ]; then
@@ -349,6 +536,9 @@ if ! kill -0 "$QEMU_PID" 2>/dev/null; then
     exit 1
 fi
 
+run_gdb_control
+SHELL_READY_BASE_SECS=$SECONDS
+
 # --- Step 4: Wait for boot ---
 if [ "$BOOT_WAIT" -gt 0 ]; then
     echo "Waiting ${BOOT_WAIT}s before shell marker polling..."
@@ -356,10 +546,10 @@ if [ "$BOOT_WAIT" -gt 0 ]; then
 fi
 
 wait_for_shell_ready() {
-    local deadline=$((QEMU_START_SECS + SHELL_READY_WAIT))
+    local deadline=$((SHELL_READY_BASE_SECS + SHELL_READY_WAIT))
     while [ "$SECONDS" -lt "$deadline" ]; do
         if grep -Fq "[USER] shell: ready" "$SERIAL_LOG"; then
-            SHELL_READY_ELAPSED=$((SECONDS - QEMU_START_SECS))
+            SHELL_READY_ELAPSED=$((SECONDS - SHELL_READY_BASE_SECS))
             return 0
         fi
         sleep 1
@@ -367,16 +557,16 @@ wait_for_shell_ready() {
     return 1
 }
 
-if [ -n "$TEST_COMMAND" ]; then
-    echo "Waiting up to ${SHELL_READY_WAIT}s from QEMU launch for shell readiness marker..."
+if [ "${#TYPED_COMMANDS[@]}" -gt 0 ] || [ -n "$POST_SENDKEY" ]; then
+    echo "Waiting up to ${SHELL_READY_WAIT}s for shell readiness marker..."
     if ! wait_for_shell_ready; then
-        echo "ERROR: shell readiness marker not observed within ${SHELL_READY_WAIT}s from QEMU launch"
+        echo "ERROR: shell readiness marker not observed within ${SHELL_READY_WAIT}s"
         echo "----- serial tail (last 200 lines) -----"
         tail -n 200 "$SERIAL_LOG" || true
         echo "----------------------------------------"
         exit 1
     fi
-    echo "Shell readiness observed in ${SHELL_READY_ELAPSED}s from QEMU launch"
+    echo "Shell readiness observed in ${SHELL_READY_ELAPSED}s"
 fi
 
 # --- Step 5: Type test command(s) via QEMU monitor ---
@@ -394,29 +584,52 @@ type_ascii_command() {
             ' ') send_key "spc" ;;
             '-') send_key "minus" ;;
             '_') send_key "shift-minus" ;;
+            '=') send_key "equal" ;;
+            '+') send_key "shift-equal" ;;
             '.') send_key "dot" ;;
+            ',') send_key "comma" ;;
             '/') send_key "slash" ;;
+            '?') send_key "shift-slash" ;;
+            ';') send_key "semicolon" ;;
             ':') send_key "shift-semicolon" ;;
+            "'") send_key "apostrophe" ;;
+            '"') send_key "shift-apostrophe" ;;
+            '(') send_key "shift-9" ;;
+            ')') send_key "shift-0" ;;
+            '[') send_key "bracket_left" ;;
+            ']') send_key "bracket_right" ;;
+            '{') send_key "shift-bracket_left" ;;
+            '}') send_key "shift-bracket_right" ;;
+            '\\') send_key "backslash" ;;
+            '|') send_key "shift-backslash" ;;
+            '!') send_key "shift-1" ;;
+            '@') send_key "shift-2" ;;
+            '#') send_key "shift-3" ;;
+            '$') send_key "shift-4" ;;
+            '%') send_key "shift-5" ;;
+            '^') send_key "shift-6" ;;
+            '&') send_key "shift-7" ;;
+            '*') send_key "shift-8" ;;
+            '<') send_key "shift-comma" ;;
+            '>') send_key "shift-dot" ;;
+            '`') send_key "grave_accent" ;;
+            '~') send_key "shift-grave_accent" ;;
             [a-z0-9]) send_key "$ch" ;;
-            [A-Z]) send_key "shift+${ch,,}" ;;
+            [A-Z]) send_key "shift-${ch,,}" ;;
             *)
-                echo "WARN: unsupported character '$ch' in TEST_COMMAND; skipping"
+                echo "WARN: unsupported character '$ch' in keystroke command; skipping"
                 ;;
         esac
     done
     send_key "ret"
 }
 
-if ! [[ "$TEST_COMMAND_REPEAT" =~ ^[0-9]+$ ]] || [ "$TEST_COMMAND_REPEAT" -lt 1 ]; then
-    echo "ERROR: TEST_COMMAND_REPEAT must be a positive integer"
-    exit 1
-fi
-
-if [ -n "$TEST_COMMAND" ]; then
-    for ((i = 1; i <= TEST_COMMAND_REPEAT; i++)); do
-        echo "Sending command ${i}/${TEST_COMMAND_REPEAT}: '$TEST_COMMAND'"
-        type_ascii_command "$TEST_COMMAND"
-        if [ "$i" -lt "$TEST_COMMAND_REPEAT" ]; then
+if [ "${#TYPED_COMMANDS[@]}" -gt 0 ]; then
+    for ((i = 0; i < ${#TYPED_COMMANDS[@]}; i++)); do
+        cmd="${TYPED_COMMANDS[$i]}"
+        echo "Sending command $((i + 1))/${#TYPED_COMMANDS[@]}: '$cmd'"
+        type_ascii_command "$cmd"
+        if [ $((i + 1)) -lt "${#TYPED_COMMANDS[@]}" ]; then
             sleep "$COMMAND_GAP"
         fi
     done
@@ -429,7 +642,7 @@ if [ -n "$POST_SENDKEY" ]; then
 fi
 
 # --- Step 6: Wait for the test to run ---
-echo "Waiting ${RUN_WAIT}s for hello to execute..."
+echo "Waiting ${RUN_WAIT}s for workload to execute..."
 sleep "$RUN_WAIT"
 
 # --- Step 7: Capture and display serial output ---

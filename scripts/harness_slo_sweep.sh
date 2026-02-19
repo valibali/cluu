@@ -87,7 +87,7 @@ for ((run = 1; run <= REPEATS; run++)); do
         MIN_NOOP_MAP_ELF_SAMPLES="${MIN_NOOP_MAP_ELF_SAMPLES:-}" \
         MAX_NOOP_SPAWN_REPLY_P95_CYCLES="${MAX_NOOP_SPAWN_REPLY_P95_CYCLES:-}" \
         MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES="${MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES:-}" \
-        ./scripts/test_hello.sh $([[ "$NO_BUILD" -eq 1 ]] && echo "--no-build")
+        ./scripts/harness_run.sh $([[ "$NO_BUILD" -eq 1 ]] && echo "--no-build")
 
     ./scripts/harness_slo_report.sh \
         --log "$serial_log" \

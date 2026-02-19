@@ -6,11 +6,11 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
 
 ## Components
 
-1. `scripts/test_hello.sh`
+1. `scripts/harness_run.sh`
    - Single-run QEMU harness executor.
    - Boots CLUU, injects command(s), validates markers/faults.
    - Shell readiness policy: default `SHELL_READY_WAIT=15` and hard max `SHELL_READY_WAIT_MAX=15`.
-   - Shell-ready timeout is measured from QEMU launch (not from command injection phase).
+   - Shell-ready timeout is measured from harness boot-resume point (after optional GDB attach/continue).
    - Override only for explicit debugging with `ALLOW_SLOW_SHELL_WAIT=1`.
    - Build modes:
      - Default full mode is incremental and runs `cargo xtask build` (plus toolchain prep only if missing).
@@ -18,8 +18,11 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
    - Supports overrides for paths and debug:
      - `SERIAL_LOG`, `MONITOR_SOCK`, `IMG`, `USER_DISK`, `OVMF`
      - `QEMU_GDB=1` to start QEMU with `-S -s`
+     - `HARNESS_GDB_MODE=manual|auto-continue|script`
+     - `HARNESS_GDB_SCRIPT=...` for scripted GDB verification
      - `QEMU_EXTRA_ARGS` for additional QEMU flags
-     - `HARNESS_AUTOSTART_CMD` to force procmgr shell autostart command at build time
+     - `HARNESS_AUTOEXEC_CMD` (or compatibility alias `HARNESS_AUTOSTART_CMD`) to force procmgr shell autostart command at build time
+     - `KEYSTROKE_COMMANDS` / `KEYSTROKE_COMMANDS_FILE` for post-shell keystroke command injection
    - Debug/ad-hoc default:
      - When `MARKER_MODE=none` and `TEST_COMMAND` is not explicitly set, harness now defaults to
        autostarting `spawn micropython` and suppresses auto-typed `spawn hello`.
@@ -70,8 +73,9 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
      - IPC queue pressure metrics (`ipc_queue_bytes_peak`, `ipc_queue_messages_peak`) when present in logs
      - shell readiness latency (`shell_ready_s`, default max 15s)
      - warm-cache `/bin/noop` sample counts and p95 cycle metrics
-   - `scripts/test_hello.sh` also appends:
+   - `scripts/harness_run.sh` also appends:
      - `HARNESS build_s=...`
+     - `HARNESS shell_ready_from_resume_s=...`
      - `HARNESS qemu_to_shell_ready_s=...`
      - `HARNESS total_s=...`
 
@@ -91,6 +95,13 @@ cargo xtask harness-matrix --no-build
 # One case only
 scripts/harness_suite.sh --case m5_fairness --no-build
 
+# Run one harness with shell autoexec + typed commands
+HARNESS_AUTOEXEC_CMD="spawn micropython" KEYSTROKE_COMMANDS=$'print(\"hi\")\nprint(1+2)' \
+./scripts/harness_run.sh --no-build
+
+# Run paused under GDB, auto-continue after attach
+QEMU_GDB=1 HARNESS_GDB_MODE=auto-continue ./scripts/harness_run.sh --no-build
+
 # Fairness SLO sweep
 cargo xtask harness-slo --no-build --repeats 5
 
@@ -106,6 +117,6 @@ scripts/harness_slo_report.sh --log /tmp/cluu-serial-com2.log --min-exit-cookies
 ## CI Extension Workflow
 
 1. Add a new case line in `scripts/harness_cases.conf`.
-2. Add marker checks in `scripts/test_hello.sh` for new `MARKER_MODE`.
+2. Add marker checks in `scripts/harness_run.sh` for new `MARKER_MODE`.
 3. If new numeric SLO appears, add parsing/check in `scripts/harness_slo_report.sh`.
 4. Gate it in CI via `cargo xtask harness-matrix` and/or `cargo xtask harness-slo`.
