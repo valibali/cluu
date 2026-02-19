@@ -4,9 +4,9 @@
 //! The write end sends data messages (label 0x50) and an EOF marker (label 0x51)
 //! on close. The read end receives messages and returns data or 0 on EOF.
 
+use super::c_int;
 use crate::fd_table::{FdEntry, FD_TABLE};
 use crate::syscall::endpoint_create;
-use super::c_int;
 
 const PIPE_DATA_LABEL: u32 = 0x50;
 const PIPE_EOF_LABEL: u32 = 0x51;

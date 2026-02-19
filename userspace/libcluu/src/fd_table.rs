@@ -178,10 +178,10 @@ impl FdTable {
         pipe_mask: u8,
     ) {
         let fds: [(i32, usize, bool, bool); 4] = [
-            (0, stdin, true, false),   // stdin: readable
-            (1, stdout, false, true),  // stdout: writable
-            (2, stderr, false, true),  // stderr: writable
-            (3, stdlog, false, true),  // stdlog: writable
+            (0, stdin, true, false),  // stdin: readable
+            (1, stdout, false, true), // stdout: writable
+            (2, stderr, false, true), // stderr: writable
+            (3, stdlog, false, true), // stdlog: writable
         ];
 
         for &(fd_num, token, readable, writable) in &fds {
@@ -194,7 +194,8 @@ impl FdTable {
                 };
                 self.entries.insert(fd_num, entry);
             } else {
-                self.entries.insert(fd_num, FdEntry::tty(token, readable, writable));
+                self.entries
+                    .insert(fd_num, FdEntry::tty(token, readable, writable));
             }
         }
         self.next_fd = 4;

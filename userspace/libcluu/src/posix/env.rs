@@ -54,10 +54,7 @@ impl EnvStorage {
             let len = self.lengths[i];
             let entry = &self.buf[offset..offset + len];
             // Check if entry starts with "key="
-            if entry.len() > key.len()
-                && entry[key.len()] == b'='
-                && entry[..key.len()] == *key
-            {
+            if entry.len() > key.len() && entry[key.len()] == b'=' && entry[..key.len()] == *key {
                 return Some(i);
             }
         }

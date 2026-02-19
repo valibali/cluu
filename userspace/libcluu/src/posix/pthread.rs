@@ -181,11 +181,7 @@ pub fn alloc_tls_block() -> Option<(usize, usize)> {
     // where we place the .tdata copy.
     if tmpl.tdata_size > 0 {
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                tmpl.tdata_src as *const u8,
-                block,
-                tmpl.tdata_size,
-            );
+            core::ptr::copy_nonoverlapping(tmpl.tdata_src as *const u8, block, tmpl.tdata_size);
         }
     }
     // .tbss follows .tdata in the TLS image and is already zeroed by alloc_zeroed.
@@ -410,20 +406,29 @@ pub extern "C" fn pthread_create(
     ) {
         Ok(t) => t,
         Err(_) => {
-            unsafe { drop(Box::from_raw(internal_ptr)); }
+            unsafe {
+                drop(Box::from_raw(internal_ptr));
+            }
             let layout = core::alloc::Layout::from_size_align(tls_block_alloc_size(), 16).unwrap();
-            unsafe { alloc::alloc::dealloc(tls_block as *mut u8, layout); }
+            unsafe {
+                alloc::alloc::dealloc(tls_block as *mut u8, layout);
+            }
             let _ = crate::syscall::space_unmap(space, stack_base, DEFAULT_STACK_PAGES);
             return crate::errno::EAGAIN;
         }
     };
 
     // 6. Store child token in PthreadInternal.
-    unsafe { (*internal_ptr).token = child_token; }
+    unsafe {
+        (*internal_ptr).token = child_token;
+    }
 
     // 7. Write child token to TLS block at FS:8 (for pthread_self).
     unsafe {
-        core::ptr::write((tls_tcb_addr + TLS_THREAD_TOKEN_OFFSET) as *mut usize, child_token);
+        core::ptr::write(
+            (tls_tcb_addr + TLS_THREAD_TOKEN_OFFSET) as *mut usize,
+            child_token,
+        );
     }
 
     // 8. Set FS base on the child (updates saved context.fs_base).
@@ -447,7 +452,9 @@ pub extern "C" fn pthread_create(
     }
 
     // 11. Write pthread_t to caller.
-    unsafe { *thread = child_token; }
+    unsafe {
+        *thread = child_token;
+    }
 
     0
 }
@@ -511,7 +518,9 @@ pub extern "C" fn pthread_join(thread: pthread_t, retval: *mut *mut c_void) -> c
     }
 
     // Free PthreadInternal.
-    unsafe { drop(Box::from_raw(internal_ptr)); }
+    unsafe {
+        drop(Box::from_raw(internal_ptr));
+    }
 
     // Destroy thread (kernel-side).
     let _ = crate::syscall::thread_destroy(token);
@@ -521,7 +530,9 @@ pub extern "C" fn pthread_join(thread: pthread_t, retval: *mut *mut c_void) -> c
 
     // Free TLS block.
     if let Ok(layout) = core::alloc::Layout::from_size_align(tls_size, 16) {
-        unsafe { alloc::alloc::dealloc(tls_block as *mut u8, layout); }
+        unsafe {
+            alloc::alloc::dealloc(tls_block as *mut u8, layout);
+        }
     }
 
     0
@@ -566,11 +577,15 @@ pub extern "C" fn pthread_detach(thread: pthread_t) -> c_int {
         let tls_block = internal.tls_block;
         let tls_size = internal.tls_block_size;
         if let Ok(layout) = core::alloc::Layout::from_size_align(tls_size, 16) {
-            unsafe { alloc::alloc::dealloc(tls_block as *mut u8, layout); }
+            unsafe {
+                alloc::alloc::dealloc(tls_block as *mut u8, layout);
+            }
         }
         // Note: stack leak for detached threads (known limitation).
 
-        unsafe { drop(Box::from_raw(internal_raw as *mut PthreadInternal)); }
+        unsafe {
+            drop(Box::from_raw(internal_raw as *mut PthreadInternal));
+        }
     }
 
     0
@@ -588,20 +603,30 @@ pub extern "C" fn pthread_self() -> pthread_t {
         core::arch::asm!("mov {}, qword ptr fs:[8]", out(reg) val, options(nostack, readonly));
     }
     // Fallback if FS:8 wasn't initialized (shouldn't happen after init_tls).
-    if val != 0 { val } else { crate::boot::token_self() }
+    if val != 0 {
+        val
+    } else {
+        crate::boot::token_self()
+    }
 }
 
 /// pthread_equal — compare two thread IDs.
 #[no_mangle]
 pub extern "C" fn pthread_equal(t1: pthread_t, t2: pthread_t) -> c_int {
-    if t1 == t2 { 1 } else { 0 }
+    if t1 == t2 {
+        1
+    } else {
+        0
+    }
 }
 
 /// pthread_attr_init — initialize thread attributes (stub).
 #[no_mangle]
 pub extern "C" fn pthread_attr_init(_attr: *mut pthread_attr_t) -> c_int {
     if !_attr.is_null() {
-        unsafe { *_attr = 0; }
+        unsafe {
+            *_attr = 0;
+        }
     }
     0
 }
@@ -618,7 +643,9 @@ pub extern "C" fn pthread_attr_setstacksize(attr: *mut pthread_attr_t, stacksize
     if attr.is_null() || stacksize < PAGE_SIZE {
         return crate::errno::EINVAL;
     }
-    unsafe { *attr = stacksize; }
+    unsafe {
+        *attr = stacksize;
+    }
     0
 }
 
@@ -632,7 +659,9 @@ pub extern "C" fn pthread_attr_getstacksize(
         return crate::errno::EINVAL;
     }
     let sz = unsafe { *attr };
-    unsafe { *stacksize = if sz == 0 { DEFAULT_STACK_SIZE } else { sz }; }
+    unsafe {
+        *stacksize = if sz == 0 { DEFAULT_STACK_SIZE } else { sz };
+    }
     0
 }
 
@@ -647,14 +676,13 @@ const MUTEX_CONTENDED: u32 = 2;
 
 /// Initialize a mutex. Sets state to unlocked (0).
 #[no_mangle]
-pub extern "C" fn pthread_mutex_init(
-    mutex: *mut AtomicU32,
-    _attr: *const c_void,
-) -> c_int {
+pub extern "C" fn pthread_mutex_init(mutex: *mut AtomicU32, _attr: *const c_void) -> c_int {
     if mutex.is_null() {
         return crate::errno::EINVAL;
     }
-    unsafe { (*mutex).store(MUTEX_UNLOCKED, Ordering::Release); }
+    unsafe {
+        (*mutex).store(MUTEX_UNLOCKED, Ordering::Release);
+    }
     0
 }
 
@@ -673,8 +701,13 @@ pub extern "C" fn pthread_mutex_lock(mutex: *mut AtomicU32) -> c_int {
     let m = unsafe { &*mutex };
 
     // Fast path: CAS 0 → 1 (uncontended).
-    if m.compare_exchange(MUTEX_UNLOCKED, MUTEX_LOCKED, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
+    if m.compare_exchange(
+        MUTEX_UNLOCKED,
+        MUTEX_LOCKED,
+        Ordering::Acquire,
+        Ordering::Relaxed,
+    )
+    .is_ok()
     {
         return 0;
     }
@@ -689,12 +722,7 @@ pub extern "C" fn pthread_mutex_lock(mutex: *mut AtomicU32) -> c_int {
             return 0;
         }
         // Wait until state changes from 2.
-        let _ = crate::syscall::futex_wait(
-            space,
-            mutex as usize,
-            MUTEX_CONTENDED,
-            0,
-        );
+        let _ = crate::syscall::futex_wait(space, mutex as usize, MUTEX_CONTENDED, 0);
     }
 }
 
@@ -705,8 +733,13 @@ pub extern "C" fn pthread_mutex_trylock(mutex: *mut AtomicU32) -> c_int {
         return crate::errno::EINVAL;
     }
     let m = unsafe { &*mutex };
-    if m.compare_exchange(MUTEX_UNLOCKED, MUTEX_LOCKED, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
+    if m.compare_exchange(
+        MUTEX_UNLOCKED,
+        MUTEX_LOCKED,
+        Ordering::Acquire,
+        Ordering::Relaxed,
+    )
+    .is_ok()
     {
         0
     } else {
@@ -737,14 +770,13 @@ pub extern "C" fn pthread_mutex_unlock(mutex: *mut AtomicU32) -> c_int {
 
 /// Initialize a condition variable. Sets sequence counter to 0.
 #[no_mangle]
-pub extern "C" fn pthread_cond_init(
-    cond: *mut AtomicU32,
-    _attr: *const c_void,
-) -> c_int {
+pub extern "C" fn pthread_cond_init(cond: *mut AtomicU32, _attr: *const c_void) -> c_int {
     if cond.is_null() {
         return crate::errno::EINVAL;
     }
-    unsafe { (*cond).store(0, Ordering::Release); }
+    unsafe {
+        (*cond).store(0, Ordering::Release);
+    }
     0
 }
 
@@ -756,10 +788,7 @@ pub extern "C" fn pthread_cond_destroy(_cond: *mut AtomicU32) -> c_int {
 
 /// Wait on a condition variable. Releases mutex, waits, re-acquires mutex.
 #[no_mangle]
-pub extern "C" fn pthread_cond_wait(
-    cond: *mut AtomicU32,
-    mutex: *mut AtomicU32,
-) -> c_int {
+pub extern "C" fn pthread_cond_wait(cond: *mut AtomicU32, mutex: *mut AtomicU32) -> c_int {
     if cond.is_null() || mutex.is_null() {
         return crate::errno::EINVAL;
     }
@@ -821,10 +850,7 @@ const ONCE_DONE: u32 = 2;
 /// pthread_once_t is `{ int is_initialized; int init_executed; }` but since
 /// `_POSIX_THREADS` isn't defined, C code declares it manually.
 #[no_mangle]
-pub extern "C" fn pthread_once(
-    once: *mut AtomicU32,
-    init_routine: extern "C" fn(),
-) -> c_int {
+pub extern "C" fn pthread_once(once: *mut AtomicU32, init_routine: extern "C" fn()) -> c_int {
     if once.is_null() {
         return crate::errno::EINVAL;
     }
@@ -882,7 +908,9 @@ pub extern "C" fn pthread_key_create(
             // Claim the slot.
             KEY_ALLOCATED.fetch_or(1 << i, Ordering::Release);
             dtors[i] = destructor;
-            unsafe { *key = i as u32; }
+            unsafe {
+                *key = i as u32;
+            }
             return 0;
         }
     }
@@ -1021,7 +1049,9 @@ pub extern "C" fn pthread_exit(retval: *mut c_void) -> ! {
 
     if let Some(raw) = internal_raw {
         let internal = unsafe { &*(raw as *const PthreadInternal) };
-        internal.exit_value.store(retval as usize, Ordering::Release);
+        internal
+            .exit_value
+            .store(retval as usize, Ordering::Release);
         internal.exited.store(1, Ordering::Release);
         let space = crate::boot::space_token();
         let _ = crate::syscall::futex_wake(

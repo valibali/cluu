@@ -684,7 +684,9 @@ pub fn space_create(root_token: usize) -> Result<usize> {
 /// - `Ok(())`: Address space destroyed
 /// - `Err(error)`: Destruction failed (invalid token, active CR3, etc.)
 pub fn space_destroy(space_token: usize) -> Result<()> {
-    unsafe { invoke(space_token, InvokeOp::SpaceDestroy, 0, 0, 0, 0)?; }
+    unsafe {
+        invoke(space_token, InvokeOp::SpaceDestroy, 0, 0, 0, 0)?;
+    }
     Ok(())
 }
 
@@ -969,14 +971,7 @@ pub fn thread_resume(thread_token: usize) -> Result<()> {
 /// to that thread.
 pub fn thread_set_fs_base(thread_token: usize, fs_base: usize) -> Result<()> {
     unsafe {
-        invoke(
-            thread_token,
-            InvokeOp::ThreadSetFSBase,
-            fs_base,
-            0,
-            0,
-            0,
-        )?;
+        invoke(thread_token, InvokeOp::ThreadSetFSBase, fs_base, 0, 0, 0)?;
     }
     Ok(())
 }

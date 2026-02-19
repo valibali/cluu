@@ -300,10 +300,22 @@ impl MountBackend for DeviceBackend {
         }
 
         Ok(alloc::vec![
-            DirEntry { name: String::from("null"), is_dir: false },
-            DirEntry { name: String::from("zero"), is_dir: false },
-            DirEntry { name: String::from("urandom"), is_dir: false },
-            DirEntry { name: String::from("random"), is_dir: false },
+            DirEntry {
+                name: String::from("null"),
+                is_dir: false
+            },
+            DirEntry {
+                name: String::from("zero"),
+                is_dir: false
+            },
+            DirEntry {
+                name: String::from("urandom"),
+                is_dir: false
+            },
+            DirEntry {
+                name: String::from("random"),
+                is_dir: false
+            },
         ])
     }
 }

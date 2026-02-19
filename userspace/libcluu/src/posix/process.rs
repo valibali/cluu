@@ -504,16 +504,18 @@ struct FdAction {
 ///
 /// C passes `posix_spawn_file_actions_t *` which is `**FileActionsInner`.
 #[no_mangle]
-pub extern "C" fn posix_spawn_file_actions_init(
-    actions: *mut *mut FileActionsInner,
-) -> c_int {
+pub extern "C" fn posix_spawn_file_actions_init(actions: *mut *mut FileActionsInner) -> c_int {
     if actions.is_null() {
         return EINVAL;
     }
     let inner = alloc::boxed::Box::new(FileActionsInner {
         count: 0,
         _pad: [0; 7],
-        actions: [FdAction { target_fd: 0, flags: 0, endpoint: 0 }; MAX_FD_ACTIONS],
+        actions: [FdAction {
+            target_fd: 0,
+            flags: 0,
+            endpoint: 0,
+        }; MAX_FD_ACTIONS],
     });
     unsafe {
         *actions = alloc::boxed::Box::into_raw(inner);
@@ -523,9 +525,7 @@ pub extern "C" fn posix_spawn_file_actions_init(
 
 /// Destroy file actions — frees the heap-allocated inner struct.
 #[no_mangle]
-pub extern "C" fn posix_spawn_file_actions_destroy(
-    actions: *mut *mut FileActionsInner,
-) -> c_int {
+pub extern "C" fn posix_spawn_file_actions_destroy(actions: *mut *mut FileActionsInner) -> c_int {
     if actions.is_null() {
         return EINVAL;
     }

@@ -443,7 +443,9 @@ pub(crate) fn try_create_derived_token(
 ///
 /// * `Ok(Token)` - Valid token
 /// * `Err(&str)` - Error reason
-pub fn lookup_token(handle: TokenHandle) -> Result<(Token, crate::token::scope::ObjectRef), &'static str> {
+pub fn lookup_token(
+    handle: TokenHandle,
+) -> Result<(Token, crate::token::scope::ObjectRef), &'static str> {
     // Try per-CPU cache first (no lock needed)
     if let Some(cached) = try_cache_lookup(handle) {
         return Ok(cached);
@@ -479,9 +481,7 @@ pub fn lookup_token(handle: TokenHandle) -> Result<(Token, crate::token::scope::
 /// - Cache entry exists for this handle
 /// - Generation matches (token not revoked since caching)
 /// - Token not expired
-fn try_cache_lookup(
-    handle: TokenHandle,
-) -> Option<(Token, crate::token::scope::ObjectRef)> {
+fn try_cache_lookup(handle: TokenHandle) -> Option<(Token, crate::token::scope::ObjectRef)> {
     // SAFETY: only called from syscall context, non-reentrant on single CPU
     let cache = unsafe { &mut *PERCPU_TOKEN_CACHE.inner.get() };
     let current_generation = revocation_generation();
