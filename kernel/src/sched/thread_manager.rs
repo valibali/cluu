@@ -171,15 +171,15 @@ lazy_static! {
     /// (threads woken by other means) are cleaned lazily when popped.
     static ref TIMEOUT_HEAP: Mutex<BinaryHeap<Reverse<(u64, u64)>>> =
         Mutex::new(BinaryHeap::new());
-
-    /// Map from ReplyId to CallReplyInfo for IPC call/reply (O(1) hash map)
-    static ref CALL_REPLY_MAP: Mutex<ReplyMap<CallReplyInfo>> =
-        Mutex::new(ReplyMap::new());
-
-    /// Map from ReplyId to FaultReplyInfo for fault IPC (O(1) hash map)
-    static ref FAULT_REPLY_MAP: Mutex<ReplyMap<FaultReplyInfo>> =
-        Mutex::new(ReplyMap::new());
 }
+
+/// Map from ReplyId to CallReplyInfo for IPC call/reply (O(1) hash map).
+/// Kept as a plain static Mutex to avoid first-touch lazy init on the syscall hot path.
+static CALL_REPLY_MAP: Mutex<ReplyMap<CallReplyInfo>> = Mutex::new(ReplyMap::new());
+
+/// Map from ReplyId to FaultReplyInfo for fault IPC (O(1) hash map).
+/// Kept as a plain static Mutex to avoid first-touch lazy init on the syscall hot path.
+static FAULT_REPLY_MAP: Mutex<ReplyMap<FaultReplyInfo>> = Mutex::new(ReplyMap::new());
 
 /// Counter for generating unique ReplyIds
 static NEXT_REPLY_ID: AtomicU64 = AtomicU64::new(1);
@@ -382,9 +382,9 @@ impl ThreadManager {
         }
         // Outside scheduler lock: revoke tokens referencing the dead thread.
         // This prevents dangling token references to destroyed objects.
-        crate::token::table::revoke_tokens_for_object(
-            crate::token::scope::ObjectRef::Thread(thread_id),
-        );
+        crate::token::table::revoke_tokens_for_object(crate::token::scope::ObjectRef::Thread(
+            thread_id,
+        ));
 
         // Clean up CALL_REPLY_MAP entries involving this thread.
         // - Dead caller: remove the entry (no one to receive the reply).
@@ -498,7 +498,10 @@ impl ThreadManager {
 
     /// Take call reply info, verifying the server thread matches.
     /// Returns None if reply_id not found OR server_thread_id doesn't match.
-    pub fn take_call_reply_info_verified(reply_id: ReplyId, server: ThreadId) -> Option<CallReplyInfo> {
+    pub fn take_call_reply_info_verified(
+        reply_id: ReplyId,
+        server: ThreadId,
+    ) -> Option<CallReplyInfo> {
         let mut map = CALL_REPLY_MAP.lock();
         let info = map.get(reply_id)?;
         match info.server_thread_id {
@@ -508,7 +511,10 @@ impl ThreadManager {
     }
 
     /// Take fault reply info, verifying the server thread matches.
-    pub fn take_fault_reply_info_verified(reply_id: ReplyId, server: ThreadId) -> Option<FaultReplyInfo> {
+    pub fn take_fault_reply_info_verified(
+        reply_id: ReplyId,
+        server: ThreadId,
+    ) -> Option<FaultReplyInfo> {
         let mut map = FAULT_REPLY_MAP.lock();
         let info = map.get(reply_id)?;
         match info.server_thread_id {
@@ -548,6 +554,25 @@ impl ThreadManager {
         });
     }
 
+    /// Block current thread only if its recv-wait ticket is still armed.
+    ///
+    /// Returns `true` when the thread transitioned to blocked state, `false`
+    /// when a wake raced before the block (ticket changed or wait disarmed).
+    pub fn block_current_recv_wait(ticket: u64) -> bool {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return false,
+        };
+        Self::with_thread_mut(current, |thread| {
+            if thread.recv_wait_ticket() != ticket || !thread.is_recv_wait_armed() {
+                return false;
+            }
+            thread.make_blocked();
+            true
+        })
+        .unwrap_or(false)
+    }
+
     /// Block current thread with a timeout deadline
     ///
     /// The thread will be automatically woken when the deadline expires.
@@ -573,6 +598,34 @@ impl ThreadManager {
         TIMEOUT_HEAP
             .lock()
             .push(Reverse((deadline, current.as_u64())));
+    }
+
+    /// Block current thread with timeout only if recv-wait ticket is still armed.
+    ///
+    /// Returns `true` when the thread transitioned to blocked state, `false`
+    /// when a wake raced before the block (ticket changed or wait disarmed).
+    pub fn block_current_recv_wait_with_timeout(ticket: u64, deadline: u64) -> bool {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return false,
+        };
+        let should_block = Self::with_thread_mut(current, |thread| {
+            if thread.recv_wait_ticket() != ticket || !thread.is_recv_wait_armed() {
+                return false;
+            }
+            thread.set_timeout_deadline(deadline);
+            thread.make_blocked();
+            true
+        })
+        .unwrap_or(false);
+
+        if should_block {
+            TIMEOUT_HEAP
+                .lock()
+                .push(Reverse((deadline, current.as_u64())));
+        }
+
+        should_block
     }
 
     /// Convert milliseconds to tick deadline from now

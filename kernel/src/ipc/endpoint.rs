@@ -158,15 +158,17 @@ const MAX_QUEUE_LEN: usize = 1024;
 const MAX_CALL_QUEUE_LEN: usize = 256;
 const BUSY_LOG_EVERY: u64 = 64;
 const IPC_DIRECT_DEBUG_LIMIT: u64 = 128;
+const IPC_CALL_DEBUG_LIMIT: u64 = 256;
 /// Runtime kill-switch for rendezvous direct delivery.
 ///
-/// Defaults to disabled until explicitly enabled by boot configuration.
+/// Enabled during kernel boot.
 static IPC_RENDEZVOUS_DIRECT_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Runtime gate for register-only small-message IPC fast path.
 ///
-/// Defaults to disabled until explicitly enabled by boot configuration.
+/// Enabled by default and forced on during kernel boot.
 static IPC_REGISTER_FAST_ENABLED: AtomicBool = AtomicBool::new(true);
 static IPC_DIRECT_DEBUG_COUNT: AtomicU64 = AtomicU64::new(0);
+static IPC_CALL_DEBUG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Copy, Clone)]
 struct QueueStats {
@@ -445,7 +447,6 @@ fn get_endpoint_shard(id: EndpointId) -> &'static Mutex<EndpointShard> {
     &ENDPOINT_SHARDS[hash_endpoint_id(id)]
 }
 
-
 lazy_static! {
     static ref RECV_LOGGED: Mutex<BTreeSet<EndpointId>> = Mutex::new(BTreeSet::new());
 }
@@ -535,14 +536,10 @@ pub fn destroy_endpoint_full(id: EndpointId) {
         .into_iter()
         .map(|w| w.thread_id)
         .collect();
-    let senders: alloc::vec::Vec<crate::sched::ThreadId> = endpoint
-        .waiting_senders
-        .into_iter()
-        .collect();
-    let callers: alloc::vec::Vec<crate::sched::ThreadId> = endpoint
-        .callers_by_cookie
-        .into_values()
-        .collect();
+    let senders: alloc::vec::Vec<crate::sched::ThreadId> =
+        endpoint.waiting_senders.into_iter().collect();
+    let callers: alloc::vec::Vec<crate::sched::ThreadId> =
+        endpoint.callers_by_cookie.into_values().collect();
     let current = endpoint.current_caller;
 
     // Messages in queue and call_queue are dropped here (VecDeque Drop impl frees memory)
@@ -748,6 +745,9 @@ fn call_with_reply_id_inner(
     reply_id: crate::token::ReplyId,
 ) -> Result<(), Error> {
     let sender = crate::sched::ThreadManager::current();
+    let mut waiters_before: usize = 0;
+    let mut queue_len_after: usize = 0;
+    let mut call_queue_len_after: usize = 0;
 
     inject_reply_id(buffer, reply_id);
 
@@ -759,8 +759,14 @@ fn call_with_reply_id_inner(
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
+        waiters_before = guard.stats().waiting_len;
         let payload_bytes = &buffer[..payload_len];
-        match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, payload_bytes)? {
+        let result = match try_direct_deliver_to_waiting_receiver(
+            &mut guard,
+            endpoint,
+            sender,
+            payload_bytes,
+        )? {
             DirectDelivery::DeliveredWake(receiver_id) => (Some(receiver_id), Some(receiver_id)),
             DirectDelivery::DeliveredNoWake(receiver_id) => (None, Some(receiver_id)),
             DirectDelivery::NotDelivered => {
@@ -778,8 +784,54 @@ fn call_with_reply_id_inner(
                     Err(err) => return Err(err),
                 }
             }
-        }
+        };
+        let stats = guard.stats();
+        queue_len_after = stats.queue_len;
+        call_queue_len_after = stats.call_queue_len;
+        result
     };
+
+    let dbg_count = IPC_CALL_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if dbg_count < IPC_CALL_DEBUG_LIMIT {
+        klibcluu::info("ipc-call enqueue");
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "  endpoint=", endpoint.as_u64());
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  sender=",
+            sender.map(|tid| tid.as_u64()).unwrap_or(0),
+        );
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "  reply_id=", reply_id.as_u64());
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  payload_len=",
+            payload_len as u64,
+        );
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  waiters_before=",
+            waiters_before as u64,
+        );
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  wake=",
+            wake.map(|tid| tid.as_u64()).unwrap_or(0),
+        );
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  direct_receiver=",
+            direct_receiver.map(|tid| tid.as_u64()).unwrap_or(0),
+        );
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  queue_len_after=",
+            queue_len_after as u64,
+        );
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  call_queue_len_after=",
+            call_queue_len_after as u64,
+        );
+    }
 
     if let Some(receiver_id) = direct_receiver {
         crate::sched::ThreadManager::bind_call_reply_to_server(reply_id, receiver_id);
@@ -798,7 +850,22 @@ pub fn call_from_user_with_reply_id(
     page_table_root: x86_64::PhysAddr,
     reply_id: crate::token::ReplyId,
 ) -> Result<(), Error> {
+    let dbg_count = IPC_CALL_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if dbg_count < IPC_CALL_DEBUG_LIMIT {
+        klibcluu::info("ipc-call from-user entry");
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "  endpoint=", endpoint.as_u64());
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "  msg_ptr=", msg_ptr as u64);
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "  msg_len=", msg_len as u64);
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "  reply_id=", reply_id.as_u64());
+    }
     let mut payload = copy_user_payload(msg_ptr, msg_len, page_table_root)?;
+    if dbg_count < IPC_CALL_DEBUG_LIMIT {
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  copied_payload_len=",
+            payload.as_slice().len() as u64,
+        );
+    }
     let payload_len = payload.as_slice().len();
     call_with_reply_id_inner(endpoint, payload.as_mut_slice(), payload_len, reply_id)
 }

@@ -22,10 +22,13 @@
 use crate::error::Error;
 use crate::syscall::{SyscallArgs, SyscallResult};
 use crate::token::{lookup_token, InvokeOp, TokenHandle};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 const IPC_REG_INLINE_FLAG: usize = 1usize << (usize::BITS - 1);
 const IPC_REG_INLINE_MAX_PAYLOAD: usize = 32;
 const IPC_REG_INLINE_MAX_CALL_PAYLOAD: usize = 16;
+const IPC_CALL_TRACE_LIMIT: u64 = 512;
+static IPC_CALL_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // IPC Syscalls
@@ -295,14 +298,40 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
 
     // Block with or without timeout
     let wait_start_tick = crate::sched::ThreadManager::current_tick();
-    if timeout_ms == u64::MAX {
+    let blocked = if timeout_ms == u64::MAX {
         // Block forever
-        crate::sched::ThreadManager::block_current();
+        crate::sched::ThreadManager::block_current_recv_wait(recv_wait_ticket)
     } else {
         // Block with timeout
         let deadline = crate::sched::ThreadManager::ms_to_deadline(timeout_ms);
-        crate::sched::ThreadManager::block_current_with_timeout(deadline);
+        crate::sched::ThreadManager::block_current_recv_wait_with_timeout(
+            recv_wait_ticket,
+            deadline,
+        )
+    };
+
+    if !blocked {
+        // A sender wake can race just before we park. In that case, do not
+        // self-block; consume any pending delivery/queue state immediately.
+        crate::sched::ThreadManager::disarm_current_recv_wait();
+        if let Some((delivered_endpoint, delivered_len, delivered_sender)) =
+            crate::sched::ThreadManager::take_current_recv_wait_delivery()
+        {
+            if let Some(index) = find_endpoint_index(delivered_endpoint) {
+                write_sender_tid(delivered_sender)?;
+                return Ok((index << 32) | delivered_len);
+            }
+        }
+        return match try_recv_any() {
+            Ok((index, len)) => Ok((index << 32) | len),
+            Err(Error::WouldBlock) => {
+                crate::telemetry::record_ipc_recv_would_block();
+                Err(Error::WouldBlock)
+            }
+            Err(err) => Err(err),
+        };
     }
+
     crate::architecture::x86_64::syscall::request_resched();
     let wait_ticks = crate::sched::ThreadManager::current_tick().saturating_sub(wait_start_tick);
     crate::telemetry::record_ipc_recv_wait_ticks(wait_ticks);
@@ -368,6 +397,24 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     let msg_len = args.arg3;
     let reply_buf = args.arg4;
     let reply_len = args.arg5;
+    let trace_idx = IPC_CALL_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    if trace_idx < IPC_CALL_TRACE_LIMIT {
+        klibcluu::info("sys_call entry");
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  endpoint_token=",
+            token_handle.as_raw() as u64,
+        );
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "  msg_len=", msg_len as u64);
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "  reply_len=", reply_len as u64);
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  caller=",
+            crate::sched::ThreadManager::current()
+                .map(|tid| tid.as_u64())
+                .unwrap_or(0),
+        );
+    }
 
     // 1. Validate token and check IPC_CALL right
     let (token, obj_ref) = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
@@ -382,6 +429,13 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     } else {
         return Err(Error::InvalidArgument);
     };
+    if trace_idx < IPC_CALL_TRACE_LIMIT {
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Info,
+            "  endpoint_id=",
+            endpoint_id.as_u64(),
+        );
+    }
 
     let inline_flag_set = (msg_len & IPC_REG_INLINE_FLAG) != 0;
     if inline_flag_set {
@@ -426,7 +480,10 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
         // must be delivered to the receiver
         let payload_len = buffer.len();
         if let Err(e) = crate::ipc::endpoint::call_from_kernel_with_reply_id(
-            endpoint_id, &mut buffer, payload_len, reply_id,
+            endpoint_id,
+            &mut buffer,
+            payload_len,
+            reply_id,
         ) {
             let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
             return Err(e);
@@ -437,13 +494,25 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
         return Ok(0);
     }
     // --- existing slow path follows unchanged below ---
+    if trace_idx < IPC_CALL_TRACE_LIMIT {
+        klibcluu::info("  sys_call before current_page_table_root");
+    }
 
     let page_table_root =
         crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
+    if trace_idx < IPC_CALL_TRACE_LIMIT {
+        klibcluu::info("  sys_call after current_page_table_root");
+    }
     let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
+    if trace_idx < IPC_CALL_TRACE_LIMIT {
+        klibcluu::info("  sys_call after current");
+    }
 
     // 2. Allocate reply ID and store reply buffer info
     let reply_id = crate::sched::ThreadManager::alloc_reply_id();
+    if trace_idx < IPC_CALL_TRACE_LIMIT {
+        klibcluu::info("  sys_call before set_call_reply_info");
+    }
     if !crate::sched::ThreadManager::set_call_reply_info(
         reply_id,
         CallReplyInfo {
@@ -454,7 +523,13 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
             server_thread_id: None,
         },
     ) {
+        klibcluu::warn("sys_call: set_call_reply_info failed");
         return Err(Error::Overflow);
+    }
+    if trace_idx < IPC_CALL_TRACE_LIMIT {
+        klibcluu::info("  sys_call after set_call_reply_info");
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "  reply_id=", reply_id.as_u64());
+        klibcluu::info("  sys_call before call_from_user_with_reply_id");
     }
 
     // 3. Send call message with reply_id injected
@@ -469,6 +544,9 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
         // (prevents leak when caller retries after WouldBlock backpressure)
         let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
         return Err(e);
+    }
+    if trace_idx < IPC_CALL_TRACE_LIMIT {
+        klibcluu::info("  sys_call enqueue done");
     }
 
     // 5. Block waiting for reply
@@ -542,9 +620,7 @@ pub fn sys_reply(args: SyscallArgs) -> SyscallResult {
 
     // Try call reply first, then fault reply
     match crate::sched::ThreadManager::take_call_reply_info_verified(reply_id, current) {
-        Some(call_info) => {
-            crate::ipc::endpoint::deliver_reply(call_info, &buffer[..reply_len])
-        }
+        Some(call_info) => crate::ipc::endpoint::deliver_reply(call_info, &buffer[..reply_len]),
         None => {
             match crate::sched::ThreadManager::take_fault_reply_info_verified(reply_id, current) {
                 Some(fault_info) => {
@@ -724,8 +800,8 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
 // Invoke Operation Handlers
 // ═══════════════════════════════════════════════════════════════════════════
 
-use crate::token::Token;
 use crate::token::scope::ObjectRef;
+use crate::token::Token;
 
 // Thread operations
 
@@ -766,8 +842,7 @@ fn invoke_thread_create(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
         crate::mm::space_repository::with_space(space_id, |space| space.page_table_root)
             .ok_or(Error::NotFound)?;
 
-    let thread_id = ThreadManager::try_alloc_thread_id()
-        .map_err(|_| Error::OutOfMemory)?;
+    let thread_id = ThreadManager::try_alloc_thread_id().map_err(|_| Error::OutOfMemory)?;
     let flags = if ThreadManager::is_init_mode() {
         ThreadFlags::COOPERATIVE
     } else {
@@ -877,7 +952,11 @@ fn invoke_thread_resume(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -
     }
 }
 
-fn invoke_thread_set_priority(_token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_set_priority(
+    _token: &Token,
+    _obj_ref: ObjectRef,
+    _args: SyscallArgs,
+) -> SyscallResult {
     klibcluu::warn("invoke_thread_set_priority not yet implemented");
     Err(Error::NotImplemented)
 }
@@ -887,7 +966,11 @@ fn invoke_thread_set_priority(_token: &Token, _obj_ref: ObjectRef, _args: Syscal
 /// # Arguments
 /// - token: Thread token (requires THREAD_CONTROL right)
 /// - arg3: Endpoint token handle (or 0 to clear)
-fn invoke_thread_set_fault_endpoint(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_set_fault_endpoint(
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
+) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::THREAD_CONTROL) {
@@ -927,7 +1010,11 @@ fn invoke_thread_set_fault_endpoint(token: &Token, obj_ref: ObjectRef, args: Sys
     Ok(0)
 }
 
-fn invoke_thread_set_fs_base(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_set_fs_base(
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
+) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::THREAD_CONTROL) {
@@ -949,14 +1036,16 @@ fn invoke_thread_set_fs_base(token: &Token, obj_ref: ObjectRef, args: SyscallArg
                 return Err(Error::InvalidArgument);
             };
 
-            let current_id = crate::sched::ThreadManager::current()
-                .ok_or(Error::InvalidArgument)?;
+            let current_id =
+                crate::sched::ThreadManager::current().ok_or(Error::InvalidArgument)?;
 
             // Verify the calling thread actually belongs to this space
-            let space_root = crate::mm::space_repository::with_space(space_id, |s| s.page_table_root)
-                .ok_or(Error::NotFound)?;
-            let thread_root = crate::sched::ThreadManager::with_thread(current_id, |t| t.page_table_root)
-                .ok_or(Error::NotFound)?;
+            let space_root =
+                crate::mm::space_repository::with_space(space_id, |s| s.page_table_root)
+                    .ok_or(Error::NotFound)?;
+            let thread_root =
+                crate::sched::ThreadManager::with_thread(current_id, |t| t.page_table_root)
+                    .ok_or(Error::NotFound)?;
 
             if space_root != thread_root {
                 return Err(Error::PermissionDenied);
@@ -1081,11 +1170,12 @@ fn invoke_space_destroy(_token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) 
     }
 
     // Remove from repository (if another thread raced us, we get None)
-    let _space = crate::mm::space_repository::remove(space_id)
-        .ok_or(Error::NotFound)?;
+    let _space = crate::mm::space_repository::remove(space_id).ok_or(Error::NotFound)?;
 
     // Tear down all user page tables and frames
-    unsafe { crate::mm::vmm::teardown_user_pages(pml4_phys); }
+    unsafe {
+        crate::mm::vmm::teardown_user_pages(pml4_phys);
+    }
 
     crate::telemetry::log_resource_delta("space_destroy");
     Ok(0)
@@ -1417,7 +1507,10 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
     }
 }
 
-fn resolve_space_for_futex(token: &Token, obj_ref: ObjectRef) -> Result<crate::token::scope::AddressSpaceId, Error> {
+fn resolve_space_for_futex(
+    token: &Token,
+    obj_ref: ObjectRef,
+) -> Result<crate::token::scope::AddressSpaceId, Error> {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::SPACE_MAP) {
@@ -1579,7 +1672,8 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
     };
 
     // Lookup and validate target token
-    let (target_token, target_obj_ref) = lookup_token(target_token_handle).map_err(|_| Error::InvalidArgument)?;
+    let (target_token, target_obj_ref) =
+        lookup_token(target_token_handle).map_err(|_| Error::InvalidArgument)?;
     if !target_token.has_right(Rights::SPACE_MAP) {
         klibcluu::warn("invoke_space_grant: missing SPACE_MAP right on target token");
         return Err(Error::PermissionDenied);
@@ -2068,12 +2162,7 @@ fn map_device_range(
         let phys_addr = phys_start + (page_idx * PAGE_SIZE) as u64;
 
         let result = space_repository::with_space_mut(space_id, |space| unsafe {
-            elf::map_device_page(
-                virt_addr,
-                phys_addr,
-                writable,
-                space.page_table_root,
-            )
+            elf::map_device_page(virt_addr, phys_addr, writable, space.page_table_root)
         });
 
         match result {
@@ -2094,7 +2183,12 @@ fn map_device_range(
 
 // Token operations
 
-fn invoke_token_derive(handle: TokenHandle, token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
+fn invoke_token_derive(
+    handle: TokenHandle,
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
+) -> SyscallResult {
     use crate::token::{AuthorityId, Issuer, Rights, Timestamp};
 
     klibcluu::trace("invoke_token_derive");
@@ -2115,7 +2209,12 @@ fn invoke_token_derive(handle: TokenHandle, token: &Token, obj_ref: ObjectRef, a
     Ok(derived.as_usize())
 }
 
-fn invoke_token_revoke(handle: TokenHandle, _token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
+fn invoke_token_revoke(
+    handle: TokenHandle,
+    _token: &Token,
+    _obj_ref: ObjectRef,
+    _args: SyscallArgs,
+) -> SyscallResult {
     klibcluu::trace("invoke_token_revoke");
 
     crate::token::revoke_token(handle).map_err(|_| {
@@ -2143,8 +2242,8 @@ fn invoke_irq_attach(_token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) ->
         klibcluu::warn("invoke_irq_attach: invalid endpoint token");
         Error::InvalidArgument
     })?;
-    let endpoint_ref = crate::token::check_object_type(ep_obj_ref, ObjectType::Endpoint)
-        .map_err(|_| {
+    let endpoint_ref =
+        crate::token::check_object_type(ep_obj_ref, ObjectType::Endpoint).map_err(|_| {
             klibcluu::warn("invoke_irq_attach: endpoint resolve failed");
             Error::InvalidArgument
         })?;
@@ -2174,11 +2273,10 @@ fn invoke_irq_ack(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> Sysc
         return Err(Error::PermissionDenied);
     }
 
-    let irq_ref = crate::token::check_object_type(obj_ref, ObjectType::Irq)
-        .map_err(|_| {
-            klibcluu::warn("invoke_irq_ack: failed to resolve IRQ object");
-            Error::InvalidArgument
-        })?;
+    let irq_ref = crate::token::check_object_type(obj_ref, ObjectType::Irq).map_err(|_| {
+        klibcluu::warn("invoke_irq_ack: failed to resolve IRQ object");
+        Error::InvalidArgument
+    })?;
 
     let irq_number = if let ObjectRef::Irq(n) = irq_ref {
         n

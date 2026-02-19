@@ -147,18 +147,12 @@ pub extern "C" fn kstart() -> ! {
         let bb = &*bootboot_ptr;
         (bb.initrd_ptr, bb.initrd_size)
     };
-    let ipc_direct_enabled = boot_env_bool("cluu.ipc_direct").unwrap_or(false);
-    cluu_kernel::ipc::endpoint::set_rendezvous_direct_enabled(ipc_direct_enabled);
+    cluu_kernel::ipc::endpoint::set_rendezvous_direct_enabled(true);
     klibcluu::info("ipc direct rendezvous=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", u64::from(ipc_direct_enabled));
-    let ipc_reg_fast_enabled = boot_env_bool("cluu.ipc_reg_fast").unwrap_or(true);
-    cluu_kernel::ipc::endpoint::set_register_fast_enabled(ipc_reg_fast_enabled);
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", 1);
+    cluu_kernel::ipc::endpoint::set_register_fast_enabled(true);
     klibcluu::info("ipc register fast path=");
-    klibcluu::log_dec(
-        klibcluu::LogLevel::Info,
-        "",
-        u64::from(ipc_reg_fast_enabled),
-    );
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "", 1);
 
     // Phase 3: Memory Management Setup
     // Create bootloader adapter (abstraction layer)
@@ -222,75 +216,6 @@ pub extern "C" fn kstart() -> ! {
 
     #[allow(unreachable_code)] //temporary until pre-emption is working
     idle_loop();
-}
-
-fn boot_env_bool(key: &str) -> Option<bool> {
-    if key.is_empty() {
-        return None;
-    }
-    let key_bytes = key.as_bytes();
-    let env_ptr = (&raw const bootboot::environment).cast::<u8>();
-    if env_ptr.is_null() {
-        return None;
-    }
-    let env_page = unsafe { core::slice::from_raw_parts(env_ptr, 4096) };
-    let mut pos = 0usize;
-    while let Some((entry, next)) = next_boot_env_entry(env_page, pos) {
-        if let Some(value) = split_boot_env_entry(entry, key_bytes) {
-            return parse_env_bool_value(value);
-        }
-        pos = next;
-    }
-    None
-}
-
-fn next_boot_env_entry(page: &[u8], mut pos: usize) -> Option<(&[u8], usize)> {
-    while pos < page.len() && (page[pos] == 0 || page[pos] == b'\n' || page[pos] == b'\r') {
-        pos += 1;
-    }
-    if pos >= page.len() || page[pos] == 0 {
-        return None;
-    }
-    let start = pos;
-    while pos < page.len() && page[pos] != 0 && page[pos] != b'\n' && page[pos] != b'\r' {
-        pos += 1;
-    }
-    if start == pos {
-        return None;
-    }
-    Some((&page[start..pos], pos.saturating_add(1)))
-}
-
-fn split_boot_env_entry<'a>(entry: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
-    let eq_pos = entry.iter().position(|b| *b == b'=')?;
-    if &entry[..eq_pos] != key {
-        return None;
-    }
-    Some(&entry[eq_pos + 1..])
-}
-
-fn parse_env_bool_value(value: &[u8]) -> Option<bool> {
-    if value == b"1"
-        || value == b"true"
-        || value == b"TRUE"
-        || value == b"yes"
-        || value == b"YES"
-        || value == b"on"
-        || value == b"ON"
-    {
-        return Some(true);
-    }
-    if value == b"0"
-        || value == b"false"
-        || value == b"FALSE"
-        || value == b"no"
-        || value == b"NO"
-        || value == b"off"
-        || value == b"OFF"
-    {
-        return Some(false);
-    }
-    None
 }
 
 fn idle_loop() -> ! {
