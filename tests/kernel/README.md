@@ -5,7 +5,7 @@ This crate contains unit tests for the CLUU microkernel, separated from the main
 ## Structure
 
 ```
-kernel-tests/
+tests/kernel/
 ├── Cargo.toml          # Test crate configuration
 ├── src/
 │   └── lib.rs         # Re-exports kernel for testing
@@ -20,7 +20,7 @@ kernel-tests/
 ## Running Tests
 
 ```bash
-cd kernel-tests
+cd tests/kernel
 cargo test
 ```
 

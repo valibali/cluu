@@ -15,7 +15,7 @@
 //! # Running Tests
 //!
 //! ```bash
-//! cd kernel-tests
+//! cd tests/kernel
 //! cargo test
 //! ```
 

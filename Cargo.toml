@@ -10,7 +10,7 @@ members = [
     # Kernel
     "kernel",
     "klibcluu",
-    "kernel-tests",
+    "tests/kernel",
 
     # Userspace
     "userspace/libcluu",

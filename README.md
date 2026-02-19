@@ -390,6 +390,9 @@ doctor:
 logs:
 	cargo xtask logs
 
+repo-hygiene:
+	./scripts/repo_hygiene_check.sh
+
 userspace:
 	cargo xtask userspace
 
@@ -415,6 +418,7 @@ make rebuild-full # Deterministic from-scratch rebuild (newlib/syscalls/crt0/ker
 make rebuild-full-release # Deterministic from-scratch rebuild (release profile)
 make doctor      # Verify host toolchain + key artifacts
 make logs        # List latest rich-build task logs
+make repo-hygiene # Verify repo structure/clean invariants
 ```
 
 ---
@@ -468,6 +472,12 @@ They are fetched implicitly by build steps when missing.
 When bumping `newlib` or `micropython`, update `external/sources.env` first.
 `cargo xtask doctor` reports configured versions/refs and warns when local patch sets
 or source drift are detected.
+
+Repository layout and naming conventions are documented in:
+
+```
+docs/REPO_LAYOUT.md
+```
 
 ---
 

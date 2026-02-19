@@ -2,7 +2,7 @@
 # For idiomatic Rust development, prefer: cargo xtask <command>
 
 .PHONY: all build build-rich build-release run run-rich run-release run-debug test test-harness test-slo \
-	clean full-clean pristine rebuild-full rebuild-full-release userspace kernel setup-c doctor logs help
+	clean full-clean pristine rebuild-full rebuild-full-release userspace kernel setup-c doctor logs repo-hygiene help
 
 all: build
 
@@ -65,12 +65,16 @@ doctor:
 logs:
 	cargo xtask logs
 
+repo-hygiene:
+	./scripts/repo_hygiene_check.sh
+
 help:
 	@echo "CLUU Build System"
 	@echo ""
 	@echo "Recommended flows:"
 	@echo "  make doctor       - Check host tools + key artifacts"
 	@echo "  make logs         - List latest rich-build task logs"
+	@echo "  make repo-hygiene - Verify repository structure and clean invariants"
 	@echo "  make build-rich   - Rich UI build (parallel-safe stages + progress + per-task logs)"
 	@echo "  make build        - Rich build (default UI)"
 	@echo "  make run-debug    - Build + run paused for GDB"
@@ -91,7 +95,7 @@ help:
 	@echo "  make test-harness     - Harness churn/leak/failpoint matrix"
 	@echo "  make test-slo         - Repeated fairness SLO sweep"
 	@echo "  make clean            - Full clean (target/tmp/external caches/build outputs)"
-	@echo "  make full-clean       - Full clean (target/tmp/staging)"
+	@echo "  make full-clean       - Full clean (same as make clean)"
 	@echo "  make pristine         - Alias for full-clean"
 	@echo "  make rebuild-full     - Full clean + rebuild toolchain/images"
 	@echo "  make rebuild-full-release - Full clean + rebuild in release profile"

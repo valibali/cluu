@@ -3,7 +3,7 @@
 ## ✅ Completed Setup
 
 The kernel test infrastructure is now fully functional:
-- Created separate `kernel-tests/` crate
+- Created separate `tests/kernel/` crate
 - Tests successfully running with `cargo test`
 - Proper separation from kernel `no_std` environment
 
@@ -39,7 +39,7 @@ Used in `kernel/src/mm/heap.rs`:
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 ```
 
-kernel-tests imports kernel with feature enabled:
+tests/kernel imports kernel with feature enabled:
 ```toml
 cluu-kernel = { path = "../kernel", features = ["testing"] }
 ```
@@ -74,7 +74,7 @@ From `find kernel/src -name "*.rs" -exec grep -l "#\[cfg(test)\]"`:
 For each test module:
 
 1. **Extract test code** from `#[cfg(test)] mod tests { ... }`
-2. **Create test file** in `kernel-tests/tests/`
+2. **Create test file** in `tests/kernel/tests/`
 3. **Update imports** to use `kernel_tests::cluu_kernel::`
 4. **Handle private functions:**
    - Either make them `pub` with `#[doc(hidden)]`
@@ -97,7 +97,7 @@ mod tests {
 }
 ```
 
-**After** (`kernel-tests/tests/elf_tests.rs`):
+**After** (`tests/kernel/tests/elf_tests.rs`):
 ```rust
 use kernel_tests::cluu_kernel::elf::*;
 
@@ -136,5 +136,5 @@ cargo test --test elf_tests
 cargo test -- --nocapture
 
 # Just kernel tests (not userspace)
-cd kernel-tests && cargo test
+cd tests/kernel && cargo test
 ```

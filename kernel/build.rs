@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 fn main() {
-    let _out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
     // Link pre-assembled NASM objects
     // (assembled by xtask before cargo build)
@@ -27,43 +27,40 @@ fn main() {
         }
     }
 
-    // Link font.o for framebuffer
+    // Link font object for framebuffer from build output dir (not source tree).
     let kernel_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let font_o = kernel_dir.join("font.o");
+    let font_psf = kernel_dir.join("font.psf");
+    if font_psf.exists() {
+        let font_o = out_dir.join("font.o");
+        let font_a = out_dir.join("libfont.a");
 
-    if font_o.exists() {
-        println!("cargo:rustc-link-search=native={}", kernel_dir.display());
-        let font_a = kernel_dir.join("libfont.a");
-        let _ = std::process::Command::new("ar")
-            .args(["rcs", font_a.to_str().unwrap(), font_o.to_str().unwrap()])
-            .status();
-        println!("cargo:rustc-link-lib=static=font");
-    } else {
-        // If font.o doesn't exist, create it from font.psf
-        let font_psf = kernel_dir.join("font.psf");
-        if font_psf.exists() {
-            let status = std::process::Command::new("objcopy")
-                .args([
-                    "-O",
-                    "elf64-x86-64",
-                    "-B",
-                    "i386",
-                    "-I",
-                    "binary",
-                    font_psf.to_str().unwrap(),
-                    font_o.to_str().unwrap(),
-                ])
-                .status();
-
-            if status.is_ok() && status.unwrap().success() {
-                println!("cargo:rustc-link-search=native={}", kernel_dir.display());
-                let font_a = kernel_dir.join("libfont.a");
-                let _ = std::process::Command::new("ar")
-                    .args(["rcs", font_a.to_str().unwrap(), font_o.to_str().unwrap()])
-                    .status();
-                println!("cargo:rustc-link-lib=static=font");
-            }
+        let objcopy_status = std::process::Command::new("objcopy")
+            .args([
+                "-O",
+                "elf64-x86-64",
+                "-B",
+                "i386",
+                "-I",
+                "binary",
+                font_psf.to_str().unwrap(),
+                font_o.to_str().unwrap(),
+            ])
+            .status()
+            .expect("failed to run objcopy for font.psf");
+        if !objcopy_status.success() {
+            panic!("objcopy failed while creating {}", font_o.display());
         }
+
+        let ar_status = std::process::Command::new("ar")
+            .args(["rcs", font_a.to_str().unwrap(), font_o.to_str().unwrap()])
+            .status()
+            .expect("failed to run ar for font archive");
+        if !ar_status.success() {
+            panic!("ar failed while creating {}", font_a.display());
+        }
+
+        println!("cargo:rustc-link-search=native={}", out_dir.display());
+        println!("cargo:rustc-link-lib=static=font");
     }
 
     // Rerun if assembly sources change
@@ -74,5 +71,4 @@ fn main() {
 
     // Rerun if font changes
     println!("cargo:rerun-if-changed=font.psf");
-    println!("cargo:rerun-if-changed=font.o");
 }

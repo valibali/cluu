@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Import the kernel as a library for testing
-cluu-kernel = { path = "../kernel", features = ["testing"] }
+cluu-kernel = { path = "../../kernel", features = ["testing"] }
 
 # Test dependencies
 x86_64 = "0.15"
