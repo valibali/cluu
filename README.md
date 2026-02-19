@@ -20,7 +20,7 @@ This README reflects the **current system status**. The token system and IPC/end
 ## Getting Started (Quick Run)
 
 ```
-cargo xtask run --debug
+cargo xtask run --build --debug
 ```
 
 Open the serial console:
@@ -359,13 +359,25 @@ run:
 	cargo xtask run
 
 run-rich:
-	cargo xtask run --ui rich
+	cargo xtask run
 
 run-release:
-	cargo xtask run --profile release
+	cargo xtask run
 
 run-debug:
 	cargo xtask run --debug
+
+run-build:
+	cargo xtask run --build
+
+run-build-rich:
+	cargo xtask run --build --ui rich
+
+run-build-release:
+	cargo xtask run --build --profile release
+
+run-debug-build:
+	cargo xtask run --build --debug
 
 test:
 	cargo xtask test
@@ -406,10 +418,12 @@ Usage summary:
 make build       # Build everything (rich UI default)
 make build-rich  # Build everything (rich UI: progress + per-task logs)
 make build-release
-make run         # Build and run in QEMU (rich UI default)
-make run-rich    # Build and run in QEMU (rich UI)
-make run-release
-make run-debug   # Run with GDB + telnet serial
+make run         # Run existing image in QEMU
+make run-rich    # Alias of make run
+make run-release # Alias of make run
+make run-debug   # Run existing image with GDB + telnet serial
+make run-build   # Build and run in QEMU
+make run-debug-build # Build and run with GDB + telnet serial
 make test        # Run all tests
 make clean       # Full clean (target/tmp/external caches/build outputs)
 make full-clean  # Same as make clean
@@ -429,7 +443,8 @@ For idiomatic Rust development, **prefer using `cargo xtask` directly**:
 
 ```
 cargo xtask build [--profile dev|release] [--ui linear|rich]
-cargo xtask run [--profile dev|release] [--ui linear|rich]
+cargo xtask run [--debug]
+cargo xtask run --build [--profile dev|release] [--ui linear|rich] [--debug]
 cargo xtask run --debug
 cargo xtask test
 cargo xtask clean

@@ -2,7 +2,8 @@
 //!
 //! Usage:
 //!   cargo xtask build          # Build everything
-//!   cargo xtask run            # Build and run in QEMU
+//!   cargo xtask run            # Run existing disk image in QEMU
+//!   cargo xtask run --build    # Build and then run in QEMU
 //!   cargo xtask test           # Run all tests
 //!   cargo xtask clean          # Clean all build artifacts
 
@@ -12,6 +13,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
@@ -115,14 +118,17 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = BuildUi::Rich)]
         ui: BuildUi,
     },
-    /// Build and run in QEMU
+    /// Run existing disk image in QEMU
     Run {
+        /// Build first, then run QEMU
+        #[arg(long)]
+        build: bool,
         #[arg(long, default_value = "dev")]
         profile: String,
         /// Enable debug mode (pause for GDB, telnet serial on 4321)
         #[arg(long)]
         debug: bool,
-        /// Build UI mode: linear output or rich progress view with per-task logs
+        /// Build UI mode when used with --build
         #[arg(long, value_enum, default_value_t = BuildUi::Rich)]
         ui: BuildUi,
     },
@@ -238,8 +244,15 @@ fn main() -> Result<()> {
             build_pipeline(&profile, ui)?;
             println!("✓ Build complete: target/cluu.img");
         }
-        Commands::Run { profile, debug, ui } => {
-            build_pipeline(&profile, ui)?;
+        Commands::Run {
+            build,
+            profile,
+            debug,
+            ui,
+        } => {
+            if build {
+                build_pipeline(&profile, ui)?;
+            }
             run_qemu(debug)?;
         }
         Commands::Test => {
@@ -582,7 +595,7 @@ fn follow_log(log_path: &Path) -> Result<()> {
             .with_context(|| format!("Failed to read {}", log_path.display()))?;
 
         if !new_data.is_empty() {
-            offset += new_data.as_bytes().len() as u64;
+            offset += new_data.len() as u64;
             print!("{new_data}");
             io::stdout().flush().context("Failed to flush stdout")?;
         }
@@ -614,7 +627,7 @@ fn view_logs(run: Option<&str>, task: Option<&str>, lines: usize, follow: bool) 
                 .unwrap_or("unknown");
             println!("  {name}");
         }
-        println!("");
+        println!();
         println!("Use: cargo xtask logs --task <name> [--lines N] [--follow]");
         return Ok(());
     }
@@ -622,11 +635,11 @@ fn view_logs(run: Option<&str>, task: Option<&str>, lines: usize, follow: bool) 
     let task_name = task.unwrap();
     let log_path = resolve_task_log(&run_dir, task_name)?;
     println!("▸ Task log: {}", log_path.display());
-    println!("");
+    println!();
     print_log_tail(&log_path, lines);
 
     if follow {
-        println!("");
+        println!();
         println!("--- following (Ctrl+C to stop) ---");
         follow_log(&log_path)?;
     }
@@ -693,21 +706,62 @@ fn truncate_live_line(line: &str, max_chars: usize) -> String {
     out
 }
 
+fn ansi_escape_len(bytes: &[u8], start: usize) -> usize {
+    if start >= bytes.len() || bytes[start] != 0x1b {
+        return 0;
+    }
+    if start + 1 >= bytes.len() {
+        return 1;
+    }
+    match bytes[start + 1] {
+        b'[' => {
+            // CSI: ESC [ ... <final-byte 0x40..0x7E>
+            let mut i = start + 2;
+            while i < bytes.len() {
+                if (0x40..=0x7e).contains(&bytes[i]) {
+                    return i - start + 1;
+                }
+                i += 1;
+            }
+            bytes.len() - start
+        }
+        b']' => {
+            // OSC: ESC ] ... BEL or ST(ESC \)
+            let mut i = start + 2;
+            while i < bytes.len() {
+                if bytes[i] == 0x07 {
+                    return i - start + 1;
+                }
+                if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                    return i - start + 2;
+                }
+                i += 1;
+            }
+            bytes.len() - start
+        }
+        _ => {
+            // Other ESC sequence, assume 2-byte sequence.
+            (start + 2).min(bytes.len()) - start
+        }
+    }
+}
+
 fn visible_width_ansi(line: &str) -> usize {
     let mut width = 0usize;
-    let mut in_escape = false;
-    for ch in line.chars() {
-        if in_escape {
-            if ('@'..='~').contains(&ch) {
-                in_escape = false;
-            }
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            let esc_len = ansi_escape_len(bytes, i).max(1);
+            i = i.saturating_add(esc_len);
             continue;
         }
-        if ch == '\x1b' {
-            in_escape = true;
-            continue;
+        if let Some(ch) = line[i..].chars().next() {
+            i += ch.len_utf8();
+            width = width.saturating_add(1);
+        } else {
+            break;
         }
-        width = width.saturating_add(1);
     }
     width
 }
@@ -715,26 +769,26 @@ fn visible_width_ansi(line: &str) -> usize {
 fn take_visible_ansi(line: &str, visible_limit: usize) -> String {
     let mut out = String::new();
     let mut visible = 0usize;
-    let mut in_escape = false;
-
-    for ch in line.chars() {
-        if in_escape {
-            out.push(ch);
-            if ('@'..='~').contains(&ch) {
-                in_escape = false;
-            }
-            continue;
-        }
-        if ch == '\x1b' {
-            in_escape = true;
-            out.push(ch);
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            let esc_len = ansi_escape_len(bytes, i).max(1);
+            let end = (i + esc_len).min(bytes.len());
+            out.push_str(&line[i..end]);
+            i = end;
             continue;
         }
         if visible >= visible_limit {
             break;
         }
-        out.push(ch);
-        visible = visible.saturating_add(1);
+        if let Some(ch) = line[i..].chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
+            visible = visible.saturating_add(1);
+        } else {
+            break;
+        }
     }
 
     out
@@ -752,6 +806,22 @@ fn clamp_render_line(line: &str, width: usize, use_color: bool) -> String {
     let mut out = take_visible_ansi(line, width.saturating_sub(1));
     out.push('…');
     out.push_str("\x1b[0m");
+    out
+}
+
+fn fit_render_line(line: &str, width: usize, use_color: bool) -> String {
+    let width = width.max(1);
+    let clamped = clamp_render_line(line, width, use_color);
+    let visible = if use_color {
+        visible_width_ansi(&clamped)
+    } else {
+        clamped.chars().count()
+    };
+    if visible >= width {
+        return clamped;
+    }
+    let mut out = clamped;
+    out.push_str(&" ".repeat(width - visible));
     out
 }
 
@@ -877,15 +947,23 @@ impl RichTreeUi {
     fn start_renderer(&self) -> thread::JoinHandle<()> {
         let ui = self.clone();
         thread::spawn(move || {
-            print!("\x1b[?25l");
+            let use_ansi = should_use_ansi_controls();
+            if use_ansi {
+                // Alternate screen + hidden cursor + no line-wrap to prevent redraw scrolling.
+                print!("\x1b[?1049h\x1b[?25l\x1b[?7l");
+            }
             let _ = io::stdout().flush();
             let mut progress_floor: HashMap<&'static str, f32> = HashMap::new();
+            let mut last_frame = String::new();
 
             loop {
                 let snapshot = ui.snapshot();
                 let frame = render_tree_frame(&snapshot, &mut progress_floor);
-                print!("{frame}");
-                let _ = io::stdout().flush();
+                if frame != last_frame {
+                    print!("{frame}");
+                    let _ = io::stdout().flush();
+                    last_frame = frame;
+                }
 
                 if snapshot.stop {
                     break;
@@ -897,7 +975,10 @@ impl RichTreeUi {
                 thread::sleep(Duration::from_millis(90));
             }
 
-            print!("\x1b[?25h\n");
+            if use_ansi {
+                print!("\x1b[?7h\x1b[?25h\x1b[?1049l");
+                println!();
+            }
             let _ = io::stdout().flush();
         })
     }
@@ -977,7 +1058,7 @@ fn compute_tree_order(
         order.push(id);
         if let Some(node) = nodes.get(id) {
             for child in &node.children {
-                walk(*child, nodes, order);
+                walk(child, nodes, order);
             }
         }
     }
@@ -987,7 +1068,57 @@ fn compute_tree_order(
     order
 }
 
+#[cfg(unix)]
+fn winsize_from_fd(fd: libc::c_int) -> Option<(usize, usize)> {
+    let mut ws = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: ioctl(TIOCGWINSZ) writes into `ws` for a valid tty fd.
+    let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
+    if rc == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+        Some((ws.ws_col as usize, ws.ws_row as usize))
+    } else {
+        None
+    }
+}
+
 fn terminal_dimensions() -> (usize, usize) {
+    if let (Some(w), Some(h)) = (
+        std::env::var("CLUU_UI_WIDTH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok()),
+        std::env::var("CLUU_UI_HEIGHT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok()),
+    ) {
+        if w > 0 && h > 0 {
+            return (w, h);
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        let fds = [
+            io::stdout().as_raw_fd(),
+            io::stderr().as_raw_fd(),
+            io::stdin().as_raw_fd(),
+        ];
+        for fd in fds {
+            if let Some((w, h)) = winsize_from_fd(fd) {
+                return (w, h);
+            }
+        }
+
+        if let Ok(tty) = File::open("/dev/tty") {
+            if let Some((w, h)) = winsize_from_fd(tty.as_raw_fd()) {
+                return (w, h);
+            }
+        }
+    }
+
     if let Some((terminal_size::Width(w), terminal_size::Height(h))) =
         terminal_size::terminal_size()
     {
@@ -1109,6 +1240,16 @@ fn should_use_color() -> bool {
     io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
+fn should_use_ansi_controls() -> bool {
+    if !io::stdout().is_terminal() {
+        return false;
+    }
+    match std::env::var("TERM") {
+        Ok(term) => !term.trim().is_empty() && term != "dumb",
+        Err(_) => true,
+    }
+}
+
 fn paint(text: &str, ansi_code: &str, use_color: bool) -> String {
     if use_color {
         format!("\x1b[{}m{}\x1b[0m", ansi_code, text)
@@ -1188,11 +1329,11 @@ fn render_tree_frame(
     progress_floor: &mut HashMap<&'static str, f32>,
 ) -> String {
     let (term_width, term_height) = terminal_dimensions();
-    let width = term_width.max(70);
+    let width = term_width.max(24);
     let visible_lines = term_height.max(1);
     let use_color = should_use_color();
     let mut out = String::new();
-    out.push_str("\x1b[H\x1b[2J");
+    out.push_str("\x1b[H\x1b[J");
     let (overall_progress, _, _) = aggregate_node("build", &snapshot.nodes);
     let overall_percent = ((overall_progress.clamp(0.0, 1.0)) * 100.0).round() as u32;
     let overall_bar = progress_bar(overall_progress, 28, NodeStatus::Running, use_color);
@@ -1225,18 +1366,16 @@ fn render_tree_frame(
         )
     );
     let header_line_3 = format!(
-        "{} {}  {} {}",
+        "{} {}",
         paint("tasks:", "90", use_color),
-        paint(&total.to_string(), "94", use_color),
-        paint("logs:", "90", use_color),
-        paint(&snapshot.logs_dir, "90", use_color)
+        paint(&total.to_string(), "94", use_color)
     );
     let header_line_4 = paint(
         "hint: use 'cargo xtask logs --task <name> --follow' for live per-task logs",
         "2",
         use_color,
     );
-    let separator = paint(&"─".repeat(width.min(120)), "38;5;45", use_color);
+    let separator = paint(&"─".repeat(width), "38;5;45", use_color);
     let mut header_lines = vec![
         header_line_1,
         header_line_2,
@@ -1267,52 +1406,81 @@ fn render_tree_frame(
         };
 
         let percent = ((progress.clamp(0.0, 1.0)) * 100.0).round() as u32;
-        let bar = progress_bar(progress, 18, status, use_color);
         let percent_s = match status {
             NodeStatus::Pending => paint(&format!("{:>3}%", percent), "90", use_color),
             NodeStatus::Running => paint(&format!("{:>3}%", percent), "33", use_color),
             NodeStatus::Done => paint(&format!("{:>3}%", percent), "32", use_color),
             NodeStatus::Failed => paint(&format!("{:>3}%", percent), "31", use_color),
         };
-        let mut line = format!(
-            "{} [{}] {} {}",
-            label,
-            bar,
-            percent_s,
-            colorize_status(status, use_color)
-        );
+        let status_s = colorize_status(status, use_color);
+
+        let make_base_line = |bar_width: usize| {
+            let bar = progress_bar(progress, bar_width, status, use_color);
+            format!("{} [{}] {} {}", label, bar, percent_s, status_s)
+        };
+
+        // Fit the base line first so tree/progress/status stay intact on narrow terminals.
+        let mut bar_width = 18usize;
+        let mut line = loop {
+            let candidate = make_base_line(bar_width);
+            if visible_width_ansi(&candidate) <= width || bar_width <= 4 {
+                break candidate;
+            }
+            bar_width -= 1;
+        };
+
         if status == NodeStatus::Running && !node.last_line.is_empty() {
-            line.push_str("  ");
-            line.push_str(&paint(
-                &truncate_live_line(&node.last_line, width.saturating_sub(30)),
-                "2",
-                use_color,
-            ));
+            // Reserve visible room for a live log snippet by shrinking the bar if needed.
+            let desired_live_width = 24usize;
+            loop {
+                let remaining = width.saturating_sub(visible_width_ansi(&line) + 2);
+                if remaining >= desired_live_width || bar_width <= 4 {
+                    break;
+                }
+                bar_width -= 1;
+                line = make_base_line(bar_width);
+            }
+            let remaining = width.saturating_sub(visible_width_ansi(&line) + 2);
+            if remaining > 0 {
+                line.push_str("  ");
+                line.push_str(&paint(
+                    &truncate_live_line(&node.last_line, remaining.max(1)),
+                    "2",
+                    use_color,
+                ));
+            }
         }
         if status == NodeStatus::Failed {
             let note = fail_log.unwrap_or_else(|| "log unavailable".to_string());
-            line.push_str(&format!(
-                "  {}",
-                paint(&format!("log: {}", note), "31;1", use_color)
-            ));
+            let remaining = width.saturating_sub(visible_width_ansi(&line) + 2);
+            if remaining > 6 {
+                line.push_str("  ");
+                line.push_str(&paint(
+                    &truncate_live_line(&format!("log: {}", note), remaining),
+                    "31;1",
+                    use_color,
+                ));
+            }
         }
-        if use_color {
-            lines.push(line);
-        } else {
-            lines.push(truncate_live_line(&line, width));
-        }
+        lines.push(line);
     }
 
     let header_count = header_lines.len();
     let tree_visible = visible_lines.saturating_sub(header_count);
-    for line in header_lines.drain(..).take(visible_lines) {
-        out.push_str(&clamp_render_line(&line, width, use_color));
-        out.push('\n');
-    }
-    for line in lines.into_iter().take(tree_visible) {
-        out.push_str(&clamp_render_line(&line, width, use_color));
-        out.push('\n');
-    }
+    let mut rendered_lines: Vec<String> = Vec::new();
+    rendered_lines.extend(
+        header_lines
+            .drain(..)
+            .take(visible_lines)
+            .map(|line| fit_render_line(&line, width, use_color)),
+    );
+    rendered_lines.extend(
+        lines
+            .into_iter()
+            .take(tree_visible)
+            .map(|line| fit_render_line(&line, width, use_color)),
+    );
+    out.push_str(&rendered_lines.join("\n"));
     out
 }
 
@@ -2408,10 +2576,16 @@ fn run_qemu(debug: bool) -> Result<()> {
     let user_disk = project_root().join("target/userdisk.img");
 
     if !img_path.exists() {
-        bail!("Disk image not found. Run 'cargo xtask build' first.");
+        bail!(
+            "Disk image not found at {}. Run 'cargo xtask build' or 'cargo xtask run --build' first.",
+            img_path.display()
+        );
     }
     if !user_disk.exists() {
-        bail!("User disk image not found. Run 'cargo xtask build' first.");
+        bail!(
+            "User disk image not found at {}. Run 'cargo xtask build' or 'cargo xtask run --build' first.",
+            user_disk.display()
+        );
     }
 
     // Try to find OVMF.fd
@@ -2461,14 +2635,14 @@ fn run_qemu(debug: bool) -> Result<()> {
         println!("  📡 Telnet serial: localhost:4321 (use 'telnet localhost 4321')");
         println!("  ⏸️  CPU paused - waiting for GDB connection");
         println!("  💡 In GDB: 'continue' to start execution");
-        println!("");
+        println!();
         println!("  Quick start:");
         println!("    Terminal 1: cargo xtask run --debug");
         println!("    Terminal 2: telnet localhost 4321");
         println!("    Terminal 3: gdb target/x86_64-cluu-kernel/debug/deps/kernel-*.elf");
         println!("                (gdb) target remote :1234");
         println!("                (gdb) continue");
-        println!("");
+        println!();
 
         cmd.args([
             "-s", // GDB server on port 1234
@@ -2616,7 +2790,7 @@ fn rebuild_full(profile: &str) -> Result<()> {
 
 fn doctor() -> Result<()> {
     println!("▸ CLUU build doctor");
-    println!("");
+    println!();
 
     let required_tools = [
         "cargo",
@@ -2647,7 +2821,7 @@ fn doctor() -> Result<()> {
         }
     }
 
-    println!("");
+    println!();
     println!("Optional host tools:");
     for tool in optional_tools {
         let ok = command_in_path(tool);
@@ -2661,7 +2835,7 @@ fn doctor() -> Result<()> {
     let newlib_src = sources.newlib_dir.clone();
     let micropython_src = sources.micropython_dir.clone();
 
-    println!("");
+    println!();
     println!("Build artifact status:");
     let checks = [
         ("target/cluu.img", root.join("target/cluu.img")),
@@ -2711,7 +2885,7 @@ fn doctor() -> Result<()> {
         newlib_include.display()
     );
 
-    println!("");
+    println!();
     println!("External source config:");
     println!(
         "  [{}] {}",
@@ -2737,7 +2911,7 @@ fn doctor() -> Result<()> {
     println!("  micropython repo={}", sources.micropython_repo);
 
     let mut patch_warning = false;
-    println!("");
+    println!();
     println!("External patch audit:");
 
     let tracked_newlib = git_ls_files_under(&newlib_src);
@@ -2837,7 +3011,7 @@ fn doctor() -> Result<()> {
 
     let legacy_userfs = root.join("userfs");
     if legacy_userfs.exists() {
-        println!("");
+        println!();
         println!(
             "Note: legacy staging directory exists at {}",
             legacy_userfs.display()
@@ -2845,7 +3019,7 @@ fn doctor() -> Result<()> {
         println!("      Run `cargo xtask clean-full` to remove it.");
     }
 
-    println!("");
+    println!();
     if !missing_required.is_empty() {
         bail!(
             "Missing required host tools: {}",
@@ -3367,17 +3541,17 @@ fn setup_c_toolchain() -> Result<()> {
     build_crt0()?;
 
     // Step 3: Build newlib (auto-download if missing)
-    println!("");
+    println!();
     build_newlib()?;
 
-    println!("");
+    println!();
     println!("✓ C toolchain setup complete!");
-    println!("");
+    println!();
     println!("Sysroot: {}", sysroot_path().display());
-    println!("");
+    println!();
     println!("To build a C program:");
     println!("  cargo xtask build-c <name> <source.c>");
-    println!("");
+    println!();
     println!("Example:");
     println!("  cargo xtask build-c hello userspace/c-programs/hello.c");
 

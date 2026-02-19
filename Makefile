@@ -1,7 +1,7 @@
 # CLUU Build System - Thin wrapper around xtask
 # For idiomatic Rust development, prefer: cargo xtask <command>
 
-.PHONY: all build build-rich build-release run run-rich run-release run-debug test test-harness test-slo \
+.PHONY: all build build-rich build-release run run-rich run-release run-debug run-build run-build-rich run-build-release run-debug-build test test-harness test-slo \
 	clean full-clean pristine rebuild-full rebuild-full-release userspace kernel setup-c doctor logs repo-hygiene help
 
 all: build
@@ -19,13 +19,25 @@ run:
 	cargo xtask run
 
 run-rich:
-	cargo xtask run --ui rich
+	cargo xtask run
 
 run-release:
-	cargo xtask run --profile release
+	cargo xtask run
 
 run-debug:
 	cargo xtask run --debug
+
+run-build:
+	cargo xtask run --build
+
+run-build-rich:
+	cargo xtask run --build --ui rich
+
+run-build-release:
+	cargo xtask run --build --profile release
+
+run-debug-build:
+	cargo xtask run --build --debug
 
 test:
 	cargo xtask test
@@ -77,7 +89,8 @@ help:
 	@echo "  make repo-hygiene - Verify repository structure and clean invariants"
 	@echo "  make build-rich   - Rich UI build (parallel-safe stages + progress + per-task logs)"
 	@echo "  make build        - Rich build (default UI)"
-	@echo "  make run-debug    - Build + run paused for GDB"
+	@echo "  make run-debug    - Run existing image paused for GDB"
+	@echo "  make run-build    - Build + run in QEMU"
 	@echo "  make clean        - Full workspace clean (equivalent build reset)"
 	@echo "  make full-clean   - Remove all generated artifacts"
 	@echo "  make pristine     - Alias for full-clean"
@@ -87,10 +100,14 @@ help:
 	@echo "  make build            - Build everything (dev profile, rich UI default)"
 	@echo "  make build-rich       - Build everything (dev profile, rich UI)"
 	@echo "  make build-release    - Build everything (release profile)"
-	@echo "  make run              - Build and run in QEMU (rich UI default)"
-	@echo "  make run-rich         - Build and run in QEMU (rich UI)"
-	@echo "  make run-release      - Build+run with release profile"
-	@echo "  make run-debug        - Run with GDB + telnet serial"
+	@echo "  make run              - Run existing image in QEMU"
+	@echo "  make run-rich         - Alias of make run"
+	@echo "  make run-release      - Alias of make run"
+	@echo "  make run-debug        - Run existing image with GDB + telnet serial"
+	@echo "  make run-build        - Build and run in QEMU (dev)"
+	@echo "  make run-build-rich   - Build and run in QEMU (rich UI)"
+	@echo "  make run-build-release - Build and run in QEMU (release)"
+	@echo "  make run-debug-build  - Build and run paused for GDB"
 	@echo "  make test             - Run tests"
 	@echo "  make test-harness     - Harness churn/leak/failpoint matrix"
 	@echo "  make test-slo         - Repeated fairness SLO sweep"
@@ -109,7 +126,8 @@ help:
 	@echo "Available xtask commands:"
 	@echo "  cargo xtask doctor"
 	@echo "  cargo xtask build [--profile dev|release] [--ui linear|rich]"
-	@echo "  cargo xtask run [--profile dev|release] [--ui linear|rich]"
+	@echo "  cargo xtask run [--debug]"
+	@echo "  cargo xtask run --build [--profile dev|release] [--ui linear|rich] [--debug]"
 	@echo "  cargo xtask run --debug"
 	@echo "  cargo xtask test"
 	@echo "  cargo xtask harness-matrix [--no-build]"

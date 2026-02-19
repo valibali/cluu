@@ -6,13 +6,13 @@
 
 **Terminal 1: Start QEMU in debug mode**
 ```bash
-cargo xtask run --debug
+cargo xtask run --build --debug
 # or
-make run-debug
+make run-debug-build
 ```
 
 This will:
-- ✅ Build everything
+- ✅ Build/update disk images
 - ✅ Start QEMU with UEFI
 - ✅ **Pause CPU** - waiting for GDB
 - ✅ Start **GDB server** on `localhost:1234`
@@ -49,7 +49,13 @@ cargo xtask run
 
 - Serial output to **stdio** (your terminal)
 - No pause, starts immediately
+- Uses existing images (no rebuild)
 - Good for: Testing, watching output
+
+If you need a fresh image first:
+```bash
+cargo xtask run --build
+```
 
 ### 2. Debug Run (With GDB)
 
@@ -60,6 +66,7 @@ cargo xtask run --debug
 - Serial output to **stdio** + **telnet:4321**
 - **Pauses at startup** - waits for GDB
 - GDB server on port **1234**
+- Uses existing images (no rebuild)
 - Good for: Debugging, step-through, breakpoints
 
 ---
