@@ -8,7 +8,7 @@
 //! - /proc/self: Current process info (directory)
 
 use crate::mount::{DirEntry, VirtualEntry};
-use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use libcluu::Result;
 
@@ -23,50 +23,50 @@ pub static ENTRIES: &[(&str, VirtualEntry)] = &[
 ];
 
 fn gen_version() -> Result<Vec<u8>> {
-    let version = format!(
+    let version = String::from(
         "CLUU microkernel v0.1.0\n\
          Built with Rust (no_std)\n\
-         Architecture: x86_64\n"
+         Architecture: x86_64\n",
     );
     Ok(version.into_bytes())
 }
 
 fn gen_uptime() -> Result<Vec<u8>> {
     // TODO: Get actual uptime from timeserver
-    let uptime = format!("0.00 0.00\n");
+    let uptime = String::from("0.00 0.00\n");
     Ok(uptime.into_bytes())
 }
 
 fn gen_meminfo() -> Result<Vec<u8>> {
     // TODO: Get actual memory stats from kernel
-    let meminfo = format!(
+    let meminfo = String::from(
         "MemTotal:       131072 kB\n\
          MemFree:        100000 kB\n\
          MemAvailable:   100000 kB\n\
          Buffers:            0 kB\n\
-         Cached:             0 kB\n"
+         Cached:             0 kB\n",
     );
     Ok(meminfo.into_bytes())
 }
 
 fn gen_cpuinfo() -> Result<Vec<u8>> {
-    let cpuinfo = format!(
+    let cpuinfo = String::from(
         "processor\t: 0\n\
          vendor_id\t: CLUU\n\
          model name\t: QEMU Virtual CPU\n\
          cpu MHz\t\t: 2000.000\n\
          cache size\t: 4096 KB\n\
-         flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic\n\n"
+         flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic\n\n",
     );
     Ok(cpuinfo.into_bytes())
 }
 
 fn gen_mounts() -> Result<Vec<u8>> {
     // List mounted filesystems
-    let mounts = format!(
+    let mounts = String::from(
         "/dev/initrd /dev/initrd initrd ro 0 0\n\
          /dev/vda /mnt/disk ext2 rw 0 0\n\
-         proc /proc proc rw 0 0\n"
+         proc /proc proc rw 0 0\n",
     );
     Ok(mounts.into_bytes())
 }

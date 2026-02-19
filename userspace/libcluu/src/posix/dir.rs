@@ -126,8 +126,8 @@ pub extern "C" fn readdir(dirp: *mut DIR) -> *mut Dirent {
     // Copy name (truncate if longer than NAME_MAX)
     let name_bytes = entry.name.as_bytes();
     let copy_len = name_bytes.len().min(NAME_MAX);
-    for i in 0..copy_len {
-        dir.current.d_name[i] = name_bytes[i] as c_char;
+    for (i, &byte) in name_bytes.iter().enumerate().take(copy_len) {
+        dir.current.d_name[i] = byte as c_char;
     }
     dir.current.d_name[copy_len] = 0;
     dir.current.d_reclen = (core::mem::size_of::<Dirent>()) as u16;
@@ -176,10 +176,7 @@ pub extern "C" fn getcwd(buf: *mut c_char, size: size_t) -> *mut c_char {
     }
 
     let cwd = CWD.lock();
-    let cwd_str = match cwd.as_deref() {
-        Some(s) => s,
-        None => "/",
-    };
+    let cwd_str = cwd.as_deref().unwrap_or("/");
 
     let needed = cwd_str.len() + 1; // +1 for NUL
     if needed > size {
@@ -291,10 +288,7 @@ fn resolve_path(path: &str) -> String {
 
     // Relative path — prepend CWD
     let cwd = CWD.lock();
-    let base = match cwd.as_deref() {
-        Some(s) => s,
-        None => "/",
-    };
+    let base = cwd.as_deref().unwrap_or("/");
 
     let mut result = String::from(base);
     if !result.ends_with('/') {

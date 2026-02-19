@@ -212,7 +212,7 @@ pub extern "C" fn sleep(seconds: u32) -> u32 {
 /// 0 on success, -1 on error.
 #[no_mangle]
 pub extern "C" fn usleep(usec: u32) -> c_int {
-    if timed_sleep_ms(((usec as u64) + 999) / 1000) {
+    if timed_sleep_ms((usec as u64).div_ceil(1000)) {
         0
     } else {
         set_errno(ENOSYS);
@@ -246,7 +246,7 @@ pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> c_int {
     }
 
     // Convert to milliseconds (round up so we never sleep less than requested)
-    let ms = (ts.tv_sec as u64) * 1000 + ((ts.tv_nsec as u64) + 999_999) / 1_000_000;
+    let ms = (ts.tv_sec as u64) * 1000 + (ts.tv_nsec as u64).div_ceil(1_000_000);
     if !timed_sleep_ms(ms) {
         set_errno(ENOSYS);
         return -1;

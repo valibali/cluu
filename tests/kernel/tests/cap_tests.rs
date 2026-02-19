@@ -9,6 +9,5 @@
 
 #[test]
 fn test_placeholder() {
-    // Placeholder to make cargo test pass
-    assert!(true);
+    // Placeholder until capability tests are extracted.
 }

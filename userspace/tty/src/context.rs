@@ -291,18 +291,18 @@ impl TtyContext {
             return;
         }
 
-        if self.shell_registered_stdin != 0 && self.shell_registered_stdin != self.shell_stdin {
-            if send_with_retry_timeout(
+        if self.shell_registered_stdin != 0
+            && self.shell_registered_stdin != self.shell_stdin
+            && send_with_retry_timeout(
                 self.shell_registered_stdin,
                 libcluu::ipc::TTY_READ_LABEL,
                 line,
                 IPC_SEND_RETRIES_DEFAULT,
             )
             .is_ok()
-            {
-                self.shell_stdin = self.shell_registered_stdin;
-                let _ = debug_print("tty: repaired shell stdin route");
-            }
+        {
+            self.shell_stdin = self.shell_registered_stdin;
+            let _ = debug_print("tty: repaired shell stdin route");
         }
     }
 

@@ -29,8 +29,7 @@ const MMAP_REGION_START: usize = 0x4100_0000;
 const MMAP_REGION_END: usize = 0x5000_0000;
 
 /// Next free address in the mmap region (bump allocator).
-// Allocation now uses first-fit over tracked regions so freed holes are reused.
-
+/// Allocation uses first-fit over tracked regions so freed holes are reused.
 /// Maximum tracked mmap regions.
 const MAX_MMAP_REGIONS: usize = 64;
 
@@ -78,35 +77,29 @@ impl MmapRegionTable {
     }
 
     fn find_exact(&self, addr: usize, len: usize) -> Option<MmapRegion> {
-        for slot in self.entries.iter() {
-            if let Some(r) = slot {
-                if r.addr == addr && r.len == len {
-                    return Some(*r);
-                }
+        for r in self.entries.iter().flatten() {
+            if r.addr == addr && r.len == len {
+                return Some(*r);
             }
         }
         None
     }
 
     fn update_prot_exact(&mut self, addr: usize, len: usize, prot: c_int) -> bool {
-        for slot in self.entries.iter_mut() {
-            if let Some(r) = slot {
-                if r.addr == addr && r.len == len {
-                    r.prot = prot;
-                    return true;
-                }
+        for r in self.entries.iter_mut().flatten() {
+            if r.addr == addr && r.len == len {
+                r.prot = prot;
+                return true;
             }
         }
         false
     }
 
     fn overlaps(&self, start: usize, end: usize) -> bool {
-        for slot in self.entries.iter() {
-            if let Some(r) = slot {
-                let r_end = r.addr.saturating_add(r.len);
-                if start < r_end && r.addr < end {
-                    return true;
-                }
+        for r in self.entries.iter().flatten() {
+            let r_end = r.addr.saturating_add(r.len);
+            if start < r_end && r.addr < end {
+                return true;
             }
         }
         false
@@ -448,42 +441,6 @@ fn reset_mmap_state_for_tests() {
     *table = MmapRegionTable::new();
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn first_fit_reuses_freed_slot() {
-        reset_mmap_state_for_tests();
-        let mut table = MMAP_REGIONS.lock();
-        assert!(table.insert(MmapRegion {
-            addr: MMAP_REGION_START,
-            len: PAGE_SIZE,
-            prot: PROT_READ,
-        }));
-        assert!(table.insert(MmapRegion {
-            addr: MMAP_REGION_START + PAGE_SIZE * 2,
-            len: PAGE_SIZE,
-            prot: PROT_READ,
-        }));
-        let _ = table.remove(MMAP_REGION_START);
-        assert_eq!(table.find_first_fit(PAGE_SIZE), Some(MMAP_REGION_START));
-    }
-
-    #[test]
-    fn update_prot_requires_exact_region() {
-        reset_mmap_state_for_tests();
-        let mut table = MMAP_REGIONS.lock();
-        assert!(table.insert(MmapRegion {
-            addr: MMAP_REGION_START,
-            len: PAGE_SIZE * 2,
-            prot: PROT_READ,
-        }));
-        assert!(table.update_prot_exact(MMAP_REGION_START, PAGE_SIZE * 2, PROT_READ | PROT_WRITE));
-        assert!(!table.update_prot_exact(MMAP_REGION_START, PAGE_SIZE, PROT_EXEC));
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // sbrk / brk (heap management)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -518,7 +475,7 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
     };
 
     // Check bounds
-    if new_brk < HEAP_START || new_brk > HEAP_MAX {
+    if !(HEAP_START..=HEAP_MAX).contains(&new_brk) {
         set_errno(ENOMEM);
         return (-1isize) as *mut c_void;
     }
@@ -532,8 +489,8 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
         }
 
         // Calculate pages needed
-        let old_page = (old_brk + PAGE_SIZE - 1) / PAGE_SIZE;
-        let new_page = (new_brk + PAGE_SIZE - 1) / PAGE_SIZE;
+        let old_page = old_brk.div_ceil(PAGE_SIZE);
+        let new_page = new_brk.div_ceil(PAGE_SIZE);
 
         if new_page > old_page {
             let pages_needed = new_page - old_page;
@@ -584,7 +541,7 @@ pub fn current_brk() -> usize {
 pub extern "C" fn brk(addr: *mut c_void) -> i32 {
     let target = addr as usize;
 
-    if target < HEAP_START || target > HEAP_MAX {
+    if !(HEAP_START..=HEAP_MAX).contains(&target) {
         set_errno(ENOMEM);
         return -1;
     }
@@ -597,5 +554,41 @@ pub extern "C" fn brk(addr: *mut c_void) -> i32 {
         -1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_fit_reuses_freed_slot() {
+        reset_mmap_state_for_tests();
+        let mut table = MMAP_REGIONS.lock();
+        assert!(table.insert(MmapRegion {
+            addr: MMAP_REGION_START,
+            len: PAGE_SIZE,
+            prot: PROT_READ,
+        }));
+        assert!(table.insert(MmapRegion {
+            addr: MMAP_REGION_START + PAGE_SIZE * 2,
+            len: PAGE_SIZE,
+            prot: PROT_READ,
+        }));
+        let _ = table.remove(MMAP_REGION_START);
+        assert_eq!(table.find_first_fit(PAGE_SIZE), Some(MMAP_REGION_START));
+    }
+
+    #[test]
+    fn update_prot_requires_exact_region() {
+        reset_mmap_state_for_tests();
+        let mut table = MMAP_REGIONS.lock();
+        assert!(table.insert(MmapRegion {
+            addr: MMAP_REGION_START,
+            len: PAGE_SIZE * 2,
+            prot: PROT_READ,
+        }));
+        assert!(table.update_prot_exact(MMAP_REGION_START, PAGE_SIZE * 2, PROT_READ | PROT_WRITE));
+        assert!(!table.update_prot_exact(MMAP_REGION_START, PAGE_SIZE, PROT_EXEC));
     }
 }

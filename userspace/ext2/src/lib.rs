@@ -543,7 +543,6 @@ impl<'a> Ext2Fs<'a> {
                 break;
             }
             let name_len = data[off + 6] as usize;
-            let file_type = data[off + 7];
             if 8 + name_len <= rec_len {
                 let name_bytes = &data[off + 8..off + 8 + name_len];
                 let name = core::str::from_utf8(name_bytes)
@@ -554,7 +553,6 @@ impl<'a> Ext2Fs<'a> {
                     inode,
                     rec_len,
                     name_len,
-                    file_type,
                     name,
                 });
             }
@@ -975,7 +973,7 @@ impl<'a> Filesystem for Ext2Fs<'a> {
         Ok(raw_entries
             .into_iter()
             .map(|e| DirEntry {
-                name: String::from(e.name),
+                name: e.name,
                 inode: e.inode as u64,
                 is_dir: {
                     // Check if entry is a directory by reading its inode
@@ -999,7 +997,6 @@ struct DirEntryMeta {
     inode: u32,
     rec_len: usize,
     name_len: usize,
-    file_type: u8,
     name: String,
 }
 

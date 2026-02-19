@@ -224,8 +224,6 @@ struct FileCache {
 struct CacheEntry {
     base: usize,
     len: usize,
-    inode: u32,
-    size: usize,
     last_access: usize,
 }
 
@@ -308,8 +306,6 @@ impl FileCache {
             CacheEntry {
                 base,
                 len,
-                inode,
-                size,
                 last_access: self.access_counter,
             },
         );
@@ -469,6 +465,7 @@ struct VfsServer {
 }
 
 impl VfsServer {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: usize,
         space_token: usize,
@@ -1139,9 +1136,7 @@ impl VfsServer {
         }
 
         let requested = msg.words[3];
-        let requested = requested
-            .max(RING_MIN_REQUESTED_BYTES)
-            .min(RING_SLOT_CAPACITY);
+        let requested = requested.clamp(RING_MIN_REQUESTED_BYTES, RING_SLOT_CAPACITY);
         if requested < RING_MIN_REQUESTED_BYTES {
             reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -1645,6 +1640,7 @@ impl VfsServer {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn read_grant_remote(
         &self,
         entry: &fd_table::Ext2Entry,
@@ -1727,6 +1723,7 @@ impl VfsServer {
         self.grant_data_to_caller(slice, target_base, target_space, reply_msg)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn read_grant_cached_region(
         &self,
         base: usize,
@@ -1838,6 +1835,7 @@ impl VfsServer {
     }
 
     /// Chunked read from remote - used when file is too large to cache.
+    #[allow(clippy::too_many_arguments)]
     fn read_grant_remote_chunked(
         &self,
         endpoint: usize,
@@ -2059,7 +2057,7 @@ impl VfsServer {
         target_space: usize,
         reply_msg: &mut Message,
     ) -> Result<()> {
-        let pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+        let pages = len.div_ceil(PAGE_SIZE);
         for page_idx in 0..pages {
             let src = self.grant_buf_base + page_idx * PAGE_SIZE;
             let dst = target_base + page_idx * PAGE_SIZE;
@@ -2112,7 +2110,7 @@ impl VfsServer {
             "vfs: grant_data len={} base={:#x} pages={}",
             data.len(),
             self.grant_buf_base,
-            (data.len() + PAGE_SIZE - 1) / PAGE_SIZE
+            data.len().div_ceil(PAGE_SIZE)
         );
         // Copy data to the buffer
         unsafe {
@@ -2124,7 +2122,7 @@ impl VfsServer {
         }
 
         // Grant the pages to the caller
-        let pages = (data.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+        let pages = data.len().div_ceil(PAGE_SIZE);
         for page_idx in 0..pages {
             let src = self.grant_buf_base + page_idx * PAGE_SIZE;
             let dst = target_base + page_idx * PAGE_SIZE;
@@ -2488,8 +2486,8 @@ unsafe fn fill_random(buf: *mut u8, len: usize) {
         if let Some(val) = rdrand64() {
             let remaining = len - offset;
             let bytes = val.to_ne_bytes();
-            for i in 0..remaining {
-                *buf.add(offset + i) = bytes[i];
+            for (i, byte) in bytes.iter().enumerate().take(remaining) {
+                *buf.add(offset + i) = *byte;
             }
             return;
         }
@@ -2507,8 +2505,8 @@ unsafe fn fill_random(buf: *mut u8, len: usize) {
             let val = xorshift64(&mut state);
             let bytes = val.to_ne_bytes();
             let remaining = len - offset;
-            for i in 0..remaining {
-                *buf.add(offset + i) = bytes[i];
+            for (i, byte) in bytes.iter().enumerate().take(remaining) {
+                *buf.add(offset + i) = *byte;
             }
         }
     }
@@ -2550,7 +2548,7 @@ fn parse_single_usize(payload: &[u8]) -> Option<usize> {
 }
 
 fn map_grant_buffer(space_token: usize) -> Result<usize> {
-    let pages = (GRANT_BUF_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+    let pages = GRANT_BUF_SIZE.div_ceil(PAGE_SIZE);
     if pages == 0 {
         return Err(Error::InvalidArgument);
     }
@@ -2572,7 +2570,7 @@ fn map_grant_buffer(space_token: usize) -> Result<usize> {
 }
 
 fn map_cache_buffer(space_token: usize) -> Result<usize> {
-    let pages = (CACHE_BUF_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+    let pages = CACHE_BUF_SIZE.div_ceil(PAGE_SIZE);
     if pages == 0 {
         return Err(Error::InvalidArgument);
     }
@@ -2594,7 +2592,7 @@ fn map_cache_buffer(space_token: usize) -> Result<usize> {
 }
 
 fn map_ring_pool(space_token: usize) -> Result<usize> {
-    let pages = (RING_POOL_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+    let pages = RING_POOL_SIZE.div_ceil(PAGE_SIZE);
     if pages == 0 {
         return Err(Error::InvalidArgument);
     }

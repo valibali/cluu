@@ -31,6 +31,8 @@ testing = []  # Enable when building for host tests (disables no_std runtime)
 [[bin]]
 name = "kernel"
 path = "src/main.rs"
+test = false
+bench = false
 
 [lib]
 name = "cluu_kernel"

@@ -1055,8 +1055,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
     let mut freed_tables: u64 = 0;
 
     // Only walk user half (entries 0-255)
-    for pml4_idx in 0..256 {
-        let pml4e = pml4[pml4_idx];
+    for &pml4e in pml4.iter().take(256) {
         if pml4e & pte_flags::PRESENT == 0 {
             continue;
         }
@@ -1065,8 +1064,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
         let pdpt_virt = super::physmap::phys_to_virt_u64(pdpt_phys);
         let pdpt = &mut *(pdpt_virt as *mut [u64; 512]);
 
-        for pdpt_idx in 0..512 {
-            let pdpte = pdpt[pdpt_idx];
+        for &pdpte in pdpt.iter().take(512) {
             if pdpte & pte_flags::PRESENT == 0 {
                 continue;
             }
@@ -1081,8 +1079,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
             let pd_virt = super::physmap::phys_to_virt_u64(pd_phys);
             let pd = &mut *(pd_virt as *mut [u64; 512]);
 
-            for pd_idx in 0..512 {
-                let pde = pd[pd_idx];
+            for &pde in pd.iter().take(512) {
                 if pde & pte_flags::PRESENT == 0 {
                     continue;
                 }
@@ -1103,8 +1100,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                 let pt_virt = super::physmap::phys_to_virt_u64(pt_phys);
                 let pt = &mut *(pt_virt as *mut [u64; 512]);
 
-                for pt_idx in 0..512 {
-                    let pte = pt[pt_idx];
+                for &pte in pt.iter().take(512) {
                     if pte & pte_flags::PRESENT == 0 {
                         continue;
                     }
@@ -1399,6 +1395,30 @@ mod tests {
     use crate::mm::MockPageAllocator;
     use klibcluu::util::PAGE_SIZE;
 
+    struct TestBootInfo;
+
+    impl crate::mm::boot::BootInfoProvider for TestBootInfo {
+        fn max_physical_address(&self) -> u64 {
+            0x4_0000_0000
+        }
+
+        fn kernel_physical_range(&self) -> (u64, u64) {
+            (0x100000, 0x200000)
+        }
+
+        fn initrd_location(&self) -> Option<(u64, u64)> {
+            None
+        }
+
+        fn framebuffer_location(&self) -> Option<(u64, u64)> {
+            None
+        }
+
+        fn info_structure_location(&self) -> u64 {
+            0
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Page Table Creation Tests
     // ═══════════════════════════════════════════════════════════════════════
@@ -1410,9 +1430,11 @@ mod tests {
         let max_phys = 0x1_0000_0000u64; // 4 GB
         let kernel_start = 0x100000u64;
         let kernel_end = 0x200000u64;
+        let boot_info = TestBootInfo;
 
         unsafe {
-            let pml4_phys = create_initial_page_tables(max_phys, kernel_start, kernel_end);
+            let pml4_phys =
+                create_initial_page_tables(&boot_info, max_phys, kernel_start, kernel_end);
 
             // Verify PML4 address is valid (non-zero, page-aligned)
             assert_ne!(pml4_phys.as_u64(), 0);
@@ -1431,9 +1453,11 @@ mod tests {
         let max_phys = 0x1_0010_0000u64; // 4 GB + 1 MB
         let kernel_start = 0x100000u64;
         let kernel_end = 0x200000u64;
+        let boot_info = TestBootInfo;
 
         unsafe {
-            let pml4_phys = create_initial_page_tables(max_phys, kernel_start, kernel_end);
+            let pml4_phys =
+                create_initial_page_tables(&boot_info, max_phys, kernel_start, kernel_end);
 
             // Should succeed and create both 2MB and 4KB pages
             assert_ne!(pml4_phys.as_u64(), 0);
@@ -1448,9 +1472,11 @@ mod tests {
         let max_phys = 0x10_0000u64; // 1 MB
         let kernel_start = 0x100000u64;
         let kernel_end = 0x180000u64;
+        let boot_info = TestBootInfo;
 
         unsafe {
-            let pml4_phys = create_initial_page_tables(max_phys, kernel_start, kernel_end);
+            let pml4_phys =
+                create_initial_page_tables(&boot_info, max_phys, kernel_start, kernel_end);
 
             // Should succeed using only 4KB pages
             assert_ne!(pml4_phys.as_u64(), 0);
@@ -1465,9 +1491,11 @@ mod tests {
         let max_phys = 0x4_0000_0000u64; // 16 GB
         let kernel_start = 0x100000u64;
         let kernel_end = 0x200000u64;
+        let boot_info = TestBootInfo;
 
         unsafe {
-            let pml4_phys = create_initial_page_tables(max_phys, kernel_start, kernel_end);
+            let pml4_phys =
+                create_initial_page_tables(&boot_info, max_phys, kernel_start, kernel_end);
 
             // Should succeed with mostly 2MB pages
             assert_ne!(pml4_phys.as_u64(), 0);
@@ -1481,9 +1509,11 @@ mod tests {
         let max_phys = 0x8000_0000u64; // 2 GB
         let kernel_start = 0x100000u64;
         let kernel_end = 0x200000u64;
+        let boot_info = TestBootInfo;
 
         unsafe {
-            let pml4_phys = create_initial_page_tables(max_phys, kernel_start, kernel_end);
+            let pml4_phys =
+                create_initial_page_tables(&boot_info, max_phys, kernel_start, kernel_end);
 
             // Access PML4 via identity mapping (during tests, we're still in BOOTBOOT)
             let pml4_ptr = pml4_phys.as_u64() as *const u64;
@@ -1557,7 +1587,7 @@ mod tests {
         let pages_2mb = aligned_end / 0x20_0000;
         let partial_size = max_phys - aligned_end;
         let pages_4kb = if partial_size > 0 {
-            (partial_size + 0xFFF) / 0x1000
+            partial_size.div_ceil(0x1000)
         } else {
             0
         };
@@ -1571,7 +1601,7 @@ mod tests {
         let pages_2mb = aligned_end / 0x20_0000;
         let partial_size = max_phys - aligned_end;
         let pages_4kb = if partial_size > 0 {
-            (partial_size + 0xFFF) / 0x1000
+            partial_size.div_ceil(0x1000)
         } else {
             0
         };

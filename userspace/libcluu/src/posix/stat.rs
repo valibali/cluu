@@ -101,7 +101,7 @@ impl Stat {
         let mut s = Self::zeroed();
         s.st_mode = S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
         s.st_size = size as off_t;
-        s.st_blocks = ((size + 511) / 512) as i64;
+        s.st_blocks = size.div_ceil(512) as i64;
         s.st_blksize = 512;
         s
     }

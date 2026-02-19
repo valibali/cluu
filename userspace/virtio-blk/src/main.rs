@@ -117,7 +117,7 @@ fn run() -> Result<()> {
     // Try to mount ext2 filesystem
     let fs = match Ext2Fs::mount(&adapter) {
         Ok(fs) => {
-            debug_print(&format!("virtio-blk: ext2 filesystem mounted"))?;
+            debug_print("virtio-blk: ext2 filesystem mounted")?;
             Some(fs)
         }
         Err(e) => {
@@ -487,7 +487,7 @@ fn handle_fs_request(
 }
 
 fn map_grant_scratch(space_token: usize) -> Result<GrantScratch> {
-    let pages = (GRANT_SCRATCH_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+    let pages = GRANT_SCRATCH_SIZE.div_ceil(PAGE_SIZE);
     match space_map_range(space_token, GRANT_SCRATCH_BASE, 0, 0x03, pages, 0) {
         Ok(_) | Err(libcluu::Error::AlreadyExists) => Ok(GrantScratch {
             base: GRANT_SCRATCH_BASE,

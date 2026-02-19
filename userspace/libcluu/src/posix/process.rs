@@ -325,7 +325,7 @@ pub extern "C" fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid
 /// `posix_spawn_file_actions_t *` == `**FileActionsInner` across FFI.
 /// We heap-allocate this in _init and free it in _destroy.
 #[repr(C)]
-struct FileActionsInner {
+pub struct FileActionsInner {
     count: u8,
     _pad: [u8; 7],
     actions: [FdAction; MAX_FD_ACTIONS],
@@ -360,7 +360,7 @@ pub extern "C" fn posix_spawn(
     }
 
     // Convert path to Rust str
-    let path_str = unsafe {
+    let _path_str = unsafe {
         let mut len = 0;
         let mut p = path;
         while *p != 0 {
@@ -549,7 +549,7 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
     fd: c_int,
     newfd: c_int,
 ) -> c_int {
-    if actions.is_null() || newfd < 0 || newfd > 3 {
+    if actions.is_null() || !(0..=3).contains(&newfd) {
         return EINVAL;
     }
 
@@ -673,8 +673,8 @@ pub extern "C" fn system(command: *const c_char) -> c_int {
     }
 
     // Spawn sh -c "command"
-    let sh_path = b"/bin/sh\0".as_ptr() as *const c_char;
-    let c_flag = b"-c\0".as_ptr() as *const c_char;
+    let sh_path = c"/bin/sh".as_ptr() as *const c_char;
+    let c_flag = c"-c".as_ptr() as *const c_char;
     let argv: [*const c_char; 4] = [sh_path, c_flag, command, core::ptr::null()];
 
     let mut child_pid: pid_t = 0;

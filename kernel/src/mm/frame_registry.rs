@@ -28,6 +28,12 @@ static PHYS_TO_FRAME: Mutex<BTreeMap<u64, FrameId>> = Mutex::new(BTreeMap::new()
 /// Monotonic frame ID counter
 static NEXT_FRAME_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameRegistryError {
+    NotFound,
+    StillMapped,
+}
+
 /// Allocate a new physical frame and register it.
 ///
 /// Calls `pmm::alloc_frame()` internally. Returns `(FrameId, phys_addr)`.
@@ -50,12 +56,12 @@ pub fn alloc_frame(owner: AddressSpaceId) -> Option<(FrameId, u64)> {
 /// Free a tracked frame. Fails if `map_count > 0`.
 ///
 /// Removes from registry and calls `pmm::free_frame()`.
-pub fn free_frame(frame_id: FrameId) -> Result<(), ()> {
+pub fn free_frame(frame_id: FrameId) -> Result<(), FrameRegistryError> {
     let mut reg = FRAME_REGISTRY.lock();
-    let entry = reg.get(&frame_id).ok_or(())?;
+    let entry = reg.get(&frame_id).ok_or(FrameRegistryError::NotFound)?;
 
     if entry.map_count > 0 {
-        return Err(());
+        return Err(FrameRegistryError::StillMapped);
     }
 
     let phys = entry.phys_addr;

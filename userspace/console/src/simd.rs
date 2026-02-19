@@ -24,7 +24,7 @@ pub unsafe fn fill_row_simd(dst: *mut u32, color: u32, len: usize) {
     let mut i = 0;
 
     // Check if destination is 16-byte aligned for optimal performance
-    let aligned = (dst as usize) % 16 == 0;
+    let aligned = (dst as usize).is_multiple_of(16);
 
     if aligned {
         // Aligned writes: use aligned store for better performance
@@ -62,8 +62,8 @@ pub unsafe fn copy_row_simd(src: *const u32, dst: *mut u32, len: usize) {
     let mut i = 0;
 
     // Check alignment for optimal performance
-    let src_aligned = (src as usize) % 16 == 0;
-    let dst_aligned = (dst as usize) % 16 == 0;
+    let src_aligned = (src as usize).is_multiple_of(16);
+    let dst_aligned = (dst as usize).is_multiple_of(16);
 
     if src_aligned && dst_aligned {
         // Both aligned: use aligned loads/stores
@@ -103,8 +103,8 @@ pub unsafe fn write_row_simd(dst: *mut u32, colors: &[u32], len: usize) {
     let mut i = 0;
 
     // Check alignment
-    let dst_aligned = (dst as usize) % 16 == 0;
-    let src_aligned = (colors.as_ptr() as usize) % 16 == 0;
+    let dst_aligned = (dst as usize).is_multiple_of(16);
+    let src_aligned = (colors.as_ptr() as usize).is_multiple_of(16);
 
     if src_aligned && dst_aligned {
         // Both aligned: use aligned loads/stores
@@ -124,8 +124,8 @@ pub unsafe fn write_row_simd(dst: *mut u32, colors: &[u32], len: usize) {
 
     // Handle remaining pixels (tail) - use volatile for device memory
     let tail_start = i * 4;
-    for j in tail_start..len {
-        dst.add(j).write_volatile(colors[j]);
+    for (j, &color) in colors.iter().enumerate().take(len).skip(tail_start) {
+        dst.add(j).write_volatile(color);
     }
 }
 

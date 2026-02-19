@@ -345,51 +345,6 @@ pub fn send(endpoint_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()
     syscall::ipc_send(endpoint_token, msg_bytes)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shared_ring_roundtrip_wraps() {
-        let mut backing = [0u8; 96];
-        let mut ring = SharedRing::initialize(&mut backing).expect("init");
-        assert_eq!(ring.capacity(), 64); // 32-byte header + 64-byte data
-
-        let first = [1u8; 40];
-        assert_eq!(ring.push(&first), 40);
-        assert_eq!(ring.available_read(), 40);
-
-        let mut out = [0u8; 24];
-        assert_eq!(ring.pop(&mut out), 24);
-        assert_eq!(out, [1u8; 24]);
-
-        let second = [2u8; 30];
-        assert_eq!(ring.push(&second), 30);
-
-        let mut drain = [0u8; 46];
-        assert_eq!(ring.pop(&mut drain), 46);
-        assert_eq!(&drain[..16], [1u8; 16].as_slice());
-        assert_eq!(&drain[16..], [2u8; 30].as_slice());
-    }
-
-    #[test]
-    fn shared_ring_attach_rejects_uninitialized() {
-        let mut backing = [0u8; 128];
-        assert_eq!(
-            SharedRing::attach(&mut backing).err(),
-            Some(Error::InvalidState)
-        );
-    }
-
-    #[test]
-    fn shared_ring_bytes_overflow_guard() {
-        assert_eq!(
-            SharedRing::bytes_for_capacity(usize::MAX).err(),
-            Some(Error::Overflow)
-        );
-    }
-}
-
 /// Send a message with an inline payload appended after the Message header.
 pub fn send_with_payload(endpoint_token: usize, label: u32, payload: &[u8]) -> Result<()> {
     let mut msg = Message::new(label, [0; 6], 1);
@@ -611,4 +566,49 @@ pub fn notify_exit(exit_code: i32) -> Result<()> {
         2,
     );
     send(info.exit_token, &msg, IpcFlags::empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_ring_roundtrip_wraps() {
+        let mut backing = [0u8; 96];
+        let mut ring = SharedRing::initialize(&mut backing).expect("init");
+        assert_eq!(ring.capacity(), 64); // 32-byte header + 64-byte data
+
+        let first = [1u8; 40];
+        assert_eq!(ring.push(&first), 40);
+        assert_eq!(ring.available_read(), 40);
+
+        let mut out = [0u8; 24];
+        assert_eq!(ring.pop(&mut out), 24);
+        assert_eq!(out, [1u8; 24]);
+
+        let second = [2u8; 30];
+        assert_eq!(ring.push(&second), 30);
+
+        let mut drain = [0u8; 46];
+        assert_eq!(ring.pop(&mut drain), 46);
+        assert_eq!(&drain[..16], [1u8; 16].as_slice());
+        assert_eq!(&drain[16..], [2u8; 30].as_slice());
+    }
+
+    #[test]
+    fn shared_ring_attach_rejects_uninitialized() {
+        let mut backing = [0u8; 128];
+        assert_eq!(
+            SharedRing::attach(&mut backing).err(),
+            Some(Error::InvalidState)
+        );
+    }
+
+    #[test]
+    fn shared_ring_bytes_overflow_guard() {
+        assert_eq!(
+            SharedRing::bytes_for_capacity(usize::MAX).err(),
+            Some(Error::Overflow)
+        );
+    }
 }

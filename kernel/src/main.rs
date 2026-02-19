@@ -20,6 +20,7 @@ extern crate klibcluu;
 use cluu_kernel::{architecture, bootboot, bootstrap, mm, telemetry, token};
 use klibcluu::crypto;
 
+#[cfg(all(target_os = "none", not(test)))]
 use core::panic::PanicInfo;
 
 /// 64KB aligned stack for BSP
@@ -227,6 +228,7 @@ fn idle_loop() -> ! {
 }
 
 /// Panic handler
+#[cfg(all(target_os = "none", not(test)))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     // Disable interrupts to prevent further issues
@@ -263,6 +265,7 @@ fn panic(info: &PanicInfo) -> ! {
     }
 }
 
+#[cfg_attr(any(test, feature = "testing"), allow(dead_code))]
 fn dump_stacktrace() {
     let rsp = read_rsp();
     let mut rbp = read_rbp();
@@ -294,11 +297,13 @@ fn dump_stacktrace() {
     }
 }
 
+#[cfg_attr(any(test, feature = "testing"), allow(dead_code))]
 fn is_canonical(addr: u64) -> bool {
     let top = addr >> 48;
     top == 0 || top == 0xffff
 }
 
+#[cfg_attr(any(test, feature = "testing"), allow(dead_code))]
 fn read_rbp() -> u64 {
     let rbp: u64;
     unsafe {
@@ -311,6 +316,7 @@ fn read_rbp() -> u64 {
     rbp
 }
 
+#[cfg_attr(any(test, feature = "testing"), allow(dead_code))]
 fn read_rsp() -> u64 {
     let rsp: u64;
     unsafe {

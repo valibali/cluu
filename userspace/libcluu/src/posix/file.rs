@@ -386,7 +386,7 @@ fn ensure_grant_buffer() -> Option<usize> {
         return None;
     }
 
-    let pages = (GRANT_BUF_SIZE + crate::mem::PAGE_SIZE - 1) / crate::mem::PAGE_SIZE;
+    let pages = GRANT_BUF_SIZE.div_ceil(crate::mem::PAGE_SIZE);
     match crate::syscall::space_map_range(space_token, GRANT_BUF_BASE, 0, 0x03, pages, 0) {
         Ok(_) | Err(crate::Error::AlreadyExists) => {
             GRANT_BUF_READY.store(true, Ordering::SeqCst);

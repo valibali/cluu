@@ -530,9 +530,8 @@ impl MountTable {
                 if best.is_none() || mount.prefix.len() > best.unwrap().0.prefix.len() {
                     best = Some((mount, rel));
                 }
-            } else if path.starts_with(mount.prefix) {
+            } else if let Some(rest) = path.strip_prefix(mount.prefix) {
                 // Check for proper path separator
-                let rest = &path[mount.prefix.len()..];
                 if rest.starts_with('/') {
                     let rel = rest.trim_start_matches('/');
                     if best.is_none() || mount.prefix.len() > best.unwrap().0.prefix.len() {

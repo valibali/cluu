@@ -16,6 +16,9 @@
 
 #![no_std]
 #![cfg_attr(all(not(feature = "std"), not(test)), no_main)]
+// C-ABI entry points in POSIX/newlib shims intentionally validate/deref raw pointers
+// inside safe `extern "C"` wrappers to preserve libc-style call sites.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 extern crate alloc;
 

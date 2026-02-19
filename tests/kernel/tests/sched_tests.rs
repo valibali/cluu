@@ -10,6 +10,5 @@
 
 #[test]
 fn test_placeholder() {
-    // Placeholder to make cargo test pass
-    assert!(true);
+    // Placeholder until scheduler tests are extracted.
 }

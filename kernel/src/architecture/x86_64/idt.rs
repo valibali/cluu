@@ -301,6 +301,7 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
     }
 }
 
+#[allow(dead_code)]
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -605,6 +606,7 @@ extern "C" fn gpf_with_regs(frame: *const GpfDebugFrame) -> *const Context {
     }
 }
 
+#[allow(dead_code)]
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,

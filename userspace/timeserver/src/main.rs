@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use libcluu::boot::{process_info, TOKEN_CLOCK, TOKEN_EXTRA_0, TOKEN_IPC, TOKEN_REGISTRY};
+use libcluu::boot::{process_info, TOKEN_CLOCK, TOKEN_EXTRA_0};
 use libcluu::ipc::extract_reply_id;
 use libcluu::time::{TIME_GETCLOCK, TIME_GETTIMEOFDAY};
 use libcluu::types::Message;

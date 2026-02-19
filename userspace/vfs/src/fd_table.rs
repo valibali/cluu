@@ -23,10 +23,12 @@ pub struct Ext2Entry {
     pub inode: u32,
     pub size: usize,
     /// Original path used to open this file (for caching).
+    #[allow(dead_code)]
     pub path: String,
 }
 
 /// A file entry backed by a virtual filesystem (procfs, etc.)
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct VirtualEntry {
     pub data: Vec<u8>,
@@ -45,6 +47,7 @@ pub enum DeviceType {
 #[derive(Clone)]
 pub struct DeviceFile {
     pub device_type: DeviceType,
+    #[allow(dead_code)]
     pub path: String,
 }
 
@@ -72,6 +75,7 @@ impl OpenFile {
     }
 
     /// Get the mount prefix this file belongs to (for read routing).
+    #[allow(dead_code)]
     pub fn mount_prefix(&self) -> Option<&str> {
         match self {
             OpenFile::Ext2(_) => Some("/mnt/disk"),

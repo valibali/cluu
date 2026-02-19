@@ -995,11 +995,11 @@ fn run_key_destructors() {
         // This avoids holding the lock during user destructor callbacks.
         let dtors: [Option<KeyDestructor>; PTHREAD_KEYS_MAX] = *KEY_DESTRUCTORS.lock();
 
-        for i in 0..PTHREAD_KEYS_MAX {
+        for (i, dtor_opt) in dtors.iter().enumerate().take(PTHREAD_KEYS_MAX) {
             if alloc_bits & (1 << i) == 0 {
                 continue;
             }
-            if let Some(dtor) = dtors[i] {
+            if let Some(dtor) = *dtor_opt {
                 let offset = TLS_KEYS_OFFSET + i * 8;
                 let val: usize;
                 unsafe {

@@ -75,7 +75,7 @@ pub extern "C" fn framebuffer_acquire(info: *mut FramebufferInfo) -> c_int {
     }
 
     // Step 3: Map the physical framebuffer into our address space.
-    let num_pages = (fb_size + 0xFFF) / 0x1000;
+    let num_pages = fb_size.div_ceil(0x1000);
     let flags = 0x03 | MAP_DEVICE; // read + write + device (uncacheable)
     match syscall::space_map_range(space_token(), APP_FB_BASE, fb_phys, flags, num_pages, 0) {
         Ok(_) => {}
@@ -114,7 +114,7 @@ pub extern "C" fn framebuffer_release(info: *const FramebufferInfo) -> c_int {
         return 0;
     }
 
-    let num_pages = (size + 0xFFF) / 0x1000;
+    let num_pages = size.div_ceil(0x1000);
     let _ = syscall::space_unmap(space_token(), APP_FB_BASE, num_pages);
 
     0

@@ -344,6 +344,7 @@ impl<B: ConsoleBackend> Console<B> {
     }
 
     /// Redraw every cell in the grid, then update the cursor overlay.
+    #[allow(dead_code)]
     fn redraw_all(&mut self) {
         for y in 0..self.rows {
             for x in 0..self.cols {
@@ -676,9 +677,9 @@ impl<B: ConsoleBackend> Console<B> {
 
         for (row, line) in glyph.iter().enumerate() {
             // Build entire row in buffer
-            for col in 0..GLYPH_W {
+            for (col, pixel) in row_buffer.iter_mut().enumerate().take(GLYPH_W) {
                 let bit = (line >> (7 - col)) & 1; // MSB-first
-                row_buffer[col] = if bit != 0 { fg } else { bg };
+                *pixel = if bit != 0 { fg } else { bg };
             }
             // Write entire row at once (much faster than individual pixels)
             self.backend.put_pixels_row(px, py + row, &row_buffer);

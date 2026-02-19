@@ -150,7 +150,7 @@ fn init_root_passwd() -> *mut Passwd {
         ROOT_PASSWD_STRUCT.pw_gecos = ROOT_GECOS.as_ptr() as *mut c_char;
         ROOT_PASSWD_STRUCT.pw_dir = ROOT_DIR.as_ptr() as *mut c_char;
         ROOT_PASSWD_STRUCT.pw_shell = ROOT_SHELL.as_ptr() as *mut c_char;
-        &mut ROOT_PASSWD_STRUCT as *mut Passwd
+        &raw mut ROOT_PASSWD_STRUCT
     }
 }
 

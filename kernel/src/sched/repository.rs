@@ -337,6 +337,6 @@ mod tests {
     fn test_get_nonexistent() {
         let repo = ThreadRepository::new();
         assert!(repo.get(ThreadId::new(999)).is_none());
-        assert!(repo.contains(ThreadId::new(999)) == false);
+        assert!(!repo.contains(ThreadId::new(999)));
     }
 }

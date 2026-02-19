@@ -37,10 +37,7 @@ impl FutexQueues {
     }
 
     fn enqueue(&mut self, key: FutexKey, thread_id: ThreadId) {
-        self.waiters
-            .entry(key)
-            .or_insert_with(VecDeque::new)
-            .push_back(thread_id);
+        self.waiters.entry(key).or_default().push_back(thread_id);
     }
 
     fn remove_waiter(&mut self, key: FutexKey, thread_id: ThreadId) {

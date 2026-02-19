@@ -1336,12 +1336,10 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
                 if let Ok((_frame_token, frame_obj_ref)) =
                     crate::token::lookup_token(crate::token::TokenHandle::from_raw(copy_len))
                 {
-                    if let Ok(frame_ref) =
+                    if let Ok(ObjectRef::Frame(frame_id)) =
                         crate::token::check_object_type(frame_obj_ref, ObjectType::Frame)
                     {
-                        if let ObjectRef::Frame(frame_id) = frame_ref {
-                            frame_registry::dec_map_count(frame_id);
-                        }
+                        frame_registry::dec_map_count(frame_id);
                     }
                 }
             } else if !map_device {
@@ -1354,12 +1352,10 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
                 if let Ok((_frame_token, frame_obj_ref)) =
                     crate::token::lookup_token(crate::token::TokenHandle::from_raw(copy_len))
                 {
-                    if let Ok(frame_ref) =
+                    if let Ok(ObjectRef::Frame(frame_id)) =
                         crate::token::check_object_type(frame_obj_ref, ObjectType::Frame)
                     {
-                        if let ObjectRef::Frame(frame_id) = frame_ref {
-                            frame_registry::dec_map_count(frame_id);
-                        }
+                        frame_registry::dec_map_count(frame_id);
                     }
                 }
             } else if !map_device {
@@ -1771,6 +1767,19 @@ const PAGES_PER_LARGE_PAGE: usize = 512;
 /// Size of a large page (2MB)
 const LARGE_PAGE_SIZE: usize = 2 * 1024 * 1024;
 
+struct MapRange4kbRequest {
+    space_id: crate::token::scope::AddressSpaceId,
+    virt_start: u64,
+    data_ptr: usize,
+    data_len: usize,
+    num_pages: usize,
+    writable: bool,
+    executable: bool,
+    caller_page_table_root: x86_64::PhysAddr,
+    fail_after_pages: Option<usize>,
+    fail_on_map_stage: bool,
+}
+
 fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::elf;
     use crate::mm::{physmap, pmm, space_repository};
@@ -1892,7 +1901,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
                 None => {
                     // Fall back to regular pages if large frame allocation fails
                     klibcluu::warn("Large frame allocation failed, falling back to 4KB pages");
-                    return map_range_4kb(
+                    return map_range_4kb(MapRange4kbRequest {
                         space_id,
                         virt_start,
                         data_ptr,
@@ -1900,10 +1909,11 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
                         num_pages,
                         writable,
                         executable,
-                        caller_page_table_root.ok_or(Error::InvalidState)?,
+                        caller_page_table_root: caller_page_table_root
+                            .ok_or(Error::InvalidState)?,
                         fail_after_pages,
                         fail_on_map_stage,
-                    );
+                    });
                 }
             };
 
@@ -1954,7 +1964,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
         Ok(num_pages)
     } else {
         // Use regular 4KB pages
-        map_range_4kb(
+        map_range_4kb(MapRange4kbRequest {
             space_id,
             virt_start,
             data_ptr,
@@ -1962,30 +1972,32 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
             num_pages,
             writable,
             executable,
-            caller_page_table_root.ok_or(Error::InvalidState)?,
+            caller_page_table_root: caller_page_table_root.ok_or(Error::InvalidState)?,
             fail_after_pages,
             fail_on_map_stage,
-        )
+        })
     }
 }
 
 /// Map a range using 4KB pages (internal helper)
-fn map_range_4kb(
-    space_id: crate::token::scope::AddressSpaceId,
-    virt_start: u64,
-    data_ptr: usize,
-    data_len: usize,
-    num_pages: usize,
-    writable: bool,
-    executable: bool,
-    caller_page_table_root: x86_64::PhysAddr,
-    fail_after_pages: Option<usize>,
-    fail_on_map_stage: bool,
-) -> SyscallResult {
+fn map_range_4kb(req: MapRange4kbRequest) -> SyscallResult {
     use crate::elf;
     use crate::mm::{physmap, pmm, space_repository};
     use core::ptr::write_bytes;
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+    let MapRange4kbRequest {
+        space_id,
+        virt_start,
+        data_ptr,
+        data_len,
+        num_pages,
+        writable,
+        executable,
+        caller_page_table_root,
+        fail_after_pages,
+        fail_on_map_stage,
+    } = req;
 
     let mut bytes_copied = 0usize;
     let mut mapped_pages = 0usize;

@@ -89,13 +89,19 @@ pub fn init() {
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(df_stack_end);
         tss.interrupt_stack_table[GPF_IST_INDEX as usize] = VirtAddr::new(gpf_stack_end);
         tss.interrupt_stack_table[PF_IST_INDEX as usize] = VirtAddr::new(pf_stack_end);
-        TSS.write(tss);
+        core::ptr::addr_of_mut!(TSS)
+            .cast::<TaskStateSegment>()
+            .write(tss);
 
         // Now initialize GDT with reference to TSS
         let mut gdt = GlobalDescriptorTable::new();
         let code_selector = gdt.append(Descriptor::kernel_code_segment());
         let data_selector = gdt.append(Descriptor::kernel_data_segment());
-        let tss_selector = gdt.append(Descriptor::tss_segment(TSS.assume_init_ref()));
+        let tss_selector = {
+            let tss_ref: &'static TaskStateSegment =
+                &*core::ptr::addr_of!(TSS).cast::<TaskStateSegment>();
+            gdt.append(Descriptor::tss_segment(tss_ref))
+        };
         let user_data_selector = gdt.append(Descriptor::user_data_segment());
         let user_code_selector = gdt.append(Descriptor::user_code_segment());
 
@@ -107,11 +113,15 @@ pub fn init() {
             user_code_selector,
         };
 
-        GDT.write(gdt);
+        core::ptr::addr_of_mut!(GDT)
+            .cast::<GlobalDescriptorTable>()
+            .write(gdt);
         GDT_INITIALIZED = true;
 
         // Load the GDT
-        GDT.assume_init_ref().load();
+        let gdt_ref: &'static GlobalDescriptorTable =
+            &*core::ptr::addr_of!(GDT).cast::<GlobalDescriptorTable>();
+        gdt_ref.load();
 
         klibcluu::info("Setting segment registers...");
         // Reload CS to the new code segment
@@ -183,7 +193,7 @@ pub fn set_tss_rsp0(kernel_stack_ptr: u64) {
             klibcluu::error("set_tss_rsp0 called before GDT init!");
             return;
         }
-        let tss_ptr = TSS.assume_init_mut();
-        tss_ptr.privilege_stack_table[0] = VirtAddr::new(kernel_stack_ptr);
+        let tss_ptr = core::ptr::addr_of_mut!(TSS).cast::<TaskStateSegment>();
+        (*tss_ptr).privilege_stack_table[0] = VirtAddr::new(kernel_stack_ptr);
     }
 }

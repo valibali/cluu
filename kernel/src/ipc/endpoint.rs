@@ -745,13 +745,10 @@ fn call_with_reply_id_inner(
     reply_id: crate::token::ReplyId,
 ) -> Result<(), Error> {
     let sender = crate::sched::ThreadManager::current();
-    let mut waiters_before: usize = 0;
-    let mut queue_len_after: usize = 0;
-    let mut call_queue_len_after: usize = 0;
 
     inject_reply_id(buffer, reply_id);
 
-    let (wake, direct_receiver) = {
+    let (wake, direct_receiver, waiters_before, queue_len_after, call_queue_len_after) = {
         let shard = get_endpoint_shard(endpoint);
         let mut shard_guard = shard.lock();
         let endpoint_mutex = shard_guard
@@ -759,7 +756,7 @@ fn call_with_reply_id_inner(
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
         let mut guard = endpoint_mutex.lock();
-        waiters_before = guard.stats().waiting_len;
+        let waiters_before = guard.stats().waiting_len;
         let payload_bytes = &buffer[..payload_len];
         let result = match try_direct_deliver_to_waiting_receiver(
             &mut guard,
@@ -786,9 +783,13 @@ fn call_with_reply_id_inner(
             }
         };
         let stats = guard.stats();
-        queue_len_after = stats.queue_len;
-        call_queue_len_after = stats.call_queue_len;
-        result
+        (
+            result.0,
+            result.1,
+            waiters_before,
+            stats.queue_len,
+            stats.call_queue_len,
+        )
     };
 
     let dbg_count = IPC_CALL_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);

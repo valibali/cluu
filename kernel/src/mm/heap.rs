@@ -55,6 +55,7 @@ use linked_list_allocator::LockedHeap;
 ///
 /// This helps identify what's requesting large allocations (e.g., 4MB)
 /// that might be causing heap exhaustion.
+#[cfg_attr(any(test, feature = "testing"), allow(dead_code))]
 struct LoggingAllocator;
 
 unsafe impl GlobalAlloc for LoggingAllocator {
@@ -183,6 +184,7 @@ static INNER_ALLOCATOR: LockedHeap = LockedHeap::empty();
 static ALLOCATOR: LoggingAllocator = LoggingAllocator;
 
 #[cfg(feature = "testing")]
+#[allow(dead_code)]
 static ALLOCATOR: LoggingAllocator = LoggingAllocator;
 
 /// Initialize the kernel heap
@@ -257,7 +259,7 @@ pub unsafe fn init() -> Result<(), &'static str> {
 /// - Kernel needs its allocations to succeed for correct operation
 ///
 /// Future improvement: Could try to reclaim memory or enter degraded mode
-#[cfg(not(feature = "testing"))]
+#[cfg(all(target_os = "none", not(feature = "testing")))]
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
     let heap = INNER_ALLOCATOR.lock();

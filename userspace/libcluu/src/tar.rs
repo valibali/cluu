@@ -102,8 +102,8 @@ pub fn list_entries(archive: &[u8], dir_prefix: &str) -> Vec<TarEntry> {
             normalized
         } else if normalized.starts_with(prefix) && normalized.len() > prefix.len() {
             let rest = &normalized[prefix.len()..];
-            if rest.starts_with('/') {
-                &rest[1..]
+            if let Some(stripped) = rest.strip_prefix('/') {
+                stripped
             } else {
                 offset += align_up(BLOCK_SIZE + size, BLOCK_SIZE);
                 continue;

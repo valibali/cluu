@@ -60,7 +60,7 @@ fn calibrate_once() -> Option<u64> {
 
     let gate = unsafe { pit_gate.read() };
     // Disable speaker data (bit 1), drop gate (bit 0) for a clean restart.
-    unsafe { pit_gate.write((gate & !0x03) | 0x00) };
+    unsafe { pit_gate.write(gate & !0x03) };
 
     // Channel 2, lobyte/hibyte, mode 0 (one-shot), binary.
     unsafe { pit_cmd.write(0xB0) };

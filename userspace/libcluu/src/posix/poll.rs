@@ -324,8 +324,7 @@ pub extern "C" fn select(
 
     // Convert poll results back to fd_sets
     let mut ready = 0;
-    for i in 0..npoll {
-        let pfd = &poll_fds[i];
+    for pfd in poll_fds.iter().take(npoll) {
         if pfd.revents == 0 {
             continue;
         }

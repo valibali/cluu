@@ -14,9 +14,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 #[cfg(target_arch = "x86_64")]
-mod simd;
-
-#[cfg(target_arch = "x86_64")]
 use crate::simd::{copy_row_simd, fill_row_simd, is_sse2_available, write_row_simd};
 
 // ============================================================================
@@ -247,13 +244,11 @@ impl ConsoleBackend for FramebufferBackend {
                     unsafe fn call_write(dst: *mut u32, colors: &[u32], len: usize) {
                         write_row_simd(dst, colors, len);
                     }
-                    unsafe {
-                        call_write(dst, colors, len);
-                    }
+                    call_write(dst, colors, len);
                 } else {
                     // Fallback for small writes or non-x86_64
-                    for i in 0..len {
-                        dst.add(i).write_volatile(colors[i]);
+                    for (i, &color) in colors.iter().enumerate().take(len) {
+                        dst.add(i).write_volatile(color);
                     }
                 }
             }
@@ -294,9 +289,7 @@ impl ConsoleBackend for FramebufferBackend {
                 unsafe fn call_fill(dst: *mut u32, color: u32, len: usize) {
                     fill_row_simd(dst, color, len);
                 }
-                unsafe {
-                    call_fill(first_row, color, max_w);
-                }
+                call_fill(first_row, color, max_w);
             } else {
                 for i in 0..max_w {
                     first_row.add(i).write_volatile(color);
@@ -321,9 +314,7 @@ impl ConsoleBackend for FramebufferBackend {
                     }
                     for row in 1..max_h {
                         let dst = self.fb.add((y + row) * self.pitch + x * 4) as *mut u32;
-                        unsafe {
-                            call_copy(first_row, dst, max_w);
-                        }
+                        call_copy(first_row, dst, max_w);
                     }
                 } else {
                     for row in 1..max_h {
@@ -349,9 +340,7 @@ impl ConsoleBackend for FramebufferBackend {
                     }
                     for row in 1..max_h {
                         let dst = self.fb.add((y + row) * self.pitch + x * 4) as *mut u32;
-                        unsafe {
-                            call_fill(dst, color, max_w);
-                        }
+                        call_fill(dst, color, max_w);
                     }
                 } else {
                     for row in 1..max_h {
@@ -423,7 +412,7 @@ impl ConsoleBackend for FramebufferBackend {
                     let src = self.fb.add(src_offset) as *const u32;
                     let dst = self.fb.add(dst_offset) as *mut u32;
 
-                    if src != dst as *const u32 {
+                    if !core::ptr::eq(src, dst) {
                         #[cfg(target_arch = "x86_64")]
                         if use_simd {
                             #[target_feature(enable = "sse2")]
@@ -456,7 +445,7 @@ impl ConsoleBackend for FramebufferBackend {
                     let src = self.fb.add(src_offset) as *const u32;
                     let dst = self.fb.add(dst_offset) as *mut u32;
 
-                    if src != dst as *const u32 {
+                    if !core::ptr::eq(src, dst) {
                         #[cfg(target_arch = "x86_64")]
                         if use_simd {
                             #[target_feature(enable = "sse2")]

@@ -829,7 +829,7 @@ impl ProcessManager {
         let client = VfsClient::new(self.vfs_endpoint, client_id);
 
         // #region agent log
-        let _ = debug_print(&format!("procmgr: opening file via VFS..."));
+        let _ = debug_print("procmgr: opening file via VFS...");
         // #endregion
 
         // Open the file
@@ -1241,7 +1241,7 @@ impl ProcessManager {
                     if let Some(notify_ep) = self.exit_notify.remove(&cookie) {
                         let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
                         notify_msg.words[0] = cookie;
-                        notify_msg.words[1] = (128 + signal) as usize;
+                        notify_msg.words[1] = 128 + signal;
                         let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
                     }
                     if let Some(st) = self.cookie_to_space.remove(&cookie) {
