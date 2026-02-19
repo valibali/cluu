@@ -1,6 +1,6 @@
 # CLUU Status and Plan — February 2026
 
-**Consolidation of**: `DEEP_DIVE_ANALYSIS.md`, `KERNEL_MATURITY_ANALYSIS.md`, five research audits (POSIX layer, kernel capabilities, MicroPython/Quake, DMA/drivers, namespacing/security)
+**Consolidation of**: `DEEP_DIVE_ANALYSIS.md`, `docs/archive/kernel-maturity-analysis-feb-2026.md`, five research audits (POSIX layer, kernel capabilities, MicroPython/Quake, DMA/drivers, namespacing/security)
 **Constraints**: No new syscalls (use Invoke), seL4-inspired kernel with POSIX compat layer, single-core, minimal drivers
 **Goals**: Port and run MicroPython, Quake 1 (software renderer, no sound); build toward general-purpose console OS with device drivers and networking
 **Automated verification**: All changes can be validated end-to-end without manual testing. The harness stack (`test_hello.sh` + 36+ marker modes + SLO enforcement) boots CLUU in headless QEMU, injects commands, captures serial output, and asserts correctness markers and performance thresholds. Run `cargo xtask harness-matrix` to gate any commit against the full regression suite.

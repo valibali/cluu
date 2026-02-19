@@ -203,7 +203,7 @@ For each sub-milestone (`P0.1`, `P0.2`, ...):
 
 1. Land code + docs in one scoped commit.
 2. Run full rebuild harness (`./test_hello.sh`) with the sub-milestone marker mode.
-3. Record observed metrics in `docs/KERNEL_MATURITY_ANALYSIS.md` implementation tracker.
+3. Record observed metrics in `docs/archive/kernel-maturity-analysis-feb-2026.md` implementation tracker.
 4. Only then advance to the next sub-milestone.
 
 ## 4. Immediate Execution Queue
