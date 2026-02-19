@@ -3,11 +3,11 @@ PLATFORM=x86
 # the path to OVMF.fd (for testing with EFI)
 OVMF=/usr/share/ovmf/OVMF.fd
 
-all: ../utilies/mkbootimg/mkbootimg initdir disk
+all: ../tools/mkbootimg/mkbootimg initdir disk
 
 # compile the image creator
-../utilies/mkbootimg/mkbootimg:
-	@make -C ../utilies/mkbootimg all
+../tools/mkbootimg/mkbootimg:
+	@make -C ../tools/mkbootimg all
 
 # create an initial ram disk image with the kernel inside
 initdir:
@@ -15,8 +15,8 @@ initdir:
 	cp ../kernel/cluu-kernel-rust.x86_64.elf initrd/sys/core
 
 # create hybrid disk / cdrom image or ROM image
-disk: ../utilies/mkbootimg/mkbootimg initdir mkbootimg.json
-	../utilies/mkbootimg/mkbootimg mkbootimg.json disk-$(PLATFORM).img
+disk: ../tools/mkbootimg/mkbootimg initdir mkbootimg.json
+	../tools/mkbootimg/mkbootimg mkbootimg.json disk-$(PLATFORM).img
 	@rm -rf initrd
 
 uefi:

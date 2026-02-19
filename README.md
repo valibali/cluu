@@ -371,7 +371,7 @@ test:
 	cargo xtask test
 
 clean:
-	cargo xtask clean
+	cargo xtask clean-full
 
 full-clean:
 	cargo xtask clean-full
@@ -408,8 +408,8 @@ make run-rich    # Build and run in QEMU (rich UI)
 make run-release
 make run-debug   # Run with GDB + telnet serial
 make test        # Run all tests
-make clean       # Standard clean (cargo clean + image artifacts)
-make full-clean  # Remove all generated artifacts (toolchain + staging + images)
+make clean       # Full clean (target/tmp/external caches/build outputs)
+make full-clean  # Same as make clean
 make pristine    # Alias for full-clean
 make rebuild-full # Deterministic from-scratch rebuild (newlib/syscalls/crt0/kernel/userspace)
 make rebuild-full-release # Deterministic from-scratch rebuild (release profile)

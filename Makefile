@@ -37,7 +37,7 @@ test-slo:
 	cargo xtask harness-slo
 
 clean:
-	cargo xtask clean
+	cargo xtask clean-full
 
 full-clean:
 	cargo xtask clean-full
@@ -74,6 +74,7 @@ help:
 	@echo "  make build-rich   - Rich UI build (parallel-safe stages + progress + per-task logs)"
 	@echo "  make build        - Rich build (default UI)"
 	@echo "  make run-debug    - Build + run paused for GDB"
+	@echo "  make clean        - Full workspace clean (equivalent build reset)"
 	@echo "  make full-clean   - Remove all generated artifacts"
 	@echo "  make pristine     - Alias for full-clean"
 	@echo "  make rebuild-full - Deterministic from-scratch rebuild"
@@ -89,7 +90,7 @@ help:
 	@echo "  make test             - Run tests"
 	@echo "  make test-harness     - Harness churn/leak/failpoint matrix"
 	@echo "  make test-slo         - Repeated fairness SLO sweep"
-	@echo "  make clean            - Standard clean (cargo clean + image artifacts)"
+	@echo "  make clean            - Full clean (target/tmp/external caches/build outputs)"
 	@echo "  make full-clean       - Full clean (target/tmp/staging)"
 	@echo "  make pristine         - Alias for full-clean"
 	@echo "  make rebuild-full     - Full clean + rebuild toolchain/images"

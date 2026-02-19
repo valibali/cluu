@@ -693,6 +693,68 @@ fn truncate_live_line(line: &str, max_chars: usize) -> String {
     out
 }
 
+fn visible_width_ansi(line: &str) -> usize {
+    let mut width = 0usize;
+    let mut in_escape = false;
+    for ch in line.chars() {
+        if in_escape {
+            if ('@'..='~').contains(&ch) {
+                in_escape = false;
+            }
+            continue;
+        }
+        if ch == '\x1b' {
+            in_escape = true;
+            continue;
+        }
+        width = width.saturating_add(1);
+    }
+    width
+}
+
+fn take_visible_ansi(line: &str, visible_limit: usize) -> String {
+    let mut out = String::new();
+    let mut visible = 0usize;
+    let mut in_escape = false;
+
+    for ch in line.chars() {
+        if in_escape {
+            out.push(ch);
+            if ('@'..='~').contains(&ch) {
+                in_escape = false;
+            }
+            continue;
+        }
+        if ch == '\x1b' {
+            in_escape = true;
+            out.push(ch);
+            continue;
+        }
+        if visible >= visible_limit {
+            break;
+        }
+        out.push(ch);
+        visible = visible.saturating_add(1);
+    }
+
+    out
+}
+
+fn clamp_render_line(line: &str, width: usize, use_color: bool) -> String {
+    let width = width.max(1);
+    if !use_color {
+        return truncate_live_line(line, width);
+    }
+    if visible_width_ansi(line) <= width {
+        return line.to_string();
+    }
+
+    let mut out = take_visible_ansi(line, width.saturating_sub(1));
+    out.push('…');
+    out.push_str("\x1b[0m");
+    out
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NodeStatus {
     Pending,
@@ -1141,7 +1203,7 @@ fn render_tree_frame(
         .unwrap_or("unknown");
     let header_line_1 = format!(
         "{}  [{}]  {}",
-        paint("CLUU Build Pipeline", "1;97", use_color),
+        paint(&snapshot.title, "1;97", use_color),
         overall_bar,
         paint(&format!("{:>3}%", overall_percent), "1;33", use_color)
     );
@@ -1234,13 +1296,6 @@ fn render_tree_frame(
                 paint(&format!("log: {}", note), "31;1", use_color)
             ));
         }
-        if is_root && node.id == "build" {
-            line.push_str(&format!(
-                "  {} {}",
-                paint(&format!("({})", snapshot.title), "95", use_color),
-                paint(&format!("logs={}", snapshot.logs_dir), "90", use_color)
-            ));
-        }
         if use_color {
             lines.push(line);
         } else {
@@ -1251,11 +1306,11 @@ fn render_tree_frame(
     let header_count = header_lines.len();
     let tree_visible = visible_lines.saturating_sub(header_count);
     for line in header_lines.drain(..).take(visible_lines) {
-        out.push_str(&line);
+        out.push_str(&clamp_render_line(&line, width, use_color));
         out.push('\n');
     }
     for line in lines.into_iter().take(tree_visible) {
-        out.push_str(&line);
+        out.push_str(&clamp_render_line(&line, width, use_color));
         out.push('\n');
     }
     out
@@ -2224,11 +2279,11 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     let output_img = project_root().join("target/cluu.img");
 
     // Check if mkbootimg exists
-    let mkbootimg_path = project_root().join("utilies/mkbootimg/mkbootimg");
+    let mkbootimg_path = project_root().join("tools/mkbootimg/mkbootimg");
     if !mkbootimg_path.exists() {
         println!("  Building mkbootimg...");
         let status = Command::new("make")
-            .current_dir(project_root().join("utilies/mkbootimg"))
+            .current_dir(project_root().join("tools/mkbootimg"))
             .arg("all")
             .status()
             .context("Failed to build mkbootimg")?;
@@ -2510,6 +2565,31 @@ fn clean_full() -> Result<()> {
     remove_path_if_exists(&root.join("tmp"))?;
     // Legacy staging location from older builds.
     remove_path_if_exists(&root.join("userfs"))?;
+    // Legacy kernel-local artifacts from older build flows.
+    remove_path_if_exists(&root.join("kernel/target"))?;
+    remove_path_if_exists(&root.join("kernel/cluu-kernel-rust.x86_64.elf"))?;
+    remove_path_if_exists(&root.join("kernel/font.o"))?;
+    remove_path_if_exists(&root.join("kernel/libfont.a"))?;
+
+    // Downloaded external source trees and archives are build-managed cache.
+    // Keep only tracked config in external/.
+    if let Ok(sources) = load_external_sources_config() {
+        remove_path_if_exists(&sources.newlib_dir)?;
+        remove_path_if_exists(&sources.micropython_dir)?;
+        if let Some(archive_name) = sources.newlib_url.rsplit('/').next() {
+            let archive_path = root.join("external").join(archive_name);
+            remove_path_if_exists(&archive_path)?;
+        }
+    }
+
+    // Clean mkbootimg local build outputs (binary + object files).
+    let mkbootimg_dir = root.join("tools/mkbootimg");
+    if mkbootimg_dir.exists() {
+        let _ = Command::new("make")
+            .current_dir(&mkbootimg_dir)
+            .arg("clean")
+            .status();
+    }
 
     println!("  ✓ Full clean complete");
     Ok(())
@@ -2937,7 +3017,7 @@ fn build_crt0() -> Result<()> {
     Ok(())
 }
 
-/// Build all C programs in userspace/c_hello etc.
+/// Build all C programs in userspace/c-programs etc.
 /// This builds prerequisites (syscalls, crt0, newlib) if needed, then compiles C programs.
 fn build_c_programs(profile: &str) -> Result<()> {
     let sysroot = sysroot_path();
@@ -2970,26 +3050,26 @@ fn build_c_programs(profile: &str) -> Result<()> {
 
     // List of C programs to build: (name, source_path)
     let c_programs: &[(&str, &str)] = &[
-        ("hello", "userspace/c_hello/minimal.c"),
-        ("noop", "userspace/c_hello/noop.c"),
-        ("ownerprobe", "userspace/c_hello/ownerprobe.c"),
-        ("sleepy", "userspace/c_hello/sleepy.c"),
-        ("waitprobe", "userspace/c_hello/waitprobe.c"),
-        ("mmapprobe", "userspace/c_hello/mmapprobe.c"),
-        ("pollprobe", "userspace/c_hello/pollprobe.c"),
-        ("benchprobe", "userspace/c_hello/benchprobe.c"),
-        ("futexprobe", "userspace/c_hello/futexprobe.c"),
-        ("futexrace", "userspace/c_hello/futexrace.c"),
-        ("setjmpprobe", "userspace/c_hello/setjmpprobe.c"),
-        ("envprobe", "userspace/c_hello/envprobe.c"),
-        ("stubsprobe", "userspace/c_hello/stubsprobe.c"),
-        ("pipeprobe", "userspace/c_hello/pipeprobe.c"),
-        ("pipecat", "userspace/c_hello/pipecat.c"),
-        ("spawnpipeprobe", "userspace/c_hello/spawnpipeprobe.c"),
-        ("tlsprobe", "userspace/c_hello/tlsprobe.c"),
-        ("pthreadprobe", "userspace/c_hello/pthreadprobe.c"),
-        ("devprobe", "userspace/c_hello/devprobe.c"),
-        ("fbprobe", "userspace/c_hello/fbprobe.c"),
+        ("hello", "userspace/c-programs/minimal.c"),
+        ("noop", "userspace/c-programs/noop.c"),
+        ("ownerprobe", "userspace/c-programs/ownerprobe.c"),
+        ("sleepy", "userspace/c-programs/sleepy.c"),
+        ("waitprobe", "userspace/c-programs/waitprobe.c"),
+        ("mmapprobe", "userspace/c-programs/mmapprobe.c"),
+        ("pollprobe", "userspace/c-programs/pollprobe.c"),
+        ("benchprobe", "userspace/c-programs/benchprobe.c"),
+        ("futexprobe", "userspace/c-programs/futexprobe.c"),
+        ("futexrace", "userspace/c-programs/futexrace.c"),
+        ("setjmpprobe", "userspace/c-programs/setjmpprobe.c"),
+        ("envprobe", "userspace/c-programs/envprobe.c"),
+        ("stubsprobe", "userspace/c-programs/stubsprobe.c"),
+        ("pipeprobe", "userspace/c-programs/pipeprobe.c"),
+        ("pipecat", "userspace/c-programs/pipecat.c"),
+        ("spawnpipeprobe", "userspace/c-programs/spawnpipeprobe.c"),
+        ("tlsprobe", "userspace/c-programs/tlsprobe.c"),
+        ("pthreadprobe", "userspace/c-programs/pthreadprobe.c"),
+        ("devprobe", "userspace/c-programs/devprobe.c"),
+        ("fbprobe", "userspace/c-programs/fbprobe.c"),
     ];
 
     for (name, source) in c_programs {
@@ -3299,7 +3379,7 @@ fn setup_c_toolchain() -> Result<()> {
     println!("  cargo xtask build-c <name> <source.c>");
     println!("");
     println!("Example:");
-    println!("  cargo xtask build-c hello userspace/c_hello/hello.c");
+    println!("  cargo xtask build-c hello userspace/c-programs/hello.c");
 
     Ok(())
 }

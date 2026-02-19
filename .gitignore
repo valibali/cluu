@@ -14,6 +14,12 @@ target/
 *.elf
 *.img
 *.tar
+/kernel/target/
+/kernel/*.elf
+/kernel/font.o
+/kernel/libfont.a
+/tools/mkbootimg/mkbootimg
+/tools/mkbootimg/bin2h
 
 # BOOTBOOT artifacts
 /bootboot_image/bootboot.img
