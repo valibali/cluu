@@ -379,7 +379,8 @@ impl ConsoleBackend for FramebufferBackend {
     /// Uses SIMD (SSE2) when available for 4x speedup.
     /// This is much faster than redrawing for scrolling operations.
     ///
-    /// Handles overlapping regions correctly by copying backwards when src_y > dst_y.
+    /// Handles overlapping regions correctly by copying backwards when moving
+    /// content down (dst_y > src_y).
     fn copy_rect(
         &mut self,
         src_x: usize,
@@ -403,12 +404,12 @@ impl ConsoleBackend for FramebufferBackend {
         }
 
         unsafe {
-            // Determine if regions overlap and copy direction
-            // Two ranges [a, a+len) and [b, b+len) overlap if: a < b+len && b < a+len
-            // We need to copy backwards if src_y > dst_y AND the regions actually overlap
-            // For scrolling: src_y=GLYPH_H, dst_y=0, they don't overlap, so copy forwards
+            // Determine if regions overlap and copy direction.
+            // Two ranges [a, a+len) and [b, b+len) overlap if: a < b+len && b < a+len.
+            // We need to copy backwards only when destination is below source
+            // (dst_y > src_y), otherwise we'd clobber source rows not yet read.
             let regions_overlap = src_x == dst_x && src_y < dst_y + max_h && dst_y < src_y + max_h;
-            let copy_backwards = regions_overlap && src_y > dst_y;
+            let copy_backwards = regions_overlap && dst_y > src_y;
 
             #[cfg(target_arch = "x86_64")]
             let use_simd = is_sse2_available() && max_w >= 4;
@@ -447,7 +448,7 @@ impl ConsoleBackend for FramebufferBackend {
                     }
                 }
             } else {
-                // Copy forwards: from top row to bottom row (normal case, used for scrolling)
+                // Copy forwards: from top row to bottom row (used for scroll-up).
                 for row in 0..max_h {
                     let src_offset = (src_y + row) * self.pitch + src_x * 4;
                     let dst_offset = (dst_y + row) * self.pitch + dst_x * 4;
@@ -704,9 +705,9 @@ impl ConsoleBackend for DoubleBufferBackend {
             return;
         }
 
-        // Determine copy direction to handle overlapping regions
+        // Determine copy direction to handle overlapping regions.
         let regions_overlap = src_x == dst_x && src_y < dst_y + max_h && dst_y < src_y + max_h;
-        let copy_backwards = regions_overlap && src_y > dst_y;
+        let copy_backwards = regions_overlap && dst_y > src_y;
 
         if copy_backwards {
             // Copy backwards: from bottom row to top row
@@ -729,7 +730,7 @@ impl ConsoleBackend for DoubleBufferBackend {
                 }
             }
         } else {
-            // Copy forwards: from top row to bottom row (normal case for scrolling)
+            // Copy forwards: from top row to bottom row (normal case for scroll-up)
             for row in 0..max_h {
                 let src_row_start = (src_y + row) * self.width + src_x;
                 let dst_row_start = (dst_y + row) * self.width + dst_x;

@@ -414,6 +414,20 @@ pub extern "C" fn dirname(path: *mut c_char) -> *mut c_char {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Scheduling
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Yield the processor to other threads.
+///
+/// POSIX sched_yield — voluntarily relinquishes the CPU.
+/// Wired to CLUU's sys_yield (syscall #4).
+#[no_mangle]
+pub extern "C" fn sched_yield() -> c_int {
+    let _ = crate::syscall::yield_cpu();
+    0
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
