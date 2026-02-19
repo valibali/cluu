@@ -28,7 +28,9 @@ use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_id;
 use libcluu::ipc::SharedRing;
 use libcluu::registry;
-use libcluu::syscall::{space_destroy, thread_destroy, thread_resume, thread_suspend, token_revoke};
+use libcluu::syscall::{
+    space_destroy, thread_destroy, thread_resume, thread_suspend, token_revoke,
+};
 use libcluu::tar::find_member;
 use libcluu::*;
 
@@ -40,7 +42,7 @@ const STACK_FLAGS: usize = 0x03; // read + write
 const SERVICE_PATH: &str = "/dev/initrd/bin/shell";
 const SHELL_AUTOSTART_CMD: &str = match option_env!("CLUU_SHELL_AUTOSTART_CMD") {
     Some(cmd) => cmd,
-    None => "spawn hello",
+    None => "",
 };
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
@@ -203,6 +205,10 @@ impl ProcessManager {
     }
 
     fn run(&mut self) -> Result<()> {
+        let _ = debug_print(&format!(
+            "procmgr: entering run loop (exit_ep={} spawn_ep={})",
+            self.exit_endpoint, self.spawn_endpoint
+        ));
         loop {
             if self.tty_main == 0 && !self.requested_tty {
                 let _ = registry::request_subscription("tty:0", "main");
@@ -215,10 +221,20 @@ impl ProcessManager {
     fn poll_exit_notifications(&mut self) -> Result<()> {
         let registry_endpoint = registry::control_endpoint();
         let tokens = [self.exit_endpoint, self.spawn_endpoint, registry_endpoint];
+        let _ = debug_print(&format!(
+            "procmgr: poll tokens=[{},{},{}]",
+            tokens[0], tokens[1], tokens[2]
+        ));
         let mut buf = [0u8; 256];
         let (index, len, sender_tid) =
             match libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, u64::MAX) {
-                Ok(res) => res,
+                Ok(res) => {
+                    let _ = debug_print(&format!(
+                        "procmgr: recv_any idx={} len={} sender={}",
+                        res.0, res.1, res.2
+                    ));
+                    res
+                }
                 Err(err) => {
                     let _ = debug_print(&format!("TRACE: exit recv failed {:?}", err));
                     return Ok(());
@@ -325,7 +341,7 @@ impl ProcessManager {
     ) -> Result<()> {
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
-        let mut reply_msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 2);
+        let mut reply_msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
         self.log_spawn_stage(spawn_seq, "spawn_request", spawn_start);
         let _ = debug_print(&format!(
             "procmgr: spawn request sender_tid={} words={}",
@@ -423,10 +439,11 @@ impl ProcessManager {
             spawn_start,
             fdac_data,
         ) {
-            Ok((_thread_token, cookie, pid)) => {
+            Ok((_thread_token, cookie, pid, child_stdin_send)) => {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = pid; // Return PID instead of thread_token
                 reply_msg.words[2] = cookie; // Return cookie for _wait()
+                reply_msg.words[3] = child_stdin_send; // Parent send-cap for foreground routing.
                 if sender_tid != 0 {
                     let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
                     *entry = entry.saturating_add(1);
@@ -508,7 +525,7 @@ impl ProcessManager {
         owner_tid: usize,
         spawn_seq: usize,
         spawn_start: u64,
-    ) -> Result<(usize, usize, usize)> {
+    ) -> Result<(usize, usize, usize, usize)> {
         self.spawn_service_with_env(
             path,
             priority,
@@ -536,7 +553,7 @@ impl ProcessManager {
         spawn_seq: usize,
         spawn_start: u64,
         fdac_data: &[u8],
-    ) -> Result<(usize, usize, usize)> {
+    ) -> Result<(usize, usize, usize, usize)> {
         // Build env data: for bootstrap (owner_tid==0) use defaults,
         // otherwise use caller-provided env (from posix_spawn)
         let (env_data, envc) = if owner_tid == 0 {
@@ -640,8 +657,10 @@ impl ProcessManager {
         let mut stdlog_ep = stdlog_endpoint;
 
         if fdac_data.len() >= 8 {
-            let magic = u32::from_le_bytes([fdac_data[0], fdac_data[1], fdac_data[2], fdac_data[3]]);
-            let count = u32::from_le_bytes([fdac_data[4], fdac_data[5], fdac_data[6], fdac_data[7]]) as usize;
+            let magic =
+                u32::from_le_bytes([fdac_data[0], fdac_data[1], fdac_data[2], fdac_data[3]]);
+            let count = u32::from_le_bytes([fdac_data[4], fdac_data[5], fdac_data[6], fdac_data[7]])
+                as usize;
             if magic == 0x46444143 && count <= 4 {
                 // Each FdAction is 16 bytes: u32 target_fd + u32 flags + usize endpoint
                 for i in 0..count {
@@ -650,26 +669,54 @@ impl ProcessManager {
                         break;
                     }
                     let target_fd = u32::from_le_bytes([
-                        fdac_data[base], fdac_data[base + 1],
-                        fdac_data[base + 2], fdac_data[base + 3],
+                        fdac_data[base],
+                        fdac_data[base + 1],
+                        fdac_data[base + 2],
+                        fdac_data[base + 3],
                     ]);
                     let flags = u32::from_le_bytes([
-                        fdac_data[base + 4], fdac_data[base + 5],
-                        fdac_data[base + 6], fdac_data[base + 7],
+                        fdac_data[base + 4],
+                        fdac_data[base + 5],
+                        fdac_data[base + 6],
+                        fdac_data[base + 7],
                     ]);
                     let endpoint = usize::from_le_bytes([
-                        fdac_data[base + 8], fdac_data[base + 9],
-                        fdac_data[base + 10], fdac_data[base + 11],
-                        fdac_data[base + 12], fdac_data[base + 13],
-                        fdac_data[base + 14], fdac_data[base + 15],
+                        fdac_data[base + 8],
+                        fdac_data[base + 9],
+                        fdac_data[base + 10],
+                        fdac_data[base + 11],
+                        fdac_data[base + 12],
+                        fdac_data[base + 13],
+                        fdac_data[base + 14],
+                        fdac_data[base + 15],
                     ]);
 
                     let is_pipe = (flags & 0x01) != 0;
                     match target_fd {
-                        0 => { stdin_ep = endpoint; if is_pipe { pipe_mask |= 1 << 0; } }
-                        1 => { stdout_ep = endpoint; if is_pipe { pipe_mask |= 1 << 1; } }
-                        2 => { stderr_ep = endpoint; if is_pipe { pipe_mask |= 1 << 2; } }
-                        3 => { stdlog_ep = endpoint; if is_pipe { pipe_mask |= 1 << 3; } }
+                        0 => {
+                            stdin_ep = endpoint;
+                            if is_pipe {
+                                pipe_mask |= 1 << 0;
+                            }
+                        }
+                        1 => {
+                            stdout_ep = endpoint;
+                            if is_pipe {
+                                pipe_mask |= 1 << 1;
+                            }
+                        }
+                        2 => {
+                            stderr_ep = endpoint;
+                            if is_pipe {
+                                pipe_mask |= 1 << 2;
+                            }
+                        }
+                        3 => {
+                            stdlog_ep = endpoint;
+                            if is_pipe {
+                                pipe_mask |= 1 << 3;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -679,6 +726,12 @@ impl ProcessManager {
                 ));
             }
         }
+
+        let parent_stdin_send =
+            match token_derive(stdin_ep, Rights::IPC_SEND.bits() as usize, u64::MAX) {
+                Ok(token) => token,
+                Err(_) => stdin_ep,
+            };
 
         map_process_info_page(
             space_token,
@@ -710,10 +763,18 @@ impl ProcessManager {
         self.pid_owner_tid.insert(pid, owner_tid);
         self.cookie_to_space.insert(cookie, space_token);
         // Track derived tokens/endpoints for cleanup on exit
-        self.cookie_to_tokens.insert(cookie, vec![
-            child_endpoint, stdin_ep, proc_cap, self_cap, child_space_token,
-        ]);
-        Ok((thread_token, cookie, pid))
+        let mut derived_tokens = vec![
+            child_endpoint,
+            stdin_ep,
+            proc_cap,
+            self_cap,
+            child_space_token,
+        ];
+        if parent_stdin_send != stdin_ep {
+            derived_tokens.push(parent_stdin_send);
+        }
+        self.cookie_to_tokens.insert(cookie, derived_tokens);
+        Ok((thread_token, cookie, pid, parent_stdin_send))
     }
 
     /// Load ELF data from VFS or initrd.
