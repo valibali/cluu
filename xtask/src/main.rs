@@ -7,16 +7,25 @@
 //!   cargo xtask clean          # Clean all build artifacts
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CLUU_TARGET_TRIPLET: &str = "x86_64-cluu";
 const NEWLIB_TARGET_TRIPLET: &str = "x86_64-unknown-elf";
 const NEWLIB_CLUU_TRIPLET: &str = "x86_64-cluu-elf";
 const CLUU_CLANG_TARGET: &str = "x86_64-unknown-none-elf";
+const DEFAULT_NEWLIB_VERSION: &str = "4.4.0.20231231";
+const DEFAULT_MICROPYTHON_VERSION: &str = "v1.22.0";
+const DEFAULT_MICROPYTHON_REF: &str = "v1.22.0";
+const EXTERNAL_SOURCES_CONFIG_REL: &str = "external/sources.env";
 const BOOT_MANIFEST_HMAC_KEY: [u8; 32] = [
     0x43, 0x4c, 0x55, 0x55, 0x2d, 0x42, 0x4f, 0x4f, 0x54, 0x2d, 0x4d, 0x41, 0x4e, 0x49, 0x46, 0x45,
     0x53, 0x54, 0x2d, 0x4b, 0x45, 0x59, 0x2d, 0x30, 0x31, 0x2d, 0x44, 0x45, 0x56, 0x2d, 0x41, 0x31,
@@ -62,6 +71,33 @@ const ALL_RIGHTS_MASK: u32 = RIGHT_READ
     | RIGHT_IRQ_ACK
     | RIGHT_PCI_ACCESS;
 
+#[derive(Debug, Clone)]
+struct ExternalSourcesConfig {
+    config_path: PathBuf,
+    newlib_version: String,
+    newlib_url: String,
+    newlib_dir: PathBuf,
+    newlib_patch_files: Vec<String>,
+    micropython_version: String,
+    micropython_repo: String,
+    micropython_ref: Option<String>,
+    micropython_dir: PathBuf,
+    micropython_patch_files: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum BuildUi {
+    Linear,
+    Rich,
+}
+
+#[derive(Clone, Debug)]
+struct RichTask {
+    name: &'static str,
+    args: Vec<String>,
+    deps: &'static [&'static str],
+}
+
 #[derive(Parser)]
 #[command(name = "xtask", about = "CLUU build system")]
 struct Cli {
@@ -75,6 +111,9 @@ enum Commands {
     Build {
         #[arg(long, default_value = "dev")]
         profile: String,
+        /// Build UI mode: linear output or rich progress view with per-task logs
+        #[arg(long, value_enum, default_value_t = BuildUi::Rich)]
+        ui: BuildUi,
     },
     /// Build and run in QEMU
     Run {
@@ -83,11 +122,38 @@ enum Commands {
         /// Enable debug mode (pause for GDB, telnet serial on 4321)
         #[arg(long)]
         debug: bool,
+        /// Build UI mode: linear output or rich progress view with per-task logs
+        #[arg(long, value_enum, default_value_t = BuildUi::Rich)]
+        ui: BuildUi,
     },
     /// Run all tests
     Test,
     /// Clean all build artifacts
     Clean,
+    /// Clean all generated artifacts, including toolchain outputs and staging dirs
+    CleanFull,
+    /// Full deterministic rebuild from scratch (newlib + syscalls + crt0 + all images)
+    RebuildFull {
+        #[arg(long, default_value = "dev")]
+        profile: String,
+    },
+    /// Verify host tools and key build artifacts
+    Doctor,
+    /// View/tail rich build logs under target/logs
+    Logs {
+        /// Specific rich-build run id (timestamp directory) or path; defaults to latest run
+        #[arg(long)]
+        run: Option<String>,
+        /// Task log name (for example: userspace, kernel, c-programs, micropython, initrd)
+        #[arg(long)]
+        task: Option<String>,
+        /// Number of lines to show from the end of the log
+        #[arg(long, default_value_t = 80)]
+        lines: usize,
+        /// Keep streaming appended log output (tail -f behavior)
+        #[arg(long)]
+        follow: bool,
+    },
     /// Build only userspace programs
     Userspace {
         #[arg(long, default_value = "dev")]
@@ -135,30 +201,45 @@ enum Commands {
         #[arg(long, default_value_t = 5)]
         repeats: u32,
     },
+    /// Internal: build all C programs
+    #[command(hide = true)]
+    BuildCPrograms {
+        #[arg(long, default_value = "dev")]
+        profile: String,
+    },
+    /// Internal: build micropython port
+    #[command(hide = true)]
+    BuildMicropython,
+    /// Internal: create initrd
+    #[command(hide = true)]
+    CreateInitrd {
+        #[arg(long, default_value = "dev")]
+        profile: String,
+    },
+    /// Internal: create userspace block image
+    #[command(hide = true)]
+    CreateUserBlockImage {
+        #[arg(long, default_value = "dev")]
+        profile: String,
+    },
+    /// Internal: create boot disk image
+    #[command(hide = true)]
+    CreateDiskImage {
+        #[arg(long, default_value = "dev")]
+        profile: String,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Build { profile } => {
-            build_userspace(&profile)?;
-            build_kernel(&profile)?;
-            build_c_programs(&profile)?;
-            build_micropython()?;
-            create_initrd(&profile)?;
-            create_user_block_image(&profile)?;
-            create_disk_image(&profile)?;
+        Commands::Build { profile, ui } => {
+            build_pipeline(&profile, ui)?;
             println!("✓ Build complete: target/cluu.img");
         }
-        Commands::Run { profile, debug } => {
-            build_userspace(&profile)?;
-            build_kernel(&profile)?;
-            build_c_programs(&profile)?;
-            build_micropython()?;
-            create_initrd(&profile)?;
-            create_user_block_image(&profile)?;
-            create_disk_image(&profile)?;
+        Commands::Run { profile, debug, ui } => {
+            build_pipeline(&profile, ui)?;
             run_qemu(debug)?;
         }
         Commands::Test => {
@@ -166,6 +247,23 @@ fn main() -> Result<()> {
         }
         Commands::Clean => {
             clean()?;
+        }
+        Commands::CleanFull => {
+            clean_full()?;
+        }
+        Commands::RebuildFull { profile } => {
+            rebuild_full(&profile)?;
+        }
+        Commands::Doctor => {
+            doctor()?;
+        }
+        Commands::Logs {
+            run,
+            task,
+            lines,
+            follow,
+        } => {
+            view_logs(run.as_deref(), task.as_deref(), lines, follow)?;
         }
         Commands::Userspace { profile } => {
             build_userspace(&profile)?;
@@ -201,8 +299,1329 @@ fn main() -> Result<()> {
         Commands::HarnessSlo { no_build, repeats } => {
             run_harness_slo(no_build, repeats)?;
         }
+        Commands::BuildCPrograms { profile } => {
+            build_c_programs(&profile)?;
+        }
+        Commands::BuildMicropython => {
+            build_micropython()?;
+        }
+        Commands::CreateInitrd { profile } => {
+            create_initrd(&profile)?;
+        }
+        Commands::CreateUserBlockImage { profile } => {
+            create_user_block_image(&profile)?;
+        }
+        Commands::CreateDiskImage { profile } => {
+            create_disk_image(&profile)?;
+        }
     }
 
+    Ok(())
+}
+
+fn build_pipeline(profile: &str, ui: BuildUi) -> Result<()> {
+    match ui {
+        BuildUi::Linear => build_pipeline_linear(profile),
+        BuildUi::Rich => build_pipeline_rich(profile),
+    }
+}
+
+fn build_pipeline_linear(profile: &str) -> Result<()> {
+    build_newlib()?;
+    build_userspace(profile)?;
+    build_kernel(profile)?;
+    build_c_programs(profile)?;
+    build_micropython()?;
+    create_initrd(profile)?;
+    create_user_block_image(profile)?;
+    create_disk_image(profile)?;
+    Ok(())
+}
+
+fn logs_root_dir() -> PathBuf {
+    project_root().join("target").join("logs")
+}
+
+fn work_units_from_line(line: &str) -> u32 {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed == "(output)" {
+        return 0;
+    }
+    if trimmed.contains("Blocking waiting for file lock") {
+        return 0;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+
+    // Strong build-step indicators.
+    if lower.starts_with("compiling ")
+        || lower.starts_with("linking ")
+        || lower.starts_with("finished ")
+        || lower.contains("building c object")
+        || lower.contains("building cxx object")
+        || lower.contains("generating ")
+        || lower.contains("assembling ")
+    {
+        return 1;
+    }
+
+    // File-oriented heuristic for tool outputs that don't use the cargo-style prefixes.
+    let file_markers = [".rs", ".c", ".h", ".s", ".asm", ".o", ".a", ".ld"];
+    if file_markers.iter().any(|marker| lower.contains(marker)) {
+        return 1;
+    }
+
+    0
+}
+
+fn is_work_unit_line(line: &str) -> bool {
+    work_units_from_line(line) > 0
+}
+
+fn count_work_units_in_log(log_path: &Path) -> u32 {
+    let Ok(content) = fs::read_to_string(log_path) else {
+        return 0;
+    };
+    content.lines().fold(0u32, |acc, line| {
+        acc.saturating_add(work_units_from_line(line))
+    })
+}
+
+fn default_expected_work_units(task_id: &str) -> u32 {
+    match task_id {
+        "userspace-newlib" => 320,
+        "userspace-rust" => 450,
+        "userspace-c-programs" => 120,
+        "userspace-micropython" => 380,
+        "kernel" => 120,
+        "initrd" => 24,
+        "userdisk" => 48,
+        "disk-image" => 8,
+        _ => 80,
+    }
+}
+
+fn historical_expected_work_units(task_id: &str, logs_root: &Path) -> u32 {
+    if !logs_root.exists() {
+        return default_expected_work_units(task_id);
+    }
+
+    let mut runs: Vec<PathBuf> = match fs::read_dir(logs_root) {
+        Ok(read_dir) => read_dir
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    runs.sort_by_key(|path| path.file_name().map(|n| n.to_os_string()));
+    runs.reverse();
+
+    let mut samples: Vec<u32> = Vec::new();
+    for run_dir in runs.into_iter().take(10) {
+        let path = run_dir.join(format!("{task_id}.log"));
+        if !path.exists() {
+            continue;
+        }
+        let count = count_work_units_in_log(&path);
+        if count > 0 {
+            samples.push(count);
+        }
+    }
+
+    if samples.is_empty() {
+        return default_expected_work_units(task_id);
+    }
+    samples.sort_unstable();
+    samples[samples.len() / 2]
+}
+
+fn select_log_run_dir(run: Option<&str>) -> Result<PathBuf> {
+    let root = logs_root_dir();
+    let legacy_root = project_root().join("target").join("xtask-logs");
+    if let Some(run_arg) = run {
+        let provided = PathBuf::from(run_arg);
+        let candidates = if provided.is_absolute() {
+            vec![provided]
+        } else {
+            vec![
+                root.join(run_arg),
+                legacy_root.join(run_arg),
+                project_root().join(run_arg),
+            ]
+        };
+        for candidate in candidates {
+            if candidate.is_dir() {
+                return Ok(candidate);
+            }
+        }
+        bail!(
+            "Log run '{}' not found. Expected a directory under {}",
+            run_arg,
+            root.display()
+        );
+    }
+
+    if !root.exists() && !legacy_root.exists() {
+        bail!(
+            "No rich-build logs found yet (missing {}). Run a rich build first: cargo xtask build --ui rich",
+            root.display()
+        );
+    }
+
+    let mut runs: Vec<PathBuf> = Vec::new();
+    if root.exists() {
+        runs.extend(
+            fs::read_dir(&root)
+                .with_context(|| format!("Failed to read {}", root.display()))?
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir()),
+        );
+    }
+    if legacy_root.exists() {
+        runs.extend(
+            fs::read_dir(&legacy_root)
+                .with_context(|| format!("Failed to read {}", legacy_root.display()))?
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir()),
+        );
+    }
+    runs.sort_by_key(|path| path.file_name().map(|n| n.to_os_string()));
+
+    runs.pop().with_context(|| {
+        format!(
+            "No rich-build runs found in {}. Run: cargo xtask build --ui rich",
+            root.display()
+        )
+    })
+}
+
+fn list_task_logs(run_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut logs: Vec<PathBuf> = fs::read_dir(run_dir)
+        .with_context(|| format!("Failed to read {}", run_dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext == "log")
+                .unwrap_or(false)
+        })
+        .collect();
+    logs.sort();
+    Ok(logs)
+}
+
+fn resolve_task_log(run_dir: &Path, task: &str) -> Result<PathBuf> {
+    let file_name = if task.ends_with(".log") {
+        task.to_string()
+    } else {
+        format!("{task}.log")
+    };
+    let log_path = run_dir.join(file_name);
+    if log_path.exists() {
+        return Ok(log_path);
+    }
+
+    let available = list_task_logs(run_dir)?
+        .into_iter()
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        })
+        .collect::<Vec<String>>()
+        .join(", ");
+    bail!(
+        "Task log '{}' not found in {}. Available: {}",
+        task,
+        run_dir.display(),
+        available
+    );
+}
+
+fn print_log_tail(log_path: &Path, lines: usize) {
+    let tail = read_log_tail(log_path, lines);
+    if tail.is_empty() {
+        println!("(log is currently empty)");
+        return;
+    }
+    print!("{tail}");
+    if !tail.ends_with('\n') {
+        println!();
+    }
+}
+
+fn follow_log(log_path: &Path) -> Result<()> {
+    let mut offset = fs::metadata(log_path)
+        .with_context(|| format!("Failed to stat {}", log_path.display()))?
+        .len();
+
+    loop {
+        if !log_path.exists() {
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+
+        let file_size = fs::metadata(log_path)
+            .with_context(|| format!("Failed to stat {}", log_path.display()))?
+            .len();
+        if file_size < offset {
+            offset = 0;
+        }
+
+        let mut file = File::open(log_path)
+            .with_context(|| format!("Failed to open {}", log_path.display()))?;
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("Failed to seek {}", log_path.display()))?;
+
+        let mut new_data = String::new();
+        file.read_to_string(&mut new_data)
+            .with_context(|| format!("Failed to read {}", log_path.display()))?;
+
+        if !new_data.is_empty() {
+            offset += new_data.as_bytes().len() as u64;
+            print!("{new_data}");
+            io::stdout().flush().context("Failed to flush stdout")?;
+        }
+
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn view_logs(run: Option<&str>, task: Option<&str>, lines: usize, follow: bool) -> Result<()> {
+    let run_dir = select_log_run_dir(run)?;
+    println!("▸ Logs run: {}", run_dir.display());
+
+    if task.is_none() {
+        if follow {
+            bail!("--follow requires --task <name>");
+        }
+
+        let logs = list_task_logs(&run_dir)?;
+        if logs.is_empty() {
+            println!("No task logs found in this run directory.");
+            return Ok(());
+        }
+
+        println!("Available task logs:");
+        for log in logs {
+            let name = log
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            println!("  {name}");
+        }
+        println!("");
+        println!("Use: cargo xtask logs --task <name> [--lines N] [--follow]");
+        return Ok(());
+    }
+
+    let task_name = task.unwrap();
+    let log_path = resolve_task_log(&run_dir, task_name)?;
+    println!("▸ Task log: {}", log_path.display());
+    println!("");
+    print_log_tail(&log_path, lines);
+
+    if follow {
+        println!("");
+        println!("--- following (Ctrl+C to stop) ---");
+        follow_log(&log_path)?;
+    }
+
+    Ok(())
+}
+
+fn rich_log_dir() -> Result<PathBuf> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("System clock before UNIX_EPOCH")?
+        .as_secs();
+    let dir = project_root()
+        .join("target")
+        .join("logs")
+        .join(stamp.to_string());
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn sanitize_live_line(raw: &str) -> String {
+    // Strip ANSI/control noise so pane lines stay stable.
+    let mut out = String::with_capacity(raw.len());
+    let mut in_escape = false;
+
+    for ch in raw.chars() {
+        if in_escape {
+            // End of CSI/escape sequence.
+            if ('@'..='~').contains(&ch) {
+                in_escape = false;
+            }
+            continue;
+        }
+
+        if ch == '\x1b' {
+            in_escape = true;
+            continue;
+        }
+        if ch == '\n' || ch == '\r' {
+            continue;
+        }
+        if ch.is_control() {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        "(output)".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn truncate_live_line(line: &str, max_chars: usize) -> String {
+    if line.chars().count() <= max_chars {
+        return line.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut out: String = line.chars().take(keep).collect();
+    out.push_str("...");
+    out
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NodeStatus {
+    Pending,
+    Running,
+    Done,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+struct RichTreeNode {
+    id: &'static str,
+    label: &'static str,
+    parent: Option<&'static str>,
+    children: Vec<&'static str>,
+    is_leaf: bool,
+    status: NodeStatus,
+    last_line: String,
+    fail_log: Option<String>,
+    progress: f32,
+    work_units_seen: u32,
+    work_units_expected: u32,
+    start_tick: u64,
+}
+
+#[derive(Clone, Debug)]
+struct RichTreeNodeDef {
+    id: &'static str,
+    label: &'static str,
+    parent: Option<&'static str>,
+    is_leaf: bool,
+}
+
+#[derive(Clone, Debug)]
+struct RichTreeSnapshot {
+    title: String,
+    logs_dir: String,
+    order: Vec<&'static str>,
+    nodes: HashMap<&'static str, RichTreeNode>,
+    stop: bool,
+}
+
+#[derive(Debug)]
+struct RichTreeState {
+    title: String,
+    logs_dir: PathBuf,
+    order: Vec<&'static str>,
+    nodes: HashMap<&'static str, RichTreeNode>,
+    tick: u64,
+    stop: bool,
+}
+
+#[derive(Clone)]
+struct RichTreeUi {
+    state: Arc<Mutex<RichTreeState>>,
+}
+
+impl RichTreeUi {
+    fn new(title: String, logs_dir: PathBuf, defs: &[RichTreeNodeDef]) -> Self {
+        let logs_root = logs_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(logs_root_dir);
+        let mut nodes: HashMap<&'static str, RichTreeNode> = HashMap::new();
+        for def in defs {
+            let expected = if def.is_leaf {
+                historical_expected_work_units(def.id, &logs_root)
+            } else {
+                0
+            };
+            nodes.insert(
+                def.id,
+                RichTreeNode {
+                    id: def.id,
+                    label: def.label,
+                    parent: def.parent,
+                    children: Vec::new(),
+                    is_leaf: def.is_leaf,
+                    status: NodeStatus::Pending,
+                    last_line: String::new(),
+                    fail_log: None,
+                    progress: 0.0,
+                    work_units_seen: 0,
+                    work_units_expected: expected,
+                    start_tick: 0,
+                },
+            );
+        }
+        for def in defs {
+            if let Some(parent_id) = def.parent {
+                if let Some(parent) = nodes.get_mut(parent_id) {
+                    parent.children.push(def.id);
+                }
+            }
+        }
+
+        let order = compute_tree_order(defs, &nodes);
+        Self {
+            state: Arc::new(Mutex::new(RichTreeState {
+                title,
+                logs_dir,
+                order,
+                nodes,
+                tick: 0,
+                stop: false,
+            })),
+        }
+    }
+
+    fn snapshot(&self) -> RichTreeSnapshot {
+        let state = self.state.lock().expect("tree state lock poisoned");
+        RichTreeSnapshot {
+            title: state.title.clone(),
+            logs_dir: state.logs_dir.display().to_string(),
+            order: state.order.clone(),
+            nodes: state.nodes.clone(),
+            stop: state.stop,
+        }
+    }
+
+    fn start_renderer(&self) -> thread::JoinHandle<()> {
+        let ui = self.clone();
+        thread::spawn(move || {
+            print!("\x1b[?25l");
+            let _ = io::stdout().flush();
+            let mut progress_floor: HashMap<&'static str, f32> = HashMap::new();
+
+            loop {
+                let snapshot = ui.snapshot();
+                let frame = render_tree_frame(&snapshot, &mut progress_floor);
+                print!("{frame}");
+                let _ = io::stdout().flush();
+
+                if snapshot.stop {
+                    break;
+                }
+                {
+                    let mut state = ui.state.lock().expect("tree state lock poisoned");
+                    state.tick = state.tick.wrapping_add(1);
+                }
+                thread::sleep(Duration::from_millis(90));
+            }
+
+            print!("\x1b[?25h\n");
+            let _ = io::stdout().flush();
+        })
+    }
+
+    fn start_task(&self, id: &'static str) {
+        let mut state = self.state.lock().expect("tree state lock poisoned");
+        let tick = state.tick;
+        if let Some(node) = state.nodes.get_mut(id) {
+            node.status = NodeStatus::Running;
+            node.last_line.clear();
+            node.fail_log = None;
+            node.progress = node.progress.max(0.01);
+            node.work_units_seen = 0;
+            node.start_tick = tick;
+        }
+    }
+
+    fn push_line(&self, id: &'static str, line: String) {
+        let mut state = self.state.lock().expect("tree state lock poisoned");
+        let tick = state.tick;
+        if let Some(node) = state.nodes.get_mut(id) {
+            node.last_line = line;
+            if node.status == NodeStatus::Running {
+                if is_work_unit_line(&node.last_line) {
+                    node.work_units_seen = node
+                        .work_units_seen
+                        .saturating_add(work_units_from_line(&node.last_line));
+                }
+                let expected = node.work_units_expected.max(1) as f32;
+                let by_units = (node.work_units_seen as f32 / expected).clamp(0.0, 0.97);
+                let elapsed = tick.saturating_sub(node.start_tick) as f32;
+                let by_time = (0.02 + elapsed * 0.0025).min(0.90);
+                let candidate = by_units.max(by_time);
+                node.progress = node.progress.max(candidate);
+            }
+        }
+    }
+
+    fn finish_task(&self, id: &'static str, failed: bool, log_path: &Path) {
+        let mut state = self.state.lock().expect("tree state lock poisoned");
+        if let Some(node) = state.nodes.get_mut(id) {
+            if failed {
+                node.status = NodeStatus::Failed;
+                node.fail_log = Some(relative_to_root_display(log_path));
+                node.progress = 1.0;
+            } else {
+                node.status = NodeStatus::Done;
+                node.last_line = "done".to_string();
+                node.fail_log = None;
+                node.progress = 1.0;
+            }
+        }
+    }
+
+    fn stop(&self) {
+        let mut state = self.state.lock().expect("tree state lock poisoned");
+        state.stop = true;
+    }
+}
+
+fn compute_tree_order(
+    defs: &[RichTreeNodeDef],
+    nodes: &HashMap<&'static str, RichTreeNode>,
+) -> Vec<&'static str> {
+    let roots: Vec<&'static str> = defs
+        .iter()
+        .filter(|def| def.parent.is_none())
+        .map(|def| def.id)
+        .collect();
+
+    let mut order = Vec::new();
+    fn walk(
+        id: &'static str,
+        nodes: &HashMap<&'static str, RichTreeNode>,
+        order: &mut Vec<&'static str>,
+    ) {
+        order.push(id);
+        if let Some(node) = nodes.get(id) {
+            for child in &node.children {
+                walk(*child, nodes, order);
+            }
+        }
+    }
+    for root in roots {
+        walk(root, nodes, &mut order);
+    }
+    order
+}
+
+fn terminal_dimensions() -> (usize, usize) {
+    if let Some((terminal_size::Width(w), terminal_size::Height(h))) =
+        terminal_size::terminal_size()
+    {
+        return (w as usize, h as usize);
+    }
+
+    let width = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(120);
+    let height = std::env::var("LINES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(40);
+    (width, height)
+}
+
+fn leaf_progress(node: &RichTreeNode) -> f32 {
+    match node.status {
+        NodeStatus::Pending => node.progress,
+        NodeStatus::Running => node.progress,
+        NodeStatus::Done | NodeStatus::Failed => 1.0,
+    }
+}
+
+fn aggregate_node(
+    id: &'static str,
+    nodes: &HashMap<&'static str, RichTreeNode>,
+) -> (f32, NodeStatus, Option<String>) {
+    let Some(node) = nodes.get(id) else {
+        return (0.0, NodeStatus::Pending, None);
+    };
+    if node.children.is_empty() || node.is_leaf {
+        return (leaf_progress(node), node.status, node.fail_log.clone());
+    }
+
+    let mut progress_sum = 0.0f32;
+    let mut count = 0usize;
+    let mut any_running = false;
+    let mut any_done = false;
+    let mut any_failed = false;
+    let mut all_done = true;
+    let mut first_fail_log: Option<String> = None;
+
+    for child in &node.children {
+        let (progress, status, fail_log) = aggregate_node(child, nodes);
+        progress_sum += progress;
+        count += 1;
+        match status {
+            NodeStatus::Failed => {
+                any_failed = true;
+                if first_fail_log.is_none() {
+                    first_fail_log = fail_log;
+                }
+            }
+            NodeStatus::Running => any_running = true,
+            NodeStatus::Done => any_done = true,
+            NodeStatus::Pending => {}
+        }
+        if status != NodeStatus::Done {
+            all_done = false;
+        }
+    }
+
+    let progress = if count == 0 {
+        0.0
+    } else {
+        progress_sum / (count as f32)
+    };
+    let status = if any_failed {
+        NodeStatus::Failed
+    } else if count > 0 && all_done {
+        NodeStatus::Done
+    } else if any_running || any_done {
+        NodeStatus::Running
+    } else {
+        NodeStatus::Pending
+    };
+
+    (progress, status, first_fail_log)
+}
+
+fn tree_prefix(id: &'static str, nodes: &HashMap<&'static str, RichTreeNode>) -> (String, bool) {
+    let mut parent_chain: Vec<(&'static str, &'static str)> = Vec::new();
+    let mut current = id;
+    while let Some(node) = nodes.get(current) {
+        if let Some(parent) = node.parent {
+            parent_chain.push((current, parent));
+            current = parent;
+        } else {
+            break;
+        }
+    }
+
+    let mut prefix = String::new();
+    for (idx, (child, parent)) in parent_chain.iter().rev().enumerate() {
+        let parent_node = match nodes.get(parent) {
+            Some(node) => node,
+            None => continue,
+        };
+        let is_last = parent_node
+            .children
+            .last()
+            .map(|last| last == child)
+            .unwrap_or(true);
+        let is_direct_parent = idx + 1 == parent_chain.len();
+        if is_direct_parent {
+            prefix.push_str(if is_last { "└─ " } else { "├─ " });
+        } else {
+            prefix.push_str(if is_last { "   " } else { "│  " });
+        }
+    }
+
+    let is_root = parent_chain.is_empty();
+    (prefix, is_root)
+}
+
+fn should_use_color() -> bool {
+    io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+fn paint(text: &str, ansi_code: &str, use_color: bool) -> String {
+    if use_color {
+        format!("\x1b[{}m{}\x1b[0m", ansi_code, text)
+    } else {
+        text.to_string()
+    }
+}
+
+fn colorize_tree_prefix(prefix: &str, use_color: bool) -> String {
+    if !use_color {
+        return prefix.to_string();
+    }
+    let mut out = String::with_capacity(prefix.len() * 2);
+    for ch in prefix.chars() {
+        match ch {
+            '├' | '└' | '│' | '─' => out.push_str(&paint(&ch.to_string(), "38;5;45", true)),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn progress_bar(progress: f32, width: usize, status: NodeStatus, use_color: bool) -> String {
+    let width = width.max(4);
+    let filled = ((progress.clamp(0.0, 1.0)) * (width as f32)).round() as usize;
+    let (fill_color, empty_color) = match status {
+        NodeStatus::Pending => ("90", "90"),
+        NodeStatus::Running => ("38;5;45", "90"),
+        NodeStatus::Done => ("32", "90"),
+        NodeStatus::Failed => ("31", "90"),
+    };
+    let mut out = String::with_capacity(width * 8);
+    for i in 0..width {
+        if i < filled {
+            out.push_str(&paint("#", fill_color, use_color));
+        } else {
+            out.push_str(&paint("-", empty_color, use_color));
+        }
+    }
+    out
+}
+
+fn colorize_status(status: NodeStatus, use_color: bool) -> String {
+    match status {
+        NodeStatus::Pending => paint("PENDING", "90", use_color),
+        NodeStatus::Running => paint("RUNNING", "33", use_color),
+        NodeStatus::Done => paint("DONE", "32", use_color),
+        NodeStatus::Failed => paint("FAILED", "31", use_color),
+    }
+}
+
+fn status_counts(snapshot: &RichTreeSnapshot) -> (usize, usize, usize, usize, usize) {
+    let mut leaves = 0usize;
+    let mut pending = 0usize;
+    let mut running = 0usize;
+    let mut done = 0usize;
+    let mut failed = 0usize;
+
+    for node in snapshot.nodes.values() {
+        if !node.is_leaf {
+            continue;
+        }
+        leaves += 1;
+        match node.status {
+            NodeStatus::Pending => pending += 1,
+            NodeStatus::Running => running += 1,
+            NodeStatus::Done => done += 1,
+            NodeStatus::Failed => failed += 1,
+        }
+    }
+
+    (leaves, pending, running, done, failed)
+}
+
+fn render_tree_frame(
+    snapshot: &RichTreeSnapshot,
+    progress_floor: &mut HashMap<&'static str, f32>,
+) -> String {
+    let (term_width, term_height) = terminal_dimensions();
+    let width = term_width.max(70);
+    let visible_lines = term_height.max(1);
+    let use_color = should_use_color();
+    let mut out = String::new();
+    out.push_str("\x1b[H\x1b[2J");
+    let (overall_progress, _, _) = aggregate_node("build", &snapshot.nodes);
+    let overall_percent = ((overall_progress.clamp(0.0, 1.0)) * 100.0).round() as u32;
+    let overall_bar = progress_bar(overall_progress, 28, NodeStatus::Running, use_color);
+    let (total, pending, running, done, failed) = status_counts(snapshot);
+    let run_id = Path::new(&snapshot.logs_dir)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
+    let header_line_1 = format!(
+        "{}  [{}]  {}",
+        paint("CLUU Build Pipeline", "1;97", use_color),
+        overall_bar,
+        paint(&format!("{:>3}%", overall_percent), "1;33", use_color)
+    );
+    let header_line_2 = format!(
+        "{} {}  {} {}  {} {}  {} {}  {} {}",
+        paint("run:", "90", use_color),
+        paint(run_id, "96", use_color),
+        paint("done:", "90", use_color),
+        paint(&done.to_string(), "32", use_color),
+        paint("running:", "90", use_color),
+        paint(&running.to_string(), "33", use_color),
+        paint("pending:", "90", use_color),
+        paint(&pending.to_string(), "90", use_color),
+        paint("failed:", "90", use_color),
+        paint(
+            &failed.to_string(),
+            if failed > 0 { "31;1" } else { "32" },
+            use_color
+        )
+    );
+    let header_line_3 = format!(
+        "{} {}  {} {}",
+        paint("tasks:", "90", use_color),
+        paint(&total.to_string(), "94", use_color),
+        paint("logs:", "90", use_color),
+        paint(&snapshot.logs_dir, "90", use_color)
+    );
+    let header_line_4 = paint(
+        "hint: use 'cargo xtask logs --task <name> --follow' for live per-task logs",
+        "2",
+        use_color,
+    );
+    let separator = paint(&"─".repeat(width.min(120)), "38;5;45", use_color);
+    let mut header_lines = vec![
+        header_line_1,
+        header_line_2,
+        header_line_3,
+        header_line_4,
+        separator,
+    ];
+
+    let mut lines: Vec<String> = Vec::new();
+    for id in &snapshot.order {
+        let Some(node) = snapshot.nodes.get(id) else {
+            continue;
+        };
+        let (raw_progress, status, fail_log) = aggregate_node(node.id, &snapshot.nodes);
+        let previous = progress_floor.get(id).copied().unwrap_or(0.0);
+        let progress = match status {
+            NodeStatus::Done | NodeStatus::Failed => 1.0,
+            NodeStatus::Pending | NodeStatus::Running => raw_progress.max(previous),
+        }
+        .clamp(0.0, 1.0);
+        progress_floor.insert(*id, progress);
+        let (prefix, is_root) = tree_prefix(node.id, &snapshot.nodes);
+        let prefix = colorize_tree_prefix(&prefix, use_color);
+        let label = if is_root {
+            paint(node.label, "1;97", use_color)
+        } else {
+            format!("{}{}", prefix, paint(node.label, "36", use_color))
+        };
+
+        let percent = ((progress.clamp(0.0, 1.0)) * 100.0).round() as u32;
+        let bar = progress_bar(progress, 18, status, use_color);
+        let percent_s = match status {
+            NodeStatus::Pending => paint(&format!("{:>3}%", percent), "90", use_color),
+            NodeStatus::Running => paint(&format!("{:>3}%", percent), "33", use_color),
+            NodeStatus::Done => paint(&format!("{:>3}%", percent), "32", use_color),
+            NodeStatus::Failed => paint(&format!("{:>3}%", percent), "31", use_color),
+        };
+        let mut line = format!(
+            "{} [{}] {} {}",
+            label,
+            bar,
+            percent_s,
+            colorize_status(status, use_color)
+        );
+        if status == NodeStatus::Running && !node.last_line.is_empty() {
+            line.push_str("  ");
+            line.push_str(&paint(
+                &truncate_live_line(&node.last_line, width.saturating_sub(30)),
+                "2",
+                use_color,
+            ));
+        }
+        if status == NodeStatus::Failed {
+            let note = fail_log.unwrap_or_else(|| "log unavailable".to_string());
+            line.push_str(&format!(
+                "  {}",
+                paint(&format!("log: {}", note), "31;1", use_color)
+            ));
+        }
+        if is_root && node.id == "build" {
+            line.push_str(&format!(
+                "  {} {}",
+                paint(&format!("({})", snapshot.title), "95", use_color),
+                paint(&format!("logs={}", snapshot.logs_dir), "90", use_color)
+            ));
+        }
+        if use_color {
+            lines.push(line);
+        } else {
+            lines.push(truncate_live_line(&line, width));
+        }
+    }
+
+    let header_count = header_lines.len();
+    let tree_visible = visible_lines.saturating_sub(header_count);
+    for line in header_lines.drain(..).take(visible_lines) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    for line in lines.into_iter().take(tree_visible) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+type TaskSink = Arc<dyn Fn(String) + Send + Sync + 'static>;
+
+fn stream_child_pipe<R: Read + Send + 'static>(
+    reader: R,
+    log_file: Arc<Mutex<File>>,
+    sink: TaskSink,
+) -> thread::JoinHandle<Result<()>> {
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        loop {
+            let mut bytes = Vec::<u8>::new();
+            let n = reader.read_until(b'\n', &mut bytes)?;
+            if n == 0 {
+                break;
+            }
+
+            {
+                let mut file = log_file
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Log file lock poisoned"))?;
+                file.write_all(&bytes)?;
+                file.flush()?;
+            }
+
+            let text = String::from_utf8_lossy(&bytes);
+            let line = sanitize_live_line(&text);
+            if !line.is_empty() {
+                sink(line);
+            }
+        }
+        Ok(())
+    })
+}
+
+fn run_internal_xtask_task(args: &[String], log_path: &Path, sink: TaskSink) -> Result<()> {
+    let exe = std::env::current_exe().context("Failed to locate xtask executable")?;
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let log_file = File::create(log_path)
+        .with_context(|| format!("Failed to create task log at {}", log_path.display()))?;
+    let log_file = Arc::new(Mutex::new(log_file));
+    let mut child = Command::new(exe)
+        .current_dir(project_root())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to run internal xtask command: {:?}", args))?;
+    let child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture child stdout"))?;
+    let child_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture child stderr"))?;
+
+    let stdout_thread = stream_child_pipe(child_stdout, log_file.clone(), sink.clone());
+    let stderr_thread = stream_child_pipe(child_stderr, log_file, sink);
+    let status = child.wait().context("Failed to wait for internal task")?;
+
+    stdout_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("stdout stream thread panicked"))??;
+    stderr_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("stderr stream thread panicked"))??;
+
+    if !status.success() {
+        bail!("Internal task failed: {:?}", args);
+    }
+    Ok(())
+}
+
+fn read_log_tail(log_path: &Path, lines: usize) -> String {
+    let Ok(content) = fs::read_to_string(log_path) else {
+        return String::new();
+    };
+    let mut collected: Vec<&str> = content.lines().rev().take(lines).collect();
+    collected.reverse();
+    collected.join("\n")
+}
+
+fn run_rich_task(task: &RichTask, logs_dir: &Path, ui: Option<RichTreeUi>) -> Result<()> {
+    let task_name = task.name;
+    let log_path = logs_dir.join(format!("{}.log", task_name));
+    if let Some(ui_ref) = ui.as_ref() {
+        ui_ref.start_task(task_name);
+    }
+
+    let sink: TaskSink = if let Some(ui_ref) = ui.clone() {
+        Arc::new(move |line: String| {
+            ui_ref.push_line(task_name, line);
+        })
+    } else {
+        Arc::new(move |line: String| {
+            println!("[{}] {}", task_name, line);
+        })
+    };
+
+    let result = run_internal_xtask_task(&task.args, &log_path, sink);
+    match result {
+        Ok(()) => {
+            if let Some(ui_ref) = ui.as_ref() {
+                ui_ref.finish_task(task_name, false, &log_path);
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if let Some(ui_ref) = ui.as_ref() {
+                ui_ref.finish_task(task_name, true, &log_path);
+            }
+            Err(err.context(format!(
+                "Task '{}' failed. Log: {}",
+                task_name,
+                log_path.display()
+            )))
+        }
+    }
+}
+
+fn run_rich_dag(
+    tasks: Vec<RichTask>,
+    tree_defs: Vec<RichTreeNodeDef>,
+    logs_dir: &Path,
+    interactive_tree: bool,
+) -> Result<()> {
+    let mut pending: HashMap<&'static str, RichTask> =
+        tasks.into_iter().map(|task| (task.name, task)).collect();
+    let mut completed: HashSet<&'static str> = HashSet::new();
+    let mut running: HashSet<&'static str> = HashSet::new();
+    let (tx, rx) = mpsc::channel::<(&'static str, Result<()>)>();
+    let mut first_error: Option<anyhow::Error> = None;
+
+    let tree_ui = if interactive_tree {
+        Some(RichTreeUi::new(
+            "CLUU rich build".to_string(),
+            logs_dir.to_path_buf(),
+            &tree_defs,
+        ))
+    } else {
+        None
+    };
+    let renderer = tree_ui.as_ref().map(|ui| ui.start_renderer());
+
+    loop {
+        if first_error.is_none() {
+            let ready: Vec<&'static str> = pending
+                .iter()
+                .filter(|(_, task)| task.deps.iter().all(|dep| completed.contains(dep)))
+                .map(|(name, _)| *name)
+                .collect();
+
+            for name in ready {
+                let task = pending.remove(name).expect("task must exist");
+                running.insert(name);
+
+                let logs_dir = logs_dir.to_path_buf();
+                let tx = tx.clone();
+                let tree_ui = tree_ui.clone();
+
+                thread::spawn(move || {
+                    let result = run_rich_task(&task, &logs_dir, tree_ui);
+                    let _ = tx.send((task.name, result));
+                });
+            }
+        }
+
+        if running.is_empty() {
+            if let Some(ui) = tree_ui.as_ref() {
+                ui.stop();
+            }
+            if let Some(handle) = renderer {
+                let _ = handle.join();
+            }
+
+            if let Some(err) = first_error {
+                return Err(err);
+            }
+            if pending.is_empty() {
+                return Ok(());
+            }
+
+            let unresolved = pending.keys().copied().collect::<Vec<_>>().join(", ");
+            bail!(
+                "Task dependency deadlock: unresolved tasks [{}]",
+                unresolved
+            );
+        }
+
+        let (finished_name, result) = rx.recv().context("Failed to receive task completion")?;
+        running.remove(finished_name);
+        completed.insert(finished_name);
+
+        if let Err(err) = result {
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
+
+        if first_error.is_some() && running.is_empty() {
+            continue;
+        }
+    }
+}
+
+fn build_pipeline_rich(profile: &str) -> Result<()> {
+    let logs_dir = rich_log_dir()?;
+    println!("▸ Build UI: rich");
+    println!("  Logs: {}", logs_dir.display());
+    println!("  Switch to linear mode for verbose output: --ui linear");
+
+    let tree_defs = vec![
+        RichTreeNodeDef {
+            id: "build",
+            label: "build",
+            parent: None,
+            is_leaf: false,
+        },
+        RichTreeNodeDef {
+            id: "userspace",
+            label: "userspace",
+            parent: Some("build"),
+            is_leaf: false,
+        },
+        RichTreeNodeDef {
+            id: "userspace-newlib",
+            label: "newlib",
+            parent: Some("userspace"),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "userspace-rust",
+            label: "rust",
+            parent: Some("userspace"),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "userspace-c-programs",
+            label: "c-programs",
+            parent: Some("userspace"),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "userspace-micropython",
+            label: "micropython",
+            parent: Some("userspace"),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "kernel",
+            label: "kernel",
+            parent: Some("build"),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "initrd",
+            label: "initrd",
+            parent: Some("build"),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "userdisk",
+            label: "userdisk",
+            parent: Some("build"),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "disk-image",
+            label: "disk-image",
+            parent: Some("build"),
+            is_leaf: true,
+        },
+    ];
+
+    // Dependency-checked parallelization:
+    // - userspace-newlib, kernel: immediate.
+    // - userspace-rust: waits for userspace-newlib.
+    // - userspace-c-programs: waits for userspace-newlib + userspace-rust.
+    // - userspace-micropython: waits for userspace-newlib + userspace-c-programs.
+    // - initrd: waits for userspace-rust + kernel.
+    // - userdisk: waits for userspace-rust + userspace-c-programs + userspace-micropython.
+    // - disk-image: waits for initrd + userdisk.
+    let tasks = vec![
+        RichTask {
+            name: "userspace-newlib",
+            args: vec!["build-newlib".to_string()],
+            deps: &[],
+        },
+        RichTask {
+            name: "userspace-rust",
+            args: vec![
+                "userspace".to_string(),
+                "--profile".to_string(),
+                profile.to_string(),
+            ],
+            deps: &["userspace-newlib"],
+        },
+        RichTask {
+            name: "userspace-c-programs",
+            args: vec![
+                "build-c-programs".to_string(),
+                "--profile".to_string(),
+                profile.to_string(),
+            ],
+            deps: &["userspace-newlib", "userspace-rust"],
+        },
+        RichTask {
+            name: "userspace-micropython",
+            args: vec!["build-micropython".to_string()],
+            deps: &["userspace-newlib", "userspace-c-programs"],
+        },
+        RichTask {
+            name: "kernel",
+            args: vec![
+                "kernel".to_string(),
+                "--profile".to_string(),
+                profile.to_string(),
+            ],
+            deps: &[],
+        },
+        RichTask {
+            name: "initrd",
+            args: vec![
+                "create-initrd".to_string(),
+                "--profile".to_string(),
+                profile.to_string(),
+            ],
+            deps: &["userspace-rust", "kernel"],
+        },
+        RichTask {
+            name: "userdisk",
+            args: vec![
+                "create-user-block-image".to_string(),
+                "--profile".to_string(),
+                profile.to_string(),
+            ],
+            deps: &[
+                "userspace-rust",
+                "userspace-c-programs",
+                "userspace-micropython",
+            ],
+        },
+        RichTask {
+            name: "disk-image",
+            args: vec![
+                "create-disk-image".to_string(),
+                "--profile".to_string(),
+                profile.to_string(),
+            ],
+            deps: &["initrd", "userdisk"],
+        },
+    ];
+
+    let interactive_tree = io::stdout().is_terminal();
+    run_rich_dag(tasks, tree_defs, &logs_dir, interactive_tree)?;
+
+    println!("✓ Rich build complete");
+    println!("  Per-task logs are in {}", logs_dir.display());
     Ok(())
 }
 
@@ -250,6 +1669,186 @@ fn project_root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
+}
+
+fn parse_config_line(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let entry = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let (key, raw_value) = entry.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let mut value = raw_value.trim().to_string();
+    if value.len() >= 2 {
+        let quoted = (value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\''));
+        if quoted {
+            value = value[1..value.len() - 1].to_string();
+        }
+    }
+    Some((key.to_string(), value))
+}
+
+fn parse_csv_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn resolve_config_path(root: &Path, maybe_relative: &str) -> PathBuf {
+    let path = PathBuf::from(maybe_relative);
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
+fn relative_to_root_display(path: &Path) -> String {
+    let root = project_root();
+    match path.strip_prefix(&root) {
+        Ok(rel) => rel.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+fn load_external_sources_config() -> Result<ExternalSourcesConfig> {
+    let root = project_root();
+    let config_path = root.join(EXTERNAL_SOURCES_CONFIG_REL);
+    let mut map = HashMap::<String, String>::new();
+
+    if config_path.exists() {
+        let contents = fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {:?}", config_path))?;
+        for line in contents.lines() {
+            if let Some((key, value)) = parse_config_line(line) {
+                map.insert(key, value);
+            }
+        }
+    }
+
+    let newlib_version = map
+        .get("CLUU_NEWLIB_VERSION")
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_NEWLIB_VERSION.to_string());
+    let newlib_url = map.get("CLUU_NEWLIB_URL").cloned().unwrap_or_else(|| {
+        format!(
+            "ftp://sourceware.org/pub/newlib/newlib-{}.tar.gz",
+            newlib_version
+        )
+    });
+    let newlib_dir_rel = map
+        .get("CLUU_NEWLIB_DIR")
+        .cloned()
+        .unwrap_or_else(|| format!("external/newlib-{}", newlib_version));
+    let newlib_patch_files = map
+        .get("CLUU_NEWLIB_PATCH_FILES")
+        .map(|raw| parse_csv_list(raw))
+        .unwrap_or_default();
+
+    let micropython_version = map
+        .get("CLUU_MICROPYTHON_VERSION")
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_MICROPYTHON_VERSION.to_string());
+    let micropython_repo = map
+        .get("CLUU_MICROPYTHON_REPO")
+        .cloned()
+        .unwrap_or_else(|| "https://github.com/micropython/micropython.git".to_string());
+    let micropython_ref = map
+        .get("CLUU_MICROPYTHON_REF")
+        .cloned()
+        .or_else(|| Some(DEFAULT_MICROPYTHON_REF.to_string()));
+    let micropython_dir_rel = map
+        .get("CLUU_MICROPYTHON_DIR")
+        .cloned()
+        .unwrap_or_else(|| "external/micropython".to_string());
+    let micropython_patch_files = map
+        .get("CLUU_MICROPYTHON_PATCH_FILES")
+        .map(|raw| parse_csv_list(raw))
+        .unwrap_or_default();
+
+    Ok(ExternalSourcesConfig {
+        config_path,
+        newlib_version,
+        newlib_url,
+        newlib_dir: resolve_config_path(&root, &newlib_dir_rel),
+        newlib_patch_files,
+        micropython_version,
+        micropython_repo,
+        micropython_ref,
+        micropython_dir: resolve_config_path(&root, &micropython_dir_rel),
+        micropython_patch_files,
+    })
+}
+
+fn git_capture_stdout(repo_dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .current_dir(repo_dir)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_lines_stdout(repo_dir: &Path, args: &[&str]) -> Vec<String> {
+    let Some(stdout) = git_capture_stdout(repo_dir, args) else {
+        return Vec::new();
+    };
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn git_ls_files_under(path: &Path) -> Vec<String> {
+    let root = project_root();
+    let rel = path.strip_prefix(&root).unwrap_or(path);
+    let rel_str = rel.to_string_lossy().to_string();
+    if rel_str.is_empty() {
+        return Vec::new();
+    }
+    git_lines_stdout(&root, &["ls-files", "--", rel_str.as_str()])
+}
+
+fn nested_repo_has_tracked_modifications(repo_dir: &Path) -> bool {
+    !git_lines_stdout(repo_dir, &["status", "--porcelain", "--untracked-files=no"]).is_empty()
+}
+
+fn run_script(script_relative: &str) -> Result<()> {
+    let script_path = project_root().join(script_relative);
+    if !script_path.exists() {
+        bail!("Required script not found: {}", script_path.display());
+    }
+
+    let status = Command::new("bash")
+        .current_dir(project_root())
+        .arg(&script_path)
+        .status()
+        .with_context(|| format!("Failed to run {}", script_path.display()))?;
+    if !status.success() {
+        bail!("Script failed: {}", script_path.display());
+    }
+    Ok(())
+}
+
+fn ensure_newlib_source() -> Result<()> {
+    run_script("scripts/download-newlib.sh")
+}
+
+fn ensure_micropython_source() -> Result<()> {
+    run_script("scripts/download-micropython.sh")
 }
 
 fn build_userspace(profile: &str) -> Result<()> {
@@ -662,7 +2261,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         .join("target/x86_64-cluu-user")
         .join(cargo_profile);
 
-    let staging_dir = project_root().join("userfs");
+    let staging_dir = project_root().join("target/userfs");
     let bin_dir = staging_dir.join("bin");
     let _ = fs::remove_dir_all(&bin_dir);
     fs::create_dir_all(&bin_dir)?;
@@ -894,12 +2493,312 @@ fn clean() -> Result<()> {
     let _ = fs::remove_dir_all(project_root().join("target/initrd"));
     let _ = fs::remove_file(project_root().join("target/initrd.tar"));
     let _ = fs::remove_file(project_root().join("target/cluu.img"));
-    //let _ = fs::remove_dir_all(project_root().join("target/userfs"));
     let _ = fs::remove_file(project_root().join("target/userdisk.img"));
     let _ = fs::remove_dir_all(project_root().join("target/asm"));
+    let _ = fs::remove_dir_all(project_root().join("target/userfs"));
+    let _ = fs::remove_dir_all(project_root().join("userfs"));
 
     println!("  ✓ Cleaned");
     Ok(())
+}
+
+fn clean_full() -> Result<()> {
+    println!("▸ Full clean (including toolchain/staging artifacts)...");
+
+    let root = project_root();
+    remove_path_if_exists(&root.join("target"))?;
+    remove_path_if_exists(&root.join("tmp"))?;
+    // Legacy staging location from older builds.
+    remove_path_if_exists(&root.join("userfs"))?;
+
+    println!("  ✓ Full clean complete");
+    Ok(())
+}
+
+fn rebuild_full(profile: &str) -> Result<()> {
+    println!("▸ Full rebuild from scratch...");
+    clean_full()?;
+
+    build_newlib()?;
+    build_syscalls(profile)?;
+    build_crt0()?;
+    build_userspace(profile)?;
+    build_kernel(profile)?;
+    build_c_programs(profile)?;
+    build_micropython()?;
+    create_initrd(profile)?;
+    create_user_block_image(profile)?;
+    create_disk_image(profile)?;
+
+    println!("✓ Full rebuild complete: target/cluu.img");
+    Ok(())
+}
+
+fn doctor() -> Result<()> {
+    println!("▸ CLUU build doctor");
+    println!("");
+
+    let required_tools = [
+        "cargo",
+        "rustc",
+        "nasm",
+        "make",
+        "mke2fs",
+        "qemu-system-x86_64",
+    ];
+    let optional_tools = [
+        "clang",
+        "ld.lld",
+        "gdb",
+        "telnet",
+        "x86_64-linux-gnu-as",
+        "x86_64-linux-gnu-ld",
+        "x86_64-linux-gnu-gcc",
+    ];
+
+    let mut missing_required = Vec::new();
+
+    println!("Required host tools:");
+    for tool in required_tools {
+        let ok = command_in_path(tool);
+        println!("  [{}] {}", if ok { "ok" } else { "missing" }, tool);
+        if !ok {
+            missing_required.push(tool);
+        }
+    }
+
+    println!("");
+    println!("Optional host tools:");
+    for tool in optional_tools {
+        let ok = command_in_path(tool);
+        println!("  [{}] {}", if ok { "ok" } else { "missing" }, tool);
+    }
+
+    let root = project_root();
+    let sources = load_external_sources_config()?;
+    let sysroot = sysroot_path();
+    let (newlib_lib, newlib_include) = newlib_paths(&sysroot);
+    let newlib_src = sources.newlib_dir.clone();
+    let micropython_src = sources.micropython_dir.clone();
+
+    println!("");
+    println!("Build artifact status:");
+    let checks = [
+        ("target/cluu.img", root.join("target/cluu.img")),
+        ("target/userdisk.img", root.join("target/userdisk.img")),
+        (
+            "target/sysroot/lib/libcluu_syscalls.a",
+            root.join("target/sysroot/lib/libcluu_syscalls.a"),
+        ),
+        (
+            "target/sysroot/lib/crt0.o",
+            root.join("target/sysroot/lib/crt0.o"),
+        ),
+    ];
+    for (label, path) in checks {
+        println!(
+            "  [{}] {}",
+            if path.exists() { "ok" } else { "missing" },
+            label
+        );
+    }
+    println!(
+        "  [{}] {}",
+        if newlib_src.exists() { "ok" } else { "missing" },
+        relative_to_root_display(&newlib_src)
+    );
+    println!(
+        "  [{}] {}",
+        if micropython_src.exists() {
+            "ok"
+        } else {
+            "missing"
+        },
+        relative_to_root_display(&micropython_src)
+    );
+    println!(
+        "  [{}] {}",
+        if newlib_lib.exists() { "ok" } else { "missing" },
+        newlib_lib.display()
+    );
+    println!(
+        "  [{}] {}",
+        if newlib_include.exists() {
+            "ok"
+        } else {
+            "missing"
+        },
+        newlib_include.display()
+    );
+
+    println!("");
+    println!("External source config:");
+    println!(
+        "  [{}] {}",
+        if sources.config_path.exists() {
+            "ok"
+        } else {
+            "missing"
+        },
+        relative_to_root_display(&sources.config_path)
+    );
+    println!(
+        "  newlib: version={} dir={} url={}",
+        sources.newlib_version,
+        relative_to_root_display(&sources.newlib_dir),
+        sources.newlib_url
+    );
+    println!(
+        "  micropython: version={} ref={} dir={}",
+        sources.micropython_version,
+        sources.micropython_ref.as_deref().unwrap_or("(unset)"),
+        relative_to_root_display(&sources.micropython_dir)
+    );
+    println!("  micropython repo={}", sources.micropython_repo);
+
+    let mut patch_warning = false;
+    println!("");
+    println!("External patch audit:");
+
+    let tracked_newlib = git_ls_files_under(&newlib_src);
+    if !tracked_newlib.is_empty() {
+        patch_warning = true;
+        println!("  [warn] Tracked overrides under newlib source:");
+        for entry in tracked_newlib {
+            println!("    - {}", entry);
+        }
+    }
+
+    if !sources.newlib_patch_files.is_empty() {
+        patch_warning = true;
+        println!("  [warn] Local newlib patch set declared in sources config.");
+        println!("  Declared newlib patch files:");
+        for rel in &sources.newlib_patch_files {
+            let patch_path = newlib_src.join(rel);
+            let exists = patch_path.exists();
+            if !exists {
+                patch_warning = true;
+            }
+            println!(
+                "    - [{}] {}",
+                if exists { "present" } else { "missing" },
+                relative_to_root_display(&patch_path)
+            );
+        }
+    }
+
+    let tracked_micropython = git_ls_files_under(&micropython_src);
+    if !tracked_micropython.is_empty() {
+        patch_warning = true;
+        println!("  [warn] Tracked overrides under MicroPython source:");
+        for entry in tracked_micropython {
+            println!("    - {}", entry);
+        }
+    }
+
+    if !sources.micropython_patch_files.is_empty() {
+        patch_warning = true;
+        println!("  [warn] Local MicroPython patch set declared in sources config.");
+        println!("  Declared MicroPython patch files:");
+        for rel in &sources.micropython_patch_files {
+            let patch_path = micropython_src.join(rel);
+            let exists = patch_path.exists();
+            if !exists {
+                patch_warning = true;
+            }
+            println!(
+                "    - [{}] {}",
+                if exists { "present" } else { "missing" },
+                relative_to_root_display(&patch_path)
+            );
+        }
+    }
+
+    if micropython_src.join(".git").exists() {
+        if nested_repo_has_tracked_modifications(&micropython_src) {
+            patch_warning = true;
+            println!("  [warn] MicroPython repo has tracked local modifications.");
+        }
+
+        if let Some(current_head) = git_capture_stdout(&micropython_src, &["rev-parse", "HEAD"]) {
+            println!("  MicroPython HEAD={}", current_head);
+            if let Some(expected_ref) = sources.micropython_ref.as_deref() {
+                let expected_expr = format!("{expected_ref}^{{commit}}");
+                let expected_commit =
+                    git_capture_stdout(&micropython_src, &["rev-parse", expected_expr.as_str()]);
+                match expected_commit {
+                    Some(expected) if expected != current_head => {
+                        patch_warning = true;
+                        println!(
+                            "  [warn] MicroPython HEAD does not match configured ref '{}' ({})",
+                            expected_ref, expected
+                        );
+                    }
+                    Some(_) => {}
+                    None => {
+                        patch_warning = true;
+                        println!(
+                            "  [warn] Could not resolve configured MicroPython ref '{}'",
+                            expected_ref
+                        );
+                    }
+                }
+            }
+        }
+    } else {
+        println!("  [note] MicroPython source is not a nested git repo; ref verification skipped.");
+    }
+
+    if patch_warning {
+        println!(
+            "  [warn] External source patches/deltas detected. Verify patch correctness before lifting versions."
+        );
+    }
+
+    let legacy_userfs = root.join("userfs");
+    if legacy_userfs.exists() {
+        println!("");
+        println!(
+            "Note: legacy staging directory exists at {}",
+            legacy_userfs.display()
+        );
+        println!("      Run `cargo xtask clean-full` to remove it.");
+    }
+
+    println!("");
+    if !missing_required.is_empty() {
+        bail!(
+            "Missing required host tools: {}",
+            missing_required.join(", ")
+        );
+    }
+    println!("✓ Doctor check complete");
+    Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(path).with_context(|| format!("Failed to remove {:?}", path))?;
+    } else {
+        fs::remove_file(path).with_context(|| format!("Failed to remove {:?}", path))?;
+    }
+    Ok(())
+}
+
+fn command_in_path(tool: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(tool);
+        if candidate.is_file() {
+            return true;
+        }
+    }
+    false
 }
 
 // ============================================================================
@@ -928,6 +2827,7 @@ fn newlib_paths(sysroot: &Path) -> (PathBuf, PathBuf) {
 
 fn build_newlib() -> Result<()> {
     println!("▸ Building newlib...");
+    ensure_newlib_source()?;
 
     let script = project_root().join("scripts/build-newlib.sh");
     if !script.exists() {
@@ -1064,16 +2964,8 @@ fn build_c_programs(profile: &str) -> Result<()> {
     // Check for newlib and build/install if needed
     let (newlib_lib, _) = newlib_paths(&sysroot);
     if !newlib_lib.exists() {
-        let newlib_src = project_root()
-            .join("external")
-            .join(format!("newlib-{}", "4.4.0.20231231"));
-        if newlib_src.exists() {
-            println!("▸ Installing newlib to sysroot (required for C programs)...");
-            ensure_newlib_installed()?;
-        } else {
-            println!("  ⚠ Newlib not found - C programs will have limited libc support");
-            println!("    To enable full C library: ./scripts/download-newlib.sh && cargo xtask build-newlib");
-        }
+        println!("▸ Installing newlib to sysroot (required for C programs)...");
+        ensure_newlib_installed()?;
     }
 
     // List of C programs to build: (name, source_path)
@@ -1115,19 +3007,31 @@ fn build_c_programs(profile: &str) -> Result<()> {
 /// Build MicroPython port (if source exists)
 fn build_micropython() -> Result<()> {
     let micropython_dir = project_root().join("userspace/micropython");
-    let micropython_src = project_root().join("external/micropython/py/py.mk");
-    if micropython_dir.exists() && micropython_src.exists() {
-        println!("▸ Building MicroPython...");
-        let status = Command::new("make")
-            .current_dir(&micropython_dir)
-            .arg("-j4")
-            .status()
-            .context("Failed to build MicroPython")?;
-        if !status.success() {
-            bail!("MicroPython build failed");
-        }
-        println!("  ✓ MicroPython built");
+    if !micropython_dir.exists() {
+        println!("▸ MicroPython port directory not found, skipping");
+        return Ok(());
     }
+
+    ensure_micropython_source()?;
+    let sources = load_external_sources_config()?;
+    let micropython_src = sources.micropython_dir.join("py/py.mk");
+    if !micropython_src.exists() {
+        bail!(
+            "MicroPython source not found at {} after download",
+            micropython_src.display()
+        );
+    }
+
+    println!("▸ Building MicroPython {}...", sources.micropython_version);
+    let status = Command::new("make")
+        .current_dir(&micropython_dir)
+        .arg("-j4")
+        .status()
+        .context("Failed to build MicroPython")?;
+    if !status.success() {
+        bail!("MicroPython build failed");
+    }
+    println!("  ✓ MicroPython built");
     Ok(())
 }
 
@@ -1382,19 +3286,9 @@ fn setup_c_toolchain() -> Result<()> {
     // Step 2: Build crt0.o
     build_crt0()?;
 
-    // Step 3: Check for newlib
-    let newlib_src = project_root().join("external/newlib-4.4.0.20231231");
-    if newlib_src.exists() {
-        println!("");
-        println!("  Newlib source found. Building...");
-        build_newlib()?;
-    } else {
-        println!("");
-        println!("  Newlib source not found.");
-        println!("  To enable full C library support, run:");
-        println!("    ./scripts/download-newlib.sh");
-        println!("    cargo xtask build-newlib");
-    }
+    // Step 3: Build newlib (auto-download if missing)
+    println!("");
+    build_newlib()?;
 
     println!("");
     println!("✓ C toolchain setup complete!");
