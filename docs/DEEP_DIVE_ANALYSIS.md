@@ -355,7 +355,7 @@ The per-process capability space is a deeper architectural change. It's the righ
 
 ## 12. Concrete Next Steps
 
-Execution-tracked version of this section: `docs/DEEP_DIVE_IMPLEMENTATION_PLAN.md` (IPC optimization first, then Phases A-D).
+Execution-tracked version of this section: `docs/archive/plans/deep-dive-implementation-plan.md` (IPC optimization first, then Phases A-D).
 
 ### Phase A: Unblock software porting (poll + signal + fcntl)
 

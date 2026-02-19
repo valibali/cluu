@@ -10,7 +10,8 @@ This document defines the canonical CLUU repository structure and naming rules.
 - `tests/kernel/`: kernel test crate (hosted test harness for kernel modules).
 - `xtask/`: build orchestration and developer workflows.
 - `tools/`: third-party/local build tools used by CLUU (for example `mkbootimg`).
-- `docs/`: architecture, audits, plans, and developer documentation.
+- `docs/`: architecture, audits, active plans, and developer documentation.
+- `docs/archive/plans/`: historical/superseded plan documents.
 - `scripts/`: automation scripts used by xtask and CI.
 - `external/`: source download cache roots; only `external/sources.env` is tracked.
 - `target/`, `tmp/`: generated outputs and build caches (never tracked).
