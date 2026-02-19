@@ -1139,6 +1139,20 @@ fn invoke_space_create(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -
         Timestamp::far_future(),
         ObjectRef::Space(space_id),
     );
+    klibcluu::trace("invoke_space_create: minted space token=");
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", space_token.as_usize() as u64);
+    klibcluu::trace("invoke_space_create: minted role_bits=");
+    klibcluu::log_hex(
+        klibcluu::LogLevel::Trace,
+        "",
+        (Rights::space_full()
+            | Rights::CREATE
+            | Rights::GRANT
+            | Rights::THREAD_CONTROL
+            | Rights::THREAD_SUSPEND
+            | Rights::DESTROY)
+            .bits() as u64,
+    );
 
     Ok(space_token.as_usize())
 }
@@ -2765,8 +2779,6 @@ fn invoke_frame_get_phys(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) 
 
 /// sys_debug_print - Print debug message
 ///
-/// Only available in debug builds.
-///
 /// # Arguments
 ///
 /// - arg1: msg_ptr (*const u8)
@@ -2822,6 +2834,6 @@ pub fn sys_debug_print(args: SyscallArgs) -> SyscallResult {
 
 #[cfg(not(debug_assertions))]
 pub fn sys_debug_print(_args: SyscallArgs) -> SyscallResult {
-    // Debug print disabled in release builds
-    Err(Error::NotImplemented)
+    // Disabled in release builds.
+    Ok(0)
 }

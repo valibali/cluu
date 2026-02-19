@@ -7,7 +7,7 @@
 //!
 //! 1. **IRQ-Safe**: No mutexes, no locks, no waiting
 //! 2. **No Allocation**: No heap usage, no formatting
-//! 3. **Zero-Cost in Release**: Completely compiled out in release builds
+//! 3. **Zero-overhead in Release**: Logging is compiled out in release builds
 //! 4. **Simple**: Just write strings to UART
 //!
 //! # Debug Levels
@@ -15,8 +15,8 @@
 //! - ERROR: Critical errors only
 //! - WARN: Warnings and errors
 //! - INFO: Informational messages (default)
-//! - DEBUG: Verbose debugging (only in debug builds)
-//! - TRACE: Very verbose (only in debug builds with TRACE feature)
+//! - DEBUG: Verbose debugging
+//! - TRACE: Very verbose (via feature)
 
 use crate::uart::COM2;
 
@@ -36,8 +36,12 @@ pub enum LogLevel {
 pub const fn current_log_level() -> LogLevel {
     #[cfg(not(debug_assertions))]
     {
-        // Release build: no logging
-        return LogLevel::Error; // Won't actually log, see should_log()
+        // Release diagnostics mode: keep DEBUG logs enabled.
+        #[cfg(feature = "log-trace")]
+        return LogLevel::Trace;
+
+        #[cfg(not(feature = "log-trace"))]
+        return LogLevel::Debug;
     }
 
     #[cfg(debug_assertions)]
@@ -59,7 +63,7 @@ pub const fn current_log_level() -> LogLevel {
 pub const fn should_log(level: LogLevel) -> bool {
     #[cfg(not(debug_assertions))]
     {
-        // Release build: NO LOGGING AT ALL
+        let _ = level;
         return false;
     }
 
@@ -245,6 +249,6 @@ pub fn init() {
 
     #[cfg(not(debug_assertions))]
     {
-        // In release build, this does nothing (compiled out)
+        // Intentionally silent in release builds.
     }
 }

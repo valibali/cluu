@@ -1763,9 +1763,7 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
 
     // Dependency-checked parallelization:
     // - userspace-newlib, kernel: immediate.
-    // - userspace-rust: waits for userspace-newlib.
-    // - userspace-c-programs: waits for userspace-newlib + userspace-rust.
-    // - userspace-micropython: waits for userspace-newlib + userspace-c-programs.
+    // - userspace-rust, userspace-c-programs, userspace-micropython: all wait only for userspace-newlib.
     // - initrd: waits for userspace-rust + kernel.
     // - userdisk: waits for userspace-rust + userspace-c-programs + userspace-micropython.
     // - disk-image: waits for initrd + userdisk.
@@ -1791,12 +1789,12 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
                 "--profile".to_string(),
                 profile.to_string(),
             ],
-            deps: &["userspace-newlib", "userspace-rust"],
+            deps: &["userspace-newlib"],
         },
         RichTask {
             name: "userspace-micropython",
             args: vec!["build-micropython".to_string()],
-            deps: &["userspace-newlib", "userspace-c-programs"],
+            deps: &["userspace-newlib"],
         },
         RichTask {
             name: "kernel",
@@ -2522,7 +2520,6 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         "pthreadprobe",
         "devprobe",
         "fbprobe",
-        "micropython",
     ];
     for prog in &c_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
@@ -2531,6 +2528,22 @@ fn create_user_block_image(profile: &str) -> Result<()> {
             fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
             println!("  Added {} (C program)", prog);
         }
+    }
+
+    // MicroPython is built by userspace/micropython/Makefile and may not land in the
+    // profile-specific x86_64-cluu-user/<profile> directory. Probe known output paths.
+    let micropython_candidates = [
+        userspace_target_dir.join("micropython.elf"),
+        project_root().join("target/x86_64-cluu-user/debug/micropython.elf"),
+        project_root().join("target/micropython-build/micropython"),
+    ];
+    let micropython_dst = bin_dir.join("micropython");
+    if let Some(src) = micropython_candidates.iter().find(|p| p.exists()) {
+        fs::copy(src, &micropython_dst)
+            .with_context(|| format!("Failed to copy micropython from {}", src.display()))?;
+        println!("  Added micropython ({})", src.display());
+    } else {
+        println!("  Skipping micropython (not built)");
     }
 
     // Create short alias for micropython (avoids keyboard layout issues in testing)
@@ -3266,14 +3279,30 @@ fn build_micropython() -> Result<()> {
         return Ok(());
     }
 
-    ensure_micropython_source()?;
-    let sources = load_external_sources_config()?;
+    if let Err(err) = ensure_micropython_source() {
+        eprintln!(
+            "  Warning: failed to fetch/clone MicroPython sources; skipping MicroPython build ({err:#})"
+        );
+        return Ok(());
+    }
+
+    let sources = match load_external_sources_config() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!(
+                "  Warning: failed to load external source config for MicroPython; skipping ({err:#})"
+            );
+            return Ok(());
+        }
+    };
+
     let micropython_src = sources.micropython_dir.join("py/py.mk");
     if !micropython_src.exists() {
-        bail!(
-            "MicroPython source not found at {} after download",
+        eprintln!(
+            "  Warning: MicroPython source missing at {} after fetch; skipping MicroPython build",
             micropython_src.display()
         );
+        return Ok(());
     }
 
     println!("▸ Building MicroPython {}...", sources.micropython_version);

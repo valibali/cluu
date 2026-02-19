@@ -147,14 +147,24 @@ pub unsafe fn syscall_raw(
     core::arch::asm!(
         "syscall",
         inlateout("rax") number => ret,
-        in("rdi") arg1,
-        in("rsi") arg2,
-        in("rdx") arg3,
-        in("r10") arg4,
-        in("r8") arg5,
-        in("r9") arg6,
+        // Caller-saved argument registers are clobbered by the kernel path.
+        // Model them as inlateout (not plain inputs) to avoid UB under optimization.
+        inlateout("rdi") arg1 => _,
+        inlateout("rsi") arg2 => _,
+        inlateout("rdx") arg3 => _,
+        inlateout("r10") arg4 => _,
+        inlateout("r8") arg5 => _,
+        inlateout("r9") arg6 => _,
+        // The kernel syscall entry does not currently preserve all SysV callee-saved
+        // registers. Declare them clobbered so optimized callers don't keep live
+        // state (e.g. token handles) across the boundary in these registers.
+        lateout("r12") _,
+        lateout("r13") _,
+        lateout("r14") _,
+        lateout("r15") _,
         lateout("rcx") _, // Clobbered by SYSCALL (saves RIP)
         lateout("r11") _, // Clobbered by SYSCALL (saves RFLAGS)
+        options(nostack),
     );
 
     if ret < 0 {
@@ -1209,8 +1219,6 @@ pub fn clock_frequency(clock_token: usize) -> Result<u64> {
 ///
 /// Prints a UTF-8 string to the kernel log. The message is prefixed
 /// with "[USER]" in the kernel log output.
-///
-/// Only available in debug builds.
 ///
 /// # Arguments
 ///
