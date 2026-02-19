@@ -12,6 +12,7 @@ IMG="${IMG:-$PROJECT_ROOT/target/cluu.img}"
 USER_DISK="${USER_DISK:-$PROJECT_ROOT/target/userdisk.img}"
 QEMU_GDB="${QEMU_GDB:-0}"
 QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
+HARNESS_AUTOSTART_CMD="${HARNESS_AUTOSTART_CMD:-}"
 QEMU_PID=""
 BOOT_WAIT="${BOOT_WAIT:-0}"
 SHELL_READY_WAIT="${SHELL_READY_WAIT:-15}"
@@ -21,8 +22,10 @@ HARNESS_CLEAN_REBUILD="${HARNESS_CLEAN_REBUILD:-0}"
 RUN_WAIT="${RUN_WAIT:-5}"
 POST_SENDKEY="${POST_SENDKEY:-}"
 POST_SENDKEY_DELAY="${POST_SENDKEY_DELAY:-1}"
+TEST_COMMAND_WAS_UNSET=0
 # Preserve explicit empty TEST_COMMAND; only auto-fill when it is truly unset.
 if [ -z "${TEST_COMMAND+x}" ]; then
+    TEST_COMMAND_WAS_UNSET=1
     TEST_COMMAND="__AUTO__"
 fi
 TEST_COMMAND_REPEAT="${TEST_COMMAND_REPEAT:-1}"
@@ -180,8 +183,21 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
     esac
 fi
 
-if [ -n "$SHELL_AUTOSTART_CMD_DEFAULT" ] && [ -z "${CLUU_SHELL_AUTOSTART_CMD:-}" ]; then
-    export CLUU_SHELL_AUTOSTART_CMD="$SHELL_AUTOSTART_CMD_DEFAULT"
+# Debug/testing default: when running ad-hoc mode (MARKER_MODE=none) without an explicit
+# typed command, autostart MicroPython from procmgr and avoid injecting spawn hello.
+if [ "$MARKER_MODE" = "none" ] \
+    && [ "$TEST_COMMAND_WAS_UNSET" = "1" ] \
+    && [ -z "$HARNESS_AUTOSTART_CMD" ]; then
+    HARNESS_AUTOSTART_CMD="spawn micropython"
+    TEST_COMMAND=""
+fi
+
+if [ -z "${CLUU_SHELL_AUTOSTART_CMD:-}" ]; then
+    if [ -n "$SHELL_AUTOSTART_CMD_DEFAULT" ]; then
+        export CLUU_SHELL_AUTOSTART_CMD="$SHELL_AUTOSTART_CMD_DEFAULT"
+    elif [ -n "$HARNESS_AUTOSTART_CMD" ]; then
+        export CLUU_SHELL_AUTOSTART_CMD="$HARNESS_AUTOSTART_CMD"
+    fi
 fi
 if [ -n "$POST_SENDKEY_DEFAULT" ] && [ -z "$POST_SENDKEY" ]; then
     POST_SENDKEY="$POST_SENDKEY_DEFAULT"
@@ -395,13 +411,15 @@ if ! [[ "$TEST_COMMAND_REPEAT" =~ ^[0-9]+$ ]] || [ "$TEST_COMMAND_REPEAT" -lt 1 
     exit 1
 fi
 
-for ((i = 1; i <= TEST_COMMAND_REPEAT; i++)); do
-    echo "Sending command ${i}/${TEST_COMMAND_REPEAT}: '$TEST_COMMAND'"
-    type_ascii_command "$TEST_COMMAND"
-    if [ "$i" -lt "$TEST_COMMAND_REPEAT" ]; then
-        sleep "$COMMAND_GAP"
-    fi
-done
+if [ -n "$TEST_COMMAND" ]; then
+    for ((i = 1; i <= TEST_COMMAND_REPEAT; i++)); do
+        echo "Sending command ${i}/${TEST_COMMAND_REPEAT}: '$TEST_COMMAND'"
+        type_ascii_command "$TEST_COMMAND"
+        if [ "$i" -lt "$TEST_COMMAND_REPEAT" ]; then
+            sleep "$COMMAND_GAP"
+        fi
+    done
+fi
 
 if [ -n "$POST_SENDKEY" ]; then
     sleep "$POST_SENDKEY_DELAY"

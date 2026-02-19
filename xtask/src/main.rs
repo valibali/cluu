@@ -8,7 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -145,6 +145,7 @@ fn main() -> Result<()> {
             build_userspace(&profile)?;
             build_kernel(&profile)?;
             build_c_programs(&profile)?;
+            build_micropython()?;
             create_initrd(&profile)?;
             create_user_block_image(&profile)?;
             create_disk_image(&profile)?;
@@ -154,6 +155,7 @@ fn main() -> Result<()> {
             build_userspace(&profile)?;
             build_kernel(&profile)?;
             build_c_programs(&profile)?;
+            build_micropython()?;
             create_initrd(&profile)?;
             create_user_block_image(&profile)?;
             create_disk_image(&profile)?;
@@ -370,13 +372,7 @@ fn assemble_nasm(profile: &str) -> Result<()> {
         let obj = out_dir.join(&obj_name);
 
         let mut cmd = Command::new("nasm");
-        cmd.args([
-            "-f",
-            "elf64",
-            "-g",
-            "-F",
-            "dwarf",
-        ]);
+        cmd.args(["-f", "elf64", "-g", "-F", "dwarf"]);
 
         // Define DEBUG symbol for non-release builds so %ifdef DEBUG
         // sections (e.g. telemetry stores in syscall_entry.asm) are active.
@@ -384,15 +380,9 @@ fn assemble_nasm(profile: &str) -> Result<()> {
             cmd.arg("-dDEBUG");
         }
 
-        cmd.args([
-            "-o",
-            obj.to_str().unwrap(),
-            src.to_str().unwrap(),
-        ]);
+        cmd.args(["-o", obj.to_str().unwrap(), src.to_str().unwrap()]);
 
-        let status = cmd
-            .status()
-            .context("Failed to run NASM")?;
+        let status = cmd.status().context("Failed to run NASM")?;
 
         if !status.success() {
             bail!("NASM failed for {}", asm_file);
@@ -710,6 +700,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         "pthreadprobe",
         "devprobe",
         "fbprobe",
+        "micropython",
     ];
     for prog in &c_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
@@ -718,6 +709,14 @@ fn create_user_block_image(profile: &str) -> Result<()> {
             fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
             println!("  Added {} (C program)", prog);
         }
+    }
+
+    // Create short alias for micropython (avoids keyboard layout issues in testing)
+    let mp_src = bin_dir.join("micropython");
+    let mp_dst = bin_dir.join("mp");
+    if mp_src.exists() {
+        fs::copy(&mp_src, &mp_dst).context("Failed to copy mp alias")?;
+        println!("  Added mp (alias for micropython)");
     }
 
     let disk_path = project_root().join("target/userdisk.img");
@@ -1110,6 +1109,25 @@ fn build_c_programs(profile: &str) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Build MicroPython port (if source exists)
+fn build_micropython() -> Result<()> {
+    let micropython_dir = project_root().join("userspace/micropython");
+    let micropython_src = project_root().join("external/micropython/py/py.mk");
+    if micropython_dir.exists() && micropython_src.exists() {
+        println!("▸ Building MicroPython...");
+        let status = Command::new("make")
+            .current_dir(&micropython_dir)
+            .arg("-j4")
+            .status()
+            .context("Failed to build MicroPython")?;
+        if !status.success() {
+            bail!("MicroPython build failed");
+        }
+        println!("  ✓ MicroPython built");
+    }
     Ok(())
 }
 

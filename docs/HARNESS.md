@@ -19,6 +19,10 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
      - `SERIAL_LOG`, `MONITOR_SOCK`, `IMG`, `USER_DISK`, `OVMF`
      - `QEMU_GDB=1` to start QEMU with `-S -s`
      - `QEMU_EXTRA_ARGS` for additional QEMU flags
+     - `HARNESS_AUTOSTART_CMD` to force procmgr shell autostart command at build time
+   - Debug/ad-hoc default:
+     - When `MARKER_MODE=none` and `TEST_COMMAND` is not explicitly set, harness now defaults to
+       autostarting `spawn micropython` and suppresses auto-typed `spawn hello`.
    - M6 IPC SLO env gates:
      - `MAX_IPC_WAIT_P95_MS`, `MAX_IPC_WAIT_P99_MS`, `MAX_IPC_SCAN_AVG_STEPS_X100`
      - `MAX_IPC_QUEUE_BYTES_PEAK`, `MAX_IPC_QUEUE_MESSAGES_PEAK`
