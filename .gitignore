@@ -37,16 +37,16 @@ Thumbs.db
 
 # Debug
 *.log
+/tmp/
+/userfs/
 userfs/hello
 userfs/bin/shell
 userfs/bin/timeserver
 userfs/bin/hello
 
-# Ignore external folder except for patched config.sub
+# Ignore external sources (downloaded on demand). Keep only source config.
 /external/*
-!/external/newlib-*/
-/external/newlib-*/*
-!/external/newlib-*/config.sub
+!/external/sources.env
 tmp/harness_slo/slo_run_1.txt
 tmp/harness_slo/slo_run_2.txt
 tmp/harness_slo/slo_run_3.txt

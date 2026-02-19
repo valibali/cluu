@@ -2,12 +2,22 @@
 # Build newlib for CLUU
 # Run from repository root after downloading newlib
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-NEWLIB_VERSION="4.4.0.20231231"
-NEWLIB_SRC="${PROJECT_ROOT}/external/newlib-${NEWLIB_VERSION}"
+SOURCES_CONFIG="${PROJECT_ROOT}/external/sources.env"
+if [ ! -f "$SOURCES_CONFIG" ]; then
+    echo "Error: external source config not found at ${SOURCES_CONFIG}"
+    echo "Create/restore it (see external/sources.env in repo)."
+    exit 1
+fi
+# shellcheck disable=SC1090
+source "$SOURCES_CONFIG"
+
+NEWLIB_VERSION="${CLUU_NEWLIB_VERSION:-4.4.0.20231231}"
+NEWLIB_DIR_REL="${CLUU_NEWLIB_DIR:-external/newlib-${NEWLIB_VERSION}}"
+NEWLIB_SRC="${PROJECT_ROOT}/${NEWLIB_DIR_REL}"
 BUILD_DIR="${PROJECT_ROOT}/target/newlib-build"
 SYSROOT="${PROJECT_ROOT}/target/sysroot"
 # newlib config.sub patched to recognize "cluu".
@@ -17,8 +27,12 @@ SYSROOT_TRIPLET_DIR="${SYSROOT}/${TARGET_TRIPLET}"
 
 # Check for newlib source
 if [ ! -d "$NEWLIB_SRC" ]; then
-    echo "Error: Newlib source not found at ${NEWLIB_SRC}"
-    echo "Run: ./scripts/download-newlib.sh"
+    echo "Newlib source not found at ${NEWLIB_SRC}; downloading..."
+    "${PROJECT_ROOT}/scripts/download-newlib.sh"
+fi
+
+if [ ! -d "$NEWLIB_SRC" ]; then
+    echo "Error: Newlib source still missing after download: ${NEWLIB_SRC}"
     exit 1
 fi
 

@@ -349,8 +349,20 @@ all: build
 build:
 	cargo xtask build
 
+build-rich:
+	cargo xtask build --ui rich
+
+build-release:
+	cargo xtask build --profile release
+
 run:
 	cargo xtask run
+
+run-rich:
+	cargo xtask run --ui rich
+
+run-release:
+	cargo xtask run --profile release
 
 run-debug:
 	cargo xtask run --debug
@@ -360,6 +372,23 @@ test:
 
 clean:
 	cargo xtask clean
+
+full-clean:
+	cargo xtask clean-full
+
+pristine: full-clean
+
+rebuild-full:
+	cargo xtask rebuild-full
+
+rebuild-full-release:
+	cargo xtask rebuild-full --profile release
+
+doctor:
+	cargo xtask doctor
+
+logs:
+	cargo xtask logs
 
 userspace:
 	cargo xtask userspace
@@ -371,11 +400,21 @@ kernel:
 Usage summary:
 
 ```
-make build       # Build everything
-make run         # Build and run in QEMU
+make build       # Build everything (rich UI default)
+make build-rich  # Build everything (rich UI: progress + per-task logs)
+make build-release
+make run         # Build and run in QEMU (rich UI default)
+make run-rich    # Build and run in QEMU (rich UI)
+make run-release
 make run-debug   # Run with GDB + telnet serial
 make test        # Run all tests
-make clean       # Clean artifacts
+make clean       # Standard clean (cargo clean + image artifacts)
+make full-clean  # Remove all generated artifacts (toolchain + staging + images)
+make pristine    # Alias for full-clean
+make rebuild-full # Deterministic from-scratch rebuild (newlib/syscalls/crt0/kernel/userspace)
+make rebuild-full-release # Deterministic from-scratch rebuild (release profile)
+make doctor      # Verify host toolchain + key artifacts
+make logs        # List latest rich-build task logs
 ```
 
 ---
@@ -385,14 +424,50 @@ make clean       # Clean artifacts
 For idiomatic Rust development, **prefer using `cargo xtask` directly**:
 
 ```
-cargo xtask build [--profile dev|release]
-cargo xtask run [--profile dev|release]
+cargo xtask build [--profile dev|release] [--ui linear|rich]
+cargo xtask run [--profile dev|release] [--ui linear|rich]
 cargo xtask run --debug
 cargo xtask test
 cargo xtask clean
+cargo xtask clean-full
+cargo xtask rebuild-full [--profile dev|release]
+cargo xtask doctor
+cargo xtask logs [--run <id|path>] [--task <name>] [--lines N] [--follow]
 cargo xtask userspace [--profile dev|release]
 cargo xtask kernel [--profile dev|release]
 ```
+
+For the most reliable "start fresh" build, use:
+
+```
+cargo xtask rebuild-full
+```
+
+UI modes:
+
+- default is `rich` when `--ui` is omitted.
+- `--ui rich`: dependency-aware parallel execution with an in-place, colorized task tree (one line per task/subtask), per-line progress bars, parent progress aggregated from children, and failure lines showing red log locations. Full logs are written to `target/logs/<timestamp>/`.
+- `--ui linear`: classic linear output, better for detailed error inspection.
+
+Log viewer:
+
+- `cargo xtask logs`: show available task logs from the latest rich-build run.
+- `cargo xtask logs --task kernel --lines 120`: show tail of a specific task log.
+- `cargo xtask logs --task kernel --follow`: follow appended output (Ctrl+C to stop).
+- `cargo xtask logs --run 1771492286 --task micropython --follow`: inspect a specific rich-build run.
+
+External source versions are centralized in:
+
+```
+external/sources.env
+```
+
+`newlib` and `micropython` source trees under `external/` are intentionally **not tracked**.
+They are fetched implicitly by build steps when missing.
+
+When bumping `newlib` or `micropython`, update `external/sources.env` first.
+`cargo xtask doctor` reports configured versions/refs and warns when local patch sets
+or source drift are detected.
 
 ---
 

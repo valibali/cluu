@@ -109,14 +109,11 @@ debug = 0
 debug = 0
 
 [profile.release]
-opt-level = 0
+opt-level = 2
 lto = false
 panic = "abort"
 
 [profile.release.package.libcluu]
-debug = 0
-
-[profile.release.package."cap-demo"]
 debug = 0
 
 [profile.release.package."cluu-init"]
