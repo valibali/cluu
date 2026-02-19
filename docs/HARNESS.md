@@ -6,7 +6,7 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
 
 ## Components
 
-1. `test_hello.sh`
+1. `scripts/test_hello.sh`
    - Single-run QEMU harness executor.
    - Boots CLUU, injects command(s), validates markers/faults.
    - Shell readiness policy: default `SHELL_READY_WAIT=15` and hard max `SHELL_READY_WAIT_MAX=15`.
@@ -70,7 +70,7 @@ The harness stack is split into reusable layers so new cases and SLO checks can 
      - IPC queue pressure metrics (`ipc_queue_bytes_peak`, `ipc_queue_messages_peak`) when present in logs
      - shell readiness latency (`shell_ready_s`, default max 15s)
      - warm-cache `/bin/noop` sample counts and p95 cycle metrics
-   - `test_hello.sh` also appends:
+   - `scripts/test_hello.sh` also appends:
      - `HARNESS build_s=...`
      - `HARNESS qemu_to_shell_ready_s=...`
      - `HARNESS total_s=...`
@@ -106,6 +106,6 @@ scripts/harness_slo_report.sh --log /tmp/cluu-serial-com2.log --min-exit-cookies
 ## CI Extension Workflow
 
 1. Add a new case line in `scripts/harness_cases.conf`.
-2. Add marker checks in `test_hello.sh` for new `MARKER_MODE`.
+2. Add marker checks in `scripts/test_hello.sh` for new `MARKER_MODE`.
 3. If new numeric SLO appears, add parsing/check in `scripts/harness_slo_report.sh`.
 4. Gate it in CI via `cargo xtask harness-matrix` and/or `cargo xtask harness-slo`.

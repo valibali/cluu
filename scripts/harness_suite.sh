@@ -71,10 +71,10 @@ run_case() {
     echo "=== Harness case: ${name} ==="
     if [[ "$effective_mode" == "no_build" ]]; then
         # shellcheck disable=SC2086
-        env $env_assignments ./test_hello.sh --no-build
+        env $env_assignments ./scripts/test_hello.sh --no-build
     else
         # shellcheck disable=SC2086
-        env $env_assignments ./test_hello.sh
+        env $env_assignments ./scripts/test_hello.sh
     fi
     echo "=== Harness case PASS: ${name} ==="
 }
