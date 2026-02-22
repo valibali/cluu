@@ -25,6 +25,7 @@ use libcluu::*;
 mod fd_table;
 mod mount;
 mod procfs;
+mod view;
 
 use fd_table::{FdTable, OpenFile};
 use mount::MountTable;
@@ -187,8 +188,8 @@ fn setup_mounts(initrd: &'static [u8]) -> Result<MountTable> {
     mounts.mount_virtual("/proc", "procfs", procfs::ENTRIES);
     debug_print("vfs: mounted /proc (procfs)")?;
 
-    // Device files: /dev/null, /dev/zero, /dev/urandom
-    mounts.mount("/dev", alloc::boxed::Box::new(mount::DeviceBackend));
+    // Device files: /dev/null, /dev/zero, /dev/urandom, /dev/tty*
+    mounts.mount("/dev", alloc::boxed::Box::new(mount::DeviceBackend::new()));
     debug_print("vfs: mounted /dev (devfs)")?;
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -462,6 +463,7 @@ struct VfsServer {
     read_rings: BTreeMap<usize, ReadRingSession>,
     free_ring_slots: Vec<usize>,
     clock_token: usize,
+    views: view::VfsViewTable,
 }
 
 impl VfsServer {
@@ -499,6 +501,7 @@ impl VfsServer {
             read_rings: BTreeMap::new(),
             free_ring_slots,
             clock_token,
+            views: view::VfsViewTable::new(),
         }
     }
 
@@ -519,6 +522,10 @@ impl VfsServer {
     }
 
     fn handle_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
+        // Control messages handled before regular VFS ops.
+        if msg.tag.label == libcluu::ipc::VFS_SET_VIEW_LABEL {
+            return self.handle_set_view(msg, payload);
+        }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
             return Ok(());
@@ -532,10 +539,10 @@ impl VfsServer {
             VfsOp::ReadGrant => {
                 self.handle_read_grant(msg, payload, reply_token, authenticated_client)
             }
-            VfsOp::Readdir => self.handle_readdir(payload, reply_token),
+            VfsOp::Readdir => self.handle_readdir(msg, payload, reply_token, authenticated_client),
             VfsOp::MapElf => self.handle_map_elf(msg, reply_token, authenticated_client),
             VfsOp::Write => self.handle_write(msg, payload, reply_token, authenticated_client),
-            VfsOp::Stat => self.handle_stat(msg, payload, reply_token),
+            VfsOp::Stat => self.handle_stat(msg, payload, reply_token, authenticated_client),
             VfsOp::Fstat => self.handle_fstat(msg, reply_token, authenticated_client),
             VfsOp::Unlink => self.handle_unlink(msg, payload, reply_token, authenticated_client),
             VfsOp::Mkdir => self.handle_mkdir(msg, payload, reply_token, authenticated_client),
@@ -548,6 +555,74 @@ impl VfsServer {
         };
         vfs_trace!("vfs: handled {:?} result={:?}", op, result);
         result
+    }
+
+    /// Handle VFS_SET_VIEW_LABEL: register a per-client filesystem view.
+    fn handle_set_view(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+        let client_id = msg.words[1];
+        let mount_count = msg.words[2];
+
+        let mut mounts = alloc::vec::Vec::new();
+        let mut offset = 0;
+
+        for _ in 0..mount_count {
+            // Each mount: u16 src_len LE + u16 dst_len LE + u8 flags + src_bytes + dst_bytes
+            if offset + 5 > payload.len() {
+                break;
+            }
+            let src_len = u16::from_le_bytes([payload[offset], payload[offset + 1]]) as usize;
+            let dst_len = u16::from_le_bytes([payload[offset + 2], payload[offset + 3]]) as usize;
+            let flags = payload[offset + 4];
+            offset += 5;
+
+            if offset + src_len + dst_len > payload.len() {
+                break;
+            }
+            let src = core::str::from_utf8(&payload[offset..offset + src_len])
+                .unwrap_or("")
+                .into();
+            offset += src_len;
+            let dst = core::str::from_utf8(&payload[offset..offset + dst_len])
+                .unwrap_or("")
+                .into();
+            offset += dst_len;
+
+            mounts.push(view::ViewMount {
+                src,
+                dst,
+                writable: (flags & 1) != 0,
+            });
+        }
+
+        let _ = debug_print(&format!(
+            "vfs: set_view client={} mounts={}",
+            client_id,
+            mounts.len()
+        ));
+
+        self.views.set_view(client_id, view::VfsView { mounts });
+        Ok(())
+    }
+
+    /// Check a path against the client's VFS view, rewriting if needed.
+    /// Returns the real backing path, or Error::NotFound if outside the view.
+    /// If no view is registered for this client, passes through unchanged.
+    fn view_check_path(&self, client_id: usize, path: &str) -> Result<alloc::string::String> {
+        self.views.check_path(client_id, path)
+    }
+
+    /// Like view_check_path, but also enforces the writable flag.
+    /// Returns Error::PermissionDenied if the matching mount is read-only.
+    fn view_check_path_writable(
+        &self,
+        client_id: usize,
+        path: &str,
+    ) -> Result<alloc::string::String> {
+        let (real_path, writable) = self.views.check_path_writable(client_id, path)?;
+        if !writable {
+            return Err(Error::PermissionDenied);
+        }
+        Ok(real_path)
     }
 
     fn resolve_client_id(
@@ -599,12 +674,21 @@ impl VfsServer {
         let flags = msg.words[2];
         let mode = msg.words[3];
 
+        // View check: rewrite path if client has a registered view.
+        let real_path = match self.view_check_path(client_id, path) {
+            Ok(p) => p,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
         // #region agent log
         let _ = debug_print(&format!("vfs: open '{}' client={}", path, client_id));
         // #endregion
 
         // Use unified mount table for all paths
-        match self.mounts.open(path) {
+        match self.mounts.open(&real_path) {
             Ok(file) => {
                 if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
                     reply_msg.words[0] = Error::AlreadyExists.to_errno() as usize;
@@ -625,8 +709,8 @@ impl VfsServer {
                         reply_msg.words[0] = policy_err.to_errno() as usize;
                         return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                     }
-                    match self.mounts.create_file(path, mode) {
-                        Ok(()) => match self.mounts.open(path) {
+                    match self.mounts.create_file(&real_path, mode) {
+                        Ok(()) => match self.mounts.open(&real_path) {
                             Ok(file) => {
                                 self.set_owner(path, client_id);
                                 let fd = self.files.open(client_id, file.clone());
@@ -722,10 +806,26 @@ impl VfsServer {
                 reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
                 reply_msg.words[1] = 0;
             }
-            OpenFile::Device(_) => {
-                // Device writes: accept and discard (null/zero/urandom all ignore writes)
-                reply_msg.words[0] = 0;
-                reply_msg.words[1] = data.len();
+            OpenFile::Device(device) => {
+                use fd_table::DeviceType;
+                match device.device_type {
+                    DeviceType::Tty { endpoint, .. }
+                    | DeviceType::Tty0 { endpoint }
+                    | DeviceType::Console { endpoint }
+                        if endpoint != 0 =>
+                    {
+                        // Forward write to tty endpoint.
+                        let _ =
+                            ipc::send_with_payload(endpoint, libcluu::ipc::TTY_WRITE_LABEL, data);
+                        reply_msg.words[0] = 0;
+                        reply_msg.words[1] = data.len();
+                    }
+                    _ => {
+                        // null/zero/urandom: accept and discard writes
+                        reply_msg.words[0] = 0;
+                        reply_msg.words[1] = data.len();
+                    }
+                }
             }
             OpenFile::Ext2(ext2) => {
                 let endpoint = ext2.endpoint;
@@ -765,9 +865,21 @@ impl VfsServer {
         Ok(reply.words[1])
     }
 
-    fn handle_stat(&mut self, msg: &Message, payload: &[u8], reply_token: usize) -> Result<()> {
-        let _client_id = msg.words[1];
+    fn handle_stat(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_STAT, [0; 6], 3);
+        let client_id = match self.resolve_client_id("stat", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
 
         let path = match core::str::from_utf8(payload) {
             Ok(path) => path,
@@ -777,7 +889,16 @@ impl VfsServer {
             }
         };
 
-        match self.stat_path(path) {
+        // View check: resolve virtual path.
+        let real_path = match self.view_check_path(client_id, path) {
+            Ok(p) => p,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        match self.stat_path(&real_path) {
             Ok((size, mode)) => {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = size;
@@ -844,11 +965,19 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        // View check (writable — unlink is a mutation).
+        let real_path = match self.view_check_path_writable(client_id, path) {
+            Ok(p) => p,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
         if let Err(err) = self.ensure_mutation_allowed(client_id, path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
-        match self.mounts.unlink(path) {
+        match self.mounts.unlink(&real_path) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
                 self.clear_owner_path(path);
@@ -881,12 +1010,20 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        // View check (writable — mkdir is a mutation).
+        let real_path = match self.view_check_path_writable(client_id, path) {
+            Ok(p) => p,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
         if let Err(err) = self.ensure_create_allowed(client_id, path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
         let mode = msg.words[2];
-        match self.mounts.mkdir(path, mode) {
+        match self.mounts.mkdir(&real_path, mode) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
                 self.set_owner(path, client_id);
@@ -919,11 +1056,19 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        // View check (writable — rmdir is a mutation).
+        let real_path = match self.view_check_path_writable(client_id, path) {
+            Ok(p) => p,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
         if let Err(err) = self.ensure_mutation_allowed(client_id, path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
-        match self.mounts.rmdir(path) {
+        match self.mounts.rmdir(&real_path) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
                 self.clear_owner_subtree(path);
@@ -968,6 +1113,21 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        // View check: both paths must be in the view and writable.
+        let real_old = match self.view_check_path_writable(client_id, old_path) {
+            Ok(p) => p,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let real_new = match self.view_check_path_writable(client_id, new_path) {
+            Ok(p) => p,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
         if let Err(err) = self.ensure_mutation_allowed(client_id, old_path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -976,7 +1136,7 @@ impl VfsServer {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
-        match self.mounts.rename(old_path, new_path) {
+        match self.mounts.rename(&real_old, &real_new) {
             Ok(()) => {
                 reply_msg.words[0] = 0;
                 self.move_owner_subtree(old_path, new_path);
@@ -1349,6 +1509,25 @@ impl VfsServer {
                         let mut buf = alloc::vec![0u8; len];
                         unsafe { fill_random(buf.as_mut_ptr(), len) };
                         Ok(buf)
+                    }
+                    DeviceType::Tty { endpoint, .. }
+                    | DeviceType::Tty0 { endpoint }
+                    | DeviceType::Console { endpoint } => {
+                        if endpoint == 0 {
+                            return Err(Error::InvalidState);
+                        }
+                        // Forward read to tty via IPC.
+                        let req = Message::new(
+                            libcluu::ipc::TTY_READ_REQUEST_LABEL,
+                            [requested, 0, 0, 0, 0, 0],
+                            1,
+                        );
+                        let mut tty_buf = [0u8; 256];
+                        let (_reply, payload_len) =
+                            ipc::call_with_reply_buf(endpoint, &req, &[], &mut tty_buf)?;
+                        let data_start = core::mem::size_of::<Message>();
+                        let data_len = payload_len.min(requested);
+                        Ok(tty_buf[data_start..data_start + data_len].to_vec())
                     }
                 }
             }
@@ -2044,6 +2223,35 @@ impl VfsServer {
                 }
                 self.grant_buf_to_caller(len, target_base, target_space, reply_msg)
             }
+            DeviceType::Tty { endpoint, .. }
+            | DeviceType::Tty0 { endpoint }
+            | DeviceType::Console { endpoint } => {
+                // TTY devices: forward read to the tty endpoint via IPC.
+                // For grant-based reads, we proxy through IPC_CALL to the tty.
+                if endpoint == 0 {
+                    return Err(Error::InvalidState);
+                }
+                // Send TTY_READ_REQUEST to the tty endpoint and wait for reply.
+                let req = Message::new(
+                    libcluu::ipc::TTY_READ_REQUEST_LABEL,
+                    [requested, 0, 0, 0, 0, 0],
+                    1,
+                );
+                let mut tty_reply = Message::new(0, [0; 6], 0);
+                let mut tty_buf = [0u8; 256];
+                let (reply_msg_out, payload_len) =
+                    ipc::call_with_reply_buf(endpoint, &req, &[], &mut tty_buf)?;
+                let data_start = core::mem::size_of::<Message>();
+                let data_len = payload_len.min(requested);
+                if data_len > 0 {
+                    let data = &tty_buf[data_start..data_start + data_len];
+                    return self.grant_data_to_caller(data, target_base, target_space, reply_msg);
+                }
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = 0;
+                reply_msg.words[2] = 0;
+                Ok(())
+            }
         }
     }
 
@@ -2139,8 +2347,21 @@ impl VfsServer {
         Ok(())
     }
 
-    fn handle_readdir(&self, payload: &[u8], reply_token: usize) -> Result<()> {
+    fn handle_readdir(
+        &self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_READDIR, [0; 6], 2);
+        let client_id = match self.resolve_client_id("readdir", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
 
         let path = match core::str::from_utf8(payload) {
             Ok(path) => path,
@@ -2150,10 +2371,19 @@ impl VfsServer {
             }
         };
 
+        // View check: resolve virtual path.
+        let real_path = match self.view_check_path(client_id, path) {
+            Ok(p) => p,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
         vfs_trace!("vfs: readdir '{}'", path);
 
         // Use unified mount table for readdir
-        match self.mounts.readdir(path) {
+        match self.mounts.readdir(&real_path) {
             Ok(entries) => {
                 // Serialize entries: [name_len: u8, is_dir: u8, name bytes...]
                 let mut data = Vec::new();

@@ -4,8 +4,9 @@
 //! Init process for the CLUU userspace bootstrap.
 //!
 //! This binary is the first userspace program. It reads boot parameters,
-//! spawns critical services (registry, procmgr, kbd, tty, console), and then
-//! yields so the scheduler can switch to normal preemptive mode.
+//! spawns critical services (registry, procmgr, kbd, tty:0, console:0,
+//! vtmgr), and then idles forever.  On-demand VT spawning is handled by
+//! vtmgr (kbd sends VTMGR_SWITCH_VT_LABEL to vtmgr).
 
 extern crate alloc;
 
@@ -28,13 +29,11 @@ pub extern "C" fn main() -> i32 {
     }
 }
 
-/// Bootstraps core services and yields to the scheduler.
+/// Bootstraps core services and idles.
 ///
-/// This centralizes the init flow while delegating policy and wiring to
-/// dedicated modules so the sequence stays easy to audit.
+/// Init spawns the boot-critical service set, then yields forever.
+/// On-demand VT spawning is handled directly by procmgr.
 fn run() -> Result<()> {
-    // Init is the first userspace process: it spawns critical services and
-    // then yields to the scheduler so preemptive mode can take over.
     debug_print("init: bootstrapping critical services")?;
 
     let boot = boot::capture_boot_snapshot()?;
@@ -51,8 +50,8 @@ fn run() -> Result<()> {
         wiring::launch_service(&ctx, service, index, Some(&manifest))?;
     }
 
-    debug_print("init: all critical services created; yielding to scheduler")?;
-    yield_cpu()?;
-
-    Ok(())
+    debug_print("init: all critical services created; done")?;
+    loop {
+        yield_cpu()?;
+    }
 }

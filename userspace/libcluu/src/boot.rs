@@ -168,6 +168,8 @@ pub const PARAM_FB_HEIGHT: usize = 3;
 pub const PARAM_FB_PITCH: usize = 4;
 pub const PARAM_CONSOLE_INSTANCE: usize = 5;
 pub const PARAM_FB_PHYS: usize = 6;
+/// 1 if this console instance starts as the active (visible) VT, 0 otherwise.
+pub const PARAM_CONSOLE_ACTIVE: usize = 7;
 
 /// Fixed virtual address where apps map the framebuffer for direct access.
 pub const APP_FB_BASE: usize = 0xA000_0000;
@@ -185,6 +187,11 @@ pub const PARAM_ARGV_OFFSET: usize = 7;
 // Well-known param indices for environment (shared by procmgr + libcluu env init)
 pub const PARAM_ENVC: usize = 8;
 pub const PARAM_ENV_OFFSET: usize = 9;
+
+// Well-known param index for capability profile (shared by procmgr + all processes)
+// Overlaps with PARAM_CONSOLE_INSTANCE for console service — console's profile is
+// implied (SERVICE) and it uses this slot for its VT instance index instead.
+pub const PARAM_CAP_PROFILE: usize = 5;
 
 /// Read the process info structure.
 pub fn process_info() -> &'static ProcessInfo {

@@ -268,8 +268,26 @@ impl MountBackend for RemoteBackend {
     }
 }
 
-/// Device backend - special device files (/dev/null, /dev/zero, /dev/urandom).
-pub struct DeviceBackend;
+/// Device backend - special device files (/dev/null, /dev/zero, /dev/urandom, /dev/tty*).
+pub struct DeviceBackend {
+    /// Endpoints for tty:0..tty:3 (resolved via registry at VFS startup).
+    pub tty_endpoints: [usize; 4],
+}
+
+impl DeviceBackend {
+    pub fn new() -> Self {
+        Self {
+            tty_endpoints: [0; 4],
+        }
+    }
+
+    /// Update a tty endpoint (called when registry grants arrive).
+    pub fn set_tty_endpoint(&mut self, index: usize, endpoint: usize) {
+        if index < 4 {
+            self.tty_endpoints[index] = endpoint;
+        }
+    }
+}
 
 impl MountBackend for DeviceBackend {
     fn name(&self) -> &'static str {
@@ -284,6 +302,28 @@ impl MountBackend for DeviceBackend {
             "null" => DeviceType::Null,
             "zero" => DeviceType::Zero,
             "urandom" | "random" => DeviceType::Urandom,
+            "tty0" => DeviceType::Tty0 {
+                endpoint: self.tty_endpoints[0],
+            },
+            "tty1" => DeviceType::Tty {
+                vt_index: 0,
+                endpoint: self.tty_endpoints[0],
+            },
+            "tty2" => DeviceType::Tty {
+                vt_index: 1,
+                endpoint: self.tty_endpoints[1],
+            },
+            "tty3" => DeviceType::Tty {
+                vt_index: 2,
+                endpoint: self.tty_endpoints[2],
+            },
+            "tty4" => DeviceType::Tty {
+                vt_index: 3,
+                endpoint: self.tty_endpoints[3],
+            },
+            "console" => DeviceType::Console {
+                endpoint: self.tty_endpoints[0],
+            },
             _ => return Err(Error::NotFound),
         };
 
@@ -314,6 +354,30 @@ impl MountBackend for DeviceBackend {
             },
             DirEntry {
                 name: String::from("random"),
+                is_dir: false
+            },
+            DirEntry {
+                name: String::from("tty0"),
+                is_dir: false
+            },
+            DirEntry {
+                name: String::from("tty1"),
+                is_dir: false
+            },
+            DirEntry {
+                name: String::from("tty2"),
+                is_dir: false
+            },
+            DirEntry {
+                name: String::from("tty3"),
+                is_dir: false
+            },
+            DirEntry {
+                name: String::from("tty4"),
+                is_dir: false
+            },
+            DirEntry {
+                name: String::from("console"),
                 is_dir: false
             },
         ])

@@ -4,7 +4,11 @@
 //! Keyboard service for CLUU.
 //!
 //! This service receives raw IRQ scancodes, tracks modifier state, converts
-//! scancodes to ASCII, and forwards key events to the tty via the registry.
+//! scancodes to ASCII, and forwards key events to the active VT's tty via
+//! the registry.  VT switching is intercepted here: Ctrl+Alt+F1..F4 triggers
+//! a switch without forwarding the key event.
+
+extern crate alloc;
 
 mod context;
 mod layout;
@@ -33,11 +37,11 @@ pub extern "C" fn main() -> i32 {
 fn run() -> Result<()> {
     let mut ctx = KbdContext::new()?;
     let mut decoder = ScancodeDecoder::new();
-    let mut buf = [0u8; 64];
+    let mut buf = [0u8; 128];
     let mut saw_error = false;
 
     loop {
-        ctx.ensure_tty_subscription();
+        ctx.ensure_subscriptions();
 
         let tokens = [ctx.endpoint, ctx.registry_endpoint];
         match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
@@ -59,12 +63,25 @@ fn run() -> Result<()> {
 }
 
 /// Decode a keyboard IRQ message into an ASCII event and forward it.
+///
+/// VT switch combos (Ctrl+Alt+F1..F4) are intercepted and consumed —
+/// the key event is *not* forwarded to the tty.
 fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: &Message) {
     if msg.tag.label != KBD_EVENT_LABEL || msg.tag.words < 1 {
         return;
     }
 
     let scancode = msg.words[0] as u8;
+
+    // Check for VT switch *before* updating decoder state so current
+    // modifier state (ctrl+alt already held) is visible.
+    if let Some(target_vt) = decoder.detect_vt_switch(scancode) {
+        ctx.switch_vt(target_vt as usize);
+        // Consume the scancode so it doesn't produce a key event.
+        let _ = decoder.handle_scancode(scancode);
+        return;
+    }
+
     if let Some(event) = decoder.handle_scancode(scancode) {
         // Forward if there's an ASCII char OR an extended key code (arrows etc.)
         if event.ascii.is_some() || event.extended != 0 {

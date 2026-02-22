@@ -41,6 +41,19 @@ pub enum DeviceType {
     Null,
     Zero,
     Urandom,
+    /// /dev/tty1../dev/tty4 — specific VT (1-indexed, vt_index is 0-indexed)
+    Tty {
+        vt_index: u8,
+        endpoint: usize,
+    },
+    /// /dev/tty0 — alias for the currently active VT
+    Tty0 {
+        endpoint: usize,
+    },
+    /// /dev/console — system console (alias for tty:0)
+    Console {
+        endpoint: usize,
+    },
 }
 
 /// A device file handle.

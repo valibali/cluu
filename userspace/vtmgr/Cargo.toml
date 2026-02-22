@@ -1,0 +1,14 @@
+[package]
+name = "cluu-vtmgr"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU virtual terminal manager"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "vtmgr"
+path = "src/main.rs"

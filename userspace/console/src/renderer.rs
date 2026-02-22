@@ -42,6 +42,9 @@ const ANSI_BRIGHT_COLORS: [u32; 8] = [
     0x00FFFFFF, // bright white
 ];
 
+/// Number of virtual terminals supported.
+const VT_COUNT: usize = 4;
+
 /// ANSI escape sequence parser state.
 #[derive(Clone, Copy, PartialEq)]
 enum EscState {
@@ -53,17 +56,12 @@ enum EscState {
     Csi,
 }
 
-/// Console renderer backed by a pluggable pixel backend.
-pub struct Console<B: ConsoleBackend> {
-    backend: B,
-    width: usize,
-    height: usize,
-    /// Framebuffer physical address (for serving to apps).
-    fb_phys: u64,
-    /// Framebuffer size in bytes.
-    fb_size: u64,
-    cols: usize,
-    rows: usize,
+/// Per-VT state that can be saved/restored on VT switch.
+///
+/// This uses the "register context switch" pattern: the Console struct
+/// holds the "active registers" (its own fields). On VT switch, we swap
+/// state between the active registers and a VtBuffer using mem::swap.
+struct VtBuffer {
     cursor_x: usize,
     cursor_y: usize,
     cursor_visible: bool,
@@ -76,13 +74,79 @@ pub struct Console<B: ConsoleBackend> {
     last_cursor_x: usize,
     last_cursor_y: usize,
     chars_since_cursor_redraw: usize,
-    // Batching: track dirty cells to render in bulk
-    dirty_cells: Vec<(usize, usize)>, // (x, y) pairs
-    // ANSI escape sequence parser state (persists across IPC messages)
+    dirty_cells: Vec<(usize, usize)>,
     esc_state: EscState,
     esc_params: [u16; 4],
     esc_param_count: usize,
     esc_current_param: u16,
+}
+
+impl VtBuffer {
+    fn new(cols: usize, rows: usize) -> Self {
+        Self {
+            cursor_x: 0,
+            cursor_y: 0,
+            cursor_visible: true,
+            blink_enabled: true,
+            cells: alloc::vec![b' '; cols * rows],
+            fg_cells: alloc::vec![COLOR_FG; cols * rows],
+            bg_cells: alloc::vec![COLOR_BG; cols * rows],
+            current_fg: COLOR_FG,
+            current_bg: COLOR_BG,
+            last_cursor_x: 0,
+            last_cursor_y: 0,
+            chars_since_cursor_redraw: 0,
+            dirty_cells: Vec::new(),
+            esc_state: EscState::Normal,
+            esc_params: [0; 4],
+            esc_param_count: 0,
+            esc_current_param: 0,
+        }
+    }
+}
+
+/// Console renderer backed by a pluggable pixel backend.
+///
+/// Multi-VT support: the Console holds per-VT state in `vt_buffers`.
+/// The "active registers" (cursor_x, cells, etc.) always contain the
+/// state for `active_vt`. On VT switch, state is saved to the old
+/// VtBuffer and loaded from the new one using mem::swap.
+pub struct Console<B: ConsoleBackend> {
+    backend: B,
+    width: usize,
+    height: usize,
+    /// Framebuffer physical address (for serving to apps).
+    fb_phys: u64,
+    /// Framebuffer size in bytes.
+    fb_size: u64,
+    cols: usize,
+    rows: usize,
+    // ── Active VT registers (per-VT state) ──
+    cursor_x: usize,
+    cursor_y: usize,
+    cursor_visible: bool,
+    blink_enabled: bool,
+    cells: Vec<u8>,
+    fg_cells: Vec<u32>,
+    bg_cells: Vec<u32>,
+    current_fg: u32,
+    current_bg: u32,
+    last_cursor_x: usize,
+    last_cursor_y: usize,
+    chars_since_cursor_redraw: usize,
+    dirty_cells: Vec<(usize, usize)>,
+    esc_state: EscState,
+    esc_params: [u16; 4],
+    esc_param_count: usize,
+    esc_current_param: u16,
+    // ── Multi-VT state ──
+    /// Whether this console is the active (visible) VT.
+    active: bool,
+    /// Currently loaded VT index (matches the active registers).
+    active_vt: usize,
+    /// Storage for inactive VT state. VT 0 starts as None because its
+    /// state lives in the "active registers" initially.
+    vt_buffers: [Option<VtBuffer>; VT_COUNT],
 }
 
 impl<B: ConsoleBackend> Console<B> {
@@ -117,9 +181,176 @@ impl<B: ConsoleBackend> Console<B> {
             esc_params: [0; 4],
             esc_param_count: 0,
             esc_current_param: 0,
+            active: true,
+            active_vt: 0,
+            vt_buffers: [None, None, None, None],
         };
         console.clear();
         console
+    }
+
+    /// Set the initial active state (called once at startup from boot params).
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
+    }
+
+    /// Mark this console as the active (visible) VT and repaint to FB.
+    pub fn activate(&mut self) {
+        self.active = true;
+        self.repaint_all();
+        self.backend.flush();
+    }
+
+    /// Mark this console as inactive. Subsequent flush/tick calls become no-ops.
+    pub fn deactivate(&mut self) {
+        self.active = false;
+    }
+
+    /// Whether this console is the active VT.
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    // ── Multi-VT methods ──────────────────────────────────────────────
+
+    /// Create a new VT buffer at the given index.
+    ///
+    /// Called by vtmgr via CONSOLE_CREATE_VT_LABEL. VT 0 always exists
+    /// (created at boot), so this is a no-op for index 0.
+    pub fn create_vt(&mut self, vt_index: usize) {
+        if vt_index == 0 || vt_index >= VT_COUNT {
+            return;
+        }
+        if self.vt_buffers[vt_index].is_some() {
+            return; // already exists
+        }
+        self.vt_buffers[vt_index] = Some(VtBuffer::new(self.cols, self.rows));
+    }
+
+    /// Switch the active VT display.
+    ///
+    /// Saves current register state to `vt_buffers[old]`, loads state from
+    /// `vt_buffers[new_vt]`, and repaints.
+    pub fn switch_vt(&mut self, new_vt: usize) {
+        if new_vt >= VT_COUNT || new_vt == self.active_vt {
+            return;
+        }
+        // Ensure the target VT exists.
+        if new_vt != 0 && self.vt_buffers[new_vt].is_none() {
+            return;
+        }
+
+        // Save current registers → old VtBuffer.
+        self.save_vt_state(self.active_vt);
+
+        // Load new VtBuffer → current registers.
+        self.load_vt_state(new_vt);
+
+        self.active_vt = new_vt;
+        self.active = true;
+        self.repaint_all();
+        self.backend.flush();
+    }
+
+    /// Deactivate a specific VT (called by vtmgr before switching).
+    pub fn deactivate_vt(&mut self, _vt_index: usize) {
+        // Currently we only deactivate the active VT.
+        self.active = false;
+    }
+
+    /// Write data to a specific VT index.
+    ///
+    /// If the target is the active VT, writes directly. Otherwise,
+    /// temporarily context-switches to the target VT, writes, and
+    /// switches back.
+    pub fn write_to_vt(&mut self, vt_index: usize, payload: &[u8]) {
+        if vt_index >= VT_COUNT {
+            return;
+        }
+        if vt_index == self.active_vt {
+            // Fast path: write directly to active registers.
+            self.write_utf8_bytes(payload);
+            return;
+        }
+        // Ensure target VT exists.
+        if vt_index != 0 && self.vt_buffers[vt_index].is_none() {
+            return;
+        }
+        // Context switch: save active, load target, write, restore.
+        let saved_active = self.active;
+        let saved_vt = self.active_vt;
+
+        self.save_vt_state(saved_vt);
+        self.load_vt_state(vt_index);
+        self.active_vt = vt_index;
+        self.active = false; // Don't render to backend for non-visible VT.
+
+        self.write_utf8_bytes(payload);
+
+        // Restore original VT.
+        self.save_vt_state(vt_index);
+        self.load_vt_state(saved_vt);
+        self.active_vt = saved_vt;
+        self.active = saved_active;
+    }
+
+    /// Save current register state into a VtBuffer.
+    fn save_vt_state(&mut self, vt_index: usize) {
+        if vt_index >= VT_COUNT {
+            return;
+        }
+        let buf =
+            self.vt_buffers[vt_index].get_or_insert_with(|| VtBuffer::new(self.cols, self.rows));
+        core::mem::swap(&mut self.cursor_x, &mut buf.cursor_x);
+        core::mem::swap(&mut self.cursor_y, &mut buf.cursor_y);
+        core::mem::swap(&mut self.cursor_visible, &mut buf.cursor_visible);
+        core::mem::swap(&mut self.blink_enabled, &mut buf.blink_enabled);
+        core::mem::swap(&mut self.cells, &mut buf.cells);
+        core::mem::swap(&mut self.fg_cells, &mut buf.fg_cells);
+        core::mem::swap(&mut self.bg_cells, &mut buf.bg_cells);
+        core::mem::swap(&mut self.current_fg, &mut buf.current_fg);
+        core::mem::swap(&mut self.current_bg, &mut buf.current_bg);
+        core::mem::swap(&mut self.last_cursor_x, &mut buf.last_cursor_x);
+        core::mem::swap(&mut self.last_cursor_y, &mut buf.last_cursor_y);
+        core::mem::swap(
+            &mut self.chars_since_cursor_redraw,
+            &mut buf.chars_since_cursor_redraw,
+        );
+        core::mem::swap(&mut self.dirty_cells, &mut buf.dirty_cells);
+        core::mem::swap(&mut self.esc_state, &mut buf.esc_state);
+        core::mem::swap(&mut self.esc_params, &mut buf.esc_params);
+        core::mem::swap(&mut self.esc_param_count, &mut buf.esc_param_count);
+        core::mem::swap(&mut self.esc_current_param, &mut buf.esc_current_param);
+    }
+
+    /// Load state from a VtBuffer into the active registers.
+    fn load_vt_state(&mut self, vt_index: usize) {
+        if vt_index >= VT_COUNT {
+            return;
+        }
+        let buf =
+            self.vt_buffers[vt_index].get_or_insert_with(|| VtBuffer::new(self.cols, self.rows));
+        core::mem::swap(&mut self.cursor_x, &mut buf.cursor_x);
+        core::mem::swap(&mut self.cursor_y, &mut buf.cursor_y);
+        core::mem::swap(&mut self.cursor_visible, &mut buf.cursor_visible);
+        core::mem::swap(&mut self.blink_enabled, &mut buf.blink_enabled);
+        core::mem::swap(&mut self.cells, &mut buf.cells);
+        core::mem::swap(&mut self.fg_cells, &mut buf.fg_cells);
+        core::mem::swap(&mut self.bg_cells, &mut buf.bg_cells);
+        core::mem::swap(&mut self.current_fg, &mut buf.current_fg);
+        core::mem::swap(&mut self.current_bg, &mut buf.current_bg);
+        core::mem::swap(&mut self.last_cursor_x, &mut buf.last_cursor_x);
+        core::mem::swap(&mut self.last_cursor_y, &mut buf.last_cursor_y);
+        core::mem::swap(
+            &mut self.chars_since_cursor_redraw,
+            &mut buf.chars_since_cursor_redraw,
+        );
+        core::mem::swap(&mut self.dirty_cells, &mut buf.dirty_cells);
+        core::mem::swap(&mut self.esc_state, &mut buf.esc_state);
+        core::mem::swap(&mut self.esc_params, &mut buf.esc_params);
+        core::mem::swap(&mut self.esc_param_count, &mut buf.esc_param_count);
+        core::mem::swap(&mut self.esc_current_param, &mut buf.esc_current_param);
     }
 
     /// Handle a console IPC message and apply the requested action.
@@ -176,7 +407,7 @@ impl<B: ConsoleBackend> Console<B> {
     /// Advance the blink timer; called on IPC timeout.
     /// Returns true if cursor visibility changed.
     pub fn tick(&mut self) -> bool {
-        if !self.blink_enabled {
+        if !self.active || !self.blink_enabled {
             return false;
         }
         self.cursor_visible = !self.cursor_visible;
@@ -188,8 +419,12 @@ impl<B: ConsoleBackend> Console<B> {
     ///
     /// For double-buffered backends, this copies the dirty region to the frontbuffer.
     /// Should be called after rendering operations and periodically for cursor blink.
+    /// No-op when this console is inactive (another VT is visible).
     #[inline]
     pub fn flush(&mut self) {
+        if !self.active {
+            return;
+        }
         self.backend.flush();
     }
 
@@ -198,6 +433,27 @@ impl<B: ConsoleBackend> Console<B> {
     #[allow(dead_code)]
     pub fn is_dirty(&self) -> bool {
         self.backend.is_dirty()
+    }
+
+    /// Repaint the entire grid to the framebuffer from cell data.
+    ///
+    /// Used after VT activation to restore the full display from the
+    /// in-memory cell buffer without clearing the grid state.
+    fn repaint_all(&mut self) {
+        self.backend
+            .fill_rect(0, 0, self.width, self.height, COLOR_BG);
+        for y in 0..self.rows {
+            for x in 0..self.cols {
+                let idx = y * self.cols + x;
+                let ch = self.cells[idx];
+                let fg = self.fg_cells[idx];
+                let bg = self.bg_cells[idx];
+                if ch != b' ' || bg != COLOR_BG {
+                    self.draw_glyph(x, y, ch, fg, bg);
+                }
+            }
+        }
+        self.redraw_cursor();
     }
 
     /// Reset the grid contents and repaint the framebuffer to a clean state.

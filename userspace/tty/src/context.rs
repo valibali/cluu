@@ -10,9 +10,9 @@ use alloc::format;
 use alloc::vec::Vec;
 use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::ipc::{
-    call_with_payload, send_with_retry_timeout, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
-    IPC_CHUNK_BYTES_DEFAULT, IPC_SEND_RETRIES_DEFAULT, TTY_FG_FLAG_FORWARD_CTRL_C,
-    TTY_FG_FLAG_NOTIFY_CTRL_C,
+    call_with_payload, send, send_with_retry_timeout, CONSOLE_WRITE_LABEL,
+    CONSOLE_WRITE_SYNC_LABEL, IPC_CHUNK_BYTES_DEFAULT, IPC_SEND_RETRIES_DEFAULT,
+    TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_SPAWN_SHELL_LABEL,
 };
 use libcluu::registry;
 use libcluu::types::Message;
@@ -37,6 +37,13 @@ pub struct TtyContext {
     shell_registered_stdin: usize,
     requested_console: bool,
     requested_shell: bool,
+    /// Instance index (0-3) for this tty, used to subscribe to the matching console.
+    instance_id: u64,
+    /// procmgr "spawn" endpoint for requesting shell creation.
+    procmgr_spawn: usize,
+    requested_procmgr: bool,
+    /// Whether we've already requested a shell spawn for this VT.
+    shell_spawn_requested: bool,
     pending_console_output: Vec<u8>,
     /// Deferred sync write reply token (if console wasn't ready)
     pending_sync_reply: Option<usize>,
@@ -90,6 +97,10 @@ impl TtyContext {
             shell_registered_stdin: 0,
             requested_console: false,
             requested_shell: false,
+            instance_id,
+            procmgr_spawn: 0,
+            requested_procmgr: false,
+            shell_spawn_requested: false,
             pending_console_output: Vec::new(),
             pending_sync_reply: None,
             console_credit: CONSOLE_CREDIT_WINDOW,
@@ -100,13 +111,13 @@ impl TtyContext {
         })
     }
 
-    /// Request console and shell subscriptions if they are missing.
+    /// Request console, shell, and procmgr subscriptions if they are missing.
     pub fn request_subscriptions(&mut self) {
-        if self.console_endpoint == 0
-            && !self.requested_console
-            && registry::request_subscription("console:0", "write").is_ok()
-        {
-            self.requested_console = true;
+        if self.console_endpoint == 0 && !self.requested_console {
+            let console_name = format!("console:{}", self.instance_id);
+            if registry::request_subscription(&console_name, "write").is_ok() {
+                self.requested_console = true;
+            }
         }
         if self.shell_registered_stdin == 0
             && !self.requested_shell
@@ -114,6 +125,34 @@ impl TtyContext {
         {
             self.requested_shell = true;
         }
+        // Subscribe to procmgr so we can request shell spawn.
+        if self.procmgr_spawn == 0 && !self.requested_procmgr {
+            if registry::request_subscription("procmgr", "spawn").is_ok() {
+                self.requested_procmgr = true;
+            }
+        }
+        // Once we have both console and procmgr, request a shell for this VT.
+        self.maybe_spawn_shell();
+    }
+
+    /// Request procmgr to spawn a shell for this VT if not already done.
+    fn maybe_spawn_shell(&mut self) {
+        if self.shell_spawn_requested || self.procmgr_spawn == 0 || self.console_endpoint == 0 {
+            return;
+        }
+        self.shell_spawn_requested = true;
+        let _ = debug_print(&format!("tty:{}: requesting shell spawn", self.instance_id));
+
+        // Notify procmgr to spawn a shell for this VT.  Procmgr already knows
+        // the shell path (SERVICE_PATH); we only need to identify ourselves.
+        // words[0] carries our instance_id so procmgr can look up the correct
+        // tty endpoint from its registry-granted table.
+        let msg = libcluu::types::Message::new(
+            TTY_SPAWN_SHELL_LABEL,
+            [self.instance_id as usize, 0, 0, 0, 0, 0],
+            1,
+        );
+        let _ = send(self.procmgr_spawn, &msg, libcluu::types::IpcFlags::empty());
     }
 
     /// Handle registry control traffic and update subscriptions.
@@ -125,6 +164,9 @@ impl TtyContext {
                         self.console_endpoint = token;
                         let _ = debug_print("tty: console subscribed");
                         self.flush_pending_console();
+                    } else if name == "spawn" {
+                        self.procmgr_spawn = token;
+                        let _ = debug_print("tty: procmgr spawn subscribed");
                     } else if name == "stdin" {
                         // Keep a stable "registered shell route" from registry grants.
                         // If we are currently routing to that route (or have no route),

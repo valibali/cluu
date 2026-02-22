@@ -2087,6 +2087,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/console",
         "userspace/kbd",
         "userspace/tty",
+        "userspace/vtmgr",
         "userspace/shell",
         "userspace/timeserver",
         "userspace/cat",
@@ -2268,6 +2269,7 @@ fn create_initrd(profile: &str) -> Result<()> {
         "console",
         "kbd",
         "tty",
+        "vtmgr",
         "virtio-blk",
     ];
     let mut copied_sys_paths = Vec::new();

@@ -21,6 +21,7 @@ members = [
     "userspace/console",
     "userspace/kbd",
     "userspace/tty",
+    "userspace/vtmgr",
     "userspace/shell",
     "userspace/registry",
     "userspace/timeserver",
@@ -45,6 +46,7 @@ default-members = [
     "userspace/console",
     "userspace/kbd",
     "userspace/tty",
+    "userspace/vtmgr",
     "userspace/shell",
     "userspace/registry",
     "userspace/timeserver",
@@ -96,6 +98,9 @@ debug = 0
 [profile.dev.package."cluu-tty"]
 debug = 0
 
+[profile.dev.package."cluu-vtmgr"]
+debug = 0
+
 [profile.dev.package."cluu-shell"]
 debug = 0
 
@@ -130,6 +135,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-tty"]
+debug = 0
+
+[profile.release.package."cluu-vtmgr"]
 debug = 0
 
 [profile.release.package."cluu-shell"]

@@ -25,6 +25,7 @@ extern crate alloc;
 pub mod allocator;
 pub mod boot;
 pub mod boot_manifest;
+pub mod cap;
 pub mod device_io;
 pub mod elf;
 pub mod error;

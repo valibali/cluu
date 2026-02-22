@@ -18,6 +18,7 @@ use commands::{poll_background_jobs, BuiltinFactory, CommandContext, CommandExec
 use core::mem::size_of;
 use libcluu::boot::{
     process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG,
+    TOKEN_STDOUT,
 };
 use libcluu::ipc::{
     send_with_payload, CONSOLE_CLEAR_LABEL, CONSOLE_WRITE_LABEL, TTY_READ_LABEL, TTY_WRITE_LABEL,
@@ -41,23 +42,25 @@ fn run() -> Result<()> {
     let stdin = info.tokens[TOKEN_STDIN];
     let stderr = info.tokens[TOKEN_STDERR];
     let stdlog = info.tokens[TOKEN_STDLOG];
-    let stdout = loop {
-        // Lazily subscribe to tty's main output and use it as stdout.
-        match registry::subscribe_output("tty:0", "main") {
-            Ok(token) => break token,
-            Err(_) => {
-                let _ = yield_cpu();
+    // stdout is already connected to the correct tty:N by procmgr.
+    let stdout = info.tokens[TOKEN_STDOUT];
+    // Best-effort console subscription for clear/banner.
+    // Try console:0 first but don't block — the shell works without it.
+    let console_write = {
+        let mut console = 0usize;
+        for _ in 0..20 {
+            // Try all console instances; our tty will route to the right one.
+            match registry::subscribe_output("console:0", "write") {
+                Ok(token) => {
+                    console = token;
+                    break;
+                }
+                Err(_) => {
+                    let _ = yield_cpu();
+                }
             }
         }
-    };
-    let console_write = loop {
-        // Best-effort console access for clearing before banner.
-        match registry::subscribe_output("console:0", "write") {
-            Ok(token) => break token,
-            Err(_) => {
-                let _ = yield_cpu();
-            }
-        }
+        console
     };
     let registry_endpoint = registry::control_endpoint();
     let mut command_context = CommandContext::new();
@@ -67,8 +70,10 @@ fn run() -> Result<()> {
         "shell: stdin {} stdout {} stderr {} stdlog {}",
         stdin, stdout, stderr, stdlog
     ));
-    let _ = send_with_payload(console_write, CONSOLE_CLEAR_LABEL, &[]);
-    let _ = print_banner(console_write);
+    if console_write != 0 {
+        let _ = send_with_payload(console_write, CONSOLE_CLEAR_LABEL, &[]);
+        let _ = print_banner(console_write);
+    }
     let _ = print_prompt(stdout);
     #[cfg(feature = "lang-parser")]
     {

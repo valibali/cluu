@@ -32,6 +32,38 @@ pub const TTY_WRITE_SYNC_LABEL: u32 = 5;
 pub const TTY_READ_REQUEST_LABEL: u32 = 6;
 pub const CONSOLE_FB_INFO_LABEL: u32 = 6;
 pub const TTY_POLL_QUERY_LABEL: u32 = 7;
+pub const CONSOLE_ACTIVATE_LABEL: u32 = 8;
+pub const CONSOLE_DEACTIVATE_LABEL: u32 = 9;
+pub const PROCMGR_QUERY_CTTY_LABEL: u32 = 11;
+/// tty → procmgr: request shell spawn for this VT.
+/// words[0] = tty endpoint token (stdout for the shell).
+/// Payload = path string (e.g., "/dev/initrd/bin/shell\0").
+pub const TTY_SPAWN_SHELL_LABEL: u32 = 13;
+/// kbd → vtmgr: request VT switch.
+/// words[0] = target VT index (0-3).
+pub const VTMGR_SWITCH_VT_LABEL: u32 = 15;
+/// vtmgr → console: create a new VT buffer.
+/// words[0] = VT index (0-3).
+pub const CONSOLE_CREATE_VT_LABEL: u32 = 17;
+/// per-VT write: tty → console with VT index routing.
+/// words[0] = payload length, words[1] = VT index.
+pub const CONSOLE_WRITE_VT_LABEL: u32 = 18;
+/// per-VT synchronous write (call): tty → console with VT index routing.
+/// words[0] = payload length, words[1] = VT index.
+pub const CONSOLE_WRITE_VT_SYNC_LABEL: u32 = 19;
+/// Generic service spawn request (any service → procmgr).
+/// words[0] = payload length, words[1] = priority,
+/// words[2] = TOKEN_EXTRA_0 mode (0=none, 1=listen, 2=grantable),
+/// words[3] = param override count.
+/// Payload = path\0 + param overrides (each: u16 index LE + u64 value LE = 10 bytes).
+pub const PROCMGR_SPAWN_SERVICE_LABEL: u32 = 20;
+
+/// Procmgr → VFS: register a per-client filesystem view.
+/// words[1] = client_id (sender_tid of the target process),
+/// words[2] = mount count.
+/// Payload: for each mount: u16 src_len LE + u16 dst_len LE + u8 flags (bit 0 = writable) + src_bytes + dst_bytes.
+pub const VFS_SET_VIEW_LABEL: u32 = 21;
+
 pub const TTY_FG_FLAG_FORWARD_CTRL_C: usize = 1 << 0;
 pub const TTY_FG_FLAG_NOTIFY_CTRL_C: usize = 1 << 1;
 pub const TTY_CTL_SYNC: u32 = 1;
@@ -349,6 +381,16 @@ pub fn send(endpoint_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()
 pub fn send_with_payload(endpoint_token: usize, label: u32, payload: &[u8]) -> Result<()> {
     let mut msg = Message::new(label, [0; 6], 1);
     msg.words[0] = payload.len();
+    send_msg_with_payload(endpoint_token, &msg, payload)
+}
+
+/// Send a caller-constructed Message with an inline payload.
+///
+/// Unlike `send_with_payload`, this preserves the caller's Message header
+/// (label, words, extra) exactly as provided. The caller is responsible
+/// for setting words[0] to payload.len() if the receiver uses
+/// `parse_message` to extract the payload.
+pub fn send_msg_with_payload(endpoint_token: usize, msg: &Message, payload: &[u8]) -> Result<()> {
     let header = msg.as_bytes();
     let total_len = header.len() + payload.len();
     if total_len <= IPC_INLINE_STACK_MAX {

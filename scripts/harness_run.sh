@@ -614,6 +614,12 @@ type_ascii_command() {
             '>') send_key "shift-dot" ;;
             '`') send_key "grave_accent" ;;
             '~') send_key "shift-grave_accent" ;;
+            # HU (QWERTZ) layout swaps y↔z scancodes.  QEMU sendkey uses
+            # US key names, so we pre-swap to produce the intended character.
+            'y') send_key "z" ;;
+            'z') send_key "y" ;;
+            'Y') send_key "shift-z" ;;
+            'Z') send_key "shift-y" ;;
             [a-z0-9]) send_key "$ch" ;;
             [A-Z]) send_key "shift-${ch,,}" ;;
             *)

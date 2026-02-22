@@ -60,6 +60,21 @@ pub fn init(service_name: &str) -> Result<()> {
     if registry_endpoint == 0 || ipc_cap == 0 {
         return Err(Error::InvalidArgument);
     }
+    init_with_tokens(service_name, registry_endpoint, ipc_cap)
+}
+
+/// Initialize the registry client with explicit tokens.
+///
+/// This is used by init, which creates the registry endpoint itself and
+/// therefore does not have TOKEN_REGISTRY set in its boot parameters.
+pub fn init_with_tokens(
+    service_name: &str,
+    registry_endpoint: usize,
+    ipc_cap: usize,
+) -> Result<()> {
+    if registry_endpoint == 0 || ipc_cap == 0 {
+        return Err(Error::InvalidArgument);
+    }
 
     // The control endpoint is where subscribe replies and grants arrive.
     let control_endpoint = endpoint_create(ipc_cap)?;
@@ -67,7 +82,6 @@ pub fn init(service_name: &str) -> Result<()> {
     state.service_name = Some(service_name.to_string());
     state.registry_endpoint = registry_endpoint;
     state.control_endpoint = control_endpoint;
-    let _ = service_name;
     Ok(())
 }
 

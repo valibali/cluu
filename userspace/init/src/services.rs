@@ -2,7 +2,12 @@
 //!
 //! Service metadata is kept here so it can be reused by the launcher without
 //! leaking policy into the boot and mapping layers.
+//!
+//! Multi-VT: Only the first VT (console:0, tty:0) is launched by init.
+//! Additional VTs are spawned on demand by vtmgr when the user switches
+//! to a new VT via Ctrl+Alt+Fn.
 
+use libcluu::cap::CapProfile;
 use libcluu::Rights;
 
 pub struct ServiceSpec {
@@ -13,6 +18,7 @@ pub struct ServiceSpec {
     pub space_policy: SpacePolicy,
     pub kind: ServiceKind,
     pub instance_id: Option<u64>,
+    pub profile: CapProfile,
 }
 
 #[derive(Copy, Clone)]
@@ -30,6 +36,7 @@ pub enum ServiceKind {
     Tty,
     Procmgr,
     Vfs,
+    Vtmgr,
     VirtioBlk,
 }
 
@@ -63,6 +70,9 @@ const VIRTIOBLK_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
 const VIRTIOBLK_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIOBLK_RIGHTS_BITS);
 
 // Boot-critical services in launch order.
+//
+// Only VT0 (console:0, tty:0) is launched at boot.  Additional VTs are
+// spawned on demand by vtmgr when the user activates them.
 pub const SERVICE_LIST: &[ServiceSpec] = &[
     ServiceSpec {
         name: "registry",
@@ -72,6 +82,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Registry,
         instance_id: None,
+        profile: CapProfile::SERVICE,
     },
     ServiceSpec {
         name: "timeserver",
@@ -81,6 +92,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Timeserver,
         instance_id: None,
+        profile: CapProfile::SERVICE,
     },
     ServiceSpec {
         name: "procmgr",
@@ -90,6 +102,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Procmgr,
         instance_id: None,
+        profile: CapProfile::SUPERVISOR,
     },
     ServiceSpec {
         name: "vfs",
@@ -99,6 +112,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         space_policy: SpacePolicy::Grantable,
         kind: ServiceKind::Vfs,
         instance_id: None,
+        profile: CapProfile::SERVICE,
     },
     ServiceSpec {
         name: "kbd",
@@ -108,6 +122,29 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Kbd,
         instance_id: None,
+        profile: CapProfile::SERVICE,
+    },
+    // VT0: default terminal launched at boot (console before vtmgr before tty)
+    ServiceSpec {
+        name: "console",
+        path: "sys/console",
+        priority: 210,
+        rights: None,
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::Console,
+        instance_id: Some(0),
+        profile: CapProfile::SERVICE,
+    },
+    // vtmgr: VT lifecycle coordinator (between console and tty)
+    ServiceSpec {
+        name: "vtmgr",
+        path: "sys/vtmgr",
+        priority: 208,
+        rights: None,
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::Vtmgr,
+        instance_id: None,
+        profile: CapProfile::SERVICE,
     },
     ServiceSpec {
         name: "tty",
@@ -117,15 +154,7 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Tty,
         instance_id: Some(0),
-    },
-    ServiceSpec {
-        name: "console",
-        path: "sys/console",
-        priority: 210,
-        rights: None,
-        space_policy: SpacePolicy::Standard,
-        kind: ServiceKind::Console,
-        instance_id: Some(0),
+        profile: CapProfile::SERVICE,
     },
     ServiceSpec {
         name: "virtio-blk",
@@ -135,5 +164,6 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::VirtioBlk,
         instance_id: None,
+        profile: CapProfile::SERVICE,
     },
 ];

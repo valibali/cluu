@@ -7,6 +7,8 @@
 use alloc::format;
 use libcluu::boot::{
     CONSOLE_FB_BASE,
+    PARAM_CAP_PROFILE,
+    PARAM_CONSOLE_ACTIVE,
     PARAM_CONSOLE_INSTANCE,
     PARAM_FB_BASE,
     PARAM_FB_HEIGHT,
@@ -108,6 +110,8 @@ impl ServiceWiring for ServiceKind {
                 params[PARAM_FB_PITCH] = ctx.boot.fb_pitch as u64;
                 params[PARAM_FB_PHYS] = ctx.boot.fb_phys;
                 params[PARAM_CONSOLE_INSTANCE] = instance_id.unwrap_or(0);
+                // Only console:0 starts as the active (visible) VT.
+                params[PARAM_CONSOLE_ACTIVE] = if instance_id.unwrap_or(0) == 0 { 1 } else { 0 };
             }
             ServiceKind::Kbd => {
                 // Kbd will create its own endpoint in Phase 3
@@ -131,6 +135,10 @@ impl ServiceWiring for ServiceKind {
                 // VFS will create its own endpoint in Phase 3
                 tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
                 params[PARAM_INITRD_SIZE] = ctx.boot.initrd_size as u64;
+            }
+            ServiceKind::Vtmgr => {
+                // Vtmgr needs a listen endpoint for kbd switch requests.
+                tokens[TOKEN_EXTRA_0] = create_listen_endpoint(ctx.boot.root_token)?;
             }
             ServiceKind::VirtioBlk => {
                 // VirtioBlk will create its own endpoint in Phase 3
@@ -161,6 +169,7 @@ impl ServiceWiring for ServiceKind {
             ServiceKind::Registry
             | ServiceKind::Kbd
             | ServiceKind::Tty
+            | ServiceKind::Vtmgr
             | ServiceKind::VirtioBlk => Ok(()),
             ServiceKind::Timeserver => Ok(()),
         }
@@ -202,6 +211,10 @@ pub fn launch_service(
     // Assemble process info payload (tokens + params) before mapping it into the child.
     let mut tokens = [0usize; 16];
     let mut params = [0u64; 10];
+
+    // Write profile before configure_tokens — console's configure_tokens
+    // overwrites slot 5 with PARAM_CONSOLE_INSTANCE (documented overlap).
+    params[PARAM_CAP_PROFILE] = service.profile.bits() as u64;
 
     // Universal token slots (0-8) - every process gets these
     // Slots 0-3: Standard I/O (filled by fill_default_endpoints)

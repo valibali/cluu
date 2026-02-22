@@ -64,6 +64,30 @@ impl ScancodeDecoder {
         self.modifiers
     }
 
+    /// Detect a VT switch hotkey (Ctrl+Alt+F1..F4).
+    ///
+    /// Must be called *before* `handle_scancode` so the modifier state is
+    /// still current for the frame that includes the F-key press.  Returns
+    /// the target VT index (0-3) when the combo is detected, `None` otherwise.
+    pub fn detect_vt_switch(&self, scancode: u8) -> Option<u8> {
+        // Only act on key-press (bit 7 clear) and non-extended scancodes.
+        if scancode & 0x80 != 0 || scancode == 0xE0 || scancode == 0xE1 {
+            return None;
+        }
+        if !self.modifiers.ctrl || !self.modifiers.alt {
+            return None;
+        }
+        let code = scancode & 0x7F;
+        // Set-1 scancodes: F1=0x3B, F2=0x3C, F3=0x3D, F4=0x3E
+        match code {
+            0x3B => Some(0),
+            0x3C => Some(1),
+            0x3D => Some(2),
+            0x3E => Some(3),
+            _ => None,
+        }
+    }
+
     /// Process a raw scancode, updating modifiers and producing an event.
     ///
     /// Returns `None` for releases or modifier-only presses.
