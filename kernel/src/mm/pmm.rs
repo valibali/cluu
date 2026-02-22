@@ -120,13 +120,15 @@ impl BuddyAllocator {
     // ─── Intrusive list helpers (require physmap) ──────────────────────────
 
     fn read_header(&self, frame: usize) -> FreePageHeader {
-        let phys = (frame * PAGE_SIZE) as u64;
+        debug_assert!(frame > 0 && frame < MAX_FRAMES, "read_header: invalid frame {}", frame);
+        let phys = (frame as u64) * (PAGE_SIZE as u64);
         let virt = unsafe { crate::mm::physmap::phys_to_virt_u64(phys) } as *const FreePageHeader;
         unsafe { core::ptr::read_volatile(virt) }
     }
 
     fn write_header(&self, frame: usize, header: &FreePageHeader) {
-        let phys = (frame * PAGE_SIZE) as u64;
+        debug_assert!(frame > 0 && frame < MAX_FRAMES, "write_header: invalid frame {}", frame);
+        let phys = (frame as u64) * (PAGE_SIZE as u64);
         let virt = unsafe { crate::mm::physmap::phys_to_virt_u64(phys) } as *mut FreePageHeader;
         unsafe { core::ptr::write_volatile(virt, FreePageHeader { ..*header }) }
     }
@@ -430,8 +432,10 @@ pub unsafe fn init(bootboot: &BOOTBOOT, boot_info: &dyn BootInfoProvider) {
     let mut pmm = PMM.lock();
     let (kernel_phys_start, kernel_phys_end) = boot_info.kernel_physical_range();
 
-    // Parse memory map and mark free regions
-    let mmap_entries = bootboot.size as usize / 16;
+    // Parse memory map and mark free regions.
+    // bootboot.size includes the 128-byte header; subtract it to get mmap byte count.
+    const BOOTBOOT_HEADER_SIZE: usize = 128;
+    let mmap_entries = bootboot.size.saturating_sub(BOOTBOOT_HEADER_SIZE as u32) as usize / 16;
     let mmap_ptr = &bootboot.mmap as *const MMapEnt;
     let mut total_free_frames = 0;
     let mut max_managed_frame: usize = 0;
