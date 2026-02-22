@@ -17,8 +17,8 @@ pub const FD_CLOEXEC: c_int = 1;
 
 // Common status flags. CLUU currently only stores them; no nonblocking behavior
 // is enforced by kernel paths yet.
-pub const O_NONBLOCK: c_int = 0o4000;
-pub const O_APPEND: c_int = 0o2000;
+pub const O_NONBLOCK: c_int = 0o40000; // newlib _FNONBLOCK = 0x4000
+pub const O_APPEND: c_int = 0o10; // newlib _FAPPEND = 0x0008
 
 #[derive(Default)]
 struct FcntlState {

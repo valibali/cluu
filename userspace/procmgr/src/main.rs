@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
+use alloc::{collections::BTreeMap, collections::BTreeSet, format, string::String, vec::Vec};
 use core::mem::{size_of, take};
 use libcluu::boot::{
     process_info,
@@ -45,6 +45,7 @@ struct PendingVfsView {
     client_tid: usize,
     mounts: ViewMountList,
     profile: CapProfile,
+    container_id: u64,
 }
 
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
@@ -126,6 +127,11 @@ struct ProcessManager {
     vfs_file_cache: BTreeMap<String, libcluu::fs::client::VfsFile>,
     pending_vfs_views: Vec<PendingVfsView>,
     manager_vfs_view_registered: bool,
+    container_id_next: u64,
+    pid_to_container_id: BTreeMap<usize, u64>,
+    /// PIDs that own their container (created via next_container_id).
+    /// Only owners trigger container cleanup on exit.
+    container_owner_pids: BTreeSet<usize>,
 }
 
 impl ProcessManager {
@@ -166,6 +172,9 @@ impl ProcessManager {
             vfs_file_cache: BTreeMap::new(),
             pending_vfs_views: Vec::new(),
             manager_vfs_view_registered: false,
+            container_id_next: 1,
+            pid_to_container_id: BTreeMap::new(),
+            container_owner_pids: BTreeSet::new(),
         })
     }
 
@@ -182,6 +191,44 @@ impl ProcessManager {
         seq
     }
 
+    fn next_container_id(&mut self) -> u64 {
+        let id = self.container_id_next;
+        debug_assert!(id > 0, "container_id counter wrapped to 0");
+        self.container_id_next = self.container_id_next.wrapping_add(1);
+        id
+    }
+
+    /// Create per-container directories via VFS before registering the container view.
+    /// /var and /var/containers are pre-created on the ext2 image at build time.
+    /// Returns true on success, false on failure (caller should degrade gracefully).
+    fn create_container_dirs(&mut self, container_id: u64) -> bool {
+        if self.vfs_endpoint == 0 {
+            if self.ensure_vfs_endpoint().is_err() {
+                return false;
+            }
+        }
+        let client = VfsClient::new(self.vfs_endpoint, 0);
+        let base = format!("/var/containers/c-{}", container_id);
+        for dir in [
+            base.as_str(),
+            &format!("{}/data", base),
+            &format!("{}/tmp", base),
+            &format!("{}/log", base),
+        ] {
+            match client.mkdir(dir, 0o755) {
+                Ok(()) | Err(Error::AlreadyExists) => {}
+                Err(err) => {
+                    let _ = debug_print(&format!(
+                        "procmgr: container mkdir failed dir='{}' err={:?}",
+                        dir, err
+                    ));
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn log_spawn_stage(&self, seq: usize, stage: &str, start_ts: u64) {
         let now = self.clock_sample();
         let delta = now.saturating_sub(start_ts);
@@ -196,6 +243,7 @@ impl ProcessManager {
         client_tid: usize,
         mounts: ViewMountList,
         profile: CapProfile,
+        container_id: u64,
     ) {
         if let Some(pending) = self
             .pending_vfs_views
@@ -204,12 +252,14 @@ impl ProcessManager {
         {
             pending.mounts = mounts;
             pending.profile = profile;
+            pending.container_id = container_id;
             return;
         }
         self.pending_vfs_views.push(PendingVfsView {
             client_tid,
             mounts,
             profile,
+            container_id,
         });
     }
 
@@ -223,6 +273,7 @@ impl ProcessManager {
             0,
             &manager_mounts,
             CapProfile::SUPERVISOR,
+            0,
         ) {
             Ok(()) => {
                 self.manager_vfs_view_registered = true;
@@ -247,12 +298,13 @@ impl ProcessManager {
                 entry.client_tid,
                 &entry.mounts,
                 entry.profile,
+                entry.container_id,
             ) {
                 let _ = debug_print(&format!(
                     "procmgr: deferred VFS_SET_VIEW failed tid={} err={:?}",
                     entry.client_tid, err
                 ));
-                self.queue_pending_vfs_view(entry.client_tid, entry.mounts, entry.profile);
+                self.queue_pending_vfs_view(entry.client_tid, entry.mounts, entry.profile, entry.container_id);
             }
         }
     }
@@ -272,6 +324,7 @@ impl ProcessManager {
         thread_token: usize,
         mounts: &[(&'static str, &'static str, bool)],
         profile: CapProfile,
+        container_id: u64,
     ) {
         let thread_tid = match thread_get_id(thread_token) {
             Ok(tid) => tid,
@@ -286,16 +339,16 @@ impl ProcessManager {
 
         let mounts_vec = mounts.to_vec();
         if self.vfs_endpoint == 0 {
-            self.queue_pending_vfs_view(thread_tid, mounts_vec, profile);
+            self.queue_pending_vfs_view(thread_tid, mounts_vec, profile, container_id);
             let _ = self.ensure_vfs_endpoint();
             return;
         }
-        if let Err(err) = send_vfs_set_view(self.vfs_endpoint, thread_tid, mounts, profile) {
+        if let Err(err) = send_vfs_set_view(self.vfs_endpoint, thread_tid, mounts, profile, container_id) {
             let _ = debug_print(&format!(
                 "procmgr: VFS_SET_VIEW failed tid={} err={:?}",
                 thread_tid, err
             ));
-            self.queue_pending_vfs_view(thread_tid, mounts_vec, profile);
+            self.queue_pending_vfs_view(thread_tid, mounts_vec, profile, container_id);
         }
     }
 
@@ -304,7 +357,7 @@ impl ProcessManager {
             return;
         }
         if self.vfs_endpoint == 0 {
-            self.queue_pending_vfs_view(client_tid, Vec::new(), CapProfile::empty());
+            self.queue_pending_vfs_view(client_tid, Vec::new(), CapProfile::empty(), 0);
             let _ = self.ensure_vfs_endpoint();
             if self.vfs_endpoint == 0 {
                 return;
@@ -316,12 +369,13 @@ impl ProcessManager {
             client_tid,
             &empty_mounts,
             CapProfile::empty(),
+            0,
         ) {
             let _ = debug_print(&format!(
                 "procmgr: clear VFS_SET_VIEW failed tid={} err={:?}",
                 client_tid, err
             ));
-            self.queue_pending_vfs_view(client_tid, Vec::new(), CapProfile::empty());
+            self.queue_pending_vfs_view(client_tid, Vec::new(), CapProfile::empty(), 0);
         }
     }
 
@@ -423,8 +477,11 @@ impl ProcessManager {
         };
 
         // Clean up PID tracking
+        let mut container_id: u64 = 0;
         if let Some(pid) = self.cookie_to_pid.remove(&cookie) {
             let child_tid = self.pid_to_tid.get(&pid).copied().unwrap_or(0);
+            // Extract container_id before clearing state for cleanup IPC.
+            container_id = self.pid_to_container_id.remove(&pid).unwrap_or(0);
             self.clear_vfs_view_for_tid(child_tid);
             self.pid_to_cookie.remove(&pid);
             self.clear_pid_runtime_state(pid);
@@ -455,6 +512,12 @@ impl ProcessManager {
             for tok in tokens {
                 let _ = token_revoke(tok);
             }
+        }
+        // Clean up container dir only when no other process shares this container.
+        if container_id > 0
+            && !self.pid_to_container_id.values().any(|&cid| cid == container_id)
+        {
+            let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
         }
         Ok(())
     }
@@ -554,9 +617,21 @@ impl ProcessManager {
             spawn_start,
             CapProfile::USER,
         ) {
+            let mut container_id = self.next_container_id();
+            if !self.create_container_dirs(container_id) {
+                let _ = debug_print(&format!(
+                    "procmgr: WARNING create_container_dirs failed c-{}, proceeding without private storage",
+                    container_id
+                ));
+                container_id = 0;
+            }
+            self.pid_to_container_id.insert(pid, container_id);
+            if container_id > 0 {
+                self.container_owner_pids.insert(pid);
+            }
             // Register VFS view for the shell based on USER profile.
             let view_mounts = default_view_for_profile(CapProfile::USER);
-            self.register_vfs_view_for_thread(thread_token, &view_mounts, CapProfile::USER);
+            self.register_vfs_view_for_thread(thread_token, &view_mounts, CapProfile::USER, container_id);
             self.pid_to_view.insert(pid, view_mounts);
         }
 
@@ -782,8 +857,9 @@ impl ProcessManager {
         )?;
 
         // Register VFS view for the service based on its profile.
+        // System services (pid=0) don't get private storage — container_id=0.
         let view_mounts = default_view_for_profile(requested_profile);
-        self.register_vfs_view_for_thread(thread_token, &view_mounts, requested_profile);
+        self.register_vfs_view_for_thread(thread_token, &view_mounts, requested_profile, 0);
 
         let _ = debug_print(&format!("procmgr: service '{}' spawned", path));
         Ok(())
@@ -840,11 +916,11 @@ impl ProcessManager {
         }
 
         // ── Policy: authenticated caller resolution + profile/view inheritance ──
-        let (caller_profile, child_view_mounts) = if sender_tid == 0 {
+        let (caller_profile, child_view_mounts, caller_pid) = if sender_tid == 0 {
             // Boot/legacy sender path: caller identity is unavailable, so use
             // profile defaults for compatibility.
             let profile = CapProfile::USER;
-            (profile, default_view_for_profile(profile))
+            (profile, default_view_for_profile(profile), 0usize)
         } else {
             let caller_pid = match self.tid_to_pid.get(&sender_tid).copied() {
                 Some(pid) => pid,
@@ -892,7 +968,7 @@ impl ProcessManager {
                 let _ = self.send_spawn_reply(reply_token, &reply_msg);
                 return Ok(());
             }
-            (caller_profile, inherited_view)
+            (caller_profile, inherited_view, caller_pid)
         };
         if !caller_profile.contains(CapProfile::SPAWN) {
             reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
@@ -963,7 +1039,10 @@ impl ProcessManager {
                 reply_msg.words[1] = pid; // Return PID instead of thread_token
                 reply_msg.words[2] = cookie; // Return cookie for _wait()
                 reply_msg.words[3] = child_stdin_send; // Parent send-cap for foreground routing.
-                self.register_vfs_view_for_thread(thread_token, &child_view_mounts, child_profile);
+                // Inherit parent's container — dirs already exist from parent's spawn.
+                let container_id = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
+                self.pid_to_container_id.insert(pid, container_id);
+                self.register_vfs_view_for_thread(thread_token, &child_view_mounts, child_profile, container_id);
                 self.pid_to_view.insert(pid, child_view_mounts.clone());
                 if sender_tid != 0 {
                     let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
@@ -1045,6 +1124,7 @@ impl ProcessManager {
     fn clear_pid_runtime_state(&mut self, pid: usize) {
         self.pid_to_profile.remove(&pid);
         self.pid_to_view.remove(&pid);
+        self.container_owner_pids.remove(&pid);
         if let Some(thread_tid) = self.pid_to_tid.remove(&pid) {
             self.tid_to_pid.remove(&thread_tid);
         }
@@ -1768,6 +1848,8 @@ impl ProcessManager {
             Ok(()) => {
                 if signal == SIGINT || signal == SIGTERM || signal == SIGKILL {
                     let child_tid = self.pid_to_tid.get(&target_pid).copied().unwrap_or(0);
+                    // Extract container_id before clearing state for cleanup IPC.
+                    let container_id = self.pid_to_container_id.remove(&target_pid).unwrap_or(0);
                     self.clear_vfs_view_for_tid(child_tid);
                     self.exit_table.remove(&cookie);
                     self.pid_to_cookie.remove(&target_pid);
@@ -1791,6 +1873,12 @@ impl ProcessManager {
                         for tok in tokens {
                             let _ = token_revoke(tok);
                         }
+                    }
+                    // Container cleanup only when no other process shares this container.
+                    if container_id > 0
+                        && !self.pid_to_container_id.values().any(|&cid| cid == container_id)
+                    {
+                        let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
                     }
                 }
 
@@ -2099,6 +2187,7 @@ fn send_vfs_set_view(
     client_tid: usize,
     mounts: &[(&str, &str, bool)],
     profile: CapProfile,
+    container_id: u64,
 ) -> Result<()> {
     if vfs_endpoint == 0 {
         return Ok(());
@@ -2116,12 +2205,28 @@ fn send_vfs_set_view(
         payload.extend_from_slice(dst_bytes);
     }
 
-    let mut msg = Message::new(ipc::VFS_SET_VIEW_LABEL, [0; 6], 4);
+    let mut msg = Message::new(ipc::VFS_SET_VIEW_LABEL, [0; 6], 5);
     msg.words[0] = payload.len();
     msg.words[1] = client_tid;
     msg.words[2] = mounts.len();
     msg.words[3] = profile.bits() as usize;
+    // container_id is u64; usize is 64-bit on x86_64 so the cast is lossless.
+    msg.words[4] = container_id as usize;
     ipc::send_msg_with_payload(vfs_endpoint, &msg, &payload)
+}
+
+/// Send a VFS_CONTAINER_CLEANUP message to VFS for container storage cleanup.
+///
+/// `mode` 0 = exit (delete tmp/ contents only), 1 = destroy (delete entire container tree).
+fn send_vfs_container_cleanup(vfs_endpoint: usize, container_id: u64, mode: usize) -> Result<()> {
+    if vfs_endpoint == 0 || container_id == 0 {
+        return Ok(());
+    }
+    let mut msg = Message::new(ipc::VFS_CONTAINER_CLEANUP_LABEL, [0; 6], 3);
+    msg.words[0] = 0; // no payload
+    msg.words[1] = container_id as usize;
+    msg.words[2] = mode;
+    send(vfs_endpoint, &msg, IpcFlags::empty())
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {

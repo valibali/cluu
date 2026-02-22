@@ -71,9 +71,9 @@ const S_IFCHR: usize = 0o020000;
 const MODE_DIR: usize = S_IFDIR | 0o755;
 const O_WRONLY: usize = 1;
 const O_RDWR: usize = 2;
-const O_CREAT: usize = 0o100;
-const O_EXCL: usize = 0o200;
-const O_TRUNC: usize = 0o1000;
+const O_CREAT: usize = 0o1000; // newlib _FCREAT = 0x0200
+const O_EXCL: usize = 0o4000; // newlib _FEXCL = 0x0800
+const O_TRUNC: usize = 0o2000; // newlib _FTRUNC = 0x0400
 
 macro_rules! vfs_trace {
     ($($arg:tt)*) => {
@@ -469,6 +469,7 @@ struct VfsServer {
     views: view::VfsViewTable,
     // Bound once from the first privileged procmgr self-view bootstrap message.
     view_manager_tid: Option<usize>,
+    client_containers: BTreeMap<usize, u64>,
 }
 
 impl VfsServer {
@@ -508,6 +509,7 @@ impl VfsServer {
             clock_token,
             views: view::VfsViewTable::new(),
             view_manager_tid: None,
+            client_containers: BTreeMap::new(),
         }
     }
 
@@ -531,6 +533,9 @@ impl VfsServer {
         // Control messages handled before regular VFS ops.
         if msg.tag.label == libcluu::ipc::VFS_SET_VIEW_LABEL {
             return self.handle_set_view(msg, payload, sender_tid);
+        }
+        if msg.tag.label == libcluu::ipc::VFS_CONTAINER_CLEANUP_LABEL {
+            return self.handle_container_cleanup(msg, sender_tid);
         }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
@@ -581,6 +586,12 @@ impl VfsServer {
             0
         };
         let profile = libcluu::cap::CapProfile::from_bits_truncate(profile_bits);
+        // container_id from procmgr (0 = no container / SUPERVISOR).
+        let container_id: u64 = if msg.tag.words >= 5 {
+            msg.words[4] as u64
+        } else {
+            0
+        };
         if let Some(manager_tid) = self.view_manager_tid {
             if manager_tid != sender_tid {
                 let _ = debug_print(&format!(
@@ -611,6 +622,7 @@ impl VfsServer {
             requested_client_id
         };
         if mount_count == 0 {
+            self.client_containers.remove(&client_id);
             if profile_bits == 0 {
                 self.views.remove_view(client_id);
                 let _ = debug_print(&format!("vfs: set_view cleared client={}", client_id));
@@ -664,6 +676,35 @@ impl VfsServer {
             return Err(Error::InvalidArgument);
         }
 
+        // Container isolation: create private dirs and prepend container mounts.
+        // Container mount prepend: dirs are created by procmgr before sending set_view.
+        if container_id > 0 {
+            self.client_containers.insert(client_id, container_id);
+            let cdir = format!("/var/containers/c-{}", container_id);
+            let container_mounts = alloc::vec![
+                view::ViewMount {
+                    src: format!("{}/data", cdir),
+                    dst: alloc::string::String::from("/data"),
+                    writable: true,
+                },
+                view::ViewMount {
+                    src: format!("{}/tmp", cdir),
+                    dst: alloc::string::String::from("/tmp"),
+                    writable: true,
+                },
+                // TODO: Phase E — enforce append-only on /log mounts
+                view::ViewMount {
+                    src: format!("{}/log", cdir),
+                    dst: alloc::string::String::from("/log"),
+                    writable: true,
+                },
+            ];
+            // Prepend: container mounts go first (first-match-wins)
+            let mut all_mounts = container_mounts;
+            all_mounts.extend(mounts);
+            mounts = all_mounts;
+        }
+
         let _ = debug_print(&format!(
             "vfs: set_view client={} mounts={}",
             client_id,
@@ -675,6 +716,101 @@ impl VfsServer {
             self.views.set_profile(client_id, profile);
         }
         Ok(())
+    }
+
+    /// Handle VFS_CONTAINER_CLEANUP_LABEL: clean up container storage on exit or destroy.
+    fn handle_container_cleanup(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
+        // Only the view manager (procmgr) can trigger cleanup.
+        if let Some(manager_tid) = self.view_manager_tid {
+            if manager_tid != sender_tid {
+                let _ = debug_print("vfs: container_cleanup denied: not view manager");
+                return Err(Error::PermissionDenied);
+            }
+        } else {
+            let _ = debug_print("vfs: container_cleanup denied: no view manager bound");
+            return Err(Error::PermissionDenied);
+        }
+
+        let container_id = msg.words[1] as u64;
+        let mode = msg.words[2];
+
+        if container_id == 0 {
+            return Ok(());
+        }
+
+        let base = format!("/var/containers/c-{}", container_id);
+
+        match mode {
+            0 => {
+                // EXIT: delete contents of tmp/ only
+                self.recursive_delete(&format!("{}/tmp", base));
+                let _ = debug_print(&format!(
+                    "vfs: container cleanup exit c-{}",
+                    container_id
+                ));
+            }
+            1 => {
+                // DESTROY: delete the entire container directory tree
+                self.recursive_delete(&format!("{}/data", base));
+                self.recursive_delete(&format!("{}/tmp", base));
+                self.recursive_delete(&format!("{}/log", base));
+                let _ = self.mounts.rmdir(&format!("{}/data", base));
+                let _ = self.mounts.rmdir(&format!("{}/tmp", base));
+                let _ = self.mounts.rmdir(&format!("{}/log", base));
+                let _ = self.mounts.rmdir(&base);
+                let _ = debug_print(&format!(
+                    "vfs: container cleanup destroy c-{}",
+                    container_id
+                ));
+            }
+            _ => {
+                let _ = debug_print(&format!(
+                    "vfs: container_cleanup unknown mode={}",
+                    mode
+                ));
+            }
+        }
+
+        // Clear client_containers entries for this container_id
+        self.client_containers
+            .retain(|_, &mut cid| cid != container_id);
+
+        Ok(())
+    }
+
+    /// Recursively delete all contents of a directory (files and subdirs).
+    /// The directory itself is NOT removed — only its contents.
+    /// Operates on real backing paths (no view translation).
+    /// Silently ignores errors (best-effort cleanup).
+    fn recursive_delete(&mut self, dir_path: &str) {
+        // Defense-in-depth: only allow deletion under container storage prefix.
+        if !dir_path.starts_with("/var/containers/c-") {
+            let _ = debug_print(&format!(
+                "vfs: recursive_delete blocked non-container path: {}",
+                dir_path
+            ));
+            return;
+        }
+        let entries = match self.mounts.readdir(dir_path) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+
+        for entry in entries {
+            if entry.name == "." || entry.name == ".." {
+                continue;
+            }
+            let child_path = format!("{}/{}", dir_path, entry.name);
+            if entry.is_dir {
+                self.recursive_delete(&child_path);
+                let _ = self.mounts.rmdir(&child_path);
+            } else {
+                let _ = self.mounts.unlink(&child_path);
+            }
+        }
+
+        // Invalidate the file cache after deletions
+        self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
     }
 
     /// Check a path against the client's VFS view, rewriting if needed.

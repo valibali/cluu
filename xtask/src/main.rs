@@ -2488,10 +2488,12 @@ fn create_user_block_image(profile: &str) -> Result<()> {
     let bin_dir = staging_dir.join("bin");
     let tmp_dir = staging_dir.join("tmp");
     let home_root_dir = staging_dir.join("home/root");
+    let var_containers_dir = staging_dir.join("var/containers");
     let _ = fs::remove_dir_all(&bin_dir);
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&tmp_dir)?;
     fs::create_dir_all(&home_root_dir)?;
+    fs::create_dir_all(&var_containers_dir)?;
 
     let bin_programs = ["shell"];
     for prog in &bin_programs {
@@ -2526,6 +2528,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         "pthreadprobe",
         "devprobe",
         "fbprobe",
+        "containerprobe",
     ];
     for prog in &c_programs {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
@@ -3263,6 +3266,7 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("pthreadprobe", "userspace/c-programs/pthreadprobe.c"),
         ("devprobe", "userspace/c-programs/devprobe.c"),
         ("fbprobe", "userspace/c-programs/fbprobe.c"),
+        ("containerprobe", "userspace/c-programs/containerprobe.c"),
     ];
 
     for (name, source) in c_programs {

@@ -85,6 +85,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             TEST_COMMAND="ext2ownerdeny"
             SHELL_AUTOSTART_CMD_DEFAULT="ext2ownerdeny"
             ;;
+        d7_container_storage)
+            TEST_COMMAND="spawn containerprobe"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn containerprobe"
+            ;;
         l2_sigint)
             TEST_COMMAND="spawn sleepy"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn sleepy"
@@ -895,6 +899,13 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "ownerprobe: PASS permission denied"
             "ext2ownerdeny: PASS non-owner denied + owner cleanup"
+        )
+        ;;
+    d7_container_storage)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "containerprobe: PASS"
         )
         ;;
     l2_sigint)

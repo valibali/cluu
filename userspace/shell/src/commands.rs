@@ -1879,7 +1879,7 @@ impl BuiltinCommand for Ext2UnlinkBuiltin {
             }
         }
 
-        let created = match vfs.open_with(path, 0o100 | 2, 0o644) {
+        let created = match vfs.open_with(path, 0o1000 | 2, 0o644) {
             Ok(file) => file,
             Err(err) => {
                 let line = format!("ext2unlink: FAIL create/open {:?}\n", err);
@@ -1947,7 +1947,7 @@ impl BuiltinCommand for Ext2OwnerDenyBuiltin {
             }
         };
 
-        let created = match vfs.open_with(path, 0o100 | 2, 0o644) {
+        let created = match vfs.open_with(path, 0o1000 | 2, 0o644) {
             Ok(file) => file,
             Err(err) => {
                 let line = format!("ext2ownerdeny: FAIL create/open {:?}\n", err);

@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-20
 **Scope:** Capability profiles, VFS views, container model, spawn protocol
-**Status:** Design — Phase A in progress
+**Status:** Implementation in progress — Phases A/B complete; Phase C baseline implemented
 **Depends on:** IPC registry (docs/IPC_REGISTRY.md), kernel token system (rights.rs)
 
 ---
@@ -881,22 +881,26 @@ path. No VFS changes yet — profiles only gate token rights at spawn time.
 | B9 | Assign profiles to init-spawned services           | done      |
 | B10 | Build + harness verification (all 4 pass)         | done      |
 
-### Phase C: VFS Views
+### Phase C: VFS Views — COMPLETE
 
 Add per-client path filtering to VFS. Processes receive a scoped view at
 spawn time, and VFS enforces it on every file operation.
 
 | #  | Task                                              | Status    |
 |----|---------------------------------------------------|-----------|
-| C1 | Define VfsView + ViewMount structs in vfs/src/view.rs | pending |
-| C2 | Add per-client view storage (BTreeMap) in VFS     | pending   |
-| C3 | Add VFS_SET_VIEW_LABEL IPC handler                | pending   |
-| C4 | Path rewriting in VFS open/read/write/stat/readdir | pending  |
-| C5 | Default view generation from CapProfile            | pending   |
-| C6 | Procmgr: send VFS_SET_VIEW after spawn            | pending   |
-| C7 | View narrowing validation in procmgr              | pending   |
-| C8 | Inherit parent view when child specifies none     | pending   |
-| C9 | Build + test: USER process cannot see /dev         | pending   |
+| C1 | Define VfsView + ViewMount structs in vfs/src/view.rs | done    |
+| C2 | Add per-client view storage (BTreeMap) in VFS     | done      |
+| C3 | Add VFS_SET_VIEW_LABEL IPC handler                | done      |
+| C4 | Path rewriting in VFS open/read/write/stat/readdir | done     |
+| C5 | Default view generation from CapProfile            | done      |
+| C6 | Procmgr: send VFS_SET_VIEW after spawn            | done      |
+| C7 | View narrowing validation in procmgr              | done      |
+| C8 | Inherit parent view when child specifies none     | done      |
+| C9 | Build + test: USER process cannot see /dev         | done      |
+
+Latest verification snapshot (2026-02-22):
+- `cargo xtask clean-full && cargo xtask build` passed.
+- Harness regressions passed for `m4_deny_paths`, `m4_registry_deny_paths`, and `l2_owner_deny`.
 
 ### Phase D: Private Storage
 
@@ -904,12 +908,12 @@ Per-container isolated storage areas, managed by VFS.
 
 | #  | Task                                              | Status    |
 |----|---------------------------------------------------|-----------|
-| D1 | Container ID generation in procmgr (monotonic)    | pending   |
-| D2 | VFS: create `/var/containers/<id>/` on spawn      | pending   |
-| D3 | VFS: auto-add private storage mounts to view      | pending   |
-| D4 | VFS: clean tmp/ on container exit                 | pending   |
-| D5 | VFS: delete all of `<id>/` on destroy             | pending   |
-| D6 | Procmgr: track container_id in process bookkeeping | pending  |
+| D1 | Container ID generation in procmgr (monotonic)    | done      |
+| D2 | VFS: create `/var/containers/<id>/` on spawn      | done      |
+| D3 | VFS: auto-add private storage mounts to view      | done      |
+| D4 | VFS: clean tmp/ on container exit                 | done      |
+| D5 | VFS: delete all of `<id>/` on destroy             | done      |
+| D6 | Procmgr: track container_id in process bookkeeping | done     |
 | D7 | Build + test: two processes have isolated /data    | pending   |
 
 ### Phase E: Container Images

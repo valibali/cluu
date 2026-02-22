@@ -65,6 +65,11 @@ pub const PROCMGR_SPAWN_SERVICE_LABEL: u32 = 20;
 /// Payload: for each mount: u16 src_len LE + u16 dst_len LE + u8 flags (bit 0 = writable) + src_bytes + dst_bytes.
 pub const VFS_SET_VIEW_LABEL: u32 = 21;
 
+/// Procmgr → VFS: clean up container storage on process exit or destroy.
+/// words[1] = container_id (u64 as usize),
+/// words[2] = mode (0 = exit: delete tmp/ contents; 1 = destroy: delete entire c-{id}/ tree).
+pub const VFS_CONTAINER_CLEANUP_LABEL: u32 = 22;
+
 pub const TTY_FG_FLAG_FORWARD_CTRL_C: usize = 1 << 0;
 pub const TTY_FG_FLAG_NOTIFY_CTRL_C: usize = 1 << 1;
 pub const TTY_CTL_SYNC: u32 = 1;
@@ -473,15 +478,25 @@ pub fn call_with_payload(
         let mut buffer = [0u8; IPC_INLINE_STACK_MAX];
         buffer[..header.len()].copy_from_slice(header);
         buffer[header.len()..total_len].copy_from_slice(payload);
-        let _ = syscall::ipc_call(endpoint_token, &buffer[..total_len], reply_bytes)?;
-        return Ok(());
+        loop {
+            match syscall::ipc_call(endpoint_token, &buffer[..total_len], reply_bytes) {
+                Ok(_) => return Ok(()),
+                Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     let mut buffer = Vec::with_capacity(total_len);
     buffer.extend_from_slice(header);
     buffer.extend_from_slice(payload);
-    let _ = syscall::ipc_call(endpoint_token, &buffer, reply_bytes)?;
-    Ok(())
+    loop {
+        match syscall::ipc_call(endpoint_token, &buffer, reply_bytes) {
+            Ok(_) => return Ok(()),
+            Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Receive a message
@@ -505,8 +520,13 @@ pub fn call(endpoint_token: usize, msg: &mut Message, _flags: IpcFlags) -> Resul
     let msg_copy = msg.clone();
     let send_bytes = msg_copy.as_bytes();
     let reply_bytes = msg.as_bytes_mut();
-    let _bytes_received = syscall::ipc_call(endpoint_token, send_bytes, reply_bytes)?;
-    Ok(())
+    loop {
+        match syscall::ipc_call(endpoint_token, send_bytes, reply_bytes) {
+            Ok(_) => return Ok(()),
+            Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Extract reply ID from a received call message
