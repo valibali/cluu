@@ -374,6 +374,7 @@ pub enum InvokeOp {
     ThreadSetPriority = 4,
     ThreadSetFaultEndpoint = 5,
     ThreadSetFSBase = 6,
+    ThreadGetId = 7,
 
     // Space operations
     SpaceCreate = 10,
@@ -433,6 +434,7 @@ impl InvokeOp {
             4 => Some(Self::ThreadSetPriority),
             5 => Some(Self::ThreadSetFaultEndpoint),
             6 => Some(Self::ThreadSetFSBase),
+            7 => Some(Self::ThreadGetId),
             10 => Some(Self::SpaceCreate),
             11 => Some(Self::SpaceDestroy),
             12 => Some(Self::SpaceMap),
@@ -500,6 +502,7 @@ mod tests {
         assert_eq!(InvokeOp::from_usize(12), Some(InvokeOp::SpaceMap));
         assert_eq!(InvokeOp::from_usize(17), Some(InvokeOp::FutexWait));
         assert_eq!(InvokeOp::from_usize(18), Some(InvokeOp::FutexWake));
+        assert_eq!(InvokeOp::from_usize(7), Some(InvokeOp::ThreadGetId));
         assert_eq!(InvokeOp::from_usize(999), None);
     }
 }

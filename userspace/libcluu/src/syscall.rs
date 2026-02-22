@@ -56,6 +56,7 @@ pub enum InvokeOp {
     ThreadResume = 3,
     ThreadSetPriority = 4,
     ThreadSetFSBase = 6,
+    ThreadGetId = 7,
 
     // Space operations
     SpaceCreate = 10,
@@ -986,6 +987,11 @@ pub fn thread_set_fs_base(thread_token: usize, fs_base: usize) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the kernel thread id carried by a thread token.
+pub fn thread_get_id(thread_token: usize) -> Result<usize> {
+    unsafe { invoke(thread_token, InvokeOp::ThreadGetId, 0, 0, 0, 0) }
+}
+
 /// Create a new IPC endpoint.
 #[inline]
 pub fn endpoint_create(root_token: usize) -> Result<usize> {
@@ -1288,6 +1294,7 @@ mod tests {
     #[test]
     fn test_invoke_ops() {
         assert_eq!(InvokeOp::ThreadCreate as usize, 0);
+        assert_eq!(InvokeOp::ThreadGetId as usize, 7);
         assert_eq!(InvokeOp::SpaceMap as usize, 12);
         assert_eq!(InvokeOp::FutexWait as usize, 17);
         assert_eq!(InvokeOp::FutexWake as usize, 18);

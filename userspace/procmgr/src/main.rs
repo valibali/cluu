@@ -3,11 +3,12 @@
 
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use core::mem::size_of;
 use libcluu::boot::{
     process_info,
     ProcessInfo,
+    PARAM_CAP_PROFILE,
     PARAM_INITRD_SIZE,
     PROCESS_INFO_ADDR,
     // New token slot constants
@@ -23,16 +24,22 @@ use libcluu::boot::{
     TOKEN_STDLOG,
     TOKEN_STDOUT,
 };
+use libcluu::cap::CapProfile;
 use libcluu::elf::ElfFile;
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_id;
 use libcluu::ipc::SharedRing;
+use libcluu::ipc::PROCMGR_QUERY_CTTY_LABEL;
+use libcluu::ipc::PROCMGR_SPAWN_SERVICE_LABEL;
 use libcluu::registry;
 use libcluu::syscall::{
-    space_destroy, thread_destroy, thread_resume, thread_suspend, token_revoke,
+    space_destroy, thread_destroy, thread_get_id, thread_resume, thread_suspend, token_revoke,
 };
 use libcluu::tar::find_member;
 use libcluu::*;
+
+/// A list of (src, dst, writable) mount tuples representing a process's VFS view.
+type ViewMountList = Vec<(&'static str, &'static str, bool)>;
 
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
 const SERVICE_STACK_BASE: usize = 0x6d000000;
@@ -72,6 +79,12 @@ fn main_result() -> Result<()> {
     manager.run()
 }
 
+/// Maximum number of virtual terminals supported.
+const VT_COUNT: usize = 4;
+
+// INITRD_USER_BASE is used for loading ELF binaries from initrd
+const INITRD_USER_BASE: usize = libcluu::boot::INITRD_USER_BASE;
+
 struct ProcessManager {
     token: usize,
     exit_endpoint: usize,
@@ -88,10 +101,15 @@ struct ProcessManager {
     pid_to_cookie: BTreeMap<usize, usize>, // pid -> cookie (for PROC_KILL)
     cookie_to_pid: BTreeMap<usize, usize>, // cookie -> pid (for exit handling)
     pid_owner_tid: BTreeMap<usize, usize>, // pid -> authenticated owner thread id
+    pid_ctty: BTreeMap<usize, u8>,       // pid -> controlling terminal VT index
+    pid_to_profile: BTreeMap<usize, CapProfile>, // pid -> capability profile
+    pid_to_view: BTreeMap<usize, ViewMountList>, // pid -> VFS view mounts
     cookie_to_space: BTreeMap<usize, usize>, // cookie -> space_token (for space_destroy on exit/kill)
     cookie_to_tokens: BTreeMap<usize, Vec<usize>>, // cookie -> derived tokens/endpoints to revoke on exit
-    tty_main: usize,
-    requested_tty: bool,
+    /// Per-VT tty "main" endpoints.  Index 0 is the boot VT.
+    tty_endpoints: [usize; VT_COUNT],
+    /// Bitmask: bit N set means subscription for tty:N was requested.
+    requested_tty_mask: u8,
     vfs_endpoint: usize,    // VFS service endpoint
     space_token: usize,     // Our address space token for grants
     grant_base_next: usize, // Reused base address for grant buffer
@@ -121,10 +139,13 @@ impl ProcessManager {
             pid_to_cookie: BTreeMap::new(),
             cookie_to_pid: BTreeMap::new(),
             pid_owner_tid: BTreeMap::new(),
+            pid_ctty: BTreeMap::new(),
+            pid_to_profile: BTreeMap::new(),
+            pid_to_view: BTreeMap::new(),
             cookie_to_space: BTreeMap::new(),
             cookie_to_tokens: BTreeMap::new(),
-            tty_main: 0,
-            requested_tty: false,
+            tty_endpoints: [0; VT_COUNT],
+            requested_tty_mask: 0,
             vfs_endpoint: 0,
             space_token: info.tokens[TOKEN_SPACE],
             grant_base_next: 0x50100000, // Start after virtqueue region
@@ -156,20 +177,40 @@ impl ProcessManager {
         ));
     }
 
+    fn register_vfs_view_for_thread(&self, thread_token: usize, mounts: &[(&str, &str, bool)]) {
+        let thread_tid = match thread_get_id(thread_token) {
+            Ok(tid) => tid,
+            Err(err) => {
+                let _ = debug_print(&format!(
+                    "procmgr: thread_get_id failed token={} err={:?}",
+                    thread_token, err
+                ));
+                return;
+            }
+        };
+
+        if let Err(err) = send_vfs_set_view(self.vfs_endpoint, thread_tid, mounts) {
+            let _ = debug_print(&format!(
+                "procmgr: VFS_SET_VIEW failed tid={} err={:?}",
+                thread_tid, err
+            ));
+        }
+    }
+
     fn init(&mut self) -> Result<()> {
         registry::init("procmgr")?;
         registry::register_default_outputs()?;
         self.spawn_endpoint = endpoint_create(self.token)?;
         registry::register_output("spawn", self.spawn_endpoint)?;
 
-        // Wait for tty:main to be available before spawning any processes
-        // This ensures children get proper stdout with IPC_CALL rights
-        while self.tty_main == 0 {
+        // Wait for tty:0 main to be available before spawning any processes.
+        // This ensures children get proper stdout with IPC_CALL rights.
+        while self.tty_endpoints[0] == 0 {
             match registry::subscribe_output("tty:0", "main") {
                 Ok(token) => {
-                    self.tty_main = token;
-                    let _ = debug_print(&format!("procmgr: tty main granted {}", token));
-                    self.requested_tty = true;
+                    self.tty_endpoints[0] = token;
+                    self.requested_tty_mask |= 1;
+                    let _ = debug_print(&format!("procmgr: tty:0 main granted {}", token));
                 }
                 Err(_) => {
                     let _ = yield_cpu();
@@ -182,24 +223,11 @@ impl ProcessManager {
         debug_print("=========================================")?;
         debug_print("Derived procmgr token handle")?;
         debug_print(&format!("  Handle: {}", self.token))?;
-        debug_print(&format!(
-            "procmgr: shell startup command '{}'",
-            SHELL_AUTOSTART_CMD
-        ))?;
 
-        let spawn_seq = self.next_spawn_seq();
-        let spawn_start = self.clock_sample();
-        let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
-        let _ = self.spawn_service(
-            SERVICE_PATH,
-            DEFAULT_PRIORITY,
-            &shell_argv_payload,
-            shell_argc,
-            0, // system-managed bootstrap spawn
-            spawn_seq,
-            spawn_start,
-        )?;
-        debug_print("Service spawned; yielding to scheduler")?;
+        // Shell spawning is now initiated by each tty instance via
+        // TTY_SPAWN_SHELL_LABEL.  procmgr no longer auto-spawns a shell
+        // here — tty:0 will request one once it has its console wired up.
+        debug_print("procmgr: ready (shell spawn deferred to tty)")?;
         yield_cpu()?;
         Ok(())
     }
@@ -210,10 +238,6 @@ impl ProcessManager {
             self.exit_endpoint, self.spawn_endpoint
         ));
         loop {
-            if self.tty_main == 0 && !self.requested_tty {
-                let _ = registry::request_subscription("tty:0", "main");
-                self.requested_tty = true;
-            }
             self.poll_exit_notifications()?;
         }
     }
@@ -273,6 +297,7 @@ impl ProcessManager {
         // Clean up PID tracking
         if let Some(pid) = self.cookie_to_pid.remove(&cookie) {
             self.pid_to_cookie.remove(&pid);
+            self.pid_to_profile.remove(&pid);
             if let Some(owner_tid) = self.pid_owner_tid.remove(&pid) {
                 self.on_child_reaped(owner_tid);
             }
@@ -308,12 +333,23 @@ impl ProcessManager {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             if let registry::RegistryEvent::Grant { name, token } = event {
                 if name == "main" {
-                    self.tty_main = token;
-                    let _ = debug_print(&format!("procmgr: tty main granted {}", token));
+                    // Assign to the first empty tty slot.
+                    if let Some(idx) = self.tty_endpoints.iter().position(|&ep| ep == 0) {
+                        self.tty_endpoints[idx] = token;
+                        let _ =
+                            debug_print(&format!("procmgr: tty:{} main granted {}", idx, token));
+                    }
                 }
             } else if let registry::RegistryEvent::SubscribeStatus { code } = event {
                 if code != 0 {
-                    self.requested_tty = false;
+                    // Reset all failed requested bits so we retry.
+                    self.requested_tty_mask = 0;
+                    // Re-mark already-subscribed ones.
+                    for i in 0..VT_COUNT {
+                        if self.tty_endpoints[i] != 0 {
+                            self.requested_tty_mask |= 1u8 << i;
+                        }
+                    }
                 }
             }
         }
@@ -330,7 +366,296 @@ impl ProcessManager {
         if msg.tag.label == PROCMGR_KILL_LABEL {
             return self.handle_kill_message(msg, sender_tid);
         }
+        if msg.tag.label == libcluu::ipc::TTY_SPAWN_SHELL_LABEL {
+            return self.handle_tty_shell_spawn(msg, payload);
+        }
+        if msg.tag.label == PROCMGR_QUERY_CTTY_LABEL {
+            return self.handle_ctty_query(msg, sender_tid);
+        }
+        if msg.tag.label == PROCMGR_SPAWN_SERVICE_LABEL {
+            return self.handle_service_spawn(msg, payload);
+        }
         self.handle_spawn_message(msg, payload, sender_tid)
+    }
+
+    /// Handle TTY_SPAWN_SHELL_LABEL: spawn a shell for the requesting tty instance.
+    ///
+    /// The tty passes its VT index in words[0].  Procmgr already holds the
+    /// corresponding tty endpoint from a registry grant, so we use that
+    /// (rather than a raw token handle from the message which wouldn't be
+    /// valid in our token space).
+    fn handle_tty_shell_spawn(&mut self, msg: &Message, _payload: &[u8]) -> Result<()> {
+        let vt_index = msg.words[0];
+        let tty_ep = if vt_index < VT_COUNT {
+            self.tty_endpoints[vt_index]
+        } else {
+            self.tty_endpoints[0]
+        };
+
+        if tty_ep == 0 {
+            let _ = debug_print(&format!(
+                "procmgr: tty shell spawn vt={}: no endpoint registered",
+                vt_index
+            ));
+            return Ok(());
+        }
+
+        let _ = debug_print(&format!(
+            "procmgr: tty shell spawn vt={} ep={}",
+            vt_index, tty_ep
+        ));
+
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
+        let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
+
+        // For multi-VT: temporarily set tty_endpoints[0] to the target VT
+        // so spawn_service wires stdout to the correct tty.
+        let saved = self.tty_endpoints[0];
+        self.tty_endpoints[0] = tty_ep;
+
+        if let Ok((thread_token, ..)) = self.spawn_service(
+            SERVICE_PATH,
+            DEFAULT_PRIORITY,
+            &shell_argv_payload,
+            shell_argc,
+            0,
+            spawn_seq,
+            spawn_start,
+            CapProfile::USER,
+        ) {
+            // Register VFS view for the shell based on USER profile.
+            let view_mounts = default_view_for_profile(CapProfile::USER);
+            self.register_vfs_view_for_thread(thread_token, &view_mounts);
+        }
+
+        self.tty_endpoints[0] = saved;
+        Ok(())
+    }
+
+    /// Handle PROCMGR_QUERY_CTTY_LABEL: reply with the caller's controlling terminal index.
+    fn handle_ctty_query(&self, msg: &Message, sender_tid: usize) -> Result<()> {
+        let reply_token = match extract_reply_id(msg) {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+
+        // Look up pid by sender_tid, then look up ctty.
+        let ctty_index = self
+            .pid_owner_tid
+            .iter()
+            .find(|(_, &tid)| tid == sender_tid)
+            .and_then(|(&pid, _)| self.pid_ctty.get(&pid))
+            .copied()
+            .unwrap_or(0u8);
+
+        let reply_msg = Message::new(
+            PROCMGR_QUERY_CTTY_LABEL,
+            [ctty_index as usize, 0, 0, 0, 0, 0],
+            1,
+        );
+        let _ = libcluu::ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        Ok(())
+    }
+
+    /// Handle PROCMGR_SPAWN_SERVICE_LABEL: generic system service spawn.
+    ///
+    /// The caller specifies path, priority, token mode, and param overrides.
+    /// Procmgr validates the request, creates the process, and applies the
+    /// wiring without any service-specific knowledge.
+    ///
+    /// Policy enforcement:
+    /// - Only initrd paths (sys/*) are permitted for service spawns.
+    /// - Param indices must be within bounds (0-9).
+    /// - Token mode must be a valid enum value (0-2).
+    /// - The spawn endpoint itself is capability-gated (only holders can call).
+    fn handle_service_spawn(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+        // words[0] = payload length (used by parse_message), metadata in words[1..3]
+        let priority = msg.words[1];
+        let token_extra_mode = msg.words[2]; // 0=none, 1=listen, 2=grantable
+        let param_count = msg.words[3];
+
+        // ── Policy: read requested CapProfile from words[4] ──
+        // Default to SERVICE when 0 (backward compat: existing callers
+        // like vtmgr don't send this yet).
+        let requested_profile = {
+            let raw = msg.words[4] as u16;
+            if raw == 0 {
+                CapProfile::SERVICE
+            } else {
+                CapProfile::from_bits_truncate(raw)
+            }
+        };
+
+        // ── Policy: cap at SERVICE ceiling ──
+        // Service spawn path: holding the spawn endpoint IS the authorization.
+        // No caller lookup needed — just ensure nothing exceeds SERVICE.
+        if !CapProfile::SERVICE.can_grant(requested_profile) {
+            let _ = debug_print("procmgr: service spawn rejected: exceeds SERVICE ceiling");
+            return Ok(());
+        }
+
+        // ── Policy: validate token mode ──
+        if token_extra_mode > 2 {
+            let _ = debug_print("procmgr: service spawn rejected: invalid token mode");
+            return Ok(());
+        }
+
+        // ── Policy: validate param count bounds ──
+        if param_count > 10 {
+            let _ = debug_print("procmgr: service spawn rejected: too many params");
+            return Ok(());
+        }
+
+        // Parse path from payload.
+        let path = match parse_cstr(payload) {
+            Some(p) => p,
+            None => {
+                let _ = debug_print("procmgr: service spawn rejected: no path");
+                return Ok(());
+            }
+        };
+
+        // ── Policy: only initrd paths are permitted for service spawns ──
+        if !path.starts_with("sys/") {
+            let _ = debug_print(&format!(
+                "procmgr: service spawn rejected: path '{}' not permitted",
+                path
+            ));
+            return Ok(());
+        }
+
+        // Parse param overrides from payload (after path\0).
+        let path_nul_end = payload
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(payload.len())
+            + 1;
+        let param_data = &payload[path_nul_end..];
+        let mut params = [0u64; 10];
+        for i in 0..param_count {
+            let offset = i * 10; // 2 bytes index + 8 bytes value
+            if offset + 10 > param_data.len() {
+                let _ = debug_print("procmgr: service spawn: param data truncated");
+                break;
+            }
+            let idx = u16::from_le_bytes([param_data[offset], param_data[offset + 1]]) as usize;
+
+            // ── Policy: validate param index bounds ──
+            if idx >= 10 {
+                let _ = debug_print(&format!(
+                    "procmgr: service spawn rejected: param index {} out of range",
+                    idx
+                ));
+                return Ok(());
+            }
+            let val = u64::from_le_bytes([
+                param_data[offset + 2],
+                param_data[offset + 3],
+                param_data[offset + 4],
+                param_data[offset + 5],
+                param_data[offset + 6],
+                param_data[offset + 7],
+                param_data[offset + 8],
+                param_data[offset + 9],
+            ]);
+            params[idx] = val;
+        }
+
+        // Write profile AFTER param overrides to prevent caller spoofing.
+        params[PARAM_CAP_PROFILE] = requested_profile.bits() as u64;
+
+        let _ = debug_print(&format!(
+            "procmgr: service spawn path='{}' pri={} mode={}",
+            path, priority, token_extra_mode
+        ));
+
+        // Load and parse ELF from initrd.
+        let initrd =
+            unsafe { core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, self.initrd_size) };
+        let service_bytes = find_member(initrd, path).ok_or(Error::NotFound)?;
+        let elf = ElfFile::parse(service_bytes)?;
+
+        let space_token = space_create(self.token)?;
+        libcluu::map_segments(space_token, &elf, service_bytes)?;
+        libcluu::map_stack(
+            space_token,
+            SERVICE_STACK_TOP,
+            SERVICE_STACK_SIZE,
+            STACK_FLAGS,
+        )?;
+
+        // Build tokens (standard layout for system services).
+        let slot_rights = profile_to_rights(requested_profile);
+        let mut tokens = [0usize; 16];
+        tokens[TOKEN_STDIN] = endpoint_create(self.token)?;
+        tokens[TOKEN_STDOUT] = endpoint_create(self.token)?;
+        tokens[TOKEN_STDERR] = endpoint_create(self.token)?;
+        tokens[TOKEN_STDLOG] = endpoint_create(self.token)?;
+        tokens[TOKEN_SELF] = derive_slot(self.token, slot_rights[TOKEN_SELF])?;
+        tokens[TOKEN_SPACE] = derive_slot(space_token, slot_rights[TOKEN_SPACE])?;
+        tokens[TOKEN_IPC] = derive_slot(self.token, slot_rights[TOKEN_IPC])?;
+        tokens[TOKEN_CLOCK] = self.clock_token;
+        tokens[TOKEN_REGISTRY] = self.registry_send;
+
+        // Apply TOKEN_EXTRA_0 based on requested mode.
+        match token_extra_mode {
+            1 => {
+                // Listen-only endpoint (recv only).
+                let ep = endpoint_create(self.token)?;
+                tokens[TOKEN_EXTRA_0] =
+                    token_derive(ep, Rights::IPC_RECV.bits() as usize, u64::MAX)?;
+            }
+            2 => {
+                // Grantable endpoint (recv + send + call + grant).
+                let ep = endpoint_create(self.token)?;
+                let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT;
+                tokens[TOKEN_EXTRA_0] = token_derive(ep, rights.bits() as usize, u64::MAX)?;
+            }
+            _ => {} // No TOKEN_EXTRA_0
+        }
+
+        // Map ProcessInfo (system service: no exit tracking, no argv).
+        let info = ProcessInfo {
+            exit_token: 0,
+            exit_cookie: 0,
+            pid: 0,
+            tokens,
+            params,
+        };
+        let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
+        let info_offset = PROCESS_INFO_ADDR - page_base;
+        let info_size = size_of::<ProcessInfo>();
+        let mut page = [0u8; PAGE_SIZE];
+        let bytes = unsafe {
+            core::slice::from_raw_parts(&info as *const ProcessInfo as *const u8, info_size)
+        };
+        let end = info_offset + bytes.len();
+        if end > PAGE_SIZE {
+            return Err(Error::InvalidArgument);
+        }
+        page[info_offset..end].copy_from_slice(bytes);
+        space_map(
+            space_token,
+            page_base,
+            page.as_ptr() as usize,
+            0x01,
+            PAGE_SIZE,
+        )?;
+
+        let thread_token = thread_create(
+            space_token,
+            elf.entry_point as usize,
+            SERVICE_STACK_TOP,
+            priority,
+        )?;
+
+        // Register VFS view for the service based on its profile.
+        let view_mounts = default_view_for_profile(requested_profile);
+        self.register_vfs_view_for_thread(thread_token, &view_mounts);
+
+        let _ = debug_print(&format!("procmgr: service '{}' spawned", path));
+        Ok(())
     }
 
     fn handle_spawn_message(
@@ -383,6 +708,18 @@ impl ProcessManager {
             return Ok(());
         }
 
+        // ── Policy: caller profile for spawn validation ──
+        // Phase B: default to USER for all user-spawn callers.
+        // Future: add tid_to_pid map for real caller lookup.
+        let caller_profile = CapProfile::USER;
+        let child_profile = caller_profile; // inherit parent profile
+
+        if !caller_profile.can_grant(child_profile) {
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            let _ = self.send_spawn_reply(reply_token, &reply_msg);
+            return Ok(());
+        }
+
         let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
         let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
         let envc = if msg.tag.words >= 5 { msg.words[4] } else { 0 };
@@ -421,9 +758,9 @@ impl ProcessManager {
             &[]
         };
 
-        if self.tty_main == 0 {
+        if self.tty_endpoints[0] == 0 {
             if let Ok(token) = registry::subscribe_output("tty:0", "main") {
-                self.tty_main = token;
+                self.tty_endpoints[0] = token;
             }
         }
 
@@ -438,12 +775,18 @@ impl ProcessManager {
             spawn_seq,
             spawn_start,
             fdac_data,
+            child_profile,
         ) {
-            Ok((_thread_token, cookie, pid, child_stdin_send)) => {
+            Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = pid; // Return PID instead of thread_token
                 reply_msg.words[2] = cookie; // Return cookie for _wait()
                 reply_msg.words[3] = child_stdin_send; // Parent send-cap for foreground routing.
+                self.pid_to_profile.insert(pid, child_profile);
+                // Register VFS view for the child based on its profile.
+                let view_mounts = default_view_for_profile(child_profile);
+                self.register_vfs_view_for_thread(thread_token, &view_mounts);
+                self.pid_to_view.insert(pid, view_mounts);
                 if sender_tid != 0 {
                     let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
                     *entry = entry.saturating_add(1);
@@ -525,6 +868,7 @@ impl ProcessManager {
         owner_tid: usize,
         spawn_seq: usize,
         spawn_start: u64,
+        profile: CapProfile,
     ) -> Result<(usize, usize, usize, usize)> {
         self.spawn_service_with_env(
             path,
@@ -537,6 +881,7 @@ impl ProcessManager {
             spawn_seq,
             spawn_start,
             &[],
+            profile,
         )
     }
 
@@ -553,6 +898,7 @@ impl ProcessManager {
         spawn_seq: usize,
         spawn_start: u64,
         fdac_data: &[u8],
+        profile: CapProfile,
     ) -> Result<(usize, usize, usize, usize)> {
         // Build env data: for bootstrap (owner_tid==0) use defaults,
         // otherwise use caller-provided env (from posix_spawn)
@@ -626,9 +972,13 @@ impl ProcessManager {
             child_endpoint, cookie, pid
         ))?;
         let stdin_endpoint = endpoint_create(self.token)?;
-        let (stdout_endpoint, stderr_endpoint, stdlog_endpoint) = if self.tty_main != 0 {
+        let (stdout_endpoint, stderr_endpoint, stdlog_endpoint) = if self.tty_endpoints[0] != 0 {
             // The tty main endpoint already grants IPC_SEND, so reuse it directly.
-            (self.tty_main, self.tty_main, self.tty_main)
+            (
+                self.tty_endpoints[0],
+                self.tty_endpoints[0],
+                self.tty_endpoints[0],
+            )
         } else {
             (
                 endpoint_create(self.token)?,
@@ -636,19 +986,11 @@ impl ProcessManager {
                 endpoint_create(self.token)?,
             )
         };
-        let proc_cap = derive_proc_cap(self.token)?;
-        let self_cap = derive_self_cap(self.token)?;
-        // Derive space token with SPACE_MAP rights for the child
-        let child_space_token = match derive_space_token(space_token) {
-            Ok(t) => {
-                let _ = debug_print(&format!("procmgr: derived child_space_token={}", t));
-                t
-            }
-            Err(e) => {
-                let _ = debug_print(&format!("procmgr: derive_space_token FAILED {:?}", e));
-                return Err(e);
-            }
-        };
+        // Derive capability tokens based on the child's CapProfile.
+        let slot_rights = profile_to_rights(profile);
+        let proc_cap = derive_slot(self.token, slot_rights[TOKEN_IPC])?;
+        let self_cap = derive_slot(self.token, slot_rights[TOKEN_SELF])?;
+        let child_space_token = derive_slot(space_token, slot_rights[TOKEN_SPACE])?;
         // Parse FDAC (fd actions) to override child stdio endpoints
         let mut pipe_mask: u8 = 0;
         let mut stdin_ep = stdin_endpoint;
@@ -745,13 +1087,14 @@ impl ProcessManager {
             self.registry_send,
             proc_cap,
             self_cap,
-            child_space_token, // Now properly derived!
+            child_space_token,
             self.clock_token,
             argv_payload,
             argc,
             &env_data,
             envc,
             pipe_mask,
+            profile,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
@@ -762,15 +1105,18 @@ impl ProcessManager {
         self.cookie_to_pid.insert(cookie, pid);
         self.pid_owner_tid.insert(pid, owner_tid);
         self.cookie_to_space.insert(cookie, space_token);
-        // Track derived tokens/endpoints for cleanup on exit
-        let mut derived_tokens = vec![
+        // Track derived tokens/endpoints for cleanup on exit (skip 0-value slots)
+        let mut derived_tokens: Vec<usize> = [
             child_endpoint,
             stdin_ep,
             proc_cap,
             self_cap,
             child_space_token,
-        ];
-        if parent_stdin_send != stdin_ep {
+        ]
+        .into_iter()
+        .filter(|&t| t != 0)
+        .collect();
+        if parent_stdin_send != 0 && parent_stdin_send != stdin_ep {
             derived_tokens.push(parent_stdin_send);
         }
         self.cookie_to_tokens.insert(cookie, derived_tokens);
@@ -1233,6 +1579,7 @@ impl ProcessManager {
                 if signal == SIGINT || signal == SIGTERM || signal == SIGKILL {
                     self.exit_table.remove(&cookie);
                     self.pid_to_cookie.remove(&target_pid);
+                    self.pid_to_profile.remove(&target_pid);
                     self.cookie_to_pid.remove(&cookie);
                     if let Some(owner_tid) = self.pid_owner_tid.remove(&target_pid) {
                         self.on_child_reaped(owner_tid);
@@ -1361,6 +1708,7 @@ fn map_process_info_page(
     env_data: &[u8],
     envc: usize,
     pipe_mask: u8,
+    profile: CapProfile,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -1383,6 +1731,7 @@ fn map_process_info_page(
     let mut params = [0u64; 10];
     // params[0] = pipe_mask for regular processes (shared with PARAM_FB_BASE for console)
     params[0] = pipe_mask as u64;
+    params[PARAM_CAP_PROFILE] = profile.bits() as u64;
 
     let info_offset = PROCESS_INFO_ADDR - page_base;
     let info_size = size_of::<ProcessInfo>();
@@ -1445,26 +1794,169 @@ fn map_process_info_page(
     Ok(())
 }
 
-fn derive_proc_cap(token: usize) -> Result<usize> {
-    let rights =
-        Rights::CREATE | Rights::IPC_SEND | Rights::IPC_RECV | Rights::IPC_CALL | Rights::GRANT;
-    token_derive(token, rights.bits() as usize, u64::MAX)
-}
-
-/// Derive a self/thread capability token for child processes.
+/// Map a CapProfile to the kernel Rights for each of the 16 token slots.
 ///
-/// TOKEN_SELF provides basic thread control authority (CREATE + GRANT).
-/// This is intentionally narrower than TOKEN_IPC to follow least-privilege.
-fn derive_self_cap(token: usize) -> Result<usize> {
-    let rights = Rights::CREATE | Rights::GRANT;
-    token_derive(token, rights.bits() as usize, u64::MAX)
+/// This is the policy bridge between the abstract profile bitmask and
+/// concrete token derivations. TOKEN_CLOCK is handled separately (always
+/// wired unconditionally). TOKEN_EXTRA slots (9-15) are populated by
+/// service-specific logic, not the profile.
+fn profile_to_rights(profile: CapProfile) -> [Rights; 16] {
+    let mut r = [Rights::empty(); 16];
+
+    // Stdio: always present regardless of profile.
+    // Even SANDBOXED processes get pre-wired stdio tokens.
+    r[TOKEN_STDIN] = Rights::IPC_SEND | Rights::IPC_RECV;
+    r[TOKEN_STDOUT] = Rights::IPC_SEND;
+    r[TOKEN_STDERR] = Rights::IPC_SEND;
+    r[TOKEN_STDLOG] = Rights::IPC_SEND;
+
+    // IPC capability: basic send/recv for endpoint communication.
+    if profile.contains(CapProfile::IPC) {
+        r[TOKEN_IPC] |= Rights::IPC_SEND | Rights::IPC_RECV;
+    }
+
+    // SPAWN or REGISTRY: need CREATE+GRANT on IPC cap to create endpoints.
+    if profile.contains(CapProfile::SPAWN) || profile.contains(CapProfile::REGISTRY) {
+        r[TOKEN_IPC] |= Rights::CREATE | Rights::GRANT;
+    }
+
+    // SPAWN, REGISTRY, or VFS: need IPC_CALL for synchronous request/reply.
+    if profile.contains(CapProfile::SPAWN)
+        || profile.contains(CapProfile::REGISTRY)
+        || profile.contains(CapProfile::VFS)
+    {
+        r[TOKEN_IPC] |= Rights::IPC_CALL;
+    }
+
+    // SPAWN: needs CREATE+GRANT on self token to create child threads.
+    if profile.contains(CapProfile::SPAWN) {
+        r[TOKEN_SELF] |= Rights::CREATE | Rights::GRANT;
+    }
+
+    // VFS: needs SPACE_MAP to map file data into address space.
+    if profile.contains(CapProfile::VFS) {
+        r[TOKEN_SPACE] |= Rights::SPACE_MAP;
+    }
+
+    // DEVICE: needs THREAD_CONTROL for interrupt handling threads.
+    if profile.contains(CapProfile::DEVICE) {
+        r[TOKEN_SELF] |= Rights::THREAD_CONTROL;
+    }
+
+    // SPACE_GRANT: needs SPACE_GRANT+CREATE on space for shared memory.
+    if profile.contains(CapProfile::SPACE_GRANT) {
+        r[TOKEN_SPACE] |= Rights::SPACE_GRANT | Rights::CREATE;
+    }
+
+    r
 }
 
-/// Derive a space token with SPACE_MAP rights for child processes.
-/// This allows the child's allocator to map heap pages and allocate frames.
-fn derive_space_token(space_token: usize) -> Result<usize> {
-    let rights = Rights::SPACE_MAP | Rights::SPACE_GRANT | Rights::CREATE | Rights::THREAD_CONTROL;
-    token_derive(space_token, rights.bits() as usize, u64::MAX)
+/// Derive a child token with the given rights, or return 0 if rights are empty.
+fn derive_slot(base: usize, rights: Rights) -> Result<usize> {
+    if rights.is_empty() {
+        Ok(0)
+    } else {
+        token_derive(base, rights.bits() as usize, u64::MAX)
+    }
+}
+
+/// Generate the default VFS view mounts for a capability profile.
+///
+/// Returns a list of (src, dst, writable) tuples.  For Phase C these are
+/// identity mappings (src == dst); Phase D will add path remapping.
+///
+/// SUPERVISOR gets no mounts — the VFS pass-through (no registered view)
+/// gives full access.
+fn default_view_for_profile(profile: CapProfile) -> Vec<(&'static str, &'static str, bool)> {
+    if profile.contains(CapProfile::ADMIN) {
+        // SUPERVISOR: don't register a view → pass-through = full access.
+        return Vec::new();
+    }
+    if profile.contains(CapProfile::DEVICE) {
+        // SERVICE: /bin(ro), /lib(ro), /dev(rw), /etc(ro), /tmp(rw)
+        return alloc::vec![
+            ("/bin", "/bin", false),
+            ("/lib", "/lib", false),
+            ("/dev", "/dev", true),
+            ("/etc", "/etc", false),
+            ("/tmp", "/tmp", true),
+            ("/dev/initrd", "/dev/initrd", false),
+        ];
+    }
+    if profile.contains(CapProfile::IPC) {
+        // USER: /bin(ro), /lib(ro), /tmp(rw), /home/root(rw), /dev/initrd(ro)
+        return alloc::vec![
+            ("/bin", "/bin", false),
+            ("/lib", "/lib", false),
+            ("/tmp", "/tmp", true),
+            ("/home/root", "/home/root", true),
+            ("/dev/initrd", "/dev/initrd", false),
+        ];
+    }
+    // SANDBOXED: no filesystem access.
+    Vec::new()
+}
+
+/// Check whether `child_view` is a valid narrowing of `parent_view`.
+///
+/// Every mount in the child view must be covered by a mount in the parent view
+/// with an equal or wider prefix and equal or greater write permission.
+/// An empty parent view means no filesystem access — no child mount can pass.
+/// An empty child view is always valid (child requests no access).
+fn can_narrow_view(parent_view: &[(&str, &str, bool)], child_view: &[(&str, &str, bool)]) -> bool {
+    for &(child_src, child_dst, child_writable) in child_view {
+        let covered = parent_view.iter().any(|&(p_src, p_dst, p_writable)| {
+            // Child prefix must be under (or equal to) parent prefix.
+            let src_ok = child_src == p_src
+                || (child_src.starts_with(p_src)
+                    && child_src.as_bytes().get(p_src.len()) == Some(&b'/'))
+                || p_src == "/";
+            let dst_ok = child_dst == p_dst
+                || (child_dst.starts_with(p_dst)
+                    && child_dst.as_bytes().get(p_dst.len()) == Some(&b'/'))
+                || p_dst == "/";
+            // Child can't request write if parent is read-only.
+            let write_ok = !child_writable || p_writable;
+            src_ok && dst_ok && write_ok
+        });
+        if !covered {
+            return false;
+        }
+    }
+    true
+}
+
+/// Serialize and send a VFS_SET_VIEW message for a newly spawned child.
+///
+/// `client_tid` is the child's kernel `ThreadId` (the `sender_tid` seen by VFS).
+/// `mounts` is the list of (src, dst, writable) tuples from `default_view_for_profile`.
+/// Does nothing if `mounts` is empty (SUPERVISOR pass-through) or VFS endpoint is 0.
+fn send_vfs_set_view(
+    vfs_endpoint: usize,
+    client_tid: usize,
+    mounts: &[(&str, &str, bool)],
+) -> Result<()> {
+    if vfs_endpoint == 0 || mounts.is_empty() {
+        return Ok(());
+    }
+
+    // Serialize payload: per mount: u16 src_len + u16 dst_len + u8 flags + src + dst
+    let mut payload = Vec::new();
+    for &(src, dst, writable) in mounts {
+        let src_bytes = src.as_bytes();
+        let dst_bytes = dst.as_bytes();
+        payload.extend_from_slice(&(src_bytes.len() as u16).to_le_bytes());
+        payload.extend_from_slice(&(dst_bytes.len() as u16).to_le_bytes());
+        payload.push(if writable { 1u8 } else { 0u8 });
+        payload.extend_from_slice(src_bytes);
+        payload.extend_from_slice(dst_bytes);
+    }
+
+    let mut msg = Message::new(ipc::VFS_SET_VIEW_LABEL, [0; 6], 3);
+    msg.words[0] = payload.len();
+    msg.words[1] = client_tid;
+    msg.words[2] = mounts.len();
+    ipc::send_msg_with_payload(vfs_endpoint, &msg, &payload)
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {

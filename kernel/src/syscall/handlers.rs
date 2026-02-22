@@ -750,6 +750,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::ThreadSetPriority => invoke_thread_set_priority(&token, obj_ref, args),
         InvokeOp::ThreadSetFaultEndpoint => invoke_thread_set_fault_endpoint(&token, obj_ref, args),
         InvokeOp::ThreadSetFSBase => invoke_thread_set_fs_base(&token, obj_ref, args),
+        InvokeOp::ThreadGetId => invoke_thread_get_id(&token, obj_ref, args),
 
         // Space operations
         InvokeOp::SpaceCreate => invoke_space_create(&token, obj_ref, args),
@@ -1079,6 +1080,24 @@ fn invoke_thread_set_fs_base(
     }
 
     Ok(0)
+}
+
+fn invoke_thread_get_id(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::READ) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let thread_ref = crate::token::check_object_type(obj_ref, ObjectType::Thread)
+        .map_err(|_| Error::InvalidArgument)?;
+    let thread_id = if let ObjectRef::Thread(id) = thread_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    Ok(thread_id.as_u64() as usize)
 }
 
 fn invoke_endpoint_create(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
