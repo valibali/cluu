@@ -29,6 +29,8 @@ use libcluu::elf::ElfFile;
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_id;
 use libcluu::ipc::SharedRing;
+use libcluu::ipc::PROCMGR_CONTAINER_LIST_LABEL;
+use libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL;
 use libcluu::ipc::PROCMGR_QUERY_CTTY_LABEL;
 use libcluu::ipc::PROCMGR_SPAWN_SERVICE_LABEL;
 use libcluu::registry;
@@ -40,6 +42,13 @@ use libcluu::*;
 
 /// A list of (src, dst, writable) mount tuples representing a process's VFS view.
 type ViewMountList = Vec<(&'static str, &'static str, bool)>;
+
+struct ContainerInstance {
+    name: String,
+    container_id: u64,
+    pid: usize,
+    image_path: String,
+}
 
 struct PendingVfsView {
     client_tid: usize,
@@ -132,6 +141,7 @@ struct ProcessManager {
     /// PIDs that own their container (created via next_container_id).
     /// Only owners trigger container cleanup on exit.
     container_owner_pids: BTreeSet<usize>,
+    container_instances: BTreeMap<u64, ContainerInstance>,
 }
 
 impl ProcessManager {
@@ -175,6 +185,7 @@ impl ProcessManager {
             container_id_next: 1,
             pid_to_container_id: BTreeMap::new(),
             container_owner_pids: BTreeSet::new(),
+            container_instances: BTreeMap::new(),
         })
     }
 
@@ -567,6 +578,12 @@ impl ProcessManager {
         }
         if msg.tag.label == PROCMGR_SPAWN_SERVICE_LABEL {
             return self.handle_service_spawn(msg, payload);
+        }
+        if msg.tag.label == PROCMGR_CONTAINER_RUN_LABEL {
+            return self.handle_container_run(msg, payload, sender_tid);
+        }
+        if msg.tag.label == PROCMGR_CONTAINER_LIST_LABEL {
+            return self.handle_container_list(msg);
         }
         self.handle_spawn_message(msg, payload, sender_tid)
     }
@@ -1775,6 +1792,231 @@ impl ProcessManager {
         }
     }
 
+    fn handle_container_run(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
+        let reply_token = extract_reply_id(msg);
+        let mut reply_msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
+
+        // Extract image name from payload
+        let image_name = match core::str::from_utf8(payload) {
+            Ok(s) => s.trim_end_matches('\0').trim(),
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+        if image_name.is_empty() {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+        let _ = debug_print(&format!("procmgr: container run '{}'", image_name));
+
+        // Read manifest.toml from VFS
+        let manifest_path = format!("/var/images/{}/manifest.toml", image_name);
+        let manifest_contents = match self.read_file_from_vfs(&manifest_path) {
+            Some(data) => data,
+            None => {
+                let _ = debug_print(&format!("procmgr: container manifest not found: {}", manifest_path));
+                reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+        let manifest_str = match core::str::from_utf8(&manifest_contents) {
+            Ok(s) => s,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        // Parse manifest TOML
+        let doc = match libcluu::toml::parse(manifest_str) {
+            Ok(d) => d,
+            Err(err) => {
+                let _ = debug_print(&format!("procmgr: manifest parse error: {}", err));
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        // Extract binary path
+        let binary = match doc.table("exec").and_then(|t| t.get_str("binary")) {
+            Some(b) => b,
+            None => {
+                let _ = debug_print("procmgr: manifest missing [exec] binary");
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        // Build capability profile from manifest
+        let mut requested_profile = CapProfile::USER;
+        if let Some(profile_table) = doc.table("profile") {
+            if let Some(caps) = profile_table.get_array("capabilities") {
+                for cap_name in caps {
+                    if let Some(cap) = parse_capability(cap_name) {
+                        requested_profile |= cap;
+                    } else {
+                        let _ = debug_print(&format!(
+                            "procmgr: container '{}' unknown capability '{}'",
+                            image_name, cap_name
+                        ));
+                        reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                        if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Validate caller can grant the requested profile
+        let caller_profile = if sender_tid == 0 {
+            CapProfile::USER
+        } else {
+            match self.tid_to_pid.get(&sender_tid)
+                .and_then(|pid| self.pid_to_profile.get(pid))
+                .copied()
+            {
+                Some(p) => p,
+                None => {
+                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                    if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                    return Ok(());
+                }
+            }
+        };
+        if !caller_profile.can_grant(requested_profile) {
+            let _ = debug_print(&format!(
+                "procmgr: container '{}' profile escalation denied",
+                image_name
+            ));
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        // Allocate container_id and create dirs
+        let mut container_id = self.next_container_id();
+        if !self.create_container_dirs(container_id) {
+            let _ = debug_print(&format!(
+                "procmgr: container '{}' dir creation failed",
+                image_name
+            ));
+            container_id = 0;
+        }
+
+        // Resolve the binary path within the image
+        let binary_vfs_path = format!("/var/images/{}{}", image_name, binary);
+
+        // Extract persistent dirs for view mounts
+        let persistent_dirs: Vec<String> = doc
+            .table("storage")
+            .and_then(|t| t.get_array("persistent_dirs"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
+
+        // Spawn the process
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
+
+        if self.tty_endpoints[0] == 0 {
+            if let Ok(token) = registry::subscribe_output("tty:0", "main") {
+                self.tty_endpoints[0] = token;
+            }
+        }
+
+        match self.spawn_service(
+            &binary_vfs_path,
+            DEFAULT_PRIORITY,
+            &[],
+            0,
+            sender_tid,
+            spawn_seq,
+            spawn_start,
+            requested_profile,
+        ) {
+            Ok((_thread_token, _cookie, pid, _child_stdin_send)) => {
+                // Build container view mounts
+                // Use leaked strings since ViewMountList expects &'static str
+                let base_dir = format!("/var/containers/c-{}", container_id);
+                let image_dir = format!("/var/images/{}", image_name);
+
+                // We need to construct view mounts with 'static lifetime.
+                // Use the default USER view as base, then register with container_id
+                // which triggers the VFS container mount prepend (same as shell spawns).
+                let view_mounts = default_view_for_profile(requested_profile);
+
+                self.pid_to_container_id.insert(pid, container_id);
+                self.container_owner_pids.insert(pid);
+                self.register_vfs_view_for_thread(_thread_token, &view_mounts, requested_profile, container_id);
+                self.pid_to_view.insert(pid, view_mounts.clone());
+                self.pid_to_profile.insert(pid, requested_profile);
+
+                // Track container instance
+                self.container_instances.insert(container_id, ContainerInstance {
+                    name: String::from(image_name),
+                    container_id,
+                    pid,
+                    image_path: image_dir,
+                });
+
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = pid;
+                reply_msg.words[2] = container_id as usize;
+                let _ = debug_print(&format!(
+                    "procmgr: container '{}' started pid={} cid={}",
+                    image_name, pid, container_id
+                ));
+            }
+            Err(err) => {
+                let _ = debug_print(&format!(
+                    "procmgr: container '{}' spawn failed: {:?}",
+                    image_name, err
+                ));
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+
+        if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+        Ok(())
+    }
+
+    fn handle_container_list(&mut self, msg: &Message) -> Result<()> {
+        let reply_token = extract_reply_id(msg);
+        let mut reply_msg = Message::new(PROCMGR_CONTAINER_LIST_LABEL, [0; 6], 1);
+
+        let mut listing = String::new();
+        for inst in self.container_instances.values() {
+            listing.push_str(&format!("{} {} {}\n", inst.name, inst.pid, inst.container_id));
+        }
+
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = listing.len();
+        if let Some(tok) = reply_token {
+            if listing.is_empty() {
+                let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+            } else {
+                let _ = ipc::reply_with_payload(tok, &reply_msg, listing.as_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    /// Read a file's contents from VFS into a Vec<u8>.
+    fn read_file_from_vfs(&mut self, path: &str) -> Option<Vec<u8>> {
+        self.load_from_vfs(path)
+    }
+
     fn handle_kill_message(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
         let reply_token = extract_reply_id(msg);
         let mut reply_msg = Message::new(PROCMGR_KILL_LABEL, [0; 6], 1);
@@ -2227,6 +2469,21 @@ fn send_vfs_container_cleanup(vfs_endpoint: usize, container_id: u64, mode: usiz
     msg.words[1] = container_id as usize;
     msg.words[2] = mode;
     send(vfs_endpoint, &msg, IpcFlags::empty())
+}
+
+/// Map a capability name string to the corresponding CapProfile flag.
+fn parse_capability(name: &str) -> Option<CapProfile> {
+    match name {
+        "ipc" => Some(CapProfile::IPC),
+        "spawn" => Some(CapProfile::SPAWN),
+        "registry" => Some(CapProfile::REGISTRY),
+        "vfs" => Some(CapProfile::VFS),
+        "device" => Some(CapProfile::DEVICE),
+        "space_grant" => Some(CapProfile::SPACE_GRANT),
+        "net" => Some(CapProfile::NET),
+        "admin" => Some(CapProfile::ADMIN),
+        _ => None,
+    }
 }
 
 fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {

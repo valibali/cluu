@@ -70,6 +70,14 @@ pub const VFS_SET_VIEW_LABEL: u32 = 21;
 /// words[2] = mode (0 = exit: delete tmp/ contents; 1 = destroy: delete entire c-{id}/ tree).
 pub const VFS_CONTAINER_CLEANUP_LABEL: u32 = 22;
 
+/// Container run: payload = image name (UTF-8).
+/// Reply: words[0] = errno, words[1] = pid, words[2] = container_id.
+pub const PROCMGR_CONTAINER_RUN_LABEL: u32 = 24;
+
+/// Container list: no payload.
+/// Reply: payload = "name pid container_id\n" lines.
+pub const PROCMGR_CONTAINER_LIST_LABEL: u32 = 25;
+
 pub const TTY_FG_FLAG_FORWARD_CTRL_C: usize = 1 << 0;
 pub const TTY_FG_FLAG_NOTIFY_CTRL_C: usize = 1 << 1;
 pub const TTY_CTL_SYNC: u32 = 1;

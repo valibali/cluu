@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-20
 **Scope:** Capability profiles, VFS views, container model, spawn protocol
-**Status:** Implementation in progress — Phases A/B complete; Phase C baseline implemented
+**Status:** Implementation in progress — Phases A–D complete; Phase E in design
 **Depends on:** IPC registry (docs/IPC_REGISTRY.md), kernel token system (rights.rs)
 
 ---
@@ -461,56 +461,142 @@ unless it wants to restrict the child.
 ### 4.3 Image Containers
 
 An image container is a self-describing package that declares its own
-requirements. It is a tar archive with a mandatory manifest:
+requirements. It is built from a **Cluufile** (a Dockerfile-like declarative
+build file) and stored as a pre-extracted directory on the ext2 disk.
+
+#### Cluufile
+
+The Cluufile is the source of truth for building container images. It uses
+a line-oriented, keyword-driven syntax inspired by Dockerfile:
+
+```dockerfile
+# containers/myapp/Cluufile
+FROM base
+
+PROFILE ipc vfs
+ENTRYPOINT /bin/myapp --config /data/config.json
+
+COPY target/x86_64-cluu-user/debug/myapp.elf /bin/myapp
+COPY config/default.json /data/config.json
+
+PERSISTENT /data
+ENV APP_MODE=production
+```
+
+| Directive     | Syntax                          | Required | Description                                                  |
+|---------------|---------------------------------|----------|--------------------------------------------------------------|
+| `FROM`        | `FROM base`                     | Yes      | Base layer. `base` = shared sysroot (/bin, /lib).            |
+| `PROFILE`     | `PROFILE cap1 cap2 ...`         | Yes      | Space-separated CapProfile bit names.                        |
+| `ENTRYPOINT`  | `ENTRYPOINT /path arg1 arg2`    | Yes      | Binary path (container-relative) + arguments.                |
+| `COPY`        | `COPY <host-path> <ctr-path>`   | No       | Copy file from build host into image. Host path is relative to Cluufile dir. |
+| `PERSISTENT`  | `PERSISTENT /path`              | No       | Directory that survives container restart.                   |
+| `ENV`         | `ENV KEY=VALUE`                 | No       | Environment variable for the container process.              |
+
+Parsing rules: one directive per line, `#` comments, `FROM` must be first
+non-comment directive. Multiple `COPY`, `ENV`, `PERSISTENT` allowed. Only
+one `FROM`, `PROFILE`, `ENTRYPOINT`. Unknown directives are errors.
+
+Capability names map directly to CapProfile bits (lowercase): `ipc`, `vfs`,
+`spawn`, `registry`, `device`, `space_grant`, `net`, `admin`. Unknown names
+are rejected (fail-fast, not silently ignored).
+
+#### Build Pipeline
+
+`cargo xtask container-build <cluufile-path>`:
+
+1. Parse Cluufile directives.
+2. Resolve `FROM base`: merge the sysroot's `/bin` and `/lib` into the
+   image directory. This makes each image self-contained — no runtime
+   overlay or layer fallback needed.
+3. Process `COPY` directives: copy specified files into their container paths.
+4. Generate `manifest.toml` from `PROFILE`, `ENTRYPOINT`, `ENV`,
+   `PERSISTENT` directives.
+5. Output: `target/containers/<name>/` with manifest.toml + merged files.
+6. During `cargo xtask build`, copy to `/var/images/<name>/` on the ext2
+   userdisk image.
+
+#### Image Layout on Disk
 
 ```
-myapp.container.tar
-├── manifest.toml       ← declares profile, VFS mounts, exec info
-├── bin/
-│   └── myapp           ← ELF binary
-└── data/               ← optional seed data (copied to private storage)
-    └── config.json
+/var/images/
+└── myapp/
+    ├── manifest.toml       ← runtime manifest (generated from Cluufile)
+    ├── bin/
+    │   ├── myapp           ← COPY'd binary
+    │   ├── ls              ← merged from base sysroot
+    │   └── shell           ← merged from base sysroot
+    ├── lib/
+    │   └── ...             ← merged from base sysroot
+    └── data/
+        └── config.json     ← COPY'd seed data
 ```
 
-The manifest is the container's "birth certificate" — it declares what
-capabilities and paths the container needs. Procmgr reads the manifest,
-validates it against the caller's profile (no escalation), and creates the
-process accordingly.
+`FROM base` does not copy base files at runtime. It merges them at build
+time. Each image is self-contained under `/var/images/<name>/`. This trades
+disk space for simplicity — no runtime overlay, COW, or whiteouts needed.
 
-#### manifest.toml Schema
+#### manifest.toml (Generated)
+
+The manifest is generated from the Cluufile by xtask. Procmgr reads it at
+runtime. It is intentionally simple (flat TOML, no nested structures) to
+keep the no_std TOML parser minimal.
 
 ```toml
+# Auto-generated from Cluufile — do not edit
 [container]
-name = "myapp"                    # Human-readable name (required)
-version = "1.0.0"                 # Semver (required)
-description = "My application"    # Optional
+name = "myapp"
 
 [profile]
-# Capability bits requested. Must be a subset of the caller's profile.
-capabilities = ["ipc", "vfs", "registry"]
-
-[vfs]
-# Mount rules. "src" paths starting with "/" are absolute (backed by the
-# real filesystem, validated against caller's view). "src" paths without
-# "/" are relative to the container image (extracted to private storage).
-mounts = [
-    { src = "/lib",    dst = "/lib",    mode = "ro" },
-    { src = "/bin",    dst = "/bin",    mode = "ro" },
-    { src = "data/",   dst = "/data",   mode = "rw", seed = true },
-]
+capabilities = ["ipc", "vfs"]
 
 [exec]
-binary = "bin/myapp"              # Path within the container image
+binary = "/bin/myapp"
 args = ["--config", "/data/config.json"]
-env = ["APP_MODE=production"]     # Additional env vars (merged with defaults)
 
 [storage]
-persistent = true                 # Keep /data across container restarts
-quota = "16M"                     # Maximum private storage size (future)
+persistent_dirs = ["/data"]
+
+[[env]]
+key = "APP_MODE"
+value = "production"
 ```
 
-Capability names in `[profile].capabilities` map directly to CapProfile bit
-names (lowercase): `"ipc"` → `CAP_IPC`, `"spawn"` → `CAP_SPAWN`, etc.
+#### Container Run Flow
+
+When a user runs `container run myapp`:
+
+1. Shell sends `PROCMGR_CONTAINER_RUN_LABEL` (24) with image name as payload.
+2. Procmgr reads `/var/images/myapp/manifest.toml` via VFS.
+3. Procmgr validates: `requested_profile ⊆ caller.profile` (can_grant).
+4. Allocates container_id via `next_container_id()`.
+5. Creates container dirs: `/var/containers/c-N/{data,tmp,log}` (Phase D).
+6. Copies seed data from `/var/images/myapp/data/` to `/var/containers/c-N/data/`
+   (only on first run or if target is empty).
+7. Builds view mounts (first-match-wins ordering):
+   ```
+   /tmp   → /var/containers/c-N/tmp       (rw)   ← writable ephemeral
+   /data  → /var/containers/c-N/data      (rw)   ← writable persistent
+   /log   → /var/containers/c-N/log       (rw)   ← writable log
+   /bin   → /var/images/myapp/bin         (ro)   ← merged base + image
+   /lib   → /var/images/myapp/lib         (ro)   ← merged base + image
+   ```
+8. Spawns thread from `/var/images/myapp/bin/myapp` (procmgr loads ELF
+   via its SUPERVISOR view — child never loads its own binary).
+9. Registers VFS view with container_id (child can now access VFS).
+10. Tracks instance: pid, container_id, image name.
+
+**Critical ordering:** Steps 5-6 (create dirs, copy seed) MUST precede
+step 8 (thread_create). If seed copy happens after spawn, there's a race
+where the child accesses `/data` before seed files exist.
+
+#### Image Security Properties
+
+- Images stored at `/var/images/` on ext2, outside USER view — containers
+  cannot see or modify their own base images.
+- VFS enforces read-only on image mounts (writable=false in ViewMount).
+- Manifest capabilities are validated as subset of caller's profile.
+- Procmgr loads the binary, not the container — no path traversal risk.
+- Unknown capability names in manifest are rejected, not silently ignored.
 
 ### 4.4 Private Storage
 
@@ -902,7 +988,7 @@ Latest verification snapshot (2026-02-22):
 - `cargo xtask clean-full && cargo xtask build` passed.
 - Harness regressions passed for `m4_deny_paths`, `m4_registry_deny_paths`, and `l2_owner_deny`.
 
-### Phase D: Private Storage
+### Phase D: Private Storage — COMPLETE
 
 Per-container isolated storage areas, managed by VFS.
 
@@ -914,24 +1000,30 @@ Per-container isolated storage areas, managed by VFS.
 | D4 | VFS: clean tmp/ on container exit                 | done      |
 | D5 | VFS: delete all of `<id>/` on destroy             | done      |
 | D6 | Procmgr: track container_id in process bookkeeping | done     |
-| D7 | Build + test: two processes have isolated /data    | pending   |
+| D7 | Build + test: container storage isolation          | done      |
 
 ### Phase E: Container Images
 
-Manifest-based container packaging and loading from tar archives.
+Cluufile-based container packaging with extract-on-install and merge-at-build.
 
-| #  | Task                                              | Status    |
-|----|---------------------------------------------------|-----------|
-| E1 | Define manifest.toml schema (finalize section 4.3) | pending  |
-| E2 | Add TOML parser to libcluu (minimal, no_std)      | pending   |
-| E3 | Manifest parsing in procmgr                       | pending   |
-| E4 | Extract binary from container tar                 | pending   |
-| E5 | Extract seed data to private storage              | pending   |
-| E6 | Profile + view from manifest (validated as always) | pending  |
-| E7 | Shell builtin: `container run <path>`             | pending   |
-| E8 | Shell builtin: `container list`                   | pending   |
-| E9 | Shell builtin: `container stop <id>`              | pending   |
-| E10 | Build + test: run a container image from shell   | pending   |
+| #   | Task                                              | Status  | Depends |
+|-----|---------------------------------------------------|---------|---------|
+| E1  | Cluufile parser (standalone `tools/container-build/`) | done | —       |
+| E2  | manifest.toml generator                           | done    | E1      |
+| E3  | `container-build` command (merge base + COPY)     | done    | E2      |
+| E4  | Userdisk integration (copy images to /var/images/) | done   | E3      |
+| E5  | Minimal TOML parser (no_std) in libcluu           | done    | —       |
+| E6  | Procmgr: container run handler (manifest + spawn) | pending | E4, E5  |
+| E7  | VFS hardlink support (FS_LINK + VFS_LINK)         | pending | —       |
+| E8  | Procmgr: seed persistent data via hardlinks       | pending | E6, E7  |
+| E9  | Shell builtin: `container run <name>`             | pending | E6      |
+| E10 | Shell builtin: `container list`                   | pending | E6      |
+| E11 | Shell builtin: `container stop <name>`            | pending | E6      |
+| E12 | Extract container-build from xtask to `tools/`    | pending | E3      |
+| E13 | Integration test: build + run container            | pending | E9      |
+
+Critical path: E1 → E2 → E3 → E4 → E6 → E9 → E13
+Parallel tracks: E5 (TOML parser), E7 (hardlink support), E12 (crate extraction)
 
 ### Phase F: Nested Containers
 
@@ -955,16 +1047,22 @@ Files created or modified across all phases:
 | File                               | Phases  | Purpose                              |
 |------------------------------------|---------|--------------------------------------|
 | `userspace/libcluu/src/cap.rs`     | B       | CapProfile bitflags + helpers        |
-| `userspace/libcluu/src/lib.rs`     | B       | Export cap module                    |
+| `userspace/libcluu/src/lib.rs`     | B, E    | Export cap, toml modules             |
 | `userspace/libcluu/src/boot.rs`    | B       | PARAM_CAP_PROFILE constant           |
-| `userspace/libcluu/src/ipc.rs`     | A, C    | send_msg_with_payload, VFS_SET_VIEW  |
-| `userspace/procmgr/src/main.rs`    | A,B,D,E | Profile-gated spawn, container IDs   |
+| `userspace/libcluu/src/ipc.rs`     | A, C, D, E | send_msg_with_payload, VFS_SET_VIEW, container cleanup, container run/list labels |
+| `userspace/libcluu/src/toml.rs`    | E       | Minimal no_std TOML parser           |
+| `userspace/libcluu/src/fs/client.rs` | E     | VfsClient::link() for hardlinks      |
+| `userspace/procmgr/src/main.rs`    | A,B,D,E | Profile-gated spawn, container IDs, container run |
 | `userspace/vtmgr/src/context.rs`   | A       | Fix spawn protocol                   |
 | `userspace/vtmgr/src/main.rs`      | A       | Clean unused imports                 |
-| `userspace/vfs/src/main.rs`        | C, D    | View enforcement, storage lifecycle  |
+| `userspace/vfs/src/main.rs`        | C, D, E | View enforcement, storage lifecycle, VFS_LINK |
+| `userspace/vfs/src/mount.rs`       | E       | MountTable::link() → ext2 FS_LINK   |
 | `userspace/vfs/src/view.rs`        | C       | VfsView struct + path filter logic   |
 | `userspace/init/src/services.rs`   | B       | Profile assignments per service      |
-| `userspace/shell/src/main.rs`      | E       | Container shell builtins             |
+| `userspace/shell/src/commands.rs`   | E       | Container shell builtins             |
+| `tools/container-build/`          | E       | Standalone container image builder (Cluufile parser, manifest gen) |
+| `xtask/src/main.rs`               | D, E    | Userdisk build, /var/images/ integration |
+| `containers/*/Cluufile`           | E       | Container build definitions          |
 | `docs/PROCESS_ISOLATION_DESIGN.md` | all     | This document (updated per phase)    |
 
 ---

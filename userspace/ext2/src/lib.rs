@@ -320,6 +320,23 @@ impl<'a> Ext2Fs<'a> {
         Ok(())
     }
 
+    pub fn link_path(&self, old_path: &str, new_path: &str) -> Result<()> {
+        let old_ino = self.resolve_path_to_inode(old_path)?;
+        let old_inode = self.read_inode(old_ino)?;
+        if old_inode.is_dir() {
+            return Err(Error::InvalidOperation);
+        }
+        if self.resolve_path_to_inode(new_path).is_ok() {
+            return Err(Error::AlreadyExists);
+        }
+        let (new_parent_ino, new_name) = self.resolve_parent(new_path)?;
+        self.add_dir_entry(new_parent_ino, new_name, old_ino, dir::FT_REG_FILE)?;
+        let mut inode = old_inode;
+        inode.links_count = inode.links_count.saturating_add(1);
+        self.write_inode(old_ino, &inode)?;
+        Ok(())
+    }
+
     pub fn rmdir_path(&self, path: &str) -> Result<()> {
         let (parent_ino, name) = self.resolve_parent(path)?;
         let (entry, mut parent_data) = self.find_dir_entry(parent_ino, name)?;

@@ -234,6 +234,11 @@ enum Commands {
         #[arg(long, default_value = "dev")]
         profile: String,
     },
+    /// Build a container image from a Cluufile
+    ContainerBuild {
+        /// Path to the Cluufile
+        path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -326,6 +331,17 @@ fn main() -> Result<()> {
         }
         Commands::CreateDiskImage { profile } => {
             create_disk_image(&profile)?;
+        }
+        Commands::ContainerBuild { path } => {
+            // Delegate to standalone container-build tool
+            let status = Command::new("cargo")
+                .args(["run", "-p", "container-build", "--"])
+                .arg(&path)
+                .status()
+                .context("Failed to run container-build tool")?;
+            if !status.success() {
+                bail!("container-build failed with exit code {:?}", status.code());
+            }
         }
     }
 
@@ -2489,11 +2505,13 @@ fn create_user_block_image(profile: &str) -> Result<()> {
     let tmp_dir = staging_dir.join("tmp");
     let home_root_dir = staging_dir.join("home/root");
     let var_containers_dir = staging_dir.join("var/containers");
+    let var_images_dir = staging_dir.join("var/images");
     let _ = fs::remove_dir_all(&bin_dir);
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&tmp_dir)?;
     fs::create_dir_all(&home_root_dir)?;
     fs::create_dir_all(&var_containers_dir)?;
+    fs::create_dir_all(&var_images_dir)?;
 
     let bin_programs = ["shell"];
     for prog in &bin_programs {
@@ -2563,6 +2581,23 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         println!("  Added mp (alias for micropython)");
     }
 
+    // Copy built container images into /var/images/ on the userdisk
+    let containers_dir = project_root().join("target/containers");
+    if containers_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&containers_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    let name = entry.file_name();
+                    let dst = var_images_dir.join(&name);
+                    fs::create_dir_all(&dst)?;
+                    copy_container_image(&entry.path(), &dst)
+                        .with_context(|| format!("Failed to copy container image '{}'", name.to_string_lossy()))?;
+                    println!("  Added container image: {}", name.to_string_lossy());
+                }
+            }
+        }
+    }
+
     let disk_path = project_root().join("target/userdisk.img");
     if disk_path.exists() {
         fs::remove_file(&disk_path)?;
@@ -2580,7 +2615,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
             "-b",
             "1024",
             disk_path.to_str().unwrap(),
-            "196608", // 192MB image (196608 blocks * 1KiB)
+            "229376", // 224MB image (229376 blocks * 1KiB)
         ])
         .status()
         .context("Failed to run mke2fs for user disk")?;
@@ -3594,5 +3629,21 @@ fn setup_c_toolchain() -> Result<()> {
     println!("Example:");
     println!("  cargo xtask build-c hello userspace/c-programs/hello.c");
 
+    Ok(())
+}
+
+/// Recursively copy a container image directory tree.
+fn copy_container_image(src_dir: &Path, dst_dir: &Path) -> Result<()> {
+    for entry in fs::read_dir(src_dir)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst_dir.join(entry.file_name());
+        if src_path.is_dir() {
+            fs::create_dir_all(&dst_path)?;
+            copy_container_image(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
     Ok(())
 }

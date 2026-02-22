@@ -32,6 +32,9 @@ members = [
     # Language tooling
     "crates/cluu_lang",
     "crates/cluu_lang_harness",
+
+    # Host tools
+    "tools/container-build",
 ]
 
 # Exclude xtask from default members (it uses std)

@@ -15,8 +15,9 @@ use core::cmp;
 use core::mem::size_of;
 use libcluu::elf::{ElfFile, LoadableSegment};
 use libcluu::fs::protocol::{
-    VfsOp, VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT,
-    VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
+    VfsOp, VFS_CLOSE, VFS_FSTAT, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR,
+    VFS_READ_GRANT, VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK,
+    VFS_WRITE,
 };
 use libcluu::ipc::{self, extract_reply_id, reply_with_payload, SharedRing, SharedRingHeader};
 use libcluu::types::Message;
@@ -559,6 +560,7 @@ impl VfsServer {
             VfsOp::Mkdir => self.handle_mkdir(msg, payload, reply_token, authenticated_client),
             VfsOp::Rmdir => self.handle_rmdir(msg, payload, reply_token, authenticated_client),
             VfsOp::Rename => self.handle_rename(msg, payload, reply_token, authenticated_client),
+            VfsOp::Link => self.handle_link(msg, payload, reply_token, authenticated_client),
             VfsOp::RingSetup => {
                 self.handle_ring_setup(msg, payload, reply_token, authenticated_client)
             }
@@ -1361,6 +1363,68 @@ impl VfsServer {
                 reply_msg.words[0] = 0;
                 self.move_owner_subtree(old_path, new_path);
                 self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
+            }
+            Err(err) => reply_msg.words[0] = err.to_errno() as usize,
+        }
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    fn handle_link(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
+        let mut reply_msg = Message::new(VFS_LINK, [0; 6], 1);
+        let client_id = match self.resolve_client_id("link", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let old_len = msg.words[2];
+        if old_len > payload.len() {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+        let old_path = match core::str::from_utf8(&payload[..old_len]) {
+            Ok(p) => p,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let new_path = match core::str::from_utf8(&payload[old_len..]) {
+            Ok(p) => p,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        // View check: old must be readable, new must be writable.
+        let real_old = match self.view_check_path(client_id, old_path) {
+            Ok(p) => p,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let real_new = match self.view_check_path_writable(client_id, new_path) {
+            Ok(p) => p,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        if let Err(err) = self.ensure_create_allowed(client_id, new_path) {
+            reply_msg.words[0] = err.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+        match self.mounts.link(&real_old, &real_new) {
+            Ok(()) => {
+                reply_msg.words[0] = 0;
             }
             Err(err) => reply_msg.words[0] = err.to_errno() as usize,
         }

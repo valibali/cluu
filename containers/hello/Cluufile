@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs
+COPY ../../target/userfs/bin/hello /bin/hello
+ENTRYPOINT /bin/hello

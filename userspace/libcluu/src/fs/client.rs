@@ -5,8 +5,9 @@
 
 use crate::error::{Error, Result};
 use crate::fs::protocol::{
-    VFS_CLOSE, VFS_FSTAT, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT,
-    VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
+    VFS_CLOSE, VFS_FSTAT, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR,
+    VFS_READ_GRANT, VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK,
+    VFS_WRITE,
 };
 use crate::ipc;
 use crate::types::Message;
@@ -322,6 +323,23 @@ impl VfsClient {
         payload.extend_from_slice(new_bytes);
         let msg = make_payload_message(
             VFS_RENAME,
+            payload.len(),
+            &[self.client_id, old_bytes.len()],
+        );
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, &payload, &mut reply)?;
+        parse_status(reply.words[0])
+    }
+
+    /// Create a hard link.
+    pub fn link(&self, old: &str, new: &str) -> Result<()> {
+        let old_bytes = old.as_bytes();
+        let new_bytes = new.as_bytes();
+        let mut payload = Vec::with_capacity(old_bytes.len() + new_bytes.len());
+        payload.extend_from_slice(old_bytes);
+        payload.extend_from_slice(new_bytes);
+        let msg = make_payload_message(
+            VFS_LINK,
             payload.len(),
             &[self.client_id, old_bytes.len()],
         );

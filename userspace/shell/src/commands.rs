@@ -12,9 +12,10 @@ use core::mem::size_of;
 use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
-    call, call_with_payload, recv, send_with_payload, send_with_retry, SharedRing,
-    CONSOLE_CLEAR_LABEL, TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C,
-    TTY_READ_LABEL, TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
+    call, call_with_payload, call_with_reply_buf, recv, send_with_payload, send_with_retry,
+    SharedRing, CONSOLE_CLEAR_LABEL, PROCMGR_CONTAINER_LIST_LABEL, PROCMGR_CONTAINER_RUN_LABEL,
+    TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
+    TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
 };
 use libcluu::registry;
 use libcluu::syscall;
@@ -27,6 +28,7 @@ const PROCMGR_SPAWN_LABEL: u32 = 2;
 const PROCMGR_KILL_LABEL: u32 = 3;
 const DEFAULT_PRIORITY: usize = 200;
 const SIGINT: usize = 2;
+const SIGTERM: usize = 15;
 const SIGCONT: usize = 18;
 const SIGSTOP: usize = 19;
 const TTY_LFLAG_ICANON: usize = 0x02;
@@ -291,6 +293,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(CatBuiltin));
         registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(HeapBuiltin));
+        registry.register(Box::new(ContainerBuiltin));
     }
 }
 
@@ -2623,4 +2626,140 @@ impl BuiltinCommand for HeapBuiltin {
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         Ok(())
     }
+}
+
+struct ContainerBuiltin;
+
+impl BuiltinCommand for ContainerBuiltin {
+    fn name(&self) -> &'static str {
+        "container"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let subcmd = args.first().map(|s| s.as_str()).unwrap_or("");
+        match subcmd {
+            "run" => container_run(stdout, context, &args[1..]),
+            "list" => container_list(stdout, context),
+            "stop" => container_stop(stdout, context, &args[1..]),
+            _ => {
+                send_with_payload(
+                    stdout,
+                    TTY_WRITE_LABEL,
+                    b"usage: container run|list|stop\n",
+                )?;
+                Ok(())
+            }
+        }
+    }
+}
+
+fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+    let Some(name) = args.first() else {
+        send_with_payload(stdout, TTY_WRITE_LABEL, b"container run: missing image name\n")?;
+        return Ok(());
+    };
+
+    let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+    let payload = name.as_bytes();
+    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 1);
+    msg.words[0] = payload.len();
+    let mut reply = Message::new(0, [0; 6], 0);
+
+    call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
+
+    let status = reply.words[0];
+    if status != 0 {
+        let line = format!("container run: error {}\n", status);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+    } else {
+        let pid = reply.words[1];
+        let cid = reply.words[2];
+        let line = format!("container '{}' started pid={} cid={}\n", name, pid, cid);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn container_list(stdout: usize, context: &mut CommandContext) -> Result<()> {
+    let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+    let msg = Message::new(PROCMGR_CONTAINER_LIST_LABEL, [0; 6], 0);
+    let mut reply_buf = [0u8; 4096];
+
+    let (reply_msg, payload_len) =
+        call_with_reply_buf(procmgr_endpoint, &msg, &[], &mut reply_buf)?;
+
+    if reply_msg.words[0] != 0 {
+        let line = format!("container list: error {}\n", reply_msg.words[0]);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        return Ok(());
+    }
+
+    if payload_len == 0 {
+        send_with_payload(stdout, TTY_WRITE_LABEL, b"no containers running\n")?;
+        return Ok(());
+    }
+
+    // Payload starts after Message header in reply_buf
+    let hdr_len = size_of::<Message>();
+    let payload = &reply_buf[hdr_len..hdr_len + payload_len];
+    send_with_payload(stdout, TTY_WRITE_LABEL, payload)?;
+    Ok(())
+}
+
+fn container_stop(stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+    let Some(name) = args.first() else {
+        send_with_payload(stdout, TTY_WRITE_LABEL, b"container stop: missing name\n")?;
+        return Ok(());
+    };
+
+    // First list containers to find the pid for the named container
+    let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+    let msg = Message::new(PROCMGR_CONTAINER_LIST_LABEL, [0; 6], 0);
+    let mut reply_buf = [0u8; 4096];
+    let (reply_msg, payload_len) =
+        call_with_reply_buf(procmgr_endpoint, &msg, &[], &mut reply_buf)?;
+
+    if reply_msg.words[0] != 0 || payload_len == 0 {
+        send_with_payload(stdout, TTY_WRITE_LABEL, b"container stop: no containers found\n")?;
+        return Ok(());
+    }
+
+    let hdr_len = size_of::<Message>();
+    let payload = &reply_buf[hdr_len..hdr_len + payload_len];
+    let listing = core::str::from_utf8(payload).unwrap_or("");
+
+    // Each line: "<name> <pid> <cid>"
+    let mut target_pid = None;
+    for line in listing.lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(cname), Some(pid_str)) = (parts.next(), parts.next()) {
+            if cname == name.as_str() {
+                if let Ok(pid) = usize::from_str_radix(pid_str, 10) {
+                    target_pid = Some(pid);
+                    break;
+                }
+            }
+        }
+    }
+
+    let Some(pid) = target_pid else {
+        let line = format!("container stop: '{}' not found\n", name);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        return Ok(());
+    };
+
+    // Send kill to procmgr
+    let mut kill_msg = Message::new(PROCMGR_KILL_LABEL, [0; 6], 2);
+    kill_msg.words[0] = pid;
+    kill_msg.words[1] = SIGTERM;
+    call(procmgr_endpoint, &mut kill_msg, IpcFlags::empty())?;
+
+    if kill_msg.words[0] != 0 {
+        let line = format!("container stop: kill failed ({})\n", kill_msg.words[0]);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+    } else {
+        let line = format!("container '{}' (pid={}) stopped\n", name, pid);
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+    }
+    Ok(())
 }

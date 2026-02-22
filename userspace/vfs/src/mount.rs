@@ -26,6 +26,7 @@ const FS_MKDIR: u32 = 0x308;
 const FS_RMDIR: u32 = 0x309;
 const FS_RENAME: u32 = 0x30A;
 const FS_CREATE: u32 = 0x30B;
+const FS_LINK: u32 = 0x30C;
 const IPC_MESSAGE_MAX: usize = 256;
 
 /// Directory entry for readdir results.
@@ -70,6 +71,11 @@ pub trait MountBackend: Send + Sync {
     }
 
     fn rename(&self, rel_old: &str, rel_new: &str) -> Result<()> {
+        let _ = (rel_old, rel_new);
+        Err(Error::NotImplemented)
+    }
+
+    fn link(&self, rel_old: &str, rel_new: &str) -> Result<()> {
         let _ = (rel_old, rel_new);
         Err(Error::NotImplemented)
     }
@@ -255,6 +261,18 @@ impl MountBackend for RemoteBackend {
         payload.extend_from_slice(old_bytes);
         payload.extend_from_slice(new_bytes);
         let req = Message::new(FS_RENAME, [payload.len(), 0, old_bytes.len(), 0, 0, 0], 3);
+        let mut reply = Message::new(0, [0; 6], 0);
+        call_with_payload(self.endpoint, &req, &payload, &mut reply)?;
+        parse_status(reply.words[0])
+    }
+
+    fn link(&self, rel_old: &str, rel_new: &str) -> Result<()> {
+        let old_bytes = rel_old.as_bytes();
+        let new_bytes = rel_new.as_bytes();
+        let mut payload = Vec::with_capacity(old_bytes.len() + new_bytes.len());
+        payload.extend_from_slice(old_bytes);
+        payload.extend_from_slice(new_bytes);
+        let req = Message::new(FS_LINK, [payload.len(), 0, old_bytes.len(), 0, 0, 0], 3);
         let mut reply = Message::new(0, [0; 6], 0);
         call_with_payload(self.endpoint, &req, &payload, &mut reply)?;
         parse_status(reply.words[0])
@@ -547,6 +565,15 @@ impl MountTable {
             return Err(Error::InvalidOperation);
         }
         old_mount.backend.rename(rel_old, rel_new)
+    }
+
+    pub fn link(&self, old_path: &str, new_path: &str) -> Result<()> {
+        let (old_mount, rel_old) = self.resolve(old_path)?;
+        let (new_mount, rel_new) = self.resolve(new_path)?;
+        if old_mount.prefix != new_mount.prefix {
+            return Err(Error::InvalidOperation);
+        }
+        old_mount.backend.link(rel_old, rel_new)
     }
 
     pub fn create_file(&self, path: &str, mode: usize) -> Result<()> {

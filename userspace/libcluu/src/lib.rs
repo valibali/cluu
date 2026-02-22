@@ -40,6 +40,7 @@ pub mod runtime;
 pub mod syscall;
 pub mod tar;
 pub mod time;
+pub mod toml;
 pub mod types;
 pub mod vfs_view;
 pub mod vspace;

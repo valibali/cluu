@@ -57,6 +57,8 @@ pub const VFS_RENAME: u32 = 0x20B;
 pub const VFS_RING_SETUP: u32 = 0x20C;
 /// Read into an established shared ring.
 pub const VFS_READ_RING: u32 = 0x20D;
+/// Create a hard link.
+pub const VFS_LINK: u32 = 0x20E;
 
 /// Structured enum for protocol routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +77,7 @@ pub enum VfsOp {
     Rename,
     RingSetup,
     ReadRing,
+    Link,
 }
 
 impl VfsOp {
@@ -94,6 +97,7 @@ impl VfsOp {
             VFS_RENAME => Some(Self::Rename),
             VFS_RING_SETUP => Some(Self::RingSetup),
             VFS_READ_RING => Some(Self::ReadRing),
+            VFS_LINK => Some(Self::Link),
             _ => None,
         }
     }
