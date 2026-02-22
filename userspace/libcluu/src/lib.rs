@@ -41,6 +41,7 @@ pub mod syscall;
 pub mod tar;
 pub mod time;
 pub mod types;
+pub mod vfs_view;
 pub mod vspace;
 
 // POSIX syscall stubs (feature-gated for newlib compatibility)

@@ -1,11 +1,13 @@
 //! Per-client VFS views for capability-based path filtering.
 //!
 //! Each client (identified by sender_tid) can have a `VfsView` that restricts
-//! which paths it can access.  Clients with no registered view get unrestricted
-//! access (backward compatibility during transition).
+//! which paths it can access. If no explicit view is registered, VFS can fall
+//! back to the client's stored capability profile defaults.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use libcluu::cap::CapProfile;
+use libcluu::vfs_view;
 use libcluu::{Error, Result};
 
 /// A single mount rule within a view: maps a virtual path to a real backing path.
@@ -42,12 +44,14 @@ impl VfsView {
 /// Table of per-client views, keyed by client_id (sender_tid).
 pub struct VfsViewTable {
     views: BTreeMap<usize, VfsView>,
+    profiles: BTreeMap<usize, CapProfile>,
 }
 
 impl VfsViewTable {
     pub fn new() -> Self {
         Self {
             views: BTreeMap::new(),
+            profiles: BTreeMap::new(),
         }
     }
 
@@ -56,27 +60,45 @@ impl VfsViewTable {
         self.views.insert(client_id, view);
     }
 
+    pub fn set_profile(&mut self, client_id: usize, profile: CapProfile) {
+        self.profiles.insert(client_id, profile);
+    }
+
     /// Remove a client's view (cleanup on process exit).
     pub fn remove_view(&mut self, client_id: usize) {
         self.views.remove(&client_id);
+        self.profiles.remove(&client_id);
+    }
+
+    /// Remove only the explicit view while keeping profile metadata.
+    pub fn clear_explicit_view(&mut self, client_id: usize) {
+        self.views.remove(&client_id);
+    }
+
+    fn resolve_effective_path(&self, client_id: usize, path: &str) -> Result<(String, bool)> {
+        if let Some(view) = self.views.get(&client_id) {
+            return view.resolve_path(path).ok_or(Error::NotFound);
+        }
+        let profile = match self.profiles.get(&client_id).copied() {
+            Some(bits) => bits,
+            None => return Err(Error::PermissionDenied),
+        };
+        default_view_for_profile(profile)
+            .resolve_path(path)
+            .ok_or(Error::NotFound)
     }
 
     /// Check and rewrite a path for a client.
     ///
-    /// - If no view is registered for `client_id`, passes through unchanged
-    ///   (backward compatibility).
+    /// - If no explicit view is registered, falls back to profile defaults.
+    ///   If no profile is known, returns `Err(Error::PermissionDenied)`.
     /// - If a view exists but the path doesn't match any mount rule, returns
     ///   `Err(Error::NotFound)` — indistinguishable from "path doesn't exist."
     /// - Otherwise returns the rewritten real path.
     pub fn check_path(&self, client_id: usize, path: &str) -> Result<String> {
-        let view = match self.views.get(&client_id) {
-            Some(v) => v,
-            None => return Ok(String::from(path)),
-        };
-        match view.resolve_path(path) {
-            Some((real_path, _)) => Ok(real_path),
-            None => Err(Error::NotFound),
-        }
+        validate_clean_absolute_path(path)?;
+        self.resolve_effective_path(client_id, path)
+            .map(|(real_path, _)| real_path)
     }
 
     /// Check a path for a client and also return the writable flag.
@@ -84,15 +106,43 @@ impl VfsViewTable {
     /// Same semantics as `check_path`, but also indicates whether the
     /// resolved mount allows writes.
     pub fn check_path_writable(&self, client_id: usize, path: &str) -> Result<(String, bool)> {
-        let view = match self.views.get(&client_id) {
-            Some(v) => v,
-            None => return Ok((String::from(path), true)),
-        };
-        match view.resolve_path(path) {
-            Some(result) => Ok(result),
-            None => Err(Error::NotFound),
+        validate_clean_absolute_path(path)?;
+        self.resolve_effective_path(client_id, path)
+    }
+}
+
+fn default_view_for_profile(profile: CapProfile) -> VfsView {
+    fn mount(src: &str, dst: &str, writable: bool) -> ViewMount {
+        ViewMount {
+            src: String::from(src),
+            dst: String::from(dst),
+            writable,
         }
     }
+
+    let mounts = vfs_view::default_mounts_for_profile(profile)
+        .iter()
+        .map(|(src, dst, writable)| mount(src, dst, *writable))
+        .collect();
+
+    VfsView { mounts }
+}
+
+/// Validate a request path before prefix matching/rewrite.
+///
+/// Policy:
+/// - must be absolute
+/// - reject any "." or ".." segment to prevent traversal escapes
+pub fn validate_clean_absolute_path(path: &str) -> Result<()> {
+    if !path.starts_with('/') {
+        return Err(Error::InvalidArgument);
+    }
+    for segment in path.split('/').skip(1) {
+        if segment == "." || segment == ".." {
+            return Err(Error::PermissionDenied);
+        }
+    }
+    Ok(())
 }
 
 /// Rewrite `path` if it falls under `dst_prefix`, replacing that prefix with `src_prefix`.
@@ -101,6 +151,9 @@ impl VfsViewTable {
 /// - Exact: path == dst_prefix
 /// - Subtree: path starts with dst_prefix + "/"
 fn rewrite_path(path: &str, dst_prefix: &str, src_prefix: &str) -> Option<String> {
+    if !path.starts_with('/') {
+        return None;
+    }
     if dst_prefix == "/" {
         // Root mount matches all absolute paths.
         if src_prefix == "/" {

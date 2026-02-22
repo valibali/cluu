@@ -2486,8 +2486,12 @@ fn create_user_block_image(profile: &str) -> Result<()> {
 
     let staging_dir = project_root().join("target/userfs");
     let bin_dir = staging_dir.join("bin");
+    let tmp_dir = staging_dir.join("tmp");
+    let home_root_dir = staging_dir.join("home/root");
     let _ = fs::remove_dir_all(&bin_dir);
     fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&tmp_dir)?;
+    fs::create_dir_all(&home_root_dir)?;
 
     let bin_programs = ["shell"];
     for prog in &bin_programs {

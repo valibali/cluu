@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
-static const char *kPath = "/l2a_owner_probe";
+static const char *kPath = "/tmp/l2a_owner_probe";
 void debug_print(const char *msg);
 
 int main(void) {

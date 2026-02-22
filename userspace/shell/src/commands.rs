@@ -1870,6 +1870,15 @@ impl BuiltinCommand for Ext2UnlinkBuiltin {
         };
 
         // O_CREAT | O_RDWR
+        if let Err(err) = vfs.mkdir("/tmp", 0o755) {
+            if err != Error::AlreadyExists {
+                let line = format!("ext2ownerdeny: FAIL mkdir /tmp {:?}\n", err);
+                let _ = debug_print(line.as_str());
+                send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                return Ok(());
+            }
+        }
+
         let created = match vfs.open_with(path, 0o100 | 2, 0o644) {
             Ok(file) => file,
             Err(err) => {
@@ -1918,7 +1927,7 @@ impl BuiltinCommand for Ext2OwnerDenyBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
-        let path = "/l2a_owner_probe";
+        let path = "/tmp/l2a_owner_probe";
         let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
             Ok(ep) => ep,
             Err(err) => {

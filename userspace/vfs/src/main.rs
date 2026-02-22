@@ -69,8 +69,11 @@ const S_IFDIR: usize = 0o040000;
 const MODE_FILE: usize = S_IFREG | 0o644;
 const S_IFCHR: usize = 0o020000;
 const MODE_DIR: usize = S_IFDIR | 0o755;
+const O_WRONLY: usize = 1;
+const O_RDWR: usize = 2;
 const O_CREAT: usize = 0o100;
 const O_EXCL: usize = 0o200;
+const O_TRUNC: usize = 0o1000;
 
 macro_rules! vfs_trace {
     ($($arg:tt)*) => {
@@ -154,7 +157,7 @@ fn run_vfs() -> Result<()> {
             libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, u64::MAX)?;
         if let Some((msg, payload)) = parse_message(&buf[..len]) {
             if index == 1 {
-                let _ = registry::handle_incoming_message(&msg, payload);
+                server.handle_registry_message(&msg, payload, sender_tid);
                 continue;
             }
             if let Err(err) = server.handle_message(&msg, payload, sender_tid) {
@@ -464,6 +467,8 @@ struct VfsServer {
     free_ring_slots: Vec<usize>,
     clock_token: usize,
     views: view::VfsViewTable,
+    // Bound once from the first privileged procmgr self-view bootstrap message.
+    view_manager_tid: Option<usize>,
 }
 
 impl VfsServer {
@@ -502,6 +507,7 @@ impl VfsServer {
             free_ring_slots,
             clock_token,
             views: view::VfsViewTable::new(),
+            view_manager_tid: None,
         }
     }
 
@@ -524,7 +530,7 @@ impl VfsServer {
     fn handle_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
         // Control messages handled before regular VFS ops.
         if msg.tag.label == libcluu::ipc::VFS_SET_VIEW_LABEL {
-            return self.handle_set_view(msg, payload);
+            return self.handle_set_view(msg, payload, sender_tid);
         }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
@@ -557,10 +563,67 @@ impl VfsServer {
         result
     }
 
+    fn handle_registry_message(&mut self, msg: &Message, payload: &[u8], _sender_tid: usize) {
+        let _ = registry::handle_incoming_message(msg, payload);
+    }
+
     /// Handle VFS_SET_VIEW_LABEL: register a per-client filesystem view.
-    fn handle_set_view(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
-        let client_id = msg.words[1];
+    fn handle_set_view(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
+        if sender_tid == 0 {
+            let _ = debug_print("vfs: set_view denied unauthenticated sender");
+            return Err(Error::PermissionDenied);
+        }
+        let requested_client_id = msg.words[1];
         let mount_count = msg.words[2];
+        let profile_bits = if msg.tag.words >= 4 {
+            msg.words[3] as u16
+        } else {
+            0
+        };
+        let profile = libcluu::cap::CapProfile::from_bits_truncate(profile_bits);
+        if let Some(manager_tid) = self.view_manager_tid {
+            if manager_tid != sender_tid {
+                let _ = debug_print(&format!(
+                    "vfs: set_view denied sender_tid={} manager_tid={}",
+                    sender_tid, manager_tid
+                ));
+                return Err(Error::PermissionDenied);
+            }
+        } else {
+            // Bootstrap manager binding from procmgr self-view installation.
+            let bootstrap_allowed = requested_client_id == 0
+                && mount_count > 0
+                && profile.contains(libcluu::cap::CapProfile::ADMIN);
+            if !bootstrap_allowed {
+                let _ = debug_print("vfs: set_view denied manager bootstrap preconditions");
+                return Err(Error::PermissionDenied);
+            }
+            self.view_manager_tid = Some(sender_tid);
+            let _ = debug_print(&format!(
+                "vfs: view manager bound sender_tid={}",
+                sender_tid
+            ));
+        }
+
+        let client_id = if requested_client_id == 0 {
+            sender_tid
+        } else {
+            requested_client_id
+        };
+        if mount_count == 0 {
+            if profile_bits == 0 {
+                self.views.remove_view(client_id);
+                let _ = debug_print(&format!("vfs: set_view cleared client={}", client_id));
+            } else {
+                self.views.set_profile(client_id, profile);
+                self.views.clear_explicit_view(client_id);
+                let _ = debug_print(&format!(
+                    "vfs: set_view fallback profile-only client={} profile={:#x}",
+                    client_id, profile_bits
+                ));
+            }
+            return Ok(());
+        }
 
         let mut mounts = alloc::vec::Vec::new();
         let mut offset = 0;
@@ -568,7 +631,7 @@ impl VfsServer {
         for _ in 0..mount_count {
             // Each mount: u16 src_len LE + u16 dst_len LE + u8 flags + src_bytes + dst_bytes
             if offset + 5 > payload.len() {
-                break;
+                return Err(Error::InvalidArgument);
             }
             let src_len = u16::from_le_bytes([payload[offset], payload[offset + 1]]) as usize;
             let dst_len = u16::from_le_bytes([payload[offset + 2], payload[offset + 3]]) as usize;
@@ -576,22 +639,29 @@ impl VfsServer {
             offset += 5;
 
             if offset + src_len + dst_len > payload.len() {
-                break;
+                return Err(Error::InvalidArgument);
             }
-            let src = core::str::from_utf8(&payload[offset..offset + src_len])
-                .unwrap_or("")
-                .into();
+            let src: alloc::string::String =
+                core::str::from_utf8(&payload[offset..offset + src_len])
+                    .map_err(|_| Error::InvalidArgument)?
+                    .into();
             offset += src_len;
-            let dst = core::str::from_utf8(&payload[offset..offset + dst_len])
-                .unwrap_or("")
-                .into();
+            let dst: alloc::string::String =
+                core::str::from_utf8(&payload[offset..offset + dst_len])
+                    .map_err(|_| Error::InvalidArgument)?
+                    .into();
             offset += dst_len;
+            view::validate_clean_absolute_path(src.as_str())?;
+            view::validate_clean_absolute_path(dst.as_str())?;
 
             mounts.push(view::ViewMount {
                 src,
                 dst,
                 writable: (flags & 1) != 0,
             });
+        }
+        if offset != payload.len() {
+            return Err(Error::InvalidArgument);
         }
 
         let _ = debug_print(&format!(
@@ -601,12 +671,14 @@ impl VfsServer {
         ));
 
         self.views.set_view(client_id, view::VfsView { mounts });
+        if profile_bits != 0 {
+            self.views.set_profile(client_id, profile);
+        }
         Ok(())
     }
 
     /// Check a path against the client's VFS view, rewriting if needed.
-    /// Returns the real backing path, or Error::NotFound if outside the view.
-    /// If no view is registered for this client, passes through unchanged.
+    /// Returns the real backing path, or an error if disallowed.
     fn view_check_path(&self, client_id: usize, path: &str) -> Result<alloc::string::String> {
         self.views.check_path(client_id, path)
     }
@@ -674,12 +746,24 @@ impl VfsServer {
         let flags = msg.words[2];
         let mode = msg.words[3];
 
-        // View check: rewrite path if client has a registered view.
-        let real_path = match self.view_check_path(client_id, path) {
-            Ok(p) => p,
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        let write_capable_open = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0;
+        let real_path = if write_capable_open {
+            // Write-capable opens must resolve via a writable mount.
+            match self.view_check_path_writable(client_id, path) {
+                Ok(p) => p,
+                Err(err) => {
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            }
+        } else {
+            // Read-only opens only require path visibility in the caller view.
+            match self.view_check_path(client_id, path) {
+                Ok(p) => p,
+                Err(err) => {
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
             }
         };
 

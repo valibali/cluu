@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
-use core::mem::size_of;
+use core::mem::{size_of, take};
 use libcluu::boot::{
     process_info,
     ProcessInfo,
@@ -40,6 +40,12 @@ use libcluu::*;
 
 /// A list of (src, dst, writable) mount tuples representing a process's VFS view.
 type ViewMountList = Vec<(&'static str, &'static str, bool)>;
+
+struct PendingVfsView {
+    client_tid: usize,
+    mounts: ViewMountList,
+    profile: CapProfile,
+}
 
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
 const SERVICE_STACK_BASE: usize = 0x6d000000;
@@ -101,6 +107,8 @@ struct ProcessManager {
     pid_to_cookie: BTreeMap<usize, usize>, // pid -> cookie (for PROC_KILL)
     cookie_to_pid: BTreeMap<usize, usize>, // cookie -> pid (for exit handling)
     pid_owner_tid: BTreeMap<usize, usize>, // pid -> authenticated owner thread id
+    pid_to_tid: BTreeMap<usize, usize>,  // pid -> child main thread id
+    tid_to_pid: BTreeMap<usize, usize>,  // child main thread id -> pid
     pid_ctty: BTreeMap<usize, u8>,       // pid -> controlling terminal VT index
     pid_to_profile: BTreeMap<usize, CapProfile>, // pid -> capability profile
     pid_to_view: BTreeMap<usize, ViewMountList>, // pid -> VFS view mounts
@@ -116,6 +124,8 @@ struct ProcessManager {
     clock_token: usize,
     spawn_seq_next: usize,
     vfs_file_cache: BTreeMap<String, libcluu::fs::client::VfsFile>,
+    pending_vfs_views: Vec<PendingVfsView>,
+    manager_vfs_view_registered: bool,
 }
 
 impl ProcessManager {
@@ -139,6 +149,8 @@ impl ProcessManager {
             pid_to_cookie: BTreeMap::new(),
             cookie_to_pid: BTreeMap::new(),
             pid_owner_tid: BTreeMap::new(),
+            pid_to_tid: BTreeMap::new(),
+            tid_to_pid: BTreeMap::new(),
             pid_ctty: BTreeMap::new(),
             pid_to_profile: BTreeMap::new(),
             pid_to_view: BTreeMap::new(),
@@ -152,6 +164,8 @@ impl ProcessManager {
             clock_token: info.tokens[TOKEN_CLOCK],
             spawn_seq_next: 1,
             vfs_file_cache: BTreeMap::new(),
+            pending_vfs_views: Vec::new(),
+            manager_vfs_view_registered: false,
         })
     }
 
@@ -177,7 +191,88 @@ impl ProcessManager {
         ));
     }
 
-    fn register_vfs_view_for_thread(&self, thread_token: usize, mounts: &[(&str, &str, bool)]) {
+    fn queue_pending_vfs_view(
+        &mut self,
+        client_tid: usize,
+        mounts: ViewMountList,
+        profile: CapProfile,
+    ) {
+        if let Some(pending) = self
+            .pending_vfs_views
+            .iter_mut()
+            .find(|entry| entry.client_tid == client_tid)
+        {
+            pending.mounts = mounts;
+            pending.profile = profile;
+            return;
+        }
+        self.pending_vfs_views.push(PendingVfsView {
+            client_tid,
+            mounts,
+            profile,
+        });
+    }
+
+    fn register_manager_vfs_view(&mut self) {
+        if self.vfs_endpoint == 0 || self.manager_vfs_view_registered {
+            return;
+        }
+        let manager_mounts = default_view_for_profile(CapProfile::SUPERVISOR);
+        match send_vfs_set_view(
+            self.vfs_endpoint,
+            0,
+            &manager_mounts,
+            CapProfile::SUPERVISOR,
+        ) {
+            Ok(()) => {
+                self.manager_vfs_view_registered = true;
+            }
+            Err(err) => {
+                let _ = debug_print(&format!(
+                    "procmgr: failed to register manager VFS view err={:?}",
+                    err
+                ));
+            }
+        }
+    }
+
+    fn flush_pending_vfs_views(&mut self) {
+        if self.vfs_endpoint == 0 || self.pending_vfs_views.is_empty() {
+            return;
+        }
+        let pending = take(&mut self.pending_vfs_views);
+        for entry in pending {
+            if let Err(err) = send_vfs_set_view(
+                self.vfs_endpoint,
+                entry.client_tid,
+                &entry.mounts,
+                entry.profile,
+            ) {
+                let _ = debug_print(&format!(
+                    "procmgr: deferred VFS_SET_VIEW failed tid={} err={:?}",
+                    entry.client_tid, err
+                ));
+                self.queue_pending_vfs_view(entry.client_tid, entry.mounts, entry.profile);
+            }
+        }
+    }
+
+    fn ensure_vfs_endpoint(&mut self) -> Result<()> {
+        if self.vfs_endpoint == 0 {
+            self.vfs_endpoint = registry::subscribe_output("vfs", "main")?;
+            let _ = debug_print(&format!("procmgr: vfs_endpoint={}", self.vfs_endpoint));
+        }
+        self.register_manager_vfs_view();
+        self.flush_pending_vfs_views();
+        Ok(())
+    }
+
+    fn register_vfs_view_for_thread(
+        &mut self,
+        thread_token: usize,
+        mounts: &[(&'static str, &'static str, bool)],
+        profile: CapProfile,
+    ) {
         let thread_tid = match thread_get_id(thread_token) {
             Ok(tid) => tid,
             Err(err) => {
@@ -189,11 +284,44 @@ impl ProcessManager {
             }
         };
 
-        if let Err(err) = send_vfs_set_view(self.vfs_endpoint, thread_tid, mounts) {
+        let mounts_vec = mounts.to_vec();
+        if self.vfs_endpoint == 0 {
+            self.queue_pending_vfs_view(thread_tid, mounts_vec, profile);
+            let _ = self.ensure_vfs_endpoint();
+            return;
+        }
+        if let Err(err) = send_vfs_set_view(self.vfs_endpoint, thread_tid, mounts, profile) {
             let _ = debug_print(&format!(
                 "procmgr: VFS_SET_VIEW failed tid={} err={:?}",
                 thread_tid, err
             ));
+            self.queue_pending_vfs_view(thread_tid, mounts_vec, profile);
+        }
+    }
+
+    fn clear_vfs_view_for_tid(&mut self, client_tid: usize) {
+        if client_tid == 0 {
+            return;
+        }
+        if self.vfs_endpoint == 0 {
+            self.queue_pending_vfs_view(client_tid, Vec::new(), CapProfile::empty());
+            let _ = self.ensure_vfs_endpoint();
+            if self.vfs_endpoint == 0 {
+                return;
+            }
+        }
+        let empty_mounts: [(&str, &str, bool); 0] = [];
+        if let Err(err) = send_vfs_set_view(
+            self.vfs_endpoint,
+            client_tid,
+            &empty_mounts,
+            CapProfile::empty(),
+        ) {
+            let _ = debug_print(&format!(
+                "procmgr: clear VFS_SET_VIEW failed tid={} err={:?}",
+                client_tid, err
+            ));
+            self.queue_pending_vfs_view(client_tid, Vec::new(), CapProfile::empty());
         }
     }
 
@@ -296,8 +424,10 @@ impl ProcessManager {
 
         // Clean up PID tracking
         if let Some(pid) = self.cookie_to_pid.remove(&cookie) {
+            let child_tid = self.pid_to_tid.get(&pid).copied().unwrap_or(0);
+            self.clear_vfs_view_for_tid(child_tid);
             self.pid_to_cookie.remove(&pid);
-            self.pid_to_profile.remove(&pid);
+            self.clear_pid_runtime_state(pid);
             if let Some(owner_tid) = self.pid_owner_tid.remove(&pid) {
                 self.on_child_reaped(owner_tid);
             }
@@ -414,7 +544,7 @@ impl ProcessManager {
         let saved = self.tty_endpoints[0];
         self.tty_endpoints[0] = tty_ep;
 
-        if let Ok((thread_token, ..)) = self.spawn_service(
+        if let Ok((thread_token, _cookie, pid, _stdin_send)) = self.spawn_service(
             SERVICE_PATH,
             DEFAULT_PRIORITY,
             &shell_argv_payload,
@@ -426,7 +556,8 @@ impl ProcessManager {
         ) {
             // Register VFS view for the shell based on USER profile.
             let view_mounts = default_view_for_profile(CapProfile::USER);
-            self.register_vfs_view_for_thread(thread_token, &view_mounts);
+            self.register_vfs_view_for_thread(thread_token, &view_mounts, CapProfile::USER);
+            self.pid_to_view.insert(pid, view_mounts);
         }
 
         self.tty_endpoints[0] = saved;
@@ -652,7 +783,7 @@ impl ProcessManager {
 
         // Register VFS view for the service based on its profile.
         let view_mounts = default_view_for_profile(requested_profile);
-        self.register_vfs_view_for_thread(thread_token, &view_mounts);
+        self.register_vfs_view_for_thread(thread_token, &view_mounts, requested_profile);
 
         let _ = debug_print(&format!("procmgr: service '{}' spawned", path));
         Ok(())
@@ -708,17 +839,67 @@ impl ProcessManager {
             return Ok(());
         }
 
-        // ── Policy: caller profile for spawn validation ──
-        // Phase B: default to USER for all user-spawn callers.
-        // Future: add tid_to_pid map for real caller lookup.
-        let caller_profile = CapProfile::USER;
-        let child_profile = caller_profile; // inherit parent profile
-
-        if !caller_profile.can_grant(child_profile) {
+        // ── Policy: authenticated caller resolution + profile/view inheritance ──
+        let (caller_profile, child_view_mounts) = if sender_tid == 0 {
+            // Boot/legacy sender path: caller identity is unavailable, so use
+            // profile defaults for compatibility.
+            let profile = CapProfile::USER;
+            (profile, default_view_for_profile(profile))
+        } else {
+            let caller_pid = match self.tid_to_pid.get(&sender_tid).copied() {
+                Some(pid) => pid,
+                None => {
+                    let _ = debug_print(&format!(
+                        "procmgr: spawn denied unknown caller sender_tid={}",
+                        sender_tid
+                    ));
+                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                    let _ = self.send_spawn_reply(reply_token, &reply_msg);
+                    return Ok(());
+                }
+            };
+            let caller_profile = match self.pid_to_profile.get(&caller_pid).copied() {
+                Some(profile) => profile,
+                None => {
+                    let _ = debug_print(&format!(
+                        "procmgr: spawn denied missing caller profile pid={}",
+                        caller_pid
+                    ));
+                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                    let _ = self.send_spawn_reply(reply_token, &reply_msg);
+                    return Ok(());
+                }
+            };
+            let caller_view = match self.pid_to_view.get(&caller_pid) {
+                Some(view) => view.clone(),
+                None => {
+                    let _ = debug_print(&format!(
+                        "procmgr: spawn denied missing caller view pid={}",
+                        caller_pid
+                    ));
+                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                    let _ = self.send_spawn_reply(reply_token, &reply_msg);
+                    return Ok(());
+                }
+            };
+            let inherited_view = caller_view.clone();
+            if !can_narrow_view(&caller_view, &inherited_view) {
+                let _ = debug_print(&format!(
+                    "procmgr: spawn denied view inheritance caller_pid={}",
+                    caller_pid
+                ));
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                let _ = self.send_spawn_reply(reply_token, &reply_msg);
+                return Ok(());
+            }
+            (caller_profile, inherited_view)
+        };
+        if !caller_profile.contains(CapProfile::SPAWN) {
             reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
             let _ = self.send_spawn_reply(reply_token, &reply_msg);
             return Ok(());
         }
+        let child_profile = caller_profile;
 
         let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
         let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
@@ -782,11 +963,8 @@ impl ProcessManager {
                 reply_msg.words[1] = pid; // Return PID instead of thread_token
                 reply_msg.words[2] = cookie; // Return cookie for _wait()
                 reply_msg.words[3] = child_stdin_send; // Parent send-cap for foreground routing.
-                self.pid_to_profile.insert(pid, child_profile);
-                // Register VFS view for the child based on its profile.
-                let view_mounts = default_view_for_profile(child_profile);
-                self.register_vfs_view_for_thread(thread_token, &view_mounts);
-                self.pid_to_view.insert(pid, view_mounts);
+                self.register_vfs_view_for_thread(thread_token, &child_view_mounts, child_profile);
+                self.pid_to_view.insert(pid, child_view_mounts.clone());
                 if sender_tid != 0 {
                     let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
                     *entry = entry.saturating_add(1);
@@ -813,7 +991,13 @@ impl ProcessManager {
         requested_notify_endpoint: usize,
     ) -> Result<usize> {
         if sender_tid == 0 {
-            return Err(Error::PermissionDenied);
+            if requested_notify_endpoint != 0 {
+                let _ = debug_print(
+                    "procmgr: deny notify endpoint bind for unauthenticated sender_tid=0",
+                );
+                return Err(Error::PermissionDenied);
+            }
+            return Ok(0);
         }
         if requested_notify_endpoint != 0 {
             self.sender_notify_endpoint
@@ -855,6 +1039,14 @@ impl ProcessManager {
                     ));
                 }
             }
+        }
+    }
+
+    fn clear_pid_runtime_state(&mut self, pid: usize) {
+        self.pid_to_profile.remove(&pid);
+        self.pid_to_view.remove(&pid);
+        if let Some(thread_tid) = self.pid_to_tid.remove(&pid) {
+            self.tid_to_pid.remove(&thread_tid);
         }
     }
 
@@ -1098,12 +1290,16 @@ impl ProcessManager {
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
+        let thread_tid = thread_get_id(thread_token)?;
         self.log_spawn_stage(spawn_seq, "thread_start_done", spawn_start);
 
         self.exit_table.insert(cookie, thread_token);
         self.pid_to_cookie.insert(pid, cookie);
         self.cookie_to_pid.insert(cookie, pid);
         self.pid_owner_tid.insert(pid, owner_tid);
+        self.pid_to_tid.insert(pid, thread_tid);
+        self.tid_to_pid.insert(thread_tid, pid);
+        self.pid_to_profile.insert(pid, profile);
         self.cookie_to_space.insert(cookie, space_token);
         // Track derived tokens/endpoints for cleanup on exit (skip 0-value slots)
         let mut derived_tokens: Vec<usize> = [
@@ -1160,12 +1356,9 @@ impl ProcessManager {
         // #endregion
 
         // Ensure we have VFS endpoint
-        if self.vfs_endpoint == 0 {
-            self.vfs_endpoint = registry::subscribe_output("vfs", "main").ok()?;
+        if self.ensure_vfs_endpoint().is_err() {
+            return None;
         }
-        // #region agent log
-        let _ = debug_print(&format!("procmgr: vfs_endpoint={}", self.vfs_endpoint));
-        // #endregion
 
         let client_id = registry::control_endpoint();
         if client_id == 0 {
@@ -1438,11 +1631,8 @@ impl ProcessManager {
 
     fn map_elf_from_vfs(&mut self, path: &str, space_token: usize) -> Result<Option<usize>> {
         // Ensure we have VFS endpoint
-        if self.vfs_endpoint == 0 {
-            match registry::subscribe_output("vfs", "main") {
-                Ok(token) => self.vfs_endpoint = token,
-                Err(_) => return Ok(None),
-            }
+        if self.ensure_vfs_endpoint().is_err() {
+            return Ok(None);
         }
 
         let client_id = registry::control_endpoint();
@@ -1577,9 +1767,11 @@ impl ProcessManager {
         match signal_result {
             Ok(()) => {
                 if signal == SIGINT || signal == SIGTERM || signal == SIGKILL {
+                    let child_tid = self.pid_to_tid.get(&target_pid).copied().unwrap_or(0);
+                    self.clear_vfs_view_for_tid(child_tid);
                     self.exit_table.remove(&cookie);
                     self.pid_to_cookie.remove(&target_pid);
-                    self.pid_to_profile.remove(&target_pid);
+                    self.clear_pid_runtime_state(target_pid);
                     self.cookie_to_pid.remove(&cookie);
                     if let Some(owner_tid) = self.pid_owner_tid.remove(&target_pid) {
                         self.on_child_reaped(owner_tid);
@@ -1864,37 +2056,8 @@ fn derive_slot(base: usize, rights: Rights) -> Result<usize> {
 ///
 /// Returns a list of (src, dst, writable) tuples.  For Phase C these are
 /// identity mappings (src == dst); Phase D will add path remapping.
-///
-/// SUPERVISOR gets no mounts — the VFS pass-through (no registered view)
-/// gives full access.
 fn default_view_for_profile(profile: CapProfile) -> Vec<(&'static str, &'static str, bool)> {
-    if profile.contains(CapProfile::ADMIN) {
-        // SUPERVISOR: don't register a view → pass-through = full access.
-        return Vec::new();
-    }
-    if profile.contains(CapProfile::DEVICE) {
-        // SERVICE: /bin(ro), /lib(ro), /dev(rw), /etc(ro), /tmp(rw)
-        return alloc::vec![
-            ("/bin", "/bin", false),
-            ("/lib", "/lib", false),
-            ("/dev", "/dev", true),
-            ("/etc", "/etc", false),
-            ("/tmp", "/tmp", true),
-            ("/dev/initrd", "/dev/initrd", false),
-        ];
-    }
-    if profile.contains(CapProfile::IPC) {
-        // USER: /bin(ro), /lib(ro), /tmp(rw), /home/root(rw), /dev/initrd(ro)
-        return alloc::vec![
-            ("/bin", "/bin", false),
-            ("/lib", "/lib", false),
-            ("/tmp", "/tmp", true),
-            ("/home/root", "/home/root", true),
-            ("/dev/initrd", "/dev/initrd", false),
-        ];
-    }
-    // SANDBOXED: no filesystem access.
-    Vec::new()
+    libcluu::vfs_view::default_mounts_for_profile(profile).to_vec()
 }
 
 /// Check whether `child_view` is a valid narrowing of `parent_view`.
@@ -1930,13 +2093,14 @@ fn can_narrow_view(parent_view: &[(&str, &str, bool)], child_view: &[(&str, &str
 ///
 /// `client_tid` is the child's kernel `ThreadId` (the `sender_tid` seen by VFS).
 /// `mounts` is the list of (src, dst, writable) tuples from `default_view_for_profile`.
-/// Does nothing if `mounts` is empty (SUPERVISOR pass-through) or VFS endpoint is 0.
+/// A `client_tid` of 0 means "sender_tid" (manager self-view bootstrap path).
 fn send_vfs_set_view(
     vfs_endpoint: usize,
     client_tid: usize,
     mounts: &[(&str, &str, bool)],
+    profile: CapProfile,
 ) -> Result<()> {
-    if vfs_endpoint == 0 || mounts.is_empty() {
+    if vfs_endpoint == 0 {
         return Ok(());
     }
 
@@ -1952,10 +2116,11 @@ fn send_vfs_set_view(
         payload.extend_from_slice(dst_bytes);
     }
 
-    let mut msg = Message::new(ipc::VFS_SET_VIEW_LABEL, [0; 6], 3);
+    let mut msg = Message::new(ipc::VFS_SET_VIEW_LABEL, [0; 6], 4);
     msg.words[0] = payload.len();
     msg.words[1] = client_tid;
     msg.words[2] = mounts.len();
+    msg.words[3] = profile.bits() as usize;
     ipc::send_msg_with_payload(vfs_endpoint, &msg, &payload)
 }
 

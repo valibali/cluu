@@ -61,6 +61,7 @@ pub const PROCMGR_SPAWN_SERVICE_LABEL: u32 = 20;
 /// Procmgr → VFS: register a per-client filesystem view.
 /// words[1] = client_id (sender_tid of the target process),
 /// words[2] = mount count.
+/// words[3] = CapProfile bits for default-view fallback (0 = clear profile on empty mount update).
 /// Payload: for each mount: u16 src_len LE + u16 dst_len LE + u8 flags (bit 0 = writable) + src_bytes + dst_bytes.
 pub const VFS_SET_VIEW_LABEL: u32 = 21;
 
