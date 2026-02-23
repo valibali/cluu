@@ -204,6 +204,10 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
             SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
             ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
+        legacy_p1)
+            TEST_COMMAND="spawn minimal"
+            SHELL_AUTOSTART_CMD_DEFAULT="spawn minimal"
+            ;;
         *) TEST_COMMAND="spawn hello" ;;
     esac
 fi

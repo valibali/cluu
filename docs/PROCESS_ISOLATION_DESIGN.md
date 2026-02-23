@@ -256,20 +256,25 @@ ProcessInfo field (future expansion).
 
 ### 2.7 Service Profile Assignments
 
-Every existing service gets a concrete profile assignment:
+Every service gets its **minimal** profile — only the capability bits it
+actually needs. Most services were historically over-privileged with the
+full SERVICE bitmask.
 
-| Service     | Profile       | Rationale                                               |
-|-------------|---------------|---------------------------------------------------------|
-| init        | SUPERVISOR    | Bootstrap authority, holds root token                   |
-| procmgr     | SUPERVISOR    | Sole spawn authority, derives all child tokens          |
-| console     | SERVICE       | Needs device (framebuffer), space_grant (shared memory) |
-| tty         | SERVICE       | Needs registry (to subscribe to console, spawn shell)   |
-| kbd         | SERVICE       | Needs device (IRQ), registry (subscribe to tty/vtmgr)   |
-| vtmgr       | SERVICE       | Needs registry, spawn (to request tty:N from procmgr)   |
-| vfs         | SERVICE       | Needs device (virtio), space_grant (grant reads)        |
-| shell       | USER          | Needs spawn (child processes), VFS (file access)         |
-| user program| USER          | Inherits shell's profile or narrower                     |
-| plugin      | SANDBOXED     | IPC only — communicates through parent's pipes           |
+| Service     | Profile       | Hex    | Bits Needed                             | Rationale                                  |
+|-------------|---------------|--------|-----------------------------------------|--------------------------------------------|
+| init        | SUPERVISOR    | `0xFF` | All                                     | Bootstrap authority, holds root token      |
+| procmgr     | SUPERVISOR    | `0xFF` | All                                     | Sole spawn authority, derives all tokens   |
+| vfs         | Custom        | `0x25` | IPC + REGISTRY + SPACE_GRANT            | Serve clients, advertise, zero-copy grants |
+| virtio-blk  | Custom        | `0x37` | IPC + REGISTRY + DEVICE + SPACE_GRANT   | PCI BAR, DMA, shared memory with VFS       |
+| console     | Custom        | `0x17` | IPC + REGISTRY + DEVICE                 | Framebuffer mapping, advertise endpoints   |
+| kbd         | Custom        | `0x17` | IPC + REGISTRY + DEVICE                 | IRQ attachment, subscribe to tty endpoints |
+| vtmgr       | Custom        | `0x05` | IPC + REGISTRY                          | Coordinate VTs via IPC, no direct spawn    |
+| registry    | Custom        | `0x05` | IPC + REGISTRY                          | Process subscriptions, self-register       |
+| timeserver  | Custom        | `0x05` | IPC + REGISTRY                          | Serve time queries                         |
+| VT (tty+shell) | USER       | `0x0F` | IPC + SPAWN + REGISTRY + VFS            | Terminal + shell colocated (see 4.6)       |
+| shell       | USER          | `0x0F` | IPC + SPAWN + REGISTRY + VFS            | Standalone shell container                 |
+| user program| USER          | `0x0F` | Inherits shell's profile or narrower    | —                                          |
+| plugin      | SANDBOXED     | `0x01` | IPC only                                | Communicates through parent's pipes        |
 
 ---
 
@@ -726,6 +731,102 @@ fn validate_spawn(caller: &Process, request: &SpawnRequest) -> Result<()> {
 }
 ```
 
+### 4.6 VT Containers
+
+A Virtual Terminal (VT) is a single container that colocates the tty process
+and the shell process. The container profile is USER (`0x0F`).
+
+```dockerfile
+# containers/vt/Cluufile
+FROM base
+PROFILE ipc spawn registry vfs
+BUILD "cargo build --release -p tty" target/x86_64-cluu-user/release/tty /bin/tty
+BUILD "cargo build --release -p shell" target/x86_64-cluu-user/release/shell /bin/shell
+ENTRYPOINT /bin/tty
+PARAM tty_instance
+PRIORITY 205
+ENDPOINT grantable
+```
+
+The ENTRYPOINT is tty. tty spawns shell internally (via procmgr, same as
+today). Both processes share the container's VFS view, private storage, and
+container_id. Child processes spawned by the shell also inherit the same
+container_id.
+
+Container lifecycle = ENTRYPOINT lifecycle: the VT container lives as long
+as tty lives. If shell exits, tty can respawn it. If tty exits, the
+container is destroyed and all children are cleaned up.
+
+A standalone shell container also exists for non-VT use cases:
+
+```dockerfile
+# containers/shell/Cluufile
+FROM base
+PROFILE ipc spawn registry vfs
+BUILD "cargo build --release -p shell" target/x86_64-cluu-user/release/shell /bin/shell
+ENTRYPOINT /bin/shell
+```
+
+When overlay/layering is introduced, the standalone shell becomes
+lightweight via shared base layers with the VT container.
+
+### 4.7 Two-Tier Boot Model
+
+Services are divided into two tiers based on the bootstrap ordering
+constraint: container-run requires procmgr + VFS + ext2, but ext2 requires
+virtio-blk, which must be spawned first.
+
+**Tier 1: Primordial services (init-spawned from initrd)**
+
+These provide the infrastructure that containers depend on. They cannot go
+through the container-run flow because the required infrastructure doesn't
+exist yet when they start.
+
+```
+init → registry → timeserver → procmgr → vfs → virtio-blk
+```
+
+Init spawns these 5 directly using the root token, same as today. They
+still have CapProfiles, VFS views, and private storage — they ARE
+containers in every functional sense. They just aren't spawned from a
+Cluufile.
+
+**Tier 2: System service containers (procmgr-spawned from ext2)**
+
+Once the primordials are running and ext2 is mounted, all subsequent
+services are real image containers with Cluufiles:
+
+```
+procmgr reads /etc/autostart.toml
+procmgr → container run kbd
+procmgr → container run console (instance=0)
+procmgr → container run vtmgr
+procmgr → container run vt (instance=0)
+```
+
+Init sends `BOOT_PHASE2_LABEL` to procmgr after all primordials are up.
+Procmgr reads `/etc/autostart.toml` from ext2 and starts Tier 2 services.
+
+```toml
+# /etc/autostart.toml
+[[service]]
+name = "kbd"
+
+[[service]]
+name = "console"
+params = { console_instance = 0 }
+
+[[service]]
+name = "vtmgr"
+
+[[service]]
+name = "vt"
+params = { tty_instance = 0 }
+```
+
+On-demand VT creation (Ctrl+Alt+Fn) goes through the same path:
+vtmgr sends `container run vt` with `params = {tty_instance = N}`.
+
 ---
 
 ## 5. Spawn Protocol
@@ -1013,13 +1114,13 @@ Cluufile-based container packaging with extract-on-install and merge-at-build.
 | E3  | `container-build` command (merge base + COPY)     | done    | E2      |
 | E4  | Userdisk integration (copy images to /var/images/) | done   | E3      |
 | E5  | Minimal TOML parser (no_std) in libcluu           | done    | —       |
-| E6  | Procmgr: container run handler (manifest + spawn) | pending | E4, E5  |
-| E7  | VFS hardlink support (FS_LINK + VFS_LINK)         | pending | —       |
+| E6  | Procmgr: container run handler (manifest + spawn) | done    | E4, E5  |
+| E7  | VFS hardlink support (FS_LINK + VFS_LINK)         | done    | —       |
 | E8  | Procmgr: seed persistent data via hardlinks       | pending | E6, E7  |
-| E9  | Shell builtin: `container run <name>`             | pending | E6      |
-| E10 | Shell builtin: `container list`                   | pending | E6      |
-| E11 | Shell builtin: `container stop <name>`            | pending | E6      |
-| E12 | Extract container-build from xtask to `tools/`    | pending | E3      |
+| E9  | Shell builtin: `container run <name>`             | done    | E6      |
+| E10 | Shell builtin: `container list`                   | done    | E6      |
+| E11 | Shell builtin: `container stop <name>`            | done    | E6      |
+| E12 | Extract container-build from xtask to `tools/`    | done    | E3      |
 | E13 | Integration test: build + run container            | pending | E9      |
 
 Critical path: E1 → E2 → E3 → E4 → E6 → E9 → E13

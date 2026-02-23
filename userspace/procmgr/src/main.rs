@@ -1799,7 +1799,7 @@ impl ProcessManager {
         sender_tid: usize,
     ) -> Result<()> {
         let reply_token = extract_reply_id(msg);
-        let mut reply_msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
+        let mut reply_msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 4);
 
         // Extract image name from payload
         let image_name = match core::str::from_utf8(payload) {
@@ -1905,6 +1905,17 @@ impl ProcessManager {
             return Ok(());
         }
 
+        // Fix E: Extract notify_endpoint from caller message (same as handle_spawn_message)
+        let notify_endpoint = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
+        let notify_endpoint = match self.resolve_notify_endpoint(sender_tid, notify_endpoint) {
+            Ok(endpoint) => endpoint,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
         // Allocate container_id and create dirs
         let mut container_id = self.next_container_id();
         if !self.create_container_dirs(container_id) {
@@ -1925,6 +1936,12 @@ impl ProcessManager {
             .map(|a| a.iter().map(|s| s.clone()).collect())
             .unwrap_or_default();
 
+        // Fix B: Build argv payload with binary path as argv[0]
+        let mut argv_payload: Vec<u8> = Vec::new();
+        argv_payload.extend_from_slice(binary.as_bytes());
+        argv_payload.push(0);
+        let argc = 1usize;
+
         // Spawn the process
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
@@ -1938,29 +1955,25 @@ impl ProcessManager {
         match self.spawn_service(
             &binary_vfs_path,
             DEFAULT_PRIORITY,
-            &[],
-            0,
+            &argv_payload,
+            argc,
             sender_tid,
             spawn_seq,
             spawn_start,
             requested_profile,
         ) {
-            Ok((_thread_token, _cookie, pid, _child_stdin_send)) => {
+            Ok((thread_token, cookie, pid, _child_stdin_send)) => {
                 // Build container view mounts
-                // Use leaked strings since ViewMountList expects &'static str
-                let base_dir = format!("/var/containers/c-{}", container_id);
-                let image_dir = format!("/var/images/{}", image_name);
-
-                // We need to construct view mounts with 'static lifetime.
                 // Use the default USER view as base, then register with container_id
                 // which triggers the VFS container mount prepend (same as shell spawns).
+                let image_dir = format!("/var/images/{}", image_name);
                 let view_mounts = default_view_for_profile(requested_profile);
 
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
-                self.register_vfs_view_for_thread(_thread_token, &view_mounts, requested_profile, container_id);
+                self.register_vfs_view_for_thread(thread_token, &view_mounts, requested_profile, container_id);
                 self.pid_to_view.insert(pid, view_mounts.clone());
-                self.pid_to_profile.insert(pid, requested_profile);
+                // Fix C: removed redundant pid_to_profile insert (spawn_service_with_env already does it)
 
                 // Track container instance
                 self.container_instances.insert(container_id, ContainerInstance {
@@ -1970,9 +1983,20 @@ impl ProcessManager {
                     image_path: image_dir,
                 });
 
+                // Fix E: Register exit notification so shell can wait
+                if sender_tid != 0 {
+                    let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
+                    *entry = entry.saturating_add(1);
+                }
+                if notify_endpoint != 0 {
+                    self.exit_notify.insert(cookie, notify_endpoint);
+                }
+
+                // Fix D: Return cookie in reply for wait() support
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = pid;
-                reply_msg.words[2] = container_id as usize;
+                reply_msg.words[2] = cookie;
+                reply_msg.words[3] = container_id as usize;
                 let _ = debug_print(&format!(
                     "procmgr: container '{}' started pid={} cid={}",
                     image_name, pid, container_id

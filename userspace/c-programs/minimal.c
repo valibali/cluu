@@ -61,6 +61,7 @@ int main(int argc, char *argv[])
 {
     int pass = 0, fail = 0;
 
+    debug_print("=== P1 POSIX stubs test ===");
     printf("=== P1 POSIX stubs test ===\n");
 
     /* ── Test 1: argc/argv ─────────────────────────────────────────── */
@@ -147,6 +148,7 @@ int main(int argc, char *argv[])
     struct timespec rem = { 0 };
     int ns_ret = nanosleep(&req, &rem);
     if (ns_ret == 0) {
+        debug_print("[OK] nanosleep(100ms) returned 0");
         printf("[OK] nanosleep(100ms) returned 0\n");
         pass++;
     } else {
@@ -158,6 +160,7 @@ int main(int argc, char *argv[])
     printf("Testing usleep(50000) = 50ms...\n");
     int us_ret = usleep(50000);
     if (us_ret == 0) {
+        debug_print("[OK] usleep(50ms) returned 0");
         printf("[OK] usleep(50ms) returned 0\n");
         pass++;
     } else {
@@ -169,6 +172,7 @@ int main(int argc, char *argv[])
     printf("\n=== Results: %d passed, %d failed ===\n", pass, fail);
 
     if (fail == 0) {
+        debug_print("=== P1 POSIX stubs test PASSED ===");
         printf("=== P1 POSIX stubs test PASSED ===\n");
     } else {
         printf("=== P1 POSIX stubs test FAILED ===\n");

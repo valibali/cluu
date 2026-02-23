@@ -2527,6 +2527,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
     // Also add any C programs (built via cargo xtask build-c)
     let c_programs = [
         "hello",
+        "minimal",
         "noop",
         "ownerprobe",
         "sleepy",
@@ -3281,7 +3282,8 @@ fn build_c_programs(profile: &str) -> Result<()> {
 
     // List of C programs to build: (name, source_path)
     let c_programs: &[(&str, &str)] = &[
-        ("hello", "userspace/c-programs/minimal.c"),
+        ("hello", "userspace/c-programs/hello.c"),
+        ("minimal", "userspace/c-programs/minimal.c"),
         ("noop", "userspace/c-programs/noop.c"),
         ("ownerprobe", "userspace/c-programs/ownerprobe.c"),
         ("sleepy", "userspace/c-programs/sleepy.c"),

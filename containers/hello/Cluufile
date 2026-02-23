@@ -1,4 +1,4 @@
 FROM minimal
 PROFILE ipc vfs
-COPY ../../target/userfs/bin/hello /bin/hello
+BUILD "cargo xtask build-c hello userspace/c-programs/hello.c" target/x86_64-cluu-user/debug/hello.elf /bin/hello
 ENTRYPOINT /bin/hello

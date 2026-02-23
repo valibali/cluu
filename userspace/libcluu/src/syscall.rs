@@ -175,29 +175,6 @@ pub unsafe fn syscall_raw(
     }
 }
 
-/// Returns the first observed RBX change across syscall_raw (if any) and clears the flag.
-/// Diagnostic removed - kernel preserves RBX correctly.
-pub fn take_rbx_change() -> Option<(u64, u64)> {
-    None
-}
-
-#[no_mangle]
-pub extern "C" fn cluu_take_rbx_change(before: *mut u64, after: *mut u64) -> i32 {
-    if let Some((b, a)) = take_rbx_change() {
-        unsafe {
-            if !before.is_null() {
-                *before = b;
-            }
-            if !after.is_null() {
-                *after = a;
-            }
-        }
-        1
-    } else {
-        0
-    }
-}
-
 /// Helper for syscalls with 0 arguments
 #[inline]
 unsafe fn syscall0(n: SyscallNumber) -> Result<usize> {

@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Parser)]
 #[command(name = "container-build", about = "Build a CLUU container image from a Cluufile")]
@@ -27,6 +28,14 @@ fn main() -> Result<()> {
 // Cluufile parser
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// A build step: run a command, then copy the build output into the container.
+#[derive(Debug, Clone)]
+struct BuildStep {
+    command: String,
+    build_output: String,
+    container_path: String,
+}
+
 /// Parsed representation of a Cluufile — a declarative container manifest
 /// used at build time to assemble container images.
 #[derive(Debug, Clone)]
@@ -34,6 +43,7 @@ struct Cluufile {
     base: String,
     profile: Vec<String>,
     entrypoint: Vec<String>,
+    builds: Vec<BuildStep>,
     copies: Vec<(String, String)>,
     persistent_dirs: Vec<String>,
     env: Vec<(String, String)>,
@@ -46,6 +56,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
     let mut base: Option<String> = None;
     let mut profile: Option<Vec<String>> = None;
     let mut entrypoint: Option<Vec<String>> = None;
+    let mut builds: Vec<BuildStep> = Vec::new();
     let mut copies: Vec<(String, String)> = Vec::new();
     let mut persistent_dirs: Vec<String> = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
@@ -105,6 +116,39 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
                         .collect(),
                 );
             }
+            "BUILD" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before BUILD", path.display(), lineno);
+                }
+                // BUILD "command" build-output container-path
+                // The command is quoted; the two paths are unquoted.
+                let rest_trimmed = rest.trim();
+                if !rest_trimmed.starts_with('"') {
+                    bail!(
+                        "{}:{}: BUILD command must be quoted: BUILD \"command\" output dest",
+                        path.display(), lineno
+                    );
+                }
+                // Find the closing quote
+                let after_open = &rest_trimmed[1..];
+                let close_pos = after_open.find('"').ok_or_else(|| {
+                    anyhow::anyhow!("{}:{}: unterminated quote in BUILD command", path.display(), lineno)
+                })?;
+                let command = after_open[..close_pos].to_string();
+                let remainder = after_open[close_pos + 1..].trim();
+                let paths: Vec<&str> = remainder.split_whitespace().collect();
+                if paths.len() != 2 {
+                    bail!(
+                        "{}:{}: BUILD requires exactly: \"command\" build-output container-path, got {} path(s)",
+                        path.display(), lineno, paths.len()
+                    );
+                }
+                builds.push(BuildStep {
+                    command,
+                    build_output: paths[0].to_string(),
+                    container_path: paths[1].to_string(),
+                });
+            }
             "COPY" => {
                 if base.is_none() {
                     bail!("{}:{}: FROM must appear before COPY", path.display(), lineno);
@@ -160,6 +204,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
         base,
         profile: profile.unwrap_or_default(),
         entrypoint: entrypoint.unwrap_or_default(),
+        builds,
         copies,
         persistent_dirs,
         env,
@@ -280,6 +325,12 @@ fn container_build(cluufile_path: &Path) -> Result<()> {
         }
     }
 
+    // Execute BUILD directives: run the command, then copy build output into image
+    let root = project_root();
+    for step in &cluufile.builds {
+        execute_build(&root, step, &output_dir)?;
+    }
+
     // Process COPY directives: resolve host paths relative to Cluufile directory
     let cluufile_dir = cluufile_path.parent().unwrap();
     for (src_rel, dst_rel) in &cluufile.copies {
@@ -311,6 +362,47 @@ fn container_build(cluufile_path: &Path) -> Result<()> {
     println!("  Generated manifest.toml");
 
     println!("✓ Container '{}' built at {}", container_name, output_dir.display());
+    Ok(())
+}
+
+/// Execute a single BUILD step: run the command from the project root, then copy the
+/// build artifact into the container image directory.
+fn execute_build(project_root: &Path, step: &BuildStep, output_dir: &Path) -> Result<()> {
+    println!("  BUILD \"{}\"", step.command);
+
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(&step.command)
+        .current_dir(project_root)
+        .status()
+        .with_context(|| format!("Failed to execute BUILD command: {}", step.command))?;
+
+    if !status.success() {
+        bail!(
+            "BUILD command failed (exit {}): {}",
+            status.code().unwrap_or(-1),
+            step.command
+        );
+    }
+
+    // Copy the build artifact into the container image
+    let src = project_root.join(&step.build_output);
+    if !src.exists() {
+        bail!(
+            "BUILD output not found after command: {}",
+            src.display()
+        );
+    }
+
+    let dst_rel = step.container_path.strip_prefix('/').unwrap_or(&step.container_path);
+    let dst = output_dir.join(dst_rel);
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&src, &dst)
+        .with_context(|| format!("Failed to copy build output {} → {}", src.display(), dst.display()))?;
+
+    println!("  BUILD {} → {}", step.build_output, step.container_path);
     Ok(())
 }
 

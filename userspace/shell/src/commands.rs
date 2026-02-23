@@ -2660,9 +2660,11 @@ fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -
     };
 
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+    let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
     let payload = name.as_bytes();
-    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 1);
+    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 2);
     msg.words[0] = payload.len();
+    msg.words[1] = notify_endpoint;
     let mut reply = Message::new(0, [0; 6], 0);
 
     call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
@@ -2673,9 +2675,14 @@ fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
     } else {
         let pid = reply.words[1];
-        let cid = reply.words[2];
+        let cookie = reply.words[2];
+        let cid = reply.words[3];
         let line = format!("container '{}' started pid={} cid={}\n", name, pid, cid);
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+
+        // Wait for container to exit (foreground wait)
+        let mut notify_msg = Message::new(0, [0; 6], 0);
+        let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
     }
     Ok(())
 }
