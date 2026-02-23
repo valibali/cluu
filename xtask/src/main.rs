@@ -1795,7 +1795,7 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
     // - userspace-newlib, kernel: immediate.
     // - userspace-rust, userspace-c-programs, userspace-micropython: all wait only for userspace-newlib.
     // - build-containers: waits for userspace-rust + userspace-c-programs (BUILD directives compile code).
-    // - initrd: waits for userspace-rust + kernel.
+    // - initrd: waits for userspace-rust + kernel + build-containers (prevents cargo lock race).
     // - userdisk: waits for userspace-rust + userspace-c-programs + userspace-micropython + build-containers.
     // - disk-image: waits for initrd + userdisk.
     let tasks = vec![
@@ -1848,7 +1848,7 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
                 "--profile".to_string(),
                 profile.to_string(),
             ],
-            deps: &["userspace-rust", "kernel"],
+            deps: &["userspace-rust", "kernel", "build-containers"],
         },
         RichTask {
             name: "userdisk",
@@ -2637,7 +2637,7 @@ fn create_user_block_image(profile: &str) -> Result<()> {
             "-b",
             "1024",
             disk_path.to_str().unwrap(),
-            "229376", // 224MB image (229376 blocks * 1KiB)
+            "294912", // 288MB image (294912 blocks * 1KiB)
         ])
         .status()
         .context("Failed to run mke2fs for user disk")?;
