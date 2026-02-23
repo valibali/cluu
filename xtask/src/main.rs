@@ -239,6 +239,9 @@ enum Commands {
         /// Path to the Cluufile
         path: PathBuf,
     },
+    /// Internal: build all container images from containers/*/Cluufile
+    #[command(hide = true)]
+    BuildContainers,
 }
 
 fn main() -> Result<()> {
@@ -343,6 +346,9 @@ fn main() -> Result<()> {
                 bail!("container-build failed with exit code {:?}", status.code());
             }
         }
+        Commands::BuildContainers => {
+            build_containers()?;
+        }
     }
 
     Ok(())
@@ -361,6 +367,7 @@ fn build_pipeline_linear(profile: &str) -> Result<()> {
     build_kernel(profile)?;
     build_c_programs(profile)?;
     build_micropython()?;
+    build_containers()?;
     create_initrd(profile)?;
     create_user_block_image(profile)?;
     create_disk_image(profile)?;
@@ -424,6 +431,7 @@ fn default_expected_work_units(task_id: &str) -> u32 {
         "userspace-micropython" => 380,
         "kernel" => 120,
         "initrd" => 24,
+        "build-containers" => 40,
         "userdisk" => 48,
         "disk-image" => 8,
         _ => 80,
@@ -1764,6 +1772,12 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
             is_leaf: true,
         },
         RichTreeNodeDef {
+            id: "build-containers",
+            label: "containers",
+            parent: Some("build"),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
             id: "userdisk",
             label: "userdisk",
             parent: Some("build"),
@@ -1780,8 +1794,9 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
     // Dependency-checked parallelization:
     // - userspace-newlib, kernel: immediate.
     // - userspace-rust, userspace-c-programs, userspace-micropython: all wait only for userspace-newlib.
+    // - build-containers: waits for userspace-rust + userspace-c-programs (BUILD directives compile code).
     // - initrd: waits for userspace-rust + kernel.
-    // - userdisk: waits for userspace-rust + userspace-c-programs + userspace-micropython.
+    // - userdisk: waits for userspace-rust + userspace-c-programs + userspace-micropython + build-containers.
     // - disk-image: waits for initrd + userdisk.
     let tasks = vec![
         RichTask {
@@ -1822,6 +1837,11 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
             deps: &[],
         },
         RichTask {
+            name: "build-containers",
+            args: vec!["build-containers".to_string()],
+            deps: &["userspace-rust", "userspace-c-programs"],
+        },
+        RichTask {
             name: "initrd",
             args: vec![
                 "create-initrd".to_string(),
@@ -1841,6 +1861,7 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
                 "userspace-rust",
                 "userspace-c-programs",
                 "userspace-micropython",
+                "build-containers",
             ],
         },
         RichTask {
@@ -2838,6 +2859,7 @@ fn rebuild_full(profile: &str) -> Result<()> {
     build_kernel(profile)?;
     build_c_programs(profile)?;
     build_micropython()?;
+    build_containers()?;
     create_initrd(profile)?;
     create_user_block_image(profile)?;
     create_disk_image(profile)?;
@@ -3635,6 +3657,59 @@ fn setup_c_toolchain() -> Result<()> {
 }
 
 /// Recursively copy a container image directory tree.
+fn build_containers() -> Result<()> {
+    println!("▸ Building container images...");
+
+    let containers_dir = project_root().join("containers");
+    if !containers_dir.exists() {
+        println!("  No containers/ directory found, skipping");
+        return Ok(());
+    }
+
+    let mut cluufiles: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(&containers_dir)
+        .with_context(|| format!("Failed to read {}", containers_dir.display()))?
+    {
+        let entry = entry?;
+        if entry.path().is_dir() {
+            let cluufile = entry.path().join("Cluufile");
+            if cluufile.exists() {
+                cluufiles.push(cluufile);
+            }
+        }
+    }
+    cluufiles.sort();
+
+    if cluufiles.is_empty() {
+        println!("  No Cluufiles found in containers/*/");
+        return Ok(());
+    }
+
+    for cluufile in &cluufiles {
+        let name = cluufile
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        println!("  Building container: {}", name);
+        let status = Command::new("cargo")
+            .args(["run", "-p", "container-build", "--"])
+            .arg(cluufile)
+            .status()
+            .with_context(|| format!("Failed to run container-build for {}", name))?;
+        if !status.success() {
+            bail!(
+                "container-build failed for {} (exit {:?})",
+                name,
+                status.code()
+            );
+        }
+    }
+
+    println!("  ✓ {} container image(s) built", cluufiles.len());
+    Ok(())
+}
+
 fn copy_container_image(src_dir: &Path, dst_dir: &Path) -> Result<()> {
     for entry in fs::read_dir(src_dir)? {
         let entry = entry?;
