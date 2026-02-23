@@ -102,6 +102,15 @@ fn run_vfs() -> Result<()> {
     let initrd_size = info.params[PARAM_INITRD_SIZE] as usize;
     let initrd = map_initrd_slice(initrd_size);
 
+    // Populate /proc/fb with framebuffer info from init
+    procfs::set_fb_info(procfs::FbInfo {
+        phys: info.params[PARAM_VFS_FB_PHYS],
+        size: info.params[PARAM_VFS_FB_SIZE],
+        width: info.params[PARAM_VFS_FB_WIDTH],
+        height: info.params[PARAM_VFS_FB_HEIGHT],
+        pitch: info.params[PARAM_VFS_FB_PITCH],
+    });
+
     debug_print("vfs: registering...")?;
     registry::init("vfs")?;
     registry::register_default_outputs()?;

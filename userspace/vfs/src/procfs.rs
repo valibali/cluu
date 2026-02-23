@@ -19,6 +19,7 @@ pub static ENTRIES: &[(&str, VirtualEntry)] = &[
     ("meminfo", VirtualEntry::File(gen_meminfo)),
     ("cpuinfo", VirtualEntry::File(gen_cpuinfo)),
     ("mounts", VirtualEntry::File(gen_mounts)),
+    ("fb", VirtualEntry::File(gen_fb)),
     ("self", VirtualEntry::Dir(gen_self_dir)),
 ];
 
@@ -69,6 +70,37 @@ fn gen_mounts() -> Result<Vec<u8>> {
          proc /proc proc rw 0 0\n",
     );
     Ok(mounts.into_bytes())
+}
+
+pub struct FbInfo {
+    pub phys: u64,
+    pub size: u64,
+    pub width: u64,
+    pub height: u64,
+    pub pitch: u64,
+}
+
+static mut FB_INFO: Option<FbInfo> = None;
+
+pub fn set_fb_info(info: FbInfo) {
+    unsafe {
+        let ptr = &raw mut FB_INFO;
+        *ptr = Some(info);
+    }
+}
+
+fn gen_fb() -> Result<Vec<u8>> {
+    let text = unsafe {
+        let ptr = &raw const FB_INFO;
+        match &*ptr {
+            Some(fb) => alloc::format!(
+                "phys=0x{:x}\nsize={}\nwidth={}\nheight={}\npitch={}\n",
+                fb.phys, fb.size, fb.width, fb.height, fb.pitch
+            ),
+            None => String::from("# no framebuffer info available\n"),
+        }
+    };
+    Ok(text.into_bytes())
 }
 
 fn gen_self_dir() -> Result<Vec<DirEntry>> {

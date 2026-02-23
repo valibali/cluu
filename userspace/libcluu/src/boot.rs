@@ -180,6 +180,13 @@ pub const PARAM_INITRD_SIZE: usize = 0;
 // Well-known param indices for tty
 pub const PARAM_TTY_INSTANCE: usize = 0;
 
+// Well-known param indices for VFS (FB info passed from init via ProcessInfo)
+pub const PARAM_VFS_FB_PHYS: usize = 1;
+pub const PARAM_VFS_FB_SIZE: usize = 2;
+pub const PARAM_VFS_FB_WIDTH: usize = 3;
+pub const PARAM_VFS_FB_HEIGHT: usize = 4;
+pub const PARAM_VFS_FB_PITCH: usize = 6; // skip 5 = PARAM_CAP_PROFILE
+
 // Well-known param indices for argv (shared by procmgr + crt0)
 pub const PARAM_ARGC: usize = 6;
 pub const PARAM_ARGV_OFFSET: usize = 7;

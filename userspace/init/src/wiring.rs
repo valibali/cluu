@@ -18,6 +18,11 @@ use libcluu::boot::{
     PARAM_FB_WIDTH,
     PARAM_INITRD_SIZE,
     PARAM_TTY_INSTANCE,
+    PARAM_VFS_FB_PHYS,
+    PARAM_VFS_FB_SIZE,
+    PARAM_VFS_FB_WIDTH,
+    PARAM_VFS_FB_HEIGHT,
+    PARAM_VFS_FB_PITCH,
     // New token slot constants
     TOKEN_CLOCK,
     TOKEN_EXTRA_0,
@@ -135,6 +140,12 @@ impl ServiceWiring for ServiceKind {
                 // VFS will create its own endpoint in Phase 3
                 tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
                 params[PARAM_INITRD_SIZE] = ctx.boot.initrd_size as u64;
+                // Framebuffer info for /proc/fb
+                params[PARAM_VFS_FB_PHYS] = ctx.boot.fb_phys;
+                params[PARAM_VFS_FB_SIZE] = ctx.boot.fb_size;
+                params[PARAM_VFS_FB_WIDTH] = ctx.boot.fb_width as u64;
+                params[PARAM_VFS_FB_HEIGHT] = ctx.boot.fb_height as u64;
+                params[PARAM_VFS_FB_PITCH] = ctx.boot.fb_pitch as u64;
             }
             ServiceKind::Vtmgr => {
                 // Vtmgr needs a listen endpoint for kbd switch requests.
