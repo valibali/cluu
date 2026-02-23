@@ -1051,6 +1051,7 @@ impl ProcessManager {
             fdac_data,
             child_profile,
             0,
+            0,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 reply_msg.words[0] = 0;
@@ -1173,6 +1174,7 @@ impl ProcessManager {
             &[],
             profile,
             0,
+            0,
         )
     }
 
@@ -1191,6 +1193,7 @@ impl ProcessManager {
         fdac_data: &[u8],
         profile: CapProfile,
         extra_token: usize,
+        extra_token_1: usize,
     ) -> Result<(usize, usize, usize, usize)> {
         // Build env data: for bootstrap (owner_tid==0) use defaults,
         // otherwise use caller-provided env (from posix_spawn)
@@ -1410,6 +1413,7 @@ impl ProcessManager {
             pipe_mask,
             profile,
             extra_token,
+            extra_token_1,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
@@ -2020,12 +2024,24 @@ impl ProcessManager {
             ));
         }
 
-        // DEVICE: read [hardware] devices from manifest (actual wiring deferred)
+        // DEVICE: read [hardware] devices from manifest and derive device tokens
         let devices: Vec<String> = doc
             .table("hardware")
             .and_then(|t| t.get_array("devices"))
             .map(|a| a.iter().map(|s| s.clone()).collect())
             .unwrap_or_default();
+        let extra_token_1 = if devices.iter().any(|d| d == "irq") {
+            let _ = debug_print(&format!(
+                "procmgr: container '{}' deriving IRQ token",
+                image_name
+            ));
+            match token_derive(self.token, Rights::IRQ_HANDLE.bits() as usize, u64::MAX) {
+                Ok(t) => t,
+                Err(_) => 0,
+            }
+        } else {
+            0
+        };
         if !devices.is_empty() {
             let _ = debug_print(&format!(
                 "procmgr: container '{}' devices: {:?}",
@@ -2062,6 +2078,7 @@ impl ProcessManager {
             fdac_data,
             requested_profile,
             extra_token,
+            extra_token_1,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build container view mounts
@@ -2358,6 +2375,7 @@ fn map_process_info_page(
     pipe_mask: u8,
     profile: CapProfile,
     extra_token: usize,
+    extra_token_1: usize,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -2378,6 +2396,9 @@ fn map_process_info_page(
     // Slots 9-15: Contextual
     if extra_token != 0 {
         tokens[TOKEN_EXTRA_0] = extra_token;
+    }
+    if extra_token_1 != 0 {
+        tokens[TOKEN_EXTRA_1] = extra_token_1;
     }
 
     let mut params = [0u64; 10];
