@@ -1,0 +1,11 @@
+[[service]]
+image = "console"
+
+[[service]]
+image = "vtmgr"
+
+[[service]]
+image = "vt"
+
+[[service]]
+image = "kbd"

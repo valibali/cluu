@@ -164,9 +164,11 @@ impl TtyContext {
                         self.console_endpoint = token;
                         let _ = debug_print("tty: console subscribed");
                         self.flush_pending_console();
+                        self.maybe_spawn_shell();
                     } else if name == "spawn" {
                         self.procmgr_spawn = token;
                         let _ = debug_print("tty: procmgr spawn subscribed");
+                        self.maybe_spawn_shell();
                     } else if name == "stdin" {
                         // Keep a stable "registered shell route" from registry grants.
                         // If we are currently routing to that route (or have no route),

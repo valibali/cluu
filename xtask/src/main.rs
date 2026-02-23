@@ -2620,6 +2620,15 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         }
     }
 
+    // Copy /etc/autostart.toml for procmgr service autostart
+    let etc_dir = staging_dir.join("etc");
+    fs::create_dir_all(&etc_dir)?;
+    let autostart_src = project_root().join("etc/autostart.toml");
+    if autostart_src.exists() {
+        fs::copy(&autostart_src, etc_dir.join("autostart.toml"))?;
+        println!("  Added /etc/autostart.toml");
+    }
+
     let disk_path = project_root().join("target/userdisk.img");
     if disk_path.exists() {
         fs::remove_file(&disk_path)?;

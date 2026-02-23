@@ -8,8 +8,17 @@ use core::mem::{size_of, take};
 use libcluu::boot::{
     process_info,
     ProcessInfo,
-    PARAM_CAP_PROFILE,
+    CONSOLE_FB_BASE,
+    PARAM_CONSOLE_ACTIVE,
+    PARAM_CONSOLE_INSTANCE,
+    PARAM_FB_BASE,
+    PARAM_FB_HEIGHT,
+    PARAM_FB_PHYS,
+    PARAM_FB_PITCH,
+    PARAM_FB_SIZE,
+    PARAM_FB_WIDTH,
     PARAM_INITRD_SIZE,
+    PARAM_TTY_INSTANCE,
     PROCESS_INFO_ADDR,
     // New token slot constants
     TOKEN_CLOCK,
@@ -142,6 +151,7 @@ struct ProcessManager {
     /// Only owners trigger container cleanup on exit.
     container_owner_pids: BTreeSet<usize>,
     container_instances: BTreeMap<u64, ContainerInstance>,
+    autostart_done: bool,
 }
 
 impl ProcessManager {
@@ -186,6 +196,7 @@ impl ProcessManager {
             pid_to_container_id: BTreeMap::new(),
             container_owner_pids: BTreeSet::new(),
             container_instances: BTreeMap::new(),
+            autostart_done: false,
         })
     }
 
@@ -396,20 +407,9 @@ impl ProcessManager {
         self.spawn_endpoint = endpoint_create(self.token)?;
         registry::register_output("spawn", self.spawn_endpoint)?;
 
-        // Wait for tty:0 main to be available before spawning any processes.
-        // This ensures children get proper stdout with IPC_CALL rights.
-        while self.tty_endpoints[0] == 0 {
-            match registry::subscribe_output("tty:0", "main") {
-                Ok(token) => {
-                    self.tty_endpoints[0] = token;
-                    self.requested_tty_mask |= 1;
-                    let _ = debug_print(&format!("procmgr: tty:0 main granted {}", token));
-                }
-                Err(_) => {
-                    let _ = yield_cpu();
-                }
-            }
-        }
+        // Request tty:0 main (non-blocking); grant arrives via registry event in IPC loop
+        let _ = registry::request_subscription("tty:0", "main");
+        debug_print("procmgr: requested tty:0/main subscription")?;
 
         debug_print("=========================================")?;
         debug_print("  Process Manager Starting")?;
@@ -417,10 +417,10 @@ impl ProcessManager {
         debug_print("Derived procmgr token handle")?;
         debug_print(&format!("  Handle: {}", self.token))?;
 
-        // Shell spawning is now initiated by each tty instance via
-        // TTY_SPAWN_SHELL_LABEL.  procmgr no longer auto-spawns a shell
-        // here — tty:0 will request one once it has its console wired up.
-        debug_print("procmgr: ready (shell spawn deferred to tty)")?;
+        // Request VFS "mounted" event (non-blocking); autostart triggers when grant arrives
+        let _ = registry::request_subscription("vfs", "mounted");
+        debug_print("procmgr: requested vfs/mounted subscription")?;
+
         yield_cpu()?;
         Ok(())
     }
@@ -433,6 +433,231 @@ impl ProcessManager {
         loop {
             self.poll_exit_notifications()?;
         }
+    }
+
+    fn run_autostart(&mut self) {
+        let data = match self.read_file_from_vfs("/etc/autostart.toml") {
+            Some(d) => d,
+            None => {
+                let _ = debug_print("procmgr: autostart.toml not found, skipping");
+                return;
+            }
+        };
+
+        let text = match core::str::from_utf8(&data) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = debug_print("procmgr: autostart.toml is not valid UTF-8");
+                return;
+            }
+        };
+        let doc = match libcluu::toml::parse(text) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = debug_print(&format!("procmgr: autostart.toml parse error: {}", e));
+                return;
+            }
+        };
+
+        let services = doc.array_tables("service");
+        let _ = debug_print(&format!("procmgr: autostart {} service(s)", services.len()));
+
+        for svc in &services {
+            let image_name = match svc.get_str("image") {
+                Some(n) => n,
+                None => {
+                    let _ = debug_print("procmgr: autostart entry missing 'image' key");
+                    continue;
+                }
+            };
+            let _ = debug_print(&format!("procmgr: autostart '{}'", image_name));
+            if let Err(e) = self.autostart_container(image_name, svc) {
+                let _ = debug_print(&format!(
+                    "procmgr: autostart '{}' failed: {:?}", image_name, e
+                ));
+            }
+        }
+        let _ = debug_print("procmgr: autostart complete");
+    }
+
+    fn autostart_container(&mut self, image_name: &str, _svc: &libcluu::toml::TomlTable) -> Result<()> {
+        // Read manifest
+        let manifest_path = format!("/var/images/{}/manifest.toml", image_name);
+        let manifest_contents = self.read_file_from_vfs(&manifest_path)
+            .ok_or(Error::NotFound)?;
+        let manifest_str = core::str::from_utf8(&manifest_contents)
+            .map_err(|_| Error::InvalidArgument)?;
+        let doc = libcluu::toml::parse(manifest_str)
+            .map_err(|_| Error::InvalidArgument)?;
+
+        // Extract binary path
+        let binary = doc.table("exec").and_then(|t| t.get_str("binary"))
+            .ok_or(Error::InvalidArgument)?;
+
+        // Build capability profile
+        let mut requested_profile = CapProfile::USER;
+        if let Some(profile_table) = doc.table("profile") {
+            if let Some(caps) = profile_table.get_array("capabilities") {
+                for cap_name in caps {
+                    if let Some(cap) = parse_capability(cap_name) {
+                        requested_profile |= cap;
+                    }
+                }
+            }
+        }
+
+        // Container dirs
+        let mut container_id = self.next_container_id();
+        if !self.create_container_dirs(container_id) {
+            container_id = 0;
+        }
+
+        let binary_vfs_path = format!("/var/images/{}{}", image_name, binary);
+
+        // PRIORITY
+        let priority = doc.table("scheduling")
+            .and_then(|t| t.get_str("priority"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_PRIORITY);
+
+        // ENDPOINT
+        let endpoint_mode = doc.table("tokens")
+            .and_then(|t| t.get_str("endpoint_mode"));
+        let extra_token = match endpoint_mode {
+            Some("listen") => {
+                let ep = endpoint_create(self.token)?;
+                token_derive(ep, Rights::IPC_RECV.bits() as usize, u64::MAX).unwrap_or(0)
+            }
+            Some("grantable") => {
+                let ep = endpoint_create(self.token)?;
+                let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT;
+                token_derive(ep, rights.bits() as usize, u64::MAX).unwrap_or(0)
+            }
+            _ => 0,
+        };
+
+        // DEVICE (IRQ token)
+        let devices: Vec<String> = doc.table("hardware")
+            .and_then(|t| t.get_array("devices"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
+        let extra_token_1 = if devices.iter().any(|d| d == "irq") {
+            token_derive(self.token, Rights::IRQ_HANDLE.bits() as usize, u64::MAX).unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Build argv
+        let mut argv_payload: Vec<u8> = Vec::new();
+        argv_payload.extend_from_slice(binary.as_bytes());
+        argv_payload.push(0);
+        let argc = 1usize;
+
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
+
+        // Instance params: console and vt share PARAM_CAP_PROFILE slot with their
+        // instance ID, so we override after the profile is written.
+        // Console also needs framebuffer params from /proc/fb.
+        let mut overrides_buf: [(usize, u64); 8] = [(0, 0); 8];
+        let mut n_overrides = 0;
+        let mut fb_phys: u64 = 0;
+        let mut fb_size: u64 = 0;
+        if image_name == "console" {
+            // Read framebuffer info from /proc/fb
+            if let Some(data) = self.read_file_from_vfs("/proc/fb") {
+                if let Ok(text) = core::str::from_utf8(&data) {
+                    for line in text.lines() {
+                        if let Some(v) = line.strip_prefix("phys=0x") {
+                            fb_phys = u64::from_str_radix(v, 16).unwrap_or(0);
+                        } else if let Some(v) = line.strip_prefix("size=") {
+                            fb_size = v.parse::<u64>().unwrap_or(0);
+                        } else if let Some(v) = line.strip_prefix("width=") {
+                            overrides_buf[n_overrides] = (PARAM_FB_WIDTH, v.parse::<u64>().unwrap_or(0));
+                            n_overrides += 1;
+                        } else if let Some(v) = line.strip_prefix("height=") {
+                            overrides_buf[n_overrides] = (PARAM_FB_HEIGHT, v.parse::<u64>().unwrap_or(0));
+                            n_overrides += 1;
+                        } else if let Some(v) = line.strip_prefix("pitch=") {
+                            overrides_buf[n_overrides] = (PARAM_FB_PITCH, v.parse::<u64>().unwrap_or(0));
+                            n_overrides += 1;
+                        }
+                    }
+                }
+            }
+            overrides_buf[n_overrides] = (PARAM_FB_BASE, CONSOLE_FB_BASE as u64);
+            n_overrides += 1;
+            overrides_buf[n_overrides] = (PARAM_FB_PHYS, fb_phys);
+            n_overrides += 1;
+            overrides_buf[n_overrides] = (PARAM_FB_SIZE, fb_size);
+            n_overrides += 1;
+            overrides_buf[n_overrides] = (PARAM_CONSOLE_INSTANCE, 0);
+            n_overrides += 1;
+            overrides_buf[n_overrides] = (PARAM_CONSOLE_ACTIVE, 1);
+            n_overrides += 1;
+        } else if image_name == "vt" {
+            overrides_buf[0] = (PARAM_TTY_INSTANCE, 0);
+            n_overrides = 1;
+        }
+        let param_overrides = &overrides_buf[..n_overrides];
+
+        match self.spawn_service_with_env(
+            &binary_vfs_path,
+            priority,
+            &argv_payload,
+            argc,
+            &[],
+            0,
+            0, // sender_tid=0 (internal autostart)
+            spawn_seq,
+            spawn_start,
+            &[], // no FDAC
+            requested_profile,
+            extra_token,
+            extra_token_1,
+            param_overrides,
+        ) {
+            Ok((_thread_token, cookie, pid, _child_stdin_send)) => {
+                let image_dir = format!("/var/images/{}", image_name);
+                let view_mounts = default_view_for_profile(requested_profile);
+                self.pid_to_container_id.insert(pid, container_id);
+                self.container_owner_pids.insert(pid);
+                self.register_vfs_view_for_thread(_thread_token, &view_mounts, requested_profile, container_id);
+                self.pid_to_view.insert(pid, view_mounts);
+                self.container_instances.insert(container_id, ContainerInstance {
+                    name: String::from(image_name),
+                    container_id,
+                    pid,
+                    image_path: image_dir,
+                });
+                // Map framebuffer into console's address space.
+                if image_name == "console" && fb_phys != 0 && fb_size != 0 {
+                    if let Some(&space_tok) = self.cookie_to_space.get(&cookie) {
+                        let num_pages = (fb_size as usize).div_ceil(PAGE_SIZE);
+                        let _ = space_map_range(
+                            space_tok,
+                            CONSOLE_FB_BASE,
+                            fb_phys as usize,
+                            0x03 | MAP_DEVICE, // read + write + device
+                            num_pages,
+                            0,
+                        );
+                    }
+                }
+                let _ = debug_print(&format!(
+                    "procmgr: autostart '{}' started pid={} cid={}",
+                    image_name, pid, container_id
+                ));
+                let _ = cookie; // no exit notify for autostart
+            }
+            Err(err) => {
+                let _ = debug_print(&format!(
+                    "procmgr: autostart '{}' spawn failed: {:?}",
+                    image_name, err
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn poll_exit_notifications(&mut self) -> Result<()> {
@@ -536,7 +761,13 @@ impl ProcessManager {
     fn handle_registry_event(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             if let registry::RegistryEvent::Grant { name, token } = event {
-                if name == "main" {
+                if name == "mounted" && !self.autostart_done {
+                    let _ = debug_print(&format!(
+                        "procmgr: VFS mounted signal received (token={})", token
+                    ));
+                    self.autostart_done = true;
+                    self.run_autostart();
+                } else if name == "main" {
                     // Assign to the first empty tty slot.
                     if let Some(idx) = self.tty_endpoints.iter().position(|&ep| ep == 0) {
                         self.tty_endpoints[idx] = token;
@@ -785,8 +1016,9 @@ impl ProcessManager {
             params[idx] = val;
         }
 
-        // Write profile AFTER param overrides to prevent caller spoofing.
-        params[PARAM_CAP_PROFILE] = requested_profile.bits() as u64;
+        // NOTE: PARAM_CAP_PROFILE (slot 5) intentionally NOT written here.
+        // Cap profile is enforced server-side via pid_to_profile, and slot 5
+        // is shared with PARAM_CONSOLE_INSTANCE for console services.
 
         let _ = debug_print(&format!(
             "procmgr: service spawn path='{}' pri={} mode={}",
@@ -1032,12 +1264,6 @@ impl ProcessManager {
             &[]
         };
 
-        if self.tty_endpoints[0] == 0 {
-            if let Ok(token) = registry::subscribe_output("tty:0", "main") {
-                self.tty_endpoints[0] = token;
-            }
-        }
-
         match self.spawn_service_with_env(
             path,
             priority,
@@ -1052,6 +1278,7 @@ impl ProcessManager {
             child_profile,
             0,
             0,
+            &[],
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 reply_msg.words[0] = 0;
@@ -1175,6 +1402,7 @@ impl ProcessManager {
             profile,
             0,
             0,
+            &[],
         )
     }
 
@@ -1194,6 +1422,7 @@ impl ProcessManager {
         profile: CapProfile,
         extra_token: usize,
         extra_token_1: usize,
+        param_overrides: &[(usize, u64)],
     ) -> Result<(usize, usize, usize, usize)> {
         // Build env data: for bootstrap (owner_tid==0) use defaults,
         // otherwise use caller-provided env (from posix_spawn)
@@ -1414,6 +1643,7 @@ impl ProcessManager {
             profile,
             extra_token,
             extra_token_1,
+            param_overrides,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
@@ -2059,12 +2289,6 @@ impl ProcessManager {
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
 
-        if self.tty_endpoints[0] == 0 {
-            if let Ok(token) = registry::subscribe_output("tty:0", "main") {
-                self.tty_endpoints[0] = token;
-            }
-        }
-
         match self.spawn_service_with_env(
             &binary_vfs_path,
             priority,
@@ -2079,6 +2303,7 @@ impl ProcessManager {
             requested_profile,
             extra_token,
             extra_token_1,
+            &[],
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build container view mounts
@@ -2373,9 +2598,10 @@ fn map_process_info_page(
     env_data: &[u8],
     envc: usize,
     pipe_mask: u8,
-    profile: CapProfile,
+    _profile: CapProfile,
     extra_token: usize,
     extra_token_1: usize,
+    param_overrides: &[(usize, u64)],
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -2404,7 +2630,16 @@ fn map_process_info_page(
     let mut params = [0u64; 10];
     // params[0] = pipe_mask for regular processes (shared with PARAM_FB_BASE for console)
     params[0] = pipe_mask as u64;
-    params[PARAM_CAP_PROFILE] = profile.bits() as u64;
+    // NOTE: PARAM_CAP_PROFILE (slot 5) is NOT written here. The cap profile is
+    // tracked server-side in pid_to_profile. Slot 5 is shared with
+    // PARAM_CONSOLE_INSTANCE for console, so writing the profile here would
+    // corrupt the instance ID. Callers use param_overrides for slot 5 if needed.
+    // Apply caller-specified param overrides (e.g. instance IDs, FB params).
+    for &(idx, val) in param_overrides {
+        if idx < params.len() {
+            params[idx] = val;
+        }
+    }
 
     let info_offset = PROCESS_INFO_ADDR - page_base;
     let info_size = size_of::<ProcessInfo>();

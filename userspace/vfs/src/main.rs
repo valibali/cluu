@@ -126,6 +126,10 @@ fn run_vfs() -> Result<()> {
     // Setup all mount points declaratively
     let mounts = setup_mounts(initrd)?;
 
+    // Signal that ext2 is mounted (procmgr blocks on this for autostart)
+    registry::register_output("mounted", endpoint)?;
+    debug_print("vfs: published 'mounted' signal")?;
+
     let grant_buf_base = map_grant_buffer(space_token)?;
     let _ = debug_print(&format!(
         "vfs: grant buffer mapped base={:#x} size={}",
