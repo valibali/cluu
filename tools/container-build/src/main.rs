@@ -50,6 +50,7 @@ struct Cluufile {
     priority: Option<usize>,
     endpoint_mode: Option<String>,
     params: Vec<String>,
+    devices: Vec<String>,
 }
 
 fn parse_cluufile(path: &Path) -> Result<Cluufile> {
@@ -66,6 +67,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
     let mut priority: Option<usize> = None;
     let mut endpoint_mode: Option<String> = None;
     let mut params: Vec<String> = Vec::new();
+    let mut devices: Vec<String> = Vec::new();
     let mut saw_directive = false;
 
     for (line_idx, raw_line) in content.lines().enumerate() {
@@ -238,6 +240,25 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
                 }
                 params.push(name);
             }
+            "DEVICE" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before DEVICE", path.display(), lineno);
+                }
+                match rest {
+                    "irq" | "framebuffer" => {
+                        if devices.contains(&rest.to_string()) {
+                            bail!("{}:{}: duplicate DEVICE '{}'", path.display(), lineno, rest);
+                        }
+                        devices.push(rest.to_string());
+                    }
+                    _ => {
+                        bail!(
+                            "{}:{}: DEVICE must be 'irq' or 'framebuffer', got '{}'",
+                            path.display(), lineno, rest
+                        );
+                    }
+                }
+            }
             unknown => {
                 bail!(
                     "{}:{}: unknown directive '{}'",
@@ -264,6 +285,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
         priority,
         endpoint_mode,
         params,
+        devices,
     })
 }
 
@@ -338,6 +360,18 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str) -> String {
     // [tokens] — only if endpoint mode specified
     if let Some(ref mode) = cluufile.endpoint_mode {
         out.push_str(&format!("\n[tokens]\nendpoint_mode = \"{}\"\n", mode));
+    }
+
+    // [hardware] — only if devices specified
+    if !cluufile.devices.is_empty() {
+        out.push_str("\n[hardware]\ndevices = [");
+        for (i, dev) in cluufile.devices.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("\"{}\"", dev));
+        }
+        out.push_str("]\n");
     }
 
     // [params] — only if param slots specified

@@ -2020,6 +2020,19 @@ impl ProcessManager {
             ));
         }
 
+        // DEVICE: read [hardware] devices from manifest (actual wiring deferred)
+        let devices: Vec<String> = doc
+            .table("hardware")
+            .and_then(|t| t.get_array("devices"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
+        if !devices.is_empty() {
+            let _ = debug_print(&format!(
+                "procmgr: container '{}' devices: {:?}",
+                image_name, devices
+            ));
+        }
+
         // Fix B: Build argv payload with binary path as argv[0]
         let mut argv_payload: Vec<u8> = Vec::new();
         argv_payload.extend_from_slice(binary.as_bytes());
