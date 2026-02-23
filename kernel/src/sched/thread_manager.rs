@@ -536,6 +536,7 @@ impl ThreadManager {
             None => {
                 klibcluu::error("schedule_next_from_fault: no runnable threads!");
                 loop {
+                    x86_64::instructions::interrupts::enable();
                     x86_64::instructions::hlt();
                 }
             }

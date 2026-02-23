@@ -55,6 +55,7 @@ pub enum InvokeOp {
     ThreadSuspend = 2,
     ThreadResume = 3,
     ThreadSetPriority = 4,
+    ThreadSetFaultEndpoint = 5,
     ThreadSetFSBase = 6,
     ThreadGetId = 7,
 
@@ -960,6 +961,24 @@ pub fn thread_resume(thread_token: usize) -> Result<()> {
 pub fn thread_set_fs_base(thread_token: usize, fs_base: usize) -> Result<()> {
     unsafe {
         invoke(thread_token, InvokeOp::ThreadSetFSBase, fs_base, 0, 0, 0)?;
+    }
+    Ok(())
+}
+
+/// Set the fault handler endpoint for a thread.
+///
+/// When the thread faults, the kernel sends a fault IPC to the endpoint
+/// instead of killing the thread outright.  Pass 0 to clear.
+pub fn thread_set_fault_endpoint(thread_token: usize, endpoint_token: usize) -> Result<()> {
+    unsafe {
+        invoke(
+            thread_token,
+            InvokeOp::ThreadSetFaultEndpoint,
+            endpoint_token,
+            0,
+            0,
+            0,
+        )?;
     }
     Ok(())
 }

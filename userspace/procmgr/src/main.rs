@@ -44,7 +44,8 @@ use libcluu::ipc::PROCMGR_QUERY_CTTY_LABEL;
 use libcluu::ipc::PROCMGR_SPAWN_SERVICE_LABEL;
 use libcluu::registry;
 use libcluu::syscall::{
-    space_destroy, thread_destroy, thread_get_id, thread_resume, thread_suspend, token_revoke,
+    space_destroy, thread_destroy, thread_get_id, thread_resume, thread_set_fault_endpoint,
+    thread_suspend, token_revoke,
 };
 use libcluu::tar::find_member;
 use libcluu::*;
@@ -79,6 +80,7 @@ const SHELL_AUTOSTART_CMD: &str = match option_env!("CLUU_SHELL_AUTOSTART_CMD") 
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
 const PROCMGR_KILL_LABEL: u32 = 3;
+const PROCMGR_FAULT_LABEL: u32 = 0xFA017;
 const DEFAULT_PRIORITY: usize = 200;
 const SIGINT: usize = 2;
 const SIGTERM: usize = 15;
@@ -114,6 +116,7 @@ struct ProcessManager {
     token: usize,
     exit_endpoint: usize,
     spawn_endpoint: usize,
+    fault_endpoint: usize,
     registry_send: usize,
     initrd_size: usize,
     _proc_cap: usize,
@@ -163,6 +166,7 @@ impl ProcessManager {
             // TOKEN_EXTRA_1: elevated capability token for process management
             token: info.tokens[TOKEN_EXTRA_1],
             spawn_endpoint: 0,
+            fault_endpoint: 0,
             registry_send: info.tokens[TOKEN_REGISTRY],
             initrd_size: info.params[PARAM_INITRD_SIZE] as usize,
             _proc_cap: info.tokens[TOKEN_IPC], // Now using TOKEN_IPC
@@ -428,6 +432,7 @@ impl ProcessManager {
         registry::register_default_outputs()?;
         self.spawn_endpoint = endpoint_create(self.token)?;
         registry::register_output("spawn", self.spawn_endpoint)?;
+        self.fault_endpoint = endpoint_create(self.token)?;
 
         // Request tty:0 main (non-blocking); grant arrives via registry event in IPC loop
         let _ = registry::request_subscription("tty:0", "main");
@@ -684,10 +689,15 @@ impl ProcessManager {
 
     fn poll_exit_notifications(&mut self) -> Result<()> {
         let registry_endpoint = registry::control_endpoint();
-        let tokens = [self.exit_endpoint, self.spawn_endpoint, registry_endpoint];
+        let tokens = [
+            self.exit_endpoint,
+            self.spawn_endpoint,
+            registry_endpoint,
+            self.fault_endpoint,
+        ];
         let _ = debug_print(&format!(
-            "procmgr: poll tokens=[{},{},{}]",
-            tokens[0], tokens[1], tokens[2]
+            "procmgr: poll tokens=[{},{},{},{}]",
+            tokens[0], tokens[1], tokens[2], tokens[3]
         ));
         let mut buf = [0u8; 256];
         let (index, len, sender_tid) =
@@ -704,6 +714,12 @@ impl ProcessManager {
                     return Ok(());
                 }
             };
+        if index == 3 {
+            if let Some((msg, _payload)) = parse_message(&buf[..len]) {
+                self.handle_fault_message(&msg);
+            }
+            return Ok(());
+        }
         if index == 2 {
             if let Some((msg, payload)) = parse_message(&buf[..len]) {
                 let _ = self.handle_registry_event(&msg, payload);
@@ -811,6 +827,80 @@ impl ProcessManager {
             }
         }
         Ok(())
+    }
+
+    /// Handle a fault IPC from the kernel.
+    ///
+    /// Fault message format (label = 0xFA017):
+    ///   words[0] = fault_type, words[1] = fault_addr, words[2] = error_code,
+    ///   words[3] = rip, words[4] = thread_id, words[5] = reply_id
+    fn handle_fault_message(&mut self, msg: &Message) {
+        if msg.tag.label != PROCMGR_FAULT_LABEL {
+            return;
+        }
+        let fault_type = msg.words[0];
+        let fault_addr = msg.words[1];
+        let rip = msg.words[3];
+        let thread_id = msg.words[4];
+
+        let _ = debug_print(&format!(
+            "procmgr: FAULT type={} addr=0x{:x} rip=0x{:x} tid={}",
+            fault_type, fault_addr, rip, thread_id
+        ));
+
+        // Look up the PID for the faulting thread and clean up as if it exited
+        // with a fault signal (128 + signal convention).
+        let fault_exit_code: i32 = -(fault_type as i32);
+        if let Some(&pid) = self.tid_to_pid.get(&thread_id) {
+            if let Some(&cookie) = self.pid_to_cookie.get(&pid) {
+                // Reuse exit cleanup path: inject a synthetic exit event.
+                // Remove exit_table entry for the thread token first.
+                let thread_token = self.exit_table.remove(&cookie);
+
+                let mut container_id: u64 = 0;
+                if let Some(p) = self.cookie_to_pid.remove(&cookie) {
+                    let child_tid = self.pid_to_tid.get(&p).copied().unwrap_or(0);
+                    container_id = self.pid_to_container_id.remove(&p).unwrap_or(0);
+                    self.clear_vfs_view_for_tid(child_tid);
+                    self.pid_to_cookie.remove(&p);
+                    self.clear_pid_runtime_state(p);
+                    if let Some(owner_tid) = self.pid_owner_tid.remove(&p) {
+                        self.on_child_reaped(owner_tid);
+                    }
+                }
+
+                // Notify parent (e.g. shell) about the fault exit.
+                if let Some(notify_endpoint) = self.exit_notify.remove(&cookie) {
+                    let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+                    notify_msg.words[0] = cookie;
+                    notify_msg.words[1] = fault_exit_code as usize;
+                    let _ = send(notify_endpoint, &notify_msg, IpcFlags::empty());
+                }
+
+                let _ = debug_print(&format!(
+                    "procmgr: fault exit pid={} cookie={} (code {})",
+                    pid, cookie, fault_exit_code
+                ));
+
+                // Destroy the thread and address space.
+                if let Some(tt) = thread_token {
+                    let _ = thread_destroy(tt);
+                }
+                if let Some(st) = self.cookie_to_space.remove(&cookie) {
+                    let _ = space_destroy(st);
+                }
+                if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
+                    for tok in tokens {
+                        let _ = token_revoke(tok);
+                    }
+                }
+                if container_id > 0
+                    && !self.pid_to_container_id.values().any(|&cid| cid == container_id)
+                {
+                    let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
+                }
+            }
+        }
     }
 
     fn handle_spawn_or_kill_message(
@@ -1669,6 +1759,10 @@ impl ProcessManager {
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
+        // Set fault endpoint so the kernel forwards faults to us instead of silently killing.
+        if self.fault_endpoint != 0 {
+            let _ = thread_set_fault_endpoint(thread_token, self.fault_endpoint);
+        }
         let thread_tid = thread_get_id(thread_token)?;
         self.log_spawn_stage(spawn_seq, "thread_start_done", spawn_start);
 
