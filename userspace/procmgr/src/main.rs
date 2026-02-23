@@ -2792,6 +2792,11 @@ fn profile_to_rights(profile: CapProfile) -> [Rights; 16] {
     r[TOKEN_STDERR] = Rights::IPC_SEND;
     r[TOKEN_STDLOG] = Rights::IPC_SEND;
 
+    // THREAD_CONTROL on TOKEN_SPACE is always needed for TLS initialization
+    // (init_tls → thread_set_fs_base). Without this, FS base stays 0 and any
+    // __thread / TLS access causes PAGE_FAULT.
+    r[TOKEN_SPACE] |= Rights::THREAD_CONTROL;
+
     // IPC capability: basic send/recv for endpoint communication.
     if profile.contains(CapProfile::IPC) {
         r[TOKEN_IPC] |= Rights::IPC_SEND | Rights::IPC_RECV;
