@@ -1361,8 +1361,30 @@ impl ProcessManager {
         let parent_stdin_send =
             match token_derive(stdin_ep, Rights::IPC_SEND.bits() as usize, u64::MAX) {
                 Ok(token) => token,
-                Err(_) => stdin_ep,
+                Err(_) => 0, // No access rather than raw endpoint on derivation failure
             };
+
+        // Narrow pipe endpoint rights: child stdin = recv-only, stdout/stderr/stdlog = send-only
+        if pipe_mask & (1 << 0) != 0 {
+            if let Ok(narrowed) = token_derive(stdin_ep, Rights::IPC_RECV.bits() as usize, u64::MAX) {
+                stdin_ep = narrowed;
+            }
+        }
+        if pipe_mask & (1 << 1) != 0 {
+            if let Ok(narrowed) = token_derive(stdout_ep, Rights::IPC_SEND.bits() as usize, u64::MAX) {
+                stdout_ep = narrowed;
+            }
+        }
+        if pipe_mask & (1 << 2) != 0 {
+            if let Ok(narrowed) = token_derive(stderr_ep, Rights::IPC_SEND.bits() as usize, u64::MAX) {
+                stderr_ep = narrowed;
+            }
+        }
+        if pipe_mask & (1 << 3) != 0 {
+            if let Ok(narrowed) = token_derive(stdlog_ep, Rights::IPC_SEND.bits() as usize, u64::MAX) {
+                stdlog_ep = narrowed;
+            }
+        }
 
         map_process_info_page(
             space_token,
@@ -1799,16 +1821,31 @@ impl ProcessManager {
         sender_tid: usize,
     ) -> Result<()> {
         let reply_token = extract_reply_id(msg);
-        let mut reply_msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 4);
+        let mut reply_msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 5);
 
-        // Extract image name from payload
-        let image_name = match core::str::from_utf8(payload) {
+        // Extract FDAC offset from message words
+        let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
+
+        // Extract image name from payload (NUL-terminated or full payload before FDAC)
+        let name_end = if fdac_offset > 0 && fdac_offset <= payload.len() {
+            fdac_offset
+        } else {
+            payload.len()
+        };
+        let image_name = match core::str::from_utf8(&payload[..name_end]) {
             Ok(s) => s.trim_end_matches('\0').trim(),
             Err(_) => {
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                 return Ok(());
             }
+        };
+
+        // Extract FDAC data from payload (after image name)
+        let fdac_data = if fdac_offset > 0 && fdac_offset < payload.len() {
+            &payload[fdac_offset..]
+        } else {
+            &[]
         };
         if image_name.is_empty() {
             reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
@@ -1952,17 +1989,20 @@ impl ProcessManager {
             }
         }
 
-        match self.spawn_service(
+        match self.spawn_service_with_env(
             &binary_vfs_path,
             DEFAULT_PRIORITY,
             &argv_payload,
             argc,
+            &[],
+            0,
             sender_tid,
             spawn_seq,
             spawn_start,
+            fdac_data,
             requested_profile,
         ) {
-            Ok((thread_token, cookie, pid, _child_stdin_send)) => {
+            Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build container view mounts
                 // Use the default USER view as base, then register with container_id
                 // which triggers the VFS container mount prepend (same as shell spawns).
@@ -1997,6 +2037,7 @@ impl ProcessManager {
                 reply_msg.words[1] = pid;
                 reply_msg.words[2] = cookie;
                 reply_msg.words[3] = container_id as usize;
+                reply_msg.words[4] = child_stdin_send;
                 let _ = debug_print(&format!(
                     "procmgr: container '{}' started pid={} cid={}",
                     image_name, pid, container_id

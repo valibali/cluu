@@ -9,7 +9,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::mem::size_of;
-use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE};
+use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE, TOKEN_STDIN};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
     call, call_with_payload, call_with_reply_buf, recv, send_with_payload, send_with_retry,
@@ -2662,9 +2662,10 @@ fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
     let payload = name.as_bytes();
-    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 2);
+    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();
     msg.words[1] = notify_endpoint;
+    msg.words[2] = 0; // fdac_offset — no FDAC for basic container run
     let mut reply = Message::new(0, [0; 6], 0);
 
     call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
@@ -2677,12 +2678,26 @@ fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -
         let pid = reply.words[1];
         let cookie = reply.words[2];
         let cid = reply.words[3];
+        let child_stdin = reply.words[4];
         let line = format!("container '{}' started pid={} cid={}\n", name, pid, cid);
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
 
-        // Wait for container to exit (foreground wait)
-        let mut notify_msg = Message::new(0, [0; 6], 0);
-        let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+        // Route TTY foreground to the container process while it runs
+        if child_stdin != 0 {
+            set_tty_foreground(stdout, child_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C)?;
+
+            // Wait for container to exit (foreground wait)
+            let mut notify_msg = Message::new(0, [0; 6], 0);
+            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+
+            // Restore TTY foreground to shell
+            let shell_stdin = process_info().tokens[TOKEN_STDIN];
+            let _ = set_tty_foreground(stdout, shell_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C);
+        } else {
+            // Fallback: no stdin route, just wait for exit
+            let mut notify_msg = Message::new(0, [0; 6], 0);
+            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+        }
     }
     Ok(())
 }
