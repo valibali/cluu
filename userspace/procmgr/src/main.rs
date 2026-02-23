@@ -222,8 +222,10 @@ impl ProcessManager {
 
     /// Create per-container directories via VFS before registering the container view.
     /// /var and /var/containers are pre-created on the ext2 image at build time.
+    /// If the container image has a `data/` directory, its files are hardlinked
+    /// into the container's `/data/` directory (zero-copy seeding).
     /// Returns true on success, false on failure (caller should degrade gracefully).
-    fn create_container_dirs(&mut self, container_id: u64) -> bool {
+    fn create_container_dirs(&mut self, container_id: u64, image_name: &str) -> bool {
         if self.vfs_endpoint == 0 {
             if self.ensure_vfs_endpoint().is_err() {
                 return false;
@@ -245,6 +247,26 @@ impl ProcessManager {
                         dir, err
                     ));
                     return false;
+                }
+            }
+        }
+        // Seed /data via hardlinks from the image's data/ directory.
+        if !image_name.is_empty() {
+            let image_data = format!("/var/images/{}/data", image_name);
+            if let Ok(entries) = client.readdir(&image_data) {
+                let container_data = format!("{}/data", base);
+                for entry in &entries {
+                    if entry.is_dir {
+                        continue; // only seed regular files
+                    }
+                    let src = format!("{}/{}", image_data, entry.name);
+                    let dst = format!("{}/{}", container_data, entry.name);
+                    if let Err(e) = client.link(&src, &dst) {
+                        let _ = debug_print(&format!(
+                            "procmgr: seed link '{}' → '{}' failed: {:?}",
+                            src, dst, e
+                        ));
+                    }
                 }
             }
         }
@@ -508,7 +530,7 @@ impl ProcessManager {
 
         // Container dirs
         let mut container_id = self.next_container_id();
-        if !self.create_container_dirs(container_id) {
+        if !self.create_container_dirs(container_id, image_name) {
             container_id = 0;
         }
 
@@ -866,7 +888,7 @@ impl ProcessManager {
             CapProfile::USER,
         ) {
             let mut container_id = self.next_container_id();
-            if !self.create_container_dirs(container_id) {
+            if !self.create_container_dirs(container_id, "") {
                 let _ = debug_print(&format!(
                     "procmgr: WARNING create_container_dirs failed c-{}, proceeding without private storage",
                     container_id
@@ -2193,7 +2215,7 @@ impl ProcessManager {
 
         // Allocate container_id and create dirs
         let mut container_id = self.next_container_id();
-        if !self.create_container_dirs(container_id) {
+        if !self.create_container_dirs(container_id, image_name) {
             let _ = debug_print(&format!(
                 "procmgr: container '{}' dir creation failed",
                 image_name
