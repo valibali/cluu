@@ -1050,6 +1050,7 @@ impl ProcessManager {
             spawn_start,
             fdac_data,
             child_profile,
+            0,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 reply_msg.words[0] = 0;
@@ -1171,6 +1172,7 @@ impl ProcessManager {
             spawn_start,
             &[],
             profile,
+            0,
         )
     }
 
@@ -1188,6 +1190,7 @@ impl ProcessManager {
         spawn_start: u64,
         fdac_data: &[u8],
         profile: CapProfile,
+        extra_token: usize,
     ) -> Result<(usize, usize, usize, usize)> {
         // Build env data: for bootstrap (owner_tid==0) use defaults,
         // otherwise use caller-provided env (from posix_spawn)
@@ -1406,6 +1409,7 @@ impl ProcessManager {
             envc,
             pipe_mask,
             profile,
+            extra_token,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
@@ -1973,6 +1977,49 @@ impl ProcessManager {
             .map(|a| a.iter().map(|s| s.clone()).collect())
             .unwrap_or_default();
 
+        // PRIORITY: extract from [scheduling] section
+        let priority = doc
+            .table("scheduling")
+            .and_then(|t| t.get_str("priority"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_PRIORITY);
+
+        // ENDPOINT: create TOKEN_EXTRA_0 based on [tokens] endpoint_mode
+        let endpoint_mode = doc
+            .table("tokens")
+            .and_then(|t| t.get_str("endpoint_mode"));
+        let extra_token = match endpoint_mode {
+            Some("listen") => {
+                let ep = endpoint_create(self.token)?;
+                match token_derive(ep, Rights::IPC_RECV.bits() as usize, u64::MAX) {
+                    Ok(t) => t,
+                    Err(_) => 0,
+                }
+            }
+            Some("grantable") => {
+                let ep = endpoint_create(self.token)?;
+                let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT;
+                match token_derive(ep, rights.bits() as usize, u64::MAX) {
+                    Ok(t) => t,
+                    Err(_) => 0,
+                }
+            }
+            _ => 0,
+        };
+
+        // PARAM: read [params] slots from manifest (wire format deferred to vtmgr migration)
+        let param_slots: Vec<String> = doc
+            .table("params")
+            .and_then(|t| t.get_array("slots"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
+        if !param_slots.is_empty() {
+            let _ = debug_print(&format!(
+                "procmgr: container '{}' param slots: {:?}",
+                image_name, param_slots
+            ));
+        }
+
         // Fix B: Build argv payload with binary path as argv[0]
         let mut argv_payload: Vec<u8> = Vec::new();
         argv_payload.extend_from_slice(binary.as_bytes());
@@ -1991,7 +2038,7 @@ impl ProcessManager {
 
         match self.spawn_service_with_env(
             &binary_vfs_path,
-            DEFAULT_PRIORITY,
+            priority,
             &argv_payload,
             argc,
             &[],
@@ -2001,6 +2048,7 @@ impl ProcessManager {
             spawn_start,
             fdac_data,
             requested_profile,
+            extra_token,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build container view mounts
@@ -2296,6 +2344,7 @@ fn map_process_info_page(
     envc: usize,
     pipe_mask: u8,
     profile: CapProfile,
+    extra_token: usize,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -2313,7 +2362,10 @@ fn map_process_info_page(
     tokens[TOKEN_CLOCK] = clock_token;
     // Slot 8: System service
     tokens[TOKEN_REGISTRY] = registry_token;
-    // Slots 9-15: Contextual (empty for regular programs)
+    // Slots 9-15: Contextual
+    if extra_token != 0 {
+        tokens[TOKEN_EXTRA_0] = extra_token;
+    }
 
     let mut params = [0u64; 10];
     // params[0] = pipe_mask for regular processes (shared with PARAM_FB_BASE for console)

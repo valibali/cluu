@@ -47,6 +47,9 @@ struct Cluufile {
     copies: Vec<(String, String)>,
     persistent_dirs: Vec<String>,
     env: Vec<(String, String)>,
+    priority: Option<usize>,
+    endpoint_mode: Option<String>,
+    params: Vec<String>,
 }
 
 fn parse_cluufile(path: &Path) -> Result<Cluufile> {
@@ -60,6 +63,9 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
     let mut copies: Vec<(String, String)> = Vec::new();
     let mut persistent_dirs: Vec<String> = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
+    let mut priority: Option<usize> = None;
+    let mut endpoint_mode: Option<String> = None;
+    let mut params: Vec<String> = Vec::new();
     let mut saw_directive = false;
 
     for (line_idx, raw_line) in content.lines().enumerate() {
@@ -185,6 +191,53 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
                 }
                 env.push((key.to_string(), value.to_string()));
             }
+            "PRIORITY" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before PRIORITY", path.display(), lineno);
+                }
+                if priority.is_some() {
+                    bail!("{}:{}: duplicate PRIORITY directive", path.display(), lineno);
+                }
+                let val: usize = rest.parse().map_err(|_| {
+                    anyhow::anyhow!("{}:{}: PRIORITY requires an integer value", path.display(), lineno)
+                })?;
+                if val < 1 || val > 255 {
+                    bail!("{}:{}: PRIORITY must be 1-255, got {}", path.display(), lineno, val);
+                }
+                priority = Some(val);
+            }
+            "ENDPOINT" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before ENDPOINT", path.display(), lineno);
+                }
+                if endpoint_mode.is_some() {
+                    bail!("{}:{}: duplicate ENDPOINT directive", path.display(), lineno);
+                }
+                match rest {
+                    "listen" | "grantable" => {
+                        endpoint_mode = Some(rest.to_string());
+                    }
+                    _ => {
+                        bail!(
+                            "{}:{}: ENDPOINT must be 'listen' or 'grantable', got '{}'",
+                            path.display(), lineno, rest
+                        );
+                    }
+                }
+            }
+            "PARAM" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before PARAM", path.display(), lineno);
+                }
+                if rest.is_empty() {
+                    bail!("{}:{}: PARAM requires a name", path.display(), lineno);
+                }
+                let name = rest.to_string();
+                if params.contains(&name) {
+                    bail!("{}:{}: duplicate PARAM '{}'", path.display(), lineno, name);
+                }
+                params.push(name);
+            }
             unknown => {
                 bail!(
                     "{}:{}: unknown directive '{}'",
@@ -208,6 +261,9 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
         copies,
         persistent_dirs,
         env,
+        priority,
+        endpoint_mode,
+        params,
     })
 }
 
@@ -272,6 +328,28 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str) -> String {
             "\n[[env]]\nkey = \"{}\"\nvalue = \"{}\"\n",
             key, value
         ));
+    }
+
+    // [scheduling] — only if priority specified
+    if let Some(prio) = cluufile.priority {
+        out.push_str(&format!("\n[scheduling]\npriority = \"{}\"\n", prio));
+    }
+
+    // [tokens] — only if endpoint mode specified
+    if let Some(ref mode) = cluufile.endpoint_mode {
+        out.push_str(&format!("\n[tokens]\nendpoint_mode = \"{}\"\n", mode));
+    }
+
+    // [params] — only if param slots specified
+    if !cluufile.params.is_empty() {
+        out.push_str("\n[params]\nslots = [");
+        for (i, name) in cluufile.params.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("\"{}\"", name));
+        }
+        out.push_str("]\n");
     }
 
     out
