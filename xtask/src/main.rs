@@ -427,8 +427,6 @@ fn default_expected_work_units(task_id: &str) -> u32 {
     match task_id {
         "userspace-newlib" => 320,
         "userspace-rust" => 450,
-        "userspace-c-programs" => 120,
-        "userspace-micropython" => 380,
         "kernel" => 120,
         "initrd" => 24,
         "build-containers" => 40,
@@ -1748,18 +1746,6 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
             is_leaf: true,
         },
         RichTreeNodeDef {
-            id: "userspace-c-programs",
-            label: "c-programs",
-            parent: Some("userspace"),
-            is_leaf: true,
-        },
-        RichTreeNodeDef {
-            id: "userspace-micropython",
-            label: "micropython",
-            parent: Some("userspace"),
-            is_leaf: true,
-        },
-        RichTreeNodeDef {
             id: "kernel",
             label: "kernel",
             parent: Some("build"),
@@ -1793,10 +1779,10 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
 
     // Dependency-checked parallelization:
     // - userspace-newlib, kernel: immediate.
-    // - userspace-rust, userspace-c-programs, userspace-micropython: all wait only for userspace-newlib.
-    // - build-containers: waits for userspace-rust + userspace-c-programs (BUILD directives compile code).
+    // - userspace-rust: waits for userspace-newlib.
+    // - build-containers: waits for userspace-newlib + userspace-rust (BUILD directives compile code).
     // - initrd: waits for userspace-rust + kernel + build-containers (prevents cargo lock race).
-    // - userdisk: waits for userspace-rust + userspace-c-programs + userspace-micropython + build-containers.
+    // - userdisk: waits for userspace-rust + build-containers.
     // - disk-image: waits for initrd + userdisk.
     let tasks = vec![
         RichTask {
@@ -1814,20 +1800,6 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
             deps: &["userspace-newlib"],
         },
         RichTask {
-            name: "userspace-c-programs",
-            args: vec![
-                "build-c-programs".to_string(),
-                "--profile".to_string(),
-                profile.to_string(),
-            ],
-            deps: &["userspace-newlib"],
-        },
-        RichTask {
-            name: "userspace-micropython",
-            args: vec!["build-micropython".to_string()],
-            deps: &["userspace-newlib"],
-        },
-        RichTask {
             name: "kernel",
             args: vec![
                 "kernel".to_string(),
@@ -1839,7 +1811,7 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
         RichTask {
             name: "build-containers",
             args: vec!["build-containers".to_string()],
-            deps: &["userspace-rust", "userspace-c-programs"],
+            deps: &["userspace-newlib", "userspace-rust"],
         },
         RichTask {
             name: "initrd",
@@ -1859,8 +1831,6 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
             ],
             deps: &[
                 "userspace-rust",
-                "userspace-c-programs",
-                "userspace-micropython",
                 "build-containers",
             ],
         },
@@ -2543,64 +2513,6 @@ fn create_user_block_image(profile: &str) -> Result<()> {
         }
         fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
         println!("  Added {}", prog);
-    }
-
-    // Also add any C programs (built via cargo xtask build-c)
-    let c_programs = [
-        "hello",
-        "minimal",
-        "noop",
-        "ownerprobe",
-        "sleepy",
-        "waitprobe",
-        "mmapprobe",
-        "pollprobe",
-        "benchprobe",
-        "futexprobe",
-        "futexrace",
-        "setjmpprobe",
-        "envprobe",
-        "stubsprobe",
-        "pipeprobe",
-        "pipecat",
-        "spawnpipeprobe",
-        "tlsprobe",
-        "pthreadprobe",
-        "devprobe",
-        "fbprobe",
-        "containerprobe",
-    ];
-    for prog in &c_programs {
-        let src = userspace_target_dir.join(format!("{}.elf", prog));
-        let dst = bin_dir.join(prog);
-        if src.exists() {
-            fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
-            println!("  Added {} (C program)", prog);
-        }
-    }
-
-    // MicroPython is built by userspace/micropython/Makefile and may not land in the
-    // profile-specific x86_64-cluu-user/<profile> directory. Probe known output paths.
-    let micropython_candidates = [
-        userspace_target_dir.join("micropython.elf"),
-        project_root().join("target/x86_64-cluu-user/debug/micropython.elf"),
-        project_root().join("target/micropython-build/micropython"),
-    ];
-    let micropython_dst = bin_dir.join("micropython");
-    if let Some(src) = micropython_candidates.iter().find(|p| p.exists()) {
-        fs::copy(src, &micropython_dst)
-            .with_context(|| format!("Failed to copy micropython from {}", src.display()))?;
-        println!("  Added micropython ({})", src.display());
-    } else {
-        println!("  Skipping micropython (not built)");
-    }
-
-    // Create short alias for micropython (avoids keyboard layout issues in testing)
-    let mp_src = bin_dir.join("micropython");
-    let mp_dst = bin_dir.join("mp");
-    if mp_src.exists() {
-        fs::copy(&mp_src, &mp_dst).context("Failed to copy mp alias")?;
-        println!("  Added mp (alias for micropython)");
     }
 
     // Copy built container images into /var/images/ on the userdisk

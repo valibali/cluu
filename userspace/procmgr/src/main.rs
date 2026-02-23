@@ -2797,8 +2797,9 @@ fn profile_to_rights(profile: CapProfile) -> [Rights; 16] {
         r[TOKEN_IPC] |= Rights::IPC_SEND | Rights::IPC_RECV;
     }
 
-    // SPAWN or REGISTRY: need CREATE+GRANT on IPC cap to create endpoints.
-    if profile.contains(CapProfile::SPAWN) || profile.contains(CapProfile::REGISTRY) {
+    // SPAWN, REGISTRY, or VFS: need CREATE+GRANT on IPC cap to create endpoints.
+    // VFS requires registry lookup (endpoint_create) for service discovery.
+    if profile.contains(CapProfile::SPAWN) || profile.contains(CapProfile::REGISTRY) || profile.contains(CapProfile::VFS) {
         r[TOKEN_IPC] |= Rights::CREATE | Rights::GRANT;
     }
 

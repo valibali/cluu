@@ -12,7 +12,7 @@ use core::mem::size_of;
 use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE, TOKEN_STDIN};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
-    call, call_with_payload, call_with_reply_buf, recv, send_with_payload, send_with_retry,
+    call, call_with_payload, call_with_reply_buf, recv, send, send_with_payload, send_with_retry,
     SharedRing, CONSOLE_CLEAR_LABEL, PROCMGR_CONTAINER_LIST_LABEL, PROCMGR_CONTAINER_RUN_LABEL,
     TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
     TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
@@ -1196,7 +1196,7 @@ fn set_tty_foreground(
         msg.words[0] = foreground_endpoint;
         msg.words[1] = ctrl_c_notify_endpoint;
         msg.words[2] = flags;
-        match call(tty_endpoint, &mut msg, IpcFlags::empty()) {
+        match send(tty_endpoint, &msg, IpcFlags::empty()) {
             Ok(()) => return Ok(()),
             Err(Error::WouldBlock) | Err(Error::Busy) => {
                 let _ = syscall::yield_cpu();
