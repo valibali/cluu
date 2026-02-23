@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs
+BUILD "make -C userspace/micropython -j4" target/micropython-build/micropython /bin/micropython
+ENTRYPOINT /bin/micropython

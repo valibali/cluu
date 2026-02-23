@@ -1229,196 +1229,20 @@ impl ProcessManager {
     fn handle_spawn_message(
         &mut self,
         msg: &Message,
-        payload: &[u8],
+        _payload: &[u8],
         sender_tid: usize,
     ) -> Result<()> {
-        let spawn_seq = self.next_spawn_seq();
-        let spawn_start = self.clock_sample();
         let mut reply_msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
-        self.log_spawn_stage(spawn_seq, "spawn_request", spawn_start);
         let _ = debug_print(&format!(
-            "procmgr: spawn request sender_tid={} words={}",
-            sender_tid, msg.tag.words
+            "procmgr: bare spawn rejected sender_tid={} (use 'container run')",
+            sender_tid
         ));
-        // Spawn must come via ipc_call; do not trust caller-routed reply endpoints.
+        // Bare binary spawning is not supported.  All user workloads must be
+        // launched as containers via PROCMGR_CONTAINER_RUN_LABEL.  The internal
+        // tty shell spawn path (TTY_SPAWN_SHELL_LABEL) is handled separately.
         let reply_token = extract_reply_id(msg);
-        let notify_endpoint = if msg.tag.words >= 4 { msg.words[3] } else { 0 };
-        let notify_endpoint = match self.resolve_notify_endpoint(sender_tid, notify_endpoint) {
-            Ok(endpoint) => endpoint,
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
-                let _ = self.send_spawn_reply(reply_token, &reply_msg);
-                return Ok(());
-            }
-        };
-        if msg.tag.label != PROCMGR_SPAWN_LABEL {
-            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
-            let _ = self.send_spawn_reply(reply_token, &reply_msg);
-            return Ok(());
-        }
-
-        let path = match parse_cstr(payload) {
-            Some(value) => value,
-            None => {
-                let _ = debug_print("procmgr: spawn request missing path");
-                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
-                let _ = self.send_spawn_reply(reply_token, &reply_msg);
-                return Ok(());
-            }
-        };
-        let _ = debug_print(&format!("procmgr: spawn path {}", path));
-
-        // Require absolute paths (must start with '/')
-        if !path.starts_with('/') {
-            let _ = debug_print(&format!("procmgr: rejecting relative path '{}'", path));
-            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
-            let _ = self.send_spawn_reply(reply_token, &reply_msg);
-            return Ok(());
-        }
-
-        // ── Policy: authenticated caller resolution + profile/view inheritance ──
-        let (caller_profile, child_view_mounts, caller_pid) = if sender_tid == 0 {
-            // Boot/legacy sender path: caller identity is unavailable, so use
-            // profile defaults for compatibility.
-            let profile = CapProfile::USER;
-            (profile, default_view_for_profile(profile), 0usize)
-        } else {
-            let caller_pid = match self.tid_to_pid.get(&sender_tid).copied() {
-                Some(pid) => pid,
-                None => {
-                    let _ = debug_print(&format!(
-                        "procmgr: spawn denied unknown caller sender_tid={}",
-                        sender_tid
-                    ));
-                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
-                    let _ = self.send_spawn_reply(reply_token, &reply_msg);
-                    return Ok(());
-                }
-            };
-            let caller_profile = match self.pid_to_profile.get(&caller_pid).copied() {
-                Some(profile) => profile,
-                None => {
-                    let _ = debug_print(&format!(
-                        "procmgr: spawn denied missing caller profile pid={}",
-                        caller_pid
-                    ));
-                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
-                    let _ = self.send_spawn_reply(reply_token, &reply_msg);
-                    return Ok(());
-                }
-            };
-            let caller_view = match self.pid_to_view.get(&caller_pid) {
-                Some(view) => view.clone(),
-                None => {
-                    let _ = debug_print(&format!(
-                        "procmgr: spawn denied missing caller view pid={}",
-                        caller_pid
-                    ));
-                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
-                    let _ = self.send_spawn_reply(reply_token, &reply_msg);
-                    return Ok(());
-                }
-            };
-            let inherited_view = caller_view.clone();
-            if !can_narrow_view(&caller_view, &inherited_view) {
-                let _ = debug_print(&format!(
-                    "procmgr: spawn denied view inheritance caller_pid={}",
-                    caller_pid
-                ));
-                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
-                let _ = self.send_spawn_reply(reply_token, &reply_msg);
-                return Ok(());
-            }
-            (caller_profile, inherited_view, caller_pid)
-        };
-        if !caller_profile.contains(CapProfile::SPAWN) {
-            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
-            let _ = self.send_spawn_reply(reply_token, &reply_msg);
-            return Ok(());
-        }
-        let child_profile = caller_profile;
-
-        let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
-        let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
-        let envc = if msg.tag.words >= 5 { msg.words[4] } else { 0 };
-        let env_payload_offset = if msg.tag.words >= 6 { msg.words[5] } else { 0 };
-        let priority = DEFAULT_PRIORITY;
-
-        // Extract argv data: payload is [path\0, argv[0]\0, argv[1]\0, ...]
-        // Skip past the path string (including its NUL terminator)
-        let path_nul_end = payload
-            .iter()
-            .position(|b| *b == 0)
-            .unwrap_or(payload.len())
-            + 1;
-        let argv_data = if argc > 0 && path_nul_end < payload.len() {
-            &payload[path_nul_end..]
-        } else {
-            &[]
-        };
-
-        // Extract env data from payload (between env_payload_offset and fdac_offset)
-        let env_end = if fdac_offset > 0 && fdac_offset <= payload.len() {
-            fdac_offset
-        } else {
-            payload.len()
-        };
-        let env_data = if envc > 0 && env_payload_offset > 0 && env_payload_offset < env_end {
-            &payload[env_payload_offset..env_end]
-        } else {
-            &[]
-        };
-
-        // Extract FDAC (fd actions) from payload
-        let fdac_data = if fdac_offset > 0 && fdac_offset < payload.len() {
-            &payload[fdac_offset..]
-        } else {
-            &[]
-        };
-
-        match self.spawn_service_with_env(
-            path,
-            priority,
-            argv_data,
-            argc,
-            env_data,
-            envc,
-            sender_tid,
-            spawn_seq,
-            spawn_start,
-            fdac_data,
-            child_profile,
-            0,
-            0,
-            &[],
-        ) {
-            Ok((thread_token, cookie, pid, child_stdin_send)) => {
-                reply_msg.words[0] = 0;
-                reply_msg.words[1] = pid; // Return PID instead of thread_token
-                reply_msg.words[2] = cookie; // Return cookie for _wait()
-                reply_msg.words[3] = child_stdin_send; // Parent send-cap for foreground routing.
-                // Inherit parent's container — dirs already exist from parent's spawn.
-                let container_id = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
-                self.pid_to_container_id.insert(pid, container_id);
-                self.register_vfs_view_for_thread(thread_token, &child_view_mounts, child_profile, container_id);
-                self.pid_to_view.insert(pid, child_view_mounts.clone());
-                if sender_tid != 0 {
-                    let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
-                    *entry = entry.saturating_add(1);
-                }
-                if notify_endpoint != 0 {
-                    self.exit_notify.insert(cookie, notify_endpoint);
-                }
-            }
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
-            }
-        }
-        if let Err(err) = self.send_spawn_reply(reply_token, &reply_msg) {
-            let _ = debug_print(&format!("procmgr: spawn reply failed {:?}", err));
-        } else {
-            self.log_spawn_stage(spawn_seq, "reply_sent", spawn_start);
-        }
+        reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+        let _ = self.send_spawn_reply(reply_token, &reply_msg);
         Ok(())
     }
 
