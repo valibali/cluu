@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs
+BUILD "cargo xtask build-c stubsprobe userspace/c-programs/stubsprobe.c" target/x86_64-cluu-user/debug/stubsprobe.elf /bin/stubsprobe
+ENTRYPOINT /bin/stubsprobe

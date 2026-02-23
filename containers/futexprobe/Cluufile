@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c futexprobe userspace/c-programs/futexprobe.c" target/x86_64-cluu-user/debug/futexprobe.elf /bin/futexprobe
+ENTRYPOINT /bin/futexprobe

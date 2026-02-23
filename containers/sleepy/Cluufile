@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c sleepy userspace/c-programs/sleepy.c" target/x86_64-cluu-user/debug/sleepy.elf /bin/sleepy
+ENTRYPOINT /bin/sleepy

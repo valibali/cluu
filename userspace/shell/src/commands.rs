@@ -24,7 +24,6 @@ use libcluu::{debug_print, process_info, Error, IpcFlags, Result, TOKEN_IPC};
 
 use cluu_lang::ast::{Assign, CmdElem, DqPart, Program, Stmt, Word, WordPart};
 
-const PROCMGR_SPAWN_LABEL: u32 = 2;
 const PROCMGR_KILL_LABEL: u32 = 3;
 const DEFAULT_PRIORITY: usize = 200;
 const SIGINT: usize = 2;
@@ -774,7 +773,7 @@ impl BuiltinCommand for SpawnBgBuiltin {
                     spawn.pid,
                     spawn.notify_endpoint,
                     spawn.stdin_endpoint,
-                    normalize_spawn_path(path.as_str()),
+                    String::from(path.as_str()),
                     fg_mode,
                 );
                 let line = format!("spawnbg: started pid={}\n", spawn.pid);
@@ -906,7 +905,7 @@ impl BuiltinCommand for JobChurnBuiltin {
                 pid,
                 spawn.notify_endpoint,
                 spawn.stdin_endpoint,
-                normalize_spawn_path("sleepy"),
+                String::from("sleepy"),
                 ForegroundMode::SignalOnCtrlC,
             );
 
@@ -953,7 +952,7 @@ impl BuiltinCommand for JobMixBuiltin {
             pid_a,
             spawn_a.notify_endpoint,
             spawn_a.stdin_endpoint,
-            normalize_spawn_path("sleepy"),
+            String::from("sleepy"),
             ForegroundMode::SignalOnCtrlC,
         );
 
@@ -964,7 +963,7 @@ impl BuiltinCommand for JobMixBuiltin {
             pid_b,
             spawn_b.notify_endpoint,
             spawn_b.stdin_endpoint,
-            normalize_spawn_path("sleepy"),
+            String::from("sleepy"),
             ForegroundMode::SignalOnCtrlC,
         );
 
@@ -1053,32 +1052,30 @@ struct SpawnResult {
     stdin_endpoint: usize,
 }
 
-fn spawn_process(context: &mut CommandContext, path: &str, priority: usize) -> Result<SpawnResult> {
+fn spawn_process(context: &mut CommandContext, name: &str, _priority: usize) -> Result<SpawnResult> {
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-    let initrd_path = normalize_spawn_path(path);
-    let payload = initrd_path.as_bytes();
+    let payload = name.as_bytes();
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
-    let mut msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
+    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();
-    msg.words[1] = priority;
-    msg.words[2] = 0;
-    msg.words[3] = notify_endpoint;
+    msg.words[1] = notify_endpoint;
+    msg.words[2] = 0; // fdac_offset
     let mut reply = Message::new(0, [0; 6], 0);
     let _ = debug_print(&format!(
-        "shell: spawn call begin path={} ep={} notify={}",
-        initrd_path, procmgr_endpoint, notify_endpoint
+        "shell: container run begin name={} ep={} notify={}",
+        name, procmgr_endpoint, notify_endpoint
     ));
     call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
     let _ = debug_print(&format!(
-        "shell: spawn call done status={} pid={} stdin={}",
-        reply.words[0], reply.words[1], reply.words[3]
+        "shell: container run done status={} pid={} stdin={}",
+        reply.words[0], reply.words[1], reply.words[4]
     ));
     Ok(SpawnResult {
         procmgr_endpoint,
         notify_endpoint,
         status_word: reply.words[0],
         pid: reply.words[1],
-        stdin_endpoint: reply.words[3],
+        stdin_endpoint: reply.words[4],
     })
 }
 
@@ -1961,24 +1958,8 @@ impl BuiltinCommand for Ext2OwnerDenyBuiltin {
         };
         let _ = vfs.close(created);
 
-        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
-        let payload = normalize_spawn_path("ownerprobe");
-        let mut msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
-        msg.words[0] = payload.len();
-        msg.words[1] = DEFAULT_PRIORITY;
-        msg.words[2] = 0;
-        msg.words[3] = notify_endpoint;
-        let mut reply = Message::new(0, [0; 6], 0);
-        if let Err(err) = call_with_payload(procmgr_endpoint, &msg, payload.as_bytes(), &mut reply)
-        {
-            let line = format!("ext2ownerdeny: FAIL spawn-call {:?}\n", err);
-            let _ = debug_print(line.as_str());
-            send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-            let _ = vfs.unlink(path);
-            return Ok(());
-        }
-        if let Err(err) = parse_status(reply.words[0]) {
+        let spawn = spawn_process(context, "ownerprobe", DEFAULT_PRIORITY)?;
+        if let Err(err) = parse_status(spawn.status_word) {
             let line = format!("ext2ownerdeny: FAIL spawn-status {:?}\n", err);
             let _ = debug_print(line.as_str());
             send_with_retry(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
@@ -1987,7 +1968,7 @@ impl BuiltinCommand for Ext2OwnerDenyBuiltin {
         }
 
         let mut exit_msg = Message::new(0, [0; 6], 0);
-        let _ = recv(notify_endpoint, &mut exit_msg, IpcFlags::empty());
+        let _ = recv(spawn.notify_endpoint, &mut exit_msg, IpcFlags::empty());
         if exit_msg.tag.words >= 2 && exit_msg.words[1] != 0 {
             let line = format!(
                 "ext2ownerdeny: FAIL ownerprobe-exit {}\n",
@@ -2223,16 +2204,6 @@ where
     send_with_payload(stdout, TTY_WRITE_LABEL, result.as_bytes())?;
     send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
     Ok(())
-}
-
-fn normalize_spawn_path(path: &str) -> String {
-    // Procmgr requires absolute paths.
-    // If path doesn't start with '/', assume it's in /bin/
-    if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("/bin/{}", path)
-    }
 }
 
 fn encode_registry_names(service: &str, endpoint: &str) -> Vec<u8> {

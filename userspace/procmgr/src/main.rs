@@ -1229,20 +1229,154 @@ impl ProcessManager {
     fn handle_spawn_message(
         &mut self,
         msg: &Message,
-        _payload: &[u8],
+        payload: &[u8],
         sender_tid: usize,
     ) -> Result<()> {
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
         let mut reply_msg = Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
-        let _ = debug_print(&format!(
-            "procmgr: bare spawn rejected sender_tid={} (use 'container run')",
-            sender_tid
-        ));
-        // Bare binary spawning is not supported.  All user workloads must be
-        // launched as containers via PROCMGR_CONTAINER_RUN_LABEL.  The internal
-        // tty shell spawn path (TTY_SPAWN_SHELL_LABEL) is handled separately.
         let reply_token = extract_reply_id(msg);
-        reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
-        let _ = self.send_spawn_reply(reply_token, &reply_msg);
+
+        // Only containers with SPAWN capability may use bare spawn (for child
+        // processes like benchprobe→noop or spawnpipeprobe→pipe child).
+        let (caller_pid, caller_profile, caller_container_id) = match self
+            .tid_to_pid
+            .get(&sender_tid)
+            .copied()
+        {
+            Some(pid) => {
+                let profile = self.pid_to_profile.get(&pid).copied().unwrap_or(CapProfile::empty());
+                let cid = self.pid_to_container_id.get(&pid).copied().unwrap_or(0);
+                (pid, profile, cid)
+            }
+            None => {
+                let _ = debug_print(&format!(
+                    "procmgr: bare spawn rejected unknown sender_tid={}",
+                    sender_tid
+                ));
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                let _ = self.send_spawn_reply(reply_token, &reply_msg);
+                return Ok(());
+            }
+        };
+        if caller_container_id == 0 || !caller_profile.contains(CapProfile::SPAWN) {
+            let _ = debug_print(&format!(
+                "procmgr: bare spawn rejected sender_tid={} (no container or no SPAWN cap)",
+                sender_tid
+            ));
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            let _ = self.send_spawn_reply(reply_token, &reply_msg);
+            return Ok(());
+        }
+
+        self.log_spawn_stage(spawn_seq, "spawn_request", spawn_start);
+        let _ = debug_print(&format!(
+            "procmgr: spawn request sender_tid={} words={}",
+            sender_tid, msg.tag.words
+        ));
+        let notify_endpoint = if msg.tag.words >= 4 { msg.words[3] } else { 0 };
+        let notify_endpoint = match self.resolve_notify_endpoint(sender_tid, notify_endpoint) {
+            Ok(endpoint) => endpoint,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                let _ = self.send_spawn_reply(reply_token, &reply_msg);
+                return Ok(());
+            }
+        };
+        if msg.tag.label != PROCMGR_SPAWN_LABEL {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            let _ = self.send_spawn_reply(reply_token, &reply_msg);
+            return Ok(());
+        }
+
+        let path = match parse_cstr(payload) {
+            Some(value) => value,
+            None => {
+                let _ = debug_print("procmgr: spawn request missing path");
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                let _ = self.send_spawn_reply(reply_token, &reply_msg);
+                return Ok(());
+            }
+        };
+        let _ = debug_print(&format!("procmgr: spawn path {}", path));
+
+        if !path.starts_with('/') {
+            let _ = debug_print(&format!("procmgr: rejecting relative path '{}'", path));
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            let _ = self.send_spawn_reply(reply_token, &reply_msg);
+            return Ok(());
+        }
+
+        // Inherit parent's view and profile.
+        let child_view_mounts = match self.pid_to_view.get(&caller_pid) {
+            Some(view) => view.clone(),
+            None => default_view_for_profile(caller_profile),
+        };
+        let child_profile = caller_profile;
+
+        let priority = DEFAULT_PRIORITY;
+
+        // Extract argv data: payload is [path\0, argv[0]\0, argv[1]\0, ...]
+        let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
+        let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
+        let path_nul_end = payload
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(payload.len())
+            + 1;
+        let argv_data = if argc > 0 && path_nul_end < payload.len() {
+            &payload[path_nul_end..]
+        } else {
+            &[]
+        };
+        let fdac_data = if fdac_offset > 0 && fdac_offset < payload.len() {
+            &payload[fdac_offset..]
+        } else {
+            &[]
+        };
+
+        match self.spawn_service_with_env(
+            path,
+            priority,
+            argv_data,
+            argc,
+            &[],
+            0,
+            sender_tid,
+            spawn_seq,
+            spawn_start,
+            fdac_data,
+            child_profile,
+            0,
+            0,
+            &[],
+        ) {
+            Ok((thread_token, cookie, pid, child_stdin_send)) => {
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = pid;
+                reply_msg.words[2] = cookie;
+                reply_msg.words[3] = child_stdin_send;
+                // Inherit parent's container.
+                self.pid_to_container_id.insert(pid, caller_container_id);
+                self.register_vfs_view_for_thread(thread_token, &child_view_mounts, child_profile, caller_container_id);
+                self.pid_to_view.insert(pid, child_view_mounts.clone());
+                if sender_tid != 0 {
+                    let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
+                    *entry = entry.saturating_add(1);
+                }
+                if notify_endpoint != 0 {
+                    self.exit_notify.insert(cookie, notify_endpoint);
+                }
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+        if let Err(err) = self.send_spawn_reply(reply_token, &reply_msg) {
+            let _ = debug_print(&format!("procmgr: spawn reply failed {:?}", err));
+        } else {
+            self.log_spawn_stage(spawn_seq, "reply_sent", spawn_start);
+        }
         Ok(())
     }
 

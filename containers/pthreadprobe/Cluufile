@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c pthreadprobe userspace/c-programs/pthreadprobe.c" target/x86_64-cluu-user/debug/pthreadprobe.elf /bin/pthreadprobe
+ENTRYPOINT /bin/pthreadprobe

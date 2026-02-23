@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs
+BUILD "cargo xtask build-c ownerprobe userspace/c-programs/ownerprobe.c" target/x86_64-cluu-user/debug/ownerprobe.elf /bin/ownerprobe
+ENTRYPOINT /bin/ownerprobe

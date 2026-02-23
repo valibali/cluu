@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs
+BUILD "cargo xtask build-c pipecat userspace/c-programs/pipecat.c" target/x86_64-cluu-user/debug/pipecat.elf /bin/pipecat
+ENTRYPOINT /bin/pipecat

@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c tlsprobe userspace/c-programs/tlsprobe.c" target/x86_64-cluu-user/debug/tlsprobe.elf /bin/tlsprobe
+ENTRYPOINT /bin/tlsprobe

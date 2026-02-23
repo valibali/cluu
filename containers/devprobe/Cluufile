@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs device
+BUILD "cargo xtask build-c devprobe userspace/c-programs/devprobe.c" target/x86_64-cluu-user/debug/devprobe.elf /bin/devprobe
+ENTRYPOINT /bin/devprobe

@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c minimal userspace/c-programs/minimal.c" target/x86_64-cluu-user/debug/minimal.elf /bin/minimal
+ENTRYPOINT /bin/minimal

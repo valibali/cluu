@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs
+BUILD "cargo xtask build-c mmapprobe userspace/c-programs/mmapprobe.c" target/x86_64-cluu-user/debug/mmapprobe.elf /bin/mmapprobe
+ENTRYPOINT /bin/mmapprobe

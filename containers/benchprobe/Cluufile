@@ -1,0 +1,6 @@
+FROM minimal
+PROFILE ipc spawn
+BUILD "cargo xtask build-c benchprobe userspace/c-programs/benchprobe.c" target/x86_64-cluu-user/debug/benchprobe.elf /bin/benchprobe
+BUILD "cargo xtask build-c noop userspace/c-programs/noop.c" target/x86_64-cluu-user/debug/noop.elf /bin/noop
+BUILD "cargo xtask build-c sleepy userspace/c-programs/sleepy.c" target/x86_64-cluu-user/debug/sleepy.elf /bin/sleepy
+ENTRYPOINT /bin/benchprobe

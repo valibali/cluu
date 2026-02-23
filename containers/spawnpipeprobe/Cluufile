@@ -1,0 +1,5 @@
+FROM minimal
+PROFILE ipc vfs spawn
+BUILD "cargo xtask build-c spawnpipeprobe userspace/c-programs/spawnpipeprobe.c" target/x86_64-cluu-user/debug/spawnpipeprobe.elf /bin/spawnpipeprobe
+BUILD "cargo xtask build-c pipecat userspace/c-programs/pipecat.c" target/x86_64-cluu-user/debug/pipecat.elf /bin/pipecat
+ENTRYPOINT /bin/spawnpipeprobe

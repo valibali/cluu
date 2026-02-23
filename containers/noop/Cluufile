@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c noop userspace/c-programs/noop.c" target/x86_64-cluu-user/debug/noop.elf /bin/noop
+ENTRYPOINT /bin/noop

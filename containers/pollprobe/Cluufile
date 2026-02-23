@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs
+BUILD "cargo xtask build-c pollprobe userspace/c-programs/pollprobe.c" target/x86_64-cluu-user/debug/pollprobe.elf /bin/pollprobe
+ENTRYPOINT /bin/pollprobe
