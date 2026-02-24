@@ -1637,32 +1637,40 @@ impl ProcessManager {
                     ]);
 
                     let is_pipe = (flags & 0x01) != 0;
-                    match target_fd {
-                        0 => {
-                            stdin_ep = endpoint;
-                            if is_pipe {
-                                pipe_mask |= 1 << 0;
+                    // Validate + narrow: stdin needs recv, others need send.
+                    let probe_rights = match target_fd {
+                        0 => Rights::IPC_RECV.bits() as usize,
+                        _ => Rights::IPC_SEND.bits() as usize,
+                    };
+                    match token_derive(endpoint, probe_rights, u64::MAX) {
+                        Ok(derived) => {
+                            match target_fd {
+                                0 => {
+                                    stdin_ep = derived;
+                                    if is_pipe { pipe_mask |= 1 << 0; }
+                                }
+                                1 => {
+                                    stdout_ep = derived;
+                                    if is_pipe { pipe_mask |= 1 << 1; }
+                                }
+                                2 => {
+                                    stderr_ep = derived;
+                                    if is_pipe { pipe_mask |= 1 << 2; }
+                                }
+                                3 => {
+                                    stdlog_ep = derived;
+                                    if is_pipe { pipe_mask |= 1 << 3; }
+                                }
+                                _ => {}
                             }
                         }
-                        1 => {
-                            stdout_ep = endpoint;
-                            if is_pipe {
-                                pipe_mask |= 1 << 1;
-                            }
+                        Err(_) => {
+                            let _ = debug_print(&format!(
+                                "procmgr: FDAC rejected: endpoint {} for fd {} failed derive",
+                                endpoint, target_fd
+                            ));
+                            return Err(Error::PermissionDenied);
                         }
-                        2 => {
-                            stderr_ep = endpoint;
-                            if is_pipe {
-                                pipe_mask |= 1 << 2;
-                            }
-                        }
-                        3 => {
-                            stdlog_ep = endpoint;
-                            if is_pipe {
-                                pipe_mask |= 1 << 3;
-                            }
-                        }
-                        _ => {}
                     }
                 }
                 let _ = debug_print(&format!(
@@ -1677,28 +1685,6 @@ impl ProcessManager {
                 Ok(token) => token,
                 Err(_) => 0, // No access rather than raw endpoint on derivation failure
             };
-
-        // Narrow pipe endpoint rights: child stdin = recv-only, stdout/stderr/stdlog = send-only
-        if pipe_mask & (1 << 0) != 0 {
-            if let Ok(narrowed) = token_derive(stdin_ep, Rights::IPC_RECV.bits() as usize, u64::MAX) {
-                stdin_ep = narrowed;
-            }
-        }
-        if pipe_mask & (1 << 1) != 0 {
-            if let Ok(narrowed) = token_derive(stdout_ep, Rights::IPC_SEND.bits() as usize, u64::MAX) {
-                stdout_ep = narrowed;
-            }
-        }
-        if pipe_mask & (1 << 2) != 0 {
-            if let Ok(narrowed) = token_derive(stderr_ep, Rights::IPC_SEND.bits() as usize, u64::MAX) {
-                stderr_ep = narrowed;
-            }
-        }
-        if pipe_mask & (1 << 3) != 0 {
-            if let Ok(narrowed) = token_derive(stdlog_ep, Rights::IPC_SEND.bits() as usize, u64::MAX) {
-                stdlog_ep = narrowed;
-            }
-        }
 
         map_process_info_page(
             space_token,
