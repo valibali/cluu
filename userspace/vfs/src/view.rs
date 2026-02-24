@@ -10,14 +10,26 @@ use libcluu::cap::CapProfile;
 use libcluu::vfs_view;
 use libcluu::{Error, Result};
 
+/// Where a view mount routes I/O requests.
+#[derive(Clone, Copy, PartialEq)]
+pub enum MountTarget {
+    /// Route through the global MountTable (initrd, ext2, devfs, procfs).
+    MountTable,
+    /// Route to a per-container in-memory filesystem.
+    MemFs { container_id: u64 },
+}
+
 /// A single mount rule within a view: maps a virtual path to a real backing path.
 pub struct ViewMount {
     /// Real backing path in the VFS mount table (e.g. "/data/home").
+    /// For MemFs targets, this is the path prefix within the MemFs (e.g. "/tmp").
     pub src: String,
     /// Virtual path seen by the client (e.g. "/home").
     pub dst: String,
     /// Whether the client can write through this mount.
     pub writable: bool,
+    /// Routing target for this mount.
+    pub target: MountTarget,
 }
 
 /// A client's view of the filesystem: an ordered list of mount rules.
@@ -29,12 +41,12 @@ pub struct VfsView {
 impl VfsView {
     /// Resolve a client-visible path to the real backing path.
     ///
-    /// Returns `Some((real_path, writable))` if the path matches a mount rule,
+    /// Returns `Some((real_path, writable, target))` if the path matches a mount rule,
     /// `None` if the path is outside the view entirely.
-    pub fn resolve_path(&self, path: &str) -> Option<(String, bool)> {
+    pub fn resolve_path(&self, path: &str) -> Option<(String, bool, MountTarget)> {
         for m in &self.mounts {
             if let Some(real) = rewrite_path(path, &m.dst, &m.src) {
-                return Some((real, m.writable));
+                return Some((real, m.writable, m.target));
             }
         }
         None
@@ -70,12 +82,21 @@ impl VfsViewTable {
         self.profiles.remove(&client_id);
     }
 
+    /// Get the view for a client (if one is explicitly registered).
+    pub fn get_view(&self, client_id: usize) -> Option<&VfsView> {
+        self.views.get(&client_id)
+    }
+
     /// Remove only the explicit view while keeping profile metadata.
     pub fn clear_explicit_view(&mut self, client_id: usize) {
         self.views.remove(&client_id);
     }
 
-    fn resolve_effective_path(&self, client_id: usize, path: &str) -> Result<(String, bool)> {
+    fn resolve_effective_path(
+        &self,
+        client_id: usize,
+        path: &str,
+    ) -> Result<(String, bool, MountTarget)> {
         if let Some(view) = self.views.get(&client_id) {
             return view.resolve_path(path).ok_or(Error::NotFound);
         }
@@ -98,7 +119,7 @@ impl VfsViewTable {
     pub fn check_path(&self, client_id: usize, path: &str) -> Result<String> {
         validate_clean_absolute_path(path)?;
         self.resolve_effective_path(client_id, path)
-            .map(|(real_path, _)| real_path)
+            .map(|(real_path, _, _)| real_path)
     }
 
     /// Check a path for a client and also return the writable flag.
@@ -106,6 +127,28 @@ impl VfsViewTable {
     /// Same semantics as `check_path`, but also indicates whether the
     /// resolved mount allows writes.
     pub fn check_path_writable(&self, client_id: usize, path: &str) -> Result<(String, bool)> {
+        validate_clean_absolute_path(path)?;
+        self.resolve_effective_path(client_id, path)
+            .map(|(real_path, writable, _)| (real_path, writable))
+    }
+
+    /// Check a path and return the resolved path + mount target.
+    pub fn check_path_with_target(
+        &self,
+        client_id: usize,
+        path: &str,
+    ) -> Result<(String, MountTarget)> {
+        validate_clean_absolute_path(path)?;
+        self.resolve_effective_path(client_id, path)
+            .map(|(real_path, _, target)| (real_path, target))
+    }
+
+    /// Check a path for write access and return the resolved path, writable flag, and target.
+    pub fn check_path_writable_with_target(
+        &self,
+        client_id: usize,
+        path: &str,
+    ) -> Result<(String, bool, MountTarget)> {
         validate_clean_absolute_path(path)?;
         self.resolve_effective_path(client_id, path)
     }
@@ -117,6 +160,7 @@ fn default_view_for_profile(profile: CapProfile) -> VfsView {
             src: String::from(src),
             dst: String::from(dst),
             writable,
+            target: MountTarget::MountTable,
         }
     }
 

@@ -533,11 +533,19 @@ impl ProcessManager {
             }
         }
 
-        // Container dirs
+        // Container dirs — only create ext2 dirs if persistent storage is needed
         let mut container_id = self.next_container_id();
-        if !self.create_container_dirs(container_id, image_name) {
-            container_id = 0;
+        let has_persistent_storage = doc
+            .table("storage")
+            .and_then(|t| t.get_array("persistent_dirs"))
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if has_persistent_storage {
+            if !self.create_container_dirs(container_id, image_name) {
+                container_id = 0;
+            }
         }
+        // else: skip ext2 dir creation — MemFs handles ephemeral storage
 
         let binary_vfs_path = format!("/var/images/{}{}", image_name, binary);
 
@@ -977,14 +985,8 @@ impl ProcessManager {
             spawn_start,
             CapProfile::USER,
         ) {
-            let mut container_id = self.next_container_id();
-            if !self.create_container_dirs(container_id, "") {
-                let _ = debug_print(&format!(
-                    "procmgr: WARNING create_container_dirs failed c-{}, proceeding without private storage",
-                    container_id
-                ));
-                container_id = 0;
-            }
+            // Shell containers use MemFs for ephemeral storage — skip ext2 dir creation
+            let container_id = self.next_container_id();
             self.pid_to_container_id.insert(pid, container_id);
             if container_id > 0 {
                 self.container_owner_pids.insert(pid);
@@ -2272,23 +2274,25 @@ impl ProcessManager {
 
         // Allocate container_id and create dirs
         let mut container_id = self.next_container_id();
-        if !self.create_container_dirs(container_id, image_name) {
-            let _ = debug_print(&format!(
-                "procmgr: container '{}' dir creation failed",
-                image_name
-            ));
-            container_id = 0;
+        // Only create ext2 dirs if persistent storage is needed
+        let has_persistent_storage = doc
+            .table("storage")
+            .and_then(|t| t.get_array("persistent_dirs"))
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if has_persistent_storage {
+            if !self.create_container_dirs(container_id, image_name) {
+                let _ = debug_print(&format!(
+                    "procmgr: container '{}' dir creation failed",
+                    image_name
+                ));
+                container_id = 0;
+            }
         }
+        // else: skip ext2 dir creation — MemFs handles ephemeral storage
 
         // Resolve the binary path within the image
         let binary_vfs_path = format!("/var/images/{}{}", image_name, binary);
-
-        // Extract persistent dirs for view mounts
-        let persistent_dirs: Vec<String> = doc
-            .table("storage")
-            .and_then(|t| t.get_array("persistent_dirs"))
-            .map(|a| a.iter().map(|s| s.clone()).collect())
-            .unwrap_or_default();
 
         // PRIORITY: extract from [scheduling] section
         let priority = doc

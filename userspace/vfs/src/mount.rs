@@ -8,9 +8,11 @@
 //! - Virtual: Dynamic content generation (e.g., procfs)
 
 use crate::fd_table::{Ext2Entry, FileEntry, OpenFile};
+use crate::memfs::MemFs;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::mem::size_of;
 use libcluu::ipc::{call_with_payload, call_with_reply_buf};
 use libcluu::tar::{find_member, list_entries};
@@ -633,6 +635,31 @@ impl MountTable {
         }
 
         best.ok_or(Error::NotFound)
+    }
+}
+
+/// In-memory filesystem wrapper for per-container ephemeral storage.
+///
+/// Wraps `MemFs` in a `RefCell` for interior mutability. Safe because
+/// VFS is single-threaded. Not registered in the global MountTable —
+/// held per-container and dispatched directly by VfsServer.
+pub struct MemFsBackend {
+    fs: RefCell<MemFs>,
+}
+
+impl MemFsBackend {
+    pub fn new(quota_bytes: usize) -> Self {
+        Self {
+            fs: RefCell::new(MemFs::new(quota_bytes)),
+        }
+    }
+
+    pub fn borrow(&self) -> core::cell::Ref<MemFs> {
+        self.fs.borrow()
+    }
+
+    pub fn borrow_mut(&self) -> core::cell::RefMut<MemFs> {
+        self.fs.borrow_mut()
     }
 }
 

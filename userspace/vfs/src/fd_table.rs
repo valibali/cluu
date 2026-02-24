@@ -56,6 +56,15 @@ pub enum DeviceType {
     },
 }
 
+/// A file entry backed by an in-memory filesystem (per-container tmpfs).
+#[derive(Clone)]
+pub struct MemFsEntry {
+    pub container_id: u64,
+    pub inode_id: usize,
+    pub memfs_path: String,
+    pub size: usize,
+}
+
 /// A device file handle.
 #[derive(Clone)]
 pub struct DeviceFile {
@@ -75,6 +84,8 @@ pub enum OpenFile {
     Virtual(crate::mount::VirtualFile),
     /// Special device file (/dev/null, /dev/zero, /dev/urandom)
     Device(DeviceFile),
+    /// In-memory filesystem file (per-container tmpfs)
+    MemFs(MemFsEntry),
 }
 
 impl OpenFile {
@@ -84,6 +95,7 @@ impl OpenFile {
             OpenFile::Ext2(e) => e.size,
             OpenFile::Virtual(v) => v.data.len(),
             OpenFile::Device(_) => 0,
+            OpenFile::MemFs(e) => e.size,
         }
     }
 
@@ -95,6 +107,7 @@ impl OpenFile {
             OpenFile::Virtual(v) => Some(v.path.as_str()),
             OpenFile::Memory(_) => None,
             OpenFile::Device(d) => Some(d.path.as_str()),
+            OpenFile::MemFs(_) => None,
         }
     }
 }

@@ -24,6 +24,7 @@ use libcluu::types::Message;
 use libcluu::*;
 
 mod fd_table;
+pub mod memfs;
 mod mount;
 mod procfs;
 mod view;
@@ -466,6 +467,9 @@ struct ReadRingSession {
     slot: usize,
 }
 
+/// Default quota for per-container ephemeral MemFs (4 MiB).
+const DEFAULT_MEMFS_QUOTA: usize = 4 * 1024 * 1024;
+
 struct VfsServer {
     endpoint: usize,
     space_token: usize,
@@ -484,6 +488,8 @@ struct VfsServer {
     // Bound once from the first privileged procmgr self-view bootstrap message.
     view_manager_tid: Option<usize>,
     client_containers: BTreeMap<usize, u64>,
+    /// Per-container ephemeral in-memory filesystems (keyed by container_id).
+    container_memfs: BTreeMap<u64, mount::MemFsBackend>,
 }
 
 impl VfsServer {
@@ -524,6 +530,7 @@ impl VfsServer {
             views: view::VfsViewTable::new(),
             view_manager_tid: None,
             client_containers: BTreeMap::new(),
+            container_memfs: BTreeMap::new(),
         }
     }
 
@@ -685,6 +692,7 @@ impl VfsServer {
                 src,
                 dst,
                 writable: (flags & 1) != 0,
+                target: view::MountTarget::MountTable,
             });
         }
         if offset != payload.len() {
@@ -692,31 +700,57 @@ impl VfsServer {
         }
 
         // Container isolation: create private dirs and prepend container mounts.
-        // Container mount prepend: dirs are created by procmgr before sending set_view.
+        // /data is persistent (ext2-backed). /tmp and /log are ephemeral (MemFs-backed).
         if container_id > 0 {
             self.client_containers.insert(client_id, container_id);
             let cdir = format!("/var/containers/c-{}", container_id);
+
+            // Create per-container MemFs (if not already present from a previous spawn).
+            if !self.container_memfs.contains_key(&container_id) {
+                let memfs = mount::MemFsBackend::new(DEFAULT_MEMFS_QUOTA);
+                {
+                    let mut fs = memfs.borrow_mut();
+                    let _ = fs.mkdir("/tmp");
+                    let _ = fs.mkdir("/log");
+                }
+                self.container_memfs.insert(container_id, memfs);
+            }
+
             let container_mounts = alloc::vec![
                 view::ViewMount {
                     src: format!("{}/data", cdir),
                     dst: alloc::string::String::from("/data"),
                     writable: true,
+                    target: view::MountTarget::MountTable,
                 },
                 view::ViewMount {
-                    src: format!("{}/tmp", cdir),
+                    src: alloc::string::String::from("/tmp"),
                     dst: alloc::string::String::from("/tmp"),
                     writable: true,
+                    target: view::MountTarget::MemFs { container_id },
                 },
                 // TODO: Phase E — enforce append-only on /log mounts
                 view::ViewMount {
-                    src: format!("{}/log", cdir),
+                    src: alloc::string::String::from("/log"),
                     dst: alloc::string::String::from("/log"),
                     writable: true,
+                    target: view::MountTarget::MemFs { container_id },
                 },
             ];
             // Prepend: container mounts go first (first-match-wins)
             let mut all_mounts = container_mounts;
             all_mounts.extend(mounts);
+
+            // Catch-all: "/" → "/" on MemFs so readdir("/") and any
+            // uncovered path still resolve (first-match-wins means specific
+            // mounts above take priority).
+            all_mounts.push(view::ViewMount {
+                src: alloc::string::String::from("/"),
+                dst: alloc::string::String::from("/"),
+                writable: true,
+                target: view::MountTarget::MemFs { container_id },
+            });
+
             mounts = all_mounts;
         }
 
@@ -757,21 +791,24 @@ impl VfsServer {
 
         match mode {
             0 => {
-                // EXIT: delete contents of tmp/ only
-                self.recursive_delete(&format!("{}/tmp", base));
+                // EXIT: reset the MemFs (drop all inodes, re-create /tmp and /log).
+                // /tmp and /log are MemFs-backed — no ext2 cleanup needed for them.
+                if let Some(memfs) = self.container_memfs.get(&container_id) {
+                    let mut fs = memfs.borrow_mut();
+                    fs.drop_all();
+                    let _ = fs.mkdir("/tmp");
+                    let _ = fs.mkdir("/log");
+                }
                 let _ = debug_print(&format!(
                     "vfs: container cleanup exit c-{}",
                     container_id
                 ));
             }
             1 => {
-                // DESTROY: delete the entire container directory tree
+                // DESTROY: remove the MemFs entirely + delete persistent ext2 /data dir.
+                self.container_memfs.remove(&container_id);
                 self.recursive_delete(&format!("{}/data", base));
-                self.recursive_delete(&format!("{}/tmp", base));
-                self.recursive_delete(&format!("{}/log", base));
                 let _ = self.mounts.rmdir(&format!("{}/data", base));
-                let _ = self.mounts.rmdir(&format!("{}/tmp", base));
-                let _ = self.mounts.rmdir(&format!("{}/log", base));
                 let _ = self.mounts.rmdir(&base);
                 let _ = debug_print(&format!(
                     "vfs: container cleanup destroy c-{}",
@@ -848,6 +885,49 @@ impl VfsServer {
         Ok(real_path)
     }
 
+    /// Check a path and return the resolved path + mount target.
+    fn view_check_path_with_target(
+        &self,
+        client_id: usize,
+        path: &str,
+    ) -> Result<(alloc::string::String, view::MountTarget)> {
+        self.views.check_path_with_target(client_id, path)
+    }
+
+    /// Like view_check_path_writable, but also returns the MountTarget.
+    fn view_check_path_writable_with_target(
+        &self,
+        client_id: usize,
+        path: &str,
+    ) -> Result<(alloc::string::String, view::MountTarget)> {
+        let (real_path, writable, target) =
+            self.views.check_path_writable_with_target(client_id, path)?;
+        if !writable {
+            return Err(Error::PermissionDenied);
+        }
+        Ok((real_path, target))
+    }
+
+    /// Get the MemFsBackend for a container.
+    fn get_container_memfs(&self, container_id: u64) -> Result<&mount::MemFsBackend> {
+        self.container_memfs
+            .get(&container_id)
+            .ok_or(Error::NotFound)
+    }
+
+    /// Stat a path on a container's MemFs. Returns (size, mode).
+    fn stat_memfs_path(&self, container_id: u64, path: &str) -> Result<(usize, usize)> {
+        let memfs_backend = self.get_container_memfs(container_id)?;
+        let fs = memfs_backend.borrow();
+        if let Ok((_, size)) = fs.open(path) {
+            return Ok((size, MODE_FILE));
+        }
+        if fs.readdir(path).is_ok() {
+            return Ok((0, MODE_DIR));
+        }
+        Err(Error::NotFound)
+    }
+
     fn resolve_client_id(
         &self,
         op_name: &str,
@@ -898,19 +978,17 @@ impl VfsServer {
         let mode = msg.words[3];
 
         let write_capable_open = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0;
-        let real_path = if write_capable_open {
-            // Write-capable opens must resolve via a writable mount.
-            match self.view_check_path_writable(client_id, path) {
-                Ok(p) => p,
+        let (real_path, target) = if write_capable_open {
+            match self.view_check_path_writable_with_target(client_id, path) {
+                Ok(pt) => pt,
                 Err(err) => {
                     reply_msg.words[0] = err.to_errno() as usize;
                     return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                 }
             }
         } else {
-            // Read-only opens only require path visibility in the caller view.
-            match self.view_check_path(client_id, path) {
-                Ok(p) => p,
+            match self.view_check_path_with_target(client_id, path) {
+                Ok(pt) => pt,
                 Err(err) => {
                     reply_msg.words[0] = err.to_errno() as usize;
                     return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -922,7 +1000,18 @@ impl VfsServer {
         let _ = debug_print(&format!("vfs: open '{}' client={}", path, client_id));
         // #endregion
 
-        // Use unified mount table for all paths
+        if let view::MountTarget::MemFs { container_id } = target {
+            return self.handle_open_memfs(
+                container_id,
+                &real_path,
+                client_id,
+                flags,
+                reply_token,
+                &mut reply_msg,
+            );
+        }
+
+        // MountTable path: use unified mount table for all paths
         match self.mounts.open(&real_path) {
             Ok(file) => {
                 if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
@@ -971,6 +1060,70 @@ impl VfsServer {
         }
 
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    /// MemFs dispatch for handle_open.
+    fn handle_open_memfs(
+        &mut self,
+        container_id: u64,
+        memfs_path: &str,
+        client_id: usize,
+        flags: usize,
+        reply_token: usize,
+        reply_msg: &mut Message,
+    ) -> Result<()> {
+        // Scope MemFs operations so the immutable borrow of self.container_memfs
+        // is released before we mutably borrow self.files.
+        let memfs_result: Result<(usize, usize)> = {
+            let Some(memfs_backend) = self.container_memfs.get(&container_id) else {
+                reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                return ipc::reply(reply_token, reply_msg, IpcFlags::empty());
+            };
+            let open_result = memfs_backend.borrow().open(memfs_path);
+            match open_result {
+                Ok((inode_id, size)) => {
+                    if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
+                        Err(Error::AlreadyExists)
+                    } else if (flags & O_TRUNC) != 0 {
+                        match memfs_backend.borrow_mut().truncate(inode_id, 0) {
+                            Ok(()) => Ok((inode_id, 0)),
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        Ok((inode_id, size))
+                    }
+                }
+                Err(Error::NotFound) if (flags & O_CREAT) != 0 => {
+                    match memfs_backend.borrow_mut().create(memfs_path) {
+                        Ok(inode_id) => Ok((inode_id, 0)),
+                        Err(err) => Err(err),
+                    }
+                }
+                Err(err) => Err(err),
+            }
+        };
+
+        match memfs_result {
+            Ok((inode_id, size)) => {
+                let fd = self.files.open(
+                    client_id,
+                    OpenFile::MemFs(fd_table::MemFsEntry {
+                        container_id,
+                        inode_id,
+                        memfs_path: alloc::string::String::from(memfs_path),
+                        size,
+                    }),
+                );
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = fd;
+                reply_msg.words[2] = size;
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+
+        ipc::reply(reply_token, reply_msg, IpcFlags::empty())
     }
 
     fn handle_close(
@@ -1084,6 +1237,27 @@ impl VfsServer {
                     }
                 }
             }
+            OpenFile::MemFs(memfs_entry) => {
+                let cid = memfs_entry.container_id;
+                let ino = memfs_entry.inode_id;
+                if let Some(memfs_backend) = self.container_memfs.get(&cid) {
+                    match memfs_backend.borrow_mut().write(ino, offset, data) {
+                        Ok(written) => {
+                            reply_msg.words[0] = 0;
+                            reply_msg.words[1] = written;
+                            // Update cached size in the fd entry.
+                            memfs_entry.size = memfs_backend.borrow().file_size(ino);
+                        }
+                        Err(err) => {
+                            reply_msg.words[0] = err.to_errno() as usize;
+                            reply_msg.words[1] = 0;
+                        }
+                    }
+                } else {
+                    reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                    reply_msg.words[1] = 0;
+                }
+            }
         }
 
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
@@ -1124,16 +1298,22 @@ impl VfsServer {
             }
         };
 
-        // View check: resolve virtual path.
-        let real_path = match self.view_check_path(client_id, path) {
-            Ok(p) => p,
+        // View check: resolve virtual path + target.
+        let (real_path, target) = match self.view_check_path_with_target(client_id, path) {
+            Ok(pt) => pt,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
 
-        match self.stat_path(&real_path) {
+        let stat_result = if let view::MountTarget::MemFs { container_id } = target {
+            self.stat_memfs_path(container_id, &real_path)
+        } else {
+            self.stat_path(&real_path)
+        };
+
+        match stat_result {
             Ok((size, mode)) => {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = size;
@@ -1201,13 +1381,22 @@ impl VfsServer {
             }
         };
         // View check (writable — unlink is a mutation).
-        let real_path = match self.view_check_path_writable(client_id, path) {
-            Ok(p) => p,
+        let (real_path, target) = match self.view_check_path_writable_with_target(client_id, path) {
+            Ok(pt) => pt,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        if let view::MountTarget::MemFs { container_id } = target {
+            match self.get_container_memfs(container_id).and_then(|b| {
+                b.borrow_mut().unlink(&real_path)
+            }) {
+                Ok(()) => reply_msg.words[0] = 0,
+                Err(err) => reply_msg.words[0] = err.to_errno() as usize,
+            }
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
         if let Err(err) = self.ensure_mutation_allowed(client_id, path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -1246,13 +1435,22 @@ impl VfsServer {
             }
         };
         // View check (writable — mkdir is a mutation).
-        let real_path = match self.view_check_path_writable(client_id, path) {
-            Ok(p) => p,
+        let (real_path, target) = match self.view_check_path_writable_with_target(client_id, path) {
+            Ok(pt) => pt,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        if let view::MountTarget::MemFs { container_id } = target {
+            match self.get_container_memfs(container_id).and_then(|b| {
+                b.borrow_mut().mkdir(&real_path)
+            }) {
+                Ok(()) => reply_msg.words[0] = 0,
+                Err(err) => reply_msg.words[0] = err.to_errno() as usize,
+            }
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
         if let Err(err) = self.ensure_create_allowed(client_id, path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -1292,13 +1490,22 @@ impl VfsServer {
             }
         };
         // View check (writable — rmdir is a mutation).
-        let real_path = match self.view_check_path_writable(client_id, path) {
-            Ok(p) => p,
+        let (real_path, target) = match self.view_check_path_writable_with_target(client_id, path) {
+            Ok(pt) => pt,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
+        if let view::MountTarget::MemFs { container_id } = target {
+            match self.get_container_memfs(container_id).and_then(|b| {
+                b.borrow_mut().rmdir(&real_path)
+            }) {
+                Ok(()) => reply_msg.words[0] = 0,
+                Err(err) => reply_msg.words[0] = err.to_errno() as usize,
+            }
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
         if let Err(err) = self.ensure_mutation_allowed(client_id, path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -1349,20 +1556,36 @@ impl VfsServer {
             }
         };
         // View check: both paths must be in the view and writable.
-        let real_old = match self.view_check_path_writable(client_id, old_path) {
-            Ok(p) => p,
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
+        let (real_old, target_old) =
+            match self.view_check_path_writable_with_target(client_id, old_path) {
+                Ok(pt) => pt,
+                Err(err) => {
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            };
+        let (real_new, target_new) =
+            match self.view_check_path_writable_with_target(client_id, new_path) {
+                Ok(pt) => pt,
+                Err(err) => {
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            };
+        // Both paths must target the same backend.
+        if let view::MountTarget::MemFs { container_id } = target_old {
+            if target_old != target_new {
+                reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
-        };
-        let real_new = match self.view_check_path_writable(client_id, new_path) {
-            Ok(p) => p,
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            match self.get_container_memfs(container_id).and_then(|b| {
+                b.borrow_mut().rename(&real_old, &real_new)
+            }) {
+                Ok(()) => reply_msg.words[0] = 0,
+                Err(err) => reply_msg.words[0] = err.to_errno() as usize,
             }
-        };
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
         if let Err(err) = self.ensure_mutation_allowed(client_id, old_path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -1417,20 +1640,36 @@ impl VfsServer {
             }
         };
         // View check: old must be readable, new must be writable.
-        let real_old = match self.view_check_path(client_id, old_path) {
-            Ok(p) => p,
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
+        let (real_old, target_old) =
+            match self.view_check_path_with_target(client_id, old_path) {
+                Ok(pt) => pt,
+                Err(err) => {
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            };
+        let (real_new, target_new) =
+            match self.view_check_path_writable_with_target(client_id, new_path) {
+                Ok(pt) => pt,
+                Err(err) => {
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            };
+        if let view::MountTarget::MemFs { container_id } = target_old {
+            if target_old != target_new {
+                reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
-        };
-        let real_new = match self.view_check_path_writable(client_id, new_path) {
-            Ok(p) => p,
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            // MemFs::link returns NotImplemented.
+            match self.get_container_memfs(container_id).and_then(|b| {
+                b.borrow().link(&real_old, &real_new)
+            }) {
+                Ok(()) => reply_msg.words[0] = 0,
+                Err(err) => reply_msg.words[0] = err.to_errno() as usize,
             }
-        };
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
         if let Err(err) = self.ensure_create_allowed(client_id, new_path) {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -1828,6 +2067,12 @@ impl VfsServer {
                     }
                 }
             }
+            OpenFile::MemFs(entry) => {
+                match self.container_memfs.get(&entry.container_id) {
+                    Some(backend) => backend.borrow().read(entry.inode_id, offset, requested),
+                    None => Err(Error::NotFound),
+                }
+            }
         }
     }
 
@@ -2045,6 +2290,34 @@ impl VfsServer {
                     target_space,
                     &mut reply_msg,
                 )?;
+            }
+            OpenFile::MemFs(entry) => {
+                let read_result: Result<Vec<u8>> = {
+                    match self.container_memfs.get(&entry.container_id) {
+                        Some(backend) => {
+                            backend.borrow().read(entry.inode_id, offset, requested)
+                        }
+                        None => Err(Error::NotFound),
+                    }
+                };
+                match read_result {
+                    Ok(data) if !data.is_empty() => {
+                        self.grant_data_to_caller(
+                            &data,
+                            target_base,
+                            target_space,
+                            &mut reply_msg,
+                        )?;
+                    }
+                    Ok(_) => {
+                        reply_msg.words[0] = 0;
+                        reply_msg.words[1] = 0;
+                        reply_msg.words[2] = 0;
+                    }
+                    Err(err) => {
+                        reply_msg.words[0] = err.to_errno() as usize;
+                    }
+                }
             }
         }
 
@@ -2668,9 +2941,9 @@ impl VfsServer {
             }
         };
 
-        // View check: resolve virtual path.
-        let real_path = match self.view_check_path(client_id, path) {
-            Ok(p) => p,
+        // View check: resolve virtual path + target.
+        let (real_path, target) = match self.view_check_path_with_target(client_id, path) {
+            Ok(pt) => pt,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -2678,6 +2951,16 @@ impl VfsServer {
         };
 
         vfs_trace!("vfs: readdir '{}'", path);
+
+        if let view::MountTarget::MemFs { container_id } = target {
+            return self.handle_readdir_memfs(
+                container_id,
+                &real_path,
+                client_id,
+                reply_token,
+                &mut reply_msg,
+            );
+        }
 
         // Use unified mount table for readdir
         match self.mounts.readdir(&real_path) {
@@ -2701,6 +2984,68 @@ impl VfsServer {
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
                 ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+            }
+        }
+    }
+
+    /// MemFs dispatch for handle_readdir.
+    fn handle_readdir_memfs(
+        &self,
+        container_id: u64,
+        memfs_path: &str,
+        client_id: usize,
+        reply_token: usize,
+        reply_msg: &mut Message,
+    ) -> Result<()> {
+        let memfs_backend = match self.get_container_memfs(container_id) {
+            Ok(b) => b,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, reply_msg, IpcFlags::empty());
+            }
+        };
+        match memfs_backend.borrow().readdir(memfs_path) {
+            Ok(mut entries) => {
+                // For root readdir, merge in top-level dirs from the client's
+                // view mounts so `ls /` shows /bin, /lib, /dev, etc.
+                if memfs_path == "/" {
+                    if let Some(view) = self.views.get_view(client_id) {
+                        for m in &view.mounts {
+                            // Extract top-level component from dst (e.g. "/bin" → "bin")
+                            let top = m.dst.strip_prefix('/').unwrap_or(&m.dst);
+                            let top = match top.find('/') {
+                                Some(pos) => &top[..pos],
+                                None => top,
+                            };
+                            if top.is_empty() || top == "/" {
+                                continue;
+                            }
+                            // Only add if not already present from MemFs listing
+                            let already = entries.iter().any(|(name, _)| name == top);
+                            if !already {
+                                entries.push((alloc::string::String::from(top), true));
+                            }
+                        }
+                    }
+                }
+
+                let mut data = Vec::new();
+                for (name, is_dir) in &entries {
+                    let name_bytes = name.as_bytes();
+                    if name_bytes.len() > 255 {
+                        continue;
+                    }
+                    data.push(name_bytes.len() as u8);
+                    data.push(if *is_dir { 1 } else { 0 });
+                    data.extend_from_slice(name_bytes);
+                }
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = entries.len();
+                reply_with_payload(reply_token, reply_msg, &data)
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                ipc::reply(reply_token, reply_msg, IpcFlags::empty())
             }
         }
     }
@@ -2790,7 +3135,7 @@ impl VfsServer {
                 reply_msg.words[1] = elf.entry_point as usize;
                 reply_msg.words[2] = entry.size;
             }
-            OpenFile::Virtual(_) | OpenFile::Device(_) => {
+            OpenFile::Virtual(_) | OpenFile::Device(_) | OpenFile::MemFs(_) => {
                 reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
             }
         }
