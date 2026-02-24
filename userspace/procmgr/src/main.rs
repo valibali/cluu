@@ -1719,7 +1719,12 @@ impl ProcessManager {
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
         // Set fault endpoint so the kernel forwards faults to us instead of silently killing.
         if self.fault_endpoint != 0 {
-            let _ = thread_set_fault_endpoint(thread_token, self.fault_endpoint);
+            if let Err(err) = thread_set_fault_endpoint(thread_token, self.fault_endpoint) {
+                let _ = debug_print(&format!(
+                    "procmgr: thread_set_fault_endpoint failed token={} ep={} err={:?}",
+                    thread_token, self.fault_endpoint, err
+                ));
+            }
         }
         let thread_tid = thread_get_id(thread_token)?;
         self.log_spawn_stage(spawn_seq, "thread_start_done", spawn_start);

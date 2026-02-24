@@ -10,9 +10,9 @@ use alloc::format;
 use alloc::vec::Vec;
 use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::ipc::{
-    call_with_payload, send, send_with_retry_timeout, CONSOLE_WRITE_LABEL,
-    CONSOLE_WRITE_SYNC_LABEL, IPC_CHUNK_BYTES_DEFAULT, IPC_SEND_RETRIES_DEFAULT,
-    TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_SPAWN_SHELL_LABEL,
+    send, send_with_retry_timeout, CONSOLE_WRITE_LABEL, IPC_CHUNK_BYTES_DEFAULT,
+    IPC_SEND_RETRIES_DEFAULT, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C,
+    TTY_SPAWN_SHELL_LABEL,
 };
 use libcluu::registry;
 use libcluu::types::Message;
@@ -45,9 +45,11 @@ pub struct TtyContext {
     /// Whether we've already requested a shell spawn for this VT.
     shell_spawn_requested: bool,
     pending_console_output: Vec<u8>,
-    /// Deferred sync write reply token (if console wasn't ready)
-    pending_sync_reply: Option<usize>,
     console_credit: usize,
+    /// Queued console output waiting for credit refills from the console.
+    console_output_queue: Vec<u8>,
+    /// True when the output queue hit its cap and had to drop data.
+    console_queue_overflow: bool,
     /// Queue of pending read requests waiting for input data.
     pub pending_reads: VecDeque<PendingRead>,
     /// Input bytes queued for pending readers (raw mode or canonical leftovers).
@@ -102,8 +104,9 @@ impl TtyContext {
             requested_procmgr: false,
             shell_spawn_requested: false,
             pending_console_output: Vec::new(),
-            pending_sync_reply: None,
             console_credit: CONSOLE_CREDIT_WINDOW,
+            console_output_queue: Vec::new(),
+            console_queue_overflow: false,
             pending_reads: VecDeque::new(),
             input_queue: VecDeque::new(),
             ctrl_c_notify: 0,
@@ -241,45 +244,19 @@ impl TtyContext {
         }
     }
 
-    /// Forward output for sync write. Returns true if output was sent to console,
-    /// false if it was buffered (caller should defer reply).
-    pub fn forward_to_console_sync(&mut self, payload: &[u8], reply_token: usize) -> bool {
-        if self.console_endpoint != 0 {
-            // Use sync write to console so we wait for it to render
-            self.send_to_console_sync(payload);
-            true
-        } else {
-            // Buffer the output and defer the reply
-            if self.pending_console_output.len() + payload.len() <= 2048 {
-                self.pending_console_output.extend_from_slice(payload);
-            }
-            self.pending_sync_reply = Some(reply_token);
-            false
-        }
+    /// Forward output for sync write (now always async — caller replies immediately).
+    pub fn forward_to_console_sync(&mut self, payload: &[u8]) {
+        self.forward_to_console(payload);
     }
 
     /// Flush any pending console output once the console is subscribed.
-    /// Also sends any deferred sync write reply.
     pub fn flush_pending_console(&mut self) {
         if self.console_endpoint == 0 {
             return;
         }
         if !self.pending_console_output.is_empty() {
             let pending = core::mem::take(&mut self.pending_console_output);
-            // Use sync write for pending output that has a deferred reply
-            if self.pending_sync_reply.is_some() {
-                self.send_to_console_sync(&pending);
-            } else {
-                self.send_to_console(&pending);
-            }
-        }
-
-        // Send deferred sync reply now that console is ready
-        if let Some(reply_token) = self.pending_sync_reply.take() {
-            use libcluu::ipc::{reply, TTY_WRITE_SYNC_LABEL};
-            use libcluu::types::{IpcFlags, Message};
-            let reply_msg = Message::new(TTY_WRITE_SYNC_LABEL, [0; 6], 0);
-            let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+            self.send_to_console(&pending);
         }
     }
 
@@ -353,8 +330,8 @@ impl TtyContext {
     fn send_to_console(&mut self, payload: &[u8]) {
         for chunk in payload.chunks(CONSOLE_MAX_PAYLOAD) {
             if self.console_credit < chunk.len() {
-                self.send_to_console_sync(chunk);
-                self.console_credit = CONSOLE_CREDIT_WINDOW.saturating_sub(chunk.len());
+                // Credits exhausted — queue instead of blocking.
+                self.enqueue_console_output(chunk);
                 continue;
             }
             let _ = send_with_retry_timeout(
@@ -367,24 +344,58 @@ impl TtyContext {
         }
     }
 
-    fn send_to_console_sync(&mut self, payload: &[u8]) {
-        for chunk in payload.chunks(CONSOLE_MAX_PAYLOAD) {
-            let mut msg = Message::new(CONSOLE_WRITE_SYNC_LABEL, [0; 6], 1);
-            msg.words[0] = chunk.len();
-            let mut reply_msg = Message::new(0, [0; 6], 0);
-            // Use ipc_call to wait for console to render
-            if call_with_payload(self.console_endpoint, &msg, chunk, &mut reply_msg).is_err() {
-                // Fall back to async
-                let _ = send_with_retry_timeout(
-                    self.console_endpoint,
-                    CONSOLE_WRITE_LABEL,
-                    chunk,
-                    CONSOLE_SEND_RETRIES,
-                );
+    /// Append data to the output queue, dropping oldest on overflow.
+    fn enqueue_console_output(&mut self, data: &[u8]) {
+        let new_len = self.console_output_queue.len() + data.len();
+        if new_len > CONSOLE_OUTPUT_QUEUE_CAP {
+            // Drop oldest bytes to make room.
+            let excess = new_len - CONSOLE_OUTPUT_QUEUE_CAP;
+            if excess >= self.console_output_queue.len() {
+                self.console_output_queue.clear();
+            } else {
+                self.console_output_queue.drain(..excess);
+            }
+            if !self.console_queue_overflow {
+                self.console_queue_overflow = true;
+                let _ = debug_print("tty: console output queue overflow, dropping oldest");
             }
         }
+        self.console_output_queue.extend_from_slice(data);
+    }
+
+    /// Drain queued output when credits are available.
+    pub fn drain_console_queue(&mut self) {
+        if self.console_endpoint == 0 || self.console_output_queue.is_empty() {
+            return;
+        }
+        while !self.console_output_queue.is_empty() && self.console_credit > 0 {
+            let chunk_len = self.console_output_queue.len().min(CONSOLE_MAX_PAYLOAD).min(self.console_credit);
+            if chunk_len == 0 {
+                break;
+            }
+            let chunk: Vec<u8> = self.console_output_queue.drain(..chunk_len).collect();
+            let _ = send_with_retry_timeout(
+                self.console_endpoint,
+                CONSOLE_WRITE_LABEL,
+                &chunk,
+                CONSOLE_SEND_RETRIES,
+            );
+            self.console_credit = self.console_credit.saturating_sub(chunk_len);
+        }
+        if self.console_output_queue.is_empty() {
+            self.console_queue_overflow = false;
+        }
+    }
+
+    /// Handle a credit refill notification from the console.
+    pub fn handle_credit_refill(&mut self, refill_amount: usize) {
+        self.console_credit = self.console_credit.saturating_add(refill_amount)
+            .min(CONSOLE_CREDIT_WINDOW);
+        self.drain_console_queue();
     }
 }
 const CONSOLE_MAX_PAYLOAD: usize = IPC_CHUNK_BYTES_DEFAULT;
 const CONSOLE_CREDIT_WINDOW: usize = IPC_CHUNK_BYTES_DEFAULT * 4;
 const CONSOLE_SEND_RETRIES: u32 = IPC_SEND_RETRIES_DEFAULT;
+/// Maximum console output queue size (16 KB). Oldest bytes are dropped on overflow.
+const CONSOLE_OUTPUT_QUEUE_CAP: usize = 16 * 1024;

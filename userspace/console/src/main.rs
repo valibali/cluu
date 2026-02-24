@@ -40,10 +40,11 @@ use libcluu::boot::{
 };
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_ACTIVATE_LABEL, CONSOLE_CREATE_VT_LABEL,
-    CONSOLE_DEACTIVATE_LABEL, CONSOLE_WRITE_VT_LABEL, CONSOLE_WRITE_VT_SYNC_LABEL,
+    CONSOLE_DEACTIVATE_LABEL, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
+    CONSOLE_WRITE_VT_LABEL, CONSOLE_WRITE_VT_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
-use libcluu::{debug_print, registry, syscall, Error, Result};
+use libcluu::{debug_print, syscall, Error, Result};
 
 /// Cursor blink timeout in milliseconds (used for both modes).
 const BLINK_TIMEOUT_MS: u64 = 500;
@@ -89,7 +90,7 @@ fn run_with_backend<B: ConsoleBackend>(
     let mut console = Console::new(backend, fb_phys, fb_size);
     console.set_active(start_active);
 
-    let context = ConsoleContext::new()?;
+    let mut context = ConsoleContext::new()?;
 
     // Yield once so other services can register before we start consuming IPC.
     syscall::yield_cpu()?;
@@ -100,11 +101,12 @@ fn run_with_backend<B: ConsoleBackend>(
     let mut buf = [0u8; 512];
 
     loop {
+        context.request_subscriptions();
         let tokens = [context.endpoint, context.registry_endpoint];
         match syscall::ipc_recv_any(&tokens, &mut buf, BLINK_TIMEOUT_MS) {
             Ok((index, len)) => {
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
-                    handle_incoming(index, &mut console, &msg, payload)?;
+                    handle_incoming(index, &mut console, &mut context, &msg, payload)?;
                     // Flush after IPC for responsive input (no-op if inactive)
                     console.flush();
                 } else {
@@ -127,6 +129,7 @@ fn run_with_backend<B: ConsoleBackend>(
 fn handle_incoming<B: ConsoleBackend>(
     index: usize,
     console: &mut Console<B>,
+    context: &mut ConsoleContext,
     msg: &libcluu::types::Message,
     payload: &[u8],
 ) -> Result<()> {
@@ -154,6 +157,7 @@ fn handle_incoming<B: ConsoleBackend>(
                     let vt_index = msg.words[1];
                     console.write_to_vt(vt_index, payload);
                 }
+                context.record_rendered_bytes(payload.len());
                 return Ok(());
             }
             CONSOLE_WRITE_VT_SYNC_LABEL => {
@@ -161,6 +165,7 @@ fn handle_incoming<B: ConsoleBackend>(
                     let vt_index = msg.words[1];
                     console.write_to_vt(vt_index, payload);
                 }
+                context.record_rendered_bytes(payload.len());
                 if let Some(reply_token) = extract_reply_id(msg) {
                     let reply_msg = Message::new(CONSOLE_WRITE_VT_SYNC_LABEL, [0; 6], 0);
                     let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -169,9 +174,14 @@ fn handle_incoming<B: ConsoleBackend>(
             }
             _ => {}
         }
-        console.handle_message(msg, payload)
+        // CONSOLE_WRITE_LABEL and CONSOLE_WRITE_SYNC_LABEL go through handle_message
+        let result = console.handle_message(msg, payload);
+        if msg.tag.label == CONSOLE_WRITE_LABEL || msg.tag.label == CONSOLE_WRITE_SYNC_LABEL {
+            context.record_rendered_bytes(payload.len());
+        }
+        result
     } else {
-        let _ = registry::handle_incoming_message(msg, payload)?;
+        context.handle_registry_event(msg, payload);
         Ok(())
     }
 }

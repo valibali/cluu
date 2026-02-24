@@ -593,8 +593,23 @@ extern "C" fn gpf_with_regs(frame: *const GpfDebugFrame) -> *const Context {
         if try_forward_fault(FaultType::GeneralProtection, 0, f.error_code, &saved_ctx) {
             return ThreadManager::schedule_next_from_fault();
         }
-        // No handler — kill thread
-        klibcluu::warn("GPF: no fault handler — killing thread");
+        // try_forward_fault failed (lock contention or no handler).
+        // Read fault_endpoint BEFORE mark_current_dead so we can queue
+        // a deferred notification for procmgr.
+        if let Some(current_id) = ThreadManager::current() {
+            let fault_ep = ThreadManager::with_thread(current_id, |t| t.fault_endpoint);
+            if let Some(Some(ep)) = fault_ep {
+                ThreadManager::queue_deferred_fault(
+                    current_id,
+                    ep,
+                    FaultType::GeneralProtection as u64,
+                    0,
+                    f.error_code,
+                    f.rip,
+                );
+            }
+        }
+        klibcluu::warn("GPF: killing thread (deferred notification queued if handler set)");
         ThreadManager::mark_current_dead();
         return ThreadManager::schedule_next_from_fault();
     }
@@ -800,8 +815,23 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
         if try_forward_fault(FaultType::PageFault, cr2, f.error_code, &saved_ctx) {
             return ThreadManager::schedule_next_from_fault();
         }
-        // No handler — kill thread
-        klibcluu::warn("PF: no fault handler — killing thread");
+        // try_forward_fault failed (lock contention or no handler).
+        // Read fault_endpoint BEFORE mark_current_dead so we can queue
+        // a deferred notification for procmgr.
+        if let Some(current_id) = ThreadManager::current() {
+            let fault_ep = ThreadManager::with_thread(current_id, |t| t.fault_endpoint);
+            if let Some(Some(ep)) = fault_ep {
+                ThreadManager::queue_deferred_fault(
+                    current_id,
+                    ep,
+                    FaultType::PageFault as u64,
+                    cr2,
+                    f.error_code,
+                    f.rip,
+                );
+            }
+        }
+        klibcluu::warn("PF: killing thread (deferred notification queued if handler set)");
         ThreadManager::mark_current_dead();
         return ThreadManager::schedule_next_from_fault();
     }

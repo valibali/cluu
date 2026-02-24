@@ -14,9 +14,9 @@ mod protocol;
 
 use context::TtyContext;
 use libcluu::ipc::{
-    extract_reply_id, reply, KBD_EVENT_LABEL, TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C,
-    TTY_POLL_QUERY_LABEL, TTY_READ_LABEL, TTY_READ_REQUEST_LABEL, TTY_REGISTER_LABEL,
-    TTY_WRITE_LABEL, TTY_WRITE_SYNC_LABEL,
+    extract_reply_id, reply, CONSOLE_CREDIT_REFILL_LABEL, KBD_EVENT_LABEL, TTY_CTL_LABEL,
+    TTY_FG_FLAG_FORWARD_CTRL_C, TTY_POLL_QUERY_LABEL, TTY_READ_LABEL, TTY_READ_REQUEST_LABEL,
+    TTY_REGISTER_LABEL, TTY_WRITE_LABEL, TTY_WRITE_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{yield_cpu, Error, Result};
@@ -73,19 +73,16 @@ fn run() -> Result<()> {
                             ctx.forward_to_console(payload);
                         }
                         TTY_WRITE_SYNC_LABEL => {
-                            // Synchronous write: forward to console, then reply
-                            // If console not ready, defer reply until flush
+                            // Forward as async, reply immediately so caller never blocks.
+                            ctx.forward_to_console_sync(payload);
                             if let Some(reply_token) = extract_reply_id(&msg) {
-                                if ctx.forward_to_console_sync(payload, reply_token) {
-                                    // Output sent immediately, reply now
-                                    let reply_msg = Message::new(TTY_WRITE_SYNC_LABEL, [0; 6], 0);
-                                    let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                                }
-                                // else: reply deferred until console is ready
-                            } else {
-                                // No reply token - treat as async write
-                                ctx.forward_to_console(payload);
+                                let reply_msg = Message::new(TTY_WRITE_SYNC_LABEL, [0; 6], 0);
+                                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
                             }
+                        }
+                        CONSOLE_CREDIT_REFILL_LABEL => {
+                            let refill_amount = msg.words[0];
+                            ctx.handle_credit_refill(refill_amount);
                         }
                         TTY_CTL_LABEL => {
                             // Terminal control: get/set mode

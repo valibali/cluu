@@ -466,6 +466,44 @@ pub fn ipc_call(endpoint_token: usize, msg: &[u8], reply_buf: &mut [u8]) -> Resu
     }
 }
 
+/// Call (send + receive) for synchronous RPC with timeout
+///
+/// Like `ipc_call`, but passes a timeout in milliseconds via arg6.
+/// The kernel interprets arg6 as timeout_ms when the inline-fast-path flag
+/// is *not* set (slow path only). 0 = block forever (same as `ipc_call`).
+///
+/// # Arguments
+///
+/// - `endpoint_token`: Token handle for the endpoint
+/// - `msg`: Message to send
+/// - `reply_buf`: Buffer to receive reply into
+/// - `timeout_ms`: Timeout in milliseconds (0 = block forever)
+///
+/// # Returns
+///
+/// - `Ok(bytes_received)`: Number of bytes in reply
+/// - `Err(Error::Timeout)`: Timeout expired before reply arrived
+/// - `Err(error)`: Call failed
+#[inline]
+pub fn ipc_call_timeout(
+    endpoint_token: usize,
+    msg: &[u8],
+    reply_buf: &mut [u8],
+    timeout_ms: usize,
+) -> Result<usize> {
+    unsafe {
+        syscall6(
+            SyscallNumber::Call,
+            endpoint_token,
+            msg.as_ptr() as usize,
+            msg.len(),
+            reply_buf.as_mut_ptr() as usize,
+            reply_buf.len(),
+            timeout_ms,
+        )
+    }
+}
+
 /// Reply to IPC sender
 ///
 /// Sends a reply to a thread that called us via ipc_call().

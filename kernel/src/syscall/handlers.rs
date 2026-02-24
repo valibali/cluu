@@ -397,6 +397,8 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     let msg_len = args.arg3;
     let reply_buf = args.arg4;
     let reply_len = args.arg5;
+    // arg6 is used for inline data in the fast path (IPC_REG_INLINE_FLAG).
+    // In the slow path, arg6 is interpreted as timeout_ms (0 = block forever).
     let trace_idx = IPC_CALL_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
     if trace_idx < IPC_CALL_TRACE_LIMIT {
         klibcluu::info("sys_call entry");
@@ -549,9 +551,33 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
         klibcluu::info("  sys_call enqueue done");
     }
 
-    // 5. Block waiting for reply
-    crate::sched::ThreadManager::block_current();
+    // 5. Block waiting for reply, with optional timeout.
+    //    arg6 is only meaningful in the slow path (fast path returned above).
+    //    0 or u64::MAX = block forever; 1..MAX-1 = timeout in ms.
+    let timeout_ms = args.arg6 as u64;
+    let has_timeout = timeout_ms != 0 && timeout_ms != u64::MAX;
+    if has_timeout {
+        let deadline = crate::sched::ThreadManager::ms_to_deadline(timeout_ms);
+        crate::sched::ThreadManager::block_current_with_timeout(deadline);
+    } else {
+        crate::sched::ThreadManager::block_current();
+    }
     crate::architecture::x86_64::syscall::request_resched();
+
+    // After wake: distinguish reply-delivered vs timeout.
+    // Race: deliver_reply may consume CALL_REPLY_MAP *and* the timeout may
+    // fire simultaneously. Check reply delivery first — if the entry is gone,
+    // the reply succeeded regardless of the timeout flag.
+    if has_timeout {
+        if !crate::sched::ThreadManager::has_call_reply_info(reply_id) {
+            // Reply was delivered — clear stale timeout flag, succeed.
+            let _ = crate::sched::ThreadManager::check_and_clear_timeout_wake();
+        } else if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
+            // Timed out — clean up orphaned CALL_REPLY_MAP entry.
+            let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
+            return Err(Error::Timeout);
+        }
+    }
 
     // Return value will be set by deliver_reply in thread.context.rax
     Ok(0)

@@ -215,6 +215,38 @@ static PENDING_WAKE_QUEUE: [AtomicU64; PENDING_WAKE_SLOTS] = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Deferred Fault Notification Queue (lock-free, IST-safe)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// When try_forward_fault fails (IST try_lock contention), the fault handler
+// queues a deferred notification here. Timer tick drains it using try_send.
+//
+// Atomics protocol:
+// - Writer (IST): stores EP, TYPE, ADDR, ERR, RIP first, then stores TID
+//   with Release ordering. TID != 0 signals "slot is occupied".
+// - Reader (tick): swaps TID with 0 using Acquire ordering, then reads
+//   the other fields. Acquire on TID ensures visibility of all prior stores.
+const DEFERRED_FAULT_SLOTS: usize = 4;
+static DEFERRED_FAULT_TID: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+static DEFERRED_FAULT_EP: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+static DEFERRED_FAULT_TYPE: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+static DEFERRED_FAULT_ADDR: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+static DEFERRED_FAULT_ERR: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+static DEFERRED_FAULT_RIP: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Thread Manager API
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -873,6 +905,101 @@ impl ThreadManager {
         // The wake will be lost, but thread will eventually be woken by retry logic
     }
 
+    /// Queue a deferred fault notification (IST-safe, lock-free).
+    ///
+    /// Called from PF/GPF handlers when try_forward_fault fails due to
+    /// lock contention. The notification is drained by drain_deferred_faults()
+    /// on the next timer tick.
+    pub fn queue_deferred_fault(
+        tid: ThreadId,
+        endpoint: crate::token::EndpointId,
+        fault_type: u64,
+        fault_addr: u64,
+        error_code: u64,
+        rip: u64,
+    ) {
+        let tid_raw = tid.as_u64();
+        for i in 0..DEFERRED_FAULT_SLOTS {
+            // Check if slot is empty (TID == 0)
+            if DEFERRED_FAULT_TID[i].load(Ordering::Relaxed) != 0 {
+                continue;
+            }
+            // Write data fields first (before the TID flag)
+            DEFERRED_FAULT_EP[i].store(endpoint.0, Ordering::Relaxed);
+            DEFERRED_FAULT_TYPE[i].store(fault_type, Ordering::Relaxed);
+            DEFERRED_FAULT_ADDR[i].store(fault_addr, Ordering::Relaxed);
+            DEFERRED_FAULT_ERR[i].store(error_code, Ordering::Relaxed);
+            DEFERRED_FAULT_RIP[i].store(rip, Ordering::Relaxed);
+            // Release store on TID makes all prior stores visible to the reader
+            if DEFERRED_FAULT_TID[i]
+                .compare_exchange(0, tid_raw, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+            // CAS failed — another IST writer took this slot. Try next.
+        }
+        // All slots full — fault notification lost. Thread is already dead.
+        klibcluu::warn("deferred fault queue full — notification dropped");
+    }
+
+    /// Drain deferred fault notifications. Called from tick() after check_timeouts().
+    ///
+    /// For each queued fault, sends the notification to the fault endpoint via
+    /// try_send. If the endpoint is contended, the notification is re-queued
+    /// for the next tick.
+    fn drain_deferred_faults() {
+        use crate::ipc::endpoint::{self, UserMessage};
+
+        for i in 0..DEFERRED_FAULT_SLOTS {
+            // Acquire swap on TID: if non-zero, we own the slot's data
+            let tid_raw = DEFERRED_FAULT_TID[i].swap(0, Ordering::Acquire);
+            if tid_raw == 0 {
+                continue;
+            }
+            let ep_raw = DEFERRED_FAULT_EP[i].load(Ordering::Relaxed);
+            let fault_type = DEFERRED_FAULT_TYPE[i].load(Ordering::Relaxed);
+            let fault_addr = DEFERRED_FAULT_ADDR[i].load(Ordering::Relaxed);
+            let error_code = DEFERRED_FAULT_ERR[i].load(Ordering::Relaxed);
+            let rip = DEFERRED_FAULT_RIP[i].load(Ordering::Relaxed);
+
+            let fault_ep = crate::token::EndpointId(ep_raw);
+
+            // Build fault message (same format as try_forward_fault but no reply_id —
+            // the thread is already dead, so no resume is possible)
+            let mut msg_bytes = [0u8; core::mem::size_of::<UserMessage>()];
+            let msg = unsafe { &mut *(msg_bytes.as_mut_ptr() as *mut UserMessage) };
+            msg.tag.label = 0xFA017;
+            msg.tag.words = 6;
+            msg.tag.extra = 0; // No reply cap — thread is dead
+            msg.tag._pad = 0;
+            msg.words[0] = fault_type as usize;
+            msg.words[1] = fault_addr as usize;
+            msg.words[2] = error_code as usize;
+            msg.words[3] = rip as usize;
+            msg.words[4] = tid_raw as usize;
+            msg.words[5] = 0; // No reply_id
+
+            match endpoint::try_send(fault_ep, &msg_bytes) {
+                Ok(receiver_to_wake) => {
+                    if let Some(thread_id) = receiver_to_wake {
+                        Self::queue_pending_wake(thread_id);
+                    }
+                    klibcluu::warn("Deferred fault notification sent");
+                }
+                Err(_) => {
+                    // Still contended — re-queue for next tick
+                    DEFERRED_FAULT_EP[i].store(ep_raw, Ordering::Relaxed);
+                    DEFERRED_FAULT_TYPE[i].store(fault_type, Ordering::Relaxed);
+                    DEFERRED_FAULT_ADDR[i].store(fault_addr, Ordering::Relaxed);
+                    DEFERRED_FAULT_ERR[i].store(error_code, Ordering::Relaxed);
+                    DEFERRED_FAULT_RIP[i].store(rip, Ordering::Relaxed);
+                    DEFERRED_FAULT_TID[i].store(tid_raw, Ordering::Release);
+                }
+            }
+        }
+    }
+
     /// Get page table root (CR3) of currently running thread
     pub fn current_page_table_root() -> Option<PhysAddr> {
         let thread_id = Self::current()?;
@@ -969,6 +1096,9 @@ impl ThreadManager {
 
         // Check for expired timeouts and wake blocked threads
         Self::check_timeouts();
+
+        // Drain deferred fault notifications (IST couldn't send due to lock contention)
+        Self::drain_deferred_faults();
     }
 
     /// Get current scheduler tick count

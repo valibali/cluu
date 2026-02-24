@@ -31,6 +31,7 @@ pub const TTY_REGISTER_LABEL: u32 = 4;
 pub const TTY_WRITE_SYNC_LABEL: u32 = 5;
 pub const TTY_READ_REQUEST_LABEL: u32 = 6;
 pub const CONSOLE_FB_INFO_LABEL: u32 = 6;
+pub const CONSOLE_CREDIT_REFILL_LABEL: u32 = 8;
 pub const TTY_POLL_QUERY_LABEL: u32 = 7;
 pub const CONSOLE_ACTIVATE_LABEL: u32 = 8;
 pub const CONSOLE_DEACTIVATE_LABEL: u32 = 9;
@@ -530,6 +531,32 @@ pub fn call(endpoint_token: usize, msg: &mut Message, _flags: IpcFlags) -> Resul
     let reply_bytes = msg.as_bytes_mut();
     loop {
         match syscall::ipc_call(endpoint_token, send_bytes, reply_bytes) {
+            Ok(_) => return Ok(()),
+            Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Synchronous call with timeout
+///
+/// Like `call`, but returns `Err(Error::Timeout)` if the server does not
+/// reply within `timeout_ms` milliseconds. Retries on WouldBlock up to the
+/// deadline (each retry re-enters the kernel which re-computes its own
+/// internal deadline, so the overall wall-clock bound is approximate).
+///
+/// `timeout_ms` of 0 is equivalent to `call` (block forever).
+pub fn call_with_timeout(
+    endpoint_token: usize,
+    msg: &mut Message,
+    _flags: IpcFlags,
+    timeout_ms: usize,
+) -> Result<()> {
+    let msg_copy = msg.clone();
+    let send_bytes = msg_copy.as_bytes();
+    let reply_bytes = msg.as_bytes_mut();
+    loop {
+        match syscall::ipc_call_timeout(endpoint_token, send_bytes, reply_bytes, timeout_ms) {
             Ok(_) => return Ok(()),
             Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
             Err(err) => return Err(err),
