@@ -72,7 +72,7 @@ const SERVICE_STACK_BASE: usize = 0x6d000000;
 const SERVICE_STACK_TOP: usize = SERVICE_STACK_BASE + SERVICE_STACK_SIZE;
 const STACK_FLAGS: usize = 0x03; // read + write
                                  // PAGE_SIZE is imported from libcluu::*
-const SERVICE_PATH: &str = "/dev/initrd/bin/shell";
+const SERVICE_PATH: &str = "/bin/shell";
 const SHELL_AUTOSTART_CMD: &str = match option_env!("CLUU_SHELL_AUTOSTART_CMD") {
     Some(cmd) => cmd,
     None => "",

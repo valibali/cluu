@@ -251,9 +251,10 @@ enum Commands {
         #[arg(long, default_value = "dev")]
         profile: String,
     },
-    /// Internal: build userspace services (non-containerized)
+    /// Internal: build a single init primordial crate
     #[command(hide = true)]
-    UserspaceServices {
+    BuildInitCrate {
+        name: String,
         #[arg(long, default_value = "dev")]
         profile: String,
     },
@@ -375,8 +376,8 @@ fn main() -> Result<()> {
         Commands::BuildLibcluu { profile } => {
             build_libcluu(&profile)?;
         }
-        Commands::UserspaceServices { profile } => {
-            build_userspace_services(&profile)?;
+        Commands::BuildInitCrate { name, profile } => {
+            build_init_crate(&name, &profile)?;
         }
         Commands::BuildSingleContainer { name } => {
             build_single_container(&name)?;
@@ -402,8 +403,10 @@ fn build_pipeline_linear(profile: &str) -> Result<()> {
     build_crt0()?;
     // Kernel
     build_kernel(profile)?;
-    // Userspace services
-    build_userspace_services(profile)?;
+    // Init primordials
+    for name in INIT_CRATES {
+        build_init_crate(name, profile)?;
+    }
     // Containers
     build_containers()?;
     // Packaging
@@ -469,7 +472,7 @@ fn default_expected_work_units(task_id: &str) -> u32 {
         "dep-newlib" => 320,
         "dep-syscalls" => 40,
         "dep-crt0" => 8,
-        "userspace-services" => 450,
+        id if id.starts_with("init-") => 40,
         "kernel" => 120,
         "initrd" => 24,
         "userdisk" => 48,
@@ -1791,13 +1794,23 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
         RichTreeNodeDef { id: "kernel".into(), label: "kernel".into(), parent: Some("build".into()), is_leaf: true },
         // Userspace
         RichTreeNodeDef { id: "userspace".into(), label: "userspace".into(), parent: Some("build".into()), is_leaf: false },
-        RichTreeNodeDef { id: "userspace-services".into(), label: "services".into(), parent: Some("userspace".into()), is_leaf: true },
+        RichTreeNodeDef { id: "init".into(), label: "init".into(), parent: Some("userspace".into()), is_leaf: false },
         RichTreeNodeDef { id: "containers".into(), label: "containers".into(), parent: Some("userspace".into()), is_leaf: false },
         // Packaging
         RichTreeNodeDef { id: "initrd".into(), label: "initrd".into(), parent: Some("build".into()), is_leaf: true },
         RichTreeNodeDef { id: "userdisk".into(), label: "userdisk".into(), parent: Some("build".into()), is_leaf: true },
         RichTreeNodeDef { id: "disk-image".into(), label: "disk-image".into(), parent: Some("build".into()), is_leaf: true },
     ];
+
+    // Init primordial subtasks (one per crate)
+    for crate_name in INIT_CRATES {
+        tree_defs.push(RichTreeNodeDef {
+            id: format!("init-{}", crate_name),
+            label: crate_name.to_string(),
+            parent: Some("init".into()),
+            is_leaf: true,
+        });
+    }
 
     // Dynamic container nodes (auto-discovered from containers/*/)
     for name in &container_names {
@@ -1813,14 +1826,19 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
     // Dependencies: klibcluu, libcluu, newlib, crt0 start immediately.
     //               syscalls waits for libcluu (Cargo dependency).
     // Kernel:       waits for all deps.
-    // Userspace:    services waits for all deps; containers wait for services.
-    // Packaging:    initrd waits for kernel + services + all containers.
-    //               userdisk waits for services + all containers.
+    // Init:         each crate waits for all deps; serializes via cargo lock.
+    // Containers:   each waits for all init crates (need warm cache).
+    // Packaging:    initrd waits for kernel + all init + all containers.
+    //               userdisk waits for all init + all containers.
     //               disk-image waits for initrd + userdisk.
     let all_dep_names: Vec<String> = vec![
         "dep-klibcluu".into(), "dep-libcluu".into(), "dep-newlib".into(),
         "dep-syscalls".into(), "dep-crt0".into(),
     ];
+
+    let init_task_ids: Vec<String> = INIT_CRATES.iter()
+        .map(|n| format!("init-{}", n))
+        .collect();
 
     let mut tasks = vec![
         // Dependencies
@@ -1831,11 +1849,18 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
         RichTask { name: "dep-crt0".into(), args: vec!["build-crt0".into()], deps: vec![] },
         // Kernel
         RichTask { name: "kernel".into(), args: vec!["kernel".into(), "--profile".into(), profile.into()], deps: all_dep_names.clone() },
-        // Userspace services
-        RichTask { name: "userspace-services".into(), args: vec!["userspace-services".into(), "--profile".into(), profile.into()], deps: all_dep_names.clone() },
     ];
 
-    // Dynamic container tasks (each depends on userspace-services)
+    // Init primordial tasks — each depends on all deps
+    for crate_name in INIT_CRATES {
+        tasks.push(RichTask {
+            name: format!("init-{}", crate_name),
+            args: vec!["build-init-crate".into(), crate_name.to_string(), "--profile".into(), profile.into()],
+            deps: all_dep_names.clone(),
+        });
+    }
+
+    // Dynamic container tasks (each depends on all init crates for warm cache)
     let container_task_ids: Vec<String> = container_names.iter()
         .map(|n| format!("container-{}", n))
         .collect();
@@ -1843,15 +1868,16 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
         tasks.push(RichTask {
             name: format!("container-{}", name),
             args: vec!["build-single-container".into(), name.clone()],
-            deps: vec!["userspace-services".into()],
+            deps: init_task_ids.clone(),
         });
     }
 
     // Packaging
-    let mut initrd_deps = vec!["kernel".into(), "userspace-services".into()];
+    let mut initrd_deps = vec!["kernel".into()];
+    initrd_deps.extend(init_task_ids.iter().cloned());
     initrd_deps.extend(container_task_ids.iter().cloned());
 
-    let mut userdisk_deps: Vec<String> = vec!["userspace-services".into()];
+    let mut userdisk_deps: Vec<String> = init_task_ids.clone();
     userdisk_deps.extend(container_task_ids.iter().cloned());
 
     tasks.push(RichTask {
@@ -2261,9 +2287,11 @@ fn create_initrd(profile: &str) -> Result<()> {
 
     let initrd_dir = project_root().join("target/initrd");
 
-    // Create directory structure
+    // Clean and recreate to remove stale files from previous builds.
+    if initrd_dir.exists() {
+        fs::remove_dir_all(&initrd_dir)?;
+    }
     fs::create_dir_all(initrd_dir.join("sys"))?;
-    fs::create_dir_all(initrd_dir.join("bin"))?;
     fs::create_dir_all(initrd_dir.join("etc"))?;
 
     // Copy kernel as sys/core (BOOTBOOT convention)
@@ -2291,17 +2319,15 @@ fn create_initrd(profile: &str) -> Result<()> {
         bail!("Kernel binary not found in {:?}", deps_dir);
     }
 
-    // Copy system servers to initrd/sys/
+    // Copy init primordials to initrd/sys/ — only the services
+    // bootstrapped by init before procmgr takes over.  Everything else
+    // (console, kbd, tty, vtmgr, shell) is loaded from ext2 containers.
     let sys_programs = [
         "init",
-        "procmgr",
         "registry",
         "timeserver",
+        "procmgr",
         "vfs",
-        "console",
-        "kbd",
-        "tty",
-        "vtmgr",
         "virtio-blk",
     ];
     let mut copied_sys_paths = Vec::new();
@@ -2317,21 +2343,8 @@ fn create_initrd(profile: &str) -> Result<()> {
         }
     }
 
-    // Copy user programs to initrd/bin/
-    let bin_programs = ["shell"];
-    for prog in &bin_programs {
-        let src = userspace_target_dir.join(format!("{}.elf", prog));
-        let dst = initrd_dir.join("bin").join(prog);
-        if src.exists() {
-            fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
-            println!("  Copied bin/{}", prog);
-        } else {
-            println!("  Warning: {} not found, skipping", prog);
-        }
-    }
-
-    // Note: C programs are intentionally NOT in the initrd.
-    // They are placed on the ext2 disk and spawned via VFS.
+    // Note: shell and other userspace programs are loaded from ext2 containers,
+    // not from the initrd.
 
     // Create etc/motd
     fs::write(initrd_dir.join("etc/motd"), "Welcome to CLUU!\n")?;
@@ -3186,60 +3199,50 @@ fn build_libcluu(profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn build_userspace_services(profile: &str) -> Result<()> {
-    println!("▸ Building userspace services...");
-    // All Rust userspace crates EXCEPT libcluu (built separately as dep-libcluu).
-    // Includes both initrd-only and containerized services so cargo cache
-    // is warm when container BUILD directives run (making them noops).
-    let userspace_crates = [
-        "userspace/virtio-blk",
-        "userspace/ext2",
-        "userspace/init",
-        "userspace/procmgr",
-        "userspace/registry",
-        "userspace/vfs",
-        "userspace/ramfs",
-        "userspace/console",
-        "userspace/kbd",
-        "userspace/tty",
-        "userspace/vtmgr",
-        "userspace/shell",
-        "userspace/timeserver",
-        "userspace/cat",
-    ];
+/// Init primordial crate names — bootstrapped by init before procmgr takes
+/// over.  Everything else (console, kbd, tty, vtmgr, shell) is started by
+/// procmgr from containers.
+const INIT_CRATES: &[&str] = &[
+    "init", "registry", "timeserver", "procmgr", "vfs", "virtio-blk",
+];
+
+/// Build a single init primordial crate by name.
+fn build_init_crate(name: &str, profile: &str) -> Result<()> {
+    println!("▸ Building init crate: {}...", name);
+
+    let crate_path = format!("userspace/{}/Cargo.toml", name);
+    let manifest = project_root().join(&crate_path);
+    if !manifest.exists() {
+        bail!("Init crate manifest not found: {}", manifest.display());
+    }
 
     let target_json = project_root().join("triplets/x86_64-cluu-user.json");
     let tmp_dir = project_root().join("tmp");
     fs::create_dir_all(&tmp_dir)?;
 
-    for crate_path in &userspace_crates {
-        let crate_name = Path::new(crate_path).file_name().unwrap().to_str().unwrap();
-        println!("  Building {}...", crate_name);
-
-        let mut cmd = Command::new("cargo");
-        cmd.current_dir(project_root()).args([
-            "build",
-            "--manifest-path",
-            &format!("{}/Cargo.toml", crate_path),
-            "--target",
-            target_json.to_str().unwrap(),
-            "-Z",
-            "build-std=core,alloc",
-            "-Z",
-            "build-std-features=compiler-builtins-mem",
-        ]);
-        cmd.env("TMPDIR", tmp_dir.as_os_str());
-        if profile == "release" {
-            cmd.arg("--release");
-        }
-
-        let status = cmd.status().context("Failed to run cargo")?;
-        if !status.success() {
-            bail!("Failed to build {}", crate_name);
-        }
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(project_root()).args([
+        "build",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+        "--target",
+        target_json.to_str().unwrap(),
+        "-Z",
+        "build-std=core,alloc",
+        "-Z",
+        "build-std-features=compiler-builtins-mem",
+    ]);
+    cmd.env("TMPDIR", tmp_dir.as_os_str());
+    if profile == "release" {
+        cmd.arg("--release");
     }
 
-    println!("  ✓ Userspace services built");
+    let status = cmd.status().context("Failed to run cargo")?;
+    if !status.success() {
+        bail!("Failed to build init crate {}", name);
+    }
+
+    println!("  ✓ {} built", name);
     Ok(())
 }
 
