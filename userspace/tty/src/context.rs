@@ -213,8 +213,12 @@ impl TtyContext {
     /// `flags` controls whether Ctrl-C is forwarded to the route and/or notified.
     pub fn configure_foreground(&mut self, endpoint: usize, ctrl_c_notify: usize, flags: usize) {
         // Foreground switches define a new input session boundary. Drop stale
-        // read waiters/buffered bytes from the previous foreground owner.
-        self.pending_reads.clear();
+        // buffered bytes from the previous foreground owner but preserve
+        // pending read waiters — the new foreground process may have already
+        // enqueued a read (race between container start and fire-and-forget
+        // TTY_REGISTER). Stale reads from dead processes are harmless:
+        // try_satisfy_reads() handles reply failures by dropping the waiter
+        // without consuming input data.
         self.input_queue.clear();
 
         if endpoint == 0 {
