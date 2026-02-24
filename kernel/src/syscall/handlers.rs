@@ -30,6 +30,12 @@ const IPC_REG_INLINE_MAX_CALL_PAYLOAD: usize = 16;
 const IPC_CALL_TRACE_LIMIT: u64 = 512;
 static IPC_CALL_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Helper: check if IPC call tracing is active for this call index.
+#[inline]
+fn ipc_trace_active(idx: u64) -> bool {
+    idx < IPC_CALL_TRACE_LIMIT && klibcluu::should_log(klibcluu::LogLevel::Trace)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // IPC Syscalls
 // ═══════════════════════════════════════════════════════════════════════════
@@ -400,17 +406,17 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     // arg6 is used for inline data in the fast path (IPC_REG_INLINE_FLAG).
     // In the slow path, arg6 is interpreted as timeout_ms (0 = block forever).
     let trace_idx = IPC_CALL_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
-    if trace_idx < IPC_CALL_TRACE_LIMIT {
-        klibcluu::info("sys_call entry");
+    if ipc_trace_active(trace_idx) {
+        klibcluu::trace("sys_call entry");
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  endpoint_token=",
             token_handle.as_raw() as u64,
         );
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "  msg_len=", msg_len as u64);
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "  reply_len=", reply_len as u64);
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  msg_len=", msg_len as u64);
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  reply_len=", reply_len as u64);
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  caller=",
             crate::sched::ThreadManager::current()
                 .map(|tid| tid.as_u64())
@@ -431,9 +437,9 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     } else {
         return Err(Error::InvalidArgument);
     };
-    if trace_idx < IPC_CALL_TRACE_LIMIT {
+    if ipc_trace_active(trace_idx) {
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  endpoint_id=",
             endpoint_id.as_u64(),
         );
@@ -496,25 +502,13 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
         return Ok(0);
     }
     // --- existing slow path follows unchanged below ---
-    if trace_idx < IPC_CALL_TRACE_LIMIT {
-        klibcluu::info("  sys_call before current_page_table_root");
-    }
 
     let page_table_root =
         crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
-    if trace_idx < IPC_CALL_TRACE_LIMIT {
-        klibcluu::info("  sys_call after current_page_table_root");
-    }
     let current = crate::sched::ThreadManager::current().ok_or(Error::InvalidState)?;
-    if trace_idx < IPC_CALL_TRACE_LIMIT {
-        klibcluu::info("  sys_call after current");
-    }
 
     // 2. Allocate reply ID and store reply buffer info
     let reply_id = crate::sched::ThreadManager::alloc_reply_id();
-    if trace_idx < IPC_CALL_TRACE_LIMIT {
-        klibcluu::info("  sys_call before set_call_reply_info");
-    }
     if !crate::sched::ThreadManager::set_call_reply_info(
         reply_id,
         CallReplyInfo {
@@ -527,11 +521,6 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     ) {
         klibcluu::warn("sys_call: set_call_reply_info failed");
         return Err(Error::Overflow);
-    }
-    if trace_idx < IPC_CALL_TRACE_LIMIT {
-        klibcluu::info("  sys_call after set_call_reply_info");
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "  reply_id=", reply_id.as_u64());
-        klibcluu::info("  sys_call before call_from_user_with_reply_id");
     }
 
     // 3. Send call message with reply_id injected
@@ -546,9 +535,6 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
         // (prevents leak when caller retries after WouldBlock backpressure)
         let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
         return Err(e);
-    }
-    if trace_idx < IPC_CALL_TRACE_LIMIT {
-        klibcluu::info("  sys_call enqueue done");
     }
 
     // 5. Block waiting for reply, with optional timeout.

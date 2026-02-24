@@ -176,6 +176,7 @@ pub extern "C" fn kstart() -> ! {
 
     // Calibrate TSC before bringing up timer infrastructure.
     let tsc_hz = architecture::x86_64::tsc::calibrate();
+    klibcluu::set_tsc_hz(tsc_hz);
     klibcluu::info("TSC calibrated");
     klibcluu::log_dec(klibcluu::LogLevel::Info, "tsc_hz=", tsc_hz);
 

@@ -793,42 +793,42 @@ fn call_with_reply_id_inner(
     };
 
     let dbg_count = IPC_CALL_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
-    if dbg_count < IPC_CALL_DEBUG_LIMIT {
-        klibcluu::info("ipc-call enqueue");
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "  endpoint=", endpoint.as_u64());
+    if dbg_count < IPC_CALL_DEBUG_LIMIT && klibcluu::should_log(klibcluu::LogLevel::Trace) {
+        klibcluu::trace("ipc-call enqueue");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  endpoint=", endpoint.as_u64());
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  sender=",
             sender.map(|tid| tid.as_u64()).unwrap_or(0),
         );
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "  reply_id=", reply_id.as_u64());
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  reply_id=", reply_id.as_u64());
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  payload_len=",
             payload_len as u64,
         );
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  waiters_before=",
             waiters_before as u64,
         );
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  wake=",
             wake.map(|tid| tid.as_u64()).unwrap_or(0),
         );
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  direct_receiver=",
             direct_receiver.map(|tid| tid.as_u64()).unwrap_or(0),
         );
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  queue_len_after=",
             queue_len_after as u64,
         );
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  call_queue_len_after=",
             call_queue_len_after as u64,
         );
@@ -852,17 +852,17 @@ pub fn call_from_user_with_reply_id(
     reply_id: crate::token::ReplyId,
 ) -> Result<(), Error> {
     let dbg_count = IPC_CALL_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
-    if dbg_count < IPC_CALL_DEBUG_LIMIT {
-        klibcluu::info("ipc-call from-user entry");
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "  endpoint=", endpoint.as_u64());
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "  msg_ptr=", msg_ptr as u64);
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "  msg_len=", msg_len as u64);
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "  reply_id=", reply_id.as_u64());
+    if dbg_count < IPC_CALL_DEBUG_LIMIT && klibcluu::should_log(klibcluu::LogLevel::Trace) {
+        klibcluu::trace("ipc-call from-user entry");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  endpoint=", endpoint.as_u64());
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  msg_ptr=", msg_ptr as u64);
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  msg_len=", msg_len as u64);
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  reply_id=", reply_id.as_u64());
     }
     let mut payload = copy_user_payload(msg_ptr, msg_len, page_table_root)?;
-    if dbg_count < IPC_CALL_DEBUG_LIMIT {
+    if dbg_count < IPC_CALL_DEBUG_LIMIT && klibcluu::should_log(klibcluu::LogLevel::Trace) {
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  copied_payload_len=",
             payload.as_slice().len() as u64,
         );

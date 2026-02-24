@@ -18,7 +18,74 @@
 //! - DEBUG: Verbose debugging
 //! - TRACE: Very verbose (via feature)
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::uart::COM2;
+
+/// TSC frequency set once during boot via `set_tsc_hz()`.
+static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+
+/// Tell the logger the TSC frequency so it can print timestamps.
+/// Call once after TSC calibration.
+pub fn set_tsc_hz(hz: u64) {
+    TSC_HZ.store(hz, Ordering::Release);
+}
+
+/// Read the TSC (Time Stamp Counter) — no allocation, IRQ-safe.
+#[inline]
+fn rdtsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags));
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// Write a boot-relative timestamp prefix like `[    1.234] `.
+/// If TSC_HZ is not yet set, writes nothing.
+fn write_timestamp() {
+    let hz = TSC_HZ.load(Ordering::Relaxed);
+    if hz == 0 {
+        return;
+    }
+    let tsc = rdtsc();
+    // Compute seconds and milliseconds
+    let secs = tsc / hz;
+    let remainder = tsc % hz;
+    let millis = remainder * 1000 / hz;
+
+    COM2.write_byte(b'[');
+    // Right-align seconds in a 5-char field
+    write_dec_padded(secs, 5);
+    COM2.write_byte(b'.');
+    // Milliseconds: always 3 digits
+    write_dec_padded(millis, 3);
+    COM2.write_str("] ");
+}
+
+/// Write a decimal value right-aligned in `width` chars, space-padded.
+fn write_dec_padded(value: u64, width: usize) {
+    let mut buf = [b' '; 20];
+    let mut v = value;
+    let mut i = 0;
+    if v == 0 {
+        buf[19] = b'0';
+        i = 1;
+    } else {
+        while v > 0 && i < 20 {
+            buf[19 - i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            i += 1;
+        }
+    }
+    // Write at least `width` chars (space-padded on left)
+    let digits_start = 20 - i;
+    let pad_start = if i < width { 20 - width } else { digits_start };
+    for idx in pad_start..20 {
+        COM2.write_byte(buf[idx]);
+    }
+}
 
 /// Log level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -82,6 +149,8 @@ pub fn log(level: LogLevel, msg: &str) {
         return;
     }
 
+    write_timestamp();
+
     // Write level prefix
     let prefix = match level {
         LogLevel::Error => "[ERROR] ",
@@ -133,6 +202,8 @@ pub fn log_hex(level: LogLevel, prefix: &str, value: u64) {
     if !should_log(level) {
         return;
     }
+
+    write_timestamp();
 
     // Write level prefix
     let level_str = match level {
@@ -188,6 +259,8 @@ pub fn log_dec(level: LogLevel, prefix: &str, value: u64) {
     if !should_log(level) {
         return;
     }
+
+    write_timestamp();
 
     // Write level prefix
     let level_str = match level {
