@@ -69,10 +69,9 @@ impl VtmgrContext {
 
     /// Request subscriptions for services we need.
     pub fn ensure_subscriptions(&mut self) {
-        // Subscribe to console:0's write endpoint (for sending CREATE_VT / ACTIVATE / DEACTIVATE).
-        // Console registers as "console:{instance_id}" for backward compat with tty/shell.
+        // Subscribe to console:0's control endpoint (for sending CREATE_VT / ACTIVATE / DEACTIVATE).
         if self.console_endpoint == 0 && !self.requested_console {
-            if registry::request_subscription("console:0", "write").is_ok() {
+            if registry::request_subscription("console:0", "control").is_ok() {
                 self.requested_console = true;
             }
         }
@@ -90,9 +89,9 @@ impl VtmgrContext {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             match event {
                 registry::RegistryEvent::Grant { service_name: _, name, token } => {
-                    if name == "write" {
+                    if name == "control" {
                         self.console_endpoint = token;
-                        let _ = debug_print("vtmgr: console write subscribed");
+                        let _ = debug_print("vtmgr: console control subscribed");
                     } else if name == "spawn" {
                         self.procmgr_spawn_endpoint = token;
                         let _ = debug_print("vtmgr: procmgr spawn subscribed");

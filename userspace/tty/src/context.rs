@@ -118,7 +118,8 @@ impl TtyContext {
     pub fn request_subscriptions(&mut self) {
         if self.console_endpoint == 0 && !self.requested_console {
             let console_name = format!("console:{}", self.instance_id);
-            if registry::request_subscription(&console_name, "write").is_ok() {
+            let output_name = format!("vt:{}", self.instance_id);
+            if registry::request_subscription(&console_name, &output_name).is_ok() {
                 self.requested_console = true;
             }
         }
@@ -163,7 +164,7 @@ impl TtyContext {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             match event {
                 registry::RegistryEvent::Grant { service_name: _, name, token } => {
-                    if name == "write" {
+                    if name.starts_with("vt:") || name == "write" {
                         self.console_endpoint = token;
                         let _ = debug_print("tty: console subscribed");
                         self.flush_pending_console();

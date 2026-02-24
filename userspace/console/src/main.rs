@@ -5,10 +5,10 @@ extern crate alloc;
 
 /// Userspace console service.
 ///
-/// The console owns a text grid and renders it to the framebuffer. It exposes a
-/// single input endpoint (`write`) that other services (tty) can subscribe to
-/// via the registry. Rendering stays synchronous and deterministic so the
-/// console can later be swapped to a different backend (e.g., a GPU driver).
+/// The console owns a text grid and renders it to the framebuffer. It exposes
+/// per-VT write endpoints (`vt:0`, `vt:1`, ...) and a `control` endpoint via
+/// the registry. The receiving endpoint index identifies the VT — no
+/// sender-reported VT index is needed, eliminating confused-deputy attacks.
 ///
 /// # Multi-VT Support
 ///
@@ -31,7 +31,7 @@ mod renderer;
 mod simd;
 
 use crate::backend::{ConsoleBackend, DoubleBufferBackend, FramebufferBackend};
-use crate::context::ConsoleContext;
+use crate::context::{ConsoleContext, VT_COUNT};
 use crate::protocol::parse_message;
 use crate::renderer::Console;
 use libcluu::boot::{
@@ -102,7 +102,13 @@ fn run_with_backend<B: ConsoleBackend>(
 
     loop {
         context.request_subscriptions();
-        let tokens = [context.endpoint, context.registry_endpoint];
+        // Token layout: [vt:0, vt:1, ..., vt:N-1, control, registry]
+        let mut tokens = [0usize; VT_COUNT + 2];
+        for i in 0..VT_COUNT {
+            tokens[i] = context.vt_endpoints[i];
+        }
+        tokens[VT_COUNT] = context.control_endpoint;
+        tokens[VT_COUNT + 1] = context.registry_endpoint;
         match syscall::ipc_recv_any(&tokens, &mut buf, BLINK_TIMEOUT_MS) {
             Ok((index, len)) => {
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
@@ -125,7 +131,11 @@ fn run_with_backend<B: ConsoleBackend>(
     }
 }
 
-/// Route IPC traffic to the renderer or the registry control handler.
+/// Route IPC traffic by endpoint index.
+///
+/// Token layout: [vt:0 .. vt:N-1, control, registry].
+/// VT endpoints use the index as the VT number — no sender-reported VT index
+/// needed, eliminating confused-deputy attacks.
 fn handle_incoming<B: ConsoleBackend>(
     index: usize,
     console: &mut Console<B>,
@@ -133,54 +143,49 @@ fn handle_incoming<B: ConsoleBackend>(
     msg: &libcluu::types::Message,
     payload: &[u8],
 ) -> Result<()> {
-    if index == 0 {
-        // VT lifecycle and per-VT write messages from vtmgr/tty.
+    if index < VT_COUNT {
+        // Per-VT write endpoint — VT index is the endpoint index.
+        let vt_index = index;
+        match msg.tag.label {
+            CONSOLE_WRITE_LABEL | CONSOLE_WRITE_VT_LABEL => {
+                console.write_to_vt(vt_index, payload);
+                context.record_rendered_bytes(payload.len());
+            }
+            CONSOLE_WRITE_SYNC_LABEL | CONSOLE_WRITE_VT_SYNC_LABEL => {
+                console.write_to_vt(vt_index, payload);
+                context.record_rendered_bytes(payload.len());
+                if let Some(reply_token) = extract_reply_id(msg) {
+                    let reply_msg = Message::new(msg.tag.label, [0; 6], 0);
+                    let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    } else if index == VT_COUNT {
+        // Control endpoint — VT lifecycle commands from vtmgr.
         match msg.tag.label {
             CONSOLE_ACTIVATE_LABEL => {
                 let vt_index = if msg.tag.words >= 1 { msg.words[0] } else { 0 };
                 console.switch_vt(vt_index);
-                return Ok(());
             }
             CONSOLE_DEACTIVATE_LABEL => {
                 let vt_index = if msg.tag.words >= 1 { msg.words[0] } else { 0 };
                 console.deactivate_vt(vt_index);
-                return Ok(());
             }
             CONSOLE_CREATE_VT_LABEL => {
                 if msg.tag.words >= 1 {
                     console.create_vt(msg.words[0]);
                 }
-                return Ok(());
             }
-            CONSOLE_WRITE_VT_LABEL => {
-                if msg.tag.words >= 2 {
-                    let vt_index = msg.words[1];
-                    console.write_to_vt(vt_index, payload);
-                }
-                context.record_rendered_bytes(payload.len());
-                return Ok(());
+            _ => {
+                // Forward other management labels (CLEAR, CURSOR, BLINK, FB_INFO).
+                let _ = console.handle_message(msg, payload);
             }
-            CONSOLE_WRITE_VT_SYNC_LABEL => {
-                if msg.tag.words >= 2 {
-                    let vt_index = msg.words[1];
-                    console.write_to_vt(vt_index, payload);
-                }
-                context.record_rendered_bytes(payload.len());
-                if let Some(reply_token) = extract_reply_id(msg) {
-                    let reply_msg = Message::new(CONSOLE_WRITE_VT_SYNC_LABEL, [0; 6], 0);
-                    let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                }
-                return Ok(());
-            }
-            _ => {}
         }
-        // CONSOLE_WRITE_LABEL and CONSOLE_WRITE_SYNC_LABEL go through handle_message
-        let result = console.handle_message(msg, payload);
-        if msg.tag.label == CONSOLE_WRITE_LABEL || msg.tag.label == CONSOLE_WRITE_SYNC_LABEL {
-            context.record_rendered_bytes(payload.len());
-        }
-        result
+        Ok(())
     } else {
+        // Registry control endpoint.
         context.handle_registry_event(msg, payload);
         Ok(())
     }
