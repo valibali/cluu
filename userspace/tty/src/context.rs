@@ -162,7 +162,7 @@ impl TtyContext {
     pub fn handle_registry_event(&mut self, msg: &libcluu::types::Message, payload: &[u8]) {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             match event {
-                registry::RegistryEvent::Grant { name, token } => {
+                registry::RegistryEvent::Grant { service_name: _, name, token } => {
                     if name == "write" {
                         self.console_endpoint = token;
                         let _ = debug_print("tty: console subscribed");

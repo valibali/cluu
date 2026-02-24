@@ -811,7 +811,7 @@ impl ProcessManager {
 
     fn handle_registry_event(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
-            if let registry::RegistryEvent::Grant { name, token } = event {
+            if let registry::RegistryEvent::Grant { service_name, name, token } = event {
                 if name == "mounted" && !self.autostart_done {
                     let _ = debug_print(&format!(
                         "procmgr: VFS mounted signal received (token={})", token
@@ -819,11 +819,13 @@ impl ProcessManager {
                     self.autostart_done = true;
                     self.run_autostart();
                 } else if name == "main" {
-                    // Assign to the first empty tty slot.
-                    if let Some(idx) = self.tty_endpoints.iter().position(|&ep| ep == 0) {
-                        self.tty_endpoints[idx] = token;
-                        let _ =
-                            debug_print(&format!("procmgr: tty:{} main granted {}", idx, token));
+                    // Use service name to determine VT index (e.g., "tty:0" → 0).
+                    if let Some(idx) = service_name.strip_prefix("tty:").and_then(|s| s.parse::<usize>().ok()) {
+                        if idx < VT_COUNT {
+                            self.tty_endpoints[idx] = token;
+                            let _ =
+                                debug_print(&format!("procmgr: tty:{} main granted {}", idx, token));
+                        }
                     }
                 }
             } else if let registry::RegistryEvent::SubscribeStatus { code } = event {

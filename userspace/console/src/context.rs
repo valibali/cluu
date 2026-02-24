@@ -70,7 +70,7 @@ impl ConsoleContext {
     pub fn handle_registry_event(&mut self, msg: &libcluu::types::Message, payload: &[u8]) {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             match event {
-                registry::RegistryEvent::Grant { name, token } => {
+                registry::RegistryEvent::Grant { service_name: _, name, token } => {
                     if name == "main" {
                         self.tty_endpoint = token;
                         let _ = debug_print("console: tty subscribed for credit refills");

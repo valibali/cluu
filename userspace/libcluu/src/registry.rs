@@ -28,7 +28,7 @@ pub const REGISTRY_GRANT_REQUEST_LABEL: u32 = 0x105;
 pub const REGISTRY_GRANT_DELIVER_LABEL: u32 = 0x106;
 pub enum RegistryEvent {
     /// Producer granted a token for the named output.
-    Grant { name: String, token: usize },
+    Grant { service_name: String, name: String, token: usize },
     /// Registry replied to a subscribe request; 0 is OK.
     SubscribeStatus { code: i32 },
 }
@@ -247,8 +247,9 @@ pub fn handle_incoming_message(msg: &Message, payload: &[u8]) -> Result<Option<R
             Ok(None)
         }
         REGISTRY_GRANT_DELIVER_LABEL => {
-            let name = decode_single_name(payload).ok_or(Error::InvalidArgument)?;
+            let (service_name, name) = decode_names(payload).ok_or(Error::InvalidArgument)?;
             Ok(Some(RegistryEvent::Grant {
+                service_name,
                 name,
                 token: msg.words[1],
             }))
@@ -286,7 +287,7 @@ fn wait_for_grant(endpoint_name: &str) -> Result<usize> {
         if let Some((msg, payload)) = parse_message(&buf[..len]) {
             if let Some(event) = handle_incoming_message(&msg, payload)? {
                 match event {
-                    RegistryEvent::Grant { name, token } => {
+                    RegistryEvent::Grant { service_name: _, name, token } => {
                         let _ = crate::debug_print(&alloc::format!(
                             "registry-client: grant {} token {}",
                             name,
@@ -324,10 +325,13 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
         endpoint_name,
         requester_endpoint
     ));
-    // Look up the local output token so we can derive a send-only grant.
-    let endpoint_token = {
+    // Look up the local output token and service name for the grant reply.
+    let (endpoint_token, service_name) = {
         let state = REGISTRY_STATE.lock();
-        state.outputs.get(&endpoint_name).copied().unwrap_or(0)
+        (
+            state.outputs.get(&endpoint_name).copied().unwrap_or(0),
+            state.service_name.clone().unwrap_or_default(),
+        )
     };
     if endpoint_token == 0 {
         let _ = crate::debug_print(&alloc::format!(
@@ -344,7 +348,7 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
         derived,
         endpoint_name
     ));
-    let payload = encode_single_name(&endpoint_name);
+    let payload = encode_names(&service_name, &endpoint_name);
     // Reply directly to the requester with the derived token.
     let reply = make_payload_message(REGISTRY_GRANT_DELIVER_LABEL, payload.len(), &[derived]);
     match send_with_payload(requester_endpoint, &reply, &payload) {
@@ -408,16 +412,6 @@ fn encode_names(service_name: &str, endpoint_name: &str) -> Vec<u8> {
     payload.extend_from_slice(&endpoint_len.to_le_bytes());
     payload.extend_from_slice(service_bytes);
     payload.extend_from_slice(endpoint_bytes);
-    payload
-}
-
-fn encode_single_name(name: &str) -> Vec<u8> {
-    let bytes = name.as_bytes();
-    let mut payload = Vec::with_capacity(4 + bytes.len());
-    let len = bytes.len() as u16;
-    payload.extend_from_slice(&len.to_le_bytes());
-    payload.extend_from_slice(&0u16.to_le_bytes());
-    payload.extend_from_slice(bytes);
     payload
 }
 

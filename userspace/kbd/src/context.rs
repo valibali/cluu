@@ -103,12 +103,14 @@ impl KbdContext {
     pub fn handle_registry_message(&mut self, msg: &Message, payload: &[u8]) {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             match event {
-                registry::RegistryEvent::Grant { name, token } => {
+                registry::RegistryEvent::Grant { service_name, name, token } => {
                     if name == "main" {
-                        // tty grant — assign to the first empty slot.
-                        if let Some(idx) = self.first_empty_tty() {
-                            self.tty_endpoints[idx] = token;
-                            let _ = debug_print(&format!("kbd: tty:{} subscribed", idx));
+                        // tty grant — use service name to determine VT index.
+                        if let Some(idx) = parse_tty_index(&service_name) {
+                            if idx < VT_COUNT {
+                                self.tty_endpoints[idx] = token;
+                                let _ = debug_print(&format!("kbd: tty:{} subscribed", idx));
+                            }
                         }
                     } else if name == "control" {
                         self.vtmgr_endpoint = token;
@@ -163,9 +165,11 @@ impl KbdContext {
         }
     }
 
-    fn first_empty_tty(&self) -> Option<usize> {
-        self.tty_endpoints.iter().position(|&ep| ep == 0)
-    }
+}
+
+/// Parse a VT index from a service name like "tty:0" → Some(0).
+fn parse_tty_index(service_name: &str) -> Option<usize> {
+    service_name.strip_prefix("tty:").and_then(|s| s.parse().ok())
 }
 
 /// Helper for sleeping when the IPC queue is empty or errored.
