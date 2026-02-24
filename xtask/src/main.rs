@@ -96,9 +96,9 @@ enum BuildUi {
 
 #[derive(Clone, Debug)]
 struct RichTask {
-    name: &'static str,
+    name: String,
     args: Vec<String>,
-    deps: &'static [&'static str],
+    deps: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -242,6 +242,26 @@ enum Commands {
     /// Internal: build all container images from containers/*/Cluufile
     #[command(hide = true)]
     BuildContainers,
+    /// Internal: build klibcluu kernel library
+    #[command(hide = true)]
+    BuildKlibcluu,
+    /// Internal: build libcluu userspace library
+    #[command(hide = true)]
+    BuildLibcluu {
+        #[arg(long, default_value = "dev")]
+        profile: String,
+    },
+    /// Internal: build userspace services (non-containerized)
+    #[command(hide = true)]
+    UserspaceServices {
+        #[arg(long, default_value = "dev")]
+        profile: String,
+    },
+    /// Internal: build a single container by name
+    #[command(hide = true)]
+    BuildSingleContainer {
+        name: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -349,6 +369,18 @@ fn main() -> Result<()> {
         Commands::BuildContainers => {
             build_containers()?;
         }
+        Commands::BuildKlibcluu => {
+            build_klibcluu()?;
+        }
+        Commands::BuildLibcluu { profile } => {
+            build_libcluu(&profile)?;
+        }
+        Commands::UserspaceServices { profile } => {
+            build_userspace_services(&profile)?;
+        }
+        Commands::BuildSingleContainer { name } => {
+            build_single_container(&name)?;
+        }
     }
 
     Ok(())
@@ -362,12 +394,19 @@ fn build_pipeline(profile: &str, ui: BuildUi) -> Result<()> {
 }
 
 fn build_pipeline_linear(profile: &str) -> Result<()> {
+    // Dependencies
+    build_klibcluu()?;
+    build_libcluu(profile)?;
     build_newlib()?;
-    build_userspace(profile)?;
+    build_syscalls(profile)?;
+    build_crt0()?;
+    // Kernel
     build_kernel(profile)?;
-    build_c_programs(profile)?;
-    build_micropython()?;
+    // Userspace services
+    build_userspace_services(profile)?;
+    // Containers
     build_containers()?;
+    // Packaging
     create_initrd(profile)?;
     create_user_block_image(profile)?;
     create_disk_image(profile)?;
@@ -425,13 +464,17 @@ fn count_work_units_in_log(log_path: &Path) -> u32 {
 
 fn default_expected_work_units(task_id: &str) -> u32 {
     match task_id {
-        "userspace-newlib" => 320,
-        "userspace-rust" => 450,
+        "dep-klibcluu" => 60,
+        "dep-libcluu" => 80,
+        "dep-newlib" => 320,
+        "dep-syscalls" => 40,
+        "dep-crt0" => 8,
+        "userspace-services" => 450,
         "kernel" => 120,
         "initrd" => 24,
-        "build-containers" => 40,
         "userdisk" => 48,
         "disk-image" => 8,
+        id if id.starts_with("container-") => 20,
         _ => 80,
     }
 }
@@ -857,10 +900,10 @@ enum NodeStatus {
 
 #[derive(Clone, Debug)]
 struct RichTreeNode {
-    id: &'static str,
-    label: &'static str,
-    parent: Option<&'static str>,
-    children: Vec<&'static str>,
+    id: String,
+    label: String,
+    parent: Option<String>,
+    children: Vec<String>,
     is_leaf: bool,
     status: NodeStatus,
     last_line: String,
@@ -873,9 +916,9 @@ struct RichTreeNode {
 
 #[derive(Clone, Debug)]
 struct RichTreeNodeDef {
-    id: &'static str,
-    label: &'static str,
-    parent: Option<&'static str>,
+    id: String,
+    label: String,
+    parent: Option<String>,
     is_leaf: bool,
 }
 
@@ -883,8 +926,8 @@ struct RichTreeNodeDef {
 struct RichTreeSnapshot {
     title: String,
     logs_dir: String,
-    order: Vec<&'static str>,
-    nodes: HashMap<&'static str, RichTreeNode>,
+    order: Vec<String>,
+    nodes: HashMap<String, RichTreeNode>,
     stop: bool,
 }
 
@@ -892,8 +935,8 @@ struct RichTreeSnapshot {
 struct RichTreeState {
     title: String,
     logs_dir: PathBuf,
-    order: Vec<&'static str>,
-    nodes: HashMap<&'static str, RichTreeNode>,
+    order: Vec<String>,
+    nodes: HashMap<String, RichTreeNode>,
     tick: u64,
     stop: bool,
 }
@@ -909,19 +952,19 @@ impl RichTreeUi {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(logs_root_dir);
-        let mut nodes: HashMap<&'static str, RichTreeNode> = HashMap::new();
+        let mut nodes: HashMap<String, RichTreeNode> = HashMap::new();
         for def in defs {
             let expected = if def.is_leaf {
-                historical_expected_work_units(def.id, &logs_root)
+                historical_expected_work_units(&def.id, &logs_root)
             } else {
                 0
             };
             nodes.insert(
-                def.id,
+                def.id.clone(),
                 RichTreeNode {
-                    id: def.id,
-                    label: def.label,
-                    parent: def.parent,
+                    id: def.id.clone(),
+                    label: def.label.clone(),
+                    parent: def.parent.clone(),
                     children: Vec::new(),
                     is_leaf: def.is_leaf,
                     status: NodeStatus::Pending,
@@ -935,9 +978,9 @@ impl RichTreeUi {
             );
         }
         for def in defs {
-            if let Some(parent_id) = def.parent {
+            if let Some(parent_id) = def.parent.as_deref() {
                 if let Some(parent) = nodes.get_mut(parent_id) {
-                    parent.children.push(def.id);
+                    parent.children.push(def.id.clone());
                 }
             }
         }
@@ -971,19 +1014,28 @@ impl RichTreeUi {
         thread::spawn(move || {
             let use_ansi = should_use_ansi_controls();
             if use_ansi {
-                // Alternate screen + hidden cursor + no line-wrap to prevent redraw scrolling.
-                print!("\x1b[?1049h\x1b[?25l\x1b[?7l");
+                // Hidden cursor + no line-wrap to prevent redraw artifacts.
+                // We intentionally do NOT use the alternate screen buffer
+                // (\x1b[?1049h) so the final tree state remains visible
+                // after the build completes.
+                print!("\x1b[?25l\x1b[?7l");
             }
             let _ = io::stdout().flush();
-            let mut progress_floor: HashMap<&'static str, f32> = HashMap::new();
+            let mut progress_floor: HashMap<String, f32> = HashMap::new();
             let mut last_frame = String::new();
+            let mut prev_line_count: usize = 0;
 
             loop {
                 let snapshot = ui.snapshot();
                 let frame = render_tree_frame(&snapshot, &mut progress_floor);
                 if frame != last_frame {
+                    if use_ansi && prev_line_count > 0 {
+                        // Move cursor up to overwrite the previous frame.
+                        print!("\x1b[{}A\r\x1b[J", prev_line_count);
+                    }
                     print!("{frame}");
                     let _ = io::stdout().flush();
+                    prev_line_count = frame.lines().count();
                     last_frame = frame;
                 }
 
@@ -998,14 +1050,15 @@ impl RichTreeUi {
             }
 
             if use_ansi {
-                print!("\x1b[?7h\x1b[?25h\x1b[?1049l");
+                // Restore line wrap + show cursor. The final frame stays on screen.
+                print!("\x1b[?7h\x1b[?25h");
                 println!();
             }
             let _ = io::stdout().flush();
         })
     }
 
-    fn start_task(&self, id: &'static str) {
+    fn start_task(&self, id: &str) {
         let mut state = self.state.lock().expect("tree state lock poisoned");
         let tick = state.tick;
         if let Some(node) = state.nodes.get_mut(id) {
@@ -1018,7 +1071,7 @@ impl RichTreeUi {
         }
     }
 
-    fn push_line(&self, id: &'static str, line: String) {
+    fn push_line(&self, id: &str, line: String) {
         let mut state = self.state.lock().expect("tree state lock poisoned");
         let tick = state.tick;
         if let Some(node) = state.nodes.get_mut(id) {
@@ -1039,7 +1092,7 @@ impl RichTreeUi {
         }
     }
 
-    fn finish_task(&self, id: &'static str, failed: bool, log_path: &Path) {
+    fn finish_task(&self, id: &str, failed: bool, log_path: &Path) {
         let mut state = self.state.lock().expect("tree state lock poisoned");
         if let Some(node) = state.nodes.get_mut(id) {
             if failed {
@@ -1063,28 +1116,28 @@ impl RichTreeUi {
 
 fn compute_tree_order(
     defs: &[RichTreeNodeDef],
-    nodes: &HashMap<&'static str, RichTreeNode>,
-) -> Vec<&'static str> {
-    let roots: Vec<&'static str> = defs
+    nodes: &HashMap<String, RichTreeNode>,
+) -> Vec<String> {
+    let roots: Vec<String> = defs
         .iter()
         .filter(|def| def.parent.is_none())
-        .map(|def| def.id)
+        .map(|def| def.id.clone())
         .collect();
 
     let mut order = Vec::new();
     fn walk(
-        id: &'static str,
-        nodes: &HashMap<&'static str, RichTreeNode>,
-        order: &mut Vec<&'static str>,
+        id: &str,
+        nodes: &HashMap<String, RichTreeNode>,
+        order: &mut Vec<String>,
     ) {
-        order.push(id);
+        order.push(id.to_string());
         if let Some(node) = nodes.get(id) {
             for child in &node.children {
                 walk(child, nodes, order);
             }
         }
     }
-    for root in roots {
+    for root in &roots {
         walk(root, nodes, &mut order);
     }
     order
@@ -1167,8 +1220,8 @@ fn leaf_progress(node: &RichTreeNode) -> f32 {
 }
 
 fn aggregate_node(
-    id: &'static str,
-    nodes: &HashMap<&'static str, RichTreeNode>,
+    id: &str,
+    nodes: &HashMap<String, RichTreeNode>,
 ) -> (f32, NodeStatus, Option<String>) {
     let Some(node) = nodes.get(id) else {
         return (0.0, NodeStatus::Pending, None);
@@ -1223,11 +1276,11 @@ fn aggregate_node(
     (progress, status, first_fail_log)
 }
 
-fn tree_prefix(id: &'static str, nodes: &HashMap<&'static str, RichTreeNode>) -> (String, bool) {
-    let mut parent_chain: Vec<(&'static str, &'static str)> = Vec::new();
+fn tree_prefix(id: &str, nodes: &HashMap<String, RichTreeNode>) -> (String, bool) {
+    let mut parent_chain: Vec<(&str, &str)> = Vec::new();
     let mut current = id;
     while let Some(node) = nodes.get(current) {
-        if let Some(parent) = node.parent {
+        if let Some(parent) = node.parent.as_deref() {
             parent_chain.push((current, parent));
             current = parent;
         } else {
@@ -1237,14 +1290,14 @@ fn tree_prefix(id: &'static str, nodes: &HashMap<&'static str, RichTreeNode>) ->
 
     let mut prefix = String::new();
     for (idx, (child, parent)) in parent_chain.iter().rev().enumerate() {
-        let parent_node = match nodes.get(parent) {
+        let parent_node = match nodes.get(*parent) {
             Some(node) => node,
             None => continue,
         };
         let is_last = parent_node
             .children
             .last()
-            .map(|last| last == child)
+            .map(|last| last.as_str() == *child)
             .unwrap_or(true);
         let is_direct_parent = idx + 1 == parent_chain.len();
         if is_direct_parent {
@@ -1348,14 +1401,13 @@ fn status_counts(snapshot: &RichTreeSnapshot) -> (usize, usize, usize, usize, us
 
 fn render_tree_frame(
     snapshot: &RichTreeSnapshot,
-    progress_floor: &mut HashMap<&'static str, f32>,
+    progress_floor: &mut HashMap<String, f32>,
 ) -> String {
     let (term_width, term_height) = terminal_dimensions();
     let width = term_width.max(24);
     let visible_lines = term_height.max(1);
     let use_color = should_use_color();
     let mut out = String::new();
-    out.push_str("\x1b[H\x1b[J");
     let (overall_progress, _, _) = aggregate_node("build", &snapshot.nodes);
     let overall_percent = ((overall_progress.clamp(0.0, 1.0)) * 100.0).round() as u32;
     let overall_bar = progress_bar(overall_progress, 28, NodeStatus::Running, use_color);
@@ -1408,23 +1460,23 @@ fn render_tree_frame(
 
     let mut lines: Vec<String> = Vec::new();
     for id in &snapshot.order {
-        let Some(node) = snapshot.nodes.get(id) else {
+        let Some(node) = snapshot.nodes.get(id.as_str()) else {
             continue;
         };
-        let (raw_progress, status, fail_log) = aggregate_node(node.id, &snapshot.nodes);
+        let (raw_progress, status, fail_log) = aggregate_node(&node.id, &snapshot.nodes);
         let previous = progress_floor.get(id).copied().unwrap_or(0.0);
         let progress = match status {
             NodeStatus::Done | NodeStatus::Failed => 1.0,
             NodeStatus::Pending | NodeStatus::Running => raw_progress.max(previous),
         }
         .clamp(0.0, 1.0);
-        progress_floor.insert(*id, progress);
-        let (prefix, is_root) = tree_prefix(node.id, &snapshot.nodes);
+        progress_floor.insert(id.clone(), progress);
+        let (prefix, is_root) = tree_prefix(&node.id, &snapshot.nodes);
         let prefix = colorize_tree_prefix(&prefix, use_color);
         let label = if is_root {
-            paint(node.label, "1;97", use_color)
+            paint(&node.label, "1;97", use_color)
         } else {
-            format!("{}{}", prefix, paint(node.label, "36", use_color))
+            format!("{}{}", prefix, paint(&node.label, "36", use_color))
         };
 
         let percent = ((progress.clamp(0.0, 1.0)) * 100.0).round() as u32;
@@ -1592,19 +1644,21 @@ fn read_log_tail(log_path: &Path, lines: usize) -> String {
 }
 
 fn run_rich_task(task: &RichTask, logs_dir: &Path, ui: Option<RichTreeUi>) -> Result<()> {
-    let task_name = task.name;
+    let task_name = task.name.clone();
     let log_path = logs_dir.join(format!("{}.log", task_name));
     if let Some(ui_ref) = ui.as_ref() {
-        ui_ref.start_task(task_name);
+        ui_ref.start_task(&task_name);
     }
 
     let sink: TaskSink = if let Some(ui_ref) = ui.clone() {
+        let name_for_sink = task_name.clone();
         Arc::new(move |line: String| {
-            ui_ref.push_line(task_name, line);
+            ui_ref.push_line(&name_for_sink, line);
         })
     } else {
+        let name_for_sink = task_name.clone();
         Arc::new(move |line: String| {
-            println!("[{}] {}", task_name, line);
+            println!("[{}] {}", name_for_sink, line);
         })
     };
 
@@ -1612,13 +1666,13 @@ fn run_rich_task(task: &RichTask, logs_dir: &Path, ui: Option<RichTreeUi>) -> Re
     match result {
         Ok(()) => {
             if let Some(ui_ref) = ui.as_ref() {
-                ui_ref.finish_task(task_name, false, &log_path);
+                ui_ref.finish_task(&task_name, false, &log_path);
             }
             Ok(())
         }
         Err(err) => {
             if let Some(ui_ref) = ui.as_ref() {
-                ui_ref.finish_task(task_name, true, &log_path);
+                ui_ref.finish_task(&task_name, true, &log_path);
             }
             Err(err.context(format!(
                 "Task '{}' failed. Log: {}",
@@ -1635,11 +1689,11 @@ fn run_rich_dag(
     logs_dir: &Path,
     interactive_tree: bool,
 ) -> Result<()> {
-    let mut pending: HashMap<&'static str, RichTask> =
-        tasks.into_iter().map(|task| (task.name, task)).collect();
-    let mut completed: HashSet<&'static str> = HashSet::new();
-    let mut running: HashSet<&'static str> = HashSet::new();
-    let (tx, rx) = mpsc::channel::<(&'static str, Result<()>)>();
+    let mut pending: HashMap<String, RichTask> =
+        tasks.into_iter().map(|task| (task.name.clone(), task)).collect();
+    let mut completed: HashSet<String> = HashSet::new();
+    let mut running: HashSet<String> = HashSet::new();
+    let (tx, rx) = mpsc::channel::<(String, Result<()>)>();
     let mut first_error: Option<anyhow::Error> = None;
 
     let tree_ui = if interactive_tree {
@@ -1655,14 +1709,14 @@ fn run_rich_dag(
 
     loop {
         if first_error.is_none() {
-            let ready: Vec<&'static str> = pending
+            let ready: Vec<String> = pending
                 .iter()
                 .filter(|(_, task)| task.deps.iter().all(|dep| completed.contains(dep)))
-                .map(|(name, _)| *name)
+                .map(|(name, _)| name.clone())
                 .collect();
 
             for name in ready {
-                let task = pending.remove(name).expect("task must exist");
+                let task = pending.remove(&name).expect("task must exist");
                 running.insert(name);
 
                 let logs_dir = logs_dir.to_path_buf();
@@ -1670,8 +1724,9 @@ fn run_rich_dag(
                 let tree_ui = tree_ui.clone();
 
                 thread::spawn(move || {
+                    let name = task.name.clone();
                     let result = run_rich_task(&task, &logs_dir, tree_ui);
-                    let _ = tx.send((task.name, result));
+                    let _ = tx.send((name, result));
                 });
             }
         }
@@ -1691,7 +1746,7 @@ fn run_rich_dag(
                 return Ok(());
             }
 
-            let unresolved = pending.keys().copied().collect::<Vec<_>>().join(", ");
+            let unresolved = pending.keys().cloned().collect::<Vec<_>>().join(", ");
             bail!(
                 "Task dependency deadlock: unresolved tasks [{}]",
                 unresolved
@@ -1699,7 +1754,7 @@ fn run_rich_dag(
         }
 
         let (finished_name, result) = rx.recv().context("Failed to receive task completion")?;
-        running.remove(finished_name);
+        running.remove(&finished_name);
         completed.insert(finished_name);
 
         if let Err(err) = result {
@@ -1720,130 +1775,100 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
     println!("  Logs: {}", logs_dir.display());
     println!("  Switch to linear mode for verbose output: --ui linear");
 
-    let tree_defs = vec![
-        RichTreeNodeDef {
-            id: "build",
-            label: "build",
-            parent: None,
-            is_leaf: false,
-        },
-        RichTreeNodeDef {
-            id: "userspace",
-            label: "userspace",
-            parent: Some("build"),
-            is_leaf: false,
-        },
-        RichTreeNodeDef {
-            id: "userspace-newlib",
-            label: "newlib",
-            parent: Some("userspace"),
-            is_leaf: true,
-        },
-        RichTreeNodeDef {
-            id: "userspace-rust",
-            label: "rust",
-            parent: Some("userspace"),
-            is_leaf: true,
-        },
-        RichTreeNodeDef {
-            id: "kernel",
-            label: "kernel",
-            parent: Some("build"),
-            is_leaf: true,
-        },
-        RichTreeNodeDef {
-            id: "initrd",
-            label: "initrd",
-            parent: Some("build"),
-            is_leaf: true,
-        },
-        RichTreeNodeDef {
-            id: "build-containers",
-            label: "containers",
-            parent: Some("build"),
-            is_leaf: true,
-        },
-        RichTreeNodeDef {
-            id: "userdisk",
-            label: "userdisk",
-            parent: Some("build"),
-            is_leaf: true,
-        },
-        RichTreeNodeDef {
-            id: "disk-image",
-            label: "disk-image",
-            parent: Some("build"),
-            is_leaf: true,
-        },
+    let container_names = discover_containers();
+
+    // -- Tree node definitions --------------------------------------------------
+    let mut tree_defs = vec![
+        RichTreeNodeDef { id: "build".into(), label: "build".into(), parent: None, is_leaf: false },
+        // Dependencies
+        RichTreeNodeDef { id: "dependencies".into(), label: "dependencies".into(), parent: Some("build".into()), is_leaf: false },
+        RichTreeNodeDef { id: "dep-klibcluu".into(), label: "klibcluu".into(), parent: Some("dependencies".into()), is_leaf: true },
+        RichTreeNodeDef { id: "dep-libcluu".into(), label: "libcluu".into(), parent: Some("dependencies".into()), is_leaf: true },
+        RichTreeNodeDef { id: "dep-newlib".into(), label: "newlib".into(), parent: Some("dependencies".into()), is_leaf: true },
+        RichTreeNodeDef { id: "dep-syscalls".into(), label: "syscalls".into(), parent: Some("dependencies".into()), is_leaf: true },
+        RichTreeNodeDef { id: "dep-crt0".into(), label: "crt0".into(), parent: Some("dependencies".into()), is_leaf: true },
+        // Kernel
+        RichTreeNodeDef { id: "kernel".into(), label: "kernel".into(), parent: Some("build".into()), is_leaf: true },
+        // Userspace
+        RichTreeNodeDef { id: "userspace".into(), label: "userspace".into(), parent: Some("build".into()), is_leaf: false },
+        RichTreeNodeDef { id: "userspace-services".into(), label: "services".into(), parent: Some("userspace".into()), is_leaf: true },
+        RichTreeNodeDef { id: "containers".into(), label: "containers".into(), parent: Some("userspace".into()), is_leaf: false },
+        // Packaging
+        RichTreeNodeDef { id: "initrd".into(), label: "initrd".into(), parent: Some("build".into()), is_leaf: true },
+        RichTreeNodeDef { id: "userdisk".into(), label: "userdisk".into(), parent: Some("build".into()), is_leaf: true },
+        RichTreeNodeDef { id: "disk-image".into(), label: "disk-image".into(), parent: Some("build".into()), is_leaf: true },
     ];
 
-    // Dependency-checked parallelization:
-    // - userspace-newlib, kernel: immediate.
-    // - userspace-rust: waits for userspace-newlib.
-    // - build-containers: waits for userspace-newlib + userspace-rust (BUILD directives compile code).
-    // - initrd: waits for userspace-rust + kernel + build-containers (prevents cargo lock race).
-    // - userdisk: waits for userspace-rust + build-containers.
-    // - disk-image: waits for initrd + userdisk.
-    let tasks = vec![
-        RichTask {
-            name: "userspace-newlib",
-            args: vec!["build-newlib".to_string()],
-            deps: &[],
-        },
-        RichTask {
-            name: "userspace-rust",
-            args: vec![
-                "userspace".to_string(),
-                "--profile".to_string(),
-                profile.to_string(),
-            ],
-            deps: &["userspace-newlib"],
-        },
-        RichTask {
-            name: "kernel",
-            args: vec![
-                "kernel".to_string(),
-                "--profile".to_string(),
-                profile.to_string(),
-            ],
-            deps: &[],
-        },
-        RichTask {
-            name: "build-containers",
-            args: vec!["build-containers".to_string()],
-            deps: &["userspace-newlib", "userspace-rust"],
-        },
-        RichTask {
-            name: "initrd",
-            args: vec![
-                "create-initrd".to_string(),
-                "--profile".to_string(),
-                profile.to_string(),
-            ],
-            deps: &["userspace-rust", "kernel", "build-containers"],
-        },
-        RichTask {
-            name: "userdisk",
-            args: vec![
-                "create-user-block-image".to_string(),
-                "--profile".to_string(),
-                profile.to_string(),
-            ],
-            deps: &[
-                "userspace-rust",
-                "build-containers",
-            ],
-        },
-        RichTask {
-            name: "disk-image",
-            args: vec![
-                "create-disk-image".to_string(),
-                "--profile".to_string(),
-                profile.to_string(),
-            ],
-            deps: &["initrd", "userdisk"],
-        },
+    // Dynamic container nodes (auto-discovered from containers/*/)
+    for name in &container_names {
+        tree_defs.push(RichTreeNodeDef {
+            id: format!("container-{}", name),
+            label: name.clone(),
+            parent: Some("containers".into()),
+            is_leaf: true,
+        });
+    }
+
+    // -- Task DAG ---------------------------------------------------------------
+    // Dependencies: klibcluu, libcluu, newlib, crt0 start immediately.
+    //               syscalls waits for libcluu (Cargo dependency).
+    // Kernel:       waits for all deps.
+    // Userspace:    services waits for all deps; containers wait for services.
+    // Packaging:    initrd waits for kernel + services + all containers.
+    //               userdisk waits for services + all containers.
+    //               disk-image waits for initrd + userdisk.
+    let all_dep_names: Vec<String> = vec![
+        "dep-klibcluu".into(), "dep-libcluu".into(), "dep-newlib".into(),
+        "dep-syscalls".into(), "dep-crt0".into(),
     ];
+
+    let mut tasks = vec![
+        // Dependencies
+        RichTask { name: "dep-klibcluu".into(), args: vec!["build-klibcluu".into()], deps: vec![] },
+        RichTask { name: "dep-libcluu".into(), args: vec!["build-libcluu".into(), "--profile".into(), profile.into()], deps: vec![] },
+        RichTask { name: "dep-newlib".into(), args: vec!["build-newlib".into()], deps: vec![] },
+        RichTask { name: "dep-syscalls".into(), args: vec!["build-syscalls".into(), "--profile".into(), profile.into()], deps: vec!["dep-libcluu".into()] },
+        RichTask { name: "dep-crt0".into(), args: vec!["build-crt0".into()], deps: vec![] },
+        // Kernel
+        RichTask { name: "kernel".into(), args: vec!["kernel".into(), "--profile".into(), profile.into()], deps: all_dep_names.clone() },
+        // Userspace services
+        RichTask { name: "userspace-services".into(), args: vec!["userspace-services".into(), "--profile".into(), profile.into()], deps: all_dep_names.clone() },
+    ];
+
+    // Dynamic container tasks (each depends on userspace-services)
+    let container_task_ids: Vec<String> = container_names.iter()
+        .map(|n| format!("container-{}", n))
+        .collect();
+    for name in &container_names {
+        tasks.push(RichTask {
+            name: format!("container-{}", name),
+            args: vec!["build-single-container".into(), name.clone()],
+            deps: vec!["userspace-services".into()],
+        });
+    }
+
+    // Packaging
+    let mut initrd_deps = vec!["kernel".into(), "userspace-services".into()];
+    initrd_deps.extend(container_task_ids.iter().cloned());
+
+    let mut userdisk_deps: Vec<String> = vec!["userspace-services".into()];
+    userdisk_deps.extend(container_task_ids.iter().cloned());
+
+    tasks.push(RichTask {
+        name: "initrd".into(),
+        args: vec!["create-initrd".into(), "--profile".into(), profile.into()],
+        deps: initrd_deps,
+    });
+    tasks.push(RichTask {
+        name: "userdisk".into(),
+        args: vec!["create-user-block-image".into(), "--profile".into(), profile.into()],
+        deps: userdisk_deps,
+    });
+    tasks.push(RichTask {
+        name: "disk-image".into(),
+        args: vec!["create-disk-image".into(), "--profile".into(), profile.into()],
+        deps: vec!["initrd".into(), "userdisk".into()],
+    });
 
     let interactive_tree = io::stdout().is_terminal();
     run_rich_dag(tasks, tree_defs, &logs_dir, interactive_tree)?;
@@ -3080,6 +3105,200 @@ fn newlib_paths(sysroot: &Path) -> (PathBuf, PathBuf) {
     (newlib_lib, newlib_include)
 }
 
+fn discover_containers() -> Vec<String> {
+    let containers_dir = project_root().join("containers");
+    let mut names = Vec::new();
+    if let Ok(entries) = fs::read_dir(&containers_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                let has_cluufile = entry.path().join("Cluufile").exists();
+                let has_cargo = entry.path().join("Cargo.toml").exists();
+                if has_cluufile || has_cargo {
+                    if let Some(name) = entry.file_name().to_str() {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+fn build_klibcluu() -> Result<()> {
+    println!("▸ Building klibcluu...");
+    let target_json = project_root().join("triplets/x86_64-cluu-kernel.json");
+    let tmp_dir = project_root().join("tmp");
+    fs::create_dir_all(&tmp_dir)?;
+
+    let status = Command::new("cargo")
+        .current_dir(project_root())
+        .args([
+            "build",
+            "-p",
+            "klibcluu",
+            "--target",
+            target_json.to_str().unwrap(),
+            "-Z",
+            "build-std=core,alloc",
+            "-Z",
+            "build-std-features=compiler-builtins-mem",
+        ])
+        .env("TMPDIR", tmp_dir.as_os_str())
+        .status()
+        .context("Failed to build klibcluu")?;
+
+    if !status.success() {
+        bail!("Failed to build klibcluu");
+    }
+    println!("  ✓ klibcluu built");
+    Ok(())
+}
+
+fn build_libcluu(profile: &str) -> Result<()> {
+    println!("▸ Building libcluu...");
+    let target_json = project_root().join("triplets/x86_64-cluu-user.json");
+    let tmp_dir = project_root().join("tmp");
+    fs::create_dir_all(&tmp_dir)?;
+
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(project_root()).args([
+        "build",
+        "--manifest-path",
+        "userspace/libcluu/Cargo.toml",
+        "--target",
+        target_json.to_str().unwrap(),
+        "-Z",
+        "build-std=core,alloc",
+        "-Z",
+        "build-std-features=compiler-builtins-mem",
+    ]);
+    cmd.env("TMPDIR", tmp_dir.as_os_str());
+    if profile == "release" {
+        cmd.arg("--release");
+    }
+
+    let status = cmd.status().context("Failed to build libcluu")?;
+    if !status.success() {
+        bail!("Failed to build libcluu");
+    }
+    println!("  ✓ libcluu built");
+    Ok(())
+}
+
+fn build_userspace_services(profile: &str) -> Result<()> {
+    println!("▸ Building userspace services...");
+    // All Rust userspace crates EXCEPT libcluu (built separately as dep-libcluu).
+    // Includes both initrd-only and containerized services so cargo cache
+    // is warm when container BUILD directives run (making them noops).
+    let userspace_crates = [
+        "userspace/virtio-blk",
+        "userspace/ext2",
+        "userspace/init",
+        "userspace/procmgr",
+        "userspace/registry",
+        "userspace/vfs",
+        "userspace/ramfs",
+        "userspace/console",
+        "userspace/kbd",
+        "userspace/tty",
+        "userspace/vtmgr",
+        "userspace/shell",
+        "userspace/timeserver",
+        "userspace/cat",
+    ];
+
+    let target_json = project_root().join("triplets/x86_64-cluu-user.json");
+    let tmp_dir = project_root().join("tmp");
+    fs::create_dir_all(&tmp_dir)?;
+
+    for crate_path in &userspace_crates {
+        let crate_name = Path::new(crate_path).file_name().unwrap().to_str().unwrap();
+        println!("  Building {}...", crate_name);
+
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(project_root()).args([
+            "build",
+            "--manifest-path",
+            &format!("{}/Cargo.toml", crate_path),
+            "--target",
+            target_json.to_str().unwrap(),
+            "-Z",
+            "build-std=core,alloc",
+            "-Z",
+            "build-std-features=compiler-builtins-mem",
+        ]);
+        cmd.env("TMPDIR", tmp_dir.as_os_str());
+        if profile == "release" {
+            cmd.arg("--release");
+        }
+
+        let status = cmd.status().context("Failed to run cargo")?;
+        if !status.success() {
+            bail!("Failed to build {}", crate_name);
+        }
+    }
+
+    println!("  ✓ Userspace services built");
+    Ok(())
+}
+
+fn build_single_container(name: &str) -> Result<()> {
+    println!("▸ Building container: {}...", name);
+    let containers_dir = project_root().join("containers").join(name);
+
+    // Auto-discover: if Cargo.toml exists in the container dir, build the Rust crate
+    let cargo_toml = containers_dir.join("Cargo.toml");
+    if cargo_toml.exists() {
+        let target_json = project_root().join("triplets/x86_64-cluu-user.json");
+        let tmp_dir = project_root().join("tmp");
+        fs::create_dir_all(&tmp_dir)?;
+
+        let status = Command::new("cargo")
+            .current_dir(project_root())
+            .args([
+                "build",
+                "--manifest-path",
+                cargo_toml.to_str().unwrap(),
+                "--target",
+                target_json.to_str().unwrap(),
+                "-Z",
+                "build-std=core,alloc",
+                "-Z",
+                "build-std-features=compiler-builtins-mem",
+            ])
+            .env("TMPDIR", tmp_dir.as_os_str())
+            .status()
+            .context("Failed to build container crate")?;
+
+        if !status.success() {
+            bail!("Failed to build container crate for {}", name);
+        }
+    }
+
+    // Run container-build for metadata/packaging via Cluufile
+    let cluufile = containers_dir.join("Cluufile");
+    if cluufile.exists() {
+        let status = Command::new("cargo")
+            .args(["run", "-p", "container-build", "--"])
+            .arg(&cluufile)
+            .status()
+            .with_context(|| format!("Failed to run container-build for {}", name))?;
+        if !status.success() {
+            bail!(
+                "container-build failed for {} (exit {:?})",
+                name,
+                status.code()
+            );
+        }
+    } else if !cargo_toml.exists() {
+        bail!("Container {} has neither Cluufile nor Cargo.toml", name);
+    }
+
+    println!("  ✓ Container {} built", name);
+    Ok(())
+}
+
 fn build_newlib() -> Result<()> {
     println!("▸ Building newlib...");
     ensure_newlib_source()?;
@@ -3406,9 +3625,14 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
     }
 
     let cargo_profile = if profile == "dev" { "debug" } else { profile };
-    let out_dir = project_root()
-        .join("target/x86_64-cluu-user")
-        .join(cargo_profile);
+    // Honour CLUU_BUILD_OUTPUT_DIR so container-build can redirect outputs
+    // to a container-scoped directory, avoiding races in parallel builds.
+    let out_dir = match std::env::var_os("CLUU_BUILD_OUTPUT_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => project_root()
+            .join("target/x86_64-cluu-user")
+            .join(cargo_profile),
+    };
     fs::create_dir_all(&out_dir)?;
 
     let obj_file = out_dir.join(format!("{}.o", name));

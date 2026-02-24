@@ -440,7 +440,7 @@ fn container_build(cluufile_path: &Path) -> Result<()> {
     // Execute BUILD directives: run the command, then copy build output into image
     let root = project_root();
     for step in &cluufile.builds {
-        execute_build(&root, step, &output_dir)?;
+        execute_build(&root, step, &output_dir, &container_name)?;
     }
 
     // Process COPY directives: resolve host paths relative to Cluufile directory
@@ -479,13 +479,30 @@ fn container_build(cluufile_path: &Path) -> Result<()> {
 
 /// Execute a single BUILD step: run the command from the project root, then copy the
 /// build artifact into the container image directory.
-fn execute_build(project_root: &Path, step: &BuildStep, output_dir: &Path) -> Result<()> {
+///
+/// Sets `CLUU_BUILD_OUTPUT_DIR` so that build tools (e.g. `cargo xtask build-c`) can
+/// redirect their outputs to a container-scoped directory, avoiding races when
+/// multiple containers build the same artifact in parallel.
+fn execute_build(
+    project_root: &Path,
+    step: &BuildStep,
+    output_dir: &Path,
+    container_name: &str,
+) -> Result<()> {
     println!("  BUILD \"{}\"", step.command);
+
+    // Container-scoped build output directory to avoid parallel build races.
+    let build_dir = project_root
+        .join("target/containers")
+        .join(container_name)
+        .join("build");
+    fs::create_dir_all(&build_dir)?;
 
     let status = Command::new("sh")
         .arg("-c")
         .arg(&step.command)
         .current_dir(project_root)
+        .env("CLUU_BUILD_OUTPUT_DIR", &build_dir)
         .status()
         .with_context(|| format!("Failed to execute BUILD command: {}", step.command))?;
 
@@ -497,14 +514,28 @@ fn execute_build(project_root: &Path, step: &BuildStep, output_dir: &Path) -> Re
         );
     }
 
-    // Copy the build artifact into the container image
-    let src = project_root.join(&step.build_output);
-    if !src.exists() {
+    // Look for the build output: first in the container-scoped dir, then the
+    // original path.  The scoped dir is preferred because build tools that
+    // honour CLUU_BUILD_OUTPUT_DIR write there, making parallel builds safe.
+    let filename = Path::new(&step.build_output)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| step.build_output.clone());
+    let scoped_src = build_dir.join(&filename);
+    let original_src = project_root.join(&step.build_output);
+
+    let src = if scoped_src.exists() {
+        scoped_src
+    } else if original_src.exists() {
+        original_src
+    } else {
         bail!(
-            "BUILD output not found after command: {}",
-            src.display()
+            "BUILD output not found after command: {} (checked {} and {})",
+            step.build_output,
+            scoped_src.display(),
+            original_src.display(),
         );
-    }
+    };
 
     let dst_rel = step.container_path.strip_prefix('/').unwrap_or(&step.container_path);
     let dst = output_dir.join(dst_rel);
