@@ -56,17 +56,17 @@ fn write_timestamp() {
     let millis = remainder * 1000 / hz;
 
     COM2.write_byte(b'[');
-    // Right-align seconds in a 5-char field
-    write_dec_padded(secs, 5);
+    // Right-align seconds in a 5-char field (space-padded)
+    write_dec_padded(secs, 5, b' ');
     COM2.write_byte(b'.');
-    // Milliseconds: always 3 digits
-    write_dec_padded(millis, 3);
+    // Milliseconds: always 3 digits (zero-padded)
+    write_dec_padded(millis, 3, b'0');
     COM2.write_str("] ");
 }
 
-/// Write a decimal value right-aligned in `width` chars, space-padded.
-fn write_dec_padded(value: u64, width: usize) {
-    let mut buf = [b' '; 20];
+/// Write a decimal value right-aligned in `width` chars, padded with `pad`.
+fn write_dec_padded(value: u64, width: usize, pad: u8) {
+    let mut buf = [pad; 20];
     let mut v = value;
     let mut i = 0;
     if v == 0 {
