@@ -293,7 +293,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
 // manifest.toml generator
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str) -> String {
+fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str, image_dirs: &[String]) -> String {
     let mut out = String::from("# Auto-generated from Cluufile — do not edit\n");
 
     // [container]
@@ -332,16 +332,29 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str) -> String {
         }
     }
 
-    // [storage] — only if persistent dirs specified
-    if !cluufile.persistent_dirs.is_empty() {
-        out.push_str("\n[storage]\npersistent_dirs = [");
-        for (i, dir) in cluufile.persistent_dirs.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
+    // [storage] — image_dirs and/or persistent_dirs
+    if !image_dirs.is_empty() || !cluufile.persistent_dirs.is_empty() {
+        out.push_str("\n[storage]\n");
+        if !image_dirs.is_empty() {
+            out.push_str("image_dirs = [");
+            for (i, dir) in image_dirs.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("\"{}\"", dir));
             }
-            out.push_str(&format!("\"{}\"", dir));
+            out.push_str("]\n");
         }
-        out.push_str("]\n");
+        if !cluufile.persistent_dirs.is_empty() {
+            out.push_str("persistent_dirs = [");
+            for (i, dir) in cluufile.persistent_dirs.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("\"{}\"", dir));
+            }
+            out.push_str("]\n");
+        }
     }
 
     // [[env]] — one section per entry
@@ -387,6 +400,26 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str) -> String {
     }
 
     out
+}
+
+/// Discover top-level directories in the container image output dir.
+/// These become `image_dirs` in the manifest so procmgr can set up per-image
+/// view mounts (e.g., /bin → /var/images/<name>/bin).
+fn discover_image_dirs(output_dir: &Path) -> Vec<String> {
+    let mut dirs = Vec::new();
+    if let Ok(entries) = fs::read_dir(output_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // Skip build temp dir and any dotfiles
+                if name != "build" && !name.starts_with('.') {
+                    dirs.push(name);
+                }
+            }
+        }
+    }
+    dirs.sort();
+    dirs
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -467,8 +500,11 @@ fn container_build(cluufile_path: &Path) -> Result<()> {
         println!("  COPY {} → {}", src_rel, dst_rel);
     }
 
+    // Auto-discover image directories (top-level dirs in the image)
+    let image_dirs = discover_image_dirs(&output_dir);
+
     // Generate manifest.toml
-    let manifest = generate_manifest_toml(&cluufile, &container_name);
+    let manifest = generate_manifest_toml(&cluufile, &container_name, &image_dirs);
     let manifest_path = output_dir.join("manifest.toml");
     fs::write(&manifest_path, &manifest)?;
     println!("  Generated manifest.toml");

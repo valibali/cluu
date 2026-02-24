@@ -51,7 +51,7 @@ use libcluu::tar::find_member;
 use libcluu::*;
 
 /// A list of (src, dst, writable) mount tuples representing a process's VFS view.
-type ViewMountList = Vec<(&'static str, &'static str, bool)>;
+type ViewMountList = Vec<(String, String, bool)>;
 
 struct ContainerInstance {
     name: String,
@@ -370,7 +370,7 @@ impl ProcessManager {
     fn register_vfs_view_for_thread(
         &mut self,
         thread_token: usize,
-        mounts: &[(&'static str, &'static str, bool)],
+        mounts: &[(String, String, bool)],
         profile: CapProfile,
         container_id: u64,
     ) {
@@ -385,9 +385,8 @@ impl ProcessManager {
             }
         };
 
-        let mounts_vec = mounts.to_vec();
         if self.vfs_endpoint == 0 {
-            self.queue_pending_vfs_view(thread_tid, mounts_vec, profile, container_id);
+            self.queue_pending_vfs_view(thread_tid, mounts.to_vec(), profile, container_id);
             let _ = self.ensure_vfs_endpoint();
             return;
         }
@@ -396,7 +395,7 @@ impl ProcessManager {
                 "procmgr: VFS_SET_VIEW failed tid={} err={:?}",
                 thread_tid, err
             ));
-            self.queue_pending_vfs_view(thread_tid, mounts_vec, profile, container_id);
+            self.queue_pending_vfs_view(thread_tid, mounts.to_vec(), profile, container_id);
         }
     }
 
@@ -411,7 +410,7 @@ impl ProcessManager {
                 return;
             }
         }
-        let empty_mounts: [(&str, &str, bool); 0] = [];
+        let empty_mounts: ViewMountList = Vec::new();
         if let Err(err) = send_vfs_set_view(
             self.vfs_endpoint,
             client_tid,
@@ -540,6 +539,11 @@ impl ProcessManager {
             .and_then(|t| t.get_array("persistent_dirs"))
             .map(|a| !a.is_empty())
             .unwrap_or(false);
+        let image_dirs: Vec<String> = doc
+            .table("storage")
+            .and_then(|t| t.get_array("image_dirs"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
         if has_persistent_storage {
             if !self.create_container_dirs(container_id, image_name) {
                 container_id = 0;
@@ -654,7 +658,8 @@ impl ProcessManager {
         ) {
             Ok((_thread_token, cookie, pid, _child_stdin_send)) => {
                 let image_dir = format!("/var/images/{}", image_name);
-                let view_mounts = default_view_for_profile(requested_profile);
+                let mut view_mounts = default_view_for_profile(requested_profile);
+                apply_image_dir_overrides(&mut view_mounts, image_name, &image_dirs);
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
                 self.register_vfs_view_for_thread(_thread_token, &view_mounts, requested_profile, container_id);
@@ -2280,6 +2285,11 @@ impl ProcessManager {
             .and_then(|t| t.get_array("persistent_dirs"))
             .map(|a| !a.is_empty())
             .unwrap_or(false);
+        let image_dirs: Vec<String> = doc
+            .table("storage")
+            .and_then(|t| t.get_array("image_dirs"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
         if has_persistent_storage {
             if !self.create_container_dirs(container_id, image_name) {
                 let _ = debug_print(&format!(
@@ -2390,15 +2400,16 @@ impl ProcessManager {
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build container view mounts
-                // Use the default USER view as base, then register with container_id
-                // which triggers the VFS container mount prepend (same as shell spawns).
+                // Use the default USER view as base, then apply per-image dir overrides
+                // and register with container_id for VFS container mount prepend.
                 let image_dir = format!("/var/images/{}", image_name);
-                let view_mounts = default_view_for_profile(requested_profile);
+                let mut view_mounts = default_view_for_profile(requested_profile);
+                apply_image_dir_overrides(&mut view_mounts, image_name, &image_dirs);
 
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
                 self.register_vfs_view_for_thread(thread_token, &view_mounts, requested_profile, container_id);
-                self.pid_to_view.insert(pid, view_mounts.clone());
+                self.pid_to_view.insert(pid, view_mounts);
                 // Fix C: removed redundant pid_to_profile insert (spawn_service_with_env already does it)
 
                 // Track container instance
@@ -2861,8 +2872,11 @@ fn derive_slot(base: usize, rights: Rights) -> Result<usize> {
 ///
 /// Returns a list of (src, dst, writable) tuples.  For Phase C these are
 /// identity mappings (src == dst); Phase D will add path remapping.
-fn default_view_for_profile(profile: CapProfile) -> Vec<(&'static str, &'static str, bool)> {
-    libcluu::vfs_view::default_mounts_for_profile(profile).to_vec()
+fn default_view_for_profile(profile: CapProfile) -> ViewMountList {
+    libcluu::vfs_view::default_mounts_for_profile(profile)
+        .iter()
+        .map(|&(src, dst, w)| (String::from(src), String::from(dst), w))
+        .collect()
 }
 
 /// Check whether `child_view` is a valid narrowing of `parent_view`.
@@ -2871,20 +2885,20 @@ fn default_view_for_profile(profile: CapProfile) -> Vec<(&'static str, &'static 
 /// with an equal or wider prefix and equal or greater write permission.
 /// An empty parent view means no filesystem access — no child mount can pass.
 /// An empty child view is always valid (child requests no access).
-fn can_narrow_view(parent_view: &[(&str, &str, bool)], child_view: &[(&str, &str, bool)]) -> bool {
-    for &(child_src, child_dst, child_writable) in child_view {
-        let covered = parent_view.iter().any(|&(p_src, p_dst, p_writable)| {
+fn can_narrow_view(parent_view: &[(String, String, bool)], child_view: &[(String, String, bool)]) -> bool {
+    for (child_src, child_dst, child_writable) in child_view {
+        let covered = parent_view.iter().any(|(p_src, p_dst, p_writable)| {
             // Child prefix must be under (or equal to) parent prefix.
             let src_ok = child_src == p_src
-                || (child_src.starts_with(p_src)
+                || (child_src.starts_with(p_src.as_str())
                     && child_src.as_bytes().get(p_src.len()) == Some(&b'/'))
                 || p_src == "/";
             let dst_ok = child_dst == p_dst
-                || (child_dst.starts_with(p_dst)
+                || (child_dst.starts_with(p_dst.as_str())
                     && child_dst.as_bytes().get(p_dst.len()) == Some(&b'/'))
                 || p_dst == "/";
             // Child can't request write if parent is read-only.
-            let write_ok = !child_writable || p_writable;
+            let write_ok = !child_writable || *p_writable;
             src_ok && dst_ok && write_ok
         });
         if !covered {
@@ -2892,6 +2906,23 @@ fn can_narrow_view(parent_view: &[(&str, &str, bool)], child_view: &[(&str, &str
         }
     }
     true
+}
+
+/// Override default view mounts with per-image directory paths.
+///
+/// For each `image_dir` (e.g. "bin", "lib"), if there's a matching read-only mount
+/// with dst == "/<dir>", redirect its src to `/var/images/<image_name>/<dir>` so the
+/// container sees its own binaries instead of the global ones.
+fn apply_image_dir_overrides(mounts: &mut ViewMountList, image_name: &str, image_dirs: &[String]) {
+    for mount in mounts.iter_mut() {
+        for dir in image_dirs {
+            let virtual_path = format!("/{}", dir);
+            if mount.1 == virtual_path && !mount.2 {
+                // Override src to point to image-specific directory
+                mount.0 = format!("/var/images/{}/{}", image_name, dir);
+            }
+        }
+    }
 }
 
 /// Serialize and send a VFS_SET_VIEW message for a newly spawned child.
@@ -2902,7 +2933,7 @@ fn can_narrow_view(parent_view: &[(&str, &str, bool)], child_view: &[(&str, &str
 fn send_vfs_set_view(
     vfs_endpoint: usize,
     client_tid: usize,
-    mounts: &[(&str, &str, bool)],
+    mounts: &[(String, String, bool)],
     profile: CapProfile,
     container_id: u64,
 ) -> Result<()> {
@@ -2912,12 +2943,12 @@ fn send_vfs_set_view(
 
     // Serialize payload: per mount: u16 src_len + u16 dst_len + u8 flags + src + dst
     let mut payload = Vec::new();
-    for &(src, dst, writable) in mounts {
+    for (src, dst, writable) in mounts {
         let src_bytes = src.as_bytes();
         let dst_bytes = dst.as_bytes();
         payload.extend_from_slice(&(src_bytes.len() as u16).to_le_bytes());
         payload.extend_from_slice(&(dst_bytes.len() as u16).to_le_bytes());
-        payload.push(if writable { 1u8 } else { 0u8 });
+        payload.push(if *writable { 1u8 } else { 0u8 });
         payload.extend_from_slice(src_bytes);
         payload.extend_from_slice(dst_bytes);
     }
