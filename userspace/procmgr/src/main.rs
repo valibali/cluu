@@ -56,6 +56,7 @@ type ViewMountList = Vec<(String, String, bool)>;
 struct ContainerInstance {
     name: String,
     container_id: u64,
+    parent_container_id: u64, // 0 = top-level or detached
     pid: usize,
     image_path: String,
 }
@@ -88,6 +89,7 @@ const SIGSTOP: usize = 19;
 const SIGCONT: usize = 18;
 const SIGKILL: usize = 9;
 const MAX_VFS_FILE_CACHE_ENTRIES: usize = 16;
+const MAX_NESTING_DEPTH: u32 = 8;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -154,6 +156,7 @@ struct ProcessManager {
     /// Only owners trigger container cleanup on exit.
     container_owner_pids: BTreeSet<usize>,
     container_instances: BTreeMap<u64, ContainerInstance>,
+    container_children: BTreeMap<u64, Vec<u64>>, // parent_cid -> child cids
     autostart_done: bool,
 }
 
@@ -200,6 +203,7 @@ impl ProcessManager {
             pid_to_container_id: BTreeMap::new(),
             container_owner_pids: BTreeSet::new(),
             container_instances: BTreeMap::new(),
+            container_children: BTreeMap::new(),
             autostart_done: false,
         })
     }
@@ -222,6 +226,76 @@ impl ProcessManager {
         debug_assert!(id > 0, "container_id counter wrapped to 0");
         self.container_id_next = self.container_id_next.wrapping_add(1);
         id
+    }
+
+    /// Compute nesting depth of a container (0 for top-level/detached).
+    fn container_depth(&self, container_id: u64) -> u32 {
+        let mut depth = 0u32;
+        let mut cid = container_id;
+        while cid != 0 {
+            depth += 1;
+            if let Some(inst) = self.container_instances.values().find(|c| c.container_id == cid) {
+                cid = inst.parent_container_id;
+            } else {
+                break;
+            }
+        }
+        depth
+    }
+
+    /// Recursively destroy all child containers of `parent_cid`.
+    /// Kills each child's entrypoint process and cleans up container state.
+    fn destroy_container_children(&mut self, parent_cid: u64) {
+        let children = match self.container_children.remove(&parent_cid) {
+            Some(c) => c,
+            None => return,
+        };
+        for child_cid in children {
+            if let Some(inst) = self.container_instances.remove(&child_cid) {
+                let child_pid = inst.pid;
+                let _ = debug_print(&format!(
+                    "procmgr: cascading kill container cid={} pid={} (parent={})",
+                    child_cid, child_pid, parent_cid
+                ));
+                // Kill the entrypoint process
+                if let Some(&cookie) = self.pid_to_cookie.get(&child_pid) {
+                    if let Some(thread_token) = self.exit_table.remove(&cookie) {
+                        let _ = thread_destroy(thread_token);
+                    }
+                    let child_tid = self.pid_to_tid.get(&child_pid).copied().unwrap_or(0);
+                    self.clear_vfs_view_for_tid(child_tid);
+                    self.pid_to_cookie.remove(&child_pid);
+                    self.pid_to_container_id.remove(&child_pid);
+                    self.cookie_to_pid.remove(&cookie);
+                    self.clear_pid_runtime_state(child_pid);
+                    if let Some(owner_tid) = self.pid_owner_tid.remove(&child_pid) {
+                        self.on_child_reaped(owner_tid);
+                    }
+                    if let Some(notify_ep) = self.exit_notify.remove(&cookie) {
+                        let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+                        notify_msg.words[0] = cookie;
+                        notify_msg.words[1] = 128 + SIGKILL;
+                        let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
+                    }
+                    if let Some(st) = self.cookie_to_space.remove(&cookie) {
+                        let _ = space_destroy(st);
+                    }
+                    if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
+                        for tok in tokens {
+                            let _ = token_revoke(tok);
+                        }
+                    }
+                }
+                // Clean up container storage
+                if child_cid > 0
+                    && !self.pid_to_container_id.values().any(|&cid| cid == child_cid)
+                {
+                    let _ = send_vfs_container_cleanup(self.vfs_endpoint, child_cid, 1);
+                }
+                // Recursively destroy grandchildren
+                self.destroy_container_children(child_cid);
+            }
+        }
     }
 
     /// Create per-container directories via VFS before registering the container view.
@@ -667,6 +741,7 @@ impl ProcessManager {
                 self.container_instances.insert(container_id, ContainerInstance {
                     name: String::from(image_name),
                     container_id,
+                    parent_container_id: 0, // autostart = top-level
                     pid,
                     image_path: image_dir,
                 });
@@ -804,6 +879,9 @@ impl ProcessManager {
         if container_id > 0
             && !self.pid_to_container_id.values().any(|&cid| cid == container_id)
         {
+            // Cascade: destroy child containers before cleaning up this container's storage
+            self.destroy_container_children(container_id);
+            self.container_instances.remove(&container_id);
             let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
         }
         Ok(())
@@ -912,6 +990,8 @@ impl ProcessManager {
                 if container_id > 0
                     && !self.pid_to_container_id.values().any(|&cid| cid == container_id)
                 {
+                    self.destroy_container_children(container_id);
+                    self.container_instances.remove(&container_id);
                     let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
                 }
             }
@@ -2265,6 +2345,27 @@ impl ProcessManager {
             }
         };
 
+        // Determine parent container and check nesting depth
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
+        let caller_container_id = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
+
+        let detach = doc.table("container")
+            .and_then(|t| t.get_str("detach"))
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let parent_cid = if detach { 0 } else { caller_container_id };
+
+        // Check nesting depth limit
+        if parent_cid != 0 && self.container_depth(caller_container_id) >= MAX_NESTING_DEPTH {
+            let _ = debug_print(&format!(
+                "procmgr: container '{}' nesting depth exceeded (max={})",
+                image_name, MAX_NESTING_DEPTH
+            ));
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
         // Allocate container_id and create dirs
         let mut container_id = self.next_container_id();
         // Only create ext2 dirs if persistent storage is needed
@@ -2276,6 +2377,15 @@ impl ProcessManager {
         let image_dirs: Vec<String> = doc
             .table("storage")
             .and_then(|t| t.get_array("image_dirs"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
+        let deny_inherit = doc.table("mounts")
+            .and_then(|t| t.get_str("deny_inherit"))
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let deny_paths: Vec<String> = doc
+            .table("mounts")
+            .and_then(|t| t.get_array("deny"))
             .map(|a| a.iter().map(|s| s.clone()).collect())
             .unwrap_or_default();
         if has_persistent_storage {
@@ -2387,12 +2497,72 @@ impl ProcessManager {
             &[],
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
-                // Build container view mounts
-                // Use the default USER view as base, then apply per-image dir overrides
-                // and register with container_id for VFS container mount prepend.
+                // Build view: for nested containers, inherit caller's view; for top-level, use default
                 let image_dir = format!("/var/images/{}", image_name);
-                let mut view_mounts = default_view_for_profile(requested_profile);
-                apply_image_dir_overrides(&mut view_mounts, image_name, &image_dirs);
+                let mut view_mounts = if caller_container_id != 0 && !deny_inherit {
+                    // Nested: start with caller's view as base
+                    let caller_view = self.pid_to_view.get(&caller_pid)
+                        .cloned()
+                        .unwrap_or_else(|| default_view_for_profile(requested_profile));
+
+                    // Filter out denied paths
+                    let mut filtered: ViewMountList = caller_view.into_iter()
+                        .filter(|(_, dst, _)| {
+                            !deny_paths.iter().any(|deny| dst == deny || dst.starts_with(&format!("{}/", deny)))
+                        })
+                        .collect();
+
+                    // Apply image dir overrides (replace /bin, /lib etc with image versions)
+                    apply_image_dir_overrides(&mut filtered, image_name, &image_dirs);
+                    filtered
+                } else if deny_inherit {
+                    // deny_inherit = true: ONLY image dirs + container storage, no passthrough
+                    let mut mounts = ViewMountList::new();
+                    for dir in &image_dirs {
+                        mounts.push((
+                            format!("/var/images/{}/{}", image_name, dir),
+                            format!("/{}", dir),
+                            false, // read-only
+                        ));
+                    }
+                    mounts
+                } else {
+                    // Top-level: default view (current behavior)
+                    let mut mounts = default_view_for_profile(requested_profile);
+                    apply_image_dir_overrides(&mut mounts, image_name, &image_dirs);
+                    mounts
+                };
+
+                // Container-scoped /tmp: replace any passthrough /tmp (first-match-wins ordering)
+                if let Some(pos) = view_mounts.iter().position(|(_, dst, _)| dst == "/tmp") {
+                    view_mounts.remove(pos);
+                }
+                if container_id > 0 {
+                    view_mounts.insert(0, (
+                        format!("/var/containers/c-{}/tmp", container_id),
+                        String::from("/tmp"),
+                        true,
+                    ));
+                }
+
+                // Add persistent dirs (container-scoped, writable, first-match-wins)
+                if has_persistent_storage && container_id > 0 {
+                    if let Some(storage_table) = doc.table("storage") {
+                        if let Some(pdirs) = storage_table.get_array("persistent_dirs") {
+                            for pdir in pdirs {
+                                let dir_name = pdir.trim_start_matches('/');
+                                if let Some(pos) = view_mounts.iter().position(|(_, dst, _)| dst.trim_start_matches('/') == dir_name) {
+                                    view_mounts.remove(pos);
+                                }
+                                view_mounts.insert(0, (
+                                    format!("/var/containers/c-{}/{}", container_id, dir_name),
+                                    format!("/{}", dir_name),
+                                    true,
+                                ));
+                            }
+                        }
+                    }
+                }
 
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
@@ -2400,13 +2570,19 @@ impl ProcessManager {
                 self.pid_to_view.insert(pid, view_mounts);
                 // Fix C: removed redundant pid_to_profile insert (spawn_service_with_env already does it)
 
-                // Track container instance
+                // Track container instance with parent relationship
                 self.container_instances.insert(container_id, ContainerInstance {
                     name: String::from(image_name),
                     container_id,
+                    parent_container_id: parent_cid,
                     pid,
                     image_path: image_dir,
                 });
+
+                // Track parent→child for cascading cleanup
+                if parent_cid != 0 {
+                    self.container_children.entry(parent_cid).or_insert_with(Vec::new).push(container_id);
+                }
 
                 // Fix E: Register exit notification so shell can wait
                 if sender_tid != 0 {
@@ -2570,6 +2746,8 @@ impl ProcessManager {
                     if container_id > 0
                         && !self.pid_to_container_id.values().any(|&cid| cid == container_id)
                     {
+                        self.destroy_container_children(container_id);
+                        self.container_instances.remove(&container_id);
                         let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
                     }
                 }

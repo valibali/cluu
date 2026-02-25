@@ -2415,13 +2415,13 @@ detach support. Implements sections 4.5 and the nested lifecycle model.
 
 | #   | Task                                                   | Status  | Depends |
 |-----|--------------------------------------------------------|---------|---------|
-| F1  | Procmgr: `parent_container_id` tracking in ContainerInfo | pending | —     |
-| F2  | Procmgr: validate_container_run (profile ⊆ caller)    | pending | —       |
-| F3  | Procmgr: container run view construction (image dirs override + passthrough) | pending | F2 |
-| F4  | Procmgr: manifest `deny_inherit` and `deny` list in view builder | pending | F3 |
-| F5  | Procmgr: cascading container cleanup (recursive child destroy) | pending | F1 |
-| F6  | Procmgr: detach support (parent_container_id=0 when manifest.detach) | pending | F1 |
-| F7  | container-build: emit `deny_inherit`/`deny`/`detach` to manifest.toml | pending | — |
+| F1  | Procmgr: `parent_container_id` tracking in ContainerInfo | done    | —     |
+| F2  | Procmgr: validate_container_run (profile ⊆ caller)    | done    | —       |
+| F3  | Procmgr: container run view construction (image dirs override + passthrough) | done    | F2 |
+| F4  | Procmgr: manifest `deny_inherit` and `deny` list in view builder | done    | F3 |
+| F5  | Procmgr: cascading container cleanup (recursive child destroy) | done    | F1 |
+| F6  | Procmgr: detach support (parent_container_id=0 when manifest.detach) | done    | F1 |
+| F7  | container-build: emit `deny_inherit`/`deny`/`detach` to manifest.toml | done    | — |
 | F8  | Test: USER spawns nested container with narrowed profile | pending | F2, F3 |
 | F9  | Test: escalation attempt (child profile > parent) rejected | pending | F2 |
 | F10 | Test: view passthrough — child sees launcher's /home  | pending | F3     |

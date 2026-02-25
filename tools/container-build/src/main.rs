@@ -51,6 +51,9 @@ struct Cluufile {
     endpoint_mode: Option<String>,
     params: Vec<String>,
     devices: Vec<String>,
+    deny_inherit: bool,
+    deny: Vec<String>,
+    detach: bool,
 }
 
 fn parse_cluufile(path: &Path) -> Result<Cluufile> {
@@ -68,6 +71,9 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
     let mut endpoint_mode: Option<String> = None;
     let mut params: Vec<String> = Vec::new();
     let mut devices: Vec<String> = Vec::new();
+    let mut deny_inherit = false;
+    let mut deny: Vec<String> = Vec::new();
+    let mut detach = false;
     let mut saw_directive = false;
 
     for (line_idx, raw_line) in content.lines().enumerate() {
@@ -259,6 +265,27 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
                     }
                 }
             }
+            "DENY_INHERIT" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before DENY_INHERIT", path.display(), lineno);
+                }
+                deny_inherit = true;
+            }
+            "DENY" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before DENY", path.display(), lineno);
+                }
+                if rest.is_empty() {
+                    bail!("{}:{}: DENY requires a path", path.display(), lineno);
+                }
+                deny.push(rest.to_string());
+            }
+            "DETACH" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before DETACH", path.display(), lineno);
+                }
+                detach = true;
+            }
             unknown => {
                 bail!(
                     "{}:{}: unknown directive '{}'",
@@ -286,6 +313,9 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
         endpoint_mode,
         params,
         devices,
+        deny_inherit,
+        deny,
+        detach,
     })
 }
 
@@ -301,6 +331,9 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str, image_dirs:
         "\n[container]\nname = \"{}\"\n",
         container_name
     ));
+    if cluufile.detach {
+        out.push_str("detach = true\n");
+    }
 
     // [profile] — only if capabilities specified
     if !cluufile.profile.is_empty() {
@@ -397,6 +430,24 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str, image_dirs:
             out.push_str(&format!("\"{}\"", name));
         }
         out.push_str("]\n");
+    }
+
+    // [mounts] — only if deny_inherit or deny paths specified
+    if cluufile.deny_inherit || !cluufile.deny.is_empty() {
+        out.push_str("\n[mounts]\n");
+        if cluufile.deny_inherit {
+            out.push_str("deny_inherit = true\n");
+        }
+        if !cluufile.deny.is_empty() {
+            out.push_str("deny = [");
+            for (i, path) in cluufile.deny.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("\"{}\"", path));
+            }
+            out.push_str("]\n");
+        }
     }
 
     out
