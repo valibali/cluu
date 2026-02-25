@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c looper userspace/c-programs/looper.c" target/x86_64-cluu-user/debug/looper.elf /bin/looper
+ENTRYPOINT /bin/looper

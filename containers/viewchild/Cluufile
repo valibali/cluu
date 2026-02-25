@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs
+BUILD "cargo xtask build-c viewchild userspace/c-programs/viewchild.c" target/x86_64-cluu-user/debug/viewchild.elf /bin/viewchild
+ENTRYPOINT /bin/viewchild

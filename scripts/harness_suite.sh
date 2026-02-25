@@ -77,7 +77,13 @@ run_case() {
     else
         eval "$env_assignments ./scripts/harness_run.sh"
     fi
-    echo "=== Harness case PASS: ${name} ==="
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+        echo "=== Harness case PASS: ${name} ==="
+    else
+        echo "=== Harness case FAIL: ${name} ==="
+    fi
+    return $rc
 }
 
 ran_any=0

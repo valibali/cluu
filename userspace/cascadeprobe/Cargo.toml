@@ -1,0 +1,11 @@
+[package]
+name = "cluu-cascadeprobe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "cascadeprobe"
+path = "src/main.rs"

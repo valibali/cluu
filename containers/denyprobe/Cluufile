@@ -1,0 +1,5 @@
+FROM minimal
+PROFILE ipc vfs
+DENY_INHERIT
+BUILD "cargo xtask build-c denyprobe userspace/c-programs/denyprobe.c" target/x86_64-cluu-user/debug/denyprobe.elf /bin/denyprobe
+ENTRYPOINT /bin/denyprobe

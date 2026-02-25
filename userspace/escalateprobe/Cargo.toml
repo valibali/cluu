@@ -1,0 +1,11 @@
+[package]
+name = "cluu-escalateprobe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "escalateprobe"
+path = "src/main.rs"

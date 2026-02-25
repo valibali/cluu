@@ -1,0 +1,5 @@
+FROM minimal
+PROFILE ipc
+DETACH
+BUILD "cargo xtask build-c survivor userspace/c-programs/survivor.c" target/x86_64-cluu-user/debug/survivor.elf /bin/survivor
+ENTRYPOINT /bin/survivor

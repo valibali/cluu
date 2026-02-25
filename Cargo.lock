@@ -157,6 +157,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 
 [[package]]
+name = "cluu-cascadeprobe"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-cat"
 version = "0.1.0"
 dependencies = [
@@ -165,6 +172,20 @@ dependencies = [
 
 [[package]]
 name = "cluu-console"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-detachprobe"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-escalateprobe"
 version = "0.1.0"
 dependencies = [
  "libcluu",
@@ -268,6 +289,13 @@ dependencies = [
 
 [[package]]
 name = "cluu-vfs"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-viewprobe"
 version = "0.1.0"
 dependencies = [
  "libcluu",

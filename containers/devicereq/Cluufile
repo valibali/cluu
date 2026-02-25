@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs device
+BUILD "cargo xtask build-c hello userspace/c-programs/hello.c" target/x86_64-cluu-user/debug/hello.elf /bin/hello
+ENTRYPOINT /bin/hello

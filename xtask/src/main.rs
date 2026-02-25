@@ -2579,7 +2579,7 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
             "-b",
             "1024",
             disk_path.to_str().unwrap(),
-            "524288", // 512MB image (524288 blocks * 1KiB)
+            "786432", // 768MB image (786432 blocks * 1KiB)
         ])
         .status()
         .context("Failed to run mke2fs for user disk")?;

@@ -1241,7 +1241,9 @@ impl VfsServer {
                 let cid = memfs_entry.container_id;
                 let ino = memfs_entry.inode_id;
                 if let Some(memfs_backend) = self.container_memfs.get(&cid) {
-                    match memfs_backend.borrow_mut().write(ino, offset, data) {
+                    // Scope the borrow_mut so it's dropped before we borrow() for file_size.
+                    let write_result = memfs_backend.borrow_mut().write(ino, offset, data);
+                    match write_result {
                         Ok(written) => {
                             reply_msg.words[0] = 0;
                             reply_msg.words[1] = written;

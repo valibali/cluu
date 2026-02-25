@@ -27,6 +27,10 @@ members = [
     "userspace/timeserver",
     "userspace/cat",
     "userspace/nestprobe",
+    "userspace/escalateprobe",
+    "userspace/viewprobe",
+    "userspace/cascadeprobe",
+    "userspace/detachprobe",
     "userspace/virtio-blk",
     "userspace/libcluu_syscalls",
 
@@ -56,6 +60,10 @@ default-members = [
     "userspace/timeserver",
     "userspace/cat",
     "userspace/nestprobe",
+    "userspace/escalateprobe",
+    "userspace/viewprobe",
+    "userspace/cascadeprobe",
+    "userspace/detachprobe",
     "userspace/virtio-blk",
 ]
 
@@ -121,6 +129,18 @@ debug = 0
 [profile.dev.package."cluu-nestprobe"]
 debug = 0
 
+[profile.dev.package."cluu-escalateprobe"]
+debug = 0
+
+[profile.dev.package."cluu-viewprobe"]
+debug = 0
+
+[profile.dev.package."cluu-cascadeprobe"]
+debug = 0
+
+[profile.dev.package."cluu-detachprobe"]
+debug = 0
+
 [profile.release]
 opt-level = 2
 lto = false
@@ -161,4 +181,16 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-nestprobe"]
+debug = 0
+
+[profile.release.package."cluu-escalateprobe"]
+debug = 0
+
+[profile.release.package."cluu-viewprobe"]
+debug = 0
+
+[profile.release.package."cluu-cascadeprobe"]
+debug = 0
+
+[profile.release.package."cluu-detachprobe"]
 debug = 0

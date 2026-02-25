@@ -95,6 +95,21 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         f8_nested_container_run)
             TEST_COMMAND="container run nestprobe"
             ;;
+        f9_escalation)
+            TEST_COMMAND="container run escalateprobe"
+            ;;
+        f10_view_passthrough)
+            TEST_COMMAND="container run viewprobe"
+            ;;
+        f11_deny_inherit)
+            TEST_COMMAND="container run denyprobe"
+            ;;
+        f12_cascade_cleanup)
+            TEST_COMMAND="container run cascadeprobe"
+            ;;
+        f13_detach_survive)
+            TEST_COMMAND="container run detachprobe"
+            ;;
         l2_sigint)
             TEST_COMMAND="spawn sleepy"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn sleepy"
@@ -933,6 +948,41 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "nestprobe: PASS nested spawn"
+        )
+        ;;
+    f9_escalation)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "escalateprobe: PASS escalation denied"
+        )
+        ;;
+    f10_view_passthrough)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "viewchild: PASS view passthrough"
+        )
+        ;;
+    f11_deny_inherit)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "denyprobe: PASS deny_inherit"
+        )
+        ;;
+    f12_cascade_cleanup)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: cascading kill container"
+        )
+        ;;
+    f13_detach_survive)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "survivor: PASS survived parent exit"
         )
         ;;
     l2_sigint)

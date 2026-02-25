@@ -1,0 +1,11 @@
+[package]
+name = "cluu-detachprobe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "detachprobe"
+path = "src/main.rs"
