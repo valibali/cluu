@@ -1164,12 +1164,11 @@ parse_last_metric() {
     local marker="$1"
     awk -v marker="$marker" '
         $0 ~ marker {
-            if (getline > 0) {
-                v = $0
-                gsub(/[^0-9-]/, "", v)
-                if (v != "") {
-                    last = v
-                }
+            split($0, parts, "=");
+            v = parts[length(parts)];
+            gsub(/[^0-9-]/, "", v);
+            if (v != "") {
+                last = v;
             }
         }
         END {
@@ -1265,12 +1264,12 @@ if [ "$MARKER_MODE" = "m2_token_audit" ]; then
         local marker="$1"
         awk -v marker="$marker" '
             $0 ~ marker {
-                if (getline > 0) {
-                    gsub(/[^0-9]/, "", $0);
-                    if ($0 != "") {
-                        print $0;
-                        exit 0;
-                    }
+                split($0, parts, "=");
+                val = parts[length(parts)];
+                gsub(/[^0-9]/, "", val);
+                if (val != "") {
+                    print val;
+                    exit 0;
                 }
             }
         ' "$SERIAL_LOG"
@@ -1318,12 +1317,11 @@ if [ "$MARKER_MODE" = "m2_leakdiag" ]; then
         local marker="$1"
         awk -v marker="$marker" '
             $0 ~ marker {
-                if (getline > 0) {
-                    v = $0
-                    gsub(/[^0-9-]/, "", v)
-                    if (v != "") {
-                        last = v
-                    }
+                split($0, parts, "=");
+                v = parts[length(parts)];
+                gsub(/[^0-9-]/, "", v);
+                if (v != "") {
+                    last = v;
                 }
             }
             END {

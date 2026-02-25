@@ -302,6 +302,49 @@ fn write_dec(mut value: u64) {
     }
 }
 
+/// Log a key=value pair on a single line (for machine-parseable telemetry).
+pub fn log_kv_dec(level: LogLevel, key: &str, value: u64) {
+    if !should_log(level) {
+        return;
+    }
+    write_timestamp();
+    let prefix = match level {
+        LogLevel::Error => "[ERROR] ",
+        LogLevel::Warn => "[WARN]  ",
+        LogLevel::Info => "[INFO]  ",
+        LogLevel::Debug => "[DEBUG] ",
+        LogLevel::Trace => "[TRACE] ",
+    };
+    COM2.write_str(prefix);
+    COM2.write_str(key);
+    write_dec(value);
+    COM2.write_str("\n");
+}
+
+/// Log a signed key=value pair on a single line (for machine-parseable telemetry).
+pub fn log_kv_i64(level: LogLevel, key: &str, value: i64) {
+    if !should_log(level) {
+        return;
+    }
+    write_timestamp();
+    let prefix = match level {
+        LogLevel::Error => "[ERROR] ",
+        LogLevel::Warn => "[WARN]  ",
+        LogLevel::Info => "[INFO]  ",
+        LogLevel::Debug => "[DEBUG] ",
+        LogLevel::Trace => "[TRACE] ",
+    };
+    COM2.write_str(prefix);
+    COM2.write_str(key);
+    if value < 0 {
+        COM2.write_str("-");
+        write_dec(value.unsigned_abs());
+    } else {
+        write_dec(value as u64);
+    }
+    COM2.write_str("\n");
+}
+
 /// Initialize the logger
 ///
 /// Must be called after UART initialization.

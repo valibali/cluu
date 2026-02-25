@@ -381,15 +381,6 @@ fn resource_baseline() -> ResourceSnapshot {
     }
 }
 
-fn log_i64(label: &str, value: i64) {
-    klibcluu::info(label);
-    if value < 0 {
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "-", value.unsigned_abs());
-    } else {
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "", value as u64);
-    }
-}
-
 pub fn log_resource_delta(reason: &str) {
     let seq = RESOURCE_DELTA_LOG_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
     let baseline = resource_baseline();
@@ -397,75 +388,63 @@ pub fn log_resource_delta(reason: &str) {
 
     klibcluu::info("resource delta: ");
     klibcluu::info(reason);
-    klibcluu::info("  sample_seq=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", seq);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  sample_seq=", seq);
 
-    log_i64(
+    klibcluu::log_kv_i64(
+        klibcluu::LogLevel::Info,
         "  delta_threads_live=",
         current.threads_live as i64 - baseline.threads_live as i64,
     );
-    log_i64(
+    klibcluu::log_kv_i64(
+        klibcluu::LogLevel::Info,
         "  delta_spaces=",
         current.spaces as i64 - baseline.spaces as i64,
     );
-    log_i64(
+    klibcluu::log_kv_i64(
+        klibcluu::LogLevel::Info,
         "  delta_endpoints=",
         current.endpoints as i64 - baseline.endpoints as i64,
     );
-    log_i64(
+    klibcluu::log_kv_i64(
+        klibcluu::LogLevel::Info,
         "  delta_tokens=",
         current.tokens as i64 - baseline.tokens as i64,
     );
-    log_i64(
+    klibcluu::log_kv_i64(
+        klibcluu::LogLevel::Info,
         "  delta_tracked_frames=",
         current.tracked_frames as i64 - baseline.tracked_frames as i64,
     );
-    log_i64(
+    klibcluu::log_kv_i64(
+        klibcluu::LogLevel::Info,
         "  delta_mapped_frames=",
         current.mapped_frames as i64 - baseline.mapped_frames as i64,
     );
-    log_i64(
+    klibcluu::log_kv_i64(
+        klibcluu::LogLevel::Info,
         "  delta_pmm_used_frames=",
         current.pmm_used_frames as i64 - baseline.pmm_used_frames as i64,
     );
 
     let s = snapshot();
-    klibcluu::info("  ipc_wait_events=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_events);
-    klibcluu::info("  ipc_wait_avg_ms=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_avg_ms);
-    klibcluu::info("  ipc_wait_p95_ms=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_p95_ms);
-    klibcluu::info("  ipc_wait_p99_ms=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_p99_ms);
-    klibcluu::info("  ipc_wait_max_ms=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_max_ms);
-    klibcluu::info("  ipc_scan_events=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_events);
-    klibcluu::info("  ipc_scan_avg_steps_x100=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_avg_steps_x100);
-    klibcluu::info("  ipc_scan_max_steps=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_max_steps);
-    klibcluu::info("  ipc_stale_waiters=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_stale_waiters);
-    klibcluu::info("  ipc_direct_deliveries=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_direct_deliveries);
-    klibcluu::info("  ipc_queue_bytes_current=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_bytes_current);
-    klibcluu::info("  ipc_queue_bytes_peak=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_bytes_peak);
-    klibcluu::info("  ipc_queue_messages_current=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_messages_current);
-    klibcluu::info("  ipc_queue_messages_peak=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_messages_peak);
-    klibcluu::info("  thread_suspend_calls=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_suspend_calls);
-    klibcluu::info("  thread_suspend_success=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_suspend_success);
-    klibcluu::info("  thread_resume_calls=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_resume_calls);
-    klibcluu::info("  thread_resume_success=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_resume_success);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_wait_events=", s.ipc_recv_wait_events);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_wait_avg_ms=", s.ipc_recv_wait_avg_ms);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_wait_p95_ms=", s.ipc_recv_wait_p95_ms);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_wait_p99_ms=", s.ipc_recv_wait_p99_ms);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_wait_max_ms=", s.ipc_recv_wait_max_ms);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_scan_events=", s.ipc_recv_scan_events);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_scan_avg_steps_x100=", s.ipc_recv_scan_avg_steps_x100);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_scan_max_steps=", s.ipc_recv_scan_max_steps);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_stale_waiters=", s.ipc_stale_waiters);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_direct_deliveries=", s.ipc_direct_deliveries);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_queue_bytes_current=", s.ipc_queue_bytes_current);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_queue_bytes_peak=", s.ipc_queue_bytes_peak);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_queue_messages_current=", s.ipc_queue_messages_current);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_queue_messages_peak=", s.ipc_queue_messages_peak);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_suspend_calls=", s.thread_suspend_calls);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_suspend_success=", s.thread_suspend_success);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_resume_calls=", s.thread_resume_calls);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_resume_success=", s.thread_resume_success);
 }
 
 #[inline(always)]
@@ -551,85 +530,41 @@ pub fn log_bootstrap_snapshot(stage: &str) {
     klibcluu::info("telemetry snapshot: ");
     klibcluu::info(stage);
 
-    klibcluu::info("  tokens_created=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.tokens_created);
-
-    klibcluu::info("  tokens_revoked=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.tokens_revoked);
-
-    klibcluu::info("  ipc_recv_would_block=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_would_block);
-
-    klibcluu::info("  ipc_recv_timeout=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_timeout);
-
-    klibcluu::info("  ipc_recv_wait_events=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_events);
-    klibcluu::info("  ipc_recv_wait_avg_ms=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_avg_ms);
-    klibcluu::info("  ipc_recv_wait_p95_ms=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_p95_ms);
-    klibcluu::info("  ipc_recv_wait_p99_ms=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_p99_ms);
-    klibcluu::info("  ipc_recv_wait_max_ms=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_wait_max_ms);
-    klibcluu::info("  ipc_recv_scan_events=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_events);
-    klibcluu::info("  ipc_recv_scan_avg_steps_x100=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_avg_steps_x100);
-    klibcluu::info("  ipc_recv_scan_max_steps=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_recv_scan_max_steps);
-    klibcluu::info("  ipc_stale_waiters=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_stale_waiters);
-    klibcluu::info("  ipc_direct_deliveries=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_direct_deliveries);
-    klibcluu::info("  ipc_queue_bytes_current=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_bytes_current);
-    klibcluu::info("  ipc_queue_bytes_peak=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_bytes_peak);
-    klibcluu::info("  ipc_queue_messages_current=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_messages_current);
-    klibcluu::info("  ipc_queue_messages_peak=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.ipc_queue_messages_peak);
-
-    klibcluu::info("  boot_token_grants=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.boot_token_grants);
-    klibcluu::info("  thread_suspend_calls=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_suspend_calls);
-    klibcluu::info("  thread_suspend_success=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_suspend_success);
-    klibcluu::info("  thread_resume_calls=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_resume_calls);
-    klibcluu::info("  thread_resume_success=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.thread_resume_success);
-
-    klibcluu::info("  token_audit_next_seq=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.token_audit_next_seq);
-
-    klibcluu::info("  token_audit_stored=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.token_audit_stored as u64);
-
-    klibcluu::info("  token_audit_dropped=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.token_audit_dropped);
-
-    klibcluu::info("  resources_threads_total=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.threads_total);
-    klibcluu::info("  resources_threads_live=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.threads_live);
-    klibcluu::info("  resources_spaces=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.spaces);
-    klibcluu::info("  resources_endpoints=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.endpoints);
-    klibcluu::info("  resources_tokens=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.tokens);
-    klibcluu::info("  resources_tracked_frames=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.tracked_frames);
-    klibcluu::info("  resources_mapped_frames=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.mapped_frames);
-    klibcluu::info("  resources_pmm_used_frames=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.pmm_used_frames);
-    klibcluu::info("  resources_pmm_total_frames=");
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "", s.resources.pmm_total_frames);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  tokens_created=", s.tokens_created);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  tokens_revoked=", s.tokens_revoked);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_recv_would_block=", s.ipc_recv_would_block);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_recv_timeout=", s.ipc_recv_timeout);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_recv_wait_events=", s.ipc_recv_wait_events);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_recv_wait_avg_ms=", s.ipc_recv_wait_avg_ms);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_recv_wait_p95_ms=", s.ipc_recv_wait_p95_ms);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_recv_wait_p99_ms=", s.ipc_recv_wait_p99_ms);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_recv_wait_max_ms=", s.ipc_recv_wait_max_ms);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_recv_scan_events=", s.ipc_recv_scan_events);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_recv_scan_avg_steps_x100=", s.ipc_recv_scan_avg_steps_x100);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_recv_scan_max_steps=", s.ipc_recv_scan_max_steps);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_stale_waiters=", s.ipc_stale_waiters);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_direct_deliveries=", s.ipc_direct_deliveries);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_queue_bytes_current=", s.ipc_queue_bytes_current);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_queue_bytes_peak=", s.ipc_queue_bytes_peak);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_queue_messages_current=", s.ipc_queue_messages_current);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ipc_queue_messages_peak=", s.ipc_queue_messages_peak);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  boot_token_grants=", s.boot_token_grants);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_suspend_calls=", s.thread_suspend_calls);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_suspend_success=", s.thread_suspend_success);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_resume_calls=", s.thread_resume_calls);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_resume_success=", s.thread_resume_success);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  token_audit_next_seq=", s.token_audit_next_seq);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  token_audit_stored=", s.token_audit_stored as u64);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  token_audit_dropped=", s.token_audit_dropped);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_threads_total=", s.resources.threads_total);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_threads_live=", s.resources.threads_live);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_spaces=", s.resources.spaces);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_endpoints=", s.resources.endpoints);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_tokens=", s.resources.tokens);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_tracked_frames=", s.resources.tracked_frames);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_mapped_frames=", s.resources.mapped_frames);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_pmm_used_frames=", s.resources.pmm_used_frames);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_pmm_total_frames=", s.resources.pmm_total_frames);
 
     if stage == "post-bootstrap" {
         set_resource_baseline_from_current();
