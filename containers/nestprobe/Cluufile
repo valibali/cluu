@@ -1,0 +1,3 @@
+FROM minimal
+PROFILE ipc vfs registry
+ENTRYPOINT /bin/nestprobe

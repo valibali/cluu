@@ -1,0 +1,14 @@
+[package]
+name = "cluu-nestprobe"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU nested container test probe"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "nestprobe"
+path = "src/main.rs"

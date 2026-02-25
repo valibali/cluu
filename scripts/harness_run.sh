@@ -92,6 +92,9 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         e13_container_run)
             TEST_COMMAND="container run hello"
             ;;
+        f8_nested_container_run)
+            TEST_COMMAND="container run nestprobe"
+            ;;
         l2_sigint)
             TEST_COMMAND="spawn sleepy"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn sleepy"
@@ -923,6 +926,13 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "procmgr: container 'hello' started"
             "[RBX TEST] PASSED"
+        )
+        ;;
+    f8_nested_container_run)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "nestprobe: PASS nested spawn"
         )
         ;;
     l2_sigint)

@@ -2422,7 +2422,7 @@ detach support. Implements sections 4.5 and the nested lifecycle model.
 | F5  | Procmgr: cascading container cleanup (recursive child destroy) | done    | F1 |
 | F6  | Procmgr: detach support (parent_container_id=0 when manifest.detach) | done    | F1 |
 | F7  | container-build: emit `deny_inherit`/`deny`/`detach` to manifest.toml | done    | — |
-| F8  | Test: USER spawns nested container with narrowed profile | pending | F2, F3 |
+| F8  | Test: USER spawns nested container with narrowed profile | done    | F2, F3 |
 | F9  | Test: escalation attempt (child profile > parent) rejected | pending | F2 |
 | F10 | Test: view passthrough — child sees launcher's /home  | pending | F3     |
 | F11 | Test: deny_inherit — child only sees image dirs + /tmp | pending | F4     |
