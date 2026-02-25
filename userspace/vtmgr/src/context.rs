@@ -9,7 +9,7 @@ use libcluu::boot::PARAM_TTY_INSTANCE;
 use libcluu::boot::{process_info, TOKEN_EXTRA_0};
 use libcluu::ipc::{
     send, send_msg_with_payload, CONSOLE_ACTIVATE_LABEL, CONSOLE_CREATE_VT_LABEL,
-    CONSOLE_DEACTIVATE_LABEL, CONSOLE_SWITCH_VT_LABEL, PROCMGR_SPAWN_SERVICE_LABEL,
+    CONSOLE_DEACTIVATE_LABEL, CONSOLE_SWITCH_VT_LABEL, PROCMGR_CONTAINER_RUN_LABEL,
 };
 use libcluu::registry;
 use libcluu::types::{IpcFlags, Message};
@@ -32,8 +32,8 @@ pub struct VtmgrContext {
     active_vt: usize,
     /// Bitmask: bit N = VT N has been created in console.
     vt_created: u8,
-    /// Bitmask: bit N = tty:N spawn was requested from procmgr.
-    tty_spawned: u8,
+    /// Bitmask: bit N = vt:N container spawn was requested from procmgr.
+    vt_spawned: u8,
     /// Whether console subscription was requested.
     requested_console: bool,
     /// Whether procmgr spawn subscription was requested.
@@ -61,7 +61,7 @@ impl VtmgrContext {
             procmgr_spawn_endpoint: 0,
             active_vt: 0,
             vt_created: 1,  // VT 0 is created at boot by init
-            tty_spawned: 1, // tty:0 is spawned at boot by init
+            vt_spawned: 1, // vt:0 container is spawned at boot by init
             requested_console: false,
             requested_procmgr_spawn: false,
         })
@@ -110,7 +110,7 @@ impl VtmgrContext {
     /// Switch to a different virtual terminal.
     ///
     /// If the target VT doesn't exist yet, creates it in console and spawns
-    /// tty:N via procmgr.
+    /// a vt:N container via procmgr.
     pub fn switch_vt(&mut self, new_vt: usize) {
         if new_vt >= VT_COUNT || new_vt == self.active_vt {
             return;
@@ -122,9 +122,9 @@ impl VtmgrContext {
             self.create_vt(new_vt);
         }
 
-        // Spawn tty:N if not yet done.
-        if (self.tty_spawned & vt_bit) == 0 {
-            self.spawn_tty(new_vt);
+        // Spawn vt:N container if not yet done.
+        if (self.vt_spawned & vt_bit) == 0 {
+            self.spawn_vt_container(new_vt);
         }
 
         let old = self.active_vt;
@@ -151,35 +151,31 @@ impl VtmgrContext {
         let _ = debug_print(&format!("vtmgr: created vt {}", vt_index));
     }
 
-    /// Ask procmgr to spawn tty:N for a new VT using the generic service spawn protocol.
-    ///
-    /// vtmgr owns the wiring knowledge: tty needs a grantable listen endpoint
-    /// and PARAM_TTY_INSTANCE set to the VT index. Procmgr just executes it.
-    fn spawn_tty(&mut self, vt_index: usize) {
+    /// Ask procmgr to spawn a VT container for the given VT index.
+    fn spawn_vt_container(&mut self, vt_index: usize) {
         if self.procmgr_spawn_endpoint == 0 {
             let _ = debug_print("vtmgr: no procmgr spawn endpoint");
             return;
         }
 
-        // Build payload: path\0 + param overrides
-        // Param override format: u16 index LE + u64 value LE = 10 bytes each
-        let path = b"sys/tty\0";
+        // Payload: "vt\0" + 1 param override (10 bytes)
+        let mut payload = [0u8; 3 + 10];
+        payload[0] = b'v';
+        payload[1] = b't';
+        payload[2] = 0;
+        // Param override: PARAM_TTY_INSTANCE = vt_index
         let param_index = (PARAM_TTY_INSTANCE as u16).to_le_bytes();
         let param_value = (vt_index as u64).to_le_bytes();
-        let mut payload = [0u8; 8 + 10]; // path(8) + 1 param(10)
-        payload[..8].copy_from_slice(path);
-        payload[8..10].copy_from_slice(&param_index);
-        payload[10..18].copy_from_slice(&param_value);
+        payload[3..5].copy_from_slice(&param_index);
+        payload[5..13].copy_from_slice(&param_value);
 
-        // words[0]=payload_len (for parse_message), words[1]=priority,
-        // words[2]=token_extra_mode(2=grantable), words[3]=param_count(1)
         let msg = Message::new(
-            PROCMGR_SPAWN_SERVICE_LABEL,
-            [payload.len(), 205, 2, 1, 0, 0],
-            4,
+            PROCMGR_CONTAINER_RUN_LABEL,
+            [0, 0, 0, 3, 1, 0],
+            5,
         );
         let _ = send_msg_with_payload(self.procmgr_spawn_endpoint, &msg, &payload);
-        self.tty_spawned |= 1u8 << vt_index;
-        let _ = debug_print(&format!("vtmgr: requested tty:{} spawn", vt_index));
+        self.vt_spawned |= 1u8 << vt_index;
+        let _ = debug_print(&format!("vtmgr: requested vt:{} container", vt_index));
     }
 }

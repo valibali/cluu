@@ -110,6 +110,9 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         f13_detach_survive)
             TEST_COMMAND="container run detachprobe"
             ;;
+        g7_vt_container)
+            TEST_COMMAND=""
+            ;;
         l2_sigint)
             TEST_COMMAND="spawn sleepy"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn sleepy"
@@ -983,6 +986,13 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "survivor: PASS survived parent exit"
+        )
+        ;;
+    g7_vt_container)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "tty:0: requesting shell spawn"
         )
         ;;
     l2_sigint)

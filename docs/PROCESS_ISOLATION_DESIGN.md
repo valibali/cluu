@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-20
 **Scope:** Capability profiles, VFS views, container model, spawn protocol
-**Status:** Implementation in progress — Phases A–E mostly complete; Phases F–H in design
+**Status:** Implementation in progress — Phases A–G complete; Phase H in design
 **Depends on:** IPC registry (docs/IPC_REGISTRY.md), kernel token system (rights.rs)
 
 ---
@@ -95,10 +95,9 @@ VT death does not cascade to the session — vtmgr respawns the VT and
 reattaches to the surviving session. Session death (logout) cascades to
 user containers but leaves the VT alive to show a new login prompt.
 
-**Current state (pre-Phase G):** vtmgr still uses PROCMGR_SPAWN_SERVICE_LABEL
-to spawn bare tty:N services. tty:N then independently requests shell:N via
-TTY_SPAWN_SHELL_LABEL. Phase G migrates to VT containers; Phase H adds
-the session/login model.
+**Current state (Phase G complete):** vtmgr uses PROCMGR_CONTAINER_RUN_LABEL
+to spawn VT containers. Each container bundles tty + shell under a shared
+VFS view. Phase H adds the session/login model on top of this.
 
 The trust hierarchy is: kernel > init > procmgr > services > user programs.
 Each level can only grant capabilities it already holds, so the hierarchy
@@ -2238,10 +2237,10 @@ coordinator service.
 | CONSOLE_WRITE_VT_SYNC_LABEL| 19   | tty → console      | words[0]=len, words[1]=VT index     |
 | PROCMGR_SPAWN_SERVICE_LABEL| 20   | any → procmgr      | See section 5.1                     |
 
-### 6.3 VT Switch Flow (Current — Pre Phase G)
+### 6.3 VT Switch Flow (Legacy — Pre Phase G)
 
-This is the CURRENT implementation. See Phase G section 7.G.3 for the
-target flow using container run.
+This is the LEGACY flow prior to Phase G. See section 7.G.3 for the
+current flow using container run.
 
 ```
 1. User presses Ctrl+Alt+F2.
@@ -2432,12 +2431,12 @@ detach support. Implements sections 4.5 and the nested lifecycle model.
 Critical path: F1 → F5 (lifecycle), F2 → F3 → F4 (view construction)
 Parallel tracks: F6 (detach), F7 (container-build), tests depend on their feature tasks
 
-### Phase G: VT Container Migration
+### Phase G: VT Container Migration (done)
 
-Migrate vtmgr from spawning bare `sys/tty` services via
+Migrated vtmgr from spawning bare `sys/tty` services via
 PROCMGR_SPAWN_SERVICE_LABEL to spawning VT containers via
-PROCMGR_CONTAINER_RUN_LABEL. This is the transition from section 6.3's
-current architecture to section 4.6's target architecture.
+PROCMGR_CONTAINER_RUN_LABEL. G0 (view-aware binary loading) and G6
+(remove TTY_SPAWN_SHELL_LABEL) are deferred to Phase H.
 
 #### G.1 Design Issues
 
@@ -2490,7 +2489,8 @@ Resolution: vtmgr's profile must be at least `0x0F` (USER) so it can
 for itself, but it must HOLD those bits to delegate them. This is correct
 per the capability model — you can only grant what you have.
 
-Update in `init/src/services.rs`: change vtmgr from `0x05` to `0x0F`.
+Update vtmgr Cluufile: change profile from `0x05` to `0x0F`.
+(vtmgr is Tier 2 autostart — its profile is set in its Cluufile, not init/services.rs.)
 
 **Issue 3: Fire-and-forget vs call semantics**
 
@@ -2512,21 +2512,22 @@ distinguished by the label field. vtmgr can reuse its existing
 
 | #   | Task                                                  | Status  | Depends |
 |-----|-------------------------------------------------------|---------|---------|
-| G0  | View-aware binary loading in procmgr spawn handler    | pending | —       |
-| G1  | Extend container run wire format with param overrides | pending | —       |
-| G2  | Procmgr: resolve param slots → indices, apply values | pending | G1      |
-| G3  | vtmgr: replace spawn_tty with spawn_vt_container     | pending | G1      |
-| G4  | vtmgr: rename fields (tty_spawned → vt_spawned)      | pending | G3      |
-| G5  | init: update vtmgr profile from 0x05 to 0x0F         | pending | —       |
-| G6  | Remove TTY_SPAWN_SHELL_LABEL + SERVICE_PATH from procmgr | pending | G0, G3 |
-| G7  | Build + boot test: VT switch spawns container         | pending | G0-G6   |
+| G0  | View-aware binary loading in procmgr spawn handler    | deferred | —       |
+| G1  | Extend container run wire format with param overrides | done     | —       |
+| G2  | Procmgr: resolve param slots → indices, apply values | done     | G1      |
+| G3  | vtmgr: replace spawn_tty with spawn_vt_container     | done     | G1      |
+| G4  | vtmgr: rename fields (tty_spawned → vt_spawned)      | done     | G3      |
+| G5  | vtmgr: update Cluufile profile from 0x05 to 0x0F     | done     | —       |
+| G6  | Remove TTY_SPAWN_SHELL_LABEL + SERVICE_PATH from procmgr | deferred | G0, G3 |
+| G7  | Build + boot test: VT switch spawns container         | done     | G1-G5   |
 
-G0 is a prerequisite for all intra-container binary spawns (not just VT).
-It makes `handle_spawn_message` resolve the requested binary path through
-the caller's VFS view before loading. Without it, `/bin/shell` resolves
-to the userdisk root instead of the container's `/var/images/vt/bin/`.
+G0 (deferred) is a prerequisite for view-scoped binary resolution. Without
+it, intra-container spawns resolve `/bin/shell` from the userdisk root
+instead of the container's `/var/images/vt/bin/`. Currently tty spawns
+shell via the legacy TTY_SPAWN_SHELL_LABEL path, which works. G0 and G6
+are deferred to Phase H when session containers require proper view scoping.
 
-#### G.3 VT Switch Flow (Target — Post Phase G)
+#### G.3 VT Switch Flow (Current)
 
 ```
 1. User presses Ctrl+Alt+F2.
@@ -2559,6 +2560,8 @@ to the userdisk root instead of the container's `/var/images/vt/bin/`.
 5. tty:1 starts, registers as "tty:1", subscribes to console:0/vt:1.
    tty:1 requests shell spawn via TTY_SPAWN_SHELL_LABEL (or internally
    via container-scoped procmgr spawn once G6 is complete).
+   Note: TTY_SPAWN_SHELL_LABEL remains in use until G6, which is blocked
+   on G0 (view-aware binary loading). Both are deferred to Phase H.
 
 6. kbd discovers tty:1 via registry, routes keystrokes to it.
 ```
@@ -2724,7 +2727,8 @@ Files created or modified across all phases:
 | `userspace/vfs/src/main.rs`        | C, D, E   | View enforcement, storage lifecycle, VFS_LINK |
 | `userspace/vfs/src/mount.rs`       | E         | MountTable::link() → ext2 FS_LINK, MemFs |
 | `userspace/vfs/src/view.rs`        | C         | VfsView struct + path filter logic   |
-| `userspace/init/src/services.rs`   | B, G      | Profile assignments per service      |
+| `userspace/init/src/services.rs`   | B         | Profile assignments per service      |
+| `containers/vtmgr/Cluufile`       | G         | vtmgr profile escalation (0x05→0x0F) |
 | `userspace/shell/src/commands.rs`   | E        | Container shell builtins             |
 | `tools/container-build/`          | E         | Standalone container image builder (Cluufile parser, manifest gen) |
 | `xtask/src/main.rs`               | D, E      | Userdisk build, /var/images/ integration |

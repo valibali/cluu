@@ -1009,7 +1009,7 @@ impl ProcessManager {
             return self.handle_kill_message(msg, sender_tid);
         }
         if msg.tag.label == libcluu::ipc::TTY_SPAWN_SHELL_LABEL {
-            return self.handle_tty_shell_spawn(msg, payload);
+            return self.handle_tty_shell_spawn(msg, payload, sender_tid);
         }
         if msg.tag.label == PROCMGR_QUERY_CTTY_LABEL {
             return self.handle_ctty_query(msg, sender_tid);
@@ -1032,8 +1032,10 @@ impl ProcessManager {
     /// corresponding tty endpoint from a registry grant, so we use that
     /// (rather than a raw token handle from the message which wouldn't be
     /// valid in our token space).
-    fn handle_tty_shell_spawn(&mut self, msg: &Message, _payload: &[u8]) -> Result<()> {
+    fn handle_tty_shell_spawn(&mut self, msg: &Message, _payload: &[u8], sender_tid: usize) -> Result<()> {
         let vt_index = msg.words[0];
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
+        let caller_container_id = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
         let tty_ep = if vt_index < VT_COUNT {
             self.tty_endpoints[vt_index]
         } else {
@@ -1072,14 +1074,23 @@ impl ProcessManager {
             spawn_start,
             CapProfile::USER,
         ) {
-            // Shell containers use MemFs for ephemeral storage — skip ext2 dir creation
-            let container_id = self.next_container_id();
+            // G2.5: If caller has a container_id, reuse it (shell belongs to VT container)
+            let container_id = if caller_container_id > 0 {
+                caller_container_id
+            } else {
+                self.next_container_id()
+            };
             self.pid_to_container_id.insert(pid, container_id);
-            if container_id > 0 {
+            if caller_container_id == 0 && container_id > 0 {
                 self.container_owner_pids.insert(pid);
             }
-            // Register VFS view for the shell based on USER profile.
-            let view_mounts = default_view_for_profile(CapProfile::USER);
+            // G2.5: Inherit caller's VFS view if inside a container
+            let view_mounts = if caller_container_id > 0 {
+                self.pid_to_view.get(&caller_pid).cloned()
+                    .unwrap_or_else(|| default_view_for_profile(CapProfile::USER))
+            } else {
+                default_view_for_profile(CapProfile::USER)
+            };
             self.register_vfs_view_for_thread(thread_token, &view_mounts, CapProfile::USER, container_id);
             self.pid_to_view.insert(pid, view_mounts);
         }
@@ -2215,12 +2226,16 @@ impl ProcessManager {
         let reply_token = extract_reply_id(msg);
         let mut reply_msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 5);
 
-        // Extract FDAC offset from message words
+        // Extract FDAC offset and param override info from message words
         let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
+        let param_offset = if msg.tag.words >= 4 { msg.words[3] } else { 0 };
+        let param_count = if msg.tag.words >= 5 { msg.words[4] } else { 0 };
 
-        // Extract image name from payload (NUL-terminated or full payload before FDAC)
+        // Extract image name from payload (NUL-terminated, bounded by FDAC or param offset)
         let name_end = if fdac_offset > 0 && fdac_offset <= payload.len() {
             fdac_offset
+        } else if param_offset > 0 && param_offset <= payload.len() {
+            param_offset
         } else {
             payload.len()
         };
@@ -2476,6 +2491,24 @@ impl ProcessManager {
         argv_payload.push(0);
         let argc = 1usize;
 
+        // Parse param overrides from payload (G1+G2: wire format extension)
+        let mut param_overrides_buf = [(0usize, 0u64); 10];
+        let mut n_overrides = 0;
+        if param_count > 0 && param_offset > 0 && param_offset < payload.len() {
+            let param_data = &payload[param_offset..];
+            for i in 0..param_count.min(10) {
+                let off = i * 10;
+                if off + 10 > param_data.len() { break; }
+                let idx = u16::from_le_bytes([param_data[off], param_data[off + 1]]) as usize;
+                let val = u64::from_le_bytes(param_data[off + 2..off + 10].try_into().unwrap());
+                if idx < 10 {
+                    param_overrides_buf[n_overrides] = (idx, val);
+                    n_overrides += 1;
+                }
+            }
+        }
+        let param_overrides = &param_overrides_buf[..n_overrides];
+
         // Spawn the process
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
@@ -2494,7 +2527,7 @@ impl ProcessManager {
             requested_profile,
             extra_token,
             extra_token_1,
-            &[],
+            param_overrides,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build view: for nested containers, inherit caller's view; for top-level, use default
