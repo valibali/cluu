@@ -2520,14 +2520,8 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_user_block_image(profile: &str) -> Result<()> {
+fn create_user_block_image(_profile: &str) -> Result<()> {
     println!("▸ Creating virtio-blk userspace image...");
-
-    let cargo_profile = if profile == "dev" { "debug" } else { profile };
-
-    let userspace_target_dir = project_root()
-        .join("target/x86_64-cluu-user")
-        .join(cargo_profile);
 
     let staging_dir = project_root().join("target/userfs");
     let bin_dir = staging_dir.join("bin");
@@ -2541,17 +2535,6 @@ fn create_user_block_image(profile: &str) -> Result<()> {
     fs::create_dir_all(&home_root_dir)?;
     fs::create_dir_all(&var_containers_dir)?;
     fs::create_dir_all(&var_images_dir)?;
-
-    let bin_programs = ["shell"];
-    for prog in &bin_programs {
-        let src = userspace_target_dir.join(format!("{}.elf", prog));
-        let dst = bin_dir.join(prog);
-        if !src.exists() {
-            bail!("{} not found in {:?}", prog, userspace_target_dir);
-        }
-        fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
-        println!("  Added {}", prog);
-    }
 
     // Copy built container images into /var/images/ on the userdisk
     let containers_dir = project_root().join("target/containers");
