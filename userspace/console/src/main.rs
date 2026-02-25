@@ -40,8 +40,8 @@ use libcluu::boot::{
 };
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_ACTIVATE_LABEL, CONSOLE_CREATE_VT_LABEL,
-    CONSOLE_DEACTIVATE_LABEL, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
-    CONSOLE_WRITE_VT_LABEL, CONSOLE_WRITE_VT_SYNC_LABEL,
+    CONSOLE_DEACTIVATE_LABEL, CONSOLE_SWITCH_VT_LABEL, CONSOLE_WRITE_LABEL,
+    CONSOLE_WRITE_SYNC_LABEL, CONSOLE_WRITE_VT_LABEL, CONSOLE_WRITE_VT_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, syscall, Error, Result};
@@ -165,11 +165,18 @@ fn handle_incoming<B: ConsoleBackend>(
     } else if index == VT_COUNT {
         // Control endpoint — VT lifecycle commands from vtmgr.
         match msg.tag.label {
+            CONSOLE_SWITCH_VT_LABEL => {
+                // Atomic VT switch: words[0] = old_vt, words[1] = new_vt.
+                let new_vt = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
+                console.switch_vt(new_vt);
+            }
             CONSOLE_ACTIVATE_LABEL => {
+                // Backward compat: legacy two-message protocol.
                 let vt_index = if msg.tag.words >= 1 { msg.words[0] } else { 0 };
                 console.switch_vt(vt_index);
             }
             CONSOLE_DEACTIVATE_LABEL => {
+                // Backward compat: legacy two-message protocol.
                 let vt_index = if msg.tag.words >= 1 { msg.words[0] } else { 0 };
                 console.deactivate_vt(vt_index);
             }

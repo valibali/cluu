@@ -1,8 +1,12 @@
 //! Framebuffer console renderer.
 //!
-//! This module owns the glyph grid, cursor state, and raw framebuffer writes.
-//! Keeping it isolated makes it possible to swap the renderer later (e.g., to
-//! a GPU-backed device) without touching registry or IPC handling.
+//! Each VT is represented by a self-contained `VtScreen` that owns its cell
+//! grid, cursor state, ANSI parser, and colors. Writes to any VT update only
+//! that VtScreen's in-memory cell grid — no framebuffer access needed.
+//!
+//! The `Console` struct manages the framebuffer backend and renders the active
+//! VtScreen to the display. This eliminates the context-switch trick where
+//! inactive VT writes temporarily swapped state into "active registers".
 
 extern crate alloc;
 
@@ -56,72 +60,14 @@ enum EscState {
     Csi,
 }
 
-/// Per-VT state that can be saved/restored on VT switch.
+/// Self-contained virtual terminal screen.
 ///
-/// This uses the "register context switch" pattern: the Console struct
-/// holds the "active registers" (its own fields). On VT switch, we swap
-/// state between the active registers and a VtBuffer using mem::swap.
-struct VtBuffer {
-    cursor_x: usize,
-    cursor_y: usize,
-    cursor_visible: bool,
-    blink_enabled: bool,
-    cells: Vec<u8>,
-    fg_cells: Vec<u32>,
-    bg_cells: Vec<u32>,
-    current_fg: u32,
-    current_bg: u32,
-    last_cursor_x: usize,
-    last_cursor_y: usize,
-    chars_since_cursor_redraw: usize,
-    dirty_cells: Vec<(usize, usize)>,
-    esc_state: EscState,
-    esc_params: [u16; 4],
-    esc_param_count: usize,
-    esc_current_param: u16,
-}
-
-impl VtBuffer {
-    fn new(cols: usize, rows: usize) -> Self {
-        Self {
-            cursor_x: 0,
-            cursor_y: 0,
-            cursor_visible: true,
-            blink_enabled: true,
-            cells: alloc::vec![b' '; cols * rows],
-            fg_cells: alloc::vec![COLOR_FG; cols * rows],
-            bg_cells: alloc::vec![COLOR_BG; cols * rows],
-            current_fg: COLOR_FG,
-            current_bg: COLOR_BG,
-            last_cursor_x: 0,
-            last_cursor_y: 0,
-            chars_since_cursor_redraw: 0,
-            dirty_cells: Vec::new(),
-            esc_state: EscState::Normal,
-            esc_params: [0; 4],
-            esc_param_count: 0,
-            esc_current_param: 0,
-        }
-    }
-}
-
-/// Console renderer backed by a pluggable pixel backend.
-///
-/// Multi-VT support: the Console holds per-VT state in `vt_buffers`.
-/// The "active registers" (cursor_x, cells, etc.) always contain the
-/// state for `active_vt`. On VT switch, state is saved to the old
-/// VtBuffer and loaded from the new one using mem::swap.
-pub struct Console<B: ConsoleBackend> {
-    backend: B,
-    width: usize,
-    height: usize,
-    /// Framebuffer physical address (for serving to apps).
-    fb_phys: u64,
-    /// Framebuffer size in bytes.
-    fb_size: u64,
+/// Each VtScreen owns its cell grid, cursor state, ANSI parser, and colors.
+/// It can process writes independently of other VTs and without touching the
+/// framebuffer — it only updates the in-memory cell grid.
+struct VtScreen {
     cols: usize,
     rows: usize,
-    // ── Active VT registers (per-VT state) ──
     cursor_x: usize,
     cursor_y: usize,
     cursor_visible: bool,
@@ -131,37 +77,18 @@ pub struct Console<B: ConsoleBackend> {
     bg_cells: Vec<u32>,
     current_fg: u32,
     current_bg: u32,
-    last_cursor_x: usize,
-    last_cursor_y: usize,
-    chars_since_cursor_redraw: usize,
     dirty_cells: Vec<(usize, usize)>,
+    /// Set when a full repaint is needed (e.g., after scroll or clear).
+    needs_repaint: bool,
     esc_state: EscState,
     esc_params: [u16; 4],
     esc_param_count: usize,
     esc_current_param: u16,
-    // ── Multi-VT state ──
-    /// Whether this console is the active (visible) VT.
-    active: bool,
-    /// Currently loaded VT index (matches the active registers).
-    active_vt: usize,
-    /// Storage for inactive VT state. VT 0 starts as None because its
-    /// state lives in the "active registers" initially.
-    vt_buffers: [Option<VtBuffer>; VT_COUNT],
 }
 
-impl<B: ConsoleBackend> Console<B> {
-    /// Create a new console renderer and clear its contents.
-    pub fn new(backend: B, fb_phys: u64, fb_size: u64) -> Self {
-        let width = backend.width();
-        let height = backend.height();
-        let cols = width / GLYPH_W;
-        let rows = height / GLYPH_H;
-        let mut console = Self {
-            backend,
-            width,
-            height,
-            fb_phys,
-            fb_size,
+impl VtScreen {
+    fn new(cols: usize, rows: usize) -> Self {
+        Self {
             cols,
             rows,
             cursor_x: 0,
@@ -173,345 +100,47 @@ impl<B: ConsoleBackend> Console<B> {
             bg_cells: alloc::vec![COLOR_BG; cols * rows],
             current_fg: COLOR_FG,
             current_bg: COLOR_BG,
-            last_cursor_x: 0,
-            last_cursor_y: 0,
-            chars_since_cursor_redraw: 0,
             dirty_cells: Vec::new(),
+            needs_repaint: false,
             esc_state: EscState::Normal,
             esc_params: [0; 4],
             esc_param_count: 0,
             esc_current_param: 0,
-            active: true,
-            active_vt: 0,
-            vt_buffers: [None, None, None, None],
-        };
-        console.clear();
-        console
+        }
     }
 
-    /// Set the initial active state (called once at startup from boot params).
-    pub fn set_active(&mut self, active: bool) {
-        self.active = active;
-    }
-
-    /// Mark this console as the active (visible) VT and repaint to FB.
-    pub fn activate(&mut self) {
-        self.active = true;
-        self.repaint_all();
-        self.backend.flush();
-    }
-
-    /// Mark this console as inactive. Subsequent flush/tick calls become no-ops.
-    pub fn deactivate(&mut self) {
-        self.active = false;
-    }
-
-    /// Whether this console is the active VT.
-    #[inline]
-    pub fn is_active(&self) -> bool {
-        self.active
-    }
-
-    // ── Multi-VT methods ──────────────────────────────────────────────
-
-    /// Create a new VT buffer at the given index.
+    /// Process a byte stream, updating cells, cursor, and parser state.
     ///
-    /// Called by vtmgr via CONSOLE_CREATE_VT_LABEL. VT 0 always exists
-    /// (created at boot), so this is a no-op for index 0.
-    pub fn create_vt(&mut self, vt_index: usize) {
-        if vt_index == 0 || vt_index >= VT_COUNT {
-            return;
-        }
-        if self.vt_buffers[vt_index].is_some() {
-            return; // already exists
-        }
-        self.vt_buffers[vt_index] = Some(VtBuffer::new(self.cols, self.rows));
-    }
-
-    /// Switch the active VT display.
-    ///
-    /// Saves current register state to `vt_buffers[old]`, loads state from
-    /// `vt_buffers[new_vt]`, and repaints.
-    pub fn switch_vt(&mut self, new_vt: usize) {
-        if new_vt >= VT_COUNT || new_vt == self.active_vt {
-            return;
-        }
-        // Ensure the target VT exists.
-        if new_vt != 0 && self.vt_buffers[new_vt].is_none() {
-            return;
-        }
-
-        // Save current registers → old VtBuffer.
-        self.save_vt_state(self.active_vt);
-
-        // Load new VtBuffer → current registers.
-        self.load_vt_state(new_vt);
-
-        self.active_vt = new_vt;
-        self.active = true;
-        self.repaint_all();
-        self.backend.flush();
-    }
-
-    /// Deactivate a specific VT (called by vtmgr before switching).
-    pub fn deactivate_vt(&mut self, _vt_index: usize) {
-        // Currently we only deactivate the active VT.
-        self.active = false;
-    }
-
-    /// Write data to a specific VT index.
-    ///
-    /// If the target is the active VT, writes directly. Otherwise,
-    /// temporarily context-switches to the target VT, writes, and
-    /// switches back.
-    pub fn write_to_vt(&mut self, vt_index: usize, payload: &[u8]) {
-        if vt_index >= VT_COUNT {
-            return;
-        }
-        if vt_index == self.active_vt {
-            // Fast path: write directly to active registers.
-            self.write_utf8_bytes(payload);
-            return;
-        }
-        // Ensure target VT exists.
-        if vt_index != 0 && self.vt_buffers[vt_index].is_none() {
-            return;
-        }
-        // Context switch: save active, load target, write, restore.
-        let saved_active = self.active;
-        let saved_vt = self.active_vt;
-
-        self.save_vt_state(saved_vt);
-        self.load_vt_state(vt_index);
-        self.active_vt = vt_index;
-        self.active = false; // Don't render to backend for non-visible VT.
-
-        self.write_utf8_bytes(payload);
-
-        // Restore original VT.
-        self.save_vt_state(vt_index);
-        self.load_vt_state(saved_vt);
-        self.active_vt = saved_vt;
-        self.active = saved_active;
-    }
-
-    /// Save current register state into a VtBuffer.
-    fn save_vt_state(&mut self, vt_index: usize) {
-        if vt_index >= VT_COUNT {
-            return;
-        }
-        let buf =
-            self.vt_buffers[vt_index].get_or_insert_with(|| VtBuffer::new(self.cols, self.rows));
-        core::mem::swap(&mut self.cursor_x, &mut buf.cursor_x);
-        core::mem::swap(&mut self.cursor_y, &mut buf.cursor_y);
-        core::mem::swap(&mut self.cursor_visible, &mut buf.cursor_visible);
-        core::mem::swap(&mut self.blink_enabled, &mut buf.blink_enabled);
-        core::mem::swap(&mut self.cells, &mut buf.cells);
-        core::mem::swap(&mut self.fg_cells, &mut buf.fg_cells);
-        core::mem::swap(&mut self.bg_cells, &mut buf.bg_cells);
-        core::mem::swap(&mut self.current_fg, &mut buf.current_fg);
-        core::mem::swap(&mut self.current_bg, &mut buf.current_bg);
-        core::mem::swap(&mut self.last_cursor_x, &mut buf.last_cursor_x);
-        core::mem::swap(&mut self.last_cursor_y, &mut buf.last_cursor_y);
-        core::mem::swap(
-            &mut self.chars_since_cursor_redraw,
-            &mut buf.chars_since_cursor_redraw,
-        );
-        core::mem::swap(&mut self.dirty_cells, &mut buf.dirty_cells);
-        core::mem::swap(&mut self.esc_state, &mut buf.esc_state);
-        core::mem::swap(&mut self.esc_params, &mut buf.esc_params);
-        core::mem::swap(&mut self.esc_param_count, &mut buf.esc_param_count);
-        core::mem::swap(&mut self.esc_current_param, &mut buf.esc_current_param);
-    }
-
-    /// Load state from a VtBuffer into the active registers.
-    fn load_vt_state(&mut self, vt_index: usize) {
-        if vt_index >= VT_COUNT {
-            return;
-        }
-        let buf =
-            self.vt_buffers[vt_index].get_or_insert_with(|| VtBuffer::new(self.cols, self.rows));
-        core::mem::swap(&mut self.cursor_x, &mut buf.cursor_x);
-        core::mem::swap(&mut self.cursor_y, &mut buf.cursor_y);
-        core::mem::swap(&mut self.cursor_visible, &mut buf.cursor_visible);
-        core::mem::swap(&mut self.blink_enabled, &mut buf.blink_enabled);
-        core::mem::swap(&mut self.cells, &mut buf.cells);
-        core::mem::swap(&mut self.fg_cells, &mut buf.fg_cells);
-        core::mem::swap(&mut self.bg_cells, &mut buf.bg_cells);
-        core::mem::swap(&mut self.current_fg, &mut buf.current_fg);
-        core::mem::swap(&mut self.current_bg, &mut buf.current_bg);
-        core::mem::swap(&mut self.last_cursor_x, &mut buf.last_cursor_x);
-        core::mem::swap(&mut self.last_cursor_y, &mut buf.last_cursor_y);
-        core::mem::swap(
-            &mut self.chars_since_cursor_redraw,
-            &mut buf.chars_since_cursor_redraw,
-        );
-        core::mem::swap(&mut self.dirty_cells, &mut buf.dirty_cells);
-        core::mem::swap(&mut self.esc_state, &mut buf.esc_state);
-        core::mem::swap(&mut self.esc_params, &mut buf.esc_params);
-        core::mem::swap(&mut self.esc_param_count, &mut buf.esc_param_count);
-        core::mem::swap(&mut self.esc_current_param, &mut buf.esc_current_param);
-    }
-
-    /// Handle a console IPC message and apply the requested action.
-    pub fn handle_message(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
-        match msg.tag.label {
-            CONSOLE_WRITE_LABEL => {
-                self.write_utf8_bytes(payload);
-            }
-            CONSOLE_WRITE_SYNC_LABEL => {
-                // Sync write: render, then reply
-                self.write_utf8_bytes(payload);
-                if let Some(reply_token) = extract_reply_id(msg) {
-                    let reply_msg = Message::new(CONSOLE_WRITE_SYNC_LABEL, [0; 6], 0);
-                    let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                }
-            }
-            CONSOLE_CLEAR_LABEL => {
-                self.clear();
-            }
-            CONSOLE_CURSOR_LABEL => {
-                self.cursor_x = msg.words[0].min(self.cols.saturating_sub(1));
-                self.cursor_y = msg.words[1].min(self.rows.saturating_sub(1));
-                self.redraw_cursor();
-            }
-            CONSOLE_BLINK_LABEL => {
-                self.blink_enabled = msg.words[0] != 0;
-                if !self.blink_enabled {
-                    self.cursor_visible = true;
-                }
-                self.redraw_cursor();
-            }
-            CONSOLE_FB_INFO_LABEL => {
-                if let Some(reply_token) = extract_reply_id(msg) {
-                    let reply_msg = Message::new(
-                        CONSOLE_FB_INFO_LABEL,
-                        [
-                            self.fb_phys as usize,
-                            self.fb_size as usize,
-                            self.width,
-                            self.height,
-                            self.backend.pitch(),
-                            4, // bytes per pixel (BGRA32)
-                        ],
-                        6,
-                    );
-                    let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Advance the blink timer; called on IPC timeout.
-    /// Returns true if cursor visibility changed.
-    pub fn tick(&mut self) -> bool {
-        if !self.active || !self.blink_enabled {
-            return false;
-        }
-        self.cursor_visible = !self.cursor_visible;
-        self.redraw_cursor();
-        true
-    }
-
-    /// Flush any buffered writes to the display.
-    ///
-    /// For double-buffered backends, this copies the dirty region to the frontbuffer.
-    /// Should be called after rendering operations and periodically for cursor blink.
-    /// No-op when this console is inactive (another VT is visible).
-    #[inline]
-    pub fn flush(&mut self) {
-        if !self.active {
-            return;
-        }
-        self.backend.flush();
-    }
-
-    /// Check if the backend has pending changes to flush.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn is_dirty(&self) -> bool {
-        self.backend.is_dirty()
-    }
-
-    /// Repaint the entire grid to the framebuffer from cell data.
-    ///
-    /// Used after VT activation to restore the full display from the
-    /// in-memory cell buffer without clearing the grid state.
-    fn repaint_all(&mut self) {
-        self.backend
-            .fill_rect(0, 0, self.width, self.height, COLOR_BG);
-        for y in 0..self.rows {
-            for x in 0..self.cols {
-                let idx = y * self.cols + x;
-                let ch = self.cells[idx];
-                let fg = self.fg_cells[idx];
-                let bg = self.bg_cells[idx];
-                if ch != b' ' || bg != COLOR_BG {
-                    self.draw_glyph(x, y, ch, fg, bg);
-                }
-            }
-        }
-        self.redraw_cursor();
-    }
-
-    /// Reset the grid contents and repaint the framebuffer to a clean state.
-    /// Optimized to use bulk fill operation instead of per-pixel writes.
-    fn clear(&mut self) {
-        self.cells.fill(b' ');
-        self.fg_cells.fill(COLOR_FG);
-        self.bg_cells.fill(COLOR_BG);
-        self.current_fg = COLOR_FG;
-        self.current_bg = COLOR_BG;
-        self.dirty_cells.clear();
-        // Use bulk fill_rect for much faster clearing
-        self.backend
-            .fill_rect(0, 0, self.width, self.height, COLOR_BG);
-        self.cursor_x = 0;
-        self.cursor_y = 0;
-        self.last_cursor_x = self.cursor_x;
-        self.last_cursor_y = self.cursor_y;
-        self.redraw_cursor();
-    }
-
-    /// Write a byte stream into the grid, decoding UTF-8 and mapping
-    /// Unicode codepoints to CP437 glyphs.
-    fn write_utf8_bytes(&mut self, bytes: &[u8]) {
-        // Clear dirty cells at start of new message batch
+    /// This only modifies the in-memory cell grid — no framebuffer writes.
+    /// The caller (Console) is responsible for rendering after this returns.
+    fn write_bytes(&mut self, bytes: &[u8]) {
         self.dirty_cells.clear();
 
         let mut i = 0;
         while i < bytes.len() {
             let b = bytes[i];
 
-            // 1-byte (ASCII): 0xxxxxxx
             if b < 0x80 {
                 self.put_char(b);
                 i += 1;
                 continue;
             }
 
-            // Decode multi-byte UTF-8 sequence
             let (codepoint, seq_len) = if b & 0xE0 == 0xC0 && i + 1 < bytes.len() {
-                // 2-byte: 110xxxxx 10xxxxxx
                 let cp = ((b as u32 & 0x1F) << 6) | (bytes[i + 1] as u32 & 0x3F);
                 (cp, 2)
             } else if b & 0xF0 == 0xE0 && i + 2 < bytes.len() {
-                // 3-byte: 1110xxxx 10xxxxxx 10xxxxxx
                 let cp = ((b as u32 & 0x0F) << 12)
                     | ((bytes[i + 1] as u32 & 0x3F) << 6)
                     | (bytes[i + 2] as u32 & 0x3F);
                 (cp, 3)
             } else if b & 0xF8 == 0xF0 && i + 3 < bytes.len() {
-                // 4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
                 let cp = ((b as u32 & 0x07) << 18)
                     | ((bytes[i + 1] as u32 & 0x3F) << 12)
                     | ((bytes[i + 2] as u32 & 0x3F) << 6)
                     | (bytes[i + 3] as u32 & 0x3F);
                 (cp, 4)
             } else {
-                // Invalid lead byte or truncated — skip
                 self.put_char(b'?');
                 i += 1;
                 continue;
@@ -520,105 +149,25 @@ impl<B: ConsoleBackend> Console<B> {
             self.put_char(unicode_to_cp437(codepoint));
             i += seq_len;
         }
-
-        // Flush all dirty cells at once (batching)
-        self.flush_dirty_cells();
-
-        // Redraw cursor after batching
-        self.redraw_cursor();
-        self.chars_since_cursor_redraw = 0;
     }
 
-    /// Advance to the next line, scrolling when on the last row.
-    fn newline(&mut self) {
-        self.cursor_x = 0;
-        if self.cursor_y + 1 >= self.rows {
-            self.scroll_up();
-        } else {
-            self.cursor_y += 1;
-        }
-    }
-
-    /// Scroll the grid up by one row and redraw the full buffer.
-    /// Optimized to use framebuffer memory copying instead of full redraw.
-    fn scroll_up(&mut self) {
-        if self.rows == 0 || self.cols == 0 {
-            return;
-        }
-        let w = self.cols;
-
-        // CRITICAL: Flush all dirty cells BEFORE scrolling!
-        // Otherwise we'll copy from a framebuffer that doesn't have the latest content yet.
-        self.flush_dirty_cells();
-
-        // Move rows 1..end up by one row in cell buffer.
-        self.cells.copy_within(w.., 0);
-        self.fg_cells.copy_within(w.., 0);
-        self.bg_cells.copy_within(w.., 0);
-
-        // Clear last row in cell buffer.
-        let last = (self.rows - 1) * w;
-        self.cells[last..last + w].fill(b' ');
-        self.fg_cells[last..last + w].fill(self.current_fg);
-        self.bg_cells[last..last + w].fill(self.current_bg);
-
-        // Clear dirty_cells to avoid stale entries after scrolling
-        // (cells have moved, so old dirty positions are invalid)
-        // New content written after scrolling will be marked as dirty normally
+    /// Reset all cells and cursor to defaults.
+    fn clear(&mut self) {
+        self.cells.fill(b' ');
+        self.fg_cells.fill(COLOR_FG);
+        self.bg_cells.fill(COLOR_BG);
+        self.current_fg = COLOR_FG;
+        self.current_bg = COLOR_BG;
         self.dirty_cells.clear();
-
-        // Optimized scroll: copy framebuffer memory instead of redrawing everything
-        // Copy all glyph rows from row 1 to row 0 (scroll up by one text row = GLYPH_H pixels)
-        // For scrolling, src_y (GLYPH_H) > dst_y (0) and regions don't overlap, so copy forwards
-        let scroll_height = (self.rows - 1) * GLYPH_H;
-        if scroll_height > 0 {
-            self.backend
-                .copy_rect(0, GLYPH_H, 0, 0, self.width, scroll_height);
-        }
-
-        // Clear the last row's framebuffer area
-        let last_row_y = self.rows - 1;
-        let last_row_px_y = last_row_y * GLYPH_H;
-        self.backend
-            .fill_rect(0, last_row_px_y, self.width, GLYPH_H, COLOR_BG);
-
-        // Render the last row immediately (it's all spaces after clearing)
-        // This ensures the framebuffer is in a consistent state
-        for x in 0..self.cols {
-            let ch = self.get_cell(x, last_row_y);
-            let (fg, bg) = self.get_cell_colors(x, last_row_y);
-            self.draw_glyph(x, last_row_y, ch, fg, bg);
-        }
-
-        // Cursor stays on last row after scroll.
-        self.cursor_y = self.rows - 1;
-        // Update last cursor position to avoid cursor artifacts
-        self.last_cursor_x = self.cursor_x;
-        self.last_cursor_y = self.cursor_y;
-        // Note: redraw_cursor() will be called at the end of write_utf8_bytes()
-        // after all dirty cells are flushed, ensuring correct rendering order
+        self.cursor_x = 0;
+        self.cursor_y = 0;
+        self.needs_repaint = true;
     }
 
-    /// Redraw every cell in the grid, then update the cursor overlay.
-    #[allow(dead_code)]
-    fn redraw_all(&mut self) {
-        for y in 0..self.rows {
-            for x in 0..self.cols {
-                let ch = self.get_cell(x, y);
-                let (fg, bg) = self.get_cell_colors(x, y);
-                self.draw_glyph(x, y, ch, fg, bg);
-            }
-        }
-        self.redraw_cursor();
-    }
-
-    /// Render a single character at the current cursor position,
-    /// routing through the ANSI escape sequence state machine.
     fn put_char(&mut self, ch: u8) {
         match self.esc_state {
             EscState::Normal => match ch {
                 0x1B => {
-                    // ESC — begin escape sequence
                     self.esc_state = EscState::Escape;
                 }
                 b'\n' => self.newline(),
@@ -626,7 +175,6 @@ impl<B: ConsoleBackend> Console<B> {
                     self.cursor_x = 0;
                 }
                 0x08 => {
-                    // Backspace: move left; if at column 0, go to previous line end.
                     if self.cursor_x > 0 {
                         self.cursor_x -= 1;
                     } else if self.cursor_y > 0 {
@@ -657,41 +205,34 @@ impl<B: ConsoleBackend> Console<B> {
             },
             EscState::Escape => match ch {
                 b'[' => {
-                    // CSI introducer
                     self.esc_state = EscState::Csi;
                     self.esc_params = [0; 4];
                     self.esc_param_count = 0;
                     self.esc_current_param = 0;
                 }
                 _ => {
-                    // Unknown escape sequence — reset
                     self.esc_state = EscState::Normal;
                 }
             },
             EscState::Csi => {
                 if ch.is_ascii_digit() {
-                    // Accumulate parameter digit
                     self.esc_current_param = self
                         .esc_current_param
                         .saturating_mul(10)
                         .saturating_add((ch - b'0') as u16);
                 } else if ch == b';' {
-                    // Parameter separator
                     if self.esc_param_count < self.esc_params.len() {
                         self.esc_params[self.esc_param_count] = self.esc_current_param;
                         self.esc_param_count += 1;
                     }
                     self.esc_current_param = 0;
                 } else if ch == b'~' {
-                    // Tilde-terminated sequences (e.g., \e[3~)
                     if self.esc_param_count < self.esc_params.len() {
                         self.esc_params[self.esc_param_count] = self.esc_current_param;
                         self.esc_param_count += 1;
                     }
-                    // Currently no tilde sequences needed — just reset
                     self.esc_state = EscState::Normal;
                 } else if (0x40..=0x7E).contains(&ch) {
-                    // Final byte — dispatch CSI sequence
                     if self.esc_param_count < self.esc_params.len() {
                         self.esc_params[self.esc_param_count] = self.esc_current_param;
                         self.esc_param_count += 1;
@@ -699,23 +240,12 @@ impl<B: ConsoleBackend> Console<B> {
                     self.dispatch_csi(ch);
                     self.esc_state = EscState::Normal;
                 } else {
-                    // Invalid character in CSI — abort
                     self.esc_state = EscState::Normal;
                 }
             }
         }
     }
 
-    /// Dispatch a CSI (Control Sequence Introducer) escape sequence.
-    ///
-    /// Supports the minimum set needed for MicroPython REPL:
-    /// - A (CUU): cursor up
-    /// - B (CUD): cursor down
-    /// - C (CUF): cursor forward (right)
-    /// - D (CUB): cursor back (left)
-    /// - H (CUP): cursor position (row;col)
-    /// - J (ED):  erase display (2J = clear screen)
-    /// - K (EL):  erase in line (0K = cursor to end)
     fn dispatch_csi(&mut self, cmd: u8) {
         let p0 = if self.esc_param_count > 0 {
             self.esc_params[0]
@@ -730,46 +260,36 @@ impl<B: ConsoleBackend> Console<B> {
 
         match cmd {
             b'A' => {
-                // CUU — cursor up n (default 1)
                 let n = if p0 == 0 { 1 } else { p0 as usize };
                 self.cursor_y = self.cursor_y.saturating_sub(n);
             }
             b'B' => {
-                // CUD — cursor down n (default 1)
                 let n = if p0 == 0 { 1 } else { p0 as usize };
                 self.cursor_y = (self.cursor_y + n).min(self.rows.saturating_sub(1));
             }
             b'C' => {
-                // CUF — cursor forward n (default 1)
                 let n = if p0 == 0 { 1 } else { p0 as usize };
                 self.cursor_x = (self.cursor_x + n).min(self.cols.saturating_sub(1));
             }
             b'D' => {
-                // CUB — cursor back n (default 1)
                 let n = if p0 == 0 { 1 } else { p0 as usize };
                 self.cursor_x = self.cursor_x.saturating_sub(n);
             }
             b'H' => {
-                // CUP — cursor position (row;col), 1-based
                 let row = if p0 == 0 { 1 } else { p0 as usize };
                 let col = if p1 == 0 { 1 } else { p1 as usize };
                 self.cursor_y = (row - 1).min(self.rows.saturating_sub(1));
                 self.cursor_x = (col - 1).min(self.cols.saturating_sub(1));
             }
             b'J' => {
-                // ED — erase display
                 match p0 {
                     2 => {
-                        // Clear entire screen
                         self.clear();
                     }
                     0 => {
-                        // Clear from cursor to end of screen
-                        // Clear rest of current line
                         for x in self.cursor_x..self.cols {
                             self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
                         }
-                        // Clear all lines below
                         for y in (self.cursor_y + 1)..self.rows {
                             for x in 0..self.cols {
                                 self.set_cell(x, y, b' ', self.current_fg, self.current_bg);
@@ -780,22 +300,18 @@ impl<B: ConsoleBackend> Console<B> {
                 }
             }
             b'K' => {
-                // EL — erase in line
                 match p0 {
                     0 => {
-                        // Clear from cursor to end of line
                         for x in self.cursor_x..self.cols {
                             self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
                         }
                     }
                     1 => {
-                        // Clear from start of line to cursor
                         for x in 0..=self.cursor_x.min(self.cols.saturating_sub(1)) {
                             self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
                         }
                     }
                     2 => {
-                        // Clear entire line
                         for x in 0..self.cols {
                             self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
                         }
@@ -804,7 +320,6 @@ impl<B: ConsoleBackend> Console<B> {
                 }
             }
             b'm' => {
-                // SGR — select graphic rendition (colors + reset).
                 if self.esc_param_count == 0 {
                     self.current_fg = COLOR_FG;
                     self.current_bg = COLOR_BG;
@@ -826,14 +341,45 @@ impl<B: ConsoleBackend> Console<B> {
                     }
                 }
             }
-            _ => {
-                // Unknown CSI sequence — ignore
-            }
+            _ => {}
         }
     }
 
-    /// Update one grid cell and mark it as dirty (batching).
-    /// The cell will be rendered when flush_dirty_cells() is called.
+    fn newline(&mut self) {
+        self.cursor_x = 0;
+        if self.cursor_y + 1 >= self.rows {
+            self.scroll_up();
+        } else {
+            self.cursor_y += 1;
+        }
+    }
+
+    /// Scroll the grid up by one row (cell data only, no framebuffer).
+    fn scroll_up(&mut self) {
+        if self.rows == 0 || self.cols == 0 {
+            return;
+        }
+        let w = self.cols;
+
+        // Shift rows 1..end up by one row.
+        self.cells.copy_within(w.., 0);
+        self.fg_cells.copy_within(w.., 0);
+        self.bg_cells.copy_within(w.., 0);
+
+        // Clear last row.
+        let last = (self.rows - 1) * w;
+        self.cells[last..last + w].fill(b' ');
+        self.fg_cells[last..last + w].fill(self.current_fg);
+        self.bg_cells[last..last + w].fill(self.current_bg);
+
+        // Previous dirty positions are invalid after the shift.
+        self.dirty_cells.clear();
+        self.needs_repaint = true;
+
+        self.cursor_y = self.rows - 1;
+    }
+
+    /// Update one grid cell and mark it as dirty.
     fn set_cell(&mut self, x: usize, y: usize, ch: u8, fg: u32, bg: u32) {
         if x >= self.cols || y >= self.rows {
             return;
@@ -843,108 +389,351 @@ impl<B: ConsoleBackend> Console<B> {
             self.cells[idx] = ch;
             self.fg_cells[idx] = fg;
             self.bg_cells[idx] = bg;
-            // Mark cell as dirty (avoid duplicates)
             let pos = (x, y);
             if !self.dirty_cells.contains(&pos) {
                 self.dirty_cells.push(pos);
             }
         }
     }
+}
 
-    /// Render all dirty cells at once (batching optimization).
-    fn flush_dirty_cells(&mut self) {
-        // Collect dirty cells first to avoid borrow checker issues
-        let dirty = self.dirty_cells.clone();
-        self.dirty_cells.clear();
+/// Console renderer backed by a pluggable pixel backend.
+///
+/// Each VT is a self-contained VtScreen. Writes to any VT update only
+/// that VtScreen's cell grid. The renderer reads from vt_screens[active_vt]
+/// and renders to the framebuffer backend.
+pub struct Console<B: ConsoleBackend> {
+    backend: B,
+    width: usize,
+    height: usize,
+    /// Framebuffer physical address (for serving to apps).
+    fb_phys: u64,
+    /// Framebuffer size in bytes.
+    fb_size: u64,
+    cols: usize,
+    rows: usize,
+    /// Whether this console is the active (visible) VT.
+    active: bool,
+    /// Which VT is currently displayed.
+    active_vt: usize,
+    /// Per-VT screen state. All VTs are pre-created.
+    vt_screens: [VtScreen; VT_COUNT],
+    // ── Rendering state (framebuffer cursor tracking) ──
+    last_cursor_x: usize,
+    last_cursor_y: usize,
+}
 
-        for (x, y) in dirty {
-            let ch = self.get_cell(x, y);
-            let (fg, bg) = self.get_cell_colors(x, y);
-            self.draw_glyph(x, y, ch, fg, bg);
+impl<B: ConsoleBackend> Console<B> {
+    /// Create a new console renderer and clear its contents.
+    pub fn new(backend: B, fb_phys: u64, fb_size: u64) -> Self {
+        let width = backend.width();
+        let height = backend.height();
+        let cols = width / GLYPH_W;
+        let rows = height / GLYPH_H;
+        let mut console = Self {
+            backend,
+            width,
+            height,
+            fb_phys,
+            fb_size,
+            cols,
+            rows,
+            active: true,
+            active_vt: 0,
+            vt_screens: [
+                VtScreen::new(cols, rows),
+                VtScreen::new(cols, rows),
+                VtScreen::new(cols, rows),
+                VtScreen::new(cols, rows),
+            ],
+            last_cursor_x: 0,
+            last_cursor_y: 0,
+        };
+        console.repaint_all();
+        console
+    }
+
+    /// Set the initial active state (called once at startup from boot params).
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
+    }
+
+    // ── Multi-VT methods ──────────────────────────────────────────────
+
+    /// Create a new VT buffer at the given index (no-op: all VTs pre-created).
+    pub fn create_vt(&mut self, _vt_index: usize) {}
+
+    /// Switch the active VT display.
+    pub fn switch_vt(&mut self, new_vt: usize) {
+        if new_vt >= VT_COUNT || new_vt == self.active_vt {
+            return;
+        }
+        self.active_vt = new_vt;
+        self.active = true;
+        self.repaint_all();
+        self.vt_screens[new_vt].needs_repaint = false;
+        self.vt_screens[new_vt].dirty_cells.clear();
+        self.backend.flush();
+    }
+
+    /// Deactivate a specific VT (called by vtmgr before switching).
+    pub fn deactivate_vt(&mut self, _vt_index: usize) {
+        self.active = false;
+    }
+
+    /// Write data to a specific VT index.
+    ///
+    /// The VtScreen processes the bytes independently. If this is the active
+    /// VT, the changes are rendered to the framebuffer.
+    pub fn write_to_vt(&mut self, vt_index: usize, payload: &[u8]) {
+        if vt_index >= VT_COUNT {
+            return;
+        }
+        self.vt_screens[vt_index].write_bytes(payload);
+        if vt_index == self.active_vt {
+            self.render_active_vt();
         }
     }
 
-    /// Update the cursor overlay by repainting the old and current cells.
-    fn redraw_cursor(&mut self) {
-        // 1) If cursor moved, repaint the old cursor cell to erase the old cursor block.
-        if self.last_cursor_x != self.cursor_x || self.last_cursor_y != self.cursor_y {
-            let old_ch = self.get_cell(self.last_cursor_x, self.last_cursor_y);
-            let (old_fg, old_bg) = self.get_cell_colors(self.last_cursor_x, self.last_cursor_y);
-            self.draw_glyph(
-                self.last_cursor_x,
-                self.last_cursor_y,
-                old_ch,
-                old_fg,
-                old_bg,
+    /// Handle a console IPC message and apply the requested action.
+    pub fn handle_message(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+        match msg.tag.label {
+            CONSOLE_WRITE_LABEL => {
+                let vt = self.active_vt;
+                self.vt_screens[vt].write_bytes(payload);
+                if self.active {
+                    self.render_active_vt();
+                }
+            }
+            CONSOLE_WRITE_SYNC_LABEL => {
+                let vt = self.active_vt;
+                self.vt_screens[vt].write_bytes(payload);
+                if self.active {
+                    self.render_active_vt();
+                }
+                if let Some(reply_token) = extract_reply_id(msg) {
+                    let reply_msg = Message::new(CONSOLE_WRITE_SYNC_LABEL, [0; 6], 0);
+                    let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            }
+            CONSOLE_CLEAR_LABEL => {
+                let vt = self.active_vt;
+                self.vt_screens[vt].clear();
+                if self.active {
+                    self.render_active_vt();
+                }
+            }
+            CONSOLE_CURSOR_LABEL => {
+                let vt = self.active_vt;
+                let cols = self.cols;
+                let rows = self.rows;
+                self.vt_screens[vt].cursor_x = msg.words[0].min(cols.saturating_sub(1));
+                self.vt_screens[vt].cursor_y = msg.words[1].min(rows.saturating_sub(1));
+                if self.active {
+                    self.redraw_cursor();
+                }
+            }
+            CONSOLE_BLINK_LABEL => {
+                let vt = self.active_vt;
+                self.vt_screens[vt].blink_enabled = msg.words[0] != 0;
+                if !self.vt_screens[vt].blink_enabled {
+                    self.vt_screens[vt].cursor_visible = true;
+                }
+                if self.active {
+                    self.redraw_cursor();
+                }
+            }
+            CONSOLE_FB_INFO_LABEL => {
+                if let Some(reply_token) = extract_reply_id(msg) {
+                    let reply_msg = Message::new(
+                        CONSOLE_FB_INFO_LABEL,
+                        [
+                            self.fb_phys as usize,
+                            self.fb_size as usize,
+                            self.width,
+                            self.height,
+                            self.backend.pitch(),
+                            4, // bytes per pixel (BGRA32)
+                        ],
+                        6,
+                    );
+                    let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Advance the blink timer; called on IPC timeout.
+    /// Returns true if cursor visibility changed.
+    pub fn tick(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        let vt = self.active_vt;
+        if !self.vt_screens[vt].blink_enabled {
+            return false;
+        }
+        self.vt_screens[vt].cursor_visible = !self.vt_screens[vt].cursor_visible;
+        self.redraw_cursor();
+        true
+    }
+
+    /// Flush any buffered writes to the display.
+    ///
+    /// For double-buffered backends, this copies the dirty region to the frontbuffer.
+    /// Should be called after rendering operations and periodically for cursor blink.
+    /// No-op when this console is inactive (another VT is visible).
+    #[inline]
+    pub fn flush(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.backend.flush();
+    }
+
+    /// Check if the backend has pending changes to flush.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn is_dirty(&self) -> bool {
+        self.backend.is_dirty()
+    }
+
+    // ── Private rendering methods ──────────────────────────────────────
+
+    /// Render pending changes from the active VtScreen to the framebuffer.
+    fn render_active_vt(&mut self) {
+        if !self.active {
+            return;
+        }
+        let vt = self.active_vt;
+        if self.vt_screens[vt].needs_repaint {
+            self.repaint_all();
+            self.vt_screens[vt].needs_repaint = false;
+            self.vt_screens[vt].dirty_cells.clear();
+        } else {
+            self.flush_dirty_cells();
+            self.redraw_cursor();
+        }
+    }
+
+    /// Repaint the entire grid from the active VtScreen's cell data.
+    fn repaint_all(&mut self) {
+        let vt = self.active_vt;
+        let cols = self.cols;
+        let rows = self.rows;
+        self.backend
+            .fill_rect(0, 0, self.width, self.height, COLOR_BG);
+        for y in 0..rows {
+            for x in 0..cols {
+                let idx = y * cols + x;
+                let ch = self.vt_screens[vt].cells[idx];
+                let fg = self.vt_screens[vt].fg_cells[idx];
+                let bg = self.vt_screens[vt].bg_cells[idx];
+                if ch != b' ' || bg != COLOR_BG {
+                    render_glyph(&mut self.backend, x, y, ch, fg, bg);
+                }
+            }
+        }
+        if self.vt_screens[vt].cursor_visible {
+            render_cursor_block(
+                &mut self.backend,
+                self.vt_screens[vt].cursor_x,
+                self.vt_screens[vt].cursor_y,
             );
         }
+        self.last_cursor_x = self.vt_screens[vt].cursor_x;
+        self.last_cursor_y = self.vt_screens[vt].cursor_y;
+    }
 
-        // 2) Paint the current cell (to clear any old cursor block there too).
-        let ch = self.get_cell(self.cursor_x, self.cursor_y);
-        let (fg, bg) = self.get_cell_colors(self.cursor_x, self.cursor_y);
-        self.draw_glyph(self.cursor_x, self.cursor_y, ch, fg, bg);
+    /// Render dirty cells from the active VtScreen to the framebuffer.
+    fn flush_dirty_cells(&mut self) {
+        let vt = self.active_vt;
+        let cols = self.cols;
+        let dirty = core::mem::take(&mut self.vt_screens[vt].dirty_cells);
+        for &(x, y) in &dirty {
+            let idx = y * cols + x;
+            let ch = self.vt_screens[vt].cells[idx];
+            let fg = self.vt_screens[vt].fg_cells[idx];
+            let bg = self.vt_screens[vt].bg_cells[idx];
+            render_glyph(&mut self.backend, x, y, ch, fg, bg);
+        }
+    }
+
+    /// Update the cursor overlay on the framebuffer.
+    fn redraw_cursor(&mut self) {
+        let vt = self.active_vt;
+        let cols = self.cols;
+        let cx = self.vt_screens[vt].cursor_x;
+        let cy = self.vt_screens[vt].cursor_y;
+
+        // 1) Erase old cursor if it moved.
+        if self.last_cursor_x != cx || self.last_cursor_y != cy {
+            let old_idx = self.last_cursor_y * cols + self.last_cursor_x;
+            if old_idx < self.vt_screens[vt].cells.len() {
+                let ch = self.vt_screens[vt].cells[old_idx];
+                let fg = self.vt_screens[vt].fg_cells[old_idx];
+                let bg = self.vt_screens[vt].bg_cells[old_idx];
+                render_glyph(
+                    &mut self.backend,
+                    self.last_cursor_x,
+                    self.last_cursor_y,
+                    ch,
+                    fg,
+                    bg,
+                );
+            }
+        }
+
+        // 2) Repaint current cell (clears any old cursor block there).
+        let idx = cy * cols + cx;
+        if idx < self.vt_screens[vt].cells.len() {
+            let ch = self.vt_screens[vt].cells[idx];
+            let fg = self.vt_screens[vt].fg_cells[idx];
+            let bg = self.vt_screens[vt].bg_cells[idx];
+            render_glyph(&mut self.backend, cx, cy, ch, fg, bg);
+        }
 
         // 3) Draw cursor block if visible.
-        if self.cursor_visible {
-            self.draw_cursor_block(self.cursor_x, self.cursor_y);
+        if self.vt_screens[vt].cursor_visible {
+            render_cursor_block(&mut self.backend, cx, cy);
         }
 
         // 4) Update last cursor position.
-        self.last_cursor_x = self.cursor_x;
-        self.last_cursor_y = self.cursor_y;
+        self.last_cursor_x = cx;
+        self.last_cursor_y = cy;
     }
+}
 
-    /// Fetch a character from the grid, returning space for out-of-range cells.
-    fn get_cell(&self, x: usize, y: usize) -> u8 {
-        if x >= self.cols || y >= self.rows {
-            return b' ';
+// ── Free rendering helpers ─────────────────────────────────────────────
+
+/// Render a glyph bitmap to the backend at grid position (x, y).
+/// Optimized to use bulk row writes instead of individual pixels.
+fn render_glyph<B: ConsoleBackend>(backend: &mut B, x: usize, y: usize, ch: u8, fg: u32, bg: u32) {
+    let glyph = font_glyph(ch);
+    let px = x * GLYPH_W;
+    let py = y * GLYPH_H;
+
+    let mut row_buffer = [0u32; GLYPH_W];
+
+    for (row, line) in glyph.iter().enumerate() {
+        for (col, pixel) in row_buffer.iter_mut().enumerate().take(GLYPH_W) {
+            let bit = (line >> (7 - col)) & 1;
+            *pixel = if bit != 0 { fg } else { bg };
         }
-        self.cells[y * self.cols + x]
+        backend.put_pixels_row(px, py + row, &row_buffer);
     }
+}
 
-    fn get_cell_colors(&self, x: usize, y: usize) -> (u32, u32) {
-        if x >= self.cols || y >= self.rows {
-            return (COLOR_FG, COLOR_BG);
+/// Draw a minimal cursor block at the bottom of the glyph cell.
+fn render_cursor_block<B: ConsoleBackend>(backend: &mut B, x: usize, y: usize) {
+    let px = x * GLYPH_W;
+    let py = y * GLYPH_H + (GLYPH_H - 2);
+    for dy in 0..2 {
+        for dx in 0..GLYPH_W {
+            backend.put_pixel(px + dx, py + dy, COLOR_FG);
         }
-        let idx = y * self.cols + x;
-        (self.fg_cells[idx], self.bg_cells[idx])
-    }
-
-    /// Draw a minimal cursor block at the bottom of the glyph cell.
-    fn draw_cursor_block(&mut self, x: usize, y: usize) {
-        let px = x * GLYPH_W;
-        let py = y * GLYPH_H + (GLYPH_H - 2);
-        for dy in 0..2 {
-            for dx in 0..GLYPH_W {
-                self.put_pixel(px + dx, py + dy, COLOR_FG);
-            }
-        }
-    }
-
-    /// Render a glyph bitmap into the framebuffer cell at x,y.
-    /// Optimized to use bulk row writes instead of individual pixels.
-    fn draw_glyph(&mut self, x: usize, y: usize, ch: u8, fg: u32, bg: u32) {
-        let glyph = font_glyph(ch);
-        let px = x * GLYPH_W;
-        let py = y * GLYPH_H;
-
-        // Pre-allocate buffer for a row of pixels
-        let mut row_buffer = [0u32; GLYPH_W];
-
-        for (row, line) in glyph.iter().enumerate() {
-            // Build entire row in buffer
-            for (col, pixel) in row_buffer.iter_mut().enumerate().take(GLYPH_W) {
-                let bit = (line >> (7 - col)) & 1; // MSB-first
-                *pixel = if bit != 0 { fg } else { bg };
-            }
-            // Write entire row at once (much faster than individual pixels)
-            self.backend.put_pixels_row(px, py + row, &row_buffer);
-        }
-    }
-
-    /// Write a single pixel into the framebuffer.
-    fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
-        self.backend.put_pixel(x, y, color);
     }
 }
 

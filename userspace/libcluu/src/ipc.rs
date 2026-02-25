@@ -46,6 +46,9 @@ pub const VTMGR_SWITCH_VT_LABEL: u32 = 15;
 /// vtmgr → console: create a new VT buffer.
 /// words[0] = VT index (0-3).
 pub const CONSOLE_CREATE_VT_LABEL: u32 = 17;
+/// vtmgr → console: atomic VT switch (single message replaces deactivate+activate).
+/// words[0] = old VT index, words[1] = new VT index.
+pub const CONSOLE_SWITCH_VT_LABEL: u32 = 21;
 /// per-VT write: tty → console with VT index routing.
 /// words[0] = payload length, words[1] = VT index.
 pub const CONSOLE_WRITE_VT_LABEL: u32 = 18;

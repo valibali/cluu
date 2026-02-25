@@ -9,7 +9,7 @@ use libcluu::boot::PARAM_TTY_INSTANCE;
 use libcluu::boot::{process_info, TOKEN_EXTRA_0};
 use libcluu::ipc::{
     send, send_msg_with_payload, CONSOLE_ACTIVATE_LABEL, CONSOLE_CREATE_VT_LABEL,
-    CONSOLE_DEACTIVATE_LABEL, PROCMGR_SPAWN_SERVICE_LABEL,
+    CONSOLE_DEACTIVATE_LABEL, CONSOLE_SWITCH_VT_LABEL, PROCMGR_SPAWN_SERVICE_LABEL,
 };
 use libcluu::registry;
 use libcluu::types::{IpcFlags, Message};
@@ -129,15 +129,9 @@ impl VtmgrContext {
 
         let old = self.active_vt;
 
-        // Deactivate old console VT.
+        // Atomic VT switch: single message, no intermediate state.
         if self.console_endpoint != 0 {
-            let msg = Message::new(CONSOLE_DEACTIVATE_LABEL, [old, 0, 0, 0, 0, 0], 1);
-            let _ = send(self.console_endpoint, &msg, IpcFlags::empty());
-        }
-
-        // Activate new console VT.
-        if self.console_endpoint != 0 {
-            let msg = Message::new(CONSOLE_ACTIVATE_LABEL, [new_vt, 0, 0, 0, 0, 0], 1);
+            let msg = Message::new(CONSOLE_SWITCH_VT_LABEL, [old, new_vt, 0, 0, 0, 0], 2);
             let _ = send(self.console_endpoint, &msg, IpcFlags::empty());
         }
 
