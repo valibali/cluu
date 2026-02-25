@@ -1296,6 +1296,14 @@ impl ProcessManager {
 
         let _ = debug_print(&format!("procmgr: session login user='{}' vt={}", username, vt_index));
 
+        // Reject if a session is already active on this VT.
+        if vt_index < VT_COUNT && self.vt_to_session[vt_index] != 0 {
+            let _ = debug_print(&format!("procmgr: login rejected, vt={} has active session", vt_index));
+            reply_msg.words[0] = Error::AlreadyExists.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
         // Clone fields before taking &mut self
         let profile = user_record.profile;
         let view_mounts = self.build_session_view(user_record);

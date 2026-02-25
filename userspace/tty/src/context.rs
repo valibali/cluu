@@ -135,7 +135,8 @@ impl TtyContext {
     /// Request console, shell, and procmgr subscriptions if they are missing.
     pub fn request_subscriptions(&mut self) {
         if self.console_endpoint == 0 && !self.requested_console {
-            let console_name = format!("console:{}", self.instance_id);
+            // All VTs are managed by the single "console:0" service.
+            let console_name = "console:0";
             let output_name = format!("vt:{}", self.instance_id);
             if registry::request_subscription(&console_name, &output_name).is_ok() {
                 self.requested_console = true;
@@ -162,6 +163,10 @@ impl TtyContext {
             return;
         }
         self.shell_spawn_requested = true;
+        // If auto-login already connected a shell, don't override Terminal mode.
+        if self.shell_registered_stdin != 0 || self.mode == TtyMode::Terminal {
+            return;
+        }
         self.mode = TtyMode::Login(LoginState::Username);
         self.login_username.clear();
         self.login_password.clear();
@@ -433,14 +438,36 @@ impl TtyContext {
             [self.instance_id as usize, 0, 0, 0, 0, 0],
             1,
         );
-        let _ = libcluu::ipc::send_msg_with_payload(self.procmgr_spawn, &msg, &payload);
         self.mode = TtyMode::Login(LoginState::Authenticating);
         let _ = debug_print(&format!("tty:{}: login request sent", self.instance_id));
+
+        // Use call semantics so procmgr can reply with success/failure.
+        let mut reply_msg = Message::new(0, [0; 6], 0);
+        match libcluu::ipc::call_with_payload(self.procmgr_spawn, &msg, &payload, &mut reply_msg) {
+            Ok(()) => {
+                if reply_msg.words[0] != 0 {
+                    let _ = debug_print(&format!(
+                        "tty:{}: login failed (err={})", self.instance_id, reply_msg.words[0]
+                    ));
+                    self.mode = TtyMode::Login(LoginState::Username);
+                    self.login_username.clear();
+                    self.write_to_console(b"Login incorrect\r\nlogin: ");
+                }
+                // On success (words[0]==0), stay in Authenticating until "stdin" grant arrives.
+            }
+            Err(_) => {
+                self.mode = TtyMode::Login(LoginState::Username);
+                self.login_username.clear();
+                self.write_to_console(b"\r\nlogin: ");
+            }
+        }
     }
 
     pub fn handle_session_death(&mut self) {
         let _ = debug_print(&format!("tty:{}: session died, returning to login", self.instance_id));
         self.shell_stdin = 0;
+        self.shell_registered_stdin = 0;
+        self.requested_shell = false;
         self.shell_spawn_requested = false;
         self.mode = TtyMode::Login(LoginState::Username);
         self.login_username.clear();
