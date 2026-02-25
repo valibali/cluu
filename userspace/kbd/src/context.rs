@@ -149,19 +149,11 @@ impl KbdContext {
 
     /// Send a keyboard event to the active VT's tty.
     ///
-    /// Falls back to the first available tty if the active one is not ready.
+    /// Drops the event if the active VT's tty is not yet subscribed.
     pub fn send_to_tty(&self, msg: &Message) {
         let ep = self.tty_endpoints[self.active_vt];
         if ep != 0 {
             let _ = send(ep, msg, IpcFlags::empty());
-            return;
-        }
-        // Graceful fallback: try any available tty endpoint.
-        for &ep in &self.tty_endpoints {
-            if ep != 0 {
-                let _ = send(ep, msg, IpcFlags::empty());
-                return;
-            }
         }
     }
 

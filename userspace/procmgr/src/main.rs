@@ -680,7 +680,7 @@ impl ProcessManager {
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
 
         match self.spawn_service(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, 0, spawn_seq, spawn_start, profile) {
-            Ok((thread_token, _cookie, pid, _stdin_send)) => {
+            Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let container_id = self.next_container_id();
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
@@ -699,6 +699,16 @@ impl ProcessManager {
                     profile, vt_index: 0,
                 });
                 self.vt_to_session[0] = container_id;
+                // Wire shell stdin to tty:0 via TTY_REGISTER so tty transitions to Terminal.
+                let tty_ep = self.tty_endpoints[0];
+                if tty_ep != 0 && stdin_send != 0 {
+                    let reg_msg = Message::new(
+                        libcluu::ipc::TTY_REGISTER_LABEL,
+                        [stdin_send, 0, 0, 0, 0, 0],
+                        1,
+                    );
+                    let _ = ipc::send(tty_ep, &reg_msg, IpcFlags::empty());
+                }
                 let _ = debug_print(&format!("procmgr: auto-login session pid={} cid={}", pid, container_id));
             }
             Err(e) => {
@@ -1334,7 +1344,7 @@ impl ProcessManager {
             spawn_start,
             profile,
         ) {
-            Ok((thread_token, _cookie, pid, _stdin_send)) => {
+            Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let container_id = self.next_container_id();
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
@@ -1368,6 +1378,7 @@ impl ProcessManager {
 
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = container_id as usize;
+                reply_msg.words[2] = stdin_send;
             }
             Err(e) => {
                 let _ = debug_print(&format!("procmgr: session spawn failed: {:?}", e));

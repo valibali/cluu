@@ -120,7 +120,10 @@ fn run() -> Result<()> {
                             // words=1 legacy: set active stdin route.
                             // words>=3: set route + Ctrl-C notify endpoint + policy flags.
                             let foreground_endpoint = msg.words[0];
-                            if msg.tag.words >= 3 {
+                            if ctx.mode != TtyMode::Terminal && foreground_endpoint != 0 {
+                                // Auto-login: procmgr wired shell stdin directly.
+                                ctx.wire_shell_stdin(foreground_endpoint);
+                            } else if msg.tag.words >= 3 {
                                 ctx.configure_foreground(
                                     foreground_endpoint,
                                     msg.words[1],

@@ -48,7 +48,6 @@ pub struct TtyContext {
     /// `shell_stdin=0` without triggering auto re-binding.
     shell_registered_stdin: usize,
     requested_console: bool,
-    requested_shell: bool,
     /// Instance index (0-3) for this tty, used to subscribe to the matching console.
     instance_id: u64,
     /// procmgr "spawn" endpoint for requesting shell creation.
@@ -113,7 +112,6 @@ impl TtyContext {
             shell_stdin: 0,
             shell_registered_stdin: 0,
             requested_console: false,
-            requested_shell: false,
             instance_id,
             procmgr_spawn: 0,
             requested_procmgr: false,
@@ -132,7 +130,7 @@ impl TtyContext {
         })
     }
 
-    /// Request console, shell, and procmgr subscriptions if they are missing.
+    /// Request console and procmgr subscriptions if they are missing.
     pub fn request_subscriptions(&mut self) {
         if self.console_endpoint == 0 && !self.requested_console {
             // All VTs are managed by the single "console:0" service.
@@ -142,19 +140,13 @@ impl TtyContext {
                 self.requested_console = true;
             }
         }
-        if self.shell_registered_stdin == 0
-            && !self.requested_shell
-            && registry::request_subscription("shell", "stdin").is_ok()
-        {
-            self.requested_shell = true;
-        }
-        // Subscribe to procmgr so we can request shell spawn.
+        // Subscribe to procmgr so we can send login requests.
         if self.procmgr_spawn == 0 && !self.requested_procmgr {
             if registry::request_subscription("procmgr", "spawn").is_ok() {
                 self.requested_procmgr = true;
             }
         }
-        // Once we have both console and procmgr, request a shell for this VT.
+        // Once we have both console and procmgr, show login prompt for this VT.
         self.maybe_show_login_prompt();
     }
 
@@ -163,8 +155,8 @@ impl TtyContext {
             return;
         }
         self.shell_spawn_requested = true;
-        // If auto-login already connected a shell, don't override Terminal mode.
-        if self.shell_registered_stdin != 0 || self.mode == TtyMode::Terminal {
+        // If auto-login already wired a shell, don't override Terminal mode.
+        if self.mode == TtyMode::Terminal {
             return;
         }
         self.mode = TtyMode::Login(LoginState::Username);
@@ -188,28 +180,11 @@ impl TtyContext {
                         self.procmgr_spawn = token;
                         let _ = debug_print("tty: procmgr spawn subscribed");
                         self.maybe_show_login_prompt();
-                    } else if name == "stdin" {
-                        // Keep a stable "registered shell route" from registry grants.
-                        // If we are currently routing to that route (or have no route),
-                        // follow updates; otherwise preserve explicit foreground handoff.
-                        let previous = self.shell_registered_stdin;
-                        self.shell_registered_stdin = token;
-                        if previous == 0 || self.shell_stdin == 0 || self.shell_stdin == previous {
-                            self.shell_stdin = token;
-                            let _ = debug_print("tty: shell stdin subscribed");
-                        }
-                        if self.mode != TtyMode::Terminal {
-                            self.mode = TtyMode::Terminal;
-                            let _ = debug_print(&format!("tty:{}: login success, terminal mode", self.instance_id));
-                        }
                     }
                 }
                 registry::RegistryEvent::SubscribeStatus { code } => {
                     if code != 0 {
                         self.requested_console = false;
-                        if self.shell_registered_stdin == 0 {
-                            self.requested_shell = false;
-                        }
                     }
                 }
             }
@@ -441,7 +416,7 @@ impl TtyContext {
         self.mode = TtyMode::Login(LoginState::Authenticating);
         let _ = debug_print(&format!("tty:{}: login request sent", self.instance_id));
 
-        // Use call semantics so procmgr can reply with success/failure.
+        // Use call semantics so procmgr can reply with success/failure + shell stdin.
         let mut reply_msg = Message::new(0, [0; 6], 0);
         match libcluu::ipc::call_with_payload(self.procmgr_spawn, &msg, &payload, &mut reply_msg) {
             Ok(()) => {
@@ -452,8 +427,18 @@ impl TtyContext {
                     self.mode = TtyMode::Login(LoginState::Username);
                     self.login_username.clear();
                     self.write_to_console(b"Login incorrect\r\nlogin: ");
+                } else {
+                    // Login succeeded — wire shell stdin from reply and enter Terminal mode.
+                    let stdin_ep = reply_msg.words[2];
+                    if stdin_ep != 0 {
+                        self.shell_registered_stdin = stdin_ep;
+                        self.shell_stdin = stdin_ep;
+                    }
+                    self.mode = TtyMode::Terminal;
+                    let _ = debug_print(&format!(
+                        "tty:{}: login success, terminal mode", self.instance_id
+                    ));
                 }
-                // On success (words[0]==0), stay in Authenticating until "stdin" grant arrives.
             }
             Err(_) => {
                 self.mode = TtyMode::Login(LoginState::Username);
@@ -463,11 +448,23 @@ impl TtyContext {
         }
     }
 
+    /// Wire shell stdin directly (called when procmgr sends TTY_REGISTER for auto-login).
+    pub fn wire_shell_stdin(&mut self, endpoint: usize) {
+        self.shell_registered_stdin = endpoint;
+        self.shell_stdin = endpoint;
+        if self.mode != TtyMode::Terminal {
+            self.mode = TtyMode::Terminal;
+            self.shell_spawn_requested = true;
+            let _ = debug_print(&format!(
+                "tty:{}: auto-login wired, terminal mode", self.instance_id
+            ));
+        }
+    }
+
     pub fn handle_session_death(&mut self) {
         let _ = debug_print(&format!("tty:{}: session died, returning to login", self.instance_id));
         self.shell_stdin = 0;
         self.shell_registered_stdin = 0;
-        self.requested_shell = false;
         self.shell_spawn_requested = false;
         self.mode = TtyMode::Login(LoginState::Username);
         self.login_username.clear();
