@@ -2384,12 +2384,12 @@ Cluufile-based container packaging with extract-on-install and merge-at-build.
 | E5  | Minimal TOML parser (no_std) in libcluu           | done    | —       |
 | E6  | Procmgr: container run handler (manifest + spawn) | done    | E4, E5  |
 | E7  | VFS hardlink support (FS_LINK + VFS_LINK)         | done    | —       |
-| E8  | Procmgr: seed persistent data via hardlinks       | pending | E6, E7  |
+| E8  | Procmgr: seed persistent data via hardlinks       | done    | E6, E7  |
 | E9  | Shell builtin: `container run <name>`             | done    | E6      |
 | E10 | Shell builtin: `container list`                   | done    | E6      |
 | E11 | Shell builtin: `container stop <name>`            | done    | E6      |
 | E12 | Extract container-build from xtask to `tools/`    | done    | E3      |
-| E13 | Integration test: build + run container            | pending | E9      |
+| E13 | Integration test: build + run container            | done    | E9      |
 
 Critical path: E1 → E2 → E3 → E4 → E6 → E9 → E13
 Parallel tracks: E5 (TOML parser), E7 (hardlink support), E12 (crate extraction)
@@ -2680,10 +2680,10 @@ renderer fixes (L1-L5) have no dependencies on other phases.
 
 | #   | Task                                                   | Status  | Depends |
 |-----|--------------------------------------------------------|---------|---------|
-| L1  | Refactor: VtScreen as self-contained object (own write_bytes, parser) | pending | — |
-| L2  | Eliminate context-switch trick for inactive VT writes  | pending | L1      |
-| L3  | Atomic VT switch: CONSOLE_SWITCH_VT_LABEL (single msg) | pending | L1     |
-| L4  | vtmgr: replace deactivate+activate with switch message | pending | L3      |
+| L1  | Refactor: VtScreen as self-contained object (own write_bytes, parser) | done | — |
+| L2  | Eliminate context-switch trick for inactive VT writes  | done    | L1      |
+| L3  | Atomic VT switch: CONSOLE_SWITCH_VT_LABEL (single msg) | done   | L1     |
+| L4  | vtmgr: replace deactivate+activate with switch message | done    | L3      |
 | L5  | Console: repaint_all correctness (cursor position, colors) | pending | L1  |
 | L6  | Output flow control: console processes inactive VT writes into VtScreen directly | pending | L1 |
 | L7  | Remove tty output queue overflow/drop behavior         | pending | L6      |
