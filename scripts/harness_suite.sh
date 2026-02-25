@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -64,6 +64,9 @@ run_case() {
     local env_assignments="$3"
     local effective_mode="$build_mode"
 
+    # Clear stale compile-time autostart from previous cases
+    unset CLUU_SHELL_AUTOSTART_CMD
+
     if [[ "$FORCE_NO_BUILD" -eq 1 ]]; then
         effective_mode="no_build"
     fi
@@ -78,6 +81,10 @@ run_case() {
 }
 
 ran_any=0
+passed=0
+failed=0
+failed_cases=()
+
 while IFS='|' read -r name build_mode env_assignments; do
     [[ -z "${name// }" ]] && continue
     [[ "${name:0:1}" == "#" ]] && continue
@@ -91,7 +98,12 @@ while IFS='|' read -r name build_mode env_assignments; do
         exit 1
     fi
 
-    run_case "$name" "$build_mode" "$env_assignments"
+    if run_case "$name" "$build_mode" "$env_assignments"; then
+        passed=$((passed + 1))
+    else
+        failed=$((failed + 1))
+        failed_cases+=("$name")
+    fi
     ran_any=1
 done < "$CASES_FILE"
 
@@ -101,6 +113,17 @@ if [[ "$ran_any" -eq 0 ]]; then
     else
         echo "ERROR: no runnable harness cases found in $CASES_FILE"
     fi
+    exit 1
+fi
+
+echo ""
+echo "=== SUITE SUMMARY: ${passed} passed, ${failed} failed ==="
+
+if [[ "$failed" -gt 0 ]]; then
+    echo "Failed cases:"
+    for c in "${failed_cases[@]}"; do
+        echo "  - $c"
+    done
     exit 1
 fi
 

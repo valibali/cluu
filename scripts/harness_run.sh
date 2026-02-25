@@ -243,6 +243,8 @@ if [ -z "${CLUU_SHELL_AUTOSTART_CMD:-}" ]; then
         export CLUU_SHELL_AUTOSTART_CMD="$SHELL_AUTOSTART_CMD_DEFAULT"
     elif [ -n "$HARNESS_AUTOEXEC_CMD" ]; then
         export CLUU_SHELL_AUTOSTART_CMD="$HARNESS_AUTOEXEC_CMD"
+    else
+        export CLUU_SHELL_AUTOSTART_CMD=""
     fi
 fi
 if [ -n "$POST_SENDKEY_DEFAULT" ] && [ -z "$POST_SENDKEY" ]; then
