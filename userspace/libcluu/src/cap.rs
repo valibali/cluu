@@ -27,6 +27,7 @@ impl CapProfile {
         .union(Self::REGISTRY)
         .union(Self::VFS);
     pub const SERVICE: Self = Self::USER.union(Self::DEVICE).union(Self::SPACE_GRANT);
+    pub const ADMIN_PROFILE: Self = Self::USER.union(Self::ADMIN);
     pub const SUPERVISOR: Self = Self::SERVICE.union(Self::NET).union(Self::ADMIN);
 
     /// Check whether `child` is a valid narrowing of `self`.

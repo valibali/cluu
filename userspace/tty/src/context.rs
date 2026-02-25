@@ -10,13 +10,25 @@ use alloc::format;
 use alloc::vec::Vec;
 use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::ipc::{
-    send, send_with_retry_timeout, CONSOLE_WRITE_LABEL, IPC_CHUNK_BYTES_DEFAULT,
+    send_with_retry_timeout, CONSOLE_WRITE_LABEL, IPC_CHUNK_BYTES_DEFAULT,
     IPC_SEND_RETRIES_DEFAULT, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C,
-    TTY_SPAWN_SHELL_LABEL,
 };
 use libcluu::registry;
 use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Result};
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum LoginState {
+    Username,
+    Password,
+    Authenticating,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum TtyMode {
+    Login(LoginState),
+    Terminal,
+}
 
 /// A pending read request from a process that called read(0, ...).
 pub struct PendingRead {
@@ -58,6 +70,9 @@ pub struct TtyContext {
     pub ctrl_c_notify: usize,
     /// Whether Ctrl-C should be forwarded to the current foreground input route.
     pub forward_ctrl_c: bool,
+    pub mode: TtyMode,
+    pub login_username: Vec<u8>,
+    pub login_password: Vec<u8>,
 }
 
 impl TtyContext {
@@ -111,6 +126,9 @@ impl TtyContext {
             input_queue: VecDeque::new(),
             ctrl_c_notify: 0,
             forward_ctrl_c: true,
+            mode: TtyMode::Login(LoginState::Username),
+            login_username: Vec::new(),
+            login_password: Vec::new(),
         })
     }
 
@@ -136,27 +154,19 @@ impl TtyContext {
             }
         }
         // Once we have both console and procmgr, request a shell for this VT.
-        self.maybe_spawn_shell();
+        self.maybe_show_login_prompt();
     }
 
-    /// Request procmgr to spawn a shell for this VT if not already done.
-    fn maybe_spawn_shell(&mut self) {
+    fn maybe_show_login_prompt(&mut self) {
         if self.shell_spawn_requested || self.procmgr_spawn == 0 || self.console_endpoint == 0 {
             return;
         }
         self.shell_spawn_requested = true;
-        let _ = debug_print(&format!("tty:{}: requesting shell spawn", self.instance_id));
-
-        // Notify procmgr to spawn a shell for this VT.  Procmgr already knows
-        // the shell path (SERVICE_PATH); we only need to identify ourselves.
-        // words[0] carries our instance_id so procmgr can look up the correct
-        // tty endpoint from its registry-granted table.
-        let msg = libcluu::types::Message::new(
-            TTY_SPAWN_SHELL_LABEL,
-            [self.instance_id as usize, 0, 0, 0, 0, 0],
-            1,
-        );
-        let _ = send(self.procmgr_spawn, &msg, libcluu::types::IpcFlags::empty());
+        self.mode = TtyMode::Login(LoginState::Username);
+        self.login_username.clear();
+        self.login_password.clear();
+        let _ = debug_print(&format!("tty:{}: showing login prompt", self.instance_id));
+        self.write_to_console(b"\r\nlogin: ");
     }
 
     /// Handle registry control traffic and update subscriptions.
@@ -168,11 +178,11 @@ impl TtyContext {
                         self.console_endpoint = token;
                         let _ = debug_print("tty: console subscribed");
                         self.flush_pending_console();
-                        self.maybe_spawn_shell();
+                        self.maybe_show_login_prompt();
                     } else if name == "spawn" {
                         self.procmgr_spawn = token;
                         let _ = debug_print("tty: procmgr spawn subscribed");
-                        self.maybe_spawn_shell();
+                        self.maybe_show_login_prompt();
                     } else if name == "stdin" {
                         // Keep a stable "registered shell route" from registry grants.
                         // If we are currently routing to that route (or have no route),
@@ -182,6 +192,10 @@ impl TtyContext {
                         if previous == 0 || self.shell_stdin == 0 || self.shell_stdin == previous {
                             self.shell_stdin = token;
                             let _ = debug_print("tty: shell stdin subscribed");
+                        }
+                        if self.mode != TtyMode::Terminal {
+                            self.mode = TtyMode::Terminal;
+                            let _ = debug_print(&format!("tty:{}: login success, terminal mode", self.instance_id));
                         }
                     }
                 }
@@ -397,6 +411,41 @@ impl TtyContext {
         self.console_credit = self.console_credit.saturating_add(refill_amount)
             .min(CONSOLE_CREDIT_WINDOW);
         self.drain_console_queue();
+    }
+
+    pub fn write_to_console(&mut self, data: &[u8]) {
+        self.forward_to_console(data);
+    }
+
+    pub fn send_login_request(&mut self) {
+        if self.procmgr_spawn == 0 { return; }
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&self.login_username);
+        payload.push(0);
+        payload.extend_from_slice(&self.login_password);
+        payload.push(0);
+        // Zero password buffer
+        for b in self.login_password.iter_mut() { *b = 0; }
+        self.login_password.clear();
+
+        let msg = libcluu::types::Message::new(
+            libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL,
+            [self.instance_id as usize, 0, 0, 0, 0, 0],
+            1,
+        );
+        let _ = libcluu::ipc::send_msg_with_payload(self.procmgr_spawn, &msg, &payload);
+        self.mode = TtyMode::Login(LoginState::Authenticating);
+        let _ = debug_print(&format!("tty:{}: login request sent", self.instance_id));
+    }
+
+    pub fn handle_session_death(&mut self) {
+        let _ = debug_print(&format!("tty:{}: session died, returning to login", self.instance_id));
+        self.shell_stdin = 0;
+        self.shell_spawn_requested = false;
+        self.mode = TtyMode::Login(LoginState::Username);
+        self.login_username.clear();
+        self.login_password.clear();
+        self.write_to_console(b"\r\nlogin: ");
     }
 }
 const CONSOLE_MAX_PAYLOAD: usize = IPC_CHUNK_BYTES_DEFAULT;

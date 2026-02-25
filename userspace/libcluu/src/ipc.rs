@@ -82,6 +82,12 @@ pub const PROCMGR_CONTAINER_RUN_LABEL: u32 = 24;
 /// Reply: payload = "name pid container_id\n" lines.
 pub const PROCMGR_CONTAINER_LIST_LABEL: u32 = 25;
 
+/// Session login: tty → procmgr (call). words[0]=vt_instance. Payload: username\0password\0.
+/// Reply: words[0]=errno (0=ok), words[1]=container_id.
+pub const PROCMGR_SESSION_LOGIN_LABEL: u32 = 30;
+/// Session death: procmgr → tty (send). words[0]=vt_instance.
+pub const PROCMGR_SESSION_DEATH_LABEL: u32 = 31;
+
 pub const TTY_FG_FLAG_FORWARD_CTRL_C: usize = 1 << 0;
 pub const TTY_FG_FLAG_NOTIFY_CTRL_C: usize = 1 << 1;
 pub const TTY_CTL_SYNC: u32 = 1;

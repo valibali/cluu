@@ -1,0 +1,13 @@
+# /etc/users.toml — User records for login sessions.
+#
+# Fields:
+#   home     — absolute path to the user's home directory
+#   shell    — path to the shell binary (resolved through session view)
+#   profile  — CapProfile for the login session ("user", "admin", "supervisor")
+#   escalate — ceiling profile for sudo (optional; if absent, sudo is rejected)
+
+[user.root]
+home = "/home/root"
+shell = "/bin/shell"
+profile = "admin"
+escalate = "supervisor"

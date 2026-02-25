@@ -68,6 +68,21 @@ struct PendingVfsView {
     container_id: u64,
 }
 
+struct UserRecord {
+    home: String,
+    shell: String,
+    profile: CapProfile,
+    escalate: Option<CapProfile>,
+}
+
+struct SessionEntry {
+    container_id: u64,
+    pid: usize,
+    username: String,
+    profile: CapProfile,
+    vt_index: usize,
+}
+
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
 const SERVICE_STACK_BASE: usize = 0x6d000000;
 const SERVICE_STACK_TOP: usize = SERVICE_STACK_BASE + SERVICE_STACK_SIZE;
@@ -158,6 +173,10 @@ struct ProcessManager {
     container_instances: BTreeMap<u64, ContainerInstance>,
     container_children: BTreeMap<u64, Vec<u64>>, // parent_cid -> child cids
     autostart_done: bool,
+    auto_login_done: bool,
+    user_records: BTreeMap<String, UserRecord>,
+    session_table: BTreeMap<u64, SessionEntry>,
+    vt_to_session: [u64; VT_COUNT],
 }
 
 impl ProcessManager {
@@ -205,6 +224,10 @@ impl ProcessManager {
             container_instances: BTreeMap::new(),
             container_children: BTreeMap::new(),
             autostart_done: false,
+            auto_login_done: false,
+            user_records: BTreeMap::new(),
+            session_table: BTreeMap::new(),
+            vt_to_session: [0; VT_COUNT],
         })
     }
 
@@ -580,6 +603,110 @@ impl ProcessManager {
         let _ = debug_print("procmgr: autostart complete");
     }
 
+    fn parse_users_toml(&mut self) {
+        let data = match self.read_file_from_vfs("/etc/users.toml") {
+            Some(d) => d,
+            None => {
+                let _ = debug_print("procmgr: users.toml not found, skipping");
+                return;
+            }
+        };
+
+        let text = match core::str::from_utf8(&data) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = debug_print("procmgr: users.toml is not valid UTF-8");
+                return;
+            }
+        };
+        let doc = match libcluu::toml::parse(text) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = debug_print(&format!("procmgr: users.toml parse error: {}", e));
+                return;
+            }
+        };
+
+        for table in &doc.tables {
+            let username = match table.name.strip_prefix("user.") {
+                Some(u) => u,
+                None => continue,
+            };
+            let home = match table.get_str("home") {
+                Some(v) => String::from(v),
+                None => continue,
+            };
+            let shell = match table.get_str("shell") {
+                Some(v) => String::from(v),
+                None => continue,
+            };
+            let profile = match table.get_str("profile").and_then(parse_profile_str) {
+                Some(p) => p,
+                None => continue,
+            };
+            let escalate = table.get_str("escalate").and_then(parse_profile_str);
+            self.user_records.insert(String::from(username), UserRecord {
+                home,
+                shell,
+                profile,
+                escalate,
+            });
+        }
+
+        let _ = debug_print(&format!(
+            "procmgr: loaded {} user record(s)", self.user_records.len()
+        ));
+    }
+
+    fn try_auto_login(&mut self) {
+        if self.auto_login_done { return; }
+        if self.user_records.is_empty() { return; }
+        if self.tty_endpoints[0] == 0 { return; }
+
+        self.auto_login_done = true;
+        let _ = debug_print("procmgr: auto-login root on VT:0");
+
+        let (profile, view_mounts) = match self.user_records.get("root") {
+            Some(r) => {
+                let p = r.profile;
+                let v = self.build_session_view(r);
+                (p, v)
+            }
+            None => return,
+        };
+
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
+        let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
+
+        match self.spawn_service(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, 0, spawn_seq, spawn_start, profile) {
+            Ok((thread_token, _cookie, pid, _stdin_send)) => {
+                let container_id = self.next_container_id();
+                self.pid_to_container_id.insert(pid, container_id);
+                self.container_owner_pids.insert(pid);
+                self.register_vfs_view_for_thread(thread_token, &view_mounts, profile, container_id);
+                self.pid_to_view.insert(pid, view_mounts);
+                self.container_instances.insert(container_id, ContainerInstance {
+                    name: String::from("session:root"),
+                    container_id,
+                    parent_container_id: 0,
+                    pid,
+                    image_path: String::from(SERVICE_PATH),
+                });
+                self.session_table.insert(container_id, SessionEntry {
+                    container_id, pid,
+                    username: String::from("root"),
+                    profile, vt_index: 0,
+                });
+                self.vt_to_session[0] = container_id;
+                let _ = debug_print(&format!("procmgr: auto-login session pid={} cid={}", pid, container_id));
+            }
+            Err(e) => {
+                let _ = debug_print(&format!("procmgr: auto-login failed: {:?}", e));
+            }
+        }
+    }
+
     fn autostart_container(&mut self, image_name: &str, _svc: &libcluu::toml::TomlTable) -> Result<()> {
         // Read manifest
         let manifest_path = format!("/var/images/{}/manifest.toml", image_name);
@@ -884,6 +1011,25 @@ impl ProcessManager {
             self.container_instances.remove(&container_id);
             let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
         }
+        // Session death notification
+        if let Some(session) = self.session_table.remove(&container_id) {
+            if session.vt_index < VT_COUNT {
+                self.vt_to_session[session.vt_index] = 0;
+                let tty_ep = self.tty_endpoints[session.vt_index];
+                if tty_ep != 0 {
+                    let death_msg = Message::new(
+                        libcluu::ipc::PROCMGR_SESSION_DEATH_LABEL,
+                        [session.vt_index, 0, 0, 0, 0, 0],
+                        1,
+                    );
+                    let _ = send(tty_ep, &death_msg, IpcFlags::empty());
+                }
+            }
+            let _ = debug_print(&format!(
+                "procmgr: session death user='{}' cid={} vt={}",
+                session.username, session.container_id, session.vt_index
+            ));
+        }
         Ok(())
     }
 
@@ -896,6 +1042,8 @@ impl ProcessManager {
                     ));
                     self.autostart_done = true;
                     self.run_autostart();
+                    self.parse_users_toml();
+                    self.try_auto_login();
                 } else if name == "main" {
                     // Use service name to determine VT index (e.g., "tty:0" → 0).
                     if let Some(idx) = service_name.strip_prefix("tty:").and_then(|s| s.parse::<usize>().ok()) {
@@ -903,6 +1051,7 @@ impl ProcessManager {
                             self.tty_endpoints[idx] = token;
                             let _ =
                                 debug_print(&format!("procmgr: tty:{} main granted {}", idx, token));
+                            self.try_auto_login();
                         }
                     }
                 }
@@ -1023,6 +1172,9 @@ impl ProcessManager {
         if msg.tag.label == PROCMGR_CONTAINER_LIST_LABEL {
             return self.handle_container_list(msg);
         }
+        if msg.tag.label == libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL {
+            return self.handle_session_login(msg, payload, sender_tid);
+        }
         self.handle_spawn_message(msg, payload, sender_tid)
     }
 
@@ -1096,6 +1248,127 @@ impl ProcessManager {
         }
 
         self.tty_endpoints[0] = saved;
+        Ok(())
+    }
+
+    fn build_session_view(&self, user_record: &UserRecord) -> ViewMountList {
+        let base_mounts = if user_record.profile.contains(CapProfile::ADMIN) {
+            libcluu::vfs_view::admin_session_mounts()
+        } else {
+            libcluu::vfs_view::default_mounts_for_profile(CapProfile::USER)
+        };
+        let mut mounts: ViewMountList = base_mounts.iter()
+            .filter(|&&(_, dst, _)| !dst.starts_with("/home/"))
+            .map(|&(src, dst, w)| (String::from(src), String::from(dst), w))
+            .collect();
+        mounts.push((user_record.home.clone(), user_record.home.clone(), true));
+        mounts
+    }
+
+    fn handle_session_login(&mut self, msg: &Message, payload: &[u8], _sender_tid: usize) -> Result<()> {
+        let reply_token = extract_reply_id(msg);
+        let mut reply_msg = Message::new(libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL, [0; 6], 5);
+        let vt_index = msg.words[0];
+
+        // Parse username\0password\0 from payload
+        let payload_str = core::str::from_utf8(payload).unwrap_or("");
+        let mut parts = payload_str.splitn(3, '\0');
+        let username = match parts.next() {
+            Some(u) if !u.is_empty() => u,
+            _ => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+        let _password = parts.next().unwrap_or(""); // H13 will add verification
+
+        // Look up user record
+        let user_record = match self.user_records.get(username) {
+            Some(r) => r,
+            None => {
+                let _ = debug_print(&format!("procmgr: login failed, unknown user '{}'", username));
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        let _ = debug_print(&format!("procmgr: session login user='{}' vt={}", username, vt_index));
+
+        // Clone fields before taking &mut self
+        let profile = user_record.profile;
+        let view_mounts = self.build_session_view(user_record);
+
+        let tty_ep = if vt_index < VT_COUNT { self.tty_endpoints[vt_index] } else { self.tty_endpoints[0] };
+        if tty_ep == 0 {
+            let _ = debug_print(&format!("procmgr: login vt={}: no tty endpoint", vt_index));
+            reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
+        let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
+
+        // Temporarily wire stdout to target VT's tty
+        let saved = self.tty_endpoints[0];
+        self.tty_endpoints[0] = tty_ep;
+
+        match self.spawn_service(
+            SERVICE_PATH,
+            DEFAULT_PRIORITY,
+            &shell_argv_payload,
+            shell_argc,
+            0,
+            spawn_seq,
+            spawn_start,
+            profile,
+        ) {
+            Ok((thread_token, _cookie, pid, _stdin_send)) => {
+                let container_id = self.next_container_id();
+                self.pid_to_container_id.insert(pid, container_id);
+                self.container_owner_pids.insert(pid);
+
+                self.register_vfs_view_for_thread(thread_token, &view_mounts, profile, container_id);
+                self.pid_to_view.insert(pid, view_mounts);
+
+                self.container_instances.insert(container_id, ContainerInstance {
+                    name: format!("session:{}", username),
+                    container_id,
+                    parent_container_id: 0,
+                    pid,
+                    image_path: String::from(SERVICE_PATH),
+                });
+
+                self.session_table.insert(container_id, SessionEntry {
+                    container_id,
+                    pid,
+                    username: String::from(username),
+                    profile,
+                    vt_index,
+                });
+                if vt_index < VT_COUNT {
+                    self.vt_to_session[vt_index] = container_id;
+                }
+
+                let _ = debug_print(&format!(
+                    "procmgr: session created user='{}' pid={} cid={} vt={}",
+                    username, pid, container_id, vt_index
+                ));
+
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = container_id as usize;
+            }
+            Err(e) => {
+                let _ = debug_print(&format!("procmgr: session spawn failed: {:?}", e));
+                reply_msg.words[0] = e.to_errno() as usize;
+            }
+        }
+
+        self.tty_endpoints[0] = saved;
+        if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
         Ok(())
     }
 
@@ -3187,6 +3460,17 @@ fn parse_capability(name: &str) -> Option<CapProfile> {
         "space_grant" => Some(CapProfile::SPACE_GRANT),
         "net" => Some(CapProfile::NET),
         "admin" => Some(CapProfile::ADMIN),
+        _ => None,
+    }
+}
+
+fn parse_profile_str(s: &str) -> Option<CapProfile> {
+    match s {
+        "sandboxed" => Some(CapProfile::SANDBOXED),
+        "user" => Some(CapProfile::USER),
+        "service" => Some(CapProfile::SERVICE),
+        "admin" => Some(CapProfile::ADMIN_PROFILE),
+        "supervisor" => Some(CapProfile::SUPERVISOR),
         _ => None,
     }
 }

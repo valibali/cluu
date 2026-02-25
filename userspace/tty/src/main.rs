@@ -12,7 +12,7 @@ mod context;
 mod line_discipline;
 mod protocol;
 
-use context::TtyContext;
+use context::{TtyContext, TtyMode, LoginState};
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_CREDIT_REFILL_LABEL, KBD_EVENT_LABEL, TTY_CTL_LABEL,
     TTY_FG_FLAG_FORWARD_CTRL_C, TTY_POLL_QUERY_LABEL, TTY_READ_LABEL, TTY_READ_REQUEST_LABEL,
@@ -159,6 +159,10 @@ fn run() -> Result<()> {
                                 let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
                             }
                         }
+                        libcluu::ipc::PROCMGR_SESSION_DEATH_LABEL => {
+                            ctx.handle_session_death();
+                            discipline.set_mode(line_discipline::TermMode::default());
+                        }
                         _ => {}
                     }
                 }
@@ -175,6 +179,10 @@ fn run() -> Result<()> {
 
 /// Apply line discipline to a character and route echo/line output.
 fn handle_key(ctx: &mut TtyContext, discipline: &mut LineDiscipline, ch: u8, extended: u8) {
+    if ctx.mode != TtyMode::Terminal {
+        handle_login_key(ctx, ch, extended);
+        return;
+    }
     // Convert extended key codes to ANSI escape sequences before processing
     let bytes: &[u8] = match extended {
         1 => b"\x1b[A",  // KEY_UP
@@ -196,6 +204,54 @@ fn handle_key(ctx: &mut TtyContext, discipline: &mut LineDiscipline, ch: u8, ext
     for &b in bytes {
         let effect = discipline.handle_byte(b);
         apply_effect(ctx, effect);
+    }
+}
+
+fn handle_login_key(ctx: &mut TtyContext, ch: u8, extended: u8) {
+    if extended != 0 { return; }
+
+    match ctx.mode {
+        TtyMode::Login(LoginState::Username) => {
+            if ch == b'\r' || ch == b'\n' {
+                if ctx.login_username.is_empty() {
+                    ctx.write_to_console(b"\r\nlogin: ");
+                    return;
+                }
+                ctx.mode = TtyMode::Login(LoginState::Password);
+                ctx.write_to_console(b"\r\npassword: ");
+            } else if ch == 0x7f || ch == 0x08 {
+                if !ctx.login_username.is_empty() {
+                    ctx.login_username.pop();
+                    ctx.write_to_console(b"\x08 \x08");
+                }
+            } else if ch == 0x03 {
+                ctx.login_username.clear();
+                ctx.write_to_console(b"\r\nlogin: ");
+            } else if ch >= 0x20 && ch < 0x7f {
+                ctx.login_username.push(ch);
+                ctx.write_to_console(&[ch]);
+            }
+        }
+        TtyMode::Login(LoginState::Password) => {
+            if ch == b'\r' || ch == b'\n' {
+                ctx.write_to_console(b"\r\n");
+                ctx.send_login_request();
+            } else if ch == 0x7f || ch == 0x08 {
+                if !ctx.login_password.is_empty() {
+                    ctx.login_password.pop();
+                }
+            } else if ch == 0x03 {
+                for b in ctx.login_password.iter_mut() { *b = 0; }
+                ctx.login_password.clear();
+                ctx.login_username.clear();
+                ctx.mode = TtyMode::Login(LoginState::Username);
+                ctx.write_to_console(b"\r\nlogin: ");
+            } else if ch >= 0x20 && ch < 0x7f {
+                ctx.login_password.push(ch);
+            }
+        }
+        TtyMode::Login(LoginState::Authenticating) => {}
+        TtyMode::Terminal => {}
     }
 }
 

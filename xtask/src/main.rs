@@ -2561,6 +2561,11 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
         fs::copy(&autostart_src, etc_dir.join("autostart.toml"))?;
         println!("  Added /etc/autostart.toml");
     }
+    let users_src = project_root().join("etc/users.toml");
+    if users_src.exists() {
+        fs::copy(&users_src, etc_dir.join("users.toml"))?;
+        println!("  Added /etc/users.toml");
+    }
 
     let disk_path = project_root().join("target/userdisk.img");
     if disk_path.exists() {

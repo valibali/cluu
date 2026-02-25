@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-20
 **Scope:** Capability profiles, VFS views, container model, spawn protocol
-**Status:** Implementation in progress — Phases A–G complete; Phase H in design
+**Status:** Implementation in progress — Phases A–G complete, Phase H core (H1-H7, H9-H12, H16-H17) complete
 **Depends on:** IPC registry (docs/IPC_REGISTRY.md), kernel token system (rights.rs)
 
 ---
@@ -2582,26 +2582,26 @@ separate container from the session.
 
 | #   | Task                                                   | Status  | Depends |
 |-----|--------------------------------------------------------|---------|---------|
-| H1  | Define /etc/users.toml format and add to userdisk      | pending | —       |
-| H2  | Procmgr: parse /etc/users.toml at boot                | pending | H1      |
-| H3  | Add PROCMGR_SESSION_LOGIN_LABEL IPC handler            | pending | H2      |
-| H4  | Procmgr: build session view from user record + profile | pending | H3      |
-| H5  | Procmgr: spawn session container (parent=0, top-level) | pending | H4      |
-| H6  | Procmgr: VT–session attachment (wire shell to tty)     | pending | H5      |
-| H7  | Procmgr: session table (track session→VT attachments)  | pending | H5      |
+| H1  | Define /etc/users.toml format and add to userdisk      | done    | —       |
+| H2  | Procmgr: parse /etc/users.toml at boot                | done    | H1      |
+| H3  | Add PROCMGR_SESSION_LOGIN_LABEL IPC handler            | done    | H2      |
+| H4  | Procmgr: build session view from user record + profile | done    | H3      |
+| H5  | Procmgr: spawn session container (parent=0, top-level) | done    | H4      |
+| H6  | Procmgr: VT–session attachment (wire shell to tty)     | done    | H5      |
+| H7  | Procmgr: session table (track session→VT attachments)  | done    | H5      |
 | H8  | Procmgr: VT crash recovery (reattach session to new VT)| pending | H6, H7  |
-| H9  | tty: login prompt mode (read username/password, send to procmgr) | pending | H3 |
-| H10 | tty: switch between login mode and terminal mode       | pending | H9      |
-| H11 | tty: handle session death notification (return to login)| pending | H10     |
-| H12 | VT container: reduce profile from 0x0F to 0x05        | pending | H5, G7  |
+| H9  | tty: login prompt mode (read username/password, send to procmgr) | done | H3 |
+| H10 | tty: switch between login mode and terminal mode       | done    | H9      |
+| H11 | tty: handle session death notification (return to login)| done    | H10     |
+| H12 | VT container: reduce profile from 0x0F to 0x05        | done    | H5, G7  |
 | H13 | Add PROCMGR_ESCALATE_LABEL handler (sudo)              | pending | H2      |
 | H14 | Shell builtin: `sudo` (prompt + escalation request)    | pending | H13     |
 | H15 | Shell builtin: `su` (prompt + session login request)   | pending | H3      |
-| H16 | Add ADMIN profile constant to cap.rs                   | pending | —       |
-| H17 | ADMIN default view template in procmgr                 | pending | H16     |
-| H18 | Test: login → session with correct view (parent=0)     | pending | H5      |
+| H16 | Add ADMIN profile constant to cap.rs                   | done    | —       |
+| H17 | ADMIN default view template in procmgr                 | done    | H16     |
+| H18 | Test: login → session with correct view (parent=0)     | done    | H5      |
 | H19 | Test: VT crash → session survives, reattaches          | pending | H8      |
-| H20 | Test: logout → cascades children, VT shows login       | pending | H5, H11 |
+| H20 | Test: logout → cascades children, VT shows login       | done    | H5, H11 |
 | H21 | Test: sudo creates elevated container                  | pending | H13     |
 | H22 | Test: su creates nested session with target's view     | pending | H15     |
 | H23 | Test: escalation beyond ceiling rejected               | pending | H13     |
