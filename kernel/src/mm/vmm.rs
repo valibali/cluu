@@ -1144,6 +1144,98 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
     klibcluu::trace(" table frames");
 }
 
+/// Count mapped user pages in a page table, classified by virtual address
+/// into code (text+data), heap, and stack categories.
+///
+/// # Safety
+///
+/// `pml4_phys` must point to a valid PML4.  Caller must ensure the physmap
+/// is active so `phys_to_virt_u64` works.
+///
+/// # Returns
+///
+/// `(code_pages, heap_pages, stack_pages)` — each is a u16 count of 4 KiB
+/// pages.
+pub unsafe fn count_user_pages(
+    pml4_phys: PhysAddr,
+    heap_start: u64,
+    stack_start: u64,
+    stack_end: u64,
+) -> (u16, u16, u16) {
+    let pml4_virt = super::physmap::phys_to_virt_u64(pml4_phys.as_u64());
+    let pml4 = &*(pml4_virt as *const [u64; 512]);
+
+    let mut code: u32 = 0;
+    let mut heap: u32 = 0;
+    let mut stack: u32 = 0;
+
+    for (pml4_idx, &pml4e) in pml4.iter().enumerate().take(256) {
+        if pml4e & pte_flags::PRESENT == 0 {
+            continue;
+        }
+
+        let pdpt_phys = pml4e & pte_flags::ADDR_MASK;
+        let pdpt_virt = super::physmap::phys_to_virt_u64(pdpt_phys);
+        let pdpt = &*(pdpt_virt as *const [u64; 512]);
+
+        for (pdpt_idx, &pdpte) in pdpt.iter().enumerate() {
+            if pdpte & pte_flags::PRESENT == 0 {
+                continue;
+            }
+            if pdpte & pte_flags::HUGE != 0 {
+                continue; // 1GB huge — skip classification
+            }
+
+            let pd_phys = pdpte & pte_flags::ADDR_MASK;
+            let pd_virt = super::physmap::phys_to_virt_u64(pd_phys);
+            let pd = &*(pd_virt as *const [u64; 512]);
+
+            for (pd_idx, &pde) in pd.iter().enumerate() {
+                if pde & pte_flags::PRESENT == 0 {
+                    continue;
+                }
+                if pde & pte_flags::HUGE != 0 {
+                    // 2MB huge page — count as 512 pages in appropriate region
+                    let va = ((pml4_idx as u64) << 39)
+                        | ((pdpt_idx as u64) << 30)
+                        | ((pd_idx as u64) << 21);
+                    if va >= stack_start && va < stack_end {
+                        stack += 512;
+                    } else if va >= heap_start && va < stack_start {
+                        heap += 512;
+                    } else {
+                        code += 512;
+                    }
+                    continue;
+                }
+
+                let pt_phys = pde & pte_flags::ADDR_MASK;
+                let pt_virt = super::physmap::phys_to_virt_u64(pt_phys);
+                let pt = &*(pt_virt as *const [u64; 512]);
+
+                for (pt_idx, &pte) in pt.iter().enumerate() {
+                    if pte & pte_flags::PRESENT == 0 {
+                        continue;
+                    }
+                    let va = ((pml4_idx as u64) << 39)
+                        | ((pdpt_idx as u64) << 30)
+                        | ((pd_idx as u64) << 21)
+                        | ((pt_idx as u64) << 12);
+                    if va >= stack_start && va < stack_end {
+                        stack += 1;
+                    } else if va >= heap_start && va < stack_start {
+                        heap += 1;
+                    } else {
+                        code += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    (code.min(u16::MAX as u32) as u16, heap.min(u16::MAX as u32) as u16, stack.min(u16::MAX as u32) as u16)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Address Space Management Helpers
 // ═══════════════════════════════════════════════════════════════════════════

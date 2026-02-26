@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-20
 **Scope:** Capability profiles, VFS views, container model, spawn protocol
-**Status:** Implementation in progress — Phases A–G complete, Phase H core (H1-H7, H9-H12, H16-H17) complete
+**Status:** Implementation in progress — Phases A–G complete, Phase H complete, Phase H revision in progress (session architecture redesign)
 **Depends on:** IPC registry (docs/IPC_REGISTRY.md), kernel token system (rights.rs)
 
 ---
@@ -2589,25 +2589,44 @@ separate container from the session.
 | H5  | Procmgr: spawn session container (parent=0, top-level) | done    | H4      |
 | H6  | Procmgr: VT–session attachment (wire shell to tty)     | done    | H5      |
 | H7  | Procmgr: session table (track session→VT attachments)  | done    | H5      |
-| H8  | Procmgr: VT crash recovery (reattach session to new VT)| pending | H6, H7  |
+| H8  | Procmgr: VT crash recovery (reattach session to new VT)| done    | H6, H7  |
 | H9  | tty: login prompt mode (read username/password, send to procmgr) | done | H3 |
 | H10 | tty: switch between login mode and terminal mode       | done    | H9      |
 | H11 | tty: handle session death notification (return to login)| done    | H10     |
 | H12 | VT container: reduce profile from 0x0F to 0x05        | done    | H5, G7  |
-| H13 | Add PROCMGR_ESCALATE_LABEL handler (sudo)              | pending | H2      |
-| H14 | Shell builtin: `sudo` (prompt + escalation request)    | pending | H13     |
-| H15 | Shell builtin: `su` (prompt + session login request)   | pending | H3      |
+| H13 | Add PROCMGR_ESCALATE_LABEL=32 handler (sudo)           | done    | H2      |
+| H14 | Shell builtin: `sudo` (prompt + escalation request)    | done    | H13     |
+| H15 | Shell builtin: `su` (prompt + PROCMGR_SU_LABEL=33)     | done    | H3      |
 | H16 | Add ADMIN profile constant to cap.rs                   | done    | —       |
 | H17 | ADMIN default view template in procmgr                 | done    | H16     |
 | H18 | Test: login → session with correct view (parent=0)     | done    | H5      |
-| H19 | Test: VT crash → session survives, reattaches          | pending | H8      |
+| H19 | Test: VT crash → session survives, reattaches          | done    | H8      |
 | H20 | Test: logout → cascades children, VT shows login       | done    | H5, H11 |
-| H21 | Test: sudo creates elevated container                  | pending | H13     |
-| H22 | Test: su creates nested session with target's view     | pending | H15     |
-| H23 | Test: escalation beyond ceiling rejected               | pending | H13     |
+| H21 | Test: sudo creates elevated container                  | done    | H13     |
+| H22 | Test: su creates nested session with target's view     | done    | H15     |
+| H23 | Test: escalation beyond ceiling rejected               | done    | H13     |
+| H24 | Shell prompt: show session username (USER env from ProcessInfo) | done | H5 |
+| H25 | Pass per-user env (USER, HOME) to spawned shells       | done    | H5      |
 
 Critical path: H1 → H2 → H3 → H4 → H5 → H6 → H8 (login + reattach)
 Parallel tracks: H9-H11 (tty login mode), H13-H14 (sudo), H16-H17 (ADMIN profile)
+
+#### Phase H Revision: Session Architecture Redesign
+
+After initial implementation, a design review identified that `session_table` was keyed by
+the shell's `container_id` (session lifetime coupled to shell lifetime). This revision
+decouples session identity from the shell process and enforces strict capability-based
+`su` policy.
+
+| #    | Task                                                                | Status      | Depends |
+|------|---------------------------------------------------------------------|-------------|---------|
+| HR1  | Session gets own `session_cid` (virtual, no PID, not in container_instances) | in progress | H7 |
+| HR2  | Shell ContainerInstance: `parent_container_id = session_cid`       | in progress | HR1     |
+| HR3  | Session survives shell crash: clear `shell_cid`/`stdin_endpoint`, no SESSION_DEATH | in progress | HR1 |
+| HR4  | Explicit logout path: session death on `exit`, TTY returns to login | in progress | HR1     |
+| HR5  | Approach C `su` policy: `target_profile` strictly < `caller_profile` (use `can_grant`) | in progress | H15 |
+| HR6  | Test: shell crash → session survives, no login prompt shown        | pending     | HR3     |
+| HR7  | Test: `su` between equal profiles rejected (must use `sudo su`)    | pending     | HR5     |
 
 ### Phase I: Restart Policies
 
@@ -2701,6 +2720,70 @@ renderer fixes (L1-L5) have no dependencies on other phases.
 Critical path: L1 → L2/L3/L5/L6 (renderer refactor enables all fixes)
 High priority: L1-L5 fix the current garbled screen bug
 Lower priority: L8-L9 (reattach), L10-L11 (scrollback)
+
+### Phase M: Process Monitoring (`top` container)
+
+Live htop-style process/container monitor with hierarchy display, CPU and memory
+usage, and 1-second polling. Runs as a standalone container (spawned via `run top`),
+inheriting the caller's session profile for visibility filtering. Profile enforcement
+is done in procmgr's stats handler — user-profile callers see only their own session
+subtree, admin-profile callers see all containers.
+
+Note: Phase N (ProcFS) will eventually replace the procmgr stats API with a
+filesystem-based approach. The `top` binary will be refactored at that point.
+
+| #   | Task                                                                | Status      | Depends |
+|-----|---------------------------------------------------------------------|-------------|---------|
+| M1  | Kernel: add `cpu_ticks_consumed: u64` to Thread struct              | in progress | —       |
+| M2  | Kernel: accumulate ticks in `expire_current_thread` / scheduler    | in progress | M1      |
+| M3  | Kernel: `ThreadGetStats` invoke op — returns `cpu_ticks_consumed`  | in progress | M1      |
+| M4  | libcluu: `thread_get_stats(thread_token) -> Result<u64>` wrapper   | in progress | M3      |
+| M5  | libcluu/ipc.rs: add `PROCMGR_CONTAINER_STATS_LABEL = 35`           | in progress | —       |
+| M6  | Procmgr: add `mapped_pages: u32` to `ContainerInstance`, track at spawn | in progress | — |
+| M7  | Procmgr: `handle_container_stats()` — profile-filtered 64-byte records | in progress | M5, M6 |
+| M8  | `userspace/top/` binary — standalone no_std process monitor        | in progress | M5, M7  |
+| M9  | `containers/top/Cluufile` — container build + image                | in progress | M8      |
+| M10 | Test: `run top` from ADMIN session shows all containers with tree  | pending     | M9      |
+| M11 | Test: `run top` from USER session shows only own subtree           | pending     | M9, HR5 |
+| M12 | Test: CPU% updates between frames (non-zero for active containers) | pending     | M9      |
+
+Wire format: fixed 64-byte records per container (container_id, parent_id, pid,
+profile_bits, state, vt_index, mapped_pages, cpu_ticks, name[24]).
+UI: ANSI 16-color, Unicode tree chars (├── └── │), cursor-home + per-line \x1b[K
+overwrite (no flicker), Ctrl-C to quit.
+
+Critical path: M1 → M2/M3 → M4 (kernel accounting) + M5/M6 → M7 (stats API) → M8/M9 (binary + container)
+
+### Phase N: ProcFS
+
+Proper Unix-style `/proc` filesystem with per-process entries, live data from the
+kernel/procmgr, and VFS-view-based visibility filtering. This replaces the ad-hoc
+`PROCMGR_CONTAINER_STATS_LABEL` approach from Phase M — once Phase N is complete,
+tools like `top`, `ps`, and `cat` can read process data through the standard VFS
+path, and profile enforcement falls out automatically from the existing view mechanism.
+
+Currently `/proc` is a global static mount (7 entries, no per-PID data, not included
+in any user/admin VFS view). `/proc/self/*` stubs exist but return no content.
+
+| #   | Task                                                                | Status  | Depends |
+|-----|---------------------------------------------------------------------|---------|---------|
+| N1  | VFS view: add `/proc` to `ADMIN_MOUNTS` and user-profile mounts    | pending | —       |
+| N2  | procfs: implement `/proc/self/status` — pid, name, profile, state  | pending | N1      |
+| N3  | procfs: implement `/proc/self/cmdline` — null-separated argv       | pending | N1      |
+| N4  | procfs: implement `/proc/self/stat` — cpu_ticks, mapped_pages      | pending | N1, M4  |
+| N5  | procfs: implement `/proc/uptime` with real kernel tick counter      | pending | —       |
+| N6  | procfs: implement `/proc/meminfo` with buddy allocator stats        | pending | —       |
+| N7  | procfs: add dynamic per-PID directory entries (`/proc/PID/`)       | pending | N2      |
+| N8  | procfs ↔ procmgr IPC: procfs queries procmgr for per-pid data      | pending | N7      |
+| N9  | VFS view filtering: user-profile view restricts `/proc/PID/` to own session's PIDs | pending | N7, HR1 |
+| N10 | `top` refactor: read from `/proc/` via VFS instead of stats API   | pending | N7, N9  |
+| N11 | Shell builtin `ps`: list processes via `/proc/` (replaces existing container list) | pending | N7 |
+| N12 | Test: `cat /proc/self/status` shows correct info                   | pending | N2      |
+| N13 | Test: user cannot read `/proc/PID/` for PIDs outside own session   | pending | N9      |
+| N14 | Test: `top` after N10 refactor — same output, data from VFS        | pending | N10     |
+
+Critical path: N1 → N2-N4 (self entries) → N7 (per-PID dirs) → N8/N9 (live data + filtering) → N10/N11 (tool refactor)
+Can start N1/N5/N6 independently. N7 onward requires N8 (procmgr IPC for live data).
 
 ---
 

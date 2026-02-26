@@ -1,0 +1,14 @@
+[package]
+name = "cluu-top"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU container/process monitor"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "top"
+path = "src/main.rs"

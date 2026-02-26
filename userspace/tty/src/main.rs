@@ -39,7 +39,7 @@ fn run() -> Result<()> {
     let mut ctx = TtyContext::new()?;
     let mut discipline = LineDiscipline::new();
 
-    let mut buf = [0u8; 256];
+    let mut buf = [0u8; 4096];
     loop {
         ctx.request_subscriptions();
 

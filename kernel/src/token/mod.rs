@@ -375,6 +375,7 @@ pub enum InvokeOp {
     ThreadSetFaultEndpoint = 5,
     ThreadSetFSBase = 6,
     ThreadGetId = 7,
+    ThreadGetStats = 8,
 
     // Space operations
     SpaceCreate = 10,
@@ -386,6 +387,7 @@ pub enum InvokeOp {
     SpaceProtect = 16,  // Batch permission update for mapped pages
     FutexWait = 17,
     FutexWake = 18,
+    SpaceGetStats = 19, // Query mapped page counts (code, heap, stack)
 
     // Token operations
     TokenDerive = 20,
@@ -435,6 +437,7 @@ impl InvokeOp {
             5 => Some(Self::ThreadSetFaultEndpoint),
             6 => Some(Self::ThreadSetFSBase),
             7 => Some(Self::ThreadGetId),
+            8 => Some(Self::ThreadGetStats),
             10 => Some(Self::SpaceCreate),
             11 => Some(Self::SpaceDestroy),
             12 => Some(Self::SpaceMap),
@@ -444,6 +447,7 @@ impl InvokeOp {
             16 => Some(Self::SpaceProtect),
             17 => Some(Self::FutexWait),
             18 => Some(Self::FutexWake),
+            19 => Some(Self::SpaceGetStats),
             20 => Some(Self::TokenDerive),
             21 => Some(Self::TokenRevoke),
             30 => Some(Self::IrqAttach),

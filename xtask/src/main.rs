@@ -260,9 +260,7 @@ enum Commands {
     },
     /// Internal: build a single container by name
     #[command(hide = true)]
-    BuildSingleContainer {
-        name: String,
-    },
+    BuildSingleContainer { name: String },
 }
 
 fn main() -> Result<()> {
@@ -1128,11 +1126,7 @@ fn compute_tree_order(
         .collect();
 
     let mut order = Vec::new();
-    fn walk(
-        id: &str,
-        nodes: &HashMap<String, RichTreeNode>,
-        order: &mut Vec<String>,
-    ) {
+    fn walk(id: &str, nodes: &HashMap<String, RichTreeNode>, order: &mut Vec<String>) {
         order.push(id.to_string());
         if let Some(node) = nodes.get(id) {
             for child in &node.children {
@@ -1692,8 +1686,10 @@ fn run_rich_dag(
     logs_dir: &Path,
     interactive_tree: bool,
 ) -> Result<()> {
-    let mut pending: HashMap<String, RichTask> =
-        tasks.into_iter().map(|task| (task.name.clone(), task)).collect();
+    let mut pending: HashMap<String, RichTask> = tasks
+        .into_iter()
+        .map(|task| (task.name.clone(), task))
+        .collect();
     let mut completed: HashSet<String> = HashSet::new();
     let mut running: HashSet<String> = HashSet::new();
     let (tx, rx) = mpsc::channel::<(String, Result<()>)>();
@@ -1782,24 +1778,94 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
 
     // -- Tree node definitions --------------------------------------------------
     let mut tree_defs = vec![
-        RichTreeNodeDef { id: "build".into(), label: "build".into(), parent: None, is_leaf: false },
+        RichTreeNodeDef {
+            id: "build".into(),
+            label: "build".into(),
+            parent: None,
+            is_leaf: false,
+        },
         // Dependencies
-        RichTreeNodeDef { id: "dependencies".into(), label: "dependencies".into(), parent: Some("build".into()), is_leaf: false },
-        RichTreeNodeDef { id: "dep-klibcluu".into(), label: "klibcluu".into(), parent: Some("dependencies".into()), is_leaf: true },
-        RichTreeNodeDef { id: "dep-libcluu".into(), label: "libcluu".into(), parent: Some("dependencies".into()), is_leaf: true },
-        RichTreeNodeDef { id: "dep-newlib".into(), label: "newlib".into(), parent: Some("dependencies".into()), is_leaf: true },
-        RichTreeNodeDef { id: "dep-syscalls".into(), label: "syscalls".into(), parent: Some("dependencies".into()), is_leaf: true },
-        RichTreeNodeDef { id: "dep-crt0".into(), label: "crt0".into(), parent: Some("dependencies".into()), is_leaf: true },
+        RichTreeNodeDef {
+            id: "dependencies".into(),
+            label: "dependencies".into(),
+            parent: Some("build".into()),
+            is_leaf: false,
+        },
+        RichTreeNodeDef {
+            id: "dep-klibcluu".into(),
+            label: "klibcluu".into(),
+            parent: Some("dependencies".into()),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "dep-libcluu".into(),
+            label: "libcluu".into(),
+            parent: Some("dependencies".into()),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "dep-newlib".into(),
+            label: "newlib".into(),
+            parent: Some("dependencies".into()),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "dep-syscalls".into(),
+            label: "syscalls".into(),
+            parent: Some("dependencies".into()),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "dep-crt0".into(),
+            label: "crt0".into(),
+            parent: Some("dependencies".into()),
+            is_leaf: true,
+        },
         // Kernel
-        RichTreeNodeDef { id: "kernel".into(), label: "kernel".into(), parent: Some("build".into()), is_leaf: true },
+        RichTreeNodeDef {
+            id: "kernel".into(),
+            label: "kernel".into(),
+            parent: Some("build".into()),
+            is_leaf: true,
+        },
         // Userspace
-        RichTreeNodeDef { id: "userspace".into(), label: "userspace".into(), parent: Some("build".into()), is_leaf: false },
-        RichTreeNodeDef { id: "init".into(), label: "init".into(), parent: Some("userspace".into()), is_leaf: false },
-        RichTreeNodeDef { id: "containers".into(), label: "containers".into(), parent: Some("userspace".into()), is_leaf: false },
+        RichTreeNodeDef {
+            id: "userspace".into(),
+            label: "userspace".into(),
+            parent: Some("build".into()),
+            is_leaf: false,
+        },
+        RichTreeNodeDef {
+            id: "init".into(),
+            label: "init".into(),
+            parent: Some("userspace".into()),
+            is_leaf: false,
+        },
+        RichTreeNodeDef {
+            id: "containers".into(),
+            label: "containers".into(),
+            parent: Some("userspace".into()),
+            is_leaf: false,
+        },
         // Packaging
-        RichTreeNodeDef { id: "initrd".into(), label: "initrd".into(), parent: Some("build".into()), is_leaf: true },
-        RichTreeNodeDef { id: "userdisk".into(), label: "userdisk".into(), parent: Some("build".into()), is_leaf: true },
-        RichTreeNodeDef { id: "disk-image".into(), label: "disk-image".into(), parent: Some("build".into()), is_leaf: true },
+        RichTreeNodeDef {
+            id: "initrd".into(),
+            label: "initrd".into(),
+            parent: Some("build".into()),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "userdisk".into(),
+            label: "userdisk".into(),
+            parent: Some("build".into()),
+            is_leaf: true,
+        },
+        RichTreeNodeDef {
+            id: "disk-image".into(),
+            label: "disk-image".into(),
+            parent: Some("build".into()),
+            is_leaf: true,
+        },
     ];
 
     // Init primordial subtasks (one per crate)
@@ -1832,36 +1898,67 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
     //               userdisk waits for all init + all containers.
     //               disk-image waits for initrd + userdisk.
     let all_dep_names: Vec<String> = vec![
-        "dep-klibcluu".into(), "dep-libcluu".into(), "dep-newlib".into(),
-        "dep-syscalls".into(), "dep-crt0".into(),
+        "dep-klibcluu".into(),
+        "dep-libcluu".into(),
+        "dep-newlib".into(),
+        "dep-syscalls".into(),
+        "dep-crt0".into(),
     ];
 
-    let init_task_ids: Vec<String> = INIT_CRATES.iter()
-        .map(|n| format!("init-{}", n))
-        .collect();
+    let init_task_ids: Vec<String> = INIT_CRATES.iter().map(|n| format!("init-{}", n)).collect();
 
     let mut tasks = vec![
         // Dependencies
-        RichTask { name: "dep-klibcluu".into(), args: vec!["build-klibcluu".into()], deps: vec![] },
-        RichTask { name: "dep-libcluu".into(), args: vec!["build-libcluu".into(), "--profile".into(), profile.into()], deps: vec![] },
-        RichTask { name: "dep-newlib".into(), args: vec!["build-newlib".into()], deps: vec![] },
-        RichTask { name: "dep-syscalls".into(), args: vec!["build-syscalls".into(), "--profile".into(), profile.into()], deps: vec!["dep-libcluu".into()] },
-        RichTask { name: "dep-crt0".into(), args: vec!["build-crt0".into()], deps: vec![] },
+        RichTask {
+            name: "dep-klibcluu".into(),
+            args: vec!["build-klibcluu".into()],
+            deps: vec![],
+        },
+        RichTask {
+            name: "dep-libcluu".into(),
+            args: vec!["build-libcluu".into(), "--profile".into(), profile.into()],
+            deps: vec![],
+        },
+        RichTask {
+            name: "dep-newlib".into(),
+            args: vec!["build-newlib".into()],
+            deps: vec![],
+        },
+        RichTask {
+            name: "dep-syscalls".into(),
+            args: vec!["build-syscalls".into(), "--profile".into(), profile.into()],
+            deps: vec!["dep-libcluu".into()],
+        },
+        RichTask {
+            name: "dep-crt0".into(),
+            args: vec!["build-crt0".into()],
+            deps: vec![],
+        },
         // Kernel
-        RichTask { name: "kernel".into(), args: vec!["kernel".into(), "--profile".into(), profile.into()], deps: all_dep_names.clone() },
+        RichTask {
+            name: "kernel".into(),
+            args: vec!["kernel".into(), "--profile".into(), profile.into()],
+            deps: all_dep_names.clone(),
+        },
     ];
 
     // Init primordial tasks — each depends on all deps
     for crate_name in INIT_CRATES {
         tasks.push(RichTask {
             name: format!("init-{}", crate_name),
-            args: vec!["build-init-crate".into(), crate_name.to_string(), "--profile".into(), profile.into()],
+            args: vec![
+                "build-init-crate".into(),
+                crate_name.to_string(),
+                "--profile".into(),
+                profile.into(),
+            ],
             deps: all_dep_names.clone(),
         });
     }
 
     // Dynamic container tasks (each depends on all init crates for warm cache)
-    let container_task_ids: Vec<String> = container_names.iter()
+    let container_task_ids: Vec<String> = container_names
+        .iter()
         .map(|n| format!("container-{}", n))
         .collect();
     for name in &container_names {
@@ -1887,12 +1984,20 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
     });
     tasks.push(RichTask {
         name: "userdisk".into(),
-        args: vec!["create-user-block-image".into(), "--profile".into(), profile.into()],
+        args: vec![
+            "create-user-block-image".into(),
+            "--profile".into(),
+            profile.into(),
+        ],
         deps: userdisk_deps,
     });
     tasks.push(RichTask {
         name: "disk-image".into(),
-        args: vec!["create-disk-image".into(), "--profile".into(), profile.into()],
+        args: vec![
+            "create-disk-image".into(),
+            "--profile".into(),
+            profile.into(),
+        ],
         deps: vec!["initrd".into(), "userdisk".into()],
     });
 
@@ -2473,7 +2578,7 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     // Create bootboot config file. Optional extra BOOTBOOT environment lines
     // can be injected via CLUU_BOOTBOOT_ENV (newline or ';' separated).
     let mut bootboot_config =
-        String::from("// BOOTBOOT configuration\nscreen=1024x768\nkernel=sys/core\n");
+        String::from("// BOOTBOOT configuration\nscreen=1280x720\nkernel=sys/core\n");
     if let Ok(extra_env) = std::env::var("CLUU_BOOTBOOT_ENV") {
         for line in extra_env
             .split(['\n', ';'])
@@ -2545,8 +2650,12 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
                     let name = entry.file_name();
                     let dst = var_images_dir.join(&name);
                     fs::create_dir_all(&dst)?;
-                    copy_container_image(&entry.path(), &dst)
-                        .with_context(|| format!("Failed to copy container image '{}'", name.to_string_lossy()))?;
+                    copy_container_image(&entry.path(), &dst).with_context(|| {
+                        format!(
+                            "Failed to copy container image '{}'",
+                            name.to_string_lossy()
+                        )
+                    })?;
                     println!("  Added container image: {}", name.to_string_lossy());
                 }
             }
@@ -3191,7 +3300,12 @@ fn build_libcluu(profile: &str) -> Result<()> {
 /// over.  Everything else (console, kbd, tty, vtmgr, shell) is started by
 /// procmgr from containers.
 const INIT_CRATES: &[&str] = &[
-    "init", "registry", "timeserver", "procmgr", "vfs", "virtio-blk",
+    "init",
+    "registry",
+    "timeserver",
+    "procmgr",
+    "vfs",
+    "virtio-blk",
 ];
 
 /// Build a single init primordial crate by name.

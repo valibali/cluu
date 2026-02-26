@@ -1088,6 +1088,13 @@ impl ThreadManager {
             klibcluu::log_dec(klibcluu::LogLevel::Trace, "", tick);
         }
 
+        // Account CPU tick to the currently running thread
+        if let Some(current_id) = Self::current() {
+            Self::with_thread_mut(current_id, |t| {
+                t.cpu_ticks_consumed += 1;
+            });
+        }
+
         if Self::is_normal_mode() {
             if let Some(mut scheduler) = SCHEDULER.try_lock() {
                 scheduler.tick();
@@ -1258,6 +1265,10 @@ impl ThreadManager {
         // Expire current thread (moves to expired array for fair scheduling)
         Self::expire_current_thread(current_id);
 
+        // Clear current thread so idle ticks are not mis-attributed while
+        // we search for the next runnable thread (or HLT in the idle loop).
+        CURRENT_THREAD_ID.store(u64::MAX, Ordering::Release);
+
         Self::drain_pending_wake();
 
         // Pick next thread, idling if none ready
@@ -1273,6 +1284,7 @@ impl ThreadManager {
 
         // No switch needed if same thread
         if next_id == current_id {
+            Self::set_current(current_id);
             return core::ptr::null();
         }
 

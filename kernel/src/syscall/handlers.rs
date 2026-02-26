@@ -763,6 +763,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::ThreadSetFaultEndpoint => invoke_thread_set_fault_endpoint(&token, obj_ref, args),
         InvokeOp::ThreadSetFSBase => invoke_thread_set_fs_base(&token, obj_ref, args),
         InvokeOp::ThreadGetId => invoke_thread_get_id(&token, obj_ref, args),
+        InvokeOp::ThreadGetStats => invoke_thread_get_stats(&token, obj_ref, args),
 
         // Space operations
         InvokeOp::SpaceCreate => invoke_space_create(&token, obj_ref, args),
@@ -772,6 +773,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::SpaceGrant => invoke_space_grant(&token, obj_ref, args),
         InvokeOp::SpaceMapRange => invoke_space_map_range(&token, obj_ref, args),
         InvokeOp::SpaceProtect => invoke_space_protect(&token, obj_ref, args),
+        InvokeOp::SpaceGetStats => invoke_space_get_stats(&token, obj_ref, args),
         InvokeOp::FutexWait => invoke_futex_wait(&token, obj_ref, args),
         InvokeOp::FutexWake => invoke_futex_wake(&token, obj_ref, args),
 
@@ -1110,6 +1112,27 @@ fn invoke_thread_get_id(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -
     };
 
     Ok(thread_id.as_u64() as usize)
+}
+
+fn invoke_thread_get_stats(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::READ) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let thread_ref = crate::token::check_object_type(obj_ref, ObjectType::Thread)
+        .map_err(|_| Error::InvalidArgument)?;
+    let thread_id = if let ObjectRef::Thread(id) = thread_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let cpu_ticks = crate::sched::ThreadManager::with_thread(thread_id, |t| t.cpu_ticks_consumed)
+        .unwrap_or(0);
+
+    Ok(cpu_ticks as usize)
 }
 
 fn invoke_endpoint_create(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
@@ -1544,6 +1567,52 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
     match result {
         Some(Ok(changed)) => Ok(changed),
         Some(Err(err)) => Err(err),
+        None => Err(Error::NotFound),
+    }
+}
+
+/// Return mapped page counts for a user address space, classified into code,
+/// heap, and stack regions.
+///
+/// Packed return value (usize = u64 on x86_64):
+///   bits  0-15: code/data pages
+///   bits 16-31: heap pages
+///   bits 32-47: stack pages
+fn invoke_space_get_stats(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
+    use crate::mm::space_repository;
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::READ) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let result = space_repository::with_space(space_id, |space| {
+        let heap_start = space.heap.start().as_u64();
+        let stack_start = space.stack.start.as_u64();
+        let stack_end = stack_start + space.stack.size as u64;
+        unsafe {
+            crate::mm::vmm::count_user_pages(
+                space.page_table_root,
+                heap_start,
+                stack_start,
+                stack_end,
+            )
+        }
+    });
+
+    match result {
+        Some((code, heap, stack)) => {
+            let packed = (code as usize) | ((heap as usize) << 16) | ((stack as usize) << 32);
+            Ok(packed)
+        }
         None => Err(Error::NotFound),
     }
 }

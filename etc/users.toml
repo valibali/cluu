@@ -5,9 +5,25 @@
 #   shell    — path to the shell binary (resolved through session view)
 #   profile  — CapProfile for the login session ("user", "admin", "supervisor")
 #   escalate — ceiling profile for sudo (optional; if absent, sudo is rejected)
+#   password — plaintext password (empty string = no password required)
 
 [user.root]
 home = "/home/root"
 shell = "/bin/shell"
 profile = "admin"
 escalate = "supervisor"
+password = ""
+
+[user.alice]
+home = "/home/alice"
+shell = "/bin/shell"
+profile = "user"
+escalate = "admin"
+password = ""
+
+[user.guest]
+home = "/home/guest"
+shell = "/bin/shell"
+profile = "user"
+# no escalate = sudo rejected
+password = ""

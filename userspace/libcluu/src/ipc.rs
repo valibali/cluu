@@ -87,6 +87,22 @@ pub const PROCMGR_CONTAINER_LIST_LABEL: u32 = 25;
 pub const PROCMGR_SESSION_LOGIN_LABEL: u32 = 30;
 /// Session death: procmgr → tty (send). words[0]=vt_instance.
 pub const PROCMGR_SESSION_DEATH_LABEL: u32 = 31;
+/// Privilege escalation (sudo): shell → procmgr (call).
+/// words[0]=payload_len, words[1]=notify_endpoint.
+/// Payload: password\0command\0.
+/// Reply: words[0]=errno, words[1]=pid, words[2]=exit_cookie,
+///        words[3]=child_stdin_send, words[4]=container_id.
+pub const PROCMGR_ESCALATE_LABEL: u32 = 32;
+/// Identity switch (su): shell → procmgr (call).
+/// words[0]=payload_len, words[1]=notify_endpoint.
+/// Payload: username\0password\0.
+/// Reply: words[0]=errno, words[1]=pid, words[2]=exit_cookie,
+///        words[3]=child_stdin_send, words[4]=container_id.
+pub const PROCMGR_SU_LABEL: u32 = 33;
+/// Container stats query: shell → procmgr (call).
+/// Reply: words[0]=status, words[1]=record_count, words[2]=total_containers,
+///        words[3]=total_sessions. Payload = 64-byte fixed records.
+pub const PROCMGR_CONTAINER_STATS_LABEL: u32 = 35;
 
 pub const TTY_FG_FLAG_FORWARD_CTRL_C: usize = 1 << 0;
 pub const TTY_FG_FLAG_NOTIFY_CTRL_C: usize = 1 << 1;

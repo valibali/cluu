@@ -5,7 +5,4 @@ image = "console"
 image = "vtmgr"
 
 [[service]]
-image = "vt"
-
-[[service]]
 image = "kbd"

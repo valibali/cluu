@@ -232,6 +232,9 @@ pub struct Thread {
 
     /// Saved fault state while waiting for handler response
     pub fault_state: Option<FaultState>,
+
+    /// Cumulative CPU ticks consumed by this thread
+    pub cpu_ticks_consumed: u64,
 }
 
 impl Thread {
@@ -306,6 +309,7 @@ impl Thread {
             recv_scan_hint: 0,
             fault_endpoint: None,
             fault_state: None,
+            cpu_ticks_consumed: 0,
         }
     }
 
@@ -345,6 +349,7 @@ impl Thread {
             recv_scan_hint: 0,
             fault_endpoint: None,
             fault_state: None,
+            cpu_ticks_consumed: 0,
         }
     }
 

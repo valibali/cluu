@@ -26,6 +26,7 @@ members = [
     "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
+    "userspace/top",
     "userspace/nestprobe",
     "userspace/escalateprobe",
     "userspace/viewprobe",
@@ -59,6 +60,7 @@ default-members = [
     "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
+    "userspace/top",
     "userspace/nestprobe",
     "userspace/escalateprobe",
     "userspace/viewprobe",
@@ -126,6 +128,9 @@ debug = 0
 [profile.dev.package."cluu-cat"]
 debug = 0
 
+[profile.dev.package."cluu-top"]
+debug = 0
+
 [profile.dev.package."cluu-nestprobe"]
 debug = 0
 
@@ -178,6 +183,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-cat"]
+debug = 0
+
+[profile.release.package."cluu-top"]
 debug = 0
 
 [profile.release.package."cluu-nestprobe"]

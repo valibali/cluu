@@ -60,8 +60,8 @@ impl VtmgrContext {
             console_endpoint: 0,
             procmgr_spawn_endpoint: 0,
             active_vt: 0,
-            vt_created: 1,  // VT 0 is created at boot by init
-            vt_spawned: 1, // vt:0 container is spawned at boot by init
+            vt_created: 1,  // VT 0 console buffer is created at boot by console:0
+            vt_spawned: 0, // vt:0 will be spawned by us once procmgr is available
             requested_console: false,
             requested_procmgr_spawn: false,
         })
@@ -95,6 +95,10 @@ impl VtmgrContext {
                     } else if name == "spawn" {
                         self.procmgr_spawn_endpoint = token;
                         let _ = debug_print("vtmgr: procmgr spawn subscribed");
+                        // Spawn vt:0 now that we can talk to procmgr.
+                        if (self.vt_spawned & 1) == 0 {
+                            self.spawn_vt_container(0);
+                        }
                     }
                 }
                 registry::RegistryEvent::SubscribeStatus { code } => {

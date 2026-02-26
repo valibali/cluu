@@ -12,8 +12,9 @@ use core::mem::size_of;
 use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE, TOKEN_STDIN};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
-    call, call_with_payload, call_with_reply_buf, recv, send, send_with_payload, send_with_retry,
+    call, call_with_payload, call_with_reply_buf, recv, send_with_payload, send_with_retry,
     SharedRing, CONSOLE_CLEAR_LABEL, PROCMGR_CONTAINER_LIST_LABEL, PROCMGR_CONTAINER_RUN_LABEL,
+    PROCMGR_ESCALATE_LABEL, PROCMGR_SU_LABEL,
     TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
     TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
 };
@@ -297,6 +298,12 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(HeapBuiltin));
         registry.register(Box::new(ContainerBuiltin));
+        registry.register(Box::new(SuBuiltin));
+        registry.register(Box::new(SudoBuiltin));
+        registry.register(Box::new(VtCrashTestBuiltin));
+        registry.register(Box::new(SudoTestBuiltin));
+        registry.register(Box::new(SuTestBuiltin));
+        registry.register(Box::new(EscalateDenyBuiltin));
     }
 }
 
@@ -1105,7 +1112,7 @@ fn wait_for_exit_or_sigint(
     let mut ctrl_c_flags = TTY_FG_FLAG_FORWARD_CTRL_C;
     if mode == ForegroundMode::SignalOnCtrlC {
         ctrl_c_notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
-        ctrl_c_flags = TTY_FG_FLAG_NOTIFY_CTRL_C;
+        ctrl_c_flags = TTY_FG_FLAG_NOTIFY_CTRL_C | TTY_FG_FLAG_FORWARD_CTRL_C;
     }
 
     // Transfer tty foreground routing to the child while it runs.
@@ -1194,21 +1201,12 @@ fn set_tty_foreground(
     ctrl_c_notify_endpoint: usize,
     flags: usize,
 ) -> Result<()> {
-    const RETRIES: usize = 64;
-    for _ in 0..RETRIES {
-        let mut msg = Message::new(TTY_REGISTER_LABEL, [0; 6], 3);
-        msg.words[0] = foreground_endpoint;
-        msg.words[1] = ctrl_c_notify_endpoint;
-        msg.words[2] = flags;
-        match send(tty_endpoint, &msg, IpcFlags::empty()) {
-            Ok(()) => return Ok(()),
-            Err(Error::WouldBlock) | Err(Error::Busy) => {
-                let _ = syscall::yield_cpu();
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Err(Error::Busy)
+    let mut msg = Message::new(TTY_REGISTER_LABEL, [0; 6], 3);
+    msg.words[0] = foreground_endpoint;
+    msg.words[1] = ctrl_c_notify_endpoint;
+    msg.words[2] = flags;
+    call(tty_endpoint, &mut msg, IpcFlags::empty())?;
+    Ok(())
 }
 
 fn tty_get_lflag(tty_endpoint: usize) -> Result<usize> {
@@ -2759,4 +2757,313 @@ fn container_stop(stdout: usize, context: &mut CommandContext, args: &[String]) 
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
     }
     Ok(())
+}
+
+struct SudoBuiltin;
+
+impl BuiltinCommand for SudoBuiltin {
+    fn name(&self) -> &'static str {
+        "sudo"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        // sudo <command>   — run command with escalated privileges
+        // sudo -s / sudo   — open elevated shell
+        let command_path = if args.is_empty() || (args.len() == 1 && args[0] == "-s") {
+            "/bin/shell"
+        } else {
+            args[0].as_str()
+        };
+
+        // Password: stub (empty string, not verified)
+        let password = "";
+
+        // Build payload: password\0command_path\0
+        let mut payload = Vec::new();
+        payload.extend_from_slice(password.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(command_path.as_bytes());
+        payload.push(0);
+
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
+
+        let mut msg = Message::new(PROCMGR_ESCALATE_LABEL, [0; 6], 2);
+        msg.words[0] = payload.len();
+        msg.words[1] = notify_endpoint;
+        let mut reply = Message::new(0, [0; 6], 0);
+
+        call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
+
+        let status = reply.words[0];
+        if status != 0 {
+            let line = format!("sudo: permission denied (error {})\n", status);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
+        }
+
+        let pid = reply.words[1];
+        let cid = reply.words[4];
+        let child_stdin = reply.words[3];
+
+        let _ = debug_print(&format!("sudo: escalated cmd={} pid={} cid={}", command_path, pid, cid));
+
+        // Route TTY foreground to the escalated process
+        if child_stdin != 0 {
+            set_tty_foreground(stdout, child_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C)?;
+
+            // Wait for escalated process to exit
+            let mut notify_msg = Message::new(0, [0; 6], 0);
+            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+
+            // Restore TTY foreground to this shell
+            let shell_stdin = process_info().tokens[TOKEN_STDIN];
+            let _ = set_tty_foreground(stdout, shell_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C);
+        } else {
+            // No stdin route, just wait for exit
+            let mut notify_msg = Message::new(0, [0; 6], 0);
+            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+        }
+        Ok(())
+    }
+}
+
+struct SuBuiltin;
+
+impl BuiltinCommand for SuBuiltin {
+    fn name(&self) -> &'static str {
+        "su"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        let username = match args.first() {
+            Some(u) => u.as_str(),
+            None => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"usage: su <username>\n")?;
+                return Ok(());
+            }
+        };
+
+        // Password: stub (empty string, not verified)
+        let password = "";
+
+        // Build payload: target_username\0password\0
+        let mut payload = Vec::new();
+        payload.extend_from_slice(username.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(password.as_bytes());
+        payload.push(0);
+
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
+
+        let mut msg = Message::new(PROCMGR_SU_LABEL, [0; 6], 2);
+        msg.words[0] = payload.len();
+        msg.words[1] = notify_endpoint;
+        let mut reply = Message::new(0, [0; 6], 0);
+
+        call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
+
+        let status = reply.words[0];
+        if status != 0 {
+            let line = format!("su: authentication failure (error {})\n", status);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
+        }
+
+        let pid = reply.words[1];
+        let cid = reply.words[4];
+        let child_stdin = reply.words[3];
+
+        let _ = debug_print(&format!("su: nested session user={} pid={} cid={}", username, pid, cid));
+
+        // Route TTY foreground to the nested session's shell
+        if child_stdin != 0 {
+            set_tty_foreground(stdout, child_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C)?;
+
+            // Wait for nested session to exit
+            let mut notify_msg = Message::new(0, [0; 6], 0);
+            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+
+            // Restore TTY foreground to this shell
+            let shell_stdin = process_info().tokens[TOKEN_STDIN];
+            let _ = set_tty_foreground(stdout, shell_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C);
+        } else {
+            // No stdin route, just wait for exit
+            let mut notify_msg = Message::new(0, [0; 6], 0);
+            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test builtins for Phase H verification
+// ---------------------------------------------------------------------------
+
+/// H19: vtcrashtest — Verify session is alive after VT crash.
+/// The actual TTY crash must be triggered externally (kill tty pid from another VT).
+/// This builtin simply writes to stdout; if it succeeds, the session survived.
+struct VtCrashTestBuiltin;
+
+impl BuiltinCommand for VtCrashTestBuiltin {
+    fn name(&self) -> &'static str {
+        "vtcrashtest"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let line = "vtcrashtest: PASS session alive after VT reattach\n";
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        let _ = debug_print(line.trim_end());
+        Ok(())
+    }
+}
+
+/// H21: sudotest — Verify sudo creates an elevated container.
+/// Sends PROCMGR_ESCALATE_LABEL for /bin/shell, checks reply has pid/cid,
+/// then kills the spawned container.
+struct SudoTestBuiltin;
+
+impl BuiltinCommand for SudoTestBuiltin {
+    fn name(&self) -> &'static str {
+        "sudotest"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        // Build payload: password\0command\0
+        let mut payload = Vec::new();
+        payload.push(0); // empty password
+        payload.extend_from_slice(b"/bin/shell");
+        payload.push(0);
+
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
+
+        let mut msg = Message::new(PROCMGR_ESCALATE_LABEL, [0; 6], 2);
+        msg.words[0] = payload.len();
+        msg.words[1] = notify_endpoint;
+        let mut reply = Message::new(0, [0; 6], 0);
+
+        call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
+
+        let status = reply.words[0];
+        let pid = reply.words[1];
+        let cid = reply.words[4];
+
+        if status == 0 && pid != 0 {
+            let line = format!("sudotest: PASS escalated pid={} cid={}\n", pid, cid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print(line.trim_end());
+
+            // Clean up: kill the spawned container
+            let _ = signal_process(procmgr_endpoint, pid, 9);
+        } else {
+            let line = format!("sudotest: FAIL status={} pid={}\n", status, pid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print(line.trim_end());
+        }
+        Ok(())
+    }
+}
+
+/// H22: sutest — Verify su creates a nested session with target's view.
+/// Sends PROCMGR_SU_LABEL for user "alice", checks reply has pid/cid,
+/// then kills the spawned container.
+struct SuTestBuiltin;
+
+impl BuiltinCommand for SuTestBuiltin {
+    fn name(&self) -> &'static str {
+        "sutest"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let target = "alice";
+
+        // Build payload: username\0password\0
+        let mut payload = Vec::new();
+        payload.extend_from_slice(target.as_bytes());
+        payload.push(0);
+        payload.push(0); // empty password
+
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
+
+        let mut msg = Message::new(PROCMGR_SU_LABEL, [0; 6], 2);
+        msg.words[0] = payload.len();
+        msg.words[1] = notify_endpoint;
+        let mut reply = Message::new(0, [0; 6], 0);
+
+        call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
+
+        let status = reply.words[0];
+        let pid = reply.words[1];
+        let cid = reply.words[4];
+
+        if status == 0 && pid != 0 {
+            let line = format!("sutest: PASS nested session user={} pid={} cid={}\n", target, pid, cid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print(line.trim_end());
+
+            // Clean up: kill the spawned container
+            let _ = signal_process(procmgr_endpoint, pid, 9);
+        } else {
+            let line = format!("sutest: FAIL status={} pid={}\n", status, pid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print(line.trim_end());
+        }
+        Ok(())
+    }
+}
+
+/// H23: escalatedeny — Verify escalation beyond ceiling is rejected.
+/// Must be run as user "guest" (no escalate field in users.toml).
+/// Sends PROCMGR_ESCALATE_LABEL and expects PermissionDenied.
+struct EscalateDenyBuiltin;
+
+impl BuiltinCommand for EscalateDenyBuiltin {
+    fn name(&self) -> &'static str {
+        "escalatedeny"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        // Build payload: password\0command\0
+        let mut payload = Vec::new();
+        payload.push(0); // empty password
+        payload.extend_from_slice(b"/bin/shell");
+        payload.push(0);
+
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
+
+        let mut msg = Message::new(PROCMGR_ESCALATE_LABEL, [0; 6], 2);
+        msg.words[0] = payload.len();
+        msg.words[1] = notify_endpoint;
+        let mut reply = Message::new(0, [0; 6], 0);
+
+        call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
+
+        match parse_status(reply.words[0]) {
+            Err(Error::PermissionDenied) => {
+                let line = "escalatedeny: PASS escalation rejected (no ceiling)\n";
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+            }
+            Ok(()) => {
+                let line = format!(
+                    "escalatedeny: FAIL unexpected success pid={}\n",
+                    reply.words[1]
+                );
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+                // Clean up the unexpected container
+                let _ = signal_process(procmgr_endpoint, reply.words[1], 9);
+            }
+            Err(err) => {
+                let line = format!("escalatedeny: FAIL wrong error {:?}\n", err);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                let _ = debug_print(line.trim_end());
+            }
+        }
+        Ok(())
+    }
 }

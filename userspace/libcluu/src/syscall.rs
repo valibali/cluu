@@ -58,6 +58,7 @@ pub enum InvokeOp {
     ThreadSetFaultEndpoint = 5,
     ThreadSetFSBase = 6,
     ThreadGetId = 7,
+    ThreadGetStats = 8,
 
     // Space operations
     SpaceCreate = 10,
@@ -69,6 +70,7 @@ pub enum InvokeOp {
     SpaceProtect = 16,  // Batch permission update for mapped pages
     FutexWait = 17,
     FutexWake = 18,
+    SpaceGetStats = 19, // Query mapped page counts (code, heap, stack)
 
     // Token operations
     TokenDerive = 20,
@@ -1024,6 +1026,24 @@ pub fn thread_set_fault_endpoint(thread_token: usize, endpoint_token: usize) -> 
 /// Resolve the kernel thread id carried by a thread token.
 pub fn thread_get_id(thread_token: usize) -> Result<usize> {
     unsafe { invoke(thread_token, InvokeOp::ThreadGetId, 0, 0, 0, 0) }
+}
+
+/// Get cumulative CPU ticks consumed by a thread.
+pub fn thread_get_stats(thread_token: usize) -> Result<u64> {
+    let ticks = unsafe { invoke(thread_token, InvokeOp::ThreadGetStats, 0, 0, 0, 0) }?;
+    Ok(ticks as u64)
+}
+
+/// Query mapped page counts for an address space.
+///
+/// Returns `(code_pages, heap_pages, stack_pages)` as u16 values.
+#[inline]
+pub fn space_get_stats(space_token: usize) -> Result<(u16, u16, u16)> {
+    let packed = unsafe { invoke(space_token, InvokeOp::SpaceGetStats, 0, 0, 0, 0) }?;
+    let code = (packed & 0xFFFF) as u16;
+    let heap = ((packed >> 16) & 0xFFFF) as u16;
+    let stack = ((packed >> 32) & 0xFFFF) as u16;
+    Ok((code, heap, stack))
 }
 
 /// Create a new IPC endpoint.

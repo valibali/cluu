@@ -41,6 +41,7 @@ use libcluu::ipc::parse_message;
 use libcluu::ipc::SharedRing;
 use libcluu::ipc::PROCMGR_CONTAINER_LIST_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL;
+use libcluu::ipc::PROCMGR_CONTAINER_STATS_LABEL;
 use libcluu::ipc::PROCMGR_QUERY_CTTY_LABEL;
 use libcluu::ipc::PROCMGR_SPAWN_SERVICE_LABEL;
 use libcluu::registry;
@@ -60,6 +61,7 @@ struct ContainerInstance {
     parent_container_id: u64, // 0 = top-level or detached
     pid: usize,
     image_path: String,
+    mapped_pages: u32,
 }
 
 struct PendingVfsView {
@@ -74,14 +76,17 @@ struct UserRecord {
     shell: String,
     profile: CapProfile,
     escalate: Option<CapProfile>,
+    password: String,
 }
 
 struct SessionEntry {
     container_id: u64,
+    shell_cid: u64,
     pid: usize,
     username: String,
     profile: CapProfile,
     vt_index: usize,
+    stdin_endpoint: usize,
 }
 
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
@@ -178,6 +183,11 @@ struct ProcessManager {
     user_records: BTreeMap<String, UserRecord>,
     session_table: BTreeMap<u64, SessionEntry>,
     vt_to_session: [u64; VT_COUNT],
+    /// Framebuffer dimensions cached from /proc/fb; zero until console is spawned.
+    fb_width: u32,
+    fb_height: u32,
+    /// Container ID of the vtmgr service (set during autostart).
+    vtmgr_container_id: u64,
 }
 
 impl ProcessManager {
@@ -229,6 +239,9 @@ impl ProcessManager {
             user_records: BTreeMap::new(),
             session_table: BTreeMap::new(),
             vt_to_session: [0; VT_COUNT],
+            fb_width: 0,
+            fb_height: 0,
+            vtmgr_container_id: 0,
         })
     }
 
@@ -267,6 +280,62 @@ impl ProcessManager {
             }
         }
         0 // default VT0
+    }
+
+    /// Walk sender_tid → pid → container_id → session_table to find the session.
+    /// Traverses the container parent chain to find the enclosing session.
+    fn resolve_caller_session(&self, sender_tid: usize) -> Option<&SessionEntry> {
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied()?;
+        let mut cid = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
+        while cid != 0 {
+            if let Some(session) = self.session_table.get(&cid) {
+                return Some(session);
+            }
+            match self.container_instances.get(&cid) {
+                Some(inst) => cid = inst.parent_container_id,
+                None => break,
+            }
+        }
+        None
+    }
+
+    /// Reattach an existing session to a (re)started VT by sending TTY_REGISTER
+    /// with the session's shell stdin endpoint. This causes the new tty to
+    /// transition from Login mode directly to Terminal mode.
+    fn reattach_session_to_vt(&self, vt_index: usize, session_cid: u64) {
+        let tty_ep = self.tty_endpoints[vt_index];
+        if tty_ep == 0 { return; }
+        let stdin_ep = match self.session_table.get(&session_cid) {
+            Some(s) => s.stdin_endpoint,
+            None => return,
+        };
+        if stdin_ep == 0 { return; }
+        let reg_msg = Message::new(
+            libcluu::ipc::TTY_REGISTER_LABEL,
+            [stdin_ep, 0, 0, 0, 0, 0],
+            1,
+        );
+        let _ = ipc::send(tty_ep, &reg_msg, IpcFlags::empty());
+        let _ = debug_print(&format!(
+            "procmgr: reattach session cid={} stdin={} to tty:{}",
+            session_cid, stdin_ep, vt_index
+        ));
+    }
+
+    /// Build a VFS view from a capability profile and user home directory.
+    /// Picks profile-based default mounts, then replaces /home/* with the user's home.
+    fn build_view_for_profile_and_home(&self, profile: CapProfile, home: &str) -> ViewMountList {
+        let base_mounts = if profile.contains(CapProfile::ADMIN) {
+            libcluu::vfs_view::admin_session_mounts()
+        } else {
+            libcluu::vfs_view::default_mounts_for_profile(profile)
+        };
+        let mut mounts: ViewMountList = base_mounts.iter()
+            .filter(|&&(_, dst, _)| !dst.starts_with("/home/"))
+            .map(|&(src, dst, w)| (String::from(src), String::from(dst), w))
+            .collect();
+        mounts.push((String::from(home), String::from(home), true));
+        mounts
     }
 
     /// Compute nesting depth of a container (0 for top-level/detached).
@@ -668,11 +737,13 @@ impl ProcessManager {
                 None => continue,
             };
             let escalate = table.get_str("escalate").and_then(parse_profile_str);
+            let password = table.get_str("password").map(String::from).unwrap_or_default();
             self.user_records.insert(String::from(username), UserRecord {
                 home,
                 shell,
                 profile,
                 escalate,
+                password,
             });
         }
 
@@ -701,27 +772,35 @@ impl ProcessManager {
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
+        let (user_env, user_envc) = build_user_env_payload("root", "/root");
 
-        match self.spawn_service(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, 0, spawn_seq, spawn_start, profile) {
+        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[]) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
-                let container_id = self.next_container_id();
-                self.pid_to_container_id.insert(pid, container_id);
+                let session_cid = self.next_container_id();
+                let shell_cid = self.next_container_id();
+                self.pid_to_container_id.insert(pid, shell_cid);
                 self.container_owner_pids.insert(pid);
-                self.register_vfs_view_for_thread(thread_token, &view_mounts, profile, container_id);
+                self.register_vfs_view_for_thread(thread_token, &view_mounts, profile, shell_cid);
                 self.pid_to_view.insert(pid, view_mounts);
-                self.container_instances.insert(container_id, ContainerInstance {
-                    name: String::from("session:root"),
-                    container_id,
-                    parent_container_id: 0,
+                self.container_instances.insert(shell_cid, ContainerInstance {
+                    name: String::from("shell"),
+                    container_id: shell_cid,
+                    parent_container_id: session_cid,
                     pid,
                     image_path: String::from(SERVICE_PATH),
+                    mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
                 });
-                self.session_table.insert(container_id, SessionEntry {
-                    container_id, pid,
+                self.container_children.entry(session_cid)
+                    .or_insert_with(Vec::new).push(shell_cid);
+                self.session_table.insert(session_cid, SessionEntry {
+                    container_id: session_cid,
+                    shell_cid,
+                    pid,
                     username: String::from("root"),
                     profile, vt_index: 0,
+                    stdin_endpoint: stdin_send,
                 });
-                self.vt_to_session[0] = container_id;
+                self.vt_to_session[0] = session_cid;
                 // Wire shell stdin to tty:0 via TTY_REGISTER so tty transitions to Terminal.
                 let tty_ep = self.tty_endpoints[0];
                 if tty_ep != 0 && stdin_send != 0 {
@@ -732,7 +811,10 @@ impl ProcessManager {
                     );
                     let _ = ipc::send(tty_ep, &reg_msg, IpcFlags::empty());
                 }
-                let _ = debug_print(&format!("procmgr: auto-login session pid={} cid={}", pid, container_id));
+                let _ = debug_print(&format!(
+                    "procmgr: auto-login session_cid={} shell_cid={} pid={}",
+                    session_cid, shell_cid, pid
+                ));
             }
             Err(e) => {
                 let _ = debug_print(&format!("procmgr: auto-login failed: {:?}", e));
@@ -846,10 +928,14 @@ impl ProcessManager {
                         } else if let Some(v) = line.strip_prefix("size=") {
                             fb_size = v.parse::<u64>().unwrap_or(0);
                         } else if let Some(v) = line.strip_prefix("width=") {
-                            overrides_buf[n_overrides] = (PARAM_FB_WIDTH, v.parse::<u64>().unwrap_or(0));
+                            let w = v.parse::<u64>().unwrap_or(0);
+                            self.fb_width = w as u32;
+                            overrides_buf[n_overrides] = (PARAM_FB_WIDTH, w);
                             n_overrides += 1;
                         } else if let Some(v) = line.strip_prefix("height=") {
-                            overrides_buf[n_overrides] = (PARAM_FB_HEIGHT, v.parse::<u64>().unwrap_or(0));
+                            let h = v.parse::<u64>().unwrap_or(0);
+                            self.fb_height = h as u32;
+                            overrides_buf[n_overrides] = (PARAM_FB_HEIGHT, h);
                             n_overrides += 1;
                         } else if let Some(v) = line.strip_prefix("pitch=") {
                             overrides_buf[n_overrides] = (PARAM_FB_PITCH, v.parse::<u64>().unwrap_or(0));
@@ -868,9 +954,6 @@ impl ProcessManager {
             n_overrides += 1;
             overrides_buf[n_overrides] = (PARAM_CONSOLE_ACTIVE, 1);
             n_overrides += 1;
-        } else if image_name == "vt" {
-            overrides_buf[0] = (PARAM_TTY_INSTANCE, 0);
-            n_overrides = 1;
         }
         let param_overrides = &overrides_buf[..n_overrides];
 
@@ -898,12 +981,16 @@ impl ProcessManager {
                 self.container_owner_pids.insert(pid);
                 self.register_vfs_view_for_thread(_thread_token, &view_mounts, requested_profile, container_id);
                 self.pid_to_view.insert(pid, view_mounts);
+                if image_name == "vtmgr" {
+                    self.vtmgr_container_id = container_id;
+                }
                 self.container_instances.insert(container_id, ContainerInstance {
                     name: String::from(image_name),
                     container_id,
                     parent_container_id: 0, // autostart = top-level
                     pid,
                     image_path: image_dir,
+                    mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
                 });
                 // Map framebuffer into console's address space.
                 if image_name == "console" && fb_phys != 0 && fb_size != 0 {
@@ -1044,7 +1131,25 @@ impl ProcessManager {
             self.container_instances.remove(&container_id);
             let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
         }
-        // Session death notification
+        // Shell exit: clear shell from session but keep session alive
+        let mut shell_session_cid = 0u64;
+        for (&scid, session) in self.session_table.iter() {
+            if session.shell_cid == container_id && container_id != 0 {
+                shell_session_cid = scid;
+                break;
+            }
+        }
+        if shell_session_cid != 0 {
+            if let Some(session) = self.session_table.get_mut(&shell_session_cid) {
+                let _ = debug_print(&format!(
+                    "procmgr: shell exit user='{}' shell_cid={} session_cid={} (session persists)",
+                    session.username, container_id, shell_session_cid
+                ));
+                session.shell_cid = 0;
+                session.stdin_endpoint = 0;
+            }
+        }
+        // Explicit logout: session_cid itself removed (future logout path)
         if let Some(session) = self.session_table.remove(&container_id) {
             if session.vt_index < VT_COUNT {
                 self.vt_to_session[session.vt_index] = 0;
@@ -1084,6 +1189,12 @@ impl ProcessManager {
                             self.tty_endpoints[idx] = token;
                             let _ =
                                 debug_print(&format!("procmgr: tty:{} main granted {}", idx, token));
+                            // H8: If a session already owns this VT, reattach it
+                            // to the new TTY (crash recovery).
+                            let session_cid = self.vt_to_session[idx];
+                            if session_cid != 0 {
+                                self.reattach_session_to_vt(idx, session_cid);
+                            }
                             self.try_auto_login();
                         }
                     }
@@ -1208,6 +1319,15 @@ impl ProcessManager {
         if msg.tag.label == libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL {
             return self.handle_session_login(msg, payload, sender_tid);
         }
+        if msg.tag.label == libcluu::ipc::PROCMGR_ESCALATE_LABEL {
+            return self.handle_escalate(msg, payload, sender_tid);
+        }
+        if msg.tag.label == libcluu::ipc::PROCMGR_SU_LABEL {
+            return self.handle_su(msg, payload, sender_tid);
+        }
+        if msg.tag.label == PROCMGR_CONTAINER_STATS_LABEL {
+            return self.handle_container_stats(msg, sender_tid);
+        }
         self.handle_spawn_message(msg, payload, sender_tid)
     }
 
@@ -1285,17 +1405,7 @@ impl ProcessManager {
     }
 
     fn build_session_view(&self, user_record: &UserRecord) -> ViewMountList {
-        let base_mounts = if user_record.profile.contains(CapProfile::ADMIN) {
-            libcluu::vfs_view::admin_session_mounts()
-        } else {
-            libcluu::vfs_view::default_mounts_for_profile(CapProfile::USER)
-        };
-        let mut mounts: ViewMountList = base_mounts.iter()
-            .filter(|&&(_, dst, _)| !dst.starts_with("/home/"))
-            .map(|&(src, dst, w)| (String::from(src), String::from(dst), w))
-            .collect();
-        mounts.push((user_record.home.clone(), user_record.home.clone(), true));
-        mounts
+        self.build_view_for_profile_and_home(user_record.profile, &user_record.home)
     }
 
     fn handle_session_login(&mut self, msg: &Message, payload: &[u8], _sender_tid: usize) -> Result<()> {
@@ -1339,6 +1449,7 @@ impl ProcessManager {
 
         // Clone fields before taking &mut self
         let profile = user_record.profile;
+        let user_home = user_record.home.clone();
         let view_mounts = self.build_session_view(user_record);
 
         let tty_ep = if vt_index < VT_COUNT { self.tty_endpoints[vt_index] } else { self.tty_endpoints[0] };
@@ -1352,55 +1463,69 @@ impl ProcessManager {
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
+        let (user_env, user_envc) = build_user_env_payload(username, &user_home);
 
         // Temporarily wire stdout to target VT's tty
         let saved = self.tty_endpoints[0];
         self.tty_endpoints[0] = tty_ep;
 
-        match self.spawn_service(
+        match self.spawn_service_with_env(
             SERVICE_PATH,
             DEFAULT_PRIORITY,
             &shell_argv_payload,
             shell_argc,
-            0,
+            &user_env,
+            user_envc,
+            1, // non-zero owner_tid to use caller_env_data
             spawn_seq,
             spawn_start,
+            &[],
             profile,
+            0,
+            0,
+            &[],
         ) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
-                let container_id = self.next_container_id();
-                self.pid_to_container_id.insert(pid, container_id);
+                let session_cid = self.next_container_id();
+                let shell_cid = self.next_container_id();
+                self.pid_to_container_id.insert(pid, shell_cid);
                 self.container_owner_pids.insert(pid);
 
-                self.register_vfs_view_for_thread(thread_token, &view_mounts, profile, container_id);
+                self.register_vfs_view_for_thread(thread_token, &view_mounts, profile, shell_cid);
                 self.pid_to_view.insert(pid, view_mounts);
 
-                self.container_instances.insert(container_id, ContainerInstance {
-                    name: format!("session:{}", username),
-                    container_id,
-                    parent_container_id: 0,
+                self.container_instances.insert(shell_cid, ContainerInstance {
+                    name: String::from("shell"),
+                    container_id: shell_cid,
+                    parent_container_id: session_cid,
                     pid,
                     image_path: String::from(SERVICE_PATH),
+                    mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
                 });
 
-                self.session_table.insert(container_id, SessionEntry {
-                    container_id,
+                self.container_children.entry(session_cid)
+                    .or_insert_with(Vec::new).push(shell_cid);
+
+                self.session_table.insert(session_cid, SessionEntry {
+                    container_id: session_cid,
+                    shell_cid,
                     pid,
                     username: String::from(username),
                     profile,
                     vt_index,
+                    stdin_endpoint: stdin_send,
                 });
                 if vt_index < VT_COUNT {
-                    self.vt_to_session[vt_index] = container_id;
+                    self.vt_to_session[vt_index] = session_cid;
                 }
 
                 let _ = debug_print(&format!(
-                    "procmgr: session created user='{}' pid={} cid={} vt={}",
-                    username, pid, container_id, vt_index
+                    "procmgr: session created user='{}' pid={} session_cid={} shell_cid={} vt={}",
+                    username, pid, session_cid, shell_cid, vt_index
                 ));
 
                 reply_msg.words[0] = 0;
-                reply_msg.words[1] = container_id as usize;
+                reply_msg.words[1] = session_cid as usize;
                 reply_msg.words[2] = stdin_send;
             }
             Err(e) => {
@@ -1411,6 +1536,514 @@ impl ProcessManager {
 
         self.tty_endpoints[0] = saved;
         if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+        Ok(())
+    }
+
+    /// Handle PROCMGR_ESCALATE_LABEL: privilege escalation (sudo).
+    ///
+    /// Payload: password\0command\0
+    /// Reply: words[0]=errno, words[1]=pid, words[2]=cookie, words[3]=stdin, words[4]=cid.
+    fn handle_escalate(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
+        let reply_token = extract_reply_id(msg);
+        let mut reply_msg = Message::new(libcluu::ipc::PROCMGR_ESCALATE_LABEL, [0; 6], 5);
+
+        // Parse payload: password\0command\0
+        let payload_str = core::str::from_utf8(payload).unwrap_or("");
+        let mut parts = payload_str.splitn(3, '\0');
+        let password = parts.next().unwrap_or("");
+        let command_path = match parts.next() {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                let _ = debug_print("procmgr: escalate rejected: missing command path");
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        // Resolve caller's session via sender_tid → session_table
+        let (username, user_home) = match self.resolve_caller_session(sender_tid) {
+            Some(session) => {
+                let uname = session.username.clone();
+                let home = self.user_records.get(&uname)
+                    .map(|r| r.home.clone())
+                    .unwrap_or_else(|| String::from("/tmp"));
+                (uname, home)
+            }
+            None => {
+                let _ = debug_print(&format!(
+                    "procmgr: escalate rejected: sender_tid={} not in any session", sender_tid
+                ));
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        // Look up user record, verify password, check escalation ceiling
+        let record = match self.user_records.get(&username) {
+            Some(r) => r,
+            None => {
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+        let password_ok = record.password.is_empty() || record.password == password;
+        let escalate_profile = record.escalate;
+        if !password_ok {
+            let _ = debug_print(&format!(
+                "procmgr: escalate rejected: bad password for '{}'", username
+            ));
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+        let escalate_profile = match escalate_profile {
+            Some(profile) => profile,
+            None => {
+                let _ = debug_print(&format!(
+                    "procmgr: escalate rejected: user '{}' has no escalate ceiling", username
+                ));
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        let _ = debug_print(&format!(
+            "procmgr: escalate user='{}' cmd='{}' profile={:#x}",
+            username, command_path, escalate_profile.bits()
+        ));
+
+        // Build elevated view from escalation profile's default + user's home
+        let view_mounts = self.build_view_for_profile_and_home(escalate_profile, &user_home);
+
+        // Determine caller's container for parenting (cascading)
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
+        let caller_container_id = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
+
+        // Check nesting depth
+        if caller_container_id != 0 && self.container_depth(caller_container_id) >= MAX_NESTING_DEPTH {
+            let _ = debug_print("procmgr: escalate rejected: nesting depth exceeded");
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        // Resolve TTY for stdout wiring
+        let caller_vt = self.resolve_caller_vt(sender_tid);
+        let tty_ep = if caller_vt < VT_COUNT {
+            self.tty_endpoints[caller_vt]
+        } else {
+            self.tty_endpoints[0]
+        };
+
+        // Resolve notify endpoint for exit notification
+        let notify_endpoint = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
+        let notify_endpoint = match self.resolve_notify_endpoint(sender_tid, notify_endpoint) {
+            Ok(ep) => ep,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        // Temporarily wire stdout to caller's VT tty
+        let saved_tty = self.tty_endpoints[0];
+        if tty_ep != 0 { self.tty_endpoints[0] = tty_ep; }
+
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
+
+        // Build argv: use basename of command as argv[0]
+        let basename = command_path.rsplit('/').next().unwrap_or(command_path);
+        let mut argv_payload = Vec::new();
+        argv_payload.extend_from_slice(basename.as_bytes());
+        argv_payload.push(0);
+        let argc = 1usize;
+        let (esc_env, esc_envc) = build_user_env_payload(&username, &user_home);
+
+        match self.spawn_service_with_env(
+            command_path,
+            DEFAULT_PRIORITY,
+            &argv_payload,
+            argc,
+            &esc_env,
+            esc_envc,
+            1,
+            spawn_seq,
+            spawn_start,
+            &[],
+            escalate_profile,
+            0,
+            0,
+            &[],
+        ) {
+            Ok((thread_token, cookie, pid, stdin_send)) => {
+                let container_id = self.next_container_id();
+                self.pid_to_container_id.insert(pid, container_id);
+                self.container_owner_pids.insert(pid);
+                self.register_vfs_view_for_thread(thread_token, &view_mounts, escalate_profile, container_id);
+                self.pid_to_view.insert(pid, view_mounts);
+
+                self.container_instances.insert(container_id, ContainerInstance {
+                    name: format!("sudo:{}", username),
+                    container_id,
+                    parent_container_id: caller_container_id,
+                    pid,
+                    image_path: String::from(command_path),
+                    mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                });
+
+                // Track parent→child for cascading cleanup
+                if caller_container_id != 0 {
+                    self.container_children.entry(caller_container_id)
+                        .or_insert_with(Vec::new).push(container_id);
+                }
+
+                // Wire exit notification
+                if sender_tid != 0 {
+                    let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
+                    *entry = entry.saturating_add(1);
+                }
+                if notify_endpoint != 0 {
+                    self.exit_notify.insert(cookie, notify_endpoint);
+                }
+
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = pid;
+                reply_msg.words[2] = cookie;
+                reply_msg.words[3] = stdin_send;
+                reply_msg.words[4] = container_id as usize;
+                let _ = debug_print(&format!(
+                    "procmgr: escalate ok user='{}' pid={} cid={} profile={:#x}",
+                    username, pid, container_id, escalate_profile.bits()
+                ));
+            }
+            Err(err) => {
+                let _ = debug_print(&format!("procmgr: escalate spawn failed: {:?}", err));
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+
+        self.tty_endpoints[0] = saved_tty;
+        if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+        Ok(())
+    }
+
+    /// Handle PROCMGR_SU_LABEL: identity switch (su).
+    ///
+    /// Payload: target_username\0password\0
+    /// Reply: words[0]=errno, words[1]=pid, words[2]=cookie, words[3]=stdin, words[4]=cid.
+    ///
+    /// Creates a child container running target user's shell with target's profile
+    /// and view. Does NOT update vt_to_session or session_table — this is a nested
+    /// container, not a top-level session.
+    fn handle_su(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
+        let reply_token = extract_reply_id(msg);
+        let mut reply_msg = Message::new(libcluu::ipc::PROCMGR_SU_LABEL, [0; 6], 5);
+
+        // Parse payload: target_username\0password\0
+        let payload_str = core::str::from_utf8(payload).unwrap_or("");
+        let mut parts = payload_str.splitn(3, '\0');
+        let target_username = match parts.next() {
+            Some(u) if !u.is_empty() => u,
+            _ => {
+                let _ = debug_print("procmgr: su rejected: missing target username");
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+        let password = parts.next().unwrap_or("");
+
+        // Look up target user record
+        let (target_profile, target_home) = match self.user_records.get(target_username) {
+            Some(record) => {
+                // Verify target user's password
+                let password_ok = record.password.is_empty() || record.password == password;
+                if !password_ok {
+                    let _ = debug_print(&format!(
+                        "procmgr: su rejected: bad password for '{}'", target_username
+                    ));
+                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                    if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                    return Ok(());
+                }
+                (record.profile, record.home.clone())
+            }
+            None => {
+                let _ = debug_print(&format!(
+                    "procmgr: su rejected: unknown user '{}'", target_username
+                ));
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        // Approach C: caller must strictly outrank target (capability narrowing only)
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
+        let caller_profile = self.pid_to_profile.get(&caller_pid).copied()
+            .unwrap_or(CapProfile::empty());
+        if !caller_profile.can_grant(target_profile) || caller_profile == target_profile {
+            let _ = debug_print(&format!(
+                "procmgr: su rejected: caller profile {:#x} cannot narrow to target {:#x}",
+                caller_profile.bits(), target_profile.bits()
+            ));
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        let _ = debug_print(&format!(
+            "procmgr: su target='{}' profile={:#x} (caller={:#x})",
+            target_username, target_profile.bits(), caller_profile.bits()
+        ));
+
+        // Build view from target user's profile defaults + target's home
+        let view_mounts = self.build_view_for_profile_and_home(target_profile, &target_home);
+
+        // Determine caller's container for parenting (cascading)
+        let caller_container_id = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
+
+        // Check nesting depth
+        if caller_container_id != 0 && self.container_depth(caller_container_id) >= MAX_NESTING_DEPTH {
+            let _ = debug_print("procmgr: su rejected: nesting depth exceeded");
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        // Resolve TTY for stdout wiring
+        let caller_vt = self.resolve_caller_vt(sender_tid);
+        let tty_ep = if caller_vt < VT_COUNT {
+            self.tty_endpoints[caller_vt]
+        } else {
+            self.tty_endpoints[0]
+        };
+
+        // Resolve notify endpoint for exit notification
+        let notify_endpoint = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
+        let notify_endpoint = match self.resolve_notify_endpoint(sender_tid, notify_endpoint) {
+            Ok(ep) => ep,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        // Temporarily wire stdout to caller's VT tty
+        let saved_tty = self.tty_endpoints[0];
+        if tty_ep != 0 { self.tty_endpoints[0] = tty_ep; }
+
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
+        let (shell_argv_payload, shell_argc) = build_shell_argv_payload("");
+        let (su_env, su_envc) = build_user_env_payload(target_username, &target_home);
+
+        match self.spawn_service_with_env(
+            SERVICE_PATH,
+            DEFAULT_PRIORITY,
+            &shell_argv_payload,
+            shell_argc,
+            &su_env,
+            su_envc,
+            1,
+            spawn_seq,
+            spawn_start,
+            &[],
+            target_profile,
+            0,
+            0,
+            &[],
+        ) {
+            Ok((thread_token, cookie, pid, stdin_send)) => {
+                let container_id = self.next_container_id();
+                self.pid_to_container_id.insert(pid, container_id);
+                self.container_owner_pids.insert(pid);
+                self.register_vfs_view_for_thread(thread_token, &view_mounts, target_profile, container_id);
+                self.pid_to_view.insert(pid, view_mounts);
+
+                self.container_instances.insert(container_id, ContainerInstance {
+                    name: format!("su:{}", target_username),
+                    container_id,
+                    parent_container_id: caller_container_id,
+                    pid,
+                    image_path: String::from(SERVICE_PATH),
+                    mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                });
+
+                // Track parent→child for cascading cleanup
+                if caller_container_id != 0 {
+                    self.container_children.entry(caller_container_id)
+                        .or_insert_with(Vec::new).push(container_id);
+                }
+
+                // Wire exit notification
+                if sender_tid != 0 {
+                    let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
+                    *entry = entry.saturating_add(1);
+                }
+                if notify_endpoint != 0 {
+                    self.exit_notify.insert(cookie, notify_endpoint);
+                }
+
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = pid;
+                reply_msg.words[2] = cookie;
+                reply_msg.words[3] = stdin_send;
+                reply_msg.words[4] = container_id as usize;
+                let _ = debug_print(&format!(
+                    "procmgr: su ok target='{}' pid={} cid={} profile={:#x}",
+                    target_username, pid, container_id, target_profile.bits()
+                ));
+            }
+            Err(err) => {
+                let _ = debug_print(&format!("procmgr: su spawn failed: {:?}", err));
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+
+        self.tty_endpoints[0] = saved_tty;
+        if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+        Ok(())
+    }
+
+    /// Handle PROCMGR_CONTAINER_STATS_LABEL: return 64-byte fixed records for
+    /// each container visible to the caller.
+    fn handle_container_stats(&self, msg: &Message, sender_tid: usize) -> Result<()> {
+        let reply_token = match extract_reply_id(msg) {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+
+        // Determine caller profile for visibility filtering.
+        // Admin access is granted if either the container profile OR the owning
+        // session profile carries the ADMIN capability (root sessions use ADMIN).
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
+        let caller_profile = self.pid_to_profile.get(&caller_pid).copied()
+            .unwrap_or(CapProfile::empty());
+        let session_profile = self.resolve_caller_session(sender_tid)
+            .map(|s| s.profile)
+            .unwrap_or(CapProfile::empty());
+        let is_admin = caller_profile.contains(CapProfile::ADMIN)
+            || session_profile.contains(CapProfile::ADMIN);
+
+        // Find caller's session for subtree filtering
+        let caller_session_cid = if !is_admin {
+            self.resolve_caller_session(sender_tid)
+                .map(|s| s.container_id)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Collect visible containers + session entries
+        let mut records: Vec<u8> = Vec::new();
+        let mut record_count: usize = 0;
+        let total_containers = self.container_instances.len();
+        let total_sessions = self.session_table.len();
+
+        // Helper: check if cid is in session's subtree
+        let in_subtree = |cid: u64| -> bool {
+            if is_admin { return true; }
+            if caller_session_cid == 0 { return false; }
+            let mut walk = cid;
+            while walk != 0 {
+                if walk == caller_session_cid { return true; }
+                match self.container_instances.get(&walk) {
+                    Some(inst) => walk = inst.parent_container_id,
+                    None => break,
+                }
+            }
+            false
+        };
+
+        // Emit session entries (virtual containers, state=3)
+        for (&scid, session) in &self.session_table {
+            if !is_admin && scid != caller_session_cid { continue; }
+            let mut rec = [0u8; 64];
+            rec[0..8].copy_from_slice(&scid.to_le_bytes());
+            // parent_container_id = 0 for sessions
+            // pid = 0 for virtual sessions
+            // profile
+            rec[24..26].copy_from_slice(&session.profile.bits().to_le_bytes());
+            rec[26] = 3; // state: session-only
+            rec[27] = session.vt_index as u8;
+            // mapped_pages = 0 for virtual sessions
+            // cpu_ticks = 0 for virtual sessions
+            let name = format!("session:{}", session.username);
+            let name_bytes = name.as_bytes();
+            let name_len = name_bytes.len().min(24);
+            rec[40..40 + name_len].copy_from_slice(&name_bytes[..name_len]);
+            records.extend_from_slice(&rec);
+            record_count += 1;
+        }
+
+        // Emit container instances
+        for (&cid, inst) in &self.container_instances {
+            if !in_subtree(cid) { continue; }
+            let mut rec = [0u8; 64];
+            rec[0..8].copy_from_slice(&cid.to_le_bytes());
+            rec[8..16].copy_from_slice(&inst.parent_container_id.to_le_bytes());
+            rec[16..24].copy_from_slice(&(inst.pid as u64).to_le_bytes());
+            let profile = self.pid_to_profile.get(&inst.pid).copied()
+                .unwrap_or(CapProfile::empty());
+            rec[24..26].copy_from_slice(&profile.bits().to_le_bytes());
+            // State: 0=running if pid has a thread, 2=dead otherwise
+            let state = if inst.pid != 0 && self.pid_to_tid.get(&inst.pid).is_some() { 0u8 } else { 2u8 };
+            rec[26] = state;
+            // VT: find via session parent chain
+            let vt = {
+                let mut walk = inst.parent_container_id;
+                let mut found_vt = 0xFFu8;
+                while walk != 0 {
+                    if let Some(session) = self.session_table.get(&walk) {
+                        found_vt = session.vt_index as u8;
+                        break;
+                    }
+                    match self.container_instances.get(&walk) {
+                        Some(p) => walk = p.parent_container_id,
+                        None => break,
+                    }
+                }
+                found_vt
+            };
+            rec[27] = vt;
+            // Memory: query real mapped page counts from kernel (heap u16 + code+stack u16)
+            let (cpu_ticks, heap_pages, other_pages): (u64, u16, u16) = if inst.pid != 0 {
+                if let Some(&cookie) = self.pid_to_cookie.get(&inst.pid) {
+                    let ticks = self.exit_table.get(&cookie)
+                        .map(|&tt| libcluu::syscall::thread_get_stats(tt).unwrap_or(0))
+                        .unwrap_or(0);
+                    let (code, heap, stack) = self.cookie_to_space.get(&cookie)
+                        .map(|&sp| libcluu::syscall::space_get_stats(sp).unwrap_or((0, 0, 0)))
+                        .unwrap_or((0, 0, 0));
+                    (ticks, heap, code.saturating_add(stack))
+                } else { (0, 0, 0) }
+            } else { (0, 0, 0) };
+            rec[28..30].copy_from_slice(&heap_pages.to_le_bytes());
+            rec[30..32].copy_from_slice(&other_pages.to_le_bytes());
+            rec[32..40].copy_from_slice(&cpu_ticks.to_le_bytes());
+            let name_bytes = inst.name.as_bytes();
+            let name_len = name_bytes.len().min(24);
+            rec[40..40 + name_len].copy_from_slice(&name_bytes[..name_len]);
+            records.extend_from_slice(&rec);
+            record_count += 1;
+        }
+
+        let mut reply_msg = Message::new(PROCMGR_CONTAINER_STATS_LABEL, [0; 6], 4);
+        // words[0] is overwritten by reply_with_payload to payload length
+        reply_msg.words[1] = record_count;
+        reply_msg.words[2] = total_containers;
+        reply_msg.words[3] = total_sessions;
+
+        let _ = ipc::reply_with_payload(reply_token, &reply_msg, &records);
+
         Ok(())
     }
 
@@ -2092,6 +2725,23 @@ impl ProcessManager {
                 Err(_) => 0, // No access rather than raw endpoint on derivation failure
             };
 
+        // Inject framebuffer dimensions as defaults so all processes can compute
+        // terminal cols/rows.  Caller overrides are applied after, so e.g.
+        // the console service can still override with its explicit values.
+        let mut eo_buf = [(0usize, 0u64); 14];
+        let mut n_eo = 0usize;
+        if self.fb_width != 0 {
+            eo_buf[n_eo] = (PARAM_FB_WIDTH, self.fb_width as u64);
+            n_eo += 1;
+            eo_buf[n_eo] = (PARAM_FB_HEIGHT, self.fb_height as u64);
+            n_eo += 1;
+        }
+        for &(idx, val) in param_overrides.iter().take(12) {
+            eo_buf[n_eo] = (idx, val);
+            n_eo += 1;
+        }
+        let effective_overrides = &eo_buf[..n_eo];
+
         map_process_info_page(
             space_token,
             child_endpoint,
@@ -2114,7 +2764,7 @@ impl ProcessManager {
             profile,
             extra_token,
             extra_token_1,
-            param_overrides,
+            effective_overrides,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
@@ -2948,13 +3598,30 @@ impl ProcessManager {
                 self.pid_to_view.insert(pid, view_mounts);
                 // Fix C: removed redundant pid_to_profile insert (spawn_service_with_env already does it)
 
-                // Track container instance with parent relationship
+                // Track container instance with parent relationship.
+                // For "vt" containers, derive display name from TTY instance
+                // param and parent under vtmgr if available.
+                let display_name = if image_name == "vt" {
+                    let inst_idx = param_overrides.iter()
+                        .find(|&&(idx, _)| idx == PARAM_TTY_INSTANCE)
+                        .map(|&(_, v)| v)
+                        .unwrap_or(0);
+                    format!("vt:{}", inst_idx)
+                } else {
+                    String::from(image_name)
+                };
+                let effective_parent = if image_name == "vt" && parent_cid == 0 && self.vtmgr_container_id != 0 {
+                    self.vtmgr_container_id
+                } else {
+                    parent_cid
+                };
                 self.container_instances.insert(container_id, ContainerInstance {
-                    name: String::from(image_name),
+                    name: display_name,
                     container_id,
-                    parent_container_id: parent_cid,
+                    parent_container_id: effective_parent,
                     pid,
                     image_path: image_dir,
+                    mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
                 });
 
                 // Track parent→child for cascading cleanup
@@ -3167,6 +3834,22 @@ fn build_default_env_payload() -> (Vec<u8>, usize) {
         payload.push(0);
     }
     (payload, DEFAULT_ENV.len())
+}
+
+fn build_user_env_payload(username: &str, home: &str) -> (Vec<u8>, usize) {
+    let entries: [alloc::string::String; 5] = [
+        format!("PATH=/bin"),
+        format!("HOME={}", home),
+        format!("SHELL=/bin/shell"),
+        format!("USER={}", username),
+        format!("TERM=cluu"),
+    ];
+    let mut payload = Vec::new();
+    for entry in &entries {
+        payload.extend_from_slice(entry.as_bytes());
+        payload.push(0);
+    }
+    (payload, entries.len())
 }
 
 fn build_shell_argv_payload(command: &str) -> (Vec<u8>, usize) {
