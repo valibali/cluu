@@ -3,9 +3,10 @@
 //! This module keeps message encoding/decoding in one place so the rest of
 //! the service can focus on scancode processing and registry wiring.
 
-use core::mem::size_of;
 use libcluu::ipc::KBD_EVENT_LABEL;
 use libcluu::types::Message;
+
+pub use libcluu::ipc::parse_message;
 
 /// Modifier bit flags shipped alongside keyboard events.
 pub const MOD_SHIFT: u8 = 1 << 0;
@@ -23,23 +24,6 @@ pub const KEY_RIGHT: u8 = 4;
 pub const KEY_HOME: u8 = 5;
 pub const KEY_END: u8 = 6;
 pub const KEY_DELETE: u8 = 7;
-
-/// Parse an IPC message buffer into a Message header + payload slice.
-///
-/// This clamps malformed payload sizes to avoid out-of-bounds access.
-pub fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
-    if buf.len() < size_of::<Message>() {
-        return None;
-    }
-    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
-    let mut payload_len = msg.words[0];
-    let header = size_of::<Message>();
-    if header + payload_len > buf.len() {
-        payload_len = 0;
-    }
-    let end = header + payload_len;
-    Some((msg, &buf[header..end]))
-}
 
 /// Build a keyboard event message from ASCII/scancode/modifier/extended state.
 ///

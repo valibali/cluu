@@ -222,12 +222,12 @@ fn handle_fs_request(
             let mut read_buf = alloc::vec![0u8; len];
             match fs.read(inode, offset, &mut read_buf) {
                 Ok(bytes_read) => {
-                    let reply_msg = Message::new(FS_READ, [0, bytes_read, 0, 0, 0, 0], 2);
+                    let reply_msg = Message::new(FS_READ, [0, 0, bytes_read, 0, 0, 0], 3);
                     if let Some(token) = reply_token {
                         let _ = reply_with_payload(token, &reply_msg, &read_buf[..bytes_read]);
                     }
                 }
-                Err(_) => send_error_reply(reply_token, -1),
+                Err(_) => send_error_reply_shifted(reply_token, -1),
             }
         }
 
@@ -347,15 +347,15 @@ fn handle_fs_request(
                             }
 
                             let reply_msg =
-                                Message::new(FS_READDIR, [0, entries.len(), 0, 0, 0, 0], 2);
+                                Message::new(FS_READDIR, [0, 0, entries.len(), 0, 0, 0], 3);
                             if let Some(token) = reply_token {
                                 let _ = reply_with_payload(token, &reply_msg, &data);
                             }
                         }
-                        Err(_) => send_error_reply(reply_token, -1),
+                        Err(_) => send_error_reply_shifted(reply_token, -1),
                     }
                 }
-                Err(_) => send_error_reply(reply_token, -3),
+                Err(_) => send_error_reply_shifted(reply_token, -3),
             }
         }
 
@@ -486,19 +486,19 @@ fn handle_fs_request(
             let byte_count = count * 512;
 
             if byte_count > 4096 - 64 {
-                send_error_reply(reply_token, -1);
+                send_error_reply_shifted(reply_token, -1);
                 return;
             }
 
             let mut data_buf = alloc::vec![0u8; byte_count];
             match blk.read_bytes(start * 512, &mut data_buf) {
                 Ok(bytes_read) => {
-                    let reply_msg = Message::new(BLK_READ_LABEL, [bytes_read, 0, 0, 0, 0, 0], 1);
+                    let reply_msg = Message::new(BLK_READ_LABEL, [0, bytes_read, 0, 0, 0, 0], 2);
                     if let Some(token) = reply_token {
                         let _ = reply_with_payload(token, &reply_msg, &data_buf);
                     }
                 }
-                Err(_) => send_error_reply(reply_token, -1),
+                Err(_) => send_error_reply_shifted(reply_token, -1),
             }
         }
 
@@ -561,19 +561,19 @@ fn handle_block_request(blk: &VirtioBlkAdapter, msg: &Message) {
             let byte_count = count * 512;
 
             if byte_count > 4096 - 64 {
-                send_error_reply(reply_token, -1);
+                send_error_reply_shifted(reply_token, -1);
                 return;
             }
 
             let mut data_buf = alloc::vec![0u8; byte_count];
             match blk.read_bytes(start * 512, &mut data_buf) {
                 Ok(bytes_read) => {
-                    let reply_msg = Message::new(BLK_READ_LABEL, [bytes_read, 0, 0, 0, 0, 0], 1);
+                    let reply_msg = Message::new(BLK_READ_LABEL, [0, bytes_read, 0, 0, 0, 0], 2);
                     if let Some(token) = reply_token {
                         let _ = reply_with_payload(token, &reply_msg, &data_buf);
                     }
                 }
-                Err(_) => send_error_reply(reply_token, -1),
+                Err(_) => send_error_reply_shifted(reply_token, -1),
             }
         }
 
@@ -584,6 +584,14 @@ fn handle_block_request(blk: &VirtioBlkAdapter, msg: &Message) {
 fn send_error_reply(reply_token: Option<usize>, code: isize) {
     if let Some(token) = reply_token {
         let reply_msg = Message::new(0, [code as usize, 0, 0, 0, 0, 0], 1);
+        let _ = reply(token, &reply_msg, IpcFlags::empty());
+    }
+}
+
+/// Error reply with errno in words[1] (for labels that shifted status to words[1+]).
+fn send_error_reply_shifted(reply_token: Option<usize>, code: isize) {
+    if let Some(token) = reply_token {
+        let reply_msg = Message::new(0, [0, code as usize, 0, 0, 0, 0], 2);
         let _ = reply(token, &reply_msg, IpcFlags::empty());
     }
 }

@@ -117,7 +117,7 @@ pub use boot::{
 };
 pub use elf::{ElfFile, LoadableSegment};
 pub use error::{Error, Result};
-pub use ipc::{call, recv, reply, send};
+pub use ipc::{call, make_payload_message, parse_message, recv, reply, send};
 pub use process::{map_segments, map_stack};
 pub use rights::Rights;
 pub use syscall::{

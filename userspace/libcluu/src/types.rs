@@ -108,6 +108,12 @@ impl MessageTag {
 }
 
 impl Message {
+    /// Create a new message.
+    ///
+    /// **Convention:** If this message will carry payload (sent via
+    /// `send_msg_with_payload` or `reply_with_payload`), `words[0]` will be
+    /// overwritten with the payload length. Place message-specific data in
+    /// `words[1..]` instead.
     pub const fn new(label: u32, words: [usize; 6], word_count: u8) -> Self {
         Self {
             tag: MessageTag::new(label, word_count),

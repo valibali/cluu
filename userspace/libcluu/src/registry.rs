@@ -10,7 +10,6 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::mem::size_of;
 use spin::Mutex;
 
 use crate::boot::{process_info, TOKEN_IPC, TOKEN_REGISTRY};
@@ -363,20 +362,7 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
     }
 }
 
-fn make_payload_message(label: u32, payload_len: usize, words: &[usize]) -> Message {
-    let mut msg = Message::new(label, [0; 6], 1);
-    msg.words[0] = payload_len;
-    let mut count = 1;
-    for (idx, word) in words.iter().enumerate() {
-        if idx + 1 >= msg.words.len() {
-            break;
-        }
-        msg.words[idx + 1] = *word;
-        count += 1;
-    }
-    msg.tag.words = count as u8;
-    msg
-}
+use crate::ipc::{make_payload_message, parse_message};
 
 fn send_with_payload(endpoint: usize, msg: &Message, payload: &[u8]) -> Result<()> {
     // Serialize the message header + payload into a single IPC buffer.
@@ -385,21 +371,6 @@ fn send_with_payload(endpoint: usize, msg: &Message, payload: &[u8]) -> Result<(
     buffer.extend_from_slice(header);
     buffer.extend_from_slice(payload);
     crate::syscall::ipc_send(endpoint, &buffer)
-}
-
-fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
-    // Messages are encoded as a Message header followed by payload bytes.
-    if buf.len() < size_of::<Message>() {
-        return None;
-    }
-    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
-    let payload_len = msg.words[0];
-    let header = size_of::<Message>();
-    let end = header + payload_len;
-    if end > buf.len() {
-        return None;
-    }
-    Some((msg, &buf[header..end]))
 }
 
 fn encode_names(service_name: &str, endpoint_name: &str) -> Vec<u8> {

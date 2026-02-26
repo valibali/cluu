@@ -171,7 +171,7 @@ impl VtmgrContext {
 
         let msg = Message::new(
             PROCMGR_CONTAINER_RUN_LABEL,
-            [0, 0, 0, 3, 1, 0],
+            [payload.len(), 0, 0, 3, 1, 0],
             5,
         );
         let _ = send_msg_with_payload(self.procmgr_spawn_endpoint, &msg, &payload);

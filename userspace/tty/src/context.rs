@@ -53,8 +53,11 @@ pub struct TtyContext {
     /// procmgr "spawn" endpoint for requesting shell creation.
     procmgr_spawn: usize,
     requested_procmgr: bool,
-    /// Whether we've already requested a shell spawn for this VT.
+    /// Whether we've already shown/suppressed the login prompt for this VT.
     shell_spawn_requested: bool,
+    /// VT:0 at boot expects auto-login via TTY_REGISTER from procmgr.
+    /// Suppresses login prompt until auto-login arrives or session dies.
+    auto_login_pending: bool,
     pending_console_output: Vec<u8>,
     console_credit: usize,
     /// Queued console output waiting for credit refills from the console.
@@ -116,6 +119,7 @@ impl TtyContext {
             procmgr_spawn: 0,
             requested_procmgr: false,
             shell_spawn_requested: false,
+            auto_login_pending: instance_id == 0,
             pending_console_output: Vec::new(),
             console_credit: CONSOLE_CREDIT_WINDOW,
             console_output_queue: Vec::new(),
@@ -146,17 +150,22 @@ impl TtyContext {
                 self.requested_procmgr = true;
             }
         }
-        // Once we have both console and procmgr, show login prompt for this VT.
+        // Show login prompt once console is available (procmgr not needed for prompt).
         self.maybe_show_login_prompt();
     }
 
     fn maybe_show_login_prompt(&mut self) {
-        if self.shell_spawn_requested || self.procmgr_spawn == 0 || self.console_endpoint == 0 {
+        if self.shell_spawn_requested || self.console_endpoint == 0 {
             return;
         }
         self.shell_spawn_requested = true;
         // If auto-login already wired a shell, don't override Terminal mode.
         if self.mode == TtyMode::Terminal {
+            return;
+        }
+        // VT:0 at boot expects auto-login from procmgr — don't show a login
+        // prompt that would race with the incoming TTY_REGISTER.
+        if self.auto_login_pending {
             return;
         }
         self.mode = TtyMode::Login(LoginState::Username);
@@ -329,9 +338,9 @@ impl TtyContext {
     fn send_to_console(&mut self, payload: &[u8]) {
         for chunk in payload.chunks(CONSOLE_MAX_PAYLOAD) {
             if self.console_credit < chunk.len() {
-                // Credits exhausted — queue instead of blocking.
-                self.enqueue_console_output(chunk);
-                continue;
+                // Console never sends CONSOLE_CREDIT_REFILL yet — self-replenish
+                // so output is not silently queued forever.
+                self.console_credit = CONSOLE_CREDIT_WINDOW;
             }
             let _ = send_with_retry_timeout(
                 self.console_endpoint,
@@ -398,7 +407,15 @@ impl TtyContext {
     }
 
     pub fn send_login_request(&mut self) {
-        if self.procmgr_spawn == 0 { return; }
+        if self.procmgr_spawn == 0 {
+            // procmgr grant hasn't arrived yet — retry after a brief yield.
+            self.mode = TtyMode::Login(LoginState::Username);
+            self.login_username.clear();
+            for b in self.login_password.iter_mut() { *b = 0; }
+            self.login_password.clear();
+            self.write_to_console(b"Service unavailable, try again\r\nlogin: ");
+            return;
+        }
         let mut payload = Vec::new();
         payload.extend_from_slice(&self.login_username);
         payload.push(0);
@@ -410,8 +427,8 @@ impl TtyContext {
 
         let msg = libcluu::types::Message::new(
             libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL,
-            [self.instance_id as usize, 0, 0, 0, 0, 0],
-            1,
+            [payload.len(), self.instance_id as usize, 0, 0, 0, 0],
+            2,
         );
         self.mode = TtyMode::Login(LoginState::Authenticating);
         let _ = debug_print(&format!("tty:{}: login request sent", self.instance_id));
@@ -452,6 +469,7 @@ impl TtyContext {
     pub fn wire_shell_stdin(&mut self, endpoint: usize) {
         self.shell_registered_stdin = endpoint;
         self.shell_stdin = endpoint;
+        self.auto_login_pending = false;
         if self.mode != TtyMode::Terminal {
             self.mode = TtyMode::Terminal;
             self.shell_spawn_requested = true;
@@ -465,7 +483,10 @@ impl TtyContext {
         let _ = debug_print(&format!("tty:{}: session died, returning to login", self.instance_id));
         self.shell_stdin = 0;
         self.shell_registered_stdin = 0;
-        self.shell_spawn_requested = false;
+        self.auto_login_pending = false;
+        // Show login prompt and mark as requested so maybe_show_login_prompt
+        // doesn't fire a duplicate on the next loop iteration.
+        self.shell_spawn_requested = true;
         self.mode = TtyMode::Login(LoginState::Username);
         self.login_username.clear();
         self.login_password.clear();

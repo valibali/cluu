@@ -9,7 +9,7 @@ use crate::fs::protocol::{
     VFS_READ_GRANT, VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK,
     VFS_WRITE,
 };
-use crate::ipc;
+use crate::ipc::{self, make_payload_message};
 use crate::types::Message;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -216,9 +216,9 @@ impl VfsClient {
         let mut reply_buf = [0u8; 4096];
         let (reply, payload_len) =
             ipc::call_with_reply_buf(self.endpoint, &msg, payload, &mut reply_buf)?;
-        parse_status(reply.words[0])?;
+        parse_status(reply.words[1])?;
 
-        let entry_count = reply.words[1];
+        let entry_count = reply.words[2];
         let data_start = core::mem::size_of::<Message>();
         let data = &reply_buf[data_start..data_start + payload_len];
 
@@ -347,21 +347,6 @@ impl VfsClient {
         ipc::call_with_payload(self.endpoint, &msg, &payload, &mut reply)?;
         parse_status(reply.words[0])
     }
-}
-
-fn make_payload_message(label: u32, payload_len: usize, words: &[usize]) -> Message {
-    let mut msg = Message::new(label, [0; 6], 1);
-    msg.words[0] = payload_len;
-    let mut count = 1;
-    for (idx, word) in words.iter().enumerate() {
-        if idx + 1 >= msg.words.len() {
-            break;
-        }
-        msg.words[idx + 1] = *word;
-        count += 1;
-    }
-    msg.tag.words = count as u8;
-    msg
 }
 
 fn parse_status(raw: usize) -> Result<()> {

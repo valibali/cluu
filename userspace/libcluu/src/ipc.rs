@@ -410,11 +410,11 @@ pub fn send_with_payload(endpoint_token: usize, label: u32, payload: &[u8]) -> R
 
 /// Send a caller-constructed Message with an inline payload.
 ///
-/// Unlike `send_with_payload`, this preserves the caller's Message header
-/// (label, words, extra) exactly as provided. The caller is responsible
-/// for setting words[0] to payload.len() if the receiver uses
-/// `parse_message` to extract the payload.
+/// `words[0]` is always overwritten with `payload.len()` to enforce the
+/// protocol invariant that receivers rely on for `parse_message`.
 pub fn send_msg_with_payload(endpoint_token: usize, msg: &Message, payload: &[u8]) -> Result<()> {
+    let mut msg = msg.clone();
+    msg.words[0] = payload.len();
     let header = msg.as_bytes();
     let total_len = header.len() + payload.len();
     if total_len <= IPC_INLINE_STACK_MAX {
@@ -598,7 +598,12 @@ pub fn reply(reply_token: usize, msg: &Message, _flags: IpcFlags) -> Result<()> 
 }
 
 /// Reply with an additional payload appended after the message header.
+///
+/// `words[0]` is always overwritten with `payload.len()` to enforce the
+/// protocol invariant that receivers rely on for `parse_message`.
 pub fn reply_with_payload(reply_token: usize, msg: &Message, payload: &[u8]) -> Result<()> {
+    let mut msg = msg.clone();
+    msg.words[0] = payload.len();
     let header = msg.as_bytes();
     let mut buffer = Vec::with_capacity(header.len() + payload.len());
     buffer.extend_from_slice(header);
@@ -673,6 +678,41 @@ pub fn notify_exit(exit_code: i32) -> Result<()> {
         2,
     );
     send(info.exit_token, &msg, IpcFlags::empty())
+}
+
+/// Parse an IPC message buffer into a Message header + payload slice.
+///
+/// `words[0]` is read as the payload byte count. Malformed lengths are
+/// clamped to zero (defensive — header is still returned for routing).
+pub fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
+    if buf.len() < core::mem::size_of::<Message>() {
+        return None;
+    }
+    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
+    let header = core::mem::size_of::<Message>();
+    let payload_len = msg.words[0];
+    let end = if header + payload_len <= buf.len() {
+        header + payload_len
+    } else {
+        header // clamp: return empty payload
+    };
+    Some((msg, &buf[header..end]))
+}
+
+/// Build a Message with words[0] = payload_len and extra data in words[1..].
+pub fn make_payload_message(label: u32, payload_len: usize, extra_words: &[usize]) -> Message {
+    let mut msg = Message::new(label, [0; 6], 1);
+    msg.words[0] = payload_len;
+    let mut count: u8 = 1;
+    for (idx, word) in extra_words.iter().enumerate() {
+        if idx + 1 >= msg.words.len() {
+            break;
+        }
+        msg.words[idx + 1] = *word;
+        count += 1;
+    }
+    msg.tag.words = count;
+    msg
 }
 
 #[cfg(test)]

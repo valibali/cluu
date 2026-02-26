@@ -178,12 +178,12 @@ impl MountBackend for RemoteBackend {
         let (reply, payload_len) =
             call_with_reply_buf(self.endpoint, &req, rel_path.as_bytes(), &mut reply_buf)?;
 
-        let status = reply.words[0] as isize;
+        let status = reply.words[1] as isize;
         if status < 0 {
             return Err(Error::NotFound);
         }
 
-        let entry_count = reply.words[1];
+        let entry_count = reply.words[2];
         let data_start = size_of::<Message>();
         let data = &reply_buf[data_start..data_start + payload_len];
 
@@ -223,12 +223,12 @@ impl MountBackend for RemoteBackend {
         let mut reply_buf = alloc::vec![0u8; size_of::<Message>() + max_len];
         let (reply, payload_len) = call_with_reply_buf(self.endpoint, &req, &[], &mut reply_buf)?;
 
-        let status = reply.words[0] as isize;
+        let status = reply.words[1] as isize;
         if status < 0 {
             return Err(Error::InvalidState);
         }
 
-        let bytes_read = reply.words[1].min(max_len);
+        let bytes_read = reply.words[2].min(max_len);
         let data_start = size_of::<Message>();
         let data_len = payload_len.min(bytes_read);
 

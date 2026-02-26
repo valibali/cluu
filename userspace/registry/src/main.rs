@@ -9,10 +9,8 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::mem::size_of;
 use libcluu::boot::{process_info, TOKEN_EXTRA_0};
-use libcluu::ipc::send;
-use libcluu::ipc::{extract_reply_id, reply};
+use libcluu::ipc::{extract_reply_id, make_payload_message, parse_message, reply, send};
 use libcluu::registry::{
     self, REGISTRY_GRANT_REQUEST_LABEL, REGISTRY_LIST_LABEL, REGISTRY_REGISTER_LABEL,
     REGISTRY_SUBSCRIBE_LABEL, REGISTRY_SUBSCRIBE_REPLY_LABEL, REGISTRY_UNREGISTER_LABEL,
@@ -295,20 +293,6 @@ fn resolve_sender_control_endpoint(
         .unwrap_or(0))
 }
 
-fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
-    // Messages are encoded as a header followed by payload bytes.
-    if buf.len() < size_of::<Message>() {
-        return None;
-    }
-    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
-    let payload_len = msg.words[0];
-    let header = size_of::<Message>();
-    let end = header + payload_len;
-    if end > buf.len() {
-        return None;
-    }
-    Some((msg, &buf[header..end]))
-}
 
 fn parse_names(payload: &[u8]) -> Option<(String, String)> {
     // Payload encoding matches registry::encode_names (len/len/bytes/bytes).
@@ -355,21 +339,6 @@ fn encode_single_name(name: &str) -> Vec<u8> {
     payload.extend_from_slice(&0u16.to_le_bytes());
     payload.extend_from_slice(bytes);
     payload
-}
-
-fn make_payload_message(label: u32, payload_len: usize, words: &[usize]) -> Message {
-    let mut msg = Message::new(label, [0; 6], 1);
-    msg.words[0] = payload_len;
-    let mut count = 1;
-    for (idx, word) in words.iter().enumerate() {
-        if idx + 1 >= msg.words.len() {
-            break;
-        }
-        msg.words[idx + 1] = *word;
-        count += 1;
-    }
-    msg.tag.words = count as u8;
-    msg
 }
 
 fn send_with_payload(endpoint: usize, msg: &Message, payload: &[u8]) -> Result<()> {

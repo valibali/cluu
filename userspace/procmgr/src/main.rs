@@ -37,6 +37,7 @@ use libcluu::cap::CapProfile;
 use libcluu::elf::ElfFile;
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_id;
+use libcluu::ipc::parse_message;
 use libcluu::ipc::SharedRing;
 use libcluu::ipc::PROCMGR_CONTAINER_LIST_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL;
@@ -249,6 +250,23 @@ impl ProcessManager {
         debug_assert!(id > 0, "container_id counter wrapped to 0");
         self.container_id_next = self.container_id_next.wrapping_add(1);
         id
+    }
+
+    /// Walk the container parent chain to find the session's VT index.
+    fn resolve_caller_vt(&self, sender_tid: usize) -> usize {
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
+        let mut cid = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
+        while cid != 0 {
+            if let Some(session) = self.session_table.get(&cid) {
+                return session.vt_index;
+            }
+            if let Some(inst) = self.container_instances.get(&cid) {
+                cid = inst.parent_container_id;
+            } else {
+                break;
+            }
+        }
+        0 // default VT0
     }
 
     /// Compute nesting depth of a container (0 for top-level/detached).
@@ -530,9 +548,14 @@ impl ProcessManager {
         registry::register_output("spawn", self.spawn_endpoint)?;
         self.fault_endpoint = endpoint_create(self.token)?;
 
-        // Request tty:0 main (non-blocking); grant arrives via registry event in IPC loop
-        let _ = registry::request_subscription("tty:0", "main");
-        debug_print("procmgr: requested tty:0/main subscription")?;
+        // Request tty:N main for all VTs (non-blocking); grants arrive via registry events.
+        for i in 0..VT_COUNT {
+            let name = format!("tty:{}", i);
+            if registry::request_subscription(&name, "main").is_ok() {
+                self.requested_tty_mask |= 1u8 << i;
+            }
+        }
+        debug_print("procmgr: requested tty:0..3/main subscriptions")?;
 
         debug_print("=========================================")?;
         debug_print("  Process Manager Starting")?;
@@ -1278,7 +1301,7 @@ impl ProcessManager {
     fn handle_session_login(&mut self, msg: &Message, payload: &[u8], _sender_tid: usize) -> Result<()> {
         let reply_token = extract_reply_id(msg);
         let mut reply_msg = Message::new(libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL, [0; 6], 5);
-        let vt_index = msg.words[0];
+        let vt_index = msg.words[1];
 
         // Parse username\0password\0 from payload
         let payload_str = core::str::from_utf8(payload).unwrap_or("");
@@ -2534,6 +2557,10 @@ impl ProcessManager {
         let image_name = match core::str::from_utf8(&payload[..name_end]) {
             Ok(s) => s.trim_end_matches('\0').trim(),
             Err(_) => {
+                let _ = debug_print(&format!(
+                    "procmgr: container_run rejected: payload not UTF-8 (len={} name_end={})",
+                    payload.len(), name_end
+                ));
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                 return Ok(());
@@ -2547,6 +2574,10 @@ impl ProcessManager {
             &[]
         };
         if image_name.is_empty() {
+            let _ = debug_print(&format!(
+                "procmgr: container_run rejected: empty image name (payload_len={} words={:?})",
+                payload.len(), [msg.words[0], msg.words[1], msg.words[2], msg.words[3], msg.words[4]]
+            ));
             reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
             if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
             return Ok(());
@@ -2567,6 +2598,10 @@ impl ProcessManager {
         let manifest_str = match core::str::from_utf8(&manifest_contents) {
             Ok(s) => s,
             Err(_) => {
+                let _ = debug_print(&format!(
+                    "procmgr: container '{}' manifest not valid UTF-8",
+                    image_name
+                ));
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                 return Ok(());
@@ -2625,6 +2660,10 @@ impl ProcessManager {
             {
                 Some(p) => p,
                 None => {
+                    let _ = debug_print(&format!(
+                        "procmgr: container '{}' rejected: sender tid={} not in pid map",
+                        image_name, sender_tid
+                    ));
                     reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
                     if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                     return Ok(());
@@ -2646,6 +2685,10 @@ impl ProcessManager {
         let notify_endpoint = match self.resolve_notify_endpoint(sender_tid, notify_endpoint) {
             Ok(endpoint) => endpoint,
             Err(err) => {
+                let _ = debug_print(&format!(
+                    "procmgr: container '{}' notify endpoint resolution failed: {:?}",
+                    image_name, err
+                ));
                 reply_msg.words[0] = err.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                 return Ok(());
@@ -2801,6 +2844,16 @@ impl ProcessManager {
         }
         let param_overrides = &param_overrides_buf[..n_overrides];
 
+        // Resolve caller VT and temporarily wire stdout to correct tty
+        let caller_vt = self.resolve_caller_vt(sender_tid);
+        let tty_ep = if caller_vt < VT_COUNT {
+            self.tty_endpoints[caller_vt]
+        } else {
+            self.tty_endpoints[0]
+        };
+        let saved_tty = self.tty_endpoints[0];
+        if tty_ep != 0 { self.tty_endpoints[0] = tty_ep; }
+
         // Spawn the process
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
@@ -2938,6 +2991,7 @@ impl ProcessManager {
             }
         }
 
+        self.tty_endpoints[0] = saved_tty;
         if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
         Ok(())
     }
@@ -2951,8 +3005,8 @@ impl ProcessManager {
             listing.push_str(&format!("{} {} {}\n", inst.name, inst.pid, inst.container_id));
         }
 
-        reply_msg.words[0] = 0;
-        reply_msg.words[1] = listing.len();
+        reply_msg.words[1] = 0; // status
+        reply_msg.words[2] = listing.len();
         if let Some(tok) = reply_token {
             if listing.is_empty() {
                 let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
@@ -3494,16 +3548,3 @@ fn parse_profile_str(s: &str) -> Option<CapProfile> {
     }
 }
 
-fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
-    if buf.len() < size_of::<Message>() {
-        return None;
-    }
-    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
-    let mut payload_len = msg.words[0];
-    let header = size_of::<Message>();
-    if header + payload_len > buf.len() {
-        payload_len = 0;
-    }
-    let end = header + payload_len;
-    Some((msg, &buf[header..end]))
-}

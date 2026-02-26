@@ -15,13 +15,12 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 #[cfg(feature = "lang-parser")]
 use commands::{poll_background_jobs, BuiltinFactory, CommandContext, CommandExecutor, ExecResult};
-use core::mem::size_of;
 use libcluu::boot::{
     process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG,
     TOKEN_STDOUT,
 };
 use libcluu::ipc::{
-    send_with_payload, CONSOLE_CLEAR_LABEL, CONSOLE_WRITE_LABEL, TTY_READ_LABEL, TTY_WRITE_LABEL,
+    parse_message, send_with_payload, TTY_READ_LABEL, TTY_WRITE_LABEL,
 };
 use libcluu::registry;
 use libcluu::types::Message;
@@ -44,36 +43,28 @@ fn run() -> Result<()> {
     let stdlog = info.tokens[TOKEN_STDLOG];
     // stdout is already connected to the correct tty:N by procmgr.
     let stdout = info.tokens[TOKEN_STDOUT];
-    // Best-effort console subscription for clear/banner.
-    // Try console:0 first but don't block — the shell works without it.
-    let console_write = {
-        let mut console = 0usize;
+    // Best-effort pre-subscribe to procmgr:spawn to avoid first-command timeout.
+    let procmgr_spawn = {
+        let mut ep = 0usize;
         for _ in 0..20 {
-            // Try all console instances; our tty will route to the right one.
-            match registry::subscribe_output("console:0", "write") {
-                Ok(token) => {
-                    console = token;
-                    break;
-                }
-                Err(_) => {
-                    let _ = yield_cpu();
-                }
+            match registry::subscribe_output("procmgr", "spawn") {
+                Ok(token) => { ep = token; break; }
+                Err(_) => { let _ = yield_cpu(); }
             }
         }
-        console
+        ep
     };
     let registry_endpoint = registry::control_endpoint();
     let mut command_context = CommandContext::new();
+    command_context.set_procmgr_spawn(procmgr_spawn);
 
     debug_print("shell: ready")?;
     let _ = debug_print(&format!(
         "shell: stdin {} stdout {} stderr {} stdlog {}",
         stdin, stdout, stderr, stdlog
     ));
-    if console_write != 0 {
-        let _ = send_with_payload(console_write, CONSOLE_CLEAR_LABEL, &[]);
-        let _ = print_banner(console_write);
-    }
+    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"\x1b[2J\x1b[H");
+    let _ = print_banner(stdout);
     let _ = print_prompt(stdout);
     #[cfg(feature = "lang-parser")]
     {
@@ -188,31 +179,16 @@ fn startup_command_from_process_info() -> Option<String> {
     }
 }
 
-fn print_banner(console_endpoint: usize) -> Result<()> {
+fn print_banner(tty_endpoint: usize) -> Result<()> {
     // ASCII-only banner, stored in a separate file for easy editing.
     const BANNER: &str = include_str!("banner.txt");
     // Send per line to avoid splitting UTF-8 sequences across IPC messages.
     for line in BANNER.lines() {
-        send_with_payload(console_endpoint, CONSOLE_WRITE_LABEL, line.as_bytes())?;
-        send_with_payload(console_endpoint, CONSOLE_WRITE_LABEL, b"\n")?;
+        send_with_payload(tty_endpoint, TTY_WRITE_LABEL, line.as_bytes())?;
+        send_with_payload(tty_endpoint, TTY_WRITE_LABEL, b"\n")?;
     }
-    send_with_payload(console_endpoint, CONSOLE_WRITE_LABEL, b"\n")?;
+    send_with_payload(tty_endpoint, TTY_WRITE_LABEL, b"\n")?;
     Ok(())
-}
-
-fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
-    // Message header followed by optional payload bytes.
-    if buf.len() < size_of::<Message>() {
-        return None;
-    }
-    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
-    let mut payload_len = msg.words[0];
-    let header = size_of::<Message>();
-    if header + payload_len > buf.len() {
-        payload_len = 0;
-    }
-    let end = header + payload_len;
-    Some((msg, &buf[header..end]))
 }
 
 /// Update the prompt when a complete line is received from tty.

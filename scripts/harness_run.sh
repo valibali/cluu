@@ -992,7 +992,7 @@ case "$MARKER_MODE" in
         required_markers=(
             "TSC calibrated"
             "[USER] shell: ready"
-            "tty:0: requesting shell spawn"
+            "tty:0: auto-login wired, terminal mode"
         )
         ;;
     l2_sigint)

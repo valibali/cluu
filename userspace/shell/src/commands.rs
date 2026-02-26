@@ -102,6 +102,10 @@ impl CommandContext {
             .collect()
     }
 
+    pub fn set_procmgr_spawn(&mut self, ep: usize) {
+        self.procmgr_spawn = ep;
+    }
+
     fn procmgr_spawn_endpoint(&mut self) -> Result<usize> {
         if self.procmgr_spawn == 0 {
             self.procmgr_spawn = registry::subscribe_output("procmgr", "spawn")?;
@@ -2681,8 +2685,8 @@ fn container_list(stdout: usize, context: &mut CommandContext) -> Result<()> {
     let (reply_msg, payload_len) =
         call_with_reply_buf(procmgr_endpoint, &msg, &[], &mut reply_buf)?;
 
-    if reply_msg.words[0] != 0 {
-        let line = format!("container list: error {}\n", reply_msg.words[0]);
+    if reply_msg.words[1] != 0 {
+        let line = format!("container list: error {}\n", reply_msg.words[1]);
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         return Ok(());
     }
@@ -2712,7 +2716,7 @@ fn container_stop(stdout: usize, context: &mut CommandContext, args: &[String]) 
     let (reply_msg, payload_len) =
         call_with_reply_buf(procmgr_endpoint, &msg, &[], &mut reply_buf)?;
 
-    if reply_msg.words[0] != 0 || payload_len == 0 {
+    if reply_msg.words[1] != 0 || payload_len == 0 {
         send_with_payload(stdout, TTY_WRITE_LABEL, b"container stop: no containers found\n")?;
         return Ok(());
     }

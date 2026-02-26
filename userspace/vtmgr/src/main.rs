@@ -14,7 +14,7 @@ extern crate alloc;
 mod context;
 
 use context::VtmgrContext;
-use libcluu::ipc::VTMGR_SWITCH_VT_LABEL;
+use libcluu::ipc::{parse_message, VTMGR_SWITCH_VT_LABEL};
 use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Result};
 
@@ -67,15 +67,3 @@ fn handle_vtmgr_message(ctx: &mut VtmgrContext, msg: &Message) {
     }
 }
 
-fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
-    if buf.len() < core::mem::size_of::<Message>() {
-        return None;
-    }
-    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
-    let header = core::mem::size_of::<Message>();
-    let mut payload_len = msg.words[0];
-    if header + payload_len > buf.len() {
-        payload_len = 0;
-    }
-    Some((msg, &buf[header..header + payload_len]))
-}

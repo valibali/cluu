@@ -19,7 +19,7 @@ use libcluu::fs::protocol::{
     VFS_READ_GRANT, VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK,
     VFS_WRITE,
 };
-use libcluu::ipc::{self, extract_reply_id, reply_with_payload, SharedRing, SharedRingHeader};
+use libcluu::ipc::{self, extract_reply_id, parse_message, reply_with_payload, SharedRing, SharedRingHeader};
 use libcluu::types::Message;
 use libcluu::*;
 
@@ -2930,7 +2930,7 @@ impl VfsServer {
         let client_id = match self.resolve_client_id("readdir", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
+                reply_msg.words[1] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
@@ -2938,7 +2938,7 @@ impl VfsServer {
         let path = match core::str::from_utf8(payload) {
             Ok(path) => path,
             Err(_) => {
-                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                reply_msg.words[1] = Error::InvalidArgument.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
@@ -2947,7 +2947,7 @@ impl VfsServer {
         let (real_path, target) = match self.view_check_path_with_target(client_id, path) {
             Ok(pt) => pt,
             Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
+                reply_msg.words[1] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
@@ -2979,12 +2979,12 @@ impl VfsServer {
                     data.extend_from_slice(name_bytes);
                 }
 
-                reply_msg.words[0] = 0;
-                reply_msg.words[1] = entries.len();
+                reply_msg.words[1] = 0;
+                reply_msg.words[2] = entries.len();
                 reply_with_payload(reply_token, &reply_msg, &data)
             }
             Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
+                reply_msg.words[1] = err.to_errno() as usize;
                 ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
             }
         }
@@ -3002,7 +3002,7 @@ impl VfsServer {
         let memfs_backend = match self.get_container_memfs(container_id) {
             Ok(b) => b,
             Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
+                reply_msg.words[1] = err.to_errno() as usize;
                 return ipc::reply(reply_token, reply_msg, IpcFlags::empty());
             }
         };
@@ -3041,12 +3041,12 @@ impl VfsServer {
                     data.push(if *is_dir { 1 } else { 0 });
                     data.extend_from_slice(name_bytes);
                 }
-                reply_msg.words[0] = 0;
-                reply_msg.words[1] = entries.len();
+                reply_msg.words[1] = 0;
+                reply_msg.words[2] = entries.len();
                 reply_with_payload(reply_token, reply_msg, &data)
             }
             Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
+                reply_msg.words[1] = err.to_errno() as usize;
                 ipc::reply(reply_token, reply_msg, IpcFlags::empty())
             }
         }
@@ -3384,20 +3384,6 @@ unsafe fn fill_random(buf: *mut u8, len: usize) {
             }
         }
     }
-}
-
-fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
-    if buf.len() < size_of::<Message>() {
-        return None;
-    }
-    let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
-    let payload_len = msg.words[0];
-    let header = size_of::<Message>();
-    let end = header + payload_len;
-    if end > buf.len() {
-        return None;
-    }
-    Some((msg, &buf[header..end]))
 }
 
 fn parse_usize_pair(payload: &[u8]) -> Option<(usize, usize)> {
