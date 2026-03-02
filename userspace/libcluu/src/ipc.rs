@@ -36,10 +36,6 @@ pub const TTY_POLL_QUERY_LABEL: u32 = 7;
 pub const CONSOLE_ACTIVATE_LABEL: u32 = 8;
 pub const CONSOLE_DEACTIVATE_LABEL: u32 = 9;
 pub const PROCMGR_QUERY_CTTY_LABEL: u32 = 11;
-/// tty → procmgr: request shell spawn for this VT.
-/// words[0] = tty endpoint token (stdout for the shell).
-/// Payload = path string (e.g., "/dev/initrd/bin/shell\0").
-pub const TTY_SPAWN_SHELL_LABEL: u32 = 13;
 /// kbd → vtmgr: request VT switch.
 /// words[0] = target VT index (0-3).
 pub const VTMGR_SWITCH_VT_LABEL: u32 = 15;

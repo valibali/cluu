@@ -1318,9 +1318,6 @@ impl ProcessManager {
         if msg.tag.label == PROCMGR_KILL_LABEL {
             return self.handle_kill_message(msg, sender_tid);
         }
-        if msg.tag.label == libcluu::ipc::TTY_SPAWN_SHELL_LABEL {
-            return self.handle_tty_shell_spawn(msg, payload, sender_tid);
-        }
         if msg.tag.label == PROCMGR_QUERY_CTTY_LABEL {
             return self.handle_ctty_query(msg, sender_tid);
         }
@@ -1346,79 +1343,6 @@ impl ProcessManager {
             return self.handle_container_stats(msg, sender_tid);
         }
         self.handle_spawn_message(msg, payload, sender_tid)
-    }
-
-    /// Handle TTY_SPAWN_SHELL_LABEL: spawn a shell for the requesting tty instance.
-    ///
-    /// The tty passes its VT index in words[0].  Procmgr already holds the
-    /// corresponding tty endpoint from a registry grant, so we use that
-    /// (rather than a raw token handle from the message which wouldn't be
-    /// valid in our token space).
-    fn handle_tty_shell_spawn(&mut self, msg: &Message, _payload: &[u8], sender_tid: usize) -> Result<()> {
-        let vt_index = msg.words[0];
-        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
-        let caller_container_id = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
-        let tty_ep = if vt_index < VT_COUNT {
-            self.tty_endpoints[vt_index]
-        } else {
-            self.tty_endpoints[0]
-        };
-
-        if tty_ep == 0 {
-            let _ = debug_print(&format!(
-                "procmgr: tty shell spawn vt={}: no endpoint registered",
-                vt_index
-            ));
-            return Ok(());
-        }
-
-        let _ = debug_print(&format!(
-            "procmgr: tty shell spawn vt={} ep={}",
-            vt_index, tty_ep
-        ));
-
-        let spawn_seq = self.next_spawn_seq();
-        let spawn_start = self.clock_sample();
-        let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
-
-        // For multi-VT: temporarily set tty_endpoints[0] to the target VT
-        // so spawn_service wires stdout to the correct tty.
-        let saved = self.tty_endpoints[0];
-        self.tty_endpoints[0] = tty_ep;
-
-        if let Ok((thread_token, _cookie, pid, _stdin_send)) = self.spawn_service(
-            SERVICE_PATH,
-            DEFAULT_PRIORITY,
-            &shell_argv_payload,
-            shell_argc,
-            0,
-            spawn_seq,
-            spawn_start,
-            CapProfile::USER,
-        ) {
-            // G2.5: If caller has a container_id, reuse it (shell belongs to VT container)
-            let container_id = if caller_container_id > 0 {
-                caller_container_id
-            } else {
-                self.next_container_id()
-            };
-            self.pid_to_container_id.insert(pid, container_id);
-            if caller_container_id == 0 && container_id > 0 {
-                self.container_owner_pids.insert(pid);
-            }
-            // G2.5: Inherit caller's VFS view if inside a container
-            let view_mounts = if caller_container_id > 0 {
-                self.pid_to_view.get(&caller_pid).cloned()
-                    .unwrap_or_else(|| default_view_for_profile(CapProfile::USER))
-            } else {
-                default_view_for_profile(CapProfile::USER)
-            };
-            self.register_vfs_view_for_thread(thread_token, &view_mounts, CapProfile::USER, container_id);
-            self.pid_to_view.insert(pid, view_mounts);
-        }
-
-        self.tty_endpoints[0] = saved;
-        Ok(())
     }
 
     fn build_session_view(&self, user_record: &UserRecord) -> ViewMountList {
