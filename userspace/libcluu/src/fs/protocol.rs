@@ -59,6 +59,8 @@ pub const VFS_RING_SETUP: u32 = 0x20C;
 pub const VFS_READ_RING: u32 = 0x20D;
 /// Create a hard link.
 pub const VFS_LINK: u32 = 0x20E;
+/// Flush all dirty buffers to disk.
+pub const VFS_FLUSH: u32 = 0x20F;
 
 /// Structured enum for protocol routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

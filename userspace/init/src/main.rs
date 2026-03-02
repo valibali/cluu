@@ -73,10 +73,30 @@ fn run() -> Result<()> {
                     .find(|(c, _)| *c == cookie)
                     .map(|(_, n)| *n)
                     .unwrap_or("unknown");
-                let _ = debug_print(&format!(
-                    "init: FATAL — primordial '{}' exited (code {}), system halt",
-                    name, exit_code
-                ));
+
+                match exit_code {
+                    42 => {
+                        let _ = debug_print(&format!(
+                            "init: procmgr '{}' requested poweroff (code 42)", name
+                        ));
+                        // QEMU ACPI poweroff: write 0x2000 to port 0x604
+                        let _ = libcluu::syscall::port_out16(ctx.pci_token, 0x604, 0x2000);
+                    }
+                    43 => {
+                        let _ = debug_print(&format!(
+                            "init: procmgr '{}' requested reboot (code 43)", name
+                        ));
+                        // x86 reset: write 0x06 to port 0xCF9
+                        let _ = libcluu::syscall::port_out8(ctx.pci_token, 0xCF9, 0x06);
+                    }
+                    _ => {
+                        let _ = debug_print(&format!(
+                            "init: FATAL — primordial '{}' exited (code {}), system halt",
+                            name, exit_code
+                        ));
+                    }
+                }
+                // Halt regardless — if ACPI/reset failed, spin forever
                 loop { let _ = yield_cpu(); }
             }
             Err(_) => {

@@ -64,6 +64,21 @@ impl ScancodeDecoder {
         self.modifiers
     }
 
+    /// Detect the Ctrl+Alt+Delete shutdown combo.
+    ///
+    /// Delete is scancode 0x53 (both extended and non-extended in set 1).
+    /// Must be called *before* `handle_scancode` like `detect_vt_switch`.
+    pub fn detect_shutdown_combo(&self, scancode: u8) -> bool {
+        // Only key-press (bit 7 clear), not prefix bytes
+        if scancode & 0x80 != 0 || scancode == 0xE0 || scancode == 0xE1 {
+            return false;
+        }
+        if !self.modifiers.ctrl || !self.modifiers.alt {
+            return false;
+        }
+        (scancode & 0x7F) == 0x53
+    }
+
     /// Detect a VT switch hotkey (Ctrl+Alt+F1..F4).
     ///
     /// Must be called *before* `handle_scancode` so the modifier state is

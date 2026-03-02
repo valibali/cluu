@@ -203,6 +203,9 @@ struct ProcessManager {
     fb_height: u32,
     /// Container ID of the vtmgr service (set during autostart).
     vtmgr_container_id: u64,
+    shutting_down: bool,
+    shutdown_action: u8, // 0=poweroff, 1=reboot
+    autostart_order: Vec<u64>,
 }
 
 impl ProcessManager {
@@ -258,6 +261,9 @@ impl ProcessManager {
             fb_width: 0,
             fb_height: 0,
             vtmgr_container_id: 0,
+            shutting_down: false,
+            shutdown_action: 0,
+            autostart_order: Vec::new(),
         })
     }
 
@@ -1034,6 +1040,7 @@ impl ProcessManager {
                         );
                     }
                 }
+                self.autostart_order.push(container_id);
                 let _ = debug_print(&format!(
                     "procmgr: autostart '{}' started pid={} cid={}",
                     image_name, pid, container_id
@@ -1051,6 +1058,9 @@ impl ProcessManager {
     }
 
     fn should_restart_container(&self, cookie: usize, exit_code: i32) -> bool {
+        if self.shutting_down {
+            return false;
+        }
         let pid = match self.cookie_to_pid.get(&cookie) {
             Some(&p) => p,
             None => return false,
@@ -1660,7 +1670,125 @@ impl ProcessManager {
         if msg.tag.label == PROCMGR_CONTAINER_STATS_LABEL {
             return self.handle_container_stats(msg, sender_tid);
         }
+        if msg.tag.label == libcluu::ipc::PROCMGR_SHUTDOWN_LABEL {
+            return self.handle_shutdown(msg, sender_tid);
+        }
         self.handle_spawn_message(msg, payload, sender_tid)
+    }
+
+    fn is_sender_kbd_service(&self, sender_tid: usize) -> bool {
+        let pid = match self.tid_to_pid.get(&sender_tid) {
+            Some(&p) => p,
+            None => return false,
+        };
+        let cid = match self.pid_to_container_id.get(&pid) {
+            Some(&c) => c,
+            None => return false,
+        };
+        match self.container_instances.get(&cid) {
+            Some(inst) => inst.name == "kbd",
+            None => false,
+        }
+    }
+
+    fn handle_shutdown(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
+        // Auth: ADMIN profile or kbd service
+        let sender_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
+        let is_admin = self.pid_to_profile.get(&sender_pid)
+            .map(|p| p.contains(CapProfile::ADMIN))
+            .unwrap_or(false);
+        if !is_admin && !self.is_sender_kbd_service(sender_tid) {
+            let _ = debug_print(&format!(
+                "procmgr: shutdown rejected, sender tid={} not authorized", sender_tid
+            ));
+            return Err(Error::PermissionDenied);
+        }
+
+        self.shutting_down = true;
+        self.shutdown_action = msg.words[0] as u8; // 0=poweroff, 1=reboot
+        let action_str = if self.shutdown_action == 1 { "reboot" } else { "poweroff" };
+        let _ = debug_print(&format!("procmgr: shutdown initiated ({})", action_str));
+
+        self.shutdown_kill_sessions();
+        self.shutdown_kill_tier2();
+        self.shutdown_flush_vfs();
+
+        let exit_code = if self.shutdown_action == 1 { 43 } else { 42 };
+        let _ = debug_print(&format!("procmgr: shutdown complete, exiting with code {}", exit_code));
+
+        // Exit procmgr — init will detect via primordial exit monitoring
+        let _ = libcluu::ipc::notify_exit(exit_code);
+        loop { let _ = yield_cpu(); }
+    }
+
+    fn shutdown_kill_sessions(&mut self) {
+        let session_cids: Vec<u64> = self.session_table.values().map(|s| s.shell_cid).collect();
+        let _ = debug_print(&format!("procmgr: shutdown killing {} sessions", session_cids.len()));
+
+        for shell_cid in session_cids {
+            self.destroy_container_children(shell_cid);
+            if let Some(inst) = self.container_instances.remove(&shell_cid) {
+                self.kill_container_process(inst.pid, shell_cid);
+            }
+        }
+        self.session_table.clear();
+        self.vt_to_session = [0; VT_COUNT];
+    }
+
+    fn shutdown_kill_tier2(&mut self) {
+        let order: Vec<u64> = self.autostart_order.iter().rev().copied().collect();
+        let _ = debug_print(&format!(
+            "procmgr: shutdown killing {} Tier 2 services (reverse order)", order.len()
+        ));
+
+        for cid in order {
+            if let Some(inst) = self.container_instances.remove(&cid) {
+                let _ = debug_print(&format!(
+                    "procmgr: shutdown killing service '{}' (cid={})", inst.name, cid
+                ));
+                self.destroy_container_children(cid);
+                self.kill_container_process(inst.pid, cid);
+            }
+        }
+        self.autostart_order.clear();
+    }
+
+    fn shutdown_flush_vfs(&self) {
+        if self.vfs_endpoint == 0 {
+            let _ = debug_print("procmgr: shutdown skipping VFS flush (no endpoint)");
+            return;
+        }
+        let _ = debug_print("procmgr: shutdown flushing VFS");
+        let msg = Message::new(libcluu::fs::protocol::VFS_FLUSH, [0; 6], 0);
+        let _ = send(self.vfs_endpoint, &msg, IpcFlags::empty());
+    }
+
+    fn kill_container_process(&mut self, pid: usize, container_id: u64) {
+        if let Some(&cookie) = self.pid_to_cookie.get(&pid) {
+            if let Some(thread_token) = self.exit_table.remove(&cookie) {
+                let _ = thread_destroy(thread_token);
+            }
+            if let Some(st) = self.cookie_to_space.remove(&cookie) {
+                let _ = space_destroy(st);
+            }
+            if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
+                for tok in tokens {
+                    let _ = token_revoke(tok);
+                }
+            }
+            let tid = self.pid_to_tid.get(&pid).copied().unwrap_or(0);
+            self.clear_vfs_view_for_tid(tid);
+            self.pid_to_cookie.remove(&pid);
+            self.cookie_to_pid.remove(&cookie);
+            self.pid_to_container_id.remove(&pid);
+            self.clear_pid_runtime_state(pid);
+            self.exit_notify.remove(&cookie);
+            self.pid_owner_tid.remove(&pid);
+            self.container_owner_pids.remove(&pid);
+        }
+        if container_id > 0 {
+            let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
+        }
     }
 
     fn build_session_view(&self, user_record: &UserRecord) -> ViewMountList {

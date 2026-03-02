@@ -14,7 +14,7 @@ use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
     call, call_with_payload, call_with_reply_buf, recv, send_with_payload, send_with_retry,
     SharedRing, CONSOLE_CLEAR_LABEL, PROCMGR_CONTAINER_LIST_LABEL, PROCMGR_CONTAINER_RUN_LABEL,
-    PROCMGR_ESCALATE_LABEL, PROCMGR_SU_LABEL,
+    PROCMGR_ESCALATE_LABEL, PROCMGR_SHUTDOWN_LABEL, PROCMGR_SU_LABEL,
     TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
     TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
 };
@@ -306,6 +306,8 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(EscalateDenyBuiltin));
         registry.register(Box::new(SuEqualTestBuiltin));
         registry.register(Box::new(ShellCrashBuiltin));
+        registry.register(Box::new(PoweroffBuiltin));
+        registry.register(Box::new(RebootBuiltin));
     }
 }
 
@@ -3142,6 +3144,38 @@ impl BuiltinCommand for ShellCrashBuiltin {
         let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shellcrash: triggering fault\n");
         let _ = debug_print("shellcrash: triggering null-write fault");
         unsafe { core::ptr::write_volatile(0 as *mut u8, 0); }
+        Ok(())
+    }
+}
+
+struct PoweroffBuiltin;
+
+impl BuiltinCommand for PoweroffBuiltin {
+    fn name(&self) -> &'static str {
+        "poweroff"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"Powering off...\n");
+        let ep = context.procmgr_spawn_endpoint()?;
+        let msg = Message::new(PROCMGR_SHUTDOWN_LABEL, [0, 0, 0, 0, 0, 0], 1);
+        let _ = libcluu::ipc::send(ep, &msg, IpcFlags::empty());
+        Ok(())
+    }
+}
+
+struct RebootBuiltin;
+
+impl BuiltinCommand for RebootBuiltin {
+    fn name(&self) -> &'static str {
+        "reboot"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"Rebooting...\n");
+        let ep = context.procmgr_spawn_endpoint()?;
+        let msg = Message::new(PROCMGR_SHUTDOWN_LABEL, [1, 0, 0, 0, 0, 0], 1);
+        let _ = libcluu::ipc::send(ep, &msg, IpcFlags::empty());
         Ok(())
     }
 }

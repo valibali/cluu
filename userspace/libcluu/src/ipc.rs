@@ -99,6 +99,8 @@ pub const PROCMGR_SU_LABEL: u32 = 33;
 /// Reply: words[0]=status, words[1]=record_count, words[2]=total_containers,
 ///        words[3]=total_sessions. Payload = 64-byte fixed records.
 pub const PROCMGR_CONTAINER_STATS_LABEL: u32 = 35;
+/// Shutdown request. words[0]: 0=poweroff, 1=reboot.
+pub const PROCMGR_SHUTDOWN_LABEL: u32 = 36;
 
 pub const TTY_FG_FLAG_FORWARD_CTRL_C: usize = 1 << 0;
 pub const TTY_FG_FLAG_NOTIFY_CTRL_C: usize = 1 << 1;

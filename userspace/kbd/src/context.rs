@@ -36,6 +36,10 @@ pub struct KbdContext {
     vtmgr_endpoint: usize,
     /// Whether we've requested the vtmgr subscription.
     requested_vtmgr: bool,
+    /// procmgr "spawn" endpoint for shutdown requests.
+    procmgr_endpoint: usize,
+    /// Whether we've requested the procmgr subscription.
+    requested_procmgr: bool,
 }
 
 impl KbdContext {
@@ -62,6 +66,8 @@ impl KbdContext {
             requested_tty: 0,
             vtmgr_endpoint: 0,
             requested_vtmgr: false,
+            procmgr_endpoint: 0,
+            requested_procmgr: false,
         })
     }
 
@@ -77,6 +83,13 @@ impl KbdContext {
         if self.vtmgr_endpoint == 0 && !self.requested_vtmgr {
             if registry::request_subscription("vtmgr", "control").is_ok() {
                 self.requested_vtmgr = true;
+            }
+        }
+
+        // Subscribe to procmgr for shutdown requests.
+        if self.procmgr_endpoint == 0 && !self.requested_procmgr {
+            if registry::request_subscription("procmgr", "spawn").is_ok() {
+                self.requested_procmgr = true;
             }
         }
 
@@ -115,6 +128,9 @@ impl KbdContext {
                     } else if name == "control" {
                         self.vtmgr_endpoint = token;
                         let _ = debug_print("kbd: vtmgr control subscribed");
+                    } else if name == "spawn" {
+                        self.procmgr_endpoint = token;
+                        let _ = debug_print("kbd: procmgr spawn subscribed");
                     }
                 }
                 registry::RegistryEvent::SubscribeStatus { code } => {
@@ -145,6 +161,17 @@ impl KbdContext {
         let old = self.active_vt;
         self.active_vt = new_vt;
         let _ = debug_print(&format!("kbd: vt switch {} -> {}", old, new_vt));
+    }
+
+    /// Send a shutdown request to procmgr.
+    pub fn send_shutdown(&self) {
+        if self.procmgr_endpoint == 0 {
+            let _ = debug_print("kbd: shutdown combo but no procmgr endpoint");
+            return;
+        }
+        let _ = debug_print("kbd: Ctrl+Alt+Del — sending shutdown to procmgr");
+        let msg = Message::new(libcluu::ipc::PROCMGR_SHUTDOWN_LABEL, [0, 0, 0, 0, 0, 0], 1);
+        let _ = send(self.procmgr_endpoint, &msg, IpcFlags::empty());
     }
 
     /// Send a keyboard event to the active VT's tty.

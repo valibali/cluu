@@ -558,6 +558,9 @@ impl VfsServer {
         if msg.tag.label == libcluu::ipc::VFS_CONTAINER_CLEANUP_LABEL {
             return self.handle_container_cleanup(msg, sender_tid);
         }
+        if msg.tag.label == libcluu::fs::protocol::VFS_FLUSH {
+            return self.handle_flush();
+        }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
             return Ok(());
@@ -768,6 +771,11 @@ impl VfsServer {
     }
 
     /// Handle VFS_CONTAINER_CLEANUP_LABEL: clean up container storage on exit or destroy.
+    fn handle_flush(&self) -> Result<()> {
+        let _ = debug_print("vfs: flush requested (ext2 writes are synchronous, no-op)");
+        Ok(())
+    }
+
     fn handle_container_cleanup(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
         // Only the view manager (procmgr) can trigger cleanup.
         if let Some(manager_tid) = self.view_manager_tid {

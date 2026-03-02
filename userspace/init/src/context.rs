@@ -17,6 +17,7 @@ pub struct InitContext<'a> {
     pub registry_endpoint: usize,
     pub registry_send: usize,
     pub kbd_irq_token: usize,
+    pub pci_token: usize,
 }
 
 impl<'a> InitContext<'a> {
@@ -49,6 +50,13 @@ impl<'a> InitContext<'a> {
             u64::MAX,
         )?;
 
+        // PCI_ACCESS token for ACPI shutdown/reset port I/O.
+        let pci_token = token_derive(
+            boot.root_token,
+            Rights::PCI_ACCESS.bits() as usize,
+            u64::MAX,
+        )?;
+
         Ok(Self {
             boot,
             initrd,
@@ -58,6 +66,7 @@ impl<'a> InitContext<'a> {
             registry_endpoint,
             registry_send,
             kbd_irq_token,
+            pci_token,
         })
     }
 }

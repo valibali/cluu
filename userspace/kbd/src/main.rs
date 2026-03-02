@@ -82,6 +82,13 @@ fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: 
         return;
     }
 
+    // Check for Ctrl+Alt+Delete shutdown combo.
+    if decoder.detect_shutdown_combo(scancode) {
+        ctx.send_shutdown();
+        let _ = decoder.handle_scancode(scancode);
+        return;
+    }
+
     if let Some(event) = decoder.handle_scancode(scancode) {
         // Forward if there's an ASCII char OR an extended key code (arrows etc.)
         if event.ascii.is_some() || event.extended != 0 {
