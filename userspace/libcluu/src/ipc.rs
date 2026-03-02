@@ -51,6 +51,9 @@ pub const CONSOLE_WRITE_VT_LABEL: u32 = 18;
 /// per-VT synchronous write (call): tty → console with VT index routing.
 /// words[0] = payload length, words[1] = VT index.
 pub const CONSOLE_WRITE_VT_SYNC_LABEL: u32 = 19;
+/// kbd → console: scroll a VT's viewport for scrollback navigation.
+/// words[0] = VT index, words[1] = direction (0=back/up, 1=forward/down).
+pub const CONSOLE_SCROLL_VT_LABEL: u32 = 25;
 /// Generic service spawn request (any service → procmgr).
 /// words[0] = payload length, words[1] = priority,
 /// words[2] = TOKEN_EXTRA_0 mode (0=none, 1=listen, 2=grantable),

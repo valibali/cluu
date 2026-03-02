@@ -90,6 +90,16 @@ fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: 
     }
 
     if let Some(event) = decoder.handle_scancode(scancode) {
+        // Intercept Shift+PageUp/PageDown for scrollback before forwarding.
+        if event.modifiers.shift && event.extended == protocol::KEY_PAGE_UP {
+            ctx.send_scroll(0); // scroll back (show older)
+            return;
+        }
+        if event.modifiers.shift && event.extended == protocol::KEY_PAGE_DOWN {
+            ctx.send_scroll(1); // scroll forward (show newer)
+            return;
+        }
+
         // Forward if there's an ASCII char OR an extended key code (arrows etc.)
         if event.ascii.is_some() || event.extended != 0 {
             let outbound = build_kbd_event(

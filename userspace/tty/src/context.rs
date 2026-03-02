@@ -60,10 +60,6 @@ pub struct TtyContext {
     auto_login_pending: bool,
     pending_console_output: Vec<u8>,
     console_credit: usize,
-    /// Queued console output waiting for credit refills from the console.
-    console_output_queue: Vec<u8>,
-    /// True when the output queue hit its cap and had to drop data.
-    console_queue_overflow: bool,
     /// Queue of pending read requests waiting for input data.
     pub pending_reads: VecDeque<PendingRead>,
     /// Input bytes queued for pending readers (raw mode or canonical leftovers).
@@ -122,8 +118,6 @@ impl TtyContext {
             auto_login_pending: instance_id == 0,
             pending_console_output: Vec::new(),
             console_credit: CONSOLE_CREDIT_WINDOW,
-            console_output_queue: Vec::new(),
-            console_queue_overflow: false,
             pending_reads: VecDeque::new(),
             input_queue: VecDeque::new(),
             ctrl_c_notify: 0,
@@ -352,54 +346,10 @@ impl TtyContext {
         }
     }
 
-    /// Append data to the output queue, dropping oldest on overflow.
-    fn enqueue_console_output(&mut self, data: &[u8]) {
-        let new_len = self.console_output_queue.len() + data.len();
-        if new_len > CONSOLE_OUTPUT_QUEUE_CAP {
-            // Drop oldest bytes to make room.
-            let excess = new_len - CONSOLE_OUTPUT_QUEUE_CAP;
-            if excess >= self.console_output_queue.len() {
-                self.console_output_queue.clear();
-            } else {
-                self.console_output_queue.drain(..excess);
-            }
-            if !self.console_queue_overflow {
-                self.console_queue_overflow = true;
-                let _ = debug_print("tty: console output queue overflow, dropping oldest");
-            }
-        }
-        self.console_output_queue.extend_from_slice(data);
-    }
-
-    /// Drain queued output when credits are available.
-    pub fn drain_console_queue(&mut self) {
-        if self.console_endpoint == 0 || self.console_output_queue.is_empty() {
-            return;
-        }
-        while !self.console_output_queue.is_empty() && self.console_credit > 0 {
-            let chunk_len = self.console_output_queue.len().min(CONSOLE_MAX_PAYLOAD).min(self.console_credit);
-            if chunk_len == 0 {
-                break;
-            }
-            let chunk: Vec<u8> = self.console_output_queue.drain(..chunk_len).collect();
-            let _ = send_with_retry_timeout(
-                self.console_endpoint,
-                CONSOLE_WRITE_LABEL,
-                &chunk,
-                CONSOLE_SEND_RETRIES,
-            );
-            self.console_credit = self.console_credit.saturating_sub(chunk_len);
-        }
-        if self.console_output_queue.is_empty() {
-            self.console_queue_overflow = false;
-        }
-    }
-
     /// Handle a credit refill notification from the console.
     pub fn handle_credit_refill(&mut self, refill_amount: usize) {
         self.console_credit = self.console_credit.saturating_add(refill_amount)
             .min(CONSOLE_CREDIT_WINDOW);
-        self.drain_console_queue();
     }
 
     pub fn write_to_console(&mut self, data: &[u8]) {
@@ -496,5 +446,3 @@ impl TtyContext {
 const CONSOLE_MAX_PAYLOAD: usize = IPC_CHUNK_BYTES_DEFAULT;
 const CONSOLE_CREDIT_WINDOW: usize = IPC_CHUNK_BYTES_DEFAULT * 4;
 const CONSOLE_SEND_RETRIES: u32 = IPC_SEND_RETRIES_DEFAULT;
-/// Maximum console output queue size (16 KB). Oldest bytes are dropped on overflow.
-const CONSOLE_OUTPUT_QUEUE_CAP: usize = 16 * 1024;

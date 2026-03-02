@@ -5,8 +5,8 @@
 
 use crate::layout;
 use crate::protocol::{
-    KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_UP, MOD_ALT, MOD_CAPS,
-    MOD_CTRL, MOD_NUM, MOD_SCROLL, MOD_SHIFT,
+    KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_RIGHT,
+    KEY_UP, MOD_ALT, MOD_CAPS, MOD_CTRL, MOD_NUM, MOD_SCROLL, MOD_SHIFT,
 };
 
 /// Snapshot of current modifier state.
@@ -231,6 +231,8 @@ fn extended_key_code(scancode: u8, extended: bool) -> u8 {
         0x4D => KEY_RIGHT,
         0x47 => KEY_HOME,
         0x4F => KEY_END,
+        0x49 => KEY_PAGE_UP,
+        0x51 => KEY_PAGE_DOWN,
         0x53 => KEY_DELETE,
         _ => 0,
     }

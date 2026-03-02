@@ -49,6 +49,16 @@ const ANSI_BRIGHT_COLORS: [u32; 8] = [
 /// Number of virtual terminals supported.
 const VT_COUNT: usize = 4;
 
+const SCROLLBACK_LINES: usize = 200;
+const SCROLL_PAGE_LINES: usize = 10;
+
+/// A single row saved in the scrollback history buffer.
+struct HistoryRow {
+    chars: Vec<u8>,
+    fg: Vec<u32>,
+    bg: Vec<u32>,
+}
+
 /// ANSI escape sequence parser state.
 #[derive(Clone, Copy, PartialEq)]
 enum EscState {
@@ -84,6 +94,12 @@ struct VtScreen {
     esc_params: [u16; 4],
     esc_param_count: usize,
     esc_current_param: u16,
+    /// Ring buffer of scrolled-off rows.
+    history: Vec<HistoryRow>,
+    history_start: usize,
+    history_len: usize,
+    /// 0 = live view, >0 = scrolled back N lines into history.
+    viewport_offset: usize,
 }
 
 impl VtScreen {
@@ -106,6 +122,10 @@ impl VtScreen {
             esc_params: [0; 4],
             esc_param_count: 0,
             esc_current_param: 0,
+            history: Vec::new(),
+            history_start: 0,
+            history_len: 0,
+            viewport_offset: 0,
         }
     }
 
@@ -359,6 +379,9 @@ impl VtScreen {
         if self.rows == 0 || self.cols == 0 {
             return;
         }
+        // Save the top row to scrollback history before shifting.
+        self.push_history_row();
+
         let w = self.cols;
 
         // Shift rows 1..end up by one row.
@@ -375,8 +398,41 @@ impl VtScreen {
         // Previous dirty positions are invalid after the shift.
         self.dirty_cells.clear();
         self.needs_repaint = true;
+        // New output returns to live view.
+        self.viewport_offset = 0;
 
         self.cursor_y = self.rows - 1;
+    }
+
+    /// Save the top row (row 0) to the scrollback history ring buffer.
+    fn push_history_row(&mut self) {
+        let w = self.cols;
+        let row = HistoryRow {
+            chars: self.cells[..w].to_vec(),
+            fg: self.fg_cells[..w].to_vec(),
+            bg: self.bg_cells[..w].to_vec(),
+        };
+        if self.history.len() < SCROLLBACK_LINES {
+            self.history.push(row);
+            self.history_len = self.history.len();
+        } else {
+            let idx = (self.history_start + self.history_len) % SCROLLBACK_LINES;
+            self.history[idx] = row;
+            self.history_start = (self.history_start + 1) % SCROLLBACK_LINES;
+            // history_len stays at SCROLLBACK_LINES
+        }
+    }
+
+    /// Adjust the viewport offset for scrollback navigation.
+    /// Positive delta = scroll back (show older), negative = scroll forward (show newer).
+    fn scroll_viewport(&mut self, delta: isize) {
+        let new_offset = (self.viewport_offset as isize + delta)
+            .max(0)
+            .min(self.history_len as isize) as usize;
+        if new_offset != self.viewport_offset {
+            self.viewport_offset = new_offset;
+            self.needs_repaint = true;
+        }
     }
 
     /// Update one grid cell and mark it as dirty.
@@ -462,6 +518,21 @@ impl<B: ConsoleBackend> Console<B> {
 
     /// Create a new VT buffer at the given index (no-op: all VTs pre-created).
     pub fn create_vt(&mut self, _vt_index: usize) {}
+
+    /// Scroll a VT's viewport for scrollback navigation.
+    pub fn scroll_vt(&mut self, vt_index: usize, direction: usize) {
+        if vt_index >= VT_COUNT { return; }
+        let delta = if direction == 0 {
+            SCROLL_PAGE_LINES as isize   // scroll back (up = show older)
+        } else {
+            -(SCROLL_PAGE_LINES as isize) // scroll forward (down = show newer)
+        };
+        self.vt_screens[vt_index].scroll_viewport(delta);
+        if vt_index == self.active_vt {
+            self.render_active_vt();
+            self.backend.flush();
+        }
+    }
 
     /// Switch the active VT display.
     pub fn switch_vt(&mut self, new_vt: usize) {
@@ -608,7 +679,7 @@ impl<B: ConsoleBackend> Console<B> {
             return;
         }
         let vt = self.active_vt;
-        if self.vt_screens[vt].needs_repaint {
+        if self.vt_screens[vt].needs_repaint || self.vt_screens[vt].viewport_offset > 0 {
             self.repaint_all();
             self.vt_screens[vt].needs_repaint = false;
             self.vt_screens[vt].dirty_cells.clear();
@@ -619,32 +690,69 @@ impl<B: ConsoleBackend> Console<B> {
     }
 
     /// Repaint the entire grid from the active VtScreen's cell data.
+    ///
+    /// When `viewport_offset > 0`, the top rows show scrollback history and
+    /// the remaining rows show the current screen shifted down.
     fn repaint_all(&mut self) {
-        let vt = self.active_vt;
+        let vt_idx = self.active_vt;
         let cols = self.cols;
         let rows = self.rows;
+
         self.backend
             .fill_rect(0, 0, self.width, self.height, COLOR_BG);
+
+        let offset = self.vt_screens[vt_idx].viewport_offset;
+        let hist_len = self.vt_screens[vt_idx].history_len;
+        let hist_start = self.vt_screens[vt_idx].history_start;
+
         for y in 0..rows {
-            for x in 0..cols {
-                let idx = y * cols + x;
-                let ch = self.vt_screens[vt].cells[idx];
-                let fg = self.vt_screens[vt].fg_cells[idx];
-                let bg = self.vt_screens[vt].bg_cells[idx];
-                if ch != b' ' || bg != COLOR_BG {
-                    render_glyph(&mut self.backend, x, y, ch, fg, bg);
+            // With offset=N: first N screen rows come from history, rest from current.
+            // Screen row y maps to:
+            //   if y < offset: history row (hist_len - offset + y)
+            //   else: current screen row (y - offset)
+            if y < offset && offset <= hist_len {
+                // Render from history
+                let h_idx = hist_len - offset + y;
+                let ring_idx = (hist_start + h_idx) % self.vt_screens[vt_idx].history.len().max(1);
+                if ring_idx < self.vt_screens[vt_idx].history.len() {
+                    let row = &self.vt_screens[vt_idx].history[ring_idx];
+                    for x in 0..cols.min(row.chars.len()) {
+                        let ch = row.chars[x];
+                        let fg = row.fg[x];
+                        let bg = row.bg[x];
+                        if ch != b' ' || bg != COLOR_BG {
+                            render_glyph(&mut self.backend, x, y, ch, fg, bg);
+                        }
+                    }
+                }
+            } else {
+                // Render from current screen
+                let screen_y = y - offset.min(y);
+                if screen_y < rows {
+                    for x in 0..cols {
+                        let idx = screen_y * cols + x;
+                        let ch = self.vt_screens[vt_idx].cells[idx];
+                        let fg = self.vt_screens[vt_idx].fg_cells[idx];
+                        let bg = self.vt_screens[vt_idx].bg_cells[idx];
+                        if ch != b' ' || bg != COLOR_BG {
+                            render_glyph(&mut self.backend, x, y, ch, fg, bg);
+                        }
+                    }
                 }
             }
         }
-        if self.vt_screens[vt].cursor_visible {
+
+        // Draw cursor only when viewing live (offset == 0)
+        if offset == 0 && self.vt_screens[vt_idx].cursor_visible {
             render_cursor_block(
                 &mut self.backend,
-                self.vt_screens[vt].cursor_x,
-                self.vt_screens[vt].cursor_y,
+                self.vt_screens[vt_idx].cursor_x,
+                self.vt_screens[vt_idx].cursor_y,
             );
         }
-        self.last_cursor_x = self.vt_screens[vt].cursor_x;
-        self.last_cursor_y = self.vt_screens[vt].cursor_y;
+
+        self.last_cursor_x = self.vt_screens[vt_idx].cursor_x;
+        self.last_cursor_y = self.vt_screens[vt_idx].cursor_y;
     }
 
     /// Render dirty cells from the active VtScreen to the framebuffer.

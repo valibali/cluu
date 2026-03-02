@@ -24,6 +24,8 @@ pub const KEY_RIGHT: u8 = 4;
 pub const KEY_HOME: u8 = 5;
 pub const KEY_END: u8 = 6;
 pub const KEY_DELETE: u8 = 7;
+pub const KEY_PAGE_UP: u8 = 8;
+pub const KEY_PAGE_DOWN: u8 = 9;
 
 /// Build a keyboard event message from ASCII/scancode/modifier/extended state.
 ///

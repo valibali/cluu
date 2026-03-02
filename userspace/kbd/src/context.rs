@@ -40,6 +40,9 @@ pub struct KbdContext {
     procmgr_endpoint: usize,
     /// Whether we've requested the procmgr subscription.
     requested_procmgr: bool,
+    /// console:0 "control" endpoint for scroll commands.
+    console_endpoint: usize,
+    requested_console: bool,
 }
 
 impl KbdContext {
@@ -68,6 +71,8 @@ impl KbdContext {
             requested_vtmgr: false,
             procmgr_endpoint: 0,
             requested_procmgr: false,
+            console_endpoint: 0,
+            requested_console: false,
         })
     }
 
@@ -90,6 +95,13 @@ impl KbdContext {
         if self.procmgr_endpoint == 0 && !self.requested_procmgr {
             if registry::request_subscription("procmgr", "spawn").is_ok() {
                 self.requested_procmgr = true;
+            }
+        }
+
+        // Subscribe to console:0 for scrollback commands.
+        if self.console_endpoint == 0 && !self.requested_console {
+            if registry::request_subscription("console:0", "control").is_ok() {
+                self.requested_console = true;
             }
         }
 
@@ -125,9 +137,12 @@ impl KbdContext {
                                 let _ = debug_print(&format!("kbd: tty:{} subscribed", idx));
                             }
                         }
-                    } else if name == "control" {
+                    } else if name == "control" && service_name == "vtmgr" {
                         self.vtmgr_endpoint = token;
                         let _ = debug_print("kbd: vtmgr control subscribed");
+                    } else if name == "control" && service_name.starts_with("console:") {
+                        self.console_endpoint = token;
+                        let _ = debug_print("kbd: console control subscribed");
                     } else if name == "spawn" {
                         self.procmgr_endpoint = token;
                         let _ = debug_print("kbd: procmgr spawn subscribed");
@@ -172,6 +187,17 @@ impl KbdContext {
         let _ = debug_print("kbd: Ctrl+Alt+Del — sending shutdown to procmgr");
         let msg = Message::new(libcluu::ipc::PROCMGR_SHUTDOWN_LABEL, [0, 0, 0, 0, 0, 0], 1);
         let _ = send(self.procmgr_endpoint, &msg, IpcFlags::empty());
+    }
+
+    /// Send a scroll command to the console for the active VT.
+    pub fn send_scroll(&self, direction: usize) {
+        if self.console_endpoint == 0 { return; }
+        let msg = Message::new(
+            libcluu::ipc::CONSOLE_SCROLL_VT_LABEL,
+            [self.active_vt, direction, 0, 0, 0, 0],
+            2,
+        );
+        let _ = send(self.console_endpoint, &msg, IpcFlags::empty());
     }
 
     /// Send a keyboard event to the active VT's tty.
