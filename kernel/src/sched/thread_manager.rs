@@ -555,6 +555,20 @@ impl ThreadManager {
         }
     }
 
+    /// Prepare scheduler after fault forwarding without context switch.
+    ///
+    /// Drains pending wakes (so the fault receiver is in the run queue)
+    /// and sets current thread to idle (tid=0) so that the next timer
+    /// interrupt will call schedule_and_switch.
+    pub fn prepare_idle_after_fault() {
+        Self::drain_pending_wake();
+        // Set current to idle pseudo-thread so timer_interrupt_should_schedule
+        // returns 1 for the kernel-mode idle loop we're about to enter.
+        CURRENT_THREAD_ID.store(0, Ordering::Release);
+        let mut current = CURRENT_THREAD.lock();
+        *current = None;
+    }
+
     /// Schedule next thread after a fault (safe for IST context)
     ///
     /// Unlike `schedule_and_switch`, this does NOT idle if no threads are ready
@@ -564,7 +578,11 @@ impl ThreadManager {
     pub fn schedule_next_from_fault() -> *const Context {
         Self::drain_pending_wake();
         let next_id = match Self::pick_next() {
-            Some(id) => id,
+            Some(id) => {
+                klibcluu::warn("fault_sched: next tid=");
+                klibcluu::log_dec(klibcluu::LogLevel::Warn, "", id.as_u64());
+                id
+            }
             None => {
                 klibcluu::error("schedule_next_from_fault: no runnable threads!");
                 loop {
@@ -574,7 +592,16 @@ impl ThreadManager {
             }
         };
         Self::set_current(next_id);
-        Self::get_context_ptr(next_id)
+        let ctx = Self::get_context_ptr(next_id);
+        if !ctx.is_null() {
+            let cs = unsafe { (*ctx).cs };
+            klibcluu::warn("fault_sched: target CS=");
+            klibcluu::log_hex(klibcluu::LogLevel::Warn, "", cs);
+            let rip = unsafe { (*ctx).rip };
+            klibcluu::warn("fault_sched: target RIP=");
+            klibcluu::log_hex(klibcluu::LogLevel::Warn, "", rip);
+        }
+        ctx
     }
 
     pub fn block_current() {

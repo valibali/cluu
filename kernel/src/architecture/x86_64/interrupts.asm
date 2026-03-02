@@ -11,11 +11,20 @@ section .text
 global timer_interrupt_entry
 global gpf_interrupt_entry
 global pf_interrupt_entry
+global generic_fault_entry_de
+global generic_fault_entry_ud
+global generic_fault_entry_of
+global generic_fault_entry_br
+global generic_fault_entry_nm
+global generic_fault_entry_mf
+global generic_fault_entry_xm
+global shared_restore_regs
 extern timer_interrupt_dispatch
 extern timer_interrupt_ack
 extern timer_interrupt_should_schedule
 extern gpf_with_regs
 extern pf_with_regs
+extern generic_fault_with_regs
 
 %define CONTEXT_RAX     0x00
 %define CONTEXT_RBX     0x08
@@ -86,6 +95,134 @@ extern pf_with_regs
 %define PF_RSP     0x98
 %define PF_SS      0xA0
 %define PF_SIZE    0xA8
+
+; GenericFaultFrame layout (no error code)
+%define GF_RAX     0x00
+%define GF_RBX     0x08
+%define GF_RCX     0x10
+%define GF_RDX     0x18
+%define GF_RSI     0x20
+%define GF_RDI     0x28
+%define GF_RBP     0x30
+%define GF_R8      0x38
+%define GF_R9      0x40
+%define GF_R10     0x48
+%define GF_R11     0x50
+%define GF_R12     0x58
+%define GF_R13     0x60
+%define GF_R14     0x68
+%define GF_R15     0x70
+%define GF_VECTOR  0x78
+%define GF_RIP     0x80
+%define GF_CS      0x88
+%define GF_RFLAGS  0x90
+%define GF_RSP     0x98
+%define GF_SS      0xA0
+%define GF_SIZE    0xA8
+
+; ─────────────────────────────────────────────────────────────────────────
+; Generic fault entry macro for exceptions WITHOUT error code
+; (Divide Error, Invalid Opcode, Overflow, Bound Range, Device N/A)
+; ─────────────────────────────────────────────────────────────────────────
+%macro GENERIC_FAULT_ENTRY 2  ; %1 = label, %2 = vector number
+%1:
+    ; SWAPGS if from userspace
+    test byte [rsp + 8], 0x3   ; CS is at [rsp+8] (no error code)
+    jz %%no_swapgs
+    swapgs
+%%no_swapgs:
+    sub rsp, GF_SIZE
+
+    mov [rsp + GF_RAX], rax
+    mov [rsp + GF_RBX], rbx
+    mov [rsp + GF_RCX], rcx
+    mov [rsp + GF_RDX], rdx
+    mov [rsp + GF_RSI], rsi
+    mov [rsp + GF_RDI], rdi
+    mov [rsp + GF_RBP], rbp
+    mov [rsp + GF_R8], r8
+    mov [rsp + GF_R9], r9
+    mov [rsp + GF_R10], r10
+    mov [rsp + GF_R11], r11
+    mov [rsp + GF_R12], r12
+    mov [rsp + GF_R13], r13
+    mov [rsp + GF_R14], r14
+    mov [rsp + GF_R15], r15
+
+    mov qword [rsp + GF_VECTOR], %2
+
+    ; Copy exception frame (no error code: RIP at [rsp + GF_SIZE])
+    lea r11, [rsp + GF_SIZE]
+    mov r10, [r11]          ; RIP
+    mov [rsp + GF_RIP], r10
+    mov r10, [r11 + 8]      ; CS
+    mov [rsp + GF_CS], r10
+    mov r10, [r11 + 16]     ; RFLAGS
+    mov [rsp + GF_RFLAGS], r10
+    mov r10, [r11 + 24]     ; RSP
+    mov [rsp + GF_RSP], r10
+    mov r10, [r11 + 32]     ; SS
+    mov [rsp + GF_SS], r10
+
+    mov rdi, rsp
+    sub rsp, 8              ; align for call
+    call generic_fault_with_regs
+    add rsp, 8
+
+    ; RAX = null (kernel fault — halt) or context pointer (switch)
+    test rax, rax
+    jz %%halt
+
+    ; Context switch to next thread via BSP_STACK
+    mov r10, rax
+    mov rax, [r10 + CONTEXT_CR3]
+    mov cr3, rax
+    mov rsp, [gs:0x08]      ; BSP_STACK from PerCpuData.kernel_rsp
+
+    mov rax, [r10 + CONTEXT_CS]
+    test al, 0x3
+    jz %%kernel_frame
+
+    ; User-mode target
+    mov rax, [r10 + CONTEXT_SS]
+    mov rbx, [r10 + CONTEXT_RSP]
+    mov rcx, [r10 + CONTEXT_RFLAGS]
+    and rcx, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  rcx, (1 << 9) | (1 << 1)
+    mov rdx, [r10 + CONTEXT_CS]
+    mov rsi, [r10 + CONTEXT_RIP]
+    push rax                ; SS
+    push rbx                ; RSP
+    push rcx                ; RFLAGS
+    push rdx                ; CS
+    push rsi                ; RIP
+    swapgs
+    jmp shared_restore_regs
+
+%%kernel_frame:
+    push qword [r10 + CONTEXT_SS]
+    push qword [r10 + CONTEXT_RSP]
+    mov rcx, [r10 + CONTEXT_RFLAGS]
+    and rcx, ~((1 << 8) | (3 << 12) | (1 << 14) | (1 << 16) | (1 << 18))
+    or  rcx, (1 << 9) | (1 << 1)
+    push rcx
+    push qword [r10 + CONTEXT_CS]
+    push qword [r10 + CONTEXT_RIP]
+    jmp shared_restore_regs
+
+%%halt:
+    cli
+    hlt
+    jmp %%halt
+%endmacro
+
+GENERIC_FAULT_ENTRY generic_fault_entry_de, 0   ; #DE Divide Error
+GENERIC_FAULT_ENTRY generic_fault_entry_ud, 6   ; #UD Invalid Opcode
+GENERIC_FAULT_ENTRY generic_fault_entry_of, 4   ; #OF Overflow
+GENERIC_FAULT_ENTRY generic_fault_entry_br, 5   ; #BR Bound Range Exceeded
+GENERIC_FAULT_ENTRY generic_fault_entry_nm, 7   ; #NM Device Not Available
+GENERIC_FAULT_ENTRY generic_fault_entry_mf, 16  ; #MF x87 Floating-Point
+GENERIC_FAULT_ENTRY generic_fault_entry_xm, 19  ; #XM SIMD Floating-Point
 
 ; ─────────────────────────────────────────────────────────────────────────
 ; General Protection Fault entry (saves full GPR set, supports context switch)
@@ -272,8 +409,11 @@ pf_interrupt_entry:
     mov [rsp + PF_SS], r10
     jmp .pf_have_user
 .pf_no_user:
-    mov qword [rsp + PF_RSP], 0
-    mov qword [rsp + PF_SS], 0
+    ; Kernel-mode fault: x86_64 still pushes RSP/SS on the exception frame
+    mov r10, [r11 + 32]     ; RSP (pushed by CPU even for same-privilege)
+    mov [rsp + PF_RSP], r10
+    mov r10, [r11 + 40]     ; SS
+    mov [rsp + PF_SS], r10
 .pf_have_user:
 
     mov rdi, rsp
@@ -281,18 +421,46 @@ pf_interrupt_entry:
     call pf_with_regs
     add rsp, 8
 
-    ; RAX = null (resume via iretq) or non-null (context switch)
+    ; Diagnostic: emit 'R' to COM2 after pf_with_regs returns
+    push rax
+    push rdx
+    mov dx, 0x2F8
+.pf_wait_tx_r:
+    add dx, 5          ; 0x2FD = LSR
+    in al, dx
+    test al, 0x20      ; THRE bit
+    jz .pf_wait_tx_r
+    sub dx, 5
+    mov al, 'R'
+    out dx, al
+    pop rdx
+    pop rax
+
+    ; RAX = null (resume via iretq), 0x1 (idle sentinel), or valid context ptr
     test rax, rax
     jz .pf_resume
 
+    ; Check for idle sentinel (0x1) — fault was forwarded, delegate to timer
+    cmp rax, 1
+    je .pf_idle_loop
+
     ; ── Context switch to next thread ──
+    ; Transfer from IST2 stack to BSP_STACK (kernel stack) and use the
+    ; same restore path as the timer interrupt.  Direct IRETQ from IST2
+    ; silently fails (mov ds,0x2b faults; skipping DS/ES causes timer to
+    ; stop firing).  Using BSP_STACK avoids both issues.
     mov r10, rax
 
     ; Switch address space
     mov rax, [r10 + CONTEXT_CR3]
     mov cr3, rax
 
-    ; Build iretq frame for target thread
+    ; Load BSP_STACK top from PerCpuData.kernel_rsp (gs:[0x08]).
+    ; GS is still kernel GS (PF entry swapped user→kernel, context-switch
+    ; SWAPGS hasn't happened yet).
+    mov rsp, [gs:0x08]
+
+    ; Build iretq frame for target thread on BSP_STACK
     mov rax, [r10 + CONTEXT_CS]
     test al, 0x3
     jz .pf_build_kernel_frame
@@ -313,10 +481,9 @@ pf_interrupt_entry:
     push rdx                ; CS
     push rsi                ; RIP
     swapgs                  ; Kernel→user GS
-    jmp .pf_restore_switch_regs
+    jmp shared_restore_regs ; Use timer's proven restore path on BSP_STACK
 
 .pf_build_kernel_frame:
-    mov rsp, [r10 + CONTEXT_RSP]
     push qword [r10 + CONTEXT_SS]
     push qword [r10 + CONTEXT_RSP]
     mov rcx, [r10 + CONTEXT_RFLAGS]
@@ -325,35 +492,56 @@ pf_interrupt_entry:
     push rcx
     push qword [r10 + CONTEXT_CS]
     push qword [r10 + CONTEXT_RIP]
+    jmp shared_restore_regs
 
-.pf_restore_switch_regs:
-    mov ax, 0x2b
-    mov ds, ax
-    mov es, ax
+.pf_idle_loop:
+    ; ── Fault forwarded: enter kernel idle loop on BSP_STACK ──
+    ; The timer will preempt this and do a proper context switch.
+    ; GS is kernel GS (PF entry swapped user→kernel).
+    ; Load BSP_STACK from PerCpuData.kernel_rsp (gs:[0x08]).
+    mov rsp, [gs:0x08]
 
-    ; Restore FS base (TLS) via wrmsr
-    mov rax, [r10 + CONTEXT_FS_BASE]
-    mov rdx, rax
-    shr rdx, 32
-    mov ecx, 0xC0000100                 ; MSR_FS_BASE
-    wrmsr
+    ; Diagnostic: emit RSP status to COM2
+    ; 'K' = valid kernel address (top byte >= 0xFF), '0' = zero RSP
+    push rax
+    push rdx
+    mov rdx, 0x2F8
+.pf_wait_tx_s:
+    mov eax, 0
+    add dx, 5
+    in al, dx
+    sub dx, 5
+    test al, 0x20
+    jz .pf_wait_tx_s
+    ; Check RSP validity (should be > 16 since we just pushed 2 things)
+    lea rax, [rsp + 16]    ; original RSP before pushes
+    test rax, rax
+    jz .pf_rsp_zero
+    mov al, 'K'            ; valid (non-zero)
+    jmp .pf_rsp_emit
+.pf_rsp_zero:
+    mov al, '0'
+.pf_rsp_emit:
+    out dx, al
+    pop rdx
+    pop rax
 
-    mov rax, [r10 + CONTEXT_RAX]
-    mov rbx, [r10 + CONTEXT_RBX]
-    mov rcx, [r10 + CONTEXT_RCX]
-    mov rdx, [r10 + CONTEXT_RDX]
-    mov rsi, [r10 + CONTEXT_RSI]
-    mov rdi, [r10 + CONTEXT_RDI]
-    mov r8,  [r10 + CONTEXT_R8]
-    mov r9,  [r10 + CONTEXT_R9]
-    mov r11, [r10 + CONTEXT_R11]
-    mov r12, [r10 + CONTEXT_R12]
-    mov r13, [r10 + CONTEXT_R13]
-    mov r14, [r10 + CONTEXT_R14]
-    mov r15, [r10 + CONTEXT_R15]
-    mov rbp, [r10 + CONTEXT_RBP]
-    mov r10, [r10 + CONTEXT_R10]
-    iretq
+    sti
+.pf_idle_spin:
+    hlt
+
+    ; Diagnostic: emit 'W' to COM2 after waking from HLT
+    mov dx, 0x2F8
+.pf_wait_tx2:
+    add dx, 5
+    in al, dx
+    test al, 0x20
+    jz .pf_wait_tx2
+    sub dx, 5
+    mov al, 'W'
+    out dx, al
+
+    jmp .pf_idle_spin
 
 .pf_resume:
     ; ── Resume faulting instruction (lazy alloc succeeded) ──
@@ -545,7 +733,7 @@ timer_interrupt_entry:
     push rdx
     push rsi
     swapgs                                  ; Kernel->user: restore user GS
-    jmp .restore_regs
+    jmp shared_restore_regs
 
 .build_kernel_frame:
     ; x86_64 IRETQ always pops 5 values (RIP, CS, RFLAGS, RSP, SS)
@@ -563,6 +751,7 @@ timer_interrupt_entry:
     push qword [r10 + CONTEXT_CS]
     push qword [r10 + CONTEXT_RIP]
 
+shared_restore_regs:
 .restore_regs:
     ; Set userspace segment registers (DS, ES)
     mov ax, 0x2b

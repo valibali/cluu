@@ -154,3 +154,36 @@ unsafe fn read(offset: u32) -> u32 {
     let addr = (base + offset as u64) as *const u32;
     core::ptr::read_volatile(addr)
 }
+
+/// Dump APIC timer registers for debugging.
+/// Prints LVT Timer (mask bit, mode, vector), initial count, and current count.
+pub fn dump_timer_state() {
+    if !is_enabled() {
+        klibcluu::warn("APIC: not enabled");
+        return;
+    }
+    let lvt = unsafe { read(APIC_REG_LVT_TIMER) };
+    let init = unsafe { read(APIC_REG_TIMER_INIT_COUNT) };
+    let cur = unsafe { read(APIC_REG_TIMER_CUR_COUNT) };
+    let masked = (lvt & APIC_LVT_MASKED) != 0;
+    let periodic = (lvt & APIC_TIMER_MODE_PERIODIC) != 0;
+    let vector = lvt & 0xFF;
+    klibcluu::warn("APIC dump: LVT=");
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, "", lvt as u64);
+    if masked {
+        klibcluu::warn("APIC dump: MASKED!");
+    } else {
+        klibcluu::warn("APIC dump: unmasked");
+    }
+    if periodic {
+        klibcluu::warn("APIC dump: periodic");
+    } else {
+        klibcluu::warn("APIC dump: one-shot");
+    }
+    klibcluu::warn("APIC dump: vector=");
+    klibcluu::log_dec(klibcluu::LogLevel::Warn, "", vector as u64);
+    klibcluu::warn("APIC dump: init_count=");
+    klibcluu::log_dec(klibcluu::LogLevel::Warn, "", init as u64);
+    klibcluu::warn("APIC dump: cur_count=");
+    klibcluu::log_dec(klibcluu::LogLevel::Warn, "", cur as u64);
+}

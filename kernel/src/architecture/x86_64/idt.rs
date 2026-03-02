@@ -37,14 +37,25 @@ use crate::ipc::endpoint;
 use crate::sched::context::Context;
 use crate::sched::thread::FaultType;
 use crate::sched::ThreadManager;
+use core::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use lazy_static::lazy_static;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use x86_64::VirtAddr;
+
+/// Diagnostic: countdown of timer ticks to log after a fault is forwarded
+static POST_FAULT_TIMER_DIAG: AtomicU64 = AtomicU64::new(0);
 
 extern "C" {
     fn timer_interrupt_entry();
     fn gpf_interrupt_entry();
     fn pf_interrupt_entry();
+    fn generic_fault_entry_de();
+    fn generic_fault_entry_ud();
+    fn generic_fault_entry_of();
+    fn generic_fault_entry_br();
+    fn generic_fault_entry_nm();
+    fn generic_fault_entry_mf();
+    fn generic_fault_entry_xm();
 }
 
 /// Send End of Interrupt (EOI) signal to PIC.
@@ -60,14 +71,17 @@ lazy_static! {
         let mut idt = InterruptDescriptorTable::new();
 
         // Set up all exception handlers
-        idt.divide_error.set_handler_fn(divide_error_handler);
+        // #DE, #UD, #OF, #BR, #NM use custom assembly entries for userspace survival
+        unsafe {
+            idt.divide_error.set_handler_addr(VirtAddr::new(generic_fault_entry_de as *const () as u64));
+            idt.invalid_opcode.set_handler_addr(VirtAddr::new(generic_fault_entry_ud as *const () as u64));
+            idt.overflow.set_handler_addr(VirtAddr::new(generic_fault_entry_of as *const () as u64));
+            idt.bound_range_exceeded.set_handler_addr(VirtAddr::new(generic_fault_entry_br as *const () as u64));
+            idt.device_not_available.set_handler_addr(VirtAddr::new(generic_fault_entry_nm as *const () as u64));
+        }
         idt.debug.set_handler_fn(debug_handler);
         idt.non_maskable_interrupt.set_handler_fn(nmi_handler);
         idt.breakpoint.set_handler_fn(breakpoint_handler);
-        idt.overflow.set_handler_fn(overflow_handler);
-        idt.bound_range_exceeded.set_handler_fn(bound_range_exceeded_handler);
-        idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
-        idt.device_not_available.set_handler_fn(device_not_available_handler);
         // Enable IST for double fault now that GDT is properly set up
         unsafe {
             idt.double_fault
@@ -87,10 +101,12 @@ lazy_static! {
                 .set_handler_addr(VirtAddr::new(pf_interrupt_entry as *const () as u64))
                 .set_stack_index(crate::architecture::x86_64::gdt::PF_IST_INDEX);
         }
-        idt.x87_floating_point.set_handler_fn(x87_floating_point_handler);
+        unsafe {
+            idt.x87_floating_point.set_handler_addr(VirtAddr::new(generic_fault_entry_mf as *const () as u64));
+            idt.simd_floating_point.set_handler_addr(VirtAddr::new(generic_fault_entry_xm as *const () as u64));
+        }
         idt.alignment_check.set_handler_fn(alignment_check_handler);
         idt.machine_check.set_handler_fn(machine_check_handler);
-        idt.simd_floating_point.set_handler_fn(simd_floating_point_handler);
         idt.virtualization.set_handler_fn(virtualization_handler);
         idt.security_exception.set_handler_fn(security_exception_handler);
 
@@ -139,21 +155,12 @@ pub fn init() {
 
 // Exception handlers - these functions are called when CPU exceptions occur
 
-extern "x86-interrupt" fn divide_error_handler(_stack_frame: InterruptStackFrame) {
-    klibcluu::warn("DIVIDE_ERROR");
-    // Simple error message without panic for debugging
-    loop {
-        x86_64::instructions::hlt();
-    }
-}
-
 extern "x86-interrupt" fn debug_handler(_stack_frame: InterruptStackFrame) {
     klibcluu::warn("DEBUG_EXCEPTION");
 }
 
 extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
     klibcluu::warn("NMI");
-    // Simple error handling without panic for debugging
     loop {
         x86_64::instructions::hlt();
     }
@@ -161,86 +168,6 @@ extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
 
 extern "x86-interrupt" fn breakpoint_handler(_stack_frame: InterruptStackFrame) {
     klibcluu::warn("BREAKPOINT");
-}
-
-extern "x86-interrupt" fn overflow_handler(_stack_frame: InterruptStackFrame) {
-    klibcluu::warn("OVERFLOW");
-    // Simple error handling without panic for debugging
-    loop {
-        x86_64::instructions::hlt();
-    }
-}
-
-extern "x86-interrupt" fn bound_range_exceeded_handler(_stack_frame: InterruptStackFrame) {
-    klibcluu::warn("BOUND_RANGE_EXCEEDED");
-    // Simple error handling without panic for debugging
-    loop {
-        x86_64::instructions::hlt();
-    }
-}
-
-extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    klibcluu::warn("INVALID_OPCODE");
-
-    // Extract values from interrupt stack frame
-    let rip = stack_frame.instruction_pointer.as_u64();
-    let cs = stack_frame.code_segment.0 as u64;
-    let rsp = stack_frame.stack_pointer.as_u64();
-    let ss = stack_frame.stack_segment.0 as u64;
-    let rflags = stack_frame.cpu_flags.bits();
-    let is_userspace = (cs & 3) == 3;
-
-    // Use IRQ-safe logging
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "  RIP=", rip);
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "  CS=", cs);
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "  RSP=", rsp);
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "  SS=", ss);
-    klibcluu::log_hex(klibcluu::LogLevel::Warn, "  RFLAGS=", rflags);
-
-    if is_userspace {
-        klibcluu::warn("  Fault in USERSPACE (Ring 3)\n");
-
-        // TODO Phase 8: Get current thread ID using scheduler
-        // let thread_id = crate::scheduler::ThreadManager::current_id();
-        // klibcluu::log_hex(klibcluu::LogLevel::Warn, "  ThreadID=", thread_id.0 as u64);
-
-        // TODO Phase 8: Try to get process info using ThreadManager API
-        // if let Some(process_id) = crate::scheduler::ThreadManager::with_current(|t| t.process_id.0) {
-        //     klibcluu::log_hex(klibcluu::LogLevel::Warn, "  ProcessID=", process_id as u64);
-        // }
-    } else {
-        klibcluu::warn("  Fault in KERNEL (Ring 0)\n");
-    }
-
-    // Try to disassemble instruction at RIP (if accessible via physmap)
-    klibcluu::warn("  Instruction bytes at RIP: ");
-    unsafe {
-        // Attempt to read first 8 bytes at RIP (may fail)
-        // If kernel space, try direct read; if userspace, would need page table walk
-        if !is_userspace {
-            let bytes = core::slice::from_raw_parts(rip as *const u8, 8);
-            for byte in bytes.iter().take(8) {
-                klibcluu::log_hex(klibcluu::LogLevel::Warn, "", (*byte) as u64);
-                klibcluu::warn(" ");
-            }
-        } else {
-            klibcluu::warn("(userspace - skipping)");
-        }
-    }
-    klibcluu::warn("");
-
-    // Halt system
-    loop {
-        x86_64::instructions::hlt();
-    }
-}
-
-extern "x86-interrupt" fn device_not_available_handler(_stack_frame: InterruptStackFrame) {
-    klibcluu::warn("DEVICE_NOT_AVAILABLE");
-    // Simple error handling without panic for debugging
-    loop {
-        x86_64::instructions::hlt();
-    }
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -509,13 +436,21 @@ fn try_forward_fault(
     match endpoint::try_send_with_reply_id(fault_ep, &msg_bytes, reply_id) {
         Ok(receiver_to_wake) => {
             if let Some(thread_id) = receiver_to_wake {
+                klibcluu::warn("fault: waking receiver tid=");
+                klibcluu::log_dec(klibcluu::LogLevel::Warn, "", thread_id.as_u64());
                 ThreadManager::wake_thread(thread_id);
+            } else {
+                klibcluu::warn("fault: no receiver registered (msg queued only)");
             }
         }
         Err(_) => {
+            klibcluu::warn("fault: try_send_with_reply_id FAILED (lock contention)");
             return false;
         }
     }
+
+    // Arm post-fault timer diagnostic (log next 5 timer ticks)
+    POST_FAULT_TIMER_DIAG.store(5, AtomicOrdering::Release);
 
     // Store fault reply info and save fault state on thread
     if !ThreadManager::set_fault_reply_info(
@@ -544,6 +479,83 @@ fn try_forward_fault(
 
     klibcluu::warn("Fault forwarded to handler endpoint");
     true
+}
+
+/// Frame layout for generic faults without error code (#DE, #UD, #OF, #BR, #NM)
+#[repr(C)]
+struct GenericFaultFrame {
+    rax: u64, rbx: u64, rcx: u64, rdx: u64,
+    rsi: u64, rdi: u64, rbp: u64,
+    r8: u64, r9: u64, r10: u64, r11: u64,
+    r12: u64, r13: u64, r14: u64, r15: u64,
+    vector: u64,
+    rip: u64, cs: u64, rflags: u64, rsp: u64, ss: u64,
+}
+
+/// Generic fault handler for exceptions without error code.
+/// Returns null for kernel faults (assembly halts), or context pointer for next thread.
+#[no_mangle]
+extern "C" fn generic_fault_with_regs(frame: *const GenericFaultFrame) -> *const Context {
+    let f = unsafe { &*frame };
+    let is_userspace = (f.cs & 0x3) == 0x3;
+
+    let name = match f.vector {
+        0 => "DIVIDE_ERROR",
+        4 => "OVERFLOW",
+        5 => "BOUND_RANGE",
+        6 => "INVALID_OPCODE",
+        7 => "DEVICE_NOT_AVAILABLE",
+        16 => "X87_FP_EXCEPTION",
+        19 => "SIMD_FP_EXCEPTION",
+        _ => "UNKNOWN_EXCEPTION",
+    };
+
+    klibcluu::warn(name);
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, " RIP=", f.rip);
+    klibcluu::log_hex(klibcluu::LogLevel::Warn, " CS=", f.cs);
+
+    if !is_userspace {
+        klibcluu::warn("KERNEL FAULT — halting");
+        return core::ptr::null();
+    }
+
+    // Userspace fault — try to forward to fault handler, or kill thread
+    let saved_ctx = Context {
+        rax: f.rax, rbx: f.rbx, rcx: f.rcx, rdx: f.rdx,
+        rsi: f.rsi, rdi: f.rdi,
+        r8: f.r8, r9: f.r9, r10: f.r10, r11: f.r11,
+        r12: f.r12, r13: f.r13, r14: f.r14, r15: f.r15,
+        rbp: f.rbp, rsp: f.rsp, rip: f.rip,
+        cs: f.cs, ss: f.ss, rflags: f.rflags,
+        cr3: x86_64::registers::control::Cr3::read_raw().0.start_address().as_u64(),
+        fs_base: {
+            let (lo, hi): (u32, u32);
+            unsafe { core::arch::asm!("rdmsr", in("ecx") 0xC000_0100u32, out("eax") lo, out("edx") hi); }
+            ((hi as u64) << 32) | (lo as u64)
+        },
+        _pad: 0,
+    };
+
+    let fault_type = match f.vector {
+        0 => FaultType::DivideByZero,
+        6 => FaultType::InvalidOpcode,
+        _ => FaultType::GeneralProtection, // best-effort for uncommon faults
+    };
+
+    if try_forward_fault(fault_type, 0, 0, &saved_ctx) {
+        return ThreadManager::schedule_next_from_fault();
+    }
+
+    // No handler — queue deferred notification and kill thread
+    if let Some(current_id) = ThreadManager::current() {
+        let fault_ep = ThreadManager::with_thread(current_id, |t| t.fault_endpoint);
+        if let Some(Some(ep)) = fault_ep {
+            ThreadManager::queue_deferred_fault(current_id, ep, f.vector, 0, 0, f.rip);
+        }
+    }
+    klibcluu::warn("Killing thread (no fault handler)");
+    ThreadManager::mark_current_dead();
+    ThreadManager::schedule_next_from_fault()
 }
 
 #[no_mangle]
@@ -813,6 +825,9 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
     if is_userspace {
         let saved_ctx = pf_frame_to_context(f);
         if try_forward_fault(FaultType::PageFault, cr2, f.error_code, &saved_ctx) {
+            // Fault forwarded to handler. Schedule next runnable thread
+            // and return its context pointer — assembly will context-switch
+            // to it via BSP_STACK (same pattern as GPF handler).
             return ThreadManager::schedule_next_from_fault();
         }
         // try_forward_fault failed (lock contention or no handler).
@@ -914,10 +929,7 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
     }
 }
 
-extern "x86-interrupt" fn x87_floating_point_handler(_stack_frame: InterruptStackFrame) {
-    klibcluu::warn("X87_FP_EXCEPTION");
-    panic!("x87 floating point exception");
-}
+// x87 FP exceptions now handled by generic_fault_entry_mf (assembly)
 
 extern "x86-interrupt" fn alignment_check_handler(
     _stack_frame: InterruptStackFrame,
@@ -935,10 +947,7 @@ extern "x86-interrupt" fn machine_check_handler(_stack_frame: InterruptStackFram
     }
 }
 
-extern "x86-interrupt" fn simd_floating_point_handler(_stack_frame: InterruptStackFrame) {
-    klibcluu::warn("SIMD_FP_EXCEPTION");
-    panic!("SIMD floating point exception");
-}
+// SIMD FP exceptions now handled by generic_fault_entry_xm (assembly)
 
 extern "x86-interrupt" fn virtualization_handler(_stack_frame: InterruptStackFrame) {
     klibcluu::warn("VIRTUALIZATION_EXCEPTION");
@@ -975,9 +984,32 @@ extern "C" fn timer_interrupt_dispatch(
         }
     }
 
+    // Post-fault timer diagnostic
+    let diag_remaining = POST_FAULT_TIMER_DIAG.load(AtomicOrdering::Acquire);
+    if diag_remaining > 0 {
+        POST_FAULT_TIMER_DIAG.store(diag_remaining - 1, AtomicOrdering::Release);
+        let cur = crate::sched::ThreadManager::current_id_raw();
+        klibcluu::warn("post_fault_tick: cur_tid=");
+        klibcluu::log_dec(klibcluu::LogLevel::Warn, "", cur);
+        if !current_ctx_ptr.is_null() {
+            let cs = unsafe { (*current_ctx_ptr).cs };
+            klibcluu::warn("post_fault_tick: CS=");
+            klibcluu::log_hex(klibcluu::LogLevel::Warn, "", cs);
+        }
+    }
+
     // Only preempt in NORMALMODE
     if crate::sched::ThreadManager::is_normal_mode() {
-        unsafe { crate::sched::ThreadManager::schedule_and_switch(current_ctx_ptr) }
+        let result = unsafe { crate::sched::ThreadManager::schedule_and_switch(current_ctx_ptr) };
+        if diag_remaining > 0 && !result.is_null() {
+            let next_cs = unsafe { (*result).cs };
+            let next_tid = crate::sched::ThreadManager::current_id_raw();
+            klibcluu::warn("post_fault_tick: switched_to tid=");
+            klibcluu::log_dec(klibcluu::LogLevel::Warn, "", next_tid);
+            klibcluu::warn("post_fault_tick: next_CS=");
+            klibcluu::log_hex(klibcluu::LogLevel::Warn, "", next_cs);
+        }
+        result
     } else {
         core::ptr::null()
     }
@@ -985,6 +1017,15 @@ extern "C" fn timer_interrupt_dispatch(
 
 #[no_mangle]
 extern "C" fn timer_interrupt_ack() {
+    // Post-fault timer diagnostic (kernel-mode fast path)
+    let diag_remaining = POST_FAULT_TIMER_DIAG.load(AtomicOrdering::Acquire);
+    if diag_remaining > 0 {
+        POST_FAULT_TIMER_DIAG.store(diag_remaining - 1, AtomicOrdering::Release);
+        let cur = crate::sched::ThreadManager::current_id_raw();
+        klibcluu::warn("post_fault_ack: cur_tid=");
+        klibcluu::log_dec(klibcluu::LogLevel::Warn, "", cur);
+    }
+
     // Always tick the scheduler counter, even on fast path (kernel mode without scheduling)
     // This ensures timeouts are checked and the tick counter advances
     if crate::sched::ThreadManager::is_normal_mode() {

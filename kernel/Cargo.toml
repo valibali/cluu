@@ -25,6 +25,7 @@ proptest = { workspace = true }
 
 [features]
 default = []
+log-trace = ["klibcluu/log-trace"]
 test-mock = ["klibcluu/test-mock"]
 testing = []  # Enable when building for host tests (disables no_std runtime)
 

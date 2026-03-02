@@ -33,13 +33,17 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const GPF_IST_INDEX: u16 = 1;
 pub const PF_IST_INDEX: u16 = 2;
 
-/// IST stacks - 4KB each, 16-byte aligned
+/// IST stacks — 16-byte aligned.
+/// DF/GPF keep 4 KB (minimal handlers).
+/// PF needs more: fault-forwarding IPC path (try_forward_fault →
+/// endpoint queue → ThreadManager → scheduler) is deep.
+const PF_IST_SIZE: usize = 16384; // 16 KB
 #[repr(C, align(16))]
-struct IstStack([u8; 4096]);
+struct IstStack<const N: usize>([u8; N]);
 
-static mut DOUBLE_FAULT_STACK: IstStack = IstStack([0; 4096]);
-static mut GPF_STACK: IstStack = IstStack([0; 4096]);
-static mut PF_STACK: IstStack = IstStack([0; 4096]);
+static mut DOUBLE_FAULT_STACK: IstStack<4096> = IstStack([0; 4096]);
+static mut GPF_STACK: IstStack<4096> = IstStack([0; 4096]);
+static mut PF_STACK: IstStack<{ PF_IST_SIZE }> = IstStack([0; PF_IST_SIZE]);
 
 /// TSS - initialized at runtime
 static mut TSS: MaybeUninit<TaskStateSegment> = MaybeUninit::uninit();
@@ -84,7 +88,7 @@ pub fn init() {
         // Initialize TSS first
         let df_stack_end = &raw const DOUBLE_FAULT_STACK as u64 + 4096;
         let gpf_stack_end = &raw const GPF_STACK as u64 + 4096;
-        let pf_stack_end = &raw const PF_STACK as u64 + 4096;
+        let pf_stack_end = &raw const PF_STACK as u64 + PF_IST_SIZE as u64;
         let mut tss = TaskStateSegment::new();
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(df_stack_end);
         tss.interrupt_stack_table[GPF_IST_INDEX as usize] = VirtAddr::new(gpf_stack_end);

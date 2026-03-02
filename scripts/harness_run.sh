@@ -50,6 +50,7 @@ TEST_COMMAND_REPEAT="${TEST_COMMAND_REPEAT:-1}"
 COMMAND_GAP="${COMMAND_GAP:-1}"
 KEY_DELAY="${KEY_DELAY:-0.05}"
 MARKER_MODE="${MARKER_MODE:-legacy_p1}"
+EXPECT_FAULT="${EXPECT_FAULT:-0}"
 SHELL_AUTOSTART_CMD_DEFAULT=""
 POST_SENDKEY_DEFAULT=""
 if [ "$TEST_COMMAND" = "__AUTO__" ]; then
@@ -223,6 +224,13 @@ if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         p4_mmap)
             TEST_COMMAND="spawn mmapprobe"
             SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
+            ;;
+        hr6_shell_crash)
+            TEST_COMMAND="shellcrash"
+            ;;
+        hr7_su_equal)
+            TEST_COMMAND="suequaltest"
+            SHELL_AUTOSTART_CMD_DEFAULT=""
             ;;
         m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
         legacy_p1)
@@ -694,8 +702,8 @@ cat "$SERIAL_LOG"
 echo ""
 echo "=========================================="
 
-# Check for faults
-if grep -qiE 'PAGE_FAULT|GENERAL_PROTECTION|DOUBLE_FAULT|INVALID_OPCODE' "$SERIAL_LOG"; then
+# Check for faults (skip when EXPECT_FAULT=1, e.g. shell crash tests)
+if [ "$EXPECT_FAULT" -ne 1 ] && grep -qiE 'PAGE_FAULT|GENERAL_PROTECTION|DOUBLE_FAULT|INVALID_OPCODE' "$SERIAL_LOG"; then
     echo "*** FAULT DETECTED in serial output ***"
     grep -iE 'PAGE_FAULT|GENERAL_PROTECTION|DOUBLE_FAULT|INVALID_OPCODE|PF:|GPF:' "$SERIAL_LOG"
     exit 1
@@ -1200,6 +1208,22 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "mmapprobe: PASS complete"
+        )
+        ;;
+    hr6_shell_crash)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shellcrash: triggering null-write fault"
+            "shell crash"
+            "session persists"
+        )
+        ;;
+    hr7_su_equal)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "suequaltest: PASS"
         )
         ;;
     none)

@@ -1131,7 +1131,8 @@ impl ProcessManager {
             self.container_instances.remove(&container_id);
             let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
         }
-        // Shell exit: clear shell from session but keep session alive
+        // HR4: Shell normal exit = explicit logout → session death.
+        // Find session whose shell_cid matches the exiting container.
         let mut shell_session_cid = 0u64;
         for (&scid, session) in self.session_table.iter() {
             if session.shell_cid == container_id && container_id != 0 {
@@ -1140,33 +1141,27 @@ impl ProcessManager {
             }
         }
         if shell_session_cid != 0 {
-            if let Some(session) = self.session_table.get_mut(&shell_session_cid) {
+            // Cascade-destroy any remaining session children (su/sudo subshells)
+            self.destroy_container_children(shell_session_cid);
+            if let Some(session) = self.session_table.remove(&shell_session_cid) {
                 let _ = debug_print(&format!(
-                    "procmgr: shell exit user='{}' shell_cid={} session_cid={} (session persists)",
-                    session.username, container_id, shell_session_cid
+                    "procmgr: session death (shell exit) user='{}' shell_cid={} session_cid={} vt={}",
+                    session.username, container_id, shell_session_cid, session.vt_index
                 ));
-                session.shell_cid = 0;
-                session.stdin_endpoint = 0;
-            }
-        }
-        // Explicit logout: session_cid itself removed (future logout path)
-        if let Some(session) = self.session_table.remove(&container_id) {
-            if session.vt_index < VT_COUNT {
-                self.vt_to_session[session.vt_index] = 0;
-                let tty_ep = self.tty_endpoints[session.vt_index];
-                if tty_ep != 0 {
-                    let death_msg = Message::new(
-                        libcluu::ipc::PROCMGR_SESSION_DEATH_LABEL,
-                        [session.vt_index, 0, 0, 0, 0, 0],
-                        1,
-                    );
-                    let _ = send(tty_ep, &death_msg, IpcFlags::empty());
+                if session.vt_index < VT_COUNT {
+                    self.vt_to_session[session.vt_index] = 0;
+                    let tty_ep = self.tty_endpoints[session.vt_index];
+                    if tty_ep != 0 {
+                        let death_msg = Message::new(
+                            libcluu::ipc::PROCMGR_SESSION_DEATH_LABEL,
+                            [session.vt_index, 0, 0, 0, 0, 0],
+                            1,
+                        );
+                        let _ = send(tty_ep, &death_msg, IpcFlags::empty());
+                    }
                 }
+                self.container_children.remove(&shell_session_cid);
             }
-            let _ = debug_print(&format!(
-                "procmgr: session death user='{}' cid={} vt={}",
-                session.username, session.container_id, session.vt_index
-            ));
         }
         Ok(())
     }
@@ -1286,6 +1281,27 @@ impl ProcessManager {
                     self.destroy_container_children(container_id);
                     self.container_instances.remove(&container_id);
                     let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
+                }
+                // HR3: Shell crash — clear shell from session but keep session alive.
+                // No SESSION_DEATH sent; the session survives the crash.
+                let mut crash_session_cid = 0u64;
+                for (&scid, session) in self.session_table.iter_mut() {
+                    if session.shell_cid == container_id && container_id != 0 {
+                        let _ = debug_print(&format!(
+                            "procmgr: shell crash user='{}' shell_cid={} (session persists)",
+                            session.username, container_id
+                        ));
+                        session.shell_cid = 0;
+                        session.stdin_endpoint = 0;
+                        crash_session_cid = scid;
+                        break;
+                    }
+                }
+                // Remove stale shell entry from session's children list
+                if crash_session_cid != 0 {
+                    if let Some(children) = self.container_children.get_mut(&crash_session_cid) {
+                        children.retain(|&cid| cid != container_id);
+                    }
                 }
             }
         }

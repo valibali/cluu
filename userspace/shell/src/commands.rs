@@ -304,6 +304,8 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(SudoTestBuiltin));
         registry.register(Box::new(SuTestBuiltin));
         registry.register(Box::new(EscalateDenyBuiltin));
+        registry.register(Box::new(SuEqualTestBuiltin));
+        registry.register(Box::new(ShellCrashBuiltin));
     }
 }
 
@@ -1160,6 +1162,23 @@ fn wait_for_exit_or_sigint(
         if index == 0 {
             // Exit notification from procmgr.
             if msg.tag.words >= 2 {
+                let exit_code = msg.words[1] as i32;
+                if exit_code > 128 {
+                    let sig = exit_code - 128;
+                    let sig_name = match sig {
+                        4 => "Illegal instruction",
+                        6 => "Aborted",
+                        8 => "Floating point exception",
+                        9 => "Killed",
+                        11 => "Segmentation fault",
+                        _ => "Signal",
+                    };
+                    let line = format!("{} (signal {})\n", sig_name, sig);
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                } else if exit_code != 0 {
+                    let line = format!("Exited with status {}\n", exit_code);
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                }
                 break Ok(());
             }
             continue;
@@ -3064,6 +3083,65 @@ impl BuiltinCommand for EscalateDenyBuiltin {
                 let _ = debug_print(line.trim_end());
             }
         }
+        Ok(())
+    }
+}
+
+/// HR7: suequaltest — Verify su between equal profiles is rejected.
+/// Root (admin) attempts `su root` (admin); should be rejected because
+/// caller_profile == target_profile (strict narrowing enforced).
+struct SuEqualTestBuiltin;
+
+impl BuiltinCommand for SuEqualTestBuiltin {
+    fn name(&self) -> &'static str {
+        "suequaltest"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let target = "root";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(target.as_bytes());
+        payload.push(0);
+        payload.push(0); // empty password
+
+        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
+        let mut msg = Message::new(PROCMGR_SU_LABEL, [0; 6], 2);
+        msg.words[0] = payload.len();
+        msg.words[1] = 0; // no notify endpoint needed
+        let mut reply = Message::new(0, [0; 6], 0);
+
+        call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
+
+        let status = reply.words[0];
+        if status != 0 {
+            let line = format!("suequaltest: PASS su equal-profile rejected (errno={})\n", status);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print(line.trim_end());
+        } else {
+            let pid = reply.words[1];
+            let line = format!("suequaltest: FAIL su equal-profile should have been rejected (pid={})\n", pid);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            let _ = debug_print(line.trim_end());
+            let _ = signal_process(procmgr_endpoint, pid, 9);
+        }
+        Ok(())
+    }
+}
+
+/// HR6: shellcrash — Trigger a page fault to test session-survives-crash.
+/// The null-pointer write causes a page fault → kernel forwards to procmgr →
+/// procmgr clears shell_cid (session persists, no SESSION_DEATH).
+struct ShellCrashBuiltin;
+
+impl BuiltinCommand for ShellCrashBuiltin {
+    fn name(&self) -> &'static str {
+        "shellcrash"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shellcrash: triggering fault\n");
+        let _ = debug_print("shellcrash: triggering null-write fault");
+        unsafe { core::ptr::write_volatile(0 as *mut u8, 0); }
         Ok(())
     }
 }
