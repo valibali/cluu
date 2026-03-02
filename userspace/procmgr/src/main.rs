@@ -86,6 +86,8 @@ struct TimerEntry {
 
 struct ContainerInstance {
     name: String,
+    instance_name: String,      // "editor", "editor.2", etc.
+    session_id: u64,            // 0 = system/autostart
     container_id: u64,
     parent_container_id: u64, // 0 = top-level or detached
     pid: usize,
@@ -225,6 +227,8 @@ struct ProcessManager {
     shutting_down: bool,
     shutdown_action: u8, // 0=poweroff, 1=reboot
     autostart_order: Vec<u64>,
+    /// Per-(session, image_name) monotonic counter for instance naming.
+    instance_counters: BTreeMap<(u64, String), u32>,
     /// Timer queue for deferred actions (exponential backoff restarts).
     pending_timers: Vec<TimerEntry>,
     /// Container IDs that have a pending deferred restart (prevents duplicates).
@@ -287,6 +291,7 @@ impl ProcessManager {
             shutting_down: false,
             shutdown_action: 0,
             autostart_order: Vec::new(),
+            instance_counters: BTreeMap::new(),
             pending_timers: Vec::new(),
             pending_restarts: BTreeSet::new(),
         })
@@ -303,6 +308,20 @@ impl ProcessManager {
         let seq = self.spawn_seq_next;
         self.spawn_seq_next = self.spawn_seq_next.wrapping_add(1);
         seq
+    }
+
+    /// Generate a human-friendly instance name for a container.
+    /// First instance of "editor" in session 5 → "editor"
+    /// Second → "editor.2", third → "editor.3", etc.
+    fn next_instance_name(&mut self, session_id: u64, image_name: &str) -> String {
+        let key = (session_id, String::from(image_name));
+        let counter = self.instance_counters.entry(key).or_insert(0);
+        *counter += 1;
+        if *counter == 1 {
+            String::from(image_name)
+        } else {
+            format!("{}.{}", image_name, counter)
+        }
     }
 
     fn next_container_id(&mut self) -> u64 {
@@ -830,8 +849,11 @@ impl ProcessManager {
                 self.container_owner_pids.insert(pid);
                 self.register_vfs_view_for_thread(thread_token, &view_mounts, profile, shell_cid);
                 self.pid_to_view.insert(pid, view_mounts);
+                let inst_name = self.next_instance_name(session_cid, "shell");
                 self.container_instances.insert(shell_cid, ContainerInstance {
                     name: String::from("shell"),
+                    instance_name: inst_name,
+                    session_id: session_cid,
                     container_id: shell_cid,
                     parent_container_id: session_cid,
                     pid,
@@ -1040,8 +1062,11 @@ impl ProcessManager {
                 if image_name == "vtmgr" {
                     self.vtmgr_container_id = container_id;
                 }
+                let inst_name = self.next_instance_name(0, image_name);
                 self.container_instances.insert(container_id, ContainerInstance {
                     name: String::from(image_name),
+                    instance_name: inst_name,
+                    session_id: 0,
                     container_id,
                     parent_container_id: 0, // autostart = top-level
                     pid,
@@ -1781,7 +1806,7 @@ impl ProcessManager {
             return self.handle_container_run(msg, payload, sender_tid);
         }
         if msg.tag.label == PROCMGR_CONTAINER_LIST_LABEL {
-            return self.handle_container_list(msg);
+            return self.handle_container_list(msg, sender_tid);
         }
         if msg.tag.label == libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL {
             return self.handle_session_login(msg, payload, sender_tid);
@@ -2010,8 +2035,11 @@ impl ProcessManager {
                 self.register_vfs_view_for_thread(thread_token, &view_mounts, profile, shell_cid);
                 self.pid_to_view.insert(pid, view_mounts);
 
+                let inst_name = self.next_instance_name(session_cid, "shell");
                 self.container_instances.insert(shell_cid, ContainerInstance {
                     name: String::from("shell"),
+                    instance_name: inst_name,
+                    session_id: session_cid,
                     container_id: shell_cid,
                     parent_container_id: session_cid,
                     pid,
@@ -2212,8 +2240,14 @@ impl ProcessManager {
                 self.register_vfs_view_for_thread(thread_token, &view_mounts, escalate_profile, container_id);
                 self.pid_to_view.insert(pid, view_mounts);
 
+                let sudo_session_id = self.resolve_caller_session(sender_tid)
+                    .map(|s| s.container_id).unwrap_or(0);
+                let sudo_name = format!("sudo:{}", username);
+                let inst_name = self.next_instance_name(sudo_session_id, &sudo_name);
                 self.container_instances.insert(container_id, ContainerInstance {
-                    name: format!("sudo:{}", username),
+                    name: sudo_name,
+                    instance_name: inst_name,
+                    session_id: sudo_session_id,
                     container_id,
                     parent_container_id: caller_container_id,
                     pid,
@@ -2397,8 +2431,14 @@ impl ProcessManager {
                 self.register_vfs_view_for_thread(thread_token, &view_mounts, target_profile, container_id);
                 self.pid_to_view.insert(pid, view_mounts);
 
+                let su_session_id = self.resolve_caller_session(sender_tid)
+                    .map(|s| s.container_id).unwrap_or(0);
+                let su_name = format!("su:{}", target_username);
+                let inst_name = self.next_instance_name(su_session_id, &su_name);
                 self.container_instances.insert(container_id, ContainerInstance {
-                    name: format!("su:{}", target_username),
+                    name: su_name,
+                    instance_name: inst_name,
+                    session_id: su_session_id,
                     container_id,
                     parent_container_id: caller_container_id,
                     pid,
@@ -4162,8 +4202,13 @@ impl ProcessManager {
                 } else {
                     parent_cid
                 };
+                let run_session_id = self.resolve_caller_session(sender_tid)
+                    .map(|s| s.container_id).unwrap_or(0);
+                let inst_name = self.next_instance_name(run_session_id, &display_name);
                 self.container_instances.insert(container_id, ContainerInstance {
                     name: display_name,
+                    instance_name: inst_name,
+                    session_id: run_session_id,
                     container_id,
                     parent_container_id: effective_parent,
                     pid,
@@ -4214,13 +4259,31 @@ impl ProcessManager {
         Ok(())
     }
 
-    fn handle_container_list(&mut self, msg: &Message) -> Result<()> {
+    fn handle_container_list(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
         let reply_token = extract_reply_id(msg);
         let mut reply_msg = Message::new(PROCMGR_CONTAINER_LIST_LABEL, [0; 6], 1);
 
+        // Determine caller visibility
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
+        let caller_profile = self.pid_to_profile.get(&caller_pid).copied()
+            .unwrap_or(CapProfile::empty());
+        let session_profile = self.resolve_caller_session(sender_tid)
+            .map(|s| s.profile)
+            .unwrap_or(CapProfile::empty());
+        let is_admin = caller_profile.contains(CapProfile::ADMIN)
+            || session_profile.contains(CapProfile::ADMIN);
+        let caller_session_cid = self.resolve_caller_session(sender_tid)
+            .map(|s| s.container_id)
+            .unwrap_or(0);
+
         let mut listing = String::new();
         for inst in self.container_instances.values() {
-            listing.push_str(&format!("{} {} {}\n", inst.name, inst.pid, inst.container_id));
+            // Session filtering: admin sees all, user sees own session + system
+            if !is_admin && inst.session_id != 0 && inst.session_id != caller_session_cid {
+                continue;
+            }
+            listing.push_str(&format!("{} {} {} {}\n",
+                inst.instance_name, inst.pid, inst.container_id, inst.session_id));
         }
 
         reply_msg.words[1] = 0; // status

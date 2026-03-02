@@ -2744,16 +2744,27 @@ fn container_stop(stdout: usize, context: &mut CommandContext, args: &[String]) 
     let payload = &reply_buf[hdr_len..hdr_len + payload_len];
     let listing = core::str::from_utf8(payload).unwrap_or("");
 
-    // Each line: "<name> <pid> <cid>"
+    // Each line: "<instance_name> <pid> <cid> <session_id>"
     let mut target_pid = None;
+    let by_cid = name.starts_with('@');
     for line in listing.lines() {
         let mut parts = line.split_whitespace();
-        if let (Some(cname), Some(pid_str)) = (parts.next(), parts.next()) {
-            if cname == name.as_str() {
-                if let Ok(pid) = usize::from_str_radix(pid_str, 10) {
-                    target_pid = Some(pid);
-                    break;
-                }
+        let inst_name = parts.next().unwrap_or("");
+        let pid_str = parts.next().unwrap_or("");
+        let cid_str = parts.next().unwrap_or("");
+
+        let matched = if by_cid {
+            // @CID addressing
+            cid_str == &name[1..]
+        } else {
+            // Instance name match
+            inst_name == name.as_str()
+        };
+
+        if matched {
+            if let Ok(pid) = usize::from_str_radix(pid_str, 10) {
+                target_pid = Some(pid);
+                break;
             }
         }
     }
