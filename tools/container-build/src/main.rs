@@ -54,6 +54,7 @@ struct Cluufile {
     deny_inherit: bool,
     deny: Vec<String>,
     detach: bool,
+    restart_policy: Option<(String, Option<usize>, Option<u64>)>,
 }
 
 fn parse_cluufile(path: &Path) -> Result<Cluufile> {
@@ -74,6 +75,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
     let mut deny_inherit = false;
     let mut deny: Vec<String> = Vec::new();
     let mut detach = false;
+    let mut restart_policy: Option<(String, Option<usize>, Option<u64>)> = None;
     let mut saw_directive = false;
 
     for (line_idx, raw_line) in content.lines().enumerate() {
@@ -286,6 +288,47 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
                 }
                 detach = true;
             }
+            "RESTART" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before RESTART", path.display(), lineno);
+                }
+                if restart_policy.is_some() {
+                    bail!("{}:{}: duplicate RESTART directive", path.display(), lineno);
+                }
+                let tokens: Vec<&str> = rest.split_whitespace().collect();
+                if tokens.is_empty() {
+                    bail!("{}:{}: RESTART requires a policy (never, always, on_failure)", path.display(), lineno);
+                }
+                match tokens[0] {
+                    "never" | "always" | "on_failure" => {}
+                    other => {
+                        bail!(
+                            "{}:{}: RESTART policy must be 'never', 'always', or 'on_failure', got '{}'",
+                            path.display(), lineno, other
+                        );
+                    }
+                }
+                let max_restarts = if tokens.len() >= 2 {
+                    Some(tokens[1].parse::<usize>().map_err(|_| {
+                        anyhow::anyhow!("{}:{}: RESTART max_restarts must be an integer", path.display(), lineno)
+                    })?)
+                } else if tokens[0] == "on_failure" {
+                    bail!("{}:{}: RESTART on_failure requires max_restarts and restart_window (e.g. 'RESTART on_failure 3 120')",
+                          path.display(), lineno);
+                } else {
+                    None
+                };
+                let restart_window = if tokens.len() >= 3 {
+                    Some(tokens[2].parse::<u64>().map_err(|_| {
+                        anyhow::anyhow!("{}:{}: RESTART restart_window must be an integer", path.display(), lineno)
+                    })?)
+                } else if tokens[0] == "on_failure" {
+                    bail!("{}:{}: RESTART on_failure requires restart_window", path.display(), lineno);
+                } else {
+                    None
+                };
+                restart_policy = Some((tokens[0].to_string(), max_restarts, restart_window));
+            }
             unknown => {
                 bail!(
                     "{}:{}: unknown directive '{}'",
@@ -316,6 +359,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
         deny_inherit,
         deny,
         detach,
+        restart_policy,
     })
 }
 
@@ -362,6 +406,17 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str, image_dirs:
                 out.push_str(&format!("\"{}\"", arg));
             }
             out.push_str("]\n");
+        }
+    }
+
+    // [lifecycle] — only if restart policy specified
+    if let Some((ref policy, ref max_restarts, ref restart_window)) = cluufile.restart_policy {
+        out.push_str(&format!("\n[lifecycle]\nrestart_policy = \"{}\"\n", policy));
+        if let Some(max) = max_restarts {
+            out.push_str(&format!("max_restarts = {}\n", max));
+        }
+        if let Some(window) = restart_window {
+            out.push_str(&format!("restart_window_secs = {}\n", window));
         }
     }
 

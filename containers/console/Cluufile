@@ -4,3 +4,4 @@ ENDPOINT grantable
 DEVICE framebuffer
 BUILD "cargo build --manifest-path userspace/console/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/console.elf /bin/console
 ENTRYPOINT /bin/console
+RESTART always

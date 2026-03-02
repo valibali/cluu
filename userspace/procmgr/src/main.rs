@@ -55,6 +55,16 @@ use libcluu::*;
 /// A list of (src, dst, writable) mount tuples representing a process's VFS view.
 type ViewMountList = Vec<(String, String, bool)>;
 
+#[derive(Clone, Debug)]
+enum RestartPolicy {
+    Never,
+    Always,
+    OnFailure { max_restarts: usize, window_secs: u64 },
+}
+
+const DEFAULT_MAX_RESTARTS_ON_FAILURE: usize = 3;
+const DEFAULT_RESTART_WINDOW_SECS: u64 = 300;
+
 struct ContainerInstance {
     name: String,
     container_id: u64,
@@ -62,6 +72,10 @@ struct ContainerInstance {
     pid: usize,
     image_path: String,
     mapped_pages: u32,
+    restart_policy: RestartPolicy,
+    restart_count: usize,
+    last_exit_code: i32,
+    restart_attempt_start: u64,
 }
 
 struct PendingVfsView {
@@ -789,6 +803,10 @@ impl ProcessManager {
                     pid,
                     image_path: String::from(SERVICE_PATH),
                     mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                    restart_policy: RestartPolicy::Never,
+                    restart_count: 0,
+                    last_exit_code: 0,
+                    restart_attempt_start: 0,
                 });
                 self.container_children.entry(session_cid)
                     .or_insert_with(Vec::new).push(shell_cid);
@@ -835,6 +853,9 @@ impl ProcessManager {
         // Extract binary path
         let binary = doc.table("exec").and_then(|t| t.get_str("binary"))
             .ok_or(Error::InvalidArgument)?;
+
+        // Parse restart policy from [lifecycle] section
+        let restart_policy = parse_restart_policy(&doc);
 
         // Build capability profile
         let mut requested_profile = CapProfile::USER;
@@ -992,6 +1013,10 @@ impl ProcessManager {
                     pid,
                     image_path: image_dir,
                     mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                    restart_policy,
+                    restart_count: 0,
+                    last_exit_code: 0,
+                    restart_attempt_start: 0,
                 });
                 // Map framebuffer into console's address space.
                 if image_name == "console" && fb_phys != 0 && fb_size != 0 {
@@ -1018,6 +1043,263 @@ impl ProcessManager {
                     "procmgr: autostart '{}' spawn failed: {:?}",
                     image_name, err
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    fn should_restart_container(&self, cookie: usize, exit_code: i32) -> bool {
+        let pid = match self.cookie_to_pid.get(&cookie) {
+            Some(&p) => p,
+            None => return false,
+        };
+        let container_id = match self.pid_to_container_id.get(&pid) {
+            Some(&cid) => cid,
+            None => return false,
+        };
+        let container = match self.container_instances.get(&container_id) {
+            Some(c) => c,
+            None => return false,
+        };
+        match &container.restart_policy {
+            RestartPolicy::Never => false,
+            RestartPolicy::Always => true,
+            RestartPolicy::OnFailure { .. } => exit_code != 0,
+        }
+    }
+
+    fn handle_restart_exit(&mut self, cookie: usize, exit_code: i32) -> Result<()> {
+        // 1. Extract state before cleanup
+        let thread_token = self.exit_table.remove(&cookie).unwrap_or(0);
+        let pid = match self.cookie_to_pid.remove(&cookie) {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let child_tid = self.pid_to_tid.get(&pid).copied().unwrap_or(0);
+        let container_id = match self.pid_to_container_id.remove(&pid) {
+            Some(cid) => cid,
+            None => return Ok(()),
+        };
+
+        // 2. Clean up PROCESS resources (not container)
+        self.clear_vfs_view_for_tid(child_tid);
+        self.pid_to_cookie.remove(&pid);
+        self.clear_pid_runtime_state(pid);
+        if let Some(owner_tid) = self.pid_owner_tid.remove(&pid) {
+            self.on_child_reaped(owner_tid);
+        }
+        // Notify parent of exit (they see the exit, restart is internal)
+        if let Some(notify_ep) = self.exit_notify.remove(&cookie) {
+            let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+            notify_msg.words[0] = cookie;
+            notify_msg.words[1] = exit_code as usize;
+            let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
+        }
+
+        // 3. Destroy kernel objects
+        if thread_token != 0 { let _ = thread_destroy(thread_token); }
+        if let Some(st) = self.cookie_to_space.remove(&cookie) {
+            let _ = space_destroy(st);
+        }
+        if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
+            for tok in tokens { let _ = token_revoke(tok); }
+        }
+
+        // 4. Update restart metadata
+        let now = self.clock_sample();
+        let image_name = if let Some(container) = self.container_instances.get_mut(&container_id) {
+            container.pid = 0;
+            container.last_exit_code = exit_code;
+            container.restart_count += 1;
+            if container.restart_attempt_start == 0 {
+                container.restart_attempt_start = now;
+            }
+            container.name.clone()
+        } else {
+            return Ok(());
+        };
+
+        let restart_count = self.container_instances.get(&container_id)
+            .map(|c| c.restart_count).unwrap_or(0);
+        let _ = debug_print(&format!(
+            "procmgr: restarting '{}' (exit code {}, restart #{})",
+            image_name, exit_code, restart_count
+        ));
+
+        // 5. Re-read manifest and re-spawn
+        let manifest_path = format!("/var/images/{}/manifest.toml", image_name);
+        let manifest_contents = match self.read_file_from_vfs(&manifest_path) {
+            Some(data) => data,
+            None => {
+                let _ = debug_print(&format!(
+                    "procmgr: restart failed, manifest not found: {}", manifest_path
+                ));
+                self.container_instances.remove(&container_id);
+                return Ok(());
+            }
+        };
+        let manifest_str = match core::str::from_utf8(&manifest_contents) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = debug_print("procmgr: restart failed, manifest not UTF-8");
+                self.container_instances.remove(&container_id);
+                return Ok(());
+            }
+        };
+        let doc = match libcluu::toml::parse(manifest_str) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: restart failed, manifest parse error: {}", e
+                ));
+                self.container_instances.remove(&container_id);
+                return Ok(());
+            }
+        };
+
+        // Extract spawn parameters (same as autostart_container)
+        let binary = match doc.table("exec").and_then(|t| t.get_str("binary")) {
+            Some(b) => b,
+            None => {
+                let _ = debug_print("procmgr: restart failed, manifest missing binary");
+                self.container_instances.remove(&container_id);
+                return Ok(());
+            }
+        };
+        let mut requested_profile = CapProfile::USER;
+        if let Some(profile_table) = doc.table("profile") {
+            if let Some(caps) = profile_table.get_array("capabilities") {
+                for cap_name in caps {
+                    if let Some(cap) = parse_capability(cap_name) {
+                        requested_profile |= cap;
+                    }
+                }
+            }
+        }
+        let priority = doc.table("scheduling")
+            .and_then(|t| t.get_str("priority"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_PRIORITY);
+        let binary_vfs_path = format!("/var/images/{}{}", image_name, binary);
+        let image_dirs: Vec<String> = doc.table("storage")
+            .and_then(|t| t.get_array("image_dirs"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
+
+        // Endpoint setup (same as autostart)
+        let endpoint_mode = doc.table("tokens").and_then(|t| t.get_str("endpoint_mode"));
+        let extra_token = match endpoint_mode {
+            Some("listen") => {
+                let ep = endpoint_create(self.token).unwrap_or(0);
+                if ep != 0 {
+                    token_derive(ep, Rights::IPC_RECV.bits() as usize, u64::MAX).unwrap_or(0)
+                } else { 0 }
+            }
+            Some("grantable") => {
+                let ep = endpoint_create(self.token).unwrap_or(0);
+                if ep != 0 {
+                    let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT;
+                    token_derive(ep, rights.bits() as usize, u64::MAX).unwrap_or(0)
+                } else { 0 }
+            }
+            _ => 0,
+        };
+        let devices: Vec<String> = doc.table("hardware")
+            .and_then(|t| t.get_array("devices"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
+        let extra_token_1 = if devices.iter().any(|d| d == "irq") {
+            token_derive(self.token, Rights::IRQ_HANDLE.bits() as usize, u64::MAX).unwrap_or(0)
+        } else { 0 };
+
+        let mut argv_payload: Vec<u8> = Vec::new();
+        argv_payload.extend_from_slice(binary.as_bytes());
+        argv_payload.push(0);
+
+        // Console-specific param overrides (framebuffer)
+        let mut overrides_buf: [(usize, u64); 8] = [(0, 0); 8];
+        let mut n_overrides = 0;
+        let mut fb_phys: u64 = 0;
+        let mut fb_size: u64 = 0;
+        if image_name == "console" {
+            if let Some(data) = self.read_file_from_vfs("/proc/fb") {
+                if let Ok(text) = core::str::from_utf8(&data) {
+                    for line in text.lines() {
+                        if let Some(v) = line.strip_prefix("phys=0x") {
+                            fb_phys = u64::from_str_radix(v, 16).unwrap_or(0);
+                        } else if let Some(v) = line.strip_prefix("size=") {
+                            fb_size = v.parse::<u64>().unwrap_or(0);
+                        } else if let Some(v) = line.strip_prefix("width=") {
+                            overrides_buf[n_overrides] = (PARAM_FB_WIDTH, v.parse::<u64>().unwrap_or(0));
+                            n_overrides += 1;
+                        } else if let Some(v) = line.strip_prefix("height=") {
+                            overrides_buf[n_overrides] = (PARAM_FB_HEIGHT, v.parse::<u64>().unwrap_or(0));
+                            n_overrides += 1;
+                        } else if let Some(v) = line.strip_prefix("pitch=") {
+                            overrides_buf[n_overrides] = (PARAM_FB_PITCH, v.parse::<u64>().unwrap_or(0));
+                            n_overrides += 1;
+                        }
+                    }
+                }
+            }
+            overrides_buf[n_overrides] = (PARAM_FB_BASE, CONSOLE_FB_BASE as u64);
+            n_overrides += 1;
+            overrides_buf[n_overrides] = (PARAM_FB_PHYS, fb_phys);
+            n_overrides += 1;
+            overrides_buf[n_overrides] = (PARAM_FB_SIZE, fb_size);
+            n_overrides += 1;
+            overrides_buf[n_overrides] = (PARAM_CONSOLE_INSTANCE, 0);
+            n_overrides += 1;
+            overrides_buf[n_overrides] = (PARAM_CONSOLE_ACTIVE, 1);
+            n_overrides += 1;
+        }
+        let param_overrides = &overrides_buf[..n_overrides];
+
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
+
+        match self.spawn_service_with_env(
+            &binary_vfs_path, priority, &argv_payload, 1, &[], 0, 0,
+            spawn_seq, spawn_start, &[], requested_profile,
+            extra_token, extra_token_1, param_overrides, None,
+        ) {
+            Ok((new_thread_token, new_cookie, new_pid, _)) => {
+                let mut view_mounts = default_view_for_profile(requested_profile);
+                apply_image_dir_overrides(&mut view_mounts, &image_name, &image_dirs);
+                self.pid_to_container_id.insert(new_pid, container_id);
+                self.container_owner_pids.insert(new_pid);
+                self.register_vfs_view_for_thread(new_thread_token, &view_mounts, requested_profile, container_id);
+                self.pid_to_view.insert(new_pid, view_mounts);
+
+                if let Some(container) = self.container_instances.get_mut(&container_id) {
+                    container.pid = new_pid;
+                }
+
+                // Map framebuffer into console's restarted address space
+                if image_name == "console" && fb_phys != 0 && fb_size != 0 {
+                    if let Some(&space_tok) = self.cookie_to_space.get(&new_cookie) {
+                        let num_pages = (fb_size as usize).div_ceil(PAGE_SIZE);
+                        let _ = space_map_range(
+                            space_tok,
+                            CONSOLE_FB_BASE,
+                            fb_phys as usize,
+                            0x03 | MAP_DEVICE,
+                            num_pages,
+                            0,
+                        );
+                    }
+                }
+
+                let _ = debug_print(&format!(
+                    "procmgr: '{}' restarted as pid {} (container {})",
+                    image_name, new_pid, container_id
+                ));
+            }
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: restart spawn failed for '{}': {:?}", image_name, e
+                ));
+                self.container_instances.remove(&container_id);
             }
         }
         Ok(())
@@ -1081,6 +1363,12 @@ impl ProcessManager {
 
         let cookie = msg.words[0];
         let exit_code = msg.words[1] as i32;
+
+        // Check if this container should be restarted instead of torn down
+        if self.should_restart_container(cookie, exit_code) {
+            return self.handle_restart_exit(cookie, exit_code);
+        }
+
         let thread_token = match self.exit_table.remove(&cookie) {
             Some(token) => token,
             None => return Ok(()),
@@ -1443,6 +1731,10 @@ impl ProcessManager {
                     pid,
                     image_path: String::from(SERVICE_PATH),
                     mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                    restart_policy: RestartPolicy::Never,
+                    restart_count: 0,
+                    last_exit_code: 0,
+                    restart_attempt_start: 0,
                 });
 
                 self.container_children.entry(session_cid)
@@ -1641,6 +1933,10 @@ impl ProcessManager {
                     pid,
                     image_path: String::from(command_path),
                     mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                    restart_policy: RestartPolicy::Never,
+                    restart_count: 0,
+                    last_exit_code: 0,
+                    restart_attempt_start: 0,
                 });
 
                 // Track parent→child for cascading cleanup
@@ -1822,6 +2118,10 @@ impl ProcessManager {
                     pid,
                     image_path: String::from(SERVICE_PATH),
                     mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                    restart_policy: RestartPolicy::Never,
+                    restart_count: 0,
+                    last_exit_code: 0,
+                    restart_attempt_start: 0,
                 });
 
                 // Track parent→child for cascading cleanup
@@ -3226,6 +3526,9 @@ impl ProcessManager {
             }
         };
 
+        // Parse restart policy from [lifecycle] section
+        let restart_policy = parse_restart_policy(&doc);
+
         // Extract binary path
         let binary = match doc.table("exec").and_then(|t| t.get_str("binary")) {
             Some(b) => b,
@@ -3580,6 +3883,10 @@ impl ProcessManager {
                     pid,
                     image_path: image_dir,
                     mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                    restart_policy,
+                    restart_count: 0,
+                    last_exit_code: 0,
+                    restart_attempt_start: 0,
                 });
 
                 // Track parent→child for cascading cleanup
@@ -4051,6 +4358,27 @@ fn derive_slot(base: usize, rights: Rights) -> Result<usize> {
         Ok(0)
     } else {
         token_derive(base, rights.bits() as usize, u64::MAX)
+    }
+}
+
+/// Parse a RestartPolicy from a manifest TOML document's [lifecycle] section.
+fn parse_restart_policy(doc: &libcluu::toml::TomlDoc) -> RestartPolicy {
+    if let Some(lifecycle) = doc.table("lifecycle") {
+        match lifecycle.get_str("restart_policy") {
+            Some("always") => RestartPolicy::Always,
+            Some("on_failure") => {
+                let max = lifecycle.get_str("max_restarts")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(DEFAULT_MAX_RESTARTS_ON_FAILURE);
+                let window = lifecycle.get_str("restart_window_secs")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(DEFAULT_RESTART_WINDOW_SECS);
+                RestartPolicy::OnFailure { max_restarts: max, window_secs: window }
+            }
+            _ => RestartPolicy::Never,
+        }
+    } else {
+        RestartPolicy::Never
     }
 }
 
