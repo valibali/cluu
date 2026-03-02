@@ -65,6 +65,25 @@ enum RestartPolicy {
 const DEFAULT_MAX_RESTARTS_ON_FAILURE: usize = 3;
 const DEFAULT_RESTART_WINDOW_SECS: u64 = 300;
 
+/// Safety valve: Always-restart containers are rate-limited when they exceed
+/// this many restarts within the safety window.
+const ALWAYS_SAFETY_VALVE_COUNT: usize = 10;
+const ALWAYS_SAFETY_VALVE_WINDOW_SECS: u64 = 60;
+/// Exponential backoff parameters for OnFailure restarts.
+const ONFAILURE_BACKOFF_BASE_SECS: u64 = 1;
+const ONFAILURE_BACKOFF_CAP_SECS: u64 = 30;
+
+/// Action to perform when a timer expires.
+enum TimerAction {
+    Restart(u64), // container_id
+}
+
+/// A pending timer entry in the timer queue.
+struct TimerEntry {
+    deadline: u64, // TSC tick deadline
+    action: TimerAction,
+}
+
 struct ContainerInstance {
     name: String,
     container_id: u64,
@@ -206,6 +225,10 @@ struct ProcessManager {
     shutting_down: bool,
     shutdown_action: u8, // 0=poweroff, 1=reboot
     autostart_order: Vec<u64>,
+    /// Timer queue for deferred actions (exponential backoff restarts).
+    pending_timers: Vec<TimerEntry>,
+    /// Container IDs that have a pending deferred restart (prevents duplicates).
+    pending_restarts: BTreeSet<u64>,
 }
 
 impl ProcessManager {
@@ -264,6 +287,8 @@ impl ProcessManager {
             shutting_down: false,
             shutdown_action: 0,
             autostart_order: Vec::new(),
+            pending_timers: Vec::new(),
+            pending_restarts: BTreeSet::new(),
         })
     }
 
@@ -668,6 +693,7 @@ impl ProcessManager {
             self.exit_endpoint, self.spawn_endpoint
         ));
         loop {
+            self.process_expired_timers();
             self.poll_exit_notifications()?;
         }
     }
@@ -1096,77 +1122,62 @@ impl ProcessManager {
         }
     }
 
-    fn handle_restart_exit(&mut self, cookie: usize, exit_code: i32) -> Result<()> {
-        // 1. Extract state before cleanup
-        let thread_token = self.exit_table.remove(&cookie).unwrap_or(0);
-        let pid = match self.cookie_to_pid.remove(&cookie) {
-            Some(p) => p,
-            None => return Ok(()),
-        };
-        let child_tid = self.pid_to_tid.get(&pid).copied().unwrap_or(0);
-        let container_id = match self.pid_to_container_id.remove(&pid) {
-            Some(cid) => cid,
-            None => return Ok(()),
-        };
-
-        // 2. Clean up PROCESS resources (not container)
-        self.clear_vfs_view_for_tid(child_tid);
-        self.pid_to_cookie.remove(&pid);
-        self.clear_pid_runtime_state(pid);
-        if let Some(owner_tid) = self.pid_owner_tid.remove(&pid) {
-            self.on_child_reaped(owner_tid);
+    /// Process all expired timers in the timer queue.
+    fn process_expired_timers(&mut self) {
+        if self.pending_timers.is_empty() {
+            return;
         }
-        // Notify parent of exit (they see the exit, restart is internal)
-        if let Some(notify_ep) = self.exit_notify.remove(&cookie) {
-            let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
-            notify_msg.words[0] = cookie;
-            notify_msg.words[1] = exit_code as usize;
-            let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
-        }
-
-        // 3. Destroy kernel objects
-        if thread_token != 0 { let _ = thread_destroy(thread_token); }
-        if let Some(st) = self.cookie_to_space.remove(&cookie) {
-            let _ = space_destroy(st);
-        }
-        if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
-            for tok in tokens { let _ = token_revoke(tok); }
-        }
-
-        // 4. Update restart metadata
         let now = self.clock_sample();
-        let freq = self.clock_freq;
-        let image_name = if let Some(container) = self.container_instances.get_mut(&container_id) {
-            container.pid = 0;
-            container.last_exit_code = exit_code;
-            // Reset counters if outside window (fresh restart cycle)
-            let window_secs = match &container.restart_policy {
-                RestartPolicy::OnFailure { window_secs, .. } => *window_secs,
-                _ => 0,
-            };
-            if container.restart_attempt_start > 0
-               && window_secs > 0
-               && (now - container.restart_attempt_start) > window_secs * freq
-            {
-                container.restart_count = 0;
-                container.restart_attempt_start = now;
-            } else if container.restart_attempt_start == 0 {
-                container.restart_attempt_start = now;
+        // Collect expired restart container IDs.
+        let mut expired: Vec<u64> = Vec::new();
+        self.pending_timers.retain(|entry| {
+            if entry.deadline <= now {
+                match &entry.action {
+                    TimerAction::Restart(cid) => expired.push(*cid),
+                }
+                false
+            } else {
+                true
             }
-            container.restart_count += 1;
-            container.name.clone()
-        } else {
-            return Ok(());
-        };
+        });
+        for container_id in expired {
+            self.pending_restarts.remove(&container_id);
+            self.execute_deferred_restart(container_id);
+        }
+    }
 
+    /// Schedule a deferred restart for a container after `delay_secs` seconds.
+    fn schedule_restart_timer(&mut self, container_id: u64, delay_secs: u64) {
+        if self.pending_restarts.contains(&container_id) {
+            return; // already scheduled
+        }
+        let deadline = self.clock_sample() + delay_secs * self.clock_freq;
+        self.pending_timers.push(TimerEntry {
+            deadline,
+            action: TimerAction::Restart(container_id),
+        });
+        self.pending_restarts.insert(container_id);
+    }
+
+    /// Execute a deferred restart — re-read manifest and spawn a new process for the container.
+    fn execute_deferred_restart(&mut self, container_id: u64) {
+        let image_name = match self.container_instances.get(&container_id) {
+            Some(c) => c.name.clone(),
+            None => return,
+        };
         let restart_count = self.container_instances.get(&container_id)
             .map(|c| c.restart_count).unwrap_or(0);
         let _ = debug_print(&format!(
-            "procmgr: restarting '{}' (exit code {}, restart #{})",
-            image_name, exit_code, restart_count
+            "procmgr: deferred restart of '{}' (restart #{})",
+            image_name, restart_count
         ));
+        self.spawn_restarted_container(container_id, &image_name);
+    }
 
-        // 5. Re-read manifest and re-spawn
+    /// Shared spawn logic for container restart (immediate or deferred).
+    ///
+    /// Re-reads the manifest, parses it, and spawns the binary.
+    fn spawn_restarted_container(&mut self, container_id: u64, image_name: &str) {
         let manifest_path = format!("/var/images/{}/manifest.toml", image_name);
         let manifest_contents = match self.read_file_from_vfs(&manifest_path) {
             Some(data) => data,
@@ -1175,7 +1186,7 @@ impl ProcessManager {
                     "procmgr: restart failed, manifest not found: {}", manifest_path
                 ));
                 self.container_instances.remove(&container_id);
-                return Ok(());
+                return;
             }
         };
         let manifest_str = match core::str::from_utf8(&manifest_contents) {
@@ -1183,7 +1194,7 @@ impl ProcessManager {
             Err(_) => {
                 let _ = debug_print("procmgr: restart failed, manifest not UTF-8");
                 self.container_instances.remove(&container_id);
-                return Ok(());
+                return;
             }
         };
         let doc = match libcluu::toml::parse(manifest_str) {
@@ -1193,7 +1204,7 @@ impl ProcessManager {
                     "procmgr: restart failed, manifest parse error: {}", e
                 ));
                 self.container_instances.remove(&container_id);
-                return Ok(());
+                return;
             }
         };
 
@@ -1203,7 +1214,7 @@ impl ProcessManager {
             None => {
                 let _ = debug_print("procmgr: restart failed, manifest missing binary");
                 self.container_instances.remove(&container_id);
-                return Ok(());
+                return;
             }
         };
         let mut requested_profile = CapProfile::USER;
@@ -1305,7 +1316,7 @@ impl ProcessManager {
         ) {
             Ok((new_thread_token, new_cookie, new_pid, _)) => {
                 let mut view_mounts = default_view_for_profile(requested_profile);
-                apply_image_dir_overrides(&mut view_mounts, &image_name, &image_dirs);
+                apply_image_dir_overrides(&mut view_mounts, image_name, &image_dirs);
                 self.pid_to_container_id.insert(new_pid, container_id);
                 self.container_owner_pids.insert(new_pid);
                 self.register_vfs_view_for_thread(new_thread_token, &view_mounts, requested_profile, container_id);
@@ -1342,6 +1353,112 @@ impl ProcessManager {
                 self.container_instances.remove(&container_id);
             }
         }
+    }
+
+    fn handle_restart_exit(&mut self, cookie: usize, exit_code: i32) -> Result<()> {
+        // 1. Extract state before cleanup
+        let thread_token = self.exit_table.remove(&cookie).unwrap_or(0);
+        let pid = match self.cookie_to_pid.remove(&cookie) {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let child_tid = self.pid_to_tid.get(&pid).copied().unwrap_or(0);
+        let container_id = match self.pid_to_container_id.remove(&pid) {
+            Some(cid) => cid,
+            None => return Ok(()),
+        };
+
+        // 2. Clean up PROCESS resources (not container)
+        self.clear_vfs_view_for_tid(child_tid);
+        self.pid_to_cookie.remove(&pid);
+        self.clear_pid_runtime_state(pid);
+        if let Some(owner_tid) = self.pid_owner_tid.remove(&pid) {
+            self.on_child_reaped(owner_tid);
+        }
+        // Notify parent of exit (they see the exit, restart is internal)
+        if let Some(notify_ep) = self.exit_notify.remove(&cookie) {
+            let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+            notify_msg.words[0] = cookie;
+            notify_msg.words[1] = exit_code as usize;
+            let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
+        }
+
+        // 3. Destroy kernel objects
+        if thread_token != 0 { let _ = thread_destroy(thread_token); }
+        if let Some(st) = self.cookie_to_space.remove(&cookie) {
+            let _ = space_destroy(st);
+        }
+        if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
+            for tok in tokens { let _ = token_revoke(tok); }
+        }
+
+        // 4. Update restart metadata and determine restart strategy
+        let now = self.clock_sample();
+        let freq = self.clock_freq;
+        let (image_name, restart_count, policy) = {
+            let container = match self.container_instances.get_mut(&container_id) {
+                Some(c) => c,
+                None => return Ok(()),
+            };
+            container.pid = 0;
+            container.last_exit_code = exit_code;
+
+            // Determine window for counter reset (applies to both Always and OnFailure)
+            let window_secs = match &container.restart_policy {
+                RestartPolicy::OnFailure { window_secs, .. } => *window_secs,
+                RestartPolicy::Always => ALWAYS_SAFETY_VALVE_WINDOW_SECS,
+                RestartPolicy::Never => 0,
+            };
+
+            // Reset counters if outside window (fresh restart cycle)
+            if container.restart_attempt_start > 0
+               && window_secs > 0
+               && (now - container.restart_attempt_start) > window_secs * freq
+            {
+                container.restart_count = 0;
+                container.restart_attempt_start = now;
+            } else if container.restart_attempt_start == 0 {
+                container.restart_attempt_start = now;
+            }
+            container.restart_count += 1;
+
+            (container.name.clone(), container.restart_count, container.restart_policy.clone())
+        };
+
+        let _ = debug_print(&format!(
+            "procmgr: restarting '{}' (exit code {}, restart #{})",
+            image_name, exit_code, restart_count
+        ));
+
+        // 5. Dispatch: immediate or deferred restart based on policy
+        match &policy {
+            RestartPolicy::Always => {
+                // Safety valve: if too many rapid restarts, apply exponential backoff
+                if restart_count > ALWAYS_SAFETY_VALVE_COUNT {
+                    let exponent = ((restart_count - ALWAYS_SAFETY_VALVE_COUNT - 1) as u64).min(4);
+                    let delay = (ONFAILURE_BACKOFF_BASE_SECS << exponent).min(ONFAILURE_BACKOFF_CAP_SECS);
+                    let _ = debug_print(&format!(
+                        "procmgr: safety valve for '{}', deferring {}s (restart #{})",
+                        image_name, delay, restart_count
+                    ));
+                    self.schedule_restart_timer(container_id, delay);
+                } else {
+                    // Immediate restart
+                    self.spawn_restarted_container(container_id, &image_name);
+                }
+            }
+            RestartPolicy::OnFailure { .. } => {
+                // Exponential backoff: 1s, 2s, 4s, 8s, 16s, cap 30s
+                let exponent = (restart_count.saturating_sub(1) as u64).min(4);
+                let delay = (ONFAILURE_BACKOFF_BASE_SECS << exponent).min(ONFAILURE_BACKOFF_CAP_SECS);
+                let _ = debug_print(&format!(
+                    "procmgr: OnFailure backoff for '{}', deferring {}s (restart #{})",
+                    image_name, delay, restart_count
+                ));
+                self.schedule_restart_timer(container_id, delay);
+            }
+            RestartPolicy::Never => {} // should_restart_container already filters this
+        }
         Ok(())
     }
 
@@ -1358,8 +1475,16 @@ impl ProcessManager {
             tokens[0], tokens[1], tokens[2], tokens[3]
         ));
         let mut buf = [0u8; 256];
+        // Compute timeout: wake up when the soonest timer expires (or block forever).
+        let timeout = if self.pending_timers.is_empty() {
+            u64::MAX
+        } else {
+            let now = self.clock_sample();
+            let soonest = self.pending_timers.iter().map(|t| t.deadline).min().unwrap();
+            if soonest <= now { 0 } else { soonest - now }
+        };
         let (index, len, sender_tid) =
-            match libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, u64::MAX) {
+            match libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout) {
                 Ok(res) => {
                     let _ = debug_print(&format!(
                         "procmgr: recv_any idx={} len={} sender={}",
@@ -1706,6 +1831,9 @@ impl ProcessManager {
 
         self.shutting_down = true;
         self.shutdown_action = msg.words[0] as u8; // 0=poweroff, 1=reboot
+        // Cancel all pending deferred restarts.
+        self.pending_timers.clear();
+        self.pending_restarts.clear();
         let action_str = if self.shutdown_action == 1 { "reboot" } else { "poweroff" };
         let _ = debug_print(&format!("procmgr: shutdown initiated ({})", action_str));
 
