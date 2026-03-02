@@ -774,7 +774,7 @@ impl ProcessManager {
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
         let (user_env, user_envc) = build_user_env_payload("root", "/root");
 
-        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[]) {
+        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let session_cid = self.next_container_id();
                 let shell_cid = self.next_container_id();
@@ -972,6 +972,7 @@ impl ProcessManager {
             extra_token,
             extra_token_1,
             param_overrides,
+            None, // no caller view (internal autostart)
         ) {
             Ok((_thread_token, cookie, pid, _child_stdin_send)) => {
                 let image_dir = format!("/var/images/{}", image_name);
@@ -1500,6 +1501,7 @@ impl ProcessManager {
             0,
             0,
             &[],
+            None, // no caller view (session login uses SERVICE_PATH constant)
         ) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let session_cid = self.next_container_id();
@@ -1681,6 +1683,9 @@ impl ProcessManager {
         let argc = 1usize;
         let (esc_env, esc_envc) = build_user_env_payload(&username, &user_home);
 
+        // Look up caller's VFS view for path resolution
+        let caller_view_owned = self.pid_to_view.get(&caller_pid).cloned();
+
         match self.spawn_service_with_env(
             command_path,
             DEFAULT_PRIORITY,
@@ -1696,6 +1701,7 @@ impl ProcessManager {
             0,
             0,
             &[],
+            caller_view_owned.as_ref(),
         ) {
             Ok((thread_token, cookie, pid, stdin_send)) => {
                 let container_id = self.next_container_id();
@@ -1876,6 +1882,7 @@ impl ProcessManager {
             0,
             0,
             &[],
+            None, // no caller view (su uses SERVICE_PATH constant)
         ) {
             Ok((thread_token, cookie, pid, stdin_send)) => {
                 let container_id = self.next_container_id();
@@ -2414,6 +2421,7 @@ impl ProcessManager {
             0,
             0,
             &[],
+            Some(&child_view_mounts),
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 reply_msg.words[0] = 0;
@@ -2537,6 +2545,7 @@ impl ProcessManager {
             0,
             0,
             &[],
+            None,
         )
     }
 
@@ -2557,6 +2566,7 @@ impl ProcessManager {
         extra_token: usize,
         extra_token_1: usize,
         param_overrides: &[(usize, u64)],
+        caller_view: Option<&ViewMountList>,
     ) -> Result<(usize, usize, usize, usize)> {
         // Build env data: for bootstrap (owner_tid==0) use defaults,
         // otherwise use caller-provided env (from posix_spawn)
@@ -2578,7 +2588,7 @@ impl ProcessManager {
 
         if !path.starts_with("/dev/initrd/") {
             self.log_spawn_stage(spawn_seq, "elf_fetch_start", spawn_start);
-            if let Ok(Some(entry)) = self.map_elf_from_vfs(path, space_token) {
+            if let Ok(Some(entry)) = self.map_elf_from_vfs(path, space_token, caller_view) {
                 entry_point = entry;
                 mapped = true;
                 debug_print(&format!("Mapped ELF from VFS (entry=0x{:x})", entry_point))?;
@@ -2589,7 +2599,7 @@ impl ProcessManager {
         if !mapped {
             // Fall back to loading bytes in-process.
             self.log_spawn_stage(spawn_seq, "elf_fetch_start", spawn_start);
-            let (elf_data, from_vfs) = self.load_elf(path)?;
+            let (elf_data, from_vfs) = self.load_elf(path, caller_view)?;
             let service_bytes: &[u8] = &elf_data;
 
             let elf = ElfFile::parse(service_bytes)?;
@@ -2826,10 +2836,10 @@ impl ProcessManager {
     /// Returns (data, from_vfs) where from_vfs indicates the source.
     /// Path must be absolute (start with '/').
     /// Initrd is only accessible via /dev/initrd/ prefix.
-    fn load_elf(&mut self, path: &str) -> Result<(Vec<u8>, bool)> {
+    fn load_elf(&mut self, path: &str, caller_view: Option<&ViewMountList>) -> Result<(Vec<u8>, bool)> {
         const INITRD_PREFIX: &str = "/dev/initrd/";
 
-        // Check if path is for initrd
+        // Check if path is for initrd (system paths bypass view resolution)
         if let Some(initrd_path) = path.strip_prefix(INITRD_PREFIX) {
             let initrd = unsafe {
                 core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, self.initrd_size)
@@ -2840,8 +2850,11 @@ impl ProcessManager {
             return Err(Error::NotFound);
         }
 
+        // Resolve path through caller's VFS view if provided
+        let resolved = resolve_path_for_caller(path, caller_view, "load_elf")?;
+
         // All other paths go through VFS
-        if let Some(data) = self.load_from_vfs(path) {
+        if let Some(data) = self.load_from_vfs(&resolved) {
             return Ok((data, true));
         }
 
@@ -3132,7 +3145,11 @@ impl ProcessManager {
         Some(data)
     }
 
-    fn map_elf_from_vfs(&mut self, path: &str, space_token: usize) -> Result<Option<usize>> {
+    fn map_elf_from_vfs(&mut self, path: &str, space_token: usize, caller_view: Option<&ViewMountList>) -> Result<Option<usize>> {
+        // Resolve path through caller's VFS view if provided
+        let resolved = resolve_path_for_caller(path, caller_view, "map_elf_from_vfs")?;
+        let effective_path = resolved.as_str();
+
         // Ensure we have VFS endpoint
         if self.ensure_vfs_endpoint().is_err() {
             return Ok(None);
@@ -3144,7 +3161,7 @@ impl ProcessManager {
         }
 
         let client = VfsClient::new(self.vfs_endpoint, client_id);
-        let file = match self.cached_vfs_file(&client, path) {
+        let file = match self.cached_vfs_file(&client, effective_path) {
             Ok(file) => file,
             Err(_) => return Ok(None),
         };
@@ -3156,8 +3173,8 @@ impl ProcessManager {
             Err(err) => {
                 let _ = debug_print(&format!("procmgr: map_elf failed {:?}", err));
                 // Likely stale fd or VFS-side eviction: refresh once and retry.
-                self.invalidate_cached_vfs_file(&client, path);
-                match self.cached_vfs_file(&client, path) {
+                self.invalidate_cached_vfs_file(&client, effective_path);
+                match self.cached_vfs_file(&client, effective_path) {
                     Ok(refreshed_file) => client.map_elf(refreshed_file, map_token).ok(),
                     Err(_) => None,
                 }
@@ -3539,6 +3556,7 @@ impl ProcessManager {
             extra_token,
             extra_token_1,
             param_overrides,
+            None, // no caller view (container run uses absolute /var/images/ paths)
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build view: for nested containers, inherit caller's view; for top-level, use default
@@ -4109,6 +4127,60 @@ fn derive_slot(base: usize, rights: Rights) -> Result<usize> {
         Ok(0)
     } else {
         token_derive(base, rights.bits() as usize, u64::MAX)
+    }
+}
+
+/// Resolve a virtual path through a VFS view's mount table.
+/// Returns the concrete filesystem path, or None if not visible in the view.
+fn resolve_path_in_view(path: &str, view: &[(String, String, bool)]) -> Option<String> {
+    // Must be absolute
+    if !path.starts_with('/') {
+        return None;
+    }
+    // Reject ".." and "." components (prevent mount escape)
+    for component in path.split('/') {
+        if component == ".." || component == "." {
+            return None;
+        }
+    }
+
+    for (src, dst, _writable) in view {
+        // Root mount matches everything
+        if dst == "/" {
+            return Some(format!("{}{}", src, path));
+        }
+        // Exact match: path == dst
+        if path == dst {
+            return Some(src.clone());
+        }
+        // Prefix match: path starts with dst + "/"
+        if let Some(suffix) = path.strip_prefix(dst.as_str()) {
+            if suffix.starts_with('/') {
+                return Some(format!("{}{}", src, suffix));
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a path through an optional caller VFS view, with debug logging on failure.
+fn resolve_path_for_caller(
+    path: &str,
+    caller_view: Option<&ViewMountList>,
+    context: &str,
+) -> Result<String> {
+    if let Some(view) = caller_view {
+        match resolve_path_in_view(path, view) {
+            Some(p) => Ok(p),
+            None => {
+                let _ = debug_print(&format!(
+                    "procmgr: {} path '{}' not visible in caller view", context, path
+                ));
+                Err(Error::NotFound)
+            }
+        }
+    } else {
+        Ok(String::from(path))
     }
 }
 
