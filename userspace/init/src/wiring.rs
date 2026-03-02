@@ -196,6 +196,7 @@ pub fn launch_service(
     service: &ServiceSpec,
     index: usize,
     manifest: Option<&BootManifest>,
+    exit_cookie: usize,
 ) -> Result<()> {
     // Derive an optional capability token for services that need elevated rights.
     let child_token = match service.rights {
@@ -251,8 +252,8 @@ pub fn launch_service(
         tokens[TOKEN_SPACE] = derive_space_token_for_policy(space_token, service.space_policy)?;
     }
     // init-spawned services are system services without PIDs (pid=0)
-    // User processes spawned by procmgr get proper PIDs
-    map_process_info(space_token, 0, 0, 0, &tokens, &params)?;
+    // All init-spawned services are primordial — exit_cookie identifies which one died.
+    map_process_info(space_token, ctx.primordial_exit_send, exit_cookie, 0, &tokens, &params)?;
 
     service.kind.map_resources(ctx, space_token, &params)?;
 

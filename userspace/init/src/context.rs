@@ -12,6 +12,8 @@ pub struct InitContext<'a> {
     pub boot: BootSnapshot,
     pub initrd: &'a [u8],
     pub exit_endpoint: usize,
+    pub primordial_exit_recv: usize,
+    pub primordial_exit_send: usize,
     pub registry_endpoint: usize,
     pub registry_send: usize,
     pub kbd_irq_token: usize,
@@ -25,6 +27,13 @@ impl<'a> InitContext<'a> {
     pub fn new(boot: BootSnapshot, initrd: &'a [u8]) -> Result<Self> {
         // Exit endpoint used by procmgr to receive child exit notifications.
         let exit_endpoint = create_exit_endpoint(boot.root_token)?;
+
+        // Primordial exit endpoint: init monitors this for primordial service deaths.
+        let primordial_exit_full = endpoint_create(boot.root_token)?;
+        let primordial_exit_recv =
+            token_derive(primordial_exit_full, Rights::IPC_RECV.bits() as usize, u64::MAX)?;
+        let primordial_exit_send =
+            token_derive(primordial_exit_full, Rights::IPC_SEND.bits() as usize, u64::MAX)?;
 
         // Registry uses a single shared listen endpoint (recv) and a send token.
         let registry_full = endpoint_create(boot.root_token)?;
@@ -44,6 +53,8 @@ impl<'a> InitContext<'a> {
             boot,
             initrd,
             exit_endpoint,
+            primordial_exit_recv,
+            primordial_exit_send,
             registry_endpoint,
             registry_send,
             kbd_irq_token,

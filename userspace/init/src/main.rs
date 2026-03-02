@@ -16,7 +16,9 @@ mod mappings;
 mod services;
 mod wiring;
 
-use libcluu::{debug_print, yield_cpu, Result};
+use alloc::format;
+use libcluu::types::{IpcFlags, Message};
+use libcluu::{debug_print, recv, yield_cpu, Result};
 
 #[no_mangle]
 /// Kernel entrypoint for the init process.
@@ -45,13 +47,41 @@ fn run() -> Result<()> {
     debug_print("init: boot manifest parsed")?;
     let ctx = context::InitContext::new(boot, initrd)?;
 
+    // Track primordial services by exit cookie for identification on death.
+    let mut cookie_to_name: [(usize, &str); 8] = [(0, ""); 8];
+    let mut num_primordials = 0usize;
+
     // Launch services in the declared order; wiring policy is in wiring.rs.
     for (index, service) in services::SERVICE_LIST.iter().enumerate() {
-        wiring::launch_service(&ctx, service, index, Some(&manifest))?;
+        let exit_cookie = index + 1; // cookies start at 1 (0 = no tracking)
+        wiring::launch_service(&ctx, service, index, Some(&manifest), exit_cookie)?;
+        cookie_to_name[num_primordials] = (exit_cookie, service.name);
+        num_primordials += 1;
     }
 
-    debug_print("init: all critical services created; done")?;
+    debug_print("init: all critical services created; monitoring primordials")?;
+
+    // Monitor primordial exit endpoint — any message means a primordial died.
+    let mut msg = Message::new(0, [0; 6], 0);
     loop {
-        yield_cpu()?;
+        match recv(ctx.primordial_exit_recv, &mut msg, IpcFlags::empty()) {
+            Ok(()) => {
+                let cookie = msg.words[0];
+                let exit_code = msg.words[1] as i32;
+                let name = cookie_to_name[..num_primordials]
+                    .iter()
+                    .find(|(c, _)| *c == cookie)
+                    .map(|(_, n)| *n)
+                    .unwrap_or("unknown");
+                let _ = debug_print(&format!(
+                    "init: FATAL — primordial '{}' exited (code {}), system halt",
+                    name, exit_code
+                ));
+                loop { let _ = yield_cpu(); }
+            }
+            Err(_) => {
+                let _ = yield_cpu();
+            }
+        }
     }
 }

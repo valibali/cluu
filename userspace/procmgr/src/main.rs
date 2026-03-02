@@ -181,6 +181,7 @@ struct ProcessManager {
     space_token: usize,     // Our address space token for grants
     grant_base_next: usize, // Reused base address for grant buffer
     clock_token: usize,
+    clock_freq: u64,
     spawn_seq_next: usize,
     vfs_file_cache: BTreeMap<String, libcluu::fs::client::VfsFile>,
     pending_vfs_views: Vec<PendingVfsView>,
@@ -239,6 +240,7 @@ impl ProcessManager {
             space_token: info.tokens[TOKEN_SPACE],
             grant_base_next: 0x50100000, // Start after virtqueue region
             clock_token: info.tokens[TOKEN_CLOCK],
+            clock_freq: clock_frequency(info.tokens[TOKEN_CLOCK]).unwrap_or(1_000_000_000),
             spawn_seq_next: 1,
             vfs_file_cache: BTreeMap::new(),
             pending_vfs_views: Vec::new(),
@@ -1064,7 +1066,23 @@ impl ProcessManager {
         match &container.restart_policy {
             RestartPolicy::Never => false,
             RestartPolicy::Always => true,
-            RestartPolicy::OnFailure { .. } => exit_code != 0,
+            RestartPolicy::OnFailure { max_restarts, window_secs } => {
+                if exit_code == 0 { return false; }
+                if container.restart_attempt_start > 0 && *window_secs > 0 {
+                    let now = self.clock_sample();
+                    let window_ticks = *window_secs * self.clock_freq;
+                    if (now - container.restart_attempt_start) <= window_ticks
+                       && container.restart_count >= *max_restarts
+                    {
+                        let _ = debug_print(&format!(
+                            "procmgr: crash loop detected for '{}' ({} restarts in {}s window)",
+                            container.name, container.restart_count, window_secs
+                        ));
+                        return false;
+                    }
+                }
+                true
+            }
         }
     }
 
@@ -1107,13 +1125,25 @@ impl ProcessManager {
 
         // 4. Update restart metadata
         let now = self.clock_sample();
+        let freq = self.clock_freq;
         let image_name = if let Some(container) = self.container_instances.get_mut(&container_id) {
             container.pid = 0;
             container.last_exit_code = exit_code;
-            container.restart_count += 1;
-            if container.restart_attempt_start == 0 {
+            // Reset counters if outside window (fresh restart cycle)
+            let window_secs = match &container.restart_policy {
+                RestartPolicy::OnFailure { window_secs, .. } => *window_secs,
+                _ => 0,
+            };
+            if container.restart_attempt_start > 0
+               && window_secs > 0
+               && (now - container.restart_attempt_start) > window_secs * freq
+            {
+                container.restart_count = 0;
+                container.restart_attempt_start = now;
+            } else if container.restart_attempt_start == 0 {
                 container.restart_attempt_start = now;
             }
+            container.restart_count += 1;
             container.name.clone()
         } else {
             return Ok(());

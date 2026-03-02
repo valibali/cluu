@@ -69,6 +69,16 @@ const VIRTIOBLK_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
 
 const VIRTIOBLK_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIOBLK_RIGHTS_BITS);
 
+/// Primordial services whose death causes init to panic.
+/// If any of these exit, the system is in an unrecoverable state.
+pub const PRIMORDIAL_SERVICES: &[&str] = &[
+    "registry",
+    "timeserver",
+    "procmgr",
+    "vfs",
+    "virtio-blk",
+];
+
 // Boot-critical services in launch order.
 //
 // Only VT0 (console:0, tty:0) is launched at boot.  Additional VTs are
