@@ -831,545 +831,165 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 
 ---
 
-## 12. Actionable Findings
+## 12. Consolidated TODO List
 
-### 12.1 Bugs
-
-| ID | Severity | Location | Description |
-|---|---|---|---|
-| B1 | LOW | handlers.rs:477-484 | sys_call inline path limited to 16 bytes (by design, but inconsistent style with sys_send/sys_reply 4-chunk pattern — could unify for clarity) |
-
-### 12.2 Resource Leaks
-
-| ID | Severity | Location | Description |
-|---|---|---|---|
-| L1 | LOW | handlers.rs:1330-1434 | Frame registry map_count leak: if token re-lookup fails on error path, dec_map_count is never called |
-| L2 | LOW | thread_manager.rs:420-447 | Reply map cleanup on thread death scans all REPLY_MAP_SLOTS — O(n) but acceptable at current size |
-
-### 12.3 Missing Hardening
-
-| ID | Priority | Description |
-|---|---|---|
-| H1 | CRITICAL | Enable SMAP/SMEP if CPU supports (prevents kernel accessing userspace directly) |
-| H2 | CRITICAL | Hash passwords in /etc/users.toml (bcrypt/scrypt/Argon2) |
-| H3 | HIGH | Add Spectre V2 mitigation (STIBP/IBPB on kernel entry) |
-| H4 | HIGH | Add resource quotas (memory, FDs, CPU time per container) |
-| H5 | ~~HIGH~~ DONE | ~~Implement FPU/SSE context save/restore (lazy or eager)~~ — Implemented: eager FXSAVE/FXRSTOR in assembly at every kernel entry/exit, per-CPU scratch buffer (gs:0x80), per-thread FpuState (commit dddd98e) |
-| H6 | HIGH | Add audit logging (login attempts, privilege escalation, file access) |
-| H7 | MEDIUM | Implement TTY line discipline (echo, canonical mode, signal delivery) |
-| H8 | MEDIUM | Add pipe support in shell |
-| H9 | MEDIUM | Expand deferred fault queue beyond 4 slots |
-| H10 | MEDIUM | Expand pending wake queue beyond 8 slots |
-
-### 12.4 Architecture Improvements
-
-| ID | Priority | Description |
-|---|---|---|
-| A1 | HIGH | Implement grant/map zero-copy in transfer.rs |
-| A2 | HIGH | Add async notifications (seL4-style) |
-| A3 | MEDIUM | Add IOAPIC support for SMP and modern PCIe |
-| A4 | MEDIUM | Make VFS multi-threaded or async |
-| A5 | MEDIUM | Add priority inheritance on IPC |
-| A6 | LOW | Unify sys_call inline to 4-chunk pattern (would need reply buffer in separate register or IPC redesign) |
-| A7 | LOW | Add per-sender endpoint queue limits |
+*Last updated: 2026-03-03. Items marked ✅ are complete.*
 
 ---
 
-## 13. Roadmap: Sub-1000 Cycle IPC
+### 12.1 Bugs & Resource Leaks
 
-### 13.1 Current State
-
-**Measured IPC round-trip**: 1,195–1,625 cycles (after kernel audit v4 — 7.1x from original).
-
-Cycle budget breakdown (estimated):
-
-| Component | Cycles | % of Total |
-|---|---|---|
-| Syscall entry/exit (register save, SYSRET/IRETQ) | 200–250 | ~17% |
-| Token lookup (per-CPU cache + shard lock) | 80–120 | ~8% |
-| Endpoint queue ops (double lock, direct delivery scan) | 250–350 | ~24% |
-| Reply ID alloc + CALL_REPLY_MAP | 40–60 | ~4% |
-| Scheduler block/wake | 50–80 | ~5% |
-| Memory access overhead (cache misses, TLB) | 30–50 | ~3% |
-| Message copy + validation | 100–150 | ~10% |
-| Context switch (CR3, FS_BASE, GPRs) | 200–300 | ~20% |
-
-### 13.2 Tier 1: Inline Fast-Path (Target: 1,000–1,300 cycles)
-
-These changes are localized, low-risk, and combinable:
-
-| # | Optimization | Savings | Location |
-|---|---|---|---|
-| T1.1 | **Inline syscall dispatch** for sys_send/call/reply — branch directly in asm instead of `call syscall_dispatch` | 20–25 cycles | syscall_entry.asm |
-| T1.2 | **Consolidate endpoint double-lock** — merge shard lock + endpoint mutex into single 16-shard scheme | 8–12 cycles | endpoint.rs |
-| T1.3 | **Expand per-CPU token cache** from 4→8 entries with set-associative hash (better recv_any hit rate) | 10–15 cycles | table.rs |
-| T1.4 | **Thread-local ReplyMap** — store CallReplyInfo in thread context, eliminate global CALL_REPLY_MAP Mutex | 15–20 cycles | thread_manager.rs |
-| T1.5 | **Reduce register save** on fast-path — skip R12-R15 for Send/Reply (no context switch needed) | 15–20 cycles | syscall_entry.asm |
-
-**Combined Tier 1 savings: ~68–92 cycles → Target: ~1,100–1,530 cycles**
-
-### 13.3 Tier 2: Structural (Target: 900–1,100 cycles)
-
-These require deeper refactoring but have high payoff:
-
-| # | Optimization | Savings | Location |
-|---|---|---|---|
-| T2.1 | **Cache ObjectRef in Token struct** — eliminate scope→ObjectRef BTreeMap lookup | 15–20 cycles | table.rs, scope.rs |
-| T2.2 | **Cache first waiter pointer** on endpoints — O(1) direct delivery instead of linear scan | 10–15 cycles | endpoint.rs |
-| T2.3 | **Lazy timestamp validation** — defer TSC read (~20 cycles) to cache miss path only | 8–12 cycles | table.rs |
-| T2.4 | **Batch scheduler operations** — defer add_to_scheduler until after IPC completes | 10–15 cycles | scheduler.rs |
-| T2.5 | **Cache-line align hot structures** — PerCpuData, token cache, endpoint shards on 64-byte boundaries | 5–8 cycles | multiple |
-
-**Combined Tier 1+2 savings: ~116–162 cycles → Target: ~1,000–1,460 cycles**
-
-### 13.4 Tier 3: Architectural (Target: <800 cycles)
-
-These are substantial redesigns, only needed if Tier 1+2 don't meet target:
-
-| # | Optimization | Savings | Notes |
-|---|---|---|---|
-| T3.1 | **Register-passable message format** — UserMessage in thread context registers, no memory copy for ≤48B messages | 20–30 cycles | Protocol change, affects all IPC users |
-| T3.2 | **Implicit thread state** — use reply_id as "waiting" marker, inject reply value directly into caller's RAX | 15–20 cycles | Major scheduler refactor |
-| T3.3 | **Lock-free endpoint queues** — atomic push/pop with crossbeam-style epoch reclamation | 30–50 cycles | Very high complexity, only viable post-SMP |
-| T3.4 | **Direct IPC path** — when receiver is already blocked on recv, bypass queue entirely and copy message + switch in one operation | 40–60 cycles | seL4's key optimization |
-
-**Theoretical minimum with all optimizations: ~700–900 cycles**
-(seL4 achieves ~500 on optimized hardware with hand-tuned assembly)
-
-### 13.5 Measurement Strategy
-
-1. **TSC-pair benchmarks**: `RDTSC` before sys_call, after reply received
-2. **Per-component breakdown**: Token-only, endpoint-only, scheduler-only microbenchmarks
-3. **Regression gate**: Any change must show ≥5 cycle improvement in median (10K samples)
-4. **QEMU `-icount shift=0`** for deterministic cycle counting
+| # | Priority | Status | Description | Location |
+|---|---|---|---|---|
+| B1 | LOW | TODO | sys_call inline path limited to 16 bytes — inconsistent with sys_send/sys_reply 4-chunk pattern | handlers.rs:477-484 |
+| L1 | LOW | TODO | Frame registry map_count leak: token re-lookup failure on error path skips dec_map_count | handlers.rs:1330-1434 |
+| L2 | LOW | TODO | Reply map cleanup on thread death scans all REPLY_MAP_SLOTS — O(n), acceptable at current size | thread_manager.rs:420-447 |
 
 ---
 
-## 14. Roadmap: SMP (Symmetric Multi-Processing)
+### 12.2 Security Hardening
 
-### 14.1 Current State
-
-Single-CPU kernel with several SMP-aware design choices:
-
-| Component | SMP Status |
-|---|---|
-| GS-relative per-CPU data | ✅ Framework exists (PerCpuData struct has cpu_id field) |
-| AP detection (BOOTBOOT) | ✅ BSP/AP detection via CPUID, APs parked with `hlt` |
-| LAPIC timer | ✅ Per-CPU LAPIC works (init called on BSP only) |
-| CR3 per-thread | ✅ Each thread has own CR3, switched on context switch |
-| IDT (global) | ✅ Shared IDT is correct for x86_64 SMP |
-| GDT/TSS | ❌ Single global GDT+TSS (each CPU needs its own) |
-| IST stacks | ❌ Single set of 3 IST stacks (GPF/PF/DF — concurrent faults would collide) |
-| BSP_STACK | ❌ Single 64KB kernel stack |
-| TLB shootdown | ❌ No IPI infrastructure, local INVLPG only |
-| IOAPIC | ❌ PIC-only IRQ routing (single CPU destination) |
-| Scheduler | ❌ Single global `Mutex<PriorityBitmapScheduler>` |
-| PMM | ❌ Single global `Mutex<BuddyAllocator>` |
-| Token table | ⚠️ 16-shard lock — scales, but cache invalidation is global |
-| Reply maps | ❌ Single global Mutex each |
-
-### 14.2 Phase SMP-1: Per-CPU Foundation (Prerequisites)
-
-Before any AP wakes up, allocate all per-CPU structures from BSP:
-
-| Task | Detail |
-|---|---|
-| Per-CPU GDT+TSS array | `[GdtTss; MAX_CPUS]` — each CPU loads its own via LGDT/LTR |
-| Per-CPU IST stacks | 3 stacks × MAX_CPUS — avoid concurrent exception stack collision |
-| Per-CPU PerCpuData | Array indexed by APIC ID, each with own kernel_rsp, user_rsp, cpu_id |
-| Per-CPU kernel stack | 64KB per CPU (separate from BSP_STACK) |
-| CPU topology discovery | Parse MADT ACPI table for LAPIC entries → build CPU map |
-
-### 14.3 Phase SMP-2: IPI Infrastructure
-
-The foundation for all SMP coordination:
-
-| Task | Detail |
-|---|---|
-| LAPIC ICR wrapper | Write to Interrupt Command Register (0xFEE00300) to send IPIs |
-| IPI vector allocation | Reserve vectors 0xF0-0xFF for: TLB shootdown, reschedule, halt, panic |
-| TLB shootdown protocol | Sender: set dirty_cpu bitmask + target address, send IPI. Receiver: INVLPG + ACK via atomic flag |
-| Cross-CPU reschedule | IPI to wake idle CPU when new thread becomes runnable |
-| Halt/panic broadcast | Stop all CPUs during kernel panic or shutdown |
-
-### 14.4 Phase SMP-3: IOAPIC
-
-Replace 8259 PIC with IOAPIC for proper multi-CPU interrupt routing:
-
-| Task | Detail |
-|---|---|
-| IOAPIC driver | MMIO at address from ACPI MADT. Program redirection table entries |
-| IRQ→CPU affinity | Map IRQ lines to specific CPUs (or lowest-priority delivery) |
-| PIC disable | Mask all PIC IRQs after IOAPIC takes over |
-| MSI-X support | Modern PCIe devices write interrupt directly to LAPIC (no IOAPIC needed) |
-| IrqAck fix | Currently stubbed (returns NotImplemented). Implement EOI for IOAPIC |
-
-### 14.5 Phase SMP-4: Per-CPU Scheduler
-
-The biggest single change — eliminate the global scheduler lock:
-
-| Task | Detail |
-|---|---|
-| Per-CPU ready queues | Each CPU has own PriorityBitmapScheduler instance |
-| Work-stealing | Idle CPU steals from busiest CPU's expired queue |
-| Thread affinity | `ThreadSetAffinity` invoke op — pin thread to CPU or set mask |
-| Load balancing | Periodic (every N ticks) rebalance across CPUs |
-| CURRENT_THREAD per-CPU | Move from global atomic to PerCpuData field |
-
-### 14.6 Phase SMP-5: Lock Refinement
-
-Reduce contention on remaining global locks:
-
-| Lock | Strategy |
-|---|---|
-| THREAD_REPOSITORY | RWLock (many readers, rare writes) or lock-free concurrent map |
-| PMM BuddyAllocator | Per-CPU page freelists (batch alloc 64 pages, return to global when exhausted) |
-| CALL_REPLY_MAP | Per-thread (see IPC Tier 1.4) — eliminates lock entirely |
-| Token table | Already 16-shard — sufficient for ≤16 CPUs |
-| Frame registry | RCU for read path (mostly lookups) |
-
-### 14.7 Phase SMP-6: AP Bring-Up
-
-The actual multi-CPU boot sequence:
-
-```
-BSP:
-  1. Parse MADT → discover AP APIC IDs
-  2. Allocate per-CPU structures (GDT, TSS, IST, stack, PerCpuData)
-  3. Copy AP trampoline to low memory (below 1MB, real-mode accessible)
-  4. For each AP:
-     a. Send INIT IPI (reset AP)
-     b. Wait 10ms
-     c. Send SIPI (Startup IPI) with trampoline address
-     d. Wait for AP to increment CPU_READY_COUNT
-
-AP trampoline (16-bit real mode → 64-bit long mode):
-  1. Enable A20, load GDT, enter protected mode
-  2. Enable PAE + PGE, load kernel CR3
-  3. Enable long mode (EFER.LME), jump to 64-bit code
-  4. Load per-CPU GDT (LGDT), TSS (LTR)
-  5. Set GS base to per-CPU PerCpuData
-  6. Initialize LAPIC timer
-  7. Increment CPU_READY_COUNT
-  8. Enter idle loop (wait for scheduler work)
-```
-
-### 14.8 SMP Testing Strategy
-
-| Test | Purpose |
-|---|---|
-| 2-CPU ping-pong IPC | Verify cross-CPU IPC correctness |
-| N-CPU parallel malloc | Stress PMM lock contention |
-| TLB shootdown correctness | Map/unmap pages while other CPU accesses them |
-| Priority inversion | High-priority thread on CPU0 waiting for lock held by low-priority on CPU1 |
-| Thundering herd | All CPUs wake on single endpoint notification |
-| Graceful shutdown | Halt all APs, then BSP |
+| # | Priority | Status | Description | Files |
+|---|---|---|---|---|
+| SEC-1.1 | CRITICAL | TODO | **Enable SMAP/SMEP** — set CR4 bits 20-21, wrap user memory access with CLAC/STAC, use `-cpu Broadwell` | x86_64/mod.rs, copy_from_user sites |
+| SEC-1.2 | CRITICAL | TODO | **Hash passwords** — replace plaintext `==` with bcrypt/scrypt verify, store `$2b$12$salt$hash` in /etc/shadow | procmgr/main.rs, /etc/users.toml |
+| SEC-1.3 | HIGH | TODO | **Login rate limiting** — exponential backoff (1s→5min cap), per-user failed attempt tracking | procmgr/main.rs |
+| SEC-2.1 | MEDIUM | TODO | **TPM 2.0 TIS driver** — userspace `tpmd` service, MMIO at 0xFED40000, TPM2_Startup/PCR_Extend/PCR_Read | new: userspace/tpmd/ |
+| SEC-2.2 | MEDIUM | TODO | **Measured boot** — extend PCRs: kernel (PCR9), initrd (PCR13), primordial binaries (PCR14) | kernel init, init process |
+| SEC-3 | LOW | TODO | **TPM sealed storage** — seal disk encryption key / kernel secret to PCR values | tpmd, kernel init |
+| SEC-4 | LOW | TODO | **Remote attestation** — AIK, TPM Quote, external verifier | tpmd |
+| SEC-5.1 | LOW | TODO | **Spectre V2 (IBPB/STIBP)** — flush branch predictor on kernel entry, restrict SMT prediction | syscall_entry.asm, boot init |
+| SEC-5.2 | LOW | TODO | **KPTI** — separate kernel/user page tables | vmm.rs (major) |
+| SEC-5.3 | LOW | TODO | **Retpoline** — replace indirect calls with return-based trampoline | Rust compiler flag |
+| H4 | HIGH | TODO | **Resource quotas** — memory, FD, CPU time limits per container | procmgr, kernel invoke ops |
+| H5 | — | ✅ | **FPU/SSE context save/restore** — eager FXSAVE/FXRSTOR in assembly, per-CPU scratch buffer (gs:0x80) | commit dddd98e |
+| H6 | HIGH | TODO | **Audit logging** — login attempts, privilege escalation, file access | procmgr, vfs |
+| H9 | MEDIUM | TODO | **Expand deferred fault queue** beyond 4 slots | idt.rs |
+| H10 | MEDIUM | TODO | **Expand pending wake queue** beyond 8 slots | thread_manager.rs |
 
 ---
 
-## 15. Roadmap: Security Hardening & TPM
+### 12.3 IPC Performance (Current: 1,195–1,625 cycles)
 
-### 15.1 Current Crypto Infrastructure
+**Tier 1 — Inline Fast-Path (target: 1,000–1,300 cycles):**
 
-| Primitive | Status | Location |
-|---|---|---|
-| HMAC-SHA256 | ✅ Implemented | klibcluu/src/crypto/hmac.rs |
-| SHA-256 | ✅ FIPS 180-4 compliant | klibcluu/src/crypto/sha256.rs |
-| CSPRNG (RDRAND) | ✅ With TSC fallback | klibcluu/src/crypto/random.rs |
-| Constant-time compare | ✅ XOR-based | token/signature.rs |
-| Kernel secret | ✅ 256-bit, ephemeral (regenerated each boot) | token/table.rs |
-| Boot manifest HMAC | ✅ Verifies initrd integrity | bootstrap.rs |
+| # | Status | Optimization | Est. Savings | Location |
+|---|---|---|---|---|
+| T1.1 | TODO | **Inline syscall dispatch** — branch directly in asm for send/call/reply | 20–25 cycles | syscall_entry.asm |
+| T1.2 | TODO | **Consolidate endpoint double-lock** — merge shard + endpoint mutex | 8–12 cycles | endpoint.rs |
+| T1.3 | TODO | **Expand token cache** 4→8 entries, set-associative hash | 10–15 cycles | table.rs |
+| T1.4 | TODO | **Thread-local ReplyMap** — eliminate global CALL_REPLY_MAP Mutex | 15–20 cycles | thread_manager.rs |
+| T1.5 | TODO | **Reduce fast-path register save** — skip R12-R15 for Send/Reply | 15–20 cycles | syscall_entry.asm |
 
-**Weakness**: TSC-based RNG fallback (when RDRAND unavailable) is NOT cryptographically
-secure. Token scope generation could be predictable on old hardware.
+**Tier 2 — Structural (target: 900–1,100 cycles):**
 
-### 15.2 Phase SEC-1: Quick Wins (P1 — Days)
+| # | Status | Optimization | Est. Savings | Location |
+|---|---|---|---|---|
+| T2.1 | TODO | **Cache ObjectRef in Token** — eliminate scope→ObjectRef BTreeMap lookup | 15–20 cycles | table.rs, scope.rs |
+| T2.2 | TODO | **Cache first waiter pointer** — O(1) direct delivery | 10–15 cycles | endpoint.rs |
+| T2.3 | TODO | **Lazy timestamp validation** — defer TSC read to cache miss only | 8–12 cycles | table.rs |
+| T2.4 | TODO | **Batch scheduler ops** — defer add_to_scheduler until after IPC | 10–15 cycles | scheduler.rs |
+| T2.5 | TODO | **Cache-line align hot structs** — 64-byte boundaries | 5–8 cycles | multiple |
 
-#### SEC-1.1: Enable SMAP/SMEP
+**Tier 3 — Architectural (target: <800 cycles, only if Tier 1+2 insufficient):**
 
-Prevent kernel from accidentally reading/executing userspace memory.
-
-```
-CR4 bit 20 (SMEP): Kernel cannot execute user-mapped pages
-CR4 bit 21 (SMAP): Kernel cannot read/write user-mapped pages
-```
-
-Changes needed:
-- `kernel/src/architecture/x86_64/mod.rs`: Set CR4 bits during init
-- Audit all kernel code that legitimately accesses user memory → wrap with CLAC/STAC
-- QEMU: Use `-cpu Broadwell` or higher (SMAP/SMEP supported)
-
-#### SEC-1.2: Password Hashing
-
-Replace plaintext password verification in procmgr:
-
-```
-Current:  record.password == password           (plaintext, timing-vulnerable)
-Target:   bcrypt_verify(record.hash, password)  (2^80+ brute-force resistance)
-```
-
-Changes needed:
-- `userspace/procmgr/src/main.rs`: Replace `==` with bcrypt/scrypt verify
-- `/etc/users.toml` → `/etc/shadow`: Store `$2b$12$salt$hash` format
-- Add salt generation (16 bytes from RDRAND)
-
-#### SEC-1.3: Login Rate Limiting
-
-- Track failed attempts per user in procmgr memory
-- Exponential backoff: 1s, 2s, 4s, 8s, ... 5min cap
-- Reset on successful login
-
-### 15.3 Phase SEC-2: Hardware Security (P2 — Weeks)
-
-#### SEC-2.1: TPM 2.0 TIS Driver
-
-QEMU exposes TPM via TIS (TPM Interface Specification) at MMIO `0xFED40000`:
-
-| Register | Offset | Purpose |
-|---|---|---|
-| Access | 0x000 | Locality request/release |
-| Status | 0x018 | Command ready, data available |
-| Data FIFO | 0x024 | Command/response byte stream |
-| IntEnable | 0x008 | Interrupt configuration |
-| Sts.commandReady | bit 6 | TPM ready to accept command |
-| Sts.dataAvail | bit 4 | Response ready to read |
-
-**Driver architecture** (microkernel style):
-- Kernel: Map MMIO region, expose via Frame capability
-- Userspace `tpmd` service: Send/receive TPM commands via FIFO
-- IPC protocol: `TPM_SUBMIT_CMD` label, shared buffer for command/response
-
-**Core TPM 2.0 commands needed**:
-- `TPM2_Startup(TPM_SU_CLEAR)` — initialize after reset
-- `TPM2_PCR_Extend(index, digest)` — extend measurement register
-- `TPM2_PCR_Read(selection)` — read current PCR values
-- `TPM2_GetCapability(property)` — query algorithms, PCR count
-- `TPM2_Quote(PCRs, nonce)` — signed attestation (Phase SEC-4)
-- `TPM2_Create/Load/Unseal` — sealed storage (Phase SEC-3)
-
-**QEMU setup**:
-```bash
-swtpm socket --daemon --ctrl type=unixio,path=/tmp/swtpm.sock \
-  --tpmstate dir=/tmp/tpm-state --tpm2
-qemu-system-x86_64 ... \
-  -chardev socket,id=chrtpm,path=/tmp/swtpm.sock \
-  -tpmdev emulator,id=tpm0,chardev=chrtpm \
-  -device tpm-tis,tpmdev=tpm0
-```
-
-#### SEC-2.2: Measured Boot
-
-Extend TPM PCRs at each boot stage to create a cryptographic chain:
-
-| PCR | Extended By | Measurement |
-|---|---|---|
-| 0 | Firmware/BOOTBOOT | Bootloader hash |
-| 9 | Kernel init | SHA-256(kernel ELF sections) |
-| 13 | Kernel init | SHA-256(initrd TAR archive) |
-| 14 | Init process | SHA-256(each primordial service binary) |
-
-**Verification**: Remote verifier retrieves PCR values via TPM Quote, compares
-against golden measurements → confirms system booted unmodified.
-
-### 15.4 Phase SEC-3: Sealed Storage (P3 — Months)
-
-TPM-sealed secrets that only unseal when PCRs match expected values:
-
-| Use Case | Mechanism |
-|---|---|
-| Disk encryption key | Seal to PCR[0,9,13] — key only released on clean boot |
-| Kernel secret persistence | Seal to PCR[0,9] — same token signing key across reboots |
-| User credential binding | Seal user key to PCR[14] — invalidate if services modified |
-
-**Architecture**:
-```
-Boot: TPM2_Unseal(sealed_blob, policy=PCR[0..9])
-  → Success: Use unsealed key for token signing
-  → Failure: PCRs changed → kernel generates new ephemeral key
-             (all old tokens invalidated — clean slate)
-```
-
-### 15.5 Phase SEC-4: Remote Attestation (P4 — Future)
-
-Full attestation chain for cloud/multi-tenant deployment:
-
-1. **Attestation Identity Key (AIK)**: TPM-resident asymmetric key, never leaves TPM
-2. **Quote generation**: `tpmd` signs PCR values with AIK on request
-3. **Verification server**: External entity validates quote signature + PCR values
-4. **Trust decision**: Only attested systems join the trusted workload pool
-
-### 15.6 Phase SEC-5: Spectre/Meltdown Mitigation
-
-| Mitigation | Mechanism | Where |
-|---|---|---|
-| IBPB | Flush branch predictor on kernel entry | syscall_entry.asm |
-| STIBP | Restrict branch prediction across SMT threads | MSR write on init |
-| KPTI | Separate kernel/user page tables | vmm.rs (major) |
-| Retpoline | Replace indirect calls with return-based trampoline | Rust compiler flag |
-
-**Priority**: Lower than TPM (Spectre requires real hardware for meaningful testing;
-QEMU doesn't accurately model speculative execution).
+| # | Status | Optimization | Est. Savings | Notes |
+|---|---|---|---|---|
+| T3.1 | TODO | **Register-passable messages** — no memcpy for ≤48B | 20–30 cycles | Protocol change |
+| T3.2 | TODO | **Implicit thread state** — inject reply into caller's RAX | 15–20 cycles | Major scheduler refactor |
+| T3.3 | TODO | **Lock-free endpoint queues** — atomic push/pop | 30–50 cycles | Only viable post-SMP |
+| T3.4 | TODO | **Direct IPC path** — bypass queue when receiver blocked | 40–60 cycles | seL4's key optimization |
 
 ---
 
-## 16. Roadmap: Userspace & Driver Ecosystem
+### 12.4 SMP (Symmetric Multi-Processing)
 
-### 16.1 Current State
-
-| Category | What Works | What's Missing |
-|---|---|---|
-| **Block I/O** | virtio-blk (legacy+modern), ext2 R/W | AHCI, NVMe, journaling |
-| **Filesystem** | VFS with 4 backends, file cache (32MB) | Symlinks, hard links, ext4 |
-| **Display** | 4 VTs, ANSI CSI, scrollback, framebuffer | Window manager, GPU accel |
-| **Input** | PS/2 keyboard (US+HU layouts) | Mouse, raw scancodes, USB |
-| **Audio** | None | AC97, HDA |
-| **Network** | None | virtio-net, TCP/IP, sockets |
-| **Pipes** | ✅ POSIX pipe() works | Shell `\|` syntax not parsed |
-| **TTY** | ✅ Line discipline (canonical/raw, echo) | OPOST, ISIG, flow control |
-| **Threads** | ✅ Full pthreads (1046 LOC) | pthread_cancel |
-| **Signals** | ✅ signal/sigaction/raise | Async delivery from kernel |
-| **Job control** | ✅ jobs/fg/bg/stop | Process groups, SIGTSTP |
-
-### 16.2 Tier 0: Unblock Everything (Week 1) — COMPLETE
-
-**IrqAck implementation** — ~~currently stubbed~~ ALREADY IMPLEMENTED (audit was incorrect).
-`invoke_irq_ack` at handlers.rs:2394-2427 is fully functional: checks IRQ_ACK right,
-validates IRQ range 0-15, sends EOI to APIC+PIC.
-
-**FPU/SSE context save** — IMPLEMENTED (commit dddd98e). Eager FXSAVE/FXRSTOR in
-assembly at every kernel entry/exit from userspace. Per-CPU scratch buffer at gs:0x80
-(512 bytes in PerCpuData). Rust scheduler memcpys between scratch and per-thread
-FpuState on context switch. Note: cannot disable SSE in kernel code (Rust nightly
-rejects both `-sse2` and `+soft-float` on x86_64 ABI), hence assembly-based approach.
-
-### 16.3 Tier 1: Input & Application Ports (Weeks 2-4)
-
-| Task | Effort | Depends On | Enables |
+| # | Status | Phase | Tasks |
 |---|---|---|---|
-| PS/2 mouse driver | 200 LOC | IrqAck | Quake, GUI |
-| Raw keyboard scancodes (up/down events) | 150 LOC | — | Games, raw input |
-| Shell pipe `\|` syntax | 200 LOC | — | Composable commands |
-| MicroPython port | 1-2 weeks | — | Scripting, REPL |
-| sched_yield() wire-up | 10 LOC | — | MicroPython threading |
-
-### 16.4 Tier 2: Network Stack (Weeks 5-10)
-
-| Phase | Task | Effort | Detail |
-|---|---|---|---|
-| Net-1 | **virtio-net driver** | 1-2 weeks | Clone virtio-blk pattern, RX/TX virtqueues, DMA buffers |
-| Net-2 | **ARP + IPv4** | 1 week | Address resolution, IP header parse/build |
-| Net-3 | **UDP** | 3 days | Connectionless datagram, DNS resolution |
-| Net-4 | **TCP** | 2-3 weeks | 3-way handshake, sliding window, retransmit, congestion |
-| Net-5 | **Socket service** | 1-2 weeks | IPC-based socket API (socket/bind/connect/send/recv) |
-| Net-6 | **DHCP client** | 3 days | Automatic IP configuration |
-
-**Architecture**: Userspace network daemon with IPC interface:
-
-```
-virtio-net (driver)
-  ↕ IPC (raw frames)
-netd (network daemon)
-  ├── ARP table
-  ├── IP routing
-  ├── TCP state machines
-  └── Socket endpoint registry
-  ↕ IPC (socket API)
-Applications (curl, httpd, ssh...)
-```
-
-**Alternative**: Port lwIP (~300K LOC, mature) instead of custom TCP/IP. Faster to
-production-ready but larger dependency. Requires async event model (seL4-style
-notification objects or poll-based IPC).
-
-### 16.5 Tier 3: Storage & Filesystem (Weeks 11-14)
-
-| Task | Effort | Impact |
-|---|---|---|
-| **ext2 journaling** (ext3 compat) | 3-4 weeks | Crash-safe writes |
-| **Symlink support** | 1 week | POSIX compliance, app compat |
-| **virtio-blk interrupt mode** | 1 week | Eliminate polling, reduce CPU usage |
-| **AHCI/SATA driver** | 2-3 weeks | Real hardware disk support |
-| **NVMe driver** | 2-3 weeks | Modern SSD support |
-| **tmpfs** | 1 week | /tmp in RAM, faster than ext2 for temp files |
-
-### 16.6 Tier 4: Multimedia & GUI (Weeks 15+)
-
-| Task | Effort | Impact |
-|---|---|---|
-| **AC97 audio driver** | 2 weeks | Sound output (Quake, media) |
-| **Window manager service** | 3-4 weeks | Multi-window GUI |
-| **Shared memory IPC** (MAP_SHARED mmap) | 1-2 weeks | Zero-copy framebuffer sharing |
-| **virtio-gpu driver** | 3 weeks | Hardware-accelerated 2D/3D |
-| **Quake 1 port** | 3-4 weeks | Flagship demo application |
-| **XHCI (USB 3.0)** | 4-6 weeks | Modern peripherals |
-
-### 16.7 Async Notifications (Cross-Cutting)
-
-Currently CLUU only has blocking Send/Recv/Call. The network stack, GUI, and audio
-all need non-blocking event delivery. Options:
-
-| Approach | Effort | Compatibility |
-|---|---|---|
-| **seL4-style notification objects** | 2-3 weeks | Clean, proven design. Kernel adds Notification object type with signal/wait/poll ops |
-| **Extend poll() to IPC endpoints** | 1 week | Already partially done (TTY_POLL). Generalize to any endpoint |
-| **Async IPC flag** | 1 week | Non-blocking sys_send that returns immediately. Queue overflow → drop |
-
-**Recommendation**: seL4-style notifications are the right long-term answer. They
-compose well with the existing capability model (notification = token-protected
-object, same derivation rules).
+| SMP-1 | TODO | **Per-CPU Foundation** | Per-CPU GDT+TSS, per-CPU IST stacks (3×MAX_CPUS), per-CPU PerCpuData array, per-CPU kernel stack (64KB each), MADT ACPI parse for CPU topology |
+| SMP-2 | TODO | **IPI Infrastructure** | LAPIC ICR wrapper, IPI vectors 0xF0-0xFF (TLB shootdown, reschedule, halt, panic), TLB shootdown protocol (dirty bitmask + INVLPG + ACK), cross-CPU reschedule IPI |
+| SMP-3 | TODO | **IOAPIC** | IOAPIC MMIO driver (from ACPI MADT), IRQ→CPU affinity / lowest-priority delivery, PIC disable after IOAPIC takeover, MSI-X support, IrqAck EOI for IOAPIC (PIC path already works) |
+| SMP-4 | TODO | **Per-CPU Scheduler** | Per-CPU PriorityBitmapScheduler, work-stealing from expired queue, ThreadSetAffinity invoke op, periodic load balancing, CURRENT_THREAD in PerCpuData |
+| SMP-5 | TODO | **Lock Refinement** | THREAD_REPOSITORY → RWLock, PMM → per-CPU page freelists, CALL_REPLY_MAP → per-thread, Frame registry → RCU reads |
+| SMP-6 | TODO | **AP Bring-Up** | INIT+SIPI sequence, AP trampoline (16-bit→64-bit), per-CPU LGDT/LTR/GS-base/LAPIC-timer, CPU_READY_COUNT sync |
 
 ---
 
-## 17. Consolidated Roadmap Timeline
+### 12.5 Userspace & Driver Ecosystem
 
-### Near-Term (Weeks 1-4): Foundation
+**Tier 1 — Input & Application Ports:**
 
-```
-Week 1:  SEC-1 (SMAP/SMEP, password hashing, rate limiting)
-         Tier 0 (IrqAck, FPU context save) — COMPLETE (2026-03-03)
+| # | Status | Task | Effort | Enables |
+|---|---|---|---|---|
+| U1 | TODO | **PS/2 mouse driver** — IRQ12 handler, relative motion, buttons | 200 LOC | Quake, GUI |
+| U2 | TODO | **Raw keyboard scancodes** — key up/down events (not just ASCII) | 150 LOC | Games, raw input |
+| U3 | TODO | **Shell pipe `\|` syntax** — parse pipe chains, wire FDs | 200 LOC | Composable commands |
+| U4 | TODO | **MicroPython port** — REPL on VT, sched_yield stub, pthread_cancel patch | 1-2 weeks | Scripting |
+| U5 | TODO | **sched_yield() wire-up** | 10 LOC | MicroPython threading |
 
-Week 2:  IPC Tier 1 (inline dispatch, double-lock consolidation,
-         8-entry token cache, thread-local ReplyMap)
+**Tier 2 — Network Stack:**
 
-Week 3:  Tier 1 apps (mouse driver, raw scancodes, shell pipes)
+| # | Status | Task | Effort | Detail |
+|---|---|---|---|---|
+| N1 | TODO | **virtio-net driver** | 1-2 weeks | Clone virtio-blk pattern, RX/TX virtqueues, DMA buffers |
+| N2 | TODO | **ARP + IPv4** | 1 week | Address resolution, IP header parse/build |
+| N3 | TODO | **UDP** | 3 days | Connectionless datagram, DNS resolution |
+| N4 | TODO | **TCP** | 2-3 weeks | 3-way handshake, sliding window, retransmit, congestion |
+| N5 | TODO | **Socket service** | 1-2 weeks | IPC-based socket API (socket/bind/connect/send/recv) |
+| N6 | TODO | **DHCP client** | 3 days | Automatic IP configuration |
 
-Week 4:  MicroPython port (proof of concept, REPL on VT)
-```
+**Tier 3 — Storage & Filesystem:**
 
-### Mid-Term (Weeks 5-14): Ecosystem
+| # | Status | Task | Effort | Impact |
+|---|---|---|---|---|
+| S1 | TODO | **ext2 journaling** (ext3 compat) | 3-4 weeks | Crash-safe writes |
+| S2 | TODO | **Symlink support** | 1 week | POSIX compliance |
+| S3 | TODO | **virtio-blk interrupt mode** | 1 week | Eliminate polling |
+| S4 | TODO | **AHCI/SATA driver** | 2-3 weeks | Real hardware disk support |
+| S5 | TODO | **NVMe driver** | 2-3 weeks | Modern SSD support |
+| S6 | TODO | **tmpfs** | 1 week | /tmp in RAM |
 
-```
-Weeks 5-6:   SMP Phase 1-2 (per-CPU structures, IPI infrastructure)
-Weeks 7-8:   SMP Phase 3-4 (IOAPIC, per-CPU scheduler)
-Weeks 9-10:  Network Tier 2 (virtio-net, ARP, IP, UDP, TCP)
-Weeks 11-12: SEC-2 (TPM TIS driver, measured boot)
-Weeks 13-14: Storage Tier 3 (ext2 journaling, symlinks, AHCI)
-```
+**Tier 4 — Multimedia & GUI:**
 
-### Long-Term (Weeks 15+): Production Readiness
-
-```
-Weeks 15-16: SMP Phase 5-6 (lock refinement, AP bring-up, testing)
-Weeks 17-18: IPC Tier 2-3 (structural + architectural optimizations)
-Weeks 19-20: Network Tier 2 cont. (socket service, DHCP, DNS)
-Weeks 21-22: SEC-3 (TPM sealed storage, persistent kernel secret)
-Weeks 23-24: Multimedia (AC97, window manager, Quake port)
-Week 25+:    SEC-4 (remote attestation), virtio-gpu, USB
-```
-
-### Target Milestones
-
-| Milestone | Target | Metric |
-|---|---|---|
-| **M1: Sub-1200 IPC** | Week 2 | Median IPC round-trip ≤1,200 cycles |
-| **M2: MicroPython runs** | Week 4 | `>>> print("hello")` on VT |
-| **M3: 2-CPU SMP boot** | Week 8 | Both CPUs scheduling threads independently |
-| **M4: `ping` works** | Week 12 | ICMP echo request/reply via virtio-net |
-| **M5: Measured boot** | Week 12 | TPM PCRs contain kernel+initrd hashes |
-| **M6: Sub-1000 IPC** | Week 18 | Median IPC round-trip ≤1,000 cycles (SMP-ready) |
-| **M7: `ssh` inbound** | Week 20 | TCP listener accepts connections |
-| **M8: Quake playable** | Week 24 | 30fps software render with mouse+keyboard |
+| # | Status | Task | Effort | Impact |
+|---|---|---|---|---|
+| M1 | TODO | **AC97 audio driver** | 2 weeks | Sound output |
+| M2 | TODO | **Window manager service** | 3-4 weeks | Multi-window GUI |
+| M3 | TODO | **MAP_SHARED mmap** | 1-2 weeks | Zero-copy framebuffer sharing |
+| M4 | TODO | **virtio-gpu driver** | 3 weeks | Hardware-accelerated 2D/3D |
+| M5 | TODO | **Quake 1 port** | 3-4 weeks | Flagship demo |
+| M6 | TODO | **XHCI (USB 3.0)** | 4-6 weeks | Modern peripherals |
 
 ---
 
-*Generated by 12 parallel deep-dive agents analyzing 68,000+ lines of source code.*
+### 12.6 Architecture Improvements
+
+| # | Priority | Status | Description | Location |
+|---|---|---|---|---|
+| A1 | HIGH | TODO | **Grant/map zero-copy** — implement actual page transfer in transfer.rs (currently stubbed) | transfer.rs |
+| A2 | HIGH | TODO | **Async notifications** — seL4-style Notification object with signal/wait/poll (needed by network, GUI, audio) | kernel: new object type |
+| A3 | MEDIUM | TODO | **VFS multi-thread or async** — single-threaded VFS blocks all mounts on slow remote op | vfs/main.rs |
+| A4 | MEDIUM | TODO | **Priority inheritance on IPC** — prevent priority inversion | endpoint.rs, scheduler.rs |
+| A5 | LOW | TODO | **Unify sys_call inline** to 4-chunk pattern | handlers.rs (needs IPC redesign) |
+| A6 | LOW | TODO | **Per-sender endpoint queue limits** — prevent single sender flooding | endpoint.rs |
+
+---
+
+## 13. Milestones
+
+| Milestone | Description | Metric |
+|---|---|---|
+| **M0: Tier 0 complete** | FPU save + IrqAck | ✅ Done (2026-03-03) |
+| **M1: Sub-1200 IPC** | IPC Tier 1 optimizations | Median round-trip ≤1,200 cycles |
+| **M2: MicroPython runs** | Port + REPL on VT | `>>> print("hello")` works |
+| **M3: 2-CPU SMP boot** | SMP Phases 1-4 | Both CPUs scheduling independently |
+| **M4: `ping` works** | Network Tier 2 (N1-N3) | ICMP echo request/reply via virtio-net |
+| **M5: Measured boot** | SEC-2 (TPM + PCR extend) | TPM PCRs contain kernel+initrd hashes |
+| **M6: Sub-1000 IPC** | IPC Tier 2 optimizations | Median round-trip ≤1,000 cycles |
+| **M7: `ssh` inbound** | Network Tier 2 complete (N4-N6) | TCP listener accepts connections |
+| **M8: Quake playable** | Tier 1 input + Tier 4 port | 30fps software render with mouse+keyboard |
+
+---
+
+*Generated by 12 parallel deep-dive agents analyzing 68,000+ lines of source code.
+Updated 2026-03-03 with Tier 0 completion (FPU/SSE, IrqAck).*
