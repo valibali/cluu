@@ -368,7 +368,7 @@ safety. Drained every timer tick.
 
 | Issue | Severity | Detail |
 |---|---|---|
-| No FPU/SSE save | MEDIUM | SIMD code corrupts across context switches |
+| ~~No FPU/SSE save~~ | ~~MEDIUM~~ FIXED | Eager FXSAVE/FXRSTOR at all kernel entry/exit points (commit dddd98e) |
 | Shared BSP_STACK | HIGH (SMP) | Single 64KB kernel stack shared by all threads |
 | 4-slot deferred fault queue | MEDIUM | 5th concurrent IST fault dropped silently |
 | 8-slot pending wake queue | MEDIUM | Lost wakes cause hung threads |
@@ -384,10 +384,10 @@ safety. Drained every timer tick.
 | Time quantum | Fixed 40ms | Dynamic per nice | Per-SC budget | Partition budget |
 | Fairness | Epoch-based | Proportional vruntime | Budget enforcement | Partition guarantee |
 | SMP | No | Yes | Yes | Yes |
-| FPU save | No | Yes (lazy/eager) | Yes | Yes |
+| FPU save | Yes (eager) | Yes (lazy/eager) | Yes | Yes |
 | RT guarantee | No | SCHED_FIFO/RR | Yes | Yes |
 
-**Rating: 8.2/10** — Excellent single-CPU design. Missing FPU save and SMP.
+**Rating: 8.5/10** — Excellent single-CPU design with FPU save. Missing SMP.
 
 ---
 
@@ -790,7 +790,7 @@ automated build/test.
 |---|---|---|
 | IPC & Syscalls | 8.5/10 | Architecturally excellent, stubbed grants |
 | Security & Capabilities | 8.7/10 | Strongest subsystem, sound crypto |
-| Scheduler & Threading | 8.2/10 | Solid single-CPU, no FPU save |
+| Scheduler & Threading | 8.5/10 | Solid single-CPU, FPU save implemented |
 | Userspace Services | 7.5/10 | ~85% complete, missing pipes/TTY |
 | Process Isolation | 7.8/10 | Good model, plaintext passwords |
 | POSIX Layer | 7.0/10 | Sufficient for embedded |
@@ -821,7 +821,7 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 ### What's Genuinely Missing for Production
 
 1. **SMP**: Single CPU, shared BSP_STACK, no TLB shootdown, no IOAPIC
-2. **FPU/SSE**: Any SIMD code corrupts across context switches
+2. ~~**FPU/SSE**: Any SIMD code corrupts across context switches~~ — FIXED (commit dddd98e)
 3. **Password hashing**: Plaintext is a deal-breaker
 4. **Resource quotas**: No memory/CPU limits = trivial DoS
 5. **Network stack**: Can't communicate with the outside world
@@ -854,7 +854,7 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 | H2 | CRITICAL | Hash passwords in /etc/users.toml (bcrypt/scrypt/Argon2) |
 | H3 | HIGH | Add Spectre V2 mitigation (STIBP/IBPB on kernel entry) |
 | H4 | HIGH | Add resource quotas (memory, FDs, CPU time per container) |
-| H5 | HIGH | Implement FPU/SSE context save/restore (lazy or eager) |
+| H5 | ~~HIGH~~ DONE | ~~Implement FPU/SSE context save/restore (lazy or eager)~~ — Implemented: eager FXSAVE/FXRSTOR in assembly at every kernel entry/exit, per-CPU scratch buffer (gs:0x80), per-thread FpuState (commit dddd98e) |
 | H6 | HIGH | Add audit logging (login attempts, privilege escalation, file access) |
 | H7 | MEDIUM | Implement TTY line discipline (echo, canonical mode, signal delivery) |
 | H8 | MEDIUM | Add pipe support in shell |
@@ -1230,25 +1230,17 @@ QEMU doesn't accurately model speculative execution).
 | **Signals** | ✅ signal/sigaction/raise | Async delivery from kernel |
 | **Job control** | ✅ jobs/fg/bg/stop | Process groups, SIGTSTP |
 
-### 16.2 Tier 0: Unblock Everything (Week 1)
+### 16.2 Tier 0: Unblock Everything (Week 1) — COMPLETE
 
-**IrqAck implementation** — currently stubbed, blocks ALL interrupt-driven drivers:
+**IrqAck implementation** — ~~currently stubbed~~ ALREADY IMPLEMENTED (audit was incorrect).
+`invoke_irq_ack` at handlers.rs:2394-2427 is fully functional: checks IRQ_ACK right,
+validates IRQ range 0-15, sends EOI to APIC+PIC.
 
-```
-invoke_irq_ack(irq_num):
-  if irq_num >= 8: port_out8(0xA0, 0x20)  // slave PIC EOI
-  port_out8(0x20, 0x20)                     // master PIC EOI
-  unmask_irq(irq_num)                       // re-enable in PIC mask
-```
-
-**FPU/SSE context save** — without this, any SIMD code corrupts across context switches:
-
-```
-Context struct: add fxsave_area [512 bytes, 16-byte aligned]
-Context switch:
-  FXSAVE [old_thread.fxsave_area]
-  FXRSTOR [new_thread.fxsave_area]
-```
+**FPU/SSE context save** — IMPLEMENTED (commit dddd98e). Eager FXSAVE/FXRSTOR in
+assembly at every kernel entry/exit from userspace. Per-CPU scratch buffer at gs:0x80
+(512 bytes in PerCpuData). Rust scheduler memcpys between scratch and per-thread
+FpuState on context switch. Note: cannot disable SSE in kernel code (Rust nightly
+rejects both `-sse2` and `+soft-float` on x86_64 ABI), hence assembly-based approach.
 
 ### 16.3 Tier 1: Input & Application Ports (Weeks 2-4)
 
@@ -1334,7 +1326,7 @@ object, same derivation rules).
 
 ```
 Week 1:  SEC-1 (SMAP/SMEP, password hashing, rate limiting)
-         Tier 0 (IrqAck, FPU context save)
+         Tier 0 (IrqAck, FPU context save) — COMPLETE (2026-03-03)
 
 Week 2:  IPC Tier 1 (inline dispatch, double-lock consolidation,
          8-entry token cache, thread-local ReplyMap)
