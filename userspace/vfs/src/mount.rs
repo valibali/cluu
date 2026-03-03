@@ -45,10 +45,10 @@ pub trait MountBackend: Send + Sync {
 
     /// Open a file at the given relative path.
     /// full_path is the original absolute path (for caching).
-    fn open(&self, rel_path: &str, full_path: &str) -> Result<OpenFile>;
+    fn open(&self, rel_path: &str, full_path: &str, caller_tid: usize) -> Result<OpenFile>;
 
     /// Read directory entries at the given relative path.
-    fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>>;
+    fn readdir(&self, rel_path: &str, caller_tid: usize) -> Result<Vec<DirEntry>>;
 
     /// Read file data (for remote backends that need IPC).
     fn read(&self, file: &OpenFile, offset: usize, len: usize) -> Result<Vec<u8>> {
@@ -104,7 +104,7 @@ impl MountBackend for InitrdBackend {
         "initrd"
     }
 
-    fn open(&self, rel_path: &str, _full_path: &str) -> Result<OpenFile> {
+    fn open(&self, rel_path: &str, _full_path: &str, _caller_tid: usize) -> Result<OpenFile> {
         let slice = find_member(self.data, rel_path)
             .or_else(|| find_member(self.data, &dot_prefixed(rel_path)))
             .ok_or(Error::NotFound)?;
@@ -119,7 +119,7 @@ impl MountBackend for InitrdBackend {
         }))
     }
 
-    fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>> {
+    fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
         let entries = list_entries(self.data, rel_path);
         Ok(entries
             .into_iter()
@@ -151,7 +151,7 @@ impl MountBackend for RemoteBackend {
         self.service_name
     }
 
-    fn open(&self, rel_path: &str, full_path: &str) -> Result<OpenFile> {
+    fn open(&self, rel_path: &str, full_path: &str, _caller_tid: usize) -> Result<OpenFile> {
         let req = Message::new(FS_OPEN, [rel_path.len(), 0, 0, 0, 0, 0], 1);
         let mut reply = Message::new(0, [0; 6], 0);
         call_with_payload(self.endpoint, &req, rel_path.as_bytes(), &mut reply)?;
@@ -172,7 +172,7 @@ impl MountBackend for RemoteBackend {
         }))
     }
 
-    fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>> {
+    fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
         let req = Message::new(FS_READDIR, [rel_path.len(), 0, 0, 0, 0, 0], 1);
         let mut reply_buf = [0u8; 4096];
         let (reply, payload_len) =
@@ -314,7 +314,7 @@ impl MountBackend for DeviceBackend {
         "devfs"
     }
 
-    fn open(&self, rel_path: &str, full_path: &str) -> Result<OpenFile> {
+    fn open(&self, rel_path: &str, full_path: &str, _caller_tid: usize) -> Result<OpenFile> {
         use crate::fd_table::{DeviceFile, DeviceType};
 
         let rel = rel_path.trim_start_matches('/');
@@ -353,7 +353,7 @@ impl MountBackend for DeviceBackend {
         }))
     }
 
-    fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>> {
+    fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
         let rel = rel_path.trim_start_matches('/');
         if !rel.is_empty() {
             return Err(Error::NotFound);
@@ -443,7 +443,7 @@ impl MountBackend for VirtualBackend {
         self.name
     }
 
-    fn open(&self, rel_path: &str, full_path: &str) -> Result<OpenFile> {
+    fn open(&self, rel_path: &str, full_path: &str, _caller_tid: usize) -> Result<OpenFile> {
         let entry = self.find_entry(rel_path).ok_or(Error::NotFound)?;
 
         match entry {
@@ -458,7 +458,7 @@ impl MountBackend for VirtualBackend {
         }
     }
 
-    fn readdir(&self, rel_path: &str) -> Result<Vec<DirEntry>> {
+    fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
         if rel_path.is_empty() || rel_path == "/" {
             // List all entries at root
             return Ok(self
@@ -534,15 +534,15 @@ impl MountTable {
     }
 
     /// Open a file at the given absolute path.
-    pub fn open(&self, path: &str) -> Result<OpenFile> {
+    pub fn open(&self, path: &str, caller_tid: usize) -> Result<OpenFile> {
         let (mount, rel_path) = self.resolve(path)?;
-        mount.backend.open(rel_path, path)
+        mount.backend.open(rel_path, path, caller_tid)
     }
 
     /// Read directory entries at the given absolute path.
-    pub fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
+    pub fn readdir(&self, path: &str, caller_tid: usize) -> Result<Vec<DirEntry>> {
         let (mount, rel_path) = self.resolve(path)?;
-        mount.backend.readdir(rel_path)
+        mount.backend.readdir(rel_path, caller_tid)
     }
 
     pub fn unlink(&self, path: &str) -> Result<()> {

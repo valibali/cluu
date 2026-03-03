@@ -104,6 +104,11 @@ pub const PROCMGR_SU_LABEL: u32 = 33;
 pub const PROCMGR_CONTAINER_STATS_LABEL: u32 = 35;
 /// Shutdown request. words[0]: 0=poweroff, 1=reboot.
 pub const PROCMGR_SHUTDOWN_LABEL: u32 = 36;
+/// Proc query: VFS → procmgr (call).
+/// words[0] = query_type (0=status, 1=stat, 2=cmdline, 3=list),
+/// words[1] = target_pid (0=self), words[2] = original_caller_tid.
+/// Reply: words[0]=errno, words[1]=data_len or pid_count, payload=content.
+pub const PROCMGR_PROC_QUERY_LABEL: u32 = 37;
 
 pub const TTY_FG_FLAG_FORWARD_CTRL_C: usize = 1 << 0;
 pub const TTY_FG_FLAG_NOTIFY_CTRL_C: usize = 1 << 1;

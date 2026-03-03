@@ -12,6 +12,7 @@ const DEVICE_MOUNTS: &[ViewMountSpec] = &[
     ("/etc", "/etc", false),
     ("/tmp", "/tmp", true),
     ("/dev/initrd", "/dev/initrd", false),
+    ("/proc", "/proc", false),
 ];
 const ADMIN_MOUNTS: &[ViewMountSpec] = &[
     ("/bin", "/bin", false),
@@ -20,6 +21,7 @@ const ADMIN_MOUNTS: &[ViewMountSpec] = &[
     ("/tmp", "/tmp", true),
     ("/home/root", "/home/root", true),
     ("/dev/initrd", "/dev/initrd", false),
+    ("/proc", "/proc", false),
 ];
 const USER_MOUNTS: &[ViewMountSpec] = &[
     ("/bin", "/bin", false),
@@ -27,6 +29,7 @@ const USER_MOUNTS: &[ViewMountSpec] = &[
     ("/tmp", "/tmp", true),
     ("/home/root", "/home/root", true),
     ("/dev/initrd", "/dev/initrd", false),
+    ("/proc", "/proc", false),
 ];
 const EMPTY_MOUNTS: &[ViewMountSpec] = &[];
 

@@ -308,6 +308,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(ShellCrashBuiltin));
         registry.register(Box::new(PoweroffBuiltin));
         registry.register(Box::new(RebootBuiltin));
+        registry.register(Box::new(PsBuiltin));
     }
 }
 
@@ -3187,6 +3188,118 @@ impl BuiltinCommand for RebootBuiltin {
         let ep = context.procmgr_spawn_endpoint()?;
         let msg = Message::new(PROCMGR_SHUTDOWN_LABEL, [1, 0, 0, 0, 0, 0], 1);
         let _ = libcluu::ipc::send(ep, &msg, IpcFlags::empty());
+        Ok(())
+    }
+}
+
+struct PsBuiltin;
+
+impl BuiltinCommand for PsBuiltin {
+    fn name(&self) -> &'static str {
+        "ps"
+    }
+
+    fn run(&self, stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        // Get VFS endpoint
+        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+            Ok(ep) => ep,
+            Err(_) => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"ps: vfs not available\n")?;
+                return Ok(());
+            }
+        };
+
+        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+            Ok(c) => c,
+            Err(_) => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"ps: failed to connect to vfs\n")?;
+                return Ok(());
+            }
+        };
+
+        // Header
+        send_with_payload(
+            stdout,
+            TTY_WRITE_LABEL,
+            b"  PID  NAME             STATE  TICKS     MEM\n",
+        )?;
+
+        // Read /proc directory to get PID list
+        let entries = match vfs.readdir("/proc") {
+            Ok(e) => e,
+            Err(_) => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"ps: failed to read /proc\n")?;
+                return Ok(());
+            }
+        };
+
+        // Setup grant buffer for reading stat files (one page is plenty)
+        let info = process_info();
+        let space_token = info.tokens[TOKEN_SPACE];
+        const GRANT_SIZE: usize = 4096;
+        let grant_base = match libcluu::vspace::VSPACE.lock().alloc(GRANT_SIZE) {
+            Ok(addr) => addr,
+            Err(_) => {
+                send_with_payload(stdout, TTY_WRITE_LABEL, b"ps: out of virtual memory\n")?;
+                return Ok(());
+            }
+        };
+
+        for entry in &entries {
+            // Only process numeric (PID) directories
+            if !entry.is_dir || entry.name.is_empty() || !entry.name.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+
+            // Open /proc/{pid}/stat
+            let stat_path = format!("/proc/{}/stat", entry.name);
+            let file = match vfs.open(&stat_path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+
+            if file.size == 0 {
+                let _ = vfs.close(file);
+                continue;
+            }
+
+            // Read via grant
+            let read_size = file.size.min(GRANT_SIZE);
+            match vfs.read_grant(file, 0, read_size, space_token, grant_base) {
+                Ok(grant) => {
+                    if grant.len > 0 && grant.offset + grant.len <= GRANT_SIZE {
+                        let addr = grant.base + grant.offset;
+                        let data =
+                            unsafe { core::slice::from_raw_parts(addr as *const u8, grant.len) };
+                        let text = core::str::from_utf8(data).unwrap_or("");
+
+                        // Parse: "{pid} ({name}) {state} {cpu_ticks} {heap_pages} {other_pages}"
+                        let parts: Vec<&str> = text.trim().splitn(6, ' ').collect();
+                        if parts.len() >= 6 {
+                            let pid = parts[0];
+                            let name = parts[1]; // includes parens
+                            let state = parts[2];
+                            let ticks = parts[3];
+                            let heap = parts[4].parse::<u32>().unwrap_or(0);
+                            let other = parts[5].trim().parse::<u32>().unwrap_or(0);
+                            let mem_kb = (heap as u64 + other as u64) * 4; // pages to KB
+                            let line = format!(
+                                "{:>5}  {:<16} {:>5}  {:>8}  {:>4}K\n",
+                                pid, name, state, ticks, mem_kb
+                            );
+                            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+
+            let _ = vfs.close(file);
+        }
+
+        // Free grant buffer
+        let _ = libcluu::vspace::VSPACE.lock().free(grant_base, GRANT_SIZE);
+
         Ok(())
     }
 }

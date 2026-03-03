@@ -202,8 +202,9 @@ fn setup_mounts(initrd: &'static [u8]) -> Result<MountTable> {
     mounts.mount_remote("/", blkdev_endpoint, "blkdev");
     debug_print("vfs: mounted / (blkdev)")?;
 
-    // Procfs: virtual filesystem with system information
-    mounts.mount_virtual("/proc", "procfs", procfs::ENTRIES);
+    // Procfs: static generators + dynamic procmgr IPC for per-PID info
+    let procmgr_endpoint = registry::subscribe_output("procmgr", "spawn")?;
+    mounts.mount("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
     debug_print("vfs: mounted /proc (procfs)")?;
 
     // Device files: /dev/null, /dev/zero, /dev/urandom, /dev/tty*
@@ -851,7 +852,7 @@ impl VfsServer {
             ));
             return;
         }
-        let entries = match self.mounts.readdir(dir_path) {
+        let entries = match self.mounts.readdir(dir_path, 0) {
             Ok(entries) => entries,
             Err(_) => return,
         };
@@ -1020,7 +1021,7 @@ impl VfsServer {
         }
 
         // MountTable path: use unified mount table for all paths
-        match self.mounts.open(&real_path) {
+        match self.mounts.open(&real_path, client_id) {
             Ok(file) => {
                 if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
                     reply_msg.words[0] = Error::AlreadyExists.to_errno() as usize;
@@ -1042,7 +1043,7 @@ impl VfsServer {
                         return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                     }
                     match self.mounts.create_file(&real_path, mode) {
-                        Ok(()) => match self.mounts.open(&real_path) {
+                        Ok(()) => match self.mounts.open(&real_path, client_id) {
                             Ok(file) => {
                                 self.set_owner(path, client_id);
                                 let fd = self.files.open(client_id, file.clone());
@@ -1320,7 +1321,7 @@ impl VfsServer {
         let stat_result = if let view::MountTarget::MemFs { container_id } = target {
             self.stat_memfs_path(container_id, &real_path)
         } else {
-            self.stat_path(&real_path)
+            self.stat_path(&real_path, client_id)
         };
 
         match stat_result {
@@ -1693,8 +1694,8 @@ impl VfsServer {
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn stat_path(&self, path: &str) -> Result<(usize, usize)> {
-        if let Ok(file) = self.mounts.open(path) {
+    fn stat_path(&self, path: &str, caller_tid: usize) -> Result<(usize, usize)> {
+        if let Ok(file) = self.mounts.open(path, caller_tid) {
             let mode = match &file {
                 OpenFile::Device(_) => S_IFCHR | 0o666,
                 _ => MODE_FILE,
@@ -1702,7 +1703,7 @@ impl VfsServer {
             return Ok((file.size(), mode));
         }
 
-        if self.mounts.readdir(path).is_ok() {
+        if self.mounts.readdir(path, caller_tid).is_ok() {
             return Ok((0, MODE_DIR));
         }
 
@@ -2973,7 +2974,7 @@ impl VfsServer {
         }
 
         // Use unified mount table for readdir
-        match self.mounts.readdir(&real_path) {
+        match self.mounts.readdir(&real_path, client_id) {
             Ok(entries) => {
                 // Serialize entries: [name_len: u8, is_dir: u8, name bytes...]
                 let mut data = Vec::new();

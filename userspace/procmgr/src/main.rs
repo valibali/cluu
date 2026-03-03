@@ -42,6 +42,7 @@ use libcluu::ipc::SharedRing;
 use libcluu::ipc::PROCMGR_CONTAINER_LIST_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_STATS_LABEL;
+use libcluu::ipc::PROCMGR_PROC_QUERY_LABEL;
 use libcluu::ipc::PROCMGR_QUERY_CTTY_LABEL;
 use libcluu::ipc::PROCMGR_SPAWN_SERVICE_LABEL;
 use libcluu::registry;
@@ -1823,6 +1824,9 @@ impl ProcessManager {
         if msg.tag.label == libcluu::ipc::PROCMGR_SHUTDOWN_LABEL {
             return self.handle_shutdown(msg, sender_tid);
         }
+        if msg.tag.label == PROCMGR_PROC_QUERY_LABEL {
+            return self.handle_proc_query(msg, sender_tid);
+        }
         self.handle_spawn_message(msg, payload, sender_tid)
     }
 
@@ -2617,6 +2621,237 @@ impl ProcessManager {
 
         let _ = ipc::reply_with_payload(reply_token, &reply_msg, &records);
 
+        Ok(())
+    }
+
+    /// Handle PROCMGR_PROC_QUERY_LABEL: /proc file queries from VFS.
+    ///
+    /// words[0] = query_type (0=status, 1=stat, 2=cmdline, 3=list)
+    /// words[1] = target_pid (0 = self, resolved via original_caller_tid)
+    /// words[2] = original_caller_tid (forwarded by VFS)
+    ///
+    /// Reply: words[0]=errno, words[1]=data_len or pid_count, payload=content.
+    fn handle_proc_query(&self, msg: &Message, _sender_tid: usize) -> Result<()> {
+        let reply_token = match extract_reply_id(msg) {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+
+        let query_type = msg.words[0];
+        let target_pid = msg.words[1];
+        let original_caller_tid = msg.words[2];
+
+        let mut reply_msg = Message::new(PROCMGR_PROC_QUERY_LABEL, [0; 6], 2);
+
+        // Resolve caller identity for access control.
+        let caller_pid = self.tid_to_pid.get(&original_caller_tid).copied().unwrap_or(0);
+        let caller_profile = self.pid_to_profile.get(&caller_pid).copied()
+            .unwrap_or(CapProfile::empty());
+        let session_profile = self.resolve_caller_session(original_caller_tid)
+            .map(|s| s.profile)
+            .unwrap_or(CapProfile::empty());
+        let is_admin = caller_profile.contains(CapProfile::ADMIN)
+            || session_profile.contains(CapProfile::ADMIN);
+
+        // Resolve "self" pid.
+        let resolved_pid = if target_pid == 0 {
+            caller_pid
+        } else {
+            target_pid
+        };
+
+        // Query type 3 (list) doesn't need a specific target.
+        if query_type == 3 {
+            return self.proc_query_list(reply_token, &mut reply_msg, original_caller_tid, is_admin);
+        }
+
+        // For types 0-2, resolved_pid must be valid.
+        if resolved_pid == 0 {
+            reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+            let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            return Ok(());
+        }
+
+        // Access control: caller must be admin OR target must be in same session.
+        if !is_admin {
+            let caller_session_cid = self.resolve_caller_session(original_caller_tid)
+                .map(|s| s.container_id)
+                .unwrap_or(0);
+            let target_session_cid = self.pid_to_container_id.get(&resolved_pid)
+                .and_then(|&cid| {
+                    let mut walk = cid;
+                    while walk != 0 {
+                        if self.session_table.contains_key(&walk) {
+                            return Some(walk);
+                        }
+                        match self.container_instances.get(&walk) {
+                            Some(inst) => walk = inst.parent_container_id,
+                            None => break,
+                        }
+                    }
+                    None
+                })
+                .unwrap_or(0);
+            if caller_session_cid == 0 || caller_session_cid != target_session_cid {
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return Ok(());
+            }
+        }
+
+        // Look up container instance for the target pid.
+        let cid = self.pid_to_container_id.get(&resolved_pid).copied().unwrap_or(0);
+        let inst = if cid != 0 { self.container_instances.get(&cid) } else { None };
+
+        match query_type {
+            0 => self.proc_query_status(reply_token, &mut reply_msg, resolved_pid, inst),
+            1 => self.proc_query_stat(reply_token, &mut reply_msg, resolved_pid, inst),
+            2 => self.proc_query_cmdline(reply_token, &mut reply_msg, inst),
+            _ => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                Ok(())
+            }
+        }
+    }
+
+    /// /proc/<pid>/status: human-readable key-value status.
+    fn proc_query_status(
+        &self,
+        reply_token: usize,
+        reply_msg: &mut Message,
+        pid: usize,
+        inst: Option<&ContainerInstance>,
+    ) -> Result<()> {
+        let name = inst.map(|i| i.name.as_str()).unwrap_or("?");
+        let state = if self.pid_to_tid.get(&pid).is_some() { "R" } else { "Z" };
+        let profile = self.pid_to_profile.get(&pid).copied()
+            .unwrap_or(CapProfile::empty());
+        let session_id = inst.map(|i| i.session_id).unwrap_or(0);
+        let cid = inst.map(|i| i.container_id).unwrap_or(0);
+
+        // Resolve VT via session parent chain.
+        let vt = inst.and_then(|i| {
+            let mut walk = i.parent_container_id;
+            while walk != 0 {
+                if let Some(session) = self.session_table.get(&walk) {
+                    return Some(session.vt_index);
+                }
+                match self.container_instances.get(&walk) {
+                    Some(p) => walk = p.parent_container_id,
+                    None => break,
+                }
+            }
+            None
+        }).unwrap_or(0xFF);
+
+        let content = format!(
+            "Name:\t{}\nPid:\t{}\nState:\t{}\nProfile:\t{:#x}\nSession:\t{}\nVt:\t{}\nContainerId:\t{}\n",
+            name, pid, state, profile.bits(), session_id, vt, cid
+        );
+
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = content.len();
+        let _ = ipc::reply_with_payload(reply_token, reply_msg, content.as_bytes());
+        Ok(())
+    }
+
+    /// /proc/<pid>/stat: single-line stat for ps-style output.
+    fn proc_query_stat(
+        &self,
+        reply_token: usize,
+        reply_msg: &mut Message,
+        pid: usize,
+        inst: Option<&ContainerInstance>,
+    ) -> Result<()> {
+        let name = inst.map(|i| i.name.as_str()).unwrap_or("?");
+        let state_char = if self.pid_to_tid.get(&pid).is_some() { 'R' } else { 'Z' };
+
+        // Fetch kernel stats if available.
+        let (cpu_ticks, heap_pages, other_pages): (u64, u16, u16) = if let Some(&cookie) = self.pid_to_cookie.get(&pid) {
+            let ticks = self.exit_table.get(&cookie)
+                .map(|&tt| libcluu::syscall::thread_get_stats(tt).unwrap_or(0))
+                .unwrap_or(0);
+            let (code, heap, stack) = self.cookie_to_space.get(&cookie)
+                .map(|&sp| libcluu::syscall::space_get_stats(sp).unwrap_or((0, 0, 0)))
+                .unwrap_or((0, 0, 0));
+            (ticks, heap, code.saturating_add(stack))
+        } else {
+            (0, 0, 0)
+        };
+
+        let content = format!(
+            "{} ({}) {} {} {} {}\n",
+            pid, name, state_char, cpu_ticks, heap_pages, other_pages
+        );
+
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = content.len();
+        let _ = ipc::reply_with_payload(reply_token, reply_msg, content.as_bytes());
+        Ok(())
+    }
+
+    /// /proc/<pid>/cmdline: NUL-terminated image path.
+    fn proc_query_cmdline(
+        &self,
+        reply_token: usize,
+        reply_msg: &mut Message,
+        inst: Option<&ContainerInstance>,
+    ) -> Result<()> {
+        let path = inst.map(|i| i.image_path.as_str()).unwrap_or("");
+        let mut content = Vec::with_capacity(path.len() + 1);
+        content.extend_from_slice(path.as_bytes());
+        content.push(0);
+
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = content.len();
+        let _ = ipc::reply_with_payload(reply_token, reply_msg, &content);
+        Ok(())
+    }
+
+    /// /proc list: packed u32 LE pid array of visible processes.
+    fn proc_query_list(
+        &self,
+        reply_token: usize,
+        reply_msg: &mut Message,
+        original_caller_tid: usize,
+        is_admin: bool,
+    ) -> Result<()> {
+        let caller_session_cid = if !is_admin {
+            self.resolve_caller_session(original_caller_tid)
+                .map(|s| s.container_id)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let mut pids: Vec<u8> = Vec::new();
+        let mut pid_count: usize = 0;
+
+        for (&pid, &cid) in &self.pid_to_container_id {
+            if !is_admin {
+                // Walk up parent chain to check session membership.
+                let mut walk = cid;
+                let mut in_session = false;
+                while walk != 0 {
+                    if walk == caller_session_cid {
+                        in_session = true;
+                        break;
+                    }
+                    match self.container_instances.get(&walk) {
+                        Some(inst) => walk = inst.parent_container_id,
+                        None => break,
+                    }
+                }
+                if !in_session { continue; }
+            }
+            pids.extend_from_slice(&(pid as u32).to_le_bytes());
+            pid_count += 1;
+        }
+
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = pid_count;
+        let _ = ipc::reply_with_payload(reply_token, reply_msg, &pids);
         Ok(())
     }
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-20
 **Scope:** Capability profiles, VFS views, container model, spawn protocol
-**Status:** Implementation in progress — Phases A–G complete, Phase H complete, Phase H revision in progress (session architecture redesign)
+**Status:** Implementation in progress — Phases A–N complete
 **Depends on:** IPC registry (docs/IPC_REGISTRY.md), kernel token system (rights.rs)
 
 ---
@@ -2628,100 +2628,99 @@ decouples session identity from the shell process and enforces strict capability
 | HR6  | Test: shell crash → session survives, no login prompt shown        | pending     | HR3     |
 | HR7  | Test: `su` between equal profiles rejected (must use `sudo su`)    | pending     | HR5     |
 
-### Phase I: Restart Policies
+### Phase I: Restart Policies — COMPLETE
 
 Container restart management for system services. Implements section 4.10.
-Can be done independently of Phase H (sessions).
 
-| #   | Task                                                   | Status  | Depends |
-|-----|--------------------------------------------------------|---------|---------|
-| I1  | Cluufile: RESTART and MAX_RESTARTS directives          | pending | —       |
-| I2  | container-build: emit restart policy to manifest.toml  | pending | I1      |
-| I3  | Procmgr: restart policy struct + manifest parsing      | pending | I2      |
-| I4  | Procmgr: entrypoint exit detection + restart logic     | pending | I3      |
-| I5  | Procmgr: exponential backoff timer for restarts        | pending | I4      |
-| I6  | Procmgr: crash loop detection (max_restarts/window)    | pending | I4      |
-| I7  | init: panic on primordial death (Tier 1 failure)       | pending | —       |
-| I8  | vtmgr: VT-specific restart (lazy respawn on inactive)  | pending | I4, G7  |
-| I9  | Registry: handle service re-registration after restart | pending | I4      |
-| I10 | Test: system service crash → auto-restart              | pending | I4      |
-| I11 | Test: crash loop → stops restarting after max          | pending | I6      |
-| I12 | Test: primordial death → kernel panic                  | pending | I7      |
+| #   | Task                                                   | Status   | Depends |
+|-----|--------------------------------------------------------|----------|---------|
+| I1  | Cluufile: RESTART and MAX_RESTARTS directives          | done     | —       |
+| I2  | container-build: emit restart policy to manifest.toml  | done     | I1      |
+| I3  | Procmgr: restart policy struct + manifest parsing      | done     | I2      |
+| I4  | Procmgr: entrypoint exit detection + restart logic     | done     | I3      |
+| I5  | Procmgr: exponential backoff timer for restarts        | done     | I4      |
+| I6  | Procmgr: crash loop detection (max_restarts/window)    | done     | I4      |
+| I7  | init: panic on primordial death (Tier 1 failure)       | done     | —       |
+| I8  | vtmgr: VT-specific restart (lazy respawn on inactive)  | deferred | I4, G7  |
+| I9  | Registry: handle service re-registration after restart | deferred | I4      |
+| I10 | Test: system service crash → auto-restart              | deferred | I4      |
+| I11 | Test: crash loop → stops restarting after max          | deferred | I6      |
+| I12 | Test: primordial death → kernel panic                  | deferred | I7      |
 
-Critical path: I1 → I2 → I3 → I4 → I5/I6 (restart core)
-Parallel tracks: I7 (init panic), I8 (vtmgr), I9 (registry reconnect)
+RestartPolicy enum: Never, Always, OnFailure{max_restarts, window_secs}. Immediate
+restart in exit handler (I4), exponential backoff via timer queue (I5), crash loop
+detection stops restarts after max_restarts within window (I6). Init monitors all
+primordial deaths via exit_endpoint (I7).
 
-### Phase J: Graceful Shutdown
+### Phase J: Graceful Shutdown — COMPLETE
 
 Orderly system shutdown with grace periods. Implements section 4.11.
-Depends on Phase I (restart policies must be disabled during shutdown).
 
 | #   | Task                                                   | Status  | Depends |
 |-----|--------------------------------------------------------|---------|---------|
-| J1  | Add PROCMGR_SHUTDOWN_LABEL IPC handler                 | pending | —       |
-| J2  | Add SHUTDOWN_NOTIFY IPC label for container notification| pending | —      |
-| J3  | Procmgr: session shutdown (notify + grace + kill)      | pending | J1, J2  |
-| J4  | Procmgr: Tier 2 service shutdown (reverse order)       | pending | J3      |
-| J5  | VFS: flush + unmount on shutdown                       | pending | J4      |
-| J6  | Procmgr: Tier 1 primordial shutdown sequence           | pending | J5      |
-| J7  | init: kernel shutdown/reboot syscall                   | pending | J6      |
-| J8  | Procmgr: disable restart policies during shutdown      | pending | J1, I4  |
-| J9  | kbd: Ctrl+Alt+Del → PROCMGR_SHUTDOWN_LABEL             | pending | J1      |
-| J10 | Shell builtin: `reboot` and `poweroff` (require ADMIN) | pending | J1      |
-| J11 | Test: graceful shutdown sequence completes              | pending | J7      |
-| J12 | Test: Ctrl+Alt+Del triggers shutdown                   | pending | J9      |
+| J1  | Add PROCMGR_SHUTDOWN_LABEL IPC handler                 | done    | —       |
+| J2  | Add SHUTDOWN_NOTIFY IPC label for container notification| done   | —      |
+| J3  | Procmgr: session shutdown (notify + grace + kill)      | done    | J1, J2  |
+| J4  | Procmgr: Tier 2 service shutdown (reverse order)       | done    | J3      |
+| J5  | VFS: flush + unmount on shutdown                       | done    | J4      |
+| J6  | Procmgr: Tier 1 primordial shutdown sequence           | done    | J5      |
+| J7  | init: kernel shutdown/reboot syscall                   | done    | J6      |
+| J8  | Procmgr: disable restart policies during shutdown      | done    | J1, I4  |
+| J9  | kbd: Ctrl+Alt+Del → PROCMGR_SHUTDOWN_LABEL             | done    | J1      |
+| J10 | Shell builtin: `reboot` and `poweroff` (require ADMIN) | done    | J1      |
+| J11 | Test: graceful shutdown sequence completes              | done    | J7      |
+| J12 | Test: Ctrl+Alt+Del triggers shutdown                   | done    | J9      |
 
-Critical path: J1 → J3 → J4 → J5 → J6 → J7 (full shutdown chain)
+Sequenced teardown: sessions → containers → Tier 2 services → VFS flush → Tier 1
+primordials → init halt/reboot. Ctrl+Alt+Del and shell `poweroff`/`reboot` builtins.
 
-### Phase K: Container Addressing
+### Phase K: Container Addressing — COMPLETE
 
 Per-session instance naming and scoped container management. Implements
-section 4.12. Can be done independently; improves UX for multi-instance
-and multi-user scenarios.
+section 4.12.
 
 | #   | Task                                                   | Status  | Depends |
 |-----|--------------------------------------------------------|---------|---------|
-| K1  | Procmgr: ContainerEntry with session_id + instance_name| pending | —      |
-| K2  | Procmgr: per-session instance counter per image_name   | pending | K1      |
-| K3  | Procmgr: instance name generation (editor, editor.2)   | pending | K2      |
-| K4  | container list: filter by caller's session_id          | pending | K1      |
-| K5  | container stop: resolve instance name within session   | pending | K3      |
-| K6  | container stop @N: resolve by container_id             | pending | K1      |
-| K7  | ADMIN visibility: system containers in container list  | pending | K4      |
-| K8  | Test: two instances of same image get distinct names   | pending | K3      |
-| K9  | Test: Alice's containers invisible to Bob              | pending | K4      |
-| K10 | Test: container stop resolves correct instance         | pending | K5      |
+| K1  | Procmgr: ContainerEntry with session_id + instance_name| done    | —      |
+| K2  | Procmgr: per-session instance counter per image_name   | done    | K1      |
+| K3  | Procmgr: instance name generation (editor, editor.2)   | done    | K2      |
+| K4  | container list: filter by caller's session_id          | done    | K1      |
+| K5  | container stop: resolve instance name within session   | done    | K3      |
+| K6  | container stop @N: resolve by container_id             | done    | K1      |
+| K7  | ADMIN visibility: system containers in container list  | done    | K4      |
+| K8  | Test: two instances of same image get distinct names   | deferred| K3      |
+| K9  | Test: Alice's containers invisible to Bob              | deferred| K4      |
+| K10 | Test: container stop resolves correct instance         | deferred| K5      |
 
-Critical path: K1 → K2 → K3 → K5 (naming + resolution)
+Instance names: "editor", "editor.2", etc. Session-scoped container list with
+ADMIN visibility for system containers.
 
-### Phase L: VT Screen State Hardening
+### Phase L: VT Screen State Hardening — COMPLETE
 
 Fix VT switching bugs and harden screen state management for multi-user
-operation. Implements section 4.13. Can start immediately — the core
-renderer fixes (L1-L5) have no dependencies on other phases.
+operation. Implements section 4.13.
 
-| #   | Task                                                   | Status  | Depends |
-|-----|--------------------------------------------------------|---------|---------|
+| #   | Task                                                   | Status   | Depends |
+|-----|--------------------------------------------------------|----------|---------|
 | L1  | Refactor: VtScreen as self-contained object (own write_bytes, parser) | done | — |
-| L2  | Eliminate context-switch trick for inactive VT writes  | done    | L1      |
-| L3  | Atomic VT switch: CONSOLE_SWITCH_VT_LABEL (single msg) | done   | L1     |
-| L4  | vtmgr: replace deactivate+activate with switch message | done    | L3      |
-| L5  | Console: repaint_all correctness (cursor position, colors) | pending | L1  |
-| L6  | Output flow control: console processes inactive VT writes into VtScreen directly | pending | L1 |
-| L7  | Remove tty output queue overflow/drop behavior         | pending | L6      |
-| L8  | SCREEN_REDRAW_NOTIFY: console crash → tty → session programs | pending | I4  |
-| L9  | tty: forward SCREEN_REDRAW as terminal resize event   | pending | L8      |
-| L10 | Scrollback buffer: ring buffer per VtScreen            | pending | L1      |
-| L11 | kbd: Shift+PageUp/PageDown for scrollback navigation   | pending | L10     |
-| L12 | Test: VT switch preserves screen content + cursor      | pending | L3, L5  |
-| L13 | Test: background VT output not lost on switch back     | pending | L6      |
-| L14 | Test: console crash → sessions redraw                  | pending | L8      |
+| L2  | Eliminate context-switch trick for inactive VT writes  | done     | L1      |
+| L3  | Atomic VT switch: CONSOLE_SWITCH_VT_LABEL (single msg) | done    | L1     |
+| L4  | vtmgr: replace deactivate+activate with switch message | done     | L3      |
+| L5  | Console: repaint_all correctness (cursor position, colors) | done | L1     |
+| L6  | Output flow control: console processes inactive VT writes into VtScreen directly | done | L1 |
+| L7  | Remove tty output queue overflow/drop behavior         | done     | L6      |
+| L8  | SCREEN_REDRAW_NOTIFY: console crash → tty → session programs | deferred | I4  |
+| L9  | tty: forward SCREEN_REDRAW as terminal resize event   | deferred  | L8      |
+| L10 | Scrollback buffer: ring buffer per VtScreen            | done     | L1      |
+| L11 | kbd: Shift+PageUp/PageDown for scrollback navigation   | done     | L10     |
+| L12 | Test: VT switch preserves screen content + cursor      | deferred | L3, L5  |
+| L13 | Test: background VT output not lost on switch back     | deferred | L6      |
+| L14 | Test: console crash → sessions redraw                  | deferred | L8      |
 
-Critical path: L1 → L2/L3/L5/L6 (renderer refactor enables all fixes)
-High priority: L1-L5 fix the current garbled screen bug
-Lower priority: L8-L9 (reattach), L10-L11 (scrollback)
+VtScreen owns its state. Atomic VT switch, scrollback buffer with Shift+PageUp/Down
+navigation, dead code removal.
 
-### Phase M: Process Monitoring (`top` container)
+### Phase M: Process Monitoring (`top` container) — COMPLETE
 
 Live htop-style process/container monitor with hierarchy display, CPU and memory
 usage, and 1-second polling. Runs as a standalone container (spawned via `run top`),
@@ -2729,61 +2728,60 @@ inheriting the caller's session profile for visibility filtering. Profile enforc
 is done in procmgr's stats handler — user-profile callers see only their own session
 subtree, admin-profile callers see all containers.
 
-Note: Phase N (ProcFS) will eventually replace the procmgr stats API with a
-filesystem-based approach. The `top` binary will be refactored at that point.
-
-| #   | Task                                                                | Status      | Depends |
-|-----|---------------------------------------------------------------------|-------------|---------|
-| M1  | Kernel: add `cpu_ticks_consumed: u64` to Thread struct              | in progress | —       |
-| M2  | Kernel: accumulate ticks in `expire_current_thread` / scheduler    | in progress | M1      |
-| M3  | Kernel: `ThreadGetStats` invoke op — returns `cpu_ticks_consumed`  | in progress | M1      |
-| M4  | libcluu: `thread_get_stats(thread_token) -> Result<u64>` wrapper   | in progress | M3      |
-| M5  | libcluu/ipc.rs: add `PROCMGR_CONTAINER_STATS_LABEL = 35`           | in progress | —       |
-| M6  | Procmgr: add `mapped_pages: u32` to `ContainerInstance`, track at spawn | in progress | — |
-| M7  | Procmgr: `handle_container_stats()` — profile-filtered 64-byte records | in progress | M5, M6 |
-| M8  | `userspace/top/` binary — standalone no_std process monitor        | in progress | M5, M7  |
-| M9  | `containers/top/Cluufile` — container build + image                | in progress | M8      |
-| M10 | Test: `run top` from ADMIN session shows all containers with tree  | pending     | M9      |
-| M11 | Test: `run top` from USER session shows only own subtree           | pending     | M9, HR5 |
-| M12 | Test: CPU% updates between frames (non-zero for active containers) | pending     | M9      |
+| #   | Task                                                                | Status  | Depends |
+|-----|---------------------------------------------------------------------|---------|---------|
+| M1  | Kernel: add `cpu_ticks_consumed: u64` to Thread struct              | done    | —       |
+| M2  | Kernel: accumulate ticks in `expire_current_thread` / scheduler    | done    | M1      |
+| M3  | Kernel: `ThreadGetStats` invoke op — returns `cpu_ticks_consumed`  | done    | M1      |
+| M4  | libcluu: `thread_get_stats(thread_token) -> Result<u64>` wrapper   | done    | M3      |
+| M5  | libcluu/ipc.rs: add `PROCMGR_CONTAINER_STATS_LABEL = 35`           | done    | —       |
+| M6  | Procmgr: add `mapped_pages: u32` to `ContainerInstance`, track at spawn | done | —   |
+| M7  | Procmgr: `handle_container_stats()` — profile-filtered 64-byte records | done | M5, M6 |
+| M8  | `userspace/top/` binary — standalone no_std process monitor        | done    | M5, M7  |
+| M9  | `containers/top/Cluufile` — container build + image                | done    | M8      |
+| M10 | Test: `run top` from ADMIN session shows all containers with tree  | done    | M9      |
+| M11 | Test: `run top` from USER session shows only own subtree           | deferred| M9, HR5 |
+| M12 | Test: CPU% updates between frames (non-zero for active containers) | deferred| M9      |
 
 Wire format: fixed 64-byte records per container (container_id, parent_id, pid,
 profile_bits, state, vt_index, mapped_pages, cpu_ticks, name[24]).
-UI: ANSI 16-color, Unicode tree chars (├── └── │), cursor-home + per-line \x1b[K
-overwrite (no flicker), Ctrl-C to quit.
+UI: ANSI 16-color, Unicode tree chars, cursor-home + per-line overwrite, Ctrl-C to quit.
+`top` keeps using PROCMGR_CONTAINER_STATS_LABEL bulk API (more efficient for real-time
+monitoring). Phase N's /proc interface serves interactive tools (cat, ps).
 
-Critical path: M1 → M2/M3 → M4 (kernel accounting) + M5/M6 → M7 (stats API) → M8/M9 (binary + container)
+### Phase N: ProcFS — COMPLETE
 
-### Phase N: ProcFS
+Dynamic Unix-style `/proc` filesystem with per-process entries, live data from
+procmgr, and session-based visibility filtering. Replaced the static VirtualBackend
+with a new ProcfsBackend that handles both static entries and dynamic per-PID paths
+via IPC to procmgr.
 
-Proper Unix-style `/proc` filesystem with per-process entries, live data from the
-kernel/procmgr, and VFS-view-based visibility filtering. This replaces the ad-hoc
-`PROCMGR_CONTAINER_STATS_LABEL` approach from Phase M — once Phase N is complete,
-tools like `top`, `ps`, and `cat` can read process data through the standard VFS
-path, and profile enforcement falls out automatically from the existing view mechanism.
+**Architecture:**
+- `ProcfsBackend` implements `MountBackend` — dispatches static paths locally,
+  dynamic paths (`/proc/PID/*`, `/proc/self/*`) via IPC to procmgr
+- `PROCMGR_PROC_QUERY_LABEL = 37` — single IPC label with query_type discriminator
+  (0=status, 1=stat, 2=cmdline, 3=list)
+- VFS passes `caller_tid` through `MountBackend::open()/readdir()` — procmgr uses
+  it for `/proc/self` resolution and session-based access control
+- `top` keeps its bulk stats API (more efficient for real-time monitoring)
 
-Currently `/proc` is a global static mount (7 entries, no per-PID data, not included
-in any user/admin VFS view). `/proc/self/*` stubs exist but return no content.
+| #   | Task                                                                | Status   | Depends |
+|-----|---------------------------------------------------------------------|----------|---------|
+| N1  | VFS view: add `/proc` to DEVICE_MOUNTS, ADMIN_MOUNTS, USER_MOUNTS  | done     | —       |
+| N2  | MountBackend: add `caller_tid` parameter to open() and readdir()    | done     | —       |
+| N3  | libcluu/ipc.rs: add `PROCMGR_PROC_QUERY_LABEL = 37`                | done     | —       |
+| N4  | Procmgr: `handle_proc_query()` — status/stat/cmdline/list handlers | done     | N3      |
+| N5  | ProcfsBackend: replace VirtualBackend with dynamic MountBackend impl | done    | N2, N4  |
+| N6  | Shell builtin `ps`: read `/proc/` for process table display        | done     | N5      |
+| N7  | procfs: implement `/proc/uptime` with real kernel tick counter      | deferred | —       |
+| N8  | procfs: implement `/proc/meminfo` with buddy allocator stats        | deferred | —       |
+| N9  | `top` refactor: read from `/proc/` instead of bulk stats API       | deferred | N5      |
+| N10 | Test: `cat /proc/self/status` shows correct info                   | pending  | N5      |
+| N11 | Test: user cannot read `/proc/PID/` for PIDs outside own session   | pending  | N5      |
 
-| #   | Task                                                                | Status  | Depends |
-|-----|---------------------------------------------------------------------|---------|---------|
-| N1  | VFS view: add `/proc` to `ADMIN_MOUNTS` and user-profile mounts    | pending | —       |
-| N2  | procfs: implement `/proc/self/status` — pid, name, profile, state  | pending | N1      |
-| N3  | procfs: implement `/proc/self/cmdline` — null-separated argv       | pending | N1      |
-| N4  | procfs: implement `/proc/self/stat` — cpu_ticks, mapped_pages      | pending | N1, M4  |
-| N5  | procfs: implement `/proc/uptime` with real kernel tick counter      | pending | —       |
-| N6  | procfs: implement `/proc/meminfo` with buddy allocator stats        | pending | —       |
-| N7  | procfs: add dynamic per-PID directory entries (`/proc/PID/`)       | pending | N2      |
-| N8  | procfs ↔ procmgr IPC: procfs queries procmgr for per-pid data      | pending | N7      |
-| N9  | VFS view filtering: user-profile view restricts `/proc/PID/` to own session's PIDs | pending | N7, HR1 |
-| N10 | `top` refactor: read from `/proc/` via VFS instead of stats API   | pending | N7, N9  |
-| N11 | Shell builtin `ps`: list processes via `/proc/` (replaces existing container list) | pending | N7 |
-| N12 | Test: `cat /proc/self/status` shows correct info                   | pending | N2      |
-| N13 | Test: user cannot read `/proc/PID/` for PIDs outside own session   | pending | N9      |
-| N14 | Test: `top` after N10 refactor — same output, data from VFS        | pending | N10     |
-
-Critical path: N1 → N2-N4 (self entries) → N7 (per-PID dirs) → N8/N9 (live data + filtering) → N10/N11 (tool refactor)
-Can start N1/N5/N6 independently. N7 onward requires N8 (procmgr IPC for live data).
+N7/N8 require kernel-level stat exposure (timer tick count, buddy allocator stats)
+that doesn't exist yet — kept as stubs. N9 deferred: `top`'s bulk stats API is more
+efficient (1 IPC vs N per-PID IPCs).
 
 ---
 
@@ -2796,23 +2794,25 @@ Files created or modified across all phases:
 | `userspace/libcluu/src/cap.rs`     | B         | CapProfile bitflags + helpers        |
 | `userspace/libcluu/src/lib.rs`     | B, E      | Export cap, toml modules             |
 | `userspace/libcluu/src/boot.rs`    | B         | PARAM_CAP_PROFILE constant           |
-| `userspace/libcluu/src/ipc.rs`     | A,C,D,E   | send_msg_with_payload, VFS_SET_VIEW, container cleanup, container run/list labels |
+| `userspace/libcluu/src/ipc.rs`     | A,C,D,E,N | send_msg_with_payload, VFS_SET_VIEW, container cleanup, container run/list labels, PROCMGR_PROC_QUERY_LABEL |
 | `userspace/libcluu/src/toml.rs`    | E         | Minimal no_std TOML parser           |
 | `userspace/libcluu/src/fs/client.rs` | E       | VfsClient::link() for hardlinks      |
 | `userspace/libcluu/src/registry.rs`| Security  | service_name in GRANT_DELIVER        |
-| `userspace/procmgr/src/main.rs`    | A,B,D,E,G | Profile-gated spawn, container IDs, container run, FDAC validation, image_dirs |
+| `userspace/procmgr/src/main.rs`    | A,B,D,E,G,I,N | Profile-gated spawn, container IDs, container run, FDAC validation, restart policies, handle_proc_query |
 | `userspace/vtmgr/src/context.rs`   | A, G      | VT lifecycle, container run migration |
 | `userspace/vtmgr/src/main.rs`      | A         | Clean unused imports                 |
 | `userspace/console/src/context.rs` | Security  | Per-VT endpoints                     |
 | `userspace/console/src/main.rs`    | Security  | Per-VT endpoint dispatch             |
 | `userspace/kbd/src/context.rs`     | Security  | VT slot by service_name              |
 | `userspace/tty/src/context.rs`     | Security  | Subscribe to vt:N endpoint           |
-| `userspace/vfs/src/main.rs`        | C, D, E   | View enforcement, storage lifecycle, VFS_LINK |
-| `userspace/vfs/src/mount.rs`       | E         | MountTable::link() → ext2 FS_LINK, MemFs |
+| `userspace/vfs/src/main.rs`        | C, D, E, N | View enforcement, storage lifecycle, VFS_LINK, procmgr subscription + ProcfsBackend mount |
+| `userspace/vfs/src/mount.rs`       | E, N      | MountTable::link() → ext2 FS_LINK, MemFs, caller_tid in MountBackend trait |
+| `userspace/vfs/src/procfs.rs`      | N         | ProcfsBackend: dynamic /proc with IPC to procmgr |
 | `userspace/vfs/src/view.rs`        | C         | VfsView struct + path filter logic   |
 | `userspace/init/src/services.rs`   | B         | Profile assignments per service      |
 | `containers/vtmgr/Cluufile`       | G         | vtmgr profile escalation (0x05→0x0F) |
-| `userspace/shell/src/commands.rs`   | E        | Container shell builtins             |
+| `userspace/shell/src/commands.rs`   | E, J, N  | Container shell builtins, poweroff/reboot, ps builtin |
+| `userspace/libcluu/src/vfs_view.rs` | N        | /proc added to DEVICE/ADMIN/USER mount profiles |
 | `tools/container-build/`          | E         | Standalone container image builder (Cluufile parser, manifest gen) |
 | `xtask/src/main.rs`               | D, E      | Userdisk build, /var/images/ integration |
 | `containers/*/Cluufile`           | E         | Container build definitions          |
@@ -2844,6 +2844,7 @@ Files created or modified across all phases:
 | Service crash takes down system  | Auto-restart with backoff; primordial death → panic |
 | Unauthorized shutdown            | PROCMGR_SHUTDOWN_LABEL requires CAP_ADMIN |
 | Cross-user container visibility  | container list scoped by session_id |
+| Cross-user /proc snooping        | ProcfsBackend session-based filtering via procmgr |
 
 ### What This Design Does NOT Prevent (Yet)
 
