@@ -467,6 +467,11 @@ fn try_forward_fault(
     }
 
     ThreadManager::with_thread_mut(current_id, |t| {
+        // Copy FPU state from per-CPU scratch buffer (filled by assembly FXSAVE on entry)
+        unsafe {
+            let scratch = crate::architecture::x86_64::syscall::percpu_fpu_scratch_ptr();
+            core::ptr::copy_nonoverlapping(scratch, t.fpu_state.data.as_mut_ptr(), 512);
+        }
         t.fault_state = Some(FaultState {
             fault_type,
             fault_addr,

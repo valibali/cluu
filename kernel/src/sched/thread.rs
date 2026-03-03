@@ -26,6 +26,7 @@
 
 use crate::mm::space::AddressSpace;
 use crate::sched::context::Context;
+use crate::sched::fpu::FpuState;
 use crate::token::scope::{EndpointId, ReplyId};
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -194,6 +195,9 @@ pub struct Thread {
     /// CPU register state for context switching
     pub context: Context,
 
+    /// FPU/SSE register state for context switching (FXSAVE/FXRSTOR)
+    pub fpu_state: FpuState,
+
     /// Physical address of page table root (CR3 value)
     /// This is what gets loaded into CR3 during context switch
     pub page_table_root: PhysAddr,
@@ -296,6 +300,7 @@ impl Thread {
             priority,
             flags,
             context,
+            fpu_state: FpuState::new_init(),
             page_table_root,
             time_slice_remaining: 10, // Default 10 ticks
             timeout_deadline: None,
@@ -336,6 +341,7 @@ impl Thread {
             priority,
             flags,
             context,
+            fpu_state: FpuState::new_init(),
             page_table_root,
             time_slice_remaining: 10,
             timeout_deadline: None,

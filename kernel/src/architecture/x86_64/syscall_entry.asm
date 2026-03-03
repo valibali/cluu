@@ -12,6 +12,7 @@
 section .text
 
 global syscall_entry
+global enter_userspace_asm
 extern syscall_dispatch
 extern schedule_and_switch
 
@@ -30,6 +31,7 @@ extern schedule_and_switch
 %define PERCPU_LAST_ARG5       0x68
 %define PERCPU_LAST_ARG6       0x70
 %define PERCPU_LAST_RBX_RET    0x78
+%define PERCPU_FPU_SCRATCH     0x80
 
 ; Full context structure (for slow path)
 %define CONTEXT_RAX     0x00
@@ -91,6 +93,10 @@ syscall_entry:
 
     mov [gs:PERCPU_USER_RSP], rsp       ; Save user RSP
     mov rsp, [gs:PERCPU_KERNEL_RSP]     ; Load kernel RSP (already aligned)
+
+    ; Save user FPU/SSE state to per-CPU scratch buffer.
+    ; Must happen before any Rust code runs (compiler may use SSE).
+    fxsave [gs:PERCPU_FPU_SCRATCH]
 
     ; ─────────────────────────────────────────────────────────────────────────
     ; Fast path: Save only what SYSCALL clobbers + syscall number
@@ -210,6 +216,9 @@ syscall_entry:
     mov ds, r10w
     mov es, r10w
 
+    ; Restore user FPU/SSE state from per-CPU scratch buffer before returning
+    fxrstor [gs:PERCPU_FPU_SCRATCH]
+
     ; Return to userspace via fast SYSRET
     swapgs
     o64 sysret
@@ -230,6 +239,9 @@ syscall_entry:
     mov r10w, 0x2b
     mov ds, r10w
     mov es, r10w
+
+    ; Restore user FPU/SSE state from per-CPU scratch buffer
+    fxrstor [gs:PERCPU_FPU_SCRATCH]
 
     swapgs
     iretq                               ; IRETQ safely handles non-canonical RIP
@@ -408,6 +420,42 @@ syscall_entry:
     mov rbp, [r10 + CONTEXT_RBP]
     mov r10, [r10 + CONTEXT_R10]
 
+    ; Restore FPU/SSE state from per-CPU scratch buffer (Rust staged next thread's state)
+    fxrstor [gs:PERCPU_FPU_SCRATCH]
+
     ; Return to userspace
+    swapgs
+    iretq
+
+; ═══════════════════════════════════════════════════════════════════════════
+; enter_userspace_asm — Initial userspace entry (called from Rust)
+; ═══════════════════════════════════════════════════════════════════════════
+;
+; Called once by ThreadManager::start() to jump to the first thread.
+; Rust has already set FS base via wrmsr and staged FPU state in scratch.
+;
+; Arguments:
+;   RDI = pointer to Context struct
+;
+; Does not return.
+;
+enter_userspace_asm:
+    mov r10, rdi
+
+    ; Restore FPU/SSE from per-CPU scratch buffer
+    fxrstor [gs:PERCPU_FPU_SCRATCH]
+
+    ; Set userspace segment registers (DS, ES)
+    mov ax, 0x2b
+    mov ds, ax
+    mov es, ax
+
+    ; Build iretq frame from Context
+    push qword [r10 + CONTEXT_SS]
+    push qword [r10 + CONTEXT_RSP]
+    push qword [r10 + CONTEXT_RFLAGS]
+    push qword [r10 + CONTEXT_CS]
+    push qword [r10 + CONTEXT_RIP]
+
     swapgs
     iretq

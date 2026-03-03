@@ -1252,8 +1252,15 @@ impl ThreadManager {
         // Set as current
         Self::set_current(thread_id);
 
-        // Get thread context
-        let context = Self::with_thread(thread_id, |t| t.context).expect("Thread disappeared");
+        // Get thread context and stage initial FPU/SSE state in per-CPU scratch.
+        // enter_userspace will do FXRSTOR from scratch before iretq.
+        let context = Self::with_thread(thread_id, |t| {
+            unsafe {
+                let scratch = crate::architecture::x86_64::syscall::percpu_fpu_scratch_ptr();
+                core::ptr::copy_nonoverlapping(t.fpu_state.data.as_ptr(), scratch, 512);
+            }
+            t.context
+        }).expect("Thread disappeared");
 
         // Jump to thread context
         jump_to_thread(&context);
@@ -1350,6 +1357,11 @@ impl ThreadManager {
         }
         Self::with_thread_mut(thread_id, |thread| {
             thread.context = *context;
+            // Copy FPU state from per-CPU scratch buffer (filled by assembly FXSAVE on entry)
+            unsafe {
+                let scratch = crate::architecture::x86_64::syscall::percpu_fpu_scratch_ptr();
+                core::ptr::copy_nonoverlapping(scratch, thread.fpu_state.data.as_mut_ptr(), 512);
+            }
         });
     }
 
@@ -1421,10 +1433,18 @@ impl ThreadManager {
         }
     }
 
-    /// Get pointer to thread's context
+    /// Get pointer to thread's context (also stages FPU/SSE state for restore)
     fn get_context_ptr(thread_id: ThreadId) -> *const Context {
-        Self::with_thread(thread_id, |thread| &thread.context as *const Context)
-            .unwrap_or(core::ptr::null())
+        Self::with_thread(thread_id, |thread| {
+            // Copy next thread's FPU state to per-CPU scratch buffer.
+            // Assembly will do FXRSTOR from scratch on the exit path.
+            unsafe {
+                let scratch = crate::architecture::x86_64::syscall::percpu_fpu_scratch_ptr();
+                core::ptr::copy_nonoverlapping(thread.fpu_state.data.as_ptr(), scratch, 512);
+            }
+            &thread.context as *const Context
+        })
+        .unwrap_or(core::ptr::null())
     }
 }
 
@@ -1494,8 +1514,14 @@ unsafe fn load_address_space(cr3: u64) {
 
 /// Enter userspace via iretq
 ///
-/// Builds interrupt frame on stack and executes iretq to switch to Ring 3.
+/// Sets FS base for TLS, then calls into NASM `enter_userspace_asm` which
+/// restores FPU/SSE from per-CPU scratch, builds the iretq frame from the
+/// Context struct, and jumps to Ring 3.
 unsafe fn enter_userspace(context: &Context) -> ! {
+    extern "C" {
+        fn enter_userspace_asm(context: *const Context) -> !;
+    }
+
     klibcluu::trace("Executing iretq to userspace");
     klibcluu::log_hex(klibcluu::LogLevel::Info, "Entry RIP=", context.rip);
     klibcluu::log_hex(klibcluu::LogLevel::Info, "Entry RSP=", context.rsp);
@@ -1503,33 +1529,9 @@ unsafe fn enter_userspace(context: &Context) -> ! {
     klibcluu::log_hex(klibcluu::LogLevel::Info, "Entry SS=", context.ss);
 
     // Set FS base (TLS) via MSR before entering userspace.
-    // Must happen before the asm block since wrmsr clobbers rax/rcx/rdx
-    // which the compiler may have assigned for iretq frame operands.
     x86_64::registers::model_specific::Msr::new(0xC000_0100).write(context.fs_base);
 
-    core::arch::asm!(
-        // Initialize userspace segment registers (DS, ES)
-        // NOTE: Do NOT set FS — would zero the FS base we just set via wrmsr.
-        "mov ax, 0x2b",
-        "mov ds, ax",
-        "mov es, ax",
-        // Build iretq frame
-        "push {0}",      // SS
-        "push {1}",      // RSP
-        "push {2}",      // RFLAGS
-        "push {3}",      // CS
-        "push {4}",      // RIP
-        // Swap GS to user mode — kernel GS base moves to KernelGsBase MSR
-        // so the next syscall's swapgs will load it correctly.
-        "swapgs",
-        "iretq",
-        in(reg) context.ss,
-        in(reg) context.rsp,
-        in(reg) context.rflags,
-        in(reg) context.cs,
-        in(reg) context.rip,
-        options(noreturn)
-    );
+    enter_userspace_asm(context as *const Context);
 }
 
 #[cfg(test)]

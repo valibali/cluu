@@ -22,9 +22,13 @@
 
 use crate::error::Error;
 use crate::syscall::{dispatch_syscall, SyscallArgs, SyscallNumber};
+use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::registers::model_specific::{LStar, SFMask};
 use x86_64::registers::rflags::RFlags;
 use x86_64::VirtAddr;
+
+/// Stored base address of PerCpuData (set during init, read by FPU save/restore)
+static PERCPU_ADDR: AtomicU64 = AtomicU64::new(0);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // External Assembly Symbol
@@ -64,7 +68,7 @@ extern "C" {
 /// 0x70    8     Last syscall arg6 (debug)
 /// 0x78    8     Last RBX before return to user (debug)
 /// ```
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Debug)]
 pub struct PerCpuData {
     /// Temporary storage for user RSP during syscall
@@ -114,6 +118,12 @@ pub struct PerCpuData {
 
     /// Debug: last RBX value right before returning to user
     pub last_rbx_ret: u64,
+
+    /// FPU/SSE scratch buffer for FXSAVE/FXRSTOR during context switches.
+    /// Assembly saves user FPU state here on entry, restores from here on exit.
+    /// Rust code copies between this buffer and per-thread FpuState.
+    /// Offset: 0x80, size: 512 bytes, 16-byte aligned (inherits struct alignment).
+    pub fpu_scratch: [u8; 512],
 }
 
 impl PerCpuData {
@@ -136,6 +146,7 @@ impl PerCpuData {
             last_arg5: 0,
             last_arg6: 0,
             last_rbx_ret: 0,
+            fpu_scratch: [0u8; 512],
         }
     }
 
@@ -172,8 +183,9 @@ const _: () = {
     assert!(offset_of!(PerCpuData, last_arg5) == 0x68);
     assert!(offset_of!(PerCpuData, last_arg6) == 0x70);
     assert!(offset_of!(PerCpuData, last_rbx_ret) == 0x78);
-    assert!(size_of::<PerCpuData>() == 0x80);
-    assert!(align_of::<PerCpuData>() == 8);
+    assert!(offset_of!(PerCpuData, fpu_scratch) == 0x80);
+    assert!(size_of::<PerCpuData>() == 0x280);
+    assert!(align_of::<PerCpuData>() == 16);
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -345,6 +357,9 @@ pub unsafe fn set_per_cpu_area(per_cpu_data: &PerCpuData) {
 
     let addr = per_cpu_data as *const _ as u64;
 
+    // Store address for percpu_fpu_scratch_ptr()
+    PERCPU_ADDR.store(addr, Ordering::Release);
+
     // Set both GS bases to the same value
     // (SWAPGS will swap between GsBase and KernelGsBase)
     GsBase::write(VirtAddr::new(addr));
@@ -352,6 +367,20 @@ pub unsafe fn set_per_cpu_area(per_cpu_data: &PerCpuData) {
 
     klibcluu::trace("Per-CPU area set: 0x");
     klibcluu::log_hex(klibcluu::LogLevel::Trace, "", addr);
+}
+
+/// Get pointer to the per-CPU FPU scratch buffer.
+///
+/// Assembly code saves user FPU state here via `fxsave [gs:0x80]` on entry,
+/// and restores via `fxrstor [gs:0x80]` on exit. Rust code copies between
+/// this buffer and per-thread FpuState during context switches.
+///
+/// # Safety
+///
+/// Must be called after `set_per_cpu_area()` has been called.
+pub unsafe fn percpu_fpu_scratch_ptr() -> *mut u8 {
+    let base = PERCPU_ADDR.load(Ordering::Acquire) as *mut u8;
+    base.add(0x80)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -434,7 +463,7 @@ mod tests {
             assert_eq!(user_rsp_offset, 0x00);
             assert_eq!(kernel_rsp_offset, 0x08);
             assert_eq!(need_resched_offset, 0x20);
-            assert_eq!(core::mem::size_of::<PerCpuData>(), 0x28);
+            assert_eq!(core::mem::size_of::<PerCpuData>(), 0x280);
         }
     }
 }

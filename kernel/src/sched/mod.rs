@@ -49,6 +49,7 @@
 
 // Core types
 pub mod context;
+pub mod fpu;
 pub mod process;
 pub mod process_manager;
 pub mod repository;

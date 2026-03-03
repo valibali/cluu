@@ -50,6 +50,8 @@ extern generic_fault_with_regs
 %define CONTEXT_FS_BASE 0xA8
 %define CONTEXT_SIZE    0xB8
 
+%define PERCPU_FPU_SCRATCH 0x80
+
 %define GPF_RAX     0x00
 %define GPF_RBX     0x08
 %define GPF_RCX     0x10
@@ -130,6 +132,7 @@ extern generic_fault_with_regs
     test byte [rsp + 8], 0x3   ; CS is at [rsp+8] (no error code)
     jz %%no_swapgs
     swapgs
+    fxsave [gs:PERCPU_FPU_SCRATCH]
 %%no_swapgs:
     sub rsp, GF_SIZE
 
@@ -196,6 +199,7 @@ extern generic_fault_with_regs
     push rcx                ; RFLAGS
     push rdx                ; CS
     push rsi                ; RIP
+    fxrstor [gs:PERCPU_FPU_SCRATCH]
     swapgs
     jmp shared_restore_regs
 
@@ -232,6 +236,7 @@ gpf_interrupt_entry:
     test byte [rsp + 16], 0x3
     jz .gpf_no_swapgs
     swapgs
+    fxsave [gs:PERCPU_FPU_SCRATCH]
 .gpf_no_swapgs:
     sub rsp, GPF_SIZE
 
@@ -313,6 +318,7 @@ gpf_interrupt_entry:
     push rcx                ; RFLAGS (sanitized)
     push rdx                ; CS
     push rsi                ; RIP
+    fxrstor [gs:PERCPU_FPU_SCRATCH]
     swapgs                  ; Kernel→user GS
     jmp .gpf_restore_regs
 
@@ -369,6 +375,7 @@ pf_interrupt_entry:
     test byte [rsp + 16], 0x3
     jz .pf_no_swapgs
     swapgs
+    fxsave [gs:PERCPU_FPU_SCRATCH]
 .pf_no_swapgs:
     sub rsp, PF_SIZE
 
@@ -480,6 +487,7 @@ pf_interrupt_entry:
     push rcx                ; RFLAGS (sanitized)
     push rdx                ; CS
     push rsi                ; RIP
+    fxrstor [gs:PERCPU_FPU_SCRATCH]
     swapgs                  ; Kernel→user GS
     jmp shared_restore_regs ; Use timer's proven restore path on BSP_STACK
 
@@ -545,6 +553,8 @@ pf_interrupt_entry:
 
 .pf_resume:
     ; ── Resume faulting instruction (lazy alloc succeeded) ──
+    ; Restore FPU state (resume always returns to userspace, GS is still kernel)
+    fxrstor [gs:PERCPU_FPU_SCRATCH]
     ; Restore all GPRs from the saved PfDebugFrame
     mov rax, [rsp + PF_RAX]
     mov rbx, [rsp + PF_RBX]
@@ -579,6 +589,7 @@ timer_interrupt_entry:
     test qword [rsp + 0x08], 0x3
     jz .skip_swapgs_entry
     swapgs                                  ; User->kernel: switch to kernel GS
+    fxsave [gs:PERCPU_FPU_SCRATCH]
 .skip_swapgs_entry:
 
     ; Reserve space for Context
@@ -657,6 +668,12 @@ timer_interrupt_entry:
     add rsp, 8
     pop r11
 
+    ; Check CPL BEFORE restoring GPRs — need addressable memory for FXRSTOR
+    mov rax, [rsp + CONTEXT_CS]
+    test al, 0x3
+    jz .kernel_noswitch_ret
+    fxrstor [gs:PERCPU_FPU_SCRATCH]
+.kernel_noswitch_ret:
     ; Restore general-purpose registers
     mov rax, [rsp + CONTEXT_RAX]
     mov rbx, [rsp + CONTEXT_RBX]
@@ -732,6 +749,7 @@ timer_interrupt_entry:
     push rcx                                ; RFLAGS (sanitized)
     push rdx
     push rsi
+    fxrstor [gs:PERCPU_FPU_SCRATCH]
     swapgs                                  ; Kernel->user: restore user GS
     jmp shared_restore_regs
 
