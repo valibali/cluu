@@ -1,13 +1,138 @@
 # CLUU Microkernel — Comprehensive Technical Audit
 
-**Date**: 2026-03-02
+**Date**: 2026-03-02 (original), **revised 2026-04-21** with re-verification pass
 **Scope**: Full codebase (68K Rust + 20K C/ASM, 184 source files, 30 crates)
-**Method**: 9 parallel deep-dive analyses across every subsystem
+**Method**: 9 parallel deep-dive analyses across every subsystem, with a re-
+verification pass on 2026-04-21 against uncommitted WIP on `develop`.
+
+---
+
+## 0. Current State Update (2026-04-21)
+
+**Status**: ~40 days of uncommitted work sits on `develop`. Last commit is
+`d40502c` (2026-03-03). The working tree **builds cleanly** (`cargo xtask build`
+succeeds end-to-end; no newlib/syscalls/crt0 drift, no link errors) and the
+default harness case passes (`bash scripts/harness_run.sh`: all required markers
+found, zero faults, healthy resource-delta accounting). The full
+`cargo xtask harness-matrix` sweep has NOT been rerun in this pass.
+
+The WIP is concentrated in two coherent themes:
+
+- **Security hardening**: SMAP/SMEP + CLAC, Spectre V2 (IBPB + STIBP + retpoline),
+  password hashing + rate limiting + audit logging, TPM 2.0 TIS driver as a new
+  userspace crate (`tpmd`, 1,302 lines), measured-boot + sealed-storage + remote-
+  attestation (PoC) modules in init.
+- **IPC Tier-1 optimizations** (§12.3, T1.1–T1.5): inline syscall dispatch jump
+  table, EndpointShard inner Mutex removed, token cache 4→8, `PerCpuReplyMap<UnsafeCell>`
+  replacing `Mutex`, fast-path register save trimmed.
+
+Plus **async notifications (A2)** — a new seL4-style notification subsystem
+(`kernel/src/ipc/notification.rs`, 207 lines) with 8-shard registry and 4 new
+invoke ops (80–83).
+
+### 0.1 Verified Against Code (2026-04-21)
+
+Every ✅ item in §12 was re-verified against the current source. All claims
+are present and wired. Specifics:
+
+| Area | Verification | Notes |
+|---|---|---|
+| SMAP/SMEP + CLAC | ✅ | CR4 setup at `main.rs:129-152`; CLAC at `syscall_entry.asm:82` and four interrupt stubs (`:137,:242,:382,:597`) |
+| Spectre V2 (IBPB/STIBP) | ✅ | `spectre.rs` 65 lines; IBPB gated on CR3 change in context switch (`thread_manager.rs:~1449`) |
+| Retpoline | ✅ | `"features": "-mmx,+retpoline"` in kernel triplet |
+| Inline syscall dispatch (T1.1) | ✅ | 4-entry jump table (`syscall_entry.asm:153-180`) for send/recv/call/reply |
+| EndpointShard inner Mutex removed (T1.2) | ✅ | All 11 call sites updated; single-lock path verified |
+| Token cache 4→8 (T1.3) | ✅ | `TOKEN_CACHE_SIZE = 8`; arrays and LRU order expanded |
+| PerCpuReplyMap (T1.4) | ✅ | `UnsafeCell`-wrapped, `unsafe impl Sync` with documented single-CPU/non-reentrant boundary |
+| Fast-path register save (T1.5) | ✅ | 5 callee-saved pushes replaced with R15 + 8-byte alignment pad |
+| Async notifications (A2) | ✅ | `notification.rs` 207 lines, 8 shards, 4 invoke ops (80–83), `ObjectRef::Notification(NotificationId)` + tag 0x08 |
+| Deferred fault queue 4→16 (H9) | ✅ | Overflow counter present but never read |
+| Wake queue 8→32 (H10) | ✅ | Overflow counter present but never read |
+| tpmd + measured boot + sealed storage | ✅ | tpmd 1,302 lines; stub-mode detection via DID_VID probe; graceful `REPLY_ENODEV`; seal/unseal round-trip verified (`data_len == 32 && unsealed == secret`) |
+| Password hashing + rate limit + audit log | ✅ | SHA-256 + RDRAND salt, constant-time verify; exponential backoff `min(2^(f-1), 300)`; structured `AUTH_*` events (login/sudo/su, OK+FAIL) |
+| Remote attestation (SEC-4) | ⚠️ **PoC only** | `attestation.rs` sends `TPM2_Quote`, reads length, **does not verify signature** |
+
+### 0.2 Residual Risks Found in this Pass
+
+| # | Sev | Issue | Location |
+|---|---|---|---|
+| R1 | MEDIUM | **T1.5 fast-path assumes SysV ABI on `syscall_dispatch`**. No compile- or run-time check that RBX/RBP/R12–R14 are actually preserved. Silent corruption possible if dispatch is ever inlined or LLVM aggressively reallocates. | `syscall_entry.asm` |
+| R2 | MEDIUM | **RDRAND salt fallback silently zeroes**. After 10 retries per u64, salt degrades to all zeros with no warning. Hashes still verify but become dictionary-attackable. | `libcluu/src/crypto.rs:208-244` |
+| R3 | LOW | **Overflow counters unread**. `PENDING_WAKE_OVERFLOW` / `DEFERRED_FAULT_OVERFLOW` are incremented but not exposed via /proc, telemetry, or debug_print. Diagnostic value lost. | `thread_manager.rs:224,246,938,976` |
+| R4 | LOW | **Attestation signature not verified** (SEC-4). `quote_reply.words[1]` is read as length; payload signature is logged-only. Acceptable for PoC; NOT production-ready attestation. | `init/attestation.rs:46-72` |
+| R5 | LOW | **~30 compiler warnings** across workspace — dead fields/methods, unused imports (cluu-init variants, cluu-vfs helpers, cluu-procmgr fields, cluu-tpmd `off` writes). No errors. Cumulative drift signal since Phase L. | `cargo xtask build` |
+| R6 | LOW | **`etc/users.toml` schema comment updated but all entries still `password = ""`**. The new `$sha256$<salt>$<hash>` format path has no in-tree exercise yet. | `etc/users.toml` |
+| R7 | LOW | **Harness coverage quietly narrowed**. `scripts/harness_run.sh` relaxed `m0_boot`, `m6_ipc_compact`, `m6_ipc_rendezvous`, and `l2_jobchurn_heavy` to minimal markers ("SLO-heavy / redundant"). Reasonable pruning, but reduces regression-catching surface. | `scripts/harness_run.sh` |
+
+### 0.3 Stale Claims in Doc Body (Fixed Inline Below)
+
+§2.7, §4.4, §5.5, §7.5 and §11 were written before the hardening work and
+still described the pre-hardening state (plaintext passwords, "no STIBP/IBPB",
+"no async notifications", 4/8-slot queues, no audit logging, no rate limiting,
+no resource quotas). These entries have been updated inline in this revision.
+
+### 0.4 Recommended Landing Strategy
+
+The WIP is coherent enough to land, but too large for a single commit.
+Recommended split, in this order (each independently buildable and testable):
+
+1. **Kernel IPC Tier-1 optimizations** — `syscall_entry.asm`, `endpoint.rs`,
+   `thread_manager.rs`, `token/{mod,scope,table}.rs`, `syscall/handlers.rs`
+   (T1.1–T1.5 only). Measurable IPC-latency win, self-contained.
+2. **Kernel security hardening** — SMAP/SMEP (`main.rs`, `syscall_entry.asm`,
+   `interrupts.asm`), `spectre.rs`, retpoline triplet flag. Pure defensive.
+3. **Async notifications (A2)** — `notification.rs` + token machinery + 4
+   invoke ops + libcluu helpers. Kernel-and-userspace but cohesive.
+4. **TPM + userspace auth** — `tpmd` crate, `init/{measured_boot,sealed_storage,
+   attestation}.rs`, `libcluu/crypto.rs`, procmgr password/rate-limit/audit
+   changes, `etc/users.toml` comment. Large but thematically unified.
+
+Between each commit, rerun the default harness case. Before commit 4 lands,
+run `cargo xtask harness-matrix` at least once.
+
+**Block landing on fixing R1 and R2.** Both are cheap:
+- R1: add a small inline test (panic-if-mismatched sentinel pattern, or a
+  `naked` wrapper that explicitly saves/restores the registers the fast path
+  no longer touches) to assert ABI preservation at boot.
+- R2: make RDRAND failure loud — at minimum `debug_print` a warning; ideally
+  panic if salt degenerates to all zeros during a real password operation.
+
+R3/R4/R5/R6/R7 can ride in follow-up commits.
+
+### 0.5 Recommended Next Work (Post-Landing)
+
+Security hardening + IPC Tier-1 + async notifications are large, diverse
+wins. Before starting anything new, **measure** median IPC round-trip on the
+Tier-1 build — the M1 milestone ("sub-1200 cycles") may already be achieved,
+in which case declare M1 done.
+
+Three viable next milestones, roughly in order of effort / demonstrability:
+
+**Option A — M2: MicroPython port** *(recommended first)*
+All prerequisites are already met (per MEMORY.md §Research Findings). Work is
+`sched_yield()` stub (U5, ~10 LOC), `pthread_cancel` patch, and crate setup.
+~1–2 weeks. Unlocks scripting, strong visible progress, zero kernel risk.
+
+**Option B — U1/U2: raw input (PS/2 mouse + key up/down scancodes)**
+~1 week. Unblocks Quake (M8) and gives an input-rich demo path without SMP
+prerequisites.
+
+**Option C — SMP-1 (per-CPU foundation)**
+Much larger. §3.3 flags multiple CRITICAL SMP gaps (TLB shootdown, teardown
+synchronization, shared BSP_STACK). Start with SMP-1 (per-CPU GDT/TSS/IST/
+PerCpuData) because everything else depends on it. Only take this on when a
+concrete SMP workload motivates it.
+
+**Recommended path**: **A → B → (if needed) SMP**. MicroPython is cheap and
+demonstrable; raw input is cheap and unlocks Quake; SMP is the biggest cliff
+and should come once userspace is compelling enough to make SMP a felt need
+rather than an abstract one.
 
 ---
 
 ## Table of Contents
 
+0. [Current State Update (2026-04-21)](#0-current-state-update-2026-04-21)
 1. [Codebase Overview](#1-codebase-overview)
 2. [Kernel IPC & Syscall Subsystem](#2-kernel-ipc--syscall-subsystem)
 3. [Memory Management](#3-memory-management)
@@ -197,8 +322,9 @@ IPC relies entirely on copy-based transfer via physmap.
 - **Grant/Map fully stubbed**: Zero-copy page transfer not implemented. All IPC
   involves memory copies (2 copies for full Call+Reply round-trip).
 - **No batched operations**: Each invoke is a full syscall transition.
-- **No async notifications**: Unlike seL4's notification objects, CLUU only has
-  blocking Send/Recv/Call. No way to signal without blocking.
+- ~~**No async notifications**~~ — **FIXED (A2)**. 8-shard `Notification`
+  registry with signal/try_wait/poll and 4 invoke ops (80–83). See
+  `kernel/src/ipc/notification.rs` and §0.1.
 - **Endpoint queue limits**: MAX_QUEUE_LEN=1024 per endpoint. Single sender can
   fill queue, blocking all others. No per-sender quota.
 
@@ -310,8 +436,8 @@ arithmetically. A child token can never have rights its parent lacked.
 | TOCTOU pointer attack | Mitigated | Per-page translation in copy_from_user |
 | Message sender forgery | Blocked | Kernel-injected sender TID |
 | Endpoint message flooding | Partial | Bounded queue (1024) but no per-sender limit |
-| Spectre/Meltdown | Unmitigated | No STIBP/IBPB on kernel entry |
-| SMAP/SMEP | Unmitigated | Not enabled (kernel can access userspace) |
+| Spectre V2 | Mitigated (IBPB+STIBP+retpoline) | IBPB on cross-CR3 switch, STIBP at boot, retpoline in kernel triplet. Meltdown/KPTI deferred (QEMU/modern HW has HW fix; 30%+ perf cost). |
+| SMAP/SMEP | Enabled | CR4 bits 20-21 set at boot; CLAC on all kernel entries (syscall + 4 interrupt stubs). |
 
 ### 4.5 vs. seL4 / Fuchsia
 
@@ -321,7 +447,9 @@ arithmetically. A child token can never have rights its parent lacked.
 - **Fuchsia**: Handle-based with fine-grained rights hierarchy. Kernel validates
   all syscalls. CLUU delegates more to userspace via tokens.
 
-**Rating: 8.7/10** — Strongest subsystem. SMAP/Spectre hardening needed for production.
+**Rating: 9.2/10** (was 8.7) — Strongest subsystem. SMAP/SMEP + Spectre V2
+(IBPB/STIBP/retpoline) landed; password hashing + rate limiting + audit
+logging landed. KPTI deferred.
 
 ---
 
@@ -370,8 +498,8 @@ safety. Drained every timer tick.
 |---|---|---|
 | ~~No FPU/SSE save~~ | ~~MEDIUM~~ FIXED | Eager FXSAVE/FXRSTOR at all kernel entry/exit points (commit dddd98e) |
 | Shared BSP_STACK | HIGH (SMP) | Single 64KB kernel stack shared by all threads |
-| 4-slot deferred fault queue | MEDIUM | 5th concurrent IST fault dropped silently |
-| 8-slot pending wake queue | MEDIUM | Lost wakes cause hung threads |
+| ~~4-slot deferred fault queue~~ | ~~MEDIUM~~ FIXED (H9) | Expanded to 16 slots; overflow counter added (but not yet exposed to userspace — R3) |
+| ~~8-slot pending wake queue~~ | ~~MEDIUM~~ FIXED (H10) | Expanded to 32 slots; overflow counter added (but not yet exposed — R3) |
 | No priority inheritance | LOW | Priority inversion possible on IPC |
 | Fixed 40ms quantum | LOW | No per-priority adjustment (unlike CFS) |
 | TID 1 hardcoded as init | LOW | Fragile assumption if boot order changes |
@@ -531,13 +659,14 @@ ceiling. `su`: Requires capability narrowing (caller must outrank target).
 
 | Issue | Severity | Detail |
 |---|---|---|
-| Plaintext passwords | CRITICAL | /etc/users.toml stores passwords in plaintext |
-| No login rate limiting | HIGH | Brute force possible via repeated login requests |
+| ~~Plaintext passwords~~ | ~~CRITICAL~~ FIXED (SEC-1.2) | SHA-256 + RDRAND salt (`$sha256$<salt>$<hash>`), constant-time verify. Legacy plaintext path still accepted for migration (no in-tree users have a real hash yet — R6). |
+| ~~No login rate limiting~~ | ~~HIGH~~ FIXED (SEC-1.3) | Per-user exponential backoff `min(2^(f-1), 300)s`, applied to login + sudo + su. |
 | No MAC (SELinux-style) | HIGH | ADMIN = god mode, no compartmentalization |
-| No resource quotas | HIGH | No memory/CPU/FD limits. malloc loop = system OOM |
-| No audit logging | HIGH | No record of logins, escalation, file access |
+| ~~No resource quotas~~ | ~~HIGH~~ FIXED (H4, v1) | `max_processes` + `max_priority` enforced per-container in procmgr. Memory/CPU/FD limits still absent. |
+| ~~No audit logging~~ | ~~HIGH~~ FIXED (H6, v1) | Structured `AUTH_LOGIN_{OK,FAIL,RATE}`, `AUTH_SUDO_{OK,FAIL}`, `AUTH_SU_{OK,FAIL}` events via `audit_log()` in procmgr. |
 | No endpoint quotas | MEDIUM | Malicious service can create unlimited endpoints |
 | Procmgr is SPOF | MEDIUM | Compromised procmgr = total system compromise |
+| RDRAND silent zero-salt | MEDIUM (R2) | On RDRAND failure, salt degrades to zeros without warning. Fix before landing. |
 
 ### 7.6 vs. Docker / Fuchsia
 
@@ -549,8 +678,10 @@ ceiling. `su`: Requires capability narrowing (caller must outrank target).
 | Authentication | Plaintext (weak) | OAuth/token | N/A |
 | Nesting | 8-level cascade | Composable images | Strict hierarchy |
 
-**Rating: 7.8/10** — Architecturally clean. Plaintext passwords and missing quotas
-are critical gaps.
+**Rating: 8.5/10** (was 7.8) — Architecturally clean. Password hashing,
+rate limiting, audit logging, and first-tier resource quotas (max_processes,
+max_priority) have landed. Remaining gaps: MAC, memory/CPU/FD quotas,
+endpoint per-sender quotas.
 
 ### 7.7 Novelty Assessment: Containers as an OS Primitive
 
@@ -786,18 +917,20 @@ automated build/test.
 
 ### Subsystem Ratings
 
-| Subsystem | Score | Notes |
-|---|---|---|
-| IPC & Syscalls | 8.5/10 | Architecturally excellent, stubbed grants |
-| Security & Capabilities | 8.7/10 | Strongest subsystem, sound crypto |
-| Scheduler & Threading | 8.5/10 | Solid single-CPU, FPU save implemented |
-| Userspace Services | 7.5/10 | ~85% complete, missing pipes/TTY |
-| Process Isolation | 7.8/10 | Good model, plaintext passwords |
-| POSIX Layer | 7.0/10 | Sufficient for embedded |
-| Memory Management | 6.5/10 | Correct but SMP-unsafe |
-| Device Drivers | 3.5/10 | Minimal (QEMU only) |
-| Build System | 8.0/10 | Developer-friendly |
-| **OVERALL** | **7.3/10** | |
+Ratings updated 2026-04-21 to reflect the uncommitted hardening work.
+
+| Subsystem | Score | Δ | Notes |
+|---|---|---|---|
+| IPC & Syscalls | 8.8/10 | +0.3 | Tier-1 optimizations (T1.1–T1.5) + async notifications (A2); grants still stubbed |
+| Security & Capabilities | 9.2/10 | +0.5 | SMAP/SMEP + Spectre V2 + retpoline + password hashing + rate limiting + audit logging |
+| Scheduler & Threading | 8.7/10 | +0.2 | Fault/wake queues enlarged (H9/H10); still single-CPU |
+| Userspace Services | 7.5/10 | 0 | ~85% complete, missing pipes/TTY, now includes tpmd |
+| Process Isolation | 8.5/10 | +0.7 | Hashed passwords, rate limit, audit log, max_processes/max_priority quotas (H4) |
+| POSIX Layer | 7.0/10 | 0 | Sufficient for embedded |
+| Memory Management | 6.5/10 | 0 | Correct but SMP-unsafe |
+| Device Drivers | 3.5/10 | 0 | Minimal (QEMU only) |
+| Build System | 8.0/10 | 0 | Developer-friendly |
+| **OVERALL** | **7.7/10** | +0.4 | Modulo R1/R2 before the hardening commits land |
 
 ### Where CLUU Sits
 
@@ -822,8 +955,8 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 
 1. **SMP**: Single CPU, shared BSP_STACK, no TLB shootdown, no IOAPIC
 2. ~~**FPU/SSE**: Any SIMD code corrupts across context switches~~ — FIXED (commit dddd98e)
-3. **Password hashing**: Plaintext is a deal-breaker
-4. **Resource quotas**: No memory/CPU limits = trivial DoS
+3. ~~**Password hashing**: Plaintext is a deal-breaker~~ — FIXED (SEC-1.2), modulo R2 (RDRAND fallback)
+4. **Resource quotas**: Only max_processes + max_priority (H4 v1); memory/CPU/FD limits absent
 5. **Network stack**: Can't communicate with the outside world
 6. **Filesystem writes**: ext2 is read-only
 7. **Grant/Map zero-copy**: Transfer mechanism is stubbed
@@ -833,7 +966,7 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 
 ## 12. Consolidated TODO List
 
-*Last updated: 2026-03-03. Items marked ✅ are complete.*
+*Last updated: 2026-03-11. Items marked ✅ are complete, 🔧 are in progress.*
 
 ---
 
@@ -841,9 +974,9 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 
 | # | Priority | Status | Description | Location |
 |---|---|---|---|---|
-| B1 | LOW | TODO | sys_call inline path limited to 16 bytes — inconsistent with sys_send/sys_reply 4-chunk pattern | handlers.rs:477-484 |
-| L1 | LOW | TODO | Frame registry map_count leak: token re-lookup failure on error path skips dec_map_count | handlers.rs:1330-1434 |
-| L2 | LOW | TODO | Reply map cleanup on thread death scans all REPLY_MAP_SLOTS — O(n), acceptable at current size | thread_manager.rs:420-447 |
+| B1 | LOW | ✅ | sys_call inline path limited to 16 bytes — inconsistent with sys_send/sys_reply 4-chunk pattern | handlers.rs:477-484 |
+| L1 | LOW | ✅ | Frame registry map_count leak: token re-lookup failure on error path skips dec_map_count | handlers.rs:1330-1434 |
+| L2 | LOW | ✅ | Reply map cleanup on thread death scans all REPLY_MAP_SLOTS — O(n), acceptable at current size | thread_manager.rs:420-447 |
 
 ---
 
@@ -851,21 +984,21 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 
 | # | Priority | Status | Description | Files |
 |---|---|---|---|---|
-| SEC-1.1 | CRITICAL | TODO | **Enable SMAP/SMEP** — set CR4 bits 20-21, wrap user memory access with CLAC/STAC, use `-cpu Broadwell` | x86_64/mod.rs, copy_from_user sites |
-| SEC-1.2 | CRITICAL | TODO | **Hash passwords** — replace plaintext `==` with bcrypt/scrypt verify, store `$2b$12$salt$hash` in /etc/shadow | procmgr/main.rs, /etc/users.toml |
-| SEC-1.3 | HIGH | TODO | **Login rate limiting** — exponential backoff (1s→5min cap), per-user failed attempt tracking | procmgr/main.rs |
-| SEC-2.1 | MEDIUM | TODO | **TPM 2.0 TIS driver** — userspace `tpmd` service, MMIO at 0xFED40000, TPM2_Startup/PCR_Extend/PCR_Read | new: userspace/tpmd/ |
-| SEC-2.2 | MEDIUM | TODO | **Measured boot** — extend PCRs: kernel (PCR9), initrd (PCR13), primordial binaries (PCR14) | kernel init, init process |
-| SEC-3 | LOW | TODO | **TPM sealed storage** — seal disk encryption key / kernel secret to PCR values | tpmd, kernel init |
-| SEC-4 | LOW | TODO | **Remote attestation** — AIK, TPM Quote, external verifier | tpmd |
-| SEC-5.1 | LOW | TODO | **Spectre V2 (IBPB/STIBP)** — flush branch predictor on kernel entry, restrict SMT prediction | syscall_entry.asm, boot init |
-| SEC-5.2 | LOW | TODO | **KPTI** — separate kernel/user page tables | vmm.rs (major) |
-| SEC-5.3 | LOW | TODO | **Retpoline** — replace indirect calls with return-based trampoline | Rust compiler flag |
-| H4 | HIGH | TODO | **Resource quotas** — memory, FD, CPU time limits per container | procmgr, kernel invoke ops |
+| SEC-1.1 | CRITICAL | ✅ | **Enable SMAP/SMEP** — CR4 bits 20-21, CLAC on all kernel entries (syscall, timer, GPF, PF, generic fault) | main.rs:129-152, syscall_entry.asm, interrupts.asm |
+| SEC-1.2 | CRITICAL | ✅ | **Hash passwords** — SHA-256 with RDRAND salt, constant-time verify, `$sha256$<salt>$<hash>` format | procmgr/main.rs, libcluu/crypto.rs |
+| SEC-1.3 | HIGH | ✅ | **Login rate limiting** — exponential backoff (1s→5min cap), per-user LoginAttempt tracking | procmgr/main.rs |
+| SEC-2.1 | MEDIUM | ✅ | **TPM 2.0 TIS driver** — userspace `tpmd` service, full TIS FIFO protocol, TPM2 command builders, IPC server with stub mode | userspace/tpmd/, libcluu/ipc.rs |
+| SEC-2.2 | MEDIUM | ✅ | **Measured boot** — init extends PCRs via tpmd IPC: PCR9 (initrd), PCR14 (×N primordial binaries), best-effort | userspace/init/src/measured_boot.rs |
+| SEC-3 | LOW | ✅ | **TPM sealed storage** — PoC seal/unseal round-trip via tpmd IPC (CreatePrimary+Create+Load+StartAuthSession+PolicyPCR+Unseal); stub mode graceful skip | tpmd/main.rs, init/sealed_storage.rs |
+| SEC-4 | LOW | ✅ | **Remote attestation** — AIK creation (RSA-2048 signing) + TPM2_Quote (PCR 9+14 signed attestation); stub mode graceful skip | tpmd/main.rs, init/attestation.rs |
+| SEC-5.1 | LOW | ✅ | **Spectre V2 (IBPB/STIBP)** — CPUID detection, IBPB on cross-CR3 context switch, STIBP set at boot; graceful no-op if unsupported | spectre.rs, thread_manager.rs |
+| SEC-5.2 | LOW | DEFERRED | **KPTI** — Meltdown mitigation. Deferred: affects only pre-2018 Intel; QEMU/modern HW has hardware fix. 600+ lines, 30%+ perf cost. IBPB+Retpoline cover Spectre V2. | vmm.rs (major) |
+| SEC-5.3 | LOW | ✅ | **Retpoline** — `+retpoline` target feature in kernel JSON; LLVM generates thunks for all indirect calls/jumps | triplets/x86_64-cluu-kernel.json |
+| H4 | HIGH | ✅ | **Resource quotas v1** — max_processes + max_priority enforcement in procmgr (userspace-only) | procmgr/main.rs |
 | H5 | — | ✅ | **FPU/SSE context save/restore** — eager FXSAVE/FXRSTOR in assembly, per-CPU scratch buffer (gs:0x80) | commit dddd98e |
-| H6 | HIGH | TODO | **Audit logging** — login attempts, privilege escalation, file access | procmgr, vfs |
-| H9 | MEDIUM | TODO | **Expand deferred fault queue** beyond 4 slots | idt.rs |
-| H10 | MEDIUM | TODO | **Expand pending wake queue** beyond 8 slots | thread_manager.rs |
+| H6 | HIGH | ✅ | **Audit logging v1** — structured auth event logging (login/sudo/su success+fail) via debug_print | procmgr/main.rs |
+| H9 | MEDIUM | ✅ | **Expand deferred fault queue** 4→16 slots, overflow counter added | thread_manager.rs |
+| H10 | MEDIUM | ✅ | **Expand pending wake queue** 8→32 slots, overflow counter added | thread_manager.rs |
 
 ---
 
@@ -875,20 +1008,20 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 
 | # | Status | Optimization | Est. Savings | Location |
 |---|---|---|---|---|
-| T1.1 | TODO | **Inline syscall dispatch** — branch directly in asm for send/call/reply | 20–25 cycles | syscall_entry.asm |
-| T1.2 | TODO | **Consolidate endpoint double-lock** — merge shard + endpoint mutex | 8–12 cycles | endpoint.rs |
-| T1.3 | TODO | **Expand token cache** 4→8 entries, set-associative hash | 10–15 cycles | table.rs |
-| T1.4 | TODO | **Thread-local ReplyMap** — eliminate global CALL_REPLY_MAP Mutex | 15–20 cycles | thread_manager.rs |
-| T1.5 | TODO | **Reduce fast-path register save** — skip R12-R15 for Send/Reply | 15–20 cycles | syscall_entry.asm |
+| T1.1 | ✅ | **Inline syscall dispatch** — jump table in asm for syscalls 0-3 (send/recv/call/reply), dedicated `extern "C"` entry points skip SyscallNumber parse + dispatch match | 20–25 cycles | syscall_entry.asm, syscall.rs |
+| T1.2 | ✅ | **Consolidate endpoint double-lock** — removed inner Mutex from EndpointShard, shard lock sufficient (single-CPU, non-reentrant). 11 call sites updated. | 8–12 cycles | endpoint.rs |
+| T1.3 | ✅ | **Expand token cache** 4→8 entries, LRU linear scan (no hash change needed) | 10–15 cycles | table.rs |
+| T1.4 | ✅ | **Thread-local ReplyMap** — PerCpuReplyMap<UnsafeCell> replaces Mutex, lock-free access | 15–20 cycles | thread_manager.rs |
+| T1.5 | ✅ | **Reduce fast-path register save** — removed 5 callee-saved pushes, keep only R15 + 8-byte alignment pad | 15–20 cycles | syscall_entry.asm |
 
 **Tier 2 — Structural (target: 900–1,100 cycles):**
 
 | # | Status | Optimization | Est. Savings | Location |
 |---|---|---|---|---|
 | T2.1 | TODO | **Cache ObjectRef in Token** — eliminate scope→ObjectRef BTreeMap lookup | 15–20 cycles | table.rs, scope.rs |
-| T2.2 | TODO | **Cache first waiter pointer** — O(1) direct delivery | 10–15 cycles | endpoint.rs |
+| T2.2 | SKIP | **Cache first waiter pointer** — REJECTED: VecDeque front is already O(1), complexity outweighs ~5-15 cycle benefit | 10–15 cycles | endpoint.rs |
 | T2.3 | TODO | **Lazy timestamp validation** — defer TSC read to cache miss only | 8–12 cycles | table.rs |
-| T2.4 | TODO | **Batch scheduler ops** — defer add_to_scheduler until after IPC | 10–15 cycles | scheduler.rs |
+| T2.4 | SKIP | **Batch scheduler ops** — REJECTED: wake_thread() already called outside shard lock, deferred wake mechanism (try_lock + queue_pending_wake) already exists | 10–15 cycles | scheduler.rs |
 | T2.5 | TODO | **Cache-line align hot structs** — 64-byte boundaries | 5–8 cycles | multiple |
 
 **Tier 3 — Architectural (target: <800 cycles, only if Tier 1+2 insufficient):**
@@ -967,7 +1100,7 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 | # | Priority | Status | Description | Location |
 |---|---|---|---|---|
 | A1 | HIGH | TODO | **Grant/map zero-copy** — implement actual page transfer in transfer.rs (currently stubbed) | transfer.rs |
-| A2 | HIGH | TODO | **Async notifications** — seL4-style Notification object with signal/wait/poll (needed by network, GUI, audio) | kernel: new object type |
+| A2 | HIGH | ✅ | **Async notifications** — seL4-style Notification object with signal/wait/poll, 8-shard registry | ipc/notification.rs, token/scope.rs, token/table.rs |
 | A3 | MEDIUM | TODO | **VFS multi-thread or async** — single-threaded VFS blocks all mounts on slow remote op | vfs/main.rs |
 | A4 | MEDIUM | TODO | **Priority inheritance on IPC** — prevent priority inversion | endpoint.rs, scheduler.rs |
 | A5 | LOW | TODO | **Unify sys_call inline** to 4-chunk pattern | handlers.rs (needs IPC redesign) |
@@ -980,11 +1113,12 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 | Milestone | Description | Metric |
 |---|---|---|
 | **M0: Tier 0 complete** | FPU save + IrqAck | ✅ Done (2026-03-03) |
-| **M1: Sub-1200 IPC** | IPC Tier 1 optimizations | Median round-trip ≤1,200 cycles |
-| **M2: MicroPython runs** | Port + REPL on VT | `>>> print("hello")` works |
+| **M1: Sub-1200 IPC** | IPC Tier 1 optimizations | Implementation ✅ (T1.1–T1.5); **measurement pending** on current tree. |
+| **M5a: Measured boot** | SEC-2 (TPM + PCR extend) | ✅ Done (2026-03-11, uncommitted). PCR 9 = initrd; PCR 14 = each primordial; stub mode when TPM absent. |
+| **M5b: Remote attestation** | SEC-4 (TPM2_Quote) | ⚠️ PoC done. Signature verification absent (R4). |
+| **M2: MicroPython runs** | Port + REPL on VT | `>>> print("hello")` works. **Recommended next** — all prereqs met. |
 | **M3: 2-CPU SMP boot** | SMP Phases 1-4 | Both CPUs scheduling independently |
 | **M4: `ping` works** | Network Tier 2 (N1-N3) | ICMP echo request/reply via virtio-net |
-| **M5: Measured boot** | SEC-2 (TPM + PCR extend) | TPM PCRs contain kernel+initrd hashes |
 | **M6: Sub-1000 IPC** | IPC Tier 2 optimizations | Median round-trip ≤1,000 cycles |
 | **M7: `ssh` inbound** | Network Tier 2 complete (N4-N6) | TCP listener accepts connections |
 | **M8: Quake playable** | Tier 1 input + Tier 4 port | 30fps software render with mouse+keyboard |
@@ -992,4 +1126,6 @@ Significantly more advanced than educational kernels (xv6, MINIX 3).
 ---
 
 *Generated by 12 parallel deep-dive agents analyzing 68,000+ lines of source code.
-Updated 2026-03-03 with Tier 0 completion (FPU/SSE, IrqAck).*
+Updated 2026-03-03 with Tier 0 completion (FPU/SSE, IrqAck).
+Re-verified 2026-04-21 against uncommitted WIP on `develop`; see §0 for current
+state, residual risks, landing strategy, and recommended next work.*
