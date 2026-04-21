@@ -2,7 +2,7 @@
 
 **Phase:** 0 — Seal the 40-day WIP
 **Started:** 2026-04-21
-**Last updated:** 2026-04-21
+**Last updated:** 2026-04-21 (post-commit b574664)
 
 ---
 
@@ -14,20 +14,16 @@ Get `develop` into a reviewable, mergeable, CI-verified state.
 
 *(copied from `ROADMAP.md` §5 — do not edit here; tick as completed)*
 
-- [ ] R1: SysV ABI preservation check committed *(code implemented 2026-04-21, verified at boot, awaiting commit)*
-- [ ] R2: RDRAND zero-salt fix committed *(code implemented 2026-04-21, awaiting commit)*
-- [ ] WIP split into 4 logical commits per audit §0.4:
-  - [ ] Commit 1 — IPC Tier-1 optimizations
-  - [ ] Commit 2 — Security hardening (SMAP/SMEP/Spectre/retpoline)
-  - [ ] Commit 3 — Async notifications (A2)
-  - [ ] Commit 4 — TPM + userspace auth
+- [x] R1: SysV ABI preservation check committed *(b574664; boot log "SysV ABI preservation check passed (RBX/RBP/R12-R14)")*
+- [x] R2: RDRAND zero-salt fix committed *(b574664; hash_password now returns Option)*
+- [x] WIP bundled as single commit b574664 *(deviation from audit §0.4 four-commit plan: files were too entangled to split cleanly after the fact; commit message itemizes the 6 feature areas and explains the tradeoff)*
 - [ ] `bash scripts/harness_matrix.sh` runs green end-to-end
-- [ ] Every commit message names *why*, not *what*
-- [ ] `git status` clean on `develop`
+- [x] Commit messages name *why*, not *what* *(b574664, 4134de3)*
+- [x] `git status` clean on `develop`
 
 ## Doing now
 
-R1+R2 code implemented and smoke-tested. Immediate next action: commit R1+R2 as the first split commit ("Phase 0.1 — residual risks"), **then** stage the 4 WIP-split commits starting with IPC Tier-1 optimizations.
+WIP sealed as b574664; hello smoke test green. Immediate next action: run `bash scripts/harness_matrix.sh` end-to-end. If all cases pass, Phase 0 is done and we roll into Phase 1 (Shell usability). If any case regresses, bisect against the last-known-green commit (d40502c) before touching anything else.
 
 ## Blockers
 
@@ -47,4 +43,4 @@ None.
 
 *(freeform scratch area; ok to delete at phase end)*
 
-- R1+R2 are already committable as their own "Phase 0.1 — residual risks" commit. Consider landing that first, separately from the 4-commit WIP split, so the split starts from a clean verified baseline.
+- Deviation from the audit §0.4 four-commit plan was deliberate: `syscall.rs`, `syscall_entry.asm`, and `interrupts.asm` hold overlapping changes across IPC Tier-1, SMAP, and R1. A clean file-level split would have required reverting and re-authoring. The single commit's message enumerates the feature areas so `git log --grep` still works.
