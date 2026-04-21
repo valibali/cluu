@@ -126,6 +126,39 @@ pub extern "C" fn kstart() -> ! {
     // Handles CPU exceptions and hardware interrupts
     architecture::x86_64::idt::init();
 
+    // 1.5.1: Enable SMAP/SMEP (Supervisor Mode Access/Execution Prevention)
+    unsafe {
+        let cpuid7 = core::arch::x86_64::__cpuid_count(7, 0);
+        let has_smep = (cpuid7.ebx & (1 << 7)) != 0;
+        let has_smap = (cpuid7.ebx & (1 << 20)) != 0;
+
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4);
+
+        if has_smep {
+            cr4 |= 1 << 20;
+            klibcluu::info("  SMEP enabled (CR4 bit 20)");
+        }
+        if has_smap {
+            cr4 |= 1 << 21;
+            klibcluu::info("  SMAP enabled (CR4 bit 21)");
+        }
+
+        core::arch::asm!("mov cr4, {}", in(reg) cr4);
+
+        if has_smap {
+            core::arch::asm!("clac", options(nomem, nostack));
+        }
+
+        // 1.5.2: Spectre V2 mitigations (IBPB/STIBP)
+        architecture::x86_64::spectre::init(cpuid7.edx);
+    }
+
+    // 1.5.3: SysV ABI preservation sanity check.
+    // The T1.5 syscall fast path trusts that extern "C" callees preserve
+    // RBX/RBP/R12-R14. Verify that contract before syscalls go live.
+    architecture::x86_64::abi_check::verify_sysv_abi_preservation();
+
     // 1.6: Syscall mechanism
     // Configures SYSCALL/SYSRET instructions for fast system calls
     unsafe {

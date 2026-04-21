@@ -37,6 +37,11 @@ target/
 *.swo
 *~
 
+# Local tooling (Claude Code, agent frameworks, plugin locks)
+.agents/
+.claude/
+skills-lock.json
+
 # OS
 .DS_Store
 Thumbs.db

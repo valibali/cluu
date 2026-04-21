@@ -416,7 +416,7 @@ impl ByteEndpoint for QueueEndpoint {
 const NUM_ENDPOINT_SHARDS: usize = 16;
 
 struct EndpointShard {
-    endpoints: BTreeMap<EndpointId, Mutex<QueueEndpoint>>,
+    endpoints: BTreeMap<EndpointId, QueueEndpoint>,
 }
 
 impl EndpointShard {
@@ -483,7 +483,7 @@ pub fn try_create_endpoint() -> Result<EndpointId, crate::error::Error> {
     let mut shard_guard = shard.lock();
     shard_guard
         .endpoints
-        .insert(id, Mutex::new(QueueEndpoint::new()));
+        .insert(id, QueueEndpoint::new());
     Ok(id)
 }
 
@@ -521,14 +521,11 @@ pub fn destroy_endpoint_full(id: EndpointId) {
     let shard = get_endpoint_shard(id);
     let mut shard_guard = shard.lock();
 
-    let endpoint_mutex = match shard_guard.endpoints.remove(&id) {
+    let endpoint = match shard_guard.endpoints.remove(&id) {
         Some(ep) => ep,
         None => return, // Already destroyed
     };
     TOTAL_ENDPOINT_COUNT.fetch_sub(1, Ordering::Relaxed);
-
-    // Consume the mutex to get owned QueueEndpoint
-    let endpoint = endpoint_mutex.into_inner();
 
     // Collect ALL threads that need to be woken
     let receivers: alloc::vec::Vec<crate::sched::ThreadId> = endpoint
@@ -576,26 +573,24 @@ pub fn send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, Error
 
     // Lock shard, then endpoint (allows concurrent access to endpoints in different shards)
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard
+    let ep = shard_guard
         .endpoints
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
-    let mut guard = endpoint_mutex.lock();
-    guard.send(None, data)
+    ep.send(None, data)
 }
 
 pub fn try_send(endpoint: EndpointId, data: &[u8]) -> Result<Option<ThreadId>, Error> {
     // Get shard directly (static, no repository lock needed)
     let shard = get_endpoint_shard(endpoint);
 
-    // Lock shard, then endpoint (non-blocking)
+    // Lock shard (non-blocking)
     let mut shard_guard = shard.try_lock().ok_or(Error::WouldBlock)?;
-    let endpoint_mutex = shard_guard
+    let ep = shard_guard
         .endpoints
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
-    let mut guard = endpoint_mutex.try_lock().ok_or(Error::WouldBlock)?;
-    guard.send(None, data)
+    ep.send(None, data)
 }
 
 pub fn try_send_with_reply_id(
@@ -605,12 +600,11 @@ pub fn try_send_with_reply_id(
 ) -> Result<Option<ThreadId>, Error> {
     let shard = get_endpoint_shard(endpoint);
     let mut shard_guard = shard.try_lock().ok_or(Error::WouldBlock)?;
-    let endpoint_mutex = shard_guard
+    let ep = shard_guard
         .endpoints
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
-    let mut guard = endpoint_mutex.try_lock().ok_or(Error::WouldBlock)?;
-    guard.send_with_reply_id(None, data, reply_id)
+    ep.send_with_reply_id(None, data, reply_id)
 }
 
 pub fn recv(endpoint: EndpointId, receiver: ThreadId) -> Result<Option<ReceivedMessage>, Error> {
@@ -619,12 +613,11 @@ pub fn recv(endpoint: EndpointId, receiver: ThreadId) -> Result<Option<ReceivedM
 
     // Lock shard, then endpoint (allows concurrent access to endpoints in different shards)
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard
+    let ep = shard_guard
         .endpoints
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
-    let mut guard = endpoint_mutex.lock();
-    guard.recv(receiver)
+    ep.recv(receiver)
 }
 
 pub fn register_wait(
@@ -637,12 +630,11 @@ pub fn register_wait(
 ) -> Result<(), Error> {
     let shard = get_endpoint_shard(endpoint);
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard
+    let ep = shard_guard
         .endpoints
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
-    let mut guard = endpoint_mutex.lock();
-    guard.register_receiver_wait(receiver, ticket, buf_ptr, buf_len, page_table_root);
+    ep.register_receiver_wait(receiver, ticket, buf_ptr, buf_len, page_table_root);
     Ok(())
 }
 
@@ -652,12 +644,11 @@ pub fn recv_nonblocking(endpoint: EndpointId) -> Result<Option<ReceivedMessage>,
 
     // Lock shard, then endpoint (allows concurrent access to endpoints in different shards)
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard
+    let ep = shard_guard
         .endpoints
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
-    let mut guard = endpoint_mutex.lock();
-    guard.recv_nonblocking()
+    ep.recv_nonblocking()
 }
 
 pub fn send_from_user(
@@ -751,15 +742,14 @@ fn call_with_reply_id_inner(
     let (wake, direct_receiver, waiters_before, queue_len_after, call_queue_len_after) = {
         let shard = get_endpoint_shard(endpoint);
         let mut shard_guard = shard.lock();
-        let endpoint_mutex = shard_guard
+        let ep = shard_guard
             .endpoints
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
-        let mut guard = endpoint_mutex.lock();
-        let waiters_before = guard.stats().waiting_len;
+        let waiters_before = ep.stats().waiting_len;
         let payload_bytes = &buffer[..payload_len];
         let result = match try_direct_deliver_to_waiting_receiver(
-            &mut guard,
+            ep,
             endpoint,
             sender,
             payload_bytes,
@@ -767,7 +757,7 @@ fn call_with_reply_id_inner(
             DirectDelivery::DeliveredWake(receiver_id) => (Some(receiver_id), Some(receiver_id)),
             DirectDelivery::DeliveredNoWake(receiver_id) => (None, Some(receiver_id)),
             DirectDelivery::NotDelivered => {
-                match guard.send_with_reply_id(sender, payload_bytes, reply_id) {
+                match ep.send_with_reply_id(sender, payload_bytes, reply_id) {
                     Ok(wake) => (wake, None),
                     Err(Error::WouldBlock) => {
                         crate::sched::ThreadManager::block_current();
@@ -775,14 +765,14 @@ fn call_with_reply_id_inner(
                         return Err(Error::WouldBlock);
                     }
                     Err(Error::Busy) => {
-                        log_endpoint_busy(endpoint, guard.stats(), true);
+                        log_endpoint_busy(endpoint, ep.stats(), true);
                         return Err(Error::Busy);
                     }
                     Err(err) => return Err(err),
                 }
             }
         };
-        let stats = guard.stats();
+        let stats = ep.stats();
         (
             result.0,
             result.1,
@@ -925,15 +915,14 @@ fn send_payload(endpoint: EndpointId, payload: &[u8], log_send: bool) -> Result<
 
         // Lock shard, then endpoint
         let mut shard_guard = shard.lock();
-        let endpoint_mutex = shard_guard
+        let ep = shard_guard
             .endpoints
             .get_mut(&endpoint)
             .ok_or(Error::NotFound)?;
-        let mut guard = endpoint_mutex.lock();
-        match try_direct_deliver_to_waiting_receiver(&mut guard, endpoint, sender, payload)? {
+        match try_direct_deliver_to_waiting_receiver(ep, endpoint, sender, payload)? {
             DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
             DirectDelivery::DeliveredNoWake(_) => None,
-            DirectDelivery::NotDelivered => match guard.send(sender, payload) {
+            DirectDelivery::NotDelivered => match ep.send(sender, payload) {
                 Ok(wake) => wake, // Success
                 Err(Error::WouldBlock) => {
                     // Queue is full - sender was added to waiting_senders, need to block.
@@ -943,7 +932,7 @@ fn send_payload(endpoint: EndpointId, payload: &[u8], log_send: bool) -> Result<
                 }
                 Err(Error::Busy) => {
                     // Fallback for edge cases (shouldn't happen with backpressure)
-                    log_endpoint_busy(endpoint, guard.stats(), false);
+                    log_endpoint_busy(endpoint, ep.stats(), false);
                     return Err(Error::Busy);
                 }
                 Err(err) => return Err(err),
@@ -1122,12 +1111,11 @@ pub fn take_current_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
 
     // Lock shard, then endpoint
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard
+    let ep = shard_guard
         .endpoints
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
-    let mut guard = endpoint_mutex.lock();
-    guard.take_current_caller().ok_or(Error::InvalidState)
+    ep.take_current_caller().ok_or(Error::InvalidState)
 }
 
 /// Get a caller for a specific call cookie.
@@ -1137,13 +1125,11 @@ pub fn take_caller_by_cookie(endpoint: EndpointId, cookie: u64) -> Result<Thread
 
     // Lock shard, then endpoint
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard
+    let ep = shard_guard
         .endpoints
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
-    let mut guard = endpoint_mutex.lock();
-    guard
-        .take_caller_by_cookie(cookie)
+    ep.take_caller_by_cookie(cookie)
         .ok_or(Error::InvalidState)
 }
 
@@ -1153,12 +1139,11 @@ pub fn take_any_caller(endpoint: EndpointId) -> Result<ThreadId, Error> {
 
     // Lock shard, then endpoint
     let mut shard_guard = shard.lock();
-    let endpoint_mutex = shard_guard
+    let ep = shard_guard
         .endpoints
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
-    let mut guard = endpoint_mutex.lock();
-    guard.take_any_caller().ok_or(Error::InvalidState)
+    ep.take_any_caller().ok_or(Error::InvalidState)
 }
 
 /// Tag indicating the message contains a reply ID

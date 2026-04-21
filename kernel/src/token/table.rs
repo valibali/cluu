@@ -55,12 +55,8 @@ fn hash_handle(handle: TokenHandle) -> usize {
 /// Each shard contains a subset of tokens based on handle hash.
 /// This allows concurrent access to different tokens without contention.
 struct TokenTableShard {
-    /// Map from handle to token (only handles that hash to this shard)
-    handles: BTreeMap<TokenHandle, Token>,
-
-    /// Map from opaque scope to object reference
-    /// Note: Scopes are shared across shards, but lookups are rare
-    scopes: BTreeMap<OpaqueScope, ObjectRef>,
+    /// Map from handle to (token, object_ref) — both returned in a single lookup
+    handles: BTreeMap<TokenHandle, (Token, ObjectRef)>,
 }
 
 struct RemovedToken {
@@ -72,41 +68,34 @@ impl TokenTableShard {
     const fn new() -> Self {
         Self {
             handles: BTreeMap::new(),
-            scopes: BTreeMap::new(),
         }
     }
 
     /// Insert a token into this shard
     fn insert(&mut self, handle: TokenHandle, token: Token, object_ref: ObjectRef) {
-        // Register scope → object mapping
-        self.scopes.insert(token.scope, object_ref);
-
-        // Register handle → token mapping
-        self.handles.insert(handle, token);
+        self.handles.insert(handle, (token, object_ref));
     }
 
-    /// Lookup a token by handle
-    fn get(&self, handle: TokenHandle) -> Option<&Token> {
+    /// Lookup a token and its object reference by handle
+    fn get(&self, handle: TokenHandle) -> Option<&(Token, ObjectRef)> {
         self.handles.get(&handle)
     }
 
     /// Remove a token by handle
     fn remove(&mut self, handle: TokenHandle) -> Option<RemovedToken> {
-        let token = self.handles.remove(&handle)?;
-        let object_ref = self.scopes.get(&token.scope).copied();
-        if !self
-            .handles
-            .values()
-            .any(|other| other.scope == token.scope)
-        {
-            self.scopes.remove(&token.scope);
-        }
-        Some(RemovedToken { token, object_ref })
+        let (token, object_ref) = self.handles.remove(&handle)?;
+        Some(RemovedToken {
+            token,
+            object_ref: Some(object_ref),
+        })
     }
 
-    /// Resolve opaque scope to object reference
+    /// Resolve opaque scope to object reference (linear scan — not on hot path)
     fn resolve_scope(&self, scope: &OpaqueScope) -> Option<ObjectRef> {
-        self.scopes.get(scope).copied()
+        self.handles
+            .values()
+            .find(|(token, _)| &token.scope == scope)
+            .map(|(_, obj_ref)| *obj_ref)
     }
 
     /// Count tokens in this shard
@@ -118,10 +107,7 @@ impl TokenTableShard {
     fn count_for_object(&self, object_ref: ObjectRef) -> usize {
         self.handles
             .values()
-            .filter(|token| {
-                // Resolve scope to check if it matches object_ref
-                self.scopes.get(&token.scope).copied() == Some(object_ref)
-            })
+            .filter(|(_, obj_ref)| *obj_ref == object_ref)
             .count()
     }
 }
@@ -220,9 +206,9 @@ struct TokenCacheEntry {
 }
 
 /// Number of entries in the per-CPU token cache.
-const TOKEN_CACHE_SIZE: usize = 4;
+const TOKEN_CACHE_SIZE: usize = 8;
 
-/// Per-CPU 4-entry LRU token cache.
+/// Per-CPU 8-entry LRU token cache.
 ///
 /// `recv_any` with multiple endpoints benefits from caching more than one token.
 /// The LRU order is tracked in `lru_order`: index 0 = most recently used.
@@ -237,8 +223,8 @@ impl TokenCache {
     /// Create an empty cache.
     const fn new() -> Self {
         Self {
-            entries: [None, None, None, None],
-            lru_order: [0, 1, 2, 3],
+            entries: [None, None, None, None, None, None, None, None],
+            lru_order: [0, 1, 2, 3, 4, 5, 6, 7],
         }
     }
 
@@ -456,17 +442,16 @@ pub fn lookup_token(
         let shard = get_shard(handle);
         let table = shard.lock();
 
-        let token = table.get(handle).ok_or("Invalid token handle")?;
+        let (token, object_ref) = table.get(handle).ok_or("Invalid token handle")?;
 
         let now = current_timestamp();
         if token.is_expired(now) {
             return Err("Token expired");
         }
 
-        let object_ref = table.resolve_scope(&token.scope).ok_or("Unknown scope")?;
         let generation = revocation_generation();
 
-        (token.clone(), object_ref, generation)
+        (token.clone(), *object_ref, generation)
     };
 
     // Update per-CPU cache (no lock needed)
@@ -569,6 +554,7 @@ pub fn resolve_token_object(
         (ObjectRef::Irq(_), ObjectType::Irq) => Ok(obj_ref),
         (ObjectRef::Clock, ObjectType::Clock) => Ok(obj_ref),
         (ObjectRef::Frame(_), ObjectType::Frame) => Ok(obj_ref),
+        (ObjectRef::Notification(_), ObjectType::Notification) => Ok(obj_ref),
         _ => Err("Object type mismatch"),
     }
 }
@@ -588,6 +574,7 @@ pub fn check_object_type(
         (ObjectRef::Irq(_), ObjectType::Irq) => Ok(obj_ref),
         (ObjectRef::Clock, ObjectType::Clock) => Ok(obj_ref),
         (ObjectRef::Frame(_), ObjectType::Frame) => Ok(obj_ref),
+        (ObjectRef::Notification(_), ObjectType::Notification) => Ok(obj_ref),
         _ => Err("Object type mismatch"),
     }
 }
@@ -629,6 +616,13 @@ pub fn revoke_token(handle: TokenHandle) -> Result<(), &'static str> {
             }
         }
 
+        // Check if a notification became unreferenced
+        if let Some(crate::token::scope::ObjectRef::Notification(nid)) = removed.object_ref {
+            if count_tokens_for_object(crate::token::scope::ObjectRef::Notification(nid)) == 0 {
+                crate::ipc::notification::destroy_notification(nid);
+            }
+        }
+
         Ok(())
     } else {
         Err("Token not found")
@@ -660,7 +654,7 @@ pub fn revoke_tokens_for_object(target: ObjectRef) -> usize {
         let handles_to_revoke: alloc::vec::Vec<TokenHandle> = shard
             .handles
             .iter()
-            .filter(|(_, token)| shard.scopes.get(&token.scope).copied() == Some(target))
+            .filter(|(_, (_, obj_ref))| *obj_ref == target)
             .map(|(handle, _)| *handle)
             .collect();
 
@@ -685,6 +679,13 @@ pub fn revoke_tokens_for_object(target: ObjectRef) -> usize {
         if let crate::token::scope::ObjectRef::Endpoint(ep_id) = target {
             if count_tokens_for_object(target) == 0 {
                 crate::ipc::endpoint::destroy_endpoint_full(ep_id);
+            }
+        }
+
+        // If we revoked notification tokens, check for zero-reference cleanup
+        if let crate::token::scope::ObjectRef::Notification(nid) = target {
+            if count_tokens_for_object(target) == 0 {
+                crate::ipc::notification::destroy_notification(nid);
             }
         }
     }
@@ -721,6 +722,7 @@ pub enum ObjectType {
     Irq,
     Clock,
     Frame,
+    Notification,
 }
 
 /// Get current timestamp (monotonic nanoseconds since boot)

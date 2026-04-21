@@ -13,6 +13,9 @@ extern crate alloc;
 mod boot;
 mod context;
 mod mappings;
+mod measured_boot;
+mod attestation;
+mod sealed_storage;
 mod services;
 mod wiring;
 
@@ -51,15 +54,41 @@ fn run() -> Result<()> {
     let mut cookie_to_name: [(usize, &str); 8] = [(0, ""); 8];
     let mut num_primordials = 0usize;
 
+    // Collect SHA-256 hashes of each service binary for measured boot.
+    let mut service_hashes: [([u8; 32], &str); 16] = [([0u8; 32], ""); 16];
+    let mut hash_count = 0usize;
+
     // Launch services in the declared order; wiring policy is in wiring.rs.
+    // Only primordial services get an exit cookie (non-zero) so init is
+    // notified when they die.  Non-primordial services (e.g. tpmd) get
+    // cookie 0 and may exit silently.
     for (index, service) in services::SERVICE_LIST.iter().enumerate() {
-        let exit_cookie = index + 1; // cookies start at 1 (0 = no tracking)
-        wiring::launch_service(&ctx, service, index, Some(&manifest), exit_cookie)?;
-        cookie_to_name[num_primordials] = (exit_cookie, service.name);
-        num_primordials += 1;
+        let is_primordial = services::PRIMORDIAL_SERVICES.contains(&service.name);
+        let exit_cookie = if is_primordial { index + 1 } else { 0 };
+        let hash = wiring::launch_service(&ctx, service, index, Some(&manifest), exit_cookie)?;
+        service_hashes[hash_count] = (hash, service.name);
+        hash_count += 1;
+        if is_primordial {
+            cookie_to_name[num_primordials] = (exit_cookie, service.name);
+            num_primordials += 1;
+        }
     }
 
     debug_print("init: all critical services created; monitoring primordials")?;
+
+    // Measured boot: extend TPM PCRs with service binary hashes.
+    measured_boot::extend_measurements(
+        ctx.registry_send,
+        ctx.boot.root_token,
+        ctx.initrd,
+        &service_hashes[..hash_count],
+    );
+
+    // Sealed storage PoC: seal/unseal round-trip test.
+    sealed_storage::run(ctx.registry_send, ctx.boot.root_token);
+
+    // Remote attestation PoC: AIK creation + TPM Quote.
+    attestation::run(ctx.registry_send, ctx.boot.root_token);
 
     // Monitor primordial exit endpoint — any message means a primordial died.
     let mut msg = Message::new(0, [0; 6], 0);

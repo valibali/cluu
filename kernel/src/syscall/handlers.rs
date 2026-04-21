@@ -26,6 +26,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 const IPC_REG_INLINE_FLAG: usize = 1usize << (usize::BITS - 1);
 const IPC_REG_INLINE_MAX_PAYLOAD: usize = 32;
+/// sys_call uses arg4/arg5 for reply_buf/reply_len, leaving only arg2+arg6 (2 registers = 16B)
+/// for inline send data. This is an ABI constraint, not a tunable — sys_send has 4 free registers.
 const IPC_REG_INLINE_MAX_CALL_PAYLOAD: usize = 16;
 const IPC_CALL_TRACE_LIMIT: u64 = 512;
 static IPC_CALL_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -808,6 +810,12 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::FrameAllocate => invoke_frame_allocate(&token, obj_ref, args),
         InvokeOp::FrameFree => invoke_frame_free(token_handle, &token, obj_ref, args),
         InvokeOp::FrameGetPhys => invoke_frame_get_phys(&token, obj_ref, args),
+
+        // Notification operations
+        InvokeOp::NotificationCreate => invoke_notification_create(&token, obj_ref, args),
+        InvokeOp::NotificationSignal => invoke_notification_signal(&token, obj_ref, args),
+        InvokeOp::NotificationWait => invoke_notification_wait(&token, obj_ref, args),
+        InvokeOp::NotificationPoll => invoke_notification_poll(&token, obj_ref, args),
     }
 }
 
@@ -1327,6 +1335,10 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
         return Err(Error::InvalidArgument);
     };
 
+    // Track frame_id for frame-token path so error cleanup can dec_map_count directly
+    // without re-looking up the token (which could fail if token was revoked concurrently).
+    let mut mapped_frame_id: Option<crate::token::FrameId> = None;
+
     let frame_phys = if map_frame_token {
         // Frame token path: arg6 = frame token handle
         let frame_token_handle = crate::token::TokenHandle::from_raw(copy_len);
@@ -1344,6 +1356,7 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
         };
         let phys = frame_registry::get_phys(frame_id).ok_or(Error::NotFound)?;
         frame_registry::inc_map_count(frame_id);
+        mapped_frame_id = Some(frame_id);
         phys
     } else if map_device {
         if copy_len != 0 {
@@ -1400,32 +1413,16 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
     match result {
         Some(Ok(())) => Ok(0),
         Some(Err(_)) => {
-            if map_frame_token {
-                if let Ok((_frame_token, frame_obj_ref)) =
-                    crate::token::lookup_token(crate::token::TokenHandle::from_raw(copy_len))
-                {
-                    if let Ok(ObjectRef::Frame(frame_id)) =
-                        crate::token::check_object_type(frame_obj_ref, ObjectType::Frame)
-                    {
-                        frame_registry::dec_map_count(frame_id);
-                    }
-                }
+            if let Some(fid) = mapped_frame_id {
+                frame_registry::dec_map_count(fid);
             } else if !map_device {
                 pmm::free_frame(frame_phys);
             }
             Err(Error::OutOfMemory)
         }
         None => {
-            if map_frame_token {
-                if let Ok((_frame_token, frame_obj_ref)) =
-                    crate::token::lookup_token(crate::token::TokenHandle::from_raw(copy_len))
-                {
-                    if let Ok(ObjectRef::Frame(frame_id)) =
-                        crate::token::check_object_type(frame_obj_ref, ObjectType::Frame)
-                    {
-                        frame_registry::dec_map_count(frame_id);
-                    }
-                }
+            if let Some(fid) = mapped_frame_id {
+                frame_registry::dec_map_count(fid);
             } else if !map_device {
                 pmm::free_frame(frame_phys);
             }
@@ -2874,6 +2871,123 @@ fn invoke_frame_get_phys(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Notification operations
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn invoke_notification_create(
+    token: &Token,
+    _obj_ref: ObjectRef,
+    _args: SyscallArgs,
+) -> SyscallResult {
+    use crate::token::{Issuer, ObjectRef, Rights, Timestamp};
+
+    if !token.has_right(Rights::CREATE) {
+        klibcluu::warn("invoke_notification_create: missing CREATE right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let notif_id = crate::ipc::notification::try_create_notification()?;
+    let scope = crate::token::OpaqueScope::random();
+    let notif_token = crate::token::create_token(
+        scope,
+        Rights::READ | Rights::WRITE | Rights::GRANT | Rights::CREATE,
+        Issuer::Kernel,
+        Timestamp::far_future(),
+        ObjectRef::Notification(notif_id),
+    );
+
+    Ok(notif_token.as_usize())
+}
+
+fn invoke_notification_signal(
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
+) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::WRITE) {
+        klibcluu::warn("invoke_notification_signal: missing WRITE right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let notif_ref = crate::token::check_object_type(obj_ref, ObjectType::Notification)
+        .map_err(|_| Error::InvalidArgument)?;
+    let notif_id = if let ObjectRef::Notification(id) = notif_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let bits = args.arg3 as u64;
+    crate::ipc::notification::signal(notif_id, bits)?;
+    Ok(0)
+}
+
+fn invoke_notification_wait(
+    token: &Token,
+    obj_ref: ObjectRef,
+    _args: SyscallArgs,
+) -> SyscallResult {
+    use crate::sched::ThreadManager;
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::READ) {
+        klibcluu::warn("invoke_notification_wait: missing READ right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let notif_ref = crate::token::check_object_type(obj_ref, ObjectType::Notification)
+        .map_err(|_| Error::InvalidArgument)?;
+    let notif_id = if let ObjectRef::Notification(id) = notif_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let caller = ThreadManager::current().ok_or(Error::NotFound)?;
+
+    let (bits, was_pending) = crate::ipc::notification::try_wait(notif_id, caller)?;
+    if was_pending {
+        return Ok(bits as usize);
+    }
+
+    // Not pending — caller is now registered as waiter. Set thread state and block.
+    ThreadManager::with_thread_mut(caller, |t| {
+        t.notification_wait = Some(notif_id);
+    });
+    ThreadManager::block_current();
+
+    // After waking: read consumed word
+    let consumed = crate::ipc::notification::read_consumed(notif_id).unwrap_or(0);
+    Ok(consumed as usize)
+}
+
+fn invoke_notification_poll(
+    token: &Token,
+    obj_ref: ObjectRef,
+    _args: SyscallArgs,
+) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::READ) {
+        klibcluu::warn("invoke_notification_poll: missing READ right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let notif_ref = crate::token::check_object_type(obj_ref, ObjectType::Notification)
+        .map_err(|_| Error::InvalidArgument)?;
+    let notif_id = if let ObjectRef::Notification(id) = notif_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let pending = crate::ipc::notification::poll(notif_id)?;
+    Ok(pending as usize)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Debug Syscall
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2918,7 +3032,11 @@ pub fn sys_debug_print(args: SyscallArgs) -> SyscallResult {
         crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidArgument)?;
     userptr::ensure_pages_mapped(msg_ptr, msg_len, page_table_root)?;
 
-    let msg_slice = unsafe { core::slice::from_raw_parts(msg_ptr as *const u8, msg_len) };
+    let mut buf = [0u8; userptr::MAX_DEBUG_PRINT_SIZE];
+    unsafe {
+        userptr::copy_from_user(buf.as_mut_ptr(), msg_ptr, msg_len, page_table_root)?;
+    }
+    let msg_slice = &buf[..msg_len];
 
     // Convert to string (best effort)
     if let Ok(msg) = core::str::from_utf8(msg_slice) {

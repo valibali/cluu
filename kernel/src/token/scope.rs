@@ -96,6 +96,10 @@ impl OpaqueScope {
                 input[0] = 0x07;
                 input[8..16].copy_from_slice(&id.as_u64().to_le_bytes());
             }
+            ObjectRef::Notification(id) => {
+                input[0] = 0x08;
+                input[8..16].copy_from_slice(&id.as_u64().to_le_bytes());
+            }
         }
 
         // Add nonce for uniqueness
@@ -154,6 +158,22 @@ pub enum ObjectRef {
     Clock,
     /// Physical memory frame
     Frame(FrameId),
+    /// Async notification object
+    Notification(NotificationId),
+}
+
+/// Notification object identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NotificationId(pub u64);
+
+impl NotificationId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 /// Physical memory frame identifier

@@ -34,6 +34,7 @@ use libcluu::boot::{
     TOKEN_STDOUT,
 };
 use libcluu::cap::CapProfile;
+use libcluu::crypto;
 use libcluu::elf::ElfFile;
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_id;
@@ -85,6 +86,12 @@ struct TimerEntry {
     action: TimerAction,
 }
 
+#[derive(Clone, Debug, Default)]
+struct QuotaSpec {
+    max_processes: Option<u32>,
+    max_priority: Option<u8>,
+}
+
 struct ContainerInstance {
     name: String,
     instance_name: String,      // "editor", "editor.2", etc.
@@ -98,6 +105,8 @@ struct ContainerInstance {
     restart_count: usize,
     last_exit_code: i32,
     restart_attempt_start: u64,
+    quota: QuotaSpec,
+    live_processes: u32,
 }
 
 struct PendingVfsView {
@@ -113,6 +122,11 @@ struct UserRecord {
     profile: CapProfile,
     escalate: Option<CapProfile>,
     password: String,
+}
+
+struct LoginAttempt {
+    fail_count: u32,
+    last_fail_tick: u64,
 }
 
 struct SessionEntry {
@@ -234,6 +248,8 @@ struct ProcessManager {
     pending_timers: Vec<TimerEntry>,
     /// Container IDs that have a pending deferred restart (prevents duplicates).
     pending_restarts: BTreeSet<u64>,
+    /// Per-user failed login attempt tracking for rate limiting.
+    login_attempts: BTreeMap<String, LoginAttempt>,
 }
 
 impl ProcessManager {
@@ -295,6 +311,7 @@ impl ProcessManager {
             instance_counters: BTreeMap::new(),
             pending_timers: Vec::new(),
             pending_restarts: BTreeSet::new(),
+            login_attempts: BTreeMap::new(),
         })
     }
 
@@ -303,6 +320,41 @@ impl ProcessManager {
             return 0;
         }
         clock_now(self.clock_token).unwrap_or(0)
+    }
+
+    fn audit_log(&self, severity: &str, event: &str, details: &str) {
+        let ticks = self.clock_sample();
+        let line = format!("[{}] AUDIT {} {}: {}", ticks, severity, event, details);
+        let _ = debug_print(&line);
+    }
+
+    /// Check if a user is rate-limited. Returns true if the backoff period has not expired.
+    fn is_rate_limited(&self, username: &str) -> bool {
+        let attempt = match self.login_attempts.get(username) {
+            Some(a) if a.fail_count > 0 => a,
+            _ => return false,
+        };
+        let now = self.clock_sample();
+        // delay = min(1s * 2^(fails-1), 5min) in ticks
+        let exp = (attempt.fail_count - 1).min(8); // cap shift to avoid overflow
+        let delay_secs: u64 = (1u64 << exp).min(300);
+        let delay_ticks = delay_secs * self.clock_freq;
+        now.saturating_sub(attempt.last_fail_tick) < delay_ticks
+    }
+
+    /// Record a failed authentication attempt for a user.
+    fn record_auth_failure(&mut self, username: &str) {
+        let now = self.clock_sample();
+        let attempt = self.login_attempts
+            .entry(String::from(username))
+            .or_insert(LoginAttempt { fail_count: 0, last_fail_tick: 0 });
+        attempt.fail_count = attempt.fail_count.saturating_add(1);
+        attempt.last_fail_tick = now;
+    }
+
+    /// Clear failed attempt tracking for a user on successful authentication.
+    fn clear_auth_failures(&mut self, username: &str) {
+        self.login_attempts.remove(username);
     }
 
     fn next_spawn_seq(&mut self) -> usize {
@@ -864,6 +916,8 @@ impl ProcessManager {
                     restart_count: 0,
                     last_exit_code: 0,
                     restart_attempt_start: 0,
+                    quota: QuotaSpec::default(),
+                    live_processes: 0,
                 });
                 self.container_children.entry(session_cid)
                     .or_insert_with(Vec::new).push(shell_cid);
@@ -1077,6 +1131,8 @@ impl ProcessManager {
                     restart_count: 0,
                     last_exit_code: 0,
                     restart_attempt_start: 0,
+                    quota: QuotaSpec::default(),
+                    live_processes: 0,
                 });
                 // Map framebuffer into console's address space.
                 if image_name == "console" && fb_phys != 0 && fb_size != 0 {
@@ -1393,6 +1449,9 @@ impl ProcessManager {
             Some(cid) => cid,
             None => return Ok(()),
         };
+        if let Some(container) = self.container_instances.get_mut(&container_id) {
+            container.live_processes = container.live_processes.saturating_sub(1);
+        }
 
         // 2. Clean up PROCESS resources (not container)
         self.clear_vfs_view_for_tid(child_tid);
@@ -1571,6 +1630,9 @@ impl ProcessManager {
             let child_tid = self.pid_to_tid.get(&pid).copied().unwrap_or(0);
             // Extract container_id before clearing state for cleanup IPC.
             container_id = self.pid_to_container_id.remove(&pid).unwrap_or(0);
+            if let Some(container) = self.container_instances.get_mut(&container_id) {
+                container.live_processes = container.live_processes.saturating_sub(1);
+            }
             self.clear_vfs_view_for_tid(child_tid);
             self.pid_to_cookie.remove(&pid);
             self.clear_pid_runtime_state(pid);
@@ -1722,6 +1784,9 @@ impl ProcessManager {
                 if let Some(p) = self.cookie_to_pid.remove(&cookie) {
                     let child_tid = self.pid_to_tid.get(&p).copied().unwrap_or(0);
                     container_id = self.pid_to_container_id.remove(&p).unwrap_or(0);
+                    if let Some(container) = self.container_instances.get_mut(&container_id) {
+                        container.live_processes = container.live_processes.saturating_sub(1);
+                    }
                     self.clear_vfs_view_for_tid(child_tid);
                     self.pid_to_cookie.remove(&p);
                     self.clear_pid_runtime_state(p);
@@ -1968,19 +2033,48 @@ impl ProcessManager {
                 return Ok(());
             }
         };
-        let _password = parts.next().unwrap_or(""); // H13 will add verification
+        let password = parts.next().unwrap_or("");
 
-        // Look up user record
-        let user_record = match self.user_records.get(username) {
-            Some(r) => r,
+        // Rate limit check (before any password verification)
+        if self.is_rate_limited(username) {
+            let _ = debug_print(&format!("procmgr: login rate-limited for '{}'", username));
+            self.audit_log("WARN", "AUTH_LOGIN_RATE", &format!("user={}", username));
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        // Look up user record — extract all owned values so reference is dropped
+        let (stored_pw, profile, user_home, view_mounts) = match self.user_records.get(username) {
+            Some(r) => {
+                let pw = r.password.clone();
+                let p = r.profile;
+                let h = r.home.clone();
+                let v = self.build_session_view(r);
+                (pw, p, h, v)
+            }
             None => {
                 let _ = debug_print(&format!("procmgr: login failed, unknown user '{}'", username));
+                self.audit_log("WARN", "AUTH_LOGIN_FAIL", &format!("user={} reason=unknown_user", username));
+                self.record_auth_failure(username);
                 reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                 return Ok(());
             }
         };
 
+        // Verify password (no reference to self.user_records alive)
+        if !crypto::verify_password(password, &stored_pw) {
+            let _ = debug_print(&format!("procmgr: login rejected: bad password for '{}'", username));
+            self.audit_log("WARN", "AUTH_LOGIN_FAIL", &format!("user={} vt={} reason=bad_password", username, vt_index));
+            self.record_auth_failure(username);
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        self.clear_auth_failures(username);
+        self.audit_log("INFO", "AUTH_LOGIN_OK", &format!("user={} vt={}", username, vt_index));
         let _ = debug_print(&format!("procmgr: session login user='{}' vt={}", username, vt_index));
 
         // Reject if a session is already active on this VT.
@@ -1990,11 +2084,6 @@ impl ProcessManager {
             if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
             return Ok(());
         }
-
-        // Clone fields before taking &mut self
-        let profile = user_record.profile;
-        let user_home = user_record.home.clone();
-        let view_mounts = self.build_session_view(user_record);
 
         let tty_ep = if vt_index < VT_COUNT { self.tty_endpoints[vt_index] } else { self.tty_endpoints[0] };
         if tty_ep == 0 {
@@ -2053,6 +2142,8 @@ impl ProcessManager {
                     restart_count: 0,
                     last_exit_code: 0,
                     restart_attempt_start: 0,
+                    quota: QuotaSpec::default(),
+                    live_processes: 0,
                 });
 
                 self.container_children.entry(session_cid)
@@ -2132,25 +2223,36 @@ impl ProcessManager {
             }
         };
 
-        // Look up user record, verify password, check escalation ceiling
-        let record = match self.user_records.get(&username) {
-            Some(r) => r,
+        // Rate limit check
+        if self.is_rate_limited(&username) {
+            let _ = debug_print(&format!("procmgr: escalate rate-limited for '{}'", username));
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        // Look up user record — extract owned values so reference is dropped
+        let (stored_pw, escalate_profile) = match self.user_records.get(&username) {
+            Some(r) => (r.password.clone(), r.escalate),
             None => {
                 reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                 return Ok(());
             }
         };
-        let password_ok = record.password.is_empty() || record.password == password;
-        let escalate_profile = record.escalate;
-        if !password_ok {
+
+        // Verify password (no reference to self.user_records alive)
+        if !crypto::verify_password(password, &stored_pw) {
             let _ = debug_print(&format!(
                 "procmgr: escalate rejected: bad password for '{}'", username
             ));
+            self.audit_log("WARN", "AUTH_SUDO_FAIL", &format!("user={} reason=bad_password", username));
+            self.record_auth_failure(&username);
             reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
             if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
             return Ok(());
         }
+        self.clear_auth_failures(&username);
         let escalate_profile = match escalate_profile {
             Some(profile) => profile,
             None => {
@@ -2163,6 +2265,7 @@ impl ProcessManager {
             }
         };
 
+        self.audit_log("INFO", "AUTH_SUDO_OK", &format!("user={}", username));
         let _ = debug_print(&format!(
             "procmgr: escalate user='{}' cmd='{}' profile={:#x}",
             username, command_path, escalate_profile.bits()
@@ -2261,6 +2364,8 @@ impl ProcessManager {
                     restart_count: 0,
                     last_exit_code: 0,
                     restart_attempt_start: 0,
+                    quota: QuotaSpec::default(),
+                    live_processes: 0,
                 });
 
                 // Track parent→child for cascading cleanup
@@ -2325,30 +2430,42 @@ impl ProcessManager {
         };
         let password = parts.next().unwrap_or("");
 
-        // Look up target user record
-        let (target_profile, target_home) = match self.user_records.get(target_username) {
-            Some(record) => {
-                // Verify target user's password
-                let password_ok = record.password.is_empty() || record.password == password;
-                if !password_ok {
-                    let _ = debug_print(&format!(
-                        "procmgr: su rejected: bad password for '{}'", target_username
-                    ));
-                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
-                    if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
-                    return Ok(());
-                }
-                (record.profile, record.home.clone())
-            }
+        // Rate limit check
+        if self.is_rate_limited(target_username) {
+            let _ = debug_print(&format!("procmgr: su rate-limited for '{}'", target_username));
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        // Look up target user record — extract owned values so reference is dropped
+        let (stored_pw, target_profile, target_home) = match self.user_records.get(target_username) {
+            Some(record) => (record.password.clone(), record.profile, record.home.clone()),
             None => {
                 let _ = debug_print(&format!(
                     "procmgr: su rejected: unknown user '{}'", target_username
                 ));
+                self.record_auth_failure(target_username);
                 reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                 return Ok(());
             }
         };
+
+        // Verify target user's password (no reference to self.user_records alive)
+        if !crypto::verify_password(password, &stored_pw) {
+            let _ = debug_print(&format!(
+                "procmgr: su rejected: bad password for '{}'", target_username
+            ));
+            let caller_user = self.resolve_caller_session(sender_tid)
+                .map(|s| s.username.clone()).unwrap_or_else(|| String::from("?"));
+            self.audit_log("WARN", "AUTH_SU_FAIL", &format!("from={} to={} reason=bad_password", caller_user, target_username));
+            self.record_auth_failure(target_username);
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+        self.clear_auth_failures(target_username);
 
         // Approach C: caller must strictly outrank target (capability narrowing only)
         let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
@@ -2364,6 +2481,9 @@ impl ProcessManager {
             return Ok(());
         }
 
+        let caller_user = self.resolve_caller_session(sender_tid)
+            .map(|s| s.username.clone()).unwrap_or_else(|| String::from("?"));
+        self.audit_log("INFO", "AUTH_SU_OK", &format!("from={} to={}", caller_user, target_username));
         let _ = debug_print(&format!(
             "procmgr: su target='{}' profile={:#x} (caller={:#x})",
             target_username, target_profile.bits(), caller_profile.bits()
@@ -2452,6 +2572,8 @@ impl ProcessManager {
                     restart_count: 0,
                     last_exit_code: 0,
                     restart_attempt_start: 0,
+                    quota: QuotaSpec::default(),
+                    live_processes: 0,
                 });
 
                 // Track parent→child for cascading cleanup
@@ -3170,7 +3292,25 @@ impl ProcessManager {
         };
         let child_profile = caller_profile;
 
-        let priority = DEFAULT_PRIORITY;
+        let mut priority = DEFAULT_PRIORITY;
+
+        // Enforce container quotas
+        if let Some(container) = self.container_instances.get(&caller_container_id) {
+            if let Some(max) = container.quota.max_processes {
+                if container.live_processes >= max {
+                    let _ = debug_print(&format!(
+                        "procmgr: spawn denied — container {} at process limit ({})",
+                        caller_container_id, max
+                    ));
+                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                    let _ = self.send_spawn_reply(reply_token, &reply_msg);
+                    return Ok(());
+                }
+            }
+            if let Some(max_p) = container.quota.max_priority {
+                priority = priority.min(max_p as usize);
+            }
+        }
 
         // Extract argv data: payload is [path\0, argv[0]\0, argv[1]\0, ...]
         let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
@@ -3215,6 +3355,9 @@ impl ProcessManager {
                 reply_msg.words[3] = child_stdin_send;
                 // Inherit parent's container.
                 self.pid_to_container_id.insert(pid, caller_container_id);
+                if let Some(container) = self.container_instances.get_mut(&caller_container_id) {
+                    container.live_processes = container.live_processes.saturating_add(1);
+                }
                 self.register_vfs_view_for_thread(thread_token, &child_view_mounts, child_profile, caller_container_id);
                 self.pid_to_view.insert(pid, child_view_mounts.clone());
                 if sender_tid != 0 {
@@ -4453,6 +4596,8 @@ impl ProcessManager {
                     restart_count: 0,
                     last_exit_code: 0,
                     restart_attempt_start: 0,
+                    quota: QuotaSpec::default(),
+                    live_processes: 0,
                 });
 
                 // Track parent→child for cascading cleanup

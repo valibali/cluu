@@ -2254,6 +2254,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/shell",
         "userspace/timeserver",
         "userspace/cat",
+        "userspace/tpmd",
     ];
 
     let target_json = project_root().join("triplets/x86_64-cluu-user.json");
@@ -2434,6 +2435,7 @@ fn create_initrd(profile: &str) -> Result<()> {
         "procmgr",
         "vfs",
         "virtio-blk",
+        "tpmd",
     ];
     let mut copied_sys_paths = Vec::new();
     for prog in &sys_programs {
@@ -2514,6 +2516,12 @@ fn manifest_rights_mask(path: &str) -> u32 {
                 | RIGHT_IPC_RECV
                 | RIGHT_CREATE
                 | RIGHT_GRANT
+        }
+        "sys/tpmd" => {
+            RIGHT_SPACE_MAP
+                | RIGHT_IPC_SEND
+                | RIGHT_IPC_RECV
+                | RIGHT_CREATE
         }
         _ => ALL_RIGHTS_MASK,
     }
@@ -3306,6 +3314,7 @@ const INIT_CRATES: &[&str] = &[
     "procmgr",
     "vfs",
     "virtio-blk",
+    "tpmd",
 ];
 
 /// Build a single init primordial crate by name.

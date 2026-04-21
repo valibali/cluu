@@ -240,6 +240,7 @@ pub unsafe fn copy_to_user(
 /// - Verify userspace has read permission
 ///
 /// For now, we use an unsafe cast after validation.
+#[cfg(test)]
 pub fn read_user_buffer(ptr: usize, len: usize) -> Result<&'static [u8], Error> {
     // Validate buffer
     validate_user_buffer(ptr, len)?;
@@ -279,6 +280,7 @@ pub fn read_user_buffer(ptr: usize, len: usize) -> Result<&'static [u8], Error> 
 /// - Pointer is in userspace
 /// - Length doesn't cause overflow
 /// - Data is valid UTF-8
+#[cfg(test)]
 pub fn read_user_string(ptr: usize, len: usize) -> Result<&'static str, Error> {
     // Read bytes from userspace
     let bytes = read_user_buffer(ptr, len)?;

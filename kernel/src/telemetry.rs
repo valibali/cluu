@@ -456,6 +456,7 @@ fn object_fields(object_ref: ObjectRef) -> (u8, u64) {
         ObjectRef::Irq(irq) => (4, irq as u64),
         ObjectRef::Clock => (6, 0),
         ObjectRef::Frame(id) => (7, id.as_u64()),
+        ObjectRef::Notification(id) => (8, id.as_u64()),
     }
 }
 

@@ -44,6 +44,7 @@
 
 pub mod endpoint;
 pub mod message;
+pub mod notification;
 pub mod rendezvous;
 pub mod traits;
 pub mod transfer;

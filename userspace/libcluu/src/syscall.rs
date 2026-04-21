@@ -107,6 +107,12 @@ pub enum InvokeOp {
     FrameAllocate = 70,
     FrameFree = 71,
     FrameGetPhys = 72,
+
+    // Notification operations
+    NotificationCreate = 80,
+    NotificationSignal = 81,
+    NotificationWait = 82,
+    NotificationPoll = 83,
 }
 
 /// Page mapping flags for space_map.
@@ -1266,6 +1272,40 @@ pub fn clock_now(clock_token: usize) -> Result<u64> {
 #[inline]
 pub fn clock_frequency(clock_token: usize) -> Result<u64> {
     let r = unsafe { invoke(clock_token, InvokeOp::ClockFrequency, 0, 0, 0, 0) }?;
+    Ok(r as u64)
+}
+
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// Notification Wrappers
+// ═══════════════════════════════════════════════════════════════════════════
+//
+
+/// Create a new notification object. Returns a notification token handle.
+#[inline]
+pub fn notification_create(root_token: usize) -> Result<usize> {
+    unsafe { invoke(root_token, InvokeOp::NotificationCreate, 0, 0, 0, 0) }
+}
+
+/// Signal a notification by OR'ing `bits` into its pending word.
+#[inline]
+pub fn notification_signal(notif_token: usize, bits: u64) -> Result<()> {
+    unsafe { invoke(notif_token, InvokeOp::NotificationSignal, bits as usize, 0, 0, 0)? };
+    Ok(())
+}
+
+/// Wait on a notification. Blocks until pending bits are non-zero.
+/// Returns the consumed bits.
+#[inline]
+pub fn notification_wait(notif_token: usize) -> Result<u64> {
+    let r = unsafe { invoke(notif_token, InvokeOp::NotificationWait, 0, 0, 0, 0) }?;
+    Ok(r as u64)
+}
+
+/// Poll a notification without blocking. Returns current pending bits (0 if none).
+#[inline]
+pub fn notification_poll(notif_token: usize) -> Result<u64> {
+    let r = unsafe { invoke(notif_token, InvokeOp::NotificationPoll, 0, 0, 0, 0) }?;
     Ok(r as u64)
 }
 

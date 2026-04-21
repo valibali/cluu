@@ -134,6 +134,7 @@ impl<T: Copy> ReplyMap<T> {
 
 use alloc::collections::BinaryHeap;
 use core::cmp::Reverse;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -173,13 +174,28 @@ lazy_static! {
         Mutex::new(BinaryHeap::new());
 }
 
+/// Lock-free wrapper for ReplyMap. Single-CPU kernel, syscall handlers are
+/// non-reentrant, interrupt handlers never touch reply maps.
+struct PerCpuReplyMap<T: Copy> {
+    inner: UnsafeCell<ReplyMap<T>>,
+}
+unsafe impl<T: Copy> Sync for PerCpuReplyMap<T> {}
+
+impl<T: Copy> PerCpuReplyMap<T> {
+    const fn new() -> Self {
+        Self { inner: UnsafeCell::new(ReplyMap::new()) }
+    }
+    /// # Safety: single-CPU kernel, non-reentrant syscall handlers
+    unsafe fn get(&self) -> &mut ReplyMap<T> {
+        &mut *self.inner.get()
+    }
+}
+
 /// Map from ReplyId to CallReplyInfo for IPC call/reply (O(1) hash map).
-/// Kept as a plain static Mutex to avoid first-touch lazy init on the syscall hot path.
-static CALL_REPLY_MAP: Mutex<ReplyMap<CallReplyInfo>> = Mutex::new(ReplyMap::new());
+static CALL_REPLY_MAP: PerCpuReplyMap<CallReplyInfo> = PerCpuReplyMap::new();
 
 /// Map from ReplyId to FaultReplyInfo for fault IPC (O(1) hash map).
-/// Kept as a plain static Mutex to avoid first-touch lazy init on the syscall hot path.
-static FAULT_REPLY_MAP: Mutex<ReplyMap<FaultReplyInfo>> = Mutex::new(ReplyMap::new());
+static FAULT_REPLY_MAP: PerCpuReplyMap<FaultReplyInfo> = PerCpuReplyMap::new();
 
 /// Counter for generating unique ReplyIds
 static NEXT_REPLY_ID: AtomicU64 = AtomicU64::new(1);
@@ -202,17 +218,10 @@ static SCHEDULER_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Multi-slot pending wake queue (lock-free)
 /// Each slot holds a thread ID (0 = empty). Allows multiple concurrent wakes.
-const PENDING_WAKE_SLOTS: usize = 8;
-static PENDING_WAKE_QUEUE: [AtomicU64; PENDING_WAKE_SLOTS] = [
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-];
+const PENDING_WAKE_SLOTS: usize = 32;
+const WAKE_ZERO: AtomicU64 = AtomicU64::new(0);
+static PENDING_WAKE_QUEUE: [AtomicU64; PENDING_WAKE_SLOTS] = [WAKE_ZERO; PENDING_WAKE_SLOTS];
+static PENDING_WAKE_OVERFLOW: AtomicU64 = AtomicU64::new(0);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Deferred Fault Notification Queue (lock-free, IST-safe)
@@ -226,25 +235,15 @@ static PENDING_WAKE_QUEUE: [AtomicU64; PENDING_WAKE_SLOTS] = [
 //   with Release ordering. TID != 0 signals "slot is occupied".
 // - Reader (tick): swaps TID with 0 using Acquire ordering, then reads
 //   the other fields. Acquire on TID ensures visibility of all prior stores.
-const DEFERRED_FAULT_SLOTS: usize = 4;
-static DEFERRED_FAULT_TID: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-];
-static DEFERRED_FAULT_EP: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-];
-static DEFERRED_FAULT_TYPE: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-];
-static DEFERRED_FAULT_ADDR: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-];
-static DEFERRED_FAULT_ERR: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-];
-static DEFERRED_FAULT_RIP: [AtomicU64; DEFERRED_FAULT_SLOTS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-];
+const DEFERRED_FAULT_SLOTS: usize = 16;
+const FAULT_ZERO: AtomicU64 = AtomicU64::new(0);
+static DEFERRED_FAULT_TID: [AtomicU64; DEFERRED_FAULT_SLOTS] = [FAULT_ZERO; DEFERRED_FAULT_SLOTS];
+static DEFERRED_FAULT_EP: [AtomicU64; DEFERRED_FAULT_SLOTS] = [FAULT_ZERO; DEFERRED_FAULT_SLOTS];
+static DEFERRED_FAULT_TYPE: [AtomicU64; DEFERRED_FAULT_SLOTS] = [FAULT_ZERO; DEFERRED_FAULT_SLOTS];
+static DEFERRED_FAULT_ADDR: [AtomicU64; DEFERRED_FAULT_SLOTS] = [FAULT_ZERO; DEFERRED_FAULT_SLOTS];
+static DEFERRED_FAULT_ERR: [AtomicU64; DEFERRED_FAULT_SLOTS] = [FAULT_ZERO; DEFERRED_FAULT_SLOTS];
+static DEFERRED_FAULT_RIP: [AtomicU64; DEFERRED_FAULT_SLOTS] = [FAULT_ZERO; DEFERRED_FAULT_SLOTS];
+static DEFERRED_FAULT_OVERFLOW: AtomicU64 = AtomicU64::new(0);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Thread Manager API
@@ -395,14 +394,19 @@ impl ThreadManager {
     ///
     /// Also revokes all tokens that reference this thread (cleanup hook).
     pub fn mark_thread_dead(thread_id: ThreadId) -> bool {
-        let found = Self::with_thread_mut(thread_id, |thread| {
+        let notification_wait = Self::with_thread_mut(thread_id, |thread| {
             thread.make_dead();
             thread.clear_timeout_deadline();
             thread.woke_from_timeout = false;
             thread.disarm_recv_wait();
             thread.clear_suspended();
-        })
-        .is_some();
+            thread.notification_wait.take()
+        });
+        let found = notification_wait.is_some();
+        // Clean up notification waiter registration if thread was waiting
+        if let Some(Some(notif_id)) = notification_wait {
+            crate::ipc::notification::clear_waiter(notif_id, thread_id);
+        }
         if !found {
             return false;
         }
@@ -421,8 +425,11 @@ impl ThreadManager {
         // Clean up CALL_REPLY_MAP entries involving this thread.
         // - Dead caller: remove the entry (no one to receive the reply).
         // - Dead server: wake the blocked caller with an error.
+        // NOTE: This is an O(REPLY_MAP_SLOTS) scan (currently 256). Acceptable at
+        // current scale. If slot count grows significantly, consider a per-thread
+        // reply set for O(1) cleanup.
         {
-            let mut map = CALL_REPLY_MAP.lock();
+            let map = unsafe { CALL_REPLY_MAP.get() };
             let mut callers_to_wake = alloc::vec::Vec::new();
             let mut to_remove = alloc::vec::Vec::new();
 
@@ -439,7 +446,6 @@ impl ThreadManager {
             for rid in to_remove {
                 map.remove(rid);
             }
-            drop(map);
             for caller in callers_to_wake {
                 // Encode as negative errno in rax (same convention as syscall return path).
                 // deliver_reply would normally overwrite rax with byte count.
@@ -454,7 +460,7 @@ impl ThreadManager {
         // Dead faulted_thread: remove the entry (thread is gone).
         // Dead server: the faulted thread stays blocked (no good recovery).
         {
-            let mut map = FAULT_REPLY_MAP.lock();
+            let map = unsafe { FAULT_REPLY_MAP.get() };
             let mut to_remove = alloc::vec::Vec::new();
             for i in 0..REPLY_MAP_SLOTS {
                 if let Some((_rid, info)) = &map.slots[i] {
@@ -485,32 +491,32 @@ impl ThreadManager {
 
     /// Store call reply info for a reply ID. Returns false if map is full.
     pub fn set_call_reply_info(reply_id: ReplyId, info: CallReplyInfo) -> bool {
-        CALL_REPLY_MAP.lock().insert(reply_id, info)
+        unsafe { CALL_REPLY_MAP.get() }.insert(reply_id, info)
     }
 
     /// Take and remove call reply info for a reply ID (one-time use)
     pub fn take_call_reply_info(reply_id: ReplyId) -> Option<CallReplyInfo> {
-        CALL_REPLY_MAP.lock().remove(reply_id)
+        unsafe { CALL_REPLY_MAP.get() }.remove(reply_id)
     }
 
     /// Check if call reply info exists for a reply ID
     pub fn has_call_reply_info(reply_id: ReplyId) -> bool {
-        CALL_REPLY_MAP.lock().get(reply_id).is_some()
+        unsafe { CALL_REPLY_MAP.get() }.get(reply_id).is_some()
     }
 
     /// Store fault reply info for a reply ID. Returns false if map is full.
     pub fn set_fault_reply_info(reply_id: ReplyId, info: FaultReplyInfo) -> bool {
-        FAULT_REPLY_MAP.lock().insert(reply_id, info)
+        unsafe { FAULT_REPLY_MAP.get() }.insert(reply_id, info)
     }
 
     /// Take and remove fault reply info for a reply ID (one-time use)
     pub fn take_fault_reply_info(reply_id: ReplyId) -> Option<FaultReplyInfo> {
-        FAULT_REPLY_MAP.lock().remove(reply_id)
+        unsafe { FAULT_REPLY_MAP.get() }.remove(reply_id)
     }
 
     /// Bind a reply_id to the server thread that received the call message.
     pub fn bind_call_reply_to_server(reply_id: ReplyId, server: ThreadId) -> bool {
-        if let Some(info) = CALL_REPLY_MAP.lock().get_mut(reply_id) {
+        if let Some(info) = unsafe { CALL_REPLY_MAP.get() }.get_mut(reply_id) {
             info.server_thread_id = Some(server);
             true
         } else {
@@ -520,7 +526,7 @@ impl ThreadManager {
 
     /// Bind a fault reply_id to the server thread that received the fault message.
     pub fn bind_fault_reply_to_server(reply_id: ReplyId, server: ThreadId) -> bool {
-        if let Some(info) = FAULT_REPLY_MAP.lock().get_mut(reply_id) {
+        if let Some(info) = unsafe { FAULT_REPLY_MAP.get() }.get_mut(reply_id) {
             info.server_thread_id = Some(server);
             true
         } else {
@@ -534,7 +540,7 @@ impl ThreadManager {
         reply_id: ReplyId,
         server: ThreadId,
     ) -> Option<CallReplyInfo> {
-        let mut map = CALL_REPLY_MAP.lock();
+        let map = unsafe { CALL_REPLY_MAP.get() };
         let info = map.get(reply_id)?;
         match info.server_thread_id {
             Some(bound) if bound == server => map.remove(reply_id),
@@ -547,7 +553,7 @@ impl ThreadManager {
         reply_id: ReplyId,
         server: ThreadId,
     ) -> Option<FaultReplyInfo> {
-        let mut map = FAULT_REPLY_MAP.lock();
+        let map = unsafe { FAULT_REPLY_MAP.get() };
         let info = map.get(reply_id)?;
         match info.server_thread_id {
             Some(bound) if bound == server => map.remove(reply_id),
@@ -928,8 +934,8 @@ impl ThreadManager {
                 return; // Successfully queued
             }
         }
-        // All slots full - this is a bug if it happens frequently
-        // The wake will be lost, but thread will eventually be woken by retry logic
+        // All slots full — wake lost; thread will eventually be woken by retry logic
+        PENDING_WAKE_OVERFLOW.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Queue a deferred fault notification (IST-safe, lock-free).
@@ -967,6 +973,7 @@ impl ThreadManager {
             // CAS failed — another IST writer took this slot. Try next.
         }
         // All slots full — fault notification lost. Thread is already dead.
+        DEFERRED_FAULT_OVERFLOW.fetch_add(1, Ordering::Relaxed);
         klibcluu::warn("deferred fault queue full — notification dropped");
     }
 
@@ -1442,6 +1449,18 @@ impl ThreadManager {
                 let scratch = crate::architecture::x86_64::syscall::percpu_fpu_scratch_ptr();
                 core::ptr::copy_nonoverlapping(thread.fpu_state.data.as_ptr(), scratch, 512);
             }
+
+            // IBPB: flush branch predictor when switching to a different address space
+            if crate::architecture::x86_64::spectre::has_ibpb() {
+                let current_cr3: u64;
+                unsafe {
+                    core::arch::asm!("mov {}, cr3", out(reg) current_cr3, options(nomem, nostack));
+                }
+                if thread.context.cr3 != current_cr3 {
+                    unsafe { crate::architecture::x86_64::spectre::ibpb(); }
+                }
+            }
+
             &thread.context as *const Context
         })
         .unwrap_or(core::ptr::null())

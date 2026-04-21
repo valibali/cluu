@@ -5,7 +5,7 @@
 #   shell    — path to the shell binary (resolved through session view)
 #   profile  — CapProfile for the login session ("user", "admin", "supervisor")
 #   escalate — ceiling profile for sudo (optional; if absent, sudo is rejected)
-#   password — plaintext password (empty string = no password required)
+#   password — hashed password: "$sha256$<salt_hex>$<hash_hex>" (empty string = no password required)
 
 [user.root]
 home = "/home/root"

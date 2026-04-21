@@ -110,6 +110,17 @@ pub const PROCMGR_SHUTDOWN_LABEL: u32 = 36;
 /// Reply: words[0]=errno, words[1]=data_len or pid_count, payload=content.
 pub const PROCMGR_PROC_QUERY_LABEL: u32 = 37;
 
+// tpmd IPC labels (per-service label space)
+pub const TPMD_STARTUP_LABEL: u32    = 1;
+pub const TPMD_PCR_READ_LABEL: u32   = 2;
+pub const TPMD_PCR_EXTEND_LABEL: u32 = 3;
+pub const TPMD_GET_INFO_LABEL: u32   = 4;
+pub const TPMD_CREATE_PRIMARY_LABEL: u32 = 5;
+pub const TPMD_SEAL_LABEL: u32       = 6;
+pub const TPMD_UNSEAL_LABEL: u32     = 7;
+pub const TPMD_CREATE_AIK_LABEL: u32 = 8;
+pub const TPMD_QUOTE_LABEL: u32      = 9;
+
 pub const TTY_FG_FLAG_FORWARD_CTRL_C: usize = 1 << 0;
 pub const TTY_FG_FLAG_NOTIFY_CTRL_C: usize = 1 << 1;
 pub const TTY_CTL_SYNC: u32 = 1;

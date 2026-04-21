@@ -27,7 +27,7 @@
 use crate::mm::space::AddressSpace;
 use crate::sched::context::Context;
 use crate::sched::fpu::FpuState;
-use crate::token::scope::{EndpointId, ReplyId};
+use crate::token::scope::{EndpointId, NotificationId, ReplyId};
 use x86_64::{PhysAddr, VirtAddr};
 
 /// Thread ID type
@@ -239,6 +239,9 @@ pub struct Thread {
 
     /// Cumulative CPU ticks consumed by this thread
     pub cpu_ticks_consumed: u64,
+
+    /// Notification object this thread is waiting on (None if not waiting)
+    pub notification_wait: Option<NotificationId>,
 }
 
 impl Thread {
@@ -315,6 +318,7 @@ impl Thread {
             fault_endpoint: None,
             fault_state: None,
             cpu_ticks_consumed: 0,
+            notification_wait: None,
         }
     }
 
@@ -356,6 +360,7 @@ impl Thread {
             fault_endpoint: None,
             fault_state: None,
             cpu_ticks_consumed: 0,
+            notification_wait: None,
         }
     }
 

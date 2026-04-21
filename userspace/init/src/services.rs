@@ -38,6 +38,7 @@ pub enum ServiceKind {
     Vfs,
     Vtmgr,
     VirtioBlk,
+    Tpmd,
 }
 
 // Capability grant for procmgr (it needs to create, map, and manage children).
@@ -68,6 +69,14 @@ const VIRTIOBLK_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
     | Rights::GRANT.bits();
 
 const VIRTIOBLK_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIOBLK_RIGHTS_BITS);
+
+// tpmd needs MMIO mapping for TIS interface + IPC for future service
+const TPMD_RIGHTS_BITS: u32 = Rights::SPACE_MAP.bits()
+    | Rights::IPC_SEND.bits()
+    | Rights::IPC_RECV.bits()
+    | Rights::CREATE.bits();
+
+const TPMD_RIGHTS: Rights = Rights::from_bits_truncate(TPMD_RIGHTS_BITS);
 
 /// Primordial services whose death causes init to panic.
 /// If any of these exit, the system is in an unrecoverable state.
@@ -132,6 +141,16 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         rights: Some(VIRTIOBLK_RIGHTS),
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::VirtioBlk,
+        instance_id: None,
+        profile: CapProfile::SERVICE,
+    },
+    ServiceSpec {
+        name: "tpmd",
+        path: "sys/tpmd",
+        priority: 175,
+        rights: Some(TPMD_RIGHTS),
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::Tpmd,
         instance_id: None,
         profile: CapProfile::SERVICE,
     },

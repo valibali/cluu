@@ -47,7 +47,7 @@ pub mod signature;
 pub mod table;
 
 pub use rights::Rights;
-pub use scope::{AddressSpaceId, EndpointId, FrameId, ObjectRef, OpaqueScope, ReplyId};
+pub use scope::{AddressSpaceId, EndpointId, FrameId, NotificationId, ObjectRef, OpaqueScope, ReplyId};
 pub use signature::Signature;
 pub use table::{
     check_object_type, count_tokens, count_tokens_for_object, create_token,
@@ -424,6 +424,12 @@ pub enum InvokeOp {
     FrameAllocate = 70,
     FrameFree = 71,
     FrameGetPhys = 72,
+
+    // Notification operations
+    NotificationCreate = 80,
+    NotificationSignal = 81,
+    NotificationWait = 82,
+    NotificationPoll = 83,
 }
 
 impl InvokeOp {
@@ -468,6 +474,10 @@ impl InvokeOp {
             70 => Some(Self::FrameAllocate),
             71 => Some(Self::FrameFree),
             72 => Some(Self::FrameGetPhys),
+            80 => Some(Self::NotificationCreate),
+            81 => Some(Self::NotificationSignal),
+            82 => Some(Self::NotificationWait),
+            83 => Some(Self::NotificationPoll),
             _ => None,
         }
     }

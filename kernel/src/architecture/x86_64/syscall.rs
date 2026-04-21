@@ -22,6 +22,7 @@
 
 use crate::error::Error;
 use crate::syscall::{dispatch_syscall, SyscallArgs, SyscallNumber};
+use crate::syscall::{sys_call, sys_recv, sys_reply, sys_send, SyscallResult};
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::registers::model_specific::{LStar, SFMask};
 use x86_64::registers::rflags::RFlags;
@@ -242,6 +243,77 @@ extern "C" fn syscall_dispatch(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// IPC Fast-Path Entry Points (called from assembly for syscalls 0-3)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// These have the same calling convention as syscall_dispatch (7 args, same
+// register layout) but skip SyscallNumber::from_usize validation and the
+// dispatch match. The assembly jump table branches here after marshaling.
+
+fn ipc_result_to_isize(result: SyscallResult) -> isize {
+    match result {
+        Ok(ret) => ret as isize,
+        Err(e) => e.to_errno(),
+    }
+}
+
+#[no_mangle]
+extern "C" fn syscall_ipc_send(
+    _number: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> isize {
+    let args = SyscallArgs::new(arg1, arg2, arg3, arg4, arg5, arg6);
+    ipc_result_to_isize(sys_send(args))
+}
+
+#[no_mangle]
+extern "C" fn syscall_ipc_recv(
+    _number: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> isize {
+    let args = SyscallArgs::new(arg1, arg2, arg3, arg4, arg5, arg6);
+    ipc_result_to_isize(sys_recv(args))
+}
+
+#[no_mangle]
+extern "C" fn syscall_ipc_call(
+    _number: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> isize {
+    let args = SyscallArgs::new(arg1, arg2, arg3, arg4, arg5, arg6);
+    ipc_result_to_isize(sys_call(args))
+}
+
+#[no_mangle]
+extern "C" fn syscall_ipc_reply(
+    _number: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> isize {
+    let args = SyscallArgs::new(arg1, arg2, arg3, arg4, arg5, arg6);
+    ipc_result_to_isize(sys_reply(args))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Initialization
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -335,10 +407,10 @@ pub unsafe fn init() {
     // We want to clear the interrupt flag (IF) to disable interrupts
     // during syscall handling.
 
-    let flags_mask = RFlags::INTERRUPT_FLAG;
+    let flags_mask = RFlags::INTERRUPT_FLAG | RFlags::ALIGNMENT_CHECK;
     SFMask::write(flags_mask);
 
-    klibcluu::trace("  FMASK (clear IF): 0x");
+    klibcluu::trace("  FMASK (clear IF|AC): 0x");
     klibcluu::log_hex(klibcluu::LogLevel::Trace, "", flags_mask.bits());
 
     klibcluu::info("Syscall support initialized");

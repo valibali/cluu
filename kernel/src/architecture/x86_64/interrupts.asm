@@ -134,6 +134,7 @@ extern generic_fault_with_regs
     swapgs
     fxsave [gs:PERCPU_FPU_SCRATCH]
 %%no_swapgs:
+    clac                                    ; Enforce SMAP
     sub rsp, GF_SIZE
 
     mov [rsp + GF_RAX], rax
@@ -238,6 +239,7 @@ gpf_interrupt_entry:
     swapgs
     fxsave [gs:PERCPU_FPU_SCRATCH]
 .gpf_no_swapgs:
+    clac                                    ; Enforce SMAP
     sub rsp, GPF_SIZE
 
     mov [rsp + GPF_RAX], rax
@@ -377,6 +379,7 @@ pf_interrupt_entry:
     swapgs
     fxsave [gs:PERCPU_FPU_SCRATCH]
 .pf_no_swapgs:
+    clac                                    ; Enforce SMAP
     sub rsp, PF_SIZE
 
     mov [rsp + PF_RAX], rax
@@ -591,6 +594,7 @@ timer_interrupt_entry:
     swapgs                                  ; User->kernel: switch to kernel GS
     fxsave [gs:PERCPU_FPU_SCRATCH]
 .skip_swapgs_entry:
+    clac                                    ; Enforce SMAP (interrupts don't clear AC)
 
     ; Reserve space for Context
     sub rsp, CONTEXT_SIZE

@@ -47,6 +47,7 @@
 //! ```
 
 mod handlers;
+pub(crate) use handlers::{sys_call, sys_recv, sys_reply, sys_send};
 pub mod userptr;
 
 use crate::error::Error;

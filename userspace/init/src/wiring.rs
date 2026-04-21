@@ -157,6 +157,9 @@ impl ServiceWiring for ServiceKind {
                 // PCI-capable token for device access
                 tokens[TOKEN_EXTRA_1] = child_token;
             }
+            ServiceKind::Tpmd => {
+                // Tpmd uses its elevated token for MMIO mapping (via TOKEN_SPACE rights)
+            }
         }
         Ok(())
     }
@@ -181,7 +184,8 @@ impl ServiceWiring for ServiceKind {
             | ServiceKind::Kbd
             | ServiceKind::Tty
             | ServiceKind::Vtmgr
-            | ServiceKind::VirtioBlk => Ok(()),
+            | ServiceKind::VirtioBlk
+            | ServiceKind::Tpmd => Ok(()),
             ServiceKind::Timeserver => Ok(()),
         }
     }
@@ -197,7 +201,7 @@ pub fn launch_service(
     index: usize,
     manifest: Option<&BootManifest>,
     exit_cookie: usize,
-) -> Result<()> {
+) -> Result<[u8; 32]> {
     // Derive an optional capability token for services that need elevated rights.
     let child_token = match service.rights {
         Some(rights) => token_derive(ctx.boot.root_token, rights.bits() as usize, u64::MAX)?,
@@ -211,7 +215,7 @@ pub fn launch_service(
     debug_print(&format!("init: launching {}", service.name))?;
 
     let service_bytes = load_service_image(ctx.initrd, service.path, service.name)?;
-    enforce_manifest_policy(manifest, service, service_bytes)?;
+    let hash = enforce_manifest_policy(manifest, service, service_bytes)?;
     let elf = ElfFile::parse(service_bytes)?;
 
     let stack_top = PROC_STACK_TOP - index * STACK_STEP;
@@ -252,8 +256,9 @@ pub fn launch_service(
         tokens[TOKEN_SPACE] = derive_space_token_for_policy(space_token, service.space_policy)?;
     }
     // init-spawned services are system services without PIDs (pid=0)
-    // All init-spawned services are primordial — exit_cookie identifies which one died.
-    map_process_info(space_token, ctx.primordial_exit_send, exit_cookie, 0, &tokens, &params)?;
+    // exit_cookie=0 means non-primordial (no exit notification to init).
+    let exit_token = if exit_cookie != 0 { ctx.primordial_exit_send } else { 0 };
+    map_process_info(space_token, exit_token, exit_cookie, 0, &tokens, &params)?;
 
     service.kind.map_resources(ctx, space_token, &params)?;
 
@@ -266,16 +271,18 @@ pub fn launch_service(
     let _ = thread_token;
 
     debug_print(&format!("init: {} ready", service.name))?;
-    Ok(())
+    Ok(hash)
 }
 
 fn enforce_manifest_policy(
     manifest: Option<&BootManifest>,
     service: &ServiceSpec,
     service_bytes: &[u8],
-) -> Result<()> {
+) -> Result<[u8; 32]> {
+    let actual_hash = klibcluu::crypto::hash_sha256(service_bytes);
+
     let Some(manifest) = manifest else {
-        return Ok(());
+        return Ok(actual_hash);
     };
 
     let entry = manifest
@@ -284,7 +291,6 @@ fn enforce_manifest_policy(
         .find(|entry| entry.path == service.path)
         .ok_or(Error::PermissionDenied)?;
 
-    let actual_hash = klibcluu::crypto::hash_sha256(service_bytes);
     let actual_hash_hex = to_lower_hex(&actual_hash);
     if actual_hash_hex != entry.sha256_hex {
         debug_print(&format!(
@@ -307,7 +313,7 @@ fn enforce_manifest_policy(
         return Err(Error::PermissionDenied);
     }
 
-    Ok(())
+    Ok(actual_hash)
 }
 
 fn to_lower_hex(bytes: &[u8; 32]) -> alloc::string::String {

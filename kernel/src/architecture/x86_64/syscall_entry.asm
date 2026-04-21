@@ -13,8 +13,14 @@ section .text
 
 global syscall_entry
 global enter_userspace_asm
+global sysv_abi_preservation_test
 extern syscall_dispatch
+extern syscall_ipc_send
+extern syscall_ipc_recv
+extern syscall_ipc_call
+extern syscall_ipc_reply
 extern schedule_and_switch
+extern abi_check_callee
 
 ; Per-CPU data offsets (must match PerCpuData struct in syscall.rs)
 %define PERCPU_USER_RSP        0x00
@@ -75,6 +81,7 @@ syscall_entry:
     ; Switch to kernel context
     ; ─────────────────────────────────────────────────────────────────────────
     swapgs                              ; Switch GS to kernel PerCpuData
+    clac                                ; Enforce SMAP (clear AC flag)
 
     ; User RBX is required by the fast return path (SYSRET restores it)
     mov [gs:PERCPU_LAST_RBX], rbx
@@ -108,14 +115,14 @@ syscall_entry:
     push r11                            ; User RFLAGS
     push rax                            ; Syscall number (for debug, not needed for return)
 
-    ; Save callee-saved registers (SysV ABI: RBX, RBP, R12-R15)
-    ; We need these because syscall_dispatch is a C function
-    push rbx
-    push rbp
-    push r12
-    push r13
-    push r14
+    ; Save R15 (clobbered below by mov r15, rax; other callee-saved regs
+    ; are preserved by syscall_dispatch per SysV ABI)
     push r15
+
+    ; 16-byte stack alignment: 4 pushes above (rcx, r11, rax, r15) = 32 bytes
+    ; (already 16-aligned). Adding arg6 below would make 40 bytes (misaligned).
+    ; Pad here so push r9 (arg6) gives 48 bytes total = 16-aligned for call.
+    sub rsp, 8
 
     ; ─────────────────────────────────────────────────────────────────────────
     ; Marshal arguments for syscall_dispatch (SysV ABI)
@@ -145,11 +152,39 @@ syscall_entry:
     mov [rsp], rax
 
     ; ─────────────────────────────────────────────────────────────────────────
-    ; Call syscall handler
+    ; IPC fast-path: syscall numbers 0-3 branch directly to dedicated handlers
+    ; Skips SyscallNumber::from_usize + dispatch_syscall match overhead
     ; ─────────────────────────────────────────────────────────────────────────
-    call syscall_dispatch
+    cmp r15, 3                          ; r15 = saved syscall number
+    ja .generic_dispatch                ; >3 → generic path
 
-    add rsp, 8                          ; Pop arg6 from stack
+    lea rax, [rel .ipc_jump_table]
+    jmp [rax + r15 * 8]
+
+.ipc_jump_table:
+    dq .ipc_send                        ; 0 = Send
+    dq .ipc_recv                        ; 1 = Recv
+    dq .ipc_call                        ; 2 = Call
+    dq .ipc_reply                       ; 3 = Reply
+
+.ipc_send:
+    call syscall_ipc_send
+    jmp .after_dispatch
+.ipc_recv:
+    call syscall_ipc_recv
+    jmp .after_dispatch
+.ipc_call:
+    call syscall_ipc_call
+    jmp .after_dispatch
+.ipc_reply:
+    call syscall_ipc_reply
+    jmp .after_dispatch
+
+.generic_dispatch:
+    call syscall_dispatch
+.after_dispatch:
+
+    add rsp, 16                         ; Pop arg6 + alignment pad from stack
 
     ; RAX now contains return value
 
@@ -164,15 +199,9 @@ syscall_entry:
     ; ─────────────────────────────────────────────────────────────────────────
     ; RAX = return value (already set)
 
-    ; Restore callee-saved registers
+    ; Restore R15 (only callee-saved we pushed); R12-R14, RBP preserved by ABI
     pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbp
-    ; Restore user RBX directly from PerCpuData capture, then drop saved slot
     mov rbx, [gs:PERCPU_LAST_RBX]
-    add rsp, 8                          ; Drop saved RBX slot
 %ifdef DEBUG
     mov [gs:PERCPU_LAST_RBX_RET], rbx
 %endif
@@ -256,15 +285,9 @@ syscall_entry:
     ; Save return value
     mov r15, rax
 
-    ; Restore callee-saved to get their values for context save
-    pop r14                             ; Actually r15 from stack
-    mov rax, r14                        ; Save it
-    pop r14
-    pop r13
-    pop r12
-    pop rbp
-    pop rbx
-    ; Restore user RBX directly from PerCpuData capture
+    ; Pop user R15 (only callee-saved pushed); R12-R14, RBP still hold user values
+    pop rax                             ; User R15 → rax
+    ; RBX from PerCpuData capture
     mov rbx, [gs:PERCPU_LAST_RBX]
 %ifdef DEBUG
     mov [gs:PERCPU_LAST_RBX_RET], rbx
@@ -459,3 +482,85 @@ enter_userspace_asm:
 
     swapgs
     iretq
+
+; ═══════════════════════════════════════════════════════════════════════════
+; sysv_abi_preservation_test — Boot-time sentinel check
+; ═══════════════════════════════════════════════════════════════════════════
+;
+; The syscall fast path (T1.5) pushes only R15 on entry and trusts that
+; syscall_dispatch preserves the remaining SysV callee-saved registers:
+; RBX, RBP, R12, R13, R14. If that assumption ever breaks, user state
+; corrupts silently on every syscall. This stub exercises that contract:
+;
+;   - Loads known sentinel values into RBX/RBP/R12/R13/R14.
+;   - Calls an extern "C" Rust function (abi_check_callee) designed to
+;     spill to callee-saved registers.
+;   - Compares each register against its sentinel on return.
+;   - Returns 0 on success, or a code identifying the clobbered register.
+;
+; We save/restore our own caller's callee-saved regs around the test so
+; this routine itself stays a well-behaved extern "C" function.
+;
+sysv_abi_preservation_test:
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rbx, 0xBBBBBBBB11111111
+    mov rbp, 0xBBBBBBBB22222222
+    mov r12, 0xBBBBBBBB33333333
+    mov r13, 0xBBBBBBBB44444444
+    mov r14, 0xBBBBBBBB55555555
+
+    ; 6 pushes above = 48 bytes → misaligned for call; pad to 16.
+    sub rsp, 8
+    call abi_check_callee
+    add rsp, 8
+
+    mov rax, 0
+
+    mov rcx, 0xBBBBBBBB11111111
+    cmp rbx, rcx
+    jne .fail_rbx
+    mov rcx, 0xBBBBBBBB22222222
+    cmp rbp, rcx
+    jne .fail_rbp
+    mov rcx, 0xBBBBBBBB33333333
+    cmp r12, rcx
+    jne .fail_r12
+    mov rcx, 0xBBBBBBBB44444444
+    cmp r13, rcx
+    jne .fail_r13
+    mov rcx, 0xBBBBBBBB55555555
+    cmp r14, rcx
+    jne .fail_r14
+
+    xor eax, eax
+    jmp .done
+
+.fail_rbx:
+    mov eax, 1
+    jmp .done
+.fail_rbp:
+    mov eax, 2
+    jmp .done
+.fail_r12:
+    mov eax, 3
+    jmp .done
+.fail_r13:
+    mov eax, 4
+    jmp .done
+.fail_r14:
+    mov eax, 5
+
+.done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    ret

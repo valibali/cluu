@@ -20,10 +20,12 @@
  * - peripheral: Hardware device drivers and interfaces
  */
 
+pub mod abi_check;
 pub mod apic;
 pub mod gdt;
 pub mod idt;
 pub mod interrupts;
 pub mod pic;
 pub mod syscall;
+pub mod spectre;
 pub mod tsc;
