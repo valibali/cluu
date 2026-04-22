@@ -58,6 +58,39 @@ if [[ ! -f "$CASES_FILE" ]]; then
     exit 1
 fi
 
+# shellcheck source=scripts/harness_case_defaults.sh
+. "$ROOT_DIR/scripts/harness_case_defaults.sh"
+
+# Extract the effective values of the build-affecting env vars from an
+# assignments string like 'MARKER_MODE=foo CLUU_SHELL_AUTOSTART_CMD="spawn x"'.
+# The two things that actually flow into build artifacts are:
+#   - CLUU_SHELL_AUTOSTART_CMD: option_env! in procmgr (rerun-if-env-changed)
+#     — note that harness_run.sh also derives a default from MARKER_MODE when
+#     the caller didn't set one explicitly, so we run the same derivation here
+#   - CLUU_BOOTBOOT_ENV:        baked into target/bootboot_config at build time
+# Prints two lines: the effective value of each var (empty if unset).
+build_signature() {
+    local assignments="$1"
+    (
+        set +u
+        unset CLUU_SHELL_AUTOSTART_CMD CLUU_BOOTBOOT_ENV
+        eval "$assignments"
+        # Run the same MARKER_MODE default-derivation that harness_run.sh does
+        # so we compute the *effective* CLUU_SHELL_AUTOSTART_CMD.
+        TEST_COMMAND="__AUTO__"
+        harness_derive_marker_defaults
+        local effective_autostart="${CLUU_SHELL_AUTOSTART_CMD:-$SHELL_AUTOSTART_CMD_DEFAULT}"
+        printf '%s\n%s\n' \
+            "$effective_autostart" \
+            "${CLUU_BOOTBOOT_ENV-}"
+    )
+}
+
+# Tracks the build signature of the most recent case that actually built.
+# Empty while no build has happened yet.
+LAST_BUILD_SIG=""
+BUILT_ONCE=0
+
 run_case() {
     local name="$1"
     local build_mode="$2"
@@ -69,6 +102,13 @@ run_case() {
 
     if [[ "$FORCE_NO_BUILD" -eq 1 ]]; then
         effective_mode="no_build"
+    elif [[ "$effective_mode" == "full" && "$BUILT_ONCE" -eq 1 ]]; then
+        local sig
+        sig="$(build_signature "$env_assignments")"
+        if [[ "$sig" == "$LAST_BUILD_SIG" ]]; then
+            effective_mode="no_build"
+            echo "    (reusing last build — CLUU_SHELL_AUTOSTART_CMD / CLUU_BOOTBOOT_ENV unchanged)"
+        fi
     fi
 
     echo "=== Harness case: ${name} ==="
@@ -78,6 +118,10 @@ run_case() {
         eval "$env_assignments ./scripts/harness_run.sh"
     fi
     local rc=$?
+    if [[ "$effective_mode" == "full" && $rc -eq 0 ]]; then
+        LAST_BUILD_SIG="$(build_signature "$env_assignments")"
+        BUILT_ONCE=1
+    fi
     if [[ $rc -eq 0 ]]; then
         echo "=== Harness case PASS: ${name} ==="
     else
