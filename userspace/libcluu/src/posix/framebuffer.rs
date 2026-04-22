@@ -36,27 +36,18 @@ pub extern "C" fn framebuffer_acquire(info: *mut FramebufferInfo) -> c_int {
 
     // Step 1: Get console endpoint via registry subscription.
     // Console registers as "console:<instance_id>", default instance is 0.
-    let _ = crate::syscall::debug_print("fb: subscribing to console");
     let console_ep = match crate::registry::subscribe_output("console:0", "write") {
         Ok(ep) => ep,
-        Err(_) => {
-            let _ = crate::syscall::debug_print("fb: subscribe failed");
-            return -1;
-        }
+        Err(_) => return -1,
     };
-    let _ = crate::syscall::debug_print("fb: subscribe ok, calling console");
 
     // Step 2: Query framebuffer info via IPC call.
     let msg = Message::new(CONSOLE_FB_INFO_LABEL, [0; 6], 0);
     let mut reply_buf = [0u8; 512];
     let bytes = match syscall::ipc_call(console_ep, msg.as_bytes(), &mut reply_buf) {
         Ok(b) => b,
-        Err(_) => {
-            let _ = crate::syscall::debug_print("fb: ipc_call failed");
-            return -1;
-        }
+        Err(_) => return -1,
     };
-    let _ = crate::syscall::debug_print("fb: got reply from console");
 
     if bytes < core::mem::size_of::<Message>() {
         return -1;
@@ -77,9 +68,8 @@ pub extern "C" fn framebuffer_acquire(info: *mut FramebufferInfo) -> c_int {
     // Step 3: Map the physical framebuffer into our address space.
     let num_pages = fb_size.div_ceil(0x1000);
     let flags = 0x03 | MAP_DEVICE; // read + write + device (uncacheable)
-    match syscall::space_map_range(space_token(), APP_FB_BASE, fb_phys, flags, num_pages, 0) {
-        Ok(_) => {}
-        Err(_) => return -1,
+    if syscall::space_map_range(space_token(), APP_FB_BASE, fb_phys, flags, num_pages, 0).is_err() {
+        return -1;
     }
 
     // Step 4: Fill in the info struct.

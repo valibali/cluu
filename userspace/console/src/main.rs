@@ -40,9 +40,9 @@ use libcluu::boot::{
 };
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_ACTIVATE_LABEL, CONSOLE_CREATE_VT_LABEL,
-    CONSOLE_DEACTIVATE_LABEL, CONSOLE_SCROLL_VT_LABEL, CONSOLE_SWITCH_VT_LABEL,
-    CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL, CONSOLE_WRITE_VT_LABEL,
-    CONSOLE_WRITE_VT_SYNC_LABEL,
+    CONSOLE_DEACTIVATE_LABEL, CONSOLE_FB_INFO_LABEL, CONSOLE_SCROLL_VT_LABEL,
+    CONSOLE_SWITCH_VT_LABEL, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
+    CONSOLE_WRITE_VT_LABEL, CONSOLE_WRITE_VT_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, syscall, Error, Result};
@@ -159,6 +159,12 @@ fn handle_incoming<B: ConsoleBackend>(
                     let reply_msg = Message::new(msg.tag.label, [0; 6], 0);
                     let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
                 }
+            }
+            CONSOLE_FB_INFO_LABEL => {
+                // Passive framebuffer metadata query — safe on the write
+                // endpoint so clients that only hold a write grant (e.g.
+                // framebuffer_acquire in libcluu) can discover the FB layout.
+                let _ = console.handle_message(msg, payload);
             }
             _ => {}
         }

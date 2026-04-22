@@ -10,7 +10,7 @@
 [user.root]
 home = "/home/root"
 shell = "/bin/shell"
-profile = "admin"
+profile = "supervisor"
 escalate = "supervisor"
 password = ""
 

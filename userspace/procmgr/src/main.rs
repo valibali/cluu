@@ -444,7 +444,10 @@ impl ProcessManager {
     /// Build a VFS view from a capability profile and user home directory.
     /// Picks profile-based default mounts, then replaces /home/* with the user's home.
     fn build_view_for_profile_and_home(&self, profile: CapProfile, home: &str) -> ViewMountList {
-        let base_mounts = if profile.contains(CapProfile::ADMIN) {
+        // Only the plain ADMIN_PROFILE (USER | ADMIN) uses the restricted admin
+        // session mounts. Supervisor/service profiles contain ADMIN bits too but
+        // need the full device- and root-aware mount set.
+        let base_mounts = if profile == CapProfile::ADMIN_PROFILE {
             libcluu::vfs_view::admin_session_mounts()
         } else {
             libcluu::vfs_view::default_mounts_for_profile(profile)
@@ -4950,12 +4953,6 @@ fn map_process_info_page(
     // tracked server-side in pid_to_profile. Slot 5 is shared with
     // PARAM_CONSOLE_INSTANCE for console, so writing the profile here would
     // corrupt the instance ID. Callers use param_overrides for slot 5 if needed.
-    // Apply caller-specified param overrides (e.g. instance IDs, FB params).
-    for &(idx, val) in param_overrides {
-        if idx < params.len() {
-            params[idx] = val;
-        }
-    }
 
     let info_offset = PROCESS_INFO_ADDR - page_base;
     let info_size = size_of::<ProcessInfo>();
@@ -4979,6 +4976,16 @@ fn map_process_info_page(
     if env_fits {
         params[PARAM_ENVC] = envc as u64;
         params[PARAM_ENV_OFFSET] = env_data_offset as u64;
+    }
+
+    // Apply caller-specified param overrides LAST, so service-type callers can
+    // overwrite argv/env slots they don't use (e.g. console overrides slot 6
+    // with PARAM_FB_PHYS and slot 7 with PARAM_CONSOLE_ACTIVE — those services
+    // ignore argv/envp).
+    for &(idx, val) in param_overrides {
+        if idx < params.len() {
+            params[idx] = val;
+        }
     }
 
     let info = ProcessInfo {
@@ -5068,9 +5075,12 @@ fn profile_to_rights(profile: CapProfile) -> [Rights; 16] {
         r[TOKEN_SPACE] |= Rights::SPACE_MAP;
     }
 
-    // DEVICE: needs THREAD_CONTROL for interrupt handling threads.
+    // DEVICE: needs THREAD_CONTROL for interrupt handling threads, and
+    // SPACE_MAP on the space token so the driver can map MMIO regions
+    // (framebuffer, PCI BARs, etc.) into its address space.
     if profile.contains(CapProfile::DEVICE) {
         r[TOKEN_SELF] |= Rights::THREAD_CONTROL;
+        r[TOKEN_SPACE] |= Rights::SPACE_MAP;
     }
 
     // SPACE_GRANT: needs SPACE_GRANT+CREATE on space for shared memory.
@@ -5207,17 +5217,31 @@ fn can_narrow_view(parent_view: &[(String, String, bool)], child_view: &[(String
 
 /// Override default view mounts with per-image directory paths.
 ///
-/// For each `image_dir` (e.g. "bin", "lib"), if there's a matching read-only mount
-/// with dst == "/<dir>", redirect its src to `/var/images/<image_name>/<dir>` so the
-/// container sees its own binaries instead of the global ones.
+/// For each `image_dir` (e.g. "bin", "lib"), if there's a matching read-only
+/// mount with dst == "/<dir>", redirect its src to
+/// `/var/images/<image_name>/<dir>` so the container sees its own binaries
+/// instead of the global ones. If no matching mount exists (e.g. the parent
+/// view is just `("/", "/")`), insert a fresh read-only mount at the front so
+/// the image-local path takes precedence over the broader root mount.
 fn apply_image_dir_overrides(mounts: &mut ViewMountList, image_name: &str, image_dirs: &[String]) {
-    for mount in mounts.iter_mut() {
-        for dir in image_dirs {
-            let virtual_path = format!("/{}", dir);
+    for dir in image_dirs {
+        let virtual_path = format!("/{}", dir);
+        let mut overridden = false;
+        for mount in mounts.iter_mut() {
             if mount.1 == virtual_path && !mount.2 {
-                // Override src to point to image-specific directory
                 mount.0 = format!("/var/images/{}/{}", image_name, dir);
+                overridden = true;
             }
+        }
+        if !overridden {
+            mounts.insert(
+                0,
+                (
+                    format!("/var/images/{}/{}", image_name, dir),
+                    virtual_path,
+                    false,
+                ),
+            );
         }
     }
 }

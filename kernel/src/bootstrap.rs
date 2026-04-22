@@ -191,11 +191,18 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
         boot_info.clock_token = clock_token_handle.as_usize();
         boot_info.initrd_phys = initrd_phys;
         boot_info.initrd_size = initrd_size;
-        boot_info.fb_phys = crate::bootboot::bootboot.fb_ptr as u64;
-        boot_info.fb_size = crate::bootboot::bootboot.fb_size as u64;
-        boot_info.fb_width = crate::bootboot::bootboot.fb_width;
-        boot_info.fb_height = crate::bootboot::bootboot.fb_height;
-        boot_info.fb_pitch = crate::bootboot::bootboot.fb_scanline;
+        // BOOTBOOT is #[repr(C, packed)] — use read_unaligned to avoid UB from
+        // constructing misaligned references to the static fields.
+        boot_info.fb_phys =
+            core::ptr::addr_of!(crate::bootboot::bootboot.fb_ptr).read_unaligned() as u64;
+        boot_info.fb_size =
+            core::ptr::addr_of!(crate::bootboot::bootboot.fb_size).read_unaligned() as u64;
+        boot_info.fb_width =
+            core::ptr::addr_of!(crate::bootboot::bootboot.fb_width).read_unaligned();
+        boot_info.fb_height =
+            core::ptr::addr_of!(crate::bootboot::bootboot.fb_height).read_unaligned();
+        boot_info.fb_pitch =
+            core::ptr::addr_of!(crate::bootboot::bootboot.fb_scanline).read_unaligned();
     }
 
     klibcluu::info("");
