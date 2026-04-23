@@ -11,10 +11,9 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE, TOKEN_STDIN};
 use libcluu::fs::client::VfsClient;
-use libcluu::boot::CWD_MAX;
 use libcluu::ipc::{
     call, call_with_payload, call_with_reply_buf, recv, send_with_payload, send_with_retry,
-    SharedRing, CONSOLE_CLEAR_LABEL, CWD_MAGIC, PROCMGR_CONTAINER_LIST_LABEL,
+    build_container_run_payload_with_argv, SharedRing, CONSOLE_CLEAR_LABEL, PROCMGR_CONTAINER_LIST_LABEL,
     PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_ESCALATE_LABEL, PROCMGR_SHUTDOWN_LABEL, PROCMGR_SU_LABEL,
     TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
     TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
@@ -1176,16 +1175,10 @@ struct SpawnResult {
 /// strips the CWD trailer (last 8 bytes + cwd_len) before slicing argv/FDAC,
 /// so prepending the name and appending the trailer is safe even when the
 /// container_run path doesn't carry argv or FDAC blobs.
+/// Thin wrapper around `build_container_run_payload_with_argv`
+/// for the zero-arg case. Plan 2 Task 4 adds argv-carrying callers.
 fn build_container_run_payload(name: &str) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(name.len() + CWD_MAX + 8);
-    payload.extend_from_slice(name.as_bytes());
-    let cwd_string = libcluu::posix::current_dir_string();
-    let cwd_bytes = cwd_string.as_bytes();
-    let cwd_len = cwd_bytes.len().min(CWD_MAX);
-    payload.extend_from_slice(&cwd_bytes[..cwd_len]);
-    payload.extend_from_slice(&(cwd_len as u32).to_le_bytes());
-    payload.extend_from_slice(&CWD_MAGIC.to_le_bytes());
-    payload
+    build_container_run_payload_with_argv(name, &[]).0
 }
 
 fn spawn_process(context: &mut CommandContext, name: &str, _priority: usize) -> Result<SpawnResult> {

@@ -761,6 +761,40 @@ pub fn make_payload_message(label: u32, payload_len: usize, extra_words: &[usize
     msg
 }
 
+/// Build a `PROCMGR_CONTAINER_RUN_LABEL` payload with optional argv.
+///
+/// Wire format:
+///   `[name_bytes][argv[0]\0][argv[1]\0]...[cwd_trailer]`
+///
+/// When `args` is empty, the output is byte-identical to the pre-argv format
+/// (name + CWD trailer), preserving backwards compatibility.
+///
+/// Returns `(payload, argc)`. Callers pass `argc` as `msg.words[3]` so procmgr
+/// knows how many NUL-terminated strings follow the name.
+#[cfg(feature = "posix")]
+pub fn build_container_run_payload_with_argv(name: &str, args: &[&str]) -> (Vec<u8>, usize) {
+    use crate::boot::CWD_MAX;
+
+    let argc = args.len();
+    let argv_bytes_est: usize = args.iter().map(|a| a.len() + 1).sum();
+    let mut payload = Vec::with_capacity(name.len() + argv_bytes_est + CWD_MAX + 8);
+    payload.extend_from_slice(name.as_bytes());
+
+    for arg in args {
+        payload.extend_from_slice(arg.as_bytes());
+        payload.push(0); // NUL separator
+    }
+
+    let cwd_string = crate::posix::current_dir_string();
+    let cwd_bytes = cwd_string.as_bytes();
+    let cwd_len = cwd_bytes.len().min(CWD_MAX);
+    payload.extend_from_slice(&cwd_bytes[..cwd_len]);
+    payload.extend_from_slice(&(cwd_len as u32).to_le_bytes());
+    payload.extend_from_slice(&CWD_MAGIC.to_le_bytes());
+
+    (payload, argc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
