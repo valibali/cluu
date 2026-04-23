@@ -28,6 +28,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND="regdeny"
                 SHELL_AUTOSTART_CMD_DEFAULT="regdeny"
                 ;;
+            l2_cd)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="cd /; cd etc; pwd"
+                ;;
             l2_ext2write)
                 TEST_COMMAND="ext2write"
                 SHELL_AUTOSTART_CMD_DEFAULT="ext2write"

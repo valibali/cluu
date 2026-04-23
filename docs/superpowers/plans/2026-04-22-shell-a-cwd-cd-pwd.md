@@ -386,7 +386,11 @@ impl BuiltinCommand for PwdBuiltin {
             return Ok(());
         }
 
-        let mut line = libcluu::posix::current_dir_string();
+        let cwd = libcluu::posix::current_dir_string();
+        // Harness-observable signal (COM2 captures debug_print output but not
+        // TTY writes). The harness marker "shell: pwd=<path>" is keyed off this.
+        let _ = libcluu::debug_print(&alloc::format!("shell: pwd={}\n", cwd));
+        let mut line = cwd;
         line.push('\n');
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         context.set_last_status(0);

@@ -545,6 +545,7 @@ fi
 # - m4_notify_lifecycle: sender notify bindings are reclaimed after child lifecycle ends
 # - m4_deny_paths: explicit sender-auth denial path regressions (PermissionDenied flows)
 # - m4_registry_deny_paths: explicit registry ownership denial path regressions
+# - l2_cd: `cd`/`pwd` shell builtins change and report current directory
 # - l2_ext2write: end-to-end ext2 write smoke test via shell builtin
 # - l2_ext2append: append-past-EOF ext2 smoke test via shell builtin
 # - l2_ext2mutate: mkdir/rename/rmdir ext2 metadata mutation smoke test
@@ -696,6 +697,13 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "ringio: PASS path=/bin/hello"
+        )
+        ;;
+    l2_cd)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: pwd=/etc"
         )
         ;;
     l2_ext2write)
