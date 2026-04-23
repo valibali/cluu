@@ -143,6 +143,13 @@ struct SessionEntry {
     stdin_endpoint: usize,
 }
 
+/// Upper bound on the argv block emitted by `build_container_run_payload_with_argv`.
+/// The child's argv must fit inside the 4 KB ProcessInfo page alongside the
+/// ProcessInfo header, cwd block, and name; 3 KB leaves ~1 KB for the rest.
+/// `libcluu::args` enforces the corresponding read-side cap via its
+/// `argv_offset >= PAGE_SIZE` guard.
+const MAX_ARGV_TRAILER_BYTES: usize = 3072;
+
 const SERVICE_STACK_SIZE: usize = 64 * 1024;
 const SERVICE_STACK_BASE: usize = 0x6d000000;
 const SERVICE_STACK_TOP: usize = SERVICE_STACK_BASE + SERVICE_STACK_SIZE;
@@ -4184,6 +4191,10 @@ impl ProcessManager {
         // Strip the optional CWD trailer first; FDAC/param offsets refer into
         // the pre-trailer view, identical to the posix_spawn payload contract.
         let (effective_payload, cwd_bytes) = split_cwd_trailer(payload);
+        // ARGV trailer sits between the argv block and the CWD trailer in the
+        // wire format, so CWD must be stripped first — reordering these two
+        // calls will make split_argv_trailer's magic check land inside the
+        // CWD trailer's length field and silently mis-parse every payload.
         let (effective_payload, argv_extra_bytes) = split_argv_trailer(effective_payload);
 
         // Extract FDAC offset and param override info from message words
@@ -5002,10 +5013,18 @@ fn split_argv_trailer(payload: &[u8]) -> (&[u8], &[u8]) {
     if argv_bytes_len > len_pos {
         return (payload, &[]);
     }
-    // Sanity cap: argv block cannot exceed 3 KB (leaves 1 KB for name + CWD
-    // after the 4 KB ProcessInfo layout). Matches libcluu::args::MAX_ARGC=256
-    // worst case (256 one-char args × 2 bytes = 512 bytes).
-    if argv_bytes_len > 3072 {
+    // Reject trailers larger than the ProcessInfo page can plausibly carry —
+    // the child's argv must fit inside the 4 KB ProcessInfo page alongside
+    // ProcessInfo headers, the cwd block, and a small name margin. 3 KB is a
+    // conservative ceiling; libcluu::args also bails on argv_offset >= PAGE_SIZE.
+    if argv_bytes_len > MAX_ARGV_TRAILER_BYTES {
+        return (payload, &[]);
+    }
+
+    // A well-formed trailer always carries at least one NUL-terminated arg.
+    // Reject degenerate (zero-length or missing terminal NUL) trailers rather
+    // than under-counting argc downstream.
+    if argv_bytes_len == 0 || payload[len_pos - 1] != 0 {
         return (payload, &[]);
     }
 
