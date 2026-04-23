@@ -1204,17 +1204,16 @@ fn spawn_process_with_argv(
     args: &[&str],
 ) -> Result<SpawnResult> {
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-    let (payload, argc) = build_container_run_payload_with_argv(name, args);
+    let (payload, _argc) = build_container_run_payload_with_argv(name, args);
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
-    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 4);
+    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();
     msg.words[1] = notify_endpoint;
     msg.words[2] = 0; // fdac_offset
-    msg.words[3] = argc; // NEW: argv count
     let mut reply = Message::new(0, [0; 6], 0);
     let _ = debug_print(&format!(
-        "shell: container run begin name={} argc={} ep={} notify={}",
-        name, argc, procmgr_endpoint, notify_endpoint
+        "shell: container run begin name={} ep={} notify={}",
+        name, procmgr_endpoint, notify_endpoint
     ));
     call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
     let _ = debug_print(&format!(
@@ -2792,11 +2791,10 @@ fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
     let payload = build_container_run_payload(name);
-    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 4);
+    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();
     msg.words[1] = notify_endpoint;
     msg.words[2] = 0; // fdac_offset — no FDAC for basic container run
-    msg.words[3] = 0; // argc — zero for admin container run (no extra argv)
     let mut reply = Message::new(0, [0; 6], 0);
 
     call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
