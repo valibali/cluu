@@ -168,7 +168,11 @@ pub fn init_cwd() {
     let cwd_offset = info.params[crate::boot::PARAM_CWD_OFFSET] as usize;
     let cwd_len = info.params[crate::boot::PARAM_CWD_LEN] as usize;
 
-    if cwd_len == 0 || cwd_offset == 0 || cwd_len > crate::boot::CWD_MAX {
+    if cwd_len == 0
+        || cwd_offset == 0
+        || cwd_offset >= 4096
+        || cwd_len > crate::boot::CWD_MAX
+    {
         *cwd = Some(String::from("/"));
         return;
     }
@@ -182,6 +186,10 @@ pub fn init_cwd() {
         return;
     }
 
+    // SAFETY: `start` lies inside the 4 KiB ProcessInfo page which is kernel-mapped
+    // read-only at process startup. `cwd_offset` is bounded above by 4096 and below
+    // by 1, so `start` is non-null and within the page. `start + cwd_len <= page_end`
+    // was just verified, and `cwd_len <= CWD_MAX (1024) << isize::MAX`.
     let bytes = unsafe { core::slice::from_raw_parts(start as *const u8, cwd_len) };
     match core::str::from_utf8(bytes) {
         Ok(s) if !s.is_empty() && s.starts_with('/') => {
