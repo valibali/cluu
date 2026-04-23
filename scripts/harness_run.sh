@@ -893,6 +893,13 @@ case "$MARKER_MODE" in
             "mkdir: ok /tmp/b/c/d"
         )
         ;;
+    l2_rm)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "rm: ok /tmp/rmtest"
+        )
+        ;;
     l2_waitpid)
         required_markers=(
             "TSC calibrated"

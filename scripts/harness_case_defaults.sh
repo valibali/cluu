@@ -121,6 +121,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir /tmp/a; spawn mkdir -p /tmp/b/c/d"
                 ;;
+            l2_rm)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir /tmp/rmtest; spawn mkdir /tmp/rmtest/inner; spawn rm -r /tmp/rmtest"
+                ;;
             l2_waitpid)
                 TEST_COMMAND="spawn waitprobe"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn waitprobe"
