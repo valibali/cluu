@@ -885,6 +885,14 @@ case "$MARKER_MODE" in
             "procmgr: exit cookie"
         )
         ;;
+    l2_mkdir)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "mkdir: ok /tmp/a"
+            "mkdir: ok /tmp/b/c/d"
+        )
+        ;;
     l2_waitpid)
         required_markers=(
             "TSC calibrated"
