@@ -167,6 +167,25 @@ Each case uses the existing harness pattern: `MARKER_MODE=l2_<name>` with a matc
 - **Shell-C** (future): raw-mode TTY, line editor, history ring, tab completion.
 - **Shell-D/E/F** (later phase): POSIX control flow, expansions, scripting polish. Moves toward target (c).
 
+## Follow-ups discovered during implementation
+
+- **CWD trailer applies to two IPC paths, not one.** The plan only wired the
+  trailer through `posix_spawn` (libcluu) → `PROCMGR_SPAWN_LABEL`. The shell's
+  `spawn`/`spawnbg`/`container run` builtins do *not* call `posix_spawn`; they
+  call `PROCMGR_CONTAINER_RUN_LABEL` directly. Without the trailer on that path
+  too, `cd /tmp; spawn pwdprobe` would silently see `cwd=/`. Resolved by
+  promoting `CWD_MAGIC` to `libcluu::ipc` and emitting the trailer from both
+  shell paths via `build_container_run_payload`. Any future spec that touches
+  spawn semantics must enumerate both labels.
+- **`spawn` and `container run` are two surface commands wrapping the same
+  IPC.** `SpawnBuiltin::spawn_process` and `ContainerBuiltin::container_run`
+  both build a `PROCMGR_CONTAINER_RUN_LABEL` payload with `name.as_bytes()` and
+  differ only in shell-side wrapping (foreground/job tracking vs admin-style
+  inline wait). Keeping the `build_container_run_payload` helper shared
+  prevents trailer drift, but the duplication is real and predates Shell-A.
+  Worth folding into Shell-B or a dedicated shell-cleanup spec — pick one
+  surface, deprecate the other.
+
 ## Acceptance
 
 Shell-A is complete when:
