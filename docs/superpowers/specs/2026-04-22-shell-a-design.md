@@ -183,8 +183,15 @@ Each case uses the existing harness pattern: `MARKER_MODE=l2_<name>` with a matc
   differ only in shell-side wrapping (foreground/job tracking vs admin-style
   inline wait). Keeping the `build_container_run_payload` helper shared
   prevents trailer drift, but the duplication is real and predates Shell-A.
-  Worth folding into Shell-B or a dedicated shell-cleanup spec — pick one
-  surface, deprecate the other.
+- **Drop `spawn`/`spawnbg` in favour of bare-command PATH resolution
+  (Shell-A.5).** User preference: `pwdprobe` should Just Work the way `ls`
+  does, not require an `exec`-style verb. The shell's "command not a builtin"
+  branch should resolve through PATH (`/bin/$cmd`, then
+  `/var/images/$cmd/bin/$cmd`) and dispatch via the existing IPC.
+  `container run|list|stop` stays as the deliberate admin verb. Backgrounding
+  via `&` suffix is Shell-B grammar work. Migration cost: every harness case
+  using `spawn X` and every `SHELL_AUTOSTART_CMD_DEFAULT="spawn ..."` needs
+  rewriting. Wants its own brainstorm + plan, not a tack-on to Shell-A.
 
 ## Acceptance
 
