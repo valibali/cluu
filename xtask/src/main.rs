@@ -3580,6 +3580,7 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("devprobe", "userspace/c-programs/devprobe.c"),
         ("fbprobe", "userspace/c-programs/fbprobe.c"),
         ("containerprobe", "userspace/c-programs/containerprobe.c"),
+        ("pwdprobe", "userspace/c-programs/pwdprobe.c"),
     ];
 
     for (name, source) in c_programs {

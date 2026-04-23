@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c pwdprobe userspace/c-programs/pwdprobe.c" target/x86_64-cluu-user/debug/pwdprobe.elf /bin/pwdprobe
+ENTRYPOINT /bin/pwdprobe
