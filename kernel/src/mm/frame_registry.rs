@@ -17,6 +17,12 @@ pub struct FrameEntry {
     pub owner_space: AddressSpaceId,
     /// Number of address spaces currently mapping this frame
     pub map_count: u32,
+    /// If true, free the frame back to PMM when `map_count` drops to 0.
+    /// False for user-held frame tokens (FrameAllocate) where userspace
+    /// owns the lifetime and must call FrameFree explicitly.
+    /// True for entries created implicitly by `invoke_space_grant` to
+    /// track shared mappings across address spaces.
+    pub auto_free: bool,
 }
 
 /// Forward map: FrameId → FrameEntry
@@ -45,12 +51,75 @@ pub fn alloc_frame(owner: AddressSpaceId) -> Option<(FrameId, u64)> {
         phys_addr: phys,
         owner_space: owner,
         map_count: 0,
+        auto_free: false,
     };
 
     FRAME_REGISTRY.lock().insert(id, entry);
     PHYS_TO_FRAME.lock().insert(phys, id);
 
     Some((id, phys))
+}
+
+/// Register (or reuse) a frame as the backing of a shared grant mapping.
+///
+/// If the frame is not yet tracked, creates an entry with `map_count = 2`
+/// (source mapping + new target mapping) and `auto_free = true`. On
+/// subsequent grants of the same frame, just increments `map_count` by 1
+/// (one new target mapping).
+///
+/// Used by `invoke_space_grant` to track shared mappings so that
+/// `teardown_user_pages` does not double-free frames still in use.
+pub fn register_grant_mapping(phys: u64, owner: AddressSpaceId) -> FrameId {
+    // Lock order matches alloc_frame/dec_and_maybe_free/free_frame:
+    // FRAME_REGISTRY before PHYS_TO_FRAME (consistency prevents deadlock).
+    let mut reg = FRAME_REGISTRY.lock();
+    let mut phys_map = PHYS_TO_FRAME.lock();
+
+    if let Some(&existing) = phys_map.get(&phys) {
+        if let Some(entry) = reg.get_mut(&existing) {
+            entry.map_count = entry.map_count.saturating_add(1);
+        }
+        return existing;
+    }
+
+    let id = FrameId::new(NEXT_FRAME_ID.fetch_add(1, Ordering::SeqCst));
+    reg.insert(
+        id,
+        FrameEntry {
+            phys_addr: phys,
+            owner_space: owner,
+            // Source already had the frame mapped; new target adds one more.
+            map_count: 2,
+            auto_free: true,
+        },
+    );
+    phys_map.insert(phys, id);
+    id
+}
+
+/// Decrement mapping count; if the entry was auto-free (grant-tracked)
+/// and the count reaches zero, free the frame back to PMM and remove it
+/// from the registry.
+///
+/// For user-held frame tokens (`auto_free = false`), this is equivalent
+/// to `dec_map_count` — the backing frame remains allocated until an
+/// explicit `FrameFree` call.
+pub fn dec_and_maybe_free(frame_id: FrameId) {
+    let mut reg = FRAME_REGISTRY.lock();
+    let Some(entry) = reg.get_mut(&frame_id) else {
+        return;
+    };
+    entry.map_count = entry.map_count.saturating_sub(1);
+    if !entry.auto_free || entry.map_count != 0 {
+        return;
+    }
+
+    let phys = entry.phys_addr;
+    reg.remove(&frame_id);
+    drop(reg);
+
+    PHYS_TO_FRAME.lock().remove(&phys);
+    crate::mm::pmm::free_frame(phys);
 }
 
 /// Free a tracked frame. Fails if `map_count > 0`.

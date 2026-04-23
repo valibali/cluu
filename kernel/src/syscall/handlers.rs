@@ -1285,7 +1285,7 @@ fn rollback_mapped_4kb(
             if let Ok(phys) = vmm.unmap(addr) {
                 let phys_addr = phys.as_u64();
                 if let Some(frame_id) = frame_registry::lookup_by_phys(phys_addr) {
-                    frame_registry::dec_map_count(frame_id);
+                    frame_registry::dec_and_maybe_free(frame_id);
                 } else {
                     pmm::free_frame(phys_addr);
                 }
@@ -1471,9 +1471,10 @@ fn invoke_space_unmap(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
             let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
             if let Ok(phys) = vmm.unmap(addr) {
                 let phys_addr = phys.as_u64();
-                // Check if this is a tracked frame (allocated via frame capabilities)
+                // Check if this is a tracked frame (allocated via frame
+                // capabilities or shared through a grant).
                 if let Some(frame_id) = frame_registry::lookup_by_phys(phys_addr) {
-                    frame_registry::dec_map_count(frame_id);
+                    frame_registry::dec_and_maybe_free(frame_id);
                 } else {
                     pmm::free_frame(phys_addr);
                 }
@@ -1734,7 +1735,7 @@ fn invoke_futex_wake(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sy
 fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::elf;
     use crate::mm::space::layout;
-    use crate::mm::{space_repository, vmm::pte_flags};
+    use crate::mm::{frame_registry, space_repository, vmm::pte_flags};
     use crate::token::{lookup_token, ObjectRef, ObjectType, Rights, TokenHandle};
     use x86_64::VirtAddr;
 
@@ -1829,6 +1830,25 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
         return Err(Error::PermissionDenied);
     }
 
+    // If the target already has something mapped at `target_virt`, drop
+    // its refcount first so we don't leak the prior frame. For grant-
+    // tracked frames, the frame is freed to PMM when its last mapping
+    // goes away. For untracked frames (e.g. an anonymous page from
+    // `space_map_range`), we leak — they stay attributed to the owning
+    // space and will be reclaimed at teardown.
+    let prior_phys = space_repository::with_space(target_space_id, |target_space| {
+        elf::translate_vaddr_with_flags(target_space.page_table_root, VirtAddr::new(target_virt))
+    })
+    .flatten()
+    .map(|(phys, _)| phys.as_u64() & PHYS_MASK);
+    if let Some(old_phys) = prior_phys {
+        if old_phys != phys_addr {
+            if let Some(old_id) = frame_registry::lookup_by_phys(old_phys) {
+                frame_registry::dec_and_maybe_free(old_id);
+            }
+        }
+    }
+
     // Map the physical page into target address space
     let result = space_repository::with_space_mut(target_space_id, |target_space| unsafe {
         elf::map_user_page(
@@ -1841,7 +1861,16 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
     });
 
     match result {
-        Some(Ok(())) => Ok(0),
+        Some(Ok(())) => {
+            // Re-mapping the *same* physical frame to the same target
+            // address is a no-op refcount-wise (we already decremented a
+            // stale mapping above, which in this case was this same
+            // frame — compensate by not incrementing).
+            if prior_phys != Some(phys_addr) {
+                frame_registry::register_grant_mapping(phys_addr, target_space_id);
+            }
+            Ok(0)
+        }
         Some(Err(_)) => {
             klibcluu::warn("invoke_space_grant: failed to map page in target");
             Err(Error::OutOfMemory)

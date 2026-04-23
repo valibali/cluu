@@ -1111,7 +1111,17 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                     }
 
                     let frame_phys = pte & pte_flags::ADDR_MASK;
-                    crate::mm::pmm::free_frame(frame_phys);
+                    // Grant-shared frames are tracked in the registry;
+                    // freeing unconditionally here would yank the frame
+                    // out from under other spaces that still have it
+                    // mapped. Let the registry decide.
+                    if let Some(frame_id) =
+                        crate::mm::frame_registry::lookup_by_phys(frame_phys)
+                    {
+                        crate::mm::frame_registry::dec_and_maybe_free(frame_id);
+                    } else {
+                        crate::mm::pmm::free_frame(frame_phys);
+                    }
                     freed_frames += 1;
                 }
 
