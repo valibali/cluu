@@ -131,7 +131,7 @@ fn print_prompt(endpoint: usize) -> Result<()> {
 }
 
 /// Read an environment variable from the ProcessInfo page.
-fn read_env_var(name: &str) -> Option<String> {
+pub(crate) fn read_env_var(name: &str) -> Option<String> {
     use libcluu::boot::{process_info, PARAM_ENVC, PARAM_ENV_OFFSET};
 
     let info = process_info();

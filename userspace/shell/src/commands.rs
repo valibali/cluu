@@ -283,6 +283,8 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(HelpBuiltin));
         registry.register(Box::new(ClearBuiltin));
         registry.register(Box::new(EchoBuiltin));
+        registry.register(Box::new(CdBuiltin));
+        registry.register(Box::new(PwdBuiltin));
         registry.register(Box::new(ExitBuiltin));
         registry.register(Box::new(SetBuiltin));
         registry.register(Box::new(UnsetBuiltin));
@@ -333,25 +335,50 @@ impl CommandExecutor for BuiltinRegistry {
         context: &mut CommandContext,
         program: &Program,
     ) -> Result<ExecResult> {
-        let command = match flatten_simple_command(program) {
-            Some(command) => command,
-            None => return Ok(ExecResult::NotHandled),
-        };
-        for assign in command.assigns {
-            let value = render_word(context, &assign.value);
-            context.set(&assign.name, value);
-        }
-        let mut args = Vec::new();
-        for elem in command.words {
-            args.push(render_word(context, &elem));
-        }
-        let Some(name) = args.first() else {
+        if program.stmts.is_empty() {
             return Ok(ExecResult::NotHandled);
-        };
-        if name.as_str() == "repeat" {
-            return self.execute_repeat(stdout, context, &args[1..]);
         }
-        self.run_builtin(stdout, context, name, &args[1..])
+
+        // Execute each statement sequentially. Top-level `;` in cluu_lang
+        // produces multiple Stmts; we run them left-to-right and report
+        // Handled if every statement was handled (used for startup
+        // autostart strings like "cd /; cd etc; pwd").
+        let mut all_handled = true;
+        for stmt in &program.stmts {
+            let command = match flatten_simple_command_from_stmt(stmt) {
+                Some(command) => command,
+                None => {
+                    all_handled = false;
+                    continue;
+                }
+            };
+            for assign in command.assigns {
+                let value = render_word(context, &assign.value);
+                context.set(&assign.name, value);
+            }
+            let mut args = Vec::new();
+            for elem in command.words {
+                args.push(render_word(context, &elem));
+            }
+            let Some(name) = args.first() else {
+                all_handled = false;
+                continue;
+            };
+            let result = if name.as_str() == "repeat" {
+                self.execute_repeat(stdout, context, &args[1..])?
+            } else {
+                self.run_builtin(stdout, context, name, &args[1..])?
+            };
+            if let ExecResult::NotHandled = result {
+                all_handled = false;
+            }
+        }
+
+        if all_handled {
+            Ok(ExecResult::Handled)
+        } else {
+            Ok(ExecResult::NotHandled)
+        }
     }
 }
 
@@ -383,7 +410,7 @@ impl BuiltinCommand for HelpBuiltin {
         send_with_payload(
             stdout,
             TTY_WRITE_LABEL,
-            b"builtins: help, clear, echo, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, jobchurn, jobmix, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, ringio, repeat, cat, ls, heap\n",
+            b"builtins: help, clear, echo, cd, pwd, exit, set, unset, env, expr, let, spawn, spawnbg, jobs, jobchurn, jobmix, stop, fg, bg, killdeny, regdeny, mapfail, mapcpfail, maperror, ext2write, ext2append, ext2mutate, ext2unlink, ext2ownerdeny, ringio, repeat, cat, ls, heap\n",
         )?;
         Ok(())
     }
@@ -436,8 +463,7 @@ struct ParsedCommand {
     words: Vec<Word>,
 }
 
-fn flatten_simple_command(program: &Program) -> Option<ParsedCommand> {
-    let stmt = program.stmts.first()?;
+fn flatten_simple_command_from_stmt(stmt: &Stmt) -> Option<ParsedCommand> {
     let Stmt::Pipeline(pipeline) = stmt;
     if pipeline.commands.len() != 1 {
         return None;
@@ -590,6 +616,67 @@ impl BuiltinCommand for EnvBuiltin {
             let line = format!("{}={}\n", name, value);
             send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
         }
+        Ok(())
+    }
+}
+
+struct CdBuiltin;
+
+impl BuiltinCommand for CdBuiltin {
+    fn name(&self) -> &'static str {
+        "cd"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        if args.len() > 1 {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"cd: too many arguments\n")?;
+            context.set_last_status(1);
+            return Ok(());
+        }
+
+        let target: String = if args.is_empty() {
+            // No arg: use $HOME, fall back to "/" if unset.
+            crate::read_env_var("HOME").unwrap_or_else(|| String::from("/"))
+        } else {
+            args[0].clone()
+        };
+
+        match libcluu::posix::set_current_dir_str(target.as_str()) {
+            Ok(()) => {
+                context.set_last_status(0);
+            }
+            Err(errno) => {
+                let line = format!("cd: {}: errno {}\n", target, errno);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                context.set_last_status(1);
+            }
+        }
+        Ok(())
+    }
+}
+
+struct PwdBuiltin;
+
+impl BuiltinCommand for PwdBuiltin {
+    fn name(&self) -> &'static str {
+        "pwd"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        if !args.is_empty() {
+            send_with_payload(stdout, TTY_WRITE_LABEL, b"pwd: too many arguments\n")?;
+            context.set_last_status(1);
+            return Ok(());
+        }
+
+        let cwd = libcluu::posix::current_dir_string();
+        // Harness-observable signal (COM2 captures debug_print output but not
+        // TTY writes). The harness marker "shell: pwd=<path>" is keyed off this.
+        let _ = libcluu::debug_print(&format!("shell: pwd={}\n", cwd));
+        let mut line = cwd;
+        line.push('\n');
+        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        context.set_last_status(0);
         Ok(())
     }
 }
