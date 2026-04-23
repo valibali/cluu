@@ -47,6 +47,9 @@ pub struct CommandContext {
     procmgr_spawn: usize,
     console_write: usize,
     bg_jobs: BTreeMap<usize, BackgroundJob>,
+    /// Exit status of the most recently executed builtin/command.
+    /// Read by `echo $?` (Shell-B). `cd`/`pwd` write here.
+    last_status: i32,
 }
 
 struct BackgroundJob {
@@ -77,7 +80,18 @@ impl CommandContext {
             procmgr_spawn: 0,
             console_write: 0,
             bg_jobs: BTreeMap::new(),
+            last_status: 0,
         }
+    }
+
+    /// Set the exit status of the most recently executed builtin/command.
+    pub fn set_last_status(&mut self, status: i32) {
+        self.last_status = status;
+    }
+
+    /// Return the exit status of the most recently executed builtin/command.
+    pub fn last_status(&self) -> i32 {
+        self.last_status
     }
 
     /// Set or update a variable in the shell context.
