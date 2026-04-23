@@ -31,6 +31,7 @@ members = [
     "userspace/escalateprobe",
     "userspace/viewprobe",
     "userspace/argvprobe",
+    "userspace/mkdir",
     "userspace/cascadeprobe",
     "userspace/detachprobe",
     "userspace/virtio-blk",
@@ -67,6 +68,7 @@ default-members = [
     "userspace/escalateprobe",
     "userspace/viewprobe",
     "userspace/argvprobe",
+    "userspace/mkdir",
     "userspace/cascadeprobe",
     "userspace/detachprobe",
     "userspace/virtio-blk",
@@ -147,6 +149,9 @@ debug = 0
 [profile.dev.package."cluu-argvprobe"]
 debug = 0
 
+[profile.dev.package."cluu-mkdir"]
+debug = 0
+
 [profile.dev.package."cluu-cascadeprobe"]
 debug = 0
 
@@ -208,6 +213,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-argvprobe"]
+debug = 0
+
+[profile.release.package."cluu-mkdir"]
 debug = 0
 
 [profile.release.package."cluu-cascadeprobe"]

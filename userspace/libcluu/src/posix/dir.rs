@@ -348,7 +348,7 @@ fn cstr_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
 }
 
 /// Resolve a path: if relative, prepend CWD. Normalize trailing slashes.
-fn resolve_path(path: &str) -> String {
+pub fn resolve_path(path: &str) -> String {
     if path.starts_with('/') {
         // Absolute path — use as-is, but normalize trailing slash
         let mut s = String::from(path);

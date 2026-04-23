@@ -245,6 +245,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-mkdir"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-nestprobe"
 version = "0.1.0"
 dependencies = [
