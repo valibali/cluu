@@ -39,11 +39,23 @@ pub fn args() -> Vec<String> {
 /// Safety: reads from `PROCESS_INFO_ADDR`'s page. This page is always mapped
 /// read-only during the process's lifetime (procmgr guarantees this before
 /// jumping to `_start`). Bounds-check every byte offset against `PAGE_SIZE`.
+/// Sanity cap on decoded argc. A 4 KB ProcessInfo page cannot hold more than
+/// ~2000 single-char args anyway; this bounds allocation against uninitialized
+/// `params` slots (e.g., `init`, whose page is not set up by procmgr and may
+/// contain debug sentinels like 0xAFAFAFAFAFAFAFAF).
+const MAX_ARGC: usize = 256;
+
 fn decode_from_process_info() -> Vec<String> {
     let info = process_info();
     let argc = info.params[PARAM_ARGC] as usize;
     let argv_offset = info.params[PARAM_ARGV_OFFSET] as usize;
     if argc == 0 || argv_offset == 0 {
+        return Vec::new();
+    }
+    // Reject clearly-garbage values without allocating. This is the fast
+    // path for processes that boot before procmgr populates their argv
+    // (init, procmgr itself).
+    if argc > MAX_ARGC || argv_offset >= PAGE_SIZE {
         return Vec::new();
     }
 
