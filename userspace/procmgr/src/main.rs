@@ -5043,10 +5043,16 @@ fn map_process_info_page(
         params[PARAM_ENV_OFFSET] = env_data_offset as u64;
     }
 
-    // Place cwd bytes in the page AFTER env data. Clamp to CWD_MAX and guard
-    // against overflow of the 4 KB page. If it won't fit, silently emit zero
-    // length — child falls back to "/".
-    let cwd_data_offset = env_data_offset + env_data.len();
+    // Place cwd bytes in the page AFTER whatever was actually written. If env
+    // didn't fit it wasn't copied into the page, so anchor cwd just after argv
+    // so cwd still gets a chance to land. Clamp to CWD_MAX and guard against
+    // overflow of the 4 KB page. If it won't fit, silently emit zero length —
+    // child falls back to "/".
+    let cwd_data_offset = if env_fits {
+        env_data_offset + env_data.len()
+    } else {
+        argv_data_offset + argv_payload.len()
+    };
     let cwd_clamped_len = cwd_bytes.len().min(CWD_MAX);
     let cwd_end = cwd_data_offset + cwd_clamped_len;
     let cwd_fits = cwd_clamped_len > 0 && cwd_end <= PAGE_SIZE;

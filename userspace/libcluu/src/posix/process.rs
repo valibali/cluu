@@ -437,6 +437,11 @@ pub extern "C" fn posix_spawn(
 
     // Append the CWD magic trailer so procmgr can seed the child's cwd.
     // Layout: [cwd_bytes][u32 cwd_len LE][u32 CWD_MAGIC LE].
+    //
+    // IMPORTANT: this must stay AFTER serialize_fd_actions above. `fdac_offset`
+    // (and `env_payload_offset`) are offsets into the pre-trailer payload, and
+    // procmgr reconstructs the same view by stripping the trailer with
+    // split_cwd_trailer. Reordering this append breaks that contract silently.
     let cwd_string = crate::posix::dir::current_dir_string();
     let cwd_bytes = cwd_string.as_bytes();
     let cwd_len = cwd_bytes.len().min(crate::boot::CWD_MAX);
