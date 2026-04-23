@@ -805,7 +805,7 @@ fn infer_foreground_mode(path: &str) -> ForegroundMode {
     ForegroundMode::SignalOnCtrlC
 }
 
-fn parse_spawn_args(args: &[String]) -> Option<(String, usize, ForegroundMode)> {
+fn parse_spawn_args(args: &[String]) -> Option<(String, usize, ForegroundMode, Vec<String>)> {
     if args.is_empty() {
         return None;
     }
@@ -828,14 +828,25 @@ fn parse_spawn_args(args: &[String]) -> Option<(String, usize, ForegroundMode)> 
         }
     }
     let path = args.get(idx)?.clone();
-    let priority = args
-        .get(idx + 1)
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_PRIORITY);
+    idx += 1;
+
+    // Priority: if the next token parses as usize, consume it as priority. Else
+    // leave it for argv. This preserves backward compat (`spawn foo 5`) while
+    // allowing `spawn foo --help` to pass `--help` as argv[1].
+    let priority = match args.get(idx).and_then(|v| v.parse::<usize>().ok()) {
+        Some(p) => {
+            idx += 1;
+            p
+        }
+        None => DEFAULT_PRIORITY,
+    };
+
+    let argv_tail: Vec<String> = args[idx..].to_vec();
+
     if !mode_explicit {
         mode = infer_foreground_mode(path.as_str());
     }
-    Some((path, priority, mode))
+    Some((path, priority, mode, argv_tail))
 }
 
 impl BuiltinCommand for SpawnBuiltin {
@@ -844,11 +855,12 @@ impl BuiltinCommand for SpawnBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some((path, priority, fg_mode)) = parse_spawn_args(args) else {
+        let Some((path, priority, fg_mode, argv_tail)) = parse_spawn_args(args) else {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"spawn: missing path\n")?;
             return Ok(());
         };
-        let spawn = spawn_process(context, path.as_str(), priority)?;
+        let argv_refs: Vec<&str> = argv_tail.iter().map(|s| s.as_str()).collect();
+        let spawn = spawn_process_with_argv(context, path.as_str(), priority, &argv_refs)?;
         match parse_status(spawn.status_word) {
             Ok(()) => {
                 let child_pid = spawn.pid;
@@ -878,12 +890,12 @@ impl BuiltinCommand for SpawnBgBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some((path, priority, fg_mode)) = parse_spawn_args(args) else {
+        let Some((path, priority, fg_mode, _argv_tail)) = parse_spawn_args(args) else {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"spawnbg: missing path\n")?;
             return Ok(());
         };
 
-        let spawn = spawn_process(context, path.as_str(), priority)?;
+        let spawn = spawn_process_with_argv(context, path.as_str(), priority, &[])?;
         match parse_status(spawn.status_word) {
             Ok(()) => {
                 context.add_bg_job(
@@ -1181,18 +1193,28 @@ fn build_container_run_payload(name: &str) -> Vec<u8> {
     build_container_run_payload_with_argv(name, &[]).0
 }
 
-fn spawn_process(context: &mut CommandContext, name: &str, _priority: usize) -> Result<SpawnResult> {
+fn spawn_process(context: &mut CommandContext, name: &str, priority: usize) -> Result<SpawnResult> {
+    spawn_process_with_argv(context, name, priority, &[])
+}
+
+fn spawn_process_with_argv(
+    context: &mut CommandContext,
+    name: &str,
+    _priority: usize,
+    args: &[&str],
+) -> Result<SpawnResult> {
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-    let payload = build_container_run_payload(name);
+    let (payload, argc) = build_container_run_payload_with_argv(name, args);
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
-    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
+    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 4);
     msg.words[0] = payload.len();
     msg.words[1] = notify_endpoint;
     msg.words[2] = 0; // fdac_offset
+    msg.words[3] = argc; // NEW: argv count
     let mut reply = Message::new(0, [0; 6], 0);
     let _ = debug_print(&format!(
-        "shell: container run begin name={} ep={} notify={}",
-        name, procmgr_endpoint, notify_endpoint
+        "shell: container run begin name={} argc={} ep={} notify={}",
+        name, argc, procmgr_endpoint, notify_endpoint
     ));
     call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
     let _ = debug_print(&format!(
@@ -2770,10 +2792,11 @@ fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
     let payload = build_container_run_payload(name);
-    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
+    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 4);
     msg.words[0] = payload.len();
     msg.words[1] = notify_endpoint;
     msg.words[2] = 0; // fdac_offset — no FDAC for basic container run
+    msg.words[3] = 0; // argc — zero for admin container run (no extra argv)
     let mut reply = Message::new(0, [0; 6], 0);
 
     call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
