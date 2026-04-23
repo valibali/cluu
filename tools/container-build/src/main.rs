@@ -528,8 +528,13 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str, image_dirs:
         out.push_str("]\n");
     }
 
-    // [mounts] — only if deny_inherit or deny paths specified
-    if cluufile.deny_inherit || !cluufile.deny.is_empty() {
+    // [mounts] — emitted if deny_inherit, deny paths, or mount policies are set.
+    // Mount policies are emitted as [[mounts.policy]] array-of-tables so procmgr
+    // can read them as a vector without ambiguity versus deny_inherit / deny.
+    let has_mount_section = cluufile.deny_inherit
+        || !cluufile.deny.is_empty()
+        || !cluufile.mount_policies.is_empty();
+    if has_mount_section {
         out.push_str("\n[mounts]\n");
         if cluufile.deny_inherit {
             out.push_str("deny_inherit = true\n");
@@ -543,6 +548,12 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str, image_dirs:
                 out.push_str(&format!("\"{}\"", path));
             }
             out.push_str("]\n");
+        }
+        for (path, policy) in &cluufile.mount_policies {
+            out.push_str(&format!(
+                "\n[[mounts.policy]]\npath = \"{}\"\npolicy = \"{}\"\n",
+                path, policy
+            ));
         }
     }
 
@@ -833,5 +844,25 @@ mod mount_tests {
         assert_eq!(c.mount_policies.len(), 2);
         assert_eq!(c.mount_policies[0].0, "/tmp");
         assert_eq!(c.mount_policies[1].0, "/log");
+    }
+
+    #[test]
+    fn manifest_emits_mount_policy_entries() {
+        let src = "FROM base\nMOUNT /tmp inherit\nMOUNT /log private\n";
+        let c = parse_from_string(src).expect("should parse");
+        let toml = generate_manifest_toml(&c, "test", &[]);
+        assert!(toml.contains("[[mounts.policy]]"), "missing section: {}", toml);
+        assert!(toml.contains("path = \"/tmp\""), "missing path: {}", toml);
+        assert!(toml.contains("policy = \"inherit\""), "missing policy: {}", toml);
+        assert!(toml.contains("path = \"/log\""), "missing path: {}", toml);
+        assert!(toml.contains("policy = \"private\""), "missing policy: {}", toml);
+    }
+
+    #[test]
+    fn manifest_omits_mount_section_when_no_policies() {
+        let src = "FROM base\n";
+        let c = parse_from_string(src).expect("should parse");
+        let toml = generate_manifest_toml(&c, "test", &[]);
+        assert!(!toml.contains("[[mounts.policy]]"), "should not have section: {}", toml);
     }
 }
