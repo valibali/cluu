@@ -92,6 +92,14 @@ in the first place; all paths are private by definition. This matches what
 on a path also listed in `DENY` is an error at Cluufile parse time (ambiguous
 intent).
 
+### Interaction with `PERSISTENT`
+
+`PERSISTENT <path>` already establishes a fresh per-container ext2 backend at
+that path — semantically equivalent to `MOUNT <path> private` with a specific
+backend. Declaring both `PERSISTENT` and `MOUNT` on the same path is an error
+at Cluufile parse time (redundant/conflicting intent). A path with `PERSISTENT`
+and no `MOUNT` behaves as private (preserved current behavior).
+
 ### Interaction with nesting (top-level vs nested)
 
 The policy only engages when this spawn has a parent to inherit from
