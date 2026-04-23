@@ -1695,16 +1695,20 @@ impl VfsServer {
     }
 
     fn stat_path(&self, path: &str, caller_tid: usize) -> Result<(usize, usize)> {
+        // Try readdir first: some remote backends (ext2 over IPC) will
+        // happily "open" a directory inode as a file, which would make us
+        // misreport directories as regular files. readdir fails cleanly on
+        // non-directories, so we can use it as a positive dir probe.
+        if self.mounts.readdir(path, caller_tid).is_ok() {
+            return Ok((0, MODE_DIR));
+        }
+
         if let Ok(file) = self.mounts.open(path, caller_tid) {
             let mode = match &file {
                 OpenFile::Device(_) => S_IFCHR | 0o666,
                 _ => MODE_FILE,
             };
             return Ok((file.size(), mode));
-        }
-
-        if self.mounts.readdir(path, caller_tid).is_ok() {
-            return Ok((0, MODE_DIR));
         }
 
         Err(Error::NotFound)
