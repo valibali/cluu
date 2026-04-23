@@ -11,6 +11,8 @@ use libcluu::boot::{
     CONSOLE_FB_BASE,
     PARAM_CONSOLE_ACTIVE,
     PARAM_CONSOLE_INSTANCE,
+    PARAM_CWD_LEN,
+    PARAM_CWD_OFFSET,
     PARAM_FB_BASE,
     PARAM_FB_HEIGHT,
     PARAM_FB_PHYS,
@@ -3049,7 +3051,7 @@ impl ProcessManager {
         }
 
         // ── Policy: validate param count bounds ──
-        if param_count > 10 {
+        if param_count > 12 {
             let _ = debug_print("procmgr: service spawn rejected: too many params");
             return Ok(());
         }
@@ -3079,7 +3081,7 @@ impl ProcessManager {
             .unwrap_or(payload.len())
             + 1;
         let param_data = &payload[path_nul_end..];
-        let mut params = [0u64; 10];
+        let mut params = [0u64; 12];
         for i in 0..param_count {
             let offset = i * 10; // 2 bytes index + 8 bytes value
             if offset + 10 > param_data.len() {
@@ -3089,9 +3091,19 @@ impl ProcessManager {
             let idx = u16::from_le_bytes([param_data[offset], param_data[offset + 1]]) as usize;
 
             // ── Policy: validate param index bounds ──
-            if idx >= 10 {
+            if idx >= 12 {
                 let _ = debug_print(&format!(
                     "procmgr: service spawn rejected: param index {} out of range",
+                    idx
+                ));
+                return Ok(());
+            }
+            // ── Policy: slots 10/11 (PARAM_CWD_OFFSET/LEN) are procmgr-trusted. ──
+            // They are written by procmgr itself from the spawn IPC cwd trailer
+            // (Task 8/9); external callers must not forge cwd metadata.
+            if idx == PARAM_CWD_OFFSET || idx == PARAM_CWD_LEN {
+                let _ = debug_print(&format!(
+                    "procmgr: service spawn rejected: reserved cwd slot {}",
                     idx
                 ));
                 return Ok(());
@@ -4946,7 +4958,7 @@ fn map_process_info_page(
         tokens[TOKEN_EXTRA_1] = extra_token_1;
     }
 
-    let mut params = [0u64; 10];
+    let mut params = [0u64; 12];
     // params[0] = pipe_mask for regular processes (shared with PARAM_FB_BASE for console)
     params[0] = pipe_mask as u64;
     // NOTE: PARAM_CAP_PROFILE (slot 5) is NOT written here. The cap profile is
@@ -4983,6 +4995,13 @@ fn map_process_info_page(
     // with PARAM_FB_PHYS and slot 7 with PARAM_CONSOLE_ACTIVE — those services
     // ignore argv/envp).
     for &(idx, val) in param_overrides {
+        // Belt-and-suspenders: slots 10/11 (PARAM_CWD_OFFSET/LEN) are
+        // procmgr-trusted and must only be written via the cwd trailer path.
+        // Callers that reach this loop are already vetted, but keep the guard
+        // so a future caller can't accidentally forge cwd metadata.
+        if idx == PARAM_CWD_OFFSET || idx == PARAM_CWD_LEN {
+            continue;
+        }
         if idx < params.len() {
             params[idx] = val;
         }

@@ -60,8 +60,10 @@ pub struct ProcessInfo {
     /// Generic token slots (indexed by convention)
     pub tokens: [usize; 16],
 
-    /// Generic parameters (service-specific data)
-    pub params: [u64; 10],
+    /// Generic parameters (service-specific data).
+    /// Slots 0-9: existing (see PARAM_* constants below).
+    /// Slots 10-11: cwd offset / length (Shell-A).
+    pub params: [u64; 12],
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -200,6 +202,14 @@ pub const PARAM_ENV_OFFSET: usize = 9;
 // implied (SERVICE) and it uses this slot for its VT instance index instead.
 pub const PARAM_CAP_PROFILE: usize = 5;
 
+/// Current working directory inherited across posix_spawn (Shell-A).
+/// Byte offset within the 4 KB ProcessInfo page where the cwd bytes live.
+pub const PARAM_CWD_OFFSET: usize = 10;
+/// Length of the cwd bytes. 0 means "no inherited cwd; use /".
+pub const PARAM_CWD_LEN: usize = 11;
+/// Maximum cwd byte length carried across spawn.
+pub const CWD_MAX: usize = 1024;
+
 /// Read the process info structure.
 pub fn process_info() -> &'static ProcessInfo {
     unsafe { &*(PROCESS_INFO_ADDR as *const ProcessInfo) }
@@ -275,3 +285,10 @@ pub fn token_extra(index: usize) -> usize {
 pub fn pid() -> usize {
     process_info().pid
 }
+
+const _: () = {
+    let size = core::mem::size_of::<ProcessInfo>();
+    // 3 * usize + 16 * usize + 12 * u64 on x86_64 = 24 + 128 + 96 = 248 bytes.
+    // Page is 4096; plenty of room for argv/env/cwd payloads after the header.
+    assert!(size <= 512, "ProcessInfo grew unexpectedly large");
+};
