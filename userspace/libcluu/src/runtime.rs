@@ -79,7 +79,11 @@ pub extern "C" fn _start() -> ! {
         let _ = crate::registry::init("app");
         crate::posix::init_cwd();
         crate::posix::init_env();
+        crate::args::init();
     }
+
+    #[cfg(not(feature = "posix"))]
+    crate::args::init();
 
     let exit_code = unsafe { main() };
     if exit_code != 0 {
