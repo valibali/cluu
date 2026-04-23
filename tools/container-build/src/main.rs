@@ -55,6 +55,9 @@ struct Cluufile {
     deny: Vec<String>,
     detach: bool,
     restart_policy: Option<(String, Option<usize>, Option<u64>)>,
+    /// MOUNT directives: (path, policy) where policy ∈ {"inherit", "private", "ro"}.
+    /// Duplicate paths are a parse error (caught in parse_cluufile).
+    mount_policies: Vec<(String, String)>,
 }
 
 fn parse_cluufile(path: &Path) -> Result<Cluufile> {
@@ -76,6 +79,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
     let mut deny: Vec<String> = Vec::new();
     let mut detach = false;
     let mut restart_policy: Option<(String, Option<usize>, Option<u64>)> = None;
+    let mut mount_policies: Vec<(String, String)> = Vec::new();
     let mut saw_directive = false;
 
     for (line_idx, raw_line) in content.lines().enumerate() {
@@ -329,6 +333,42 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
                 };
                 restart_policy = Some((tokens[0].to_string(), max_restarts, restart_window));
             }
+            "MOUNT" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before MOUNT", path.display(), lineno);
+                }
+                let tokens: Vec<&str> = rest.split_whitespace().collect();
+                if tokens.len() != 2 {
+                    bail!(
+                        "{}:{}: MOUNT requires exactly two arguments (path policy), got {}",
+                        path.display(), lineno, tokens.len()
+                    );
+                }
+                let mount_path = tokens[0].to_string();
+                let policy = tokens[1].to_string();
+                match policy.as_str() {
+                    "inherit" | "private" | "ro" => {}
+                    other => {
+                        bail!(
+                            "{}:{}: MOUNT policy must be 'inherit', 'private', or 'ro', got '{}'",
+                            path.display(), lineno, other
+                        );
+                    }
+                }
+                if !mount_path.starts_with('/') {
+                    bail!(
+                        "{}:{}: MOUNT path must be absolute, got '{}'",
+                        path.display(), lineno, mount_path
+                    );
+                }
+                if mount_policies.iter().any(|(p, _)| p == &mount_path) {
+                    bail!(
+                        "{}:{}: duplicate MOUNT directive for path '{}'",
+                        path.display(), lineno, mount_path
+                    );
+                }
+                mount_policies.push((mount_path, policy));
+            }
             unknown => {
                 bail!(
                     "{}:{}: unknown directive '{}'",
@@ -360,6 +400,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
         deny,
         detach,
         restart_policy,
+        mount_policies,
     })
 }
 
@@ -722,4 +763,75 @@ fn copy_dir_contents(src_dir: &Path, dst_dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod mount_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn parse_from_string(content: &str) -> Result<Cluufile> {
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(content.as_bytes()).unwrap();
+        parse_cluufile(tmp.path())
+    }
+
+    #[test]
+    fn mount_directive_parses_inherit() {
+        let src = "FROM base\nMOUNT /tmp inherit\n";
+        let c = parse_from_string(src).expect("should parse");
+        assert_eq!(c.mount_policies, vec![("/tmp".to_string(), "inherit".to_string())]);
+    }
+
+    #[test]
+    fn mount_directive_parses_private() {
+        let src = "FROM base\nMOUNT /log private\n";
+        let c = parse_from_string(src).expect("should parse");
+        assert_eq!(c.mount_policies, vec![("/log".to_string(), "private".to_string())]);
+    }
+
+    #[test]
+    fn mount_directive_rejects_unknown_policy() {
+        let src = "FROM base\nMOUNT /tmp shared\n";
+        let err = parse_from_string(src).expect_err("shared is not a valid policy");
+        assert!(err.to_string().contains("MOUNT policy must be"), "err was: {}", err);
+    }
+
+    #[test]
+    fn mount_directive_rejects_relative_path() {
+        let src = "FROM base\nMOUNT tmp inherit\n";
+        let err = parse_from_string(src).expect_err("relative path should fail");
+        assert!(err.to_string().contains("MOUNT path must be absolute"), "err was: {}", err);
+    }
+
+    #[test]
+    fn mount_directive_rejects_duplicate_path() {
+        let src = "FROM base\nMOUNT /tmp inherit\nMOUNT /tmp private\n";
+        let err = parse_from_string(src).expect_err("duplicate MOUNT should fail");
+        assert!(err.to_string().contains("duplicate MOUNT"), "err was: {}", err);
+    }
+
+    #[test]
+    fn mount_directive_rejects_wrong_arity() {
+        let src = "FROM base\nMOUNT /tmp\n";
+        let err = parse_from_string(src).expect_err("single-arg MOUNT should fail");
+        assert!(err.to_string().contains("MOUNT requires exactly two arguments"), "err was: {}", err);
+    }
+
+    #[test]
+    fn mount_directive_rejects_before_from() {
+        let src = "MOUNT /tmp inherit\nFROM base\n";
+        let err = parse_from_string(src).expect_err("MOUNT before FROM should fail");
+        assert!(err.to_string().contains("FROM must appear before MOUNT"), "err was: {}", err);
+    }
+
+    #[test]
+    fn multiple_mount_directives_accumulate() {
+        let src = "FROM base\nMOUNT /tmp inherit\nMOUNT /log private\n";
+        let c = parse_from_string(src).expect("should parse");
+        assert_eq!(c.mount_policies.len(), 2);
+        assert_eq!(c.mount_policies[0].0, "/tmp");
+        assert_eq!(c.mount_policies[1].0, "/log");
+    }
 }
