@@ -156,11 +156,40 @@ pub extern "C" fn closedir(dirp: *mut DIR) -> c_int {
 /// Global current working directory, initialized to "/".
 static CWD: Mutex<Option<String>> = Mutex::new(None);
 
-/// Initialize the CWD to "/". Called from `__cluu_init`.
+/// Initialize the CWD from ProcessInfo params, falling back to "/" if absent.
+/// Called from `__cluu_init` (C programs) and `_start` (Rust programs).
 pub fn init_cwd() {
     let mut cwd = CWD.lock();
-    if cwd.is_none() {
+    if cwd.is_some() {
+        return;
+    }
+
+    let info = crate::boot::process_info();
+    let cwd_offset = info.params[crate::boot::PARAM_CWD_OFFSET] as usize;
+    let cwd_len = info.params[crate::boot::PARAM_CWD_LEN] as usize;
+
+    if cwd_len == 0 || cwd_offset == 0 || cwd_len > crate::boot::CWD_MAX {
         *cwd = Some(String::from("/"));
+        return;
+    }
+
+    let page_base = crate::boot::PROCESS_INFO_ADDR & !(4096 - 1);
+    let page_end = page_base + 4096;
+    let start = page_base + cwd_offset;
+    if start + cwd_len > page_end {
+        // Malformed — safer to default than to read past the page.
+        *cwd = Some(String::from("/"));
+        return;
+    }
+
+    let bytes = unsafe { core::slice::from_raw_parts(start as *const u8, cwd_len) };
+    match core::str::from_utf8(bytes) {
+        Ok(s) if !s.is_empty() && s.starts_with('/') => {
+            *cwd = Some(String::from(s));
+        }
+        _ => {
+            *cwd = Some(String::from("/"));
+        }
     }
 }
 
