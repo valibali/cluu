@@ -1,3 +1,7 @@
+//! Smoke test: echoes argv via `debug_print` so the `l2_argv` harness can
+//! verify the argv wire format end-to-end (shell → procmgr CONTAINER_RUN
+//! ARGV trailer → ProcessInfo params → libcluu::args decode).
+
 #![no_std]
 #![no_main]
 
