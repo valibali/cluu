@@ -11,10 +11,11 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE, TOKEN_STDIN};
 use libcluu::fs::client::VfsClient;
+use libcluu::boot::CWD_MAX;
 use libcluu::ipc::{
     call, call_with_payload, call_with_reply_buf, recv, send_with_payload, send_with_retry,
-    SharedRing, CONSOLE_CLEAR_LABEL, PROCMGR_CONTAINER_LIST_LABEL, PROCMGR_CONTAINER_RUN_LABEL,
-    PROCMGR_ESCALATE_LABEL, PROCMGR_SHUTDOWN_LABEL, PROCMGR_SU_LABEL,
+    SharedRing, CONSOLE_CLEAR_LABEL, CWD_MAGIC, PROCMGR_CONTAINER_LIST_LABEL,
+    PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_ESCALATE_LABEL, PROCMGR_SHUTDOWN_LABEL, PROCMGR_SU_LABEL,
     TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
     TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
 };
@@ -1169,9 +1170,27 @@ struct SpawnResult {
     stdin_endpoint: usize,
 }
 
+/// Build a `PROCMGR_CONTAINER_RUN_LABEL` payload of `name + CWD trailer`.
+///
+/// Procmgr reads the container image name from the start of the payload and
+/// strips the CWD trailer (last 8 bytes + cwd_len) before slicing argv/FDAC,
+/// so prepending the name and appending the trailer is safe even when the
+/// container_run path doesn't carry argv or FDAC blobs.
+fn build_container_run_payload(name: &str) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(name.len() + CWD_MAX + 8);
+    payload.extend_from_slice(name.as_bytes());
+    let cwd_string = libcluu::posix::current_dir_string();
+    let cwd_bytes = cwd_string.as_bytes();
+    let cwd_len = cwd_bytes.len().min(CWD_MAX);
+    payload.extend_from_slice(&cwd_bytes[..cwd_len]);
+    payload.extend_from_slice(&(cwd_len as u32).to_le_bytes());
+    payload.extend_from_slice(&CWD_MAGIC.to_le_bytes());
+    payload
+}
+
 fn spawn_process(context: &mut CommandContext, name: &str, _priority: usize) -> Result<SpawnResult> {
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-    let payload = name.as_bytes();
+    let payload = build_container_run_payload(name);
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
     let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();
@@ -1182,7 +1201,7 @@ fn spawn_process(context: &mut CommandContext, name: &str, _priority: usize) -> 
         "shell: container run begin name={} ep={} notify={}",
         name, procmgr_endpoint, notify_endpoint
     ));
-    call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
+    call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
     let _ = debug_print(&format!(
         "shell: container run done status={} pid={} stdin={}",
         reply.words[0], reply.words[1], reply.words[4]
@@ -2757,14 +2776,14 @@ fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -
 
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
-    let payload = name.as_bytes();
+    let payload = build_container_run_payload(name);
     let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();
     msg.words[1] = notify_endpoint;
     msg.words[2] = 0; // fdac_offset — no FDAC for basic container run
     let mut reply = Message::new(0, [0; 6], 0);
 
-    call_with_payload(procmgr_endpoint, &msg, payload, &mut reply)?;
+    call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
 
     let status = reply.words[0];
     if status != 0 {

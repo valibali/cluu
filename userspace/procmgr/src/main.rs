@@ -43,6 +43,7 @@ use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_id;
 use libcluu::ipc::parse_message;
 use libcluu::ipc::SharedRing;
+use libcluu::ipc::CWD_MAGIC as SPAWN_CWD_MAGIC;
 use libcluu::ipc::PROCMGR_CONTAINER_LIST_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_STATS_LABEL;
@@ -154,8 +155,6 @@ const SHELL_AUTOSTART_CMD: &str = match option_env!("CLUU_SHELL_AUTOSTART_CMD") 
 };
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
-/// Must match `CWD_MAGIC` in libcluu::posix::process.
-const SPAWN_CWD_MAGIC: u32 = 0x2044_5743; // "CWD "
 const PROCMGR_KILL_LABEL: u32 = 3;
 const PROCMGR_FAULT_LABEL: u32 = 0xFA017;
 const DEFAULT_PRIORITY: usize = 200;
@@ -4182,25 +4181,29 @@ impl ProcessManager {
         let reply_token = extract_reply_id(msg);
         let mut reply_msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 5);
 
+        // Strip the optional CWD trailer first; FDAC/param offsets refer into
+        // the pre-trailer view, identical to the posix_spawn payload contract.
+        let (effective_payload, cwd_bytes) = split_cwd_trailer(payload);
+
         // Extract FDAC offset and param override info from message words
         let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
         let param_offset = if msg.tag.words >= 4 { msg.words[3] } else { 0 };
         let param_count = if msg.tag.words >= 5 { msg.words[4] } else { 0 };
 
         // Extract image name from payload (NUL-terminated, bounded by FDAC or param offset)
-        let name_end = if fdac_offset > 0 && fdac_offset <= payload.len() {
+        let name_end = if fdac_offset > 0 && fdac_offset <= effective_payload.len() {
             fdac_offset
-        } else if param_offset > 0 && param_offset <= payload.len() {
+        } else if param_offset > 0 && param_offset <= effective_payload.len() {
             param_offset
         } else {
-            payload.len()
+            effective_payload.len()
         };
-        let image_name = match core::str::from_utf8(&payload[..name_end]) {
+        let image_name = match core::str::from_utf8(&effective_payload[..name_end]) {
             Ok(s) => s.trim_end_matches('\0').trim(),
             Err(_) => {
                 let _ = debug_print(&format!(
                     "procmgr: container_run rejected: payload not UTF-8 (len={} name_end={})",
-                    payload.len(), name_end
+                    effective_payload.len(), name_end
                 ));
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
@@ -4208,9 +4211,9 @@ impl ProcessManager {
             }
         };
 
-        // Extract FDAC data from payload (after image name)
-        let fdac_data = if fdac_offset > 0 && fdac_offset < payload.len() {
-            &payload[fdac_offset..]
+        // Extract FDAC data from payload (after image name, before trailer)
+        let fdac_data = if fdac_offset > 0 && fdac_offset < effective_payload.len() {
+            &effective_payload[fdac_offset..]
         } else {
             &[]
         };
@@ -4473,8 +4476,8 @@ impl ProcessManager {
         // Parse param overrides from payload (G1+G2: wire format extension)
         let mut param_overrides_buf = [(0usize, 0u64); 10];
         let mut n_overrides = 0;
-        if param_count > 0 && param_offset > 0 && param_offset < payload.len() {
-            let param_data = &payload[param_offset..];
+        if param_count > 0 && param_offset > 0 && param_offset < effective_payload.len() {
+            let param_data = &effective_payload[param_offset..];
             for i in 0..param_count.min(10) {
                 let off = i * 10;
                 if off + 10 > param_data.len() { break; }
@@ -4518,7 +4521,7 @@ impl ProcessManager {
             extra_token_1,
             param_overrides,
             None, // no caller view (container run uses absolute /var/images/ paths)
-            &[],
+            cwd_bytes,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build view: for nested containers, inherit caller's view; for top-level, use default

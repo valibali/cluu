@@ -32,6 +32,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="cd /; cd etc; pwd"
                 ;;
+            l2_cd_inherit)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="cd /tmp; spawn pwdprobe"
+                ;;
             l2_ext2write)
                 TEST_COMMAND="ext2write"
                 SHELL_AUTOSTART_CMD_DEFAULT="ext2write"

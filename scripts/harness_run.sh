@@ -706,6 +706,13 @@ case "$MARKER_MODE" in
             "shell: pwd=/etc"
         )
         ;;
+    l2_cd_inherit)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pwdprobe: cwd=/tmp"
+        )
+        ;;
     l2_ext2write)
         required_markers=(
             "TSC calibrated"

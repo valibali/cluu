@@ -503,9 +503,9 @@ pub extern "C" fn posix_spawn(
 const MAX_FD_ACTIONS: usize = 4;
 /// Magic marker for fd actions in spawn payload.
 const FDAC_MAGIC: u32 = 0x46444143; // "FDAC"
-/// Magic marker for the CWD trailer at the end of the spawn payload.
-/// Bytes in little-endian order: 'C','W','D',' ' = 0x43, 0x57, 0x44, 0x20.
-const CWD_MAGIC: u32 = 0x2044_5743;
+/// Re-exported for clarity at the call site; canonical definition lives in
+/// `libcluu::ipc::CWD_MAGIC` since it is part of the spawn IPC contract.
+use crate::ipc::CWD_MAGIC;
 const FDAC_FLAG_PIPE: u32 = 0x01;
 
 /// A single fd redirection action.

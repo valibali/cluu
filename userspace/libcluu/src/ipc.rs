@@ -73,9 +73,22 @@ pub const VFS_SET_VIEW_LABEL: u32 = 21;
 /// words[2] = mode (0 = exit: delete tmp/ contents; 1 = destroy: delete entire c-{id}/ tree).
 pub const VFS_CONTAINER_CLEANUP_LABEL: u32 = 22;
 
-/// Container run: payload = image name (UTF-8).
+/// Container run: payload = image name (UTF-8), optionally followed by an
+/// FDAC blob and/or the CWD trailer (see `CWD_MAGIC`).
 /// Reply: words[0] = errno, words[1] = pid, words[2] = container_id.
 pub const PROCMGR_CONTAINER_RUN_LABEL: u32 = 24;
+
+/// Magic marker for the CWD trailer at the end of a spawn payload.
+/// Bytes in little-endian order: 'C','W','D',' ' = 0x43, 0x57, 0x44, 0x20.
+///
+/// Trailer layout (always at the very end of the payload, after any FDAC blob):
+///   `[cwd_bytes][u32 cwd_len LE][u32 CWD_MAGIC LE]`
+///
+/// The trailer is optional; payloads without it are treated as "no parent cwd"
+/// and the child's cwd defaults to `/`. Procmgr strips the trailer before
+/// computing FDAC offsets, so callers must append the trailer **after** the
+/// FDAC blob.
+pub const CWD_MAGIC: u32 = 0x2044_5743;
 
 /// Container list: no payload.
 /// Reply: payload = "name pid container_id\n" lines.
