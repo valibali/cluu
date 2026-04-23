@@ -280,6 +280,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-rm"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-shell"
 version = "0.1.0"
 dependencies = [
