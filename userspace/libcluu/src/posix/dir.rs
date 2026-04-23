@@ -245,6 +245,41 @@ pub extern "C" fn chdir(path: *const c_char) -> c_int {
     0
 }
 
+/// Rust-friendly read of the current working directory.
+pub fn current_dir_string() -> alloc::string::String {
+    let cwd = CWD.lock();
+    cwd.as_deref().unwrap_or("/").into()
+}
+
+/// Rust-friendly `chdir`. Validates the target via VFS stat and updates CWD.
+///
+/// Returns `Ok(())` on success, or the POSIX errno value on failure.
+pub fn set_current_dir_str(path: &str) -> Result<(), c_int> {
+    let resolved = resolve_path(path);
+
+    let vfs_endpoint = match crate::registry::lookup_service("vfs:main") {
+        Some(ep) => ep,
+        None => return Err(ENOENT),
+    };
+    let client_id = crate::registry::control_endpoint();
+    if client_id == 0 {
+        return Err(EINVAL);
+    }
+    let client = crate::fs::client::VfsClient::new(vfs_endpoint, client_id);
+    match client.stat(&resolved) {
+        Ok(info) => {
+            if info.mode & 0o170000 != 0o040000 {
+                return Err(ENOTDIR);
+            }
+        }
+        Err(e) => return Err(crate::errno::from_cluu_error(e)),
+    }
+
+    let mut cwd = CWD.lock();
+    *cwd = Some(alloc::string::String::from(resolved.as_str()));
+    Ok(())
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
