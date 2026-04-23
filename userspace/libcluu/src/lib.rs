@@ -23,6 +23,7 @@
 extern crate alloc;
 
 pub mod allocator;
+pub mod args;
 pub mod boot;
 pub mod boot_manifest;
 pub mod cap;
