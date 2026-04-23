@@ -4184,6 +4184,7 @@ impl ProcessManager {
         // Strip the optional CWD trailer first; FDAC/param offsets refer into
         // the pre-trailer view, identical to the posix_spawn payload contract.
         let (effective_payload, cwd_bytes) = split_cwd_trailer(payload);
+        let (effective_payload, argv_extra_bytes) = split_argv_trailer(effective_payload);
 
         // Extract FDAC offset and param override info from message words
         let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
@@ -4467,11 +4468,19 @@ impl ProcessManager {
             ));
         }
 
-        // Fix B: Build argv payload with binary path as argv[0]
+        // Build argv payload with binary path as argv[0], followed by user argv
+        // bytes extracted from the ARGV trailer.
         let mut argv_payload: Vec<u8> = Vec::new();
         argv_payload.extend_from_slice(binary.as_bytes());
         argv_payload.push(0);
-        let argc = 1usize;
+        let mut argc = 1usize;
+
+        // argv_extra_bytes is a concatenation of NUL-terminated argv[0..] strings
+        // from the shell. Append verbatim and count NULs to derive argc.
+        if !argv_extra_bytes.is_empty() {
+            argv_payload.extend_from_slice(argv_extra_bytes);
+            argc += argv_extra_bytes.iter().filter(|&&b| b == 0).count();
+        }
 
         // Parse param overrides from payload (G1+G2: wire format extension)
         let mut param_overrides_buf = [(0usize, 0u64); 10];
@@ -4962,6 +4971,46 @@ fn split_cwd_trailer(payload: &[u8]) -> (&[u8], &[u8]) {
 
     let cwd_start = len_pos - cwd_len;
     (&payload[..cwd_start], &payload[cwd_start..len_pos])
+}
+
+/// Strip the optional ARGV trailer `[u32 argv_bytes_len LE][u32 ARGV_MAGIC LE]`
+/// from the end of `effective_payload` (which must already have the CWD trailer
+/// stripped). Returns `(remaining, argv_bytes)`. If no ARGV magic is present,
+/// returns `(payload, &[])` — the empty-argv case.
+///
+/// Bound argv_bytes_len against `payload.len() - 8` to reject malformed trailers.
+fn split_argv_trailer(payload: &[u8]) -> (&[u8], &[u8]) {
+    if payload.len() < 8 {
+        return (payload, &[]);
+    }
+    let magic_pos = payload.len() - 4;
+    let magic_bytes: [u8; 4] = match payload[magic_pos..].try_into() {
+        Ok(b) => b,
+        Err(_) => return (payload, &[]),
+    };
+    if u32::from_le_bytes(magic_bytes) != libcluu::ipc::ARGV_MAGIC {
+        return (payload, &[]);
+    }
+
+    let len_pos = magic_pos - 4;
+    let len_bytes: [u8; 4] = match payload[len_pos..magic_pos].try_into() {
+        Ok(b) => b,
+        Err(_) => return (payload, &[]),
+    };
+    let argv_bytes_len = u32::from_le_bytes(len_bytes) as usize;
+
+    if argv_bytes_len > len_pos {
+        return (payload, &[]);
+    }
+    // Sanity cap: argv block cannot exceed 3 KB (leaves 1 KB for name + CWD
+    // after the 4 KB ProcessInfo layout). Matches libcluu::args::MAX_ARGC=256
+    // worst case (256 one-char args × 2 bytes = 512 bytes).
+    if argv_bytes_len > 3072 {
+        return (payload, &[]);
+    }
+
+    let argv_start = len_pos - argv_bytes_len;
+    (&payload[..argv_start], &payload[argv_start..len_pos])
 }
 
 #[allow(clippy::too_many_arguments)]

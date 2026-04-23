@@ -90,6 +90,11 @@ pub const PROCMGR_CONTAINER_RUN_LABEL: u32 = 24;
 /// FDAC blob.
 pub const CWD_MAGIC: u32 = 0x2044_5743;
 
+/// Magic sentinel for the ARGV trailer (ASCII "ARGV" little-endian).
+/// Present only when argc > 0 in `build_container_run_payload_with_argv`
+/// output; procmgr strips it in `split_argv_trailer` after `split_cwd_trailer`.
+pub const ARGV_MAGIC: u32 = 0x5647_5241;
+
 /// Container list: no payload.
 /// Reply: payload = "name pid container_id\n" lines.
 pub const PROCMGR_CONTAINER_LIST_LABEL: u32 = 25;
@@ -764,25 +769,31 @@ pub fn make_payload_message(label: u32, payload_len: usize, extra_words: &[usize
 /// Build a `PROCMGR_CONTAINER_RUN_LABEL` payload with optional argv.
 ///
 /// Wire format:
-///   `[name_bytes][argv[0]\0][argv[1]\0]...[cwd_trailer]`
+///   `[name_bytes][argv[0]\0][argv[1]\0]...[u32 argv_bytes_len LE][u32 ARGV_MAGIC LE][cwd_trailer]`
 ///
-/// When `args` is empty, the output is byte-identical to the pre-argv format
-/// (name + CWD trailer), preserving backwards compatibility.
+/// `argc` is encoded in the ARGV trailer when argc > 0; empty-argv payloads
+/// stay byte-for-byte compatible with pre-Task-5 output (no ARGV trailer).
 ///
-/// Returns `(payload, argc)`. Callers pass `argc` as `msg.words[3]` so procmgr
-/// knows how many NUL-terminated strings follow the name.
+/// Returns `(payload, argc)`. Procmgr strips the ARGV trailer in
+/// `split_argv_trailer` after `split_cwd_trailer`.
 #[cfg(feature = "posix")]
 pub fn build_container_run_payload_with_argv(name: &str, args: &[&str]) -> (Vec<u8>, usize) {
     use crate::boot::CWD_MAX;
 
     let argc = args.len();
     let argv_bytes_est: usize = args.iter().map(|a| a.len() + 1).sum();
-    let mut payload = Vec::with_capacity(name.len() + argv_bytes_est + CWD_MAX + 8);
+    let mut payload = Vec::with_capacity(name.len() + argv_bytes_est + CWD_MAX + 16);
     payload.extend_from_slice(name.as_bytes());
 
-    for arg in args {
-        payload.extend_from_slice(arg.as_bytes());
-        payload.push(0); // NUL separator
+    if argc > 0 {
+        let argv_start = payload.len();
+        for arg in args {
+            payload.extend_from_slice(arg.as_bytes());
+            payload.push(0);
+        }
+        let argv_bytes_len = (payload.len() - argv_start) as u32;
+        payload.extend_from_slice(&argv_bytes_len.to_le_bytes());
+        payload.extend_from_slice(&ARGV_MAGIC.to_le_bytes());
     }
 
     let cwd_string = crate::posix::current_dir_string();
