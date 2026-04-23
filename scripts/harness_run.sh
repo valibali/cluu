@@ -699,6 +699,16 @@ case "$MARKER_MODE" in
             "ringio: PASS path=/bin/hello"
         )
         ;;
+    l2_argv)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "argvprobe: argc=3"
+            "argvprobe: arg0=/bin/argvprobe"
+            "argvprobe: arg1=hello"
+            "argvprobe: arg2=world"
+        )
+        ;;
     l2_cd)
         required_markers=(
             "TSC calibrated"
