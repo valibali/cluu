@@ -11,6 +11,7 @@ use libcluu::boot::{
     CONSOLE_FB_BASE,
     PARAM_CONSOLE_ACTIVE,
     PARAM_CONSOLE_INSTANCE,
+    CWD_MAX,
     PARAM_CWD_LEN,
     PARAM_CWD_OFFSET,
     PARAM_FB_BASE,
@@ -153,6 +154,8 @@ const SHELL_AUTOSTART_CMD: &str = match option_env!("CLUU_SHELL_AUTOSTART_CMD") 
 };
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
+/// Must match `CWD_MAGIC` in libcluu::posix::process.
+const SPAWN_CWD_MAGIC: u32 = 0x2044_5743; // "CWD "
 const PROCMGR_KILL_LABEL: u32 = 3;
 const PROCMGR_FAULT_LABEL: u32 = 0xFA017;
 const DEFAULT_PRIORITY: usize = 200;
@@ -899,7 +902,7 @@ impl ProcessManager {
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
         let (user_env, user_envc) = build_user_env_payload("root", "/root");
 
-        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None) {
+        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None, &[]) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let session_cid = self.next_container_id();
                 let shell_cid = self.next_container_id();
@@ -1110,6 +1113,7 @@ impl ProcessManager {
             extra_token_1,
             param_overrides,
             None, // no caller view (internal autostart)
+            &[],
         ) {
             Ok((_thread_token, cookie, pid, _child_stdin_send)) => {
                 let image_dir = format!("/var/images/{}", image_name);
@@ -1399,7 +1403,7 @@ impl ProcessManager {
         match self.spawn_service_with_env(
             &binary_vfs_path, priority, &argv_payload, 1, &[], 0, 0,
             spawn_seq, spawn_start, &[], requested_profile,
-            extra_token, extra_token_1, param_overrides, None,
+            extra_token, extra_token_1, param_overrides, None, &[],
         ) {
             Ok((new_thread_token, new_cookie, new_pid, _)) => {
                 let mut view_mounts = default_view_for_profile(requested_profile);
@@ -2123,6 +2127,7 @@ impl ProcessManager {
             0,
             &[],
             None, // no caller view (session login uses SERVICE_PATH constant)
+            &[],
         ) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let session_cid = self.next_container_id();
@@ -2344,6 +2349,7 @@ impl ProcessManager {
             0,
             &[],
             caller_view_owned.as_ref(),
+            &[],
         ) {
             Ok((thread_token, cookie, pid, stdin_send)) => {
                 let container_id = self.next_container_id();
@@ -2552,6 +2558,7 @@ impl ProcessManager {
             0,
             &[],
             None, // no caller view (su uses SERVICE_PATH constant)
+            &[],
         ) {
             Ok((thread_token, cookie, pid, stdin_send)) => {
                 let container_id = self.next_container_id();
@@ -3330,18 +3337,22 @@ impl ProcessManager {
         // Extract argv data: payload is [path\0, argv[0]\0, argv[1]\0, ...]
         let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
         let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
-        let path_nul_end = payload
+
+        // Strip the CWD trailer first so argv/fdac slices don't extend into it.
+        let (effective_payload, cwd_bytes) = split_cwd_trailer(payload);
+
+        let path_nul_end = effective_payload
             .iter()
             .position(|b| *b == 0)
-            .unwrap_or(payload.len())
+            .unwrap_or(effective_payload.len())
             + 1;
-        let argv_data = if argc > 0 && path_nul_end < payload.len() {
-            &payload[path_nul_end..]
+        let argv_data = if argc > 0 && path_nul_end < effective_payload.len() {
+            &effective_payload[path_nul_end..]
         } else {
             &[]
         };
-        let fdac_data = if fdac_offset > 0 && fdac_offset < payload.len() {
-            &payload[fdac_offset..]
+        let fdac_data = if fdac_offset > 0 && fdac_offset < effective_payload.len() {
+            &effective_payload[fdac_offset..]
         } else {
             &[]
         };
@@ -3362,6 +3373,7 @@ impl ProcessManager {
             0,
             &[],
             Some(&child_view_mounts),
+            cwd_bytes,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 reply_msg.words[0] = 0;
@@ -3489,6 +3501,7 @@ impl ProcessManager {
             0,
             &[],
             None,
+            &[],
         )
     }
 
@@ -3510,6 +3523,7 @@ impl ProcessManager {
         extra_token_1: usize,
         param_overrides: &[(usize, u64)],
         caller_view: Option<&ViewMountList>,
+        cwd_bytes: &[u8],
     ) -> Result<(usize, usize, usize, usize)> {
         // Build env data: for bootstrap (owner_tid==0) use defaults,
         // otherwise use caller-provided env (from posix_spawn)
@@ -3734,6 +3748,7 @@ impl ProcessManager {
             extra_token,
             extra_token_1,
             effective_overrides,
+            cwd_bytes,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
@@ -4503,6 +4518,7 @@ impl ProcessManager {
             extra_token_1,
             param_overrides,
             None, // no caller view (container run uses absolute /var/images/ paths)
+            &[],
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build view: for nested containers, inherit caller's view; for top-level, use default
@@ -4909,6 +4925,42 @@ const DEFAULT_ENV: &[&str] = &[
     "TERM=cluu",
 ];
 
+/// Extract the cwd string from the end of a spawn payload.
+///
+/// Returns `(payload_without_trailer, cwd_bytes)`. If no trailer is present,
+/// returns the full payload and an empty byte slice.
+fn split_cwd_trailer(payload: &[u8]) -> (&[u8], &[u8]) {
+    if payload.len() < 8 {
+        return (payload, &[]);
+    }
+    let magic_pos = payload.len() - 4;
+    let magic_bytes: [u8; 4] = match payload[magic_pos..].try_into() {
+        Ok(b) => b,
+        Err(_) => return (payload, &[]),
+    };
+    if u32::from_le_bytes(magic_bytes) != SPAWN_CWD_MAGIC {
+        return (payload, &[]);
+    }
+
+    let len_pos = magic_pos - 4;
+    let len_bytes: [u8; 4] = match payload[len_pos..magic_pos].try_into() {
+        Ok(b) => b,
+        Err(_) => return (payload, &[]),
+    };
+    let cwd_len = u32::from_le_bytes(len_bytes) as usize;
+
+    if cwd_len > len_pos {
+        return (payload, &[]);
+    }
+    if cwd_len > CWD_MAX {
+        // CWD_MAX guardrail — drop obviously malformed trailers.
+        return (payload, &[]);
+    }
+
+    let cwd_start = len_pos - cwd_len;
+    (&payload[..cwd_start], &payload[cwd_start..len_pos])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn map_process_info_page(
     space_token: usize,
@@ -4933,6 +4985,7 @@ fn map_process_info_page(
     extra_token: usize,
     extra_token_1: usize,
     param_overrides: &[(usize, u64)],
+    cwd_bytes: &[u8],
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -4990,6 +5043,19 @@ fn map_process_info_page(
         params[PARAM_ENV_OFFSET] = env_data_offset as u64;
     }
 
+    // Place cwd bytes in the page AFTER env data. Clamp to CWD_MAX and guard
+    // against overflow of the 4 KB page. If it won't fit, silently emit zero
+    // length — child falls back to "/".
+    let cwd_data_offset = env_data_offset + env_data.len();
+    let cwd_clamped_len = cwd_bytes.len().min(CWD_MAX);
+    let cwd_end = cwd_data_offset + cwd_clamped_len;
+    let cwd_fits = cwd_clamped_len > 0 && cwd_end <= PAGE_SIZE;
+
+    if cwd_fits {
+        params[PARAM_CWD_OFFSET] = cwd_data_offset as u64;
+        params[PARAM_CWD_LEN] = cwd_clamped_len as u64;
+    }
+
     // Apply caller-specified param overrides LAST, so service-type callers can
     // overwrite argv/env slots they don't use (e.g. console overrides slot 6
     // with PARAM_FB_PHYS and slot 7 with PARAM_CONSOLE_ACTIVE — those services
@@ -5032,6 +5098,11 @@ fn map_process_info_page(
     // Write env data after argv data (packed "KEY=VALUE\0" strings)
     if env_fits {
         page[env_data_offset..env_end].copy_from_slice(env_data);
+    }
+
+    // Write cwd bytes after env data
+    if cwd_fits {
+        page[cwd_data_offset..cwd_end].copy_from_slice(&cwd_bytes[..cwd_clamped_len]);
     }
 
     space_map(

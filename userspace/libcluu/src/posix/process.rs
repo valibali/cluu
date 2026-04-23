@@ -435,6 +435,15 @@ pub extern "C" fn posix_spawn(
     // Serialize fd actions (FDAC) after env data
     let fdac_offset = serialize_fd_actions(_file_actions, &mut payload);
 
+    // Append the CWD magic trailer so procmgr can seed the child's cwd.
+    // Layout: [cwd_bytes][u32 cwd_len LE][u32 CWD_MAGIC LE].
+    let cwd_string = crate::posix::dir::current_dir_string();
+    let cwd_bytes = cwd_string.as_bytes();
+    let cwd_len = cwd_bytes.len().min(crate::boot::CWD_MAX);
+    payload.extend_from_slice(&cwd_bytes[..cwd_len]);
+    payload.extend_from_slice(&(cwd_len as u32).to_le_bytes());
+    payload.extend_from_slice(&CWD_MAGIC.to_le_bytes());
+
     let mut msg = crate::types::Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 6);
     msg.words[0] = payload.len();
     msg.words[1] = argc;
@@ -489,6 +498,9 @@ pub extern "C" fn posix_spawn(
 const MAX_FD_ACTIONS: usize = 4;
 /// Magic marker for fd actions in spawn payload.
 const FDAC_MAGIC: u32 = 0x46444143; // "FDAC"
+/// Magic marker for the CWD trailer at the end of the spawn payload.
+/// Bytes in little-endian order: 'C','W','D',' ' = 0x43, 0x57, 0x44, 0x20.
+const CWD_MAGIC: u32 = 0x2044_5743;
 const FDAC_FLAG_PIPE: u32 = 0x01;
 
 /// A single fd redirection action.
