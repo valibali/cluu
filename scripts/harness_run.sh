@@ -699,6 +699,13 @@ case "$MARKER_MODE" in
             "ringio: PASS path=/bin/hello"
         )
         ;;
+    kernel_suspended_thread)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "suspendprobe: PASS suspended-thread did not run before resume"
+        )
+        ;;
     l2_argv)
         required_markers=(
             "TSC calibrated"

@@ -28,6 +28,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND="regdeny"
                 SHELL_AUTOSTART_CMD_DEFAULT="regdeny"
                 ;;
+            kernel_suspended_thread)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn suspendprobe"
+                ;;
             l2_argv)
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn argvprobe hello world"
