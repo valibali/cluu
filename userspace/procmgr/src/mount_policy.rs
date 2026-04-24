@@ -216,4 +216,15 @@ mod resolve_tests {
         // DENY_INHERIT means no inheritance at all — MOUNT entries are ignored.
         assert!(resolved.is_empty());
     }
+
+    #[test]
+    fn cluufile_appends_new_path_not_in_defaults() {
+        let custom = vec![ep("/opt", MountPolicy::Private)];
+        let resolved = resolve_effective_policies(&custom, false);
+        assert_eq!(lookup(&resolved, "/opt"), Some(MountPolicy::Private));
+        // Defaults still present.
+        assert_eq!(lookup(&resolved, "/tmp"), Some(MountPolicy::Inherit));
+        assert_eq!(lookup(&resolved, "/log"), Some(MountPolicy::Private));
+        assert_eq!(resolved.len(), 3);
+    }
 }
