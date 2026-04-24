@@ -403,6 +403,7 @@ pub extern "C" fn pthread_create(
         pthread_trampoline as *const () as usize,
         startup_addr,
         128, // default priority
+        0,   // flags — pthreads start running
     ) {
         Ok(t) => t,
         Err(_) => {

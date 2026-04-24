@@ -3226,6 +3226,7 @@ impl ProcessManager {
             elf.entry_point as usize,
             SERVICE_STACK_TOP,
             priority,
+            0,
         )?;
 
         // Register VFS view for the service based on its profile.
@@ -3762,7 +3763,7 @@ impl ProcessManager {
             cwd_bytes,
         )?;
 
-        let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority)?;
+        let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority, 0)?;
         // Set fault endpoint so the kernel forwards faults to us instead of silently killing.
         if self.fault_endpoint != 0 {
             if let Err(err) = thread_set_fault_endpoint(thread_token, self.fault_endpoint) {

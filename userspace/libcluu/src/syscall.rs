@@ -671,6 +671,9 @@ pub unsafe fn invoke(
 /// - `entry`: Thread entry point address
 /// - `stack`: Stack top address
 /// - `priority`: Thread priority
+/// - `flags`: Bitmask. Pass `0` for default (start running).
+///   `THREAD_CREATE_START_SUSPENDED` creates the thread suspended;
+///   caller must invoke `thread_resume` to make it runnable.
 ///
 /// # Returns
 ///
@@ -681,6 +684,7 @@ pub fn thread_create(
     entry: usize,
     stack: usize,
     priority: usize,
+    flags: usize,
 ) -> Result<usize> {
     unsafe {
         invoke(
@@ -689,10 +693,16 @@ pub fn thread_create(
             entry,
             stack,
             priority,
-            0,
+            flags,
         )
     }
 }
+
+/// Flag for `thread_create`: create the thread in the SUSPENDED state.
+/// Caller must call `thread_resume` to make it runnable. Useful when
+/// per-thread setup (e.g. installing a VFS view) must complete before
+/// the thread is allowed to run.
+pub const THREAD_CREATE_START_SUSPENDED: usize = 0x1;
 
 /// Create a new address space
 ///

@@ -267,6 +267,7 @@ pub fn launch_service(
         elf.entry_point as usize,
         stack_top,
         service.priority,
+        0,
     )?;
     let _ = thread_token;
 
