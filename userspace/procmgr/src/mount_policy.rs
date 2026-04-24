@@ -7,8 +7,6 @@
 //! The resulting `Vec<MountPolicyEntry>` drives per-path inheritance policy
 //! when building a container's VFS view (Task 7 consumer).
 
-#![cfg_attr(not(test), no_std)]
-
 extern crate alloc;
 
 use alloc::string::{String, ToString};
@@ -27,6 +25,8 @@ pub enum MountPolicy {
     Ro,
 }
 
+// Fields consumed by Task 7's view-building block.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MountPolicyEntry {
     pub path: String,
