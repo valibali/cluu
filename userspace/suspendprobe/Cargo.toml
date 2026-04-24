@@ -1,0 +1,14 @@
+[package]
+name = "cluu-suspendprobe"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU THREAD_CREATE_START_SUSPENDED smoke test"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "suspendprobe"
+path = "src/main.rs"
