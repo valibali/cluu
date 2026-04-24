@@ -1005,6 +1005,16 @@ This is pure logic — not yet wired into the view builder."
 
 This is the atomic behavior flip. After this task, `/tmp` inheritance actually works.
 
+> **Implementation deviation (commit 7e8dbe9):** Step 2's single
+> `container_system_mounts` helper was split into two helpers —
+> `container_system_mounts` returns only `/data` (PREPENDED) and a new
+> `container_catchall_mount` returns only `/` (APPENDED). Reason: VFS's
+> `view::resolve_path` is first-match-wins (see `userspace/vfs/src/view.rs`
+> around the mount-iteration loop); a prepended `/ → /` mount would
+> shadow every other mount in the list. The append-catchall pattern
+> matches what the deleted VFS block used to do
+> (`mounts.extend([container, caller]).push("/")`).
+
 **Files:**
 - Modify: `userspace/procmgr/src/main.rs:4549-4612` (the view-building block inside `handle_container_run`)
 - Modify: `userspace/vfs/src/main.rs:706-759` (drop the unconditional container-isolation prepend)
