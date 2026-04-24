@@ -5,7 +5,7 @@ extern crate alloc;
 
 mod mount_policy;
 
-use crate::mount_policy::{parse_mount_policies_raw, MountPolicyEntry};
+use crate::mount_policy::{parse_mount_policies_raw, resolve_effective_policies, MountPolicy, MountPolicyEntry};
 use alloc::{collections::BTreeMap, collections::BTreeSet, format, string::String, vec::Vec};
 use core::mem::{size_of, take};
 use libcluu::boot::{
@@ -4404,11 +4404,10 @@ impl ProcessManager {
             .unwrap_or_default();
         // [[mounts.policy]] — per-path inheritance policy, applied on top of
         // defaults. Parsed with a raw-text fallback because libcluu::toml does
-        // not yet expose array-of-tables. Consumed by Task 7 (view-building);
-        // for now mark as intentionally unused so -D dead_code stays clean.
+        // not yet expose array-of-tables. Consumed below by
+        // `resolve_effective_policies` in the view-building block.
         let cluufile_mount_policies: Vec<MountPolicyEntry> =
             parse_mount_policies_raw(manifest_str);
-        let _ = &cluufile_mount_policies;
         if has_persistent_storage {
             if !self.create_container_dirs(container_id, image_name) {
                 let _ = debug_print(&format!(
@@ -4593,24 +4592,44 @@ impl ProcessManager {
                     mounts
                 };
 
-                // Container-scoped /tmp: replace any passthrough /tmp (first-match-wins ordering)
-                if let Some(pos) = view_mounts.iter().position(|(_, dst, _, _)| dst == "/tmp") {
-                    view_mounts.remove(pos);
-                }
-                if container_id > 0 {
-                    // Task 7 will set memfs_cid = container_id here and drop the
-                    // VFS-side prepend; for now keep memfs_cid = 0 so VFS treats
-                    // this as a MountTable-backed mount and still prepends its
-                    // own MemFs /tmp on top.
-                    view_mounts.insert(0, (
-                        format!("/var/containers/c-{}/tmp", container_id),
-                        String::from("/tmp"),
-                        true,
-                        0u64,
-                    ));
+                // Resolve effective mount policies (defaults + Cluufile overrides).
+                let effective_policies = resolve_effective_policies(
+                    &cluufile_mount_policies,
+                    deny_inherit,
+                );
+
+                // Strip any /tmp, /log, /data, or / mounts inherited from the
+                // caller view — procmgr owns those paths for this container.
+                let container_anchored = ["/tmp", "/log", "/data", "/"];
+                view_mounts.retain(|(_, dst, _, _)| {
+                    !container_anchored.iter().any(|a| dst == *a)
+                });
+
+                // Prepend policy-driven /tmp and /log mounts with the right
+                // memfs_cid (first-match-wins — these shadow any leftover
+                // passthrough entries that slipped through retain above).
+                let memfs_mounts = policy_driven_memfs_mounts(
+                    &effective_policies,
+                    container_id,
+                    caller_container_id,
+                );
+                for m in memfs_mounts.into_iter().rev() {
+                    view_mounts.insert(0, m);
                 }
 
-                // Add persistent dirs (container-scoped, writable, first-match-wins)
+                // /data is a per-container system mount regardless of policy;
+                // prepend so it shadows any passthrough /data.
+                for m in container_system_mounts(container_id).into_iter().rev() {
+                    view_mounts.insert(0, m);
+                }
+
+                // The / catch-all (MemFs{own_cid}) is APPENDED so it only
+                // matches paths no more specific mount covered. VFS resolves
+                // first-match-wins, so the catch-all must come last.
+                view_mounts.extend(container_catchall_mount(container_id));
+
+                // PERSISTENT directives already contribute to view_mounts via
+                // the existing storage-table loop below (preserve that path).
                 if has_persistent_storage && container_id > 0 {
                     if let Some(storage_table) = doc.table("storage") {
                         if let Some(pdirs) = storage_table.get_array("persistent_dirs") {
@@ -5372,6 +5391,69 @@ fn default_view_for_profile(profile: CapProfile) -> ViewMountList {
         .iter()
         .map(|&(src, dst, w)| (String::from(src), String::from(dst), w, 0u64))
         .collect()
+}
+
+/// Build the per-container specific system mounts that were previously created
+/// inside VFS's set_view. These are prepended to the view so they take
+/// priority under VFS's first-match-wins resolution:
+///   /data  — MountTable-backed, path = /var/containers/c-<cid>/data, writable
+/// The `/` catch-all is NOT returned here because it must be *appended* to
+/// the view (see `container_catchall_mount`) — if prepended, it would shadow
+/// every other mount under first-match-wins.
+fn container_system_mounts(container_id: u64) -> ViewMountList {
+    if container_id == 0 {
+        return Vec::new();
+    }
+    alloc::vec![(
+        format!("/var/containers/c-{}/data", container_id),
+        String::from("/data"),
+        true,
+        0, // MountTable — persistent/ext2-backed via MountTable
+    )]
+}
+
+/// Build the catch-all `/ → MemFs { own_cid }` mount. Appended at the END of
+/// the view so that every more specific mount takes precedence. Returns an
+/// empty list for top-level (container_id == 0).
+fn container_catchall_mount(container_id: u64) -> ViewMountList {
+    if container_id == 0 {
+        return Vec::new();
+    }
+    alloc::vec![(
+        String::from("/"),
+        String::from("/"),
+        true,
+        container_id,
+    )]
+}
+
+/// Build /tmp and /log mounts for this container given the resolved policy.
+/// - Private or no parent → memfs_cid = own container_id (fresh MemFs)
+/// - Inherit with parent  → memfs_cid = caller_container_id (parent's MemFs)
+/// - Ro                   → same as Inherit but writable=false (stretch goal)
+fn policy_driven_memfs_mounts(
+    policies: &[MountPolicyEntry],
+    own_cid: u64,
+    parent_cid: u64,
+) -> ViewMountList {
+    let mut out = ViewMountList::new();
+    for entry in policies {
+        // Only /tmp and /log are MemFs-backed today. If the user declares a
+        // MOUNT on some other path, it has no effect here (we fall through
+        // to view passthrough, which already inherits by default).
+        if entry.path != "/tmp" && entry.path != "/log" {
+            continue;
+        }
+        let (cid, writable) = match entry.policy {
+            MountPolicy::Inherit if parent_cid != 0 => (parent_cid, true),
+            MountPolicy::Inherit => (own_cid, true), // top-level: no parent to inherit from
+            MountPolicy::Private => (own_cid, true),
+            MountPolicy::Ro if parent_cid != 0 => (parent_cid, false),
+            MountPolicy::Ro => (own_cid, false),
+        };
+        out.push((entry.path.clone(), entry.path.clone(), writable, cid));
+    }
+    out
 }
 
 /// Check whether `child_view` is a valid narrowing of `parent_view`.

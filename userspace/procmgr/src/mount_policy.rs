@@ -26,7 +26,6 @@ pub enum MountPolicy {
 }
 
 // Fields consumed by Task 7's view-building block.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MountPolicyEntry {
     pub path: String,
@@ -107,7 +106,6 @@ pub fn parse_mount_policies_raw(manifest: &str) -> Vec<MountPolicyEntry> {
 ///
 /// Other paths like /data are handled via the PERSISTENT directive upstream
 /// and do not appear in this table.
-#[allow(dead_code)]
 fn default_mount_policies() -> [(&'static str, MountPolicy); 2] {
     [
         ("/tmp", MountPolicy::Inherit),
@@ -121,7 +119,6 @@ fn default_mount_policies() -> [(&'static str, MountPolicy); 2] {
 /// DENY_INHERIT code path already produces a fresh image-only view.
 ///
 /// Wired in by Task 7 of the mount-policy plan.
-#[allow(dead_code)]
 pub fn resolve_effective_policies(
     cluufile_entries: &[MountPolicyEntry],
     deny_inherit: bool,

@@ -33,7 +33,9 @@ use fd_table::{FdTable, OpenFile};
 use mount::MountTable;
 
 use libcluu::boot::TOKEN_EXTRA_0;
-const IPC_MESSAGE_MAX: usize = 256;
+// Accommodate full set_view payloads (13B header + src/dst bytes per mount,
+// now ~10+ entries per container after the mount-policy atomic flip).
+const IPC_MESSAGE_MAX: usize = 1024;
 /// Remote filesystem IPC label for zero-copy reads into the VFS grant buffer.
 const FS_READ_GRANT: u32 = 0x306;
 /// Remote filesystem IPC label for write operations.
@@ -730,60 +732,14 @@ impl VfsServer {
             return Err(Error::InvalidArgument);
         }
 
-        // Container isolation: create private dirs and prepend container mounts.
-        // /data is persistent (ext2-backed). /tmp and /log are ephemeral (MemFs-backed).
+        // Record container membership for later cleanup/ringio paths.
         if container_id > 0 {
             self.client_containers.insert(client_id, container_id);
-            let cdir = format!("/var/containers/c-{}", container_id);
-
-            // Create per-container MemFs (if not already present from a previous spawn).
-            if !self.container_memfs.contains_key(&container_id) {
-                let memfs = mount::MemFsBackend::new(DEFAULT_MEMFS_QUOTA);
-                {
-                    let mut fs = memfs.borrow_mut();
-                    let _ = fs.mkdir("/tmp");
-                    let _ = fs.mkdir("/log");
-                }
-                self.container_memfs.insert(container_id, memfs);
-            }
-
-            let container_mounts = alloc::vec![
-                view::ViewMount {
-                    src: format!("{}/data", cdir),
-                    dst: alloc::string::String::from("/data"),
-                    writable: true,
-                    target: view::MountTarget::MountTable,
-                },
-                view::ViewMount {
-                    src: alloc::string::String::from("/tmp"),
-                    dst: alloc::string::String::from("/tmp"),
-                    writable: true,
-                    target: view::MountTarget::MemFs { container_id },
-                },
-                // TODO: Phase E — enforce append-only on /log mounts
-                view::ViewMount {
-                    src: alloc::string::String::from("/log"),
-                    dst: alloc::string::String::from("/log"),
-                    writable: true,
-                    target: view::MountTarget::MemFs { container_id },
-                },
-            ];
-            // Prepend: container mounts go first (first-match-wins)
-            let mut all_mounts = container_mounts;
-            all_mounts.extend(mounts);
-
-            // Catch-all: "/" → "/" on MemFs so readdir("/") and any
-            // uncovered path still resolve (first-match-wins means specific
-            // mounts above take priority).
-            all_mounts.push(view::ViewMount {
-                src: alloc::string::String::from("/"),
-                dst: alloc::string::String::from("/"),
-                writable: true,
-                target: view::MountTarget::MemFs { container_id },
-            });
-
-            mounts = all_mounts;
         }
+        // NOTE: /tmp, /log, /data, and the `/ → MemFs` catch-all are now
+        // procmgr's responsibility. procmgr sends explicit mount entries
+        // with the correct memfs_cid per mount (see mount-policy design
+        // spec). VFS just serves whatever mount list it's given.
 
         let _ = debug_print(&format!(
             "vfs: set_view client={} mounts={}",
