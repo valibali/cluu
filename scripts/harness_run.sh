@@ -893,6 +893,13 @@ case "$MARKER_MODE" in
             "mkdir: ok /tmp/b/c/d"
         )
         ;;
+    l2_mount_private)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "mountprobe: PASS /tmp isolation verified"
+        )
+        ;;
     l2_rm)
         required_markers=(
             "TSC calibrated"
