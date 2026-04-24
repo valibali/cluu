@@ -380,6 +380,23 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
         saw_directive = true;
     }
 
+    // Post-parse validation: MOUNT must not overlap with DENY or PERSISTENT.
+    // Both orderings caught because we check after the whole file is parsed.
+    for (mount_path, _) in &mount_policies {
+        if deny.iter().any(|d| d == mount_path) {
+            bail!(
+                "{}: MOUNT conflicts with DENY for path '{}' (ambiguous intent)",
+                path.display(), mount_path
+            );
+        }
+        if persistent_dirs.iter().any(|p| p == mount_path) {
+            bail!(
+                "{}: MOUNT conflicts with PERSISTENT for path '{}' (PERSISTENT already implies private)",
+                path.display(), mount_path
+            );
+        }
+    }
+
     let base = base.ok_or_else(|| {
         anyhow::anyhow!("{}: missing required FROM directive", path.display())
     })?;
@@ -864,5 +881,35 @@ mod mount_tests {
         let c = parse_from_string(src).expect("should parse");
         let toml = generate_manifest_toml(&c, "test", &[]);
         assert!(!toml.contains("[[mounts.policy]]"), "should not have section: {}", toml);
+    }
+
+    #[test]
+    fn mount_conflicts_with_deny() {
+        let src = "FROM base\nDENY /tmp\nMOUNT /tmp inherit\n";
+        let err = parse_from_string(src).expect_err("MOUNT on DENY path should fail");
+        assert!(
+            err.to_string().contains("MOUNT conflicts with DENY"),
+            "err was: {}", err
+        );
+    }
+
+    #[test]
+    fn mount_conflicts_with_persistent() {
+        let src = "FROM base\nPERSISTENT /data\nMOUNT /data private\n";
+        let err = parse_from_string(src).expect_err("MOUNT on PERSISTENT path should fail");
+        assert!(
+            err.to_string().contains("MOUNT conflicts with PERSISTENT"),
+            "err was: {}", err
+        );
+    }
+
+    #[test]
+    fn deny_declared_after_mount_still_conflicts() {
+        let src = "FROM base\nMOUNT /tmp inherit\nDENY /tmp\n";
+        let err = parse_from_string(src).expect_err("order shouldn't matter");
+        assert!(
+            err.to_string().contains("MOUNT conflicts with DENY"),
+            "err was: {}", err
+        );
     }
 }
