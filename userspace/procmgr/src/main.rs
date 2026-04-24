@@ -61,8 +61,10 @@ use libcluu::syscall::{
 use libcluu::tar::find_member;
 use libcluu::*;
 
-/// A list of (src, dst, writable) mount tuples representing a process's VFS view.
-type ViewMountList = Vec<(String, String, bool)>;
+/// Per-mount entry sent to VFS: (src, dst, writable, memfs_cid).
+/// `memfs_cid = 0` → mount resolves against the global MountTable (filesystem-backed).
+/// `memfs_cid > 0` → mount resolves against that container's MemFs backend.
+type ViewMountList = Vec<(String, String, bool, u64)>;
 
 #[derive(Clone, Debug)]
 enum RestartPolicy {
@@ -468,9 +470,9 @@ impl ProcessManager {
         };
         let mut mounts: ViewMountList = base_mounts.iter()
             .filter(|&&(_, dst, _)| !dst.starts_with("/home/"))
-            .map(|&(src, dst, w)| (String::from(src), String::from(dst), w))
+            .map(|&(src, dst, w)| (String::from(src), String::from(dst), w, 0u64))
             .collect();
-        mounts.push((String::from(home), String::from(home), true));
+        mounts.push((String::from(home), String::from(home), true, 0u64));
         mounts
     }
 
@@ -690,7 +692,7 @@ impl ProcessManager {
     fn register_vfs_view_for_thread(
         &mut self,
         thread_token: usize,
-        mounts: &[(String, String, bool)],
+        mounts: &[(String, String, bool, u64)],
         profile: CapProfile,
         container_id: u64,
     ) {
@@ -4564,7 +4566,7 @@ impl ProcessManager {
 
                     // Filter out denied paths
                     let mut filtered: ViewMountList = caller_view.into_iter()
-                        .filter(|(_, dst, _)| {
+                        .filter(|(_, dst, _, _)| {
                             !deny_paths.iter().any(|deny| dst == deny || dst.starts_with(&format!("{}/", deny)))
                         })
                         .collect();
@@ -4580,6 +4582,7 @@ impl ProcessManager {
                             format!("/var/images/{}/{}", image_name, dir),
                             format!("/{}", dir),
                             false, // read-only
+                            0u64,
                         ));
                     }
                     mounts
@@ -4591,14 +4594,19 @@ impl ProcessManager {
                 };
 
                 // Container-scoped /tmp: replace any passthrough /tmp (first-match-wins ordering)
-                if let Some(pos) = view_mounts.iter().position(|(_, dst, _)| dst == "/tmp") {
+                if let Some(pos) = view_mounts.iter().position(|(_, dst, _, _)| dst == "/tmp") {
                     view_mounts.remove(pos);
                 }
                 if container_id > 0 {
+                    // Task 7 will set memfs_cid = container_id here and drop the
+                    // VFS-side prepend; for now keep memfs_cid = 0 so VFS treats
+                    // this as a MountTable-backed mount and still prepends its
+                    // own MemFs /tmp on top.
                     view_mounts.insert(0, (
                         format!("/var/containers/c-{}/tmp", container_id),
                         String::from("/tmp"),
                         true,
+                        0u64,
                     ));
                 }
 
@@ -4608,13 +4616,14 @@ impl ProcessManager {
                         if let Some(pdirs) = storage_table.get_array("persistent_dirs") {
                             for pdir in pdirs {
                                 let dir_name = pdir.trim_start_matches('/');
-                                if let Some(pos) = view_mounts.iter().position(|(_, dst, _)| dst.trim_start_matches('/') == dir_name) {
+                                if let Some(pos) = view_mounts.iter().position(|(_, dst, _, _)| dst.trim_start_matches('/') == dir_name) {
                                     view_mounts.remove(pos);
                                 }
                                 view_mounts.insert(0, (
                                     format!("/var/containers/c-{}/{}", container_id, dir_name),
                                     format!("/{}", dir_name),
                                     true,
+                                    0u64,
                                 ));
                             }
                         }
@@ -5300,7 +5309,7 @@ fn parse_restart_policy(doc: &libcluu::toml::TomlDoc) -> RestartPolicy {
 
 /// Resolve a virtual path through a VFS view's mount table.
 /// Returns the concrete filesystem path, or None if not visible in the view.
-fn resolve_path_in_view(path: &str, view: &[(String, String, bool)]) -> Option<String> {
+fn resolve_path_in_view(path: &str, view: &[(String, String, bool, u64)]) -> Option<String> {
     // Must be absolute
     if !path.starts_with('/') {
         return None;
@@ -5312,7 +5321,7 @@ fn resolve_path_in_view(path: &str, view: &[(String, String, bool)]) -> Option<S
         }
     }
 
-    for (src, dst, _writable) in view {
+    for (src, dst, _writable, _memfs_cid) in view {
         // Root mount matches everything
         if dst == "/" {
             return Some(format!("{}{}", src, path));
@@ -5354,12 +5363,14 @@ fn resolve_path_for_caller(
 
 /// Generate the default VFS view mounts for a capability profile.
 ///
-/// Returns a list of (src, dst, writable) tuples.  For Phase C these are
-/// identity mappings (src == dst); Phase D will add path remapping.
+/// Returns a list of (src, dst, writable, memfs_cid) tuples.  For Phase C these
+/// are identity mappings (src == dst); Phase D will add path remapping.  All
+/// `memfs_cid` values are 0 (resolve via global MountTable); the per-container
+/// MemFs prepend is currently still added by VFS at view-set time (see Task 7).
 fn default_view_for_profile(profile: CapProfile) -> ViewMountList {
     libcluu::vfs_view::default_mounts_for_profile(profile)
         .iter()
-        .map(|&(src, dst, w)| (String::from(src), String::from(dst), w))
+        .map(|&(src, dst, w)| (String::from(src), String::from(dst), w, 0u64))
         .collect()
 }
 
@@ -5369,9 +5380,9 @@ fn default_view_for_profile(profile: CapProfile) -> ViewMountList {
 /// with an equal or wider prefix and equal or greater write permission.
 /// An empty parent view means no filesystem access — no child mount can pass.
 /// An empty child view is always valid (child requests no access).
-fn can_narrow_view(parent_view: &[(String, String, bool)], child_view: &[(String, String, bool)]) -> bool {
-    for (child_src, child_dst, child_writable) in child_view {
-        let covered = parent_view.iter().any(|(p_src, p_dst, p_writable)| {
+fn can_narrow_view(parent_view: &[(String, String, bool, u64)], child_view: &[(String, String, bool, u64)]) -> bool {
+    for (child_src, child_dst, child_writable, _child_memfs_cid) in child_view {
+        let covered = parent_view.iter().any(|(p_src, p_dst, p_writable, _p_memfs_cid)| {
             // Child prefix must be under (or equal to) parent prefix.
             let src_ok = child_src == p_src
                 || (child_src.starts_with(p_src.as_str())
@@ -5417,6 +5428,7 @@ fn apply_image_dir_overrides(mounts: &mut ViewMountList, image_name: &str, image
                     format!("/var/images/{}/{}", image_name, dir),
                     virtual_path,
                     false,
+                    0u64,
                 ),
             );
         }
@@ -5426,12 +5438,13 @@ fn apply_image_dir_overrides(mounts: &mut ViewMountList, image_name: &str, image
 /// Serialize and send a VFS_SET_VIEW message for a newly spawned child.
 ///
 /// `client_tid` is the child's kernel `ThreadId` (the `sender_tid` seen by VFS).
-/// `mounts` is the list of (src, dst, writable) tuples from `default_view_for_profile`.
-/// A `client_tid` of 0 means "sender_tid" (manager self-view bootstrap path).
+/// `mounts` is the list of (src, dst, writable, memfs_cid) tuples from
+/// `default_view_for_profile` (or a derived view).  A `client_tid` of 0 means
+/// "sender_tid" (manager self-view bootstrap path).
 fn send_vfs_set_view(
     vfs_endpoint: usize,
     client_tid: usize,
-    mounts: &[(String, String, bool)],
+    mounts: &[(String, String, bool, u64)],
     profile: CapProfile,
     container_id: u64,
 ) -> Result<()> {
@@ -5439,14 +5452,20 @@ fn send_vfs_set_view(
         return Ok(());
     }
 
-    // Serialize payload: per mount: u16 src_len + u16 dst_len + u8 flags + src + dst
+    // Wire format (per mount):
+    //   u16 src_len LE | u16 dst_len LE | u8 flags | u64 memfs_cid LE |
+    //   src_bytes       | dst_bytes
+    //
+    // flags: bit 0 = writable. `memfs_cid = 0` means MountTable; non-zero
+    // means MountTarget::MemFs { container_id: memfs_cid }.
     let mut payload = Vec::new();
-    for (src, dst, writable) in mounts {
+    for (src, dst, writable, memfs_cid) in mounts {
         let src_bytes = src.as_bytes();
         let dst_bytes = dst.as_bytes();
         payload.extend_from_slice(&(src_bytes.len() as u16).to_le_bytes());
         payload.extend_from_slice(&(dst_bytes.len() as u16).to_le_bytes());
         payload.push(if *writable { 1u8 } else { 0u8 });
+        payload.extend_from_slice(&memfs_cid.to_le_bytes());
         payload.extend_from_slice(src_bytes);
         payload.extend_from_slice(dst_bytes);
     }

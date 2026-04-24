@@ -61,11 +61,22 @@ pub const CONSOLE_SCROLL_VT_LABEL: u32 = 25;
 /// Payload = path\0 + param overrides (each: u16 index LE + u64 value LE = 10 bytes).
 pub const PROCMGR_SPAWN_SERVICE_LABEL: u32 = 20;
 
-/// Procmgr → VFS: register a per-client filesystem view.
-/// words[1] = client_id (sender_tid of the target process),
-/// words[2] = mount count.
-/// words[3] = CapProfile bits for default-view fallback (0 = clear profile on empty mount update).
-/// Payload: for each mount: u16 src_len LE + u16 dst_len LE + u8 flags (bit 0 = writable) + src_bytes + dst_bytes.
+/// Set the per-client VFS view (mount list). Request from procmgr to VFS.
+///
+/// Message words:
+///   [0] payload length in bytes
+///   [1] target client_tid (0 = sender_tid)
+///   [2] mount count
+///   [3] CapProfile bits (0 = clear profile on empty mount update)
+///   [4] container_id (u64 fits in usize on x86_64)
+///
+/// Per-mount wire layout:
+///   u16 src_len LE | u16 dst_len LE | u8 flags | u64 memfs_cid LE |
+///   src_bytes (src_len) | dst_bytes (dst_len)
+///
+/// Flags bit 0 = writable. `memfs_cid = 0` resolves the mount against the
+/// global MountTable; `memfs_cid > 0` resolves against that container's
+/// per-container MemFs backend (procmgr owns the keying).
 pub const VFS_SET_VIEW_LABEL: u32 = 21;
 
 /// Procmgr → VFS: clean up container storage on process exit or destroy.

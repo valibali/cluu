@@ -667,14 +667,25 @@ impl VfsServer {
         let mut offset = 0;
 
         for _ in 0..mount_count {
-            // Each mount: u16 src_len LE + u16 dst_len LE + u8 flags + src_bytes + dst_bytes
-            if offset + 5 > payload.len() {
+            // Per-mount wire: u16 src_len | u16 dst_len | u8 flags | u64 memfs_cid | src | dst
+            // Header: 2 + 2 + 1 + 8 = 13 bytes.
+            if offset + 13 > payload.len() {
                 return Err(Error::InvalidArgument);
             }
             let src_len = u16::from_le_bytes([payload[offset], payload[offset + 1]]) as usize;
             let dst_len = u16::from_le_bytes([payload[offset + 2], payload[offset + 3]]) as usize;
             let flags = payload[offset + 4];
-            offset += 5;
+            let memfs_cid = u64::from_le_bytes([
+                payload[offset + 5],
+                payload[offset + 6],
+                payload[offset + 7],
+                payload[offset + 8],
+                payload[offset + 9],
+                payload[offset + 10],
+                payload[offset + 11],
+                payload[offset + 12],
+            ]);
+            offset += 13;
 
             if offset + src_len + dst_len > payload.len() {
                 return Err(Error::InvalidArgument);
@@ -692,11 +703,27 @@ impl VfsServer {
             view::validate_clean_absolute_path(src.as_str())?;
             view::validate_clean_absolute_path(dst.as_str())?;
 
+            let target = if memfs_cid == 0 {
+                view::MountTarget::MountTable
+            } else {
+                // Lazily allocate the MemFs for this container on first sight.
+                if !self.container_memfs.contains_key(&memfs_cid) {
+                    let memfs = mount::MemFsBackend::new(DEFAULT_MEMFS_QUOTA);
+                    {
+                        let mut fs = memfs.borrow_mut();
+                        let _ = fs.mkdir("/tmp");
+                        let _ = fs.mkdir("/log");
+                    }
+                    self.container_memfs.insert(memfs_cid, memfs);
+                }
+                view::MountTarget::MemFs { container_id: memfs_cid }
+            };
+
             mounts.push(view::ViewMount {
                 src,
                 dst,
                 writable: (flags & 1) != 0,
-                target: view::MountTarget::MountTable,
+                target,
             });
         }
         if offset != payload.len() {
