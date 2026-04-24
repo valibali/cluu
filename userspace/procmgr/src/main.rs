@@ -3,6 +3,9 @@
 
 extern crate alloc;
 
+mod mount_policy;
+
+use crate::mount_policy::{parse_mount_policies_raw, MountPolicyEntry};
 use alloc::{collections::BTreeMap, collections::BTreeSet, format, string::String, vec::Vec};
 use core::mem::{size_of, take};
 use libcluu::boot::{
@@ -4397,6 +4400,13 @@ impl ProcessManager {
             .and_then(|t| t.get_array("deny"))
             .map(|a| a.iter().map(|s| s.clone()).collect())
             .unwrap_or_default();
+        // [[mounts.policy]] — per-path inheritance policy, applied on top of
+        // defaults. Parsed with a raw-text fallback because libcluu::toml does
+        // not yet expose array-of-tables. Consumed by Task 7 (view-building);
+        // for now mark as intentionally unused so -D dead_code stays clean.
+        let cluufile_mount_policies: Vec<MountPolicyEntry> =
+            parse_mount_policies_raw(manifest_str);
+        let _ = &cluufile_mount_policies;
         if has_persistent_storage {
             if !self.create_container_dirs(container_id, image_name) {
                 let _ = debug_print(&format!(
