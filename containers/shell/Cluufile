@@ -1,4 +1,5 @@
 FROM minimal
 PROFILE ipc spawn registry vfs
+MOUNT /tmp private
 BUILD "cargo build --manifest-path userspace/shell/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/shell.elf /bin/shell
 ENTRYPOINT /bin/shell
