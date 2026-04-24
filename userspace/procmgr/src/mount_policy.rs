@@ -98,6 +98,53 @@ pub fn parse_mount_policies_raw(manifest: &str) -> Vec<MountPolicyEntry> {
     out
 }
 
+/// Default mount policy table. Paths not listed here get no entry (meaning
+/// the view-inheritance code path applies without per-path fiddling).
+///
+/// - `/tmp → Inherit`: shell session anchor; child processes see shell's /tmp.
+///   Containers that want isolation opt in via `MOUNT /tmp private`.
+/// - `/log → Private`: per-container log scope is the whole point of /log.
+///
+/// Other paths like /data are handled via the PERSISTENT directive upstream
+/// and do not appear in this table.
+#[allow(dead_code)]
+fn default_mount_policies() -> [(&'static str, MountPolicy); 2] {
+    [
+        ("/tmp", MountPolicy::Inherit),
+        ("/log", MountPolicy::Private),
+    ]
+}
+
+/// Compose defaults + Cluufile overrides into a single effective policy list.
+/// Cluufile entries win over defaults on the same path. When `deny_inherit`
+/// is set, returns an empty list because there's nothing to inherit — the
+/// DENY_INHERIT code path already produces a fresh image-only view.
+///
+/// Wired in by Task 7 of the mount-policy plan.
+#[allow(dead_code)]
+pub fn resolve_effective_policies(
+    cluufile_entries: &[MountPolicyEntry],
+    deny_inherit: bool,
+) -> Vec<MountPolicyEntry> {
+    if deny_inherit {
+        return Vec::new();
+    }
+    let mut out: Vec<MountPolicyEntry> = Vec::new();
+    // Seed with defaults.
+    for (path, policy) in default_mount_policies().iter() {
+        out.push(MountPolicyEntry { path: path.to_string(), policy: *policy });
+    }
+    // Apply Cluufile overrides.
+    for entry in cluufile_entries {
+        if let Some(existing) = out.iter_mut().find(|e| e.path == entry.path) {
+            existing.policy = entry.policy;
+        } else {
+            out.push(entry.clone());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +176,44 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, "/tmp");
         assert_eq!(out[0].policy, MountPolicy::Private);
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use alloc::vec;
+
+    fn ep(path: &str, policy: MountPolicy) -> MountPolicyEntry {
+        MountPolicyEntry { path: path.to_string(), policy }
+    }
+
+    fn lookup(policies: &[MountPolicyEntry], path: &str) -> Option<MountPolicy> {
+        policies.iter().find(|e| e.path == path).map(|e| e.policy)
+    }
+
+    #[test]
+    fn defaults_applied_when_no_cluufile_entries() {
+        let resolved = resolve_effective_policies(&[], false);
+        // /tmp defaults to Inherit, /log to Private.
+        assert_eq!(lookup(&resolved, "/tmp"), Some(MountPolicy::Inherit));
+        assert_eq!(lookup(&resolved, "/log"), Some(MountPolicy::Private));
+    }
+
+    #[test]
+    fn cluufile_override_wins() {
+        let custom = vec![ep("/tmp", MountPolicy::Private)];
+        let resolved = resolve_effective_policies(&custom, false);
+        assert_eq!(lookup(&resolved, "/tmp"), Some(MountPolicy::Private));
+        // /log default still applies.
+        assert_eq!(lookup(&resolved, "/log"), Some(MountPolicy::Private));
+    }
+
+    #[test]
+    fn deny_inherit_yields_empty_policy_set() {
+        let custom = vec![ep("/tmp", MountPolicy::Inherit)];
+        let resolved = resolve_effective_policies(&custom, true);
+        // DENY_INHERIT means no inheritance at all — MOUNT entries are ignored.
+        assert!(resolved.is_empty());
     }
 }
