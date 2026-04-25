@@ -26,6 +26,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 const IPC_REG_INLINE_FLAG: usize = 1usize << (usize::BITS - 1);
 const IPC_REG_INLINE_MAX_PAYLOAD: usize = 32;
+/// Flag bit on `invoke_thread_create`'s `args.arg6`: create the thread
+/// SUSPENDED. Userspace must call `thread_resume` to make it runnable.
+/// Mirrors `THREAD_CREATE_START_SUSPENDED` in `userspace/libcluu/src/syscall.rs`.
+const THREAD_CREATE_START_SUSPENDED: u64 = 0x1;
 /// sys_call uses arg4/arg5 for reply_buf/reply_len, leaving only arg2+arg6 (2 registers = 16B)
 /// for inline send data. This is an ABI constraint, not a tunable — sys_send has 4 free registers.
 const IPC_REG_INLINE_MAX_CALL_PAYLOAD: usize = 16;
@@ -847,6 +851,7 @@ fn invoke_thread_create(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
     } else {
         args.arg5 as u8
     };
+    let create_flags = args.arg6 as u64;
 
     if entry == 0 || stack == 0 {
         return Err(Error::InvalidArgument);
@@ -866,11 +871,17 @@ fn invoke_thread_create(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
             .ok_or(Error::NotFound)?;
 
     let thread_id = ThreadManager::try_alloc_thread_id().map_err(|_| Error::OutOfMemory)?;
-    let flags = if ThreadManager::is_init_mode() {
+    let mut flags = if ThreadManager::is_init_mode() {
         ThreadFlags::COOPERATIVE
     } else {
         ThreadFlags::empty()
     };
+    // Flag bit 0: create the thread SUSPENDED. Caller must invoke
+    // thread_resume to make it runnable. Used by procmgr to install per-thread
+    // VFS views before the thread runs (closes a SET_VIEW vs first-call race).
+    if create_flags & THREAD_CREATE_START_SUSPENDED != 0 {
+        flags = flags.with(ThreadFlags::SUSPENDED);
+    }
 
     let thread = Thread::new(
         thread_id,

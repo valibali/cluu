@@ -265,15 +265,21 @@ impl ThreadManager {
     pub fn add_thread(thread: Thread) -> ThreadId {
         let thread_id = thread.id;
         let priority = thread.priority;
+        let suspended = thread.is_suspended();
 
         // Insert into repository
         let mut repo = THREAD_REPOSITORY.lock();
         repo.insert(thread).expect("Failed to insert thread");
         drop(repo);
 
-        // Add to scheduler
-        let mut scheduler = SCHEDULER.lock();
-        scheduler.add(thread_id, priority);
+        // Threads created SUSPENDED stay out of the scheduler runqueue;
+        // userspace must call thread_resume to make them runnable. Used by
+        // procmgr to install per-thread VFS views before the thread runs
+        // (closes a SET_VIEW vs first-call race).
+        if !suspended {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.add(thread_id, priority);
+        }
 
         thread_id
     }
