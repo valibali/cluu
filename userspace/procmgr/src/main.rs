@@ -913,7 +913,7 @@ impl ProcessManager {
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
         let (user_env, user_envc) = build_user_env_payload("root", "/root");
 
-        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None, &[]) {
+        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None, &[], 0) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let session_cid = self.next_container_id();
                 let shell_cid = self.next_container_id();
@@ -1125,6 +1125,7 @@ impl ProcessManager {
             param_overrides,
             None, // no caller view (internal autostart)
             &[],
+            0,
         ) {
             Ok((_thread_token, cookie, pid, _child_stdin_send)) => {
                 let image_dir = format!("/var/images/{}", image_name);
@@ -1415,6 +1416,7 @@ impl ProcessManager {
             &binary_vfs_path, priority, &argv_payload, 1, &[], 0, 0,
             spawn_seq, spawn_start, &[], requested_profile,
             extra_token, extra_token_1, param_overrides, None, &[],
+            0,
         ) {
             Ok((new_thread_token, new_cookie, new_pid, _)) => {
                 let mut view_mounts = default_view_for_profile(requested_profile);
@@ -2139,6 +2141,7 @@ impl ProcessManager {
             &[],
             None, // no caller view (session login uses SERVICE_PATH constant)
             &[],
+            0,
         ) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let session_cid = self.next_container_id();
@@ -2361,6 +2364,7 @@ impl ProcessManager {
             &[],
             caller_view_owned.as_ref(),
             &[],
+            0,
         ) {
             Ok((thread_token, cookie, pid, stdin_send)) => {
                 let container_id = self.next_container_id();
@@ -2570,6 +2574,7 @@ impl ProcessManager {
             &[],
             None, // no caller view (su uses SERVICE_PATH constant)
             &[],
+            0,
         ) {
             Ok((thread_token, cookie, pid, stdin_send)) => {
                 let container_id = self.next_container_id();
@@ -3386,6 +3391,7 @@ impl ProcessManager {
             &[],
             Some(&child_view_mounts),
             cwd_bytes,
+            0,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 reply_msg.words[0] = 0;
@@ -3514,6 +3520,7 @@ impl ProcessManager {
             &[],
             None,
             &[],
+            0,
         )
     }
 
@@ -3536,6 +3543,7 @@ impl ProcessManager {
         param_overrides: &[(usize, u64)],
         caller_view: Option<&ViewMountList>,
         cwd_bytes: &[u8],
+        thread_flags: usize,
     ) -> Result<(usize, usize, usize, usize)> {
         // Build env data: for bootstrap (owner_tid==0) use defaults,
         // otherwise use caller-provided env (from posix_spawn)
@@ -3763,7 +3771,7 @@ impl ProcessManager {
             cwd_bytes,
         )?;
 
-        let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority, 0)?;
+        let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority, thread_flags)?;
         // Set fault endpoint so the kernel forwards faults to us instead of silently killing.
         if self.fault_endpoint != 0 {
             if let Err(err) = thread_set_fault_endpoint(thread_token, self.fault_endpoint) {
@@ -4554,6 +4562,7 @@ impl ProcessManager {
             param_overrides,
             None, // no caller view (container run uses absolute /var/images/ paths)
             cwd_bytes,
+            0,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build view: for nested containers, inherit caller's view; for top-level, use default
