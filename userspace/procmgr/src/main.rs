@@ -56,7 +56,7 @@ use libcluu::ipc::PROCMGR_SPAWN_SERVICE_LABEL;
 use libcluu::registry;
 use libcluu::syscall::{
     space_destroy, thread_destroy, thread_get_id, thread_resume, thread_set_fault_endpoint,
-    thread_suspend, token_revoke,
+    thread_suspend, token_revoke, THREAD_CREATE_START_SUSPENDED,
 };
 use libcluu::tar::find_member;
 use libcluu::*;
@@ -689,6 +689,33 @@ impl ProcessManager {
         Ok(())
     }
 
+    /// Install a VFS view for a thread, then resume it.
+    ///
+    /// Used in conjunction with `THREAD_CREATE_START_SUSPENDED` to close the
+    /// race where a freshly-spawned thread could make VFS calls before its
+    /// view was installed. Caller passes a thread that was created suspended;
+    /// this helper sends VFS_SET_VIEW (or queues it if VFS isn't up yet),
+    /// then resumes the thread.
+    ///
+    /// On thread_resume failure, logs and best-effort destroys the thread —
+    /// otherwise we'd leak a forever-suspended thread.
+    fn install_view_and_run(
+        &mut self,
+        thread_token: usize,
+        mounts: &[(String, String, bool, u64)],
+        profile: CapProfile,
+        container_id: u64,
+    ) {
+        self.register_vfs_view_for_thread(thread_token, mounts, profile, container_id);
+        if let Err(err) = thread_resume(thread_token) {
+            let _ = debug_print(&format!(
+                "procmgr: thread_resume failed token={} err={:?}",
+                thread_token, err
+            ));
+            let _ = thread_destroy(thread_token);
+        }
+    }
+
     fn register_vfs_view_for_thread(
         &mut self,
         thread_token: usize,
@@ -913,13 +940,13 @@ impl ProcessManager {
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
         let (user_env, user_envc) = build_user_env_payload("root", "/root");
 
-        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None, &[], 0) {
+        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None, &[], THREAD_CREATE_START_SUSPENDED) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let session_cid = self.next_container_id();
                 let shell_cid = self.next_container_id();
                 self.pid_to_container_id.insert(pid, shell_cid);
                 self.container_owner_pids.insert(pid);
-                self.register_vfs_view_for_thread(thread_token, &view_mounts, profile, shell_cid);
+                self.install_view_and_run(thread_token, &view_mounts, profile, shell_cid);
                 self.pid_to_view.insert(pid, view_mounts);
                 let inst_name = self.next_instance_name(session_cid, "shell");
                 self.container_instances.insert(shell_cid, ContainerInstance {
@@ -1125,7 +1152,7 @@ impl ProcessManager {
             param_overrides,
             None, // no caller view (internal autostart)
             &[],
-            0,
+            THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((_thread_token, cookie, pid, _child_stdin_send)) => {
                 let image_dir = format!("/var/images/{}", image_name);
@@ -1133,7 +1160,7 @@ impl ProcessManager {
                 apply_image_dir_overrides(&mut view_mounts, image_name, &image_dirs);
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
-                self.register_vfs_view_for_thread(_thread_token, &view_mounts, requested_profile, container_id);
+                self.install_view_and_run(_thread_token, &view_mounts, requested_profile, container_id);
                 self.pid_to_view.insert(pid, view_mounts);
                 if image_name == "vtmgr" {
                     self.vtmgr_container_id = container_id;
@@ -1416,14 +1443,14 @@ impl ProcessManager {
             &binary_vfs_path, priority, &argv_payload, 1, &[], 0, 0,
             spawn_seq, spawn_start, &[], requested_profile,
             extra_token, extra_token_1, param_overrides, None, &[],
-            0,
+            THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((new_thread_token, new_cookie, new_pid, _)) => {
                 let mut view_mounts = default_view_for_profile(requested_profile);
                 apply_image_dir_overrides(&mut view_mounts, image_name, &image_dirs);
                 self.pid_to_container_id.insert(new_pid, container_id);
                 self.container_owner_pids.insert(new_pid);
-                self.register_vfs_view_for_thread(new_thread_token, &view_mounts, requested_profile, container_id);
+                self.install_view_and_run(new_thread_token, &view_mounts, requested_profile, container_id);
                 self.pid_to_view.insert(new_pid, view_mounts);
 
                 if let Some(container) = self.container_instances.get_mut(&container_id) {
@@ -2141,7 +2168,7 @@ impl ProcessManager {
             &[],
             None, // no caller view (session login uses SERVICE_PATH constant)
             &[],
-            0,
+            THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let session_cid = self.next_container_id();
@@ -2149,7 +2176,7 @@ impl ProcessManager {
                 self.pid_to_container_id.insert(pid, shell_cid);
                 self.container_owner_pids.insert(pid);
 
-                self.register_vfs_view_for_thread(thread_token, &view_mounts, profile, shell_cid);
+                self.install_view_and_run(thread_token, &view_mounts, profile, shell_cid);
                 self.pid_to_view.insert(pid, view_mounts);
 
                 let inst_name = self.next_instance_name(session_cid, "shell");
@@ -2364,13 +2391,13 @@ impl ProcessManager {
             &[],
             caller_view_owned.as_ref(),
             &[],
-            0,
+            THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, cookie, pid, stdin_send)) => {
                 let container_id = self.next_container_id();
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
-                self.register_vfs_view_for_thread(thread_token, &view_mounts, escalate_profile, container_id);
+                self.install_view_and_run(thread_token, &view_mounts, escalate_profile, container_id);
                 self.pid_to_view.insert(pid, view_mounts);
 
                 let sudo_session_id = self.resolve_caller_session(sender_tid)
@@ -2574,13 +2601,13 @@ impl ProcessManager {
             &[],
             None, // no caller view (su uses SERVICE_PATH constant)
             &[],
-            0,
+            THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, cookie, pid, stdin_send)) => {
                 let container_id = self.next_container_id();
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
-                self.register_vfs_view_for_thread(thread_token, &view_mounts, target_profile, container_id);
+                self.install_view_and_run(thread_token, &view_mounts, target_profile, container_id);
                 self.pid_to_view.insert(pid, view_mounts);
 
                 let su_session_id = self.resolve_caller_session(sender_tid)
@@ -3231,13 +3258,13 @@ impl ProcessManager {
             elf.entry_point as usize,
             SERVICE_STACK_TOP,
             priority,
-            0,
+            THREAD_CREATE_START_SUSPENDED,
         )?;
 
         // Register VFS view for the service based on its profile.
         // System services (pid=0) don't get private storage — container_id=0.
         let view_mounts = default_view_for_profile(requested_profile);
-        self.register_vfs_view_for_thread(thread_token, &view_mounts, requested_profile, 0);
+        self.install_view_and_run(thread_token, &view_mounts, requested_profile, 0);
 
         let _ = debug_print(&format!("procmgr: service '{}' spawned", path));
         Ok(())
@@ -3391,7 +3418,7 @@ impl ProcessManager {
             &[],
             Some(&child_view_mounts),
             cwd_bytes,
-            0,
+            THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 reply_msg.words[0] = 0;
@@ -3403,7 +3430,7 @@ impl ProcessManager {
                 if let Some(container) = self.container_instances.get_mut(&caller_container_id) {
                     container.live_processes = container.live_processes.saturating_add(1);
                 }
-                self.register_vfs_view_for_thread(thread_token, &child_view_mounts, child_profile, caller_container_id);
+                self.install_view_and_run(thread_token, &child_view_mounts, child_profile, caller_container_id);
                 self.pid_to_view.insert(pid, child_view_mounts.clone());
                 if sender_tid != 0 {
                     let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
@@ -4562,7 +4589,7 @@ impl ProcessManager {
             param_overrides,
             None, // no caller view (container run uses absolute /var/images/ paths)
             cwd_bytes,
-            0,
+            THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
                 // Build view: for nested containers, inherit caller's view; for top-level, use default
@@ -4661,7 +4688,7 @@ impl ProcessManager {
 
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
-                self.register_vfs_view_for_thread(thread_token, &view_mounts, requested_profile, container_id);
+                self.install_view_and_run(thread_token, &view_mounts, requested_profile, container_id);
                 self.pid_to_view.insert(pid, view_mounts);
                 // Fix C: removed redundant pid_to_profile insert (spawn_service_with_env already does it)
 
