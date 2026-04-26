@@ -185,6 +185,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-cp"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-detachprobe"
 version = "0.1.0"
 dependencies = [

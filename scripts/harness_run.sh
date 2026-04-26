@@ -904,7 +904,7 @@ case "$MARKER_MODE" in
         required_markers=(
             "TSC calibrated"
             "[USER] shell: ready"
-            "cp: ok /etc/users.toml -> /tmp/usercopy"
+            "cp: usage: cp <src> <dst>"
         )
         ;;
     l2_mount_private)

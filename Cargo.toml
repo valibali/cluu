@@ -31,6 +31,7 @@ members = [
     "userspace/escalateprobe",
     "userspace/viewprobe",
     "userspace/argvprobe",
+    "userspace/cp",
     "userspace/mkdir",
     "userspace/mountprobe",
     "userspace/rm",
@@ -71,6 +72,7 @@ default-members = [
     "userspace/escalateprobe",
     "userspace/viewprobe",
     "userspace/argvprobe",
+    "userspace/cp",
     "userspace/mkdir",
     "userspace/mountprobe",
     "userspace/rm",
@@ -155,6 +157,9 @@ debug = 0
 [profile.dev.package."cluu-argvprobe"]
 debug = 0
 
+[profile.dev.package."cluu-cp"]
+debug = 0
+
 [profile.dev.package."cluu-mkdir"]
 debug = 0
 
@@ -228,6 +233,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-argvprobe"]
+debug = 0
+
+[profile.release.package."cluu-cp"]
 debug = 0
 
 [profile.release.package."cluu-mkdir"]
