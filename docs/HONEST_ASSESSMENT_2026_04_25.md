@@ -16,7 +16,7 @@
 
 **Test harness: timing-based, brittle, and you know it.** Stream-tail (#73) closes 80% of the flake. gdbstub-driven testing is a hobby project inside a hobby project; defer until something specific demands it. Don't over-rebuild this either.
 
-**The 40-day WIP that you sealed in b574664 was the most honest signal you've sent yourself in months.** You named the pattern, you fixed the symptom. You did not fix the process that produced it. The next 40-day WIP is one good kernel idea away from now unless you change how you respond to "good kernel idea" thoughts.
+**The 40-day WIP that you sealed in 9cd0ddf was the most honest signal you've sent yourself in months.** You named the pattern, you fixed the symptom. You did not fix the process that produced it. The next 40-day WIP is one good kernel idea away from now unless you change how you respond to "good kernel idea" thoughts.
 
 ---
 

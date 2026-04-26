@@ -120,11 +120,11 @@ Race fix landed in 6 commits (libcluu API, suspendprobe, harness wiring, kernel 
 
 All in-tree pre-post work landed:
 
-- **#75 line editing + history** — TTY canonical mode now handles ↑/↓ for in-memory history (32-entry ring, dedupes consecutive duplicates), DEL-as-backspace, ←/→ silently consumed. 16 unit tests via `rustc --test`. (commit b4d20cb)
-- **#52 + #53 cp** — `/bin/cp` ships, smoke-tested by spawning with no args. Full file-copy is interactive due to a separate VFS write-on-MemFs issue captured as #80. Also added a `touch` shell builtin for visitor convenience. (commits 51b7696, 5c5d965)
-- **#54 + #55 mv** — `/bin/mv` ships as a thin wrapper around VfsClient::rename. Smoke tested. (commits fe338a9, 384f835)
-- **#76 /etc seeds + README + demo script** — `/etc/motd`, `/etc/welcome.txt`, `/etc/architecture.txt` wired into the userdisk. New top-level honest README (195 lines, leads with what works AND what doesn't). Old README relocated to `docs/INTERNALS.md`. `docs/DEMO_SCRIPT.md` captures the GIF recording walk-through. (commit df8989c)
-- **#77 r/osdev post draft** — `docs/POST_DRAFT.md` ready. Three title options, pre-publish checklist, fallback plan if engagement is low. (commit 9957358)
+- **#75 line editing + history** — TTY canonical mode now handles ↑/↓ for in-memory history (32-entry ring, dedupes consecutive duplicates), DEL-as-backspace, ←/→ silently consumed. 16 unit tests via `rustc --test`. (commit 7524213)
+- **#52 + #53 cp** — `/bin/cp` ships, smoke-tested by spawning with no args. Full file-copy is interactive due to a separate VFS write-on-MemFs issue captured as #80. Also added a `touch` shell builtin for visitor convenience. (commits a5823fa, b4ff6fa)
+- **#54 + #55 mv** — `/bin/mv` ships as a thin wrapper around VfsClient::rename. Smoke tested. (commits 6f043da, 75976af)
+- **#76 /etc seeds + README + demo script** — `/etc/motd`, `/etc/welcome.txt`, `/etc/architecture.txt` wired into the userdisk. New top-level honest README (195 lines, leads with what works AND what doesn't). Old README relocated to `docs/INTERNALS.md`. `docs/DEMO_SCRIPT.md` captures the GIF recording walk-through. (commit 268af50)
+- **#77 r/osdev post draft** — `docs/POST_DRAFT.md` ready. Three title options, pre-publish checklist, fallback plan if engagement is low. (commit 8faa40d)
 
 **Stage 1 exit criteria check:**
 1. Fresh-checkout build dry-run from a clean Linux box succeeds in <15 min — needs verification.

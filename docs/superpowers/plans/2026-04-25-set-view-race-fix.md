@@ -279,7 +279,7 @@ pub extern "C" fn main() -> i32 {
 }
 ```
 
-NOTE: cross-reference against `userspace/mountprobe/src/main.rs` (Task 9 of the mount-policy plan, commit 57298a0) for the exact runtime/main signature and any required panic handler boilerplate. If `space_create` / `TOKEN_SELF` aren't in scope, check the actual public API in `userspace/libcluu/src/syscall.rs` and adapt the imports. The semantic test is: create-suspended → assert not run → resume → assert run; the specific syscalls used to set up the child are implementation detail.
+NOTE: cross-reference against `userspace/mountprobe/src/main.rs` (Task 9 of the mount-policy plan, commit 70931ec) for the exact runtime/main signature and any required panic handler boilerplate. If `space_create` / `TOKEN_SELF` aren't in scope, check the actual public API in `userspace/libcluu/src/syscall.rs` and adapt the imports. The semantic test is: create-suspended → assert not run → resume → assert run; the specific syscalls used to set up the child are implementation detail.
 
 If `space_create(TOKEN_SELF)` is the wrong shape, an alternative is to spawn a child thread in the probe's own space using whatever helper `pthread_create` uses internally (see `userspace/libcluu/src/posix/pthread.rs:397-405`). Pick the simpler path that compiles.
 
@@ -297,7 +297,7 @@ ENTRYPOINT /bin/suspendprobe
 - [ ] **Step 4: Register workspace member**
 
 In root `Cargo.toml`:
-- Add `"userspace/suspendprobe"` to the `members = [...]` list, alphabetically (between `userspace/stack-string` and `userspace/timeserver` or similar; match the sibling pattern set by mountprobe in commit 57298a0).
+- Add `"userspace/suspendprobe"` to the `members = [...]` list, alphabetically (between `userspace/stack-string` and `userspace/timeserver` or similar; match the sibling pattern set by mountprobe in commit 70931ec).
 - Add it to `default-members = [...]` if other probes are listed there.
 - Add `[profile.dev.package."cluu-suspendprobe"]` and `[profile.release.package."cluu-suspendprobe"]` blocks matching siblings (e.g. `cluu-mountprobe`).
 
@@ -508,7 +508,7 @@ Replace with:
 
 - [ ] **Step 3: Update all `spawn_service_with_env` callers to pass `0`**
 
-The existing call sites (line numbers as of HEAD `315f876`): 916, 1111, 1414, 2125, 2347, 2556, 3371, 3499, 4539. Each is a `match self.spawn_service_with_env(...)` or `self.spawn_service_with_env(...)` invocation. Add a trailing `, 0` to the argument list.
+The existing call sites (line numbers as of HEAD `bb466cb`): 916, 1111, 1414, 2125, 2347, 2556, 3371, 3499, 4539. Each is a `match self.spawn_service_with_env(...)` or `self.spawn_service_with_env(...)` invocation. Add a trailing `, 0` to the argument list.
 
 Run `grep -n 'spawn_service_with_env' userspace/procmgr/src/main.rs` to enumerate the actual sites — the line numbers may have drifted by ±10 lines.
 

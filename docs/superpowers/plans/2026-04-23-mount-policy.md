@@ -1005,7 +1005,7 @@ This is pure logic — not yet wired into the view builder."
 
 This is the atomic behavior flip. After this task, `/tmp` inheritance actually works.
 
-> **Implementation deviation (commit 7e8dbe9):** Step 2's single
+> **Implementation deviation (commit e1887f5):** Step 2's single
 > `container_system_mounts` helper was split into two helpers —
 > `container_system_mounts` returns only `/data` (PREPENDED) and a new
 > `container_catchall_mount` returns only `/` (APPENDED). Reason: VFS's

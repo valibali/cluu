@@ -137,7 +137,7 @@ Existing callers that don't need suspension pass `0`.
 
 The nine sites that today call `spawn_service_with_env` followed by
 `register_vfs_view_for_thread` migrate to the new helper. List (line
-numbers as of HEAD `57298a0`):
+numbers as of HEAD `70931ec`):
 
 - `:922`, `:1135`, `:1424`, `:2149`, `:2369`, `:2578`, `:3234`, `:3399`,
   `:4654`.

@@ -2,7 +2,7 @@
 
 **Phase:** 0 — Seal the 40-day WIP
 **Started:** 2026-04-21
-**Last updated:** 2026-04-21 (post-commit b574664)
+**Last updated:** 2026-04-21 (post-commit 9cd0ddf)
 
 ---
 
@@ -14,16 +14,16 @@ Get `develop` into a reviewable, mergeable, CI-verified state.
 
 *(copied from `ROADMAP.md` §5 — do not edit here; tick as completed)*
 
-- [x] R1: SysV ABI preservation check committed *(b574664; boot log "SysV ABI preservation check passed (RBX/RBP/R12-R14)")*
-- [x] R2: RDRAND zero-salt fix committed *(b574664; hash_password now returns Option)*
-- [x] WIP bundled as single commit b574664 *(deviation from audit §0.4 four-commit plan: files were too entangled to split cleanly after the fact; commit message itemizes the 6 feature areas and explains the tradeoff)*
+- [x] R1: SysV ABI preservation check committed *(9cd0ddf; boot log "SysV ABI preservation check passed (RBX/RBP/R12-R14)")*
+- [x] R2: RDRAND zero-salt fix committed *(9cd0ddf; hash_password now returns Option)*
+- [x] WIP bundled as single commit 9cd0ddf *(deviation from audit §0.4 four-commit plan: files were too entangled to split cleanly after the fact; commit message itemizes the 6 feature areas and explains the tradeoff)*
 - [ ] `bash scripts/harness_matrix.sh` runs green end-to-end
-- [x] Commit messages name *why*, not *what* *(b574664, 4134de3)*
+- [x] Commit messages name *why*, not *what* *(9cd0ddf, 4134de3)*
 - [x] `git status` clean on `develop`
 
 ## Doing now
 
-WIP sealed as b574664; hello smoke test green. Immediate next action: run `bash scripts/harness_matrix.sh` end-to-end. If all cases pass, Phase 0 is done and we roll into Phase 1 (Shell usability). If any case regresses, bisect against the last-known-green commit (d40502c) before touching anything else.
+WIP sealed as 9cd0ddf; hello smoke test green. Immediate next action: run `bash scripts/harness_matrix.sh` end-to-end. If all cases pass, Phase 0 is done and we roll into Phase 1 (Shell usability). If any case regresses, bisect against the last-known-green commit (d40502c) before touching anything else.
 
 ## Blockers
 
