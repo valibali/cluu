@@ -907,6 +907,13 @@ case "$MARKER_MODE" in
             "cp: usage: cp <src> <dst>"
         )
         ;;
+    l2_mv)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "mv: usage: mv <src> <dst>"
+        )
+        ;;
     l2_mount_private)
         required_markers=(
             "TSC calibrated"

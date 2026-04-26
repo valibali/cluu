@@ -134,6 +134,12 @@ harness_derive_marker_defaults() {
                 # separate VFS investigation — see follow-up task).
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn cp"
                 ;;
+            l2_mv)
+                TEST_COMMAND=""
+                # Same smoke pattern as l2_cp until end-to-end /tmp file
+                # creation is unblocked.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn mv"
+                ;;
             l2_mount_private)
                 TEST_COMMAND=""
                 # Seed shell's /tmp, then spawn the probe. The probe should see an
