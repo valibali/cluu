@@ -125,6 +125,12 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir /tmp/a; spawn mkdir -p /tmp/b/c/d"
                 ;;
+            l2_cp)
+                TEST_COMMAND=""
+                # Copy a known-existing file (users.toml ships in /etc) to /tmp.
+                # /bin/cp is expected to log "cp: ok <src> -> <dst>" on success.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn cp /etc/users.toml /tmp/usercopy"
+                ;;
             l2_mount_private)
                 TEST_COMMAND=""
                 # Seed shell's /tmp, then spawn the probe. The probe should see an

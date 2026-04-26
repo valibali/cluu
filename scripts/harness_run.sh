@@ -900,6 +900,13 @@ case "$MARKER_MODE" in
             "mkdir: ok /tmp/b/c/d"
         )
         ;;
+    l2_cp)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "cp: ok /etc/users.toml -> /tmp/usercopy"
+        )
+        ;;
     l2_mount_private)
         required_markers=(
             "TSC calibrated"
