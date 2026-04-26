@@ -50,6 +50,7 @@ The profile is a capability bitmask (IPC, VFS, REGISTRY, ADMIN, DEVICE, SUPERVIS
 - `/bin/mkdir`, `/bin/rm -r`, `/bin/cp`, `/bin/mv` — each its own container.
 - A live `/proc` filesystem (per-PID `stat`/`status`/`cmdline`); `top` reads it.
 - Two virtual terminals (Alt-F1/F2), TTY scrollback, graceful shutdown (Ctrl-Alt-Del).
+- **Framebuffer-rendered console.** Text is drawn into the GPU framebuffer, not legacy VGA text mode. Userspace programs can `framebuffer_acquire()` to grab the FB and write raw pixels — the primitive is there. There's no compositor / window manager yet; that's v2 work.
 - **MicroPython** runs, executes scripts, reads files (caveats below).
 - A POSIX-ish C runtime (custom-patched newlib targeting `x86_64-cluu-elf`) — C programs build with the standard toolchain and use stdio/malloc/pthreads/signals.
 

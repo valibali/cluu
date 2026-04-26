@@ -20,6 +20,11 @@ just works. Containers can opt into isolation with `MOUNT /tmp private`
 (the shell does this — its `/tmp` is its own session). See
 `docs/superpowers/specs/2026-04-23-mount-policy-design.md`.
 
-What this is for: a shippable hobby OS. TUI now, GUI 2027+.
+Graphics: the console renders text into the GPU framebuffer (not
+legacy VGA text mode). Userspace can `framebuffer_acquire()` to grab
+the FB and write raw pixels — the primitive is there. What's NOT
+there yet is a compositor, windowing, or GUI shell; that's v2 work.
+
+What this is for: a shippable hobby OS. Text-first now, GUI 2027+.
 Not a Linux competitor. Not a research artifact. See
 `docs/ROADMAP.md`.

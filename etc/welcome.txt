@@ -18,7 +18,8 @@ Things you can poke at right now:
   spawn mv <src> <dst>     atomic rename via VFS
   echo $?                  last command's exit status (TODO)
   ↑ / ↓                    command history
-  Alt + F1/F2              switch virtual terminals
+  Alt + F1/F2              switch virtual terminals (text rendered
+                           into the GPU framebuffer, not legacy VGA)
   exit                     log out
 
 Things that don't work yet (honest list — Phase 1+2 work):
