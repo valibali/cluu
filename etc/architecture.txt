@@ -1,0 +1,25 @@
+CLUU architecture in 200 words.
+
+Kernel: x86_64, microkernel, seL4-inspired. Knows threads, capability
+tokens, and IPC — nothing else. No file system, no process manager,
+no network stack. Everything else is userspace.
+
+IPC: capability-based. Senders need a token granting the right to talk
+to a given endpoint. Tokens are unforgeable, kernel-issued, and HMAC-
+signed. Full call/reply round-trip is ~1,200-1,600 cycles.
+
+Userspace: a small set of services (procmgr, vfs, registry, tpmd,
+virtio-blk, console, kbd, tty, vtmgr) plus everything else as
+containers. Yes, every binary you spawn is its own container with its
+own VFS view and capability profile, defined in a `Cluufile` (think
+Dockerfile, scoped to a single binary).
+
+Mount policy: containers inherit a parent's `/tmp` by default
+(`MOUNT /tmp inherit`), so `mkdir /tmp/x; rm -r /tmp/x` across spawns
+just works. Containers can opt into isolation with `MOUNT /tmp private`
+(the shell does this — its `/tmp` is its own session). See
+`docs/superpowers/specs/2026-04-23-mount-policy-design.md`.
+
+What this is for: a shippable hobby OS. TUI now, GUI 2027+.
+Not a Linux competitor. Not a research artifact. See
+`docs/ROADMAP.md`.

@@ -1,571 +1,195 @@
 ![logo](artwork/logo_v1.png)
-![Static Badge](https://img.shields.io/badge/builds-passing-green?style=flat&label=builds&color=green) ![Static Badge](https://img.shields.io/badge/unit--tests-145-blue?style=flat&color=green) ![Static Badge](https://img.shields.io/badge/coverage-~90%25-orange?style=flat&color=green) ![Static Badge](https://img.shields.io/badge/LOOKING%20FOR-CONTRIBUTORS-orange)
 
-# CLUU (Compact Lightweight Unix Utopia)
+# CLUU
 
-**Current Capabilities (Quick Facts)**
-- **Microkernel core**: scheduler, IPC, memory, tokens, IRQs, syscalls
-- **IPC endpoints + registry**: dynamic endpoint registration and lazy subscription at runtime
-- **Capability tokens**: unforgeable handles, explicit rights, transferable via IPC
-- **Dataflow**: multi-subscriber outputs, per-process input ownership, runtime wiring
-- **Userspace services**: init, registry, procmgr, console, tty, kbd, shell, vfs, ramfs
-- **Tooling**: xtask build/run, initrd, QEMU debug with telnet + GDB
+A hobby microkernel and minimal POSIX-flavored userspace, built solo over ~18 months. Written in Rust. seL4-inspired. Pre-v1 — boots, lets you log in, gives you a shell, and admits what it can't do yet.
 
-CLUU is a hobby operating system written in Rust, pursuing a **clean L4-inspired microkernel** architecture with strong emphasis on **minimality, and explicit authority**. The project is deliberately engineered, test-driven, and uncompromising about architectural discipline.
-
-This README reflects the **current system status**. The token system and IPC/endpoint registry are integrated. Core kernel subsystems are implemented, tested, and internally consistent.
+This repo is at a "Show & Tell" stage. The kernel is solid. Userspace is thin but real. Posting it now to break my own feedback drought; happy to hear what's broken.
 
 ---
 
-## Getting Started (Quick Run)
+## What works today
 
-```
-cargo xtask run --build --debug
-```
+- Boots a 134 MB ISO under stock QEMU with one command.
+- Login + multi-user (`/etc/users.toml`, password-hashed, TPM-backed).
+- DIY shell with: `cd`, `pwd`, `ls`, `cat`, `echo`, `touch`, `ps`, `top`, `spawn`, `spawnbg`, `jobs`, `fg`, `bg`, `stop`, `kill`, `sudo`, `su`, `container`, `exit`, ↑/↓ command history.
+- `/bin/mkdir`, `/bin/rm` (with `-r`), `/bin/cp`, `/bin/mv` — each shipping as its own container with a declared capability profile.
+- Job control: Ctrl-C, fg/bg, jobs listing.
+- Two virtual terminals (Alt-F1 / Alt-F2), TTY scrollback.
+- A live `/proc` filesystem (per-PID `stat`/`status`/`cmdline`).
+- `top` reads `/proc` and gives you a live process list.
+- Graceful shutdown (Ctrl-Alt-Del → reboot/poweroff).
+- Capability-based IPC at ~1,200-1,600 cycles for a full call/reply.
+- A declarative container model: every userspace binary has a `Cluufile` (think Dockerfile, but for a single binary) that defines its capability profile, mount policy, restart policy, and entrypoint. See [`containers/`](containers/).
+- **MicroPython** (`spawn micropython`): runs as a container, executes scripts, can read files via the POSIX shim. Limitations: REPL ergonomics are rough (no line editing inside the REPL prompt), no socket support, no threading, large scripts may bump into heap limits.
+- **POSIX-ish C runtime** via a custom-patched newlib targeting `x86_64-cluu-elf`. C programs (see [`userspace/c-programs/`](userspace/c-programs/)) build with the standard toolchain and use stdio, malloc, pthreads, futexes, signals.
 
-Open the serial console:
+## What does NOT work yet (honest)
 
-```
-telnet localhost 4321
-```
+- **Pipes.** `cat foo | grep bar` doesn't execute as a real pipeline.
+- **Redirection.** No `>`, `>>`, `<`.
+- **Tab completion.**
+- **In-line cursor editing.** Arrow keys do history (↑/↓) but ←/→ inside a typed line do nothing.
+- **No editor.** Nothing TUI runs yet (Phase 2 will port `kilo`).
+- **MicroPython is rough.** Runs and reads files, but REPL line editing is missing, no sockets, no threads, heap limits are tight. Phase 2 will tighten this.
+- **No network.** No driver, no socket layer, no DHCP, no anything.
+- **No package manager**, no shell scripting beyond what's in `userspace/shell/src/cluu_lang/`.
 
-Expected boot flow:
-
-```
-init -> registry -> procmgr -> kbd -> tty -> console -> shell
-```
-
-Primary dataflow:
-
-```
-kbd -> tty (line discipline) -> shell -> tty -> console
-```
-
-## Motivation
-
-Modern monolithic kernels are large, implicit, and difficult to reason about. CLUU intentionally moves in the opposite direction:
-
-* minimal kernel surface
-* explicit authority via capabilities / tokens
-* message-passing as the primary abstraction
-* aggressive separation between mechanism (kernel) and policy (userspace)
-
-The goal is not speed of development, but **clarity of design** and **long-term evolvability**.
+This is not a v1 release. It's a checkpoint. Roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md) · path to v1: [`docs/PATH_TO_V1.md`](docs/PATH_TO_V1.md) · honest self-assessment: [`docs/HONEST_ASSESSMENT_2026_04_25.md`](docs/HONEST_ASSESSMENT_2026_04_25.md).
 
 ---
 
-## Design Pillars
+## Boot it
 
-* **Microkernel first** – scheduler, memory, IPC, tokens, interrupts
-* **Everything else in userspace** – filesystems, drivers, services
-* **Explicit authority** – no ambient permissions, no global namespaces
-* **Deterministic control flow** – no hidden work, no implicit magic
-* **SOLID by construction** – traits, composition, strict responsibility
+Tested on Debian 12 / Ubuntu 22.04 with KVM. Should work on any recent Linux with `qemu-system-x86_64` + KVM access.
+
+### Prerequisites
+
+```bash
+# nightly Rust (we use unstable build-std features)
+rustup toolchain install nightly
+rustup component add rust-src --toolchain nightly
+
+# system packages (Debian/Ubuntu names)
+sudo apt install qemu-system-x86 ovmf e2fsprogs build-essential
+```
+
+### Build
+
+```bash
+git clone <this-repo> cluu
+cd cluu
+cargo xtask build    # ~5-10 min cold; ~30 s incremental
+```
+
+The output is `target/cluu.img` (boot image) and `target/userdisk.img` (ext2 with /etc, container images).
+
+### Run
+
+```bash
+cargo xtask run
+```
+
+A QEMU window opens with two virtual terminals. After the boot log settles, you'll see a login prompt.
+
+### Login
+
+Default user table is in `etc/users.toml`. The seeded admin account is:
+
+- username: `admin`
+- password: `admin`
+
+(Change it before posting CLUU on the public internet.)
 
 ---
 
-## High-Level Architecture
+## A 10-minute tour
 
-```
-+-------------------------+
-|        Userspace		  |
-|       (as of now)       |
-|-------------------------|
-| init | procmgr | vfs    |
-| ramfs | console | shell |
-| cat | drivers | servers |
-+----------- IPC ---------+
-|        Microkernel      |
-|        (as of now)      |
-|-------------------------|
-| Scheduler | IPC | VMM   |
-| PMM | Tokens | IRQ      |
-| Syscalls | Timer        |
-+-------------------------+
-|        Hardware         |
-+-------------------------+
+After login, try these in order:
+
+```sh
+cat /etc/welcome.txt          # what works, what doesn't, in one screen
+cat /etc/architecture.txt     # 200 words on how the OS is structured
+ls /                          # top-level directories
+ls /var/images                # all installed containers
+cat /etc/users.toml           # the user table (hashed passwords)
+
+# Container model demo:
+container run hello           # runs the 'hello' container (its own view, profile)
+ps                            # see processes
+top                           # live process monitor — q to quit
+
+# Mount-policy demo (see docs/superpowers/specs/2026-04-23-mount-policy-design.md):
+spawn mkdir /tmp/demo         # /bin/mkdir runs as a container, inherits shell's /tmp
+spawn mkdir /tmp/demo/inner
+spawn rm -r /tmp/demo         # /bin/rm sees what mkdir created — across spawns
+
+# MicroPython, with caveats:
+spawn micropython -c "print(2 ** 64)"
+spawn micropython -c "open('/etc/welcome.txt').read()[:80]"
+
+# History recall:
+↑                             # recall last command
+↑ ↑ ↑                         # walk further back
 ```
 
-The kernel provides **mechanisms only**. All policy lives in userspace.
+Use Alt-F1 / Alt-F2 to switch virtual terminals. `exit` logs out. Ctrl-Alt-Del shuts the system down cleanly.
 
 ---
 
-## Kernel Status Overview
+## What's actually distinctive
 
-| Subsystem                 | Status     |
-| ------------------------- | ---------- |
-| Physical Memory (PMM)     | ✅ Complete |
-| Virtual Memory (VMM)      | ✅ Complete |
-| Address Spaces            | ✅ Complete |
-| Scheduler                 | ✅ Complete |
-| IPC (rendezvous)          | ✅ Complete |
-| Capability / Token system | ✅ Complete |
-| IRQ handling              | ✅ Complete |
-| Syscall infrastructure    | ✅ Complete |
-| Logging (IRQ-safe)        | ✅ Complete |
-| Userspace ABI             | ✅ Stable   |
+**Container per binary.** Every userspace executable, including `mkdir` and `rm`, ships as a CLUU container with a declarative manifest. A container's authority is fully described by a [`Cluufile`](containers/rm/Cluufile):
 
-**Total kernel tests**: 145/145 passing
+```
+FROM minimal
+PROFILE ipc vfs registry
+MOUNT /tmp inherit
+BUILD "cargo build ..." target/x86_64-cluu-user/debug/rm.elf /bin/rm
+ENTRYPOINT /bin/rm
+```
+
+Profiles are capability bitmasks (IPC, VFS, REGISTRY, ADMIN, DEVICE, SUPERVISOR). Mount policy controls how the container's `/tmp`, `/log`, etc. interact with its parent's view.
+
+**Capability-based IPC, no syscall sprawl.** The kernel exposes a tiny syscall surface. New userspace features almost never need a new syscall — they go through capability-token invoke ops. The kernel knows threads; processes are a userspace concept that procmgr maintains.
+
+**No new audits.** This isn't a research artifact and there's no paper. The kernel was audited at 9/10 internally; freeze begins now (see ROADMAP §3) until userspace catches up.
+
+For the deep dive on architecture, IPC, scheduler, and token system, see [`docs/INTERNALS.md`](docs/INTERNALS.md).
 
 ---
 
-## Memory Model
-
-### Address Spaces
-
-Each process owns a strict address space:
+## Layout
 
 ```
-USERSPACE
-0x00000000  NULL guard
-0x00400000  Text
-0x00600000  Data / BSS
-0x00800000  Heap (lazy)
-0x7ff00000  Stack
-
-KERNELSPACE (high half)
-0xffff8000_00000000  physmap
-0xffffffff_c0000000  kernel heap
+kernel/                       # x86_64 microkernel (Rust, no_std)
+userspace/
+├── libcluu/                  # userspace runtime + capability/IPC wrappers + POSIX shim
+├── newlib/                   # custom-patched newlib for fd 0..3 (stdin/out/err/log)
+├── init/                     # primordial userspace, spawns the boot services
+├── procmgr/                  # the process manager (containers, restart policy, /proc)
+├── vfs/                      # virtual filesystem service
+├── shell/                    # DIY shell (pest grammar, Rust executor)
+├── tty/, kbd/, console/      # terminal stack
+├── mkdir/, rm/, cp/, mv/     # POSIX-ish utilities, each its own container
+├── *probe/                   # test/demo containers used by the harness
+└── ...
+containers/                   # one Cluufile per container image
+scripts/                      # build + harness drivers
+docs/                         # design specs, roadmap, internals
 ```
 
-* Lazy heap allocation via page faults
-* Explicit validation of all user pointers
-* No implicit memory sharing
+## Tests
 
----
-
-## Scheduler
-
-* O(1) **priority bitmap scheduler**
-* 256 priority levels
-* FIFO fairness within same priority
-* Cooperative + preemptive modes
-* Clean separation between policy and mechanism
-
-```
-Ready queues: [256]
-Priority bitmap: 256 bits
-pick_next(): O(1)
+```bash
+cargo xtask build
+bash scripts/harness_suite.sh           # ~30 min, full integration matrix
+bash scripts/harness_repeat.sh l2_rm 5  # run a single case 5 times
 ```
 
----
+Current matrix: 44/47 passing. Three failures are tracked: `l2_argv` (suite-only flake — see #78), `l2_owner_deny` (test design issue — see #70), `p4_dev` (pre-existing kernel page-fault corner — see #39).
 
-## IPC Model
+Unit tests for pure-logic modules use `rustc --test` directly because most userspace crates are `#![no_std]`:
 
-IPC is **synchronous rendezvous**, inspired by L4:
-
-```
-Sender ----+      +---- Receiver
-           |      |
-           +-- IPC +
-           |      |
-Sender <-- +      + --> Receiver
+```bash
+rustc --edition 2021 --test userspace/tty/src/line_discipline.rs -o /tmp/t && /tmp/t
+rustc --edition 2021 --test userspace/procmgr/src/mount_policy.rs -o /tmp/t && /tmp/t
 ```
 
-* send / recv / call / reply / replyrecv
-* optional buffer transfer
-* copy / map / grant semantics
-* deterministic blocking behavior
+## Roadmap
 
-IPC is the **only communication primitive**.
+- **Phase 1** (in progress): pipes, redirection, line editing polish, history persistence, tab completion. Phase 1 exit is "the shell feels like a shell."
+- **Phase 2**: MicroPython REPL + one TUI editor (probably `kilo`).
+- **Phase 3 (revised)**: ship v1 with what Phases 0-2 give us. Don't gate v1 on network.
+- **Phase 4 / v1.1**: SpaceDestroy, leak audit, virtio-net, DHCP, sockets, wget.
 
----
-
-## Endpoint Registry and Dataflow
-
-Userspace endpoint wiring is **dynamic and lazy**:
-
-- Each process **owns its input endpoints**.
-- Output endpoints are **registered** with the registry service by name.
-- Consumers **subscribe at runtime**; the registry brokers discovery and grant flow.
-- Tokens are **transferred via blocking send/recv** (no new syscall numbers).
-- Outputs can have **multiple subscribers**; inputs remain per-process.
-
-Flow overview:
-
-```
-Requester -> registry.subscribe(producer, endpoint)
-registry  -> producer.grant(requester)
-producer  -> send(token) to requester (or via registry)
-requester -> recv(token)
-```
-
-The registry stores **metadata only**. Tokens are issued by the endpoint owner and
-granted on demand, preserving least privilege.
-
----
-
-## Token-Based Authority System
-
-All authority is represented by **cryptographically signed tokens**.
-
-### Core Properties
-
-* Opaque, non-enumerable object references
-* Explicit rights bitmask
-* Mandatory expiration
-* Delegation via derivation
-* HMAC-SHA256 integrity
-
-Tokens are conceptually similar to JWTs, but **kernel-verified and capability-safe**.
-
-```
-Token = {
-  scope   : OpaqueScope,
-  rights  : RightsMask,
-  issuer  : Kernel | Authority,
-  expires : Timestamp,
-  sig     : HMAC
-}
-```
-
-No token → no authority → no operation.
-
----
-
-## Syscall Surface (Minimal)
-
-Only **7 syscalls** exist:
-
-```
-Send
-Recv
-Call
-Reply
-Yield
-Invoke   (all privileged operations)
-DebugPrint (debug only)
-```
-
-All resource manipulation flows through `sys_invoke()` using tokens.
-
----
-
-## Interrupts & Exceptions
-
-* Full x86_64 IDT
-* All CPU exceptions handled
-* Page faults integrated with VMM
-* Timer IRQ drives preemption
-* IRQ-safe logging (no locks, no allocation)
-
----
-
-## Logging
-
-* Zero-cost in release builds
-* IRQ-safe
-* No allocation
-* Manual formatting
-* UART-backed
-
-Logging is a **diagnostic tool**, not a runtime dependency.
-
----
-
-## Userspace
-
-Userspace programs are:
-
-* statically linked ELF binaries
-* no_std
-* linked against `libcluu`
-
-`libcluu` provides:
-
-* syscall wrappers
-* IPC helpers
-* error handling
-* runtime entry point
-
-### Core Services (Current)
-
-```
-init       - bootstrap and service spawning
-registry   - endpoint registration and discovery
-procmgr    - process management and exit notifications
-kbd        - keyboard input producer
-tty        - line discipline + stdio routing
-console    - display output sink
-shell      - interactive command frontend
-vfs/ramfs  - filesystem services (evolving)
-```
-
----
-
-## Screenshots
-
-Place screenshots under `artwork/` and link them here.
-
-Suggested captures:
-- **Boot + service bring-up**: telnet output showing `init` launching `registry`, `procmgr`, `kbd`, `tty`, `console`, `shell`.
-- **Interactive shell**: a prompt with a few builtins (`help`, `set`, `expr`, `repeat`) and visible output routed via `tty`.
-- **Registry activity**: telnet output showing endpoint registrations and a subscription/grant flow.
-- **Console output**: framebuffer view showing the console rendering and cursor blink.
-
-Screenshots:
-
-![boot](artwork/bootlog.png)
-![shell](artwork/shell.png)
-![registry](artwork/registry.png)
-
-## Bootloader
-
-CLUU uses the **BOOTBOOT** bootloader as its stage-2 boot mechanism.
-
-BOOTBOOT provides a clean, modern boot environment and deliberately minimal abstractions, aligning well with CLUU’s microkernel philosophy.
-
-Key BOOTBOOT features used by CLUU:
-
-* High-half kernel loading
-* Identity-mapped physmap
-* Early UART debug support
-* Framebuffer setup
-* Initrd delivery
-* Strict boot-time memory map
-
-The kernel is loaded as `sys/core` from the initrd, following BOOTBOOT conventions. All early platform setup (CPU mode, paging, memory discovery) is delegated to BOOTBOOT, allowing the kernel to remain focused on **core mechanisms only**.
-
----
-
-## Build System
-
-CLUU uses a **thin build wrapper around Rust’s `xtask` pattern**. The build system is intentionally explicit and scriptable, avoiding hidden magic.
-
-### High-Level Principles
-
-* `cargo xtask` is the **primary interface**
-* `make` is provided only as a convenience wrapper
-* Kernel and userspace are built with **custom Rust targets**
-* Disk images are produced via **mkbootimg + BOOTBOOT**
-
----
-
-### Makefile Interface (Convenience)
-
-```makefile
-all: build
-
-build:
-	cargo xtask build
-
-build-rich:
-	cargo xtask build --ui rich
-
-build-release:
-	cargo xtask build --profile release
-
-run:
-	cargo xtask run
-
-run-rich:
-	cargo xtask run
-
-run-release:
-	cargo xtask run
-
-run-debug:
-	cargo xtask run --debug
-
-run-build:
-	cargo xtask run --build
-
-run-build-rich:
-	cargo xtask run --build --ui rich
-
-run-build-release:
-	cargo xtask run --build --profile release
-
-run-debug-build:
-	cargo xtask run --build --debug
-
-test:
-	cargo xtask test
-
-clean:
-	cargo xtask clean-full
-
-full-clean:
-	cargo xtask clean-full
-
-pristine: full-clean
-
-rebuild-full:
-	cargo xtask rebuild-full
-
-rebuild-full-release:
-	cargo xtask rebuild-full --profile release
-
-doctor:
-	cargo xtask doctor
-
-logs:
-	cargo xtask logs
-
-repo-hygiene:
-	./scripts/repo_hygiene_check.sh
-
-userspace:
-	cargo xtask userspace
-
-kernel:
-	cargo xtask kernel
-```
-
-Usage summary:
-
-```
-make build       # Build everything (rich UI default)
-make build-rich  # Build everything (rich UI: progress + per-task logs)
-make build-release
-make run         # Run existing image in QEMU
-make run-rich    # Alias of make run
-make run-release # Alias of make run
-make run-debug   # Run existing image with GDB + telnet serial
-make run-build   # Build and run in QEMU
-make run-debug-build # Build and run with GDB + telnet serial
-make test        # Run all tests
-make clean       # Full clean (target/tmp/external caches/build outputs)
-make full-clean  # Same as make clean
-make pristine    # Alias for full-clean
-make rebuild-full # Deterministic from-scratch rebuild (newlib/syscalls/crt0/kernel/userspace)
-make rebuild-full-release # Deterministic from-scratch rebuild (release profile)
-make doctor      # Verify host toolchain + key artifacts
-make logs        # List latest rich-build task logs
-make repo-hygiene # Verify repo structure/clean invariants
-```
-
----
-
-### Preferred Interface: cargo xtask
-
-For idiomatic Rust development, **prefer using `cargo xtask` directly**:
-
-```
-cargo xtask build [--profile dev|release] [--ui linear|rich]
-cargo xtask run [--debug]
-cargo xtask run --build [--profile dev|release] [--ui linear|rich] [--debug]
-cargo xtask run --debug
-cargo xtask test
-cargo xtask clean
-cargo xtask clean-full
-cargo xtask rebuild-full [--profile dev|release]
-cargo xtask doctor
-cargo xtask logs [--run <id|path>] [--task <name>] [--lines N] [--follow]
-cargo xtask userspace [--profile dev|release]
-cargo xtask kernel [--profile dev|release]
-```
-
-For the most reliable "start fresh" build, use:
-
-```
-cargo xtask rebuild-full
-```
-
-UI modes:
-
-- default is `rich` when `--ui` is omitted.
-- `--ui rich`: dependency-aware parallel execution with an in-place, colorized task tree (one line per task/subtask), per-line progress bars, parent progress aggregated from children, and failure lines showing red log locations. Full logs are written to `target/logs/<timestamp>/`.
-- `--ui linear`: classic linear output, better for detailed error inspection.
-
-Log viewer:
-
-- `cargo xtask logs`: show available task logs from the latest rich-build run.
-- `cargo xtask logs --task kernel --lines 120`: show tail of a specific task log.
-- `cargo xtask logs --task kernel --follow`: follow appended output (Ctrl+C to stop).
-- `cargo xtask logs --run 1771492286 --task micropython --follow`: inspect a specific rich-build run.
-
-External source versions are centralized in:
-
-```
-external/sources.env
-```
-
-`newlib` and `micropython` source trees under `external/` are intentionally **not tracked**.
-They are fetched implicitly by build steps when missing.
-
-When bumping `newlib` or `micropython`, update `external/sources.env` first.
-`cargo xtask doctor` reports configured versions/refs and warns when local patch sets
-or source drift are detected.
-
-Repository layout and naming conventions are documented in:
-
-```
-docs/REPO_LAYOUT.md
-```
-
----
-
-### Debug Workflow
-
-Debug mode starts QEMU paused with:
-
-* GDB server on `localhost:1234`
-* Telnet serial on `localhost:4321`
-
-```
-Terminal 1: cargo xtask run --debug
-Terminal 2: telnet localhost 4321
-Terminal 3: gdb target/.../kernel-*.elf
-            (gdb) target remote :1234
-            (gdb) continue
-```
-
----
-
-### xtask Responsibilities
-
-The `xtask` binary orchestrates the full system build:
-
-* Builds userspace programs (no_std ELFs)
-* Builds the kernel (custom target)
-* Assembles NASM sources
-* Constructs initrd layout
-* Invokes `mkbootimg` to generate `cluu.img`
-* Launches QEMU (normal or debug)
-
-`xtask` is intentionally **boring and explicit**: every step is visible, inspectable, and reproducible.
-
----
-
-## Current Milestone
-
-**Working userspace shell executing:**
-
-```
-$ cat file.txt
-```
-
-Demonstrates:
-
-* scheduling
-* IPC-based VFS
-* zero-copy buffers
-* userspace drivers
-* token-based authority
-
----
-
-## Non-Goals
-
-* POSIX compatibility (explicitly not a goal)
-* Monolithic drivers
-* Implicit global state
-* Fast iteration at the cost of clarity
-
----
-
-## Philosophy
-
-> If an operation is possible, the authority must be visible.
-> If authority is visible, it must be explicit.
-> If it is explicit, it must be minimal.
-
-CLUU is intentionally slow, explicit, and strict — by design.
-
----
+The full plan: [`docs/ROADMAP.md`](docs/ROADMAP.md). Why "ship before network": [`docs/HONEST_ASSESSMENT_2026_04_25.md`](docs/HONEST_ASSESSMENT_2026_04_25.md).
 
 ## Status
 
-Active development. Architecture considered **stable**.
-Implementation continues in userspace.
+- 18 months solo, built in evenings and weekends.
+- Kernel: ~50K LOC Rust + assembly. Userspace: ~30K LOC Rust + ~20K C/asm of newlib.
+- Develops on `develop`, releases (eventually) on `master`.
+- License: see [`LICENSE`](LICENSE) (MIT).
+
+If you boot it and find something broken, please open an issue. If you want to read about how it's built, [`docs/INTERNALS.md`](docs/INTERNALS.md) is the long form. If you just want to know what's coming next, [`docs/PATH_TO_V1.md`](docs/PATH_TO_V1.md).

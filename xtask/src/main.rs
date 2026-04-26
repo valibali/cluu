@@ -2684,6 +2684,16 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
         println!("  Added /etc/users.toml");
     }
 
+    // Visitor-friendly seeds: motd shown by login, plus welcome and
+    // architecture files for `cat /etc/welcome.txt` exploration.
+    for name in &["motd", "welcome.txt", "architecture.txt"] {
+        let src = project_root().join("etc").join(name);
+        if src.exists() {
+            fs::copy(&src, etc_dir.join(name))?;
+            println!("  Added /etc/{}", name);
+        }
+    }
+
     let disk_path = project_root().join("target/userdisk.img");
     if disk_path.exists() {
         fs::remove_file(&disk_path)?;

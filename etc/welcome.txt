@@ -1,0 +1,35 @@
+Welcome to CLUU.
+
+This is a hobby microkernel + minimal POSIX userspace, written solo
+over ~18 months. It's pre-v1, intentionally rough, and absolutely
+not Linux.
+
+Things you can poke at right now:
+
+  ls /                     see top-level directories
+  ls /var/images           see all installed containers
+  cat /etc/architecture    why this OS looks the way it does
+  cat /etc/users.toml      look at the (admin-readable) user table
+  ps                       process list (reads /proc)
+  top                      live process monitor
+  spawn mkdir /tmp/x       run a binary as a fresh container
+  spawn rm -r /tmp/x       same, with mount-policy /tmp inheritance
+  spawn cp <src> <dst>     copy a file (try a path under /dev/initrd)
+  spawn mv <src> <dst>     atomic rename via VFS
+  echo $?                  last command's exit status (TODO)
+  ↑ / ↓                    command history
+  Alt + F1/F2              switch virtual terminals
+  exit                     log out
+
+Things that don't work yet (honest list — Phase 1+2 work):
+
+  pipes (cat | grep | head)
+  redirection (>, >>, <)
+  tab completion
+  in-line cursor editing (←/→ inside a typed command)
+  MicroPython
+  any text editor
+  network — there is none
+
+Source: see /etc/architecture, then docs/ROADMAP.md and
+docs/HONEST_ASSESSMENT_2026_04_25.md in the repo.
