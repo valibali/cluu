@@ -264,6 +264,7 @@ fn apply_effect(ctx: &mut TtyContext, effect: line_discipline::LineEffect) {
         EchoAction::None => {}
         EchoAction::Bytes(bytes) => ctx.forward_to_console(bytes),
         EchoAction::Byte(byte) => ctx.forward_to_console(&[byte]),
+        EchoAction::OwnedBytes(bytes) => ctx.forward_to_console(&bytes),
     }
 
     if let Some(raw) = effect.raw_byte {
