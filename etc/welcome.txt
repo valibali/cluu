@@ -32,5 +32,5 @@ Things that don't work yet (honest list — Phase 1+2 work):
   any text editor
   network — there is none
 
-Source: see /etc/architecture, then docs/ROADMAP.md and
-docs/HONEST_ASSESSMENT_2026_04_25.md in the repo.
+Source: see /etc/architecture, then docs/ARCHITECTURE.md and
+docs/ROADMAP.md in the repo.

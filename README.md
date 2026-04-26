@@ -36,7 +36,7 @@ This repo is at a "Show & Tell" stage. The kernel is solid. Userspace is thin bu
 - **No network.** No driver, no socket layer, no DHCP, no anything.
 - **No package manager**, no shell scripting beyond what's in `userspace/shell/src/cluu_lang/`.
 
-This is not a v1 release. It's a checkpoint. Roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md) · path to v1: [`docs/PATH_TO_V1.md`](docs/PATH_TO_V1.md) · honest self-assessment: [`docs/HONEST_ASSESSMENT_2026_04_25.md`](docs/HONEST_ASSESSMENT_2026_04_25.md).
+This is not a v1 release. It's a checkpoint. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full plan and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the structural map.
 
 ---
 
@@ -100,7 +100,7 @@ container run hello           # runs the 'hello' container (its own view, profil
 ps                            # see processes
 top                           # live process monitor — q to quit
 
-# Mount-policy demo (see docs/superpowers/specs/2026-04-23-mount-policy-design.md):
+# Mount-policy demo:
 spawn mkdir /tmp/demo         # /bin/mkdir runs as a container, inherits shell's /tmp
 spawn mkdir /tmp/demo/inner
 spawn rm -r /tmp/demo         # /bin/rm sees what mkdir created — across spawns
@@ -184,7 +184,7 @@ rustc --edition 2021 --test userspace/procmgr/src/mount_policy.rs -o /tmp/t && /
 - **Phase 3 (revised)**: ship v1 with what Phases 0-2 give us. Don't gate v1 on network.
 - **Phase 4 / v1.1**: SpaceDestroy, leak audit, virtio-net, DHCP, sockets, wget.
 
-The full plan: [`docs/ROADMAP.md`](docs/ROADMAP.md). Why "ship before network": [`docs/HONEST_ASSESSMENT_2026_04_25.md`](docs/HONEST_ASSESSMENT_2026_04_25.md).
+The full plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Status
 
@@ -193,4 +193,4 @@ The full plan: [`docs/ROADMAP.md`](docs/ROADMAP.md). Why "ship before network": 
 - Develops on `develop`, releases (eventually) on `master`.
 - License: see [`LICENSE`](LICENSE) (MIT).
 
-If you boot it and find something broken, please open an issue. If you want to read about how it's built, [`docs/INTERNALS.md`](docs/INTERNALS.md) is the long form. If you just want to know what's coming next, [`docs/PATH_TO_V1.md`](docs/PATH_TO_V1.md).
+If you boot it and find something broken, please open an issue. If you want to read about how it's built, [`docs/INTERNALS.md`](docs/INTERNALS.md) is the long form. If you just want to know what's coming next, [`docs/ROADMAP.md`](docs/ROADMAP.md).

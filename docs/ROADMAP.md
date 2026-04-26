@@ -69,13 +69,13 @@ Four patterns have cost real weeks. Naming them here makes them harder to ration
 
 **The move:** speculative kernel work justified by imagined future needs — usually performance.
 
-**The counter:** Phase 4 is not here. The optimization is imaginary; the lost week is not. Write the optimization idea in `CURRENT_PHASE.md` under *Deferred kernel ideas* if you must, and move on. If Phase 4 actually needs it, you will know then — and will still have time, because you did Phase 1 first.
+**The counter:** Phase 4 is not here. The optimization is imaginary; the lost week is not. Note the idea somewhere out-of-band and move on. If Phase 4 actually needs it, you will know then — and will still have time, because you did Phase 1 first.
 
 ### Pattern 3: "Just one more audit"
 
 **The move:** measuring the state of the system instead of advancing it. Produces readable documents; produces no user-visible capability.
 
-**The counter:** `docs/COMPREHENSIVE_AUDIT_2026_03_02.md` exists. Re-read it. Do not write a new one. If a material state change has happened that the audit does not capture, add a dated update section to the *existing* file — do not start fresh. A new audit file during the freeze is a drift symptom.
+**The counter:** if a prior audit document exists, re-read it. Do not write a new one. If a material state change has happened that the prior audit does not capture, add a dated update section to the *existing* file — do not start fresh. A new audit file during the freeze is a drift symptom.
 
 ### Pattern 4: 40-day WIP
 
@@ -195,7 +195,7 @@ No dates. A phase is done when the capabilities exist, full stop.
 
 **Allowed kernel work:** only if the virtio-net driver forces a kernel-side IRQ-delivery fix. Named fix rule applies.
 
-**Known unknowns & pivot triggers:** biggest risk in the whole plan. TCP is genuinely hard. **Pivot trigger:** if after 3 weeks of Phase 4 you do not have DHCP + ping, ship UDP-only and defer TCP to v1.1. Write the pivot decision in `CURRENT_PHASE.md` — do not silently slip.
+**Known unknowns & pivot triggers:** biggest risk in the whole plan. TCP is genuinely hard. **Pivot trigger:** if after 3 weeks of Phase 4 you do not have DHCP + ping, ship UDP-only and defer TCP to v1.1. Note the pivot decision somewhere durable — do not silently slip.
 
 ---
 
@@ -237,4 +237,4 @@ No dates. A phase is done when the capabilities exist, full stop.
 - The freeze expired (~2026-10-21) and you have decided whether to extend, end, or revisit. Update §3.
 - A genuinely-new drift pattern cost you a week. Add it to §4 *after* the week is over, not during.
 
-**Companion doc:** `docs/CURRENT_PHASE.md` holds the tactical state — what you are doing this week, which exit criteria are already ticked, current blockers, deferred ideas. That doc changes often. This one does not.
+**Companion practice:** keep a separate (non-public) tactical note for what you are doing this week, which exit criteria are already ticked, current blockers, deferred ideas. That note changes often. This roadmap doesn't.

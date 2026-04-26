@@ -250,7 +250,7 @@ procmgr sends `set_view` to VFS so its view is installed in VFS's
 inbox, then procmgr resumes the thread. The IPC ordering guarantee
 (VFS processes its inbox in send order) closes the race where a freshly
 created thread could reach VFS before its view did. See
-[`docs/superpowers/specs/2026-04-25-set-view-race-fix-design.md`](superpowers/specs/2026-04-25-set-view-race-fix-design.md).
+the suspend-bracket pattern (kernel `THREAD_CREATE_START_SUSPENDED` flag + procmgr's `install_view_and_run` helper).
 
 ### Container profile bits
 
@@ -305,7 +305,7 @@ sequenceDiagram
     Note over mkdir,rm: same MemFs, both see /tmp/x
 ```
 
-Full design in [`docs/superpowers/specs/2026-04-23-mount-policy-design.md`](superpowers/specs/2026-04-23-mount-policy-design.md).
+Implementation: `MOUNT` directive parser in `tools/container-build/src/main.rs`; per-path policy resolution in `userspace/procmgr/src/mount_policy.rs`; the wire-level extension is a per-mount `memfs_cid` field in `VFS_SET_VIEW` (see `userspace/libcluu/src/ipc.rs:VFS_SET_VIEW_LABEL`).
 
 ---
 
@@ -388,12 +388,12 @@ flowchart LR
 | If you want… | Read |
 |---|---|
 | Long-form per-subsystem deep-dive | [`docs/INTERNALS.md`](INTERNALS.md) |
-| Why CLUU exists, what it isn't | [`docs/ROADMAP.md`](ROADMAP.md) §1-4 |
-| The five-phase plan to v1 | [`docs/ROADMAP.md`](ROADMAP.md) §5 + [`docs/PATH_TO_V1.md`](PATH_TO_V1.md) |
-| Honest project state from inside | [`docs/HONEST_ASSESSMENT_2026_04_25.md`](HONEST_ASSESSMENT_2026_04_25.md) |
-| Container/Cluufile design rationale | [`docs/superpowers/specs/2026-04-23-mount-policy-design.md`](superpowers/specs/2026-04-23-mount-policy-design.md) |
-| The set_view-vs-thread-start race fix | [`docs/superpowers/specs/2026-04-25-set-view-race-fix-design.md`](superpowers/specs/2026-04-25-set-view-race-fix-design.md) |
-| All written specs and plans | [`docs/superpowers/`](superpowers/) |
+| Why CLUU exists, what it isn't, the phased plan | [`docs/ROADMAP.md`](ROADMAP.md) |
+| Test harness driver and how to run cases | [`docs/HARNESS.md`](HARNESS.md) |
+| IPC + registry design references | [`docs/IPC_REGISTRY.md`](IPC_REGISTRY.md) |
+| Process isolation and capability profiles | [`docs/PROCESS_ISOLATION_DESIGN.md`](PROCESS_ISOLATION_DESIGN.md) |
+| Kernel internal audit notes | [`docs/KERNEL_AUDIT.md`](KERNEL_AUDIT.md) |
+| Repo navigation guide | [`docs/REPO_LAYOUT.md`](REPO_LAYOUT.md) |
 
 ---
 

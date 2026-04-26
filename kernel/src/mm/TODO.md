@@ -1,1 +1,0 @@
-implement bootstrap allocator to support any bootloader - for now its BOOTBOOT only
