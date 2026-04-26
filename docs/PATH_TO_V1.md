@@ -112,6 +112,10 @@ Out of scope for v1. Captured here so they don't get forgotten.
 
 Captured the path to v1 after a long, honest brainstorming session. Mount-policy + race-fix landed; race fix mid-finishing. Pre-post sequence locked in. Goal is the r/osdev post in ~3-4 evening sessions.
 
+### 2026-04-26 — #71 set_view race closed
+
+Race fix landed in 6 commits (libcluu API, suspendprobe, harness wiring, kernel honor of flag, procmgr migration, harness_repeat helper). Kernel adds `THREAD_CREATE_START_SUSPENDED` flag; procmgr's 9 spawn-with-view sites now go through `install_view_and_run` helper which suspends/installs view/resumes. Harness improved 39/46 → 44/47. Race-victim cases (l2_rm, l2_argv, f13_detach_survive) all hit 10/10 standalone. l2_sigint 8/10 (second timing dependency, captured as #79). No spawn-perf regression (~8K cycles added on a 158M-cycle spawn). Next pre-post: #75 shell line editing.
+
 ### YYYY-MM-DD — *(template)*
 
 - What landed:
