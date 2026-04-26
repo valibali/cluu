@@ -34,6 +34,7 @@ members = [
     "userspace/cp",
     "userspace/mkdir",
     "userspace/mountprobe",
+    "userspace/mv",
     "userspace/rm",
     "userspace/suspendprobe",
     "userspace/cascadeprobe",
@@ -75,6 +76,7 @@ default-members = [
     "userspace/cp",
     "userspace/mkdir",
     "userspace/mountprobe",
+    "userspace/mv",
     "userspace/rm",
     "userspace/suspendprobe",
     "userspace/cascadeprobe",
@@ -163,6 +165,9 @@ debug = 0
 [profile.dev.package."cluu-mkdir"]
 debug = 0
 
+[profile.dev.package."cluu-mv"]
+debug = 0
+
 [profile.dev.package."cluu-mountprobe"]
 debug = 0
 
@@ -239,6 +244,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-mkdir"]
+debug = 0
+
+[profile.release.package."cluu-mv"]
 debug = 0
 
 [profile.release.package."cluu-mountprobe"]
