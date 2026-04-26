@@ -136,7 +136,7 @@ Profiles are capability bitmasks (IPC, VFS, REGISTRY, ADMIN, DEVICE, SUPERVISOR)
 
 **No new audits.** This isn't a research artifact and there's no paper. The kernel was audited at 9/10 internally; freeze begins now (see ROADMAP §3) until userspace catches up.
 
-For the deep dive on architecture, IPC, scheduler, and token system, see [`docs/INTERNALS.md`](docs/INTERNALS.md).
+For diagrams and the architectural map, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). For the long-form per-subsystem deep dive, see [`docs/INTERNALS.md`](docs/INTERNALS.md).
 
 ---
 

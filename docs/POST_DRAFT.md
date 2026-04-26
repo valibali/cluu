@@ -83,7 +83,7 @@ Default login is `admin` / `admin`. Then try `cat /etc/welcome.txt` for a short 
 2. Anyone with experience porting `kilo` (or another small TUI editor) to a non-Linux POSIX-ish target — gotchas worth knowing?
 3. The kernel freeze: I committed to no kernel work for ~6 months unless a userspace test forces it. Sustainable, or am I going to regret it?
 
-**The roadmap is in [docs/ROADMAP.md](<repo-url>/blob/master/docs/ROADMAP.md)**, the honest self-assessment that drove the freeze decision is in [docs/HONEST_ASSESSMENT_2026_04_25.md](<repo-url>/blob/master/docs/HONEST_ASSESSMENT_2026_04_25.md). Both worth a skim if the project itself piques you.
+**Architecture overview with mermaid diagrams** (kernel layout, userspace service map, IPC flows, container spawn): [docs/ARCHITECTURE.md](<repo-url>/blob/master/docs/ARCHITECTURE.md). **The roadmap** is in [docs/ROADMAP.md](<repo-url>/blob/master/docs/ROADMAP.md), the **honest self-assessment** that drove the freeze decision is in [docs/HONEST_ASSESSMENT_2026_04_25.md](<repo-url>/blob/master/docs/HONEST_ASSESSMENT_2026_04_25.md). All three worth a skim if the project itself piques you.
 
 Happy to answer questions, accept critique, or commiserate.
 
