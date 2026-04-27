@@ -28,6 +28,7 @@ members = [
     "userspace/cat",
     "userspace/grep",
     "userspace/head",
+    "userspace/tail",
     "userspace/wc",
     "userspace/ls",
     "userspace/ps",
@@ -76,6 +77,7 @@ default-members = [
     "userspace/cat",
     "userspace/grep",
     "userspace/head",
+    "userspace/tail",
     "userspace/wc",
     "userspace/ls",
     "userspace/ps",
@@ -160,6 +162,9 @@ debug = 0
 debug = 0
 
 [profile.dev.package."cluu-head"]
+debug = 0
+
+[profile.dev.package."cluu-tail"]
 debug = 0
 
 [profile.dev.package."cluu-wc"]
@@ -259,6 +264,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-head"]
+debug = 0
+
+[profile.release.package."cluu-tail"]
 debug = 0
 
 [profile.release.package."cluu-wc"]

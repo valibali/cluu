@@ -351,6 +351,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-tail"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-timeserver"
 version = "0.1.0"
 dependencies = [
