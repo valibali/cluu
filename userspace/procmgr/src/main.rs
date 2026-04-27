@@ -3697,6 +3697,18 @@ impl ProcessManager {
         if let Some(thread_tid) = self.pid_to_tid.remove(&pid) {
             self.tid_to_pid.remove(&thread_tid);
         }
+        for idx in 0..self.pipes.len() {
+            if self.pipes[idx].as_ref().map_or(false, |e| e.creator_pid == pid) {
+                let entry = self.pipes[idx].take().unwrap();
+                if entry.write_token != 0 {
+                    let _ = token_revoke(entry.write_token);
+                }
+                if entry.read_token != 0 {
+                    let _ = token_revoke(entry.read_token);
+                }
+                let _ = token_revoke(entry.endpoint);
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
