@@ -122,7 +122,7 @@ No dates. A phase is done when the capabilities exist, full stop.
 
 ---
 
-### Phase 1 — Shell usability
+### Phase 1 — Shell usability ✅ DONE 2026-04-27
 
 **Goal:** the shell feels like a shell, not a launcher.
 
