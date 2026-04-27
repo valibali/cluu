@@ -120,7 +120,7 @@ Use Alt-F1 / Alt-F2 to switch virtual terminals. `exit` logs out. Ctrl-Alt-Del s
 
 ## What's actually distinctive
 
-**Container per binary.** Every userspace executable, including `mkdir` and `rm`, ships as a CLUU container with a declarative manifest. A container's authority is fully described by a [`Cluufile`](containers/rm/Cluufile):
+**Native authority encapsulation per binary.** Every userspace executable, including `mkdir` and `rm`, ships with a declarative manifest. A binary's authority — capability profile, VFS view, mount policy, restart policy, entrypoint — is fully described by a [`Cluufile`](containers/rm/Cluufile):
 
 ```
 FROM minimal
@@ -130,7 +130,9 @@ BUILD "cargo build ..." target/x86_64-cluu-user/debug/rm.elf /bin/rm
 ENTRYPOINT /bin/rm
 ```
 
-Profiles are capability bitmasks (IPC, VFS, REGISTRY, ADMIN, DEVICE, SUPERVISOR). Mount policy controls how the container's `/tmp`, `/log`, etc. interact with its parent's view.
+Profiles are capability bitmasks (IPC, VFS, REGISTRY, ADMIN, DEVICE, SUPERVISOR). Mount policy controls how the binary's `/tmp`, `/log`, etc. interact with its parent's view.
+
+> *A note on the word "container."* Early writeups called these "containers" because the Cluufile is Dockerfile-shaped — that's misleading. A CLUU "container" is **not** a Docker-style image bundle: there's no parallel runtime, no namespace + cgroup recreation, no replicated rootfs. A CLUU binary is spawned with a declarative authority envelope read from its Cluufile manifest, and the kernel doesn't know about Cluufiles at all — procmgr reads the manifest and applies the envelope at spawn time. **Encapsulation at spawn**, not containerization in the Docker sense. The directory is named `containers/` for historical reasons; the precise word is *capability-scoped binary*.
 
 **Capability-based IPC, no syscall sprawl.** The kernel exposes a tiny syscall surface. New userspace features almost never need a new syscall — they go through capability-token invoke ops. The kernel knows threads; processes are a userspace concept that procmgr maintains.
 

@@ -214,7 +214,20 @@ newlib + tests).
 
 ## 6. The container model — what makes CLUU actually distinctive
 
-Every userspace binary is a container with a declarative `Cluufile`.
+> **A precise word, before we continue.** This section talks about
+> "containers." That word is misleading. A CLUU "container" is **not**
+> a Docker-style image bundle — there's no parallel runtime, no
+> namespace + cgroup recreation, no replicated rootfs, no shipped
+> image. A CLUU binary is spawned with a declarative *authority
+> envelope* — capability profile + VFS view + mount policy + restart
+> policy — read from its `Cluufile` manifest. The kernel doesn't know
+> about Cluufiles at all; procmgr reads the manifest and applies the
+> envelope at spawn time. **Encapsulation at spawn**, not
+> containerization. The repo directory is named `containers/` for
+> historical reasons, but the technically precise term is
+> *capability-scoped binary*.
+
+Every userspace binary has a declarative `Cluufile`.
 
 ```text
 containers/rm/Cluufile:
