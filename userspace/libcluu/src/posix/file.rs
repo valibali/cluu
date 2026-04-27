@@ -129,6 +129,17 @@ pub extern "C" fn _close(fd: c_int) -> c_int {
     }
 
     table.remove(fd);
+
+    // If this was a procmgr-tracked pipe end, tell procmgr to free the slot
+    // once no other fd in this process still references the same pipe_id.
+    if let Some(pipe_id) = entry.pipe_id {
+        if !table.any_with_pipe_id(pipe_id) {
+            drop(table);
+            super::pipe::close_pipe_id_in_procmgr(pipe_id);
+            return 0;
+        }
+    }
+
     0
 }
 

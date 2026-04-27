@@ -49,6 +49,9 @@ pub struct FdEntry {
     pub file_size: Option<usize>,
     /// Cached mode bits (if known)
     pub file_mode: Option<usize>,
+    /// Procmgr's pipe-table handle for pipe-end fds. None for non-pipe entries.
+    /// Used at close time to send PROCMGR_PIPE_CLOSE_LABEL.
+    pub pipe_id: Option<usize>,
 }
 
 impl FdEntry {
@@ -69,6 +72,7 @@ impl FdEntry {
             client_id: 0,
             file_size: None,
             file_mode: None,
+            pipe_id: None,
         }
     }
 
@@ -95,6 +99,7 @@ impl FdEntry {
             client_id,
             file_size: None,
             file_mode: None,
+            pipe_id: None,
         }
     }
 
@@ -124,7 +129,7 @@ impl FdEntry {
     }
 
     /// Create a pipe read-end fd entry.
-    pub fn pipe_read(endpoint: usize) -> Self {
+    pub fn pipe_read(endpoint: usize, pipe_id: usize) -> Self {
         Self {
             endpoint,
             caps: FdCaps::READ | FdCaps::IS_PIPE,
@@ -133,11 +138,12 @@ impl FdEntry {
             client_id: 0,
             file_size: None,
             file_mode: None,
+            pipe_id: Some(pipe_id),
         }
     }
 
     /// Create a pipe write-end fd entry.
-    pub fn pipe_write(endpoint: usize) -> Self {
+    pub fn pipe_write(endpoint: usize, pipe_id: usize) -> Self {
         Self {
             endpoint,
             caps: FdCaps::WRITE | FdCaps::IS_PIPE,
@@ -146,6 +152,7 @@ impl FdEntry {
             client_id: 0,
             file_size: None,
             file_mode: None,
+            pipe_id: Some(pipe_id),
         }
     }
 }
@@ -186,11 +193,21 @@ impl FdTable {
 
         for &(fd_num, token, readable, writable) in &fds {
             if pipe_mask & (1 << fd_num) != 0 {
-                // This fd is a pipe endpoint
-                let entry = if readable {
-                    FdEntry::pipe_read(token)
+                // Inherited pipe endpoint: no procmgr pipe_id on this side.
+                let caps = if readable {
+                    FdCaps::READ | FdCaps::IS_PIPE
                 } else {
-                    FdEntry::pipe_write(token)
+                    FdCaps::WRITE | FdCaps::IS_PIPE
+                };
+                let entry = FdEntry {
+                    endpoint: token,
+                    caps,
+                    position: 0,
+                    remote_fd: None,
+                    client_id: 0,
+                    file_size: None,
+                    file_mode: None,
+                    pipe_id: None,
                 };
                 self.entries.insert(fd_num, entry);
             } else {
@@ -247,6 +264,11 @@ impl FdTable {
     /// Check if the table is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Return true iff any fd in the table has the given pipe_id.
+    pub fn any_with_pipe_id(&self, pipe_id: usize) -> bool {
+        self.entries.values().any(|e| e.pipe_id == Some(pipe_id))
     }
 
     /// Duplicate an fd (like dup()).

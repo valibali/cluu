@@ -3,10 +3,16 @@
 //! A pipe is a unidirectional data channel backed by a single IPC endpoint.
 //! The write end sends data messages (label 0x50) and an EOF marker (label 0x51)
 //! on close. The read end receives messages and returns data or 0 on EOF.
+//!
+//! Pipe creation goes through procmgr (PROCMGR_PIPE_CREATE_LABEL) so that each
+//! end receives a rights-restricted token: write-only for the write end and
+//! read-only for the read end.
 
 use super::c_int;
 use crate::fd_table::{FdEntry, FD_TABLE};
-use crate::syscall::endpoint_create;
+use crate::ipc::{PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL};
+use crate::types::Message;
+use crate::IpcFlags;
 
 const PIPE_DATA_LABEL: u32 = 0x50;
 const PIPE_EOF_LABEL: u32 = 0x51;
@@ -15,9 +21,26 @@ const PIPE_EOF_LABEL: u32 = 0x51;
 /// value must not exceed the kernel's IPC_MESSAGE_MAX (4096 bytes).
 const PIPE_CHUNK_SIZE: usize = 4092;
 
+/// Send PROCMGR_PIPE_CLOSE_LABEL to procmgr for the given pipe_id.
+///
+/// Called when the last local fd referencing a pipe_id is closed, so procmgr
+/// can free its bookkeeping for the pipe table slot.
+pub fn close_pipe_id_in_procmgr(pipe_id: usize) {
+    let procmgr_ep = match crate::registry::lookup_service("procmgr:spawn") {
+        Some(ep) => ep,
+        None => return,
+    };
+    let mut msg = Message::new(PROCMGR_PIPE_CLOSE_LABEL, [0; 6], 0);
+    msg.words[0] = pipe_id;
+    let _ = crate::ipc::call(procmgr_ep, &mut msg, IpcFlags::empty());
+}
+
 /// Create a pipe (POSIX pipe(2)).
 ///
 /// pipefd[0] is the read end, pipefd[1] is the write end.
+///
+/// Asks procmgr for a rights-restricted token pair: the write end receives a
+/// send-only token and the read end a receive-only token.
 #[no_mangle]
 pub extern "C" fn pipe(pipefd: *mut c_int) -> c_int {
     if pipefd.is_null() {
@@ -25,18 +48,39 @@ pub extern "C" fn pipe(pipefd: *mut c_int) -> c_int {
         return -1;
     }
 
-    let ep = match endpoint_create(crate::boot::token_ipc()) {
-        Ok(ep) => ep,
-        Err(e) => {
-            crate::errno::set_errno(crate::errno::from_cluu_error(e));
+    // Step 1: resolve procmgr's spawn endpoint.
+    let procmgr_ep = match crate::registry::lookup_service("procmgr:spawn") {
+        Some(ep) => ep,
+        None => {
+            crate::errno::set_errno(crate::errno::ENOMEM);
             return -1;
         }
     };
 
-    let mut table = FD_TABLE.lock();
-    let read_fd = table.insert(FdEntry::pipe_read(ep));
-    let write_fd = table.insert(FdEntry::pipe_write(ep));
+    // Step 2: ask procmgr to create the pipe and hand back token pair + pipe_id.
+    let mut req = Message::new(PROCMGR_PIPE_CREATE_LABEL, [0; 6], 0);
+    if crate::ipc::call(procmgr_ep, &mut req, IpcFlags::empty()).is_err() {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return -1;
+    }
 
+    // Step 3: decode the reply that is now in `req`.
+    let status = req.words[0];
+    if status != 0 {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return -1;
+    }
+    let write_token = req.words[1];
+    let read_token = req.words[2];
+    let pipe_id = req.words[3];
+
+    // Step 4: insert fd table entries.
+    let mut table = FD_TABLE.lock();
+    let read_fd = table.insert(FdEntry::pipe_read(read_token, pipe_id));
+    let write_fd = table.insert(FdEntry::pipe_write(write_token, pipe_id));
+    drop(table);
+
+    // Step 5: write back fd numbers to caller.
     unsafe {
         *pipefd = read_fd;
         *pipefd.add(1) = write_fd;
