@@ -139,6 +139,13 @@ pub const PROCMGR_SHUTDOWN_LABEL: u32 = 36;
 /// Reply: words[0]=errno, words[1]=data_len or pid_count, payload=content.
 pub const PROCMGR_PROC_QUERY_LABEL: u32 = 37;
 
+/// Allocate a new pipe. Reply: words[0]=status, words[1]=write_token,
+/// words[2]=read_token, words[3]=pipe_id.
+pub const PROCMGR_PIPE_CREATE_LABEL: u32 = 38;
+
+/// Release the caller's tokens for a pipe. words[0]=pipe_id. Idempotent.
+pub const PROCMGR_PIPE_CLOSE_LABEL: u32 = 39;
+
 // tpmd IPC labels (per-service label space)
 pub const TPMD_STARTUP_LABEL: u32    = 1;
 pub const TPMD_PCR_READ_LABEL: u32   = 2;
