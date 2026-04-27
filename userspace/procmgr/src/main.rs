@@ -2872,8 +2872,15 @@ impl ProcessManager {
             }
         };
 
-        // Step 2: derive the write-only (IPC_SEND) token.
-        let write_token = match token_derive(endpoint, Rights::IPC_SEND.bits() as usize, 0) {
+        // Step 2: derive the write-only (IPC_SEND | GRANT) token.
+        // GRANT is required so that the FDAC handler (which calls token_derive
+        // on the shell-supplied token) can narrow it further for the child.
+        // u64::MAX expiry so the derived child token passes the expiry check.
+        let write_token = match token_derive(
+            endpoint,
+            (Rights::IPC_SEND | Rights::GRANT).bits() as usize,
+            u64::MAX,
+        ) {
             Ok(t) => t,
             Err(e) => {
                 let _ = token_revoke(endpoint);
@@ -2885,8 +2892,13 @@ impl ProcessManager {
             }
         };
 
-        // Step 3: derive the read-only (IPC_RECV) token.
-        let read_token = match token_derive(endpoint, Rights::IPC_RECV.bits() as usize, 0) {
+        // Step 3: derive the read-only (IPC_RECV | GRANT) token.
+        // GRANT included for the same reason as write_token above.
+        let read_token = match token_derive(
+            endpoint,
+            (Rights::IPC_RECV | Rights::GRANT).bits() as usize,
+            u64::MAX,
+        ) {
             Ok(t) => t,
             Err(e) => {
                 let _ = token_revoke(write_token);

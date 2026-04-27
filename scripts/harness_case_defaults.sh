@@ -232,6 +232,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND="spawn mmapprobe"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
                 ;;
+            l2_pipe_basic)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd | head -3"
+                ;;
             hr6_shell_crash)
                 TEST_COMMAND="shellcrash"
                 ;;

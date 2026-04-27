@@ -271,6 +271,11 @@ impl FdTable {
         self.entries.values().any(|e| e.pipe_id == Some(pipe_id))
     }
 
+    /// Iterate over all (fd, entry) pairs.
+    pub fn all_fds(&self) -> impl Iterator<Item = (i32, &FdEntry)> {
+        self.entries.iter().map(|(&fd, entry)| (fd, entry))
+    }
+
     /// Duplicate an fd (like dup()).
     pub fn dup(&mut self, old_fd: i32) -> Option<i32> {
         let entry = self.entries.get(&old_fd)?.clone();

@@ -1066,6 +1066,13 @@ case "$MARKER_MODE" in
             "mmapprobe: PASS complete"
         )
         ;;
+    l2_pipe_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: pipeline done stages=2 status=0"
+        )
+        ;;
     hr6_shell_crash)
         required_markers=(
             "TSC calibrated"

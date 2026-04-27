@@ -27,6 +27,8 @@ use libcluu::posix::{_read, _write};
 use libcluu::registry;
 
 const CHUNK_SIZE: usize = 64 * 1024;
+// Stdin reads use a stack-allocated buffer; keep it small to avoid stack overflow.
+const STDIN_CHUNK: usize = 4 * 1024;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -51,6 +53,12 @@ pub extern "C" fn main() -> i32 {
                 Ok(parsed) => n = parsed,
                 Err(_) => return usage_err(),
             }
+        } else if arg.len() >= 2 && arg[1..].chars().all(|c| c.is_ascii_digit()) {
+            // BSD-style: head -N  (e.g. head -3)
+            match arg[1..].parse::<usize>() {
+                Ok(parsed) => n = parsed,
+                Err(_) => return usage_err(),
+            }
         } else if arg.starts_with('-') {
             return usage_err();
         } else {
@@ -67,7 +75,7 @@ pub extern "C" fn main() -> i32 {
             return 1;
         }
     } else {
-        let mut chunk = [0u8; CHUNK_SIZE];
+        let mut chunk = [0u8; STDIN_CHUNK];
         loop {
             let r = _read(0, chunk.as_mut_ptr() as *mut _, chunk.len());
             if r <= 0 {

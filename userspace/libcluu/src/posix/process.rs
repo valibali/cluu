@@ -88,6 +88,25 @@ fn get_cached_or_lookup_procmgr_endpoint() -> Option<usize> {
 /// - `status`: Exit status code
 #[no_mangle]
 pub extern "C" fn _exit(status: c_int) -> ! {
+    // Close all pipe write ends so downstream readers get EOF.
+    // This must happen before notify_exit so the reader unblocks before
+    // the shell's wait loop sees the exit notification.
+    // Use process_info directly to avoid Vec allocation during exit path.
+    {
+        let info = crate::boot::process_info();
+        let pipe_mask = info.params[crate::boot::PARAM_FD_PIPE_MASK] as u8;
+        // stdin(0) is always read-only; check stdout(1), stderr(2), stdlog(3).
+        for fd_idx in 1u8..=3u8 {
+            if pipe_mask & (1 << fd_idx) != 0 {
+                let token_idx = fd_idx as usize; // TOKEN_STDOUT=1, TOKEN_STDERR=2, TOKEN_STDLOG=3
+                let ep = info.tokens[token_idx];
+                if ep != 0 {
+                    crate::posix::pipe::close_pipe_write(ep);
+                }
+            }
+        }
+    }
+
     // Notify parent via IPC
     let _ = crate::ipc::notify_exit(status);
 

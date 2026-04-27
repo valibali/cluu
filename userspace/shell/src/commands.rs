@@ -121,7 +121,7 @@ impl CommandContext {
         self.procmgr_spawn = ep;
     }
 
-    fn procmgr_spawn_endpoint(&mut self) -> Result<usize> {
+    pub fn procmgr_spawn_endpoint(&mut self) -> Result<usize> {
         if self.procmgr_spawn == 0 {
             self.procmgr_spawn = registry::subscribe_output("procmgr", "spawn")?;
         }
@@ -346,6 +346,23 @@ impl CommandExecutor for BuiltinRegistry {
         // autostart strings like "cd /; cd etc; pwd").
         let mut all_handled = true;
         for stmt in &program.stmts {
+            // Multi-command pipelines (`a | b | c`) are dispatched to the
+            // PipelineExecutor; single-command pipelines fall through to the
+            // existing builtin-lookup path via `flatten_simple_command_from_stmt`.
+            let Stmt::Pipeline(pipeline) = stmt;
+            if pipeline.commands.len() >= 2 {
+                match crate::pipeline::PipelineExecutor::run(stdout, context, pipeline) {
+                    Ok(status) => {
+                        context.set_last_status(status);
+                    }
+                    Err(_e) => {
+                        context.set_last_status(1);
+                        all_handled = false;
+                    }
+                }
+                continue;
+            }
+
             let command = match flatten_simple_command_from_stmt(stmt) {
                 Some(command) => command,
                 None => {
@@ -507,6 +524,11 @@ fn render_word(context: &CommandContext, word: &Word) -> String {
         }
     }
     out
+}
+
+/// Public wrapper around `render_word` for use by `pipeline.rs`.
+pub fn render_word_public(context: &CommandContext, word: &Word) -> String {
+    render_word(context, word)
 }
 
 fn join_words(words: &[String]) -> String {

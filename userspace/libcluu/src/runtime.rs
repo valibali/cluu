@@ -89,6 +89,28 @@ pub extern "C" fn _start() -> ! {
     if exit_code != 0 {
         let _ = debug_print("userspace: exiting with error");
     }
+
+    // Close pipe write ends before notifying exit so downstream readers
+    // receive EOF before the shell's wait loop sees the exit notification.
+    // We use process_info directly (no Vec allocation) to avoid heap use
+    // during the exit path.
+    #[cfg(feature = "posix")]
+    {
+        let info = crate::boot::process_info();
+        let pipe_mask = info.params[crate::boot::PARAM_FD_PIPE_MASK] as u8;
+        // Check each of stdin(0), stdout(1), stderr(2), stdlog(3) for write-pipe.
+        // stdin is always read-only; stdout/stderr/stdlog may be write-pipe.
+        for fd_idx in 1u8..=3u8 {
+            if pipe_mask & (1 << fd_idx) != 0 {
+                let token_idx = fd_idx as usize; // TOKEN_STDOUT=1, TOKEN_STDERR=2, TOKEN_STDLOG=3
+                let ep = info.tokens[token_idx];
+                if ep != 0 {
+                    crate::posix::pipe::close_pipe_write(ep);
+                }
+            }
+        }
+    }
+
     let _ = notify_exit(exit_code);
 
     // Block forever waiting for procmgr to destroy us
