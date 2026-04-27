@@ -1073,6 +1073,13 @@ case "$MARKER_MODE" in
             "shell: pipeline done stages=2 status=0"
         )
         ;;
+    l2_pipe_three)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: pipeline done stages=3 status=0"
+        )
+        ;;
     hr6_shell_crash)
         required_markers=(
             "TSC calibrated"

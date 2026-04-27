@@ -236,6 +236,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd | head -3"
                 ;;
+            l2_pipe_three)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd | grep CLUU | head -1"
+                ;;
             hr6_shell_crash)
                 TEST_COMMAND="shellcrash"
                 ;;
