@@ -7,7 +7,7 @@ authors = ["CLUU Team", "Balazs Valkony"]
 license = "MIT"
 
 [dependencies]
-libcluu = { path = "../libcluu" }
+libcluu = { path = "../libcluu", features = ["posix"] }
 
 [[bin]]
 name = "cat"
