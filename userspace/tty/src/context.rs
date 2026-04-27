@@ -9,6 +9,7 @@ use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::vec::Vec;
 use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_EXTRA_0, TOKEN_IPC};
+use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
     send_with_retry_timeout, CONSOLE_WRITE_LABEL, IPC_CHUNK_BYTES_DEFAULT,
     IPC_SEND_RETRIES_DEFAULT, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C,
@@ -71,6 +72,8 @@ pub struct TtyContext {
     pub mode: TtyMode,
     pub login_username: Vec<u8>,
     pub login_password: Vec<u8>,
+    /// Lazily-initialized VFS client for tab completion path resolution.
+    vfs_client: Option<VfsClient>,
 }
 
 impl TtyContext {
@@ -125,6 +128,7 @@ impl TtyContext {
             mode: TtyMode::Login(LoginState::Username),
             login_username: Vec::new(),
             login_password: Vec::new(),
+            vfs_client: None,
         })
     }
 
@@ -441,6 +445,20 @@ impl TtyContext {
         self.login_username.clear();
         self.login_password.clear();
         self.write_to_console(b"\r\nlogin: ");
+    }
+
+    /// Return a reference to the VFS client, initializing it on first use.
+    ///
+    /// Uses registry::subscribe_output which blocks on the registry control
+    /// endpoint until VFS grants a token. This is a one-time cost on the first
+    /// TAB press; subsequent calls return the cached client immediately.
+    /// Returns None if VFS is not available (e.g., still starting up).
+    pub fn vfs_client_lazy(&mut self) -> Option<&VfsClient> {
+        if self.vfs_client.is_none() {
+            let endpoint = registry::subscribe_output("vfs", "main").ok()?;
+            self.vfs_client = VfsClient::new_from_registry(endpoint).ok();
+        }
+        self.vfs_client.as_ref()
     }
 }
 const CONSOLE_MAX_PAYLOAD: usize = IPC_CHUNK_BYTES_DEFAULT;

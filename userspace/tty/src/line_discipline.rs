@@ -21,6 +21,10 @@ pub struct LineEffect {
     pub line_ready: Option<Vec<u8>>,
     /// In raw mode, each byte is delivered immediately (no line buffering).
     pub raw_byte: Option<u8>,
+    /// When TAB was pressed in canonical mode, this carries a snapshot of the
+    /// current line buffer so the TTY main loop can run completion logic.
+    /// `None` for any non-TAB byte.
+    pub tab_request: Option<Vec<u8>>,
 }
 
 /// Echo action for the console.
@@ -167,12 +171,14 @@ impl LineDiscipline {
                 echo: EchoAction::None,
                 line_ready: None,
                 raw_byte: None,
+                tab_request: None,
             },
             // Unknown CSI: also silently consume.
             _ => LineEffect {
                 echo: EchoAction::None,
                 line_ready: None,
                 raw_byte: None,
+                tab_request: None,
             },
         }
     }
@@ -185,6 +191,7 @@ impl LineDiscipline {
                         echo: EchoAction::None,
                         line_ready: None,
                         raw_byte: None,
+                        tab_request: None,
                     };
                 }
                 self.saved_partial = Some(self.buffer.clone());
@@ -202,6 +209,7 @@ impl LineDiscipline {
             },
             line_ready: None,
             raw_byte: None,
+            tab_request: None,
         }
     }
 
@@ -211,6 +219,7 @@ impl LineDiscipline {
                 echo: EchoAction::None,
                 line_ready: None,
                 raw_byte: None,
+                tab_request: None,
             },
             Some(p) if p + 1 < self.history.len() => {
                 let echo = self.navigate_to_history(p + 1);
@@ -222,6 +231,7 @@ impl LineDiscipline {
                     },
                     line_ready: None,
                     raw_byte: None,
+                    tab_request: None,
                 }
             }
             Some(_) => {
@@ -234,6 +244,7 @@ impl LineDiscipline {
                     },
                     line_ready: None,
                     raw_byte: None,
+                    tab_request: None,
                 }
             }
         }
@@ -256,6 +267,7 @@ impl LineDiscipline {
                     echo: EchoAction::None,
                     line_ready: None,
                     raw_byte: None,
+                    tab_request: None,
                 };
             }
             CsiState::Bracket => {
@@ -272,6 +284,19 @@ impl LineDiscipline {
                     echo: EchoAction::None,
                     line_ready: None,
                     raw_byte: None,
+                    tab_request: None,
+                }
+            }
+            0x09 => {
+                // TAB in canonical mode: snapshot buffer so the main loop can do
+                // VFS-aware completion. We don't echo or modify the buffer here —
+                // the main loop will call append_completion + echo if it finds a
+                // unique match.
+                LineEffect {
+                    echo: EchoAction::None,
+                    line_ready: None,
+                    raw_byte: None,
+                    tab_request: Some(self.buffer.clone()),
                 }
             }
             0x03 => {
@@ -288,6 +313,7 @@ impl LineDiscipline {
                     },
                     line_ready: Some(alloc::vec![0x03]),
                     raw_byte: None,
+                    tab_request: None,
                 }
             }
             0x04 => {
@@ -298,6 +324,7 @@ impl LineDiscipline {
                         echo: EchoAction::None,
                         line_ready: Some(alloc::vec![0x04]),
                         raw_byte: None,
+                        tab_request: None,
                     }
                 } else {
                     let line = core::mem::take(&mut self.buffer);
@@ -307,6 +334,7 @@ impl LineDiscipline {
                         echo: EchoAction::None,
                         line_ready: Some(line),
                         raw_byte: None,
+                        tab_request: None,
                     }
                 }
             }
@@ -330,6 +358,7 @@ impl LineDiscipline {
                     },
                     line_ready: Some(line),
                     raw_byte: None,
+                    tab_request: None,
                 }
             }
             0x08 | 0x7f => {
@@ -344,12 +373,14 @@ impl LineDiscipline {
                         },
                         line_ready: None,
                         raw_byte: None,
+                        tab_request: None,
                     }
                 } else {
                     LineEffect {
                         echo: EchoAction::None,
                         line_ready: None,
                         raw_byte: None,
+                        tab_request: None,
                     }
                 }
             }
@@ -369,9 +400,20 @@ impl LineDiscipline {
                     },
                     line_ready: None,
                     raw_byte: None,
+                    tab_request: None,
                 }
             }
         }
+    }
+
+    /// Append completion bytes to the buffer. Called by the TTY main loop after
+    /// resolving a tab_request. Does NOT echo; the caller is responsible for
+    /// emitting echo bytes to the console.
+    pub fn append_completion(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
+        // Reset history navigation state — the user is editing fresh again.
+        self.history_pos = None;
+        self.saved_partial = None;
     }
 
     /// Raw mode: deliver each byte immediately, optional echo.
@@ -384,6 +426,7 @@ impl LineDiscipline {
             },
             line_ready: None,
             raw_byte: Some(byte),
+            tab_request: None,
         }
     }
 }

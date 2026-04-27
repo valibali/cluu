@@ -438,6 +438,7 @@ type_ascii_command() {
         ch="${cmd:$i:1}"
         case "$ch" in
             ' ') send_key "spc" ;;
+            $'\t') send_key "tab" ;;
             '-') send_key "minus" ;;
             '_') send_key "shift-minus" ;;
             '=') send_key "equal" ;;
@@ -1086,6 +1087,16 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
             "shell: pipeline done stages=1 status=0"
             "shell: pipeline done stages=2 status=0"
+        )
+        ;;
+    l2_tab_complete)
+        # TAB pressed after "cat /etc/m" completes to "cat /etc/motd " and
+        # Enter runs the command. The shell emits a debug marker when the
+        # pipeline finishes; that's our observable signal on COM2.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: pipeline done stages=1 status=0"
         )
         ;;
     hr6_shell_crash)

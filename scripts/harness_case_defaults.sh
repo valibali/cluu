@@ -244,6 +244,12 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd > /tmp/motdcopy; cat /tmp/motdcopy | head -1"
                 ;;
+            l2_tab_complete)
+                TEST_COMMAND=""
+                # Type "cat /etc/m" then TAB: TTY completes to "cat /etc/motd ".
+                # Press Enter: shell runs cat /etc/motd and emits motd content.
+                KEYSTROKE_COMMANDS=$'cat /etc/m\t'
+                ;;
             hr6_shell_crash)
                 TEST_COMMAND="shellcrash"
                 ;;

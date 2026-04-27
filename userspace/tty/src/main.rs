@@ -198,7 +198,7 @@ fn handle_key(ctx: &mut TtyContext, discipline: &mut LineDiscipline, ch: u8, ext
         _ => {
             // Normal ASCII byte
             let effect = discipline.handle_byte(ch);
-            apply_effect(ctx, effect);
+            apply_effect(ctx, discipline, effect);
             return;
         }
     };
@@ -206,7 +206,7 @@ fn handle_key(ctx: &mut TtyContext, discipline: &mut LineDiscipline, ch: u8, ext
     // Feed each byte of the escape sequence through the discipline
     for &b in bytes {
         let effect = discipline.handle_byte(b);
-        apply_effect(ctx, effect);
+        apply_effect(ctx, discipline, effect);
     }
 }
 
@@ -259,7 +259,7 @@ fn handle_login_key(ctx: &mut TtyContext, ch: u8, extended: u8) {
 }
 
 /// Apply a line discipline effect: echo and deliver line/raw data.
-fn apply_effect(ctx: &mut TtyContext, effect: line_discipline::LineEffect) {
+fn apply_effect(ctx: &mut TtyContext, discipline: &mut line_discipline::LineDiscipline, effect: line_discipline::LineEffect) {
     match effect.echo {
         EchoAction::None => {}
         EchoAction::Bytes(bytes) => ctx.forward_to_console(bytes),
@@ -270,6 +270,15 @@ fn apply_effect(ctx: &mut TtyContext, effect: line_discipline::LineEffect) {
     if let Some(raw) = effect.raw_byte {
         ctx.input_queue.push_back(raw);
         ctx.try_satisfy_reads();
+    }
+
+    if let Some(partial) = effect.tab_request {
+        if let Some(completion) = compute_path_completion(&partial, ctx) {
+            // Echo the completion bytes to the console so the user sees them,
+            // then append them to the line discipline buffer.
+            ctx.forward_to_console(&completion);
+            discipline.append_completion(&completion);
+        }
     }
 
     if let Some(line) = effect.line_ready {
@@ -284,6 +293,66 @@ fn apply_effect(ctx: &mut TtyContext, effect: line_discipline::LineEffect) {
         }
         deliver_line(ctx, &line);
     }
+}
+
+/// Resolve a TAB press to a completion suffix using VFS readdir.
+///
+/// Returns `Some(bytes)` if there is exactly one match; the bytes are the
+/// suffix to append after the already-typed prefix (plus '/' for dirs or ' '
+/// for files). Returns `None` for zero or multiple matches.
+fn compute_path_completion(partial: &[u8], ctx: &mut TtyContext) -> Option<alloc::vec::Vec<u8>> {
+    // 1. Extract the last whitespace-delimited token.
+    let token_start = partial
+        .iter()
+        .rposition(|&b| b == b' ' || b == b'\t')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let token = &partial[token_start..];
+    let token_str = core::str::from_utf8(token).ok()?;
+
+    // 2. Split into parent_dir and prefix.
+    let (parent_dir, prefix) = match token_str.rfind('/') {
+        Some(idx) => (&token_str[..=idx], &token_str[idx + 1..]),
+        None => ("", token_str),
+    };
+
+    // 3. Resolve parent_dir absolutely.
+    // Empty/relative without a leading slash → fall back to "/" (root).
+    // This makes `cat /etc/mo<TAB>` work. CWD-relative completion would need
+    // a TTY↔shell roundtrip and is deferred to a future polish task.
+    let resolved_parent: alloc::string::String = if parent_dir.is_empty() {
+        alloc::string::String::from("/")
+    } else if parent_dir.starts_with('/') {
+        alloc::string::String::from(parent_dir)
+    } else {
+        // Relative path with a slash in it: CWD-unaware, skip.
+        return None;
+    };
+
+    // 4. Get VFS client, initializing lazily on first TAB press.
+    let vfs = ctx.vfs_client_lazy()?;
+
+    // 5. Read the parent directory.
+    let entries = vfs.readdir(&resolved_parent).ok()?;
+
+    // 6. Find unique-prefix match.
+    let mut matches = entries.iter().filter(|e| e.name.starts_with(prefix));
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None; // 2+ matches — silent no-op
+    }
+
+    // 7. Build completion bytes: the suffix after the already-typed prefix.
+    // E.g., prefix="mo", first.name="motd" → suffix="td", out=b"td "
+    // E.g., first.name="bin", is_dir=true → out=b"in/"
+    let suffix = &first.name[prefix.len()..];
+    let mut out = suffix.as_bytes().to_vec();
+    if first.is_dir {
+        out.push(b'/');
+    } else {
+        out.push(b' '); // trailing space after a complete filename — bash convention
+    }
+    Some(out)
 }
 
 /// Deliver a completed line to pending readers or the shell.
