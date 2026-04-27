@@ -311,7 +311,6 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(Ext2OwnerDenyBuiltin));
         registry.register(Box::new(RingIoBuiltin));
         registry.register(Box::new(CatBuiltin));
-        registry.register(Box::new(LsBuiltin));
         registry.register(Box::new(TouchBuiltin));
         registry.register(Box::new(HeapBuiltin));
         registry.register(Box::new(ContainerBuiltin));
@@ -2690,56 +2689,6 @@ impl BuiltinCommand for CatBuiltin {
             .free(read_buf_base, grant_size);
 
         let _ = vfs.close(file);
-        Ok(())
-    }
-}
-
-struct LsBuiltin;
-
-impl BuiltinCommand for LsBuiltin {
-    fn name(&self) -> &'static str {
-        "ls"
-    }
-
-    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let path = args.first().map(|s| s.as_str()).unwrap_or("/");
-
-        // Get VFS endpoint
-        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
-            Ok(ep) => ep,
-            Err(_) => {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"ls: vfs not available\n")?;
-                return Ok(());
-            }
-        };
-
-        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
-            Ok(c) => c,
-            Err(_) => {
-                send_with_payload(
-                    stdout,
-                    TTY_WRITE_LABEL,
-                    b"ls: failed to create vfs client\n",
-                )?;
-                return Ok(());
-            }
-        };
-
-        // Read directory
-        match vfs.readdir(path) {
-            Ok(entries) => {
-                for entry in entries {
-                    let suffix = if entry.is_dir { "/" } else { "" };
-                    let line = format!("{}{}\n", entry.name, suffix);
-                    send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-                }
-            }
-            Err(e) => {
-                let msg = format!("ls: {}: {:?}\n", path, e);
-                send_with_payload(stdout, TTY_WRITE_LABEL, msg.as_bytes())?;
-            }
-        }
-
         Ok(())
     }
 }
