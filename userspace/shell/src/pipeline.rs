@@ -11,9 +11,9 @@ use alloc::vec::Vec;
 
 use cluu_lang::ast::{CmdElem, Pipeline};
 
-use crate::commands::{render_word_public, CommandContext};
+use crate::commands::{build_redir_actions, render_word_public, spawn_process_with_argv_and_redirs, CommandContext};
 use libcluu::ipc::{
-    build_container_run_payload_with_argv_and_fdac, call_with_payload, send_with_payload,
+    build_container_run_payload_full, call_with_payload, send_with_payload,
     FdAction, PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL,
     TTY_WRITE_LABEL,
 };
@@ -45,10 +45,71 @@ impl PipelineExecutor {
         context: &mut CommandContext,
         pipeline: &Pipeline,
     ) -> Result<i32> {
-        if pipeline.commands.len() < 2 {
+        // Single-command pipeline with no redirections: caller shouldn't reach us.
+        if pipeline.commands.len() == 1 && pipeline.commands[0].redirs.is_empty() {
             return Ok(0);
         }
+        // Single-command pipeline with redirections: handle directly without pipes.
+        if pipeline.commands.len() == 1 {
+            return Self::run_single_with_redirs(stdout, context, pipeline);
+        }
         Self::run_multi(stdout, context, pipeline)
+    }
+
+    fn run_single_with_redirs(
+        stdout: usize,
+        context: &mut CommandContext,
+        pipeline: &Pipeline,
+    ) -> Result<i32> {
+        let cmd = &pipeline.commands[0];
+        let mut argv: Vec<String> = Vec::new();
+        for elem in &cmd.elems {
+            match elem {
+                CmdElem::Word(w) => argv.push(render_word_public(context, w)),
+                CmdElem::Subshell(_) => {
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shell: subshells not supported\n");
+                    return Ok(2);
+                }
+            }
+        }
+        if argv.is_empty() {
+            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shell: empty command\n");
+            return Ok(2);
+        }
+        let name = argv[0].as_str();
+        let image_name = name.strip_prefix("/bin/").unwrap_or(name);
+        let arg_refs: Vec<&str> = argv.iter().skip(1).map(|s| s.as_str()).collect();
+        let redirs = build_redir_actions(context, &cmd.redirs);
+
+        let spawn = match spawn_process_with_argv_and_redirs(context, image_name, 200, &arg_refs, &redirs) {
+            Ok(s) => s,
+            Err(e) => {
+                let line = alloc::format!("shell: spawn error {:?}\n", e);
+                let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                return Ok(127);
+            }
+        };
+        if spawn.status_word != 0 {
+            let line = alloc::format!("shell: '{}' failed to start (status={})\n", image_name, spawn.status_word);
+            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+            return Ok(127);
+        }
+
+        // Wait for exit notification.
+        let mut buf = [0u8; 256];
+        let _ = libcluu::syscall::ipc_recv(spawn.notify_endpoint, &mut buf);
+        let exit_code = if buf.len() >= 24 {
+            let bytes = [buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23]];
+            i64::from_le_bytes(bytes) as i32
+        } else {
+            0
+        };
+
+        let _ = libcluu::debug_print(&alloc::format!(
+            "shell: pipeline done stages=1 status={}",
+            exit_code
+        ));
+        Ok(exit_code)
     }
 
     fn run_multi(
@@ -61,16 +122,8 @@ impl PipelineExecutor {
 
         // Render every command's argv (and reject unsupported features for v1).
         let mut argvs: Vec<Vec<String>> = Vec::with_capacity(n);
+        let mut redir_lists: Vec<Vec<libcluu::ipc::RedirAction>> = Vec::with_capacity(n);
         for cmd in &pipeline.commands {
-            if !cmd.redirs.is_empty() {
-                // Per-stage redirections are Phase 4. Reject for now.
-                let _ = send_with_payload(
-                    stdout,
-                    TTY_WRITE_LABEL,
-                    b"shell: redirections inside pipelines not supported yet\n",
-                );
-                return Ok(2);
-            }
             let mut argv: Vec<String> = Vec::new();
             for elem in &cmd.elems {
                 match elem {
@@ -96,6 +149,7 @@ impl PipelineExecutor {
                 return Ok(2);
             }
             argvs.push(argv);
+            redir_lists.push(build_redir_actions(context, &cmd.redirs));
         }
 
         // Allocate N-1 pipes.
@@ -131,6 +185,36 @@ impl PipelineExecutor {
             // spawn_process_with_argv does.
             let arg_refs: Vec<&str> = argv.iter().skip(1).map(|s| s.as_str()).collect();
 
+            // Check for conflicts: a stage cannot have both a pipe-wired fd
+            // AND an explicit redir targeting the same fd.
+            let stage_redirs = &redir_lists[i];
+            if i > 0 {
+                if stage_redirs.iter().any(|r| r.target_fd == 0) {
+                    let line = format!(
+                        "shell: pipeline stage {} ('{}') cannot redirect stdin and receive pipe input\n",
+                        i, image_name
+                    );
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    for p in &pipes {
+                        let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+                    }
+                    return Ok(1);
+                }
+            }
+            if i < n - 1 {
+                if stage_redirs.iter().any(|r| r.target_fd == 1) {
+                    let line = format!(
+                        "shell: pipeline stage {} ('{}') cannot redirect stdout and feed pipe output\n",
+                        i, image_name
+                    );
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    for p in &pipes {
+                        let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+                    }
+                    return Ok(1);
+                }
+            }
+
             let mut fdac: Vec<FdAction> = Vec::with_capacity(2);
             // Wire read end of upstream pipe as stdin (not for first stage).
             if i > 0 {
@@ -150,7 +234,7 @@ impl PipelineExecutor {
             }
 
             let (payload, _argc, fdac_offset) =
-                build_container_run_payload_with_argv_and_fdac(image_name, &arg_refs, &fdac);
+                build_container_run_payload_full(image_name, &arg_refs, &fdac, stage_redirs);
 
             let notify_endpoint = match endpoint_create(process_info().tokens[TOKEN_IPC]) {
                 Ok(ep) => ep,

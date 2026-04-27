@@ -13,7 +13,8 @@ use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE, TOKEN_STDIN};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
     call, call_with_payload, call_with_reply_buf, recv, send_with_payload, send_with_retry,
-    build_container_run_payload_with_argv, SharedRing, CONSOLE_CLEAR_LABEL, PROCMGR_CONTAINER_LIST_LABEL,
+    build_container_run_payload_with_argv, build_container_run_payload_full, FdAction, RedirAction,
+    SharedRing, CONSOLE_CLEAR_LABEL, PROCMGR_CONTAINER_LIST_LABEL,
     PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_ESCALATE_LABEL, PROCMGR_SHUTDOWN_LABEL, PROCMGR_SU_LABEL,
     TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
     TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
@@ -23,7 +24,7 @@ use libcluu::syscall;
 use libcluu::types::Message;
 use libcluu::{debug_print, process_info, Error, IpcFlags, Result, TOKEN_IPC};
 
-use cluu_lang::ast::{Assign, CmdElem, DqPart, Program, Stmt, Word, WordPart};
+use cluu_lang::ast::{Assign, CmdElem, DqPart, Program, Redir, RedirOp, Stmt, Word, WordPart};
 
 const PROCMGR_KILL_LABEL: u32 = 3;
 const DEFAULT_PRIORITY: usize = 200;
@@ -346,11 +347,12 @@ impl CommandExecutor for BuiltinRegistry {
         // autostart strings like "cd /; cd etc; pwd").
         let mut all_handled = true;
         for stmt in &program.stmts {
-            // Multi-command pipelines (`a | b | c`) are dispatched to the
-            // PipelineExecutor; single-command pipelines fall through to the
-            // existing builtin-lookup path via `flatten_simple_command_from_stmt`.
+            // Multi-command pipelines (`a | b | c`) and single-command pipelines
+            // that carry file redirections are dispatched to the PipelineExecutor.
+            // Plain single-command pipelines fall through to the builtin-lookup path.
             let Stmt::Pipeline(pipeline) = stmt;
-            if pipeline.commands.len() >= 2 {
+            let has_redirs = pipeline.commands.iter().any(|c| !c.redirs.is_empty());
+            if pipeline.commands.len() >= 2 || has_redirs {
                 match crate::pipeline::PipelineExecutor::run(stdout, context, pipeline) {
                     Ok(status) => {
                         context.set_last_status(status);
@@ -529,6 +531,23 @@ fn render_word(context: &CommandContext, word: &Word) -> String {
 /// Public wrapper around `render_word` for use by `pipeline.rs`.
 pub fn render_word_public(context: &CommandContext, word: &Word) -> String {
     render_word(context, word)
+}
+
+/// Convert AST `Redir` entries into `RedirAction` values for the REDIR trailer.
+/// Callers should first check that there are no conflicts with pipe-wired fds.
+pub fn build_redir_actions(context: &CommandContext, redirs: &[Redir]) -> Vec<RedirAction> {
+    let mut actions = Vec::with_capacity(redirs.len());
+    for r in redirs {
+        let target = render_word(context, &r.target);
+        let (target_fd, flags) = match r.op {
+            RedirOp::OutTrunc => (1u8, 1u8),
+            RedirOp::OutAppend => (1u8, 2u8),
+            RedirOp::In => (0u8, 3u8),
+            RedirOp::ErrTrunc => (2u8, 1u8),
+        };
+        actions.push(RedirAction { target_fd, flags, path: target });
+    }
+    actions
 }
 
 fn join_words(words: &[String]) -> String {
@@ -1196,12 +1215,12 @@ impl BuiltinCommand for BackgroundBuiltin {
     }
 }
 
-struct SpawnResult {
-    procmgr_endpoint: usize,
-    notify_endpoint: usize,
-    status_word: usize,
-    pid: usize,
-    stdin_endpoint: usize,
+pub(crate) struct SpawnResult {
+    pub(crate) procmgr_endpoint: usize,
+    pub(crate) notify_endpoint: usize,
+    pub(crate) status_word: usize,
+    pub(crate) pid: usize,
+    pub(crate) stdin_endpoint: usize,
 }
 
 /// Build a `PROCMGR_CONTAINER_RUN_LABEL` payload of `name + CWD trailer`.
@@ -1226,13 +1245,23 @@ fn spawn_process_with_argv(
     _priority: usize,
     args: &[&str],
 ) -> Result<SpawnResult> {
+    spawn_process_with_argv_and_redirs(context, name, _priority, args, &[])
+}
+
+pub fn spawn_process_with_argv_and_redirs(
+    context: &mut CommandContext,
+    name: &str,
+    _priority: usize,
+    args: &[&str],
+    redirs: &[RedirAction],
+) -> Result<SpawnResult> {
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-    let (payload, _argc) = build_container_run_payload_with_argv(name, args);
+    let (payload, _argc, fdac_offset) = build_container_run_payload_full(name, args, &[], redirs);
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
     let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();
     msg.words[1] = notify_endpoint;
-    msg.words[2] = 0; // fdac_offset
+    msg.words[2] = fdac_offset;
     let mut reply = Message::new(0, [0; 6], 0);
     let _ = debug_print(&format!(
         "shell: container run begin name={} ep={} notify={}",

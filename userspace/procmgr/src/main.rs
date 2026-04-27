@@ -17,6 +17,8 @@ use libcluu::boot::{
     CWD_MAX,
     PARAM_CWD_LEN,
     PARAM_CWD_OFFSET,
+    PARAM_REDIR_LEN,
+    PARAM_REDIR_OFFSET,
     PARAM_FB_BASE,
     PARAM_FB_HEIGHT,
     PARAM_FB_PHYS,
@@ -47,6 +49,7 @@ use libcluu::ipc::extract_reply_id;
 use libcluu::ipc::parse_message;
 use libcluu::ipc::SharedRing;
 use libcluu::ipc::CWD_MAGIC as SPAWN_CWD_MAGIC;
+use libcluu::ipc::REDIR_MAGIC as SPAWN_REDIR_MAGIC;
 use libcluu::ipc::PROCMGR_CONTAINER_LIST_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_STATS_LABEL;
@@ -981,7 +984,7 @@ impl ProcessManager {
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
         let (user_env, user_envc) = build_user_env_payload("root", "/root");
 
-        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None, &[], THREAD_CREATE_START_SUSPENDED) {
+        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None, &[], &[], THREAD_CREATE_START_SUSPENDED) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
                 let session_cid = self.next_container_id();
                 let shell_cid = self.next_container_id();
@@ -1193,6 +1196,7 @@ impl ProcessManager {
             param_overrides,
             None, // no caller view (internal autostart)
             &[],
+            &[], // no redir
             THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((_thread_token, cookie, pid, _child_stdin_send)) => {
@@ -1483,7 +1487,7 @@ impl ProcessManager {
         match self.spawn_service_with_env(
             &binary_vfs_path, priority, &argv_payload, 1, &[], 0, 0,
             spawn_seq, spawn_start, &[], requested_profile,
-            extra_token, extra_token_1, param_overrides, None, &[],
+            extra_token, extra_token_1, param_overrides, None, &[], &[],
             THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((new_thread_token, new_cookie, new_pid, _)) => {
@@ -2215,6 +2219,7 @@ impl ProcessManager {
             &[],
             None, // no caller view (session login uses SERVICE_PATH constant)
             &[],
+            &[], // no redir
             THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
@@ -2438,6 +2443,7 @@ impl ProcessManager {
             &[],
             caller_view_owned.as_ref(),
             &[],
+            &[], // no redir
             THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, cookie, pid, stdin_send)) => {
@@ -2648,6 +2654,7 @@ impl ProcessManager {
             &[],
             None, // no caller view (su uses SERVICE_PATH constant)
             &[],
+            &[], // no redir
             THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, cookie, pid, stdin_send)) => {
@@ -3324,7 +3331,7 @@ impl ProcessManager {
             .unwrap_or(payload.len())
             + 1;
         let param_data = &payload[path_nul_end..];
-        let mut params = [0u64; 12];
+        let mut params = [0u64; 14];
         for i in 0..param_count {
             let offset = i * 10; // 2 bytes index + 8 bytes value
             if offset + 10 > param_data.len() {
@@ -3334,19 +3341,21 @@ impl ProcessManager {
             let idx = u16::from_le_bytes([param_data[offset], param_data[offset + 1]]) as usize;
 
             // ── Policy: validate param index bounds ──
-            if idx >= 12 {
+            if idx >= 14 {
                 let _ = debug_print(&format!(
                     "procmgr: service spawn rejected: param index {} out of range",
                     idx
                 ));
                 return Ok(());
             }
-            // ── Policy: slots 10/11 (PARAM_CWD_OFFSET/LEN) are procmgr-trusted. ──
-            // They are written by procmgr itself from the spawn IPC cwd trailer
-            // (Task 8/9); external callers must not forge cwd metadata.
-            if idx == PARAM_CWD_OFFSET || idx == PARAM_CWD_LEN {
+            // ── Policy: slots 10/11 (PARAM_CWD_OFFSET/LEN) and 12/13 (PARAM_REDIR_OFFSET/LEN)
+            // are procmgr-trusted. They are written by procmgr itself from the spawn
+            // IPC trailers; external callers must not forge these metadata slots.
+            if idx == PARAM_CWD_OFFSET || idx == PARAM_CWD_LEN
+                || idx == PARAM_REDIR_OFFSET || idx == PARAM_REDIR_LEN
+            {
                 let _ = debug_print(&format!(
-                    "procmgr: service spawn rejected: reserved cwd slot {}",
+                    "procmgr: service spawn rejected: reserved metadata slot {}",
                     idx
                 ));
                 return Ok(());
@@ -3611,6 +3620,7 @@ impl ProcessManager {
             &[],
             Some(&child_view_mounts),
             cwd_bytes,
+            &[], // no redir for posix_spawn path
             THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
@@ -3752,6 +3762,7 @@ impl ProcessManager {
             &[],
             None,
             &[],
+            &[], // no redir
             0,
         )
     }
@@ -3775,6 +3786,7 @@ impl ProcessManager {
         param_overrides: &[(usize, u64)],
         caller_view: Option<&ViewMountList>,
         cwd_bytes: &[u8],
+        redir_bytes: &[u8],
         thread_flags: usize,
     ) -> Result<(usize, usize, usize, usize)> {
         // Build env data: for bootstrap (owner_tid==0) use defaults,
@@ -4001,6 +4013,7 @@ impl ProcessManager {
             extra_token_1,
             effective_overrides,
             cwd_bytes,
+            redir_bytes,
         )?;
 
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority, thread_flags)?;
@@ -4437,10 +4450,11 @@ impl ProcessManager {
         // Strip the optional CWD trailer first; FDAC/param offsets refer into
         // the pre-trailer view, identical to the posix_spawn payload contract.
         let (effective_payload, cwd_bytes) = split_cwd_trailer(payload);
-        // ARGV trailer sits between the argv block and the CWD trailer in the
-        // wire format, so CWD must be stripped first — reordering these two
-        // calls will make split_argv_trailer's magic check land inside the
-        // CWD trailer's length field and silently mis-parse every payload.
+        // REDIR trailer sits between the ARGV block and the CWD trailer.
+        // Strip it second (after CWD, before ARGV).
+        let (effective_payload, redir_bytes) = split_redir_trailer(effective_payload);
+        // ARGV trailer sits between the argv block and the REDIR trailer in the
+        // wire format, so CWD and REDIR must be stripped first.
         let (effective_payload, argv_extra_bytes) = split_argv_trailer(effective_payload);
 
         // Extract FDAC offset and param override info from message words
@@ -4794,6 +4808,7 @@ impl ProcessManager {
             param_overrides,
             None, // no caller view (container run uses absolute /var/images/ paths)
             cwd_bytes,
+            redir_bytes,
             THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
@@ -5312,6 +5327,46 @@ fn split_argv_trailer(payload: &[u8]) -> (&[u8], &[u8]) {
     (&payload[..argv_start], &payload[argv_start..len_pos])
 }
 
+/// Strip the optional REDIR trailer from the end of `payload` (which must already
+/// have the CWD trailer stripped). Returns `(remaining, redir_entries_bytes)`.
+/// If no REDIR magic is present, returns `(payload, &[])`.
+///
+/// Wire format (at end of payload after ARGV, before CWD was already stripped):
+///   `[redir entries...]`
+///   `[u32 entries_len LE][u32 REDIR_MAGIC LE]`
+fn split_redir_trailer(payload: &[u8]) -> (&[u8], &[u8]) {
+    if payload.len() < 8 {
+        return (payload, &[]);
+    }
+    let magic_pos = payload.len() - 4;
+    let magic_bytes: [u8; 4] = match payload[magic_pos..].try_into() {
+        Ok(b) => b,
+        Err(_) => return (payload, &[]),
+    };
+    if u32::from_le_bytes(magic_bytes) != SPAWN_REDIR_MAGIC {
+        return (payload, &[]);
+    }
+
+    let len_pos = magic_pos - 4;
+    let len_bytes: [u8; 4] = match payload[len_pos..magic_pos].try_into() {
+        Ok(b) => b,
+        Err(_) => return (payload, &[]),
+    };
+    let entries_len = u32::from_le_bytes(len_bytes) as usize;
+
+    if entries_len > len_pos {
+        return (payload, &[]);
+    }
+    // Sanity cap: max 4 entries, each at most 4 + 255 = 259 bytes → ~1 KB.
+    const MAX_REDIR_TRAILER_BYTES: usize = 4 * 259;
+    if entries_len > MAX_REDIR_TRAILER_BYTES {
+        return (payload, &[]);
+    }
+
+    let entries_start = len_pos - entries_len;
+    (&payload[..entries_start], &payload[entries_start..len_pos])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn map_process_info_page(
     space_token: usize,
@@ -5337,6 +5392,7 @@ fn map_process_info_page(
     extra_token_1: usize,
     param_overrides: &[(usize, u64)],
     cwd_bytes: &[u8],
+    redir_bytes: &[u8],
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -5362,7 +5418,7 @@ fn map_process_info_page(
         tokens[TOKEN_EXTRA_1] = extra_token_1;
     }
 
-    let mut params = [0u64; 12];
+    let mut params = [0u64; 14];
     // params[0] = pipe_mask for regular processes (shared with PARAM_FB_BASE for console)
     params[0] = pipe_mask as u64;
     // NOTE: PARAM_CAP_PROFILE (slot 5) is NOT written here. The cap profile is
@@ -5413,16 +5469,33 @@ fn map_process_info_page(
         params[PARAM_CWD_LEN] = cwd_clamped_len as u64;
     }
 
+    // Place redir bytes in the page AFTER cwd. Clamp to a reasonable ceiling
+    // (max 4 entries * (4 + 255) bytes ≈ 1 KB) and guard against page overflow.
+    let redir_data_offset = if cwd_fits {
+        cwd_data_offset + cwd_clamped_len
+    } else {
+        cwd_data_offset
+    };
+    let redir_end = redir_data_offset + redir_bytes.len();
+    let redir_fits = !redir_bytes.is_empty() && redir_end <= PAGE_SIZE;
+
+    if redir_fits {
+        params[PARAM_REDIR_OFFSET] = redir_data_offset as u64;
+        params[PARAM_REDIR_LEN] = redir_bytes.len() as u64;
+    }
+
     // Apply caller-specified param overrides LAST, so service-type callers can
     // overwrite argv/env slots they don't use (e.g. console overrides slot 6
     // with PARAM_FB_PHYS and slot 7 with PARAM_CONSOLE_ACTIVE — those services
     // ignore argv/envp).
     for &(idx, val) in param_overrides {
-        // Belt-and-suspenders: slots 10/11 (PARAM_CWD_OFFSET/LEN) are
-        // procmgr-trusted and must only be written via the cwd trailer path.
+        // Belt-and-suspenders: slots 10/11 (PARAM_CWD_OFFSET/LEN) and
+        // slots 12/13 (PARAM_REDIR_OFFSET/LEN) are procmgr-trusted.
         // Callers that reach this loop are already vetted, but keep the guard
-        // so a future caller can't accidentally forge cwd metadata.
-        if idx == PARAM_CWD_OFFSET || idx == PARAM_CWD_LEN {
+        // so a future caller can't accidentally forge these metadata slots.
+        if idx == PARAM_CWD_OFFSET || idx == PARAM_CWD_LEN
+            || idx == PARAM_REDIR_OFFSET || idx == PARAM_REDIR_LEN
+        {
             continue;
         }
         if idx < params.len() {
@@ -5460,6 +5533,11 @@ fn map_process_info_page(
     // Write cwd bytes after env data
     if cwd_fits {
         page[cwd_data_offset..cwd_end].copy_from_slice(&cwd_bytes[..cwd_clamped_len]);
+    }
+
+    // Write redir bytes after cwd
+    if redir_fits {
+        page[redir_data_offset..redir_end].copy_from_slice(redir_bytes);
     }
 
     space_map(

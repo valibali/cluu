@@ -824,6 +824,9 @@ pub fn build_container_run_payload_with_argv(name: &str, args: &[&str]) -> (Vec<
     (payload, argc)
 }
 
+/// Magic sentinel for the REDIR trailer (ASCII "REDI" little-endian).
+pub const REDIR_MAGIC: u32 = 0x52454449;
+
 /// One entry in the FDAC blob passed in a `CONTAINER_RUN` payload.
 ///
 /// FDAC = "File Descriptor Action" — each entry overrides one of the child's
@@ -833,6 +836,16 @@ pub struct FdAction {
     pub target_fd: u32,
     pub is_pipe: bool,
     pub endpoint: usize,
+}
+
+/// One file redirection entry packed into a `CONTAINER_RUN` payload.
+pub struct RedirAction {
+    /// Target fd to redirect (0=stdin, 1=stdout, 2=stderr).
+    pub target_fd: u8,
+    /// Open flags: 1=O_WRONLY|O_TRUNC, 2=O_WRONLY|O_APPEND, 3=O_RDONLY.
+    pub flags: u8,
+    /// Path to the file.
+    pub path: alloc::string::String,
 }
 
 /// Build a `CONTAINER_RUN` payload that includes argv AND FDAC entries.
@@ -894,6 +907,89 @@ pub fn build_container_run_payload_with_argv_and_fdac(
         let argv_bytes_len = (payload.len() - argv_start) as u32;
         payload.extend_from_slice(&argv_bytes_len.to_le_bytes());
         payload.extend_from_slice(&ARGV_MAGIC.to_le_bytes());
+    }
+
+    // CWD trailer is always last.
+    let cwd_string = crate::posix::current_dir_string();
+    let cwd_bytes = cwd_string.as_bytes();
+    let cwd_len = cwd_bytes.len().min(CWD_MAX);
+    payload.extend_from_slice(&cwd_bytes[..cwd_len]);
+    payload.extend_from_slice(&(cwd_len as u32).to_le_bytes());
+    payload.extend_from_slice(&CWD_MAGIC.to_le_bytes());
+
+    (payload, argc, fdac_offset)
+}
+
+/// Build a `CONTAINER_RUN` payload with argv, FDAC entries, AND REDIR entries.
+///
+/// Wire format (in order):
+///   `[name_bytes]`
+///   `[u32 FDAC_MAGIC LE][u32 count LE][(u32 fd, u32 flags, u64 ep) * count]`
+///   `[argv[0]\0][argv[1]\0]...[u32 argv_bytes_len LE][u32 ARGV_MAGIC LE]`
+///   `[redir entries...][u32 entries_len LE][u32 REDIR_MAGIC LE]`
+///   `[cwd_bytes][u32 cwd_len LE][u32 CWD_MAGIC LE]`
+///
+/// Stripping order in procmgr (outermost first): CWD → REDIR → ARGV, leaving
+/// `[name][FDAC]` in `effective_payload`.
+///
+/// Returns `(payload_bytes, argc, fdac_offset)`.
+/// Maximum 4 redirs; paths capped at 255 bytes each.
+#[cfg(feature = "posix")]
+pub fn build_container_run_payload_full(
+    name: &str,
+    args: &[&str],
+    fdac: &[FdAction],
+    redirs: &[RedirAction],
+) -> (Vec<u8>, usize, usize) {
+    use crate::boot::CWD_MAX;
+
+    let argc = args.len();
+    let argv_bytes_est: usize = args.iter().map(|a| a.len() + 1).sum();
+    let redir_bytes_est: usize = redirs.iter().map(|r| 4 + r.path.len().min(255)).sum();
+    let mut payload =
+        Vec::with_capacity(name.len() + argv_bytes_est + 16 * fdac.len() + redir_bytes_est + 24 + CWD_MAX + 24);
+    payload.extend_from_slice(name.as_bytes());
+
+    // FDAC blob immediately after the image name.
+    let fdac_offset = if fdac.is_empty() { 0 } else { payload.len() };
+    if !fdac.is_empty() {
+        const FDAC_MAGIC: u32 = 0x46444143;
+        payload.extend_from_slice(&FDAC_MAGIC.to_le_bytes());
+        payload.extend_from_slice(&(fdac.len() as u32).to_le_bytes());
+        for entry in fdac {
+            payload.extend_from_slice(&entry.target_fd.to_le_bytes());
+            let flags: u32 = if entry.is_pipe { 0x01 } else { 0 };
+            payload.extend_from_slice(&flags.to_le_bytes());
+            payload.extend_from_slice(&(entry.endpoint as u64).to_le_bytes());
+        }
+    }
+
+    // ARGV trailer comes after FDAC.
+    if argc > 0 {
+        let argv_start = payload.len();
+        for arg in args {
+            payload.extend_from_slice(arg.as_bytes());
+            payload.push(0);
+        }
+        let argv_bytes_len = (payload.len() - argv_start) as u32;
+        payload.extend_from_slice(&argv_bytes_len.to_le_bytes());
+        payload.extend_from_slice(&ARGV_MAGIC.to_le_bytes());
+    }
+
+    // REDIR trailer comes after ARGV, before CWD.
+    if !redirs.is_empty() {
+        let redir_start = payload.len();
+        for r in redirs.iter().take(4) {
+            let path_bytes = r.path.as_bytes();
+            let path_len = path_bytes.len().min(255) as u16;
+            payload.push(r.target_fd);
+            payload.push(r.flags);
+            payload.extend_from_slice(&path_len.to_le_bytes());
+            payload.extend_from_slice(&path_bytes[..path_len as usize]);
+        }
+        let entries_len = (payload.len() - redir_start) as u32;
+        payload.extend_from_slice(&entries_len.to_le_bytes());
+        payload.extend_from_slice(&REDIR_MAGIC.to_le_bytes());
     }
 
     // CWD trailer is always last.

@@ -282,6 +282,18 @@ impl FdTable {
         Some(self.insert(entry))
     }
 
+    /// Replace an fd entry unconditionally.
+    ///
+    /// Used by `apply_redirections` at startup to substitute a TTY entry
+    /// with a VFS-backed file. Does NOT close the old entry (TTY endpoints
+    /// are borrowed, not owned by the fd table).
+    pub fn replace(&mut self, fd: i32, entry: FdEntry) {
+        self.entries.insert(fd, entry);
+        if fd >= self.next_fd {
+            self.next_fd = fd + 1;
+        }
+    }
+
     /// Duplicate an fd to a specific number (like dup2()).
     pub fn dup2(&mut self, old_fd: i32, new_fd: i32) -> Option<i32> {
         if old_fd == new_fd {

@@ -240,6 +240,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd | grep CLUU | head -1"
                 ;;
+            l2_redir_stdout_file)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd > /tmp/motdcopy; cat /tmp/motdcopy | head -1"
+                ;;
             hr6_shell_crash)
                 TEST_COMMAND="shellcrash"
                 ;;

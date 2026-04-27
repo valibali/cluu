@@ -26,7 +26,7 @@
 mod dir;
 mod env;
 mod fcntl;
-mod file;
+pub(crate) mod file;
 mod framebuffer;
 mod memory;
 pub mod pipe;

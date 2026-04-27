@@ -63,7 +63,8 @@ pub struct ProcessInfo {
     /// Generic parameters (service-specific data).
     /// Slots 0-9: existing (see PARAM_* constants below).
     /// Slots 10-11: cwd offset / length (Shell-A).
-    pub params: [u64; 12],
+    /// Slots 12-13: redir offset / length (file redirection).
+    pub params: [u64; 14],
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -210,6 +211,11 @@ pub const PARAM_CWD_LEN: usize = 11;
 /// Maximum cwd byte length carried across spawn.
 pub const CWD_MAX: usize = 1024;
 
+/// Redirection trailer offset within the ProcessInfo page.
+pub const PARAM_REDIR_OFFSET: usize = 12;
+/// Redirection trailer length (excludes the magic+len_marker; just the entries).
+pub const PARAM_REDIR_LEN: usize = 13;
+
 /// Read the process info structure.
 pub fn process_info() -> &'static ProcessInfo {
     unsafe { &*(PROCESS_INFO_ADDR as *const ProcessInfo) }
@@ -288,7 +294,7 @@ pub fn pid() -> usize {
 
 const _: () = {
     let size = core::mem::size_of::<ProcessInfo>();
-    // 3 * usize + 16 * usize + 12 * u64 on x86_64 = 24 + 128 + 96 = 248 bytes.
-    // Page is 4096; plenty of room for argv/env/cwd payloads after the header.
+    // 3 * usize + 16 * usize + 14 * u64 on x86_64 = 24 + 128 + 112 = 264 bytes.
+    // Page is 4096; plenty of room for argv/env/cwd/redir payloads after the header.
     assert!(size <= 512, "ProcessInfo grew unexpectedly large");
 };

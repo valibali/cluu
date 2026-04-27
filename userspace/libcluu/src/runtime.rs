@@ -80,6 +80,21 @@ pub extern "C" fn _start() -> ! {
         crate::posix::init_cwd();
         crate::posix::init_env();
         crate::args::init();
+
+        // Apply file redirections written by the shell into the ProcessInfo page.
+        // Must run AFTER init_stdio (so entries exist to replace) and AFTER
+        // registry::init (so VFS lookups work), but BEFORE main().
+        {
+            let info = crate::boot::process_info();
+            let redir_offset = info.params[crate::boot::PARAM_REDIR_OFFSET] as usize;
+            let redir_len = info.params[crate::boot::PARAM_REDIR_LEN] as usize;
+            if redir_offset > 0 && redir_len > 0 {
+                let page_base = crate::boot::PROCESS_INFO_ADDR & !(crate::mem::PAGE_SIZE - 1);
+                let redir_ptr = (page_base + redir_offset) as *const u8;
+                let redir_slice = unsafe { core::slice::from_raw_parts(redir_ptr, redir_len) };
+                apply_redirections(redir_slice);
+            }
+        }
     }
 
     #[cfg(not(feature = "posix"))]
@@ -126,6 +141,79 @@ pub extern "C" fn _start() -> ! {
     // Fallback: yield loop (only if endpoint creation failed)
     loop {
         let _ = yield_cpu();
+    }
+}
+
+/// Open files listed in the REDIR trailer and replace the corresponding fd_table
+/// entries so that subsequent reads/writes go to the redirected files.
+///
+/// Called from `_start` after `init_stdio` and `registry::init`, before `main`.
+/// Best-effort: if a file cannot be opened, the original fd entry is left intact
+/// and the child will see EBADF/EIO on that fd (matching shell error semantics).
+#[cfg(all(
+    not(feature = "std"),
+    not(test),
+    not(feature = "c-runtime"),
+    feature = "posix",
+    target_os = "none"
+))]
+fn apply_redirections(redir_bytes: &[u8]) {
+    use crate::posix::file::{O_APPEND, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY};
+
+    let vfs_endpoint = match crate::registry::lookup_service("vfs:main") {
+        Some(ep) => ep,
+        None => return,
+    };
+    let client_id = crate::registry::control_endpoint();
+    if client_id == 0 {
+        return;
+    }
+    let vfs = crate::fs::client::VfsClient::new(vfs_endpoint, client_id);
+
+    let mut cursor = 0usize;
+    while cursor + 4 <= redir_bytes.len() {
+        let target_fd = redir_bytes[cursor];
+        let flags = redir_bytes[cursor + 1];
+        let path_len = u16::from_le_bytes([redir_bytes[cursor + 2], redir_bytes[cursor + 3]]) as usize;
+        cursor += 4;
+        if cursor + path_len > redir_bytes.len() {
+            break;
+        }
+        let path_bytes = &redir_bytes[cursor..cursor + path_len];
+        cursor += path_len;
+
+        let path = match core::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let posix_flags: usize = match flags {
+            1 => (O_WRONLY | O_CREAT | O_TRUNC) as usize,
+            2 => (O_WRONLY | O_CREAT | O_APPEND) as usize,
+            3 => O_RDONLY as usize,
+            _ => continue,
+        };
+
+        let resolved = crate::posix::resolve_path(path);
+        let file = match vfs.open_with(&resolved, posix_flags, 0o644) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+
+        let readable = flags == 3;
+        let writable = flags == 1 || flags == 2;
+        let mut entry = crate::fd_table::FdEntry::file(
+            vfs_endpoint,
+            file.fd,
+            client_id,
+            readable,
+            writable,
+        );
+        if flags == 2 {
+            // O_APPEND: position at end of file so writes go there.
+            entry.position = file.size as u64;
+        }
+        crate::fd_table::FD_TABLE.lock().replace(target_fd as i32, entry);
     }
 }
 
