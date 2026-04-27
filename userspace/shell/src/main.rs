@@ -5,6 +5,8 @@ extern crate alloc;
 
 #[cfg(feature = "lang-parser")]
 mod commands;
+#[cfg(feature = "lang-parser")]
+mod pipeline;
 
 use alloc::format;
 #[cfg(feature = "lang-parser")]
