@@ -2254,6 +2254,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/shell",
         "userspace/timeserver",
         "userspace/cat",
+        "userspace/grep",
         "userspace/tpmd",
     ];
 
@@ -2848,6 +2849,8 @@ fn run_tests() -> Result<()> {
             "cluu-shell",
             "--exclude",
             "cluu-cat",
+            "--exclude",
+            "cluu-grep",
             "--exclude",
             "cluu-virtio-blk",
             "--features",

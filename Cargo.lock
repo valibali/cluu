@@ -213,6 +213,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-grep"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-init"
 version = "0.1.0"
 dependencies = [
