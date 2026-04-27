@@ -395,6 +395,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-wc"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu_lang"
 version = "0.1.0"
 dependencies = [

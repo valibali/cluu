@@ -28,6 +28,7 @@ members = [
     "userspace/cat",
     "userspace/grep",
     "userspace/head",
+    "userspace/wc",
     "userspace/top",
     "userspace/nestprobe",
     "userspace/escalateprobe",
@@ -72,6 +73,7 @@ default-members = [
     "userspace/cat",
     "userspace/grep",
     "userspace/head",
+    "userspace/wc",
     "userspace/top",
     "userspace/nestprobe",
     "userspace/escalateprobe",
@@ -152,6 +154,9 @@ debug = 0
 debug = 0
 
 [profile.dev.package."cluu-head"]
+debug = 0
+
+[profile.dev.package."cluu-wc"]
 debug = 0
 
 [profile.dev.package."cluu-top"]
@@ -239,6 +244,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-head"]
+debug = 0
+
+[profile.release.package."cluu-wc"]
 debug = 0
 
 [profile.release.package."cluu-top"]
