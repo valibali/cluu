@@ -148,6 +148,20 @@ struct SessionEntry {
     stdin_endpoint: usize,
 }
 
+/// One pipe — an IPC endpoint with two rights-restricted tokens minted from it.
+/// See docs/superpowers/specs/2026-04-27-pipes-design.md §4.
+#[allow(dead_code)] // fields are read by handle_pipe_create/close (next tasks)
+struct PipeEntry {
+    /// Underlying endpoint root token owned by procmgr.
+    endpoint: usize,
+    /// PID of the process that called PIPE_CREATE — used for cleanup on exit.
+    creator_pid: usize,
+    /// Send-only token derived from `endpoint`. Cleared once revoked.
+    write_token: usize,
+    /// Recv-only token derived from `endpoint`. Cleared once revoked.
+    read_token: usize,
+}
+
 /// Upper bound on the argv block emitted by `build_container_run_payload_with_argv`.
 /// The child's argv must fit inside the 4 KB ProcessInfo page alongside the
 /// ProcessInfo header, cwd block, and name; 3 KB leaves ~1 KB for the rest.
@@ -266,6 +280,8 @@ struct ProcessManager {
     pending_restarts: BTreeSet<u64>,
     /// Per-user failed login attempt tracking for rate limiting.
     login_attempts: BTreeMap<String, LoginAttempt>,
+    /// Pipe table: index = lower 16 bits of pipe_id; `None` means free slot.
+    pipes: Vec<Option<PipeEntry>>,
 }
 
 impl ProcessManager {
@@ -328,7 +344,36 @@ impl ProcessManager {
             pending_timers: Vec::new(),
             pending_restarts: BTreeSet::new(),
             login_attempts: BTreeMap::new(),
+            pipes: Vec::new(),
         })
+    }
+
+    /// Allocate a free slot in the pipe table; returns its index.
+    /// Encodes to a `pipe_id` via `pipe_id_encode`.
+    #[allow(dead_code)] // used by handle_pipe_create (next task)
+    fn allocate_pipe_slot(&mut self) -> usize {
+        for (idx, slot) in self.pipes.iter().enumerate() {
+            if slot.is_none() {
+                return idx;
+            }
+        }
+        self.pipes.push(None);
+        self.pipes.len() - 1
+    }
+
+    /// Encode a pipe table index into the `pipe_id` value returned to callers.
+    /// v1 keeps the encoding trivial (index in low 16 bits, generation reserved
+    /// in upper bits but unused); future generations counter for ABA-safe
+    /// reuse can plug in here without an API change.
+    #[allow(dead_code)] // used by handle_pipe_create (next task)
+    fn pipe_id_encode(index: usize) -> usize {
+        index & 0xFFFF
+    }
+
+    /// Decode a `pipe_id` into a slot index.
+    #[allow(dead_code)] // used by handle_pipe_close (next task)
+    fn pipe_id_decode(pipe_id: usize) -> usize {
+        pipe_id & 0xFFFF
     }
 
     fn clock_sample(&self) -> u64 {
