@@ -368,7 +368,6 @@ impl ProcessManager {
     }
 
     /// Decode a `pipe_id` into a slot index.
-    #[allow(dead_code)] // used by handle_pipe_close (next task)
     fn pipe_id_decode(pipe_id: usize) -> usize {
         pipe_id & 0xFFFF
     }
@@ -1986,6 +1985,9 @@ impl ProcessManager {
         if msg.tag.label == libcluu::ipc::PROCMGR_PIPE_CREATE_LABEL {
             return self.handle_pipe_create(msg, sender_tid);
         }
+        if msg.tag.label == libcluu::ipc::PROCMGR_PIPE_CLOSE_LABEL {
+            return self.handle_pipe_close(msg, sender_tid);
+        }
         self.handle_spawn_message(msg, payload, sender_tid)
     }
 
@@ -2912,6 +2914,68 @@ impl ProcessManager {
         reply_msg.words[1] = write_token;
         reply_msg.words[2] = read_token;
         reply_msg.words[3] = pipe_id;
+        if let Some(tok) = reply_token {
+            let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+        }
+        Ok(())
+    }
+
+    /// Handle PROCMGR_PIPE_CLOSE_LABEL: revoke and free a pipe.
+    ///
+    /// words[0] = pipe_id (as returned by PIPE_CREATE).
+    ///
+    /// Idempotent: if the slot is already empty or out of range, replies
+    /// success without doing anything.  Only the creator process may close a
+    /// pipe; a non-creator caller gets a silent success (no-op) per spec §4.2.
+    ///
+    /// On close the kernel tokens are revoked in order: write_token,
+    /// read_token, then the root endpoint.  The slot is then set to None.
+    ///
+    /// Reply: [status=0] always in v1.
+    fn handle_pipe_close(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
+        let reply_token = extract_reply_id(msg);
+        let mut reply_msg = Message::new(0, [0; 6], 1);
+
+        let pipe_id = msg.words[0];
+        let idx = Self::pipe_id_decode(pipe_id);
+
+        // Steps 1-2: bounds check and presence check (idempotent close).
+        if idx >= self.pipes.len() || self.pipes[idx].is_none() {
+            reply_msg.words[0] = 0;
+            if let Some(tok) = reply_token {
+                let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+            }
+            return Ok(());
+        }
+
+        // Step 3: ownership check — only the creator may close.
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
+        {
+            let entry = self.pipes[idx].as_ref().unwrap();
+            if entry.creator_pid != caller_pid {
+                // Non-creator: silent success, no revocation.
+                reply_msg.words[0] = 0;
+                if let Some(tok) = reply_token {
+                    let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+                }
+                return Ok(());
+            }
+        }
+
+        // Step 3 (continued): revoke tokens and free the slot.
+        let entry = self.pipes[idx].take().unwrap();
+        if entry.write_token != 0 {
+            let _ = token_revoke(entry.write_token);
+        }
+        if entry.read_token != 0 {
+            let _ = token_revoke(entry.read_token);
+        }
+        if entry.endpoint != 0 {
+            let _ = token_revoke(entry.endpoint);
+        }
+
+        // Step 4: reply success.
+        reply_msg.words[0] = 0;
         if let Some(tok) = reply_token {
             let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
         }
