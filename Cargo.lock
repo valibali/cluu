@@ -308,6 +308,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-ps"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-ramfs"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,11 @@
+[package]
+name = "cluu-ps"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ps"
+path = "src/main.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }

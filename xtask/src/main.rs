@@ -2258,6 +2258,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/head",
         "userspace/wc",
         "userspace/ls",
+        "userspace/ps",
         "userspace/tpmd",
     ];
 
@@ -2860,6 +2861,8 @@ fn run_tests() -> Result<()> {
             "cluu-wc",
             "--exclude",
             "cluu-ls",
+            "--exclude",
+            "cluu-ps",
             "--exclude",
             "cluu-virtio-blk",
             "--features",
