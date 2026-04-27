@@ -150,7 +150,6 @@ struct SessionEntry {
 
 /// One pipe — an IPC endpoint with two rights-restricted tokens minted from it.
 /// See docs/superpowers/specs/2026-04-27-pipes-design.md §4.
-#[allow(dead_code)] // fields are read by handle_pipe_create/close (next tasks)
 struct PipeEntry {
     /// Underlying endpoint root token owned by procmgr.
     endpoint: usize,
@@ -350,7 +349,6 @@ impl ProcessManager {
 
     /// Allocate a free slot in the pipe table; returns its index.
     /// Encodes to a `pipe_id` via `pipe_id_encode`.
-    #[allow(dead_code)] // used by handle_pipe_create (next task)
     fn allocate_pipe_slot(&mut self) -> usize {
         for (idx, slot) in self.pipes.iter().enumerate() {
             if slot.is_none() {
@@ -365,7 +363,6 @@ impl ProcessManager {
     /// v1 keeps the encoding trivial (index in low 16 bits, generation reserved
     /// in upper bits but unused); future generations counter for ABA-safe
     /// reuse can plug in here without an API change.
-    #[allow(dead_code)] // used by handle_pipe_create (next task)
     fn pipe_id_encode(index: usize) -> usize {
         index & 0xFFFF
     }
@@ -1986,6 +1983,9 @@ impl ProcessManager {
         if msg.tag.label == PROCMGR_PROC_QUERY_LABEL {
             return self.handle_proc_query(msg, sender_tid);
         }
+        if msg.tag.label == libcluu::ipc::PROCMGR_PIPE_CREATE_LABEL {
+            return self.handle_pipe_create(msg, sender_tid);
+        }
         self.handle_spawn_message(msg, payload, sender_tid)
     }
 
@@ -2843,6 +2843,78 @@ impl ProcessManager {
 
         let _ = ipc::reply_with_payload(reply_token, &reply_msg, &records);
 
+        Ok(())
+    }
+
+    /// Handle PROCMGR_PIPE_CREATE_LABEL: allocate a new IPC-endpoint-backed pipe.
+    ///
+    /// Creates a fresh endpoint, mints an IPC_SEND token (write end) and an
+    /// IPC_RECV token (read end), stores them in the pipe table, and replies
+    /// with [status=0, write_token, read_token, pipe_id].  On any failure the
+    /// partially-allocated resources are revoked and status is non-zero.
+    fn handle_pipe_create(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
+        let reply_token = extract_reply_id(msg);
+        let mut reply_msg = Message::new(0, [0; 6], 4);
+
+        let creator_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
+
+        // Step 1: create the underlying IPC endpoint.
+        let endpoint = match endpoint_create(self.token) {
+            Ok(ep) => ep,
+            Err(e) => {
+                reply_msg.words[0] = e.to_errno() as usize;
+                if let Some(tok) = reply_token {
+                    let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+                }
+                return Ok(());
+            }
+        };
+
+        // Step 2: derive the write-only (IPC_SEND) token.
+        let write_token = match token_derive(endpoint, Rights::IPC_SEND.bits() as usize, 0) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = token_revoke(endpoint);
+                reply_msg.words[0] = e.to_errno() as usize;
+                if let Some(tok) = reply_token {
+                    let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+                }
+                return Ok(());
+            }
+        };
+
+        // Step 3: derive the read-only (IPC_RECV) token.
+        let read_token = match token_derive(endpoint, Rights::IPC_RECV.bits() as usize, 0) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = token_revoke(write_token);
+                let _ = token_revoke(endpoint);
+                reply_msg.words[0] = e.to_errno() as usize;
+                if let Some(tok) = reply_token {
+                    let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+                }
+                return Ok(());
+            }
+        };
+
+        // Step 4: allocate a pipe table slot and store the entry.
+        let slot_idx = self.allocate_pipe_slot();
+        self.pipes[slot_idx] = Some(PipeEntry {
+            endpoint,
+            creator_pid,
+            write_token,
+            read_token,
+        });
+        let pipe_id = Self::pipe_id_encode(slot_idx);
+
+        // Step 5: reply with [status=0, write_token, read_token, pipe_id].
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = write_token;
+        reply_msg.words[2] = read_token;
+        reply_msg.words[3] = pipe_id;
+        if let Some(tok) = reply_token {
+            let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+        }
         Ok(())
     }
 
