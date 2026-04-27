@@ -311,7 +311,6 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(Ext2OwnerDenyBuiltin));
         registry.register(Box::new(RingIoBuiltin));
         registry.register(Box::new(CatBuiltin));
-        registry.register(Box::new(TouchBuiltin));
         registry.register(Box::new(HeapBuiltin));
         registry.register(Box::new(ContainerBuiltin));
         registry.register(Box::new(SuBuiltin));
@@ -2688,63 +2687,6 @@ impl BuiltinCommand for CatBuiltin {
             .free(read_buf_base, grant_size);
 
         let _ = vfs.close(file);
-        Ok(())
-    }
-}
-
-struct TouchBuiltin;
-
-impl BuiltinCommand for TouchBuiltin {
-    fn name(&self) -> &'static str {
-        "touch"
-    }
-
-    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
-        if args.is_empty() {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"touch: missing path\n")?;
-            return Ok(());
-        }
-
-        let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
-            Ok(ep) => ep,
-            Err(_) => {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"touch: vfs not available\n")?;
-                return Ok(());
-            }
-        };
-        let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
-            Ok(c) => c,
-            Err(_) => {
-                send_with_payload(
-                    stdout,
-                    TTY_WRITE_LABEL,
-                    b"touch: failed to create vfs client\n",
-                )?;
-                return Ok(());
-            }
-        };
-
-        for path in args {
-            // O_WRONLY | O_CREAT, mode 0644. No truncate — existing files
-            // are left intact (POSIX touch updates atime/mtime; we just
-            // ensure existence).
-            let resolved = libcluu::posix::resolve_path(path);
-            match vfs.open_with(
-                &resolved,
-                (libcluu::posix::O_WRONLY | libcluu::posix::O_CREAT) as usize,
-                0o644,
-            ) {
-                Ok(f) => {
-                    let _ = vfs.close(f);
-                    let _ = libcluu::debug_print(&format!("touch: ok {}", resolved));
-                }
-                Err(e) => {
-                    let line = format!("touch: {}: {:?}\n", resolved, e);
-                    send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-                    let _ = libcluu::debug_print(&format!("touch: {}: {:?}", resolved, e));
-                }
-            }
-        }
         Ok(())
     }
 }
