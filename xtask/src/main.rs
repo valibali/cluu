@@ -2690,6 +2690,11 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
         fs::copy(&users_src, etc_dir.join("users.toml"))?;
         println!("  Added /etc/users.toml");
     }
+    let envelopes_src = project_root().join("etc/envelopes.toml");
+    if envelopes_src.exists() {
+        fs::copy(&envelopes_src, etc_dir.join("envelopes.toml"))?;
+        println!("  Added /etc/envelopes.toml");
+    }
 
     // Visitor-friendly seeds: motd shown by login, plus welcome and
     // architecture files for `cat /etc/welcome.txt` exploration.

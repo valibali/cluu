@@ -1,0 +1,110 @@
+# /etc/envelopes.toml — system-wide envelope definitions.
+#
+# Per-profile-class. users.toml's [user.<name>].profile field selects
+# which envelope is applied at session-login. Procmgr resolves the
+# envelope into the shell's mount view + initial env block.
+#
+# Mount entries are "mode:path" strings:
+#   ro / readonly  — read-only mount
+#   rw / readwrite — read-write mount
+#
+# {user} in env_template values is substituted with the logging-in
+# user's name at session-login.
+#
+# See docs/superpowers/specs/2026-04-28-user-envelope-design.md.
+
+[envelope.user]
+mounts = [
+    "ro:/",
+    "ro:/etc",
+    "ro:/lib",
+    "ro:/usr",
+    "ro:/bin",
+    "rw:/var/log",
+    "rw:/tmp",
+    "rw:/home",
+]
+
+[envelope.user.env]
+SHELL = "/bin/shell"
+TERM = "cluu"
+PATH = "/bin:/usr/bin"
+LANG = "C"
+
+[envelope.user.env_template]
+HOME = "/home/{user}"
+USER = "{user}"
+LOGNAME = "{user}"
+PWD = "/home/{user}"
+
+
+[envelope.admin]
+mounts = [
+    "rw:/",
+    "rw:/etc",
+    "rw:/lib",
+    "rw:/usr",
+    "rw:/bin",
+    "rw:/var",
+    "rw:/tmp",
+    "rw:/home",
+]
+
+[envelope.admin.env]
+SHELL = "/bin/shell"
+TERM = "cluu"
+PATH = "/sbin:/bin:/usr/sbin:/usr/bin"
+LANG = "C"
+
+[envelope.admin.env_template]
+HOME = "/home/{user}"
+USER = "{user}"
+LOGNAME = "{user}"
+PWD = "/home/{user}"
+
+
+[envelope.supervisor]
+# Same as admin — supervisor profile maps to admin envelope. CLUU's
+# users.toml uses "supervisor" as the highest privilege class; alias
+# until we have a fourth envelope category that needs to differ.
+mounts = [
+    "rw:/",
+    "rw:/etc",
+    "rw:/lib",
+    "rw:/usr",
+    "rw:/bin",
+    "rw:/var",
+    "rw:/tmp",
+    "rw:/home",
+]
+
+[envelope.supervisor.env]
+SHELL = "/bin/shell"
+TERM = "cluu"
+PATH = "/sbin:/bin:/usr/sbin:/usr/bin"
+LANG = "C"
+
+[envelope.supervisor.env_template]
+HOME = "/home/{user}"
+USER = "{user}"
+LOGNAME = "{user}"
+PWD = "/home/{user}"
+
+
+[envelope.service]
+# Stripped envelope for daemons spawned by procmgr/init at boot.
+# No /home, no /tmp by default — services declare what they need
+# in their own Cluufiles (which then narrow within this envelope).
+mounts = [
+    "ro:/",
+    "ro:/etc",
+    "ro:/lib",
+    "rw:/var/log",
+]
+
+[envelope.service.env]
+PATH = "/sbin:/bin"
+TERM = "dumb"
+LANG = "C"
+
+# No env_template — services don't have a "user".
