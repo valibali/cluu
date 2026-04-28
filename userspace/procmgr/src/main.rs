@@ -2614,8 +2614,12 @@ impl ProcessManager {
         }
 
         // Look up target user record — extract owned values so reference is dropped
-        let (stored_pw, target_profile, target_home) = match self.user_records.get(target_username) {
-            Some(record) => (record.password.clone(), record.profile, record.home.clone()),
+        let (stored_pw, target_profile, target_profile_name) = match self.user_records.get(target_username) {
+            Some(record) => (
+                record.password.clone(),
+                record.profile,
+                record.profile_name.clone(),
+            ),
             None => {
                 let _ = debug_print(&format!(
                     "procmgr: su rejected: unknown user '{}'", target_username
@@ -2664,8 +2668,27 @@ impl ProcessManager {
             target_username, target_profile.bits(), caller_profile.bits()
         ));
 
-        // Build view from target user's profile defaults + target's home
-        let view_mounts = self.build_view_for_profile_and_home(target_profile, &target_home);
+        // Resolve target user's envelope; reject su if not found.
+        let envelope = match envelopes::lookup_envelope(&self.envelopes, &target_profile_name) {
+            Some(e) => e.clone(),
+            None => {
+                let _ = debug_print(&format!(
+                    "procmgr: su rejected: no envelope for profile '{}'",
+                    target_profile_name
+                ));
+                self.audit_log(
+                    "WARN",
+                    "AUTH_SU_FAIL",
+                    &format!("from={} to={} reason=no_envelope", caller_user, target_username),
+                );
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+        // Build view from envelope mounts (UE10 pattern).
+        let view_mounts = Self::build_view_from_envelope(&envelope);
+        let resolved_env = envelopes::resolve_env(&envelope, target_username);
 
         // Determine caller's container for parenting (cascading)
         let caller_container_id = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
@@ -2704,7 +2727,7 @@ impl ProcessManager {
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload("");
-        let (su_env, su_envc) = build_user_env_payload(target_username, &target_home);
+        let (su_env, su_envc) = build_envelope_env_payload(&resolved_env);
 
         match self.spawn_service_with_env(
             SERVICE_PATH,
