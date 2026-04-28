@@ -264,6 +264,7 @@ struct ProcessManager {
     container_children: BTreeMap<u64, Vec<u64>>, // parent_cid -> child cids
     autostart_done: bool,
     auto_login_done: bool,
+    envelopes: Vec<envelopes::Envelope>,
     user_records: BTreeMap<String, UserRecord>,
     session_table: BTreeMap<u64, SessionEntry>,
     vt_to_session: [u64; VT_COUNT],
@@ -334,6 +335,7 @@ impl ProcessManager {
             container_children: BTreeMap::new(),
             autostart_done: false,
             auto_login_done: false,
+            envelopes: Vec::new(),
             user_records: BTreeMap::new(),
             session_table: BTreeMap::new(),
             vt_to_session: [0; VT_COUNT],
@@ -904,6 +906,28 @@ impl ProcessManager {
             }
         }
         let _ = debug_print("procmgr: autostart complete");
+    }
+
+    fn load_envelopes(&mut self) {
+        let data = match self.read_file_from_vfs("/etc/envelopes.toml") {
+            Some(d) => d,
+            None => panic!("procmgr: /etc/envelopes.toml not found — boot cannot continue"),
+        };
+
+        let text = match core::str::from_utf8(&data) {
+            Ok(s) => s,
+            Err(_) => panic!("procmgr: /etc/envelopes.toml is not valid UTF-8"),
+        };
+
+        let parsed = match envelopes::parse_envelopes(text) {
+            Ok(v) => v,
+            Err(e) => panic!("procmgr: envelopes.toml malformed: {}", e),
+        };
+
+        self.envelopes = parsed;
+        let _ = debug_print(&format!(
+            "procmgr: loaded {} envelope(s)", self.envelopes.len()
+        ));
     }
 
     fn parse_users_toml(&mut self) {
@@ -1812,6 +1836,7 @@ impl ProcessManager {
                     ));
                     self.autostart_done = true;
                     self.run_autostart();
+                    self.load_envelopes();
                     self.parse_users_toml();
                     self.try_auto_login();
                 } else if name == "main" {
