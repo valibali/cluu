@@ -126,6 +126,13 @@ pub const MAP_LARGE_PAGES: usize = 0x200;
 /// When set, arg4 (data_len) is reinterpreted as the frame token handle.
 pub const MAP_FRAME_TOKEN: usize = 0x400;
 
+/// Map the SAME physical frames as the source pages instead of allocating
+/// new frames + copying. Source pages must remain mapped (i.e., the caller
+/// must keep them alive) for as long as the target's mapping exists.
+/// Always read-only; writable bit ignored. Used by VFS for shared ELF
+/// segments (.text, .rodata).
+pub const MAP_SHARE_PHYS: usize = 0x800;
+
 /// Raw syscall invocation using x86_64 SYSCALL instruction
 ///
 /// # Safety

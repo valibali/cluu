@@ -302,22 +302,13 @@ impl FileCache {
         if size == 0 || size > FILE_CACHE_MAX_SIZE || size > FILE_CACHE_TOTAL_MAX {
             return None;
         }
-        loop {
-            if self.total_size + size > FILE_CACHE_TOTAL_MAX {
-                if self.entries.is_empty() {
-                    return None;
-                }
-                self.evict_lru();
-                continue;
-            }
-            if let Some(base) = self.region.allocate(size) {
-                return Some(base);
-            }
-            if self.entries.is_empty() {
-                return None;
-            }
-            self.evict_lru();
+        // FIXME(MAP_SHARE_PHYS): evict_lru is a no-op while shared frames are
+        // pinned, so we check the budget once and return None if full rather
+        // than looping forever.
+        if self.total_size + size > FILE_CACHE_TOTAL_MAX {
+            return None;
         }
+        self.region.allocate(size)
     }
 
     fn insert(&mut self, inode: u32, size: usize, base: usize, len: usize) {
@@ -378,20 +369,10 @@ impl FileCache {
     }
 
     fn evict_lru(&mut self) {
-        // Find entry with lowest access counter
-        let lru_path = self
-            .entries
-            .iter()
-            .min_by_key(|(_, e)| e.last_access)
-            .map(|(k, _)| *k);
-
-        if let Some(path) = lru_path {
-            if let Some(entry) = self.entries.remove(&path) {
-                self.total_size = self.total_size.saturating_sub(entry.len);
-                self.region.free(entry.base, entry.len);
-            }
-            self.elf_meta.remove(&path);
-        }
+        // FIXME(MAP_SHARE_PHYS): cache eviction disabled while shares are pinned.
+        // Revisit when refcount lands. For v1 the 32 MB cache budget is enough
+        // for all CLUU userspace binaries (sum < 30 MB).
+        let _ = self; // suppress unused-mut warning
     }
 }
 
@@ -406,7 +387,12 @@ impl CacheRegion {
     }
 
     fn allocate(&mut self, size: usize) -> Option<usize> {
-        let size = align_up(size, 16);
+        // Align to PAGE_SIZE so that MAP_SHARE_PHYS can share physical frames
+        // without sub-page offset issues.  Each cache entry's base must be
+        // page-aligned so that `data_ptr + segment.file_offset` (where
+        // file_offset is always page-aligned for well-formed ELFs) is also
+        // page-aligned.
+        let size = align_up(size, PAGE_SIZE);
         if let Some(index) = self.free.iter().position(|b| b.size >= size) {
             let block = self.free.remove(index);
             let base = block.base;
@@ -429,7 +415,7 @@ impl CacheRegion {
     }
 
     fn free(&mut self, base: usize, size: usize) {
-        let size = align_up(size, 16);
+        let size = align_up(size, PAGE_SIZE);
         self.free.push(FreeBlock { base, size });
         self.coalesce();
     }
@@ -3242,6 +3228,14 @@ impl VfsServer {
         }
 
         // Handle non-page-aligned segments (e.g., .bss after .tdata/.tbss).
+        // Determine if this segment is shareable (read-only in caller's space).
+        let writable = (segment.page_flags & 0x02) != 0;
+        let final_flags = if writable {
+            segment.page_flags
+        } else {
+            segment.page_flags | libcluu::syscall::MAP_SHARE_PHYS
+        };
+
         let page_offset = vaddr & (PAGE_SIZE - 1);
         if page_offset != 0 {
             let next_page = (vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -3259,7 +3253,7 @@ impl VfsServer {
                 target_space,
                 next_page,
                 data_ptr,
-                segment.page_flags,
+                final_flags,
                 num_pages,
                 adj_file_size,
             )
@@ -3272,7 +3266,7 @@ impl VfsServer {
             target_space,
             vaddr,
             data_ptr,
-            segment.page_flags,
+            final_flags,
             num_pages,
             file_size,
         )?;

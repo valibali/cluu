@@ -72,6 +72,12 @@ pub mod pte_flags {
     /// No execute (bit 63) - requires NX support
     pub const NO_EXECUTE: u64 = 1 << 63;
 
+    /// Shared physical frame (bit 9, OS-available).
+    /// Set by MAP_SHARE_PHYS on PTEs that alias another space's physical frames.
+    /// teardown_user_pages skips PMM free for these PTEs — the owning space is
+    /// responsible for the frame lifetime.
+    pub const SHARED_PHYS: u64 = 1 << 9;
+
     /// Mask to extract the physical address from a page table entry (bits 12-51).
     /// Strips flag bits (0-11) and reserved/NX bits (52-63).
     pub const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -1107,6 +1113,13 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
 
                     // Skip device-mapped pages (MMIO) — they are not PMM-owned
                     if pte & pte_flags::NO_CACHE != 0 {
+                        continue;
+                    }
+
+                    // Skip MAP_SHARE_PHYS pages — the physical frame is owned
+                    // by the caller's (VFS) address space, not this one.
+                    // Freeing it here would corrupt the caller's mapping.
+                    if pte & pte_flags::SHARED_PHYS != 0 {
                         continue;
                     }
 

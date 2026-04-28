@@ -1940,6 +1940,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
     const MAP_DEVICE: u32 = 0x100;
+    const MAP_SHARE_PHYS: u32 = 0x800;
     const MAP_TEST_FAILPOINT: u32 = 0x8000_0000;
     const MAP_TEST_FAIL_ON_MAP_STAGE: u32 = 0x4000_0000;
     const MAP_TEST_FAIL_AFTER_SHIFT: u32 = 16;
@@ -1980,6 +1981,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
     let executable = (flags & 0x04) != 0;
     let use_large_pages = (flags & MAP_LARGE_PAGES) != 0;
     let map_device = (flags & MAP_DEVICE) != 0;
+    let map_share_phys = (flags & MAP_SHARE_PHYS) != 0;
     let fail_after_pages = if (flags & MAP_TEST_FAILPOINT) != 0 {
         let raw = ((flags & MAP_TEST_FAIL_AFTER_MASK) >> MAP_TEST_FAIL_AFTER_SHIFT) as usize;
         Some(raw)
@@ -2019,9 +2021,43 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
         return Err(Error::InvalidArgument);
     };
 
+    // MAP_SHARE_PHYS: reject incompatible flag combinations up front.
+    if map_share_phys {
+        if data_ptr == 0 || data_len == 0 {
+            klibcluu::warn("invoke_space_map_range: SHARE_PHYS requires non-zero data_ptr/data_len");
+            return Err(Error::InvalidArgument);
+        }
+        if (data_ptr & 0xFFF) != 0 {
+            // data_ptr must be page-aligned so that the physical frame boundary
+            // coincides with the start of the segment data in the caller's space.
+            klibcluu::warn("invoke_space_map_range: SHARE_PHYS data_ptr not page-aligned");
+            return Err(Error::InvalidArgument);
+        }
+        if map_device {
+            klibcluu::warn("invoke_space_map_range: SHARE_PHYS incompatible with MAP_DEVICE");
+            return Err(Error::InvalidArgument);
+        }
+        if use_large_pages {
+            klibcluu::warn("invoke_space_map_range: SHARE_PHYS incompatible with MAP_LARGE_PAGES");
+            return Err(Error::InvalidArgument);
+        }
+    }
+
     // Device mapping: map physical address range directly
     if map_device {
         return map_device_range(space_id, virt_start, data_ptr as u64, num_pages, writable);
+    }
+
+    // MAP_SHARE_PHYS: remap caller's physical frames read-only into target space.
+    if map_share_phys {
+        return map_range_4kb_shared(MapRangeSharedRequest {
+            space_id,
+            virt_start,
+            data_ptr,
+            num_pages,
+            executable,
+            caller_page_table_root: caller_page_table_root.ok_or(Error::InvalidState)?,
+        });
     }
 
     // Check if we can use large pages:
@@ -2244,6 +2280,76 @@ fn map_range_4kb(req: MapRange4kbRequest) -> SyscallResult {
     klibcluu::trace("map_range_4kb: mapped ");
     klibcluu::log_dec(klibcluu::LogLevel::Trace, "", num_pages as u64);
     klibcluu::trace(" pages");
+
+    Ok(num_pages)
+}
+
+/// Request parameters for map_range_4kb_shared
+struct MapRangeSharedRequest {
+    space_id: crate::token::scope::AddressSpaceId,
+    virt_start: u64,
+    data_ptr: usize,
+    num_pages: usize,
+    executable: bool,
+    caller_page_table_root: x86_64::PhysAddr,
+}
+
+/// Map a range of pages by sharing the caller's physical frames (no alloc, no copy).
+///
+/// For each source page, translates caller virt → phys via their page table,
+/// then installs a READ-ONLY PTE in the target address space pointing at the
+/// same physical frame. Executable bit follows the caller's request.
+fn map_range_4kb_shared(req: MapRangeSharedRequest) -> SyscallResult {
+    use crate::elf;
+    use crate::mm::space_repository;
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+    let MapRangeSharedRequest {
+        space_id,
+        virt_start,
+        data_ptr,
+        num_pages,
+        executable,
+        caller_page_table_root,
+    } = req;
+
+    for page_idx in 0..num_pages {
+        let src_virt = (data_ptr as u64).wrapping_add((page_idx * PAGE_SIZE) as u64);
+
+        // Translate caller's virtual address to physical via their page table.
+        // This is done OUTSIDE the target-space lock to avoid double-acquiring
+        // the repository lock (caller and target may differ).
+        let src_phys = match elf::translate_vaddr(
+            caller_page_table_root,
+            x86_64::VirtAddr::new(src_virt),
+        ) {
+            Some(phys) => phys.as_u64() & !0xFFF, // page-aligned physical address
+            None => {
+                klibcluu::warn("map_range_4kb_shared: source page not mapped in caller space");
+                return Err(Error::InvalidArgument);
+            }
+        };
+
+        let target_virt = virt_start.wrapping_add((page_idx * PAGE_SIZE) as u64);
+
+        // Map src_phys into the target space, READ-ONLY with SHARED_PHYS marker.
+        // map_shared_page sets pte_flags::SHARED_PHYS so teardown_user_pages
+        // skips PMM free for these PTEs — the frame is owned by the caller.
+        let result = space_repository::with_space_mut(space_id, |space| unsafe {
+            elf::map_shared_page(target_virt, src_phys, executable, space.page_table_root)
+        });
+
+        match result {
+            Some(Ok(())) => {}
+            Some(Err(_)) => {
+                klibcluu::warn("map_range_4kb_shared: map_user_page failed");
+                return Err(Error::OutOfMemory);
+            }
+            None => {
+                return Err(Error::NotFound);
+            }
+        }
+    }
 
     Ok(num_pages)
 }
