@@ -551,6 +551,7 @@ fi
 # - l2_ext2append: append-past-EOF ext2 smoke test via shell builtin
 # - l2_ext2mutate: mkdir/rename/rmdir ext2 metadata mutation smoke test
 # - l2_ext2unlink: create+unlink verification smoke test
+# - l2_envelope_mounts: read-only /etc enforced via user envelope mount view (RED until UE10)
 # - l2_owner_deny: explicit non-owner mutation denial with second spawned client
 # - l2_sigint: foreground spawn interrupted by Ctrl-C (minimal SIGINT path)
 # - l2_jobs: background spawn + async reap notification (`SIGCHLD`-style baseline)
@@ -913,6 +914,18 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "mv: usage: mv <src> <dst>"
+        )
+        ;;
+    l2_envelope_mounts)
+        # TDD-red until UE10 wires the user envelope into send_vfs_set_view.
+        # With envelope-driven mounts /etc becomes read-only, so /bin/touch
+        # fails on open(O_WRONLY|O_CREAT) with PermissionDenied. The marker
+        # below comes from userspace/touch/src/main.rs:51 — `format!("touch:
+        # {}: {:?}\n", path, e)` where e is libcluu::error::Error::PermissionDenied.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "touch: /etc/probefile: PermissionDenied"
         )
         ;;
     l2_mount_private)

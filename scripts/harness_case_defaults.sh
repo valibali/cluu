@@ -140,6 +140,14 @@ harness_derive_marker_defaults() {
                 # creation is unblocked.
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn mv"
                 ;;
+            l2_envelope_mounts)
+                TEST_COMMAND=""
+                # TDD-red harness: with the (eventual) UE10 envelope-driven mount
+                # view, /etc is read-only and `touch /etc/probefile` must fail
+                # with PermissionDenied. RED today because root logs in with
+                # supervisor mounts (/ → / rw); flips GREEN once UE10 lands.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn touch /etc/probefile"
+                ;;
             l2_mount_private)
                 TEST_COMMAND=""
                 # Seed shell's /tmp, then spawn the probe. The probe should see an
