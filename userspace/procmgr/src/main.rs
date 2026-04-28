@@ -6,7 +6,10 @@ extern crate alloc;
 mod envelopes;
 mod mount_policy;
 
-use crate::mount_policy::{parse_mount_policies_raw, resolve_effective_policies, MountPolicy, MountPolicyEntry};
+use crate::mount_policy::{
+    parse_mount_policies_raw, resolve_effective_policies, validate_cluufile_against_parent,
+    MountPolicy, MountPolicyEntry,
+};
 use alloc::{collections::BTreeMap, collections::BTreeSet, format, string::String, vec::Vec};
 use core::mem::{size_of, take};
 use libcluu::boot::{
@@ -4755,6 +4758,32 @@ impl ProcessManager {
         // `resolve_effective_policies` in the view-building block.
         let cluufile_mount_policies: Vec<MountPolicyEntry> =
             parse_mount_policies_raw(manifest_str);
+
+        // UE13: strict Cluufile-vs-parent validation. If the caller already
+        // has a recorded view, every Cluufile MOUNT directive must be
+        // satisfiable by that view. A bare boot/autostart caller (no stored
+        // view) is exempted — the supervisor envelope is implicit there.
+        if sender_tid != 0 {
+            if let Some(parent_pid) = self.tid_to_pid.get(&sender_tid).copied() {
+                if let Some(parent_view) = self.pid_to_view.get(&parent_pid) {
+                    if let Err(reason) = validate_cluufile_against_parent(
+                        &cluufile_mount_policies,
+                        parent_view.as_slice(),
+                    ) {
+                        let _ = debug_print(&format!(
+                            "procmgr: cluufile mismatch: {}",
+                            reason
+                        ));
+                        reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                        if let Some(tok) = reply_token {
+                            let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         if has_persistent_storage {
             if !self.create_container_dirs(container_id, image_name) {
                 let _ = debug_print(&format!(

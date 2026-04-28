@@ -35,11 +35,27 @@ pub struct MountPolicyEntry {
     pub mode: MountMode,
 }
 
-pub fn parse_mount_policy(s: &str) -> Option<MountPolicy> {
+/// Parse a `MOUNT <path> <keyword>` keyword into a (policy, mode) pair.
+///
+/// UE12: keywords now communicate both the policy (Inherit vs Private) and
+/// the writability mode (Ro vs Rw):
+///
+/// | keyword              | policy             | mode |
+/// |----------------------|--------------------|------|
+/// | `inherit`            | Inherit            | Rw   |
+/// | `private`            | Private            | Rw   |
+/// | `ro` / `readonly`    | Inherit            | Ro   |
+/// | `rw` / `readwrite`   | Inherit            | Rw   |
+///
+/// Note: the legacy `MountPolicy::Ro` enum variant is kept for backwards
+/// compatibility but is no longer emitted by this parser — `ro/readonly`
+/// now resolves to `(Inherit, Ro)`.
+pub fn parse_mount_policy(s: &str) -> Option<(MountPolicy, MountMode)> {
     match s {
-        "inherit" => Some(MountPolicy::Inherit),
-        "private" => Some(MountPolicy::Private),
-        "ro" => Some(MountPolicy::Ro),
+        "inherit"          => Some((MountPolicy::Inherit, MountMode::Rw)),
+        "private"          => Some((MountPolicy::Private, MountMode::Rw)),
+        "ro" | "readonly"  => Some((MountPolicy::Inherit, MountMode::Ro)),
+        "rw" | "readwrite" => Some((MountPolicy::Inherit, MountMode::Rw)),
         _ => None,
     }
 }
@@ -56,16 +72,16 @@ pub fn parse_mount_policies_raw(manifest: &str) -> Vec<MountPolicyEntry> {
     let mut out: Vec<MountPolicyEntry> = Vec::new();
     let mut in_section = false;
     let mut path: Option<String> = None;
-    let mut policy: Option<MountPolicy> = None;
+    let mut policy_and_mode: Option<(MountPolicy, MountMode)> = None;
     for line in manifest.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("[[") {
             if in_section {
-                if let (Some(p), Some(pol)) = (path.take(), policy.take()) {
-                    out.push(MountPolicyEntry { path: p, policy: pol, mode: MountMode::Rw });
+                if let (Some(p), Some(pol_mode)) = (path.take(), policy_and_mode.take()) {
+                    out.push(MountPolicyEntry { path: p, policy: pol_mode.0, mode: pol_mode.1 });
                 } else {
                     path = None;
-                    policy = None;
+                    policy_and_mode = None;
                 }
             }
             in_section = trimmed == "[[mounts.policy]]";
@@ -73,11 +89,11 @@ pub fn parse_mount_policies_raw(manifest: &str) -> Vec<MountPolicyEntry> {
         }
         if trimmed.starts_with('[') {
             if in_section {
-                if let (Some(p), Some(pol)) = (path.take(), policy.take()) {
-                    out.push(MountPolicyEntry { path: p, policy: pol, mode: MountMode::Rw });
+                if let (Some(p), Some(pol_mode)) = (path.take(), policy_and_mode.take()) {
+                    out.push(MountPolicyEntry { path: p, policy: pol_mode.0, mode: pol_mode.1 });
                 } else {
                     path = None;
-                    policy = None;
+                    policy_and_mode = None;
                 }
             }
             in_section = false;
@@ -89,12 +105,12 @@ pub fn parse_mount_policies_raw(manifest: &str) -> Vec<MountPolicyEntry> {
         if let Some(rest) = trimmed.strip_prefix("path = ") {
             path = Some(rest.trim_matches('"').to_string());
         } else if let Some(rest) = trimmed.strip_prefix("policy = ") {
-            policy = parse_mount_policy(rest.trim_matches('"'));
+            policy_and_mode = parse_mount_policy(rest.trim_matches('"'));
         }
     }
     if in_section {
-        if let (Some(p), Some(pol)) = (path, policy) {
-            out.push(MountPolicyEntry { path: p, policy: pol, mode: MountMode::Rw });
+        if let (Some(p), Some(pol_mode)) = (path, policy_and_mode) {
+            out.push(MountPolicyEntry { path: p, policy: pol_mode.0, mode: pol_mode.1 });
         }
     }
     out
@@ -138,11 +154,58 @@ pub fn resolve_effective_policies(
     for entry in cluufile_entries {
         if let Some(existing) = out.iter_mut().find(|e| e.path == entry.path) {
             existing.policy = entry.policy;
+            existing.mode = entry.mode;
         } else {
             out.push(entry.clone());
         }
     }
     out
+}
+
+/// Validate that every Cluufile MOUNT directive is satisfiable by the parent's
+/// view. Returns Err with a human-readable reason if any directive demands
+/// more than the parent provides. Today the only "more" we check for is
+/// rw-vs-ro (Cluufile asks Rw, parent provides only Ro).
+///
+/// `parent_view` shape mirrors `ViewMountList` from main.rs:
+///   `(src, dst, writable, memfs_cid)`.
+/// We accept it as a slice to keep `mount_policy.rs` independent of the
+/// `ViewMountList` type alias.
+///
+/// Path matching uses longest-prefix-match on `dst`. The catch-all `dst == "/"`
+/// matches any path (covers the supervisor-envelope `rw:/`). Boundary safety
+/// (`/etc` vs `/etcetera`) is handled by appending `/` for the prefix test.
+pub fn validate_cluufile_against_parent(
+    cluufile_entries: &[MountPolicyEntry],
+    parent_view: &[(String, String, bool, u64)],
+) -> core::result::Result<(), alloc::string::String> {
+    use alloc::format;
+    for cl in cluufile_entries {
+        let parent_mount = parent_view
+            .iter()
+            .filter(|(_, dst, _, _)| {
+                cl.path == *dst
+                    || dst == "/"
+                    || (dst.ends_with('/') && cl.path.starts_with(dst.as_str()))
+                    || (!dst.ends_with('/') && cl.path.starts_with(&format!("{}/", dst)))
+            })
+            .max_by_key(|(_, dst, _, _)| dst.len());
+
+        let Some((_, _, parent_writable, _)) = parent_mount else {
+            return Err(format!(
+                "cluufile mismatch: {} not provided by parent view",
+                cl.path
+            ));
+        };
+
+        if matches!(cl.mode, MountMode::Rw) && !parent_writable {
+            return Err(format!(
+                "cluufile mismatch: {} requires rw, parent has ro",
+                cl.path
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -156,6 +219,8 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, "/tmp");
         assert_eq!(out[0].policy, MountPolicy::Inherit);
+        // bare `inherit` defaults to Rw.
+        assert_eq!(out[0].mode, MountMode::Rw);
     }
 
     #[test]
@@ -165,8 +230,10 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].path, "/tmp");
         assert_eq!(out[0].policy, MountPolicy::Inherit);
+        assert_eq!(out[0].mode, MountMode::Rw);
         assert_eq!(out[1].path, "/log");
         assert_eq!(out[1].policy, MountPolicy::Private);
+        assert_eq!(out[1].mode, MountMode::Rw);
     }
 
     #[test]
@@ -176,6 +243,41 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, "/tmp");
         assert_eq!(out[0].policy, MountPolicy::Private);
+        assert_eq!(out[0].mode, MountMode::Rw);
+    }
+
+    #[test]
+    fn ro_keyword_emits_inherit_plus_ro_mode() {
+        // UE12: `ro` (and its `readonly` alias) now mean "inherit, but readonly".
+        let m = "[[mounts.policy]]\npath = \"/etc\"\npolicy = \"ro\"\n";
+        let out = parse_mount_policies_raw(m);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, "/etc");
+        assert_eq!(out[0].policy, MountPolicy::Inherit);
+        assert_eq!(out[0].mode, MountMode::Ro);
+
+        let m2 = "[[mounts.policy]]\npath = \"/etc\"\npolicy = \"readonly\"\n";
+        let out2 = parse_mount_policies_raw(m2);
+        assert_eq!(out2.len(), 1);
+        assert_eq!(out2[0].policy, MountPolicy::Inherit);
+        assert_eq!(out2[0].mode, MountMode::Ro);
+    }
+
+    #[test]
+    fn rw_keyword_emits_inherit_plus_rw_mode() {
+        // UE12: `rw` (and its `readwrite` alias) explicitly request inherit + writable.
+        let m = "[[mounts.policy]]\npath = \"/data\"\npolicy = \"rw\"\n";
+        let out = parse_mount_policies_raw(m);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, "/data");
+        assert_eq!(out[0].policy, MountPolicy::Inherit);
+        assert_eq!(out[0].mode, MountMode::Rw);
+
+        let m2 = "[[mounts.policy]]\npath = \"/data\"\npolicy = \"readwrite\"\n";
+        let out2 = parse_mount_policies_raw(m2);
+        assert_eq!(out2.len(), 1);
+        assert_eq!(out2[0].policy, MountPolicy::Inherit);
+        assert_eq!(out2[0].mode, MountMode::Rw);
     }
 }
 
@@ -226,5 +328,82 @@ mod resolve_tests {
         assert_eq!(lookup(&resolved, "/tmp"), Some(MountPolicy::Inherit));
         assert_eq!(lookup(&resolved, "/log"), Some(MountPolicy::Private));
         assert_eq!(resolved.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+    use alloc::vec;
+
+    fn ep(path: &str, mode: MountMode) -> MountPolicyEntry {
+        MountPolicyEntry {
+            path: path.to_string(),
+            policy: MountPolicy::Inherit,
+            mode,
+        }
+    }
+
+    fn pv(dst: &str, writable: bool) -> (String, String, bool, u64) {
+        (dst.to_string(), dst.to_string(), writable, 0)
+    }
+
+    #[test]
+    fn rw_demand_against_ro_parent_rejects() {
+        let cluufile = vec![ep("/etc", MountMode::Rw)];
+        let parent = vec![pv("/etc", false)];
+        let r = validate_cluufile_against_parent(&cluufile, &parent);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("requires rw, parent has ro"));
+    }
+
+    #[test]
+    fn ro_demand_against_ro_parent_ok() {
+        let cluufile = vec![ep("/etc", MountMode::Ro)];
+        let parent = vec![pv("/etc", false)];
+        assert!(validate_cluufile_against_parent(&cluufile, &parent).is_ok());
+    }
+
+    #[test]
+    fn rw_demand_against_rw_parent_ok() {
+        let cluufile = vec![ep("/etc", MountMode::Rw)];
+        let parent = vec![pv("/etc", true)];
+        assert!(validate_cluufile_against_parent(&cluufile, &parent).is_ok());
+    }
+
+    #[test]
+    fn root_catchall_satisfies_any_path() {
+        // Supervisor envelope: rw:/ → covers everything.
+        let cluufile = vec![ep("/etc", MountMode::Rw)];
+        let parent = vec![pv("/", true)];
+        assert!(validate_cluufile_against_parent(&cluufile, &parent).is_ok());
+    }
+
+    #[test]
+    fn empty_parent_view_rejects_any_demand() {
+        let cluufile = vec![ep("/etc", MountMode::Rw)];
+        let parent: Vec<(String, String, bool, u64)> = Vec::new();
+        let r = validate_cluufile_against_parent(&cluufile, &parent);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("not provided"));
+    }
+
+    #[test]
+    fn boundary_safety_etc_vs_etcetera() {
+        // Cluufile asks /etcetera (rw), parent only provides /etc (ro).
+        // /etc must NOT match /etcetera as a prefix.
+        let cluufile = vec![ep("/etcetera", MountMode::Rw)];
+        let parent = vec![pv("/etc", false)];
+        let r = validate_cluufile_against_parent(&cluufile, &parent);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("not provided"));
+    }
+
+    #[test]
+    fn longest_prefix_wins() {
+        // Parent: /usr (ro), /usr/local (rw). Cluufile asks /usr/local/bin rw → ok.
+        let cluufile = vec![ep("/usr/local/bin", MountMode::Rw)];
+        let parent = vec![pv("/usr", false), pv("/usr/local", true)];
+        assert!(validate_cluufile_against_parent(&cluufile, &parent).is_ok());
     }
 }
