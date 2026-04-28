@@ -524,6 +524,18 @@ impl ProcessManager {
         mounts
     }
 
+    /// Build a VFS view directly from a resolved envelope's mount list.
+    /// Each MountSpec becomes a 1:1 path binding (src == dst); writability is
+    /// derived from MountMode. memfs_cid=0 means "resolve against the global
+    /// MountTable" — per-Cluufile MOUNT private uses non-zero memfs_cid and
+    /// is layered on later (Phase 4).
+    fn build_view_from_envelope(envelope: &crate::envelopes::Envelope) -> ViewMountList {
+        envelope.mounts.iter().map(|m| {
+            let writable = matches!(m.mode, crate::envelopes::MountMode::Rw);
+            (m.path.clone(), m.path.clone(), writable, 0u64)
+        }).collect()
+    }
+
     /// Compute nesting depth of a container (0 for top-level/detached).
     fn container_depth(&self, container_id: u64) -> u32 {
         let mut depth = 0u32;
@@ -1001,14 +1013,8 @@ impl ProcessManager {
         self.auto_login_done = true;
         let _ = debug_print("procmgr: auto-login root on VT:0");
 
-        let (profile, profile_name, home, view_mounts) = match self.user_records.get("root") {
-            Some(r) => {
-                let p = r.profile;
-                let pn = r.profile_name.clone();
-                let h = r.home.clone();
-                let v = self.build_session_view(r);
-                (p, pn, h, v)
-            }
+        let (profile, profile_name) = match self.user_records.get("root") {
+            Some(r) => (r.profile, r.profile_name.clone()),
             None => return,
         };
 
@@ -1023,8 +1029,8 @@ impl ProcessManager {
                 );
             }
         };
+        let view_mounts = Self::build_view_from_envelope(&envelope);
         let resolved_env = envelopes::resolve_env(&envelope, "root");
-        let _ = home; // silence unused warning; mounts/home come from view + envelope
         let (user_env, user_envc) = build_envelope_env_payload(&resolved_env);
 
         let spawn_seq = self.next_spawn_seq();
@@ -2193,15 +2199,8 @@ impl ProcessManager {
         }
 
         // Look up user record — extract all owned values so reference is dropped
-        let (stored_pw, profile, profile_name, user_home, view_mounts) = match self.user_records.get(username) {
-            Some(r) => {
-                let pw = r.password.clone();
-                let p = r.profile;
-                let pn = r.profile_name.clone();
-                let h = r.home.clone();
-                let v = self.build_session_view(r);
-                (pw, p, pn, h, v)
-            }
+        let (stored_pw, profile, profile_name) = match self.user_records.get(username) {
+            Some(r) => (r.password.clone(), r.profile, r.profile_name.clone()),
             None => {
                 let _ = debug_print(&format!("procmgr: login failed, unknown user '{}'", username));
                 self.audit_log("WARN", "AUTH_LOGIN_FAIL", &format!("user={} reason=unknown_user", username));
@@ -2260,8 +2259,8 @@ impl ProcessManager {
                 return Ok(());
             }
         };
+        let view_mounts = Self::build_view_from_envelope(&envelope);
         let resolved_env = envelopes::resolve_env(&envelope, username);
-        let _ = user_home; // silence unused; envelope provides HOME via env_template
 
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
