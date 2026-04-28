@@ -928,6 +928,33 @@ case "$MARKER_MODE" in
             "touch: /etc/probefile: PermissionDenied"
         )
         ;;
+    l2_cluufile_match)
+        # UE14 happy path: cat container has no MOUNT directives, so
+        # validate_cluufile_against_parent succeeds and the spawn proceeds.
+        # The marker below (emitted at procmgr/main.rs after cluufile
+        # validation passes and the container child is created) confirms
+        # validation didn't reject the spawn. The actual motd text goes
+        # to TTY/stdout, not the COM2 debug channel, so we anchor on the
+        # debug-print marker — same pattern as l2_pipe_basic.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: container 'cat' started"
+        )
+        ;;
+    l2_cluufile_mismatch)
+        # UE14 mismatch path: cfmismatch's Cluufile demands MOUNT /etc
+        # readwrite. Alice's user envelope provides /etc as ro, so
+        # validate_cluufile_against_parent rejects with the marker
+        # below (procmgr/main.rs ~line 4774). Procmgr replies
+        # PermissionDenied before the binary's main() runs — the probe's
+        # own debug_print MUST NOT fire.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: cluufile mismatch"
+        )
+        ;;
     l2_envelope_user)
         required_markers=(
             "TSC calibrated"

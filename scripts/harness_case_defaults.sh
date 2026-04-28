@@ -149,6 +149,28 @@ harness_derive_marker_defaults() {
                 # PermissionDenied`, then exits.
                 SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn touch /etc/probefile"
                 ;;
+            l2_cluufile_match)
+                TEST_COMMAND=""
+                # Happy path for UE13's strict Cluufile validation: the
+                # cat container has no MOUNT directives, so any caller view
+                # is acceptable. The supervisor shell spawns /bin/cat to
+                # read /etc/motd, demonstrating that validation is
+                # permissive when the Cluufile makes no demands. Using
+                # `spawn cat …` (not bare `cat …`) because the shell's
+                # parser dispatches plain command words only to builtins;
+                # `spawn` is the explicit binary-launch builtin.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn cat /etc/motd"
+                ;;
+            l2_cluufile_mismatch)
+                TEST_COMMAND=""
+                # Mismatch path for UE13: the cfmismatch probe's Cluufile
+                # demands MOUNT /etc readwrite, but alice's user envelope
+                # provides /etc only as ro. Spawning from alice's nested
+                # shell forces validation through pid_to_view and procmgr
+                # must emit `cluufile mismatch` and reject with
+                # PermissionDenied before main() runs.
+                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn cfmismatch"
+                ;;
             l2_envelope_user)
                 TEST_COMMAND=""
                 # RED until UE16 lands env propagation: spawn child currently

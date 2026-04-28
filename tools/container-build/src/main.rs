@@ -55,8 +55,11 @@ struct Cluufile {
     deny: Vec<String>,
     detach: bool,
     restart_policy: Option<(String, Option<usize>, Option<u64>)>,
-    /// MOUNT directives: (path, policy) where policy ∈ {"inherit", "private", "ro"}.
-    /// Duplicate paths are a parse error (caught in parse_cluufile).
+    /// MOUNT directives: (path, policy) where policy ∈
+    /// {"inherit", "private", "ro", "readonly", "rw", "readwrite"}.
+    /// Procmgr's mount_policy parser maps `ro/readonly` → Inherit+Ro and
+    /// `rw/readwrite` → Inherit+Rw. Duplicate paths are a parse error
+    /// (caught in parse_cluufile).
     mount_policies: Vec<(String, String)>,
 }
 
@@ -347,10 +350,10 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
                 let mount_path = tokens[0].to_string();
                 let policy = tokens[1].to_string();
                 match policy.as_str() {
-                    "inherit" | "private" | "ro" => {}
+                    "inherit" | "private" | "ro" | "readonly" | "rw" | "readwrite" => {}
                     other => {
                         bail!(
-                            "{}:{}: MOUNT policy must be 'inherit', 'private', or 'ro', got '{}'",
+                            "{}:{}: MOUNT policy must be 'inherit', 'private', 'ro', 'readonly', 'rw', or 'readwrite', got '{}'",
                             path.display(), lineno, other
                         );
                     }
@@ -824,6 +827,19 @@ mod mount_tests {
         let src = "FROM base\nMOUNT /tmp shared\n";
         let err = parse_from_string(src).expect_err("shared is not a valid policy");
         assert!(err.to_string().contains("MOUNT policy must be"), "err was: {}", err);
+    }
+
+    #[test]
+    fn mount_directive_accepts_rw_keywords() {
+        // UE14: procmgr's mount_policy parser also accepts rw/readwrite
+        // (and ro/readonly). The compiler must pass them through verbatim
+        // so procmgr can interpret them — otherwise Cluufiles that demand
+        // explicit writable mounts can't be authored.
+        for keyword in ["rw", "readwrite", "readonly"] {
+            let src = format!("FROM base\nMOUNT /etc {}\n", keyword);
+            let c = parse_from_string(&src).expect("should parse");
+            assert_eq!(c.mount_policies, vec![("/etc".to_string(), keyword.to_string())]);
+        }
     }
 
     #[test]

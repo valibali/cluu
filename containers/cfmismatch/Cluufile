@@ -1,0 +1,5 @@
+FROM minimal
+PROFILE ipc vfs
+MOUNT /etc readwrite
+BUILD "cargo xtask build-c cfmismatch userspace/c-programs/cfmismatch.c" target/x86_64-cluu-user/debug/cfmismatch.elf /bin/cfmismatch
+ENTRYPOINT /bin/cfmismatch

@@ -3607,6 +3607,7 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("futexrace", "userspace/c-programs/futexrace.c"),
         ("setjmpprobe", "userspace/c-programs/setjmpprobe.c"),
         ("envprobe", "userspace/c-programs/envprobe.c"),
+        ("cfmismatch", "userspace/c-programs/cfmismatch.c"),
         ("stubsprobe", "userspace/c-programs/stubsprobe.c"),
         ("pipeprobe", "userspace/c-programs/pipeprobe.c"),
         ("pipecat", "userspace/c-programs/pipecat.c"),
