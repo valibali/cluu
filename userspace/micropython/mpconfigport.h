@@ -18,13 +18,15 @@
 #define MICROPY_ERROR_REPORTING    (MICROPY_ERROR_REPORTING_DETAILED)
 #define MICROPY_WARNINGS           (1)
 
-// VFS
+// VFS — full POSIX backend.
+// libcluu provides opendir/readdir/closedir + open/read/write/close/lseek/stat
+// already; statvfs is stubbed (returns -1/ENOSYS) since CLUU has no real
+// filesystem-statistics concept yet, but it's only actually invoked when
+// MICROPY_PY_OS_STATVFS=1 (which we keep off).
 #define MICROPY_VFS                (1)
-#define MICROPY_VFS_POSIX          (0)
+#define MICROPY_VFS_POSIX          (1)
 #define MICROPY_READER_VFS         (1)
 #define MICROPY_READER_POSIX       (0)
-
-// CLUU sysroot currently lacks full POSIX statvfs/dirent/poll surface.
 #define MICROPY_PY_OS_STATVFS      (0)
 
 // Threading — GIL-based, using pthreads

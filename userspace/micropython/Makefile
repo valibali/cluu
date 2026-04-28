@@ -28,11 +28,12 @@ include $(TOP)/py/py.mk
 # include extmod (VFS, os, json, etc.) — adds to PY_O and SRC_QSTR
 include $(TOP)/extmod/extmod.mk
 
-# CLUU does not yet provide the full POSIX dirent/statvfs/poll surface
-# expected by MicroPython's POSIX VFS helpers.
-EXTMOD_UNSUPPORTED_C = \
-	extmod/vfs_posix.c \
-	extmod/vfs_posix_file.c
+# Re-enabled 2026-04-28: libcluu's POSIX shim now provides opendir/readdir/
+# closedir, and we stub statvfs in the port's mphalport (or via newlib
+# weak symbol) since MICROPY_PY_OS_STATVFS=0 means the Python binding
+# never actually invokes it. Both vfs_posix.c and vfs_posix_file.c
+# now compile and link cleanly.
+EXTMOD_UNSUPPORTED_C =
 SRC_EXTMOD_C := $(filter-out $(EXTMOD_UNSUPPORTED_C),$(SRC_EXTMOD_C))
 PY_O := $(filter-out $(addprefix $(BUILD)/, $(EXTMOD_UNSUPPORTED_C:.c=.o)),$(PY_O))
 SRC_QSTR := $(filter-out $(EXTMOD_UNSUPPORTED_C),$(SRC_QSTR))
