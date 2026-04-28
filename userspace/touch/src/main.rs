@@ -10,7 +10,7 @@ use alloc::format;
 use alloc::vec::Vec;
 use libcluu::fs::client::VfsClient;
 use libcluu::posix::{_write, O_CREAT, O_WRONLY};
-use libcluu::registry;
+use libcluu::{debug_print, registry};
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -50,6 +50,10 @@ pub extern "C" fn main() -> i32 {
             Err(e) => {
                 let line = format!("touch: {}: {:?}\n", path, e);
                 let _ = unsafe { _write(2, line.as_ptr() as *const _, line.len()) };
+                // Mirror the failure to the kernel debug stream so the
+                // harness (which scrapes COM2) can observe it; tty/console
+                // output never reaches serial.
+                let _ = debug_print(line.trim_end());
                 exit_code = 1;
             }
         }

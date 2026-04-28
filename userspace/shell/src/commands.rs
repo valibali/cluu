@@ -2774,9 +2774,32 @@ impl BuiltinCommand for SuBuiltin {
         let username = match args.first() {
             Some(u) => u.as_str(),
             None => {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"usage: su <username>\n")?;
+                send_with_payload(
+                    stdout,
+                    TTY_WRITE_LABEL,
+                    b"usage: su <username> [-c <command>]\n",
+                )?;
                 return Ok(());
             }
+        };
+
+        // Optional `-c <command>` form: drop into the target user's envelope
+        // just long enough to run a single command non-interactively. Used by
+        // harness cases (e.g. l2_envelope_mounts) to exercise per-envelope
+        // mount enforcement without taking over the host TTY.
+        let inline_command: Option<String> = match args.get(1).map(|s| s.as_str()) {
+            Some("-c") => {
+                if args.len() < 3 {
+                    send_with_payload(
+                        stdout,
+                        TTY_WRITE_LABEL,
+                        b"usage: su <username> -c <command>\n",
+                    )?;
+                    return Ok(());
+                }
+                Some(args[2..].join(" "))
+            }
+            _ => None,
         };
 
         // Password: stub (empty string, not verified)
@@ -2810,9 +2833,30 @@ impl BuiltinCommand for SuBuiltin {
         let cid = reply.words[4];
         let child_stdin = reply.words[3];
 
-        let _ = debug_print(&format!("su: nested session user={} pid={} cid={}", username, pid, cid));
+        let _ = debug_print(&format!(
+            "su: nested session user={} pid={} cid={}",
+            username, pid, cid
+        ));
 
-        // Route TTY foreground to the nested session's shell
+        if let Some(cmd) = inline_command {
+            // Non-interactive: feed the command + an exit into the nested
+            // shell's stdin. The TTY driver normally delivers keypresses to
+            // the shell as TTY_READ_LABEL messages — we mimic that wire
+            // shape here so the nested shell parses and runs the line.
+            if child_stdin != 0 {
+                let mut line = cmd.clone();
+                line.push('\n');
+                let _ = send_with_payload(child_stdin, TTY_READ_LABEL, line.as_bytes());
+                let _ = send_with_payload(child_stdin, TTY_READ_LABEL, b"exit\n");
+            }
+            // Block until nested session reports exit (do NOT route the host
+            // TTY foreground; this path is meant for scripted use).
+            let mut notify_msg = Message::new(0, [0; 6], 0);
+            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+            return Ok(());
+        }
+
+        // Interactive: route TTY foreground to the nested session's shell.
         if child_stdin != 0 {
             set_tty_foreground(stdout, child_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C)?;
 
