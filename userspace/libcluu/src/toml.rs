@@ -92,7 +92,8 @@ pub fn parse(input: &str) -> Result<TomlDoc, ParseError> {
         entries: Vec::new(),
     };
 
-    for (line_idx, raw_line) in input.lines().enumerate() {
+    let mut iter = input.lines().enumerate();
+    while let Some((line_idx, raw_line)) = iter.next() {
         let lineno = line_idx + 1;
         let line = raw_line.trim();
 
@@ -143,8 +144,30 @@ pub fn parse(input: &str) -> Result<TomlDoc, ParseError> {
             }
 
             let value = if val_str.starts_with('[') {
-                // Array of strings: ["a", "b", "c"]
-                parse_string_array(val_str, lineno)?
+                // Array of strings: ["a", "b", "c"] — single- or multi-line.
+                if val_str.contains(']') {
+                    parse_string_array(val_str, lineno)?
+                } else {
+                    // Multi-line array: accumulate continuation lines until ']'.
+                    let mut accum = String::from(val_str);
+                    let mut closed = false;
+                    while let Some((_, cont_raw)) = iter.next() {
+                        let cont = cont_raw.trim();
+                        if cont.is_empty() || cont.starts_with('#') {
+                            continue;
+                        }
+                        accum.push(' ');
+                        accum.push_str(cont);
+                        if cont.contains(']') {
+                            closed = true;
+                            break;
+                        }
+                    }
+                    if !closed {
+                        return Err(ParseError { line: lineno, msg: "unterminated array" });
+                    }
+                    parse_string_array(&accum, lineno)?
+                }
             } else if val_str.starts_with('"') {
                 // Quoted string
                 TomlValue::String(parse_quoted_string(val_str, lineno)?)
@@ -340,5 +363,83 @@ key = "unterminated
 no_equals_here
 "#;
         assert!(parse(input).is_err());
+    }
+
+    #[test]
+    fn parses_single_line_array() {
+        let input = r#"[t]
+xs = ["a", "b", "c"]
+"#;
+        let doc = parse(input).expect("parse");
+        let table = doc.table("t").expect("t");
+        let arr = table.get_array("xs").expect("xs");
+        assert_eq!(arr, &["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parses_multi_line_array() {
+        let input = r#"[t]
+xs = [
+    "a",
+    "b",
+    "c",
+]
+"#;
+        let doc = parse(input).expect("parse");
+        let table = doc.table("t").expect("t");
+        let arr = table.get_array("xs").expect("xs");
+        assert_eq!(arr, &["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parses_envelope_service_block() {
+        // Verbatim copy of [envelope.service] block from /etc/envelopes.toml.
+        let input = r#"[envelope.service]
+# Stripped envelope for daemons spawned by procmgr/init at boot.
+# No /home, no /tmp by default — services declare what they need
+# in their own Cluufiles (which then narrow within this envelope).
+mounts = [
+    "ro:/",
+    "ro:/etc",
+    "ro:/lib",
+    "rw:/var/log",
+]
+
+[envelope.service.env]
+PATH = "/sbin:/bin"
+TERM = "dumb"
+LANG = "C"
+"#;
+        let doc = parse(input).expect("parse");
+        let svc = doc.table("envelope.service").expect("envelope.service");
+        let mounts = svc.get_array("mounts").expect("mounts");
+        assert_eq!(mounts.len(), 4);
+        assert_eq!(mounts[0], "ro:/");
+        assert_eq!(mounts[3], "rw:/var/log");
+
+        let env = doc.table("envelope.service.env").expect("env");
+        assert_eq!(env.get_str("PATH"), Some("/sbin:/bin"));
+    }
+
+    #[test]
+    fn unterminated_multi_line_array_errors() {
+        let input = "[t]\nxs = [\n  \"a\",\n";
+        assert!(parse(input).is_err());
+    }
+
+    #[test]
+    fn parses_multi_line_array_with_comments_and_blanks() {
+        let input = r#"[t]
+xs = [
+    # a comment
+
+    "a",
+    "b",
+]
+"#;
+        let doc = parse(input).expect("parse");
+        let table = doc.table("t").expect("t");
+        let arr = table.get_array("xs").expect("xs");
+        assert_eq!(arr, &["a", "b"]);
     }
 }
