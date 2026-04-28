@@ -133,6 +133,7 @@ struct UserRecord {
     home: String,
     shell: String,
     profile: CapProfile,
+    profile_name: String,
     escalate: Option<CapProfile>,
     password: String,
 }
@@ -967,7 +968,11 @@ impl ProcessManager {
                 Some(v) => String::from(v),
                 None => continue,
             };
-            let profile = match table.get_str("profile").and_then(parse_profile_str) {
+            let profile_str = match table.get_str("profile") {
+                Some(s) => s,
+                None => continue,
+            };
+            let profile = match parse_profile_str(profile_str) {
                 Some(p) => p,
                 None => continue,
             };
@@ -977,6 +982,7 @@ impl ProcessManager {
                 home,
                 shell,
                 profile,
+                profile_name: String::from(profile_str),
                 escalate,
                 password,
             });
@@ -995,19 +1001,35 @@ impl ProcessManager {
         self.auto_login_done = true;
         let _ = debug_print("procmgr: auto-login root on VT:0");
 
-        let (profile, view_mounts) = match self.user_records.get("root") {
+        let (profile, profile_name, home, view_mounts) = match self.user_records.get("root") {
             Some(r) => {
                 let p = r.profile;
+                let pn = r.profile_name.clone();
+                let h = r.home.clone();
                 let v = self.build_session_view(r);
-                (p, v)
+                (p, pn, h, v)
             }
             None => return,
         };
 
+        // Resolve envelope and build env. Boot cannot proceed without an
+        // envelope for root.
+        let envelope = match envelopes::lookup_envelope(&self.envelopes, &profile_name) {
+            Some(e) => e.clone(),
+            None => {
+                panic!(
+                    "procmgr: auto-login fail: no envelope for profile '{}'",
+                    profile_name
+                );
+            }
+        };
+        let resolved_env = envelopes::resolve_env(&envelope, "root");
+        let _ = home; // silence unused warning; mounts/home come from view + envelope
+        let (user_env, user_envc) = build_envelope_env_payload(&resolved_env);
+
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
-        let (user_env, user_envc) = build_user_env_payload("root", "/root");
 
         match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None, &[], &[], THREAD_CREATE_START_SUSPENDED) {
             Ok((thread_token, _cookie, pid, stdin_send)) => {
@@ -2171,13 +2193,14 @@ impl ProcessManager {
         }
 
         // Look up user record — extract all owned values so reference is dropped
-        let (stored_pw, profile, user_home, view_mounts) = match self.user_records.get(username) {
+        let (stored_pw, profile, profile_name, user_home, view_mounts) = match self.user_records.get(username) {
             Some(r) => {
                 let pw = r.password.clone();
                 let p = r.profile;
+                let pn = r.profile_name.clone();
                 let h = r.home.clone();
                 let v = self.build_session_view(r);
-                (pw, p, h, v)
+                (pw, p, pn, h, v)
             }
             None => {
                 let _ = debug_print(&format!("procmgr: login failed, unknown user '{}'", username));
@@ -2219,10 +2242,31 @@ impl ProcessManager {
             return Ok(());
         }
 
+        // Resolve envelope after authentication; reject login if not found.
+        let envelope = match envelopes::lookup_envelope(&self.envelopes, &profile_name) {
+            Some(e) => e.clone(),
+            None => {
+                let _ = debug_print(&format!(
+                    "procmgr: session-login fail: no envelope for profile '{}'",
+                    profile_name
+                ));
+                self.audit_log(
+                    "WARN",
+                    "AUTH_LOGIN_FAIL",
+                    &format!("user={} reason=no_envelope", username),
+                );
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+        let resolved_env = envelopes::resolve_env(&envelope, username);
+        let _ = user_home; // silence unused; envelope provides HOME via env_template
+
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
-        let (user_env, user_envc) = build_user_env_payload(username, &user_home);
+        let (user_env, user_envc) = build_envelope_env_payload(&resolved_env);
 
         // Temporarily wire stdout to target VT's tty
         let saved = self.tty_endpoints[0];
@@ -5219,6 +5263,23 @@ fn build_user_env_payload(username: &str, home: &str) -> (Vec<u8>, usize) {
         payload.push(0);
     }
     (payload, entries.len())
+}
+
+/// Pack a resolved envelope env map into the wire format procmgr expects:
+/// "KEY=VALUE\0KEY=VALUE\0...". Returns (packed_bytes, count).
+fn build_envelope_env_payload(
+    env: &alloc::collections::BTreeMap<alloc::string::String, alloc::string::String>,
+) -> (Vec<u8>, usize) {
+    let mut payload = Vec::new();
+    let mut count = 0;
+    for (k, v) in env {
+        payload.extend_from_slice(k.as_bytes());
+        payload.push(b'=');
+        payload.extend_from_slice(v.as_bytes());
+        payload.push(0);
+        count += 1;
+    }
+    (payload, count)
 }
 
 fn build_shell_argv_payload(command: &str) -> (Vec<u8>, usize) {
