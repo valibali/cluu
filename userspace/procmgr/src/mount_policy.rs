@@ -12,6 +12,8 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::envelopes::MountMode;
+
 /// Mount inheritance policy for a single path. Drives whether a nested
 /// container's view inherits the parent's mount at that path or gets a
 /// fresh backend.
@@ -30,6 +32,7 @@ pub enum MountPolicy {
 pub struct MountPolicyEntry {
     pub path: String,
     pub policy: MountPolicy,
+    pub mode: MountMode,
 }
 
 pub fn parse_mount_policy(s: &str) -> Option<MountPolicy> {
@@ -59,7 +62,7 @@ pub fn parse_mount_policies_raw(manifest: &str) -> Vec<MountPolicyEntry> {
         if trimmed.starts_with("[[") {
             if in_section {
                 if let (Some(p), Some(pol)) = (path.take(), policy.take()) {
-                    out.push(MountPolicyEntry { path: p, policy: pol });
+                    out.push(MountPolicyEntry { path: p, policy: pol, mode: MountMode::Rw });
                 } else {
                     path = None;
                     policy = None;
@@ -71,7 +74,7 @@ pub fn parse_mount_policies_raw(manifest: &str) -> Vec<MountPolicyEntry> {
         if trimmed.starts_with('[') {
             if in_section {
                 if let (Some(p), Some(pol)) = (path.take(), policy.take()) {
-                    out.push(MountPolicyEntry { path: p, policy: pol });
+                    out.push(MountPolicyEntry { path: p, policy: pol, mode: MountMode::Rw });
                 } else {
                     path = None;
                     policy = None;
@@ -91,7 +94,7 @@ pub fn parse_mount_policies_raw(manifest: &str) -> Vec<MountPolicyEntry> {
     }
     if in_section {
         if let (Some(p), Some(pol)) = (path, policy) {
-            out.push(MountPolicyEntry { path: p, policy: pol });
+            out.push(MountPolicyEntry { path: p, policy: pol, mode: MountMode::Rw });
         }
     }
     out
@@ -129,7 +132,7 @@ pub fn resolve_effective_policies(
     let mut out: Vec<MountPolicyEntry> = Vec::new();
     // Seed with defaults.
     for (path, policy) in default_mount_policies().iter() {
-        out.push(MountPolicyEntry { path: path.to_string(), policy: *policy });
+        out.push(MountPolicyEntry { path: path.to_string(), policy: *policy, mode: MountMode::Rw });
     }
     // Apply Cluufile overrides.
     for entry in cluufile_entries {
@@ -182,7 +185,7 @@ mod resolve_tests {
     use alloc::vec;
 
     fn ep(path: &str, policy: MountPolicy) -> MountPolicyEntry {
-        MountPolicyEntry { path: path.to_string(), policy }
+        MountPolicyEntry { path: path.to_string(), policy, mode: MountMode::Rw }
     }
 
     fn lookup(policies: &[MountPolicyEntry], path: &str) -> Option<MountPolicy> {
