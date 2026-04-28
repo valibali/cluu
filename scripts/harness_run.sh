@@ -928,6 +928,17 @@ case "$MARKER_MODE" in
             "touch: /etc/probefile: PermissionDenied"
         )
         ;;
+    l2_envelope_user)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "envprobe: HOME=/home/alice"
+            "envprobe: USER=alice"
+            "envprobe: PATH=/bin:/usr/bin"
+            "envprobe: SHELL=/bin/shell"
+            "envprobe: PASS"
+        )
+        ;;
     l2_mount_private)
         required_markers=(
             "TSC calibrated"

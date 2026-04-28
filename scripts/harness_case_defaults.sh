@@ -149,6 +149,13 @@ harness_derive_marker_defaults() {
                 # PermissionDenied`, then exits.
                 SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn touch /etc/probefile"
                 ;;
+            l2_envelope_user)
+                TEST_COMMAND=""
+                # RED until UE16 lands env propagation: spawn child currently
+                # falls back to procmgr's DEFAULT_ENV instead of inheriting the
+                # alice shell's resolved-from-envelope env.
+                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn envprobe HOME USER PATH SHELL"
+                ;;
             l2_mount_private)
                 TEST_COMMAND=""
                 # Seed shell's /tmp, then spawn the probe. The probe should see an
