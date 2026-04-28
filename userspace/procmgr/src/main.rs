@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod envelopes;
 mod mount_policy;
 
 use crate::mount_policy::{parse_mount_policies_raw, resolve_effective_policies, MountPolicy, MountPolicyEntry};
