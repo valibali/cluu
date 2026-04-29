@@ -159,6 +159,16 @@ struct UndoStack {
     head:    usize,           // ≤ entries.len(); redo possible if < len
     pending: Option<UndoBuilder>,  // accumulates an INSERT session
 }
+
+/// Accumulator for an in-progress undo group (typically an INSERT session).
+/// On commit, all the per-keystroke piece changes are coalesced into one
+/// UndoEntry so `u` reverses the whole INSERT session at once.
+struct UndoBuilder {
+    cursor_before: usize,
+    cursor_at_open: usize,    // cursor at first edit; final cursor recorded on commit
+    initial_pieces: Vec<Piece>,  // snapshot of the touched piece range before edits
+    range_start: usize,       // index in `pieces` where edits started
+}
 ```
 
 ### 4.5 Undo grouping (vim-style coarse, Q1)
@@ -388,6 +398,12 @@ Dispatch flow per keystroke:
 | `*` | search word under cursor (forward) |
 | `#` | search word under cursor (backward) |
 
+**Visual re-entry:**
+
+| Key | Action |
+|-----|--------|
+| `gv` | re-enter visual mode with the last-used selection range (mode is whichever VisualChar/VisualLine was active before) |
+
 **Modern conveniences (Q2):**
 
 | Key | Action |
@@ -426,7 +442,6 @@ Movement keys extend the selection's "other end" (the anchor stays). Selection r
 |-----|--------|
 | `h j k l w b e gg G $ 0 %` etc. | extend selection by motion |
 | `o` | toggle which end is the cursor inside the selection |
-| `gv` (when entering visual) | restore last selection range |
 | `d` | delete selection, exit to NORMAL |
 | `y` | yank selection, exit to NORMAL |
 | `c` | delete selection, enter INSERT |
@@ -823,13 +838,23 @@ Explicitly punted:
 
 ---
 
-## 17. References
+## 17. References & pre-implementation checks
+
+### 17.1 References
 
 - Piece table primer: Charles Crowley, "Data Structures for Text Sequences" (1998).
 - Vim modeling: `:help` topics motion, change, undo, visual.
-- CLUU shell line editor (`userspace/shell/src/editor.rs` if it exists, else inlined in commands.rs): existing precedent for raw-mode TTY handling, escape-sequence decoding, and history.
-- libcluu's existing VFS read pattern: `userspace/shell/src/shellrc.rs::read_file_via_vfs` (UE18).
-- libcluu's existing atomic write pattern: none yet — we'll be the first; the rename + write ordering is the standard POSIX recipe.
+- libcluu's existing VFS read pattern: `userspace/shell/src/shellrc.rs::read_file_via_vfs` (UE18) — copy this shape for `vfs_io::load_file`.
+- libcluu's existing atomic write pattern: none yet — we'll be the first; the open-write-close + rename ordering is the standard POSIX recipe.
+
+### 17.2 Things to verify in Plan task 0 (before any implementation work)
+
+These claims in the spec rest on libcluu / kbd / console behaviors; planning should start with a short verification pass:
+
+- `libcluu::posix` exposes a `read_with_timeout`-equivalent (or we use a non-blocking read + manual sleep; see kbd driver's existing escape-sequence handling for the precedent).
+- libcluu has a `set_mode` API for raw TTY mode (referenced by §3.3 step 4); confirm exact signature, what flags it disables (echo, ICANON, signal handling), and how to restore it.
+- The console renderer honors at least: cursor position, `CSI K`, `CSI 2 J`, `CSI 7 m` / `CSI 0 m`, `CSI ?25 l/h`, basic SGR colors. Anything missing → spec section 8.2 needs a fallback.
+- The shell's existing line-editor module location for raw-mode + escape-sequence decoding precedent (likely inside `userspace/shell/src/commands.rs` or a sibling module). Plan task 0 confirms file path so later subagents can reference real code.
 
 ## 18. LOC budget tally
 
