@@ -2695,6 +2695,18 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
         fs::copy(&envelopes_src, etc_dir.join("envelopes.toml"))?;
         println!("  Added /etc/envelopes.toml");
     }
+    // UE20: ship system-wide and root's personal shellrc into the
+    // userdisk so /bin/shell can source them on startup.
+    let shellrc_src = project_root().join("etc/shellrc");
+    if shellrc_src.exists() {
+        fs::copy(&shellrc_src, etc_dir.join("shellrc"))?;
+        println!("  Added /etc/shellrc");
+    }
+    let root_shellrc_src = project_root().join("home/root/.shellrc");
+    if root_shellrc_src.exists() {
+        fs::copy(&root_shellrc_src, home_root_dir.join(".shellrc"))?;
+        println!("  Added /home/root/.shellrc");
+    }
 
     // Visitor-friendly seeds: motd shown by login, plus welcome and
     // architecture files for `cat /etc/welcome.txt` exploration.

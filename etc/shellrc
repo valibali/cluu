@@ -1,0 +1,3 @@
+# /etc/shellrc — system-wide shell startup, loaded by /bin/shell.
+# All defaults already come from /etc/envelopes.toml; this file is a
+# placeholder for site-wide additions.

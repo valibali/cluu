@@ -9,6 +9,8 @@ mod commands;
 mod path_lookup;
 #[cfg(feature = "lang-parser")]
 mod pipeline;
+#[cfg(feature = "lang-parser")]
+mod shellrc;
 
 use alloc::format;
 #[cfg(feature = "lang-parser")]
@@ -61,6 +63,55 @@ fn run() -> Result<()> {
     let registry_endpoint = registry::control_endpoint();
     let mut command_context = CommandContext::new();
     command_context.set_procmgr_spawn(procmgr_spawn);
+
+    // UE18+UE19: source /etc/shellrc and $HOME/.shellrc before the
+    // prompt fires. We build the registry once for sourcing and let
+    // the per-line REPL keep its current behavior of rebuilding
+    // inline. Sourcing is best-effort: a missing file, a broken line,
+    // or even a missing VFS endpoint just logs and moves on so a
+    // stale userdisk can't lock anyone out of their shell.
+    #[cfg(feature = "lang-parser")]
+    {
+        match registry::subscribe_output("vfs", "main") {
+            Ok(vfs_ep) => match libcluu::fs::client::VfsClient::new_from_registry(vfs_ep) {
+                Ok(vfs) => {
+                    let factory = BuiltinFactory::new();
+                    let rc_registry = factory.build();
+                    let _ = shellrc::source_file(
+                        "/etc/shellrc",
+                        stdout,
+                        &mut command_context,
+                        &rc_registry,
+                        &vfs,
+                    );
+                    if let Some(home) = shellrc::home_from_env() {
+                        let path = format!("{}/.shellrc", home);
+                        let _ = shellrc::source_file(
+                            &path,
+                            stdout,
+                            &mut command_context,
+                            &rc_registry,
+                            &vfs,
+                        );
+                    } else {
+                        let _ = debug_print(
+                            "shellrc: HOME unset, skipping ~/.shellrc",
+                        );
+                    }
+                }
+                Err(_) => {
+                    let _ = debug_print(
+                        "shellrc: VfsClient setup failed, skipping rc files",
+                    );
+                }
+            },
+            Err(_) => {
+                let _ = debug_print(
+                    "shellrc: vfs endpoint unavailable, skipping rc files",
+                );
+            }
+        }
+    }
 
     debug_print("shell: ready")?;
     let _ = debug_print(&format!(

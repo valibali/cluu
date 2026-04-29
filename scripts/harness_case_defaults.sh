@@ -202,6 +202,16 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir /tmp/rmtest; spawn mkdir /tmp/rmtest/inner; spawn rm -r /tmp/rmtest"
                 ;;
+            l2_shellrc)
+                TEST_COMMAND=""
+                # UE18+UE19+UE20: Verifies that /home/root/.shellrc was
+                # sourced at session-shell startup. The rc file
+                # overrides PATH via `export PATH=...`; if sourcing
+                # worked, envprobe's child sees the overridden PATH
+                # (instead of supervisor's envelope default
+                # /sbin:/bin:/usr/sbin:/usr/bin).
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn envprobe HOME PATH"
+                ;;
             l2_waitpid)
                 TEST_COMMAND="spawn waitprobe"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn waitprobe"

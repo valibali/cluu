@@ -1006,6 +1006,19 @@ case "$MARKER_MODE" in
             "rm: ok /tmp/rmtest"
         )
         ;;
+    l2_shellrc)
+        # UE18+UE19+UE20: /home/root/.shellrc must be sourced at
+        # startup; its `export PATH=/bin:/usr/bin:/home/root/bin`
+        # must reach the spawned envprobe child via the ENV trailer.
+        # If sourcing failed we'd see supervisor's envelope default
+        # (PATH=/sbin:/bin:/usr/sbin:/usr/bin) instead.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "envprobe: HOME=/home/root"
+            "envprobe: PATH=/bin:/usr/bin:/home/root/bin"
+        )
+        ;;
     l2_waitpid)
         required_markers=(
             "TSC calibrated"
