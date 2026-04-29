@@ -420,6 +420,22 @@ impl CommandExecutor for BuiltinRegistry {
             } else {
                 self.run_builtin(stdout, context, name, &args[1..])?
             };
+            // UE17: if the first word didn't match a builtin and isn't a
+            // path-like literal (no `/`), fall through to PATH-based
+            // resolution. PATH lookup checks /var/images/<name>/manifest.toml
+            // for an installed container image; on hit, dispatch the binary
+            // through the same code SpawnBuiltin uses (`spawn <name> args…`).
+            // On miss, leave `all_handled` false so the caller emits the
+            // "shell: unsupported command" diagnostic.
+            let result = if let ExecResult::NotHandled = result {
+                if name.as_str() != "repeat" && !name.contains('/') {
+                    try_path_dispatch(stdout, context, name, &args[1..])?
+                } else {
+                    ExecResult::NotHandled
+                }
+            } else {
+                result
+            };
             if let ExecResult::NotHandled = result {
                 all_handled = false;
             }
@@ -1302,6 +1318,99 @@ pub(crate) struct SpawnResult {
     pub(crate) status_word: usize,
     pub(crate) pid: usize,
     pub(crate) stdin_endpoint: usize,
+}
+
+/// UE17: bare-command PATH resolution + dispatch.
+///
+/// Called from `BuiltinRegistry::execute` when the first word didn't
+/// match any builtin and isn't a literal path (no `/` in `name`). On
+/// hit (i.e. `/var/images/<name>/manifest.toml` exists), dispatch the
+/// binary through the same code SpawnBuiltin uses and wait for exit.
+/// On miss, return NotHandled so the caller emits "unsupported command".
+fn try_path_dispatch(
+    stdout: usize,
+    context: &mut CommandContext,
+    name: &str,
+    args: &[String],
+) -> Result<ExecResult> {
+    let path_env = read_path_env();
+    let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+        Ok(ep) => ep,
+        Err(_) => return Ok(ExecResult::NotHandled),
+    };
+    let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+        Ok(v) => v,
+        Err(_) => return Ok(ExecResult::NotHandled),
+    };
+    let Some(resolved_name) = crate::path_lookup::resolve(name, &path_env, &vfs) else {
+        return Ok(ExecResult::NotHandled);
+    };
+    let _ = debug_print(&format!(
+        "shell: PATH resolved '{}' -> /var/images/{}",
+        name, resolved_name
+    ));
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let fg_mode = infer_foreground_mode(resolved_name.as_str());
+    let status = spawn_and_wait(
+        stdout,
+        context,
+        resolved_name.as_str(),
+        DEFAULT_PRIORITY,
+        &arg_refs,
+        fg_mode,
+    )?;
+    context.set_last_status(status);
+    Ok(ExecResult::Handled)
+}
+
+/// Read $PATH from the process env (envelope-resolved at session-login,
+/// optionally overridden by `export PATH=...`). Falls back to a paranoid
+/// `/bin:/usr/bin` default if PATH is unset or empty so PATH lookup at
+/// least works for the standard installed images.
+fn read_path_env() -> String {
+    for (k, v) in libcluu::posix::snapshot_env() {
+        if k == "PATH" {
+            return v;
+        }
+    }
+    String::from("/bin:/usr/bin")
+}
+
+/// Spawn `name` with `args`, wait for exit, return the exit code (or
+/// `1` on internal error). Shared between `SpawnBuiltin::run` and
+/// UE17's PATH-dispatch fall-through.
+fn spawn_and_wait(
+    stdout: usize,
+    context: &mut CommandContext,
+    name: &str,
+    priority: usize,
+    args: &[&str],
+    fg_mode: ForegroundMode,
+) -> Result<i32> {
+    let spawn = spawn_process_with_argv(context, name, priority, args)?;
+    match parse_status(spawn.status_word) {
+        Ok(()) => {
+            wait_for_exit_or_sigint(
+                spawn.procmgr_endpoint,
+                stdout,
+                spawn.notify_endpoint,
+                spawn.stdin_endpoint,
+                spawn.pid,
+                stdout,
+                fg_mode,
+            )?;
+            // wait_for_exit_or_sigint doesn't surface the child's exit
+            // code; we treat reaching here as success (status=0). Tighter
+            // exit-code threading is a follow-up if `$?` plumbing
+            // requires it.
+            Ok(0)
+        }
+        Err(err) => {
+            let line = format!("spawn: {:?}\n", err);
+            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+            Ok(1)
+        }
+    }
 }
 
 /// Build a `PROCMGR_CONTAINER_RUN_LABEL` payload of `name + CWD trailer`.

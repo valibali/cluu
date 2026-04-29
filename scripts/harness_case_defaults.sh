@@ -36,6 +36,15 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn argvprobe hello world"
                 ;;
+            l2_bare_cmd)
+                TEST_COMMAND=""
+                # UE17: PATH-based bare-command resolution. No `spawn` prefix —
+                # the shell falls through from the builtin lookup to PATH-based
+                # dispatch and runs /var/images/cat. We anchor on the procmgr
+                # debug-print marker (`procmgr: container 'cat' started`)
+                # because /etc/motd's contents go to TTY/stdout, not to COM2.
+                SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd"
+                ;;
             l2_cd)
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="cd /; cd etc; pwd"

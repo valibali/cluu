@@ -718,6 +718,21 @@ case "$MARKER_MODE" in
             "argvprobe: arg2=world"
         )
         ;;
+    l2_bare_cmd)
+        # UE17: PATH-based bare-command resolution. Typing `cat /etc/motd`
+        # (no `spawn`, no `/`) goes through BuiltinRegistry::execute,
+        # falls through to try_path_dispatch, hits /var/images/cat via
+        # VfsClient::stat, and dispatches the binary as if `spawn cat
+        # /etc/motd` had been typed. The marker below is procmgr's debug
+        # print after container_run accepted the spawn — same pattern
+        # as l2_cluufile_match. (cat's stdout — the motd text — goes to
+        # TTY/stdout, not COM2, so we can't anchor on motd content.)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: container 'cat' started"
+        )
+        ;;
     l2_cd)
         required_markers=(
             "TSC calibrated"
