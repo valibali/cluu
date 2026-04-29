@@ -26,6 +26,8 @@ pub struct Buffer {
     pub add: Vec<u8>,
     pub pieces: Vec<Piece>,
     pub edit_seq: u64,
+    pub line_idx: Vec<usize>,
+    pub line_idx_seq: u64,
 }
 
 /// (piece_index, byte_offset_within_piece) for a logical byte offset.
@@ -57,6 +59,8 @@ impl Buffer {
             add: Vec::new(),
             pieces,
             edit_seq: 0,
+            line_idx: Vec::new(),
+            line_idx_seq: u64::MAX,
         }
     }
 
@@ -168,6 +172,50 @@ impl Buffer {
         }
         out
     }
+
+    /// Return the (cached) byte offsets of each line start. Rebuilds on demand
+    /// after edits.
+    pub fn line_index(&mut self) -> &[usize] {
+        if self.line_idx_seq != self.edit_seq {
+            self.rebuild_line_index();
+        }
+        &self.line_idx
+    }
+
+    fn rebuild_line_index(&mut self) {
+        self.line_idx.clear();
+        self.line_idx.push(0);
+        let mut byte_offset = 0;
+        for p in &self.pieces {
+            let src = match p.source {
+                Source::Original => &self.original[p.offset..p.offset + p.length],
+                Source::Add      => &self.add[p.offset..p.offset + p.length],
+            };
+            for (i, b) in src.iter().enumerate() {
+                if *b == b'\n' {
+                    self.line_idx.push(byte_offset + i + 1);
+                }
+            }
+            byte_offset += p.length;
+        }
+        self.line_idx_seq = self.edit_seq;
+    }
+
+    /// Convert byte_offset → (line, col_in_bytes). Both are 0-indexed.
+    pub fn line_col(&mut self, byte_offset: usize) -> (usize, usize) {
+        let idx = self.line_index();
+        let line = match idx.binary_search(&byte_offset) {
+            Ok(i)  => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        let col = byte_offset - idx[line];
+        (line, col)
+    }
+
+    /// Number of lines in the buffer (always ≥ 1; an empty buffer has one line).
+    pub fn line_count(&mut self) -> usize {
+        self.line_index().len().max(1)
+    }
 }
 
 #[cfg(test)]
@@ -257,5 +305,31 @@ mod tests {
         b.delete(3..8).expect("del across boundary");
         // "hel" + "rld" = "helrld"
         assert_eq!(b.read_all(), b"helrld".to_vec());
+    }
+
+    #[test]
+    fn line_index_basic() {
+        let mut b = Buffer::from_bytes(b"line1\nline2\nline3".to_vec());
+        let idx = b.line_index();
+        // 3 lines: starts at 0, 6, 12
+        assert_eq!(idx, &[0, 6, 12]);
+    }
+
+    #[test]
+    fn line_index_trailing_newline() {
+        let mut b = Buffer::from_bytes(b"a\nb\n".to_vec());
+        let idx = b.line_index();
+        // 3 lines: "a", "b", "" — starts at 0, 2, 4
+        assert_eq!(idx, &[0, 2, 4]);
+    }
+
+    #[test]
+    fn line_index_invalidates_after_edit() {
+        let mut b = Buffer::from_bytes(b"abc\ndef".to_vec());
+        b.line_index();  // populate
+        b.insert(0, b"X").expect("ins");
+        let idx = b.line_index();
+        // After: "Xabc\ndef" — line starts at 0, 5
+        assert_eq!(idx, &[0, 5]);
     }
 }
