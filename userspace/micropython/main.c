@@ -18,6 +18,10 @@
 #include "extmod/vfs_posix.h"
 #endif
 
+// debug_print on exit gives the harness a stable success/failure marker
+// (mp's stdout goes to TTY/console/framebuffer, not COM2).
+extern void debug_print(const char *msg);
+
 #define HEAP_SIZE (1024 * 1024)  // 1MB GC heap
 
 static char heap[HEAP_SIZE];
@@ -117,6 +121,13 @@ int main(int argc, char **argv) {
 
     mp_thread_deinit();
     mp_deinit();
+
+    {
+        char buf[32];
+        snprintf(buf, sizeof buf, "micropython: exit %d", ret);
+        debug_print(buf);
+    }
+
     return ret;
 }
 
