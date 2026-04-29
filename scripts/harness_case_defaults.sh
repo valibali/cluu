@@ -198,6 +198,22 @@ harness_derive_marker_defaults() {
                 # empty /tmp because its Cluufile declares MOUNT /tmp private.
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir /tmp/MOUNTPROBE_CANARY; spawn mountprobe"
                 ;;
+            l2_mp_etc)
+                TEST_COMMAND=""
+                # MicroPython opens /etc/motd through libcluu's POSIX shim, which
+                # in turn goes through VFS. Success proves: (a) the mp container
+                # composes correctly with the supervisor envelope, (b) /etc is
+                # reachable via the inherited view, (c) mp's POSIX VFS layer is
+                # functional end-to-end. Marker: `micropython: exit 0` (added in
+                # UE22 as the one permanent debug_print mp emits on exit).
+                #
+                # The python source is double-quoted because cluu_lang's
+                # parser treats `(` `)` as subshell delimiters in bare
+                # words. Inside double quotes parens are plain text. The
+                # python source itself uses single quotes for the path,
+                # so the outer double quotes nest cleanly.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn mp -c \"open('/etc/motd').read()\""
+                ;;
             l2_rm)
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir /tmp/rmtest; spawn mkdir /tmp/rmtest/inner; spawn rm -r /tmp/rmtest"

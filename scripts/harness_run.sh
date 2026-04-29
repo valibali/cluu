@@ -999,6 +999,14 @@ case "$MARKER_MODE" in
             "mountprobe: PASS /tmp isolation verified"
         )
         ;;
+    l2_mp_etc)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: container 'mp' started"
+            "micropython: exit 0"
+        )
+        ;;
     l2_rm)
         required_markers=(
             "TSC calibrated"
