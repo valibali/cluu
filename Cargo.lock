@@ -199,6 +199,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-edit"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-escalateprobe"
 version = "0.1.0"
 dependencies = [
