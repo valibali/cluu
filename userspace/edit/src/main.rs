@@ -57,6 +57,7 @@ mod insert;
 mod mode;
 mod normal;
 mod piece;
+mod prompt;
 mod tty;
 mod undo;
 

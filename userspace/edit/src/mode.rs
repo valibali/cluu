@@ -34,6 +34,7 @@ pub struct Editor {
     pub mode: Mode,
     pub running: bool,
     pub message: String,
+    pub prompt: Option<crate::prompt::PromptState>,
     // More fields added in later tasks (settings, search state, viewport, etc.)
 }
 
@@ -45,6 +46,7 @@ impl Editor {
             mode: Mode::Normal,
             running: true,
             message: String::new(),
+            prompt: None,
         }
     }
 }

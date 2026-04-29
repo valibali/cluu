@@ -1,0 +1,56 @@
+//! Ex / search prompt buffer + minimal command dispatch.
+//! Full ex parser lands in Task 26. For now: :q, :q!, :wq.
+
+extern crate alloc;
+use alloc::string::String;
+use alloc::vec::Vec;
+use crate::input::KeyEvent;
+use crate::mode::{Editor, Mode, PromptKind, StepResult};
+
+pub struct PromptState {
+    pub buf: String,
+    pub kind: PromptKind,
+}
+
+impl PromptState {
+    pub fn new(kind: PromptKind) -> Self {
+        PromptState { buf: String::new(), kind }
+    }
+}
+
+pub fn handle(state: &mut Editor, event: KeyEvent, _kind: PromptKind) -> StepResult {
+    let prompt = state.prompt.get_or_insert_with(|| PromptState::new(PromptKind::Ex));
+    match event {
+        KeyEvent::Esc => {
+            state.prompt = None;
+            state.mode = Mode::Normal;
+            StepResult::Redraw
+        }
+        KeyEvent::Enter => {
+            let line = core::mem::take(&mut prompt.buf);
+            state.prompt = None;
+            state.mode = Mode::Normal;
+            dispatch_ex(state, &line);
+            StepResult::Redraw
+        }
+        KeyEvent::Backspace => {
+            prompt.buf.pop();
+            StepResult::Redraw
+        }
+        KeyEvent::Char(c) => {
+            prompt.buf.push(c);
+            StepResult::Redraw
+        }
+        _ => StepResult::Continue,
+    }
+}
+
+fn dispatch_ex(state: &mut Editor, line: &str) {
+    let line = line.trim();
+    match line {
+        "q"        => { if state.buf.dirty { state.message = "E37: No write since last change".into(); } else { state.running = false; } }
+        "q!"       => { state.running = false; }
+        "wq" | "x" => { /* save then quit; save lands in Task 31 */ state.running = false; }
+        _          => { state.message = alloc::format!("Not an editor command: {}", line); }
+    }
+}
