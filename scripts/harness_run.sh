@@ -970,6 +970,14 @@ case "$MARKER_MODE" in
             "procmgr: cluufile mismatch"
         )
         ;;
+    l2_edit_smoke)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "edit: starting up"
+            "edit: scaffold only"
+        )
+        ;;
     l2_envelope_user)
         required_markers=(
             "TSC calibrated"

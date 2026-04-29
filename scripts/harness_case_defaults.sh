@@ -180,6 +180,11 @@ harness_derive_marker_defaults() {
                 # PermissionDenied before main() runs.
                 SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn cfmismatch"
                 ;;
+            l2_edit_smoke)
+                TEST_COMMAND=""
+                # Smoke: spawn edit (no args) and verify the boot debug_print fires.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn edit"
+                ;;
             l2_envelope_user)
                 TEST_COMMAND=""
                 # GREEN as of UE16: ENV trailer in CONTAINER_RUN propagates the
