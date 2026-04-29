@@ -54,6 +54,7 @@ extern crate alloc;
 mod buffer;
 mod input;
 mod mode;
+mod normal;
 mod piece;
 mod tty;
 mod undo;

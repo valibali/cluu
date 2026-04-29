@@ -48,3 +48,16 @@ impl Editor {
         }
     }
 }
+
+use crate::input::KeyEvent;
+
+pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
+    match state.mode {
+        Mode::Normal => crate::normal::handle(state, event),
+        Mode::Insert => crate::insert::handle(state, event),
+        Mode::ExPrompt(kind) => crate::prompt::handle(state, event, kind),
+        // Other modes added in later tasks. For the skeleton, fall through
+        // to NORMAL to avoid wedging.
+        _ => crate::normal::handle(state, event),
+    }
+}
