@@ -69,7 +69,28 @@ use libcluu::{debug_print, Result};
 
 fn main_result() -> Result<()> {
     debug_print("edit: starting up")?;
-    debug_print("edit: scaffold only — exits immediately")?;
+
+    // Argv: optional file path. For now, ignore content; integration in Task 31.
+    let argv = libcluu::args::args();
+    let _file_arg: Option<alloc::string::String> = argv.iter().nth(1).map(|s| s.clone());
+
+    let saved_tty = tty::enter_raw_mode()?;
+    let mut editor = mode::Editor::new(buffer::EditBuffer::empty());
+    let mut reader = input::StdinReader::new();
+
+    while editor.running {
+        let Some(event) = input::decode(&mut reader) else {
+            // EOF on stdin → quit cleanly.
+            break;
+        };
+        match mode::handle(&mut editor, event) {
+            mode::StepResult::Quit(_) => break,
+            _ => {} // no rendering yet
+        }
+    }
+
+    tty::restore_mode(saved_tty)?;
+    debug_print("edit: bye")?;
     Ok(())
 }
 

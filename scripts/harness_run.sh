@@ -975,7 +975,7 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "edit: starting up"
-            "edit: scaffold only"
+            "edit: bye"
         )
         ;;
     l2_envelope_user)
