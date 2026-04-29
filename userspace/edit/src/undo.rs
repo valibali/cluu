@@ -36,6 +36,10 @@ impl UndoStack {
         UndoStack { entries: Vec::new(), head: 0, pending: None }
     }
 
+    pub fn is_session_open(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// Record a single atomic edit (NORMAL command, visual op, :s).
     pub fn record(&mut self, cursor_before: usize, cursor_after: usize, patch: PiecePatch) {
         self.entries.truncate(self.head);
