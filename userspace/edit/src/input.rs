@@ -4,6 +4,7 @@
 
 extern crate alloc;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyEvent {
@@ -83,6 +84,84 @@ fn decode_escape<R: ByteReader>(r: &mut R) -> KeyEvent {
         [b'6', b'~']                => KeyEvent::PageDown,
         [b'Z']                      => KeyEvent::ShiftTab,
         _                            => KeyEvent::Esc,  // unknown sequence → swallow
+    }
+}
+
+/// `ByteReader` backed by libcluu's TTY input endpoint (TOKEN_STDIN).
+///
+/// Reads bytes via TTY_READ_LABEL IPC. Buffers payloads between
+/// `read_byte` calls so multi-byte payloads (e.g. CSI sequences from
+/// the kbd driver) drain one byte at a time.
+pub struct StdinReader {
+    stdin_endpoint: usize,
+    pending: Vec<u8>, // bytes buffered from a prior recv
+}
+
+impl StdinReader {
+    pub fn new() -> Self {
+        let info = libcluu::boot::process_info();
+        let stdin = info.tokens[libcluu::boot::TOKEN_STDIN];
+        StdinReader { stdin_endpoint: stdin, pending: Vec::new() }
+    }
+
+    /// Receive a TTY_READ payload into self.pending, blocking up to `ms`.
+    /// Returns true if any bytes were appended to `self.pending`.
+    fn recv_payload(&mut self, ms: u64) -> bool {
+        // Mirrors the shell's input loop pattern (userspace/shell/src/main.rs:142-162):
+        // wait on the stdin endpoint, parse_message, drop anything that isn't
+        // TTY_READ_LABEL, then copy the payload bytes into our pending buffer.
+        // The editor only listens on stdin (no registry endpoint), so single-token
+        // ipc_recv_any is fine.
+        let mut buf = [0u8; 128];
+        let tokens = [self.stdin_endpoint];
+        match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, ms) {
+            Ok((_index, len)) => {
+                let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) else {
+                    return false;
+                };
+                if msg.tag.label != libcluu::ipc::TTY_READ_LABEL {
+                    // Unexpected label — drop defensively.
+                    return false;
+                }
+                if !payload.is_empty() {
+                    self.pending.extend_from_slice(payload);
+                    true
+                } else if msg.tag.words >= 2 {
+                    // Inline single-byte form: words[1] holds the char.
+                    let ch = msg.words[1] as u8;
+                    self.pending.push(ch);
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+impl ByteReader for StdinReader {
+    fn read_byte(&mut self) -> Option<u8> {
+        if self.pending.is_empty() {
+            // Block (long timeout) until input arrives.
+            self.recv_payload(60_000);
+        }
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(self.pending.remove(0))
+        }
+    }
+
+    fn read_byte_with_timeout_ms(&mut self, ms: u64) -> Option<u8> {
+        if self.pending.is_empty() {
+            self.recv_payload(ms);
+        }
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(self.pending.remove(0))
+        }
     }
 }
 
