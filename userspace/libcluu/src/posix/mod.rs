@@ -38,6 +38,7 @@ mod stat;
 mod stubs;
 pub mod termios;
 mod time;
+pub mod tty;
 
 pub use dir::*;
 pub use env::*;

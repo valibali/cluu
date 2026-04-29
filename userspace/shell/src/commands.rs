@@ -16,8 +16,12 @@ use libcluu::ipc::{
     build_container_run_payload_with_argv, build_container_run_payload_full, FdAction, RedirAction,
     SharedRing, CONSOLE_CLEAR_LABEL, PROCMGR_CONTAINER_LIST_LABEL,
     PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_ESCALATE_LABEL, PROCMGR_SHUTDOWN_LABEL, PROCMGR_SU_LABEL,
-    TTY_CTL_LABEL, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
+    TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
     TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
+};
+use libcluu::posix::tty::{
+    get_lflag as tty_get_lflag, set_lflag as tty_set_lflag,
+    TTY_LFLAG_ECHO, TTY_LFLAG_ICANON,
 };
 use libcluu::registry;
 use libcluu::syscall;
@@ -32,8 +36,6 @@ const SIGINT: usize = 2;
 const SIGTERM: usize = 15;
 const SIGCONT: usize = 18;
 const SIGSTOP: usize = 19;
-const TTY_LFLAG_ICANON: usize = 0x02;
-const TTY_LFLAG_ECHO: usize = 0x08;
 const TTY_LFLAG_DEFAULT: usize = TTY_LFLAG_ICANON | TTY_LFLAG_ECHO;
 
 /// Execution result for a command handler.
@@ -1624,34 +1626,6 @@ fn set_tty_foreground(
     msg.words[2] = flags;
     call(tty_endpoint, &mut msg, IpcFlags::empty())?;
     Ok(())
-}
-
-fn tty_get_lflag(tty_endpoint: usize) -> Result<usize> {
-    let mut msg = Message::new(TTY_CTL_LABEL, [0; 6], 1);
-    msg.words[0] = 0; // getattr
-    tty_ctl_call_with_retry(tty_endpoint, &mut msg)?;
-    Ok(msg.words[4])
-}
-
-fn tty_set_lflag(tty_endpoint: usize, lflag: usize) -> Result<()> {
-    let mut msg = Message::new(TTY_CTL_LABEL, [0; 6], 5);
-    msg.words[0] = 1; // setattr
-    msg.words[4] = lflag;
-    tty_ctl_call_with_retry(tty_endpoint, &mut msg)
-}
-
-fn tty_ctl_call_with_retry(tty_endpoint: usize, msg: &mut Message) -> Result<()> {
-    const RETRIES: usize = 128;
-    for _ in 0..RETRIES {
-        match call(tty_endpoint, msg, IpcFlags::empty()) {
-            Ok(()) => return Ok(()),
-            Err(Error::WouldBlock) | Err(Error::Busy) => {
-                let _ = syscall::yield_cpu();
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Err(Error::Busy)
 }
 
 /// Poll background job notify endpoints and emit async completion markers.

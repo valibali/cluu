@@ -51,9 +51,10 @@
 
 extern crate alloc;
 
-mod piece;
-mod undo;
 mod buffer;
+mod piece;
+mod tty;
+mod undo;
 
 #[allow(unused_imports)]
 use libcluu::runtime as _;
