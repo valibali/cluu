@@ -4,7 +4,7 @@
 //! parser wiring, following SOLID separation between parsing, dispatch, and IO.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -45,6 +45,10 @@ pub enum ExecResult {
 /// Per-shell execution context shared across command invocations.
 pub struct CommandContext {
     vars: BTreeMap<String, String>,
+    /// Names of vars marked for propagation to spawned children (bash semantics).
+    /// `set X=v` puts X into `vars` only; `export X` (or `export X=v`) adds X here.
+    /// `unset X` removes X from both.
+    exported: BTreeSet<String>,
     procmgr_spawn: usize,
     console_write: usize,
     bg_jobs: BTreeMap<usize, BackgroundJob>,
@@ -78,6 +82,7 @@ impl CommandContext {
     pub fn new() -> Self {
         Self {
             vars: BTreeMap::new(),
+            exported: BTreeSet::new(),
             procmgr_spawn: 0,
             console_write: 0,
             bg_jobs: BTreeMap::new(),
@@ -101,8 +106,12 @@ impl CommandContext {
     }
 
     /// Remove a variable from the shell context.
+    ///
+    /// Drops the var from both the local set and the exported set, so that
+    /// `unset NAME` purges it from `env` output and from the spawn ENV trailer.
     pub fn unset(&mut self, name: &str) {
         self.vars.remove(name);
+        self.exported.remove(name);
     }
 
     /// Fetch a variable value, if present.
@@ -115,6 +124,27 @@ impl CommandContext {
         self.vars
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Mark `name` as exported. The next `spawn` will include this var in the
+    /// child's environment (provided it has a value in `vars`).
+    pub fn export_var(&mut self, name: &str) {
+        self.exported.insert(name.to_string());
+    }
+
+    /// Test whether `name` is currently exported.
+    pub fn is_exported(&self, name: &str) -> bool {
+        self.exported.contains(name)
+    }
+
+    /// Snapshot of (key, value) pairs for every exported var that also has a
+    /// value in `vars`. Used by `spawn_process_with_argv_and_redirs` to overlay
+    /// shell-local exports on top of the inherited (envelope-resolved) env.
+    pub fn exported_pairs(&self) -> Vec<(String, String)> {
+        self.exported
+            .iter()
+            .filter_map(|k| self.vars.get(k).map(|v| (k.clone(), v.clone())))
             .collect()
     }
 
@@ -288,6 +318,7 @@ impl BuiltinProvider for DefaultBuiltins {
         registry.register(Box::new(PwdBuiltin));
         registry.register(Box::new(ExitBuiltin));
         registry.register(Box::new(SetBuiltin));
+        registry.register(Box::new(ExportBuiltin));
         registry.register(Box::new(UnsetBuiltin));
         registry.register(Box::new(EnvBuiltin));
         registry.register(Box::new(ExprBuiltin));
@@ -641,7 +672,57 @@ impl BuiltinCommand for UnsetBuiltin {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"unset: missing name\n")?;
             return Ok(());
         };
+        // CommandContext::unset already removes from `exported` too.
         context.unset(name);
+        Ok(())
+    }
+}
+
+/// `export` — bash-style env propagation builtin.
+///
+/// Three call shapes:
+///   `export`              — print every exported var as `export K=V`.
+///   `export NAME=VALUE`   — set NAME locally AND mark it exported.
+///   `export NAME`         — promote an existing local var to exported
+///                           (no-op if NAME isn't set; bash matches this).
+///
+/// Exported vars are layered on top of the parent's inherited env in
+/// `spawn_process_with_argv_and_redirs` and packed into the CONTAINER_RUN
+/// payload's ENV trailer.
+struct ExportBuiltin;
+
+impl BuiltinCommand for ExportBuiltin {
+    fn name(&self) -> &'static str {
+        "export"
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        if args.is_empty() {
+            for (k, v) in context.exported_pairs() {
+                let line = format!("export {}={}\n", k, v);
+                let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+            }
+            return Ok(());
+        }
+        for arg in args {
+            if let Some(eq) = arg.find('=') {
+                let name = &arg[..eq];
+                let value = &arg[eq + 1..];
+                if name.is_empty() {
+                    let _ = send_with_payload(
+                        stdout,
+                        TTY_WRITE_LABEL,
+                        b"export: missing name before '='\n",
+                    );
+                    continue;
+                }
+                context.set(name, value.to_string());
+                context.export_var(name);
+            } else {
+                // Promote an existing local var; no-op if it doesn't exist.
+                context.export_var(arg);
+            }
+        }
         Ok(())
     }
 }
@@ -1256,7 +1337,26 @@ pub fn spawn_process_with_argv_and_redirs(
     redirs: &[RedirAction],
 ) -> Result<SpawnResult> {
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-    let (payload, _argc, fdac_offset) = build_container_run_payload_full(name, args, &[], redirs);
+
+    // Build the child's env: start from the shell's own (envelope-resolved at
+    // session-login) env, then overlay any vars marked `export` in this
+    // shell. Bash semantics: shell-local `set X=v` does NOT propagate; only
+    // `export X` (or a var that was already inherited as exported) does.
+    let mut env_pairs: Vec<(String, String)> = libcluu::posix::snapshot_env();
+    for (k, v) in context.exported_pairs() {
+        if let Some(idx) = env_pairs.iter().position(|(ek, _)| ek == &k) {
+            env_pairs[idx].1 = v;
+        } else {
+            env_pairs.push((k, v));
+        }
+    }
+    let env_refs: Vec<(&str, &str)> = env_pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    let (payload, _argc, fdac_offset) =
+        build_container_run_payload_full(name, args, &[], redirs, &env_refs);
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
     let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();

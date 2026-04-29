@@ -85,7 +85,10 @@ pub const VFS_SET_VIEW_LABEL: u32 = 21;
 pub const VFS_CONTAINER_CLEANUP_LABEL: u32 = 22;
 
 /// Container run: payload = image name (UTF-8), optionally followed by an
-/// FDAC blob and/or the CWD trailer (see `CWD_MAGIC`).
+/// FDAC blob, ARGV trailer, REDIR trailer, ENV trailer, and/or CWD trailer.
+/// Wire order (when all trailers present):
+///   `[name][FDAC][ARGV trailer][REDIR trailer][ENV trailer][CWD trailer]`
+/// Procmgr strips trailers in reverse order: CWD → ENV → REDIR → ARGV.
 /// Reply: words[0] = errno, words[1] = pid, words[2] = container_id.
 pub const PROCMGR_CONTAINER_RUN_LABEL: u32 = 24;
 
@@ -827,6 +830,13 @@ pub fn build_container_run_payload_with_argv(name: &str, args: &[&str]) -> (Vec<
 /// Magic sentinel for the REDIR trailer (ASCII "REDI" little-endian).
 pub const REDIR_MAGIC: u32 = 0x52454449;
 
+/// Magic sentinel for the ENV trailer (ASCII "ENV " little-endian).
+///
+/// Trailer layout (sits between the REDIR and CWD trailers on the wire):
+///   `[env_bytes][u32 env_bytes_len LE][u32 ENV_MAGIC LE]`
+/// where `env_bytes` is "KEY=VALUE\0KEY=VALUE\0..." packed.
+pub const ENV_MAGIC: u32 = 0x2056_4E45;
+
 /// One entry in the FDAC blob passed in a `CONTAINER_RUN` payload.
 ///
 /// FDAC = "File Descriptor Action" — each entry overrides one of the child's
@@ -920,17 +930,24 @@ pub fn build_container_run_payload_with_argv_and_fdac(
     (payload, argc, fdac_offset)
 }
 
-/// Build a `CONTAINER_RUN` payload with argv, FDAC entries, AND REDIR entries.
+/// Build a `CONTAINER_RUN` payload with argv, FDAC entries, REDIR entries,
+/// AND an ENV block.
 ///
 /// Wire format (in order):
 ///   `[name_bytes]`
 ///   `[u32 FDAC_MAGIC LE][u32 count LE][(u32 fd, u32 flags, u64 ep) * count]`
 ///   `[argv[0]\0][argv[1]\0]...[u32 argv_bytes_len LE][u32 ARGV_MAGIC LE]`
 ///   `[redir entries...][u32 entries_len LE][u32 REDIR_MAGIC LE]`
+///   `[env_bytes][u32 env_bytes_len LE][u32 ENV_MAGIC LE]`
 ///   `[cwd_bytes][u32 cwd_len LE][u32 CWD_MAGIC LE]`
 ///
-/// Stripping order in procmgr (outermost first): CWD → REDIR → ARGV, leaving
-/// `[name][FDAC]` in `effective_payload`.
+/// Stripping order in procmgr (outermost first): CWD → ENV → REDIR → ARGV,
+/// leaving `[name][FDAC]` in `effective_payload`.
+///
+/// `env` carries the parent's exported env layered with the shell's exported
+/// vars; entries are packed as "KEY=VALUE\0" — same wire format as procmgr's
+/// `build_default_env_payload`. An empty `env` slice omits the ENV trailer
+/// (procmgr falls back to `DEFAULT_ENV`).
 ///
 /// Returns `(payload_bytes, argc, fdac_offset)`.
 /// Maximum 4 redirs; paths capped at 255 bytes each.
@@ -940,14 +957,16 @@ pub fn build_container_run_payload_full(
     args: &[&str],
     fdac: &[FdAction],
     redirs: &[RedirAction],
+    env: &[(&str, &str)],
 ) -> (Vec<u8>, usize, usize) {
     use crate::boot::CWD_MAX;
 
     let argc = args.len();
     let argv_bytes_est: usize = args.iter().map(|a| a.len() + 1).sum();
     let redir_bytes_est: usize = redirs.iter().map(|r| 4 + r.path.len().min(255)).sum();
+    let env_bytes_est: usize = env.iter().map(|(k, v)| k.len() + v.len() + 2).sum();
     let mut payload =
-        Vec::with_capacity(name.len() + argv_bytes_est + 16 * fdac.len() + redir_bytes_est + 24 + CWD_MAX + 24);
+        Vec::with_capacity(name.len() + argv_bytes_est + 16 * fdac.len() + redir_bytes_est + env_bytes_est + 24 + CWD_MAX + 24);
     payload.extend_from_slice(name.as_bytes());
 
     // FDAC blob immediately after the image name.
@@ -976,7 +995,7 @@ pub fn build_container_run_payload_full(
         payload.extend_from_slice(&ARGV_MAGIC.to_le_bytes());
     }
 
-    // REDIR trailer comes after ARGV, before CWD.
+    // REDIR trailer comes after ARGV, before ENV.
     if !redirs.is_empty() {
         let redir_start = payload.len();
         for r in redirs.iter().take(4) {
@@ -990,6 +1009,20 @@ pub fn build_container_run_payload_full(
         let entries_len = (payload.len() - redir_start) as u32;
         payload.extend_from_slice(&entries_len.to_le_bytes());
         payload.extend_from_slice(&REDIR_MAGIC.to_le_bytes());
+    }
+
+    // ENV trailer comes after REDIR, before CWD.
+    if !env.is_empty() {
+        let env_start = payload.len();
+        for (k, v) in env {
+            payload.extend_from_slice(k.as_bytes());
+            payload.push(b'=');
+            payload.extend_from_slice(v.as_bytes());
+            payload.push(0);
+        }
+        let env_bytes_len = (payload.len() - env_start) as u32;
+        payload.extend_from_slice(&env_bytes_len.to_le_bytes());
+        payload.extend_from_slice(&ENV_MAGIC.to_le_bytes());
     }
 
     // CWD trailer is always last.

@@ -290,3 +290,27 @@ pub extern "C" fn unsetenv(name: *const c_char) -> c_int {
     let mut env = ENV.lock();
     env.unset(key)
 }
+
+/// Take a snapshot of every "KEY=VALUE" entry currently held by the process
+/// env. Returns owned `(key, value)` String pairs. Used by the shell when it
+/// needs to propagate its (envelope-resolved) env into a child via the ENV
+/// trailer.
+///
+/// Entries with malformed (non-UTF-8 or missing `=`) bytes are skipped.
+pub fn snapshot_env() -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)> {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    let env = ENV.lock();
+    let mut out: Vec<(String, String)> = Vec::with_capacity(env.count);
+    for i in 0..env.count {
+        let off = env.entries[i];
+        let len = env.lengths[i];
+        let kv = &env.buf[off..off + len];
+        let Some(eq) = kv.iter().position(|&b| b == b'=') else { continue };
+        let Ok(key) = core::str::from_utf8(&kv[..eq]) else { continue };
+        let Ok(val) = core::str::from_utf8(&kv[eq + 1..]) else { continue };
+        out.push((String::from(key), String::from(val)));
+    }
+    out
+}

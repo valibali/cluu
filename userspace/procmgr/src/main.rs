@@ -53,6 +53,7 @@ use libcluu::ipc::extract_reply_id;
 use libcluu::ipc::parse_message;
 use libcluu::ipc::SharedRing;
 use libcluu::ipc::CWD_MAGIC as SPAWN_CWD_MAGIC;
+use libcluu::ipc::ENV_MAGIC as SPAWN_ENV_MAGIC;
 use libcluu::ipc::REDIR_MAGIC as SPAWN_REDIR_MAGIC;
 use libcluu::ipc::PROCMGR_CONTAINER_LIST_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL;
@@ -4545,12 +4546,19 @@ impl ProcessManager {
         // Strip the optional CWD trailer first; FDAC/param offsets refer into
         // the pre-trailer view, identical to the posix_spawn payload contract.
         let (effective_payload, cwd_bytes) = split_cwd_trailer(payload);
-        // REDIR trailer sits between the ARGV block and the CWD trailer.
-        // Strip it second (after CWD, before ARGV).
+        // ENV trailer sits between the REDIR trailer and the CWD trailer on
+        // the wire (UE16). Strip immediately after CWD so REDIR/ARGV strips
+        // continue to operate on the same view as before this trailer was
+        // introduced.
+        let (effective_payload, env_bytes) = split_env_trailer(effective_payload);
+        // REDIR trailer sits between the ARGV block and the ENV trailer.
         let (effective_payload, redir_bytes) = split_redir_trailer(effective_payload);
         // ARGV trailer sits between the argv block and the REDIR trailer in the
-        // wire format, so CWD and REDIR must be stripped first.
+        // wire format, so CWD/ENV/REDIR must be stripped first.
         let (effective_payload, argv_extra_bytes) = split_argv_trailer(effective_payload);
+
+        // Count env entries (one NUL per "KEY=VALUE\0" record).
+        let envc = env_bytes.iter().filter(|&&b| b == 0).count();
 
         // Extract FDAC offset and param override info from message words
         let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
@@ -4917,8 +4925,8 @@ impl ProcessManager {
             priority,
             &argv_payload,
             argc,
-            &[],
-            0,
+            env_bytes,
+            envc,
             sender_tid,
             spawn_seq,
             spawn_start,
@@ -5463,6 +5471,52 @@ fn split_argv_trailer(payload: &[u8]) -> (&[u8], &[u8]) {
 
     let argv_start = len_pos - argv_bytes_len;
     (&payload[..argv_start], &payload[argv_start..len_pos])
+}
+
+/// Strip the optional ENV trailer from the end of `payload` (which must
+/// already have the CWD trailer stripped, since ENV sits between REDIR and
+/// CWD on the wire). Returns `(remaining, env_bytes)`. If no ENV magic is
+/// present, returns `(payload, &[])` and procmgr falls back to `DEFAULT_ENV`.
+///
+/// Wire format:
+///   `[env_bytes][u32 env_bytes_len LE][u32 ENV_MAGIC LE]`
+/// where `env_bytes` is "KEY=VALUE\0KEY=VALUE\0..." packed.
+fn split_env_trailer(payload: &[u8]) -> (&[u8], &[u8]) {
+    if payload.len() < 8 {
+        return (payload, &[]);
+    }
+    let magic_pos = payload.len() - 4;
+    let magic_bytes: [u8; 4] = match payload[magic_pos..].try_into() {
+        Ok(b) => b,
+        Err(_) => return (payload, &[]),
+    };
+    if u32::from_le_bytes(magic_bytes) != SPAWN_ENV_MAGIC {
+        return (payload, &[]);
+    }
+
+    let len_pos = magic_pos - 4;
+    let len_bytes: [u8; 4] = match payload[len_pos..magic_pos].try_into() {
+        Ok(b) => b,
+        Err(_) => return (payload, &[]),
+    };
+    let env_bytes_len = u32::from_le_bytes(len_bytes) as usize;
+
+    if env_bytes_len > len_pos {
+        return (payload, &[]);
+    }
+    // Sanity cap: env data must fit in the child's ProcessInfo page alongside
+    // headers, argv, and cwd. 3 KB is a generous ceiling — same envelope cap
+    // we use for argv.
+    if env_bytes_len > MAX_ARGV_TRAILER_BYTES {
+        return (payload, &[]);
+    }
+    // Well-formed env trailers always end with a NUL terminator.
+    if env_bytes_len == 0 || payload[len_pos - 1] != 0 {
+        return (payload, &[]);
+    }
+
+    let env_start = len_pos - env_bytes_len;
+    (&payload[..env_start], &payload[env_start..len_pos])
 }
 
 /// Strip the optional REDIR trailer from the end of `payload` (which must already

@@ -233,8 +233,13 @@ impl PipelineExecutor {
                 });
             }
 
+            // TODO(UE17+): pipeline stages currently spawn with the procmgr
+            // DEFAULT_ENV (since env is &[]). Single-command spawn in
+            // commands.rs propagates the shell's env via ENV trailer; lifting
+            // that into the pipe path is left for a follow-up — l2_envelope_user
+            // exercises the single-command path.
             let (payload, _argc, fdac_offset) =
-                build_container_run_payload_full(image_name, &arg_refs, &fdac, stage_redirs);
+                build_container_run_payload_full(image_name, &arg_refs, &fdac, stage_redirs, &[]);
 
             let notify_endpoint = match endpoint_create(process_info().tokens[TOKEN_IPC]) {
                 Ok(ep) => ep,

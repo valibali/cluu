@@ -966,6 +966,17 @@ case "$MARKER_MODE" in
             "envprobe: PASS"
         )
         ;;
+    l2_export)
+        # UE15+UE16: bash `export` semantics through the ENV trailer.
+        # X is set locally only — the spawned child must see "X=(null)".
+        # Y is exported — the child must see "Y=exported".
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "envprobe: X=(null)"
+            "envprobe: Y=exported"
+        )
+        ;;
     l2_mount_private)
         required_markers=(
             "TSC calibrated"

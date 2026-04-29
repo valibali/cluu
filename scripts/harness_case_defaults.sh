@@ -173,10 +173,15 @@ harness_derive_marker_defaults() {
                 ;;
             l2_envelope_user)
                 TEST_COMMAND=""
-                # RED until UE16 lands env propagation: spawn child currently
-                # falls back to procmgr's DEFAULT_ENV instead of inheriting the
-                # alice shell's resolved-from-envelope env.
+                # GREEN as of UE16: ENV trailer in CONTAINER_RUN propagates the
+                # shell's envelope-resolved env to the child.
                 SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn envprobe HOME USER PATH SHELL"
+                ;;
+            l2_export)
+                TEST_COMMAND=""
+                # UE15: `set X=v` is shell-local (child sees null); `export Y=v`
+                # propagates via the ENV trailer so envprobe gets Y=exported.
+                SHELL_AUTOSTART_CMD_DEFAULT="set X=local; export Y=exported; spawn envprobe X Y"
                 ;;
             l2_mount_private)
                 TEST_COMMAND=""
