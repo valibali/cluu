@@ -148,9 +148,22 @@ pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
                 if let Some(p) = crate::search::next_match(state) { state.buf.cursor = p; }
             }
         }
-        KeyEvent::Char(':')                                       => { state.mode = Mode::ExPrompt(PromptKind::Ex); }
-        KeyEvent::Char('/') => { state.mode = Mode::ExPrompt(PromptKind::SearchFwd); }
-        KeyEvent::Char('?') => { state.mode = Mode::ExPrompt(PromptKind::SearchBwd); }
+        // Initialize state.prompt eagerly so the first frame after entering
+        // the prompt actually renders the ":"/"/"/"?" prefix. Without this,
+        // prompt::handle creates it lazily on the *next* key, so the user
+        // sees no visible change and may think `:` was ignored.
+        KeyEvent::Char(':') => {
+            state.mode = Mode::ExPrompt(PromptKind::Ex);
+            state.prompt = Some(crate::prompt::PromptState::new(PromptKind::Ex));
+        }
+        KeyEvent::Char('/') => {
+            state.mode = Mode::ExPrompt(PromptKind::SearchFwd);
+            state.prompt = Some(crate::prompt::PromptState::new(PromptKind::SearchFwd));
+        }
+        KeyEvent::Char('?') => {
+            state.mode = Mode::ExPrompt(PromptKind::SearchBwd);
+            state.prompt = Some(crate::prompt::PromptState::new(PromptKind::SearchBwd));
+        }
         KeyEvent::Char('n') => { if let Some(p) = crate::search::next_match(state) { state.buf.cursor = p; } }
         KeyEvent::Char('N') => { if let Some(p) = crate::search::prev_match(state) { state.buf.cursor = p; } }
         KeyEvent::Char('v') => { state.visual_anchor = state.buf.cursor; state.mode = Mode::VisualChar; }
