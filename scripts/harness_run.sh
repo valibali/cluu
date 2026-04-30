@@ -982,6 +982,30 @@ case "$MARKER_MODE" in
         # smoke can only verify boot. Once visual rendering lands we'll
         # add an `l2_edit_quit` case that injects `:q\n` and verifies exit.
         ;;
+    l2_edit_insert)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "edit: starting up"
+            # Future: "hello world" once injectable INSERT lands
+        )
+        ;;
+    l2_edit_undo)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "edit: starting up"
+            # Future: undo round-trip verification once byte-injection works
+        )
+        ;;
+    l2_edit_eacces)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "edit: starting up"
+            # Future: "Cannot save" once :w EACCES path is reachable from harness
+        )
+        ;;
     l2_envelope_user)
         required_markers=(
             "TSC calibrated"

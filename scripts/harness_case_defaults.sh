@@ -189,6 +189,27 @@ harness_derive_marker_defaults() {
                 # rendering exists; see harness_run.sh marker comment).
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn edit"
                 ;;
+            l2_edit_insert)
+                TEST_COMMAND=""
+                # RED until an editprobe-style byte-injection helper exists. The
+                # harness's KEYSTROKE_COMMANDS mechanism types whole lines + Enter,
+                # so it can't drive INSERT mode (needs raw chars + Esc + :wq).
+                # Manual interactive verification is the v1 acceptance path.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn edit /home/root/test.txt"
+                ;;
+            l2_edit_undo)
+                TEST_COMMAND=""
+                # Same RED status as l2_edit_insert.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn edit /home/root/undo.txt"
+                ;;
+            l2_edit_eacces)
+                TEST_COMMAND=""
+                # RED until byte-injection lands. Drops into alice (user envelope =
+                # ro:/etc) and runs edit on /etc/motd. Without keystroke injection
+                # for `iX:w`, the failing-write code path can't be exercised by the
+                # harness; manual verification only.
+                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn edit /etc/motd"
+                ;;
             l2_envelope_user)
                 TEST_COMMAND=""
                 # GREEN as of UE16: ENV trailer in CONTAINER_RUN propagates the
