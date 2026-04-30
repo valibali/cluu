@@ -87,8 +87,8 @@ pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
         KeyEvent::Char('p') => { ops::paste_after(state); }
         KeyEvent::Char('u') => { if let Some(c) = state.undo.undo(&mut state.buf.pieces) { state.buf.cursor = c; } }
         KeyEvent::Ctrl('r') => { if let Some(c) = state.undo.redo(&mut state.buf.pieces) { state.buf.cursor = c; } }
-        KeyEvent::Ctrl('q')                                       => return StepResult::Quit(0),
-        KeyEvent::Ctrl('s')                                       => { /* :w shortcut, lands in Task 31 */ }
+        KeyEvent::Ctrl('q') => { crate::ex::dispatch(state, "q"); }
+        KeyEvent::Ctrl('s') => { crate::ex::dispatch(state, "w"); }
         _                                                          => return StepResult::Continue,
     }
     StepResult::Redraw
