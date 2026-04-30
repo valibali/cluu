@@ -182,7 +182,11 @@ harness_derive_marker_defaults() {
                 ;;
             l2_edit_smoke)
                 TEST_COMMAND=""
-                # Smoke: spawn edit (no args) and verify the boot debug_print fires.
+                # Smoke: spawn edit (no args). Verifies the binary boots
+                # into raw-mode input loop without crashing. Edit blocks
+                # on stdin recv after `edit: starting up` — clean exit
+                # via injected key is a follow-up case (post-T18 once
+                # rendering exists; see harness_run.sh marker comment).
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn edit"
                 ;;
             l2_envelope_user)
