@@ -127,3 +127,22 @@ pub fn flush_to_tty(bytes: &[u8]) {
     );
 }
 
+/// Adjust viewport so the cursor is on screen.
+pub fn ensure_cursor_visible(state: &mut Editor) {
+    let (line, col) = state.buf.pieces.line_col(state.buf.cursor);
+    let scrolloff = 3;
+    let h = state.viewport.height as usize;
+    let w = state.viewport.width as usize;
+
+    if line < state.viewport.top_line + scrolloff {
+        state.viewport.top_line = line.saturating_sub(scrolloff);
+    } else if line >= state.viewport.top_line + h.saturating_sub(scrolloff) {
+        state.viewport.top_line = (line + scrolloff + 1).saturating_sub(h);
+    }
+
+    if col < state.viewport.left_col {
+        state.viewport.left_col = col;
+    } else if col >= state.viewport.left_col + w {
+        state.viewport.left_col = col + 1 - w;
+    }
+}

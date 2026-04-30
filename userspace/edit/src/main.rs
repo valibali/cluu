@@ -80,6 +80,7 @@ fn main_result() -> Result<()> {
     let mut reader = input::StdinReader::new();
 
     while editor.running {
+        render::ensure_cursor_visible(&mut editor);
         let frame = render::render(&mut editor);
         render::flush_to_tty(&frame);
 
