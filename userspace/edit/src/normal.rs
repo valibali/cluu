@@ -72,6 +72,10 @@ pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
             state.mode = Mode::Insert;
         }
         KeyEvent::Char(':')                                       => { state.mode = Mode::ExPrompt(PromptKind::Ex); }
+        KeyEvent::Char('/') => { state.mode = Mode::ExPrompt(PromptKind::SearchFwd); }
+        KeyEvent::Char('?') => { state.mode = Mode::ExPrompt(PromptKind::SearchBwd); }
+        KeyEvent::Char('n') => { if let Some(p) = crate::search::next_match(state) { state.buf.cursor = p; } }
+        KeyEvent::Char('N') => { if let Some(p) = crate::search::prev_match(state) { state.buf.cursor = p; } }
         KeyEvent::Char('v') => { state.visual_anchor = state.buf.cursor; state.mode = Mode::VisualChar; }
         KeyEvent::Char('V') => { state.visual_anchor = state.buf.cursor; state.mode = Mode::VisualLine; }
         KeyEvent::Char('d') => { state.mode = Mode::OperatorPending(Operator::Delete); return StepResult::Continue; }

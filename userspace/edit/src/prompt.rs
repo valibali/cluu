@@ -18,8 +18,8 @@ impl PromptState {
     }
 }
 
-pub fn handle(state: &mut Editor, event: KeyEvent, _kind: PromptKind) -> StepResult {
-    let prompt = state.prompt.get_or_insert_with(|| PromptState::new(PromptKind::Ex));
+pub fn handle(state: &mut Editor, event: KeyEvent, kind: PromptKind) -> StepResult {
+    let prompt = state.prompt.get_or_insert_with(|| PromptState::new(kind));
     match event {
         KeyEvent::Esc => {
             state.prompt = None;
@@ -28,9 +28,20 @@ pub fn handle(state: &mut Editor, event: KeyEvent, _kind: PromptKind) -> StepRes
         }
         KeyEvent::Enter => {
             let line = core::mem::take(&mut prompt.buf);
+            let kind = prompt.kind;
             state.prompt = None;
             state.mode = Mode::Normal;
-            dispatch_ex(state, &line);
+            match kind {
+                PromptKind::Ex => dispatch_ex(state, &line),
+                PromptKind::SearchFwd => {
+                    crate::search::set_pattern(state, line, crate::mode::SearchDir::Forward);
+                    if let Some(p) = crate::search::next_match(state) { state.buf.cursor = p; }
+                }
+                PromptKind::SearchBwd => {
+                    crate::search::set_pattern(state, line, crate::mode::SearchDir::Backward);
+                    if let Some(p) = crate::search::next_match(state) { state.buf.cursor = p; }
+                }
+            }
             StepResult::Redraw
         }
         KeyEvent::Backspace => {

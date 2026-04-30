@@ -55,6 +55,29 @@ impl Settings {
     }
 }
 
+pub struct SearchState {
+    pub pattern: String,
+    pub direction: SearchDir,
+    pub matches: Vec<core::ops::Range<usize>>,
+    pub matches_seq: u64,
+    pub history: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SearchDir { Forward, Backward }
+
+impl SearchState {
+    pub fn new() -> Self {
+        SearchState {
+            pattern: String::new(),
+            direction: SearchDir::Forward,
+            matches: Vec::new(),
+            matches_seq: u64::MAX,
+            history: Vec::new(),
+        }
+    }
+}
+
 /// Editor viewport — the rectangular slice of the buffer currently visible on
 /// screen. `top_line`/`left_col` track the scroll origin (0-indexed); `height`
 /// is the number of content rows (status + message rows live below);
@@ -87,6 +110,7 @@ pub struct Editor {
     pub visual_anchor: usize,
     pub last_visual_range: Option<(usize, usize, Mode)>,
     pub settings: Settings,
+    pub search: SearchState,
     // More fields added in later tasks (search state, etc.)
 }
 
@@ -105,6 +129,7 @@ impl Editor {
             visual_anchor: 0,
             last_visual_range: None,
             settings: Settings::defaults(),
+            search: SearchState::new(),
         }
     }
 }

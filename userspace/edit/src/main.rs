@@ -62,6 +62,7 @@ mod ops;
 mod piece;
 mod prompt;
 mod render;
+mod search;
 mod tty;
 mod undo;
 mod visual;
