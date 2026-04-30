@@ -179,6 +179,7 @@ impl ScancodeDecoder {
 /// Convert a scancode into ASCII using the current modifier state.
 fn ascii_for_scancode(scancode: u8, modifiers: Modifiers, extended: bool) -> Option<u8> {
     match scancode {
+        0x01 => Some(0x1B), // ESC
         0x1C => Some(b'\n'),
         0x0E => Some(0x08),
         0x0F => Some(b'\t'),

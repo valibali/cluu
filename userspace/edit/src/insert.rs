@@ -2,7 +2,7 @@
 
 extern crate alloc;
 
-use crate::input::KeyEvent;
+use crate::input::{Direction, KeyEvent};
 use crate::mode::{Editor, Mode, StepResult};
 
 pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
@@ -76,10 +76,52 @@ pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
             }
             StepResult::Redraw
         }
-        KeyEvent::Arrow(_) | KeyEvent::PageUp | KeyEvent::PageDown
-        | KeyEvent::Home | KeyEvent::End | KeyEvent::Delete => StepResult::Continue,
+        KeyEvent::Arrow(dir) => {
+            move_cursor(state, dir);
+            StepResult::Redraw
+        }
+        KeyEvent::Home => {
+            state.buf.cursor = crate::motion::line_start(&mut state.buf);
+            StepResult::Redraw
+        }
+        KeyEvent::End => {
+            state.buf.cursor = crate::motion::line_end(&mut state.buf);
+            StepResult::Redraw
+        }
+        KeyEvent::Delete => {
+            // Forward delete: remove the byte under the cursor (same as `x` in NORMAL).
+            let len = state.buf.pieces.len();
+            if state.buf.cursor < len {
+                ensure_session(state);
+                let bytes = state.buf.pieces.read_all();
+                if state.buf.cursor < bytes.len() && bytes[state.buf.cursor] != b'\n' {
+                    state.buf.pieces.delete(state.buf.cursor..state.buf.cursor + 1);
+                    state.buf.mark_dirty();
+                }
+            }
+            StepResult::Redraw
+        }
+        KeyEvent::PageUp => {
+            let h = state.viewport.height as usize;
+            for _ in 0..h.saturating_sub(1) { move_cursor(state, Direction::Up); }
+            StepResult::Redraw
+        }
+        KeyEvent::PageDown => {
+            let h = state.viewport.height as usize;
+            for _ in 0..h.saturating_sub(1) { move_cursor(state, Direction::Down); }
+            StepResult::Redraw
+        }
         _ => StepResult::Continue,
     }
+}
+
+fn move_cursor(state: &mut Editor, dir: Direction) {
+    state.buf.cursor = match dir {
+        Direction::Left  => crate::motion::left(&mut state.buf, 1),
+        Direction::Right => crate::motion::right(&mut state.buf, 1),
+        Direction::Up    => crate::motion::up(&mut state.buf, 1),
+        Direction::Down  => crate::motion::down(&mut state.buf, 1),
+    };
 }
 
 fn ensure_session(state: &mut Editor) {
