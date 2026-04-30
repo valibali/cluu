@@ -55,6 +55,7 @@ pub struct Editor {
     pub message: String,
     pub prompt: Option<crate::prompt::PromptState>,
     pub viewport: Viewport,
+    pub normal_accum: crate::normal::NormalAccum,
     // More fields added in later tasks (settings, search state, etc.)
 }
 
@@ -68,6 +69,7 @@ impl Editor {
             message: String::new(),
             prompt: None,
             viewport: Viewport::default_80x24(),
+            normal_accum: crate::normal::NormalAccum::new(),
         }
     }
 }

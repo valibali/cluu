@@ -55,6 +55,7 @@ mod buffer;
 mod input;
 mod insert;
 mod mode;
+mod motion;
 mod normal;
 mod piece;
 mod prompt;
