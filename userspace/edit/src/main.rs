@@ -108,8 +108,12 @@ fn main_result() -> Result<()> {
         render::flush_to_tty(&frame);
 
         let Some(event) = input::decode(&mut reader) else {
-            // EOF on stdin → quit cleanly.
-            break;
+            // No bytes from the TTY despite our 60s timeout — treat as a
+            // transient hiccup, not EOF. Loop back and re-issue the request
+            // instead of quitting silently. (Real EOF on a TTY shouldn't
+            // happen in practice — the TTY service stays up for the life of
+            // the session.)
+            continue;
         };
         match mode::handle(&mut editor, event) {
             mode::StepResult::Quit(_) => break,

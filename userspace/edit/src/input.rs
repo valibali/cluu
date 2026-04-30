@@ -112,6 +112,7 @@ impl StdinReader {
     /// Blocks up to `ms` ms (0 = forever). Returns true if any bytes arrived.
     fn request_bytes(&mut self, ms: u64) -> bool {
         if self.tty_endpoint == 0 {
+            let _ = libcluu::debug_print("edit: request_bytes tty_endpoint=0");
             return false;
         }
         // Match libcluu::posix::file::read_tty: request label, words[0]=max_bytes.
@@ -131,16 +132,30 @@ impl StdinReader {
             ms as usize,
         );
         let bytes = match result {
+            // Kernel sometimes returns Ok(0) on a timed-out call instead of
+            // Err(Timeout) — race in sys_call between the timeout-wake flag
+            // and the call-reply slot lookup (see handlers.rs:560-572).
+            // Treat zero-byte success as a timeout: no data, retry.
+            Ok(0) => return false,
             Ok(b) => b,
             Err(_) => return false,
         };
+        let header_size = core::mem::size_of::<libcluu::types::Message>();
         let Some((_msg, payload)) = libcluu::ipc::parse_message(&reply_buf[..bytes]) else {
             return false;
         };
-        if payload.is_empty() {
+        let real_payload: &[u8] = if !payload.is_empty() {
+            payload
+        } else if bytes > header_size {
+            // Defensive: TTY's reply_with_payload should set words[0] to the
+            // payload length, but a stale-reply race can deliver the bytes
+            // with words[0]==0. Salvage the trailing bytes — they're our key
+            // bytes — rather than dropping them and faking EOF.
+            &reply_buf[header_size..bytes]
+        } else {
             return false;
-        }
-        self.pending.extend_from_slice(payload);
+        };
+        self.pending.extend_from_slice(real_payload);
         true
     }
 }
