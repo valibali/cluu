@@ -180,7 +180,8 @@ fn run() -> Result<()> {
 
 fn print_prompt(endpoint: usize) -> Result<()> {
     let user = read_env_var("USER").unwrap_or_else(|| String::from("cluu"));
-    let prompt = format!("{}@cluu> ", user);
+    let cwd = libcluu::posix::current_dir_string();
+    let prompt = format!("{}:{}> ", user, cwd);
     send_with_payload(endpoint, TTY_WRITE_LABEL, prompt.as_bytes())?;
     Ok(())
 }
