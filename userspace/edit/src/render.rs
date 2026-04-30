@@ -25,6 +25,14 @@ pub fn render(state: &mut Editor) -> Vec<u8> {
 }
 
 fn paint_content(state: &mut Editor, out: &mut Vec<u8>) {
+    if state.settings.wrap {
+        paint_content_wrapped(state, out);
+    } else {
+        paint_content_scrolled(state, out);
+    }
+}
+
+fn paint_content_scrolled(state: &mut Editor, out: &mut Vec<u8>) {
     crate::search::refresh_matches(state);
     let total_lines = state.buf.pieces.line_count();
     let line_idx = state.buf.pieces.line_index().to_vec();
@@ -61,6 +69,48 @@ fn paint_content(state: &mut Editor, out: &mut Vec<u8>) {
             col_drawn += 1;
         }
         if highlighted { out.extend_from_slice(b"\x1b[0m"); }
+    }
+}
+
+fn paint_content_wrapped(state: &mut Editor, out: &mut Vec<u8>) {
+    crate::search::refresh_matches(state);
+    let total_lines = state.buf.pieces.line_count();
+    let line_idx = state.buf.pieces.line_index().to_vec();
+    let buf_bytes = state.buf.pieces.read_all();
+    let matches = state.search.matches.clone();
+    let hl_on = state.settings.hlsearch && !state.search.pattern.is_empty();
+    let mut row: u16 = 0;
+    let width = state.viewport.width as usize;
+
+    let mut file_line = state.viewport.top_line;
+    while row < state.viewport.height && file_line < total_lines {
+        let start = line_idx[file_line];
+        let end = if file_line + 1 < line_idx.len() { line_idx[file_line + 1].saturating_sub(1) } else { buf_bytes.len() };
+        let line = &buf_bytes[start..end];
+        let mut col = 0;
+        while col < line.len() && row < state.viewport.height {
+            let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
+            let take = (width).min(line.len() - col);
+            for (i, &b) in line[col..col + take].iter().enumerate() {
+                let abs = start + col + i;
+                let in_match = hl_on && matches.iter().any(|r| r.contains(&abs));
+                if in_match { out.extend_from_slice(b"\x1b[33m"); }
+                let display = if b >= 0x20 && b < 0x7F { b } else if b == b'\t' { b' ' } else { b'?' };
+                out.push(display);
+                if in_match { out.extend_from_slice(b"\x1b[0m"); }
+            }
+            col += take;
+            row += 1;
+        }
+        if line.is_empty() && row < state.viewport.height {
+            let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
+            row += 1;
+        }
+        file_line += 1;
+    }
+    while row < state.viewport.height {
+        let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K~", row + 1));
+        row += 1;
     }
 }
 
