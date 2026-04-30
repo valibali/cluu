@@ -95,6 +95,27 @@ impl Viewport {
     pub fn default_80x24() -> Self {
         Viewport { top_line: 0, left_col: 0, height: 22, width: 80 }
     }
+
+    /// Query the actual console size from the boot framebuffer info and reserve
+    /// 2 rows for the status + message lines. Falls back to 80×24 if the
+    /// framebuffer dimensions aren't available (host has no FB).
+    pub fn from_console() -> Self {
+        const GLYPH_W: u32 = 8;
+        const GLYPH_H: u32 = 16;
+        let info = libcluu::boot::boot_info();
+        if info.fb_width == 0 || info.fb_height == 0 {
+            return Self::default_80x24();
+        }
+        let cols = info.fb_width / GLYPH_W;
+        let rows = info.fb_height / GLYPH_H;
+        let content_rows = rows.saturating_sub(2);
+        Viewport {
+            top_line: 0,
+            left_col: 0,
+            height: content_rows.min(u16::MAX as u32) as u16,
+            width: cols.min(u16::MAX as u32) as u16,
+        }
+    }
 }
 
 pub struct Editor {
@@ -126,7 +147,7 @@ impl Editor {
             running: true,
             message: String::new(),
             prompt: None,
-            viewport: Viewport::default_80x24(),
+            viewport: Viewport::from_console(),
             normal_accum: crate::normal::NormalAccum::new(),
             register: Vec::new(),
             visual_anchor: 0,

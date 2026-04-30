@@ -87,56 +87,61 @@ fn decode_escape<R: ByteReader>(r: &mut R) -> KeyEvent {
     }
 }
 
-/// `ByteReader` backed by libcluu's TTY input endpoint (TOKEN_STDIN).
+/// `ByteReader` backed by the TTY service (TOKEN_STDOUT = TTY main endpoint).
 ///
-/// Reads bytes via TTY_READ_LABEL IPC. Buffers payloads between
-/// `read_byte` calls so multi-byte payloads (e.g. CSI sequences from
-/// the kbd driver) drain one byte at a time.
+/// In raw mode the line discipline does not push `TTY_READ_LABEL` messages —
+/// it only fills the TTY's `input_queue` and replies to pending
+/// `TTY_READ_REQUEST_LABEL` calls (see userspace/tty/src/context.rs:269-302).
+/// So the editor must request bytes synchronously via `ipc_call`, the same
+/// way `libcluu::posix::file::read_tty` does for `read(0, ...)` — not via
+/// `ipc_recv_any` on TOKEN_STDIN (which is a procmgr bridge endpoint that
+/// only carries push-mode TTY_READ_LABEL traffic for canonical-mode shells).
 pub struct StdinReader {
-    stdin_endpoint: usize,
-    pending: Vec<u8>, // bytes buffered from a prior recv
+    tty_endpoint: usize,
+    pending: Vec<u8>, // bytes buffered from a prior request
 }
 
 impl StdinReader {
     pub fn new() -> Self {
         let info = libcluu::boot::process_info();
-        let stdin = info.tokens[libcluu::boot::TOKEN_STDIN];
-        StdinReader { stdin_endpoint: stdin, pending: Vec::new() }
+        let tty = info.tokens[libcluu::boot::TOKEN_STDOUT];
+        StdinReader { tty_endpoint: tty, pending: Vec::new() }
     }
 
-    /// Receive a TTY_READ payload into self.pending, blocking up to `ms`.
-    /// Returns true if any bytes were appended to `self.pending`.
-    fn recv_payload(&mut self, ms: u64) -> bool {
-        // Mirrors the shell's input loop pattern (userspace/shell/src/main.rs:142-162):
-        // wait on the stdin endpoint, parse_message, drop anything that isn't
-        // TTY_READ_LABEL, then copy the payload bytes into our pending buffer.
-        // The editor only listens on stdin (no registry endpoint), so single-token
-        // ipc_recv_any is fine.
-        let mut buf = [0u8; 128];
-        let tokens = [self.stdin_endpoint];
-        match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, ms) {
-            Ok((_index, len)) => {
-                let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) else {
-                    return false;
-                };
-                if msg.tag.label != libcluu::ipc::TTY_READ_LABEL {
-                    // Unexpected label — drop defensively.
-                    return false;
-                }
-                if !payload.is_empty() {
-                    self.pending.extend_from_slice(payload);
-                    true
-                } else if msg.tag.words >= 2 {
-                    // Inline single-byte form: words[1] holds the char.
-                    let ch = msg.words[1] as u8;
-                    self.pending.push(ch);
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(_) => false,
+    /// Issue TTY_READ_REQUEST_LABEL and append reply payload to `pending`.
+    /// Blocks up to `ms` ms (0 = forever). Returns true if any bytes arrived.
+    fn request_bytes(&mut self, ms: u64) -> bool {
+        if self.tty_endpoint == 0 {
+            return false;
         }
+        // Match libcluu::posix::file::read_tty: request label, words[0]=max_bytes.
+        let mut req = libcluu::types::Message::new(
+            libcluu::ipc::TTY_READ_REQUEST_LABEL,
+            [0; 6],
+            1,
+        );
+        req.words[0] = 128;
+        let req_bytes = req.as_bytes();
+
+        let mut reply_buf = [0u8; 256];
+        let result = libcluu::syscall::ipc_call_timeout(
+            self.tty_endpoint,
+            req_bytes,
+            &mut reply_buf,
+            ms as usize,
+        );
+        let bytes = match result {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        let Some((_msg, payload)) = libcluu::ipc::parse_message(&reply_buf[..bytes]) else {
+            return false;
+        };
+        if payload.is_empty() {
+            return false;
+        }
+        self.pending.extend_from_slice(payload);
+        true
     }
 }
 
@@ -144,7 +149,7 @@ impl ByteReader for StdinReader {
     fn read_byte(&mut self) -> Option<u8> {
         if self.pending.is_empty() {
             // Block (long timeout) until input arrives.
-            self.recv_payload(60_000);
+            self.request_bytes(60_000);
         }
         if self.pending.is_empty() {
             None
@@ -155,7 +160,7 @@ impl ByteReader for StdinReader {
 
     fn read_byte_with_timeout_ms(&mut self, ms: u64) -> Option<u8> {
         if self.pending.is_empty() {
-            self.recv_payload(ms);
+            self.request_bytes(ms);
         }
         if self.pending.is_empty() {
             None
