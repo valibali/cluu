@@ -40,12 +40,27 @@ fn paint_content_scrolled(state: &mut Editor, out: &mut Vec<u8>) {
     let matches = state.search.matches.clone();
     let hl_on = state.settings.hlsearch && !state.search.pattern.is_empty();
 
+    let gutter = if state.settings.number {
+        let total = state.buf.pieces.line_count();
+        let digits = alloc::format!("{}", total).len();
+        digits + 1   // " 123 "
+    } else {
+        0
+    };
+    let content_w = (state.viewport.width as usize).saturating_sub(gutter);
+
     for row in 0..state.viewport.height {
         let file_line = state.viewport.top_line + row as usize;
         let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
         if file_line >= total_lines {
+            if state.settings.number {
+                for _ in 0..gutter { out.push(b' '); }
+            }
             out.push(b'~');
             continue;
+        }
+        if state.settings.number {
+            let _ = write_str(out, &alloc::format!("{:>w$} ", file_line + 1, w = gutter - 1));
         }
         let start = line_idx[file_line];
         let end = if file_line + 1 < line_idx.len() { line_idx[file_line + 1].saturating_sub(1) } else { buf_bytes.len() };
@@ -54,7 +69,7 @@ fn paint_content_scrolled(state: &mut Editor, out: &mut Vec<u8>) {
         let mut highlighted = false;
         for (i, &b) in buf_bytes[start..end].iter().enumerate() {
             if col_skipped < state.viewport.left_col { col_skipped += 1; continue; }
-            if col_drawn >= state.viewport.width as usize { break; }
+            if col_drawn >= content_w { break; }
             let abs = start + i;
             let in_match = hl_on && matches.iter().any(|r| r.contains(&abs));
             if in_match && !highlighted {
@@ -80,7 +95,15 @@ fn paint_content_wrapped(state: &mut Editor, out: &mut Vec<u8>) {
     let matches = state.search.matches.clone();
     let hl_on = state.settings.hlsearch && !state.search.pattern.is_empty();
     let mut row: u16 = 0;
-    let width = state.viewport.width as usize;
+
+    let gutter = if state.settings.number {
+        let total = state.buf.pieces.line_count();
+        let digits = alloc::format!("{}", total).len();
+        digits + 1
+    } else {
+        0
+    };
+    let content_w = (state.viewport.width as usize).saturating_sub(gutter);
 
     let mut file_line = state.viewport.top_line;
     while row < state.viewport.height && file_line < total_lines {
@@ -88,9 +111,17 @@ fn paint_content_wrapped(state: &mut Editor, out: &mut Vec<u8>) {
         let end = if file_line + 1 < line_idx.len() { line_idx[file_line + 1].saturating_sub(1) } else { buf_bytes.len() };
         let line = &buf_bytes[start..end];
         let mut col = 0;
+        let mut first_row = true;
         while col < line.len() && row < state.viewport.height {
             let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
-            let take = (width).min(line.len() - col);
+            if state.settings.number {
+                if first_row {
+                    let _ = write_str(out, &alloc::format!("{:>w$} ", file_line + 1, w = gutter - 1));
+                } else {
+                    for _ in 0..gutter { out.push(b' '); }
+                }
+            }
+            let take = content_w.min(line.len() - col);
             for (i, &b) in line[col..col + take].iter().enumerate() {
                 let abs = start + col + i;
                 let in_match = hl_on && matches.iter().any(|r| r.contains(&abs));
@@ -100,16 +131,24 @@ fn paint_content_wrapped(state: &mut Editor, out: &mut Vec<u8>) {
                 if in_match { out.extend_from_slice(b"\x1b[0m"); }
             }
             col += take;
+            first_row = false;
             row += 1;
         }
         if line.is_empty() && row < state.viewport.height {
             let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
+            if state.settings.number {
+                let _ = write_str(out, &alloc::format!("{:>w$} ", file_line + 1, w = gutter - 1));
+            }
             row += 1;
         }
         file_line += 1;
     }
     while row < state.viewport.height {
-        let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K~", row + 1));
+        let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
+        if state.settings.number {
+            for _ in 0..gutter { out.push(b' '); }
+        }
+        out.push(b'~');
         row += 1;
     }
 }
@@ -159,8 +198,11 @@ fn paint_message(state: &mut Editor, out: &mut Vec<u8>) {
 
 fn place_cursor(state: &mut Editor, out: &mut Vec<u8>) {
     let (line, col) = state.buf.pieces.line_col(state.buf.cursor);
+    let gutter = if state.settings.number {
+        alloc::format!("{}", state.buf.pieces.line_count()).len() + 1
+    } else { 0 };
     let row = (line.saturating_sub(state.viewport.top_line) + 1) as u16;
-    let column = (col.saturating_sub(state.viewport.left_col) + 1) as u16;
+    let column = (col.saturating_sub(state.viewport.left_col) + 1 + gutter) as u16;
     let _ = write_str(out, &alloc::format!("\x1b[{};{}H", row, column));
 }
 
