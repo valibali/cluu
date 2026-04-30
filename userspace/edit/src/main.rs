@@ -67,6 +67,7 @@ mod search;
 mod settings;
 mod tty;
 mod undo;
+mod vfs_io;
 mod visual;
 
 #[allow(unused_imports)]
@@ -78,12 +79,22 @@ use libcluu::{debug_print, Result};
 fn main_result() -> Result<()> {
     debug_print("edit: starting up")?;
 
-    // Argv: optional file path. For now, ignore content; integration in Task 31.
+    // Argv: optional file path. If the user passed a file, attempt to
+    // load it via VFS into the initial buffer (T29 step 3). Failure is
+    // best-effort: tmp_state.message captures the error and we still
+    // hand the buffer (possibly empty) to the editor so the user can
+    // see the error message on the status line.
     let argv = libcluu::args::args();
-    let _file_arg: Option<alloc::string::String> = argv.iter().nth(1).map(|s| s.clone());
+    let initial_buf = if let Some(path) = argv.iter().nth(1) {
+        let mut tmp_state = mode::Editor::new(buffer::EditBuffer::empty());
+        vfs_io::load(&mut tmp_state, path);
+        tmp_state.buf
+    } else {
+        buffer::EditBuffer::empty()
+    };
 
     let saved_tty = tty::enter_raw_mode()?;
-    let mut editor = mode::Editor::new(buffer::EditBuffer::empty());
+    let mut editor = mode::Editor::new(initial_buf);
     let mut reader = input::StdinReader::new();
 
     while editor.running {
