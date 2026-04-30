@@ -57,11 +57,5 @@ pub fn handle(state: &mut Editor, event: KeyEvent, kind: PromptKind) -> StepResu
 }
 
 fn dispatch_ex(state: &mut Editor, line: &str) {
-    let line = line.trim();
-    match line {
-        "q"        => { if state.buf.dirty { state.message = "E37: No write since last change".into(); } else { state.running = false; } }
-        "q!"       => { state.running = false; }
-        "wq" | "x" => { /* save then quit; save lands in Task 31 */ state.running = false; }
-        _          => { state.message = alloc::format!("Not an editor command: {}", line); }
-    }
+    crate::ex::dispatch(state, line);
 }
