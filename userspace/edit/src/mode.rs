@@ -111,6 +111,9 @@ pub struct Editor {
     pub last_visual_range: Option<(usize, usize, Mode)>,
     pub settings: Settings,
     pub search: SearchState,
+    pub awaiting_replace: bool,
+    pub ex_history: alloc::vec::Vec<alloc::string::String>,
+    pub search_history: alloc::vec::Vec<alloc::string::String>,
     // More fields added in later tasks (search state, etc.)
 }
 
@@ -130,6 +133,9 @@ impl Editor {
             last_visual_range: None,
             settings: Settings::defaults(),
             search: SearchState::new(),
+            awaiting_replace: false,
+            ex_history: alloc::vec::Vec::new(),
+            search_history: alloc::vec::Vec::new(),
         }
     }
 }

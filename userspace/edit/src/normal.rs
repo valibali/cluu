@@ -1,6 +1,8 @@
 //! NORMAL-mode keymap with count accumulator and full motion set.
 //! See spec §7.2 + §7.3.
 
+extern crate alloc;
+
 use crate::input::{KeyEvent, Direction};
 use crate::mode::{Editor, Mode, Operator, PromptKind, StepResult};
 use crate::motion;
@@ -17,6 +19,23 @@ impl NormalAccum {
 }
 
 pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
+    // Awaiting replace (r{c}) — clear flag FIRST so Esc/non-Char doesn't stick.
+    if state.awaiting_replace {
+        state.awaiting_replace = false;
+        if let KeyEvent::Char(c) = event {
+            if state.buf.cursor < state.buf.pieces.len() {
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                if let Some(patch) = state.buf.pieces.delete(state.buf.cursor..state.buf.cursor + 1) {
+                    state.undo.record(state.buf.cursor, state.buf.cursor, patch);
+                    state.buf.pieces.insert(state.buf.cursor, s.as_bytes());
+                    state.buf.mark_dirty();
+                }
+            }
+        }
+        return StepResult::Redraw;
+    }
+
     let count_in_progress = state.normal_accum.count.is_some();
 
     // Digit prefix.
@@ -43,7 +62,22 @@ pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
             }
             return StepResult::Redraw;
         }
-        // (gd handled in Task 27.)
+        if let KeyEvent::Char('d') = event {
+            let w = crate::search::word_at_cursor(state);
+            if !w.is_empty() {
+                for kw in &["fn", "struct", "let", "const", "enum", "impl", "mod", "trait", "type"] {
+                    let pat = alloc::format!("{} {}", kw, w);
+                    crate::search::set_pattern(state, pat, crate::mode::SearchDir::Backward);
+                    if let Some(p) = crate::search::next_match(state) {
+                        state.buf.cursor = p;
+                        return StepResult::Redraw;
+                    }
+                }
+                crate::search::set_pattern(state, w, crate::mode::SearchDir::Backward);
+                if let Some(p) = crate::search::next_match(state) { state.buf.cursor = p; }
+            }
+            return StepResult::Redraw;
+        }
         return StepResult::Redraw;
     }
 
@@ -70,6 +104,49 @@ pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
             state.buf.cursor += 1;
             state.buf.mark_dirty();
             state.mode = Mode::Insert;
+        }
+        KeyEvent::Char('I') => {
+            state.buf.cursor = motion::line_start(&mut state.buf);
+            let bytes = state.buf.pieces.read_all();
+            while state.buf.cursor < bytes.len() && (bytes[state.buf.cursor] == b' ' || bytes[state.buf.cursor] == b'\t') {
+                state.buf.cursor += 1;
+            }
+            state.mode = Mode::Insert;
+        }
+        KeyEvent::Char('A') => {
+            state.buf.cursor = motion::line_end(&mut state.buf);
+            state.mode = Mode::Insert;
+        }
+        KeyEvent::Char('O') => {
+            state.buf.cursor = motion::line_start(&mut state.buf);
+            state.buf.pieces.insert(state.buf.cursor, b"\n");
+            state.buf.mark_dirty();
+            state.mode = Mode::Insert;
+        }
+        KeyEvent::Char('P') => {
+            if !state.register.is_empty() {
+                let bytes = state.register.clone();
+                let pos = state.buf.cursor;
+                if let Some(patch) = state.buf.pieces.insert(pos, &bytes) {
+                    state.undo.record(state.buf.cursor, pos, patch);
+                    state.buf.mark_dirty();
+                }
+            }
+        }
+        KeyEvent::Char('r') => { state.awaiting_replace = true; return StepResult::Continue; }
+        KeyEvent::Char('*') => {
+            let w = crate::search::word_at_cursor(state);
+            if !w.is_empty() {
+                crate::search::set_pattern(state, w, crate::mode::SearchDir::Forward);
+                if let Some(p) = crate::search::next_match(state) { state.buf.cursor = p; }
+            }
+        }
+        KeyEvent::Char('#') => {
+            let w = crate::search::word_at_cursor(state);
+            if !w.is_empty() {
+                crate::search::set_pattern(state, w, crate::mode::SearchDir::Backward);
+                if let Some(p) = crate::search::next_match(state) { state.buf.cursor = p; }
+            }
         }
         KeyEvent::Char(':')                                       => { state.mode = Mode::ExPrompt(PromptKind::Ex); }
         KeyEvent::Char('/') => { state.mode = Mode::ExPrompt(PromptKind::SearchFwd); }

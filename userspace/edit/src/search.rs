@@ -129,3 +129,15 @@ pub fn substitute(state: &mut Editor, range: ExRange, pat: &str, repl: &str, glo
     state.buf.mark_dirty();
     state.message = alloc::format!("{} substitution{}", count, if count == 1 { "" } else { "s" });
 }
+
+pub fn word_at_cursor(state: &mut Editor) -> alloc::string::String {
+    let bytes = state.buf.pieces.read_all();
+    if state.buf.cursor >= bytes.len() { return alloc::string::String::new(); }
+    let is_word = |b: u8| (b >= b'a' && b <= b'z') || (b >= b'A' && b <= b'Z')
+        || (b >= b'0' && b <= b'9') || b == b'_';
+    let mut start = state.buf.cursor;
+    while start > 0 && is_word(bytes[start - 1]) { start -= 1; }
+    let mut end = state.buf.cursor;
+    while end < bytes.len() && is_word(bytes[end]) { end += 1; }
+    alloc::string::String::from_utf8_lossy(&bytes[start..end]).into_owned()
+}
