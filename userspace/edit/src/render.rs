@@ -25,31 +25,42 @@ pub fn render(state: &mut Editor) -> Vec<u8> {
 }
 
 fn paint_content(state: &mut Editor, out: &mut Vec<u8>) {
+    crate::search::refresh_matches(state);
     let total_lines = state.buf.pieces.line_count();
     let line_idx = state.buf.pieces.line_index().to_vec();
     let buf_bytes = state.buf.pieces.read_all();
+    let matches = state.search.matches.clone();
+    let hl_on = state.settings.hlsearch && !state.search.pattern.is_empty();
+
     for row in 0..state.viewport.height {
         let file_line = state.viewport.top_line + row as usize;
-        // Move cursor to start of this row, clear to EOL.
         let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
         if file_line >= total_lines {
             out.push(b'~');
             continue;
         }
         let start = line_idx[file_line];
-        let end = if file_line + 1 < line_idx.len() {
-            line_idx[file_line + 1].saturating_sub(1)
-        } else {
-            buf_bytes.len()
-        };
-        let line = &buf_bytes[start..end];
-        // Horizontal scroll: skip `left_col` display columns. For v1, byte
-        // count ~= display column for ASCII; non-ASCII renders as `?`.
-        let visible: Vec<u8> = line.iter().skip(state.viewport.left_col)
-            .take(state.viewport.width as usize)
-            .map(|&b| if b >= 0x20 && b < 0x7F { b } else if b == b'\t' { b' ' } else { b'?' })
-            .collect();
-        out.extend_from_slice(&visible);
+        let end = if file_line + 1 < line_idx.len() { line_idx[file_line + 1].saturating_sub(1) } else { buf_bytes.len() };
+        let mut col_skipped = 0;
+        let mut col_drawn = 0;
+        let mut highlighted = false;
+        for (i, &b) in buf_bytes[start..end].iter().enumerate() {
+            if col_skipped < state.viewport.left_col { col_skipped += 1; continue; }
+            if col_drawn >= state.viewport.width as usize { break; }
+            let abs = start + i;
+            let in_match = hl_on && matches.iter().any(|r| r.contains(&abs));
+            if in_match && !highlighted {
+                out.extend_from_slice(b"\x1b[33m");
+                highlighted = true;
+            } else if !in_match && highlighted {
+                out.extend_from_slice(b"\x1b[0m");
+                highlighted = false;
+            }
+            let display = if b >= 0x20 && b < 0x7F { b } else if b == b'\t' { b' ' } else { b'?' };
+            out.push(display);
+            col_drawn += 1;
+        }
+        if highlighted { out.extend_from_slice(b"\x1b[0m"); }
     }
 }
 
