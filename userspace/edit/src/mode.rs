@@ -58,6 +58,8 @@ pub struct Editor {
     pub viewport: Viewport,
     pub normal_accum: crate::normal::NormalAccum,
     pub register: Vec<u8>,
+    pub visual_anchor: usize,
+    pub last_visual_range: Option<(usize, usize, Mode)>,
     // More fields added in later tasks (settings, search state, etc.)
 }
 
@@ -73,6 +75,8 @@ impl Editor {
             viewport: Viewport::default_80x24(),
             normal_accum: crate::normal::NormalAccum::new(),
             register: Vec::new(),
+            visual_anchor: 0,
+            last_visual_range: None,
         }
     }
 }

@@ -64,6 +64,7 @@ mod prompt;
 mod render;
 mod tty;
 mod undo;
+mod visual;
 
 #[allow(unused_imports)]
 use libcluu::runtime as _;

@@ -35,6 +35,14 @@ pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
             state.buf.cursor = motion::first_line(&mut state.buf);
             return StepResult::Redraw;
         }
+        if let KeyEvent::Char('v') = event {
+            if let Some((lo, hi, m)) = state.last_visual_range {
+                state.visual_anchor = lo;
+                state.buf.cursor = hi.saturating_sub(1);
+                state.mode = m;
+            }
+            return StepResult::Redraw;
+        }
         // (gd handled in Task 27.)
         return StepResult::Redraw;
     }
@@ -64,6 +72,8 @@ pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
             state.mode = Mode::Insert;
         }
         KeyEvent::Char(':')                                       => { state.mode = Mode::ExPrompt(PromptKind::Ex); }
+        KeyEvent::Char('v') => { state.visual_anchor = state.buf.cursor; state.mode = Mode::VisualChar; }
+        KeyEvent::Char('V') => { state.visual_anchor = state.buf.cursor; state.mode = Mode::VisualLine; }
         KeyEvent::Char('d') => { state.mode = Mode::OperatorPending(Operator::Delete); return StepResult::Continue; }
         KeyEvent::Char('y') => { state.mode = Mode::OperatorPending(Operator::Yank);   return StepResult::Continue; }
         KeyEvent::Char('c') => { state.mode = Mode::OperatorPending(Operator::Change); return StepResult::Continue; }
