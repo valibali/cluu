@@ -53,6 +53,7 @@ extern crate alloc;
 
 mod buffer;
 mod ex;
+mod help;
 mod input;
 mod insert;
 mod mode;
