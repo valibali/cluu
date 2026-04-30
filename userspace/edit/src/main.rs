@@ -58,6 +58,7 @@ mod mode;
 mod normal;
 mod piece;
 mod prompt;
+mod render;
 mod tty;
 mod undo;
 
@@ -79,15 +80,22 @@ fn main_result() -> Result<()> {
     let mut reader = input::StdinReader::new();
 
     while editor.running {
+        let frame = render::render(&mut editor);
+        render::flush_to_tty(&frame);
+
         let Some(event) = input::decode(&mut reader) else {
             // EOF on stdin → quit cleanly.
             break;
         };
         match mode::handle(&mut editor, event) {
             mode::StepResult::Quit(_) => break,
-            _ => {} // no rendering yet
+            _ => {}
         }
     }
+
+    // Clear screen so the shell prompt isn't garbled by the editor's last
+    // frame. Same write path as the renderer (TTY_WRITE_LABEL on stdout).
+    render::flush_to_tty(b"\x1b[2J\x1b[H");
 
     tty::restore_mode(saved_tty)?;
     debug_print("edit: bye")?;
