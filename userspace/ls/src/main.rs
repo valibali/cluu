@@ -16,7 +16,9 @@ use libcluu::registry;
 pub extern "C" fn main() -> i32 {
     let args = libcluu::args::args();
     // argv[0] is "/bin/ls" or "ls"; first operand at index 1.
-    let path: String = args.into_iter().nth(1).unwrap_or_else(|| String::from("/"));
+    // No operand → list cwd (POSIX behavior), not "/".
+    let path: String = args.into_iter().nth(1)
+        .unwrap_or_else(|| libcluu::posix::current_dir_string());
 
     let Ok(vfs_endpoint) = registry::subscribe_output("vfs", "main") else {
         let msg = b"ls: vfs not available\n";
