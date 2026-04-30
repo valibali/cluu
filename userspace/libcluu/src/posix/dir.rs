@@ -347,30 +347,40 @@ fn cstr_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     }
 }
 
-/// Resolve a path: if relative, prepend CWD. Normalize trailing slashes.
+/// Resolve a path: if relative, prepend CWD; collapse `.` and `..` segments;
+/// strip duplicate and trailing slashes. The VFS doesn't do dot-dot lookup
+/// itself — `cd ..` from `/home` would otherwise ship `/home/..` literally
+/// and the VFS would return PermissionDenied.
 pub fn resolve_path(path: &str) -> String {
-    if path.starts_with('/') {
-        // Absolute path — use as-is, but normalize trailing slash
-        let mut s = String::from(path);
-        while s.len() > 1 && s.ends_with('/') {
-            s.pop();
+    let raw = if path.starts_with('/') {
+        String::from(path)
+    } else {
+        let cwd = CWD.lock();
+        let mut result = String::from(cwd.as_deref().unwrap_or("/"));
+        drop(cwd);
+        if !result.ends_with('/') {
+            result.push('/');
         }
-        return s;
-    }
+        result.push_str(path);
+        result
+    };
 
-    // Relative path — prepend CWD
-    let cwd = CWD.lock();
-    let base = cwd.as_deref().unwrap_or("/");
-
-    let mut result = String::from(base);
-    if !result.ends_with('/') {
-        result.push('/');
+    // Single pass: split on '/', resolve "."/".." against an explicit stack.
+    let mut stack: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    for seg in raw.split('/') {
+        match seg {
+            "" | "." => {}             // keep leading '/' implicit, drop redundant
+            ".." => { stack.pop(); }   // pop one — going above root is a no-op
+            other => stack.push(other),
+        }
     }
-    result.push_str(path);
-
-    // Normalize trailing slash
-    while result.len() > 1 && result.ends_with('/') {
-        result.pop();
+    if stack.is_empty() {
+        return String::from("/");
     }
-    result
+    let mut out = String::with_capacity(raw.len());
+    for seg in &stack {
+        out.push('/');
+        out.push_str(seg);
+    }
+    out
 }

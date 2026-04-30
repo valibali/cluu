@@ -31,21 +31,38 @@ pub fn load(state: &mut Editor, path: &str) {
         state.message = "E32: No file name".into();
         return;
     }
+    // Resolve relative paths against CWD so `edit hello.txt` from /home
+    // talks to the VFS about /home/hello.txt, not a bare "hello.txt".
+    let resolved = libcluu::posix::resolve_path(path);
     let mut vfs = match connect_vfs() {
         Ok(v) => v,
         Err(e) => { state.message = e; return; }
     };
-    let bytes = match read_file(&mut vfs, path) {
-        Ok(b) => b,
-        Err(e) => { state.message = e; return; }
-    };
-    state.buf = EditBuffer::new(bytes, Some(path.into()));
-    state.message = alloc::format!("\"{}\" loaded", path);
+    match read_file(&mut vfs, &resolved) {
+        Ok(bytes) => {
+            state.buf = EditBuffer::new(bytes, Some(resolved.clone()));
+            state.message = alloc::format!("\"{}\" loaded", resolved);
+        }
+        Err(e) => {
+            // Vim convention: opening a non-existent path creates a new
+            // buffer named after the path so `:w` writes to it. We can't
+            // distinguish NotFound from other errors via the current Vfs
+            // API surface, so for any open failure we still attach the
+            // path to the buffer and let the user see the error message.
+            // Save will hit the real error if it's anything but NotFound.
+            state.buf = EditBuffer::new(Vec::new(), Some(resolved.clone()));
+            state.message = if e.contains("Cannot open") {
+                alloc::format!("\"{}\" [New File]", resolved)
+            } else {
+                e
+            };
+        }
+    }
 }
 
 pub fn save(state: &mut Editor, override_path: Option<&str>) {
     let target_path = override_path
-        .map(String::from)
+        .map(libcluu::posix::resolve_path)
         .or_else(|| state.buf.path.clone());
     let Some(path) = target_path else {
         state.message = "E32: No file name".into();
