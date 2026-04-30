@@ -29,6 +29,32 @@ pub enum StepResult {
     Quit(i32),
 }
 
+pub struct Settings {
+    pub expandtab: bool,
+    pub tabstop: u8,
+    pub smartindent: bool,
+    pub ignorecase: bool,
+    pub hlsearch: bool,
+    pub wrap: bool,
+    pub number: bool,
+    pub scrolloff: u8,
+}
+
+impl Settings {
+    pub fn defaults() -> Self {
+        Settings {
+            expandtab: false,
+            tabstop: 4,
+            smartindent: true,
+            ignorecase: false,
+            hlsearch: true,
+            wrap: false,
+            number: false,
+            scrolloff: 3,
+        }
+    }
+}
+
 /// Editor viewport — the rectangular slice of the buffer currently visible on
 /// screen. `top_line`/`left_col` track the scroll origin (0-indexed); `height`
 /// is the number of content rows (status + message rows live below);
@@ -60,7 +86,8 @@ pub struct Editor {
     pub register: Vec<u8>,
     pub visual_anchor: usize,
     pub last_visual_range: Option<(usize, usize, Mode)>,
-    // More fields added in later tasks (settings, search state, etc.)
+    pub settings: Settings,
+    // More fields added in later tasks (search state, etc.)
 }
 
 impl Editor {
@@ -77,6 +104,7 @@ impl Editor {
             register: Vec::new(),
             visual_anchor: 0,
             last_visual_range: None,
+            settings: Settings::defaults(),
         }
     }
 }
