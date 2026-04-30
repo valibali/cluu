@@ -212,18 +212,16 @@ fn write_str(out: &mut Vec<u8>, s: &str) -> Result<(), ()> {
 }
 
 /// Send the rendered bytes to the TTY via TTY_WRITE_LABEL on the
-/// stdout endpoint. The plan literal called for `libcluu::posix::write(1, ...)`,
-/// but that name is the C-extern `(c_int, *const c_void, size_t) -> ssize_t`
-/// shim — not Rust-friendly. Instead we use the same `send_with_payload`
-/// path that the shell uses for all of its TTY output (see
-/// userspace/shell/src/main.rs:121,184,281). Same wire format, same ack
-/// semantics, just no FFI dance.
+/// stdout endpoint. Uses `send_with_retry` (same as `_write`/cat) so a
+/// busy/full TTY queue retries instead of silently dropping the frame.
+/// Per-frame edits are 1-6KB; without retry the editor renders nothing
+/// visible because writes drop on backpressure.
 pub fn flush_to_tty(bytes: &[u8]) {
     let stdout = libcluu::boot::stdout();
     if stdout == 0 {
         return;
     }
-    let _ = libcluu::ipc::send_with_payload(
+    let _ = libcluu::ipc::send_with_retry(
         stdout,
         libcluu::ipc::TTY_WRITE_LABEL,
         bytes,
