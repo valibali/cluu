@@ -2,8 +2,9 @@
 //! See spec §7.2 + §7.3.
 
 use crate::input::{KeyEvent, Direction};
-use crate::mode::{Editor, Mode, PromptKind, StepResult};
+use crate::mode::{Editor, Mode, Operator, PromptKind, StepResult};
 use crate::motion;
+use crate::ops;
 
 pub struct NormalAccum {
     pub count: Option<usize>,
@@ -63,6 +64,15 @@ pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
             state.mode = Mode::Insert;
         }
         KeyEvent::Char(':')                                       => { state.mode = Mode::ExPrompt(PromptKind::Ex); }
+        KeyEvent::Char('d') => { state.mode = Mode::OperatorPending(Operator::Delete); return StepResult::Continue; }
+        KeyEvent::Char('y') => { state.mode = Mode::OperatorPending(Operator::Yank);   return StepResult::Continue; }
+        KeyEvent::Char('c') => { state.mode = Mode::OperatorPending(Operator::Change); return StepResult::Continue; }
+        KeyEvent::Char('>') => { state.mode = Mode::OperatorPending(Operator::Indent); return StepResult::Continue; }
+        KeyEvent::Char('<') => { state.mode = Mode::OperatorPending(Operator::Dedent); return StepResult::Continue; }
+        KeyEvent::Char('x') => { ops::delete_char(state, count); }
+        KeyEvent::Char('p') => { ops::paste_after(state); }
+        KeyEvent::Char('u') => { if let Some(c) = state.undo.undo(&mut state.buf.pieces) { state.buf.cursor = c; } }
+        KeyEvent::Ctrl('r') => { if let Some(c) = state.undo.redo(&mut state.buf.pieces) { state.buf.cursor = c; } }
         KeyEvent::Ctrl('q')                                       => return StepResult::Quit(0),
         KeyEvent::Ctrl('s')                                       => { /* :w shortcut, lands in Task 31 */ }
         _                                                          => return StepResult::Continue,

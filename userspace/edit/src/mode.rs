@@ -2,6 +2,7 @@
 
 extern crate alloc;
 use alloc::string::String;
+use alloc::vec::Vec;
 use crate::buffer::EditBuffer;
 use crate::undo::UndoStack;
 
@@ -56,6 +57,7 @@ pub struct Editor {
     pub prompt: Option<crate::prompt::PromptState>,
     pub viewport: Viewport,
     pub normal_accum: crate::normal::NormalAccum,
+    pub register: Vec<u8>,
     // More fields added in later tasks (settings, search state, etc.)
 }
 
@@ -70,6 +72,7 @@ impl Editor {
             prompt: None,
             viewport: Viewport::default_80x24(),
             normal_accum: crate::normal::NormalAccum::new(),
+            register: Vec::new(),
         }
     }
 }
@@ -78,11 +81,10 @@ use crate::input::KeyEvent;
 
 pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
     match state.mode {
-        Mode::Normal => crate::normal::handle(state, event),
-        Mode::Insert => crate::insert::handle(state, event),
-        Mode::ExPrompt(kind) => crate::prompt::handle(state, event, kind),
-        // Other modes added in later tasks. For the skeleton, fall through
-        // to NORMAL to avoid wedging.
-        _ => crate::normal::handle(state, event),
+        Mode::Normal             => crate::normal::handle(state, event),
+        Mode::Insert             => crate::insert::handle(state, event),
+        Mode::ExPrompt(kind)     => crate::prompt::handle(state, event, kind),
+        Mode::OperatorPending(op) => crate::op_pending::handle(state, event, op),
+        Mode::VisualChar | Mode::VisualLine => crate::visual::handle(state, event),
     }
 }

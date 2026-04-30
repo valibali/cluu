@@ -57,6 +57,8 @@ mod insert;
 mod mode;
 mod motion;
 mod normal;
+mod op_pending;
+mod ops;
 mod piece;
 mod prompt;
 mod render;
