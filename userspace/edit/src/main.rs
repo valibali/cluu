@@ -95,6 +95,10 @@ fn main_result() -> Result<()> {
     };
 
     let saved_tty = tty::enter_raw_mode()?;
+    // Wipe whatever the shell left on screen — render::render only emits CSI K
+    // per row, and our viewport is shorter than the console, so without this
+    // the rows below status would show stale shell output.
+    render::flush_to_tty(b"\x1b[2J\x1b[H");
     let mut editor = mode::Editor::new(initial_buf);
     let mut reader = input::StdinReader::new();
 
