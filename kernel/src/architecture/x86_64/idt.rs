@@ -837,6 +837,27 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
     // fault — but we trust f.rsp here because we got here on the user IRQ
     // path, which means RSP was valid enough to push the iretq frame.
     if is_userspace && f.rip == cr2 && f.rip < 0x4_4000_0000 {
+        // Whichever register held the bad target tells us which call site
+        // is misbehaving. Most indirect-call patterns use RAX (Rust's
+        // default for `call rax`-style trait/closure dispatch) but the
+        // compiler is free to use any GPR. Dump them all.
+        COM2.write_str("PF: GPRs at fault:\n");
+        uart_hex("  rax=", f.rax);
+        uart_hex("  rbx=", f.rbx);
+        uart_hex("  rcx=", f.rcx);
+        uart_hex("  rdx=", f.rdx);
+        uart_hex("  rsi=", f.rsi);
+        uart_hex("  rdi=", f.rdi);
+        uart_hex("  rbp=", f.rbp);
+        uart_hex("  r8 =", f.r8);
+        uart_hex("  r9 =", f.r9);
+        uart_hex("  r10=", f.r10);
+        uart_hex("  r11=", f.r11);
+        uart_hex("  r12=", f.r12);
+        uart_hex("  r13=", f.r13);
+        uart_hex("  r14=", f.r14);
+        uart_hex("  r15=", f.r15);
+
         COM2.write_str("PF: stack@RSP (low → high):\n");
         // SMAP is enabled; set AC=1 so the kernel can read the user page.
         // We're on the IST stack, so a nested PF here is bounded.
