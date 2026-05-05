@@ -549,35 +549,37 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     let timeout_ms = args.arg6 as u64;
     let has_timeout = timeout_ms != 0 && timeout_ms != u64::MAX;
     if has_timeout {
-        // Loop until one of the two terminal conditions holds. The thread can
-        // also be woken without either (signal-like / scheduler / suspend
-        // resume); in that case we re-block instead of falling through with
-        // rax=0 — which is what the editor's IPC stack saw as `Ok(0)` and
-        // misinterpreted as "TTY returned an empty reply", leading to a
-        // surprise EOF break in the main loop.
         let deadline = crate::sched::ThreadManager::ms_to_deadline(timeout_ms);
-        loop {
-            crate::sched::ThreadManager::block_current_with_timeout(deadline);
-            crate::architecture::x86_64::syscall::request_resched();
-
-            if !crate::sched::ThreadManager::has_call_reply_info(reply_id) {
-                // Reply was delivered. deliver_reply already wrote rax + woke us.
-                let _ = crate::sched::ThreadManager::check_and_clear_timeout_wake();
-                break;
-            }
-            if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
-                // Real timeout: drop the orphaned reply slot, return Timeout.
-                let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
-                return Err(Error::Timeout);
-            }
-            // Spurious wake — neither condition held. Re-enter block. If the
-            // deadline has already passed, block_current_with_timeout will set
-            // the timeout flag promptly on the next pass, so the loop is
-            // bounded by 1-2 iterations in practice.
-        }
+        crate::sched::ThreadManager::block_current_with_timeout(deadline);
     } else {
         crate::sched::ThreadManager::block_current();
-        crate::architecture::x86_64::syscall::request_resched();
+    }
+    crate::architecture::x86_64::syscall::request_resched();
+
+    // After wake: distinguish reply-delivered vs timeout vs spurious wake.
+    //
+    // Spurious wake (woken with reply not delivered AND timeout flag not set)
+    // is rare but real — historically caused the editor's IPC stack to see
+    // `Ok(0)`. Earlier I tried wrapping the block in a loop, but every
+    // re-block pushed a new entry into TIMEOUT_HEAP without removing the old
+    // one, so under heavy IPC traffic the kernel BinaryHeap grew unboundedly
+    // and OOM'd. Kept here as a single-shot block; treat the spurious-wake
+    // case as a Timeout so userspace can retry. The real fix for the heap
+    // growth is to dedupe TIMEOUT_HEAP entries per thread, which is a bigger
+    // refactor than this freeze allows.
+    if has_timeout {
+        if !crate::sched::ThreadManager::has_call_reply_info(reply_id) {
+            // Reply was delivered — clear stale timeout flag, succeed.
+            let _ = crate::sched::ThreadManager::check_and_clear_timeout_wake();
+        } else {
+            // Either timeout fired cleanly OR we got a spurious wake: in
+            // both cases the call has no reply, so cleanup and report
+            // Timeout. Userspace's `request_bytes` already treats Timeout
+            // as "retry with a fresh call".
+            let _ = crate::sched::ThreadManager::check_and_clear_timeout_wake();
+            let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
+            return Err(Error::Timeout);
+        }
     }
 
     // Return value will be set by deliver_reply in thread.context.rax
