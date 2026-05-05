@@ -110,7 +110,18 @@ mod inner {
     const USER_HEAP_START: usize = 0x0080_0000;
 
     /// Maximum heap address for the Rust allocator.
-    const USER_HEAP_MAX: usize = 0x0100_0000;
+    ///
+    /// 8 MiB was too small for procmgr: a single failed `map_elf` would force
+    /// the chunked-read fallback to allocate a contiguous `Vec<u8>` the size
+    /// of the binary (4-5 MiB for /bin/ls etc.), and after the first such
+    /// load the linked-list allocator's free regions were too fragmented for
+    /// a second 4 MiB Vec to land. The slow-path allocation is wasteful in
+    /// principle (the file is already in VFS's cache region), but until that
+    /// path is replaced with a streaming ELF loader, give Rust binaries
+    /// enough room to load the largest userspace ELF a couple of times.
+    /// 56 MiB heap fits well below newlib's `_sbrk` range top (0x4000_0000)
+    /// and the mmap region start (0x4100_0000).
+    const USER_HEAP_MAX: usize = 0x0400_0000;
 
     /// Static bootstrap heap for early allocations before boot tokens are ready.
     #[repr(align(4096))]
