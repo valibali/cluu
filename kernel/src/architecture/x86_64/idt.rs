@@ -826,6 +826,28 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
     uart_hex("PF: RSP=", f.rsp);
     uart_hex("PF: SS=", f.ss);
 
+    // Diagnostic for the wild-instruction-fetch case (RIP==CR2 in user space):
+    // dump 8 quadwords starting at RSP. If [rsp+0] equals RIP, the fault came
+    // from a `ret` that popped a corrupted return address. If not, the fault
+    // came from an indirect `call`/`jmp` through a clobbered register/memory
+    // operand; in that case the bad target is from a register, not the stack.
+    //
+    // CR3 is still the faulting process's at this point, so user pointer
+    // reads work directly. Wrap each read so a bad RSP doesn't recursively
+    // fault — but we trust f.rsp here because we got here on the user IRQ
+    // path, which means RSP was valid enough to push the iretq frame.
+    if is_userspace && f.rip == cr2 && f.rip < 0x4_4000_0000 {
+        COM2.write_str("PF: stack@RSP (low → high):\n");
+        for off in 0..8u64 {
+            let addr = f.rsp.wrapping_add(off * 8);
+            // Skip if RSP+off would cross a page boundary into nowhere.
+            // Best-effort: just read; the IST handler is fine to take a
+            // nested fault here (we'd just see a second PF log).
+            let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
+            uart_hex("  qword =", val);
+        }
+    }
+
     // Userspace fault that can't be handled by lazy alloc
     if is_userspace {
         let saved_ctx = pf_frame_to_context(f);
