@@ -556,30 +556,34 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     }
     crate::architecture::x86_64::syscall::request_resched();
 
-    // After wake: distinguish reply-delivered vs timeout vs spurious wake.
+    // After wake: three cases.
     //
-    // Spurious wake (woken with reply not delivered AND timeout flag not set)
-    // is rare but real — historically caused the editor's IPC stack to see
-    // `Ok(0)`. Earlier I tried wrapping the block in a loop, but every
-    // re-block pushed a new entry into TIMEOUT_HEAP without removing the old
-    // one, so under heavy IPC traffic the kernel BinaryHeap grew unboundedly
-    // and OOM'd. Kept here as a single-shot block; treat the spurious-wake
-    // case as a Timeout so userspace can retry. The real fix for the heap
-    // growth is to dedupe TIMEOUT_HEAP entries per thread, which is a bigger
-    // refactor than this freeze allows.
+    // 1. Reply was delivered. has_call_reply_info → false. deliver_reply has
+    //    already written rax. Fall through with Ok(0); the kernel returns
+    //    rax (the byte count) to userspace.
+    //
+    // 2. Timeout fired cleanly. check_and_clear_timeout_wake → true.
+    //    Reply slot is orphaned; clean it up and return Err(Timeout).
+    //
+    // 3. Spurious wake. Reply not delivered AND timeout flag not set —
+    //    something else woke this thread. Fall through with Ok(0) and rax=0.
+    //    Userspace's `request_bytes` already treats Ok(0) as "no data,
+    //    retry," so we don't need to artificially synthesize a Timeout
+    //    here. (An earlier attempt to do that — return Timeout on every
+    //    spurious wake — broke edit: the kernel scheduler wakes blocked
+    //    threads spuriously several times a second, so every TTY_READ_REQUEST
+    //    returned Timeout almost immediately and edit tightloop'd without
+    //    ever observing a key.)
     if has_timeout {
         if !crate::sched::ThreadManager::has_call_reply_info(reply_id) {
-            // Reply was delivered — clear stale timeout flag, succeed.
+            // Case 1.
             let _ = crate::sched::ThreadManager::check_and_clear_timeout_wake();
-        } else {
-            // Either timeout fired cleanly OR we got a spurious wake: in
-            // both cases the call has no reply, so cleanup and report
-            // Timeout. Userspace's `request_bytes` already treats Timeout
-            // as "retry with a fresh call".
-            let _ = crate::sched::ThreadManager::check_and_clear_timeout_wake();
+        } else if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
+            // Case 2.
             let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
             return Err(Error::Timeout);
         }
+        // Case 3: fall through with rax=0.
     }
 
     // Return value will be set by deliver_reply in thread.context.rax
