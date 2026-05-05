@@ -838,14 +838,15 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
     // path, which means RSP was valid enough to push the iretq frame.
     if is_userspace && f.rip == cr2 && f.rip < 0x4_4000_0000 {
         COM2.write_str("PF: stack@RSP (low → high):\n");
+        // SMAP is enabled; set AC=1 so the kernel can read the user page.
+        // We're on the IST stack, so a nested PF here is bounded.
+        unsafe { core::arch::asm!("stac", options(nomem, nostack)) };
         for off in 0..8u64 {
             let addr = f.rsp.wrapping_add(off * 8);
-            // Skip if RSP+off would cross a page boundary into nowhere.
-            // Best-effort: just read; the IST handler is fine to take a
-            // nested fault here (we'd just see a second PF log).
             let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
             uart_hex("  qword =", val);
         }
+        unsafe { core::arch::asm!("clac", options(nomem, nostack)) };
     }
 
     // Userspace fault that can't be handled by lazy alloc
