@@ -4984,9 +4984,18 @@ impl ProcessManager {
                     deny_inherit,
                 );
 
-                // Strip any /tmp, /log, /data, or / mounts inherited from the
-                // caller view — procmgr owns those paths for this container.
-                let container_anchored = ["/tmp", "/log", "/data", "/"];
+                // Strip /tmp, /log, /data inherited from the caller view —
+                // procmgr re-applies those with the right per-container
+                // MemFs backend below (private/inherit/ro per Cluufile).
+                //
+                // `/` is NOT stripped: if the envelope grants the caller
+                // `rw:/` (admin/supervisor) we want children to inherit that
+                // ext2 passthrough so `edit /hello.txt` actually persists.
+                // The catchall `/ → MemFs{own_cid}` we append below sits at
+                // the end of the view list and only fires when no earlier
+                // mount covers the path (first-match-wins) — so an inherited
+                // `rw:/` shadows it without any extra logic.
+                let container_anchored = ["/tmp", "/log", "/data"];
                 view_mounts.retain(|(_, dst, _, _)| {
                     !container_anchored.iter().any(|a| dst == *a)
                 });
