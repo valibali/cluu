@@ -352,12 +352,19 @@ impl TtyContext {
                 // so output is not silently queued forever.
                 self.console_credit = CONSOLE_CREDIT_WINDOW;
             }
-            let _ = send_with_retry_timeout(
+            let result = send_with_retry_timeout(
                 self.console_endpoint,
                 CONSOLE_WRITE_LABEL,
                 chunk,
                 CONSOLE_SEND_RETRIES,
             );
+            if let Err(e) = result {
+                let _ = debug_print(&format!(
+                    "tty: send_to_console FAIL after retries len={} err={:?}",
+                    chunk.len(),
+                    e
+                ));
+            }
             self.console_credit = self.console_credit.saturating_sub(chunk.len());
         }
     }
