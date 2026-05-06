@@ -3228,13 +3228,13 @@ impl VfsServer {
         }
 
         // Handle non-page-aligned segments (e.g., .bss after .tdata/.tbss).
-        // Determine if this segment is shareable (read-only in caller's space).
-        let writable = (segment.page_flags & 0x02) != 0;
-        let final_flags = if writable {
-            segment.page_flags
-        } else {
-            segment.page_flags | libcluu::syscall::MAP_SHARE_PHYS
-        };
+        // MAP_SHARE_PHYS disabled: shared frames don't track all consumers, so
+        // when a frame's mapping in *any* space is dropped the underlying frame
+        // can be returned to PMM and reused, silently corrupting other spaces
+        // that still map it. Reverting to fresh-frame copy on every spawn
+        // until the refcount path covers MAP_SHARE_PHYS too. Symptom this
+        // avoids: console wild-jump to 0x437720 after ls/edit/:w/:q/ls.
+        let final_flags = segment.page_flags;
 
         let page_offset = vaddr & (PAGE_SIZE - 1);
         if page_offset != 0 {
