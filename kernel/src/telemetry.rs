@@ -262,6 +262,14 @@ pub fn record_ipc_queue_enqueue(bytes: usize) {
         .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
     update_max_atomic(&IPC_QUEUE_PEAK_MESSAGES, current_messages);
+
+    // Trip-wire: when total queued messages crosses a power-of-2 high
+    // water mark above 32, dump per-endpoint depths so we can identify
+    // *which* endpoint is clogging up.  Power-of-2 spacing keeps the
+    // log noise bounded under sustained load (32, 64, 128, 256, ...).
+    if current_messages >= 32 && current_messages.is_power_of_two() {
+        crate::ipc::endpoint::dump_heavy_endpoints(8);
+    }
 }
 
 #[inline(always)]

@@ -426,6 +426,30 @@ if [ "${#TYPED_COMMANDS[@]}" -gt 0 ] || [ -n "$POST_SENDKEY" ]; then
 fi
 
 # --- Step 5: Type test command(s) via QEMU monitor ---
+# When KEY_DELAY=0 and a long string is being typed, the per-key open/close
+# of `nc` becomes the rate bottleneck (~10ms/key). FAST_KEYSTROKES=1 batches
+# all sendkey lines into a single nc invocation — QEMU then parses them as
+# fast as it can read from the socket, hitting saturation rates the regular
+# 50/s path can't reach. Useful for stress tests like perf_typing_storm.
+FAST_KEYSTROKES_BATCH=()
+FAST_MODE="${FAST_KEYSTROKES:-}"
+
+queue_key() {
+    if [ -n "$FAST_MODE" ]; then
+        FAST_KEYSTROKES_BATCH+=("sendkey $1")
+    else
+        queue_key "$1"
+    fi
+}
+
+flush_fast_batch() {
+    if [ -n "$FAST_MODE" ] && [ "${#FAST_KEYSTROKES_BATCH[@]}" -gt 0 ]; then
+        printf '%s\n' "${FAST_KEYSTROKES_BATCH[@]}" \
+            | nc -U -w 5 "$MONITOR_SOCK" >/dev/null 2>&1 || true
+        FAST_KEYSTROKES_BATCH=()
+    fi
+}
+
 send_key() {
     echo "sendkey $1" | nc -U -q0 "$MONITOR_SOCK" >/dev/null 2>&1 || true
     sleep "$KEY_DELAY"
@@ -437,56 +461,56 @@ type_ascii_command() {
     for ((i = 0; i < ${#cmd}; i++)); do
         ch="${cmd:$i:1}"
         case "$ch" in
-            ' ') send_key "spc" ;;
-            $'\t') send_key "tab" ;;
-            '-') send_key "minus" ;;
-            '_') send_key "shift-minus" ;;
-            '=') send_key "equal" ;;
-            '+') send_key "shift-equal" ;;
-            '.') send_key "dot" ;;
-            ',') send_key "comma" ;;
+            ' ') queue_key "spc" ;;
+            $'\t') queue_key "tab" ;;
+            '-') queue_key "minus" ;;
+            '_') queue_key "shift-minus" ;;
+            '=') queue_key "equal" ;;
+            '+') queue_key "shift-equal" ;;
+            '.') queue_key "dot" ;;
+            ',') queue_key "comma" ;;
             # HU layout: '/' lives on Shift+6, '?' on the comma key with shift.
             # The US 'slash' scancode (0x35) maps to '-' on HU.
-            '/') send_key "shift-6" ;;
-            '?') send_key "shift-comma" ;;
-            ';') send_key "semicolon" ;;
-            ':') send_key "shift-semicolon" ;;
-            "'") send_key "apostrophe" ;;
-            '"') send_key "shift-apostrophe" ;;
-            '(') send_key "shift-9" ;;
-            ')') send_key "shift-0" ;;
-            '[') send_key "bracket_left" ;;
-            ']') send_key "bracket_right" ;;
-            '{') send_key "shift-bracket_left" ;;
-            '}') send_key "shift-bracket_right" ;;
-            '\\') send_key "backslash" ;;
-            '|') send_key "shift-backslash" ;;
-            '!') send_key "shift-1" ;;
-            '@') send_key "shift-2" ;;
-            '#') send_key "shift-3" ;;
-            '$') send_key "shift-4" ;;
-            '%') send_key "shift-5" ;;
-            '^') send_key "shift-6" ;;
-            '&') send_key "shift-7" ;;
-            '*') send_key "shift-8" ;;
-            '<') send_key "shift-comma" ;;
-            '>') send_key "shift-dot" ;;
-            '`') send_key "grave_accent" ;;
-            '~') send_key "shift-grave_accent" ;;
+            '/') queue_key "shift-6" ;;
+            '?') queue_key "shift-comma" ;;
+            ';') queue_key "semicolon" ;;
+            ':') queue_key "shift-semicolon" ;;
+            "'") queue_key "apostrophe" ;;
+            '"') queue_key "shift-apostrophe" ;;
+            '(') queue_key "shift-9" ;;
+            ')') queue_key "shift-0" ;;
+            '[') queue_key "bracket_left" ;;
+            ']') queue_key "bracket_right" ;;
+            '{') queue_key "shift-bracket_left" ;;
+            '}') queue_key "shift-bracket_right" ;;
+            '\\') queue_key "backslash" ;;
+            '|') queue_key "shift-backslash" ;;
+            '!') queue_key "shift-1" ;;
+            '@') queue_key "shift-2" ;;
+            '#') queue_key "shift-3" ;;
+            '$') queue_key "shift-4" ;;
+            '%') queue_key "shift-5" ;;
+            '^') queue_key "shift-6" ;;
+            '&') queue_key "shift-7" ;;
+            '*') queue_key "shift-8" ;;
+            '<') queue_key "shift-comma" ;;
+            '>') queue_key "shift-dot" ;;
+            '`') queue_key "grave_accent" ;;
+            '~') queue_key "shift-grave_accent" ;;
             # HU (QWERTZ) layout swaps y↔z scancodes.  QEMU sendkey uses
             # US key names, so we pre-swap to produce the intended character.
-            'y') send_key "z" ;;
-            'z') send_key "y" ;;
-            'Y') send_key "shift-z" ;;
-            'Z') send_key "shift-y" ;;
-            [a-z0-9]) send_key "$ch" ;;
-            [A-Z]) send_key "shift-${ch,,}" ;;
+            'y') queue_key "z" ;;
+            'z') queue_key "y" ;;
+            'Y') queue_key "shift-z" ;;
+            'Z') queue_key "shift-y" ;;
+            [a-z0-9]) queue_key "$ch" ;;
+            [A-Z]) queue_key "shift-${ch,,}" ;;
             *)
                 echo "WARN: unsupported character '$ch' in keystroke command; skipping"
                 ;;
         esac
     done
-    send_key "ret"
+    queue_key "ret"
 }
 
 if [ "${#TYPED_COMMANDS[@]}" -gt 0 ]; then
@@ -498,12 +522,14 @@ if [ "${#TYPED_COMMANDS[@]}" -gt 0 ]; then
             sleep "$COMMAND_GAP"
         fi
     done
+    flush_fast_batch
 fi
 
 if [ -n "$POST_SENDKEY" ]; then
     sleep "$POST_SENDKEY_DELAY"
     echo "Sending post key: '$POST_SENDKEY'"
-    send_key "$POST_SENDKEY"
+    queue_key "$POST_SENDKEY"
+    flush_fast_batch
 fi
 
 # --- Step 6: Wait for the test to run ---

@@ -447,6 +447,48 @@ fn get_endpoint_shard(id: EndpointId) -> &'static Mutex<EndpointShard> {
     &ENDPOINT_SHARDS[hash_endpoint_id(id)]
 }
 
+/// Dump per-endpoint queue depths for any endpoint exceeding `threshold`
+/// pending messages or with any blocked sender/receiver.
+///
+/// Uses `try_lock` per shard so it's safe to call from inside another
+/// shard's lock (e.g. directly after enqueue) — busy shards are skipped
+/// rather than waited on, which is fine for diagnostic purposes.
+pub fn dump_heavy_endpoints(threshold: usize) {
+    klibcluu::warn("ipc-depth: dump start");
+    let mut total_busy = 0u64;
+    let mut total_skipped = 0u64;
+    for shard_idx in 0..NUM_ENDPOINT_SHARDS {
+        let shard = &ENDPOINT_SHARDS[shard_idx];
+        match shard.try_lock() {
+            Some(guard) => {
+                for (id, ep) in guard.endpoints.iter() {
+                    let q = ep.queue.len();
+                    let cq = ep.call_queue.len();
+                    let ws = ep.waiting_senders.len();
+                    let wr = ep.waiting_receivers.len();
+                    if q >= threshold || cq >= threshold || ws > 0 {
+                        total_busy += 1;
+                        klibcluu::log_dec(klibcluu::LogLevel::Info, "  ep=", id.as_u64());
+                        klibcluu::log_dec(klibcluu::LogLevel::Info, "    q=", q as u64);
+                        klibcluu::log_dec(klibcluu::LogLevel::Info, "    cq=", cq as u64);
+                        klibcluu::log_dec(klibcluu::LogLevel::Info, "    ws=", ws as u64);
+                        klibcluu::log_dec(klibcluu::LogLevel::Info, "    wr=", wr as u64);
+                    }
+                }
+            }
+            None => {
+                total_skipped += 1;
+            }
+        }
+    }
+    klibcluu::log_dec(klibcluu::LogLevel::Info, "ipc-depth: heavy_eps=", total_busy);
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Info,
+        "ipc-depth: skipped_shards=",
+        total_skipped,
+    );
+}
+
 lazy_static! {
     static ref RECV_LOGGED: Mutex<BTreeSet<EndpointId>> = Mutex::new(BTreeSet::new());
 }
