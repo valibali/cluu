@@ -4062,11 +4062,16 @@ impl ProcessManager {
             }
         }
 
-        let parent_stdin_send =
-            match token_derive(stdin_ep, Rights::IPC_SEND.bits() as usize, u64::MAX) {
-                Ok(token) => token,
-                Err(_) => 0, // No access rather than raw endpoint on derivation failure
-            };
+        // TTY needs CALL (not just SEND) so it can do tab-completion queries
+        // back to the shell over the same endpoint.
+        let parent_stdin_send = match token_derive(
+            stdin_ep,
+            (Rights::IPC_SEND.bits() | Rights::IPC_CALL.bits()) as usize,
+            u64::MAX,
+        ) {
+            Ok(token) => token,
+            Err(_) => 0, // No access rather than raw endpoint on derivation failure
+        };
 
         // Inject framebuffer dimensions as defaults so all processes can compute
         // terminal cols/rows.  Caller overrides are applied after, so e.g.

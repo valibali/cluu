@@ -26,7 +26,8 @@ use libcluu::boot::{
     TOKEN_STDOUT,
 };
 use libcluu::ipc::{
-    parse_message, send_with_payload, TTY_READ_LABEL, TTY_WRITE_LABEL,
+    extract_reply_id, parse_message, reply_with_payload, send_with_payload, TTY_READ_LABEL,
+    TTY_TAB_QUERY_LABEL, TTY_WRITE_LABEL,
 };
 use libcluu::registry;
 use libcluu::types::Message;
@@ -158,6 +159,15 @@ fn run() -> Result<()> {
                             let ch = msg.words[1] as u8;
                             handle_line_payload(stdout, stdlog, &mut command_context, &[ch])?;
                         }
+                    } else if msg.tag.label == TTY_TAB_QUERY_LABEL {
+                        // TTY asked us to compute a tab completion using OUR
+                        // view and CWD. Always reply, even on failure, so TTY
+                        // doesn't time out.
+                        if let Some(rid) = extract_reply_id(&msg) {
+                            let suffix = handle_tab_query(payload);
+                            let reply_msg = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 1);
+                            let _ = reply_with_payload(rid, &reply_msg, &suffix);
+                        }
                     }
                 }
             }
@@ -184,6 +194,81 @@ fn print_prompt(endpoint: usize) -> Result<()> {
     let prompt = format!("{}:{}> ", user, cwd);
     send_with_payload(endpoint, TTY_WRITE_LABEL, prompt.as_bytes())?;
     Ok(())
+}
+
+/// Resolve a tab-completion query forwarded from TTY.
+///
+/// Input: the partial last-token bytes the user is typing (no NUL).
+/// Output: the suffix to append after that token (with trailing '/' for
+/// directories or ' ' for files), or empty for "no unique completion."
+///
+/// Splits the token at the rightmost '/' into (parent_dir, prefix). If
+/// parent_dir is absent or relative, resolves against shell's CWD —
+/// which is exactly the TTY-side limitation we're working around. Calls
+/// VFS readdir using shell's view, so /etc and /var (and anything else
+/// the user's envelope grants) are visible to tab.
+///
+/// Failure modes return empty (no completion). Caller (TTY) treats
+/// empty as "do nothing," matching the silent-no-op behavior the user
+/// already expects.
+fn handle_tab_query(payload: &[u8]) -> Vec<u8> {
+    let token = match core::str::from_utf8(payload) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    // Split into (parent_dir_str, prefix).
+    let (parent_dir_str, prefix) = match token.rfind('/') {
+        Some(idx) => (&token[..=idx], &token[idx + 1..]),
+        None => ("", token),
+    };
+
+    // Resolve parent against CWD if relative.
+    let cwd = libcluu::posix::current_dir_string();
+    let resolved_parent: String = if parent_dir_str.is_empty() {
+        // No '/' in token: search the current working directory.
+        cwd
+    } else if parent_dir_str.starts_with('/') {
+        // Absolute path.
+        String::from(parent_dir_str)
+    } else {
+        // Relative path with a slash: prefix with CWD.
+        let mut s = cwd;
+        if !s.ends_with('/') {
+            s.push('/');
+        }
+        s.push_str(parent_dir_str);
+        s
+    };
+
+    // Get a VFS client. Best-effort — if registry/IPC isn't ready, no completion.
+    let vfs_endpoint = match libcluu::registry::subscribe_output("vfs", "main") {
+        Ok(ep) => ep,
+        Err(_) => return Vec::new(),
+    };
+    let vfs = match libcluu::fs::client::VfsClient::new_from_registry(vfs_endpoint) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let entries = match vfs.readdir(&resolved_parent) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut matches = entries.iter().filter(|e| e.name.starts_with(prefix));
+    let first = match matches.next() {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+    if matches.next().is_some() {
+        return Vec::new(); // 2+ matches — silent no-op
+    }
+
+    // Build suffix: bytes after the already-typed prefix, plus '/' (dir) or ' ' (file).
+    let mut out: Vec<u8> = first.name[prefix.len()..].as_bytes().to_vec();
+    out.push(if first.is_dir { b'/' } else { b' ' });
+    out
 }
 
 /// Read an environment variable from the ProcessInfo page.

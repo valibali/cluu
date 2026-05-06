@@ -217,6 +217,7 @@ name = "cluu-ext2"
 version = "0.1.0"
 dependencies = [
  "libcluu",
+ "spin",
 ]
 
 [[package]]

@@ -445,8 +445,10 @@ type_ascii_command() {
             '+') send_key "shift-equal" ;;
             '.') send_key "dot" ;;
             ',') send_key "comma" ;;
-            '/') send_key "slash" ;;
-            '?') send_key "shift-slash" ;;
+            # HU layout: '/' lives on Shift+6, '?' on the comma key with shift.
+            # The US 'slash' scancode (0x35) maps to '-' on HU.
+            '/') send_key "shift-6" ;;
+            '?') send_key "shift-comma" ;;
             ';') send_key "semicolon" ;;
             ':') send_key "shift-semicolon" ;;
             "'") send_key "apostrophe" ;;
@@ -1225,12 +1227,14 @@ case "$MARKER_MODE" in
         ;;
     l2_tab_complete)
         # TAB pressed after "cat /etc/m" completes to "cat /etc/motd " and
-        # Enter runs the command. The shell emits a debug marker when the
-        # pipeline finishes; that's our observable signal on COM2.
+        # Enter runs the command. Post-UE17 bare-command path goes through
+        # spawn_and_wait, so the observable success marker is the
+        # container-run-done line with status=0 for the cat invocation.
         required_markers=(
             "TSC calibrated"
             "[USER] shell: ready"
-            "shell: pipeline done stages=1 status=0"
+            "shell: PATH resolved 'cat' -> /var/images/cat"
+            "shell: container run done status=0"
         )
         ;;
     hr6_shell_crash)

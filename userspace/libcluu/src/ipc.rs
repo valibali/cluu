@@ -33,6 +33,14 @@ pub const TTY_READ_REQUEST_LABEL: u32 = 6;
 pub const CONSOLE_FB_INFO_LABEL: u32 = 6;
 pub const CONSOLE_CREDIT_REFILL_LABEL: u32 = 8;
 pub const TTY_POLL_QUERY_LABEL: u32 = 7;
+/// tty → shell (synchronous CALL on shell's stdin endpoint): ask shell to
+/// resolve a tab-completion query against its OWN VFS view + CWD. Payload
+/// is the partial last-token bytes the user is typing (no NUL terminator).
+/// Reply payload is the suffix bytes to append after that token, or empty
+/// for "no unique completion." Trailing '/' or ' ' is part of the suffix.
+/// Lives on the same stdin endpoint that delivers TTY_READ_LABEL — shell's
+/// recv loop dispatches by label.
+pub const TTY_TAB_QUERY_LABEL: u32 = 30;
 pub const CONSOLE_ACTIVATE_LABEL: u32 = 8;
 pub const CONSOLE_DEACTIVATE_LABEL: u32 = 9;
 pub const PROCMGR_QUERY_CTTY_LABEL: u32 = 11;

@@ -16,7 +16,7 @@ use context::{TtyContext, TtyMode, LoginState};
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_CREDIT_REFILL_LABEL, KBD_EVENT_LABEL, TTY_CTL_LABEL,
     TTY_FG_FLAG_FORWARD_CTRL_C, TTY_POLL_QUERY_LABEL, TTY_READ_LABEL, TTY_READ_REQUEST_LABEL,
-    TTY_REGISTER_LABEL, TTY_WRITE_LABEL, TTY_WRITE_SYNC_LABEL,
+    TTY_REGISTER_LABEL, TTY_TAB_QUERY_LABEL, TTY_WRITE_LABEL, TTY_WRITE_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{yield_cpu, Error, Result};
@@ -295,64 +295,57 @@ fn apply_effect(ctx: &mut TtyContext, discipline: &mut line_discipline::LineDisc
     }
 }
 
-/// Resolve a TAB press to a completion suffix using VFS readdir.
+/// Resolve a TAB press to a completion suffix.
 ///
-/// Returns `Some(bytes)` if there is exactly one match; the bytes are the
-/// suffix to append after the already-typed prefix (plus '/' for dirs or ' '
-/// for files). Returns `None` for zero or multiple matches.
+/// Sends an IPC_CALL to shell's stdin endpoint with the partial last-token
+/// bytes. Shell does the readdir using its own VFS view + CWD (which TTY
+/// can't see) and replies with the suffix. Returns `Some(bytes)` for a
+/// completion, `None` for "no completion / shell unavailable / multiple
+/// matches" — all silent failures.
 fn compute_path_completion(partial: &[u8], ctx: &mut TtyContext) -> Option<alloc::vec::Vec<u8>> {
-    // 1. Extract the last whitespace-delimited token.
+    // Extract the last whitespace-delimited token from the line buffer.
     let token_start = partial
         .iter()
         .rposition(|&b| b == b' ' || b == b'\t')
         .map(|p| p + 1)
         .unwrap_or(0);
     let token = &partial[token_start..];
-    let token_str = core::str::from_utf8(token).ok()?;
 
-    // 2. Split into parent_dir and prefix.
-    let (parent_dir, prefix) = match token_str.rfind('/') {
-        Some(idx) => (&token_str[..=idx], &token_str[idx + 1..]),
-        None => ("", token_str),
-    };
-
-    // 3. Resolve parent_dir absolutely.
-    // Empty/relative without a leading slash → fall back to "/" (root).
-    // This makes `cat /etc/mo<TAB>` work. CWD-relative completion would need
-    // a TTY↔shell roundtrip and is deferred to a future polish task.
-    let resolved_parent: alloc::string::String = if parent_dir.is_empty() {
-        alloc::string::String::from("/")
-    } else if parent_dir.starts_with('/') {
-        alloc::string::String::from(parent_dir)
-    } else {
-        // Relative path with a slash in it: CWD-unaware, skip.
+    // Need shell stdin to address the call; foreground may have stolen the
+    // route, in which case we just bail.
+    if ctx.shell_stdin == 0 {
         return None;
-    };
-
-    // 4. Get VFS client, initializing lazily on first TAB press.
-    let vfs = ctx.vfs_client_lazy()?;
-
-    // 5. Read the parent directory.
-    let entries = vfs.readdir(&resolved_parent).ok()?;
-
-    // 6. Find unique-prefix match.
-    let mut matches = entries.iter().filter(|e| e.name.starts_with(prefix));
-    let first = matches.next()?;
-    if matches.next().is_some() {
-        return None; // 2+ matches — silent no-op
     }
+    let shell_endpoint = ctx.shell_stdin;
 
-    // 7. Build completion bytes: the suffix after the already-typed prefix.
-    // E.g., prefix="mo", first.name="motd" → suffix="td", out=b"td "
-    // E.g., first.name="bin", is_dir=true → out=b"in/"
-    let suffix = &first.name[prefix.len()..];
-    let mut out = suffix.as_bytes().to_vec();
-    if first.is_dir {
-        out.push(b'/');
-    } else {
-        out.push(b' '); // trailing space after a complete filename — bash convention
+    // Build request: Message header + token bytes appended.
+    // words[0] is the conventional payload-length slot (the IPC layer's
+    // parse_message reads it). We deliberately do NOT use
+    // call_with_payload's helper because it discards the reply payload —
+    // we need to read variable-length suffix bytes back.
+    let mut req = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 1);
+    req.words[0] = token.len();
+    let header = req.as_bytes();
+    let mut send_buf = alloc::vec::Vec::with_capacity(header.len() + token.len());
+    send_buf.extend_from_slice(header);
+    send_buf.extend_from_slice(token);
+
+    let mut reply_buf = [0u8; 256];
+    // 250 ms timeout: shell typically replies in well under a millisecond,
+    // but if it's mid-pipeline we'd rather drop the TAB than freeze TTY.
+    let bytes_recv = libcluu::syscall::ipc_call_timeout(
+        shell_endpoint,
+        &send_buf,
+        &mut reply_buf,
+        250,
+    )
+    .ok()?;
+
+    let (msg, payload) = libcluu::ipc::parse_message(&reply_buf[..bytes_recv])?;
+    if msg.tag.label != TTY_TAB_QUERY_LABEL || payload.is_empty() {
+        return None;
     }
-    Some(out)
+    Some(payload.to_vec())
 }
 
 /// Deliver a completed line to pending readers or the shell.
