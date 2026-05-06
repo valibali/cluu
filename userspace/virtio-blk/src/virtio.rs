@@ -95,7 +95,11 @@ struct VirtioBlkReqHeader {
 /// Base address for virtqueue memory allocation
 const VIRTQUEUE_BASE: usize = 0x50000000;
 const DATA_BUFFER_OFFSET: usize = 0x10000 + core::mem::size_of::<VirtioBlkReqHeader>() + 8;
-const DATA_BUFFER_MAX: usize = 64 * 1024;
+/// Per-request DMA capacity. Bumped from 64 KiB to 1 MiB so ext2's
+/// contiguous-block batching can serve large ELF reads in a handful of DMAs
+/// instead of dozens. The 2 MiB pmm_alloc_large block we allocate at init
+/// covers the new size — `data_pages` below sizes the mapping accordingly.
+const DATA_BUFFER_MAX: usize = 1024 * 1024;
 
 /// Virtio-blk device
 pub struct VirtioBlkDevice {

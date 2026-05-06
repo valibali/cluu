@@ -20,6 +20,22 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use libcluu::fs::{BlockDevice, DirEntry, FileStat, Filesystem};
 use libcluu::{Error, Result};
+use spin::Mutex;
+
+/// One-slot cache for indirect block contents.
+///
+/// Sequential file reads call `read_indirect_block(block_num, idx)` once per
+/// data block, asking for one 4-byte pointer at a time. Without caching, every
+/// call issues a fresh DMA round-trip to the same physical block (just to read
+/// 4 bytes from it). For a 4 MB file that's ~1024 redundant 4-byte DMAs.
+///
+/// One slot is enough for sequential reads on the boot path: each indirect
+/// block covers 1024 data blocks (= 4 MB at block_size=4 KiB), and the 4 MB
+/// ELF binaries each fit comfortably in one indirect block.
+struct IndirectCache {
+    block_num: u32,
+    contents: Vec<u8>,
+}
 
 /// Ext2 filesystem instance.
 ///
@@ -31,6 +47,10 @@ pub struct Ext2Fs<'a> {
     block_size: usize,
     inodes_per_group: u32,
     inode_size: usize,
+    /// Cached indirect block — one slot, replaced on every miss. Mutex because
+    /// `read_indirect_block` takes `&self`. Contents is empty when the cache
+    /// is invalid.
+    indirect_cache: Mutex<IndirectCache>,
 }
 
 impl<'a> Ext2Fs<'a> {
@@ -56,7 +76,20 @@ impl<'a> Ext2Fs<'a> {
             block_size,
             inodes_per_group,
             inode_size,
+            indirect_cache: Mutex::new(IndirectCache {
+                block_num: 0,
+                contents: Vec::new(),
+            }),
         })
+    }
+
+    /// Invalidate the indirect-block cache. Called from any path that mutates
+    /// indirect blocks on disk (write_indirect_block, allocate_block, etc.)
+    /// so a subsequent read sees the updated content.
+    fn invalidate_indirect_cache(&self) {
+        let mut cache = self.indirect_cache.lock();
+        cache.block_num = 0;
+        cache.contents.clear();
     }
 
     /// Read an inode by number.
@@ -156,40 +189,80 @@ impl<'a> Ext2Fs<'a> {
     }
 
     /// Read file data into a buffer.
+    ///
+    /// Sequential-read fast path: walks the file's logical block numbers and
+    /// detects runs of physically-contiguous blocks (the common case for
+    /// freshly-written ELF binaries). Each contiguous run is served by a
+    /// single underlying `read_bytes` call — taking what would otherwise be
+    /// hundreds of 4 KiB DMAs and collapsing them into a handful of large
+    /// ones.  Sparse holes inside a run are also handled in one shot via
+    /// `fill(0)`.
     pub fn read_file(&self, inode: &Inode, offset: usize, buf: &mut [u8]) -> Result<usize> {
         let file_size = inode.size() as usize;
         if offset >= file_size {
             return Ok(0);
         }
-
         let available = file_size - offset;
         let to_read = buf.len().min(available);
+        if to_read == 0 {
+            return Ok(0);
+        }
 
-        // Read block by block
-        let mut bytes_read = 0;
+        let mut bytes_read = 0usize;
         let mut current_offset = offset;
 
         while bytes_read < to_read {
-            let block_idx = current_offset / self.block_size;
+            // Position inside the current logical block.
+            let block_idx = (current_offset / self.block_size) as u32;
             let block_offset = current_offset % self.block_size;
-            let block_remaining = self.block_size - block_offset;
-            let chunk_size = (to_read - bytes_read).min(block_remaining);
+            let first_block_remaining = self.block_size - block_offset;
 
-            let block_num = self.get_block_num(inode, block_idx as u32)?;
+            // Look up the first block's physical number.
+            let first_block_num = self.get_block_num(inode, block_idx)?;
 
-            if block_num == 0 {
-                // Sparse block - fill with zeros
-                buf[bytes_read..bytes_read + chunk_size].fill(0);
-            } else {
-                let block_byte_offset = (block_num as usize) * self.block_size + block_offset;
-                self.block.read_bytes(
-                    block_byte_offset as u64,
-                    &mut buf[bytes_read..bytes_read + chunk_size],
-                )?;
+            // Build a run of consecutive logical blocks that are *also*
+            // physically contiguous (or all-sparse). Cap the run at the
+            // bytes still requested.
+            let mut run_logical_blocks = 1u32;
+            let max_remaining = to_read - bytes_read;
+            // First chunk only takes block_offset..block_size of its block;
+            // every subsequent block contributes a full block until we hit
+            // the user's request limit or a discontinuity.
+            let mut run_bytes = first_block_remaining.min(max_remaining);
+            while run_bytes < max_remaining {
+                let next_logical = block_idx + run_logical_blocks;
+                let next_phys = self.get_block_num(inode, next_logical)?;
+                let extends = if first_block_num == 0 {
+                    // Sparse run: keep extending while next block is also sparse.
+                    next_phys == 0
+                } else {
+                    // Allocated run: keep extending while the next block
+                    // sits immediately after the previous (i.e. no fragmentation).
+                    next_phys != 0
+                        && next_phys == first_block_num + run_logical_blocks
+                };
+                if !extends {
+                    break;
+                }
+                run_logical_blocks += 1;
+                let take = self.block_size.min(max_remaining - run_bytes);
+                run_bytes += take;
+                if take < self.block_size {
+                    break; // Reached user's byte limit mid-block.
+                }
             }
 
-            bytes_read += chunk_size;
-            current_offset += chunk_size;
+            let dst = &mut buf[bytes_read..bytes_read + run_bytes];
+            if first_block_num == 0 {
+                dst.fill(0);
+            } else {
+                let phys_byte_offset =
+                    (first_block_num as usize) * self.block_size + block_offset;
+                self.block.read_bytes(phys_byte_offset as u64, dst)?;
+            }
+
+            bytes_read += run_bytes;
+            current_offset += run_bytes;
         }
 
         Ok(bytes_read)
@@ -793,10 +866,37 @@ impl<'a> Ext2Fs<'a> {
             return Ok(0);
         }
 
-        let offset = (block_num as usize) * self.block_size + index * 4;
-        let mut buf = [0u8; 4];
-        self.block.read_bytes(offset as u64, &mut buf)?;
-        Ok(u32::from_le_bytes(buf))
+        // Fast path: cache hit — read the 4-byte pointer out of the cached copy.
+        {
+            let cache = self.indirect_cache.lock();
+            if cache.block_num == block_num && !cache.contents.is_empty() {
+                let off = index * 4;
+                if off + 4 <= cache.contents.len() {
+                    let bytes: [u8; 4] = cache.contents[off..off + 4].try_into().unwrap();
+                    return Ok(u32::from_le_bytes(bytes));
+                }
+            }
+        }
+
+        // Miss: load the entire indirect block once and serve from cache.
+        let block_offset = (block_num as usize) * self.block_size;
+        let mut full_block = alloc::vec![0u8; self.block_size];
+        self.block.read_bytes(block_offset as u64, &mut full_block)?;
+
+        let off = index * 4;
+        if off + 4 > full_block.len() {
+            return Err(Error::InvalidArgument);
+        }
+        let bytes: [u8; 4] = full_block[off..off + 4].try_into().unwrap();
+        let result = u32::from_le_bytes(bytes);
+
+        // Replace cache slot. Fine to do this after the read returned;
+        // no other thread mutates `indirect_cache` outside the mutex.
+        let mut cache = self.indirect_cache.lock();
+        cache.block_num = block_num;
+        cache.contents = full_block;
+
+        Ok(result)
     }
 
     fn write_indirect_block(&self, block_num: u32, index: usize, value: u32) -> Result<()> {
@@ -806,6 +906,9 @@ impl<'a> Ext2Fs<'a> {
         let offset = (block_num as usize) * self.block_size + index * 4;
         self.block
             .write_bytes(offset as u64, &value.to_le_bytes())?;
+        // The on-disk indirect block just changed; if our cached copy was for
+        // this same block, drop it so the next read re-fetches.
+        self.invalidate_indirect_cache();
         Ok(())
     }
 
