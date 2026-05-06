@@ -35,6 +35,15 @@ pub extern "C" fn main() -> i32 {
 }
 
 /// Main service loop: handle registry wiring, input discipline, and output routing.
+///
+/// Two-stage receive on each iteration:
+/// 1. Block on recv_any waiting for the next message.
+/// 2. After processing, drain any back-to-back pending messages with
+///    timeout=0 (nonblocking).  This batches multiple keystrokes into
+///    one console flush — without it, fast typing produces N separate
+///    CONSOLE_WRITE messages, each forcing a full render pipeline in
+///    the console.  Sustained ~20 msg/sec render rate easily backs
+///    up the queue and looks like a freeze to the user.
 fn run() -> Result<()> {
     let mut ctx = TtyContext::new()?;
     let mut discipline = LineDiscipline::new();
@@ -46,136 +55,18 @@ fn run() -> Result<()> {
         let tokens = [ctx.endpoint, ctx.registry_endpoint];
         match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
             Ok((index, len)) => {
-                if let Some((msg, payload)) = parse_message(&buf[..len]) {
-                    if index == 1 {
-                        ctx.handle_registry_event(&msg, payload);
-                        continue;
-                    }
-
-                    match msg.tag.label {
-                        KBD_EVENT_LABEL => {
-                            if let Some(event) = decode_kbd_event(&msg) {
-                                handle_key(&mut ctx, &mut discipline, event.ascii, event.extended);
-                            }
+                handle_one_message(index, &buf[..len], &mut ctx, &mut discipline);
+                // Nonblocking drain of any back-to-back messages.
+                loop {
+                    match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, 0) {
+                        Ok((idx, n)) => {
+                            handle_one_message(idx, &buf[..n], &mut ctx, &mut discipline);
                         }
-                        TTY_READ_REQUEST_LABEL => {
-                            // A process called read(0, buf, n) — enqueue the request
-                            if let Some(reply_token) = extract_reply_id(&msg) {
-                                let max_bytes = msg.words[0];
-                                ctx.pending_reads.push_back(context::PendingRead {
-                                    reply_token,
-                                    max_bytes,
-                                });
-                                ctx.try_satisfy_reads();
-                            }
-                        }
-                        TTY_WRITE_LABEL => {
-                            ctx.forward_to_console(payload);
-                        }
-                        TTY_WRITE_SYNC_LABEL => {
-                            // Forward as async, reply immediately so caller never blocks.
-                            ctx.forward_to_console_sync(payload);
-                            if let Some(reply_token) = extract_reply_id(&msg) {
-                                let reply_msg = Message::new(TTY_WRITE_SYNC_LABEL, [0; 6], 0);
-                                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                            }
-                        }
-                        CONSOLE_CREDIT_REFILL_LABEL => {
-                            let refill_amount = msg.words[0];
-                            ctx.handle_credit_refill(refill_amount);
-                        }
-                        TTY_TAB_QUERY_LABEL => {
-                            // Async reply from shell to a previous dispatch.
-                            // (TTY *receives* this label but never *sends* it
-                            // to itself — only shell ever produces it on this
-                            // endpoint.)
-                            apply_tab_completion(&mut ctx, &mut discipline, &msg, payload);
-                        }
-                        TTY_CTL_LABEL => {
-                            // Terminal control: get/set mode
-                            if let Some(reply_token) = extract_reply_id(&msg) {
-                                let subcmd = msg.words[0];
-                                match subcmd {
-                                    0 => {
-                                        // getattr: reply with current mode flags
-                                        let mode = &discipline.mode;
-                                        let lflag: usize = (if mode.canonical { 0x02 } else { 0 })
-                                            | (if mode.echo { 0x08 } else { 0 });
-                                        let reply_msg =
-                                            Message::new(TTY_CTL_LABEL, [0, 0, 0, 0, lflag, 0], 5);
-                                        let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                                    }
-                                    1 => {
-                                        // setattr: update discipline mode
-                                        let lflag = msg.words[4];
-                                        let new_mode = line_discipline::TermMode {
-                                            canonical: (lflag & 0x02) != 0,
-                                            echo: (lflag & 0x08) != 0,
-                                        };
-                                        discipline.set_mode(new_mode);
-                                        let reply_msg = Message::new(TTY_CTL_LABEL, [0; 6], 0);
-                                        let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                                    }
-                                    _ => {
-                                        let reply_msg = Message::new(TTY_CTL_LABEL, [0; 6], 0);
-                                        let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                                    }
-                                }
-                            }
-                        }
-                        TTY_REGISTER_LABEL => {
-                            // words=1 legacy: set active stdin route.
-                            // words>=3: set route + Ctrl-C notify endpoint + policy flags.
-                            let foreground_endpoint = msg.words[0];
-                            if ctx.mode != TtyMode::Terminal && foreground_endpoint != 0 {
-                                // Auto-login: procmgr wired shell stdin directly.
-                                ctx.wire_shell_stdin(foreground_endpoint);
-                            } else if msg.tag.words >= 3 {
-                                ctx.configure_foreground(
-                                    foreground_endpoint,
-                                    msg.words[1],
-                                    msg.words[2],
-                                );
-                            } else {
-                                ctx.configure_foreground(
-                                    foreground_endpoint,
-                                    0,
-                                    TTY_FG_FLAG_FORWARD_CTRL_C,
-                                );
-                            }
-                            if foreground_endpoint == 0 {
-                                // Foreground returned to shell: force canonical+echo so
-                                // shell input cannot get stuck in child raw mode.
-                                discipline.set_mode(line_discipline::TermMode::default());
-                            }
-                            if let Some(reply_token) = extract_reply_id(&msg) {
-                                let reply_msg = Message::new(TTY_REGISTER_LABEL, [0; 6], 0);
-                                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                            }
-                        }
-                        TTY_POLL_QUERY_LABEL => {
-                            // Readiness query from poll(): reply with 1 if input available, 0 otherwise.
-                            if let Some(reply_token) = extract_reply_id(&msg) {
-                                let has_data = if ctx.input_queue.is_empty() {
-                                    0usize
-                                } else {
-                                    1usize
-                                };
-                                let reply_msg = Message::new(
-                                    TTY_POLL_QUERY_LABEL,
-                                    [has_data, 0, 0, 0, 0, 0],
-                                    1,
-                                );
-                                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                            }
-                        }
-                        libcluu::ipc::PROCMGR_SESSION_DEATH_LABEL => {
-                            ctx.handle_session_death();
-                            discipline.set_mode(line_discipline::TermMode::default());
-                        }
-                        _ => {}
+                        Err(_) => break,
                     }
                 }
+                // Flush all batched echo bytes as a single CONSOLE_WRITE.
+                ctx.flush_pending_console();
             }
             Err(Error::WouldBlock) => {
                 let _ = yield_cpu();
@@ -184,6 +75,150 @@ fn run() -> Result<()> {
                 let _ = yield_cpu();
             }
         }
+    }
+}
+
+/// Dispatch a single message received from `ctx.endpoint` (index 0) or
+/// `ctx.registry_endpoint` (index 1).  All console output is queued via
+/// `ctx.forward_to_console` (which buffers into `pending_console_output`)
+/// rather than sent immediately — the caller is expected to flush after a
+/// burst.
+fn handle_one_message(
+    index: usize,
+    msg_buf: &[u8],
+    ctx: &mut TtyContext,
+    discipline: &mut LineDiscipline,
+) {
+    let Some((msg, payload)) = parse_message(msg_buf) else {
+        return;
+    };
+    if index == 1 {
+        ctx.handle_registry_event(&msg, payload);
+        return;
+    }
+
+    match msg.tag.label {
+        KBD_EVENT_LABEL => {
+            if let Some(event) = decode_kbd_event(&msg) {
+                handle_key(ctx, discipline, event.ascii, event.extended);
+            }
+        }
+        TTY_READ_REQUEST_LABEL => {
+            // A process called read(0, buf, n) — enqueue the request
+            if let Some(reply_token) = extract_reply_id(&msg) {
+                let max_bytes = msg.words[0];
+                ctx.pending_reads.push_back(context::PendingRead {
+                    reply_token,
+                    max_bytes,
+                });
+                ctx.try_satisfy_reads();
+            }
+        }
+        TTY_WRITE_LABEL => {
+            ctx.forward_to_console(payload);
+        }
+        TTY_WRITE_SYNC_LABEL => {
+            // Forward as async, reply immediately so caller never blocks.
+            ctx.forward_to_console_sync(payload);
+            if let Some(reply_token) = extract_reply_id(&msg) {
+                let reply_msg = Message::new(TTY_WRITE_SYNC_LABEL, [0; 6], 0);
+                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
+        CONSOLE_CREDIT_REFILL_LABEL => {
+            let refill_amount = msg.words[0];
+            ctx.handle_credit_refill(refill_amount);
+        }
+        TTY_TAB_QUERY_LABEL => {
+            // Async reply from shell to a previous dispatch.
+            // (TTY *receives* this label but never *sends* it
+            // to itself — only shell ever produces it on this
+            // endpoint.)
+            apply_tab_completion(ctx, discipline, &msg, payload);
+        }
+        TTY_CTL_LABEL => {
+            // Terminal control: get/set mode
+            if let Some(reply_token) = extract_reply_id(&msg) {
+                let subcmd = msg.words[0];
+                match subcmd {
+                    0 => {
+                        // getattr: reply with current mode flags
+                        let mode = &discipline.mode;
+                        let lflag: usize = (if mode.canonical { 0x02 } else { 0 })
+                            | (if mode.echo { 0x08 } else { 0 });
+                        let reply_msg =
+                            Message::new(TTY_CTL_LABEL, [0, 0, 0, 0, lflag, 0], 5);
+                        let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                    1 => {
+                        // setattr: update discipline mode
+                        let lflag = msg.words[4];
+                        let new_mode = line_discipline::TermMode {
+                            canonical: (lflag & 0x02) != 0,
+                            echo: (lflag & 0x08) != 0,
+                        };
+                        discipline.set_mode(new_mode);
+                        let reply_msg = Message::new(TTY_CTL_LABEL, [0; 6], 0);
+                        let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                    _ => {
+                        let reply_msg = Message::new(TTY_CTL_LABEL, [0; 6], 0);
+                        let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                }
+            }
+        }
+        TTY_REGISTER_LABEL => {
+            // words=1 legacy: set active stdin route.
+            // words>=3: set route + Ctrl-C notify endpoint + policy flags.
+            let foreground_endpoint = msg.words[0];
+            if ctx.mode != TtyMode::Terminal && foreground_endpoint != 0 {
+                // Auto-login: procmgr wired shell stdin directly.
+                ctx.wire_shell_stdin(foreground_endpoint);
+            } else if msg.tag.words >= 3 {
+                ctx.configure_foreground(
+                    foreground_endpoint,
+                    msg.words[1],
+                    msg.words[2],
+                );
+            } else {
+                ctx.configure_foreground(
+                    foreground_endpoint,
+                    0,
+                    TTY_FG_FLAG_FORWARD_CTRL_C,
+                );
+            }
+            if foreground_endpoint == 0 {
+                // Foreground returned to shell: force canonical+echo so
+                // shell input cannot get stuck in child raw mode.
+                discipline.set_mode(line_discipline::TermMode::default());
+            }
+            if let Some(reply_token) = extract_reply_id(&msg) {
+                let reply_msg = Message::new(TTY_REGISTER_LABEL, [0; 6], 0);
+                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
+        TTY_POLL_QUERY_LABEL => {
+            // Readiness query from poll(): reply with 1 if input available, 0 otherwise.
+            if let Some(reply_token) = extract_reply_id(&msg) {
+                let has_data = if ctx.input_queue.is_empty() {
+                    0usize
+                } else {
+                    1usize
+                };
+                let reply_msg = Message::new(
+                    TTY_POLL_QUERY_LABEL,
+                    [has_data, 0, 0, 0, 0, 0],
+                    1,
+                );
+                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
+        libcluu::ipc::PROCMGR_SESSION_DEATH_LABEL => {
+            ctx.handle_session_death();
+            discipline.set_mode(line_discipline::TermMode::default());
+        }
+        _ => {}
     }
 }
 

@@ -252,12 +252,20 @@ impl TtyContext {
         self.forward_ctrl_c = (flags & TTY_FG_FLAG_FORWARD_CTRL_C) != 0;
     }
 
-    /// Forward output to the console or buffer it until the console is ready.
+    /// Queue output for the console — actual send is deferred to
+    /// `flush_pending_console`. Batching multiple keystrokes (or a burst
+    /// of program output) into one CONSOLE_WRITE drastically reduces the
+    /// per-message render overhead in the console, which would otherwise
+    /// turn fast typing into a multi-second backlog.
+    ///
+    /// Pre-subscribe (console_endpoint == 0): cap buffering at 2KiB to
+    /// avoid runaway growth before console is wired.
     pub fn forward_to_console(&mut self, payload: &[u8]) {
-        if self.console_endpoint != 0 {
-            self.send_to_console(payload);
-        } else if self.pending_console_output.len() + payload.len() <= 2048 {
-            // Keep a small buffer so early shell output is not lost.
+        if self.console_endpoint == 0 {
+            if self.pending_console_output.len() + payload.len() <= 2048 {
+                self.pending_console_output.extend_from_slice(payload);
+            }
+        } else {
             self.pending_console_output.extend_from_slice(payload);
         }
     }
@@ -267,7 +275,11 @@ impl TtyContext {
         self.forward_to_console(payload);
     }
 
-    /// Flush any pending console output once the console is subscribed.
+    /// Flush queued console output as a single CONSOLE_WRITE.
+    ///
+    /// Called by the main loop after draining all currently-pending events,
+    /// so a burst of N keystrokes ends up as one console message instead
+    /// of N (which would each trigger a full render pipeline).
     pub fn flush_pending_console(&mut self) {
         if self.console_endpoint == 0 {
             return;
