@@ -525,6 +525,17 @@ pub fn alloc_frame() -> Option<u64> {
     PMM.lock().alloc_order(0)
 }
 
+/// Non-blocking variant of `alloc_frame` for use from interrupt/exception
+/// handlers (e.g. demand-paging from `pf_with_regs`). Returns `None` if the
+/// PMM lock is contended — caller must treat that as if memory is briefly
+/// unavailable and either retry on a later trap or fail the fault.
+///
+/// CRITICAL: blocking on PMM.lock() inside an ISR with interrupts disabled
+/// causes the same kernel halt as the timer-tick bug fixed in 393cd6b.
+pub fn try_alloc_frame() -> Option<u64> {
+    PMM.try_lock()?.alloc_order(0)
+}
+
 /// Free a single 4KB frame
 pub fn free_frame(phys_addr: u64) {
     PMM.lock().free_order(phys_addr, 0);
