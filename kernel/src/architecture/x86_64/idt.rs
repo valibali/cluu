@@ -858,14 +858,48 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
         uart_hex("  r14=", f.r14);
         uart_hex("  r15=", f.r15);
 
-        COM2.write_str("PF: stack@RSP (low → high):\n");
+        // Probe the from_errno jump table at 0x43c968 in console's .rodata.
+        // table[3] (errno=-12 WouldBlock) should be ~0x4198c1; if it reads as
+        // 0x437720, that's a smoking gun for .rodata corruption (the wild jmp
+        // source).
+        unsafe { core::arch::asm!("stac", options(nomem, nostack)) };
+        let table_base: u64 = 0x43c968;
+        for idx in 0..6u64 {
+            let addr = table_base + idx * 8;
+            let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
+            uart_hex("PF: from_errno entry = ", val);
+        }
+
+        // Dump 8 qwords BELOW RSP first (the just-popped slots — if this was
+        // a `ret` with a corrupted return-PC slot, [RSP-8] still holds the
+        // popped value because `ret` only increments RSP, doesn't zero the slot).
+        // Then dump 64 qwords from user RSP (caller frames). Mark entries that
+        // look like .text return addresses.
         // SMAP is enabled; set AC=1 so the kernel can read the user page.
         // We're on the IST stack, so a nested PF here is bounded.
-        unsafe { core::arch::asm!("stac", options(nomem, nostack)) };
-        for off in 0..8u64 {
+        COM2.write_str("PF: stack near RSP (TEXT marks 0x400000..0x500000):\n");
+        // 8 qwords below RSP (descending in offset, ascending in physical address)
+        for i in 0..8u64 {
+            let off = 8 - i; // 8, 7, ..., 1 (qwords below)
+            let addr = f.rsp.wrapping_sub(off * 8);
+            let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
+            let prefix = if (0x400000..0x500000).contains(&val) {
+                "  TEXT BELOW q="
+            } else {
+                "  BELOW q="
+            };
+            uart_hex(prefix, val);
+        }
+        // 64 qwords at and above RSP
+        for off in 0..64u64 {
             let addr = f.rsp.wrapping_add(off * 8);
             let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
-            uart_hex("  qword =", val);
+            let prefix = if (0x400000..0x500000).contains(&val) {
+                "  TEXT q="
+            } else {
+                "  q="
+            };
+            uart_hex(prefix, val);
         }
         unsafe { core::arch::asm!("clac", options(nomem, nostack)) };
     }
