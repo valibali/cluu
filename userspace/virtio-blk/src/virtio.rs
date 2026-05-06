@@ -725,10 +725,22 @@ impl VirtioBlkDevice {
             vq.used_idx(),
             vq.last_used_idx()
         );
+        // Hot poll first for low latency on fast paths (KVM virtio is
+        // typically <50us), then yield to the scheduler so other threads
+        // can run while a slower request completes.  Without the yield,
+        // a single virtio-blk read pegs the CPU for the full timeout and
+        // serialises all other progress on a single-core build.
         let mut timeout = 1_000_000u32;
+        let mut spins = 0u32;
         while !vq.has_used() && timeout > 0 {
             timeout -= 1;
-            core::hint::spin_loop();
+            spins += 1;
+            if spins >= 1024 {
+                spins = 0;
+                let _ = libcluu::syscall::yield_cpu();
+            } else {
+                core::hint::spin_loop();
+            }
         }
 
         if timeout == 0 {
