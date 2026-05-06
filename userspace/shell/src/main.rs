@@ -26,7 +26,7 @@ use libcluu::boot::{
     TOKEN_STDOUT,
 };
 use libcluu::ipc::{
-    extract_reply_id, parse_message, reply_with_payload, send_with_payload, TTY_READ_LABEL,
+    parse_message, send_with_payload, TTY_READ_LABEL,
     TTY_TAB_QUERY_LABEL, TTY_WRITE_LABEL,
 };
 use libcluu::registry;
@@ -160,14 +160,26 @@ fn run() -> Result<()> {
                             handle_line_payload(stdout, stdlog, &mut command_context, &[ch])?;
                         }
                     } else if msg.tag.label == TTY_TAB_QUERY_LABEL {
-                        // TTY asked us to compute a tab completion using OUR
-                        // view and CWD. Always reply, even on failure, so TTY
-                        // doesn't time out.
-                        if let Some(rid) = extract_reply_id(&msg) {
-                            let suffix = handle_tab_query(payload);
-                            let reply_msg = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 1);
-                            let _ = reply_with_payload(rid, &reply_msg, &suffix);
-                        }
+                        // Async TAB query from TTY. We do the readdir using
+                        // OUR view + CWD (which TTY can't see) and SEND the
+                        // suffix back to TTY's stdout endpoint with the same
+                        // sequence number. We don't reply over the call
+                        // mechanism — that synchronously blocks TTY, which
+                        // can deadlock if TTY's queue is full and we're
+                        // blocked sending into it. Async send is
+                        // queue-oriented and lets TTY drain at its own pace.
+                        let seq = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
+                        let suffix = handle_tab_query(payload);
+                        let mut reply_msg = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 2);
+                        reply_msg.words[0] = suffix.len();
+                        reply_msg.words[1] = seq;
+                        let header = reply_msg.as_bytes();
+                        let mut send_buf =
+                            Vec::with_capacity(header.len() + suffix.len());
+                        send_buf.extend_from_slice(header);
+                        send_buf.extend_from_slice(&suffix);
+                        let _ =
+                            libcluu::syscall::ipc_send(stdout, &send_buf);
                     }
                 }
             }

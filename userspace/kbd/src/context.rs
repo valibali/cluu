@@ -202,11 +202,25 @@ impl KbdContext {
 
     /// Send a keyboard event to the active VT's tty.
     ///
-    /// Drops the event if the active VT's tty is not yet subscribed.
+    /// Drops the event if the active VT's tty is not yet subscribed. If
+    /// TTY's recv queue is full (WouldBlock), the kernel parks us until
+    /// it drains, but the syscall returns WouldBlock — we'd lose the
+    /// scancode. Spin a short bounded retry so a brief TTY backlog
+    /// doesn't cause silent keystroke loss.
     pub fn send_to_tty(&self, msg: &Message) {
         let ep = self.tty_endpoints[self.active_vt];
-        if ep != 0 {
-            let _ = send(ep, msg, IpcFlags::empty());
+        if ep == 0 {
+            return;
+        }
+        for _ in 0..8 {
+            match send(ep, msg, IpcFlags::empty()) {
+                Ok(()) => return,
+                Err(Error::WouldBlock) | Err(Error::Busy) => {
+                    let _ = yield_cpu();
+                    continue;
+                }
+                Err(_) => return, // unrecoverable: drop
+            }
         }
     }
 

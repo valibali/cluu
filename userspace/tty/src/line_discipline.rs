@@ -406,6 +406,14 @@ impl LineDiscipline {
         }
     }
 
+    /// Number of bytes currently in the canonical-mode line buffer. Used to
+    /// detect whether the user has typed anything between dispatching a TAB
+    /// query and receiving the async reply — if the length changed, the
+    /// completion is stale and must be dropped.
+    pub fn buffer_len(&self) -> usize {
+        self.buffer.len()
+    }
+
     /// Append completion bytes to the buffer. Called by the TTY main loop after
     /// resolving a tab_request. Does NOT echo; the caller is responsible for
     /// emitting echo bytes to the console.
