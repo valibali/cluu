@@ -202,11 +202,24 @@ pub fn launch_service(
     manifest: Option<&BootManifest>,
     exit_cookie: usize,
 ) -> Result<[u8; 32]> {
+    // Per-stage timing harness. Disabled at compile time when not chasing
+    // boot-time regressions; turn on by flipping BOOT_PROFILE to true. The
+    // overhead is one clock_now() per stage (a single InvokeOp::ClockNow
+    // syscall, ~1k cycles), which is negligible compared to the stages
+    // themselves.
+    const BOOT_PROFILE: bool = true;
+    let mut t = if BOOT_PROFILE {
+        StageTimer::new(ctx.boot.clock_token, service.name)
+    } else {
+        StageTimer::disabled()
+    };
+
     // Derive an optional capability token for services that need elevated rights.
     let child_token = match service.rights {
         Some(rights) => token_derive(ctx.boot.root_token, rights.bits() as usize, u64::MAX)?,
         None => ctx.boot.root_token,
     };
+    t.mark("token_derive");
 
     if service.name == "procmgr" {
         debug_print(&format!("init: procmgr token {}", child_token))?;
@@ -215,14 +228,20 @@ pub fn launch_service(
     debug_print(&format!("init: launching {}", service.name))?;
 
     let service_bytes = load_service_image(ctx.initrd, service.path, service.name)?;
+    t.mark("load_image");
     let hash = enforce_manifest_policy(manifest, service, service_bytes)?;
+    t.mark("manifest_check");
     let elf = ElfFile::parse(service_bytes)?;
+    t.mark("elf_parse");
 
     let stack_top = PROC_STACK_TOP - index * STACK_STEP;
     let space_token = space_create(ctx.boot.root_token)?;
+    t.mark("space_create");
 
     map_segments(space_token, &elf, service_bytes)?;
+    t.mark("map_segments");
     map_stack(space_token, stack_top, PROC_STACK_SIZE, STACK_FLAGS)?;
+    t.mark("map_stack");
 
     // Assemble process info payload (tokens + params) before mapping it into the child.
     let mut tokens = [0usize; 16];
@@ -255,12 +274,15 @@ pub fn launch_service(
     if tokens[TOKEN_SPACE] == 0 {
         tokens[TOKEN_SPACE] = derive_space_token_for_policy(space_token, service.space_policy)?;
     }
+    t.mark("configure_tokens");
     // init-spawned services are system services without PIDs (pid=0)
     // exit_cookie=0 means non-primordial (no exit notification to init).
     let exit_token = if exit_cookie != 0 { ctx.primordial_exit_send } else { 0 };
     map_process_info(space_token, exit_token, exit_cookie, 0, &tokens, &params)?;
+    t.mark("map_process_info");
 
     service.kind.map_resources(ctx, space_token, &params)?;
+    t.mark("map_resources");
 
     let thread_token = thread_create(
         space_token,
@@ -270,9 +292,91 @@ pub fn launch_service(
         0,
     )?;
     let _ = thread_token;
+    t.mark("thread_create");
 
     debug_print(&format!("init: {} ready", service.name))?;
+    t.report();
     Ok(hash)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boot-time stage profiler
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Records per-stage TSC deltas during launch_service and emits a one-line
+// summary at end-of-service. Each line shows: service name, then each stage
+// label and its elapsed milliseconds. Read alongside the kernel timestamps
+// in the boot log to see total spawn cost vs per-stage breakdown.
+//
+// Designed to be cheap: clock_now() is one ClockNow invoke (~1k cycles), and
+// the recorded entries live on the stack (no heap), capped at 12 stages.
+
+const MAX_STAGES: usize = 12;
+
+struct StageTimer {
+    enabled: bool,
+    clock_token: usize,
+    service: &'static str,
+    last_tsc: u64,
+    entries: [(&'static str, u64); MAX_STAGES],
+    count: usize,
+}
+
+impl StageTimer {
+    fn new(clock_token: usize, service: &'static str) -> Self {
+        let now = libcluu::syscall::clock_now(clock_token).unwrap_or(0);
+        Self {
+            enabled: true,
+            clock_token,
+            service,
+            last_tsc: now,
+            entries: [("", 0); MAX_STAGES],
+            count: 0,
+        }
+    }
+
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            clock_token: 0,
+            service: "",
+            last_tsc: 0,
+            entries: [("", 0); MAX_STAGES],
+            count: 0,
+        }
+    }
+
+    fn mark(&mut self, label: &'static str) {
+        if !self.enabled || self.count >= MAX_STAGES {
+            return;
+        }
+        let now = libcluu::syscall::clock_now(self.clock_token).unwrap_or(self.last_tsc);
+        let delta = now.saturating_sub(self.last_tsc);
+        self.entries[self.count] = (label, delta);
+        self.count += 1;
+        self.last_tsc = now;
+    }
+
+    fn report(&self) {
+        if !self.enabled || self.count == 0 {
+            return;
+        }
+        let freq = libcluu::syscall::clock_frequency(self.clock_token).unwrap_or(0);
+        if freq == 0 {
+            return;
+        }
+        // Per-stage line as ticks → microseconds. Building a stitched string
+        // would heap-allocate; emit one debug_print per stage instead.
+        let _ = debug_print(&format!("init: timing {}:", self.service));
+        let mut total_us: u64 = 0;
+        for i in 0..self.count {
+            let (label, ticks) = self.entries[i];
+            let us = ticks.saturating_mul(1_000_000) / freq;
+            total_us = total_us.saturating_add(us);
+            let _ = debug_print(&format!("init:   {:>20} {:>6} us", label, us));
+        }
+        let _ = debug_print(&format!("init:   {:>20} {:>6} us", "TOTAL", total_us));
+    }
 }
 
 fn enforce_manifest_policy(
