@@ -663,13 +663,10 @@ impl ProcessManager {
         true
     }
 
-    fn log_spawn_stage(&self, seq: usize, stage: &str, start_ts: u64) {
-        let now = self.clock_sample();
-        let delta = now.saturating_sub(start_ts);
-        let _ = debug_print(&format!(
-            "procmgr: spawn_trace seq={} stage={} ts={} dt={}",
-            seq, stage, now, delta
-        ));
+    fn log_spawn_stage(&self, _seq: usize, _stage: &str, _start_ts: u64) {
+        // Per-stage spawn timing was useful when diagnosing slow boot; in
+        // normal operation it produces 6 lines per spawn at INFO.  Re-enable
+        // by un-stubbing if you need the breakdown again.
     }
 
     fn queue_pending_vfs_view(
@@ -4197,26 +4194,14 @@ impl ProcessManager {
 
         let client = VfsClient::new(self.vfs_endpoint, client_id);
 
-        // #region agent log
-        let _ = debug_print("procmgr: opening file via VFS...");
-        // #endregion
-
         // Open the file
         let file = match client.open(path) {
             Ok(f) => f,
             Err(e) => {
-                // #region agent log
-                let _ = debug_print(&format!("procmgr: VFS open failed {:?}", e));
-                // #endregion
+                let _ = debug_print(&format!("procmgr: VFS open '{}' failed {:?}", path, e));
                 return None;
             }
         };
-        // #region agent log
-        let _ = debug_print(&format!(
-            "procmgr: file opened fd={} size={}",
-            file.fd, file.size
-        ));
-        // #endregion
 
         if file.size == 0 {
             let _ = client.close(file);
@@ -4237,13 +4222,6 @@ impl ProcessManager {
         let chunk_pages = read_window.div_ceil(PAGE_SIZE);
         let grant_base = self.grant_base_next;
 
-        // #region agent log
-        let _ = debug_print(&format!(
-            "procmgr: mapping grant buf at {:#x} pages={}",
-            grant_base, chunk_pages
-        ));
-        // #endregion
-
         match space_map_range(
             self.space_token,
             grant_base,
@@ -4254,33 +4232,17 @@ impl ProcessManager {
         ) {
             Ok(_) | Err(Error::AlreadyExists) => {}
             Err(_) => {
-                // #region agent log
                 let _ = debug_print("procmgr: space_map_range FAILED");
-                // #endregion
                 let _ = client.close(file);
                 return None;
             }
         }
-        // #region agent log
-        let _ = debug_print("procmgr: grant buf mapped OK");
-        // #endregion
 
-        // Pre-allocate buffer for the full file
-        // #region agent log
-        let _ = debug_print(&format!("procmgr: allocating Vec capacity={}", file.size));
-        // #endregion
         let mut data = Vec::with_capacity(file.size);
-        // #region agent log
-        let _ = debug_print("procmgr: Vec allocated OK");
-        // #endregion
 
         // Read file in chunks (optionally priming cache with a full read request).
         let mut offset = 0;
         if use_full_read {
-            let _ = debug_print(&format!(
-                "procmgr: priming cache with full read_grant size={}",
-                file.size
-            ));
             let grant = match client.read_grant(file, 0, file.size, self.space_token, grant_base) {
                 Ok(grant) => grant,
                 Err(e) => {
@@ -4299,29 +4261,11 @@ impl ProcessManager {
             };
             data.extend_from_slice(chunk);
             offset = grant.len;
-            let _ = debug_print(&format!(
-                "procmgr: primed {} bytes, continue chunked",
-                offset
-            ));
         }
 
-        // Read file in chunks
-        // #region agent log
-        let _ = debug_print(&format!(
-            "procmgr: starting read loop file_size={}",
-            file.size
-        ));
-        // #endregion
         while offset < file.size {
             let remaining = file.size - offset;
             let read_size = remaining.min(CHUNK_SIZE);
-
-            // #region agent log
-            let _ = debug_print(&format!(
-                "procmgr: read_grant offset={} size={} grant_base={:#x}",
-                offset, read_size, grant_base
-            ));
-            // #endregion
 
             match client.read_grant(file, offset, read_size, self.space_token, grant_base) {
                 Ok(grant) => {
@@ -4346,14 +4290,9 @@ impl ProcessManager {
                     };
                     data.extend_from_slice(chunk);
                     offset += grant.len;
-                    // #region agent log
-                    let _ = debug_print(&format!("procmgr: chunk copied, total={}", data.len()));
-                    // #endregion
                 }
                 Err(e) => {
-                    // #region agent log
                     let _ = debug_print(&format!("procmgr: read_grant FAILED {:?}", e));
-                    // #endregion
                     let _ = client.close(file);
                     return None;
                 }
