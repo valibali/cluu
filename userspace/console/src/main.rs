@@ -100,6 +100,12 @@ fn run_with_backend<B: ConsoleBackend>(
     console.flush();
 
     let mut buf = [0u8; 512];
+    // Heartbeat: log every N processed messages so we can tell from a serial
+    // log whether console is still pumping its recv loop during typing-storm
+    // freezes. Cursor not blinking on screen could be either (a) console
+    // hung, or (b) console alive but never timing out because the queue is
+    // continuously full. The heartbeat distinguishes the two.
+    let mut msg_count: u64 = 0;
 
     loop {
         context.request_subscriptions();
@@ -116,6 +122,13 @@ fn run_with_backend<B: ConsoleBackend>(
                     handle_incoming(index, &mut console, &mut context, &msg, payload)?;
                     // Flush after IPC for responsive input (no-op if inactive)
                     console.flush();
+                    msg_count = msg_count.wrapping_add(1);
+                    if msg_count % 64 == 0 {
+                        let _ = debug_print(&alloc::format!(
+                            "console: alive, msgs={}",
+                            msg_count
+                        ));
+                    }
                 } else {
                     let _ = debug_print("console: parse failed");
                 }
