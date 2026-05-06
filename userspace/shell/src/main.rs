@@ -253,10 +253,13 @@ fn handle_tab_query(payload: &[u8]) -> Vec<u8> {
         s
     };
 
-    // Get a VFS client. Best-effort — if registry/IPC isn't ready, no completion.
-    let vfs_endpoint = match libcluu::registry::subscribe_output("vfs", "main") {
-        Ok(ep) => ep,
-        Err(_) => return Vec::new(),
+    // Get a VFS client. The endpoint is cached process-wide — without this,
+    // every TAB does a fresh registry::subscribe_output("vfs", "main") and
+    // leaks a new derived grant token (199, 200, 201, ... in the boot log).
+    // Cache survives as long as the shell does.
+    let vfs_endpoint = match cached_vfs_endpoint() {
+        Some(ep) => ep,
+        None => return Vec::new(),
     };
     let vfs = match libcluu::fs::client::VfsClient::new_from_registry(vfs_endpoint) {
         Ok(v) => v,
@@ -281,6 +284,29 @@ fn handle_tab_query(payload: &[u8]) -> Vec<u8> {
     let mut out: Vec<u8> = first.name[prefix.len()..].as_bytes().to_vec();
     out.push(if first.is_dir { b'/' } else { b' ' });
     out
+}
+
+/// Return a process-cached `vfs:main` endpoint token, fetching it on first
+/// call. Returns None only if registry isn't yet wired (e.g. extremely early
+/// boot races) — every subsequent call returns the same token.
+///
+/// Shell is single-threaded, so the cache uses a plain AtomicUsize:
+///   0  = not yet acquired (first call should fetch)
+///   !0 = endpoint token (reuse forever)
+fn cached_vfs_endpoint() -> Option<usize> {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static VFS_ENDPOINT: AtomicUsize = AtomicUsize::new(0);
+    let cached = VFS_ENDPOINT.load(Ordering::Relaxed);
+    if cached != 0 {
+        return Some(cached);
+    }
+    match libcluu::registry::subscribe_output("vfs", "main") {
+        Ok(ep) if ep != 0 => {
+            VFS_ENDPOINT.store(ep, Ordering::Relaxed);
+            Some(ep)
+        }
+        _ => None,
+    }
 }
 
 /// Read an environment variable from the ProcessInfo page.

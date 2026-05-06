@@ -210,18 +210,42 @@ impl KbdContext {
     pub fn send_to_tty(&self, msg: &Message) {
         let ep = self.tty_endpoints[self.active_vt];
         if ep == 0 {
+            let _ = debug_print(&format!(
+                "kbd: drop key (tty:{} not subscribed)",
+                self.active_vt
+            ));
             return;
         }
+        let mut retries = 0u32;
         for _ in 0..8 {
             match send(ep, msg, IpcFlags::empty()) {
-                Ok(()) => return,
+                Ok(()) => {
+                    if retries > 0 {
+                        let _ = debug_print(&format!(
+                            "kbd: send_to_tty ok after {} retries",
+                            retries
+                        ));
+                    }
+                    return;
+                }
                 Err(Error::WouldBlock) | Err(Error::Busy) => {
+                    retries += 1;
                     let _ = yield_cpu();
                     continue;
                 }
-                Err(_) => return, // unrecoverable: drop
+                Err(e) => {
+                    let _ = debug_print(&format!(
+                        "kbd: send_to_tty unrecoverable err={:?}",
+                        e
+                    ));
+                    return;
+                }
             }
         }
+        let _ = debug_print(&format!(
+            "kbd: DROP keystroke after {} WouldBlock/Busy retries (tty:{} ep={})",
+            retries, self.active_vt, ep
+        ));
     }
 
 }
