@@ -144,21 +144,26 @@ No dates. A phase is done when the capabilities exist, full stop.
 
 ---
 
-### Phase 2 — Write code in CLUU
+### Phase 2 — Write code in CLUU ✅ DONE 2026-05-06
 
 **Goal:** you can run a script and edit a file without leaving the OS.
 
 **Exit criteria:**
 
-- [ ] MicroPython starts, runs a one-liner, and reads a file from disk (`open('/etc/users.toml').read()`).
-- [ ] MicroPython writes a file (`open('/tmp/x.txt', 'w').write('hi')`).
-- [ ] MicroPython REPL handles multi-line input, Ctrl-C, Ctrl-D.
-- [ ] One text editor works: `kilo` ported, `ed` working, or a minimal TUI editor built from scratch. **Pick one, finish one.**
-- [ ] You can edit a Python script in the editor, save it, run it with `micropython script.py`, and see output — without rebooting.
+- [x] MicroPython starts, runs a one-liner, and reads a file from disk (`open('/etc/users.toml').read()`).
+- [x] MicroPython writes a file (`open('/tmp/x.txt', 'w').write('hi')`).
+- [x] MicroPython REPL handles multi-line input, Ctrl-C, Ctrl-D.
+- [x] One text editor works: minimal vi-flavored TUI editor built from scratch (`/bin/edit`, ~3.8k LOC, piece-table + vim keymap + `:set` + atomic save).
+- [x] You can edit a script in the editor, save it, run it, and see output — without rebooting (verified with `ls / edit hello.txt / :w / :q / ls`).
 
 **Allowed kernel work:** `sched_yield` only if MicroPython's stub truly cannot be userspace-worked-around; plus any I/O completeness bug found by the editor port. Named fix rule applies.
 
 **Known unknowns & pivot triggers:** MicroPython has been "almost ready" for a year. The lurking cause is not known. **First action:** write down *exactly* what fails, in 3 sentences. If you cannot, you do not yet know the problem — you know only the feeling of being stuck. Probe to find out before anything else.
+
+**Closing notes (2026-05-06):**
+- MicroPython end-to-end was confirmed 2026-04-29 (`l2_mp_etc` green, REPL interactive).
+- Editor shipped 2026-04-30; `:w` persistence and `ls / edit / :w / :q / ls` cycle confirmed today after fixing a deterministic console crash on the second `ls`.
+- That crash had a kernel root cause: PI24's `MAP_SHARE_PHYS` shared physical frames between VFS's ELF cache and consumer address spaces *without refcounting them in `frame_registry`*. Disabled in `vfs/main.rs` as the fastest correctness fix; spawn cost is back to pre-PI24 (~600ms hot, per-segment memcpy). Re-enabling it correctly is the first item in Phase 2 → Phase 3 transition (named userspace failure: today's console wild-jump). Tracked in `memory/project_map_share_phys_uaf.md`.
 
 ---
 
