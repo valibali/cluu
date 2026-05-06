@@ -530,13 +530,9 @@ impl VfsServer {
         clock_now(self.clock_token).unwrap_or(0)
     }
 
-    fn log_map_elf_stage(&self, fd: usize, stage: &str, start_ts: u64) {
-        let now = self.clock_sample();
-        let delta = now.saturating_sub(start_ts);
-        let _ = debug_print(&format!(
-            "vfs: map_elf_trace fd={} stage={} ts={} dt={}",
-            fd, stage, now, delta
-        ));
+    fn log_map_elf_stage(&self, _fd: usize, _stage: &str, _start_ts: u64) {
+        // 4-stage per-spawn trace silenced for INFO clarity; un-stub when
+        // diagnosing slow ELF map paths.
     }
 
     fn handle_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
@@ -726,12 +722,6 @@ impl VfsServer {
         // procmgr's responsibility. procmgr sends explicit mount entries
         // with the correct memfs_cid per mount (see mount-policy design
         // spec). VFS just serves whatever mount list it's given.
-
-        let _ = debug_print(&format!(
-            "vfs: set_view client={} mounts={}",
-            client_id,
-            mounts.len()
-        ));
 
         self.views.set_view(client_id, view::VfsView { mounts });
         if profile_bits != 0 {
@@ -1000,9 +990,6 @@ impl VfsServer {
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = fd;
                 reply_msg.words[2] = size;
-                // #region agent log
-                let _ = debug_print(&format!("vfs: open OK fd={} size={}", fd, size));
-                // #endregion
             }
             Err(err) => {
                 if err == Error::NotFound && (flags & O_CREAT) != 0 {
@@ -2153,18 +2140,8 @@ impl VfsServer {
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
 
-        // #region agent log
-        let _ = debug_print(&format!(
-            "vfs: read_grant target_base={:#x} target_space={}",
-            target_base, target_space
-        ));
-        // #endregion
-
         match file {
             OpenFile::Memory(entry) => {
-                // #region agent log
-                let _ = debug_print("vfs: read_grant from Memory");
-                // #endregion
                 self.read_grant_memory(
                     &entry,
                     offset,
@@ -2175,19 +2152,7 @@ impl VfsServer {
                 )?;
             }
             OpenFile::Ext2(entry) => {
-                // #region agent log
-                let _ = debug_print(&format!(
-                    "vfs: read_grant from Ext2 inode={} size={}",
-                    entry.inode, entry.size
-                ));
-                // #endregion
                 if let Some(cache_entry) = self.cache.get(entry.inode, entry.size) {
-                    // #region agent log
-                    let _ = debug_print(&format!(
-                        "vfs: cache hit inode={} size={}",
-                        entry.inode, entry.size
-                    ));
-                    // #endregion
                     self.read_grant_cached_region(
                         cache_entry.base,
                         cache_entry.len,
@@ -2198,19 +2163,7 @@ impl VfsServer {
                         &mut reply_msg,
                     )?;
                 } else if offset == 0 && requested >= entry.size {
-                    // #region agent log
-                    let _ = debug_print(&format!(
-                        "vfs: cache miss, filling inode={} size={}",
-                        entry.inode, entry.size
-                    ));
-                    // #endregion
                     if let Some(cache_entry) = self.cache_ext2_file(&entry) {
-                        // #region agent log
-                        let _ = debug_print(&format!(
-                            "vfs: cache fill ok inode={} size={}",
-                            entry.inode, entry.size
-                        ));
-                        // #endregion
                         self.read_grant_cached_region(
                             cache_entry.base,
                             cache_entry.len,
@@ -2221,12 +2174,6 @@ impl VfsServer {
                             &mut reply_msg,
                         )?;
                     } else {
-                        // #region agent log
-                        let _ = debug_print(&format!(
-                            "vfs: cache fill skipped inode={} size={}",
-                            entry.inode, entry.size
-                        ));
-                        // #endregion
                         self.read_grant_remote_chunked(
                             entry.endpoint,
                             entry.inode,
@@ -2253,9 +2200,6 @@ impl VfsServer {
                 }
             }
             OpenFile::Virtual(vfile) => {
-                // #region agent log
-                let _ = debug_print("vfs: read_grant from Virtual");
-                // #endregion
                 self.read_grant_virtual(
                     &vfile.data,
                     offset,
@@ -2303,13 +2247,6 @@ impl VfsServer {
                 }
             }
         }
-
-        // #region agent log
-        let _ = debug_print(&format!(
-            "vfs: read_grant done status={} len={}",
-            reply_msg.words[0], reply_msg.words[1]
-        ));
-        // #endregion
 
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
@@ -2498,12 +2435,6 @@ impl VfsServer {
         size: usize,
         target_base: usize,
     ) -> Result<()> {
-        // #region agent log
-        let _ = debug_print(&format!(
-            "vfs: cache read_remote_start inode={} size={}",
-            inode, size
-        ));
-        // #endregion
         let mut offset = 0;
 
         while offset < size {
@@ -2557,12 +2488,6 @@ impl VfsServer {
             offset += bytes_read;
         }
 
-        // #region agent log
-        let _ = debug_print(&format!(
-            "vfs: cache read_remote_done inode={} size={}",
-            inode, size
-        ));
-        // #endregion
         Ok(())
     }
 

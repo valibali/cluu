@@ -115,28 +115,17 @@ fn run() -> Result<()> {
     }
 
     debug_print("shell: ready")?;
-    let _ = debug_print(&format!(
-        "shell: stdin {} stdout {} stderr {} stdlog {}",
-        stdin, stdout, stderr, stdlog
-    ));
     let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"\x1b[2J\x1b[H");
     let _ = print_banner(stdout);
     let _ = print_prompt(stdout);
     #[cfg(feature = "lang-parser")]
     {
-        let info = process_info();
-        let _ = debug_print(&format!(
-            "shell: startup argc={} argv_offset={}",
-            info.params[PARAM_ARGC], info.params[PARAM_ARGV_OFFSET]
-        ));
         if let Some(startup_cmd) = startup_command_from_process_info() {
             let _ = debug_print(&format!("shell: startup command '{}'", startup_cmd));
             let mut line = startup_cmd;
             line.push('\n');
             let _ = parse_and_execute_line(stdout, stdlog, &mut command_context, line.as_bytes());
             let _ = print_prompt(stdout);
-        } else {
-            let _ = debug_print("shell: no startup command");
         }
     }
 

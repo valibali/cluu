@@ -294,7 +294,8 @@ pub fn launch_service(
     let _ = thread_token;
     t.mark("thread_create");
 
-    debug_print(&format!("init: {} ready", service.name))?;
+    // "<name> ready" line is emitted by the StageTimer report below
+    // (with TOTAL us).  Duplicate removed.
     t.report();
     Ok(hash)
 }
@@ -365,17 +366,19 @@ impl StageTimer {
         if freq == 0 {
             return;
         }
-        // Per-stage line as ticks → microseconds. Building a stitched string
-        // would heap-allocate; emit one debug_print per stage instead.
-        let _ = debug_print(&format!("init: timing {}:", self.service));
+        // Per-stage breakdown was useful for boot-perf debugging but produces
+        // 12 lines per service.  Keep just the TOTAL summary at INFO; full
+        // breakdown is reachable by un-commenting the loop below.
         let mut total_us: u64 = 0;
         for i in 0..self.count {
-            let (label, ticks) = self.entries[i];
+            let (_label, ticks) = self.entries[i];
             let us = ticks.saturating_mul(1_000_000) / freq;
             total_us = total_us.saturating_add(us);
-            let _ = debug_print(&format!("init:   {:>20} {:>6} us", label, us));
         }
-        let _ = debug_print(&format!("init:   {:>20} {:>6} us", "TOTAL", total_us));
+        let _ = debug_print(&format!(
+            "init: {} ready ({}us)",
+            self.service, total_us
+        ));
     }
 }
 

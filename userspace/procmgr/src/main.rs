@@ -3882,9 +3882,7 @@ impl ProcessManager {
             // Inherit default env if caller didn't provide any
             build_default_env_payload()
         };
-        debug_print("Creating address space...")?;
         let space_token = space_create(self.token)?;
-        debug_print(&format!("Address space created: {}", space_token))?;
         self.log_spawn_stage(spawn_seq, "space_create_done", spawn_start);
 
         let mut entry_point = 0usize;
@@ -3895,7 +3893,6 @@ impl ProcessManager {
             if let Ok(Some(entry)) = self.map_elf_from_vfs(path, space_token, caller_view) {
                 entry_point = entry;
                 mapped = true;
-                debug_print(&format!("Mapped ELF from VFS (entry=0x{:x})", entry_point))?;
                 self.log_spawn_stage(spawn_seq, "elf_fetch_done", spawn_start);
             }
         }
@@ -3903,46 +3900,30 @@ impl ProcessManager {
         if !mapped {
             // Fall back to loading bytes in-process.
             self.log_spawn_stage(spawn_seq, "elf_fetch_start", spawn_start);
-            let (elf_data, from_vfs) = self.load_elf(path, caller_view)?;
+            let (elf_data, _from_vfs) = self.load_elf(path, caller_view)?;
             let service_bytes: &[u8] = &elf_data;
 
             let elf = ElfFile::parse(service_bytes)?;
             entry_point = elf.entry_point as usize;
-            debug_print(&format!(
-                "Parsed ELF from {} (entry=0x{:x}, size={})",
-                if from_vfs { "VFS" } else { "initrd" },
-                elf.entry_point,
-                service_bytes.len()
-            ))?;
-
-            debug_print("Mapping ELF segments...")?;
             libcluu::map_segments(space_token, &elf, service_bytes)?;
-            debug_print("ELF segments mapped")?;
             self.log_spawn_stage(spawn_seq, "elf_fetch_done", spawn_start);
             self.log_spawn_stage(spawn_seq, "map_segments_done", spawn_start);
         } else {
-            debug_print("ELF segments mapped")?;
             self.log_spawn_stage(spawn_seq, "map_segments_done", spawn_start);
         }
 
-        debug_print("Mapping stack...")?;
         libcluu::map_stack(
             space_token,
             SERVICE_STACK_TOP,
             SERVICE_STACK_SIZE,
             STACK_FLAGS,
         )?;
-        debug_print("Stack mapped")?;
         self.log_spawn_stage(spawn_seq, "stack_map_done", spawn_start);
 
         let send_rights = Rights::IPC_SEND.bits() as usize;
         let child_endpoint = token_derive(self.exit_endpoint, send_rights, u64::MAX)?;
         let cookie = self.next_exit_cookie();
         let pid = self.next_pid();
-        debug_print(&format!(
-            "TRACE: child exit ep {} cookie {} pid {}",
-            child_endpoint, cookie, pid
-        ))?;
         let stdin_endpoint = endpoint_create(self.token)?;
         let (stdout_endpoint, stderr_endpoint, stdlog_endpoint) = if self.tty_endpoints[0] != 0 {
             // The tty main endpoint already grants IPC_SEND, so reuse it directly.

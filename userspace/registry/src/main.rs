@@ -94,10 +94,6 @@ fn run() -> Result<()> {
                                     }
                                     entries.insert(key.clone(), grant_endpoint);
                                     entry_owner.insert(key.clone(), sender_tid);
-                                    let _ = debug_print(&format!(
-                                        "registry: registered {}:{}",
-                                        service, endpoint
-                                    ));
                                     // O(1) lookup + O(k) drain where k = pending for THIS output
                                     if let Some(requesters) = pending.remove(&key) {
                                         let grant_payload = encode_single_name(&endpoint);
@@ -216,10 +212,6 @@ fn run() -> Result<()> {
                                 continue;
                             }
                             if let Some((service, endpoint)) = parse_names(payload) {
-                                let _ = debug_print(&format!(
-                                    "registry: subscribe {}:{} reply {} sender {} words {}",
-                                    service, endpoint, reply_endpoint, sender_tid, msg.tag.words
-                                ));
                                 let key = (service.clone(), endpoint.clone());
                                 match entries.get(&key) {
                                     Some(grant_endpoint) => {
