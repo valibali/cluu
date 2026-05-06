@@ -82,55 +82,19 @@ pub fn dispatch_scancode(irq: u8, scancode: u8) {
 
     match endpoint::try_send(endpoint_id, msg_bytes) {
         Ok(Some(thread_id)) => {
-            let n = IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if n == 1 || n % 32 == 0 {
-                klibcluu::log_dec(
-                    klibcluu::LogLevel::Info,
-                    "irq[kbd]: delivered=",
-                    n,
-                );
-                klibcluu::log_dec(
-                    klibcluu::LogLevel::Info,
-                    "irq[kbd]: busy=",
-                    IRQ_LOCK_BUSY_COUNT.load(Ordering::Relaxed),
-                );
-                klibcluu::log_dec(
-                    klibcluu::LogLevel::Info,
-                    "irq[kbd]: fail=",
-                    IRQ_SEND_FAIL_COUNT.load(Ordering::Relaxed),
-                );
-            }
+            IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed);
             ThreadManager::wake_thread(thread_id);
         }
         Ok(None) => {
-            let n = IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if n == 1 || n % 32 == 0 {
-                klibcluu::log_dec(
-                    klibcluu::LogLevel::Info,
-                    "irq[kbd]: delivered=",
-                    n,
-                );
-            }
+            IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         Err(Error::WouldBlock) => {
-            let n = IRQ_LOCK_BUSY_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if n == 1 || n % 32 == 0 {
-                klibcluu::log_dec(
-                    klibcluu::LogLevel::Warn,
-                    "irq[kbd]: BUSY (queue full) busy_total=",
-                    n,
-                );
-            }
+            // Queue full — userspace consumer fell behind.  Counted but
+            // not logged per-event; visible in telemetry snapshots.
+            IRQ_LOCK_BUSY_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         Err(_) => {
-            let n = IRQ_SEND_FAIL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if n == 1 || n % 32 == 0 {
-                klibcluu::log_dec(
-                    klibcluu::LogLevel::Warn,
-                    "irq[kbd]: SEND_FAIL fail_total=",
-                    n,
-                );
-            }
+            IRQ_SEND_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

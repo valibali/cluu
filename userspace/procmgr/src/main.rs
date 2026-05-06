@@ -1706,10 +1706,6 @@ impl ProcessManager {
             registry_endpoint,
             self.fault_endpoint,
         ];
-        let _ = debug_print(&format!(
-            "procmgr: poll tokens=[{},{},{},{}]",
-            tokens[0], tokens[1], tokens[2], tokens[3]
-        ));
         let mut buf = [0u8; 256];
         // Compute timeout: wake up when the soonest timer expires (or block forever).
         let timeout = if self.pending_timers.is_empty() {
@@ -1721,13 +1717,7 @@ impl ProcessManager {
         };
         let (index, len, sender_tid) =
             match libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout) {
-                Ok(res) => {
-                    let _ = debug_print(&format!(
-                        "procmgr: recv_any idx={} len={} sender={}",
-                        res.0, res.1, res.2
-                    ));
-                    res
-                }
+                Ok(res) => res,
                 Err(err) => {
                     let _ = debug_print(&format!("TRACE: exit recv failed {:?}", err));
                     return Ok(());
@@ -4062,11 +4052,16 @@ impl ProcessManager {
             }
         }
 
-        let parent_stdin_send =
-            match token_derive(stdin_ep, Rights::IPC_SEND.bits() as usize, u64::MAX) {
-                Ok(token) => token,
-                Err(_) => 0, // No access rather than raw endpoint on derivation failure
-            };
+        // TTY needs CALL (in addition to SEND) so it can do synchronous
+        // tab-completion queries to the shell over the same endpoint.
+        let parent_stdin_send = match token_derive(
+            stdin_ep,
+            (Rights::IPC_SEND.bits() | Rights::IPC_CALL.bits()) as usize,
+            u64::MAX,
+        ) {
+            Ok(token) => token,
+            Err(_) => 0,
+        };
 
         // Inject framebuffer dimensions as defaults so all processes can compute
         // terminal cols/rows.  Caller overrides are applied after, so e.g.

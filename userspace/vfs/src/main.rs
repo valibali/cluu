@@ -919,12 +919,11 @@ impl VfsServer {
             ));
             return Err(Error::PermissionDenied);
         };
-        if claimed_client != 0 && claimed_client != client_id {
-            let _ = debug_print(&format!(
-                "vfs: {} ignoring claimed client_id={} authenticated={}",
-                op_name, claimed_client, client_id
-            ));
-        }
+        // claimed_client mismatch is normal — auth uses sender_tid, not the
+        // payload field.  We accept the authenticated client_id silently;
+        // logging every mismatch was the dominant log noise during fast
+        // VFS workloads.
+        let _ = claimed_client; // intentionally unused
         Ok(client_id)
     }
 

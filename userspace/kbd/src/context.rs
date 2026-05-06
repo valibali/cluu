@@ -208,56 +208,27 @@ impl KbdContext {
     /// scancode. Spin a short bounded retry so a brief TTY backlog
     /// doesn't cause silent keystroke loss.
     pub fn send_to_tty(&self, msg: &Message) {
-        use core::sync::atomic::{AtomicU64, Ordering};
-        static FORWARDED: AtomicU64 = AtomicU64::new(0);
-        static RETRIED: AtomicU64 = AtomicU64::new(0);
-        static DROPPED: AtomicU64 = AtomicU64::new(0);
-
         let ep = self.tty_endpoints[self.active_vt];
         if ep == 0 {
-            let _ = debug_print(&format!(
-                "kbd: drop key (tty:{} not subscribed)",
-                self.active_vt
-            ));
-            return;
+            return; // tty not subscribed yet — silent drop is correct here
         }
-        let mut retries = 0u32;
         for _ in 0..8 {
             match send(ep, msg, IpcFlags::empty()) {
-                Ok(()) => {
-                    let n = FORWARDED.fetch_add(1, Ordering::Relaxed) + 1;
-                    if retries > 0 {
-                        RETRIED.fetch_add(1, Ordering::Relaxed);
-                    }
-                    if n == 1 || n % 32 == 0 {
-                        let _ = debug_print(&format!(
-                            "kbd: forwarded={} retried={} dropped={}",
-                            n,
-                            RETRIED.load(Ordering::Relaxed),
-                            DROPPED.load(Ordering::Relaxed)
-                        ));
-                    }
-                    return;
-                }
+                Ok(()) => return,
                 Err(Error::WouldBlock) | Err(Error::Busy) => {
-                    retries += 1;
                     let _ = yield_cpu();
                     continue;
                 }
-                Err(e) => {
-                    let _ = debug_print(&format!(
-                        "kbd: send_to_tty unrecoverable err={:?}",
-                        e
-                    ));
-                    return;
-                }
+                Err(_) => return, // unrecoverable: drop silently
             }
         }
-        let n = DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
-        let _ = debug_print(&format!(
-            "kbd: DROP keystroke after {} retries (tty:{} ep={}) total_dropped={}",
-            retries, self.active_vt, ep, n
-        ));
+        // Bounded retries exhausted; keystroke is lost.  Logged once
+        // (and only once) so a real outage is visible without spamming.
+        static FIRST_DROP_LOGGED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !FIRST_DROP_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            let _ = debug_print("kbd: dropped keystroke (TTY backlog persistent)");
+        }
     }
 
 }

@@ -287,22 +287,17 @@ fn wait_for_grant(endpoint_name: &str) -> Result<usize> {
             if let Some(event) = handle_incoming_message(&msg, payload)? {
                 match event {
                     RegistryEvent::Grant { service_name: _, name, token } => {
-                        let _ = crate::debug_print(&alloc::format!(
-                            "registry-client: grant {} token {}",
-                            name,
-                            token
-                        ));
                         if name == endpoint_name {
                             return Ok(token);
                         }
                     }
                     RegistryEvent::SubscribeStatus { code } => {
-                        let _ = crate::debug_print(&alloc::format!(
-                            "registry-client: subscribe status {} for {}",
-                            code,
-                            endpoint_name
-                        ));
                         if code != 0 {
+                            let _ = crate::debug_print(&alloc::format!(
+                                "registry-client: subscribe FAIL status={} for {}",
+                                code,
+                                endpoint_name
+                            ));
                             return Err(error_from_code(code));
                         }
                     }
@@ -319,11 +314,6 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
     }
     // Payload encodes the output name being requested.
     let endpoint_name = decode_single_name(payload).ok_or(Error::InvalidArgument)?;
-    let _ = crate::debug_print(&alloc::format!(
-        "registry-client: grant request endpoint={} requester={}",
-        endpoint_name,
-        requester_endpoint
-    ));
     // Look up the local output token and service name for the grant reply.
     let (endpoint_token, service_name) = {
         let state = REGISTRY_STATE.lock();
@@ -342,11 +332,6 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
     // Mint a least-privilege token that only allows IPC_SEND.
     let send_rights = (Rights::IPC_SEND | Rights::IPC_CALL).bits() as usize;
     let derived = token_derive(endpoint_token, send_rights, u64::MAX)?;
-    let _ = crate::debug_print(&alloc::format!(
-        "registry-client: derived grant {} for {}",
-        derived,
-        endpoint_name
-    ));
     let payload = encode_names(&service_name, &endpoint_name);
     // Reply directly to the requester with the derived token.
     let reply = make_payload_message(REGISTRY_GRANT_DELIVER_LABEL, payload.len(), &[derived]);

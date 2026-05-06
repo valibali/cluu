@@ -100,15 +100,6 @@ fn run_with_backend<B: ConsoleBackend>(
     console.flush();
 
     let mut buf = [0u8; 512];
-    // Heartbeat + render timing: log every 64 processed messages with
-    // average/max render-TSC + payload byte total. From this we can tell
-    // (1) console is alive (no log = stuck), (2) per-message render cost
-    // (cycles), and (3) queue-volume (payload bytes). The cycles number
-    // converted at ~3 GHz gives microseconds.
-    let mut msg_count: u64 = 0;
-    let mut accum_render_tsc: u64 = 0;
-    let mut max_render_tsc: u64 = 0;
-    let mut payload_bytes_total: u64 = 0;
 
     loop {
         context.request_subscriptions();
@@ -122,28 +113,9 @@ fn run_with_backend<B: ConsoleBackend>(
         match syscall::ipc_recv_any(&tokens, &mut buf, BLINK_TIMEOUT_MS) {
             Ok((index, len)) => {
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
-                    let t0 = rdtsc();
                     handle_incoming(index, &mut console, &mut context, &msg, payload)?;
                     // Flush after IPC for responsive input (no-op if inactive)
                     console.flush();
-                    let dt = rdtsc().wrapping_sub(t0);
-                    accum_render_tsc = accum_render_tsc.wrapping_add(dt);
-                    if dt > max_render_tsc {
-                        max_render_tsc = dt;
-                    }
-                    msg_count = msg_count.wrapping_add(1);
-                    if msg_count % 64 == 0 {
-                        // tsc_hz is approximated; emit raw cycles plus
-                        // rough microseconds at 3 GHz reference clock.
-                        let avg_cyc = accum_render_tsc / 64;
-                        let _ = debug_print(&alloc::format!(
-                            "console: msgs={} avg_render_cyc={} max_render_cyc={} payload_total={}",
-                            msg_count, avg_cyc, max_render_tsc, payload_bytes_total
-                        ));
-                        accum_render_tsc = 0;
-                        max_render_tsc = 0;
-                    }
-                    payload_bytes_total = payload_bytes_total.wrapping_add(payload.len() as u64);
                 } else {
                     let _ = debug_print("console: parse failed");
                 }
@@ -158,21 +130,6 @@ fn run_with_backend<B: ConsoleBackend>(
             }
         }
     }
-}
-
-#[inline(always)]
-fn rdtsc() -> u64 {
-    let mut lo: u32;
-    let mut hi: u32;
-    unsafe {
-        core::arch::asm!(
-            "rdtsc",
-            out("eax") lo,
-            out("edx") hi,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    ((hi as u64) << 32) | (lo as u64)
 }
 
 /// Route IPC traffic by endpoint index.
