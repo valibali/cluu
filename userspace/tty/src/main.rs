@@ -49,8 +49,6 @@ fn run() -> Result<()> {
     let mut discipline = LineDiscipline::new();
 
     let mut buf = [0u8; 4096];
-    let mut events_total: u64 = 0;
-    let mut bursts_total: u64 = 0;
     loop {
         ctx.request_subscriptions();
 
@@ -58,30 +56,17 @@ fn run() -> Result<()> {
         match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
             Ok((index, len)) => {
                 handle_one_message(index, &buf[..len], &mut ctx, &mut discipline);
-                let mut burst_size: u32 = 1;
-                // Nonblocking drain of any back-to-back messages.
+                // Nonblocking drain of any back-to-back messages so a
+                // burst of keystrokes batches into one console flush.
                 loop {
                     match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, 0) {
                         Ok((idx, n)) => {
                             handle_one_message(idx, &buf[..n], &mut ctx, &mut discipline);
-                            burst_size += 1;
                         }
                         Err(_) => break,
                     }
                 }
-                // Flush all batched echo bytes as a single CONSOLE_WRITE.
                 ctx.flush_pending_console();
-
-                events_total = events_total.wrapping_add(burst_size as u64);
-                bursts_total = bursts_total.wrapping_add(1);
-                // Heartbeat every 32 events so the slowest-end-of-pipe layer
-                // has visible rate. Burst size shows how much we batched.
-                if events_total % 32 == 0 || (events_total < 4 && burst_size > 1) {
-                    let _ = libcluu::syscall::debug_print(&alloc::format!(
-                        "tty: events={} bursts={} last_burst={}",
-                        events_total, bursts_total, burst_size
-                    ));
-                }
             }
             Err(Error::WouldBlock) => {
                 let _ = yield_cpu();
@@ -143,13 +128,6 @@ fn handle_one_message(
         CONSOLE_CREDIT_REFILL_LABEL => {
             let refill_amount = msg.words[0];
             ctx.handle_credit_refill(refill_amount);
-        }
-        TTY_TAB_QUERY_LABEL => {
-            // Async reply from shell to a previous dispatch.
-            // (TTY *receives* this label but never *sends* it
-            // to itself — only shell ever produces it on this
-            // endpoint.)
-            apply_tab_completion(ctx, discipline, &msg, payload);
         }
         TTY_CTL_LABEL => {
             // Terminal control: get/set mode
@@ -330,10 +308,12 @@ fn apply_effect(ctx: &mut TtyContext, discipline: &mut line_discipline::LineDisc
     }
 
     if let Some(partial) = effect.tab_request {
-        // Async dispatch only — shell replies via TTY_TAB_QUERY_LABEL on our
-        // main endpoint. The main loop applies the suffix after staleness
-        // checks. Keeps TTY draining kbd events while shell does the readdir.
-        dispatch_path_completion(&partial, ctx);
+        if let Some(completion) = compute_path_completion(&partial, ctx) {
+            // Echo the completion bytes and append to the line buffer so the
+            // user sees the suffix and the line ready-event will pick it up.
+            ctx.forward_to_console(&completion);
+            discipline.append_completion(&completion);
+        }
     }
 
     if let Some(line) = effect.line_ready {
@@ -350,29 +330,17 @@ fn apply_effect(ctx: &mut TtyContext, discipline: &mut line_discipline::LineDisc
     }
 }
 
-/// Dispatch a TAB press as an async IPC_SEND to shell's stdin endpoint.
+/// Resolve a TAB press to a completion suffix.
 ///
-/// We do NOT block the TTY main loop on the reply — shell will SEND a
-/// `TTY_TAB_QUERY_LABEL` message back to TTY's main endpoint when it
-/// finishes the readdir, and the main loop's recv_any will surface it
-/// alongside kbd events. While the request is in flight, TTY keeps
-/// echoing keystrokes; the user can keep typing freely.
+/// Synchronously calls shell's stdin endpoint with the partial last-token
+/// bytes. Shell does the readdir using its own VFS view + CWD (which TTY
+/// can't see) and replies with the suffix. Returns `Some(bytes)` for a
+/// completion, `None` for "no completion / shell unavailable / multiple
+/// matches" — all silent failures.
 ///
-/// The request carries a sequence number in `words[1]` — shell echoes it
-/// back so we can drop late or duplicated replies. We also snapshot the
-/// line-buffer length so we can drop replies that arrive after the user
-/// has typed (or backspaced) past the original token.
-///
-/// Silent failure modes (no completion):
-///   - shell stdin not yet wired
-///   - send returned WouldBlock/Busy (queue full — rare, retry on next TAB)
-fn dispatch_path_completion(partial: &[u8], ctx: &mut TtyContext) {
-    if ctx.shell_stdin == 0 {
-        return;
-    }
-
-    // Extract last whitespace-delimited token; shell needs only the token, not
-    // the whole line.
+/// 250 ms timeout: shell typically replies in well under a millisecond,
+/// but if it's mid-pipeline we'd rather drop the TAB than freeze TTY.
+fn compute_path_completion(partial: &[u8], ctx: &mut TtyContext) -> Option<alloc::vec::Vec<u8>> {
     let token_start = partial
         .iter()
         .rposition(|&b| b == b' ' || b == b'\t')
@@ -380,47 +348,31 @@ fn dispatch_path_completion(partial: &[u8], ctx: &mut TtyContext) {
         .unwrap_or(0);
     let token = &partial[token_start..];
 
-    let new_seq = ctx.tab_pending_seq.wrapping_add(1).max(1);
-    let mut req = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 2);
+    if ctx.shell_stdin == 0 {
+        return None;
+    }
+
+    let mut req = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 1);
     req.words[0] = token.len();
-    req.words[1] = new_seq as usize;
     let header = req.as_bytes();
     let mut send_buf = alloc::vec::Vec::with_capacity(header.len() + token.len());
     send_buf.extend_from_slice(header);
     send_buf.extend_from_slice(token);
 
-    if libcluu::syscall::ipc_send(ctx.shell_stdin, &send_buf).is_ok() {
-        ctx.tab_pending_seq = new_seq;
-        ctx.tab_pending_buf_len = partial.len();
-    }
-}
+    let mut reply_buf = [0u8; 256];
+    let bytes_recv = libcluu::syscall::ipc_call_timeout(
+        ctx.shell_stdin,
+        &send_buf,
+        &mut reply_buf,
+        250,
+    )
+    .ok()?;
 
-/// Apply an async TAB completion reply from shell.
-///
-/// Validates that:
-/// 1. The seq number matches the most recent dispatch (no late/dup replies).
-/// 2. The line buffer length hasn't changed since the request — the user
-///    hasn't typed/backspaced. If it has, the suffix would splice into the
-///    wrong place; drop it silently.
-fn apply_tab_completion(
-    ctx: &mut TtyContext,
-    discipline: &mut LineDiscipline,
-    msg: &Message,
-    payload: &[u8],
-) {
-    let reply_seq = if msg.tag.words >= 2 { msg.words[1] as u64 } else { 0 };
-    if reply_seq == 0 || reply_seq != ctx.tab_pending_seq {
-        return;
+    let (msg, payload) = libcluu::ipc::parse_message(&reply_buf[..bytes_recv])?;
+    if msg.tag.label != TTY_TAB_QUERY_LABEL || payload.is_empty() {
+        return None;
     }
-    ctx.tab_pending_seq = 0;
-    if discipline.buffer_len() != ctx.tab_pending_buf_len {
-        return; // stale — user kept typing
-    }
-    if payload.is_empty() {
-        return; // no completion
-    }
-    ctx.forward_to_console(payload);
-    discipline.append_completion(payload);
+    Some(payload.to_vec())
 }
 
 /// Deliver a completed line to pending readers or the shell.

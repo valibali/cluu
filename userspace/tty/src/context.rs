@@ -74,16 +74,6 @@ pub struct TtyContext {
     pub login_password: Vec<u8>,
     /// Lazily-initialized VFS client for tab completion path resolution.
     vfs_client: Option<VfsClient>,
-    /// Sequence number of the in-flight TAB query (0 = none). Bumped on each
-    /// dispatch; the reply must echo this back so we can drop late or stale
-    /// replies. Async TAB lets the main loop keep draining kbd events while
-    /// shell computes the completion.
-    pub tab_pending_seq: u64,
-    /// Line buffer length captured at the moment we dispatched the TAB
-    /// query. If the discipline buffer length differs when the reply
-    /// arrives, the user has typed (or backspaced) since — drop the
-    /// completion to avoid splicing the suffix into a moved cursor.
-    pub tab_pending_buf_len: usize,
 }
 
 impl TtyContext {
@@ -139,8 +129,6 @@ impl TtyContext {
             login_username: Vec::new(),
             login_password: Vec::new(),
             vfs_client: None,
-            tab_pending_seq: 0,
-            tab_pending_buf_len: 0,
         })
     }
 
