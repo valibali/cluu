@@ -870,6 +870,36 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
             uart_hex("PF: from_errno entry = ", val);
         }
 
+        // Aliasing diagnostic: get the physical frame backing console's
+        // 0x43c000 page (the corrupted .rodata page), then scan every other
+        // address space for any virtual page mapping that same phys. If
+        // anything else maps it, we have proof that two spaces alias the
+        // same frame and one of them is overwriting the contents. CR3 is
+        // still the faulting process's at this point.
+        use x86_64::registers::control::Cr3;
+        let faulting_root = Cr3::read_raw().0.start_address();
+        let corrupted_phys = crate::elf::translate_vaddr(
+            faulting_root,
+            x86_64::VirtAddr::new(0x43c000),
+        );
+        if let Some(p) = corrupted_phys {
+            let phys_aligned = p.as_u64() & !0xFFF;
+            uart_hex("PF: console .rodata 0x43c000 -> phys ", phys_aligned);
+            // Walk every registered space and find aliases.
+            crate::mm::space_repository::for_each(|space_id, root| {
+                if root == faulting_root {
+                    return; // skip self
+                }
+                if let Some(va) = crate::elf::find_first_va_for_phys(root, phys_aligned) {
+                    COM2.write_str("PF: ALIAS in space_id=");
+                    uart_hex("", space_id.as_u64());
+                    uart_hex("PF:  -> va ", va);
+                }
+            });
+        } else {
+            COM2.write_str("PF: console 0x43c000 not mapped (?!)\n");
+        }
+
         // Dump 8 qwords BELOW RSP first (the just-popped slots — if this was
         // a `ret` with a corrupted return-PC slot, [RSP-8] still holds the
         // popped value because `ret` only increments RSP, doesn't zero the slot).

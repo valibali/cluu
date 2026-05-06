@@ -646,6 +646,75 @@ pub fn translate_vaddr(page_table_root: PhysAddr, vaddr: VirtAddr) -> Option<Phy
     }
 }
 
+/// Diagnostic: scan a user page table for the *first* 4 KiB virtual page that
+/// maps `target_phys`. Returns the user virtual address of that page, or None.
+///
+/// Used by the wild-jump PF diagnostic to confirm whether two address spaces
+/// alias the same physical frame (suspected MAP_SHARE_PHYS / cache aliasing
+/// bug). Walks PML4 user entries (0..256), skips 1 GiB and 2 MiB huge mappings
+/// (the kernel's userspace doesn't use them for normal data), only descends
+/// into present non-huge entries.
+///
+/// O(N) where N is the number of present 4 KiB user pages — sparse spaces
+/// finish quickly. Returns the first match (lowest VA).
+pub fn find_first_va_for_phys(page_table_root: PhysAddr, target_phys: u64) -> Option<u64> {
+    const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+    let target = target_phys & PHYS_MASK;
+
+    unsafe {
+        let pml4_virt = crate::mm::physmap::phys_to_virt_u64(page_table_root.as_u64());
+        let pml4 = &*(pml4_virt as *const [u64; 512]);
+
+        for pml4_idx in 0..256usize {
+            if pml4[pml4_idx] & 0x1 == 0 {
+                continue;
+            }
+            let pdpt_phys = pml4[pml4_idx] & PHYS_MASK;
+            let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
+            let pdpt = &*(pdpt_virt as *const [u64; 512]);
+
+            for pdpt_idx in 0..512usize {
+                if pdpt[pdpt_idx] & 0x1 == 0 {
+                    continue;
+                }
+                if pdpt[pdpt_idx] & pte_flags::HUGE != 0 {
+                    continue; // skip 1 GiB pages
+                }
+                let pd_phys = pdpt[pdpt_idx] & PHYS_MASK;
+                let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
+                let pd = &*(pd_virt as *const [u64; 512]);
+
+                for pd_idx in 0..512usize {
+                    if pd[pd_idx] & 0x1 == 0 {
+                        continue;
+                    }
+                    if pd[pd_idx] & pte_flags::HUGE != 0 {
+                        continue; // skip 2 MiB pages
+                    }
+                    let pt_phys = pd[pd_idx] & PHYS_MASK;
+                    let pt_virt = crate::mm::physmap::phys_to_virt_u64(pt_phys);
+                    let pt = &*(pt_virt as *const [u64; 512]);
+
+                    for pt_idx in 0..512usize {
+                        if pt[pt_idx] & 0x1 == 0 {
+                            continue;
+                        }
+                        let phys = pt[pt_idx] & PHYS_MASK;
+                        if phys == target {
+                            let va = ((pml4_idx as u64) << 39)
+                                | ((pdpt_idx as u64) << 30)
+                                | ((pd_idx as u64) << 21)
+                                | ((pt_idx as u64) << 12);
+                            return Some(va);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Translate a virtual address to physical, also returning PTE flags
 ///
 /// Returns (physical_address, pte_flags) or None if not mapped.

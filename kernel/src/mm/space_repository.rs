@@ -94,3 +94,17 @@ pub fn remove(id: AddressSpaceId) -> Option<AddressSpace> {
 pub fn count() -> usize {
     REPOSITORY.lock().spaces.len()
 }
+
+/// Visit every address space's id + page_table_root, with the repository
+/// lock held. The closure must not call back into space_repository or it
+/// will deadlock. Intended for diagnostic scanning (e.g. find every space
+/// that maps a given physical frame). Skips no entries.
+pub fn for_each<F>(mut f: F)
+where
+    F: FnMut(AddressSpaceId, x86_64::PhysAddr),
+{
+    let repo = REPOSITORY.lock();
+    for (&id, space) in repo.spaces.iter() {
+        f(id, space.page_table_root);
+    }
+}
