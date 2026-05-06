@@ -208,6 +208,11 @@ impl KbdContext {
     /// scancode. Spin a short bounded retry so a brief TTY backlog
     /// doesn't cause silent keystroke loss.
     pub fn send_to_tty(&self, msg: &Message) {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static FORWARDED: AtomicU64 = AtomicU64::new(0);
+        static RETRIED: AtomicU64 = AtomicU64::new(0);
+        static DROPPED: AtomicU64 = AtomicU64::new(0);
+
         let ep = self.tty_endpoints[self.active_vt];
         if ep == 0 {
             let _ = debug_print(&format!(
@@ -220,10 +225,16 @@ impl KbdContext {
         for _ in 0..8 {
             match send(ep, msg, IpcFlags::empty()) {
                 Ok(()) => {
+                    let n = FORWARDED.fetch_add(1, Ordering::Relaxed) + 1;
                     if retries > 0 {
+                        RETRIED.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if n == 1 || n % 32 == 0 {
                         let _ = debug_print(&format!(
-                            "kbd: send_to_tty ok after {} retries",
-                            retries
+                            "kbd: forwarded={} retried={} dropped={}",
+                            n,
+                            RETRIED.load(Ordering::Relaxed),
+                            DROPPED.load(Ordering::Relaxed)
                         ));
                     }
                     return;
@@ -242,9 +253,10 @@ impl KbdContext {
                 }
             }
         }
+        let n = DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = debug_print(&format!(
-            "kbd: DROP keystroke after {} WouldBlock/Busy retries (tty:{} ep={})",
-            retries, self.active_vt, ep
+            "kbd: DROP keystroke after {} retries (tty:{} ep={}) total_dropped={}",
+            retries, self.active_vt, ep, n
         ));
     }
 

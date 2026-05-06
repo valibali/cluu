@@ -49,6 +49,8 @@ fn run() -> Result<()> {
     let mut discipline = LineDiscipline::new();
 
     let mut buf = [0u8; 4096];
+    let mut events_total: u64 = 0;
+    let mut bursts_total: u64 = 0;
     loop {
         ctx.request_subscriptions();
 
@@ -56,17 +58,30 @@ fn run() -> Result<()> {
         match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
             Ok((index, len)) => {
                 handle_one_message(index, &buf[..len], &mut ctx, &mut discipline);
+                let mut burst_size: u32 = 1;
                 // Nonblocking drain of any back-to-back messages.
                 loop {
                     match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, 0) {
                         Ok((idx, n)) => {
                             handle_one_message(idx, &buf[..n], &mut ctx, &mut discipline);
+                            burst_size += 1;
                         }
                         Err(_) => break,
                     }
                 }
                 // Flush all batched echo bytes as a single CONSOLE_WRITE.
                 ctx.flush_pending_console();
+
+                events_total = events_total.wrapping_add(burst_size as u64);
+                bursts_total = bursts_total.wrapping_add(1);
+                // Heartbeat every 32 events so the slowest-end-of-pipe layer
+                // has visible rate. Burst size shows how much we batched.
+                if events_total % 32 == 0 || (events_total < 4 && burst_size > 1) {
+                    let _ = libcluu::syscall::debug_print(&alloc::format!(
+                        "tty: events={} bursts={} last_burst={}",
+                        events_total, bursts_total, burst_size
+                    ));
+                }
             }
             Err(Error::WouldBlock) => {
                 let _ = yield_cpu();

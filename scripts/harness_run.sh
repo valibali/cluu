@@ -1237,6 +1237,16 @@ case "$MARKER_MODE" in
             "shell: container run done status=0"
         )
         ;;
+    perf_typing_storm)
+        # Diagnostic-only mode: type 500 chars at zero key delay then idle.
+        # We only require boot + shell ready; the rest of the analysis is
+        # post-hoc (rate counters from each pipeline layer printed during
+        # the run).
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+        )
+        ;;
     hr6_shell_crash)
         required_markers=(
             "TSC calibrated"

@@ -82,28 +82,54 @@ pub fn dispatch_scancode(irq: u8, scancode: u8) {
 
     match endpoint::try_send(endpoint_id, msg_bytes) {
         Ok(Some(thread_id)) => {
-            if IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
-                klibcluu::trace("dispatch_scancode: endpoint_id=");
-                klibcluu::log_dec(klibcluu::LogLevel::Trace, "", endpoint_id.as_u64());
-                klibcluu::trace("dispatch_scancode: wake_thread_id=");
-                klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
+            let n = IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == 1 || n % 32 == 0 {
+                klibcluu::log_dec(
+                    klibcluu::LogLevel::Info,
+                    "irq[kbd]: delivered=",
+                    n,
+                );
+                klibcluu::log_dec(
+                    klibcluu::LogLevel::Info,
+                    "irq[kbd]: busy=",
+                    IRQ_LOCK_BUSY_COUNT.load(Ordering::Relaxed),
+                );
+                klibcluu::log_dec(
+                    klibcluu::LogLevel::Info,
+                    "irq[kbd]: fail=",
+                    IRQ_SEND_FAIL_COUNT.load(Ordering::Relaxed),
+                );
             }
             ThreadManager::wake_thread(thread_id);
         }
         Ok(None) => {
-            if IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
-                klibcluu::trace("dispatch_scancode: endpoint_id=");
-                klibcluu::log_dec(klibcluu::LogLevel::Trace, "", endpoint_id.as_u64());
+            let n = IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == 1 || n % 32 == 0 {
+                klibcluu::log_dec(
+                    klibcluu::LogLevel::Info,
+                    "irq[kbd]: delivered=",
+                    n,
+                );
             }
         }
         Err(Error::WouldBlock) => {
-            if IRQ_LOCK_BUSY_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
-                klibcluu::warn("dispatch_scancode: endpoint busy");
+            let n = IRQ_LOCK_BUSY_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == 1 || n % 32 == 0 {
+                klibcluu::log_dec(
+                    klibcluu::LogLevel::Warn,
+                    "irq[kbd]: BUSY (queue full) busy_total=",
+                    n,
+                );
             }
         }
         Err(_) => {
-            if IRQ_SEND_FAIL_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
-                klibcluu::warn("dispatch_scancode: send failed");
+            let n = IRQ_SEND_FAIL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == 1 || n % 32 == 0 {
+                klibcluu::log_dec(
+                    klibcluu::LogLevel::Warn,
+                    "irq[kbd]: SEND_FAIL fail_total=",
+                    n,
+                );
             }
         }
     }

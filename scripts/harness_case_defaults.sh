@@ -358,6 +358,15 @@ harness_derive_marker_defaults() {
                 # Press Enter: shell runs cat /etc/motd and emits motd content.
                 KEYSTROKE_COMMANDS=$'cat /etc/m\t'
                 ;;
+            perf_typing_storm)
+                # Inject 500 chars at KEY_DELAY=0 (as fast as QEMU monitor +
+                # bash can issue). After typing stops, the harness idles for
+                # RUN_WAIT seconds. Diagnostics in IRQ/kbd/TTY/console emit
+                # rate counts per layer; success = none of the layers go
+                # silent for >5s after the last keystroke.
+                TEST_COMMAND=""
+                KEYSTROKE_COMMANDS="$(printf 'a%.0s' {1..500})"
+                ;;
             hr6_shell_crash)
                 TEST_COMMAND="shellcrash"
                 ;;
