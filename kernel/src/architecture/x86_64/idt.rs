@@ -1077,10 +1077,27 @@ extern "x86-interrupt" fn security_exception_handler(
 
 // Hardware interrupt handlers
 
+/// Kernel heartbeat counter — incremented on every timer interrupt
+/// (both dispatch and ack paths).  Logged every N ticks so a serial
+/// log silence > 2s tells us the timer/scheduler died.  At ~100Hz
+/// this is one log line every ~1.3s.
+static KERNEL_HEARTBEAT_TICKS: AtomicU64 = AtomicU64::new(0);
+const KERNEL_HEARTBEAT_PERIOD: u64 = 128;
+
+#[inline(always)]
+fn kernel_heartbeat_tick(path: &'static str) {
+    let n = KERNEL_HEARTBEAT_TICKS.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+    if n % KERNEL_HEARTBEAT_PERIOD == 0 {
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "k_heartbeat: ticks=", n);
+        klibcluu::trace(path);
+    }
+}
+
 #[no_mangle]
 extern "C" fn timer_interrupt_dispatch(
     current_ctx_ptr: *const crate::sched::Context,
 ) -> *const crate::sched::Context {
+    kernel_heartbeat_tick("k_heartbeat: path=dispatch");
     // Tick the scheduler (handles timeslice expiration in NORMALMODE)
     if crate::sched::ThreadManager::is_normal_mode() {
         crate::sched::ThreadManager::tick();
@@ -1130,6 +1147,7 @@ extern "C" fn timer_interrupt_dispatch(
 
 #[no_mangle]
 extern "C" fn timer_interrupt_ack() {
+    kernel_heartbeat_tick("k_heartbeat: path=ack");
     // Post-fault timer diagnostic (kernel-mode fast path)
     let diag_remaining = POST_FAULT_TIMER_DIAG.load(AtomicOrdering::Acquire);
     if diag_remaining > 0 {
@@ -1165,7 +1183,19 @@ extern "C" fn timer_interrupt_should_schedule() -> u8 {
     0
 }
 
+/// Raw keyboard IRQ entry counter — incremented BEFORE any other work
+/// in the handler. If a freeze persists with new keystrokes producing
+/// no count increases here, the IRQ isn't firing at all (interrupts
+/// masked, PIC issue, etc).  Distinct from `irq[kbd]: delivered=` which
+/// counts successful dispatch_scancode delivery to a userspace endpoint.
+static KBD_IRQ_ENTRY_COUNT: AtomicU64 = AtomicU64::new(0);
+
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let n = KBD_IRQ_ENTRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+    if n == 1 || n % 32 == 0 {
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "kbd_irq_entry: n=", n);
+    }
+
     let mut port = x86_64::instructions::port::Port::<u8>::new(0x60);
     let scancode = unsafe { port.read() };
     crate::devices::irq::dispatch_scancode(1, scancode);
