@@ -1128,11 +1128,21 @@ impl ThreadManager {
             klibcluu::log_dec(klibcluu::LogLevel::Trace, "", tick);
         }
 
-        // Account CPU tick to the currently running thread
+        // Account CPU tick to the currently running thread.
+        // CRITICAL: tick() runs from the timer IRQ handler with interrupts
+        // disabled. Using a *blocking* THREAD_REPOSITORY.lock() here would
+        // spin-wait inside the ISR if any user-context path is currently
+        // holding the repo (e.g. set_recv_wait_delivery from try_send).
+        // That spin never resolves because the holder can't be re-scheduled
+        // while the timer ISR runs — total kernel halt.  Use try_lock and
+        // accept that very occasional ticks are missed in the cpu accounting
+        // counter; this is a stat, not a correctness invariant.
         if let Some(current_id) = Self::current() {
-            Self::with_thread_mut(current_id, |t| {
-                t.cpu_ticks_consumed += 1;
-            });
+            if let Some(mut repo) = THREAD_REPOSITORY.try_lock() {
+                if let Some(t) = repo.get_mut(current_id) {
+                    t.cpu_ticks_consumed += 1;
+                }
+            }
         }
 
         if Self::is_normal_mode() {
