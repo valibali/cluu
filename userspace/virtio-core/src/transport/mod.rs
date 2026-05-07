@@ -1,11 +1,14 @@
-//! Trait abstraction over the device transport (modern PCI today, MMIO future).
+//! Transport abstraction over the device transport (modern PCI today, MMIO future).
 
 use crate::virtqueue::Virtqueue;
 use libcluu::Result;
 
+pub mod modern_pci;
+pub use modern_pci::ModernPciTransport;
+
 bitflags::bitflags! {
     pub struct FeatureBits: u64 {
-        const VERSION_1   = 1 << 32;       // virtio 1.0 compliance
+        const VERSION_1 = 1 << 32;       // virtio 1.0 compliance
         // device-class feature bits live in higher namespaces (e.g. blk uses 0..16)
     }
 }
