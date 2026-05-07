@@ -59,6 +59,7 @@ pub enum InvokeOp {
     ThreadSetFSBase = 6,
     ThreadGetId = 7,
     ThreadGetStats = 8,
+    SchedGetOverflow = 9,
 
     // Space operations
     SpaceCreate = 10,
@@ -1066,6 +1067,23 @@ pub fn thread_get_id(thread_token: usize) -> Result<usize> {
 pub fn thread_get_stats(thread_token: usize) -> Result<u64> {
     let ticks = unsafe { invoke(thread_token, InvokeOp::ThreadGetStats, 0, 0, 0, 0) }?;
     Ok(ticks as u64)
+}
+
+/// Selector values for `sched_get_overflow`.
+pub const SCHED_OVERFLOW_DEFERRED_FAULT: usize = 0; // H9
+pub const SCHED_OVERFLOW_PENDING_WAKE: usize = 1;   // H10
+
+/// Read a global scheduler overflow counter.
+///
+/// `selector` picks which counter:
+///   `SCHED_OVERFLOW_DEFERRED_FAULT` → H9 deferred fault queue exhaustion events.
+///   `SCHED_OVERFLOW_PENDING_WAKE`   → H10 pending wake queue exhaustion events.
+///
+/// `token` may be any valid token the caller holds (typically `TOKEN_SELF`);
+/// the kernel only checks for the READ right.
+pub fn sched_get_overflow(token: usize, selector: usize) -> Result<u64> {
+    let v = unsafe { invoke(token, InvokeOp::SchedGetOverflow, selector, 0, 0, 0) }?;
+    Ok(v as u64)
 }
 
 /// Query mapped page counts for an address space.

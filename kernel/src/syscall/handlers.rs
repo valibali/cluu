@@ -785,6 +785,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::ThreadSetFSBase => invoke_thread_set_fs_base(&token, obj_ref, args),
         InvokeOp::ThreadGetId => invoke_thread_get_id(&token, obj_ref, args),
         InvokeOp::ThreadGetStats => invoke_thread_get_stats(&token, obj_ref, args),
+        InvokeOp::SchedGetOverflow => invoke_sched_get_overflow(&token, obj_ref, args),
 
         // Space operations
         InvokeOp::SpaceCreate => invoke_space_create(&token, obj_ref, args),
@@ -1168,6 +1169,31 @@ fn invoke_thread_get_stats(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs
         .unwrap_or(0);
 
     Ok(cpu_ticks as usize)
+}
+
+/// Read scheduler overflow counters (H9 deferred-fault queue / H10 pending-wake queue).
+///
+/// `args.arg3` (the third invoke argument after token and op) selects which counter:
+///   0 → DEFERRED_FAULT_OVERFLOW (H9)
+///   1 → PENDING_WAKE_OVERFLOW (H10)
+///
+/// Token type is not constrained beyond requiring READ — these are global
+/// scheduler statistics that any holder of a valid token (including TOKEN_SELF
+/// for any user thread) may observe.
+fn invoke_sched_get_overflow(token: &Token, _obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::READ) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let value = match args.arg3 {
+        0 => crate::sched::thread_manager::deferred_fault_overflow_count(),
+        1 => crate::sched::thread_manager::pending_wake_overflow_count(),
+        _ => return Err(Error::InvalidArgument),
+    };
+
+    Ok(value as usize)
 }
 
 fn invoke_endpoint_create(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {

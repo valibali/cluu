@@ -223,6 +223,13 @@ const WAKE_ZERO: AtomicU64 = AtomicU64::new(0);
 static PENDING_WAKE_QUEUE: [AtomicU64; PENDING_WAKE_SLOTS] = [WAKE_ZERO; PENDING_WAKE_SLOTS];
 static PENDING_WAKE_OVERFLOW: AtomicU64 = AtomicU64::new(0);
 
+/// Read the cumulative count of pending-wake-queue slot exhaustion events (H10).
+/// Each increment means a wake had no free slot — the wakee may sleep longer
+/// than expected and rely on a later kick to make progress.
+pub fn pending_wake_overflow_count() -> u64 {
+    PENDING_WAKE_OVERFLOW.load(Ordering::Relaxed)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Deferred Fault Notification Queue (lock-free, IST-safe)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -244,6 +251,13 @@ static DEFERRED_FAULT_ADDR: [AtomicU64; DEFERRED_FAULT_SLOTS] = [FAULT_ZERO; DEF
 static DEFERRED_FAULT_ERR: [AtomicU64; DEFERRED_FAULT_SLOTS] = [FAULT_ZERO; DEFERRED_FAULT_SLOTS];
 static DEFERRED_FAULT_RIP: [AtomicU64; DEFERRED_FAULT_SLOTS] = [FAULT_ZERO; DEFERRED_FAULT_SLOTS];
 static DEFERRED_FAULT_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+
+/// Read the cumulative count of deferred-fault-queue slot exhaustion events (H9).
+/// Each increment means a fault could not be queued and was dropped on the floor —
+/// the faulting thread may have been killed without notifying its supervisor.
+pub fn deferred_fault_overflow_count() -> u64 {
+    DEFERRED_FAULT_OVERFLOW.load(Ordering::Relaxed)
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Thread Manager API

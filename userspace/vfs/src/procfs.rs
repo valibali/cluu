@@ -12,7 +12,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem::size_of;
+use libcluu::boot::{process_info, TOKEN_SELF};
 use libcluu::ipc::{call_with_reply_buf, PROCMGR_PROC_QUERY_LABEL};
+use libcluu::syscall::{
+    sched_get_overflow, SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
+};
 use libcluu::types::Message;
 use libcluu::{Error, Result};
 
@@ -23,7 +27,15 @@ const QUERY_CMDLINE: usize = 2;
 const QUERY_LIST: usize = 3;
 
 /// Names of static /proc files (no procmgr IPC needed).
-const STATIC_FILES: &[&str] = &["version", "uptime", "meminfo", "cpuinfo", "mounts", "fb"];
+const STATIC_FILES: &[&str] = &[
+    "version",
+    "uptime",
+    "meminfo",
+    "cpuinfo",
+    "mounts",
+    "fb",
+    "sched_overflow",
+];
 
 /// Per-PID sub-files available under /proc/<pid>/ and /proc/self/.
 const PID_SUBFILES: &[&str] = &["status", "stat", "cmdline"];
@@ -107,6 +119,20 @@ fn gen_fb() -> Result<Vec<u8>> {
     Ok(text.into_bytes())
 }
 
+/// Read scheduler overflow counters (H9 deferred-fault queue, H10 pending-wake
+/// queue) directly from the kernel and format them as a tiny key=value file.
+/// Each line carries one counter; both start at 0 on a healthy system.
+fn gen_sched_overflow() -> Result<Vec<u8>> {
+    let self_token = process_info().tokens[TOKEN_SELF];
+    let deferred_fault = sched_get_overflow(self_token, SCHED_OVERFLOW_DEFERRED_FAULT)?;
+    let pending_wake = sched_get_overflow(self_token, SCHED_OVERFLOW_PENDING_WAKE)?;
+    let text = format!(
+        "deferred_fault_overflow {}\npending_wake_overflow {}\n",
+        deferred_fault, pending_wake
+    );
+    Ok(text.into_bytes())
+}
+
 fn gen_static(name: &str) -> Result<Vec<u8>> {
     match name {
         "version" => gen_version(),
@@ -115,6 +141,7 @@ fn gen_static(name: &str) -> Result<Vec<u8>> {
         "cpuinfo" => gen_cpuinfo(),
         "mounts" => gen_mounts(),
         "fb" => gen_fb(),
+        "sched_overflow" => gen_sched_overflow(),
         _ => Err(Error::NotFound),
     }
 }

@@ -12,11 +12,17 @@ use core::mem::size_of;
 #[allow(unused_imports)]
 use libcluu::runtime as _;
 
-use libcluu::boot::{process_info, PARAM_FB_HEIGHT, PARAM_FB_WIDTH, TOKEN_CLOCK, TOKEN_STDIN, TOKEN_STDOUT};
+use libcluu::boot::{
+    process_info, PARAM_FB_HEIGHT, PARAM_FB_WIDTH, TOKEN_CLOCK, TOKEN_SELF, TOKEN_STDIN,
+    TOKEN_STDOUT,
+};
 use libcluu::error::Error;
 use libcluu::ipc::{
     call_with_reply_buf, parse_message, send_with_payload, PROCMGR_CONTAINER_STATS_LABEL,
     PROCMGR_QUERY_CTTY_LABEL, TTY_READ_LABEL, TTY_WRITE_LABEL,
+};
+use libcluu::syscall::{
+    sched_get_overflow, SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
 };
 use libcluu::types::Message;
 use libcluu::{debug_print, registry, syscall};
@@ -40,6 +46,7 @@ fn run() -> libcluu::Result<()> {
     let stdout = info.tokens[TOKEN_STDOUT];
     let stdin = info.tokens[TOKEN_STDIN];
     let clock_token = info.tokens[TOKEN_CLOCK];
+    let self_token = info.tokens[TOKEN_SELF];
 
     // Terminal width from framebuffer params (cols = fb_width / 8px-per-glyph).
     // Falls back to 80 if procmgr has not yet populated the params.
@@ -140,14 +147,20 @@ fn run() -> libcluu::Result<()> {
         let mut frame = String::new();
         frame.push_str("\x1b[H");
 
+        // Sample H9/H10 scheduler overflow counters (zero on healthy systems).
+        let h9 = sched_get_overflow(self_token, SCHED_OVERFLOW_DEFERRED_FAULT).unwrap_or(0);
+        let h10 = sched_get_overflow(self_token, SCHED_OVERFLOW_PENDING_WAKE).unwrap_or(0);
+
         // Header line (blue bg, bright white)
         frame.push_str(&format!(
-            "\x1b[97;44m CLUU top   Containers: {}  Sessions: {}  [VT:{}]",
-            total_containers, total_sessions, my_vt
+            "\x1b[97;44m CLUU top   Containers: {}  Sessions: {}  H9:{}  H10:{}  [VT:{}]",
+            total_containers, total_sessions, h9, h10, my_vt
         ));
-        let hdr_content_len = 43
+        let hdr_content_len = 43 + 14
             + digit_count(total_containers)
             + digit_count(total_sessions)
+            + digit_count(h9 as usize)
+            + digit_count(h10 as usize)
             + digit_count(my_vt as usize);
         for _ in hdr_content_len..cols {
             frame.push(' ');

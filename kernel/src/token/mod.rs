@@ -376,6 +376,7 @@ pub enum InvokeOp {
     ThreadSetFSBase = 6,
     ThreadGetId = 7,
     ThreadGetStats = 8,
+    SchedGetOverflow = 9,
 
     // Space operations
     SpaceCreate = 10,
@@ -445,6 +446,7 @@ impl InvokeOp {
             6 => Some(Self::ThreadSetFSBase),
             7 => Some(Self::ThreadGetId),
             8 => Some(Self::ThreadGetStats),
+            9 => Some(Self::SchedGetOverflow),
             10 => Some(Self::SpaceCreate),
             11 => Some(Self::SpaceDestroy),
             12 => Some(Self::SpaceMap),
