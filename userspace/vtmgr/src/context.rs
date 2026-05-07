@@ -8,8 +8,8 @@ use alloc::format;
 use libcluu::boot::PARAM_TTY_INSTANCE;
 use libcluu::boot::{process_info, TOKEN_EXTRA_0};
 use libcluu::ipc::{
-    send, send_msg_with_payload, CONSOLE_ACTIVATE_LABEL, CONSOLE_CREATE_VT_LABEL,
-    CONSOLE_DEACTIVATE_LABEL, CONSOLE_SWITCH_VT_LABEL, PROCMGR_CONTAINER_RUN_LABEL,
+    send, send_msg_with_payload, CONSOLE_CREATE_VT_LABEL, CONSOLE_SWITCH_VT_LABEL,
+    PROCMGR_CONTAINER_RUN_LABEL,
 };
 use libcluu::registry;
 use libcluu::types::{IpcFlags, Message};

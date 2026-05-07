@@ -368,6 +368,7 @@ impl FileCache {
         Ok(meta)
     }
 
+    #[allow(dead_code)]
     fn evict_lru(&mut self) {
         // FIXME(MAP_SHARE_PHYS): cache eviction disabled while shares are pinned.
         // Revisit when refcount lands. For v1 the 32 MB cache budget is enough
@@ -835,12 +836,14 @@ impl VfsServer {
 
     /// Check a path against the client's VFS view, rewriting if needed.
     /// Returns the real backing path, or an error if disallowed.
+    #[allow(dead_code)]
     fn view_check_path(&self, client_id: usize, path: &str) -> Result<alloc::string::String> {
         self.views.check_path(client_id, path)
     }
 
     /// Like view_check_path, but also enforces the writable flag.
     /// Returns Error::PermissionDenied if the matching mount is read-only.
+    #[allow(dead_code)]
     fn view_check_path_writable(
         &self,
         client_id: usize,
@@ -2715,9 +2718,8 @@ impl VfsServer {
                     [requested, 0, 0, 0, 0, 0],
                     1,
                 );
-                let mut tty_reply = Message::new(0, [0; 6], 0);
                 let mut tty_buf = [0u8; 256];
-                let (reply_msg_out, payload_len) =
+                let (_reply_msg_out, payload_len) =
                     ipc::call_with_reply_buf(endpoint, &req, &[], &mut tty_buf)?;
                 let data_start = core::mem::size_of::<Message>();
                 let data_len = payload_len.min(requested);

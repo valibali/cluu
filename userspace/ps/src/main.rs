@@ -19,26 +19,26 @@ const GRANT_SIZE: usize = 4096;
 pub extern "C" fn main() -> i32 {
     let Ok(vfs_endpoint) = registry::subscribe_output("vfs", "main") else {
         let msg = b"ps: vfs not available\n";
-        let _ = unsafe { _write(2, msg.as_ptr() as *const _, msg.len()) };
+        let _ = _write(2, msg.as_ptr() as *const _, msg.len());
         return 1;
     };
     let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
         Ok(c) => c,
         Err(_) => {
             let msg = b"ps: failed to connect to vfs\n";
-            let _ = unsafe { _write(2, msg.as_ptr() as *const _, msg.len()) };
+            let _ = _write(2, msg.as_ptr() as *const _, msg.len());
             return 1;
         }
     };
 
     let header = b"  PID  NAME             STATE  TICKS     MEM\n";
-    let _ = unsafe { _write(1, header.as_ptr() as *const _, header.len()) };
+    let _ = _write(1, header.as_ptr() as *const _, header.len());
 
     let entries = match vfs.readdir("/proc") {
         Ok(e) => e,
         Err(_) => {
             let msg = b"ps: failed to read /proc\n";
-            let _ = unsafe { _write(2, msg.as_ptr() as *const _, msg.len()) };
+            let _ = _write(2, msg.as_ptr() as *const _, msg.len());
             return 1;
         }
     };
@@ -49,7 +49,7 @@ pub extern "C" fn main() -> i32 {
         Ok(addr) => addr,
         Err(_) => {
             let msg = b"ps: out of virtual memory\n";
-            let _ = unsafe { _write(2, msg.as_ptr() as *const _, msg.len()) };
+            let _ = _write(2, msg.as_ptr() as *const _, msg.len());
             return 1;
         }
     };
@@ -94,9 +94,7 @@ pub extern "C" fn main() -> i32 {
                         "{:>5}  {:<16} {:>5}  {:>8}  {:>4}K\n",
                         pid, name, state, ticks, mem_kb
                     );
-                    let _ = unsafe {
-                        _write(1, line.as_ptr() as *const _, line.len())
-                    };
+                    let _ = _write(1, line.as_ptr() as *const _, line.len());
                 }
             }
         }

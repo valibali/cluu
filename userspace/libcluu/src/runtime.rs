@@ -3,14 +3,14 @@
 #[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
 use core::panic::PanicInfo;
 
-#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
+#[cfg(all(not(feature = "std"), not(test), not(feature = "c-runtime"), target_os = "none"))]
 use crate::allocator;
-#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
+#[cfg(all(not(feature = "std"), not(test), not(feature = "c-runtime"), target_os = "none"))]
 use crate::{ipc::notify_exit, syscall::debug_print, syscall::yield_cpu};
-#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
-use core::fmt::{self, Write};
+#[cfg(all(not(feature = "std"), not(test), not(feature = "c-runtime"), target_os = "none"))]
+use core::fmt::Write;
 
-#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
+#[cfg(all(not(feature = "std"), not(test), not(feature = "c-runtime"), target_os = "none"))]
 mod stack_string {
     use core::fmt::{self, Write};
 
@@ -45,7 +45,7 @@ mod stack_string {
     }
 }
 
-#[cfg(all(not(feature = "std"), not(test), target_os = "none"))]
+#[cfg(all(not(feature = "std"), not(test), not(feature = "c-runtime"), target_os = "none"))]
 use stack_string::StackString;
 
 /// Entry point for userspace programs

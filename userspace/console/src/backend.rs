@@ -127,6 +127,7 @@ pub trait ConsoleBackend {
     }
     /// Copy a rectangular region from one location to another (for scrolling).
     /// Default implementation redraws, but backends can override with memory copy for speed.
+    #[allow(dead_code)]
     fn copy_rect(
         &mut self,
         _src_x: usize,

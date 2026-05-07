@@ -18,20 +18,20 @@ pub extern "C" fn main() -> i32 {
     let operands: Vec<_> = args.into_iter().skip(1).collect();
     if operands.is_empty() {
         let msg = b"touch: missing operand\n";
-        let _ = unsafe { _write(2, msg.as_ptr() as *const _, msg.len()) };
+        let _ = _write(2, msg.as_ptr() as *const _, msg.len());
         return 1;
     }
 
     let Ok(vfs_endpoint) = registry::subscribe_output("vfs", "main") else {
         let msg = b"touch: vfs not available\n";
-        let _ = unsafe { _write(2, msg.as_ptr() as *const _, msg.len()) };
+        let _ = _write(2, msg.as_ptr() as *const _, msg.len());
         return 1;
     };
     let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
         Ok(c) => c,
         Err(_) => {
             let msg = b"touch: failed to create vfs client\n";
-            let _ = unsafe { _write(2, msg.as_ptr() as *const _, msg.len()) };
+            let _ = _write(2, msg.as_ptr() as *const _, msg.len());
             return 1;
         }
     };
@@ -49,7 +49,7 @@ pub extern "C" fn main() -> i32 {
             }
             Err(e) => {
                 let line = format!("touch: {}: {:?}\n", path, e);
-                let _ = unsafe { _write(2, line.as_ptr() as *const _, line.len()) };
+                let _ = _write(2, line.as_ptr() as *const _, line.len());
                 // Mirror the failure to the kernel debug stream so the
                 // harness (which scrapes COM2) can observe it; tty/console
                 // output never reaches serial.

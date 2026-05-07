@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![allow(dead_code, unused_imports, unused_variables, unused_assignments)]
 
 // CLUU vi-like editor — scaffold (T1).
 //

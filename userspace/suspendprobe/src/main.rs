@@ -8,6 +8,7 @@
 
 #![no_std]
 #![no_main]
+#![allow(static_mut_refs)]
 
 extern crate alloc;
 
@@ -51,7 +52,7 @@ pub extern "C" fn main() -> i32 {
 
     let child = match thread_create(
         space,
-        child_entry as usize,
+        child_entry as *const () as usize,
         stack_top,
         128,
         THREAD_CREATE_START_SUSPENDED,

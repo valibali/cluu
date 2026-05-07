@@ -73,6 +73,7 @@ pub struct TtyContext {
     pub login_username: Vec<u8>,
     pub login_password: Vec<u8>,
     /// Lazily-initialized VFS client for tab completion path resolution.
+    #[allow(dead_code)]
     vfs_client: Option<VfsClient>,
 }
 
@@ -472,6 +473,7 @@ impl TtyContext {
     /// endpoint until VFS grants a token. This is a one-time cost on the first
     /// TAB press; subsequent calls return the cached client immediately.
     /// Returns None if VFS is not available (e.g., still starting up).
+    #[allow(dead_code)]
     pub fn vfs_client_lazy(&mut self) -> Option<&VfsClient> {
         if self.vfs_client.is_none() {
             let endpoint = registry::subscribe_output("vfs", "main").ok()?;

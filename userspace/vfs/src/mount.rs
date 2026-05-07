@@ -654,11 +654,11 @@ impl MemFsBackend {
         }
     }
 
-    pub fn borrow(&self) -> core::cell::Ref<MemFs> {
+    pub fn borrow(&self) -> core::cell::Ref<'_, MemFs> {
         self.fs.borrow()
     }
 
-    pub fn borrow_mut(&self) -> core::cell::RefMut<MemFs> {
+    pub fn borrow_mut(&self) -> core::cell::RefMut<'_, MemFs> {
         self.fs.borrow_mut()
     }
 }

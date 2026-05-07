@@ -28,6 +28,7 @@ pub enum SpacePolicy {
 }
 
 #[derive(Copy, Clone)]
+#[allow(dead_code)]
 pub enum ServiceKind {
     Registry,
     Timeserver,

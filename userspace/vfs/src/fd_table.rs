@@ -61,6 +61,7 @@ pub enum DeviceType {
 pub struct MemFsEntry {
     pub container_id: u64,
     pub inode_id: usize,
+    #[allow(dead_code)]
     pub memfs_path: String,
     pub size: usize,
 }

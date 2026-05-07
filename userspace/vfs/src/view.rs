@@ -116,6 +116,7 @@ impl VfsViewTable {
     /// - If a view exists but the path doesn't match any mount rule, returns
     ///   `Err(Error::NotFound)` — indistinguishable from "path doesn't exist."
     /// - Otherwise returns the rewritten real path.
+    #[allow(dead_code)]
     pub fn check_path(&self, client_id: usize, path: &str) -> Result<String> {
         validate_clean_absolute_path(path)?;
         self.resolve_effective_path(client_id, path)
@@ -126,6 +127,7 @@ impl VfsViewTable {
     ///
     /// Same semantics as `check_path`, but also indicates whether the
     /// resolved mount allows writes.
+    #[allow(dead_code)]
     pub fn check_path_writable(&self, client_id: usize, path: &str) -> Result<(String, bool)> {
         validate_clean_absolute_path(path)?;
         self.resolve_effective_path(client_id, path)

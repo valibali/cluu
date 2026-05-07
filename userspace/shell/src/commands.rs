@@ -13,7 +13,7 @@ use libcluu::boot::{TOKEN_REGISTRY, TOKEN_SPACE, TOKEN_STDIN};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
     call, call_with_payload, call_with_reply_buf, recv, send_with_payload, send_with_retry,
-    build_container_run_payload_with_argv, build_container_run_payload_full, FdAction, RedirAction,
+    build_container_run_payload_with_argv, build_container_run_payload_full, RedirAction,
     SharedRing, CONSOLE_CLEAR_LABEL, PROCMGR_CONTAINER_LIST_LABEL,
     PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_ESCALATE_LABEL, PROCMGR_SHUTDOWN_LABEL, PROCMGR_SU_LABEL,
     TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
@@ -98,6 +98,7 @@ impl CommandContext {
     }
 
     /// Return the exit status of the most recently executed builtin/command.
+    #[allow(dead_code)]
     pub fn last_status(&self) -> i32 {
         self.last_status
     }
@@ -136,6 +137,7 @@ impl CommandContext {
     }
 
     /// Test whether `name` is currently exported.
+    #[allow(dead_code)]
     pub fn is_exported(&self, name: &str) -> bool {
         self.exported.contains(name)
     }
@@ -2756,7 +2758,7 @@ fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -
         send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
     } else {
         let pid = reply.words[1];
-        let cookie = reply.words[2];
+        let _cookie = reply.words[2];
         let cid = reply.words[3];
         let child_stdin = reply.words[4];
         let line = format!("container '{}' started pid={} cid={}\n", name, pid, cid);

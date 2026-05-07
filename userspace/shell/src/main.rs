@@ -46,7 +46,7 @@ fn run() -> Result<()> {
     registry::init("shell")?;
     registry::register_default_outputs()?;
     let stdin = info.tokens[TOKEN_STDIN];
-    let stderr = info.tokens[TOKEN_STDERR];
+    let _stderr = info.tokens[TOKEN_STDERR];
     let stdlog = info.tokens[TOKEN_STDLOG];
     // stdout is already connected to the correct tty:N by procmgr.
     let stdout = info.tokens[TOKEN_STDOUT];

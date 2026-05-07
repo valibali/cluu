@@ -743,6 +743,7 @@ fn build_pcr_extend(pcr: u32, digest: &[u8; 32], buf: &mut [u8; 65]) {
 }
 
 /// TPM2_CreatePrimary — RSA-2048 AIK (restricted signing key) under owner hierarchy.
+#[allow(unused_assignments)]
 fn build_create_aik() -> [u8; 65] {
     let mut cmd = [0u8; 65];
     let mut off = 0;
@@ -811,6 +812,7 @@ fn build_create_aik() -> [u8; 65] {
 }
 
 /// TPM2_Quote — sign PCR 9 + 14 with AIK.
+#[allow(unused_assignments)]
 fn build_tpm2_quote(aik_handle: u32, nonce: &[u8; 32]) -> [u8; 73] {
     let mut cmd = [0u8; 73];
     let mut off = 0;
@@ -854,6 +856,7 @@ fn build_tpm2_quote(aik_handle: u32, nonce: &[u8; 32]) -> [u8; 73] {
 }
 
 /// TPM2_CreatePrimary — RSA-2048 SRK under owner hierarchy.
+#[allow(unused_assignments)]
 fn build_create_primary() -> [u8; 67] {
     let mut cmd = [0u8; 67];
     let mut off = 0;

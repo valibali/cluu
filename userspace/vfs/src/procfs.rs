@@ -196,7 +196,7 @@ impl ProcfsBackend {
             3,
         );
         let mut reply_buf = [0u8; 4096];
-        let (reply, payload_len) =
+        let (reply, _payload_len) =
             call_with_reply_buf(self.procmgr_endpoint, &req, &[], &mut reply_buf)?;
 
         let errno = reply.words[0] as isize;

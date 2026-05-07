@@ -24,6 +24,7 @@ pub enum MountPolicy {
     /// Replace with a fresh per-container backend (current hardcoded behavior).
     Private,
     /// Inherit, but force writable=false. Deferred — may be unimplemented for now.
+    #[allow(dead_code)]
     Ro,
 }
 

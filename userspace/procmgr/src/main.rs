@@ -117,6 +117,7 @@ struct ContainerInstance {
     parent_container_id: u64, // 0 = top-level or detached
     pid: usize,
     image_path: String,
+    #[allow(dead_code)]
     mapped_pages: u32,
     restart_policy: RestartPolicy,
     restart_count: usize,
@@ -135,6 +136,7 @@ struct PendingVfsView {
 
 struct UserRecord {
     home: String,
+    #[allow(dead_code)]
     shell: String,
     profile: CapProfile,
     profile_name: String,
@@ -150,6 +152,7 @@ struct LoginAttempt {
 struct SessionEntry {
     container_id: u64,
     shell_cid: u64,
+    #[allow(dead_code)]
     pid: usize,
     username: String,
     profile: CapProfile,
@@ -2162,6 +2165,7 @@ impl ProcessManager {
         }
     }
 
+    #[allow(dead_code)]
     fn build_session_view(&self, user_record: &UserRecord) -> ViewMountList {
         self.build_view_for_profile_and_home(user_record.profile, &user_record.home)
     }
@@ -3835,7 +3839,7 @@ impl ProcessManager {
         let _ = send(self.blkdev_endpoint, &msg, IpcFlags::empty());
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     fn spawn_service(
         &mut self,
         path: &str,
@@ -5917,6 +5921,7 @@ fn policy_driven_memfs_mounts(
 /// with an equal or wider prefix and equal or greater write permission.
 /// An empty parent view means no filesystem access — no child mount can pass.
 /// An empty child view is always valid (child requests no access).
+#[allow(dead_code)]
 fn can_narrow_view(parent_view: &[(String, String, bool, u64)], child_view: &[(String, String, bool, u64)]) -> bool {
     for (child_src, child_dst, child_writable, _child_memfs_cid) in child_view {
         let covered = parent_view.iter().any(|(p_src, p_dst, p_writable, _p_memfs_cid)| {

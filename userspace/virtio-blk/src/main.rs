@@ -27,7 +27,7 @@ use libcluu::boot::{
 };
 use libcluu::fs::{BlockDevice, Filesystem};
 use libcluu::ipc::{
-    extract_reply_id, reply, reply_with_payload, BLK_CLOSE_SESSION, BLK_COMPLETE, BLK_OPEN_SESSION,
+    extract_reply_id, reply, reply_with_payload, BLK_CLOSE_SESSION, BLK_OPEN_SESSION,
     BLK_SUBMIT, BLK_SUBMIT_NACK, BLK_TID_CLEANUP,
 };
 use libcluu::registry;

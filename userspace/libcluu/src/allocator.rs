@@ -125,6 +125,7 @@ mod inner {
 
     /// Static bootstrap heap for early allocations before boot tokens are ready.
     #[repr(align(4096))]
+    #[allow(dead_code)]
     struct StaticHeap([u8; STATIC_HEAP_SIZE]);
 
     static mut STATIC_HEAP: StaticHeap = StaticHeap([0; STATIC_HEAP_SIZE]);

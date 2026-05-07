@@ -75,7 +75,7 @@ pub extern "C" fn main() -> i32 {
     } else {
         let mut chunk = [0u8; 4096];
         loop {
-            let r = unsafe { _read(0, chunk.as_mut_ptr() as *mut _, chunk.len()) };
+            let r = _read(0, chunk.as_mut_ptr() as *mut _, chunk.len());
             if r <= 0 {
                 break;
             }
@@ -166,5 +166,5 @@ fn read_whole_file_into(path: &str, dst: &mut Vec<u8>) -> Result<(), ()> {
 }
 
 fn write_fd(fd: i32, data: &[u8]) {
-    let _ = unsafe { _write(fd, data.as_ptr() as *const _, data.len()) };
+    let _ = _write(fd, data.as_ptr() as *const _, data.len());
 }
