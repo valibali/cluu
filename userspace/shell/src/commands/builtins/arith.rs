@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
 use libcluu::Result;
 
-use crate::commands_old::CommandContext;
+use super::registry::CommandContext;
 use super::registry::{BuiltinCommand, BuiltinRegistry};
 
 pub fn register(registry: &mut BuiltinRegistry) {

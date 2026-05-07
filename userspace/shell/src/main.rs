@@ -6,8 +6,6 @@ extern crate alloc;
 #[cfg(feature = "lang-parser")]
 mod commands;
 #[cfg(feature = "lang-parser")]
-mod commands_old;
-#[cfg(feature = "lang-parser")]
 mod path_lookup;
 #[cfg(feature = "lang-parser")]
 mod pipeline;

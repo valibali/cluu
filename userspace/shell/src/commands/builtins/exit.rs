@@ -8,7 +8,7 @@ use libcluu::types::Message;
 use libcluu::{IpcFlags, Result};
 use libcluu::syscall;
 
-use crate::commands_old::CommandContext;
+use super::registry::CommandContext;
 use super::registry::{BuiltinCommand, BuiltinRegistry};
 
 pub fn register(registry: &mut BuiltinRegistry) {

@@ -21,11 +21,11 @@ use libcluu::syscall;
 use libcluu::types::Message;
 use libcluu::{debug_print, Error, IpcFlags, Result, TOKEN_IPC};
 
-use crate::commands_old::{
+use crate::commands::exec::{
     ensure_bg_job_state, parse_spawn_args, parse_status,
-    signal_process, spawn_process, wait_for_exit_or_sigint, CommandContext,
-    ForegroundMode, JobState,
+    signal_process, spawn_process, wait_for_exit_or_sigint,
 };
+use super::registry::{CommandContext, ForegroundMode, JobState};
 use super::registry::{BuiltinCommand, BuiltinRegistry};
 
 const PROCMGR_KILL_LABEL: u32 = 3;
@@ -76,7 +76,7 @@ impl BuiltinCommand for SpawnBuiltin {
             return Ok(());
         };
         let argv_refs: Vec<&str> = argv_tail.iter().map(|s| s.as_str()).collect();
-        let spawn = crate::commands_old::spawn_process_with_argv(context, path.as_str(), priority, &argv_refs)?;
+        let spawn = crate::commands::exec::spawn_process_with_argv(context, path.as_str(), priority, &argv_refs)?;
         match parse_status(spawn.status_word) {
             Ok(()) => {
                 let child_pid = spawn.pid;
@@ -117,7 +117,7 @@ impl BuiltinCommand for SpawnBgBuiltin {
             return Ok(());
         };
 
-        let spawn = crate::commands_old::spawn_process_with_argv(context, path.as_str(), priority, &[])?;
+        let spawn = crate::commands::exec::spawn_process_with_argv(context, path.as_str(), priority, &[])?;
         match parse_status(spawn.status_word) {
             Ok(()) => {
                 context.add_bg_job(
@@ -177,7 +177,7 @@ impl BuiltinCommand for ForegroundBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(pid) = crate::commands_old::resolve_job_pid(context, args.first()) else {
+        let Some(pid) = crate::commands::exec::resolve_job_pid(context, args.first()) else {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"fg: no background jobs\n")?;
             return Ok(());
         };
@@ -222,7 +222,7 @@ impl BuiltinCommand for StopBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(pid) = crate::commands_old::resolve_job_pid(context, args.first()) else {
+        let Some(pid) = crate::commands::exec::resolve_job_pid(context, args.first()) else {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"stop: no background jobs\n")?;
             return Ok(());
         };
@@ -258,7 +258,7 @@ impl BuiltinCommand for BackgroundBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(pid) = crate::commands_old::resolve_job_pid(context, args.first()) else {
+        let Some(pid) = crate::commands::exec::resolve_job_pid(context, args.first()) else {
             send_with_payload(stdout, TTY_WRITE_LABEL, b"bg: no background jobs\n")?;
             return Ok(());
         };

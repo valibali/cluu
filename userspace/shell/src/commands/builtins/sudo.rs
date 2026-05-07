@@ -15,7 +15,8 @@ use libcluu::syscall;
 use libcluu::types::Message;
 use libcluu::{debug_print, IpcFlags, Result, TOKEN_IPC};
 
-use crate::commands_old::{set_tty_foreground, CommandContext};
+use crate::commands::exec::set_tty_foreground;
+use super::registry::CommandContext;
 use super::registry::{BuiltinCommand, BuiltinRegistry};
 
 pub fn register(registry: &mut BuiltinRegistry) {
