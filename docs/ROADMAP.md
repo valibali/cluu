@@ -174,7 +174,7 @@ No dates. A phase is done when the capabilities exist, full stop.
 
 **Exit criteria:**
 
-- [ ] `SpaceDestroy` invoke op lands — longest-deferred memory-leak source closed.
+- [x] `SpaceDestroy` invoke op lands — longest-deferred memory-leak source closed. *(shipped: kernel handler in `syscall/handlers.rs::invoke_space_destroy`, libcluu wrapper, called by procmgr at exit/kill paths)*
 - [ ] Userspace `poll()`/`select()` work for pipes, TTYs, and /dev pseudo-files. (Sockets deferred to Phase 4.)
 - [ ] Compiler warnings across the tree < 5 total (currently ~30).
 - [ ] H9/H10 overflow counters exposed in `/proc` and visible from `top`.

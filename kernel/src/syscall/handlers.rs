@@ -808,6 +808,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
 
         // IPC operations
         InvokeOp::EndpointCreate => invoke_endpoint_create(&token, obj_ref, args),
+        InvokeOp::EndpointPeek => invoke_endpoint_peek(&token, obj_ref, args),
 
         // PCI operations
         InvokeOp::PciConfigRead => invoke_pci_config_read(&token, obj_ref, args),
@@ -1188,6 +1189,23 @@ fn invoke_endpoint_create(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs
     );
 
     Ok(endpoint_token.as_usize())
+}
+
+/// Non-destructive query of an endpoint's recv queue depth.
+/// Requires IPC_RECV right (matches "if you can recv, you can ask if recv would block").
+/// Returns the number of pending regular messages.
+fn invoke_endpoint_peek(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
+    use crate::token::{ObjectRef, Rights};
+
+    if !token.has_right(Rights::IPC_RECV) {
+        return Err(Error::PermissionDenied);
+    }
+    let endpoint_id = match obj_ref {
+        ObjectRef::Endpoint(id) => id,
+        _ => return Err(Error::InvalidArgument),
+    };
+    let pending = crate::ipc::endpoint::peek(endpoint_id)?;
+    Ok(pending)
 }
 
 // Space operations

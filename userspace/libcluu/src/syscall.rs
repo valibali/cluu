@@ -82,6 +82,7 @@ pub enum InvokeOp {
 
     // IPC operations
     EndpointCreate = 40,
+    EndpointPeek = 41,
 
     // PCI operations
     PciConfigRead = 50,
@@ -740,6 +741,16 @@ pub fn space_destroy(space_token: usize) -> Result<()> {
         invoke(space_token, InvokeOp::SpaceDestroy, 0, 0, 0, 0)?;
     }
     Ok(())
+}
+
+/// Non-destructive query of an endpoint's recv queue depth.
+///
+/// Returns the number of pending regular messages on the endpoint. Used by
+/// `poll()`/`select()` to test pipe read-end readiness without consuming data.
+/// Requires IPC_RECV right on the supplied token.
+pub fn endpoint_peek(endpoint_token: usize) -> Result<usize> {
+    let pending = unsafe { invoke(endpoint_token, InvokeOp::EndpointPeek, 0, 0, 0, 0)? };
+    Ok(pending)
 }
 
 /// Map page in address space

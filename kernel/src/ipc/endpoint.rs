@@ -207,6 +207,12 @@ impl QueueEndpoint {
         self.callers_by_cookie.remove(&cookie)
     }
 
+    /// Number of regular messages pending in the recv queue.
+    /// Used by `peek()` for non-destructive readiness queries (poll/select on pipes).
+    pub fn pending(&self) -> usize {
+        self.queue.len()
+    }
+
     fn stats(&self) -> QueueStats {
         QueueStats {
             queue_len: self.queue.len(),
@@ -691,6 +697,20 @@ pub fn recv_nonblocking(endpoint: EndpointId) -> Result<Option<ReceivedMessage>,
         .get_mut(&endpoint)
         .ok_or(Error::NotFound)?;
     ep.recv_nonblocking()
+}
+
+/// Non-destructive query of the recv queue depth.
+/// Returns the number of pending regular messages (does not include call_queue
+/// or waiting senders). Used by `InvokeOp::EndpointPeek` for poll() readiness
+/// checks on pipe read-ends.
+pub fn peek(endpoint: EndpointId) -> Result<usize, Error> {
+    let shard = get_endpoint_shard(endpoint);
+    let shard_guard = shard.lock();
+    let ep = shard_guard
+        .endpoints
+        .get(&endpoint)
+        .ok_or(Error::NotFound)?;
+    Ok(ep.pending())
 }
 
 pub fn send_from_user(

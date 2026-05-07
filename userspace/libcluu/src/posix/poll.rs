@@ -27,6 +27,9 @@ pub struct pollfd {
 /// Maximum number of TTY file descriptors tracked per poll() call.
 const MAX_TTY_POLL_FDS: usize = 4;
 
+/// Maximum number of pipe read-end fds tracked per poll() call.
+const MAX_PIPE_POLL_FDS: usize = 16;
+
 /// Query the TTY service for input data readiness.
 ///
 /// Uses the TTY endpoint cached from fd 1 (stdout), NOT fd 0's endpoint,
@@ -71,9 +74,12 @@ pub extern "C" fn poll(fds: *mut pollfd, nfds: nfds_t, timeout: c_int) -> c_int 
         let mut ready: c_int = 0;
 
         // Phase 1: Check non-IPC readiness under FD_TABLE lock.
-        // Collect indices of TTY fds that need a readiness IPC query.
+        // Collect indices of TTY/pipe fds that need a readiness IPC query.
         let mut tty_pollin_indices = [0usize; MAX_TTY_POLL_FDS];
         let mut n_tty = 0usize;
+        let mut pipe_pollin_indices = [0usize; MAX_PIPE_POLL_FDS];
+        let mut pipe_endpoints = [0usize; MAX_PIPE_POLL_FDS];
+        let mut n_pipe = 0usize;
 
         if nfds > 0 {
             let entries = unsafe { core::slice::from_raw_parts_mut(fds, nfds) };
@@ -96,15 +102,30 @@ pub extern "C" fn poll(fds: *mut pollfd, nfds: nfds_t, timeout: c_int) -> c_int 
                 };
 
                 if (pfd.events & POLLIN) != 0 {
-                    // Regular seekable file descriptors are always readable.
-                    if entry.is_seekable() {
+                    // Regular seekable file descriptors (incl. /dev pseudo-files
+                    // backed by VFS DeviceBackend) are always readable when the
+                    // fd was opened readable.
+                    if entry.is_seekable() && entry.is_readable() {
                         pfd.revents |= POLLIN;
+                    } else if entry.is_pipe()
+                        && entry.is_readable()
+                        && n_pipe < MAX_PIPE_POLL_FDS
+                    {
+                        pipe_pollin_indices[n_pipe] = i;
+                        pipe_endpoints[n_pipe] = entry.endpoint;
+                        n_pipe += 1;
                     } else if entry.is_tty() && entry.is_readable() && n_tty < MAX_TTY_POLL_FDS {
                         tty_pollin_indices[n_tty] = i;
                         n_tty += 1;
                     }
                 }
                 if (pfd.events & POLLOUT) != 0 && entry.is_writable() {
+                    // Pipes, TTYs, files: writes do not block in current
+                    // implementation under common-case load (queue MAX = 1024
+                    // messages). Treat POLLOUT as always-ready for any writable
+                    // fd. If write actually blocks, callers will discover via
+                    // EAGAIN when O_NONBLOCK lands; until then this matches the
+                    // behavior we want for shell pipelines.
                     pfd.revents |= POLLOUT;
                 }
                 if pfd.revents != 0 {
@@ -113,10 +134,24 @@ pub extern "C" fn poll(fds: *mut pollfd, nfds: nfds_t, timeout: c_int) -> c_int 
             }
             drop(table); // Must drop FD_TABLE lock before Phase 2 IPC calls
 
-            // Phase 2: Query TTY readiness via IPC (outside lock).
+            // Phase 2a: Query TTY readiness via IPC (outside lock).
             if n_tty > 0 && query_tty_readiness() {
                 for j in 0..n_tty {
                     let pfd = &mut entries[tty_pollin_indices[j]];
+                    if pfd.revents == 0 {
+                        ready += 1;
+                    }
+                    pfd.revents |= POLLIN;
+                }
+            }
+
+            // Phase 2b: Query pipe read-end readiness via EndpointPeek invoke
+            // (outside lock). Each pipe read-end token has IPC_RECV right; peek
+            // is non-destructive and returns the queue depth.
+            for j in 0..n_pipe {
+                let depth = crate::syscall::endpoint_peek(pipe_endpoints[j]).unwrap_or(0);
+                if depth > 0 {
+                    let pfd = &mut entries[pipe_pollin_indices[j]];
                     if pfd.revents == 0 {
                         ready += 1;
                     }

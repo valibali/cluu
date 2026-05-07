@@ -399,6 +399,7 @@ pub enum InvokeOp {
 
     // IPC operations
     EndpointCreate = 40,
+    EndpointPeek = 41,
 
     // PCI operations
     PciConfigRead = 50,
@@ -459,6 +460,7 @@ impl InvokeOp {
             30 => Some(Self::IrqAttach),
             31 => Some(Self::IrqAck),
             40 => Some(Self::EndpointCreate),
+            41 => Some(Self::EndpointPeek),
             50 => Some(Self::PciConfigRead),
             51 => Some(Self::PciConfigWrite),
             52 => Some(Self::PortIn8),

@@ -290,6 +290,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND="spawn pollprobe"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn pollprobe"
                 ;;
+            l2_poll_pipes)
+                TEST_COMMAND="spawn pollprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn pollprobe"
+                ;;
             perf_benchprobe)
                 TEST_COMMAND="spawn benchprobe"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
