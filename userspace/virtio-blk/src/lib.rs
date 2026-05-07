@@ -9,6 +9,7 @@
 extern crate alloc;
 
 pub mod pci;
+pub mod protocol;
 pub mod virtio;
 pub mod virtqueue;
 
