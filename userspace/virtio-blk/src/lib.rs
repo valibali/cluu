@@ -227,10 +227,126 @@ impl BlockDevice for ModernBlkAdapter {
         Ok(copy_len)
     }
 
-    fn write_bytes(&self, _offset: u64, _buf: &[u8]) -> Result<usize> {
-        // Writes still go through the legacy driver during the transition.
-        // Will be implemented in a follow-up after reads are proven.
-        Err(libcluu::Error::NotImplemented)
+    fn write_bytes(&self, offset: u64, buf_in: &[u8]) -> Result<usize> {
+        if buf_in.is_empty() {
+            return Ok(0);
+        }
+
+        let sector_size = self.sector_size_bytes as u64;
+        let start_sector = offset / sector_size;
+        let sector_offset = (offset % sector_size) as usize;
+        let end_byte = offset + buf_in.len() as u64;
+        let end_sector = end_byte.div_ceil(sector_size);
+        let sector_count = end_sector - start_sector;
+        let total_bytes = (sector_count as usize) * self.sector_size_bytes;
+
+        if total_bytes > self.scratch_pages * 4096 {
+            return Err(libcluu::Error::BufferTooSmall);
+        }
+
+        let n_pages = total_bytes.div_ceil(4096);
+        let mut pages: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(n_pages);
+        for i in 0..n_pages {
+            let va = self.scratch_base + i * 4096;
+            let phys = libcluu::syscall::virt_to_phys(self.space_token, va)? as u64;
+            pages.push(phys);
+        }
+
+        // Partial-sector writes need read-modify-write to preserve untouched
+        // bytes inside the head/tail sectors.
+        let needs_rmw =
+            sector_offset != 0 || !buf_in.len().is_multiple_of(self.sector_size_bytes);
+
+        let mut inner = self.state.inner.lock();
+        let mut deferred_async: Vec<(usize, u64, u8, u32)> = Vec::new();
+
+        if needs_rmw {
+            let cookie = self.state.alloc_sync_cookie();
+            inner
+                .bq
+                .submit_read(start_sector, &pages, total_bytes, cookie)?;
+            inner.bq.notify();
+            let mut my_status: Option<u8> = None;
+            let mut spins = 0u64;
+            while my_status.is_none() {
+                let completions = inner.bq.drain_completions();
+                for (got, status, blen) in completions {
+                    if got == cookie {
+                        my_status = Some(status);
+                    } else if let Some(p) = inner.pending.remove(&got) {
+                        deferred_async.push((p.comp_ep, p.rid, status, blen));
+                    }
+                }
+                if my_status.is_some() {
+                    break;
+                }
+                spins += 1;
+                if spins.is_multiple_of(1024) {
+                    let _ = libcluu::syscall::yield_cpu();
+                }
+                core::hint::spin_loop();
+            }
+            if my_status.unwrap() != 0 {
+                drop(inner);
+                for (comp_ep, rid, status, blen) in deferred_async {
+                    let msg = Message::new(
+                        BLK_COMPLETE,
+                        [rid as usize, status as usize, blen as usize, 0, 0, 0],
+                        3,
+                    );
+                    let _ = ipc_send(comp_ep, msg.as_bytes());
+                }
+                return Err(libcluu::Error::InvalidState);
+            }
+        }
+
+        // Stage payload into scratch.
+        let scratch = unsafe {
+            core::slice::from_raw_parts_mut(self.scratch_base as *mut u8, total_bytes)
+        };
+        scratch[sector_offset..sector_offset + buf_in.len()].copy_from_slice(buf_in);
+
+        let cookie = self.state.alloc_sync_cookie();
+        inner
+            .bq
+            .submit_write(start_sector, &pages, total_bytes, cookie)?;
+        inner.bq.notify();
+
+        let mut my_status: Option<u8> = None;
+        let mut spins = 0u64;
+        while my_status.is_none() {
+            let completions = inner.bq.drain_completions();
+            for (got, status, blen) in completions {
+                if got == cookie {
+                    my_status = Some(status);
+                } else if let Some(p) = inner.pending.remove(&got) {
+                    deferred_async.push((p.comp_ep, p.rid, status, blen));
+                }
+            }
+            if my_status.is_some() {
+                break;
+            }
+            spins += 1;
+            if spins.is_multiple_of(1024) {
+                let _ = libcluu::syscall::yield_cpu();
+            }
+            core::hint::spin_loop();
+        }
+        drop(inner);
+
+        for (comp_ep, rid, status, blen) in deferred_async {
+            let msg = Message::new(
+                BLK_COMPLETE,
+                [rid as usize, status as usize, blen as usize, 0, 0, 0],
+                3,
+            );
+            let _ = ipc_send(comp_ep, msg.as_bytes());
+        }
+
+        if my_status.unwrap() != 0 {
+            return Err(libcluu::Error::InvalidState);
+        }
+        Ok(buf_in.len())
     }
 
     fn sector_size(&self) -> usize {

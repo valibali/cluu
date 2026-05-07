@@ -4,7 +4,7 @@
 //! their virtqueue cookie (which packs (session_id << 32) | request_id).
 //! Completions are drained from the used ring on IRQ wake.
 
-use crate::protocol::{VirtioBlkReqHeader, VIRTIO_BLK_T_IN};
+use crate::protocol::{VirtioBlkReqHeader, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT};
 use cluu_virtio_core::dma::{DmaPool, DmaRegion};
 use cluu_virtio_core::transport::Transport;
 use cluu_virtio_core::virtqueue::{Virtqueue, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
@@ -125,6 +125,93 @@ impl<T: Transport> BlkRequestQueue<T> {
                     page_phys[page_idx],
                     bytes_in_page as u32,
                     VRING_DESC_F_NEXT | VRING_DESC_F_WRITE,
+                    next_link,
+                );
+            }
+        }
+
+        self.vq.submit(chain, cookie);
+        self.in_flight.push(InflightSlot {
+            cookie,
+            header_region,
+            status_region,
+        });
+        Ok(())
+    }
+
+    /// Submit a write of `total_bytes` from caller-provided physical pages
+    /// `page_phys[..]` to `lba`. `cookie` is opaque routing data. `notify` is
+    /// the caller's responsibility after a batch of submits.
+    ///
+    /// Descriptor chain shape:
+    ///   [ header(OUT, len=16) -> page0(OUT) -> ... -> pageN(OUT) -> status(WRITE, 1) ]
+    /// Buffer pages are device-readable (no VRING_DESC_F_WRITE on data descs).
+    pub fn submit_write(
+        &mut self,
+        lba: u64,
+        page_phys: &[u64],
+        total_bytes: usize,
+        cookie: u64,
+    ) -> Result<()> {
+        if page_phys.is_empty() {
+            return Err(Error::InvalidArgument);
+        }
+
+        let (header_region, status_region) = match self.free_slots.pop() {
+            Some(pair) => pair,
+            None => {
+                let h = self.pool.alloc(16, 16)?;
+                let s = self.pool.alloc(1, 1)?;
+                (h, s)
+            }
+        };
+
+        let n_descs = (page_phys.len() + 2) as u16;
+        let chain = match self.vq.alloc_chain(n_descs) {
+            Some(c) => c,
+            None => {
+                self.free_slots.push((header_region, status_region));
+                return Err(Error::Busy);
+            }
+        };
+
+        unsafe {
+            let h = header_region.virt as *mut VirtioBlkReqHeader;
+            (*h).type_ = VIRTIO_BLK_T_OUT;
+            (*h).reserved = 0;
+            (*h).sector = lba;
+        }
+        unsafe {
+            *(status_region.virt as *mut u8) = 0xFF;
+        }
+
+        let descs = self.collect_chain_indices(chain.head, n_descs);
+        for (i, &didx) in descs.iter().enumerate() {
+            let is_last = i == descs.len() - 1;
+            if i == 0 {
+                // Header: device reads, OUT (no WRITE flag).
+                let next_link = if is_last { 0 } else { descs[i + 1] };
+                let flags = if is_last { 0 } else { VRING_DESC_F_NEXT };
+                self.vq
+                    .desc_set(didx, header_region.phys, 16, flags, next_link);
+            } else if i == descs.len() - 1 {
+                // Status: device writes.
+                self.vq
+                    .desc_set(didx, status_region.phys, 1, VRING_DESC_F_WRITE, 0);
+            } else {
+                // Buffer pages: device READS them — no VRING_DESC_F_WRITE.
+                let page_idx = i - 1;
+                let bytes_in_page = if page_idx == page_phys.len() - 1 {
+                    total_bytes - page_idx * 4096
+                } else {
+                    4096
+                };
+                let next_link = descs[i + 1];
+                self.vq.desc_set(
+                    didx,
+                    page_phys[page_idx],
+                    bytes_in_page as u32,
+                    VRING_DESC_F_NEXT,
                     next_link,
                 );
             }
