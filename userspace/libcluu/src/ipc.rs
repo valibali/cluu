@@ -166,6 +166,9 @@ pub const BLK_SUBMIT: u32 = 0x311;
 pub const BLK_COMPLETE: u32 = 0x312;
 pub const BLK_CLOSE_SESSION: u32 = 0x313;
 pub const BLK_SUBMIT_NACK: u32 = 0x314;
+/// Procmgr → virtio-blk: a tid has exited; reap any sessions owned by it.
+/// words[0] = exited tid. No reply.
+pub const BLK_TID_CLEANUP: u32 = 0x315;
 
 // tpmd IPC labels (per-service label space)
 pub const TPMD_STARTUP_LABEL: u32    = 1;

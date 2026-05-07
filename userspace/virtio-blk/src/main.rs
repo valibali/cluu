@@ -28,10 +28,10 @@ use libcluu::boot::{
 use libcluu::fs::{BlockDevice, Filesystem};
 use libcluu::ipc::{
     extract_reply_id, reply, reply_with_payload, BLK_CLOSE_SESSION, BLK_COMPLETE, BLK_OPEN_SESSION,
-    BLK_SUBMIT, BLK_SUBMIT_NACK,
+    BLK_SUBMIT, BLK_SUBMIT_NACK, BLK_TID_CLEANUP,
 };
 use libcluu::registry;
-use libcluu::syscall::{endpoint_create, ipc_recv_any, ipc_send, space_map_range};
+use libcluu::syscall::{endpoint_create, ipc_recv_any_with_sender, ipc_send, space_map_range};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, space_grant, Error, Result, PAGE_SIZE};
 
@@ -270,7 +270,7 @@ fn run() -> Result<()> {
     let mut buf = [0u8; 4096];
     loop {
         let tokens = [listen_endpoint, irq.endpoint, registry_endpoint];
-        let (idx, len) = match ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+        let (idx, len, sender_tid) = match ipc_recv_any_with_sender(&tokens, &mut buf, u64::MAX) {
             Ok(t) => t,
             Err(_) => continue,
         };
@@ -294,7 +294,7 @@ fn run() -> Result<()> {
             continue;
         }
 
-        if dispatch_blk_session(&state, &mut sessions, msg, payload) {
+        if dispatch_blk_session(&state, &mut sessions, msg, payload, sender_tid) {
             continue;
         }
 
@@ -740,6 +740,7 @@ fn dispatch_blk_session(
     sessions: &mut BlkSessionRegistry,
     msg: &Message,
     payload: &[u8],
+    sender_tid: usize,
 ) -> bool {
     let reply_token = extract_reply_id(msg);
     match msg.tag.label {
@@ -752,7 +753,7 @@ fn dispatch_blk_session(
             }
             sessions
                 .sessions
-                .insert(sid, BlkSession::new(sid, comp_ep));
+                .insert(sid, BlkSession::new(sid, comp_ep, sender_tid));
 
             let reply_msg = Message::new(BLK_OPEN_SESSION, [0, sid as usize, 0, 0, 0, 0], 2);
             if let Some(rt) = reply_token {
@@ -764,6 +765,25 @@ fn dispatch_blk_session(
         BLK_CLOSE_SESSION => {
             let sid = msg.words[0] as u32;
             sessions.sessions.remove(&sid);
+            true
+        }
+
+        BLK_TID_CLEANUP => {
+            // Procmgr broadcast: the named tid has exited. Reap any sessions
+            // owned by it. Authoritative — we trust procmgr's tid claim;
+            // sender_tid auth on the channel limits who can issue this.
+            let dead_tid = msg.words[0];
+            let to_drop: alloc::vec::Vec<u32> = sessions
+                .sessions
+                .iter()
+                .filter_map(|(sid, s)| if s.owner_tid == dead_tid { Some(*sid) } else { None })
+                .collect();
+            for sid in to_drop {
+                sessions.sessions.remove(&sid);
+                let _ = libcluu::debug_print(&format!(
+                    "virtio-blk: session {} reaped (tid={})", sid, dead_tid
+                ));
+            }
             true
         }
 

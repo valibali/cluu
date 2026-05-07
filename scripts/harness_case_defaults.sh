@@ -52,6 +52,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn blkprobe perf"
                 ;;
+            l2_blk_session_teardown)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn blkprobe leak"
+                ;;
             l2_bare_cmd)
                 TEST_COMMAND=""
                 # UE17: PATH-based bare-command resolution. No `spawn` prefix —

@@ -252,6 +252,9 @@ struct ProcessManager {
     /// Bitmask: bit N set means subscription for tty:N was requested.
     requested_tty_mask: u8,
     vfs_endpoint: usize,    // VFS service endpoint
+    /// virtio-blk listen endpoint for BLK_TID_CLEANUP broadcasts. Resolved
+    /// lazily on first cleanup so we don't depend on blkdev boot order.
+    blkdev_endpoint: usize,
     space_token: usize,     // Our address space token for grants
     grant_base_next: usize, // Reused base address for grant buffer
     clock_token: usize,
@@ -325,6 +328,7 @@ impl ProcessManager {
             tty_endpoints: [0; VT_COUNT],
             requested_tty_mask: 0,
             vfs_endpoint: 0,
+            blkdev_endpoint: 0,
             space_token: info.tokens[TOKEN_SPACE],
             grant_base_next: 0x50100000, // Start after virtqueue region
             clock_token: info.tokens[TOKEN_CLOCK],
@@ -3801,6 +3805,7 @@ impl ProcessManager {
         self.container_owner_pids.remove(&pid);
         if let Some(thread_tid) = self.pid_to_tid.remove(&pid) {
             self.tid_to_pid.remove(&thread_tid);
+            self.broadcast_blk_tid_cleanup(thread_tid);
         }
         for idx in 0..self.pipes.len() {
             if self.pipes[idx].as_ref().map_or(false, |e| e.creator_pid == pid) {
@@ -3814,6 +3819,20 @@ impl ProcessManager {
                 let _ = token_revoke(entry.endpoint);
             }
         }
+    }
+
+    /// Tell virtio-blk that `tid` exited so it can reap any open sessions.
+    /// Resolves the blkdev endpoint lazily — boots before blkdev would fail.
+    fn broadcast_blk_tid_cleanup(&mut self, tid: usize) {
+        if self.blkdev_endpoint == 0 {
+            self.blkdev_endpoint =
+                registry::subscribe_output("blkdev", "main").unwrap_or(0);
+        }
+        if self.blkdev_endpoint == 0 {
+            return;
+        }
+        let msg = Message::new(libcluu::ipc::BLK_TID_CLEANUP, [tid, 0, 0, 0, 0, 0], 1);
+        let _ = send(self.blkdev_endpoint, &msg, IpcFlags::empty());
     }
 
     #[allow(clippy::too_many_arguments)]

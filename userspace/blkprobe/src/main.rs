@@ -4,6 +4,8 @@
 //!   - "basic" (default): single sector-0 read — l2_blk_basic.
 //!   - "concurrent":      4 sessions × 100 reads — l2_blk_concurrent.
 //!   - "perf":            64 MB sequential, ≥150 MB/s floor — l2_blk_perf.
+//!   - "leak":            open + submit + exit-without-close —
+//!                        l2_blk_session_teardown.
 
 #![no_std]
 #![no_main]
@@ -25,6 +27,9 @@ const CONCURRENT_SCRATCH_VA: usize = 0x4500_0000;
 const CONCURRENT_SCRATCH_PAGES_PER_SESSION: usize = 1;
 const CONCURRENT_SESSIONS: usize = 4;
 const CONCURRENT_READS: usize = 100;
+
+const LEAK_SCRATCH_VA: usize = 0x4700_0000;
+const LEAK_SCRATCH_PAGES: usize = 1;
 
 const PERF_SCRATCH_VA: usize = 0x4600_0000;
 const PERF_CHUNK_BYTES: usize = 512 * 1024; // 512 KB per request → 128-page chain (130 descs, fits queue_size=256).
@@ -60,6 +65,7 @@ pub extern "C" fn main() -> i32 {
         "basic" => run_basic(),
         "concurrent" => run_concurrent(),
         "perf" => run_perf(),
+        "leak" => run_leak(),
         _ => fail("unknown mode"),
     }
 }
@@ -243,5 +249,44 @@ fn run_perf() -> i32 {
     }
 
     let _ = libcluu::debug_print("blkprobe: ALL OK");
+    0
+}
+
+/// l2_blk_session_teardown probe: open a session, submit one async read,
+/// then exit before draining or closing. The driver should reap the
+/// session via procmgr's BLK_TID_CLEANUP broadcast on this process's exit.
+fn run_leak() -> i32 {
+    let info = process_info();
+    let space_token = info.tokens[TOKEN_SPACE];
+
+    if let Err(rc) = map_scratch(space_token, LEAK_SCRATCH_VA, LEAK_SCRATCH_PAGES) {
+        return rc;
+    }
+    if let Err(rc) = ensure_registry() {
+        return rc;
+    }
+
+    let blkdev = match libcluu::registry::subscribe_output("blkdev", "main") {
+        Ok(ep) => ep,
+        Err(_) => return fail("subscribe blkdev:main"),
+    };
+
+    let mut client = match BlkSessionClient::open(blkdev) {
+        Ok(c) => c,
+        Err(_) => return fail("BlkSessionClient::open"),
+    };
+
+    let buf = unsafe {
+        core::slice::from_raw_parts_mut(LEAK_SCRATCH_VA as *mut u8, 4096)
+    };
+
+    if client.submit_async(0, buf).is_err() {
+        return fail("submit_async");
+    }
+
+    let _ = libcluu::debug_print("blkprobe: leak SUBMITTED, exiting");
+    // Skip Drop: we want to simulate an unclean exit so procmgr's
+    // BLK_TID_CLEANUP path is the only thing that reaps the session.
+    core::mem::forget(client);
     0
 }

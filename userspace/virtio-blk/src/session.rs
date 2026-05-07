@@ -21,15 +21,19 @@ pub struct BlkSession {
     pub completion_endpoint: usize,
     pub queue_depth_cap: u16,
     pub in_flight: BTreeMap<RequestId, InFlight>,
+    /// Authenticated tid of the BLK_OPEN_SESSION caller. Used by procmgr's
+    /// BLK_TID_CLEANUP broadcast to reap sessions of dead processes.
+    pub owner_tid: usize,
 }
 
 impl BlkSession {
-    pub fn new(session_id: SessionId, completion_endpoint: usize) -> Self {
+    pub fn new(session_id: SessionId, completion_endpoint: usize, owner_tid: usize) -> Self {
         Self {
             session_id,
             completion_endpoint,
             queue_depth_cap: 32,
             in_flight: BTreeMap::new(),
+            owner_tid,
         }
     }
 
