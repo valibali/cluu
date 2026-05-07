@@ -217,3 +217,69 @@ impl Virtqueue {
         out
     }
 }
+
+impl Virtqueue {
+    /// Push the chain head onto the avail ring and store the caller's cookie.
+    /// Does NOT issue a `notify` to the device — the caller batches a
+    /// notify after one or more submits to amortize the MMIO exit.
+    pub fn submit(&mut self, chain: DescChain, cookie: u64) {
+        let avail_va = self.avail_region.virt;
+        // Read current avail.idx, store head at ring[idx % queue_size], inc.
+        unsafe {
+            let header = avail_va as *mut VRingAvailHeader;
+            let cur_idx = (*header).idx;
+            let ring_base = (avail_va + 4) as *mut u16; // skip flags+idx
+            *ring_base.add((cur_idx as usize) & (self.queue_size as usize - 1)) = chain.head;
+            // Memory fence so the desc-table writes (already visible) and
+            // ring entry are observed by the device before the index update.
+            fence(Ordering::Release);
+            (*header).idx = cur_idx.wrapping_add(1);
+        }
+        self.cookies[chain.head as usize] = Some(cookie);
+        // chain.tail already disconnected by alloc_chain; nothing else to do.
+    }
+
+    /// Drain one used-ring entry if one is present. Returns
+    /// `Some((cookie, bytes_written))` and frees the descriptor chain.
+    pub fn pop_used(&mut self) -> Option<(u64, u32)> {
+        let used_va = self.used_region.virt;
+        unsafe {
+            let header = used_va as *const VRingUsedHeader;
+            let device_idx = (*header).idx;
+            if device_idx == self.last_used_idx {
+                return None;
+            }
+            // Read element at last_used_idx % queue_size.
+            let ring_base = (used_va + 4) as *const VRingUsedElem;
+            let elem = *ring_base.add(self.last_used_idx as usize & (self.queue_size as usize - 1));
+            let head = elem.id as u16;
+            let written = elem.len;
+            // Acquire fence so subsequent reads of buffers see the device's writes.
+            fence(Ordering::Acquire);
+            self.last_used_idx = self.last_used_idx.wrapping_add(1);
+
+            // Take the cookie before freeing the chain.
+            let cookie = self.cookies[head as usize].take();
+
+            // Free the whole chain (rebuild the chain shape so free_chain
+            // walks it). collect_chain reads NEXT bits up to the last desc.
+            // Since alloc_chain cleared NEXT only on the tail, the chain
+            // walk works for any size including 1.
+            let descs = self.collect_chain(head);
+            let n = descs.len() as u16;
+            let tail = *descs.last().unwrap();
+            self.free_chain(DescChain { head, tail, n });
+
+            cookie.map(|c| (c, written))
+        }
+    }
+
+    /// True if the device has any unconsumed used-ring entries pending.
+    pub fn has_used(&self) -> bool {
+        let used_va = self.used_region.virt;
+        unsafe {
+            let header = used_va as *const VRingUsedHeader;
+            (*header).idx != self.last_used_idx
+        }
+    }
+}
