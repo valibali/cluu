@@ -1,11 +1,11 @@
 [package]
-name = "cluu-detachprobe"
+name = "cluu-viewprobe"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libcluu = { path = "../libcluu" }
+libcluu = { path = "../../libcluu" }
 
 [[bin]]
-name = "detachprobe"
+name = "viewprobe"
 path = "src/main.rs"

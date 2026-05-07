@@ -1,5 +1,5 @@
 FROM minimal
 PROFILE ipc vfs registry
 MOUNT /tmp private
-BUILD "cargo build --manifest-path userspace/mountprobe/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/mountprobe.elf /bin/mountprobe
+BUILD "cargo build --manifest-path userspace/probes/mountprobe/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/mountprobe.elf /bin/mountprobe
 ENTRYPOINT /bin/mountprobe

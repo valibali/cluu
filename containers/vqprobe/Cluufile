@@ -1,4 +1,4 @@
 FROM minimal
 PROFILE ipc vfs registry
-BUILD "cargo build --manifest-path userspace/vqprobe/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/vqprobe.elf /bin/vqprobe
+BUILD "cargo build --manifest-path userspace/probes/vqprobe/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/vqprobe.elf /bin/vqprobe
 ENTRYPOINT /bin/vqprobe

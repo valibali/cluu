@@ -7,8 +7,8 @@ authors = ["CLUU Team", "Balazs Valkony"]
 license = "MIT"
 
 [dependencies]
-libcluu = { path = "../libcluu" }
-cluu-virtio-core = { path = "../virtio-core" }
+libcluu = { path = "../../libcluu" }
+cluu-virtio-core = { path = "../../virtio-core" }
 
 [[bin]]
 name = "vqprobe"

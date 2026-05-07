@@ -1,11 +1,11 @@
 [package]
-name = "cluu-cascadeprobe"
+name = "cluu-detachprobe"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libcluu = { path = "../libcluu" }
+libcluu = { path = "../../libcluu" }
 
 [[bin]]
-name = "cascadeprobe"
+name = "detachprobe"
 path = "src/main.rs"
