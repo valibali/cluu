@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 libcluu = { path = "../libcluu" }
 cluu-ext2 = { path = "../ext2" }
+cluu-virtio-core = { path = "../virtio-core" }
 spin = "0.9"
 
 [[bin]]

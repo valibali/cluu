@@ -419,6 +419,7 @@ name = "cluu-virtio-blk"
 version = "0.1.0"
 dependencies = [
  "cluu-ext2",
+ "cluu-virtio-core",
  "libcluu",
  "spin",
 ]
