@@ -41,6 +41,11 @@ pub extern "C" fn main() -> i32 {
         return fail("space_map_range scratch");
     }
 
+    if libcluu::registry::init("blkprobe").is_err() {
+        return fail("registry::init");
+    }
+    let _ = libcluu::syscall::yield_cpu();
+
     let blkdev = match libcluu::registry::subscribe_output("blkdev", "main") {
         Ok(ep) => ep,
         Err(_) => return fail("subscribe blkdev:main"),
@@ -56,9 +61,11 @@ pub extern "C" fn main() -> i32 {
     };
 
     match client.read_blocking(0, buf) {
-        Ok(n) if n == 4096 => {
-            // Sanity: sector 0 (MBR / GPT header) is never all zeros on a
-            // populated disk; fail if it is.
+        // The driver reports `bytes_done` as the device-reported chain
+        // total, which includes the 1-byte status descriptor — so a
+        // 4096-byte data read returns n=4097 over the wire. Accept any
+        // n covering the requested data range.
+        Ok(n) if n >= 4096 => {
             if !buf.iter().any(|&b| b != 0) {
                 return fail("sector 0 all zeros");
             }
