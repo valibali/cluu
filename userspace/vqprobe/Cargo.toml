@@ -1,0 +1,15 @@
+[package]
+name = "cluu-vqprobe"
+version = "0.1.0"
+edition = "2021"
+description = "Virtqueue mechanics smoke test"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-virtio-core = { path = "../virtio-core" }
+
+[[bin]]
+name = "vqprobe"
+path = "src/main.rs"

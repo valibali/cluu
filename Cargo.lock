@@ -432,6 +432,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-vqprobe"
+version = "0.1.0"
+dependencies = [
+ "cluu-virtio-core",
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-vtmgr"
 version = "0.1.0"
 dependencies = [
