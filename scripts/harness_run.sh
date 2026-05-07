@@ -319,8 +319,17 @@ if [ -n "$TEST_COMMAND" ]; then
     done
 fi
 
-# --- Step 1: Build (skip if --no-build) ---
-if [ "$1" != "--no-build" ]; then
+# --- Step 1: Build (skip if --no-build, or auto-skip when image is fresh) ---
+if [ "$1" = "--no-build" ]; then
+    echo "=== Build skipped (--no-build) ==="
+elif [ "$HARNESS_FORCE_BUILD" != "1" ] && [ -f "$IMG" ] \
+    && [ -z "$(find kernel userspace scripts xtask Cargo.toml Cargo.lock \
+                    -newer "$IMG" -type f 2>/dev/null \
+                    -not -path '*/target/*' -not -path '*/.git/*' \
+                    -print -quit)" ]; then
+    echo "=== Build skipped (image newer than all sources) ==="
+    echo "    set HARNESS_FORCE_BUILD=1 to override"
+else
     build_start=$SECONDS
     if [ "$HARNESS_CLEAN_REBUILD" = "1" ]; then
         echo "=== Clean rebuild of CLUU ==="
@@ -439,7 +448,7 @@ queue_key() {
     if [ -n "$FAST_MODE" ]; then
         FAST_KEYSTROKES_BATCH+=("sendkey $1")
     else
-        queue_key "$1"
+        send_key "$1"
     fi
 }
 
@@ -533,32 +542,10 @@ if [ -n "$POST_SENDKEY" ]; then
     flush_fast_batch
 fi
 
-# --- Step 6: Wait for the test to run ---
-echo "Waiting ${RUN_WAIT}s for workload to execute..."
-sleep "$RUN_WAIT"
-
-# --- Step 7: Capture and display serial output ---
-echo ""
-echo "=========================================="
-echo "  COM2 Serial Output (debug log)"
-echo "=========================================="
-cat "$SERIAL_LOG"
-echo ""
-echo "=========================================="
-
-# Check for faults (skip when EXPECT_FAULT=1, e.g. shell crash tests)
-if [ "$EXPECT_FAULT" -ne 1 ] && grep -qiE 'PAGE_FAULT|GENERAL_PROTECTION|DOUBLE_FAULT|INVALID_OPCODE' "$SERIAL_LOG"; then
-    echo "*** FAULT DETECTED in serial output ***"
-    grep -iE 'PAGE_FAULT|GENERAL_PROTECTION|DOUBLE_FAULT|INVALID_OPCODE|PF:|GPF:' "$SERIAL_LOG"
-    exit 1
-fi
-
-# Check explicit test failures
-if grep -qE '\[FAIL\]|test FAILED|PANIC|panic' "$SERIAL_LOG"; then
-    echo "*** TEST FAILURE MARKERS DETECTED ***"
-    grep -nE '\[FAIL\]|test FAILED|PANIC|panic' "$SERIAL_LOG" || true
-    exit 1
-fi
+# --- Step 6: Wait for the test to run (streaming, deferred) ---
+# The actual wait is deferred until after marker dispatch (line ~1345) so we
+# can early-exit once all required_markers are present in the serial log.
+# Faults / explicit test failures abort the wait early too.
 
 # Required success markers.
 # Modes:
@@ -1158,6 +1145,14 @@ case "$MARKER_MODE" in
             "pollprobe: PASS"
         )
         ;;
+    l2_poll_pipes)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pollprobe: pipe PASS"
+            "pollprobe: PASS"
+        )
+        ;;
     perf_benchprobe)
         required_markers=(
             "TSC calibrated"
@@ -1340,6 +1335,65 @@ esac
 # REQUIRED_MARKERS can be newline-separated markers.
 if [ -n "$REQUIRED_MARKERS" ]; then
     mapfile -t required_markers <<< "$REQUIRED_MARKERS"
+fi
+
+# --- Streaming wait ---
+# Poll the serial log up to RUN_WAIT seconds. Exit early when:
+#   - all required_markers are present (success path), OR
+#   - a fault / explicit failure pattern appears (abort path).
+# Falls through to RUN_WAIT timeout if neither, leaving the existing
+# missing-markers diagnostic to print the offending markers.
+HARNESS_FAULT_PAT='PAGE_FAULT|GENERAL_PROTECTION|DOUBLE_FAULT|INVALID_OPCODE'
+HARNESS_FAIL_PAT='\[FAIL\]|test FAILED|PANIC|panic'
+echo "Waiting up to ${RUN_WAIT}s for workload markers (streaming)..."
+HARNESS_WAIT_DEADLINE=$((SECONDS + RUN_WAIT))
+HARNESS_WAIT_ELAPSED=0
+while [ "$SECONDS" -lt "$HARNESS_WAIT_DEADLINE" ]; do
+    if [ "$EXPECT_FAULT" -ne 1 ] \
+        && grep -qiE "$HARNESS_FAULT_PAT" "$SERIAL_LOG" 2>/dev/null; then
+        break
+    fi
+    if grep -qE "$HARNESS_FAIL_PAT" "$SERIAL_LOG" 2>/dev/null; then
+        break
+    fi
+    if [ "${#required_markers[@]}" -gt 0 ]; then
+        all_seen=1
+        for marker in "${required_markers[@]}"; do
+            if ! grep -Fq "$marker" "$SERIAL_LOG" 2>/dev/null; then
+                all_seen=0
+                break
+            fi
+        done
+        if [ "$all_seen" -eq 1 ]; then
+            HARNESS_WAIT_ELAPSED=$((SECONDS - (HARNESS_WAIT_DEADLINE - RUN_WAIT)))
+            echo "All required markers present after ${HARNESS_WAIT_ELAPSED}s (streaming early-exit)"
+            break
+        fi
+    fi
+    sleep 0.5
+done
+
+# --- Capture and display serial output ---
+echo ""
+echo "=========================================="
+echo "  COM2 Serial Output (debug log)"
+echo "=========================================="
+cat "$SERIAL_LOG"
+echo ""
+echo "=========================================="
+
+# Check for faults (skip when EXPECT_FAULT=1, e.g. shell crash tests)
+if [ "$EXPECT_FAULT" -ne 1 ] && grep -qiE "$HARNESS_FAULT_PAT" "$SERIAL_LOG"; then
+    echo "*** FAULT DETECTED in serial output ***"
+    grep -iE 'PAGE_FAULT|GENERAL_PROTECTION|DOUBLE_FAULT|INVALID_OPCODE|PF:|GPF:' "$SERIAL_LOG"
+    exit 1
+fi
+
+# Check explicit test failures
+if grep -qE "$HARNESS_FAIL_PAT" "$SERIAL_LOG"; then
+    echo "*** TEST FAILURE MARKERS DETECTED ***"
+    grep -nE "$HARNESS_FAIL_PAT" "$SERIAL_LOG" || true
+    exit 1
 fi
 
 missing=0
