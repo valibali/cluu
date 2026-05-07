@@ -1,0 +1,15 @@
+[package]
+name = "cluu-virtio-core"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable virtio (modern PCI 1.0+) transport core for CLUU userspace drivers"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[lib]
+name = "cluu_virtio_core"
+path = "src/lib.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+spin = { workspace = true }

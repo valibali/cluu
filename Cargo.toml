@@ -47,6 +47,7 @@ members = [
     "userspace/suspendprobe",
     "userspace/cascadeprobe",
     "userspace/detachprobe",
+    "userspace/virtio-core",
     "userspace/virtio-blk",
     "userspace/tpmd",
     "userspace/libcluu_syscalls",
@@ -97,6 +98,7 @@ default-members = [
     "userspace/suspendprobe",
     "userspace/cascadeprobe",
     "userspace/detachprobe",
+    "userspace/virtio-core",
     "userspace/virtio-blk",
     "userspace/tpmd",
 ]

@@ -424,6 +424,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-virtio-core"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+ "spin",
+]
+
+[[package]]
 name = "cluu-vtmgr"
 version = "0.1.0"
 dependencies = [
