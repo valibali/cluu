@@ -40,6 +40,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn vqprobe"
                 ;;
+            l2_blk_basic)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn blkprobe"
+                ;;
             l2_bare_cmd)
                 TEST_COMMAND=""
                 # UE17: PATH-based bare-command resolution. No `spawn` prefix —

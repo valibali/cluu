@@ -164,6 +164,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-blkprobe"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-cascadeprobe"
 version = "0.1.0"
 dependencies = [

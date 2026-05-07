@@ -752,6 +752,13 @@ case "$MARKER_MODE" in
             "vqprobe: ALL OK"
         )
         ;;
+    l2_blk_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "blkprobe: ALL OK"
+        )
+        ;;
     l2_bare_cmd)
         # UE17: PATH-based bare-command resolution. Typing `cat /etc/motd`
         # (no `spawn`, no `/`) goes through BuiltinRegistry::execute,

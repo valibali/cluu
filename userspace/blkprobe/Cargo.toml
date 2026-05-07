@@ -1,0 +1,14 @@
+[package]
+name = "cluu-blkprobe"
+version = "0.1.0"
+edition = "2021"
+description = "Raw-block read end-to-end smoke test (BLK_OPEN_SESSION/SUBMIT/COMPLETE)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "blkprobe"
+path = "src/main.rs"
