@@ -13,4 +13,4 @@ pub mod pci;
 pub use dma::{DmaPool, DmaRegion};
 pub use virtqueue::{DescChain, Virtqueue};
 pub use transport::{Transport, FeatureBits};
-// pub use irq::IrqSource;
+pub use irq::IrqSource;
