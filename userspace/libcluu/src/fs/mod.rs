@@ -5,10 +5,12 @@
 //! - VFS IPC protocol definitions
 //! - Client helpers for VFS access
 
+pub mod blk_client;
 pub mod client;
 pub mod protocol;
 pub mod traits;
 
+pub use blk_client::{BlkSessionClient, RequestHandle};
 pub use client::{VfsClient, VfsDirEntry, VfsFile, VfsGrant, VfsReadRing, VfsReadRingChunk};
 pub use protocol::{
     VfsOp, VFS_CLOSE, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR, VFS_READ_GRANT,
