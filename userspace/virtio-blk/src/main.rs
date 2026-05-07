@@ -19,7 +19,9 @@ use cluu_virtio_blk::request_queue::BlkRequestQueue;
 use cluu_virtio_blk::ModernBlkAdapter;
 use cluu_virtio_core::transport::{FeatureBits, ModernPciTransport, Transport};
 use cluu_virtio_core::DmaPool;
-use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_SPACE};
+use libcluu::boot::{
+    process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_IPC, TOKEN_SPACE,
+};
 use libcluu::fs::{BlockDevice, Filesystem};
 use libcluu::ipc::{extract_reply_id, reply, reply_with_payload};
 use libcluu::registry;
@@ -151,12 +153,23 @@ fn run() -> Result<()> {
         0,
     )?;
 
+    // Attach IRQ 11 (virtio-blk on QEMU PIC) to a fresh endpoint so reads
+    // can block on `recv_any` instead of spin-polling the used ring.
+    let irq_token = info.tokens[TOKEN_EXTRA_2];
+    let ipc_token = info.tokens[TOKEN_IPC];
+    let irq = cluu_virtio_core::IrqSource::new(ipc_token, irq_token, 11)?;
+    let _ = debug_print(&format!(
+        "virtio-blk: IRQ attached (endpoint={} irq={})",
+        irq.endpoint, irq.irq_number
+    ));
+
     let adapter = ModernBlkAdapter::new(
         bq,
         capacity_sectors,
         512,
         READ_SCRATCH_BASE,
         READ_SCRATCH_PAGES,
+        irq.endpoint,
     );
 
     debug_print(&format!(

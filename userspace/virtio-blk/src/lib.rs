@@ -21,22 +21,23 @@ use spin::Mutex;
 pub use virtio::VirtioBlkDevice;
 
 use crate::request_queue::BlkRequestQueue;
-use cluu_virtio_core::transport::ModernPciTransport;
+use cluu_virtio_core::transport::{ModernPciTransport, Transport};
 
 /// BlockDevice adapter built on the new virtio-core stack.
 ///
-/// Spin-polls the used ring for completions in `read_bytes`. T5.6 will
-/// switch this over to IRQ-driven wait. T5.7 will allow multiple in-flight
-/// requests at the IPC boundary; for now requests are strictly serialized
-/// (one in flight, single fixed cookie) and use a pre-mapped scratch
-/// buffer for DMA so we don't have to resolve `virt_to_phys` on freshly
-/// allocated `Vec` memory (which has no alignment guarantee).
+/// Waits on an IRQ-attached endpoint for ring completions in `read_bytes`.
+/// T5.7 will allow multiple in-flight requests at the IPC boundary; for now
+/// requests are strictly serialized (one in flight, single fixed cookie)
+/// and use a pre-mapped scratch buffer for DMA so we don't have to resolve
+/// `virt_to_phys` on freshly allocated `Vec` memory (which has no alignment
+/// guarantee).
 pub struct ModernBlkAdapter {
     inner: Mutex<BlkRequestQueue<ModernPciTransport>>,
     capacity_sectors: u64,
     sector_size_bytes: usize,
     scratch_base: usize,
     scratch_pages: usize,
+    irq_endpoint: usize,
 }
 
 impl ModernBlkAdapter {
@@ -46,6 +47,7 @@ impl ModernBlkAdapter {
         sector_size_bytes: usize,
         scratch_base: usize,
         scratch_pages: usize,
+        irq_endpoint: usize,
     ) -> Self {
         Self {
             inner: Mutex::new(bq),
@@ -53,13 +55,14 @@ impl ModernBlkAdapter {
             sector_size_bytes,
             scratch_base,
             scratch_pages,
+            irq_endpoint,
         }
     }
 }
 
 impl BlockDevice for ModernBlkAdapter {
-    fn read_bytes(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        if buf.is_empty() {
+    fn read_bytes(&self, offset: u64, buf_out: &mut [u8]) -> Result<usize> {
+        if buf_out.is_empty() {
             return Ok(0);
         }
         let mut bq = self.inner.lock();
@@ -67,7 +70,7 @@ impl BlockDevice for ModernBlkAdapter {
         let sector_size = self.sector_size_bytes as u64;
         let start_sector = offset / sector_size;
         let sector_offset = (offset % sector_size) as usize;
-        let end_byte = offset + buf.len() as u64;
+        let end_byte = offset + buf_out.len() as u64;
         let end_sector = end_byte.div_ceil(sector_size);
         let sector_count = end_sector - start_sector;
         let total_bytes = (sector_count as usize) * self.sector_size_bytes;
@@ -92,28 +95,35 @@ impl BlockDevice for ModernBlkAdapter {
         bq.submit_read(start_sector, &pages, total_bytes, cookie)?;
         bq.notify();
 
-        // Spin-poll the used ring until our cookie completes.
+        // Block on IRQ delivery instead of spinning. The kernel pushes an
+        // IPC message to the IRQ-attached endpoint when the device fires;
+        // recv_any wakes us, we acknowledge ISR (read clears pending), and
+        // drain the used ring. Spurious wakes / completions for a different
+        // cookie just keep the loop going.
+        let tokens = [self.irq_endpoint];
+        let mut irq_buf = [0u8; 64];
         loop {
+            libcluu::syscall::ipc_recv_any(&tokens, &mut irq_buf, u64::MAX)?;
+            let _ = bq.transport.isr_status();
             let completions = bq.drain_completions();
             for (got, status, _len) in completions {
                 if got == cookie {
                     if status != 0 {
                         return Err(libcluu::Error::InvalidState);
                     }
-                    let copy_len = buf.len().min(total_bytes - sector_offset);
+                    let copy_len = buf_out.len().min(total_bytes - sector_offset);
                     let scratch = unsafe {
                         core::slice::from_raw_parts(
                             self.scratch_base as *const u8,
                             total_bytes,
                         )
                     };
-                    buf[..copy_len].copy_from_slice(
+                    buf_out[..copy_len].copy_from_slice(
                         &scratch[sector_offset..sector_offset + copy_len],
                     );
                     return Ok(copy_len);
                 }
             }
-            core::hint::spin_loop();
         }
     }
 
