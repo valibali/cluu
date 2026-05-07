@@ -554,21 +554,21 @@ fi
 # - m1_recv: recv/wakeup churn checks
 # - m2_token_audit: recv churn + token audit telemetry invariants
 # - m2_leakdiag: churn + resource delta diagnostics
-# - m3_mapfail: kernel map-range failpoint rollback validation via shell builtin
-# - m3_mapcopyfail: copy_from_user failure branch rollback validation via shell builtin (`mapcpfail`)
-# - m3_maperror: map_user_page error branch rollback validation via shell builtin
+# - m3_mapfail: kernel map-range failpoint rollback validation via mapfail probe
+# - m3_mapcopyfail: copy_from_user failure branch rollback validation via mapcopyfail probe
+# - m3_maperror: map_user_page error branch rollback validation via maperror probe
 # - m4_sender_auth: authenticated sender binding in VFS (ignore caller-supplied client_id)
 # - m4_registry_sender_auth: authenticated sender binding in registry subscribe/register flows
 # - m4_notify_lifecycle: sender notify bindings are reclaimed after child lifecycle ends
 # - m4_deny_paths: explicit sender-auth denial path regressions (PermissionDenied flows)
 # - m4_registry_deny_paths: explicit registry ownership denial path regressions
 # - l2_cd: `cd`/`pwd` shell builtins change and report current directory
-# - l2_ext2write: end-to-end ext2 write smoke test via shell builtin
-# - l2_ext2append: append-past-EOF ext2 smoke test via shell builtin
-# - l2_ext2mutate: mkdir/rename/rmdir ext2 metadata mutation smoke test
-# - l2_ext2unlink: create+unlink verification smoke test
+# - l2_ext2write: end-to-end ext2 write smoke test via ext2io probe
+# - l2_ext2append: append-past-EOF ext2 smoke test via ext2io probe
+# - l2_ext2mutate: mkdir/rename/rmdir ext2 metadata mutation smoke test via ext2io probe
+# - l2_ext2unlink: create+unlink verification smoke test via ext2io probe
 # - l2_envelope_mounts: read-only /etc enforced via user envelope mount view (RED until UE10)
-# - l2_owner_deny: explicit non-owner mutation denial with second spawned client
+# - l2_owner_deny: explicit non-owner mutation denial via ownerdeny probe
 # - l2_sigint: foreground spawn interrupted by Ctrl-C (minimal SIGINT path)
 # - l2_jobs: background spawn + async reap notification (`SIGCHLD`-style baseline)
 # - l2_fg: background spawn promoted to foreground wait path via `fg`

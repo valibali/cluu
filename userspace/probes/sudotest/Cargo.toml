@@ -1,0 +1,14 @@
+[package]
+name = "cluu-sudotest"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU sudotest probe"
+authors = ["CLUU Team"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "sudotest"
+path = "src/main.rs"

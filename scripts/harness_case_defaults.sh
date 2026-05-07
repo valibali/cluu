@@ -17,16 +17,16 @@ harness_derive_marker_defaults() {
     POST_SENDKEY_DEFAULT=""
     if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         case "$MARKER_MODE" in
-            m3_mapfail) TEST_COMMAND="mapfail 12 4" ;;
-            m3_mapcopyfail) TEST_COMMAND="mapcpfail 4" ;;
-            m3_maperror) TEST_COMMAND="maperror 3" ;;
+            m3_mapfail) TEST_COMMAND="spawn mapfail 12 4" ;;
+            m3_mapcopyfail) TEST_COMMAND="spawn mapcopyfail 4" ;;
+            m3_maperror) TEST_COMMAND="spawn maperror 3" ;;
             m4_deny_paths)
-                TEST_COMMAND="killdeny 2 9"
-                SHELL_AUTOSTART_CMD_DEFAULT="killdeny 2 9"
+                TEST_COMMAND="spawn killdeny 2 9"
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn killdeny 2 9"
                 ;;
             m4_registry_deny_paths)
-                TEST_COMMAND="regdeny"
-                SHELL_AUTOSTART_CMD_DEFAULT="regdeny"
+                TEST_COMMAND="spawn regdeny"
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn regdeny"
                 ;;
             kernel_suspended_thread)
                 TEST_COMMAND=""
@@ -74,24 +74,24 @@ harness_derive_marker_defaults() {
                 SHELL_AUTOSTART_CMD_DEFAULT="cd /tmp; spawn pwdprobe"
                 ;;
             l2_ext2write)
-                TEST_COMMAND="ext2write"
-                SHELL_AUTOSTART_CMD_DEFAULT="ext2write"
+                TEST_COMMAND="spawn ext2io write"
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn ext2io write"
                 ;;
             l2_ext2append)
-                TEST_COMMAND="ext2append"
-                SHELL_AUTOSTART_CMD_DEFAULT="ext2append"
+                TEST_COMMAND="spawn ext2io append"
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn ext2io append"
                 ;;
             l2_ext2mutate)
-                TEST_COMMAND="ext2mutate"
-                SHELL_AUTOSTART_CMD_DEFAULT="ext2mutate"
+                TEST_COMMAND="spawn ext2io mutate"
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn ext2io mutate"
                 ;;
             l2_ext2unlink)
-                TEST_COMMAND="ext2unlink"
-                SHELL_AUTOSTART_CMD_DEFAULT="ext2unlink"
+                TEST_COMMAND="spawn ext2io unlink"
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn ext2io unlink"
                 ;;
             l2_owner_deny)
-                TEST_COMMAND="ext2ownerdeny"
-                SHELL_AUTOSTART_CMD_DEFAULT="ext2ownerdeny"
+                TEST_COMMAND="spawn ownerdeny"
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn ownerdeny"
                 ;;
             d7_container_storage)
                 TEST_COMMAND="spawn containerprobe"
@@ -139,15 +139,15 @@ harness_derive_marker_defaults() {
                 SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
                 ;;
             l2_jobchurn)
-                TEST_COMMAND="jobchurn 3"
+                TEST_COMMAND="spawn jobchurn 3"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             l2_jobchurn_heavy)
-                TEST_COMMAND="jobchurn 8"
+                TEST_COMMAND="spawn jobchurn 8"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             l2_jobmix)
-                TEST_COMMAND="jobmix"
+                TEST_COMMAND="spawn jobmix"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             l2_mkdir)
@@ -322,7 +322,7 @@ harness_derive_marker_defaults() {
                 ;;
             m6_ring_io)
                 TEST_COMMAND="echo ringio-marker"
-                SHELL_AUTOSTART_CMD_DEFAULT="ringio"
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn ringio"
                 ;;
             p1_setjmp)
                 TEST_COMMAND="spawn setjmpprobe"
@@ -392,10 +392,10 @@ harness_derive_marker_defaults() {
                 KEYSTROKE_COMMANDS="$(printf 'a%.0s' {1..500})"
                 ;;
             hr6_shell_crash)
-                TEST_COMMAND="shellcrash"
+                TEST_COMMAND="_shellcrash"
                 ;;
             hr7_su_equal)
-                TEST_COMMAND="suequaltest"
+                TEST_COMMAND="spawn sutest equal"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;

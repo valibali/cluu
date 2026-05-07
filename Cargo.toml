@@ -38,6 +38,19 @@ members = [
     "userspace/probes/escalateprobe",
     "userspace/probes/viewprobe",
     "userspace/probes/argvprobe",
+    "userspace/probes/jobchurn",
+    "userspace/probes/jobmix",
+    "userspace/probes/killdeny",
+    "userspace/probes/regdeny",
+    "userspace/probes/mapfail",
+    "userspace/probes/mapcopyfail",
+    "userspace/probes/maperror",
+    "userspace/probes/ext2io",
+    "userspace/probes/ownerdeny",
+    "userspace/probes/ringio",
+    "userspace/probes/vtcrash",
+    "userspace/probes/sudotest",
+    "userspace/probes/sutest",
     "userspace/cp",
     "userspace/edit",
     "userspace/mkdir",
@@ -225,6 +238,45 @@ debug = 0
 [profile.dev.package."cluu-blkprobe"]
 debug = 0
 
+[profile.dev.package."cluu-jobchurn"]
+debug = 0
+
+[profile.dev.package."cluu-jobmix"]
+debug = 0
+
+[profile.dev.package."cluu-killdeny"]
+debug = 0
+
+[profile.dev.package."cluu-regdeny"]
+debug = 0
+
+[profile.dev.package."cluu-mapfail"]
+debug = 0
+
+[profile.dev.package."cluu-mapcopyfail"]
+debug = 0
+
+[profile.dev.package."cluu-maperror"]
+debug = 0
+
+[profile.dev.package."cluu-ext2io"]
+debug = 0
+
+[profile.dev.package."cluu-ownerdeny"]
+debug = 0
+
+[profile.dev.package."cluu-ringio"]
+debug = 0
+
+[profile.dev.package."cluu-vtcrash"]
+debug = 0
+
+[profile.dev.package."cluu-sudotest"]
+debug = 0
+
+[profile.dev.package."cluu-sutest"]
+debug = 0
+
 [profile.dev.package."cluu-tpmd"]
 debug = 0
 
@@ -334,6 +386,45 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-blkprobe"]
+debug = 0
+
+[profile.release.package."cluu-jobchurn"]
+debug = 0
+
+[profile.release.package."cluu-jobmix"]
+debug = 0
+
+[profile.release.package."cluu-killdeny"]
+debug = 0
+
+[profile.release.package."cluu-regdeny"]
+debug = 0
+
+[profile.release.package."cluu-mapfail"]
+debug = 0
+
+[profile.release.package."cluu-mapcopyfail"]
+debug = 0
+
+[profile.release.package."cluu-maperror"]
+debug = 0
+
+[profile.release.package."cluu-ext2io"]
+debug = 0
+
+[profile.release.package."cluu-ownerdeny"]
+debug = 0
+
+[profile.release.package."cluu-ringio"]
+debug = 0
+
+[profile.release.package."cluu-vtcrash"]
+debug = 0
+
+[profile.release.package."cluu-sudotest"]
+debug = 0
+
+[profile.release.package."cluu-sutest"]
 debug = 0
 
 [profile.release.package."cluu-tpmd"]

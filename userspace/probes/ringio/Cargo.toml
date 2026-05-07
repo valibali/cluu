@@ -1,0 +1,14 @@
+[package]
+name = "cluu-ringio"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU ringio probe"
+authors = ["CLUU Team"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "ringio"
+path = "src/main.rs"

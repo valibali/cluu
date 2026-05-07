@@ -1,0 +1,14 @@
+[package]
+name = "cluu-maperror"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU maperror probe"
+authors = ["CLUU Team"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "maperror"
+path = "src/main.rs"

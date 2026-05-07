@@ -1,0 +1,14 @@
+[package]
+name = "cluu-ext2io"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU ext2io probe"
+authors = ["CLUU Team"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "ext2io"
+path = "src/main.rs"

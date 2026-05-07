@@ -13,6 +13,7 @@ cluu_lang = { path = "../../crates/cluu_lang", optional = true }
 [features]
 default = ["lang-parser"]
 lang-parser = ["cluu_lang"]
+debug-shellcrash = []
 
 [[bin]]
 name = "shell"

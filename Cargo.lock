@@ -228,6 +228,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-ext2io"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-grep"
 version = "0.1.0"
 dependencies = [
@@ -247,6 +254,20 @@ version = "0.1.0"
 dependencies = [
  "cluu-procmgr",
  "klibcluu",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-jobchurn"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-jobmix"
+version = "0.1.0"
+dependencies = [
  "libcluu",
 ]
 
@@ -281,7 +302,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-killdeny"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-ls"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-mapcopyfail"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-maperror"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-mapfail"
 version = "0.1.0"
 dependencies = [
  "libcluu",
@@ -316,6 +365,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-ownerdeny"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-procmgr"
 version = "0.1.0"
 dependencies = [
@@ -337,7 +393,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-regdeny"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-registry"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-ringio"
 version = "0.1.0"
 dependencies = [
  "libcluu",
@@ -359,7 +429,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-sudotest"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-suspendprobe"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-sutest"
 version = "0.1.0"
 dependencies = [
  "libcluu",
@@ -445,6 +529,13 @@ name = "cluu-vqprobe"
 version = "0.1.0"
 dependencies = [
  "cluu-virtio-core",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-vtcrash"
+version = "0.1.0"
+dependencies = [
  "libcluu",
 ]
 

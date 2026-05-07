@@ -1,0 +1,14 @@
+[package]
+name = "cluu-sutest"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU sutest probe"
+authors = ["CLUU Team"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "sutest"
+path = "src/main.rs"
