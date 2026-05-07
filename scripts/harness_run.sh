@@ -760,6 +760,14 @@ case "$MARKER_MODE" in
             "blkprobe: ALL OK"
         )
         ;;
+    l2_blk_concurrent)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "blkprobe: concurrent=100 OK"
+            "blkprobe: ALL OK"
+        )
+        ;;
     l2_bare_cmd)
         # UE17: PATH-based bare-command resolution. Typing `cat /etc/motd`
         # (no `spawn`, no `/`) goes through BuiltinRegistry::execute,
