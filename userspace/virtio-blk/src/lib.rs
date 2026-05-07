@@ -20,6 +20,118 @@ use spin::Mutex;
 
 pub use virtio::VirtioBlkDevice;
 
+use crate::request_queue::BlkRequestQueue;
+use cluu_virtio_core::transport::ModernPciTransport;
+
+/// BlockDevice adapter built on the new virtio-core stack.
+///
+/// Spin-polls the used ring for completions in `read_bytes`. T5.6 will
+/// switch this over to IRQ-driven wait. T5.7 will allow multiple in-flight
+/// requests at the IPC boundary; for now requests are strictly serialized
+/// (one in flight, single fixed cookie) and use a pre-mapped scratch
+/// buffer for DMA so we don't have to resolve `virt_to_phys` on freshly
+/// allocated `Vec` memory (which has no alignment guarantee).
+pub struct ModernBlkAdapter {
+    inner: Mutex<BlkRequestQueue<ModernPciTransport>>,
+    capacity_sectors: u64,
+    sector_size_bytes: usize,
+    scratch_base: usize,
+    scratch_pages: usize,
+}
+
+impl ModernBlkAdapter {
+    pub fn new(
+        bq: BlkRequestQueue<ModernPciTransport>,
+        capacity_sectors: u64,
+        sector_size_bytes: usize,
+        scratch_base: usize,
+        scratch_pages: usize,
+    ) -> Self {
+        Self {
+            inner: Mutex::new(bq),
+            capacity_sectors,
+            sector_size_bytes,
+            scratch_base,
+            scratch_pages,
+        }
+    }
+}
+
+impl BlockDevice for ModernBlkAdapter {
+    fn read_bytes(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut bq = self.inner.lock();
+
+        let sector_size = self.sector_size_bytes as u64;
+        let start_sector = offset / sector_size;
+        let sector_offset = (offset % sector_size) as usize;
+        let end_byte = offset + buf.len() as u64;
+        let end_sector = end_byte.div_ceil(sector_size);
+        let sector_count = end_sector - start_sector;
+        let total_bytes = (sector_count as usize) * self.sector_size_bytes;
+
+        if total_bytes > self.scratch_pages * 4096 {
+            return Err(libcluu::Error::BufferTooSmall);
+        }
+
+        // Resolve the scratch buffer's physical pages each time. The mapping
+        // was pinned at init via space_map_range so phys is stable, but we
+        // don't currently cache it on the adapter.
+        let space_token = bq.pool.space_token();
+        let n_pages = total_bytes.div_ceil(4096);
+        let mut pages: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(n_pages);
+        for i in 0..n_pages {
+            let va = self.scratch_base + i * 4096;
+            let phys = libcluu::syscall::virt_to_phys(space_token, va)? as u64;
+            pages.push(phys);
+        }
+
+        let cookie: u64 = 1; // single-in-flight; T5.7 will route by real cookie
+        bq.submit_read(start_sector, &pages, total_bytes, cookie)?;
+        bq.notify();
+
+        // Spin-poll the used ring until our cookie completes.
+        loop {
+            let completions = bq.drain_completions();
+            for (got, status, _len) in completions {
+                if got == cookie {
+                    if status != 0 {
+                        return Err(libcluu::Error::InvalidState);
+                    }
+                    let copy_len = buf.len().min(total_bytes - sector_offset);
+                    let scratch = unsafe {
+                        core::slice::from_raw_parts(
+                            self.scratch_base as *const u8,
+                            total_bytes,
+                        )
+                    };
+                    buf[..copy_len].copy_from_slice(
+                        &scratch[sector_offset..sector_offset + copy_len],
+                    );
+                    return Ok(copy_len);
+                }
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn write_bytes(&self, _offset: u64, _buf: &[u8]) -> Result<usize> {
+        // Writes still go through the legacy driver during the transition.
+        // Will be implemented in a follow-up after reads are proven.
+        Err(libcluu::Error::NotImplemented)
+    }
+
+    fn sector_size(&self) -> usize {
+        self.sector_size_bytes
+    }
+
+    fn sector_count(&self) -> u64 {
+        self.capacity_sectors
+    }
+}
+
 /// Thread-safe wrapper for VirtioBlkDevice that implements BlockDevice.
 ///
 /// Uses spin::Mutex for interior mutability since virtio operations need

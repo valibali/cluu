@@ -15,7 +15,10 @@ extern crate cluu_virtio_blk;
 use alloc::format;
 use alloc::vec::Vec;
 use cluu_ext2::Ext2Fs;
-use cluu_virtio_blk::{pci, VirtioBlkAdapter, VirtioBlkDevice};
+use cluu_virtio_blk::request_queue::BlkRequestQueue;
+use cluu_virtio_blk::ModernBlkAdapter;
+use cluu_virtio_core::transport::{FeatureBits, ModernPciTransport, Transport};
+use cluu_virtio_core::DmaPool;
 use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_SPACE};
 use libcluu::fs::{BlockDevice, Filesystem};
 use libcluu::ipc::{extract_reply_id, reply, reply_with_payload};
@@ -78,42 +81,89 @@ fn run() -> Result<()> {
         pci_token, space_token
     ))?;
 
-    // Find virtio-blk PCI device
-    let pci_addr = match pci::find_virtio_blk(pci_token) {
-        Ok(addr) => {
-            debug_print(&format!("virtio-blk: found PCI device at {:?}", addr))?;
-            addr
+    // === New virtio-core init path ===
+    // Address-space carve-out for the new driver. Picked above the legacy
+    // mappings so a stale lingering legacy mapping (if any) doesn't clash.
+    const DMA_POOL_VA: usize = 0x5100_0000;
+    const DMA_POOL_PAGES: usize = 64;
+    const MMIO_VA_BASE: usize = 0x5200_0000;
+    const READ_SCRATCH_BASE: usize = 0x6200_0000;
+    const READ_SCRATCH_PAGES: usize = 1024; // 4 MiB
+
+    // virtio-blk = vendor 0x1AF4, devices 0x1001 (transitional) + 0x1042 (modern).
+    // We only accept the modern variant for the new stack.
+    let pci_device = match cluu_virtio_core::pci::find_virtio_device(
+        pci_token,
+        &[0x1001, 0x1042],
+        &[0x1042],
+    ) {
+        Ok(d) => {
+            debug_print(&format!("virtio-blk: found PCI device {:?}", d))?;
+            d
         }
         Err(e) => {
-            debug_print(&format!("virtio-blk: find_virtio_blk failed: {:?}", e))?;
+            debug_print(&format!("virtio-blk: find_virtio_device failed: {:?}", e))?;
             return Err(e);
         }
     };
 
-    // Initialize the virtio-blk device
-    debug_print("virtio-blk: creating device...")?;
-    let device = match VirtioBlkDevice::new(pci_token, space_token, pci_addr) {
-        Ok(dev) => {
-            debug_print("virtio-blk: device created")?;
-            dev
-        }
-        Err(e) => {
-            debug_print(&format!("virtio-blk: failed to init device: {:?}", e))?;
-            return Err(e);
-        }
-    };
+    cluu_virtio_core::pci::enable_device(pci_token, &pci_device)?;
 
-    let sector_count = device.sector_count();
-    let sector_size = device.sector_size();
+    let pool = DmaPool::new(space_token, DMA_POOL_VA, DMA_POOL_PAGES)?;
 
+    let bar_phys = pci_device.bar0 as u64;
+    let bar_size = pci_device.bar0_size;
+    let mut transport = ModernPciTransport::new(
+        space_token,
+        pci_device.clone(),
+        bar_phys,
+        bar_size,
+        MMIO_VA_BASE,
+    )?;
+
+    // Reset, negotiate features (VERSION_1 only — no fancy device features yet).
+    transport.reset()?;
+    let dev_feats = transport.read_device_features()?;
+    let want = FeatureBits::VERSION_1.bits() & dev_feats;
+    transport.write_driver_features(want)?;
+
+    // Read device capacity from device_cfg (capacity at offset 0, u64).
+    // virtio 1.2 §5.2.4 — also has blk_size at offset 20, but we use the
+    // standard 512 sector size.
+    let device_cfg_va = transport.device_cfg_va;
+    let capacity_sectors = unsafe { core::ptr::read_volatile(device_cfg_va as *const u64) };
     debug_print(&format!(
-        "virtio-blk: device ready, {} sectors ({})",
-        sector_count,
-        sector_count * sector_size as u64
+        "virtio-blk: capacity_sectors={}",
+        capacity_sectors
     ))?;
 
-    // Wrap device in adapter that implements BlockDevice trait
-    let adapter = VirtioBlkAdapter::new(device);
+    let mut bq = BlkRequestQueue::new(transport, pool, 64)?;
+    bq.transport.set_driver_ok()?;
+
+    // Pre-map the scratch buffer for read DMA. Single-in-flight at this
+    // stage (no IPC concurrency yet) means no contention on the buffer.
+    space_map_range(
+        space_token,
+        READ_SCRATCH_BASE,
+        0,
+        0x03, // R+W
+        READ_SCRATCH_PAGES,
+        0,
+    )?;
+
+    let adapter = ModernBlkAdapter::new(
+        bq,
+        capacity_sectors,
+        512,
+        READ_SCRATCH_BASE,
+        READ_SCRATCH_PAGES,
+    );
+
+    debug_print(&format!(
+        "virtio-blk: virtio-core stack initialized ({} sectors, {} bytes)",
+        capacity_sectors,
+        capacity_sectors * 512
+    ))?;
 
     // Try to mount ext2 filesystem
     let fs = match Ext2Fs::mount(&adapter) {
@@ -181,7 +231,7 @@ fn run() -> Result<()> {
 
 fn handle_fs_request(
     fs: &Ext2Fs,
-    blk: &VirtioBlkAdapter,
+    blk: &ModernBlkAdapter,
     space_token: usize,
     grant_scratch: &GrantScratch,
     msg: &Message,
@@ -531,7 +581,7 @@ fn parse_usize_pair(payload: &[u8]) -> Option<(usize, usize)> {
     Some((first, second))
 }
 
-fn handle_block_request(blk: &VirtioBlkAdapter, msg: &Message) {
+fn handle_block_request(blk: &ModernBlkAdapter, msg: &Message) {
     let reply_token = extract_reply_id(msg);
 
     match msg.tag.label {
