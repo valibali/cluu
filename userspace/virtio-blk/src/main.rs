@@ -12,10 +12,12 @@ extern crate alloc;
 extern crate cluu_ext2;
 extern crate cluu_virtio_blk;
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::vec::Vec;
 use cluu_ext2::Ext2Fs;
 use cluu_virtio_blk::request_queue::BlkRequestQueue;
+use cluu_virtio_blk::session::{pack_cookie, BlkSession};
 use cluu_virtio_blk::ModernBlkAdapter;
 use cluu_virtio_core::transport::{FeatureBits, ModernPciTransport, Transport};
 use cluu_virtio_core::DmaPool;
@@ -23,11 +25,14 @@ use libcluu::boot::{
     process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_IPC, TOKEN_SPACE,
 };
 use libcluu::fs::{BlockDevice, Filesystem};
-use libcluu::ipc::{extract_reply_id, reply, reply_with_payload};
+use libcluu::ipc::{
+    extract_reply_id, reply, reply_with_payload, BLK_CLOSE_SESSION, BLK_COMPLETE, BLK_OPEN_SESSION,
+    BLK_SUBMIT, BLK_SUBMIT_NACK,
+};
 use libcluu::registry;
-use libcluu::syscall::{endpoint_create, ipc_recv_any, space_map_range};
+use libcluu::syscall::{endpoint_create, ipc_recv_any, ipc_send, space_map_range};
 use libcluu::types::{IpcFlags, Message};
-use libcluu::{debug_print, space_grant, yield_cpu, Result, PAGE_SIZE};
+use libcluu::{debug_print, space_grant, yield_cpu, Error, Result, PAGE_SIZE};
 
 /// IPC labels for filesystem operations (matches VFS protocol)
 const FS_OPEN: u32 = 0x300;
@@ -58,6 +63,29 @@ const GRANT_SCRATCH_SIZE: usize = 4 * 1024 * 1024;
 struct GrantScratch {
     base: usize,
     size: usize,
+}
+
+/// Per-process state for the BLK_OPEN_SESSION/SUBMIT/CLOSE protocol. Holds
+/// the live sessions and the next monotonic id. Session id `0` is reserved
+/// for the legacy FS_READ_GRANT path's cookies (see `session::pack_cookie`).
+struct BlkSessionRegistry {
+    sessions: BTreeMap<u32, BlkSession>,
+    next_session_id: u32,
+}
+
+impl BlkSessionRegistry {
+    fn new() -> Self {
+        Self {
+            sessions: BTreeMap::new(),
+            next_session_id: 1,
+        }
+    }
+}
+
+/// Outcome of a synchronous BLK_SUBMIT dispatch.
+enum BlkSubmitOutcome {
+    Ok { bytes_done: usize },
+    Failed,
 }
 
 #[no_mangle]
@@ -209,6 +237,8 @@ fn run() -> Result<()> {
     let registry_endpoint = registry::control_endpoint();
     let grant_scratch = map_grant_scratch(space_token)?;
 
+    let mut blk_sessions = BlkSessionRegistry::new();
+
     // Main service loop
     let mut buf = [0u8; 4096];
     loop {
@@ -225,6 +255,12 @@ fn run() -> Result<()> {
                 if index == 1 {
                     // Registry message
                     let _ = registry::handle_incoming_message(msg, payload);
+                    continue;
+                }
+
+                // Intercept new BLK_* session protocol before falling through
+                // to the FS / legacy block dispatchers.
+                if handle_blk_session_message(&adapter, &mut blk_sessions, msg, payload) {
                     continue;
                 }
 
@@ -657,4 +693,164 @@ fn send_error_reply_shifted(reply_token: Option<usize>, code: isize) {
         let reply_msg = Message::new(0, [0, code as usize, 0, 0, 0, 0], 2);
         let _ = reply(token, &reply_msg, IpcFlags::empty());
     }
+}
+
+/// Top-level demux for the new BLK_OPEN_SESSION / BLK_SUBMIT /
+/// BLK_CLOSE_SESSION protocol. Returns `true` when the message has been
+/// handled (or definitively malformed and dropped); `false` means the
+/// caller should route to the FS / legacy block dispatchers.
+///
+/// Dispatch is synchronous: a BLK_SUBMIT locks the BlkRequestQueue mutex,
+/// submits, blocks on the IRQ endpoint, drains, and sends BLK_COMPLETE
+/// before returning. This serializes all BLK_* requests with each other
+/// AND with the FS_READ_GRANT path (which holds the same mutex through
+/// `ModernBlkAdapter::read_bytes`). T5.7 is needed for real concurrency.
+fn handle_blk_session_message(
+    adapter: &ModernBlkAdapter,
+    sessions: &mut BlkSessionRegistry,
+    msg: &Message,
+    payload: &[u8],
+) -> bool {
+    let reply_token = extract_reply_id(msg);
+    match msg.tag.label {
+        BLK_OPEN_SESSION => {
+            // words[0] = caller's completion endpoint token
+            let comp_ep = msg.words[0];
+            let sid = sessions.next_session_id;
+            sessions.next_session_id = sessions.next_session_id.wrapping_add(1);
+            // Skip 0 if the wrap ever circles back; 0 is reserved for FS path.
+            if sessions.next_session_id == 0 {
+                sessions.next_session_id = 1;
+            }
+            sessions
+                .sessions
+                .insert(sid, BlkSession::new(sid, comp_ep));
+
+            // Reply: words[0] = errno (0 = OK), words[1] = session_id.
+            let reply_msg = Message::new(
+                BLK_OPEN_SESSION,
+                [0, sid as usize, 0, 0, 0, 0],
+                2,
+            );
+            if let Some(rt) = reply_token {
+                let _ = reply(rt, &reply_msg, IpcFlags::empty());
+            }
+            true
+        }
+
+        BLK_CLOSE_SESSION => {
+            let sid = msg.words[0] as u32;
+            sessions.sessions.remove(&sid);
+            // CLOSE is fire-and-forget per design; no reply.
+            true
+        }
+
+        BLK_SUBMIT => {
+            // words[0] = session_id, words[1] = request_id (low 32 bits used)
+            // words[2..3] = lba (low,high), words[4] = n_pages, words[5] = total_bytes
+            // payload = n_pages * u64 LE physical-page addresses.
+            let sid = msg.words[0] as u32;
+            let rid = msg.words[1] as u64;
+            let lba = ((msg.words[3] as u64) << 32) | (msg.words[2] as u64);
+            let n_pages = msg.words[4];
+            let total_bytes = msg.words[5];
+
+            // Look up the session — silently drop unknown sids (caller leaked).
+            let comp_ep = match sessions.sessions.get(&sid) {
+                Some(s) => s.completion_endpoint,
+                None => return true,
+            };
+
+            if payload.len() < 8 * n_pages {
+                send_blk_nack(comp_ep, rid, Error::InvalidArgument);
+                return true;
+            }
+
+            let mut pages: Vec<u64> = Vec::with_capacity(n_pages);
+            for i in 0..n_pages {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&payload[i * 8..i * 8 + 8]);
+                pages.push(u64::from_le_bytes(bytes));
+            }
+
+            let cookie = pack_cookie(sid, rid);
+            let outcome = run_blk_submit(adapter, lba, &pages, total_bytes, cookie);
+
+            match outcome {
+                BlkSubmitOutcome::Ok { bytes_done } => {
+                    send_blk_complete(comp_ep, rid, 0, bytes_done);
+                }
+                BlkSubmitOutcome::Failed => {
+                    send_blk_complete(comp_ep, rid, 1, 0);
+                }
+            }
+            true
+        }
+
+        _ => false,
+    }
+}
+
+/// Synchronously submit a read on the BlkRequestQueue, wait for the IRQ,
+/// and drain completions until ours pops out. Holds the BlkRequestQueue
+/// mutex (and incidentally the IRQ endpoint by virtue of the single
+/// dispatch thread) for the entire duration.
+fn run_blk_submit(
+    adapter: &ModernBlkAdapter,
+    lba: u64,
+    pages: &[u64],
+    total_bytes: usize,
+    cookie: u64,
+) -> BlkSubmitOutcome {
+    let mut bq = adapter.inner.lock();
+    if bq.submit_read(lba, pages, total_bytes, cookie).is_err() {
+        return BlkSubmitOutcome::Failed;
+    }
+    bq.notify();
+
+    let tokens = [adapter.irq_endpoint];
+    let mut irq_buf = [0u8; 64];
+    loop {
+        if ipc_recv_any(&tokens, &mut irq_buf, u64::MAX).is_err() {
+            return BlkSubmitOutcome::Failed;
+        }
+        let _ = bq.transport.isr_status();
+        for (got, status, blen) in bq.drain_completions() {
+            if got == cookie {
+                if status == 0 {
+                    return BlkSubmitOutcome::Ok {
+                        bytes_done: blen as usize,
+                    };
+                } else {
+                    return BlkSubmitOutcome::Failed;
+                }
+            }
+            // Other cookies cannot happen in this synchronous design (the
+            // BlkRequestQueue mutex is held end-to-end), but if a stale
+            // completion ever leaked through we have nowhere to deliver
+            // it — drop on the floor and keep waiting for ours.
+        }
+    }
+}
+
+/// Send a BLK_COMPLETE message to the caller's completion endpoint.
+/// `status`: 0 = success, non-zero = device/driver failure.
+fn send_blk_complete(comp_ep: usize, rid: u64, status: u8, bytes_done: usize) {
+    let msg = Message::new(
+        BLK_COMPLETE,
+        [rid as usize, status as usize, bytes_done, 0, 0, 0],
+        3,
+    );
+    let _ = ipc_send(comp_ep, msg.as_bytes());
+}
+
+/// Send a BLK_SUBMIT_NACK message — used when the request was rejected
+/// before it ever hit the device (e.g. malformed payload).
+fn send_blk_nack(comp_ep: usize, rid: u64, err: Error) {
+    let msg = Message::new(
+        BLK_SUBMIT_NACK,
+        [rid as usize, err as isize as usize, 0, 0, 0, 0],
+        2,
+    );
+    let _ = ipc_send(comp_ep, msg.as_bytes());
 }

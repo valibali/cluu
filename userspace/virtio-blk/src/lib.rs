@@ -33,12 +33,19 @@ use cluu_virtio_core::transport::{ModernPciTransport, Transport};
 /// `virt_to_phys` on freshly allocated `Vec` memory (which has no alignment
 /// guarantee).
 pub struct ModernBlkAdapter {
-    inner: Mutex<BlkRequestQueue<ModernPciTransport>>,
+    /// Public so the BLK_OPEN_SESSION/SUBMIT/CLOSE handlers in `main.rs`
+    /// can lock the request queue directly (T6.3 dispatch is synchronous
+    /// and shares the mutex with the FS path's `read_bytes`).
+    pub inner: Mutex<BlkRequestQueue<ModernPciTransport>>,
     capacity_sectors: u64,
     sector_size_bytes: usize,
     scratch_base: usize,
     scratch_pages: usize,
-    irq_endpoint: usize,
+    /// Public so the BLK_SUBMIT handler in `main.rs` can `recv_any` on the
+    /// same IRQ-attached endpoint that `read_bytes` waits on. The dispatch
+    /// is single-threaded and the BlkRequestQueue mutex is held end-to-end
+    /// during a submit, so no concurrent recv races are possible today.
+    pub irq_endpoint: usize,
 }
 
 impl ModernBlkAdapter {
