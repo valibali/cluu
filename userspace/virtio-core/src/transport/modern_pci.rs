@@ -1,48 +1,79 @@
 //! Modern PCI virtio 1.0+ transport.
 //!
 //! Strategy:
-//!   - Map the whole BAR0 once (page-rounded) at `mmio_va_base` via space_map
-//!     with MAP_DEVICE.
-//!   - Cap region VAs are `mmio_va_base + cap_offset` (offsets discovered by
-//!     `pci::parse_capabilities`).
+//!   - Map the whole BAR window (page-rounded) at `mmio_va_base` via
+//!     `space_map_range` with `MAP_DEVICE` so PTEs get the PCD bit and
+//!     writes bypass the cache.
+//!   - Cap region VAs are `mmio_va_base + cap_offset` (offsets discovered
+//!     by `pci::parse_capabilities`).
 //!
-//! Status bits (virtio 1.2 §2.1):
-//!   ACKNOWLEDGE = 1
-//!   DRIVER      = 2
-//!   FEATURES_OK = 8
-//!   DRIVER_OK   = 4
-//!   FAILED      = 128
+//! All MMIO access is done with `read_volatile` / `write_volatile` against
+//! a pointer computed by adding a byte offset to `common_va`. We do NOT
+//! use a `#[repr(C)]` struct view here — Rust's default C alignment would
+//! insert 6 bytes of padding between `queue_notify_off` (u16 at 0x1e) and
+//! `queue_desc` (u64 at 0x20), which would shift `queue_desc` and every
+//! later field off-spec. Using `#[repr(C, packed)]` would fix the layout
+//! but blocks `&mut field` references on all u64 / u32 fields, which
+//! `read_volatile`/`write_volatile` need. Byte-offset access sidesteps
+//! both pitfalls.
 
 use crate::pci::PciDevice;
 use crate::transport::Transport;
 use crate::virtqueue::Virtqueue;
 use libcluu::syscall::{space_map_range, MAP_DEVICE};
 use libcluu::{Error, Result};
+extern crate alloc;
 
 const STATUS_ACKNOWLEDGE: u8 = 1;
 const STATUS_DRIVER: u8 = 2;
 const STATUS_DRIVER_OK: u8 = 4;
 const STATUS_FEATURES_OK: u8 = 8;
 
-#[repr(C)]
-struct CommonCfg {
-    device_feature_select: u32,
-    device_feature: u32,
-    driver_feature_select: u32,
-    driver_feature: u32,
-    msix_config: u16,
-    num_queues: u16,
-    device_status: u8,
-    config_generation: u8,
-    queue_select: u16,
-    queue_size: u16,
-    queue_msix_vector: u16,
-    queue_enable: u16,
-    queue_notify_off: u16,
-    _reserved: u16,
-    queue_desc: u64,
-    queue_driver: u64,
-    queue_device: u64,
+// virtio 1.1 §4.1.4.3 virtio_pci_common_cfg byte offsets within the cap.
+const O_DEVICE_FEATURE_SELECT: usize = 0x00; // u32
+const O_DEVICE_FEATURE: usize = 0x04; // u32
+const O_DRIVER_FEATURE_SELECT: usize = 0x08; // u32
+const O_DRIVER_FEATURE: usize = 0x0c; // u32
+const O_MSIX_CONFIG: usize = 0x10; // u16
+const O_NUM_QUEUES: usize = 0x12; // u16
+const O_DEVICE_STATUS: usize = 0x14; // u8
+const O_CONFIG_GENERATION: usize = 0x15; // u8
+const O_QUEUE_SELECT: usize = 0x16; // u16
+const O_QUEUE_SIZE: usize = 0x18; // u16
+const O_QUEUE_MSIX_VECTOR: usize = 0x1a; // u16
+const O_QUEUE_ENABLE: usize = 0x1c; // u16
+const O_QUEUE_NOTIFY_OFF: usize = 0x1e; // u16
+const O_QUEUE_DESC: usize = 0x20; // u64
+const O_QUEUE_DRIVER: usize = 0x28; // u64
+const O_QUEUE_DEVICE: usize = 0x30; // u64
+
+#[inline]
+unsafe fn r8(base: usize, off: usize) -> u8 {
+    core::ptr::read_volatile((base + off) as *const u8)
+}
+#[inline]
+unsafe fn r16(base: usize, off: usize) -> u16 {
+    core::ptr::read_volatile((base + off) as *const u16)
+}
+#[inline]
+unsafe fn r32(base: usize, off: usize) -> u32 {
+    core::ptr::read_volatile((base + off) as *const u32)
+}
+#[inline]
+unsafe fn w8(base: usize, off: usize, v: u8) {
+    core::ptr::write_volatile((base + off) as *mut u8, v)
+}
+#[inline]
+unsafe fn w16(base: usize, off: usize, v: u16) {
+    core::ptr::write_volatile((base + off) as *mut u16, v)
+}
+#[inline]
+unsafe fn w32(base: usize, off: usize, v: u32) {
+    core::ptr::write_volatile((base + off) as *mut u32, v)
+}
+#[inline]
+unsafe fn w64(base: usize, off: usize, v: u64) {
+    core::ptr::write_volatile((base + off) as *mut u64, v)
 }
 
 pub struct ModernPciTransport {
@@ -55,12 +86,6 @@ pub struct ModernPciTransport {
 }
 
 impl ModernPciTransport {
-    /// Map the device's BAR0 into the driver's address space starting at
-    /// `mmio_va_base` (must be page-aligned and free), then resolve the
-    /// virt addresses of the four virtio cap regions.
-    ///
-    /// `bar_phys` is the BAR0 physical base (from `device.bar0`); `bar_size`
-    /// is `device.bar0_size` rounded up to whole pages.
     pub fn new(
         space_token: usize,
         device: PciDevice,
@@ -72,10 +97,6 @@ impl ModernPciTransport {
             return Err(Error::NotImplemented);
         }
         let pages = ((bar_size as usize) + 4095) / 4096;
-        // The kernel's single-page `space_map` path uses cacheable PTEs for
-        // MAP_DEVICE; only `space_map_range` correctly sets PCD/no-cache via
-        // `map_device_page`. Use the range form so the BAR window's PTEs
-        // bypass the cache and notify writes actually reach the device.
         space_map_range(
             space_token,
             mmio_va_base,
@@ -100,18 +121,13 @@ impl ModernPciTransport {
         })
     }
 
-    #[inline]
-    fn common(&self) -> *mut CommonCfg {
-        self.common_va as *mut CommonCfg
-    }
-
     fn write_status_or(&mut self, bit: u8) -> Result<()> {
         unsafe {
-            let cur = core::ptr::read_volatile(&(*self.common()).device_status);
-            core::ptr::write_volatile(&mut (*self.common()).device_status, cur | bit);
-            // Read back to confirm — virtio spec requires reading status
-            // after writing FEATURES_OK to verify the device accepted.
-            let after = core::ptr::read_volatile(&(*self.common()).device_status);
+            let cur = r8(self.common_va, O_DEVICE_STATUS);
+            w8(self.common_va, O_DEVICE_STATUS, cur | bit);
+            // Re-read; the device may refuse a state transition (e.g. reject
+            // FEATURES_OK if it doesn't like our subset).
+            let after = r8(self.common_va, O_DEVICE_STATUS);
             if (after & bit) == 0 {
                 return Err(Error::InvalidState);
             }
@@ -123,22 +139,21 @@ impl ModernPciTransport {
 impl Transport for ModernPciTransport {
     fn read_device_features(&mut self) -> Result<u64> {
         unsafe {
-            core::ptr::write_volatile(&mut (*self.common()).device_feature_select, 0);
-            let lo = core::ptr::read_volatile(&(*self.common()).device_feature) as u64;
-            core::ptr::write_volatile(&mut (*self.common()).device_feature_select, 1);
-            let hi = core::ptr::read_volatile(&(*self.common()).device_feature) as u64;
+            w32(self.common_va, O_DEVICE_FEATURE_SELECT, 0);
+            let lo = r32(self.common_va, O_DEVICE_FEATURE) as u64;
+            w32(self.common_va, O_DEVICE_FEATURE_SELECT, 1);
+            let hi = r32(self.common_va, O_DEVICE_FEATURE) as u64;
             Ok((hi << 32) | lo)
         }
     }
 
     fn write_driver_features(&mut self, mask: u64) -> Result<()> {
         unsafe {
-            core::ptr::write_volatile(&mut (*self.common()).driver_feature_select, 0);
-            core::ptr::write_volatile(&mut (*self.common()).driver_feature, mask as u32);
-            core::ptr::write_volatile(&mut (*self.common()).driver_feature_select, 1);
-            core::ptr::write_volatile(&mut (*self.common()).driver_feature, (mask >> 32) as u32);
+            w32(self.common_va, O_DRIVER_FEATURE_SELECT, 0);
+            w32(self.common_va, O_DRIVER_FEATURE, mask as u32);
+            w32(self.common_va, O_DRIVER_FEATURE_SELECT, 1);
+            w32(self.common_va, O_DRIVER_FEATURE, (mask >> 32) as u32);
         }
-        // ACKNOWLEDGE + DRIVER must be set first; FEATURES_OK confirms negotiation.
         self.write_status_or(STATUS_ACKNOWLEDGE)?;
         self.write_status_or(STATUS_DRIVER)?;
         self.write_status_or(STATUS_FEATURES_OK)?;
@@ -147,22 +162,42 @@ impl Transport for ModernPciTransport {
 
     fn configure_queue(&mut self, idx: u16, vq: &Virtqueue) -> Result<()> {
         unsafe {
-            core::ptr::write_volatile(&mut (*self.common()).queue_select, idx);
-            core::ptr::write_volatile(&mut (*self.common()).queue_size, vq.queue_size);
-            core::ptr::write_volatile(&mut (*self.common()).queue_desc, vq.desc_region.phys);
-            core::ptr::write_volatile(&mut (*self.common()).queue_driver, vq.avail_region.phys);
-            core::ptr::write_volatile(&mut (*self.common()).queue_device, vq.used_region.phys);
-            core::ptr::write_volatile(&mut (*self.common()).queue_enable, 1);
+            w16(self.common_va, O_QUEUE_SELECT, idx);
+            let dev_max_size = r16(self.common_va, O_QUEUE_SIZE);
+            // Don't override queue_size — use whatever the device reports as
+            // its max. The Virtqueue caller is expected to size to dev_max.
+            w64(self.common_va, O_QUEUE_DESC, vq.desc_region.phys);
+            w64(self.common_va, O_QUEUE_DRIVER, vq.avail_region.phys);
+            w64(self.common_va, O_QUEUE_DEVICE, vq.used_region.phys);
+            // No MSI-X: write NO_VECTOR explicitly so the device doesn't
+            // try to deliver via a vector we never set up.
+            w16(self.common_va, O_QUEUE_MSIX_VECTOR, 0xFFFF);
+            w16(self.common_va, O_QUEUE_ENABLE, 1);
+
+            let qe = r16(self.common_va, O_QUEUE_ENABLE);
+            let qmv = r16(self.common_va, O_QUEUE_MSIX_VECTOR);
+            let qno = r16(self.common_va, O_QUEUE_NOTIFY_OFF);
+            let qd_back = core::ptr::read_volatile((self.common_va + O_QUEUE_DESC) as *const u64);
+            let _ = libcluu::debug_print(&alloc::format!(
+                "virtio-core: q{} dev_max={} desc={:#x} (back={:#x}) avail={:#x} used={:#x} qe={} qmv={:#x} qno={}",
+                idx,
+                dev_max_size,
+                vq.desc_region.phys,
+                qd_back,
+                vq.avail_region.phys,
+                vq.used_region.phys,
+                qe,
+                qmv,
+                qno
+            ));
         }
         Ok(())
     }
 
     fn notify(&self, queue_idx: u16) {
-        // Modern: notify_addr = notify_va + queue_select.queue_notify_off * notify_off_multiplier.
-        // queue_select must be set to read queue_notify_off; we re-set it here defensively.
         unsafe {
-            core::ptr::write_volatile(&mut (*self.common()).queue_select, queue_idx);
-            let off = core::ptr::read_volatile(&(*self.common()).queue_notify_off);
+            w16(self.common_va, O_QUEUE_SELECT, queue_idx);
+            let off = r16(self.common_va, O_QUEUE_NOTIFY_OFF);
             let bytes = (off as u32) * self.device.notify_off_multiplier;
             let notify_addr = (self.notify_va + bytes as usize) as *mut u16;
             core::ptr::write_volatile(notify_addr, queue_idx);
@@ -179,7 +214,7 @@ impl Transport for ModernPciTransport {
 
     fn reset(&mut self) -> Result<()> {
         unsafe {
-            core::ptr::write_volatile(&mut (*self.common()).device_status, 0u8);
+            w8(self.common_va, O_DEVICE_STATUS, 0);
         }
         Ok(())
     }

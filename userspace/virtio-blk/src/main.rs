@@ -138,6 +138,15 @@ fn run() -> Result<()> {
     };
 
     cluu_virtio_core::pci::enable_device(pci_token, &pci_device)?;
+    // Read back PCI command register to verify bus master + memory space enabled.
+    let cmd_status = libcluu::syscall::pci_config_read(
+        pci_token, pci_device.bus, pci_device.device, pci_device.function, 0x04,
+    )?;
+    debug_print(&format!(
+        "virtio-blk: PCI command={:#06x} status={:#06x}",
+        cmd_status & 0xFFFF,
+        (cmd_status >> 16) & 0xFFFF
+    ))?;
 
     let pool = DmaPool::new(space_token, DMA_POOL_VA, DMA_POOL_PAGES)?;
 
@@ -171,7 +180,10 @@ fn run() -> Result<()> {
         capacity_sectors
     ))?;
 
-    let mut bq = BlkRequestQueue::new(transport, pool, 64)?;
+    // Match the device's max queue size (256 on QEMU). Smaller queues
+    // surface a wrap-around bug we haven't fully diagnosed; using the
+    // device max sidesteps it for now and gives us more in-flight depth.
+    let mut bq = BlkRequestQueue::new(transport, pool, 256)?;
     bq.transport.set_driver_ok()?;
 
     // Pre-map the scratch buffer for read DMA. Single-in-flight at this

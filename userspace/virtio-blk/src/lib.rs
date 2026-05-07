@@ -128,12 +128,6 @@ impl BlockDevice for ModernBlkAdapter {
                 }
             }
             spins += 1;
-            if spins == 10_000_000 {
-                let _ = libcluu::debug_print(
-                    "virtio-blk/read_bytes: spun 10M without completion — bailing",
-                );
-                return Err(libcluu::Error::Timeout);
-            }
             if spins.is_multiple_of(1024) {
                 let _ = libcluu::syscall::yield_cpu();
             }

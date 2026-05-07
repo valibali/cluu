@@ -354,6 +354,7 @@ rm -f "$MONITOR_SOCK"
 echo "=== Starting QEMU (headless) ==="
 qemu_args=(
     -bios "$OVMF"
+    -machine q35
     -m 512M
     -accel kvm
     -cpu host

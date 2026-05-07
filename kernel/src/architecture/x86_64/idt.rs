@@ -128,6 +128,7 @@ lazy_static! {
         idt[33].set_handler_fn(keyboard_interrupt_handler); // IRQ 1 - Keyboard
         idt[36].set_handler_fn(serial_interrupt_handler);   // IRQ 4 - Serial COM1
         idt[39].set_handler_fn(serial_interrupt_handler);   // IRQ 7 - Serial COM2
+        idt[43].set_handler_fn(virtio_blk_interrupt_handler); // IRQ 11 - virtio-blk-pci
 
         // Set up a generic handler for interrupt 0x68 (104)
         idt[0x68].set_handler_fn(generic_interrupt_handler);
@@ -1193,6 +1194,29 @@ extern "x86-interrupt" fn serial_interrupt_handler(_stack_frame: InterruptStackF
     // Serial interrupt - just acknowledge
     unsafe {
         pic_eoi(4); // IRQ 4 - Serial COM1/COM2
+    }
+}
+
+/// IRQ 11 — virtio-blk-pci on QEMU's PCI INTA routing.
+///
+/// virtio-blk userspace `irq_attach`s its private endpoint to IRQ 11; this
+/// handler delivers the wakeup. The "data byte" field of `dispatch_scancode`
+/// is unused for non-keyboard IRQs (the userspace driver reads ISR via MMIO
+/// to learn what fired), but the kernel-side `dispatch_scancode` is the
+/// existing IRQ→IPC bridge — reusing it keeps the lock-free fast path.
+///
+/// Userspace failure this fixes: with no IDT[43] handler, an IRQ 11 fired
+/// by virtio-blk-modern after the device started processing requests landed
+/// on a null gate descriptor and the CPU raised #GP, halting the kernel
+/// (boot got as far as `ext2 filesystem mounted` before the next IRQ
+/// brought the system down).
+extern "x86-interrupt" fn virtio_blk_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::devices::irq::dispatch_scancode(11, 0);
+    if crate::architecture::x86_64::apic::is_enabled() {
+        crate::architecture::x86_64::apic::eoi();
+    }
+    unsafe {
+        pic_eoi(11); // IRQ 11 - sends EOI to PIC2 + cascade EOI to PIC1
     }
 }
 
