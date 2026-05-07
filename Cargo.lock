@@ -427,6 +427,7 @@ dependencies = [
 name = "cluu-virtio-core"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "libcluu",
  "spin",
 ]

@@ -12,5 +12,5 @@ pub mod pci;
 // re-exports filled in by later tasks
 pub use dma::{DmaPool, DmaRegion};
 pub use virtqueue::{DescChain, Virtqueue};
-// pub use transport::{Transport, FeatureBits};
+pub use transport::{Transport, FeatureBits};
 // pub use irq::IrqSource;

@@ -13,3 +13,4 @@ path = "src/lib.rs"
 [dependencies]
 libcluu = { path = "../libcluu" }
 spin = { workspace = true }
+bitflags = { workspace = true }
