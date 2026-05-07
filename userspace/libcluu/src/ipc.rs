@@ -157,6 +157,16 @@ pub const PROCMGR_PIPE_CREATE_LABEL: u32 = 38;
 /// Release the caller's tokens for a pipe. words[0]=pipe_id. Idempotent.
 pub const PROCMGR_PIPE_CLOSE_LABEL: u32 = 39;
 
+// virtio-blk raw-block session IPC labels (Phase 6 of virtio-blk modern redesign).
+// `BLK_OPEN_SESSION` and `BLK_CLOSE_SESSION` go to the driver's listen endpoint.
+// `BLK_SUBMIT` is fire-and-forget into the driver. `BLK_COMPLETE` and
+// `BLK_SUBMIT_NACK` flow back to the caller's per-session completion endpoint.
+pub const BLK_OPEN_SESSION: u32 = 0x310;
+pub const BLK_SUBMIT: u32 = 0x311;
+pub const BLK_COMPLETE: u32 = 0x312;
+pub const BLK_CLOSE_SESSION: u32 = 0x313;
+pub const BLK_SUBMIT_NACK: u32 = 0x314;
+
 // tpmd IPC labels (per-service label space)
 pub const TPMD_STARTUP_LABEL: u32    = 1;
 pub const TPMD_PCR_READ_LABEL: u32   = 2;

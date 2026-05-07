@@ -164,6 +164,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-blkprobe"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-cascadeprobe"
 version = "0.1.0"
 dependencies = [
@@ -419,8 +426,26 @@ name = "cluu-virtio-blk"
 version = "0.1.0"
 dependencies = [
  "cluu-ext2",
+ "cluu-virtio-core",
  "libcluu",
  "spin",
+]
+
+[[package]]
+name = "cluu-virtio-core"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "libcluu",
+ "spin",
+]
+
+[[package]]
+name = "cluu-vqprobe"
+version = "0.1.0"
+dependencies = [
+ "cluu-virtio-core",
+ "libcluu",
 ]
 
 [[package]]

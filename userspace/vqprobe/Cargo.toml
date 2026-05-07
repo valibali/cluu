@@ -1,18 +1,15 @@
 [package]
-name = "cluu-virtio-blk"
+name = "cluu-vqprobe"
 version = "0.1.0"
 edition = "2021"
-
-[lib]
-name = "cluu_virtio_blk"
-path = "src/lib.rs"
+description = "Virtqueue mechanics smoke test"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
 
 [dependencies]
 libcluu = { path = "../libcluu" }
-cluu-ext2 = { path = "../ext2" }
 cluu-virtio-core = { path = "../virtio-core" }
-spin = "0.9"
 
 [[bin]]
-name = "virtio-blk"
+name = "vqprobe"
 path = "src/main.rs"

@@ -164,6 +164,7 @@ No dates. A phase is done when the capabilities exist, full stop.
 - MicroPython end-to-end was confirmed 2026-04-29 (`l2_mp_etc` green, REPL interactive).
 - Editor shipped 2026-04-30; `:w` persistence and `ls / edit / :w / :q / ls` cycle confirmed today after fixing a deterministic console crash on the second `ls`.
 - That crash had a kernel root cause: PI24's `MAP_SHARE_PHYS` shared physical frames between VFS's ELF cache and consumer address spaces *without refcounting them in `frame_registry`*. Disabled in `vfs/main.rs` as the fastest correctness fix; spawn cost is back to pre-PI24 (~600ms hot, per-segment memcpy). Re-enabling it correctly is the first item in Phase 2 → Phase 3 transition (named userspace failure: today's console wild-jump). Tracked in `memory/project_map_share_phys_uaf.md`.
+- virtio-blk modernized 2026-05-07 (branch `virtio-modern`): rebuilt on a reusable `userspace/virtio-core/` crate with virtio 1.0+ modern PCI transport, IRQ-driven completion, BlkSessionClient public IPC. `l2_blk_basic` and `l2_blk_concurrent` green; system boots end-to-end on the modern stack. Writes still go through legacy code (modern `write_bytes` returns NotImplemented); perf floor (≥150 MB/s) deferred — needs T5.7 multi-in-flight at the IPC boundary. The reusable virtio-core is the foundation for Phase 4's virtio-net. Tracked in `memory/project_virtio_blk_modern.md`.
 
 ---
 

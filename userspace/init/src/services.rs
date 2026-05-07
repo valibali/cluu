@@ -60,13 +60,16 @@ const PROCMGR_RIGHTS_BITS: u32 = Rights::READ.bits()
 
 const PROCMGR_RIGHTS: Rights = Rights::from_bits_truncate(PROCMGR_RIGHTS_BITS);
 
-// virtio-blk needs PCI access and space mapping for MMIO/DMA
+// virtio-blk needs PCI access and space mapping for MMIO/DMA, plus IRQ
+// rights so it can attach an IRQ handler for IRQ-driven completion.
 const VIRTIOBLK_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
     | Rights::SPACE_MAP.bits()
     | Rights::IPC_SEND.bits()
     | Rights::IPC_RECV.bits()
     | Rights::CREATE.bits()
-    | Rights::GRANT.bits();
+    | Rights::GRANT.bits()
+    | Rights::IRQ_HANDLE.bits()
+    | Rights::IRQ_ACK.bits();
 
 const VIRTIOBLK_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIOBLK_RIGHTS_BITS);
 

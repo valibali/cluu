@@ -47,7 +47,10 @@ members = [
     "userspace/suspendprobe",
     "userspace/cascadeprobe",
     "userspace/detachprobe",
+    "userspace/virtio-core",
     "userspace/virtio-blk",
+    "userspace/vqprobe",
+    "userspace/blkprobe",
     "userspace/tpmd",
     "userspace/libcluu_syscalls",
 
@@ -97,7 +100,10 @@ default-members = [
     "userspace/suspendprobe",
     "userspace/cascadeprobe",
     "userspace/detachprobe",
+    "userspace/virtio-core",
     "userspace/virtio-blk",
+    "userspace/vqprobe",
+    "userspace/blkprobe",
     "userspace/tpmd",
 ]
 
@@ -223,6 +229,12 @@ debug = 0
 [profile.dev.package."cluu-detachprobe"]
 debug = 0
 
+[profile.dev.package."cluu-vqprobe"]
+debug = 0
+
+[profile.dev.package."cluu-blkprobe"]
+debug = 0
+
 [profile.dev.package."cluu-tpmd"]
 debug = 0
 
@@ -326,6 +338,12 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-detachprobe"]
+debug = 0
+
+[profile.release.package."cluu-vqprobe"]
+debug = 0
+
+[profile.release.package."cluu-blkprobe"]
 debug = 0
 
 [profile.release.package."cluu-tpmd"]

@@ -354,12 +354,13 @@ rm -f "$MONITOR_SOCK"
 echo "=== Starting QEMU (headless) ==="
 qemu_args=(
     -bios "$OVMF"
+    -machine q35
     -m 512M
     -accel kvm
     -cpu host
     -drive "file=$IMG,format=raw,if=ide,index=0"
     -drive "file=$USER_DISK,format=raw,if=none,id=userblk"
-    -device virtio-blk-pci,drive=userblk
+    -device virtio-blk-pci,drive=userblk,disable-legacy=on,disable-modern=off,vectors=0
     -display none
     -no-reboot
     -no-shutdown
@@ -744,6 +745,27 @@ case "$MARKER_MODE" in
             "argvprobe: arg0=/bin/argvprobe"
             "argvprobe: arg1=hello"
             "argvprobe: arg2=world"
+        )
+        ;;
+    l2_vqprobe)
+        required_markers=(
+            "TSC calibrated"
+            "vqprobe: ALL OK"
+        )
+        ;;
+    l2_blk_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "blkprobe: ALL OK"
+        )
+        ;;
+    l2_blk_concurrent)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "blkprobe: concurrent=100 OK"
+            "blkprobe: ALL OK"
         )
         ;;
     l2_bare_cmd)

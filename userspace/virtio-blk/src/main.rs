@@ -12,17 +12,28 @@ extern crate alloc;
 extern crate cluu_ext2;
 extern crate cluu_virtio_blk;
 
+use alloc::collections::BTreeMap;
 use alloc::format;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use cluu_ext2::Ext2Fs;
-use cluu_virtio_blk::{pci, VirtioBlkAdapter, VirtioBlkDevice};
-use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_SPACE};
+use cluu_virtio_blk::request_queue::BlkRequestQueue;
+use cluu_virtio_blk::session::{pack_cookie, BlkSession};
+use cluu_virtio_blk::{DriverState, ModernBlkAdapter, PendingAsync};
+use cluu_virtio_core::transport::{FeatureBits, ModernPciTransport, Transport};
+use cluu_virtio_core::DmaPool;
+use libcluu::boot::{
+    process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_IPC, TOKEN_SPACE,
+};
 use libcluu::fs::{BlockDevice, Filesystem};
-use libcluu::ipc::{extract_reply_id, reply, reply_with_payload};
+use libcluu::ipc::{
+    extract_reply_id, reply, reply_with_payload, BLK_CLOSE_SESSION, BLK_COMPLETE, BLK_OPEN_SESSION,
+    BLK_SUBMIT, BLK_SUBMIT_NACK,
+};
 use libcluu::registry;
-use libcluu::syscall::{endpoint_create, ipc_recv_any, space_map_range};
+use libcluu::syscall::{endpoint_create, ipc_recv_any, ipc_send, space_map_range};
 use libcluu::types::{IpcFlags, Message};
-use libcluu::{debug_print, space_grant, yield_cpu, Result, PAGE_SIZE};
+use libcluu::{debug_print, space_grant, Error, Result, PAGE_SIZE};
 
 /// IPC labels for filesystem operations (matches VFS protocol)
 const FS_OPEN: u32 = 0x300;
@@ -55,6 +66,23 @@ struct GrantScratch {
     size: usize,
 }
 
+/// Per-process state for the BLK_OPEN_SESSION/SUBMIT/CLOSE protocol. Holds
+/// the live sessions and the next monotonic id. Session id `0` is reserved
+/// for the legacy FS_READ_GRANT path's cookies (see `session::pack_cookie`).
+struct BlkSessionRegistry {
+    sessions: BTreeMap<u32, BlkSession>,
+    next_session_id: u32,
+}
+
+impl BlkSessionRegistry {
+    fn new() -> Self {
+        Self {
+            sessions: BTreeMap::new(),
+            next_session_id: 1,
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     match run() {
@@ -78,59 +106,136 @@ fn run() -> Result<()> {
         pci_token, space_token
     ))?;
 
-    // Find virtio-blk PCI device
-    let pci_addr = match pci::find_virtio_blk(pci_token) {
-        Ok(addr) => {
-            debug_print(&format!("virtio-blk: found PCI device at {:?}", addr))?;
-            addr
+    // === New virtio-core init path ===
+    // Address-space carve-out for the new driver. Picked above the legacy
+    // mappings so a stale lingering legacy mapping (if any) doesn't clash.
+    const DMA_POOL_VA: usize = 0x5100_0000;
+    const DMA_POOL_PAGES: usize = 64;
+    const MMIO_VA_BASE: usize = 0x5200_0000;
+    const READ_SCRATCH_BASE: usize = 0x6200_0000;
+    const READ_SCRATCH_PAGES: usize = 1024; // 4 MiB
+
+    // virtio-blk = vendor 0x1AF4, devices 0x1001 (transitional) + 0x1042 (modern).
+    // We only accept the modern variant for the new stack.
+    let pci_device = match cluu_virtio_core::pci::find_virtio_device(
+        pci_token,
+        &[0x1001, 0x1042],
+        &[0x1042],
+    ) {
+        Ok(d) => {
+            debug_print(&format!("virtio-blk: found PCI device {:?}", d))?;
+            d
         }
         Err(e) => {
-            debug_print(&format!("virtio-blk: find_virtio_blk failed: {:?}", e))?;
+            debug_print(&format!("virtio-blk: find_virtio_device failed: {:?}", e))?;
             return Err(e);
         }
     };
 
-    // Initialize the virtio-blk device
-    debug_print("virtio-blk: creating device...")?;
-    let device = match VirtioBlkDevice::new(pci_token, space_token, pci_addr) {
-        Ok(dev) => {
-            debug_print("virtio-blk: device created")?;
-            dev
-        }
-        Err(e) => {
-            debug_print(&format!("virtio-blk: failed to init device: {:?}", e))?;
-            return Err(e);
-        }
-    };
-
-    let sector_count = device.sector_count();
-    let sector_size = device.sector_size();
-
+    cluu_virtio_core::pci::enable_device(pci_token, &pci_device)?;
+    // Read back PCI command register to verify bus master + memory space enabled.
+    let cmd_status = libcluu::syscall::pci_config_read(
+        pci_token, pci_device.bus, pci_device.device, pci_device.function, 0x04,
+    )?;
     debug_print(&format!(
-        "virtio-blk: device ready, {} sectors ({})",
-        sector_count,
-        sector_count * sector_size as u64
+        "virtio-blk: PCI command={:#06x} status={:#06x}",
+        cmd_status & 0xFFFF,
+        (cmd_status >> 16) & 0xFFFF
     ))?;
 
-    // Wrap device in adapter that implements BlockDevice trait
-    let adapter = VirtioBlkAdapter::new(device);
+    let pool = DmaPool::new(space_token, DMA_POOL_VA, DMA_POOL_PAGES)?;
 
-    // Try to mount ext2 filesystem
-    let fs = match Ext2Fs::mount(&adapter) {
-        Ok(fs) => {
-            debug_print("virtio-blk: ext2 filesystem mounted")?;
-            Some(fs)
-        }
-        Err(e) => {
-            debug_print(&format!(
-                "virtio-blk: no ext2 found ({:?}), raw block only",
-                e
-            ))?;
-            None
-        }
-    };
+    // The four virtio cap regions live in `cap_bar` (typically BAR4 on QEMU's
+    // transitional virtio-blk). `cap_bar_phys` / `cap_bar_size` were resolved
+    // by `find_virtio_device` after the cap walk; `bar0` here is a legacy
+    // I/O port BAR we don't use on the modern path.
+    let bar_phys = pci_device.cap_bar_phys;
+    let bar_size = pci_device.cap_bar_size;
+    let mut transport = ModernPciTransport::new(
+        space_token,
+        pci_device.clone(),
+        bar_phys,
+        bar_size,
+        MMIO_VA_BASE,
+    )?;
 
-    // Initialize registry and create listen endpoint
+    // Reset, negotiate features (VERSION_1 only — no fancy device features yet).
+    transport.reset()?;
+    let dev_feats = transport.read_device_features()?;
+    let want = FeatureBits::VERSION_1.bits() & dev_feats;
+    transport.write_driver_features(want)?;
+
+    // Read device capacity from device_cfg (capacity at offset 0, u64).
+    // virtio 1.2 §5.2.4 — also has blk_size at offset 20, but we use the
+    // standard 512 sector size.
+    let device_cfg_va = transport.device_cfg_va;
+    let capacity_sectors = unsafe { core::ptr::read_volatile(device_cfg_va as *const u64) };
+    debug_print(&format!(
+        "virtio-blk: capacity_sectors={}",
+        capacity_sectors
+    ))?;
+
+    // Match the device's max queue size (256 on QEMU). Smaller queues
+    // surface a wrap-around bug we haven't fully diagnosed; using the
+    // device max sidesteps it for now and gives us more in-flight depth.
+    let mut bq = BlkRequestQueue::new(transport, pool, 256)?;
+    bq.transport.set_driver_ok()?;
+
+    // Pre-map the scratch buffer for read DMA. Single-in-flight at this
+    // stage (no IPC concurrency yet) means no contention on the buffer.
+    space_map_range(
+        space_token,
+        READ_SCRATCH_BASE,
+        0,
+        0x03, // R+W
+        READ_SCRATCH_PAGES,
+        0,
+    )?;
+
+    // Read the PCI Interrupt Line register (offset 0x3C low byte) to
+    // discover which legacy IRQ the device uses on this QEMU topology.
+    let intr_line_word = libcluu::syscall::pci_config_read(
+        pci_token,
+        pci_device.bus,
+        pci_device.device,
+        pci_device.function,
+        0x3c,
+    )?;
+    let irq_number = (intr_line_word & 0xFF) as usize;
+    debug_print(&format!(
+        "virtio-blk: PCI Interrupt Line = {} (raw 0x{:08x})",
+        irq_number, intr_line_word
+    ))?;
+
+    let irq_token = info.tokens[TOKEN_EXTRA_2];
+    let ipc_token = info.tokens[TOKEN_IPC];
+    let irq = cluu_virtio_core::IrqSource::new(ipc_token, irq_token, irq_number)?;
+    let _ = debug_print(&format!(
+        "virtio-blk: IRQ attached (endpoint={} irq={})",
+        irq.endpoint, irq.irq_number
+    ));
+
+    let state = Arc::new(DriverState::new(bq));
+
+    let adapter = ModernBlkAdapter::new(
+        state.clone(),
+        capacity_sectors,
+        512,
+        READ_SCRATCH_BASE,
+        READ_SCRATCH_PAGES,
+        space_token,
+    );
+
+    debug_print(&format!(
+        "virtio-blk: virtio-core stack initialized ({} sectors, {} bytes)",
+        capacity_sectors,
+        capacity_sectors * 512
+    ))?;
+
+    // Initialize registry and create listen endpoint BEFORE the recv worker
+    // (it needs all three endpoints in WORKER_CTX) and BEFORE ext2 mount
+    // (which calls into adapter.read_bytes — that path needs the worker to
+    // drain IRQs and signal sync completions).
     registry::init("blkdev")?;
 
     let listen_endpoint = info.tokens[TOKEN_EXTRA_0];
@@ -146,42 +251,64 @@ fn run() -> Result<()> {
     let registry_endpoint = registry::control_endpoint();
     let grant_scratch = map_grant_scratch(space_token)?;
 
-    // Main service loop
+    let fs = match Ext2Fs::mount(&adapter) {
+        Ok(fs) => {
+            debug_print("virtio-blk: ext2 filesystem mounted")?;
+            Some(fs)
+        }
+        Err(e) => {
+            debug_print(&format!(
+                "virtio-blk: no ext2 found ({:?}), raw block only",
+                e
+            ))?;
+            None
+        }
+    };
+
+    // Main service loop: listen + irq + registry on a single thread.
+    let mut sessions = BlkSessionRegistry::new();
     let mut buf = [0u8; 4096];
     loop {
-        let tokens = [listen_endpoint, registry_endpoint];
-        match ipc_recv_any(&tokens, &mut buf, u64::MAX) {
-            Ok((index, len)) => {
-                if len < core::mem::size_of::<Message>() {
-                    continue;
-                }
+        let tokens = [listen_endpoint, irq.endpoint, registry_endpoint];
+        let (idx, len) = match ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
 
-                let msg = unsafe { &*(buf.as_ptr() as *const Message) };
-                let payload = &buf[core::mem::size_of::<Message>()..len];
+        if idx == 1 {
+            // IRQ wake: drain device, dispatch async BLK_COMPLETEs.
+            // sync_completions is unused in single-thread mode; read_bytes
+            // drains the queue itself directly during its wait loop.
+            state.drain_and_route();
+            continue;
+        }
 
-                if index == 1 {
-                    // Registry message
-                    let _ = registry::handle_incoming_message(msg, payload);
-                    continue;
-                }
+        if len < core::mem::size_of::<Message>() {
+            continue;
+        }
+        let msg = unsafe { &*(buf.as_ptr() as *const Message) };
+        let payload = &buf[core::mem::size_of::<Message>()..len];
 
-                // Handle request
-                if let Some(ref fs) = fs {
-                    handle_fs_request(fs, &adapter, space_token, &grant_scratch, msg, payload);
-                } else {
-                    handle_block_request(&adapter, msg);
-                }
-            }
-            Err(_) => {
-                let _ = yield_cpu();
-            }
+        if idx == 2 {
+            let _ = registry::handle_incoming_message(msg, payload);
+            continue;
+        }
+
+        if dispatch_blk_session(&state, &mut sessions, msg, payload) {
+            continue;
+        }
+
+        if let Some(ref fs) = fs {
+            handle_fs_request(fs, &adapter, space_token, &grant_scratch, msg, payload);
+        } else {
+            handle_block_request(&adapter, msg);
         }
     }
 }
 
 fn handle_fs_request(
     fs: &Ext2Fs,
-    blk: &VirtioBlkAdapter,
+    blk: &ModernBlkAdapter,
     space_token: usize,
     grant_scratch: &GrantScratch,
     msg: &Message,
@@ -531,7 +658,7 @@ fn parse_usize_pair(payload: &[u8]) -> Option<(usize, usize)> {
     Some((first, second))
 }
 
-fn handle_block_request(blk: &VirtioBlkAdapter, msg: &Message) {
+fn handle_block_request(blk: &ModernBlkAdapter, msg: &Message) {
     let reply_token = extract_reply_id(msg);
 
     match msg.tag.label {
@@ -594,4 +721,108 @@ fn send_error_reply_shifted(reply_token: Option<usize>, code: isize) {
         let reply_msg = Message::new(0, [0, code as usize, 0, 0, 0, 0], 2);
         let _ = reply(token, &reply_msg, IpcFlags::empty());
     }
+}
+
+/// Recv-worker entry point for the dedicated BLK/IRQ/registry dispatch
+/// thread. Spawned by `run()` after `WORKER_CTX` is initialized; never
+/// returns. `extern "C"` because `thread_create` jumps to a raw address
+/// using the SysV calling convention.
+/// Top-level demux for the BLK_OPEN_SESSION / BLK_SUBMIT / BLK_CLOSE_SESSION
+/// protocol. Returns `true` when the message has been handled (or
+/// definitively malformed and dropped); `false` means the caller should
+/// forward to the main thread (FS_*/legacy block dispatch).
+///
+/// BLK_SUBMIT is fire-and-forget here: register the cookie under
+/// `state.pending`, submit + notify, return without replying. The IRQ
+/// path (`drain_and_route`) delivers the eventual `BLK_COMPLETE`.
+fn dispatch_blk_session(
+    state: &DriverState,
+    sessions: &mut BlkSessionRegistry,
+    msg: &Message,
+    payload: &[u8],
+) -> bool {
+    let reply_token = extract_reply_id(msg);
+    match msg.tag.label {
+        BLK_OPEN_SESSION => {
+            let comp_ep = msg.words[0];
+            let sid = sessions.next_session_id;
+            sessions.next_session_id = sessions.next_session_id.wrapping_add(1);
+            if sessions.next_session_id == 0 {
+                sessions.next_session_id = 1;
+            }
+            sessions
+                .sessions
+                .insert(sid, BlkSession::new(sid, comp_ep));
+
+            let reply_msg = Message::new(BLK_OPEN_SESSION, [0, sid as usize, 0, 0, 0, 0], 2);
+            if let Some(rt) = reply_token {
+                let _ = reply(rt, &reply_msg, IpcFlags::empty());
+            }
+            true
+        }
+
+        BLK_CLOSE_SESSION => {
+            let sid = msg.words[0] as u32;
+            sessions.sessions.remove(&sid);
+            true
+        }
+
+        BLK_SUBMIT => {
+            let sid = msg.words[0] as u32;
+            let rid = msg.words[1] as u64;
+            let lba = ((msg.words[3] as u64) << 32) | (msg.words[2] as u64);
+            let n_pages = msg.words[4];
+            let total_bytes = msg.words[5];
+
+            let comp_ep = match sessions.sessions.get(&sid) {
+                Some(s) => s.completion_endpoint,
+                None => return true, // unknown session — drop
+            };
+
+            if payload.len() < 8 * n_pages {
+                send_blk_nack(comp_ep, rid, Error::InvalidArgument);
+                return true;
+            }
+
+            let mut pages: Vec<u64> = Vec::with_capacity(n_pages);
+            for i in 0..n_pages {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&payload[i * 8..i * 8 + 8]);
+                pages.push(u64::from_le_bytes(bytes));
+            }
+
+            let cookie = pack_cookie(sid, rid);
+            let submit_err = {
+                let mut inner = state.inner.lock();
+                inner.pending.insert(cookie, PendingAsync { comp_ep, rid });
+                match inner.bq.submit_read(lba, &pages, total_bytes, cookie) {
+                    Ok(()) => {
+                        inner.bq.notify();
+                        None
+                    }
+                    Err(e) => {
+                        inner.pending.remove(&cookie);
+                        Some(e)
+                    }
+                }
+            };
+            if submit_err.is_some() {
+                send_blk_nack(comp_ep, rid, Error::Busy);
+            }
+            true
+        }
+
+        _ => false,
+    }
+}
+
+/// Send a BLK_SUBMIT_NACK message — used when the request was rejected
+/// before it ever hit the device (e.g. malformed payload).
+fn send_blk_nack(comp_ep: usize, rid: u64, err: Error) {
+    let msg = Message::new(
+        BLK_SUBMIT_NACK,
+        [rid as usize, err as isize as usize, 0, 0, 0, 0],
+        2,
+    );
+    let _ = ipc_send(comp_ep, msg.as_bytes());
 }
