@@ -16,7 +16,7 @@
 use crate::pci::PciDevice;
 use crate::transport::Transport;
 use crate::virtqueue::Virtqueue;
-use libcluu::syscall::{space_map, MAP_DEVICE};
+use libcluu::syscall::{space_map_range, MAP_DEVICE};
 use libcluu::{Error, Result};
 
 const STATUS_ACKNOWLEDGE: u8 = 1;
@@ -72,17 +72,18 @@ impl ModernPciTransport {
             return Err(Error::NotImplemented);
         }
         let pages = ((bar_size as usize) + 4095) / 4096;
-        for i in 0..pages {
-            let virt = mmio_va_base + i * 4096;
-            let phys = bar_phys + (i as u64) * 4096;
-            space_map(
-                space_token,
-                virt,
-                phys as usize,
-                MAP_DEVICE | 0x03, // R+W + device-MMIO
-                0,                  // data_len=0; MAP_DEVICE skips alloc/zero/copy
-            )?;
-        }
+        // The kernel's single-page `space_map` path uses cacheable PTEs for
+        // MAP_DEVICE; only `space_map_range` correctly sets PCD/no-cache via
+        // `map_device_page`. Use the range form so the BAR window's PTEs
+        // bypass the cache and notify writes actually reach the device.
+        space_map_range(
+            space_token,
+            mmio_va_base,
+            bar_phys as usize,
+            (MAP_DEVICE | 0x03) as usize,
+            pages,
+            0,
+        )?;
 
         let common_va = mmio_va_base + device.common_cfg_offset as usize;
         let notify_va = mmio_va_base + device.notify_cfg_offset as usize;

@@ -103,16 +103,11 @@ impl BlockDevice for ModernBlkAdapter {
         bq.submit_read(start_sector, &pages, total_bytes, cookie)?;
         bq.notify();
 
-        // Block on IRQ delivery instead of spinning. The kernel pushes an
-        // IPC message to the IRQ-attached endpoint when the device fires;
-        // recv_any wakes us, we acknowledge ISR (read clears pending), and
-        // drain the used ring. Spurious wakes / completions for a different
-        // cookie just keep the loop going.
-        let tokens = [self.irq_endpoint];
-        let mut irq_buf = [0u8; 64];
+        // Spin-poll the used ring (debug fallback while IRQ delivery is
+        // being verified). Yields after a chunk of spins so other threads
+        // make progress.
+        let mut spins = 0u64;
         loop {
-            libcluu::syscall::ipc_recv_any(&tokens, &mut irq_buf, u64::MAX)?;
-            let _ = bq.transport.isr_status();
             let completions = bq.drain_completions();
             for (got, status, _len) in completions {
                 if got == cookie {
@@ -132,6 +127,17 @@ impl BlockDevice for ModernBlkAdapter {
                     return Ok(copy_len);
                 }
             }
+            spins += 1;
+            if spins == 10_000_000 {
+                let _ = libcluu::debug_print(
+                    "virtio-blk/read_bytes: spun 10M without completion — bailing",
+                );
+                return Err(libcluu::Error::Timeout);
+            }
+            if spins.is_multiple_of(1024) {
+                let _ = libcluu::syscall::yield_cpu();
+            }
+            core::hint::spin_loop();
         }
     }
 

@@ -141,8 +141,12 @@ fn run() -> Result<()> {
 
     let pool = DmaPool::new(space_token, DMA_POOL_VA, DMA_POOL_PAGES)?;
 
-    let bar_phys = pci_device.bar0 as u64;
-    let bar_size = pci_device.bar0_size;
+    // The four virtio cap regions live in `cap_bar` (typically BAR4 on QEMU's
+    // transitional virtio-blk). `cap_bar_phys` / `cap_bar_size` were resolved
+    // by `find_virtio_device` after the cap walk; `bar0` here is a legacy
+    // I/O port BAR we don't use on the modern path.
+    let bar_phys = pci_device.cap_bar_phys;
+    let bar_size = pci_device.cap_bar_size;
     let mut transport = ModernPciTransport::new(
         space_token,
         pci_device.clone(),
@@ -181,11 +185,24 @@ fn run() -> Result<()> {
         0,
     )?;
 
-    // Attach IRQ 11 (virtio-blk on QEMU PIC) to a fresh endpoint so reads
-    // can block on `recv_any` instead of spin-polling the used ring.
+    // Read the PCI Interrupt Line register (offset 0x3C low byte) to
+    // discover which legacy IRQ the device uses on this QEMU topology.
+    let intr_line_word = libcluu::syscall::pci_config_read(
+        pci_token,
+        pci_device.bus,
+        pci_device.device,
+        pci_device.function,
+        0x3c,
+    )?;
+    let irq_number = (intr_line_word & 0xFF) as usize;
+    debug_print(&format!(
+        "virtio-blk: PCI Interrupt Line = {} (raw 0x{:08x})",
+        irq_number, intr_line_word
+    ))?;
+
     let irq_token = info.tokens[TOKEN_EXTRA_2];
     let ipc_token = info.tokens[TOKEN_IPC];
-    let irq = cluu_virtio_core::IrqSource::new(ipc_token, irq_token, 11)?;
+    let irq = cluu_virtio_core::IrqSource::new(ipc_token, irq_token, irq_number)?;
     let _ = debug_print(&format!(
         "virtio-blk: IRQ attached (endpoint={} irq={})",
         irq.endpoint, irq.irq_number

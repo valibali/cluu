@@ -359,7 +359,7 @@ qemu_args=(
     -cpu host
     -drive "file=$IMG,format=raw,if=ide,index=0"
     -drive "file=$USER_DISK,format=raw,if=none,id=userblk"
-    -device virtio-blk-pci,drive=userblk
+    -device virtio-blk-pci,drive=userblk,disable-legacy=on,disable-modern=off,vectors=0
     -display none
     -no-reboot
     -no-shutdown

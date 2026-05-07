@@ -2523,6 +2523,8 @@ fn manifest_rights_mask(path: &str) -> u32 {
                 | RIGHT_IPC_RECV
                 | RIGHT_CREATE
                 | RIGHT_GRANT
+                | RIGHT_IRQ_HANDLE
+                | RIGHT_IRQ_ACK
         }
         "sys/tpmd" => {
             RIGHT_SPACE_MAP
@@ -2799,7 +2801,7 @@ fn run_qemu(debug: bool) -> Result<()> {
         "-drive",
         &format!("file={},format=raw,if=none,id=userblk", user_disk.display()),
         "-device",
-        "virtio-blk-pci,drive=userblk",
+        "virtio-blk-pci,drive=userblk,disable-legacy=on,disable-modern=off",
         "-display",
         "gtk",
         "-no-reboot",

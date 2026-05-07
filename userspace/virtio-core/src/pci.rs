@@ -56,7 +56,17 @@ pub struct PciDevice {
     pub isr_cfg_offset: u32,
     pub isr_cfg_bar: u8,
 
+    /// Physical base of the BAR that holds the virtio cap regions
+    /// (typically all four caps share one BAR — `common_cfg_bar`).
+    /// 0 if no caps were found.
+    pub cap_bar_phys: u64,
+    /// Size in bytes of `cap_bar_phys` (page-rounded by mappers).
+    pub cap_bar_size: u32,
+
     /// True if this device speaks modern virtio (1.0+).
+    /// Set to true if all four virtio caps were discovered, regardless of
+    /// device_id (transitional devices on some QEMU builds expose modern
+    /// caps in BAR4 even though they advertise the legacy device_id).
     pub is_modern: bool,
 }
 
@@ -108,11 +118,19 @@ fn init_device(
     device_id: u16,
     is_modern: bool,
 ) -> Result<PciDevice> {
+    // Modern-only virtio devices may leave BAR0 unprogrammed (parse_bar
+    // returns None for `bar_value == 0`). That's fine — caps live in
+    // whichever BAR the capability walk discovers, and `cap_bar_phys` is
+    // populated from THAT one below.
     let bar0_raw = pci::config_read_u32(pci_token, bus, device, function, PCI_BAR0)?;
-    let bar_info = pci::parse_bar(bar0_raw).ok_or(Error::InvalidState)?;
-    let bar0_addr = bar_info.address;
-    let is_mmio = !bar_info.is_io;
-    let bar0_size = pci::measure_bar_size(pci_token, bus, device, function, PCI_BAR0, bar0_raw)?;
+    let (bar0_addr, is_mmio, bar0_size) = match pci::parse_bar(bar0_raw) {
+        Some(info) => (
+            info.address,
+            !info.is_io,
+            pci::measure_bar_size(pci_token, bus, device, function, PCI_BAR0, bar0_raw)?,
+        ),
+        None => (0, true, 0),
+    };
 
     let mut dev = PciDevice {
         bus,
@@ -132,10 +150,41 @@ fn init_device(
         device_cfg_bar: 0,
         isr_cfg_offset: 0,
         isr_cfg_bar: 0,
+        cap_bar_phys: 0,
+        cap_bar_size: 0,
         is_modern,
     };
 
     parse_virtio_caps(pci_token, &mut dev)?;
+
+    // Resolve the cap-bearing BAR's physical base and size. Modern virtio
+    // typically routes all four caps through one BAR (e.g. BAR4 on QEMU);
+    // that BAR is often 64-bit, so we may need to combine the low half
+    // (`cap_bar`) with the high half (`cap_bar + 1`).
+    let caps_complete = dev.common_cfg_offset != 0
+        || dev.notify_cfg_offset != 0
+        || dev.isr_cfg_offset != 0
+        || dev.device_cfg_offset != 0;
+    if caps_complete {
+        let cap_bar = dev.common_cfg_bar;
+        let bar_reg_offset = PCI_BAR0 + cap_bar * 4;
+        let bar_raw = pci::config_read_u32(pci_token, bus, device, function, bar_reg_offset)?;
+        if let Some(info) = pci::parse_bar(bar_raw) {
+            // 32-bit address bits within the low BAR.
+            let low = (bar_raw & 0xFFFF_FFF0) as u64;
+            let high = if info.is_64bit {
+                let high_off = bar_reg_offset + 4;
+                pci::config_read_u32(pci_token, bus, device, function, high_off)? as u64
+            } else {
+                0
+            };
+            dev.cap_bar_phys = (high << 32) | low;
+            dev.cap_bar_size =
+                pci::measure_bar_size(pci_token, bus, device, function, bar_reg_offset, bar_raw)?;
+            dev.is_modern = true;
+        }
+    }
+
     Ok(dev)
 }
 
