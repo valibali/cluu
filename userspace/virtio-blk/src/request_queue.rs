@@ -24,6 +24,9 @@ pub struct BlkRequestQueue<T: Transport> {
     pub vq: Virtqueue,
     pub pool: DmaPool,
     pub in_flight: Vec<InflightSlot>,
+    /// Recycled (header, status) DMA region pairs returned from completed
+    /// requests. Pre-allocated regions are reused before tapping the pool.
+    free_slots: Vec<(DmaRegion, DmaRegion)>,
 }
 
 impl<T: Transport> BlkRequestQueue<T> {
@@ -35,6 +38,7 @@ impl<T: Transport> BlkRequestQueue<T> {
             vq,
             pool,
             in_flight: Vec::new(),
+            free_slots: Vec::new(),
         })
     }
 
@@ -56,22 +60,26 @@ impl<T: Transport> BlkRequestQueue<T> {
             return Err(Error::InvalidArgument);
         }
 
-        let n_descs = (page_phys.len() + 2) as u16; // header + N + status
-        let chain = self.vq.alloc_chain(n_descs).ok_or(Error::Busy)?;
-
-        // Allocate header + status from the DMA pool.
-        let header_region = match self.pool.alloc(16, 16) {
-            Ok(r) => r,
-            Err(e) => {
-                self.vq.free_chain(chain);
-                return Err(e);
+        // Acquire (header, status) DMA pair: prefer the recycled free-list
+        // before tapping the bump pool. This bounds steady-state pool usage
+        // to high-water-mark in_flight depth, not lifetime request count.
+        let (header_region, status_region) = match self.free_slots.pop() {
+            Some(pair) => pair,
+            None => {
+                let h = self.pool.alloc(16, 16)?;
+                let s = self.pool.alloc(1, 1)?;
+                (h, s)
             }
         };
-        let status_region = match self.pool.alloc(1, 1) {
-            Ok(r) => r,
-            Err(e) => {
-                self.vq.free_chain(chain);
-                return Err(e);
+
+        let n_descs = (page_phys.len() + 2) as u16; // header + N + status
+        let chain = match self.vq.alloc_chain(n_descs) {
+            Some(c) => c,
+            None => {
+                // Return the regions to the free-list so the next request
+                // can reuse them; they outlive request lifetimes.
+                self.free_slots.push((header_region, status_region));
+                return Err(Error::Busy);
             }
         };
 
@@ -137,10 +145,7 @@ impl<T: Transport> BlkRequestQueue<T> {
     }
 
     /// Drain used-ring entries. Returns Vec<(cookie, status_byte, len)>.
-    /// Caller is responsible for releasing the per-request DMA regions
-    /// (header/status) — for now we leak them into the bump pool, which
-    /// is fine because the pool is sized to absorb the steady-state load.
-    /// (Recycle in T5.4.)
+    /// Per-request DMA regions are returned to `free_slots` for reuse.
     pub fn drain_completions(&mut self) -> Vec<(u64, u8, u32)> {
         let mut out = Vec::new();
         while let Some((cookie, len)) = self.vq.pop_used() {
@@ -152,7 +157,8 @@ impl<T: Transport> BlkRequestQueue<T> {
             let slot = self.in_flight.swap_remove(pos);
             let status = unsafe { *(slot.status_region.virt as *const u8) };
             out.push((cookie, status, len));
-            // header_region/status_region currently leak (see comment above).
+            // Recycle the DMA regions back into the free-list.
+            self.free_slots.push((slot.header_region, slot.status_region));
         }
         out
     }
