@@ -243,11 +243,11 @@ impl MountBackend for RemoteBackend {
         //   [size: u64 LE][mode: u32 LE][mtime: u64 LE]
         //   [nlink: u32 LE][uid: u32 LE][gid: u32 LE]
         //   [name: name_len bytes]
-        // = 38 + name_len bytes
+        // = 34 + name_len bytes
         let mut entries: Vec<DirEntry> = Vec::with_capacity(entry_count);
         let mut offset = 0;
         for _ in 0..entry_count {
-            if offset + 38 > data.len() { break; }
+            if offset + 34 > data.len() { break; }
             let name_len = data[offset] as usize;
             let is_dir = data[offset + 1] != 0;
             offset += 2;

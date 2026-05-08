@@ -473,7 +473,7 @@ fn handle_fs_request(
             //   [size: u64 LE][mode: u32 LE][mtime: u64 LE]
             //   [nlink: u32 LE][uid: u32 LE][gid: u32 LE]
             //   [name: name_len bytes]
-            // 38 + name_len bytes per entry. Eliminates N+1 stat IPCs in
+            // 34 + name_len bytes per entry. Eliminates N+1 stat IPCs in
             // VFS RemoteBackend.
             let path = core::str::from_utf8(payload).unwrap_or("");
             match fs.resolve_path(path) {
