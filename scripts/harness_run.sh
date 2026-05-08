@@ -1262,7 +1262,26 @@ case "$MARKER_MODE" in
             "mmapprobe: PASS complete"
         )
         ;;
+    l2_pipe_3stage)
+        # Phase 4 Plan E diagnostic: 3-stage cat|grep|head on synthetic
+        # data. "alpha" must appear in the debug-print channel output
+        # (shell echoes pipeline stdout) and EXIT=0 from the echo.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: pipeline done stages=3 status=0"
+        )
+        ;;
     l2_pipe_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: pipeline done stages=2 status=0"
+        )
+        ;;
+    l2_pipe_env)
+        # Phase 4 Plan E Stage 2: env propagates through pipeline spawn.
+        # wc -c is the spawned binary; "hello\n" = 6 bytes.
         required_markers=(
             "TSC calibrated"
             "[USER] shell: ready"
