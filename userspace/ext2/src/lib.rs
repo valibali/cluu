@@ -1078,11 +1078,17 @@ impl<'a> Filesystem for Ext2Fs<'a> {
 
     fn stat(&self, inode: u64) -> Result<FileStat> {
         let ino = self.read_inode(inode as u32)?;
+        let size = ino.size();
         Ok(FileStat {
             inode,
-            size: ino.size(),
+            size,
             is_dir: ino.is_dir(),
             is_file: ino.is_file(),
+            mtime: ino.mtime as u64,
+            nlink: ino.links_count as u32,
+            uid: ino.uid as u32,
+            gid: ino.gid as u32,
+            blocks: ino.blocks as u64,
         })
     }
 

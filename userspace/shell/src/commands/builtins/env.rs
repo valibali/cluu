@@ -352,11 +352,11 @@ fn eval_unary(op: &str, arg: &str) -> bool {
                 Some(s) => s,
                 None => return false,
             };
-            let mode = stat.mode;
-            const S_IFMT: usize = 0o170000;
-            const S_IFREG: usize = 0o100000;
-            const S_IFDIR: usize = 0o040000;
-            const S_IFLNK: usize = 0o120000;
+            let mode = stat.mode as u32;
+            const S_IFMT: u32 = 0o170000;
+            const S_IFREG: u32 = 0o100000;
+            const S_IFDIR: u32 = 0o040000;
+            const S_IFLNK: u32 = 0o120000;
             match op {
                 "-e" => true,
                 "-f" => (mode & S_IFMT) == S_IFREG,

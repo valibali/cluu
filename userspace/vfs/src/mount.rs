@@ -22,6 +22,7 @@ use libcluu::{Error, Result};
 /// IPC labels for remote filesystem operations
 const FS_OPEN: u32 = 0x300;
 const FS_READ: u32 = 0x302;
+const FS_STAT: u32 = 0x303;
 const FS_READDIR: u32 = 0x304;
 const FS_UNLINK: u32 = 0x307;
 const FS_MKDIR: u32 = 0x308;
@@ -31,11 +32,39 @@ const FS_CREATE: u32 = 0x30B;
 const FS_LINK: u32 = 0x30C;
 const IPC_MESSAGE_MAX: usize = 256;
 
-/// Directory entry for readdir results.
+/// Build a minimal DirEntryStat for backends that can't provide full metadata.
+fn default_stat(is_dir: bool, size: u64) -> DirEntryStat {
+    let mode = if is_dir { 0o040755u32 } else { 0o100644u32 };
+    DirEntryStat {
+        size,
+        mode,
+        mtime: 0,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        blocks: (size + 511) / 512,
+    }
+}
+
+/// Directory entry for readdir results (internal VFS representation).
 #[derive(Clone)]
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
+    /// Full file metadata (v2). Populated by all backends.
+    pub stat: DirEntryStat,
+}
+
+/// Compact stat fields carried inline on every DirEntry.
+#[derive(Clone, Copy, Default)]
+pub struct DirEntryStat {
+    pub size:   u64,
+    pub mode:   u32,
+    pub mtime:  u64,
+    pub nlink:  u32,
+    pub uid:    u32,
+    pub gid:    u32,
+    pub blocks: u64,
 }
 
 /// Mount backend trait - all mount types implement this.
@@ -123,9 +152,31 @@ impl MountBackend for InitrdBackend {
         let entries = list_entries(self.data, rel_path);
         Ok(entries
             .into_iter()
-            .map(|e| DirEntry {
-                name: e.name,
-                is_dir: e.is_dir,
+            .map(|e| {
+                // For initrd tar entries we can probe the actual data slice for size.
+                let size = if !e.is_dir {
+                    find_member(self.data, &e.name)
+                        .or_else(|| find_member(self.data, &dot_prefixed(&e.name)))
+                        .map(|s| s.len() as u64)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                let mode = if e.is_dir { 0o040755u32 } else { 0o100644u32 };
+                let blocks = (size + 511) / 512;
+                DirEntry {
+                    name: e.name,
+                    is_dir: e.is_dir,
+                    stat: DirEntryStat {
+                        size,
+                        mode,
+                        mtime: 0,
+                        nlink: 1,
+                        uid: 0,
+                        gid: 0,
+                        blocks,
+                    },
+                }
             })
             .collect())
     }
@@ -188,7 +239,7 @@ impl MountBackend for RemoteBackend {
         let data = &reply_buf[data_start..data_start + payload_len];
 
         // Parse entries: [name_len: u8, is_dir: u8, name bytes...]
-        let mut entries = Vec::new();
+        let mut name_list: Vec<(String, bool)> = Vec::new();
         let mut offset = 0;
         for _ in 0..entry_count {
             if offset + 2 > data.len() {
@@ -201,12 +252,24 @@ impl MountBackend for RemoteBackend {
                 break;
             }
             if let Ok(name) = core::str::from_utf8(&data[offset..offset + name_len]) {
-                entries.push(DirEntry {
-                    name: String::from(name),
-                    is_dir,
-                });
+                name_list.push((String::from(name), is_dir));
             }
             offset += name_len;
+        }
+
+        // Enrich each entry with full stat via FS_STAT (N+1 IPC to remote).
+        let mut entries = Vec::with_capacity(name_list.len());
+        for (name, is_dir) in name_list {
+            let entry_path = if rel_path.is_empty() || rel_path == "/" {
+                name.clone()
+            } else {
+                let mut p = String::from(rel_path.trim_end_matches('/'));
+                p.push('/');
+                p.push_str(&name);
+                p
+            };
+            let stat = self.stat_entry(&entry_path, is_dir);
+            entries.push(DirEntry { name, is_dir, stat });
         }
 
         Ok(entries)
@@ -288,6 +351,59 @@ impl MountBackend for RemoteBackend {
     }
 }
 
+impl RemoteBackend {
+    /// Fetch full stat for a single entry path from the remote FS backend.
+    ///
+    /// Opens the file by path (FS_OPEN) and then queries FS_STAT by inode.
+    /// Falls back to a synthesized stat on any IPC error.
+    fn stat_entry(&self, path: &str, is_dir: bool) -> DirEntryStat {
+        // FS_OPEN to resolve inode number and base size.
+        let req = Message::new(FS_OPEN, [path.len(), 0, 0, 0, 0, 0], 1);
+        let mut reply = Message::new(0, [0; 6], 0);
+        if call_with_payload(self.endpoint, &req, path.as_bytes(), &mut reply).is_err() {
+            return default_stat(is_dir, 0);
+        }
+        let status = reply.words[0] as isize;
+        if status < 0 {
+            return default_stat(is_dir, 0);
+        }
+        let inode = reply.words[1] as u64;
+        let size = reply.words[2] as u64;
+
+        // Query FS_STAT by inode for full metadata.
+        let stat_req = Message::new(FS_STAT, [0, inode as usize, 0, 0, 0, 0], 2);
+        let mut stat_reply = Message::new(0, [0; 6], 0);
+        if call_with_payload(self.endpoint, &stat_req, &[], &mut stat_reply).is_err() {
+            return default_stat(is_dir, size);
+        }
+        let stat_status = stat_reply.words[0] as isize;
+        if stat_status < 0 {
+            return default_stat(is_dir, size);
+        }
+        // Remote FS_STAT reply (v2): words[1]=size, words[2]=flags,
+        // words[3]=mtime, words[4]=(uid<<16)|nlink, words[5]=gid
+        let remote_size = stat_reply.words[1] as u64;
+        let mode_flags = stat_reply.words[2];
+        let mtime = stat_reply.words[3] as u64;
+        let nlink = (stat_reply.words[4] & 0xFFFF) as u32;
+        let uid = ((stat_reply.words[4] >> 16) & 0xFFFF) as u32;
+        let gid = (stat_reply.words[5] & 0xFFFF) as u32;
+        let is_dir_from_flags = (mode_flags & 1) != 0;
+        let actual_is_dir = is_dir || is_dir_from_flags;
+        let mode = if actual_is_dir { 0o040755u32 } else { 0o100644u32 };
+        let blocks = (remote_size + 511) / 512;
+        DirEntryStat {
+            size: remote_size,
+            mode,
+            mtime,
+            nlink: if nlink == 0 { 1 } else { nlink },
+            uid,
+            gid,
+            blocks,
+        }
+    }
+}
+
 /// Device backend - special device files (/dev/null, /dev/zero, /dev/urandom, /dev/tty*).
 pub struct DeviceBackend {
     /// Endpoints for tty:0..tty:3 (resolved via registry at VFS startup).
@@ -359,48 +475,25 @@ impl MountBackend for DeviceBackend {
             return Err(Error::NotFound);
         }
 
-        Ok(alloc::vec![
-            DirEntry {
-                name: String::from("null"),
-                is_dir: false
-            },
-            DirEntry {
-                name: String::from("zero"),
-                is_dir: false
-            },
-            DirEntry {
-                name: String::from("urandom"),
-                is_dir: false
-            },
-            DirEntry {
-                name: String::from("random"),
-                is_dir: false
-            },
-            DirEntry {
-                name: String::from("tty0"),
-                is_dir: false
-            },
-            DirEntry {
-                name: String::from("tty1"),
-                is_dir: false
-            },
-            DirEntry {
-                name: String::from("tty2"),
-                is_dir: false
-            },
-            DirEntry {
-                name: String::from("tty3"),
-                is_dir: false
-            },
-            DirEntry {
-                name: String::from("tty4"),
-                is_dir: false
-            },
-            DirEntry {
-                name: String::from("console"),
-                is_dir: false
-            },
-        ])
+        let dev_stat = DirEntryStat {
+            size: 0,
+            mode: 0o020666u32, // S_IFCHR | rw-rw-rw-
+            mtime: 0,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            blocks: 0,
+        };
+
+        let names = [
+            "null", "zero", "urandom", "random",
+            "tty0", "tty1", "tty2", "tty3", "tty4", "console",
+        ];
+        Ok(names.iter().map(|&n| DirEntry {
+            name: String::from(n),
+            is_dir: false,
+            stat: dev_stat,
+        }).collect())
     }
 }
 
@@ -465,16 +558,31 @@ impl MountBackend for VirtualBackend {
                 .entries
                 .iter()
                 .filter(|(name, _)| !name.contains('/'))
-                .map(|(name, entry)| DirEntry {
-                    name: String::from(*name),
-                    is_dir: matches!(entry, VirtualEntry::Dir(_)),
+                .map(|(name, entry)| {
+                    let is_dir = matches!(entry, VirtualEntry::Dir(_));
+                    let mode = if is_dir { 0o040555u32 } else { 0o100444u32 };
+                    DirEntry {
+                        name: String::from(*name),
+                        is_dir,
+                        stat: DirEntryStat { mode, nlink: 1, ..Default::default() },
+                    }
                 })
                 .collect());
         }
 
         let entry = self.find_entry(rel_path).ok_or(Error::NotFound)?;
         match entry {
-            VirtualEntry::Dir(generator) => generator(),
+            VirtualEntry::Dir(generator) => {
+                let raw = generator()?;
+                Ok(raw.into_iter().map(|e| {
+                    let mode = if e.is_dir { 0o040555u32 } else { 0o100444u32 };
+                    DirEntry {
+                        is_dir: e.is_dir,
+                        stat: DirEntryStat { mode, nlink: 1, ..Default::default() },
+                        name: e.name,
+                    }
+                }).collect())
+            }
             VirtualEntry::File(_) => Err(Error::InvalidArgument),
         }
     }

@@ -517,9 +517,9 @@ fn vfs_fstat(entry: &mut FdEntry) -> Option<usize> {
     };
     match vfs_client.fstat(vfs_file) {
         Ok(stat) => {
-            entry.file_size = Some(stat.size);
-            entry.file_mode = Some(stat.mode);
-            Some(stat.size)
+            entry.file_size = Some(stat.size as usize);
+            entry.file_mode = Some(stat.mode as usize);
+            Some(stat.size as usize)
         }
         Err(_) => None,
     }

@@ -150,9 +150,9 @@ pub extern "C" fn _fstat(fd: c_int, st: *mut Stat) -> c_int {
         };
         match vfs_client.fstat(vfs_file) {
             Ok(info) => {
-                entry.file_size = Some(info.size);
-                entry.file_mode = Some(info.mode);
-                let mut st = Stat::regular_file(info.size as u64);
+                entry.file_size = Some(info.size as usize);
+                entry.file_mode = Some(info.mode as usize);
+                let mut st = Stat::regular_file(info.size);
                 st.st_mode = info.mode as mode_t;
                 st
             }
@@ -220,7 +220,7 @@ pub extern "C" fn _stat(_path: *const c_char, st: *mut Stat) -> c_int {
     let vfs_client = crate::fs::client::VfsClient::new(vfs_endpoint, client_id);
     match vfs_client.stat(path_str) {
         Ok(info) => {
-            let mut stat = Stat::regular_file(info.size as u64);
+            let mut stat = Stat::regular_file(info.size);
             stat.st_mode = info.mode as mode_t;
             unsafe {
                 *st = stat;

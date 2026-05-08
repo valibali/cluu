@@ -282,7 +282,11 @@ impl MountBackend for ProcfsBackend {
     }
 
     fn readdir(&self, rel_path: &str, caller_tid: usize) -> Result<Vec<DirEntry>> {
+        use crate::mount::DirEntryStat;
         let rel = rel_path.trim_start_matches('/');
+
+        let file_stat = DirEntryStat { mode: 0o100444u32, nlink: 1, ..Default::default() };
+        let dir_stat  = DirEntryStat { mode: 0o040555u32, nlink: 1, ..Default::default() };
 
         if rel.is_empty() {
             // Root /proc directory: static entries + PID directories
@@ -291,12 +295,14 @@ impl MountBackend for ProcfsBackend {
                 .map(|&name| DirEntry {
                     name: String::from(name),
                     is_dir: false,
+                    stat: file_stat,
                 })
                 .collect();
 
             entries.push(DirEntry {
                 name: String::from("self"),
                 is_dir: true,
+                stat: dir_stat,
             });
 
             // Query procmgr for PID list
@@ -305,6 +311,7 @@ impl MountBackend for ProcfsBackend {
                     entries.push(DirEntry {
                         name: format!("{}", pid),
                         is_dir: true,
+                        stat: dir_stat,
                     });
                 }
             }
@@ -319,6 +326,7 @@ impl MountBackend for ProcfsBackend {
                 .map(|&name| DirEntry {
                     name: String::from(name),
                     is_dir: false,
+                    stat: file_stat,
                 })
                 .collect());
         }
@@ -331,6 +339,7 @@ impl MountBackend for ProcfsBackend {
                 .map(|&name| DirEntry {
                     name: String::from(name),
                     is_dir: false,
+                    stat: file_stat,
                 })
                 .collect());
         }

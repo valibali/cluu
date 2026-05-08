@@ -48,17 +48,78 @@ pub struct VfsReadRingChunk {
     pub eof: bool,
 }
 
-/// File metadata returned by stat/fstat.
-#[derive(Debug, Clone, Copy)]
+/// File metadata returned by stat/fstat. Wire format v2.
+///
+/// Layout of the 40-byte serialised payload:
+///   [0..8]   size   (u64 LE)
+///   [8..12]  mode   (u32 LE)  — S_IFMT | perms
+///   [12..20] mtime  (u64 LE)  — unix seconds
+///   [20..24] nlink  (u32 LE)
+///   [24..28] uid    (u32 LE)
+///   [28..32] gid    (u32 LE)
+///   [32..40] blocks (u64 LE)  — 512-byte units
+#[derive(Debug, Clone, Copy, Default)]
 pub struct VfsStat {
-    pub size: usize,
-    pub mode: usize,
+    pub size: u64,
+    pub mode: u32,    // S_IFMT | perms
+    pub mtime: u64,   // unix seconds
+    pub nlink: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub blocks: u64,  // 512-byte units
+}
+
+impl VfsStat {
+    /// Serialise into the 40-byte wire representation.
+    pub fn to_bytes(&self) -> [u8; 40] {
+        let mut buf = [0u8; 40];
+        buf[0..8].copy_from_slice(&self.size.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.mode.to_le_bytes());
+        buf[12..20].copy_from_slice(&self.mtime.to_le_bytes());
+        buf[20..24].copy_from_slice(&self.nlink.to_le_bytes());
+        buf[24..28].copy_from_slice(&self.uid.to_le_bytes());
+        buf[28..32].copy_from_slice(&self.gid.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.blocks.to_le_bytes());
+        buf
+    }
+
+    /// Parse from the 40-byte wire representation.
+    pub fn from_bytes(buf: &[u8; 40]) -> Self {
+        let mut a = [0u8; 8];
+        let mut b = [0u8; 4];
+
+        a.copy_from_slice(&buf[0..8]);
+        let size = u64::from_le_bytes(a);
+
+        b.copy_from_slice(&buf[8..12]);
+        let mode = u32::from_le_bytes(b);
+
+        a.copy_from_slice(&buf[12..20]);
+        let mtime = u64::from_le_bytes(a);
+
+        b.copy_from_slice(&buf[20..24]);
+        let nlink = u32::from_le_bytes(b);
+
+        b.copy_from_slice(&buf[24..28]);
+        let uid = u32::from_le_bytes(b);
+
+        b.copy_from_slice(&buf[28..32]);
+        let gid = u32::from_le_bytes(b);
+
+        a.copy_from_slice(&buf[32..40]);
+        let blocks = u64::from_le_bytes(a);
+
+        Self { size, mode, mtime, nlink, uid, gid, blocks }
+    }
 }
 
 /// Directory entry returned by readdir.
 #[derive(Debug, Clone)]
 pub struct VfsDirEntry {
     pub name: String,
+    pub stat: VfsStat,
+    /// Convenience alias — `true` when `stat.mode` has `S_IFDIR` set.
+    /// Retained for backward-compatibility with existing callers.
     pub is_dir: bool,
 }
 
@@ -207,13 +268,14 @@ impl VfsClient {
 
     /// Read directory entries for a path.
     ///
-    /// Returns a list of directory entries with name and type info.
+    /// Returns a list of directory entries with full metadata (v2 wire format).
+    /// Per-entry layout: [name_len: u32 LE][stat: 40 bytes][name: name_len bytes]
     pub fn readdir(&self, path: &str) -> Result<Vec<VfsDirEntry>> {
         let payload = path.as_bytes();
         let msg = make_payload_message(VFS_READDIR, payload.len(), &[self.client_id]);
 
         // Use larger buffer for reply with entry data
-        let mut reply_buf = [0u8; 4096];
+        let mut reply_buf = [0u8; 8192];
         let (reply, payload_len) =
             ipc::call_with_reply_buf(self.endpoint, &msg, payload, &mut reply_buf)?;
         parse_status(reply.words[1])?;
@@ -222,22 +284,33 @@ impl VfsClient {
         let data_start = core::mem::size_of::<Message>();
         let data = &reply_buf[data_start..data_start + payload_len];
 
-        // Parse entries: each entry is [name_len: u8, is_dir: u8, name: [u8; name_len]]
+        // Parse entries (v2): [name_len: u32 LE][stat: 40 bytes][name: name_len bytes]
         let mut entries = Vec::new();
         let mut offset = 0;
         for _ in 0..entry_count {
-            if offset + 2 > data.len() {
+            // Need at least 4 (name_len) + 40 (stat) bytes
+            if offset + 44 > data.len() {
                 break;
             }
-            let name_len = data[offset] as usize;
-            let is_dir = data[offset + 1] != 0;
-            offset += 2;
+            let name_len = u32::from_le_bytes([
+                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            let mut stat_bytes = [0u8; 40];
+            stat_bytes.copy_from_slice(&data[offset..offset + 40]);
+            let stat = VfsStat::from_bytes(&stat_bytes);
+            offset += 40;
+
             if offset + name_len > data.len() {
                 break;
             }
             if let Ok(name) = core::str::from_utf8(&data[offset..offset + name_len]) {
+                // S_IFDIR = 0o040000
+                let is_dir = (stat.mode & 0o170000) == 0o040000;
                 entries.push(VfsDirEntry {
                     name: String::from(name),
+                    stat,
                     is_dir,
                 });
             }
@@ -261,30 +334,40 @@ impl VfsClient {
     }
 
     /// Stat a path.
+    ///
+    /// Reply carries a 40-byte stat payload after the status word (v2 format).
     pub fn stat(&self, path: &str) -> Result<VfsStat> {
         let payload = path.as_bytes();
         let msg = make_payload_message(VFS_STAT, payload.len(), &[self.client_id]);
-        let mut reply = Message::new(0, [0; 6], 0);
-        ipc::call_with_payload(self.endpoint, &msg, payload, &mut reply)?;
+        let mut reply_buf = [0u8; core::mem::size_of::<Message>() + 40];
+        let (reply, payload_len) =
+            ipc::call_with_reply_buf(self.endpoint, &msg, payload, &mut reply_buf)?;
         parse_status(reply.words[0])?;
-        Ok(VfsStat {
-            size: reply.words[1],
-            mode: reply.words[2],
-        })
+        let data_start = core::mem::size_of::<Message>();
+        if payload_len < 40 {
+            return Err(crate::error::Error::InvalidArgument);
+        }
+        let mut stat_bytes = [0u8; 40];
+        stat_bytes.copy_from_slice(&reply_buf[data_start..data_start + 40]);
+        Ok(VfsStat::from_bytes(&stat_bytes))
     }
 
     /// Stat an open file descriptor.
+    ///
+    /// Reply carries a 40-byte stat payload after the status word (v2 format).
     pub fn fstat(&self, file: VfsFile) -> Result<VfsStat> {
-        let mut msg = Message::new(VFS_FSTAT, [0; 6], 3);
-        msg.words[0] = 0;
-        msg.words[1] = self.client_id;
-        msg.words[2] = file.fd;
-        ipc::call(self.endpoint, &mut msg, crate::IpcFlags::empty())?;
-        parse_status(msg.words[0])?;
-        Ok(VfsStat {
-            size: msg.words[1],
-            mode: msg.words[2],
-        })
+        let msg = make_payload_message(VFS_FSTAT, 0, &[self.client_id, file.fd]);
+        let mut reply_buf = [0u8; core::mem::size_of::<Message>() + 40];
+        let (reply, payload_len) =
+            ipc::call_with_reply_buf(self.endpoint, &msg, &[], &mut reply_buf)?;
+        parse_status(reply.words[0])?;
+        let data_start = core::mem::size_of::<Message>();
+        if payload_len < 40 {
+            return Err(crate::error::Error::InvalidArgument);
+        }
+        let mut stat_bytes = [0u8; 40];
+        stat_bytes.copy_from_slice(&reply_buf[data_start..data_start + 40]);
+        Ok(VfsStat::from_bytes(&stat_bytes))
     }
 
     /// Create a directory.

@@ -79,6 +79,32 @@ const O_CREAT: usize = 0o1000; // newlib _FCREAT = 0x0200
 const O_EXCL: usize = 0o4000; // newlib _FEXCL = 0x0800
 const O_TRUNC: usize = 0o2000; // newlib _FTRUNC = 0x0400
 
+/// Full stat result (v2 wire format).  Mirrors VfsStat in libcluu.
+#[derive(Clone, Copy, Default)]
+struct StatInfo {
+    size:   u64,
+    mode:   u32,
+    mtime:  u64,
+    nlink:  u32,
+    uid:    u32,
+    gid:    u32,
+    blocks: u64,
+}
+
+impl StatInfo {
+    fn to_bytes(self) -> [u8; 40] {
+        let mut buf = [0u8; 40];
+        buf[0..8].copy_from_slice(&self.size.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.mode.to_le_bytes());
+        buf[12..20].copy_from_slice(&self.mtime.to_le_bytes());
+        buf[20..24].copy_from_slice(&self.nlink.to_le_bytes());
+        buf[24..28].copy_from_slice(&self.uid.to_le_bytes());
+        buf[28..32].copy_from_slice(&self.gid.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.blocks.to_le_bytes());
+        buf
+    }
+}
+
 macro_rules! vfs_trace {
     ($($arg:tt)*) => {
         if VFS_TRACE {
@@ -886,15 +912,32 @@ impl VfsServer {
             .ok_or(Error::NotFound)
     }
 
-    /// Stat a path on a container's MemFs. Returns (size, mode).
-    fn stat_memfs_path(&self, container_id: u64, path: &str) -> Result<(usize, usize)> {
+    /// Stat a path on a container's MemFs. Returns full StatInfo.
+    fn stat_memfs_path(&self, container_id: u64, path: &str) -> Result<StatInfo> {
         let memfs_backend = self.get_container_memfs(container_id)?;
         let fs = memfs_backend.borrow();
         if let Ok((_, size)) = fs.open(path) {
-            return Ok((size, MODE_FILE));
+            let sz = size as u64;
+            return Ok(StatInfo {
+                size: sz,
+                mode: MODE_FILE as u32,
+                mtime: 0,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                blocks: (sz + 511) / 512,
+            });
         }
         if fs.readdir(path).is_ok() {
-            return Ok((0, MODE_DIR));
+            return Ok(StatInfo {
+                size: 0,
+                mode: MODE_DIR as u32,
+                mtime: 0,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                blocks: 0,
+            });
         }
         Err(Error::NotFound)
     }
@@ -1250,7 +1293,7 @@ impl VfsServer {
         reply_token: usize,
         caller_client: Option<usize>,
     ) -> Result<()> {
-        let mut reply_msg = Message::new(VFS_STAT, [0; 6], 3);
+        let mut reply_msg = Message::new(VFS_STAT, [0; 6], 1);
         let client_id = match self.resolve_client_id("stat", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
@@ -1283,17 +1326,16 @@ impl VfsServer {
         };
 
         match stat_result {
-            Ok((size, mode)) => {
+            Ok(info) => {
                 reply_msg.words[0] = 0;
-                reply_msg.words[1] = size;
-                reply_msg.words[2] = mode;
+                let stat_bytes = info.to_bytes();
+                reply_with_payload(reply_token, &reply_msg, &stat_bytes)
             }
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
+                ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
             }
         }
-
-        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
     fn handle_fstat(
@@ -1302,8 +1344,10 @@ impl VfsServer {
         reply_token: usize,
         caller_client: Option<usize>,
     ) -> Result<()> {
+        // fstat uses payload-based reply (v2 format).
+        // words[1] = client_id, words[2] = fd (inline in message).
         let fd = msg.words[2];
-        let mut reply_msg = Message::new(VFS_FSTAT, [0; 6], 3);
+        let mut reply_msg = Message::new(VFS_FSTAT, [0; 6], 1);
         let client_id = match self.resolve_client_id("fstat", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
@@ -1317,14 +1361,23 @@ impl VfsServer {
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         };
 
-        reply_msg.words[0] = 0;
-        reply_msg.words[1] = entry.size();
-        reply_msg.words[2] = match entry {
-            OpenFile::Device(_) => S_IFCHR | 0o666,
-            _ => MODE_FILE,
+        let sz = entry.size() as u64;
+        let mode = match entry {
+            OpenFile::Device(_) => S_IFCHR as u32 | 0o666,
+            _ => MODE_FILE as u32,
         };
-
-        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+        let info = StatInfo {
+            size: sz,
+            mode,
+            mtime: 0,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            blocks: (sz + 511) / 512,
+        };
+        reply_msg.words[0] = 0;
+        let stat_bytes = info.to_bytes();
+        reply_with_payload(reply_token, &reply_msg, &stat_bytes)
     }
 
     fn handle_unlink(
@@ -1652,21 +1705,41 @@ impl VfsServer {
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    fn stat_path(&self, path: &str, caller_tid: usize) -> Result<(usize, usize)> {
+    fn stat_path(&self, path: &str, caller_tid: usize) -> Result<StatInfo> {
         // Try readdir first: some remote backends (ext2 over IPC) will
         // happily "open" a directory inode as a file, which would make us
         // misreport directories as regular files. readdir fails cleanly on
         // non-directories, so we can use it as a positive dir probe.
-        if self.mounts.readdir(path, caller_tid).is_ok() {
-            return Ok((0, MODE_DIR));
+        if let Ok(entries) = self.mounts.readdir(path, caller_tid) {
+            // Try to get richer stat from a representative entry if available,
+            // otherwise return a synthesized directory stat.
+            let _ = entries; // We don't need them for the directory stat itself.
+            return Ok(StatInfo {
+                size: 0,
+                mode: MODE_DIR as u32,
+                mtime: 0,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                blocks: 0,
+            });
         }
 
         if let Ok(file) = self.mounts.open(path, caller_tid) {
-            let mode = match &file {
-                OpenFile::Device(_) => S_IFCHR | 0o666,
-                _ => MODE_FILE,
+            let (mode, mtime, nlink, uid, gid) = match &file {
+                OpenFile::Device(_) => (S_IFCHR as u32 | 0o666, 0u64, 1u32, 0u32, 0u32),
+                _ => (MODE_FILE as u32, 0, 1, 0, 0),
             };
-            return Ok((file.size(), mode));
+            let sz = file.size() as u64;
+            return Ok(StatInfo {
+                size: sz,
+                mode,
+                mtime,
+                nlink,
+                uid,
+                gid,
+                blocks: (sz + 511) / 512,
+            });
         }
 
         Err(Error::NotFound)
@@ -2875,20 +2948,21 @@ impl VfsServer {
         // Use unified mount table for readdir
         match self.mounts.readdir(&real_path, client_id) {
             Ok(entries) => {
-                // Serialize entries: [name_len: u8, is_dir: u8, name bytes...]
+                // Serialize entries v2:
+                // [name_len: u32 LE][stat: 40 bytes][name: name_len bytes]
                 let mut data = Vec::new();
+                let mut count = 0usize;
                 for entry in &entries {
                     let name_bytes = entry.name.as_bytes();
-                    if name_bytes.len() > 255 {
-                        continue;
-                    }
-                    data.push(name_bytes.len() as u8);
-                    data.push(if entry.is_dir { 1 } else { 0 });
+                    data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+                    let stat_bytes = entry_to_stat_bytes(entry);
+                    data.extend_from_slice(&stat_bytes);
                     data.extend_from_slice(name_bytes);
+                    count += 1;
                 }
 
                 reply_msg.words[1] = 0;
-                reply_msg.words[2] = entries.len();
+                reply_msg.words[2] = count;
                 reply_with_payload(reply_token, &reply_msg, &data)
             }
             Err(err) => {
@@ -2939,18 +3013,44 @@ impl VfsServer {
                     }
                 }
 
+                // Serialize entries v2:
+                // [name_len: u32 LE][stat: 40 bytes][name: name_len bytes]
+                let fs_ref = memfs_backend.borrow();
                 let mut data = Vec::new();
+                let mut count = 0usize;
                 for (name, is_dir) in &entries {
                     let name_bytes = name.as_bytes();
-                    if name_bytes.len() > 255 {
-                        continue;
-                    }
-                    data.push(name_bytes.len() as u8);
-                    data.push(if *is_dir { 1 } else { 0 });
+                    // Build a full path for the entry to look up size.
+                    let entry_full = if memfs_path == "/" {
+                        alloc::format!("/{}", name)
+                    } else {
+                        alloc::format!("{}/{}", memfs_path.trim_end_matches('/'), name)
+                    };
+                    let (size, mode) = if *is_dir {
+                        (0u64, MODE_DIR as u32)
+                    } else {
+                        let sz = fs_ref.open(&entry_full)
+                            .map(|(_, s)| s as u64)
+                            .unwrap_or(0);
+                        (sz, MODE_FILE as u32)
+                    };
+                    let info = StatInfo {
+                        size,
+                        mode,
+                        mtime: 0,
+                        nlink: 1,
+                        uid: 0,
+                        gid: 0,
+                        blocks: (size + 511) / 512,
+                    };
+                    data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+                    data.extend_from_slice(&info.to_bytes());
                     data.extend_from_slice(name_bytes);
+                    count += 1;
                 }
+                drop(fs_ref);
                 reply_msg.words[1] = 0;
-                reply_msg.words[2] = entries.len();
+                reply_msg.words[2] = count;
                 reply_with_payload(reply_token, reply_msg, &data)
             }
             Err(err) => {
@@ -3198,6 +3298,21 @@ impl VfsServer {
         )?;
         Ok(())
     }
+}
+
+/// Convert a mount::DirEntry into a 40-byte v2 stat payload.
+fn entry_to_stat_bytes(entry: &mount::DirEntry) -> [u8; 40] {
+    let s = &entry.stat;
+    let info = StatInfo {
+        size: s.size,
+        mode: s.mode,
+        mtime: s.mtime,
+        nlink: s.nlink,
+        uid: s.uid,
+        gid: s.gid,
+        blocks: s.blocks,
+    };
+    info.to_bytes()
 }
 
 fn parent_path(path: &str) -> Option<alloc::string::String> {

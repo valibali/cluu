@@ -444,8 +444,20 @@ fn handle_fs_request(
             match fs.stat(inode) {
                 Ok(stat) => {
                     let flags = if stat.is_dir { 1 } else { 0 } | if stat.is_file { 2 } else { 0 };
-                    let reply_msg =
-                        Message::new(FS_STAT, [0, stat.size as usize, flags, 0, 0, 0], 3);
+                    // Pack nlink (low 16) and uid (high 16) into one word.
+                    let nlink_uid = ((stat.uid as usize) << 16) | (stat.nlink as usize & 0xFFFF);
+                    let reply_msg = Message::new(
+                        FS_STAT,
+                        [
+                            0,
+                            stat.size as usize,
+                            flags,
+                            stat.mtime as usize,
+                            nlink_uid,
+                            stat.gid as usize,
+                        ],
+                        6,
+                    );
                     if let Some(token) = reply_token {
                         let _ = reply(token, &reply_msg, IpcFlags::empty());
                     }

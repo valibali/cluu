@@ -42,6 +42,16 @@ pub struct FileStat {
     pub is_dir: bool,
     /// True if this is a regular file.
     pub is_file: bool,
+    /// Modification time (Unix seconds).
+    pub mtime: u64,
+    /// Hard link count.
+    pub nlink: u32,
+    /// Owner user id.
+    pub uid: u32,
+    /// Owner group id.
+    pub gid: u32,
+    /// 512-byte block count.
+    pub blocks: u64,
 }
 
 /// Directory entry returned by readdir operations.
