@@ -485,15 +485,28 @@ impl CommandExecutor for BuiltinRegistry {
         }
 
         // Execute each statement sequentially. Top-level `;` in cluu_lang
-        // produces multiple Stmts; we run them left-to-right and report
-        // Handled if every statement was handled (used for startup
-        // autostart strings like "cd /; cd etc; pwd").
+        // produces multiple Stmts; `&&` and `||` produce stmts whose
+        // prev_connector field controls short-circuit. We run left-to-right.
         let mut all_handled = true;
         for stmt in &program.stmts {
-            // Multi-command pipelines (`a | b | c`) and single-command pipelines
-            // that carry file redirections are dispatched to the PipelineExecutor.
-            // Plain single-command pipelines fall through to the builtin-lookup path.
             let Stmt::Pipeline(pipeline) = stmt;
+
+            // Short-circuit based on the connector that joins this pipeline
+            // to the previous one.
+            match pipeline.prev_connector {
+                cluu_lang::ast::Connector::Always => {}
+                cluu_lang::ast::Connector::AndIf => {
+                    if context.last_status != 0 {
+                        continue; // skip; previous command failed
+                    }
+                }
+                cluu_lang::ast::Connector::OrIf => {
+                    if context.last_status == 0 {
+                        continue; // skip; previous command succeeded
+                    }
+                }
+            }
+
             let has_redirs = pipeline.commands.iter().any(|c| !c.redirs.is_empty());
             // Route background pipelines, multi-stage pipelines, and
             // single-command pipelines with file redirections through the

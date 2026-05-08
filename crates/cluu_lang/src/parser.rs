@@ -76,15 +76,47 @@ fn build_program(pair: Pair<Rule>) -> Program {
 }
 
 fn build_stmt_list(pair: Pair<Rule>) -> Vec<Stmt> {
-    let mut stmts = Vec::new();
+    let mut stmts: Vec<Stmt> = Vec::new();
+    let mut next_connector = crate::ast::Connector::Always;
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::stmt => stmts.push(build_stmt(inner)),
-            Rule::pipeline => stmts.push(Stmt::Pipeline(build_pipeline(inner))),
+            Rule::stmt => {
+                let mut s = build_stmt(inner);
+                set_connector(&mut s, next_connector);
+                stmts.push(s);
+                next_connector = crate::ast::Connector::Always;
+            }
+            Rule::pipeline => {
+                let mut p = build_pipeline(inner);
+                p.prev_connector = next_connector;
+                stmts.push(Stmt::Pipeline(p));
+                next_connector = crate::ast::Connector::Always;
+            }
+            Rule::logical_sep => {
+                // Inspect children for and_if / or_if; otherwise stays Always.
+                next_connector = sep_connector(inner);
+            }
             _ => {}
         }
     }
     stmts
+}
+
+fn sep_connector(pair: Pair<Rule>) -> crate::ast::Connector {
+    for child in pair.into_inner() {
+        match child.as_rule() {
+            Rule::and_if => return crate::ast::Connector::AndIf,
+            Rule::or_if  => return crate::ast::Connector::OrIf,
+            _ => {}
+        }
+    }
+    crate::ast::Connector::Always
+}
+
+fn set_connector(stmt: &mut Stmt, c: crate::ast::Connector) {
+    match stmt {
+        Stmt::Pipeline(p) => p.prev_connector = c,
+    }
 }
 
 fn build_stmt(pair: Pair<Rule>) -> Stmt {
@@ -92,6 +124,7 @@ fn build_stmt(pair: Pair<Rule>) -> Stmt {
     let pipeline = inner.next().map(build_pipeline).unwrap_or(Pipeline {
         commands: Vec::new(),
         bg: false,
+        prev_connector: crate::ast::Connector::Always,
     });
     Stmt::Pipeline(pipeline)
 }
@@ -106,7 +139,11 @@ fn build_pipeline(pair: Pair<Rule>) -> Pipeline {
             _ => {}
         }
     }
-    Pipeline { commands, bg }
+    Pipeline {
+        commands,
+        bg,
+        prev_connector: crate::ast::Connector::Always,
+    }
 }
 
 fn build_command(pair: Pair<Rule>) -> Command {

@@ -5,12 +5,20 @@ ws0 = _{ (WS | LINE_COMMENT)* }
 
 program = { SOI ~ ws0 ~ stmt_list? ~ ws0 ~ EOI }
 subprogram = { stmt_list? }
-stmt_list = { stmt ~ (sep ~ stmt)* ~ sep? }
-sep = _{ ws0 ~ (NL+ | ";" | bg_sep) ~ ws0 }
+stmt_list = { stmt ~ (logical_sep ~ stmt)* ~ trailing_sep? }
+// Connectors between statements. and_if / or_if are short-circuit logical
+// operators evaluated by the executor; ; \n & are unconditional separators.
+logical_sep = { ws0 ~ (and_if | or_if | NL+ | ";" | bg_sep) ~ ws0 }
+trailing_sep = _{ logical_sep }
+and_if = { "&&" }
+or_if  = { "||" }
 bg_sep = _{ bg_amp }
 
 stmt = _{ pipeline }
-pipeline = { command ~ (ws0 ~ "|" ~ ws0 ~ command)* ~ bg_amp? }
+// `|` for pipe must NOT match the start of `||`. bg_amp matches a single `&`
+// not followed by another `&` (since `&&` is the and_if connector).
+pipeline = { command ~ (ws0 ~ pipe_op ~ ws0 ~ command)* ~ bg_amp? }
+pipe_op = _{ "|" ~ !("|") }
 bg_amp = { ws0 ~ "&" ~ !("&") }
 
 command = { prefix_assign* ~ cmd_item? ~ (ws0 ~ cmd_item)* }

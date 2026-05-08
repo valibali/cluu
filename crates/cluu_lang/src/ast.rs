@@ -21,6 +21,20 @@ pub struct Pipeline {
     pub commands: Vec<Command>,
     /// True when the pipeline is run in the background (trailing `&`).
     pub bg: bool,
+    /// Connector that joins this pipeline to the PREVIOUS one in the
+    /// statement list. The first pipeline always has Connector::Always.
+    pub prev_connector: Connector,
+}
+
+/// How a pipeline is joined to the previous one in a statement list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connector {
+    /// First statement, or after `;` `\n` `&` — always run.
+    Always,
+    /// `&&` — run only if previous exit code == 0.
+    AndIf,
+    /// `||` — run only if previous exit code != 0.
+    OrIf,
 }
 
 /// A command with optional prefix assignments, elements, and redirections.
