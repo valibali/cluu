@@ -60,7 +60,7 @@ harness_derive_marker_defaults
 if [ "$MARKER_MODE" = "none" ] \
     && [ "$TEST_COMMAND_WAS_UNSET" = "1" ] \
     && [ -z "$HARNESS_AUTOEXEC_CMD" ]; then
-    HARNESS_AUTOEXEC_CMD="spawn micropython"
+    HARNESS_AUTOEXEC_CMD="micropython"
     TEST_COMMAND=""
 fi
 

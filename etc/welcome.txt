@@ -12,12 +12,14 @@ Things you can poke at right now:
   cat /etc/users.toml      look at the (admin-readable) user table
   ps                       process list (reads /proc)
   top                      live process monitor
-  spawn mkdir /tmp/x       run a binary as a fresh container
-  spawn rm -r /tmp/x       same, with mount-policy /tmp inheritance
-  spawn cp <src> <dst>     copy a file (try a path under /dev/initrd)
-  spawn mv <src> <dst>     atomic rename via VFS
+  mkdir /tmp/x             every binary runs in its own container
+  rm -r /tmp/x             same, with mount-policy /tmp inheritance
+  cp <src> <dst>           copy a file (try a path under /dev/initrd)
+  mv <src> <dst>           atomic rename via VFS
   echo $?                  last command's exit status (TODO)
   ↑ / ↓                    command history
+  ← / →                    in-line cursor editing
+  TAB / TAB-TAB            complete / list (bash-style)
   Alt + F1/F2              switch virtual terminals (text rendered
                            into the GPU framebuffer, not legacy VGA)
   exit                     log out
@@ -26,10 +28,7 @@ Things that don't work yet (honest list — Phase 1+2 work):
 
   pipes (cat | grep | head)
   redirection (>, >>, <)
-  tab completion
-  in-line cursor editing (←/→ inside a typed command)
   MicroPython
-  any text editor
   network — there is none
 
 Source: see /etc/architecture, then docs/ARCHITECTURE.md and

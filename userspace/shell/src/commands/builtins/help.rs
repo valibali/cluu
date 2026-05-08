@@ -33,7 +33,6 @@ const KNOWN_BUILTINS: &[&str] = &[
     "history",
     "help", "clear", "type",
     "expr", "let",
-    "spawn", "spawnbg",
     "repeat",
     "cat", "ls", "heap",
     "su", "sudo",

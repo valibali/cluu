@@ -17,44 +17,44 @@ harness_derive_marker_defaults() {
     POST_SENDKEY_DEFAULT=""
     if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         case "$MARKER_MODE" in
-            m3_mapfail) TEST_COMMAND="spawn mapfail 12 4" ;;
-            m3_mapcopyfail) TEST_COMMAND="spawn mapcopyfail 4" ;;
-            m3_maperror) TEST_COMMAND="spawn maperror 3" ;;
+            m3_mapfail) TEST_COMMAND="mapfail 12 4" ;;
+            m3_mapcopyfail) TEST_COMMAND="mapcopyfail 4" ;;
+            m3_maperror) TEST_COMMAND="maperror 3" ;;
             m4_deny_paths)
-                TEST_COMMAND="spawn killdeny 2 9"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn killdeny 2 9"
+                TEST_COMMAND="killdeny 2 9"
+                SHELL_AUTOSTART_CMD_DEFAULT="killdeny 2 9"
                 ;;
             m4_registry_deny_paths)
-                TEST_COMMAND="spawn regdeny"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn regdeny"
+                TEST_COMMAND="regdeny"
+                SHELL_AUTOSTART_CMD_DEFAULT="regdeny"
                 ;;
             kernel_suspended_thread)
                 TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn suspendprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="suspendprobe"
                 ;;
             l2_argv)
                 TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn argvprobe hello world"
+                SHELL_AUTOSTART_CMD_DEFAULT="argvprobe hello world"
                 ;;
             l2_vqprobe)
                 TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn vqprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="vqprobe"
                 ;;
             l2_blk_basic)
                 TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn blkprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="blkprobe"
                 ;;
             l2_blk_concurrent)
                 TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn blkprobe concurrent"
+                SHELL_AUTOSTART_CMD_DEFAULT="blkprobe concurrent"
                 ;;
             l2_blk_perf)
                 TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn blkprobe perf"
+                SHELL_AUTOSTART_CMD_DEFAULT="blkprobe perf"
                 ;;
             l2_blk_session_teardown)
                 TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn blkprobe leak"
+                SHELL_AUTOSTART_CMD_DEFAULT="blkprobe leak"
                 ;;
             l2_bare_cmd)
                 TEST_COMMAND=""
@@ -71,31 +71,31 @@ harness_derive_marker_defaults() {
                 ;;
             l2_cd_inherit)
                 TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="cd /tmp; spawn pwdprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="cd /tmp; pwdprobe"
                 ;;
             l2_ext2write)
-                TEST_COMMAND="spawn ext2io write"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn ext2io write"
+                TEST_COMMAND="ext2io write"
+                SHELL_AUTOSTART_CMD_DEFAULT="ext2io write"
                 ;;
             l2_ext2append)
-                TEST_COMMAND="spawn ext2io append"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn ext2io append"
+                TEST_COMMAND="ext2io append"
+                SHELL_AUTOSTART_CMD_DEFAULT="ext2io append"
                 ;;
             l2_ext2mutate)
-                TEST_COMMAND="spawn ext2io mutate"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn ext2io mutate"
+                TEST_COMMAND="ext2io mutate"
+                SHELL_AUTOSTART_CMD_DEFAULT="ext2io mutate"
                 ;;
             l2_ext2unlink)
-                TEST_COMMAND="spawn ext2io unlink"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn ext2io unlink"
+                TEST_COMMAND="ext2io unlink"
+                SHELL_AUTOSTART_CMD_DEFAULT="ext2io unlink"
                 ;;
             l2_owner_deny)
-                TEST_COMMAND="spawn ownerdeny"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn ownerdeny"
+                TEST_COMMAND="ownerdeny"
+                SHELL_AUTOSTART_CMD_DEFAULT="ownerdeny"
                 ;;
             d7_container_storage)
-                TEST_COMMAND="spawn containerprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn containerprobe"
+                TEST_COMMAND="containerprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="containerprobe"
                 ;;
             e13_container_run)
                 TEST_COMMAND="container run hello"
@@ -122,8 +122,8 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 ;;
             l2_sigint)
-                TEST_COMMAND="spawn sleepy"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn sleepy"
+                TEST_COMMAND="sleepy"
+                SHELL_AUTOSTART_CMD_DEFAULT="sleepy"
                 POST_SENDKEY_DEFAULT="ctrl-c"
                 ;;
             l2_jobs)
@@ -167,20 +167,20 @@ harness_derive_marker_defaults() {
                 SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
                 ;;
             l2_jobchurn)
-                TEST_COMMAND="spawn jobchurn 3"
+                TEST_COMMAND="jobchurn 3"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             l2_jobchurn_heavy)
-                TEST_COMMAND="spawn jobchurn 8"
+                TEST_COMMAND="jobchurn 8"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             l2_jobmix)
-                TEST_COMMAND="spawn jobmix"
+                TEST_COMMAND="jobmix"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             l2_mkdir)
                 TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir /tmp/a; spawn mkdir -p /tmp/b/c/d"
+                SHELL_AUTOSTART_CMD_DEFAULT="mkdir /tmp/a; mkdir -p /tmp/b/c/d"
                 ;;
             l2_cp)
                 TEST_COMMAND=""
@@ -189,13 +189,13 @@ harness_derive_marker_defaults() {
                 # arg-parser fires. End-to-end file-copy is exercised
                 # interactively (writing /tmp from shell-MemFs is a
                 # separate VFS investigation — see follow-up task).
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn cp"
+                SHELL_AUTOSTART_CMD_DEFAULT="cp"
                 ;;
             l2_mv)
                 TEST_COMMAND=""
                 # Same smoke pattern as l2_cp until end-to-end /tmp file
                 # creation is unblocked.
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn mv"
+                SHELL_AUTOSTART_CMD_DEFAULT="mv"
                 ;;
             l2_envelope_mounts)
                 TEST_COMMAND=""
@@ -204,7 +204,7 @@ harness_derive_marker_defaults() {
                 # exercise the read-only /etc enforcement. The nested shell
                 # runs the command, prints `touch: /etc/probefile:
                 # PermissionDenied`, then exits.
-                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn touch /etc/probefile"
+                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c touch /etc/probefile"
                 ;;
             l2_cluufile_match)
                 TEST_COMMAND=""
@@ -216,7 +216,7 @@ harness_derive_marker_defaults() {
                 # `spawn cat …` (not bare `cat …`) because the shell's
                 # parser dispatches plain command words only to builtins;
                 # `spawn` is the explicit binary-launch builtin.
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn cat /etc/motd"
+                SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd"
                 ;;
             l2_cluufile_mismatch)
                 TEST_COMMAND=""
@@ -226,7 +226,7 @@ harness_derive_marker_defaults() {
                 # shell forces validation through pid_to_view and procmgr
                 # must emit `cluufile mismatch` and reject with
                 # PermissionDenied before main() runs.
-                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn cfmismatch"
+                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c cfmismatch"
                 ;;
             l2_edit_smoke)
                 TEST_COMMAND=""
@@ -235,7 +235,7 @@ harness_derive_marker_defaults() {
                 # on stdin recv after `edit: starting up` — clean exit
                 # via injected key is a follow-up case (post-T18 once
                 # rendering exists; see harness_run.sh marker comment).
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn edit"
+                SHELL_AUTOSTART_CMD_DEFAULT="edit"
                 ;;
             l2_edit_insert)
                 TEST_COMMAND=""
@@ -243,12 +243,12 @@ harness_derive_marker_defaults() {
                 # harness's KEYSTROKE_COMMANDS mechanism types whole lines + Enter,
                 # so it can't drive INSERT mode (needs raw chars + Esc + :wq).
                 # Manual interactive verification is the v1 acceptance path.
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn edit /home/root/test.txt"
+                SHELL_AUTOSTART_CMD_DEFAULT="edit /home/root/test.txt"
                 ;;
             l2_edit_undo)
                 TEST_COMMAND=""
                 # Same RED status as l2_edit_insert.
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn edit /home/root/undo.txt"
+                SHELL_AUTOSTART_CMD_DEFAULT="edit /home/root/undo.txt"
                 ;;
             l2_edit_eacces)
                 TEST_COMMAND=""
@@ -256,25 +256,25 @@ harness_derive_marker_defaults() {
                 # ro:/etc) and runs edit on /etc/motd. Without keystroke injection
                 # for `iX:w`, the failing-write code path can't be exercised by the
                 # harness; manual verification only.
-                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn edit /etc/motd"
+                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c edit /etc/motd"
                 ;;
             l2_envelope_user)
                 TEST_COMMAND=""
                 # GREEN as of UE16: ENV trailer in CONTAINER_RUN propagates the
                 # shell's envelope-resolved env to the child.
-                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c spawn envprobe HOME USER PATH SHELL"
+                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c envprobe HOME USER PATH SHELL"
                 ;;
             l2_export)
                 TEST_COMMAND=""
                 # UE15: `set X=v` is shell-local (child sees null); `export Y=v`
                 # propagates via the ENV trailer so envprobe gets Y=exported.
-                SHELL_AUTOSTART_CMD_DEFAULT="set X=local; export Y=exported; spawn envprobe X Y"
+                SHELL_AUTOSTART_CMD_DEFAULT="set X=local; export Y=exported; envprobe X Y"
                 ;;
             l2_mount_private)
                 TEST_COMMAND=""
                 # Seed shell's /tmp, then spawn the probe. The probe should see an
                 # empty /tmp because its Cluufile declares MOUNT /tmp private.
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir /tmp/MOUNTPROBE_CANARY; spawn mountprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="mkdir /tmp/MOUNTPROBE_CANARY; mountprobe"
                 ;;
             l2_mp_etc)
                 TEST_COMMAND=""
@@ -290,32 +290,32 @@ harness_derive_marker_defaults() {
                 # words. Inside double quotes parens are plain text. The
                 # python source itself uses single quotes for the path,
                 # so the outer double quotes nest cleanly.
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn mp -c \"open('/etc/motd').read()\""
+                SHELL_AUTOSTART_CMD_DEFAULT="mp -c \"open('/etc/motd').read()\""
                 ;;
             l2_ls)
                 TEST_COMMAND=""
                 # Basic ls of /etc: verifies ls boots, VFS readdir works,
                 # and at least one filename is printed.
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn ls /etc"
+                SHELL_AUTOSTART_CMD_DEFAULT="ls /etc"
                 ;;
             l2_ls_long)
                 TEST_COMMAND=""
                 # Write a file then ls -l: verify mode string and filename appear.
-                SHELL_AUTOSTART_CMD_DEFAULT="echo hello > /tmp/lf; spawn ls -l /tmp/lf"
+                SHELL_AUTOSTART_CMD_DEFAULT="echo hello > /tmp/lf; ls -l /tmp/lf"
                 ;;
             l2_ls_color)
                 TEST_COMMAND=""
                 # ls --color=always on /tmp: should emit ANSI escape prefix for dirs.
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir -p /tmp/cd; spawn ls --color=always /tmp"
+                SHELL_AUTOSTART_CMD_DEFAULT="mkdir -p /tmp/cd; ls --color=always /tmp"
                 ;;
             l2_ls_recursive)
                 TEST_COMMAND=""
                 # Create nested dir, ls -R, verify sub-entries appear.
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir -p /tmp/r/sub; spawn touch /tmp/r/a; spawn touch /tmp/r/sub/b; spawn ls -R /tmp/r"
+                SHELL_AUTOSTART_CMD_DEFAULT="mkdir -p /tmp/r/sub; touch /tmp/r/a; touch /tmp/r/sub/b; ls -R /tmp/r"
                 ;;
             l2_rm)
                 TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir /tmp/rmtest; spawn mkdir /tmp/rmtest/inner; spawn rm -r /tmp/rmtest"
+                SHELL_AUTOSTART_CMD_DEFAULT="mkdir /tmp/rmtest; mkdir /tmp/rmtest/inner; rm -r /tmp/rmtest"
                 ;;
             l2_shellrc)
                 TEST_COMMAND=""
@@ -325,93 +325,93 @@ harness_derive_marker_defaults() {
                 # worked, envprobe's child sees the overridden PATH
                 # (instead of supervisor's envelope default
                 # /sbin:/bin:/usr/sbin:/usr/bin).
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn envprobe HOME PATH"
+                SHELL_AUTOSTART_CMD_DEFAULT="envprobe HOME PATH"
                 ;;
             l2_waitpid)
-                TEST_COMMAND="spawn waitprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn waitprobe"
+                TEST_COMMAND="waitprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="waitprobe"
                 ;;
             l2_mmap)
-                TEST_COMMAND="spawn mmapprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
+                TEST_COMMAND="mmapprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="mmapprobe"
                 ;;
             a_poll)
-                TEST_COMMAND="spawn pollprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn pollprobe"
+                TEST_COMMAND="pollprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="pollprobe"
                 ;;
             l2_poll_pipes)
-                TEST_COMMAND="spawn pollprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn pollprobe"
+                TEST_COMMAND="pollprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="pollprobe"
                 ;;
             perf_benchprobe)
-                TEST_COMMAND="spawn benchprobe"
+                TEST_COMMAND="benchprobe"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             b_spawn_perf)
-                TEST_COMMAND="spawn benchprobe spawnonly"
+                TEST_COMMAND="benchprobe spawnonly"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             b_spawn_warm)
-                TEST_COMMAND="spawn benchprobe spawnonly"
+                TEST_COMMAND="benchprobe spawnonly"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             c_futex)
-                TEST_COMMAND="spawn futexprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn futexprobe"
+                TEST_COMMAND="futexprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="futexprobe"
                 ;;
             c_futex_race)
-                TEST_COMMAND="spawn futexrace"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn futexrace"
+                TEST_COMMAND="futexrace"
+                SHELL_AUTOSTART_CMD_DEFAULT="futexrace"
                 ;;
             m6_ipc_compact)
-                TEST_COMMAND="repeat 8 spawn hello"
+                TEST_COMMAND="repeat 8 hello"
                 ;;
             m6_ipc_rendezvous)
-                TEST_COMMAND="repeat 8 spawn hello"
+                TEST_COMMAND="repeat 8 hello"
                 ;;
             m6_ring_io)
                 TEST_COMMAND="echo ringio-marker"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn ringio"
+                SHELL_AUTOSTART_CMD_DEFAULT="ringio"
                 ;;
             p1_setjmp)
-                TEST_COMMAND="spawn setjmpprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn setjmpprobe"
+                TEST_COMMAND="setjmpprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="setjmpprobe"
                 ;;
             p1_env)
-                TEST_COMMAND="spawn envprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn envprobe"
+                TEST_COMMAND="envprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="envprobe"
                 ;;
             p1_stubs)
-                TEST_COMMAND="spawn stubsprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn stubsprobe"
+                TEST_COMMAND="stubsprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="stubsprobe"
                 ;;
             p2_pipe)
-                TEST_COMMAND="spawn pipeprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn pipeprobe"
+                TEST_COMMAND="pipeprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="pipeprobe"
                 ;;
             p2_spawn_pipe)
-                TEST_COMMAND="spawn spawnpipeprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn spawnpipeprobe"
+                TEST_COMMAND="spawnpipeprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="spawnpipeprobe"
                 ;;
             p3_tls)
-                TEST_COMMAND="spawn tlsprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn tlsprobe"
+                TEST_COMMAND="tlsprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="tlsprobe"
                 ;;
             p3_pthread)
-                TEST_COMMAND="spawn pthreadprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn pthreadprobe"
+                TEST_COMMAND="pthreadprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="pthreadprobe"
                 ;;
             p4_dev)
-                TEST_COMMAND="spawn devprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn devprobe"
+                TEST_COMMAND="devprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="devprobe"
                 ;;
             p4_framebuf)
-                TEST_COMMAND="spawn fbprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn fbprobe"
+                TEST_COMMAND="fbprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="fbprobe"
                 ;;
             p4_mmap)
-                TEST_COMMAND="spawn mmapprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
+                TEST_COMMAND="mmapprobe"
+                SHELL_AUTOSTART_CMD_DEFAULT="mmapprobe"
                 ;;
             l2_pipe_builtin)
                 TEST_COMMAND=""
@@ -486,10 +486,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND="_shellcrash"
                 ;;
             hr7_su_equal)
-                TEST_COMMAND="spawn sutest equal"
+                TEST_COMMAND="sutest equal"
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
-            m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
+            m5_fairness) TEST_COMMAND="repeat 8 hello" ;;
             l2_cat_basic)
                 TEST_COMMAND=""
                 # GNU-close cat: -n numbers all output lines.
@@ -501,7 +501,7 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 # cp -r: copy /etc to /tmp/etccopy, then ls the copy.
                 # Verifies recursive directory copy via libcluu::cli.
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn cp -r /etc /tmp/etccopy"
+                SHELL_AUTOSTART_CMD_DEFAULT="cp -r /etc /tmp/etccopy"
                 ;;
             l2_head_bytes)
                 TEST_COMMAND=""
@@ -612,10 +612,10 @@ harness_derive_marker_defaults() {
                 EXPECTED_CONTAINS=("/tmp/f/a.txt")
                 ;;
             legacy_p1)
-                TEST_COMMAND="spawn minimal"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawn minimal"
+                TEST_COMMAND="minimal"
+                SHELL_AUTOSTART_CMD_DEFAULT="minimal"
                 ;;
-            *) TEST_COMMAND="spawn hello" ;;
+            *) TEST_COMMAND="hello" ;;
         esac
     fi
 }
