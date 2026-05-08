@@ -338,10 +338,12 @@ fn apply_effect(ctx: &mut TtyContext, discipline: &mut line_discipline::LineDisc
         ctx.try_satisfy_reads();
     }
 
-    if let Some(partial) = effect.tab_request {
-        if let Some(completion) = compute_path_completion(&partial, ctx) {
+    if let Some((partial, tab_count)) = effect.tab_request {
+        if let Some(completion) = compute_path_completion(&partial, tab_count, ctx) {
             // Echo the completion bytes and append to the line buffer so the
             // user sees the suffix and the line ready-event will pick it up.
+            // For double-tab list mode the shell wrote the redraw via stdout
+            // and replies with empty payload, so this branch is skipped.
             ctx.forward_to_console(&completion);
             discipline.append_completion(&completion);
         }
@@ -398,34 +400,39 @@ fn send_pg_signal(procmgr_ep: usize, pgid: usize, signum: i32) -> Result<()> {
     libcluu::ipc::send(procmgr_ep, &msg, IpcFlags::empty())
 }
 
-/// Resolve a TAB press to a completion suffix.
+/// Resolve a TAB press to a completion suffix or trigger a list redraw.
 ///
-/// Synchronously calls shell's stdin endpoint with the partial last-token
-/// bytes. Shell does the readdir using its own VFS view + CWD (which TTY
-/// can't see) and replies with the suffix. Returns `Some(bytes)` for a
-/// completion, `None` for "no completion / shell unavailable / multiple
-/// matches" — all silent failures.
+/// Synchronously calls shell's stdin endpoint with the whole partial buffer
+/// and the consecutive-TAB count. Shell parses the last token, does the
+/// readdir using its own VFS view + CWD (which TTY can't see), and either:
+/// - mode=complete (count=1): replies with a suffix to append, or empty.
+/// - mode=list (count>=2): writes the list + redrawn prompt via its own
+///   stdout endpoint, replies with an empty payload.
+///
+/// Returns `Some(bytes)` for a suffix to echo, `None` for "no completion /
+/// shell unavailable / list already drawn by shell" — all silent here.
 ///
 /// 250 ms timeout: shell typically replies in well under a millisecond,
 /// but if it's mid-pipeline we'd rather drop the TAB than freeze TTY.
-fn compute_path_completion(partial: &[u8], ctx: &mut TtyContext) -> Option<alloc::vec::Vec<u8>> {
-    let token_start = partial
-        .iter()
-        .rposition(|&b| b == b' ' || b == b'\t')
-        .map(|p| p + 1)
-        .unwrap_or(0);
-    let token = &partial[token_start..];
-
+fn compute_path_completion(
+    partial: &[u8],
+    tab_count: u8,
+    ctx: &mut TtyContext,
+) -> Option<alloc::vec::Vec<u8>> {
     if ctx.shell_stdin == 0 {
         return None;
     }
 
-    let mut req = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 1);
-    req.words[0] = token.len();
+    // Mode: 0 = complete (single TAB), 1 = list (double+ TAB).
+    let mode: usize = if tab_count >= 2 { 1 } else { 0 };
+
+    let mut req = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 2);
+    req.words[0] = partial.len();
+    req.words[1] = mode;
     let header = req.as_bytes();
-    let mut send_buf = alloc::vec::Vec::with_capacity(header.len() + token.len());
+    let mut send_buf = alloc::vec::Vec::with_capacity(header.len() + partial.len());
     send_buf.extend_from_slice(header);
-    send_buf.extend_from_slice(token);
+    send_buf.extend_from_slice(partial);
 
     let mut reply_buf = [0u8; 256];
     let bytes_recv = libcluu::syscall::ipc_call_timeout(

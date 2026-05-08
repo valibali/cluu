@@ -179,8 +179,12 @@ fn run() -> Result<()> {
                         // TTY asked us to compute a tab completion using OUR
                         // view + CWD (which TTY can't see).  Sync reply over
                         // the call mechanism — typical readdir is sub-ms.
+                        // words[1] = mode: 0 = complete (single TAB), 1 = list
+                        // (double TAB). For list mode we write the redraw via
+                        // stdout and reply empty.
                         if let Some(rid) = extract_reply_id(&msg) {
-                            let suffix = handle_tab_query(payload);
+                            let mode = msg.words[1] as u32;
+                            let suffix = handle_tab_query(payload, mode, stdout);
                             let reply_msg = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 1);
                             let _ = reply_with_payload(rid, &reply_msg, &suffix);
                         }
@@ -214,26 +218,38 @@ fn print_prompt(endpoint: usize) -> Result<()> {
 
 /// Resolve a tab-completion query forwarded from TTY.
 ///
-/// Input: the partial last-token bytes the user is typing (no NUL).
-/// Output: the suffix to append after that token (with trailing '/' for
-/// directories or ' ' for files), or empty for "no unique completion."
+/// Input: `payload` is the whole partial line buffer the user is typing.
+/// `mode` is 0 for single-TAB (complete) or 1 for double-TAB (list).
+/// `stdout` is the TTY write endpoint — used in list mode to emit the
+/// list + redrawn prompt directly.
 ///
-/// Splits the token at the rightmost '/' into (parent_dir, prefix). If
-/// parent_dir is absent or relative, resolves against shell's CWD —
+/// Output (returned bytes): the suffix to append after the current token
+/// (with trailing '/' for directories or ' ' for files when uniquely matched,
+/// or the common-prefix extension for ambiguous matches), or empty for
+/// "no unique completion / list mode handled / no matches."
+///
+/// Splits the last token at the rightmost '/' into (parent_dir, prefix).
+/// If parent_dir is absent or relative, resolves against shell's CWD —
 /// which is exactly the TTY-side limitation we're working around. Calls
 /// VFS readdir using shell's view, so /etc and /var (and anything else
 /// the user's envelope grants) are visible to tab.
-///
-/// Failure modes return empty (no completion). Caller (TTY) treats
-/// empty as "do nothing," matching the silent-no-op behavior the user
-/// already expects.
-fn handle_tab_query(payload: &[u8]) -> Vec<u8> {
-    let token = match core::str::from_utf8(payload) {
+fn handle_tab_query(payload: &[u8], mode: u32, stdout: usize) -> Vec<u8> {
+    let buf = match core::str::from_utf8(payload) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
 
-    // Split into (parent_dir_str, prefix).
+    // Identify the last whitespace-delimited token. Anything before it is
+    // preserved verbatim; we only complete/list against the trailing token.
+    let token_start = buf
+        .as_bytes()
+        .iter()
+        .rposition(|&b| b == b' ' || b == b'\t')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let token = &buf[token_start..];
+
+    // Split token into (parent_dir_str, prefix).
     let (parent_dir_str, prefix) = match token.rfind('/') {
         Some(idx) => (&token[..=idx], &token[idx + 1..]),
         None => ("", token),
@@ -242,13 +258,10 @@ fn handle_tab_query(payload: &[u8]) -> Vec<u8> {
     // Resolve parent against CWD if relative.
     let cwd = libcluu::posix::current_dir_string();
     let resolved_parent: String = if parent_dir_str.is_empty() {
-        // No '/' in token: search the current working directory.
         cwd
     } else if parent_dir_str.starts_with('/') {
-        // Absolute path.
         String::from(parent_dir_str)
     } else {
-        // Relative path with a slash: prefix with CWD.
         let mut s = cwd;
         if !s.ends_with('/') {
             s.push('/');
@@ -257,10 +270,6 @@ fn handle_tab_query(payload: &[u8]) -> Vec<u8> {
         s
     };
 
-    // Get a VFS client. The endpoint is cached process-wide — without this,
-    // every TAB does a fresh registry::subscribe_output("vfs", "main") and
-    // leaks a new derived grant token (199, 200, 201, ... in the boot log).
-    // Cache survives as long as the shell does.
     let vfs_endpoint = match cached_vfs_endpoint() {
         Some(ep) => ep,
         None => return Vec::new(),
@@ -275,19 +284,88 @@ fn handle_tab_query(payload: &[u8]) -> Vec<u8> {
         Err(_) => return Vec::new(),
     };
 
-    let mut matches = entries.iter().filter(|e| e.name.starts_with(prefix));
-    let first = match matches.next() {
-        Some(m) => m,
-        None => return Vec::new(),
-    };
-    if matches.next().is_some() {
-        return Vec::new(); // 2+ matches — silent no-op
+    let matches: Vec<&libcluu::fs::client::VfsDirEntry> =
+        entries.iter().filter(|e| e.name.starts_with(prefix)).collect();
+
+    if matches.is_empty() {
+        return Vec::new();
     }
 
-    // Build suffix: bytes after the already-typed prefix, plus '/' (dir) or ' ' (file).
-    let mut out: Vec<u8> = first.name[prefix.len()..].as_bytes().to_vec();
-    out.push(if first.is_dir { b'/' } else { b' ' });
-    out
+    if matches.len() == 1 {
+        let only = matches[0];
+        let mut out: Vec<u8> = only.name[prefix.len()..].as_bytes().to_vec();
+        out.push(if only.is_dir { b'/' } else { b' ' });
+        return out;
+    }
+
+    // 2+ matches.
+    if mode == 1 {
+        // Double TAB: write list + redrawn prompt + current buffer to stdout.
+        emit_tab_list(stdout, &matches, buf);
+        return Vec::new();
+    }
+
+    // Single TAB with multiple matches: extend by common prefix beyond what
+    // the user has typed (silent if no advance possible).
+    let common = longest_common_prefix(matches.iter().map(|e| e.name.as_str()));
+    if common.len() > prefix.len() {
+        common.as_bytes()[prefix.len()..].to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Length of the longest string prefix shared by all `names`. Empty if no
+/// common prefix or `names` is empty.
+fn longest_common_prefix<'a, I: IntoIterator<Item = &'a str>>(names: I) -> String {
+    let mut iter = names.into_iter();
+    let first = match iter.next() {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    let mut end = first.len();
+    for n in iter {
+        let limit = end.min(n.len());
+        let fb = first.as_bytes();
+        let nb = n.as_bytes();
+        let mut i = 0;
+        while i < limit && fb[i] == nb[i] {
+            i += 1;
+        }
+        end = i;
+        if end == 0 {
+            break;
+        }
+    }
+    // Walk back to a UTF-8 char boundary.
+    while end > 0 && !first.is_char_boundary(end) {
+        end -= 1;
+    }
+    String::from(&first[..end])
+}
+
+/// Emit the double-TAB redraw: newline, formatted match list, newline,
+/// fresh prompt, then the current buffer so the user can keep typing.
+fn emit_tab_list(stdout: usize, matches: &[&libcluu::fs::client::VfsDirEntry], buf: &str) {
+    let mut out = String::from("\r\n");
+    let mut first = true;
+    for e in matches {
+        if !first {
+            out.push_str("  ");
+        }
+        first = false;
+        out.push_str(&e.name);
+        if e.is_dir {
+            out.push('/');
+        }
+    }
+    out.push_str("\r\n");
+    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, out.as_bytes());
+
+    let _ = print_prompt(stdout);
+    if !buf.is_empty() {
+        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, buf.as_bytes());
+    }
 }
 
 /// Return a process-cached `vfs:main` endpoint token, fetching it on first

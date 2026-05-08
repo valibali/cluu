@@ -22,9 +22,9 @@ pub struct LineEffect {
     /// In raw mode, each byte is delivered immediately (no line buffering).
     pub raw_byte: Option<u8>,
     /// When TAB was pressed in canonical mode, this carries a snapshot of the
-    /// current line buffer so the TTY main loop can run completion logic.
-    /// `None` for any non-TAB byte.
-    pub tab_request: Option<Vec<u8>>,
+    /// current line buffer plus the consecutive-TAB count (1 = single tab,
+    /// 2+ = double tab requesting list). `None` for any non-TAB byte.
+    pub tab_request: Option<(Vec<u8>, u8)>,
 }
 
 /// Echo action for the console.
@@ -79,6 +79,9 @@ pub struct LineDiscipline {
     saved_partial: Option<Vec<u8>>,
     /// CSI escape-sequence parser state.
     csi_state: CsiState,
+    /// Consecutive TAB count, reset by any non-TAB byte. Drives bash-style
+    /// "TAB completes, TAB-TAB lists" behavior.
+    consecutive_tabs: u8,
 }
 
 impl LineDiscipline {
@@ -91,6 +94,7 @@ impl LineDiscipline {
             history_pos: None,
             saved_partial: None,
             csi_state: CsiState::Idle,
+            consecutive_tabs: 0,
         }
     }
 
@@ -252,6 +256,12 @@ impl LineDiscipline {
 
     /// Canonical mode: buffer input, emit line on Enter.
     fn handle_byte_canonical(&mut self, byte: u8) -> LineEffect {
+        // Reset consecutive-TAB tracker for any non-TAB byte (including CSI
+        // intermediates and bare ESC). The TAB branch below increments it.
+        if !(byte == 0x09 && self.csi_state == CsiState::Idle) {
+            self.consecutive_tabs = 0;
+        }
+
         // Drive the CSI parser first. We only act on the FINAL byte of a
         // sequence; the intermediate bytes are silently consumed.
         match self.csi_state {
@@ -291,12 +301,14 @@ impl LineDiscipline {
                 // TAB in canonical mode: snapshot buffer so the main loop can do
                 // VFS-aware completion. We don't echo or modify the buffer here —
                 // the main loop will call append_completion + echo if it finds a
-                // unique match.
+                // unique match. Count consecutive TABs to drive single-vs-double
+                // tab semantics (complete vs. list).
+                self.consecutive_tabs = self.consecutive_tabs.saturating_add(1);
                 LineEffect {
                     echo: EchoAction::None,
                     line_ready: None,
                     raw_byte: None,
-                    tab_request: Some(self.buffer.clone()),
+                    tab_request: Some((self.buffer.clone(), self.consecutive_tabs)),
                 }
             }
             0x03 => {
