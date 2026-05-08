@@ -305,10 +305,23 @@ pub enum WriteSink {
 
 impl WriteSink {
     /// Write `bytes` to the sink.
+    ///
+    /// **Wire format note**: Tty/File use full Message+payload framing
+    /// because TTY/file services parse Message structures. Pipe uses the
+    /// raw 4-byte-LE-label-prefix format that libcluu/posix/pipe.rs
+    /// `read_pipe` expects on the consumer side; sending a full Message
+    /// here would make the consumer read the Message header bytes as
+    /// data, producing garbage characters before the actual payload.
     pub fn write_all(&self, bytes: &[u8]) -> Result<()> {
         match self {
             WriteSink::Tty(tok) => send_with_payload(*tok, TTY_WRITE_LABEL, bytes),
-            WriteSink::Pipe(tok) => send_with_payload(*tok, PIPE_DATA_LABEL, bytes),
+            WriteSink::Pipe(tok) => {
+                use alloc::vec::Vec;
+                let mut buf: Vec<u8> = Vec::with_capacity(4 + bytes.len());
+                buf.extend_from_slice(&PIPE_DATA_LABEL.to_le_bytes());
+                buf.extend_from_slice(bytes);
+                libcluu::syscall::ipc_send(*tok, &buf).map(|_| ())
+            }
             WriteSink::File(tok) => send_with_payload(*tok, TTY_WRITE_LABEL, bytes),
         }
     }
@@ -317,7 +330,8 @@ impl WriteSink {
     /// sees EOF. For Tty/File this is a no-op.
     pub fn close(&self) {
         if let WriteSink::Pipe(tok) = self {
-            let _ = send_with_payload(*tok, PIPE_EOF_LABEL, &[]);
+            let eof = PIPE_EOF_LABEL.to_le_bytes();
+            let _ = libcluu::syscall::ipc_send(*tok, &eof);
         }
     }
 }
