@@ -2662,16 +2662,22 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
 
     let staging_dir = project_root().join("target/userfs");
     let bin_dir = staging_dir.join("bin");
+    let lib_dir = staging_dir.join("lib");
+    let usr_dir = staging_dir.join("usr");
     let tmp_dir = staging_dir.join("tmp");
     let home_root_dir = staging_dir.join("home/root");
     let var_containers_dir = staging_dir.join("var/containers");
     let var_images_dir = staging_dir.join("var/images");
+    let var_log_dir = staging_dir.join("var/log");
     let _ = fs::remove_dir_all(&bin_dir);
     fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&lib_dir)?;
+    fs::create_dir_all(&usr_dir)?;
     fs::create_dir_all(&tmp_dir)?;
     fs::create_dir_all(&home_root_dir)?;
     fs::create_dir_all(&var_containers_dir)?;
     fs::create_dir_all(&var_images_dir)?;
+    fs::create_dir_all(&var_log_dir)?;
 
     // Copy built container images into /var/images/ on the userdisk
     let containers_dir = project_root().join("target/containers");
