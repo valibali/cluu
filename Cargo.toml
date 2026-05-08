@@ -74,6 +74,13 @@ members = [
     "userspace/printf",
     "userspace/sleep",
     "userspace/which",
+    "userspace/sort",
+    "userspace/uniq",
+    "userspace/cut",
+    "userspace/tr",
+    "userspace/find",
+    "userspace/du",
+    "userspace/stat",
 
     # Language tooling
     "crates/cluu_lang",
@@ -124,6 +131,13 @@ default-members = [
     "userspace/printf",
     "userspace/sleep",
     "userspace/which",
+    "userspace/sort",
+    "userspace/uniq",
+    "userspace/cut",
+    "userspace/tr",
+    "userspace/find",
+    "userspace/du",
+    "userspace/stat",
 ]
 
 [workspace.package]
@@ -320,6 +334,27 @@ debug = 0
 [profile.dev.package."cluu-which"]
 debug = 0
 
+[profile.dev.package."cluu-sort"]
+debug = 0
+
+[profile.dev.package."cluu-uniq"]
+debug = 0
+
+[profile.dev.package."cluu-cut"]
+debug = 0
+
+[profile.dev.package."cluu-tr"]
+debug = 0
+
+[profile.dev.package."cluu-find"]
+debug = 0
+
+[profile.dev.package."cluu-du"]
+debug = 0
+
+[profile.dev.package."cluu-stat"]
+debug = 0
+
 [profile.release]
 opt-level = 2
 lto = false
@@ -492,4 +527,25 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-which"]
+debug = 0
+
+[profile.release.package."cluu-sort"]
+debug = 0
+
+[profile.release.package."cluu-uniq"]
+debug = 0
+
+[profile.release.package."cluu-cut"]
+debug = 0
+
+[profile.release.package."cluu-tr"]
+debug = 0
+
+[profile.release.package."cluu-find"]
+debug = 0
+
+[profile.release.package."cluu-du"]
+debug = 0
+
+[profile.release.package."cluu-stat"]
 debug = 0

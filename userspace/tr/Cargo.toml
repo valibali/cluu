@@ -1,0 +1,14 @@
+[package]
+name = "cluu-tr"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU tr utility"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "tr"
+path = "src/main.rs"

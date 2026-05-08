@@ -2270,6 +2270,13 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/printf",
         "userspace/sleep",
         "userspace/which",
+        "userspace/sort",
+        "userspace/uniq",
+        "userspace/cut",
+        "userspace/tr",
+        "userspace/find",
+        "userspace/du",
+        "userspace/stat",
     ];
 
     let target_json = project_root().join("triplets/x86_64-cluu-user.json");
@@ -2745,7 +2752,7 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
             "-b",
             "1024",
             disk_path.to_str().unwrap(),
-            "786432", // 768MB image (786432 blocks * 1KiB)
+            "1048576", // 1GB image (1048576 blocks * 1KiB)
         ])
         .status()
         .context("Failed to run mke2fs for user disk")?;
