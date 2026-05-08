@@ -201,13 +201,6 @@ impl VtScreen {
                         self.cursor_y -= 1;
                         self.cursor_x = self.cols.saturating_sub(1);
                     }
-                    self.set_cell(
-                        self.cursor_x,
-                        self.cursor_y,
-                        b' ',
-                        self.current_fg,
-                        self.current_bg,
-                    );
                 }
                 _ => {
                     self.set_cell(
