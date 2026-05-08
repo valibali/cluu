@@ -316,6 +316,24 @@ impl LineDiscipline {
                     tab_request: None,
                 }
             }
+            0x1A => {
+                // Ctrl-Z (SIGTSTP): discard current input and forward as an
+                // out-of-band marker byte so the TTY can suspend the foreground
+                // process group.
+                self.buffer.clear();
+                self.history_pos = None;
+                self.saved_partial = None;
+                LineEffect {
+                    echo: if self.mode.echo {
+                        EchoAction::Bytes(b"^Z\n")
+                    } else {
+                        EchoAction::None
+                    },
+                    line_ready: Some(alloc::vec![0x1A]),
+                    raw_byte: None,
+                    tab_request: None,
+                }
+            }
             0x04 => {
                 // Ctrl-D (EOT): forward directly so foreground REPLs can exit on EOF.
                 // If there is buffered input, flush that partial line first.

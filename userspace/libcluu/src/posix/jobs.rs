@@ -11,6 +11,8 @@ use crate::ipc::{
     PROCMGR_PG_SIGNAL_LABEL,
     PROCMGR_PG_SUSPEND_LABEL,
     PROCMGR_PID_PGID_QUERY_LABEL,
+    TTY_GET_FG_LABEL,
+    TTY_SET_FG_LABEL,
 };
 use crate::types::{IpcFlags, Message};
 use crate::Result;
@@ -55,5 +57,22 @@ pub fn pg_resume(procmgr_ep: usize, pgid: usize) -> Result<()> {
 pub fn pgid_of(procmgr_ep: usize, tid: usize) -> Result<usize> {
     let mut msg = Message::new(PROCMGR_PID_PGID_QUERY_LABEL, [tid, 0, 0, 0, 0, 0], 1);
     ipc::call(procmgr_ep, &mut msg, IpcFlags::empty())?;
+    Ok(msg.words[1])
+}
+
+/// Set the foreground process-group for `session` on the TTY at `tty_ep`.
+///
+/// This is a fire-and-forget send; TTY does not reply.
+pub fn tty_set_fg(tty_ep: usize, session: usize, pgid: usize) -> Result<()> {
+    let msg = Message::new(TTY_SET_FG_LABEL, [session, pgid, 0, 0, 0, 0], 2);
+    ipc::send(tty_ep, &msg, IpcFlags::empty())
+}
+
+/// Query the foreground process-group for `session` from the TTY at `tty_ep`.
+///
+/// Returns the pgid, or 0 if no foreground group is set.
+pub fn tty_get_fg(tty_ep: usize, session: usize) -> Result<usize> {
+    let mut msg = Message::new(TTY_GET_FG_LABEL, [session, 0, 0, 0, 0, 0], 1);
+    ipc::call(tty_ep, &mut msg, IpcFlags::empty())?;
     Ok(msg.words[1])
 }

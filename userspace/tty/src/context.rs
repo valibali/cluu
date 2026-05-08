@@ -5,7 +5,7 @@
 
 extern crate alloc;
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::vec::Vec;
 use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_EXTRA_0, TOKEN_IPC};
@@ -75,6 +75,11 @@ pub struct TtyContext {
     /// Lazily-initialized VFS client for tab completion path resolution.
     #[allow(dead_code)]
     vfs_client: Option<VfsClient>,
+    /// Foreground pgid per session (session = VT instance_id).
+    pub fg_pgid_per_session: BTreeMap<usize, usize>,
+    /// Procmgr main endpoint for sending PROCMGR_PG_SIGNAL (obtained via registry).
+    pub procmgr_main: usize,
+    requested_procmgr_main: bool,
 }
 
 impl TtyContext {
@@ -130,6 +135,9 @@ impl TtyContext {
             login_username: Vec::new(),
             login_password: Vec::new(),
             vfs_client: None,
+            fg_pgid_per_session: BTreeMap::new(),
+            procmgr_main: 0,
+            requested_procmgr_main: false,
         })
     }
 
@@ -147,6 +155,12 @@ impl TtyContext {
         if self.procmgr_spawn == 0 && !self.requested_procmgr {
             if registry::request_subscription("procmgr", "spawn").is_ok() {
                 self.requested_procmgr = true;
+            }
+        }
+        // Subscribe to procmgr main endpoint for PG_SIGNAL (job control).
+        if self.procmgr_main == 0 && !self.requested_procmgr_main {
+            if registry::request_subscription("procmgr", "main").is_ok() {
+                self.requested_procmgr_main = true;
             }
         }
         // Show login prompt once console is available (procmgr not needed for prompt).
@@ -188,6 +202,9 @@ impl TtyContext {
                         self.procmgr_spawn = token;
                         let _ = debug_print("tty: procmgr spawn subscribed");
                         self.maybe_show_login_prompt();
+                    } else if name == "main" {
+                        self.procmgr_main = token;
+                        let _ = debug_print("tty: procmgr main subscribed");
                     }
                 }
                 registry::RegistryEvent::SubscribeStatus { code } => {
@@ -465,6 +482,11 @@ impl TtyContext {
         self.login_username.clear();
         self.login_password.clear();
         self.write_to_console(b"\r\nlogin: ");
+    }
+
+    /// Return the VT instance id, which doubles as the session id for fg-pgid tracking.
+    pub fn session_id(&self) -> usize {
+        self.instance_id as usize
     }
 
     /// Return a reference to the VFS client, initializing it on first use.

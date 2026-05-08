@@ -15,13 +15,18 @@ mod protocol;
 use context::{TtyContext, TtyMode, LoginState};
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_CREDIT_REFILL_LABEL, KBD_EVENT_LABEL, TTY_CTL_LABEL,
-    TTY_FG_FLAG_FORWARD_CTRL_C, TTY_POLL_QUERY_LABEL, TTY_READ_LABEL, TTY_READ_REQUEST_LABEL,
-    TTY_REGISTER_LABEL, TTY_TAB_QUERY_LABEL, TTY_WRITE_LABEL, TTY_WRITE_SYNC_LABEL,
+    TTY_FG_FLAG_FORWARD_CTRL_C, TTY_GET_FG_LABEL, TTY_POLL_QUERY_LABEL, TTY_READ_LABEL,
+    TTY_READ_REQUEST_LABEL, TTY_REGISTER_LABEL, TTY_SET_FG_LABEL, TTY_TAB_QUERY_LABEL,
+    TTY_WRITE_LABEL, TTY_WRITE_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{yield_cpu, Error, Result};
 use line_discipline::{EchoAction, LineDiscipline};
 use protocol::{decode_kbd_event, parse_message};
+
+/// POSIX signal numbers used for job-control keystroke routing.
+const SIGINT: i32 = 2;
+const SIGTSTP: i32 = 20;
 
 #[no_mangle]
 /// Kernel entrypoint for the tty service.
@@ -211,6 +216,32 @@ fn handle_one_message(
             ctx.handle_session_death();
             discipline.set_mode(line_discipline::TermMode::default());
         }
+        TTY_SET_FG_LABEL => {
+            // Set the foreground pgid for a session.
+            // words[0] = session_id, words[1] = pgid.
+            let session = msg.words[0];
+            let pgid = msg.words[1];
+            if pgid == 0 {
+                ctx.fg_pgid_per_session.remove(&session);
+            } else {
+                ctx.fg_pgid_per_session.insert(session, pgid);
+            }
+            // Reply if caller used call semantics; ignore if fire-and-forget.
+            if let Some(reply_token) = extract_reply_id(&msg) {
+                let reply_msg = Message::new(TTY_SET_FG_LABEL, [0; 6], 0);
+                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
+        TTY_GET_FG_LABEL => {
+            // Query the foreground pgid for a session.
+            // words[0] = session_id. Reply: words[0]=0, words[1]=pgid.
+            if let Some(reply_token) = extract_reply_id(&msg) {
+                let session = msg.words[0];
+                let pgid = ctx.fg_pgid_per_session.get(&session).copied().unwrap_or(0);
+                let reply_msg = Message::new(TTY_GET_FG_LABEL, [0, pgid, 0, 0, 0, 0], 2);
+                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
         _ => {}
     }
 }
@@ -318,16 +349,53 @@ fn apply_effect(ctx: &mut TtyContext, discipline: &mut line_discipline::LineDisc
 
     if let Some(line) = effect.line_ready {
         let is_ctrl_c = line.len() == 1 && line[0] == 0x03;
+        let is_ctrl_z = line.len() == 1 && line[0] == 0x1A;
+
         if is_ctrl_c {
+            // Existing ctrl_c_notify path: out-of-band notification to foreground.
             if ctx.ctrl_c_notify != 0 {
                 let _ = libcluu::ipc::send_with_payload(ctx.ctrl_c_notify, TTY_READ_LABEL, &[0x03]);
+            }
+            // Job-control: send SIGINT to the foreground pgid for this session.
+            let session = ctx.session_id();
+            if let Some(&pgid) = ctx.fg_pgid_per_session.get(&session) {
+                if ctx.procmgr_main != 0 {
+                    let _ = send_pg_signal(ctx.procmgr_main, pgid, SIGINT);
+                }
             }
             if !ctx.forward_ctrl_c {
                 return;
             }
         }
+
+        if is_ctrl_z {
+            // Job-control: send SIGTSTP to the foreground pgid for this session.
+            let session = ctx.session_id();
+            if let Some(&pgid) = ctx.fg_pgid_per_session.get(&session) {
+                if ctx.procmgr_main != 0 {
+                    let _ = send_pg_signal(ctx.procmgr_main, pgid, SIGTSTP);
+                }
+            }
+            // Do not forward Ctrl-Z to readers; it is consumed here.
+            return;
+        }
+
         deliver_line(ctx, &line);
     }
+}
+
+/// Send PROCMGR_PG_SIGNAL to deliver `signum` to all members of `pgid`.
+///
+/// Fire-and-forget: TTY does not wait for a reply.  The TTY service does not
+/// have the `posix` libcluu feature enabled, so this is an inline send rather
+/// than going through `libcluu::posix::jobs`.
+fn send_pg_signal(procmgr_ep: usize, pgid: usize, signum: i32) -> Result<()> {
+    let msg = Message::new(
+        libcluu::ipc::PROCMGR_PG_SIGNAL_LABEL,
+        [pgid, signum as usize, 0, 0, 0, 0],
+        2,
+    );
+    libcluu::ipc::send(procmgr_ep, &msg, IpcFlags::empty())
 }
 
 /// Resolve a TAB press to a completion suffix.

@@ -47,6 +47,12 @@ pub use crate::posix::pipe::PIPE_EOF_LABEL;
 /// Lives on the same stdin endpoint that delivers TTY_READ_LABEL — shell's
 /// recv loop dispatches by label.
 pub const TTY_TAB_QUERY_LABEL: u32 = 30;
+/// Set the foreground process-group for a session (procmgr/shell → tty).
+/// words[0] = session_id, words[1] = pgid.
+pub const TTY_SET_FG_LABEL: u32 = 40;
+/// Query the foreground process-group for a session (any → tty).
+/// words[0] = session_id. Reply: words[0]=0, words[1]=pgid (0 if none).
+pub const TTY_GET_FG_LABEL: u32 = 41;
 pub const CONSOLE_ACTIVATE_LABEL: u32 = 8;
 pub const CONSOLE_DEACTIVATE_LABEL: u32 = 9;
 pub const PROCMGR_QUERY_CTTY_LABEL: u32 = 11;
