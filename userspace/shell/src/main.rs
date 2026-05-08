@@ -22,8 +22,8 @@ use alloc::vec::Vec;
 #[cfg(feature = "lang-parser")]
 use commands::{poll_background_jobs, BuiltinFactory, CommandContext, CommandExecutor, ExecResult};
 use libcluu::boot::{
-    process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG,
-    TOKEN_STDOUT,
+    process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, PARAM_TTY_INSTANCE, TOKEN_STDERR, TOKEN_STDIN,
+    TOKEN_STDLOG, TOKEN_STDOUT,
 };
 use libcluu::ipc::{
     extract_reply_id, parse_message, reply_with_payload, send_with_payload, TTY_READ_LABEL,
@@ -110,6 +110,27 @@ fn run() -> Result<()> {
                 let _ = debug_print(
                     "shellrc: vfs endpoint unavailable, skipping rc files",
                 );
+            }
+        }
+    }
+
+    // ── Job control init ──────────────────────────────────────────────────────
+    // Set shell_pgid and register the shell's own process as fg.
+    #[cfg(feature = "lang-parser")]
+    {
+        let session_id = info.params[PARAM_TTY_INSTANCE] as usize;
+        command_context.tty_stdout = stdout;
+        command_context.session_id = session_id;
+
+        // Create a pgid for the shell itself.
+        if let Ok(ep) = command_context.procmgr_spawn_endpoint() {
+            if let Ok(shell_pgid) = libcluu::posix::jobs::pg_create(ep) {
+                // Attach shell's own tid as a member.
+                // Shell is single-threaded; tid is not easily exposed but pgid
+                // with zero members is still valid for TTY fg purposes.
+                command_context.shell_pgid = shell_pgid;
+                // Claim TTY foreground for the shell.
+                let _ = libcluu::posix::jobs::tty_set_fg(stdout, session_id, shell_pgid);
             }
         }
     }
@@ -407,7 +428,17 @@ fn handle_line_payload(
     if payload.contains(&b'\n') {
         #[cfg(feature = "lang-parser")]
         {
+            // Drain any pending job notifications from background jobs before
+            // executing the next command, so state is fresh.
+            crate::commands::builtins::jobs::drain_job_notifications(context);
+            // Print and remove any newly-done background jobs.
+            crate::commands::builtins::jobs::reap_done_jobs(stdout, context);
+
             parse_and_execute_line(stdout, stdlog, context, payload)?;
+
+            // Drain again after the command completes (catches fast bg exits).
+            crate::commands::builtins::jobs::drain_job_notifications(context);
+            crate::commands::builtins::jobs::reap_done_jobs(stdout, context);
         }
         print_prompt(stdout)?;
     }

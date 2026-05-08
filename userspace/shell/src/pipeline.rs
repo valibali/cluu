@@ -17,6 +17,7 @@ use libcluu::ipc::{
     FdAction, PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL,
     TTY_WRITE_LABEL,
 };
+use libcluu::posix::jobs::{pg_attach, pg_create, tty_set_fg};
 use libcluu::syscall::endpoint_create;
 use libcluu::types::Message;
 use libcluu::{boot::process_info, debug_print, Error, IpcFlags, Result, TOKEN_IPC};
@@ -47,11 +48,14 @@ impl PipelineExecutor {
         pipeline: &Pipeline,
         registry: &BuiltinRegistry,
     ) -> Result<i32> {
-        // Single-command pipeline with no redirections: caller shouldn't reach us.
-        if pipeline.commands.len() == 1 && pipeline.commands[0].redirs.is_empty() {
+        // Single-command pipeline with no redirections AND not bg: caller
+        // (registry dispatcher) handles via the single-command path. We get
+        // here only when the dispatcher routed bg, redirs, or multi-stage.
+        if pipeline.commands.len() == 1 && pipeline.commands[0].redirs.is_empty() && !pipeline.bg {
             return Ok(0);
         }
-        // Single-command pipeline with redirections: handle directly without pipes.
+        // Single-command pipeline with redirections OR bg: handle directly
+        // without pipes; run_single_with_redirs handles both.
         if pipeline.commands.len() == 1 {
             return Self::run_single_with_redirs(stdout, context, pipeline, registry);
         }
@@ -65,6 +69,7 @@ impl PipelineExecutor {
         registry: &BuiltinRegistry,
     ) -> Result<i32> {
         let cmd = &pipeline.commands[0];
+        let bg = pipeline.bg;
         let mut argv: Vec<String> = Vec::new();
         for elem in &cmd.elems {
             match elem {
@@ -81,6 +86,7 @@ impl PipelineExecutor {
         }
         let name = argv[0].as_str();
         let image_name = name.strip_prefix("/bin/").unwrap_or(name);
+        let cmd_line = argv.join(" ");
 
         // Dispatch to builtin if registered.
         // File-redir for builtins is deferred: WriteSink::File is not yet
@@ -121,6 +127,42 @@ impl PipelineExecutor {
             return Ok(127);
         }
 
+        // Assign pgid and attach this process to it.
+        let pgid = if let Ok(ep) = context.procmgr_spawn_endpoint() {
+            match pg_create(ep) {
+                Ok(id) => {
+                    let _ = pg_attach(ep, id, spawn.pid);
+                    id
+                }
+                Err(_) => 0,
+            }
+        } else {
+            0
+        };
+
+        if bg {
+            // Background: add to job table and return immediately.
+            if pgid != 0 && context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
+                let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
+            }
+            let job_id = context.jobs.add(
+                pgid,
+                alloc::vec![spawn.pid],
+                alloc::vec![spawn.notify_endpoint],
+                cmd_line.clone(),
+                true,
+            );
+            let line = format!("[{}] {}", job_id, spawn.pid);
+            let _ = libcluu::debug_print(&line);
+            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, (line + "\n").as_bytes());
+            return Ok(0);
+        }
+
+        // Foreground: set TTY fg pgid, wait for exit, restore shell.
+        if pgid != 0 && context.tty_stdout != 0 && context.session_id != 0 {
+            let _ = tty_set_fg(context.tty_stdout, context.session_id, pgid);
+        }
+
         // Wait for exit notification.
         let mut buf = [0u8; 256];
         let _ = libcluu::syscall::ipc_recv(spawn.notify_endpoint, &mut buf);
@@ -130,6 +172,11 @@ impl PipelineExecutor {
         } else {
             0
         };
+
+        // Restore shell as TTY foreground.
+        if pgid != 0 && context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
+            let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
+        }
 
         let _ = libcluu::debug_print(&alloc::format!(
             "shell: pipeline done stages=1 status={}",
@@ -145,6 +192,7 @@ impl PipelineExecutor {
         registry: &BuiltinRegistry,
     ) -> Result<i32> {
         let n = pipeline.commands.len();
+        let bg = pipeline.bg;
         let procmgr_ep = context.procmgr_spawn_endpoint()?;
 
         // Render every command's argv (and reject unsupported features for v1).
@@ -214,6 +262,21 @@ impl PipelineExecutor {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
+        // Build a human-readable command line for the job table.
+        let cmd_line: String = argvs
+            .iter()
+            .map(|argv| argv.join(" "))
+            .collect::<Vec<_>>()
+            .join(" | ");
+
+        // Allocate a pgid for this pipeline.
+        let pipeline_pgid = pg_create(procmgr_ep).unwrap_or(0);
+
+        // For foreground pipelines, point TTY fg at this pgid before spawning.
+        if !bg && pipeline_pgid != 0 && context.tty_stdout != 0 && context.session_id != 0 {
+            let _ = tty_set_fg(context.tty_stdout, context.session_id, pipeline_pgid);
+        }
+
         // Classify each stage as builtin or container. Builtin stages run
         // in-process; container stages are spawned via procmgr. We must
         // spawn container stages FIRST so they block on ipc_recv before we
@@ -230,6 +293,8 @@ impl PipelineExecutor {
         // Pass 1: spawn all container stages.
         // notify_endpoints[i] is 0 for builtin stages (no wait needed).
         let mut notify_endpoints: Vec<usize> = alloc::vec![0usize; n];
+        // pids for job table
+        let mut spawned_pids: Vec<usize> = Vec::with_capacity(n);
 
         for (i, argv) in argvs.iter().enumerate() {
             if is_builtin[i] {
@@ -326,6 +391,12 @@ impl PipelineExecutor {
                 }
                 return Ok(127);
             }
+            // Attach child to pipeline's pgid.
+            let child_pid = reply.words[1];
+            if pipeline_pgid != 0 {
+                let _ = pg_attach(procmgr_ep, pipeline_pgid, child_pid);
+            }
+            spawned_pids.push(child_pid);
             notify_endpoints[i] = notify_endpoint;
         }
 
@@ -413,6 +484,38 @@ impl PipelineExecutor {
         // done after the wait so pipe endpoints remain live while children run.
         for p in &pipes {
             let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+        }
+
+        // Job table registration and TTY fg restore.
+        // Collect non-zero notify endpoints for this pipeline's spawned stages.
+        let job_notify_eps: Vec<usize> = notify_endpoints
+            .iter()
+            .copied()
+            .filter(|&ep| ep != 0)
+            .collect();
+
+        if bg && pipeline_pgid != 0 {
+            // Background pipeline: add to job table, print [N] PID.
+            let job_id = context.jobs.add(
+                pipeline_pgid,
+                spawned_pids.clone(),
+                job_notify_eps,
+                cmd_line.clone(),
+                true,
+            );
+            let first_pid = spawned_pids.first().copied().unwrap_or(0);
+            let line = format!("[{}] {}", job_id, first_pid);
+            let _ = libcluu::debug_print(&line);
+            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, (line + "\n").as_bytes());
+            // Restore TTY foreground to shell.
+            if context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
+                let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
+            }
+        } else if !bg && pipeline_pgid != 0 {
+            // Foreground pipeline: restore TTY fg to shell after wait completes.
+            if context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
+                let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
+            }
         }
 
         let _ = debug_print(&format!(

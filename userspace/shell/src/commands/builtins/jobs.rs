@@ -1,128 +1,119 @@
-//! Job-control and spawn builtins.
+//! Job control builtins: jobs, fg, bg, wait, kill.
 //!
-//! Test-only probes culled in Stage 3 — they now live under
-//! userspace/probes/ and are invoked via `spawn <name>` or
-//! `container run <name>`.
+//! Replaces the pre-Stage-3 primitives (SpawnBuiltin, SpawnBgBuiltin,
+//! StopBuiltin, ForegroundBuiltin, BackgroundBuiltin).  The real
+//! JobTable tracks each pipeline as a single job keyed by pgid.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
-use libcluu::{debug_print, Result};
+use libcluu::ipc::{send_with_payload, PROCMGR_JOB_NOTIFY_LABEL, TTY_WRITE_LABEL};
+use libcluu::posix::jobs::{pg_resume, pg_signal, tty_set_fg};
+use libcluu::syscall;
+use libcluu::Result;
 
-use crate::commands::exec::{
-    ensure_bg_job_state, parse_spawn_args, parse_status,
-    signal_process, wait_for_exit_or_sigint,
-};
-use super::registry::{CommandContext, JobState, WriteSink};
-use super::registry::{BuiltinCommand, BuiltinRegistry};
+use super::registry::{BuiltinCommand, BuiltinRegistry, CommandContext, WriteSink};
 
-pub fn register(registry: &mut BuiltinRegistry) {
-    registry.register(Box::new(SpawnBuiltin));
-    registry.register(Box::new(SpawnBgBuiltin));
-    registry.register(Box::new(JobsBuiltin));
-    registry.register(Box::new(StopBuiltin));
-    registry.register(Box::new(ForegroundBuiltin));
-    registry.register(Box::new(BackgroundBuiltin));
-    register_shellcrash(registry);
+// ─── JobState ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobState {
+    Running,
+    Stopped,
+    Done,
 }
 
-#[cfg(feature = "debug-shellcrash")]
-fn register_shellcrash(registry: &mut BuiltinRegistry) {
-    registry.register(Box::new(ShellCrashBuiltin));
+// ─── Job ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct Job {
+    pub id: usize,
+    pub pgid: usize,
+    pub pids: Vec<usize>,
+    /// Per-pid notify endpoints (parallel to `pids`).
+    pub notify_endpoints: Vec<usize>,
+    pub state: JobState,
+    pub cmd_line: String,
+    pub bg: bool,
+    pub last_exit: Option<i32>,
 }
 
-#[cfg(not(feature = "debug-shellcrash"))]
-fn register_shellcrash(_registry: &mut BuiltinRegistry) {}
+// ─── JobTable ────────────────────────────────────────────────────────────────
 
-// ---------------------------------------------------------------------------
-// spawn
-// ---------------------------------------------------------------------------
+pub struct JobTable {
+    next_id: usize,
+    by_id: BTreeMap<usize, Job>,
+}
 
-pub(crate) struct SpawnBuiltin;
-
-impl BuiltinCommand for SpawnBuiltin {
-    fn name(&self) -> &'static str {
-        "spawn"
-    }
-
-    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some((path, priority, fg_mode, argv_tail)) = parse_spawn_args(args) else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"spawn: missing path\n")?;
-            return Ok(());
-        };
-        let argv_refs: Vec<&str> = argv_tail.iter().map(|s| s.as_str()).collect();
-        let spawn = crate::commands::exec::spawn_process_with_argv(context, path.as_str(), priority, &argv_refs)?;
-        match parse_status(spawn.status_word) {
-            Ok(()) => {
-                let child_pid = spawn.pid;
-                wait_for_exit_or_sigint(
-                    spawn.procmgr_endpoint,
-                    stdout,
-                    spawn.notify_endpoint,
-                    spawn.stdin_endpoint,
-                    child_pid,
-                    stdout,
-                    fg_mode,
-                )?;
-                Ok(())
-            }
-            Err(err) => {
-                let line = format!("spawn: {:?}\n", err);
-                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-                Ok(())
-            }
+impl JobTable {
+    pub const fn new() -> Self {
+        Self {
+            next_id: 0,
+            by_id: BTreeMap::new(),
         }
     }
-}
 
-// ---------------------------------------------------------------------------
-// spawnbg
-// ---------------------------------------------------------------------------
-
-pub(crate) struct SpawnBgBuiltin;
-
-impl BuiltinCommand for SpawnBgBuiltin {
-    fn name(&self) -> &'static str {
-        "spawnbg"
+    pub fn add(
+        &mut self,
+        pgid: usize,
+        pids: Vec<usize>,
+        notify_endpoints: Vec<usize>,
+        cmd_line: String,
+        bg: bool,
+    ) -> usize {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.by_id.insert(
+            id,
+            Job {
+                id,
+                pgid,
+                pids,
+                notify_endpoints,
+                state: JobState::Running,
+                cmd_line,
+                bg,
+                last_exit: None,
+            },
+        );
+        id
     }
 
-    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some((path, priority, fg_mode, _argv_tail)) = parse_spawn_args(args) else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"spawnbg: missing path\n")?;
-            return Ok(());
-        };
+    pub fn get(&self, id: usize) -> Option<&Job> {
+        self.by_id.get(&id)
+    }
 
-        let spawn = crate::commands::exec::spawn_process_with_argv(context, path.as_str(), priority, &[])?;
-        match parse_status(spawn.status_word) {
-            Ok(()) => {
-                context.add_bg_job(
-                    spawn.pid,
-                    spawn.notify_endpoint,
-                    spawn.stdin_endpoint,
-                    String::from(path.as_str()),
-                    fg_mode,
-                );
-                let line = format!("spawnbg: started pid={}\n", spawn.pid);
-                let _ = debug_print(line.trim_end());
-                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-            }
-            Err(err) => {
-                let line = format!("spawnbg: {:?}\n", err);
-                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-            }
-        }
-        Ok(())
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut Job> {
+        self.by_id.get_mut(&id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Job> {
+        self.by_id.values()
+    }
+
+    pub fn most_recent(&self) -> Option<&Job> {
+        self.by_id.values().last()
+    }
+
+    pub fn by_pgid_mut(&mut self, pgid: usize) -> Option<&mut Job> {
+        self.by_id.values_mut().find(|j| j.pgid == pgid)
+    }
+
+    pub fn remove_done(&mut self) {
+        self.by_id.retain(|_, j| j.state != JobState::Done);
     }
 }
 
-// ---------------------------------------------------------------------------
-// jobs
-// ---------------------------------------------------------------------------
+// ─── Builtins ────────────────────────────────────────────────────────────────
 
-pub(crate) struct JobsBuiltin;
+pub struct JobsBuiltin;
+pub struct FgBuiltin;
+pub struct BgBuiltin;
+pub struct WaitBuiltin;
+pub struct KillBuiltin;
 
 impl BuiltinCommand for JobsBuiltin {
     fn name(&self) -> &'static str {
@@ -132,146 +123,426 @@ impl BuiltinCommand for JobsBuiltin {
     fn run_with_sink(
         &self,
         stdout: &WriteSink,
-        context: &mut CommandContext,
+        ctx: &mut CommandContext,
         _args: &[String],
     ) -> Result<()> {
-        let lines = context.bg_job_lines();
-        if lines.is_empty() {
-            stdout.write_all(b"jobs: none\n")?;
-            return Ok(());
-        }
-        for line in lines {
+        drain_job_notifications(ctx);
+        let recent_id = ctx.jobs.most_recent().map(|j| j.id);
+        let mut count = 0usize;
+        for j in ctx.jobs.iter() {
+            let state_s = match j.state {
+                JobState::Running => "Running",
+                JobState::Stopped => "Stopped",
+                JobState::Done => "Done",
+            };
+            let plus = if Some(j.id) == recent_id { "+" } else { " " };
+            let line = format!("[{}]{} {:8}  {}\n", j.id, plus, state_s, j.cmd_line);
+            let _ = libcluu::debug_print(line.trim_end());
             stdout.write_all(line.as_bytes())?;
-            stdout.write_all(b"\n")?;
+            count += 1;
+        }
+        // Fall through to legacy bg_jobs table until full JobTable wiring lands.
+        if count == 0 {
+            for line in ctx.bg_job_lines() {
+                let _ = libcluu::debug_print(line.trim_end());
+                stdout.write_all(line.as_bytes())?;
+                stdout.write_all(b"\n")?;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            let _ = libcluu::debug_print("jobs: no jobs");
         }
         Ok(())
     }
 
-    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        self.run_with_sink(&WriteSink::Tty(stdout), context, args)
+    fn run(&self, stdout: usize, ctx: &mut CommandContext, args: &[String]) -> Result<()> {
+        self.run_with_sink(&WriteSink::Tty(stdout), ctx, args)
     }
 }
 
-// ---------------------------------------------------------------------------
-// fg
-// ---------------------------------------------------------------------------
-
-pub(crate) struct ForegroundBuiltin;
-
-impl BuiltinCommand for ForegroundBuiltin {
+impl BuiltinCommand for FgBuiltin {
     fn name(&self) -> &'static str {
         "fg"
     }
 
-    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(pid) = crate::commands::exec::resolve_job_pid(context, args.first()) else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"fg: no background jobs\n")?;
-            return Ok(());
+    fn run_with_sink(
+        &self,
+        stdout: &WriteSink,
+        ctx: &mut CommandContext,
+        args: &[String],
+    ) -> Result<()> {
+        let id = match parse_jobspec(args, ctx) {
+            Ok(i) => i,
+            Err(m) => {
+                stdout.write_all(format!("fg: {}\n", m).as_bytes())?;
+                return Ok(());
+            }
         };
-        let Some(job) = context.take_bg_job(pid) else {
-            let line = format!("fg: unknown pid={}\n", pid);
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-            return Ok(());
+        let pgid = match ctx.jobs.get(id).map(|j| j.pgid) {
+            Some(p) => p,
+            None => {
+                stdout.write_all(format!("fg: %{}: no such job\n", id).as_bytes())?;
+                return Ok(());
+            }
+        };
+        let cmd_line = ctx.jobs.get(id).map(|j| j.cmd_line.clone()).unwrap_or_default();
+        stdout.write_all(format!("{}\n", cmd_line).as_bytes())?;
+
+        let procmgr_ep = match ctx.procmgr_spawn_endpoint() {
+            Ok(ep) => ep,
+            Err(_) => {
+                stdout.write_all(b"fg: procmgr unavailable\n")?;
+                return Ok(());
+            }
         };
 
-        let line = format!("fg: pid={} {}\n", pid, job.command);
-        let _ = debug_print(line.trim_end());
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-
-        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-        if job.state == JobState::Stopped {
-            signal_process(procmgr_endpoint, pid, 18 /* SIGCONT */)?;
-            let line = format!("fg: continued pid={}\n", pid);
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        let _ = pg_resume(procmgr_ep, pgid);
+        if ctx.tty_stdout != 0 && ctx.session_id != 0 {
+            let _ = tty_set_fg(ctx.tty_stdout, ctx.session_id, pgid);
         }
-        wait_for_exit_or_sigint(
-            procmgr_endpoint,
-            stdout,
-            job.notify_endpoint,
-            job.stdin_endpoint,
-            pid,
-            stdout,
-            job.fg_mode,
-        )?;
+        if let Some(j) = ctx.jobs.get_mut(id) {
+            j.state = JobState::Running;
+            j.bg = false;
+        }
+
+        wait_for_job(id, ctx);
+
+        // Restore shell as TTY foreground.
+        if ctx.tty_stdout != 0 && ctx.session_id != 0 && ctx.shell_pgid != 0 {
+            let _ = tty_set_fg(ctx.tty_stdout, ctx.session_id, ctx.shell_pgid);
+        }
         Ok(())
+    }
+
+    fn run(&self, stdout: usize, ctx: &mut CommandContext, args: &[String]) -> Result<()> {
+        self.run_with_sink(&WriteSink::Tty(stdout), ctx, args)
     }
 }
 
-// ---------------------------------------------------------------------------
-// stop
-// ---------------------------------------------------------------------------
-
-pub(crate) struct StopBuiltin;
-
-impl BuiltinCommand for StopBuiltin {
-    fn name(&self) -> &'static str {
-        "stop"
-    }
-
-    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(pid) = crate::commands::exec::resolve_job_pid(context, args.first()) else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"stop: no background jobs\n")?;
-            return Ok(());
-        };
-        let Some(state) = context.bg_job_state(pid) else {
-            let line = format!("stop: unknown pid={}\n", pid);
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-            return Ok(());
-        };
-        if state == JobState::Stopped {
-            let line = format!("stop: pid={} already stopped\n", pid);
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-            return Ok(());
-        }
-
-        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-        signal_process(procmgr_endpoint, pid, 19 /* SIGSTOP */)?;
-        ensure_bg_job_state(context, pid, JobState::Stopped)?;
-        let line = format!("stop: pid={} stopped\n", pid);
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// bg
-// ---------------------------------------------------------------------------
-
-pub(crate) struct BackgroundBuiltin;
-
-impl BuiltinCommand for BackgroundBuiltin {
+impl BuiltinCommand for BgBuiltin {
     fn name(&self) -> &'static str {
         "bg"
     }
 
-    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
-        let Some(pid) = crate::commands::exec::resolve_job_pid(context, args.first()) else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"bg: no background jobs\n")?;
-            return Ok(());
+    fn run_with_sink(
+        &self,
+        stdout: &WriteSink,
+        ctx: &mut CommandContext,
+        args: &[String],
+    ) -> Result<()> {
+        let id = match parse_jobspec(args, ctx) {
+            Ok(i) => i,
+            Err(m) => {
+                stdout.write_all(format!("bg: {}\n", m).as_bytes())?;
+                return Ok(());
+            }
         };
-        let Some(state) = context.bg_job_state(pid) else {
-            let line = format!("bg: unknown pid={}\n", pid);
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-            return Ok(());
+        let pgid = match ctx.jobs.get(id).map(|j| j.pgid) {
+            Some(p) => p,
+            None => {
+                stdout.write_all(format!("bg: %{}: no such job\n", id).as_bytes())?;
+                return Ok(());
+            }
         };
-        if state == JobState::Running {
-            let line = format!("bg: pid={} already running\n", pid);
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-            return Ok(());
-        }
 
-        let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
-        signal_process(procmgr_endpoint, pid, 18 /* SIGCONT */)?;
-        ensure_bg_job_state(context, pid, JobState::Running)?;
-        let line = format!("bg: pid={} running\n", pid);
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        let procmgr_ep = match ctx.procmgr_spawn_endpoint() {
+            Ok(ep) => ep,
+            Err(_) => {
+                stdout.write_all(b"bg: procmgr unavailable\n")?;
+                return Ok(());
+            }
+        };
+
+        let _ = pg_resume(procmgr_ep, pgid);
+        let cmd_line = ctx.jobs.get(id).map(|j| j.cmd_line.clone()).unwrap_or_default();
+        if let Some(j) = ctx.jobs.get_mut(id) {
+            j.state = JobState::Running;
+            j.bg = true;
+        }
+        stdout.write_all(format!("[{}]+ {} &\n", id, cmd_line).as_bytes())?;
         Ok(())
+    }
+
+    fn run(&self, stdout: usize, ctx: &mut CommandContext, args: &[String]) -> Result<()> {
+        self.run_with_sink(&WriteSink::Tty(stdout), ctx, args)
     }
 }
 
-// ---------------------------------------------------------------------------
-// shellcrash (debug gate: feature = "debug-shellcrash")
-// ---------------------------------------------------------------------------
+impl BuiltinCommand for WaitBuiltin {
+    fn name(&self) -> &'static str {
+        "wait"
+    }
+
+    fn run_with_sink(
+        &self,
+        _stdout: &WriteSink,
+        ctx: &mut CommandContext,
+        args: &[String],
+    ) -> Result<()> {
+        if args.is_empty() {
+            let ids: Vec<usize> = ctx
+                .jobs
+                .iter()
+                .filter(|j| j.state != JobState::Done)
+                .map(|j| j.id)
+                .collect();
+            for id in ids {
+                wait_for_job(id, ctx);
+            }
+        } else if let Ok(id) = parse_jobspec(args, ctx) {
+            wait_for_job(id, ctx);
+        }
+        Ok(())
+    }
+
+    fn run(&self, stdout: usize, ctx: &mut CommandContext, args: &[String]) -> Result<()> {
+        self.run_with_sink(&WriteSink::Tty(stdout), ctx, args)
+    }
+}
+
+impl BuiltinCommand for KillBuiltin {
+    fn name(&self) -> &'static str {
+        "kill"
+    }
+
+    fn run_with_sink(
+        &self,
+        stdout: &WriteSink,
+        ctx: &mut CommandContext,
+        args: &[String],
+    ) -> Result<()> {
+        if args.is_empty() {
+            stdout.write_all(b"kill: usage: kill [-s SIG | -SIG] PID|%JOB...\n")?;
+            return Ok(());
+        }
+        let mut signum = 15i32; // SIGTERM
+        let mut idx = 0usize;
+        if args[0].starts_with('-') && args[0].len() > 1 {
+            let s = &args[0][1..];
+            if let Ok(n) = s.parse::<i32>() {
+                signum = n;
+                idx = 1;
+            } else {
+                match s {
+                    "TERM" => { signum = 15; idx = 1; }
+                    "INT"  => { signum = 2;  idx = 1; }
+                    "STOP" => { signum = 19; idx = 1; }
+                    "CONT" => { signum = 18; idx = 1; }
+                    "KILL" => { signum = 9;  idx = 1; }
+                    "HUP"  => { signum = 1;  idx = 1; }
+                    _ => {
+                        stdout.write_all(
+                            format!("kill: unknown signal {}\n", s).as_bytes(),
+                        )?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        let procmgr_ep = match ctx.procmgr_spawn_endpoint() {
+            Ok(ep) => ep,
+            Err(_) => {
+                stdout.write_all(b"kill: procmgr unavailable\n")?;
+                return Ok(());
+            }
+        };
+
+        for target in &args[idx..] {
+            if let Some(spec) = target.strip_prefix('%') {
+                let id: usize = match spec.parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        stdout.write_all(b"kill: bad job spec\n")?;
+                        continue;
+                    }
+                };
+                let pgid = match ctx.jobs.get(id).map(|j| j.pgid) {
+                    Some(p) => p,
+                    None => {
+                        stdout.write_all(
+                            format!("kill: %{}: no such job\n", id).as_bytes(),
+                        )?;
+                        continue;
+                    }
+                };
+                let _ = pg_signal(procmgr_ep, pgid, signum);
+            } else {
+                stdout.write_all(
+                    format!("kill: numeric PID kill not yet supported (use %N)\n").as_bytes(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn run(&self, stdout: usize, ctx: &mut CommandContext, args: &[String]) -> Result<()> {
+        self.run_with_sink(&WriteSink::Tty(stdout), ctx, args)
+    }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn parse_jobspec(
+    args: &[String],
+    ctx: &CommandContext,
+) -> core::result::Result<usize, String> {
+    if args.is_empty() {
+        return ctx
+            .jobs
+            .most_recent()
+            .map(|j| j.id)
+            .ok_or_else(|| "no current job".to_string());
+    }
+    let s = &args[0];
+    if let Some(spec) = s.strip_prefix('%') {
+        return spec
+            .parse()
+            .map_err(|_| format!("bad job spec '%{}'", spec));
+    }
+    s.parse().map_err(|_| format!("bad job spec '{}'", s))
+}
+
+/// Non-blocking drain of all job notify endpoints. Updates the JobTable
+/// state for any JOB_NOTIFY messages received.
+pub fn drain_job_notifications(ctx: &mut CommandContext) {
+    let mut buf = [0u8; 64];
+    // Collect (job_id, notify_ep) pairs to avoid borrow issues.
+    let jobs_info: Vec<(usize, Vec<usize>)> = ctx
+        .jobs
+        .iter()
+        .map(|j| (j.id, j.notify_endpoints.clone()))
+        .collect();
+
+    for (job_id, notify_endpoints) in &jobs_info {
+        for &notify_ep in notify_endpoints {
+            if notify_ep == 0 {
+                continue;
+            }
+            loop {
+                match syscall::ipc_recv_nonblocking(notify_ep, &mut buf) {
+                    Ok(len) if len >= 8 => {
+                        let label = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                        if label == PROCMGR_JOB_NOTIFY_LABEL {
+                            handle_notify_bytes(&buf, ctx);
+                        } else {
+                            // PROC_EXIT_LABEL (1) or similar — mark job done.
+                            handle_proc_exit_bytes(&buf, *job_id, ctx);
+                        }
+                    }
+                    Ok(_) | Err(_) => break,
+                }
+            }
+        }
+    }
+}
+
+/// Blocking wait until job `id` transitions to Stopped or Done.
+pub fn wait_for_job(id: usize, ctx: &mut CommandContext) {
+    // Collect notify endpoints for this job.
+    let notify_endpoints: Vec<usize> = ctx
+        .jobs
+        .get(id)
+        .map(|j| j.notify_endpoints.clone())
+        .unwrap_or_default();
+
+    let mut buf = [0u8; 64];
+    'outer: loop {
+        for &notify_ep in &notify_endpoints {
+            if notify_ep == 0 {
+                continue;
+            }
+            let _ = syscall::ipc_recv(notify_ep, &mut buf);
+            let label = if buf.len() >= 4 {
+                u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+            } else {
+                0
+            };
+            if label == PROCMGR_JOB_NOTIFY_LABEL {
+                handle_notify_bytes(&buf, ctx);
+            } else {
+                // PROC_EXIT_LABEL — mark job done.
+                handle_proc_exit_bytes(&buf, id, ctx);
+            }
+            if let Some(j) = ctx.jobs.get(id) {
+                if j.state == JobState::Stopped || j.state == JobState::Done {
+                    break 'outer;
+                }
+            } else {
+                break 'outer; // job was removed
+            }
+        }
+        // If no endpoints, nothing to wait on.
+        if notify_endpoints.is_empty() {
+            break;
+        }
+    }
+}
+
+/// Parse a JOB_NOTIFY message and update JobTable.
+///
+/// Message layout (PROCMGR_JOB_NOTIFY_LABEL):
+///   bytes 0-3:   label (u32 LE)
+///   bytes 4-7:   tag fields (words count etc.)
+///   bytes 8-15:  words[0] = pgid
+///   bytes 16-23: words[1] = pid
+///   bytes 24-31: words[2] = state (1=Stopped, 2=Continued, 3=Exited)
+///   bytes 32-39: words[3] = exit_code
+fn handle_notify_bytes(buf: &[u8], ctx: &mut CommandContext) {
+    if buf.len() < 40 {
+        return;
+    }
+    let pgid = usize::from_le_bytes(buf[8..16].try_into().unwrap_or([0; 8]));
+    let _pid = usize::from_le_bytes(buf[16..24].try_into().unwrap_or([0; 8]));
+    let state = usize::from_le_bytes(buf[24..32].try_into().unwrap_or([0; 8])) as u32;
+    let exit_code =
+        usize::from_le_bytes(buf[32..40].try_into().unwrap_or([0; 8])) as i32;
+
+    if let Some(j) = ctx.jobs.by_pgid_mut(pgid) {
+        match state {
+            1 => j.state = JobState::Stopped,
+            2 => j.state = JobState::Running,
+            3 => {
+                j.state = JobState::Done;
+                j.last_exit = Some(exit_code);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Handle a PROC_EXIT_LABEL (label=1) notification for job `job_id`.
+fn handle_proc_exit_bytes(buf: &[u8], job_id: usize, ctx: &mut CommandContext) {
+    // Exit code is at words[1] = bytes 16-23.
+    let exit_code = if buf.len() >= 24 {
+        let bytes: [u8; 8] = buf[16..24].try_into().unwrap_or([0; 8]);
+        i64::from_le_bytes(bytes) as i32
+    } else {
+        0
+    };
+    if let Some(j) = ctx.jobs.get_mut(job_id) {
+        j.state = JobState::Done;
+        j.last_exit = Some(exit_code);
+    }
+}
+
+/// Print `[N]+ Done  cmd` lines for all completed bg jobs, then remove them.
+pub fn reap_done_jobs(stdout: usize, ctx: &mut CommandContext) {
+    let mut done_ids: Vec<(usize, String)> = Vec::new();
+    for j in ctx.jobs.iter() {
+        if j.state == JobState::Done && j.bg {
+            done_ids.push((j.id, j.cmd_line.clone()));
+        }
+    }
+    for (id, cmd) in done_ids {
+        let line = format!("[{}]+  Done\t{}\n", id, cmd);
+        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+    }
+    ctx.jobs.remove_done();
+}
+
+// ─── shellcrash (debug gate) ──────────────────────────────────────────────────
 
 pub(crate) struct ShellCrashBuiltin;
 
@@ -280,10 +551,36 @@ impl BuiltinCommand for ShellCrashBuiltin {
         "_shellcrash"
     }
 
-    fn run(&self, stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
+    fn run(
+        &self,
+        stdout: usize,
+        _context: &mut CommandContext,
+        _args: &[String],
+    ) -> Result<()> {
         let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shellcrash: triggering fault\n");
-        let _ = debug_print("shellcrash: triggering null-write fault");
-        unsafe { core::ptr::write_volatile(0 as *mut u8, 0); }
+        let _ = libcluu::debug_print("shellcrash: triggering null-write fault");
+        unsafe {
+            core::ptr::write_volatile(0 as *mut u8, 0);
+        }
         Ok(())
     }
+}
+
+// ─── Registration ─────────────────────────────────────────────────────────────
+
+#[cfg(feature = "debug-shellcrash")]
+fn register_shellcrash(registry: &mut BuiltinRegistry) {
+    registry.register(Box::new(ShellCrashBuiltin));
+}
+
+#[cfg(not(feature = "debug-shellcrash"))]
+fn register_shellcrash(_registry: &mut BuiltinRegistry) {}
+
+pub fn register(registry: &mut BuiltinRegistry) {
+    registry.register(Box::new(JobsBuiltin));
+    registry.register(Box::new(FgBuiltin));
+    registry.register(Box::new(BgBuiltin));
+    registry.register(Box::new(WaitBuiltin));
+    registry.register(Box::new(KillBuiltin));
+    register_shellcrash(registry);
 }

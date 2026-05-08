@@ -19,6 +19,8 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pipeline {
     pub commands: Vec<Command>,
+    /// True when the pipeline is run in the background (trailing `&`).
+    pub bg: bool,
 }
 
 /// A command with optional prefix assignments, elements, and redirections.

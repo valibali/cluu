@@ -91,18 +91,22 @@ fn build_stmt(pair: Pair<Rule>) -> Stmt {
     let mut inner = pair.into_inner();
     let pipeline = inner.next().map(build_pipeline).unwrap_or(Pipeline {
         commands: Vec::new(),
+        bg: false,
     });
     Stmt::Pipeline(pipeline)
 }
 
 fn build_pipeline(pair: Pair<Rule>) -> Pipeline {
     let mut commands = Vec::new();
+    let mut bg = false;
     for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::command {
-            commands.push(build_command(inner));
+        match inner.as_rule() {
+            Rule::command => commands.push(build_command(inner)),
+            Rule::bg_amp => bg = true,
+            _ => {}
         }
     }
-    Pipeline { commands }
+    Pipeline { commands, bg }
 }
 
 fn build_command(pair: Pair<Rule>) -> Command {

@@ -59,6 +59,15 @@ pub struct CommandContext {
     /// Exit status of the most recently executed builtin/command.
     /// Read by `echo $?` (Shell-B). `cd`/`pwd` write here.
     pub(crate) last_status: i32,
+    // ── Job control (Phase 4 Plan D Stage 3) ─────────────────────────────────
+    /// Real job table replacing the primitive bg_jobs map.
+    pub jobs: crate::commands::builtins::jobs::JobTable,
+    /// Shell's own process-group id (created at startup).
+    pub shell_pgid: usize,
+    /// Session id for TTY fg-pgid calls.
+    pub session_id: usize,
+    /// TTY endpoint (same as stdout token — used for tty_set_fg).
+    pub tty_stdout: usize,
 }
 
 impl CommandContext {
@@ -71,6 +80,10 @@ impl CommandContext {
             console_write: 0,
             bg_jobs: BTreeMap::new(),
             last_status: 0,
+            jobs: crate::commands::builtins::jobs::JobTable::new(),
+            shell_pgid: 0,
+            session_id: 0,
+            tty_stdout: 0,
         }
     }
 
@@ -398,7 +411,10 @@ impl CommandExecutor for BuiltinRegistry {
             // Plain single-command pipelines fall through to the builtin-lookup path.
             let Stmt::Pipeline(pipeline) = stmt;
             let has_redirs = pipeline.commands.iter().any(|c| !c.redirs.is_empty());
-            if pipeline.commands.len() >= 2 || has_redirs {
+            // Route background pipelines, multi-stage pipelines, and
+            // single-command pipelines with file redirections through the
+            // PipelineExecutor which handles pgid creation and job table.
+            if pipeline.commands.len() >= 2 || has_redirs || pipeline.bg {
                 match crate::pipeline::PipelineExecutor::run(stdout, context, pipeline, self) {
                     Ok(status) => {
                         context.set_last_status(status);

@@ -6,10 +6,12 @@ ws0 = _{ (WS | LINE_COMMENT)* }
 program = { SOI ~ ws0 ~ stmt_list? ~ ws0 ~ EOI }
 subprogram = { stmt_list? }
 stmt_list = { stmt ~ (sep ~ stmt)* ~ sep? }
-sep = _{ ws0 ~ (NL+ | ";") ~ ws0 }
+sep = _{ ws0 ~ (NL+ | ";" | bg_sep) ~ ws0 }
+bg_sep = _{ bg_amp }
 
 stmt = _{ pipeline }
-pipeline = { command ~ (ws0 ~ "|" ~ ws0 ~ command)* }
+pipeline = { command ~ (ws0 ~ "|" ~ ws0 ~ command)* ~ bg_amp? }
+bg_amp = { ws0 ~ "&" ~ !("&") }
 
 command = { prefix_assign* ~ cmd_item? ~ (ws0 ~ cmd_item)* }
 prefix_assign = { ident ~ "=" ~ word }
@@ -28,7 +30,7 @@ cmdsub = { "$(" ~ ws0 ~ subprogram ~ ws0 ~ ")" }
 
 bare = { (bare_escape | bare_char)+ }
 bare_escape = { "\\" ~ ANY }
-bare_char = { !(WS | NL | ";" | "|" | ">" | "<" | "(" | ")" | "#" | "\"" | "'" | "$" | "\\") ~ ANY }
+bare_char = { !(WS | NL | ";" | "&" | "|" | ">" | "<" | "(" | ")" | "#" | "\"" | "'" | "$" | "\\") ~ ANY }
 
 single_quoted = { "'" ~ single_inner* ~ "'" }
 single_inner = { (!"'" ~ ANY) }

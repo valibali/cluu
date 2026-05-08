@@ -130,6 +130,18 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND="spawnbg sleepy"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
                 ;;
+            l2_jobs_basic)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="sleep 30 & ; jobs"
+                ;;
+            l2_jobs_pipeline)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="echo abc | tr a-z A-Z"
+                ;;
+            l2_jobs_kill)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="sleep 30 & ; kill %1"
+                ;;
             l2_fg)
                 TEST_COMMAND="fg"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"

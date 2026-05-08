@@ -916,6 +916,29 @@ case "$MARKER_MODE" in
             "shell: bg done pid="
         )
         ;;
+    l2_jobs_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "[1]"
+            "Running"
+            "sleep"
+        )
+        ;;
+    l2_jobs_pipeline)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: pipeline done stages=2 status=0"
+        )
+        ;;
+    l2_jobs_kill)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "[1]"
+        )
+        ;;
     l2_fg)
         required_markers=(
             "TSC calibrated"
