@@ -484,9 +484,13 @@ pub extern "C" fn main() -> i32 {
     };
     let _ = debug_print("ls: vfs client OK");
 
+    let _ = debug_print("ls: pre-color");
     let color = color_enabled(opts.color_mode);
+    let _ = debug_print("ls: pre-time");
     let now = current_unix_time();
+    let _ = debug_print("ls: pre-width");
     let width = terminal_width();
+    let _ = debug_print("ls: pre-multi");
     let multi = paths.len() > 1;
 
     let mut exit_code = 0i32;
