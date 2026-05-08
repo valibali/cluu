@@ -744,11 +744,15 @@ impl<B: ConsoleBackend> Console<B> {
 
         // Draw cursor only when viewing live (offset == 0)
         if offset == 0 && self.vt_screens[vt_idx].cursor_visible {
-            render_cursor_block(
-                &mut self.backend,
-                self.vt_screens[vt_idx].cursor_x,
-                self.vt_screens[vt_idx].cursor_y,
-            );
+            let cx = self.vt_screens[vt_idx].cursor_x;
+            let cy = self.vt_screens[vt_idx].cursor_y;
+            let cidx = cy * self.cols + cx;
+            if cidx < self.vt_screens[vt_idx].cells.len() {
+                let ch = self.vt_screens[vt_idx].cells[cidx];
+                let fg = self.vt_screens[vt_idx].fg_cells[cidx];
+                let bg = self.vt_screens[vt_idx].bg_cells[cidx];
+                render_cursor_block(&mut self.backend, cx, cy, ch, fg, bg);
+            }
         }
 
         self.last_cursor_x = self.vt_screens[vt_idx].cursor_x;
@@ -805,7 +809,10 @@ impl<B: ConsoleBackend> Console<B> {
 
         // 3) Draw cursor block if visible.
         if self.vt_screens[vt].cursor_visible {
-            render_cursor_block(&mut self.backend, cx, cy);
+            let ch = self.vt_screens[vt].cells[idx];
+            let fg = self.vt_screens[vt].fg_cells[idx];
+            let bg = self.vt_screens[vt].bg_cells[idx];
+            render_cursor_block(&mut self.backend, cx, cy, ch, fg, bg);
         }
 
         // 4) Update last cursor position.
@@ -834,15 +841,17 @@ fn render_glyph<B: ConsoleBackend>(backend: &mut B, x: usize, y: usize, ch: u8, 
     }
 }
 
-/// Draw a minimal cursor block at the bottom of the glyph cell.
-fn render_cursor_block<B: ConsoleBackend>(backend: &mut B, x: usize, y: usize) {
-    let px = x * GLYPH_W;
-    let py = y * GLYPH_H + (GLYPH_H - 2);
-    for dy in 0..2 {
-        for dx in 0..GLYPH_W {
-            backend.put_pixel(px + dx, py + dy, COLOR_FG);
-        }
-    }
+/// Draw a full-cell block cursor: redraw the cell glyph with fg/bg swapped
+/// so the character remains visible inside the cursor.
+fn render_cursor_block<B: ConsoleBackend>(
+    backend: &mut B,
+    x: usize,
+    y: usize,
+    ch: u8,
+    fg: u32,
+    bg: u32,
+) {
+    render_glyph(backend, x, y, ch, bg, fg);
 }
 
 /// Load the glyph bitmap for a single ASCII character.

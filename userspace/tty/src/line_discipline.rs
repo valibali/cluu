@@ -82,6 +82,9 @@ pub struct LineDiscipline {
     /// Consecutive TAB count, reset by any non-TAB byte. Drives bash-style
     /// "TAB completes, TAB-TAB lists" behavior.
     consecutive_tabs: u8,
+    /// Insertion point within `buffer`. Always in `0..=buffer.len()`. Moved
+    /// by ←/→ arrows; advanced/retracted by inserts and backspace.
+    cursor: usize,
 }
 
 impl LineDiscipline {
@@ -95,6 +98,7 @@ impl LineDiscipline {
             saved_partial: None,
             csi_state: CsiState::Idle,
             consecutive_tabs: 0,
+            cursor: 0,
         }
     }
 
@@ -104,6 +108,7 @@ impl LineDiscipline {
         // When switching to raw mode, flush any buffered canonical input
         if !mode.canonical && !self.buffer.is_empty() {
             self.buffer.clear();
+            self.cursor = 0;
         }
         self.csi_state = CsiState::Idle;
     }
@@ -118,9 +123,15 @@ impl LineDiscipline {
 
     /// Build a sequence of bytes that visually erases the current buffer
     /// (BS-space-BS for each char) and writes the new content. Used for
-    /// history recall (↑/↓).
+    /// history recall (↑/↓). Handles cursor anywhere in the line by first
+    /// echoing the trailing portion to push the visual cursor to end.
     fn redraw_replacement(&self, new_buf: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.buffer.len() * 3 + new_buf.len());
+        // Push visual cursor to end of current line so BS-space-BS erases
+        // every character regardless of where the logical cursor sat.
+        if self.cursor < self.buffer.len() {
+            out.extend_from_slice(&self.buffer[self.cursor..]);
+        }
         for _ in 0..self.buffer.len() {
             out.extend_from_slice(BACKSPACE_SEQ);
         }
@@ -133,6 +144,7 @@ impl LineDiscipline {
     fn navigate_to_history(&mut self, pos: usize) -> Vec<u8> {
         let new_buf = self.history.get(pos).cloned().unwrap_or_default();
         let echo = self.redraw_replacement(&new_buf);
+        self.cursor = new_buf.len();
         self.buffer = new_buf;
         self.history_pos = Some(pos);
         echo
@@ -143,6 +155,7 @@ impl LineDiscipline {
     fn restore_partial(&mut self) -> Vec<u8> {
         let new_buf = self.saved_partial.take().unwrap_or_default();
         let echo = self.redraw_replacement(&new_buf);
+        self.cursor = new_buf.len();
         self.buffer = new_buf;
         self.history_pos = None;
         echo
@@ -168,15 +181,10 @@ impl LineDiscipline {
         match final_byte {
             b'A' => self.history_back(),
             b'B' => self.history_forward(),
-            // Left/right cursor movement: silently consume. Mid-line cursor
-            // editing is a future polish task; for now visitors typing arrows
-            // see no garbage and no movement.
-            b'C' | b'D' => LineEffect {
-                echo: EchoAction::None,
-                line_ready: None,
-                raw_byte: None,
-                tab_request: None,
-            },
+            b'C' => self.cursor_right(),
+            b'D' => self.cursor_left(),
+            b'H' => self.cursor_home(),
+            b'F' => self.cursor_end(),
             // Unknown CSI: also silently consume.
             _ => LineEffect {
                 echo: EchoAction::None,
@@ -184,6 +192,85 @@ impl LineDiscipline {
                 raw_byte: None,
                 tab_request: None,
             },
+        }
+    }
+
+    fn cursor_left(&mut self) -> LineEffect {
+        if self.cursor > 0 && self.mode.echo {
+            self.cursor -= 1;
+            return LineEffect {
+                echo: EchoAction::Byte(0x08),
+                line_ready: None,
+                raw_byte: None,
+                tab_request: None,
+            };
+        }
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+        LineEffect {
+            echo: EchoAction::None,
+            line_ready: None,
+            raw_byte: None,
+            tab_request: None,
+        }
+    }
+
+    fn cursor_right(&mut self) -> LineEffect {
+        if self.cursor < self.buffer.len() {
+            let ch = self.buffer[self.cursor];
+            self.cursor += 1;
+            return LineEffect {
+                echo: if self.mode.echo { EchoAction::Byte(ch) } else { EchoAction::None },
+                line_ready: None,
+                raw_byte: None,
+                tab_request: None,
+            };
+        }
+        LineEffect {
+            echo: EchoAction::None,
+            line_ready: None,
+            raw_byte: None,
+            tab_request: None,
+        }
+    }
+
+    fn cursor_home(&mut self) -> LineEffect {
+        if self.cursor == 0 {
+            return LineEffect {
+                echo: EchoAction::None,
+                line_ready: None,
+                raw_byte: None,
+                tab_request: None,
+            };
+        }
+        let bs_count = self.cursor;
+        self.cursor = 0;
+        let echo: Vec<u8> = (0..bs_count).map(|_| 0x08u8).collect();
+        LineEffect {
+            echo: if self.mode.echo { EchoAction::OwnedBytes(echo) } else { EchoAction::None },
+            line_ready: None,
+            raw_byte: None,
+            tab_request: None,
+        }
+    }
+
+    fn cursor_end(&mut self) -> LineEffect {
+        if self.cursor >= self.buffer.len() {
+            return LineEffect {
+                echo: EchoAction::None,
+                line_ready: None,
+                raw_byte: None,
+                tab_request: None,
+            };
+        }
+        let trailing = self.buffer[self.cursor..].to_vec();
+        self.cursor = self.buffer.len();
+        LineEffect {
+            echo: if self.mode.echo { EchoAction::OwnedBytes(trailing) } else { EchoAction::None },
+            line_ready: None,
+            raw_byte: None,
+            tab_request: None,
         }
     }
 
@@ -315,6 +402,7 @@ impl LineDiscipline {
                 // Ctrl-C (SIGINT): clear current line buffer and forward an out-of-band
                 // marker byte so foreground consumers can interrupt promptly.
                 self.buffer.clear();
+                self.cursor = 0;
                 self.history_pos = None;
                 self.saved_partial = None;
                 LineEffect {
@@ -333,6 +421,7 @@ impl LineDiscipline {
                 // out-of-band marker byte so the TTY can suspend the foreground
                 // process group.
                 self.buffer.clear();
+                self.cursor = 0;
                 self.history_pos = None;
                 self.saved_partial = None;
                 LineEffect {
@@ -358,6 +447,7 @@ impl LineDiscipline {
                     }
                 } else {
                     let line = core::mem::take(&mut self.buffer);
+                    self.cursor = 0;
                     self.history_pos = None;
                     self.saved_partial = None;
                     LineEffect {
@@ -369,6 +459,9 @@ impl LineDiscipline {
                 }
             }
             b'\n' => {
+                // Move visual cursor to end so the appended '\n' lands after
+                // any trailing text the logical cursor was sitting in front of.
+                let trailing: Vec<u8> = self.buffer[self.cursor..].to_vec();
                 self.buffer.push(byte);
                 let line = core::mem::take(&mut self.buffer);
                 // Strip trailing newline before pushing to history.
@@ -378,36 +471,55 @@ impl LineDiscipline {
                     &line
                 };
                 self.push_history(cmd_only);
+                self.cursor = 0;
                 self.history_pos = None;
                 self.saved_partial = None;
+                let echo = if self.mode.echo {
+                    let mut v = trailing;
+                    v.push(b'\n');
+                    EchoAction::OwnedBytes(v)
+                } else {
+                    EchoAction::None
+                };
                 LineEffect {
-                    echo: if self.mode.echo {
-                        EchoAction::Bytes(b"\n")
-                    } else {
-                        EchoAction::None
-                    },
+                    echo,
                     line_ready: Some(line),
                     raw_byte: None,
                     tab_request: None,
                 }
             }
             0x08 | 0x7f => {
-                // Backspace (0x08) or DEL (0x7f). Both delete the last char.
-                if !self.buffer.is_empty() {
-                    self.buffer.pop();
+                // Backspace (0x08) or DEL (0x7f): delete the char before the
+                // cursor and shift the trailing portion left by one. If the
+                // cursor sits at end-of-line this collapses to BS-space-BS.
+                if self.cursor == 0 {
                     LineEffect {
-                        echo: if self.mode.echo {
-                            EchoAction::Bytes(BACKSPACE_SEQ)
-                        } else {
-                            EchoAction::None
-                        },
+                        echo: EchoAction::None,
                         line_ready: None,
                         raw_byte: None,
                         tab_request: None,
                     }
                 } else {
+                    self.buffer.remove(self.cursor - 1);
+                    self.cursor -= 1;
+                    let echo = if self.mode.echo {
+                        let mut v = Vec::with_capacity(self.buffer.len() - self.cursor + 4);
+                        // Step back over the deleted char.
+                        v.push(0x08);
+                        // Redraw the rest from new cursor onwards.
+                        v.extend_from_slice(&self.buffer[self.cursor..]);
+                        // Erase the now-stale trailing char and walk cursor back.
+                        v.push(b' ');
+                        let back = self.buffer.len() - self.cursor + 1;
+                        for _ in 0..back {
+                            v.push(0x08);
+                        }
+                        EchoAction::OwnedBytes(v)
+                    } else {
+                        EchoAction::None
+                    };
                     LineEffect {
-                        echo: EchoAction::None,
+                        echo,
                         line_ready: None,
                         raw_byte: None,
                         tab_request: None,
@@ -415,19 +527,37 @@ impl LineDiscipline {
                 }
             }
             _ => {
-                self.buffer.push(byte);
-                // Any character input invalidates history navigation: the
-                // user is now editing the line, not browsing.
+                // Insert the byte at the cursor position. Any character input
+                // invalidates history navigation: the user is now editing the
+                // line, not browsing.
+                self.buffer.insert(self.cursor, byte);
+                self.cursor += 1;
                 if self.history_pos.is_some() {
                     self.history_pos = None;
                     self.saved_partial = None;
                 }
-                LineEffect {
-                    echo: if self.mode.echo {
+                let echo = if self.mode.echo {
+                    if self.cursor == self.buffer.len() {
+                        // Append at end: cheap path, just echo the byte.
                         EchoAction::Byte(byte)
                     } else {
-                        EchoAction::None
-                    },
+                        // Mid-line insert: echo inserted byte + tail, then walk
+                        // visual cursor back to the position right after `byte`.
+                        let mut v =
+                            Vec::with_capacity(self.buffer.len() - self.cursor + 1);
+                        v.push(byte);
+                        v.extend_from_slice(&self.buffer[self.cursor..]);
+                        let back = self.buffer.len() - self.cursor;
+                        for _ in 0..back {
+                            v.push(0x08);
+                        }
+                        EchoAction::OwnedBytes(v)
+                    }
+                } else {
+                    EchoAction::None
+                };
+                LineEffect {
+                    echo,
                     line_ready: None,
                     raw_byte: None,
                     tab_request: None,
@@ -438,9 +568,11 @@ impl LineDiscipline {
 
     /// Append completion bytes to the buffer. Called by the TTY main loop after
     /// resolving a tab_request. Does NOT echo; the caller is responsible for
-    /// emitting echo bytes to the console.
+    /// emitting echo bytes to the console. The buffer cursor follows the
+    /// appended bytes.
     pub fn append_completion(&mut self, bytes: &[u8]) {
         self.buffer.extend_from_slice(bytes);
+        self.cursor = self.buffer.len();
         // Reset history navigation state — the user is editing fresh again.
         self.history_pos = None;
         self.saved_partial = None;
