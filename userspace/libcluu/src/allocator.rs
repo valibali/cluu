@@ -64,6 +64,7 @@ mod inner {
         }
     }
 
+    #[cfg(not(feature = "host-test"))]
     #[global_allocator]
     pub static GLOBAL_ALLOCATOR: NewlibAllocator = NewlibAllocator;
 
@@ -466,15 +467,20 @@ mod inner {
         }
     }
 
+    #[cfg(not(feature = "host-test"))]
     #[global_allocator]
     pub static GLOBAL_ALLOCATOR: LockedAllocator = LockedAllocator::new();
 
     pub fn init() {
+        #[cfg(not(feature = "host-test"))]
         GLOBAL_ALLOCATOR.init();
     }
 
     pub fn stats() -> AllocStats {
-        GLOBAL_ALLOCATOR.stats()
+        #[cfg(not(feature = "host-test"))]
+        { GLOBAL_ALLOCATOR.stats() }
+        #[cfg(feature = "host-test")]
+        { AllocStats { total: 0, used: 0, peak: 0, free: 0 } }
     }
 
     unsafe impl GlobalAlloc for LockedAllocator {

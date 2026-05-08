@@ -24,3 +24,4 @@ default = []
 std = []  # For testing on host
 posix = []  # Enable POSIX syscall stubs for newlib compatibility
 c-runtime = ["posix"]  # For C programs - disables Rust _start and panic handler
+host-test = []  # enables std for unit tests on host
