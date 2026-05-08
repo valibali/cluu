@@ -7,6 +7,7 @@ use libcluu::boot::{process_info, TOKEN_CLOCK, TOKEN_EXTRA_0};
 use libcluu::ipc::extract_reply_id;
 use libcluu::time::{TIME_GETCLOCK, TIME_GETTIMEOFDAY};
 use libcluu::types::Message;
+use libcluu::ipc::parse_message;
 use libcluu::{clock_frequency, clock_now, debug_print, registry, Result};
 
 #[no_mangle]
@@ -26,6 +27,7 @@ fn run() -> Result<()> {
 
     let endpoint = info.tokens[TOKEN_EXTRA_0];
     let clock_token = info.tokens[TOKEN_CLOCK];
+    let control_endpoint = registry::control_endpoint();
 
     let ticks_per_sec = match clock_frequency(clock_token) {
         Ok(hz) if hz > 0 => hz,
@@ -33,9 +35,18 @@ fn run() -> Result<()> {
     };
 
     let mut buf = [0u8; 256];
+    let endpoints: [usize; 2] = [endpoint, control_endpoint];
     loop {
-        let len = libcluu::syscall::ipc_recv(endpoint, &mut buf)?;
+        let (idx, len) = libcluu::syscall::ipc_recv_any(&endpoints, &mut buf, u64::MAX)?;
         if len < core::mem::size_of::<Message>() {
+            continue;
+        }
+
+        // Index 1 = control endpoint: registry traffic (grant requests).
+        if idx == 1 {
+            if let Some((msg, payload)) = parse_message(&buf[..len]) {
+                let _ = registry::handle_incoming_message(&msg, payload);
+            }
             continue;
         }
 

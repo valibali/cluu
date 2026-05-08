@@ -204,13 +204,21 @@ fn column_layout(names: &[String], width: usize) -> String {
 // ──────────────────────────────────────────────────────────────────────
 
 fn current_unix_time() -> u64 {
-    // clock_gettime (newlib) calls into libcluu/posix which IPCs the
-    // timeserver. In practice this hangs forever for ls because the spawn
-    // path doesn't grant the timeserver endpoint to short-lived utility
-    // containers. Return 0 unconditionally — mtime display falls back to
-    // the year-only form ("Jan 01  1970"), which is fine until the
-    // timeserver wiring is fixed.
-    0
+    // clock_gettime → libcluu posix → timeserver IPC.
+    // Timeserver now answers registry grant requests (see
+    // userspace/timeserver/src/main.rs), and wait_for_grant has a 2s
+    // timeout fallback (see userspace/libcluu/src/registry.rs), so this
+    // returns the real time when timeserver is reachable and 0 otherwise.
+    #[repr(C)]
+    struct Timespec { tv_sec: i64, tv_nsec: i64 }
+    extern "C" {
+        fn clock_gettime(clock_id: i32, tp: *mut Timespec) -> i32;
+    }
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    unsafe {
+        let rc = clock_gettime(0 /* CLOCK_REALTIME */, &mut ts);
+        if rc == 0 && ts.tv_sec > 0 { ts.tv_sec as u64 } else { 0 }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────

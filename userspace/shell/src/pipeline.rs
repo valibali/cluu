@@ -115,7 +115,9 @@ impl PipelineExecutor {
                 return Ok(0);
             } else if only_stdout_redir {
                 let redir = stdout_redirs[0];
-                let target_path = render_word_public(context, &redir.target);
+                let raw_target = render_word_public(context, &redir.target);
+                // VFS rejects relative paths; resolve against shell cwd.
+                let target_path = libcluu::posix::resolve_path(&raw_target);
                 let append = matches!(redir.op, cluu_lang::ast::RedirOp::OutAppend);
 
                 // Capture builtin output into a stack-owned Vec.
