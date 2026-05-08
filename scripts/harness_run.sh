@@ -1369,6 +1369,41 @@ case "$MARKER_MODE" in
             "suequaltest: PASS"
         )
         ;;
+    l2_cat_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "cat: ok (exit 0)"
+        )
+        ;;
+    l2_cp_recursive)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "cp: ok (exit 0)"
+        )
+        ;;
+    l2_head_bytes)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "head: ok (exit 0)"
+        )
+        ;;
+    l2_wc_lines)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "wc: ok (exit 0)"
+        )
+        ;;
+    l2_grep_recursive)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "grep: ok (exit 0)"
+        )
+        ;;
     none)
         required_markers=()
         ;;

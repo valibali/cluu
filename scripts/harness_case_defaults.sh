@@ -441,6 +441,37 @@ harness_derive_marker_defaults() {
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             m5_fairness) TEST_COMMAND="repeat 8 spawn hello" ;;
+            l2_cat_basic)
+                TEST_COMMAND=""
+                # GNU-close cat: -n numbers all output lines.
+                # Uses /etc/motd as a stable file. Verifies flag parsing
+                # and the debug marker on exit.
+                SHELL_AUTOSTART_CMD_DEFAULT="cat -n /etc/motd"
+                ;;
+            l2_cp_recursive)
+                TEST_COMMAND=""
+                # cp -r: copy /etc to /tmp/etccopy, then ls the copy.
+                # Verifies recursive directory copy via libcluu::cli.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn cp -r /etc /tmp/etccopy"
+                ;;
+            l2_head_bytes)
+                TEST_COMMAND=""
+                # head -c N: print first N bytes from /etc/motd.
+                # Verifies -c flag and RequiredArg parsing via libcluu::cli.
+                SHELL_AUTOSTART_CMD_DEFAULT="head -c 20 /etc/motd"
+                ;;
+            l2_wc_lines)
+                TEST_COMMAND=""
+                # wc -l: count newlines in /etc/motd.
+                # Verifies -l flag and single-column output via libcluu::cli.
+                SHELL_AUTOSTART_CMD_DEFAULT="wc -l /etc/motd"
+                ;;
+            l2_grep_recursive)
+                TEST_COMMAND=""
+                # grep -rn: recursive search for 'CLUU' under /etc.
+                # Verifies -r and -n flags via libcluu::cli.
+                SHELL_AUTOSTART_CMD_DEFAULT="grep -rn CLUU /etc"
+                ;;
             legacy_p1)
                 TEST_COMMAND="spawn minimal"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn minimal"
