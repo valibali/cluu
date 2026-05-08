@@ -1,14 +1,6 @@
-//! `/bin/head` — print first N lines of input.
+//! `/bin/head` — print first N lines or bytes of input.
 //!
-//! Usage: head [-n N] [FILE]
-//!
-//! With FILE: opens the file via VFS.
-//! Without FILE: reads fd 0 (stdin) until EOF.
-//!
-//! Flags:
-//!   -n N  print first N lines (default 10); joined form -nN also accepted
-//!
-//! Exit code: 0 on success, 1 on read error, 2 on usage error.
+//! Flags: -n N, -c BYTES, -q, -v; multi-file headers
 
 #![no_std]
 #![no_main]
@@ -19,62 +11,67 @@ extern crate alloc;
 use libcluu::runtime as _;
 
 use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 use libcluu::boot::{process_info, TOKEN_SPACE};
+use libcluu::cli::{parse, render_help, CliError, Spec};
+use libcluu::debug_print;
 use libcluu::fs::client::VfsClient;
 use libcluu::posix::{_read, _write};
 use libcluu::registry;
 
 const CHUNK_SIZE: usize = 64 * 1024;
-// Stdin reads use a stack-allocated buffer; keep it small to avoid stack overflow.
 const STDIN_CHUNK: usize = 4 * 1024;
+
+fn spec() -> Spec {
+    Spec::new()
+        .program("head")
+        .version("0.1.0")
+        .usage("[-qv] [-n N] [-c BYTES] [FILE]...")
+        .required('n', "lines", "print the first N lines instead of the first 10")
+        .required('c', "bytes", "print the first N bytes")
+        .flag('q', "quiet", "never print headers giving file names")
+        .flag('v', "verbose", "always print headers giving file names")
+}
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     let args = libcluu::args::args();
-    let mut iter = args.into_iter().skip(1);
-
-    let mut n: usize = 10;
-    let mut path: Option<String> = None;
-
-    while let Some(arg) = iter.next() {
-        if arg == "-n" {
-            let v = match iter.next() {
-                Some(v) => v,
-                None => return usage_err(),
-            };
-            match v.parse::<usize>() {
-                Ok(parsed) => n = parsed,
-                Err(_) => return usage_err(),
-            }
-        } else if arg.starts_with("-n") {
-            match arg[2..].parse::<usize>() {
-                Ok(parsed) => n = parsed,
-                Err(_) => return usage_err(),
-            }
-        } else if arg.len() >= 2 && arg[1..].chars().all(|c| c.is_ascii_digit()) {
-            // BSD-style: head -N  (e.g. head -3)
-            match arg[1..].parse::<usize>() {
-                Ok(parsed) => n = parsed,
-                Err(_) => return usage_err(),
-            }
-        } else if arg.starts_with('-') {
-            return usage_err();
-        } else {
-            path = Some(arg);
-            break;
+    let sp = spec();
+    let parsed = match parse(&sp, &args) {
+        Ok(p) => p,
+        Err(CliError::HelpRequested) => {
+            let h = render_help(&sp);
+            write_fd(1, h.as_bytes());
+            return 0;
         }
-    }
-
-    let mut buf: Vec<u8> = Vec::new();
-    if let Some(p) = path {
-        if read_whole_file_into(&p, &mut buf).is_err() {
-            let msg = format!("head: {}: cannot read\n", p);
+        Err(CliError::VersionRequested) => {
+            write_fd(1, b"head 0.1.0\n");
+            return 0;
+        }
+        Err(e) => {
+            let msg = format!("head: {}\n", e);
             write_fd(2, msg.as_bytes());
-            return 1;
+            return 2;
         }
+    };
+
+    let n_lines: Option<usize> = parsed.value("lines").and_then(|v| v.parse().ok());
+    let n_bytes: Option<usize> = parsed.value("bytes").and_then(|v| v.parse().ok());
+    let quiet = parsed.is_set("quiet");
+    let always_header = parsed.is_set("verbose");
+
+    // Default: 10 lines if neither -n nor -c specified.
+    let mode = if let Some(b) = n_bytes {
+        HeadMode::Bytes(b)
     } else {
+        HeadMode::Lines(n_lines.unwrap_or(10))
+    };
+
+    let multi_file = parsed.positional.len() > 1;
+
+    if parsed.positional.is_empty() {
+        // Stdin mode.
+        let mut buf: Vec<u8> = Vec::new();
         let mut chunk = [0u8; STDIN_CHUNK];
         loop {
             let r = _read(0, chunk.as_mut_ptr() as *mut _, chunk.len());
@@ -83,37 +80,72 @@ pub extern "C" fn main() -> i32 {
             }
             buf.extend_from_slice(&chunk[..r as usize]);
         }
+        emit_head(&buf, &mode);
+        return 0;
     }
 
-    let text = match core::str::from_utf8(&buf) {
-        Ok(s) => s,
-        Err(_) => return 1,
-    };
-
-    for (i, line) in text.lines().enumerate() {
-        if i >= n {
-            break;
-        }
-        let line_out = format!("{}\n", line);
-        write_fd(1, line_out.as_bytes());
-    }
-    0
-}
-
-fn usage_err() -> i32 {
-    write_fd(2, b"head: usage: head [-n N] [FILE]\n");
-    2
-}
-
-/// Read the entire contents of `path` into `dst` via VFS.
-fn read_whole_file_into(path: &str, dst: &mut Vec<u8>) -> Result<(), ()> {
-    let resolved = libcluu::posix::resolve_path(path);
     let Ok(vfs_endpoint) = registry::subscribe_output("vfs", "main") else {
-        return Err(());
+        write_fd(2, b"head: vfs unavailable\n");
+        return 1;
     };
     let vfs = VfsClient::new(vfs_endpoint, registry::control_endpoint());
 
-    let file = vfs.open(&resolved).map_err(|_| ())?;
+    let mut exit_code = 0i32;
+    let mut first = true;
+    for path in &parsed.positional {
+        // Print header when: multiple files and not -q; or always when -v.
+        if !quiet && (multi_file || always_header) {
+            if !first {
+                write_fd(1, b"\n");
+            }
+            let hdr = format!("==> {} <==\n", path);
+            write_fd(1, hdr.as_bytes());
+        }
+        first = false;
+
+        let mut buf: Vec<u8> = Vec::new();
+        let resolved = libcluu::posix::resolve_path(path);
+        if read_whole_file_into(&vfs, &resolved, &mut buf).is_err() {
+            let msg = format!("head: {}: cannot read\n", path);
+            write_fd(2, msg.as_bytes());
+            exit_code = 1;
+            continue;
+        }
+        emit_head(&buf, &mode);
+    }
+    let _ = debug_print(&format!("head: ok (exit {})", exit_code));
+    exit_code
+}
+
+enum HeadMode {
+    Lines(usize),
+    Bytes(usize),
+}
+
+fn emit_head(buf: &[u8], mode: &HeadMode) {
+    match mode {
+        HeadMode::Bytes(n) => {
+            let out = &buf[..buf.len().min(*n)];
+            write_fd(1, out);
+        }
+        HeadMode::Lines(n) => {
+            let text = match core::str::from_utf8(buf) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            for (i, line) in text.lines().enumerate() {
+                if i >= *n {
+                    break;
+                }
+                let out = format!("{}\n", line);
+                write_fd(1, out.as_bytes());
+            }
+        }
+    }
+}
+
+fn read_whole_file_into(vfs: &VfsClient, path: &str, dst: &mut Vec<u8>) -> Result<(), ()> {
+    let file = vfs.open(path).map_err(|_| ())?;
     let total = file.size;
     if total == 0 {
         let _ = vfs.close(file);
