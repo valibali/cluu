@@ -264,6 +264,27 @@ harness_derive_marker_defaults() {
                 # so the outer double quotes nest cleanly.
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn mp -c \"open('/etc/motd').read()\""
                 ;;
+            l2_ls)
+                TEST_COMMAND=""
+                # Basic ls of /etc: verifies ls boots, VFS readdir works,
+                # and at least one filename is printed.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn ls /etc"
+                ;;
+            l2_ls_long)
+                TEST_COMMAND=""
+                # Write a file then ls -l: verify mode string and filename appear.
+                SHELL_AUTOSTART_CMD_DEFAULT="echo hello > /tmp/lf; spawn ls -l /tmp/lf"
+                ;;
+            l2_ls_color)
+                TEST_COMMAND=""
+                # ls --color=always on /tmp: should emit ANSI escape prefix for dirs.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir -p /tmp/cd; spawn ls --color=always /tmp"
+                ;;
+            l2_ls_recursive)
+                TEST_COMMAND=""
+                # Create nested dir, ls -R, verify sub-entries appear.
+                SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir -p /tmp/r/sub; spawn touch /tmp/r/a; spawn touch /tmp/r/sub/b; spawn ls -R /tmp/r"
+                ;;
             l2_rm)
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn mkdir /tmp/rmtest; spawn mkdir /tmp/rmtest/inner; spawn rm -r /tmp/rmtest"

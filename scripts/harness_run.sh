@@ -1096,6 +1096,34 @@ case "$MARKER_MODE" in
             "micropython: exit 0"
         )
         ;;
+    l2_ls)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "ls: ok (exit 0)"
+        )
+        ;;
+    l2_ls_long)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "ls: ok (exit 0)"
+        )
+        ;;
+    l2_ls_color)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "ls: ok (exit 0)"
+        )
+        ;;
+    l2_ls_recursive)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "ls: ok (exit 0)"
+        )
+        ;;
     l2_rm)
         required_markers=(
             "TSC calibrated"
