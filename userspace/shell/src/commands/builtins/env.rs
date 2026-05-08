@@ -10,7 +10,7 @@ use libcluu::registry;
 use libcluu::Result;
 
 use super::registry::CommandContext;
-use super::registry::{BuiltinCommand, BuiltinRegistry};
+use super::registry::{BuiltinCommand, BuiltinRegistry, WriteSink};
 
 pub fn register(registry: &mut BuiltinRegistry) {
     registry.register(Box::new(SetBuiltin));
@@ -118,12 +118,21 @@ impl BuiltinCommand for EnvBuiltin {
         "env"
     }
 
-    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+    fn run_with_sink(
+        &self,
+        stdout: &WriteSink,
+        context: &mut CommandContext,
+        _args: &[String],
+    ) -> Result<()> {
         for (name, value) in context.entries() {
             let line = format!("{}={}\n", name, value);
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            stdout.write_all(line.as_bytes())?;
         }
         Ok(())
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        self.run_with_sink(&WriteSink::Tty(stdout), context, args)
     }
 }
 

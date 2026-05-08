@@ -14,8 +14,8 @@ use crate::ipc::{PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL};
 use crate::types::Message;
 use crate::IpcFlags;
 
-const PIPE_DATA_LABEL: u32 = 0x50;
-const PIPE_EOF_LABEL: u32 = 0x51;
+pub const PIPE_DATA_LABEL: u32 = 0x50;
+pub const PIPE_EOF_LABEL: u32 = 0x51;
 
 /// Max data payload per IPC message. The 4-byte label prefix plus this
 /// value must not exceed the kernel's IPC_MESSAGE_MAX (4096 bytes).

@@ -16,7 +16,7 @@ use crate::commands::exec::{
     ensure_bg_job_state, parse_spawn_args, parse_status,
     signal_process, wait_for_exit_or_sigint,
 };
-use super::registry::{CommandContext, JobState};
+use super::registry::{CommandContext, JobState, WriteSink};
 use super::registry::{BuiltinCommand, BuiltinRegistry};
 
 pub fn register(registry: &mut BuiltinRegistry) {
@@ -129,17 +129,26 @@ impl BuiltinCommand for JobsBuiltin {
         "jobs"
     }
 
-    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+    fn run_with_sink(
+        &self,
+        stdout: &WriteSink,
+        context: &mut CommandContext,
+        _args: &[String],
+    ) -> Result<()> {
         let lines = context.bg_job_lines();
         if lines.is_empty() {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"jobs: none\n")?;
+            stdout.write_all(b"jobs: none\n")?;
             return Ok(());
         }
         for line in lines {
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
+            stdout.write_all(line.as_bytes())?;
+            stdout.write_all(b"\n")?;
         }
         Ok(())
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        self.run_with_sink(&WriteSink::Tty(stdout), context, args)
     }
 }
 

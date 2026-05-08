@@ -3,11 +3,10 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
 use libcluu::Result;
 
 use super::registry::CommandContext;
-use super::registry::{BuiltinCommand, BuiltinRegistry};
+use super::registry::{BuiltinCommand, BuiltinRegistry, WriteSink};
 
 pub fn register(registry: &mut BuiltinRegistry) {
     registry.register(Box::new(EchoBuiltin));
@@ -20,11 +19,20 @@ impl BuiltinCommand for EchoBuiltin {
         "echo"
     }
 
-    fn run(&self, stdout: usize, _context: &mut CommandContext, args: &[String]) -> Result<()> {
+    fn run_with_sink(
+        &self,
+        stdout: &WriteSink,
+        _context: &mut CommandContext,
+        args: &[String],
+    ) -> Result<()> {
         let output = join_words(args);
-        send_with_payload(stdout, TTY_WRITE_LABEL, output.as_bytes())?;
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
+        stdout.write_all(output.as_bytes())?;
+        stdout.write_all(b"\n")?;
         Ok(())
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        self.run_with_sink(&WriteSink::Tty(stdout), context, args)
     }
 }
 

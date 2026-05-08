@@ -8,7 +8,7 @@ use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
 use libcluu::Result;
 
 use super::registry::CommandContext;
-use super::registry::{BuiltinCommand, BuiltinRegistry};
+use super::registry::{BuiltinCommand, BuiltinRegistry, WriteSink};
 
 pub fn register(registry: &mut BuiltinRegistry) {
     registry.register(Box::new(CdBuiltin));
@@ -56,9 +56,14 @@ impl BuiltinCommand for PwdBuiltin {
         "pwd"
     }
 
-    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+    fn run_with_sink(
+        &self,
+        stdout: &WriteSink,
+        context: &mut CommandContext,
+        args: &[String],
+    ) -> Result<()> {
         if !args.is_empty() {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"pwd: too many arguments\n")?;
+            stdout.write_all(b"pwd: too many arguments\n")?;
             context.set_last_status(1);
             return Ok(());
         }
@@ -67,8 +72,12 @@ impl BuiltinCommand for PwdBuiltin {
         let _ = libcluu::debug_print(&format!("shell: pwd={}\n", cwd));
         let mut line = cwd;
         line.push('\n');
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        stdout.write_all(line.as_bytes())?;
         context.set_last_status(0);
         Ok(())
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        self.run_with_sink(&WriteSink::Tty(stdout), context, args)
     }
 }

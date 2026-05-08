@@ -21,6 +21,9 @@ use libcluu::posix::{_read, _write};
 use libcluu::registry;
 
 const CHUNK_SIZE: usize = 64 * 1024;
+/// Stack-safe read buffer size for stdin reads. Must be small enough to
+/// not overflow the process stack (CHUNK_SIZE is too large for stack use).
+const STDIN_BUF: usize = 4096;
 
 fn spec() -> Spec {
     Spec::new()
@@ -107,7 +110,7 @@ pub extern "C" fn main() -> i32 {
 }
 
 fn cat_stdin() -> i32 {
-    let mut buf = [0u8; CHUNK_SIZE];
+    let mut buf = [0u8; STDIN_BUF];
     loop {
         let n = _read(0, buf.as_mut_ptr() as *mut _, buf.len());
         if n == 0 {

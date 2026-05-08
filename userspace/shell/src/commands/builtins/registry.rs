@@ -10,7 +10,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
+use libcluu::ipc::{send_with_payload, PIPE_DATA_LABEL, PIPE_EOF_LABEL, TTY_WRITE_LABEL};
 use libcluu::registry;
 use libcluu::Result;
 
@@ -210,6 +210,45 @@ impl CommandContext {
     }
 }
 
+// ─── WriteSink ────────────────────────────────────────────────────────────────
+
+/// Describes where a builtin should send its output.
+///
+/// The shell builds one of these per stage of a pipeline — Tty for the last
+/// stage (or no pipe at all), Pipe for any stage feeding another command.
+#[derive(Clone, Copy)]
+pub enum WriteSink {
+    /// Token writing TTY_WRITE_LABEL messages. Used for the shell's normal
+    /// console output and for the last stage of a pipeline if the user did
+    /// not redirect stdout.
+    Tty(usize),
+    /// Token writing PIPE_DATA_LABEL messages. Used when this builtin's stage
+    /// feeds a downstream pipeline stage.
+    Pipe(usize),
+    /// File write token. Deferred — see comment in run_single_with_redirs.
+    /// For now yields an error message rather than silently dropping output.
+    File(usize),
+}
+
+impl WriteSink {
+    /// Write `bytes` to the sink.
+    pub fn write_all(&self, bytes: &[u8]) -> Result<()> {
+        match self {
+            WriteSink::Tty(tok) => send_with_payload(*tok, TTY_WRITE_LABEL, bytes),
+            WriteSink::Pipe(tok) => send_with_payload(*tok, PIPE_DATA_LABEL, bytes),
+            WriteSink::File(tok) => send_with_payload(*tok, TTY_WRITE_LABEL, bytes),
+        }
+    }
+
+    /// Close the sink. For Pipe sends PIPE_EOF_LABEL so the downstream stage
+    /// sees EOF. For Tty/File this is a no-op.
+    pub fn close(&self) {
+        if let WriteSink::Pipe(tok) = self {
+            let _ = send_with_payload(*tok, PIPE_EOF_LABEL, &[]);
+        }
+    }
+}
+
 // ─── Traits ───────────────────────────────────────────────────────────────────
 
 /// Shell command executor abstraction.
@@ -225,6 +264,31 @@ pub trait CommandExecutor {
 /// A single builtin command implementation.
 pub trait BuiltinCommand {
     fn name(&self) -> &'static str;
+
+    /// Run the builtin with an explicit output sink. Builtins that support
+    /// piped output override this. The default adapts to the legacy `run`
+    /// signature when the sink is Tty; Pipe/File fall back to an error.
+    fn run_with_sink(
+        &self,
+        stdout: &WriteSink,
+        context: &mut CommandContext,
+        args: &[String],
+    ) -> Result<()> {
+        match stdout {
+            WriteSink::Tty(tok) => self.run(*tok, context, args),
+            _ => {
+                let m = format!(
+                    "shell: builtin '{}' does not support redirected/piped output\n",
+                    self.name()
+                );
+                let _ = stdout.write_all(m.as_bytes());
+                Ok(())
+            }
+        }
+    }
+
+    /// Legacy entry point. Existing builtins implement this. Newer builtins
+    /// MAY override `run_with_sink` directly instead.
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()>;
 }
 
@@ -256,7 +320,7 @@ impl BuiltinRegistry {
         self.builtins.push(builtin);
     }
 
-    fn find(&self, name: &str) -> Option<&dyn BuiltinCommand> {
+    pub fn find(&self, name: &str) -> Option<&dyn BuiltinCommand> {
         self.builtins
             .iter()
             .map(|b| b.as_ref())
@@ -335,7 +399,7 @@ impl CommandExecutor for BuiltinRegistry {
             let Stmt::Pipeline(pipeline) = stmt;
             let has_redirs = pipeline.commands.iter().any(|c| !c.redirs.is_empty());
             if pipeline.commands.len() >= 2 || has_redirs {
-                match crate::pipeline::PipelineExecutor::run(stdout, context, pipeline) {
+                match crate::pipeline::PipelineExecutor::run(stdout, context, pipeline, self) {
                     Ok(status) => {
                         context.set_last_status(status);
                     }

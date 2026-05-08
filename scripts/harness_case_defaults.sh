@@ -385,6 +385,27 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND="spawn mmapprobe"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn mmapprobe"
                 ;;
+            l2_pipe_builtin)
+                TEST_COMMAND=""
+                # Phase 4 Plan B Stage 0: verify builtin | container works.
+                # echo is an in-process builtin; cat is a container. The
+                # builtin writes via PIPE_DATA_LABEL; cat reads and echoes.
+                SHELL_AUTOSTART_CMD_DEFAULT="echo hello | cat"
+                ;;
+            l2_pipe_builtin_chain)
+                TEST_COMMAND=""
+                # Phase 4 Plan B Stage 0: verify builtin | container with
+                # transformation. echo feeds tr which uppercases.
+                SHELL_AUTOSTART_CMD_DEFAULT="echo abc | tr a-z A-Z"
+                ;;
+            l2_pipe_builtin_3stage)
+                TEST_COMMAND=""
+                # Phase 4 Plan B Stage 0: 3-stage pipeline where the first
+                # stage is a shell builtin (echo) and stages 2-3 are
+                # containers (cat|cat). Verifies builtin→pipe→container→pipe
+                # chain: WriteSink::Pipe → first cat → second cat → TTY.
+                SHELL_AUTOSTART_CMD_DEFAULT="echo hello | cat | cat"
+                ;;
             l2_pipe_3stage)
                 TEST_COMMAND=""
                 # Phase 4 Plan E diagnostic: 3-stage cat|grep|head with
@@ -519,6 +540,48 @@ harness_derive_marker_defaults() {
                 # kill --help: verify binary builds and parses --help.
                 SHELL_AUTOSTART_CMD_DEFAULT="kill --help"
                 EXPECTED_CONTAINS=("Usage")
+                ;;
+            l2_sort_basic)
+                TEST_COMMAND=""
+                # sort: sort three lines lexicographically.
+                SHELL_AUTOSTART_CMD_DEFAULT="printf 'c\nb\na\n' > /tmp/s.in; sort /tmp/s.in"
+                EXPECTED_CONTAINS=("a" "b" "c")
+                ;;
+            l2_uniq_basic)
+                TEST_COMMAND=""
+                # uniq -c: prefix each line with occurrence count.
+                SHELL_AUTOSTART_CMD_DEFAULT="printf 'a\na\nb\n' > /tmp/u.in; uniq -c /tmp/u.in"
+                EXPECTED_CONTAINS=("2 a" "1 b")
+                ;;
+            l2_cut_basic)
+                TEST_COMMAND=""
+                # cut -d: -f2: extract second colon-delimited field.
+                SHELL_AUTOSTART_CMD_DEFAULT="printf 'a:b:c\n' | cut -d: -f2"
+                EXPECTED_CONTAINS=("b")
+                ;;
+            l2_tr_basic)
+                TEST_COMMAND=""
+                # tr a-z A-Z: uppercase ASCII letters.
+                SHELL_AUTOSTART_CMD_DEFAULT="printf 'abc\n' | tr a-z A-Z"
+                EXPECTED_CONTAINS=("ABC")
+                ;;
+            l2_stat_basic)
+                TEST_COMMAND=""
+                # stat: display file metadata for a freshly-touched file.
+                SHELL_AUTOSTART_CMD_DEFAULT="touch /tmp/sf; stat /tmp/sf"
+                EXPECTED_CONTAINS=("File:" "sf" "Size:")
+                ;;
+            l2_du_basic)
+                TEST_COMMAND=""
+                # du -s: summarize disk usage for /etc.
+                SHELL_AUTOSTART_CMD_DEFAULT="du -s /etc"
+                EXPECTED_CONTAINS=("/etc")
+                ;;
+            l2_find_basic)
+                TEST_COMMAND=""
+                # find -name: locate files by glob pattern.
+                SHELL_AUTOSTART_CMD_DEFAULT="mkdir -p /tmp/f; touch /tmp/f/a.txt; find /tmp/f -name '*.txt'"
+                EXPECTED_CONTAINS=("/tmp/f/a.txt")
                 ;;
             legacy_p1)
                 TEST_COMMAND="spawn minimal"

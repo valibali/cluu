@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use cluu_lang::ast::{CmdElem, Pipeline};
 
-use crate::commands::{build_redir_actions, render_word_public, spawn_process_with_argv_and_redirs, CommandContext};
+use crate::commands::{build_redir_actions, render_word_public, spawn_process_with_argv_and_redirs, BuiltinRegistry, CommandContext, WriteSink};
 use libcluu::ipc::{
     build_container_run_payload_full, call_with_payload, send_with_payload,
     FdAction, PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL,
@@ -45,6 +45,7 @@ impl PipelineExecutor {
         stdout: usize,
         context: &mut CommandContext,
         pipeline: &Pipeline,
+        registry: &BuiltinRegistry,
     ) -> Result<i32> {
         // Single-command pipeline with no redirections: caller shouldn't reach us.
         if pipeline.commands.len() == 1 && pipeline.commands[0].redirs.is_empty() {
@@ -52,15 +53,16 @@ impl PipelineExecutor {
         }
         // Single-command pipeline with redirections: handle directly without pipes.
         if pipeline.commands.len() == 1 {
-            return Self::run_single_with_redirs(stdout, context, pipeline);
+            return Self::run_single_with_redirs(stdout, context, pipeline, registry);
         }
-        Self::run_multi(stdout, context, pipeline)
+        Self::run_multi(stdout, context, pipeline, registry)
     }
 
     fn run_single_with_redirs(
         stdout: usize,
         context: &mut CommandContext,
         pipeline: &Pipeline,
+        registry: &BuiltinRegistry,
     ) -> Result<i32> {
         let cmd = &pipeline.commands[0];
         let mut argv: Vec<String> = Vec::new();
@@ -79,6 +81,29 @@ impl PipelineExecutor {
         }
         let name = argv[0].as_str();
         let image_name = name.strip_prefix("/bin/").unwrap_or(name);
+
+        // Dispatch to builtin if registered.
+        // File-redir for builtins is deferred: WriteSink::File is not yet
+        // wired to the VFS write path. When a builtin has file redirects,
+        // fall through to the spawn path so the container handles it —
+        // preserving backward compat for `echo -e ... > file` which used
+        // the external echo container.
+        if cmd.redirs.is_empty() {
+            if let Some(builtin) = registry.find(image_name) {
+                let arg_refs: Vec<String> = argv.iter().skip(1).cloned().collect();
+                let sink = WriteSink::Tty(stdout);
+                if let Err(e) = builtin.run_with_sink(&sink, context, &arg_refs) {
+                    let line = alloc::format!(
+                        "shell: builtin '{}' failed: {:?}\n",
+                        image_name, e
+                    );
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    return Ok(1);
+                }
+                return Ok(0);
+            }
+        }
+
         let arg_refs: Vec<&str> = argv.iter().skip(1).map(|s| s.as_str()).collect();
         let redirs = build_redir_actions(context, &cmd.redirs);
 
@@ -117,6 +142,7 @@ impl PipelineExecutor {
         stdout: usize,
         context: &mut CommandContext,
         pipeline: &Pipeline,
+        registry: &BuiltinRegistry,
     ) -> Result<i32> {
         let n = pipeline.commands.len();
         let procmgr_ep = context.procmgr_spawn_endpoint()?;
@@ -188,18 +214,31 @@ impl PipelineExecutor {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        // Spawn each command with FDAC entries threading stdin/stdout.
-        let mut notify_endpoints: Vec<usize> = Vec::with_capacity(n);
+        // Classify each stage as builtin or container. Builtin stages run
+        // in-process; container stages are spawned via procmgr. We must
+        // spawn container stages FIRST so they block on ipc_recv before we
+        // run any inline builtin that writes to a pipe.
+        //
+        // `is_builtin[i] = true` means stage i runs inline.
+        let mut is_builtin: Vec<bool> = Vec::with_capacity(n);
+        for argv in &argvs {
+            let name = argv[0].as_str();
+            let image_name = name.strip_prefix("/bin/").unwrap_or(name);
+            is_builtin.push(registry.find(image_name).is_some());
+        }
+
+        // Pass 1: spawn all container stages.
+        // notify_endpoints[i] is 0 for builtin stages (no wait needed).
+        let mut notify_endpoints: Vec<usize> = alloc::vec![0usize; n];
 
         for (i, argv) in argvs.iter().enumerate() {
+            if is_builtin[i] {
+                // Will be run inline in pass 2. Skip spawn.
+                continue;
+            }
+
             let name = argv[0].as_str();
-            // For external binaries, image name is the basename: strip leading
-            // /bin/ prefix if present, since container names are the bare name.
             let image_name = name.strip_prefix("/bin/").unwrap_or(name);
-            // Skip argv[0] (command name) — the container binary path is the
-            // canonical argv[0] and is prepended by procmgr's container_run
-            // handler. Passing user args starting at index 1 matches what
-            // spawn_process_with_argv does.
             let arg_refs: Vec<&str> = argv.iter().skip(1).map(|s| s.as_str()).collect();
 
             // Check for conflicts: a stage cannot have both a pipe-wired fd
@@ -287,7 +326,39 @@ impl PipelineExecutor {
                 }
                 return Ok(127);
             }
-            notify_endpoints.push(notify_endpoint);
+            notify_endpoints[i] = notify_endpoint;
+        }
+
+        // Pass 2: run inline builtin stages in forward order.
+        // Container stages are already running and blocked on ipc_recv, so
+        // sends from builtins will be delivered.
+        let mut last_builtin_status: i32 = 0;
+        for (i, argv) in argvs.iter().enumerate() {
+            if !is_builtin[i] {
+                continue;
+            }
+            let name = argv[0].as_str();
+            let image_name = name.strip_prefix("/bin/").unwrap_or(name);
+            let builtin = match registry.find(image_name) {
+                Some(b) => b,
+                None => continue, // classified as builtin but not found; skip
+            };
+            let sink = if i < n - 1 {
+                WriteSink::Pipe(pipes[i].write_token)
+            } else {
+                WriteSink::Tty(stdout)
+            };
+            let arg_refs: Vec<String> = argv.iter().skip(1).cloned().collect();
+            if let Err(e) = builtin.run_with_sink(&sink, context, &arg_refs) {
+                let line = format!(
+                    "shell: builtin '{}' failed: {:?}\n",
+                    image_name, e
+                );
+                let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                last_builtin_status = 1;
+            }
+            // Send EOF on the downstream pipe so the next stage sees EOF.
+            sink.close();
         }
 
         // Wait for each child's exit notification in spawn order.
@@ -302,9 +373,16 @@ impl PipelineExecutor {
         //   - head finishes after 3 lines
         //   - cat sees EPIPE on next write and exits
         //   - we wait cat → head sequentially, both reaped
-        let mut last_status: i32 = 0;
+        let _ = last_builtin_status; // consumed below if all stages are builtins
+        let mut last_status: i32 = last_builtin_status;
         let mut buf = [0u8; 256];
+        let mut waited_any = false;
         for (i, &notify) in notify_endpoints.iter().enumerate() {
+            if is_builtin[i] {
+                // No notify endpoint for builtin stages.
+                continue;
+            }
+            waited_any = true;
             // ipc_recv blocks (with rolling 30-second timeouts) until a message arrives.
             let _ = libcluu::syscall::ipc_recv(notify, &mut buf);
 
@@ -325,6 +403,9 @@ impl PipelineExecutor {
                 last_status = exit_code;
             }
         }
+        // If the last stage was a builtin, last_status already holds its exit code.
+        // If no containers were waited, keep the builtin status as-is.
+        let _ = waited_any;
 
         // Close the shell's own pipe tokens. Children received fresh derived
         // tokens from procmgr via the FDAC path, so revoking the shell's tokens

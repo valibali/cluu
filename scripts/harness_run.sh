@@ -1290,6 +1290,35 @@ case "$MARKER_MODE" in
             "mmapprobe: PASS complete"
         )
         ;;
+    l2_pipe_builtin)
+        # Phase 4 Plan B Stage 0: builtin (echo) piped to container (cat).
+        # Verifies WriteSink::Pipe path: PIPE_DATA_LABEL delivered to cat.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: pipeline done stages=2 status=0"
+        )
+        ;;
+    l2_pipe_builtin_chain)
+        # Phase 4 Plan B Stage 0: builtin (echo) piped to container (tr).
+        # "abc" uppercased to "ABC" via tr a-z A-Z.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: pipeline done stages=2 status=0"
+        )
+        ;;
+    l2_pipe_builtin_3stage)
+        # Phase 4 Plan B Stage 0: 3-stage builtin→container→container.
+        # echo (inline builtin) | cat | cat. Verifies that a builtin feeding
+        # the head of a multi-container pipeline closes the pipe and the
+        # second container sees EOF.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: pipeline done stages=3 status=0"
+        )
+        ;;
     l2_pipe_3stage)
         # Phase 4 Plan E diagnostic: 3-stage cat|grep|head on synthetic
         # data. "alpha" must appear in the debug-print channel output
@@ -1458,6 +1487,55 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "kill: ok (exit 0)"
+        )
+        ;;
+    l2_sort_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "sort: ok (exit 0)"
+        )
+        ;;
+    l2_uniq_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "uniq: ok (exit 0)"
+        )
+        ;;
+    l2_cut_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "cut: ok (exit 0)"
+        )
+        ;;
+    l2_tr_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "tr: ok (exit 0)"
+        )
+        ;;
+    l2_stat_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "stat: ok (exit 0)"
+        )
+        ;;
+    l2_du_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "du: ok (exit 0)"
+        )
+        ;;
+    l2_find_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "find: ok (exit 0)"
         )
         ;;
     none)

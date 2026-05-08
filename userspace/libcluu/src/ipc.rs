@@ -33,6 +33,12 @@ pub const TTY_READ_REQUEST_LABEL: u32 = 6;
 pub const CONSOLE_FB_INFO_LABEL: u32 = 6;
 pub const CONSOLE_CREDIT_REFILL_LABEL: u32 = 8;
 pub const TTY_POLL_QUERY_LABEL: u32 = 7;
+/// Pipe data message: write end sends payload with this label.
+#[cfg(feature = "posix")]
+pub use crate::posix::pipe::PIPE_DATA_LABEL;
+/// Pipe EOF marker: write end sends 0-byte message with this label to signal EOF.
+#[cfg(feature = "posix")]
+pub use crate::posix::pipe::PIPE_EOF_LABEL;
 /// tty → shell (synchronous CALL on shell's stdin endpoint): ask shell to
 /// resolve a tab-completion query against its OWN VFS view + CWD. Payload
 /// is the partial last-token bytes the user is typing (no NUL terminator).

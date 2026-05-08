@@ -15,6 +15,7 @@ pub use builtins::registry::{
     CommandContext,
     CommandExecutor,
     ExecResult,
+    WriteSink,
 };
 pub use exec::poll_background_jobs;
 pub use exec::spawn_process_with_argv_and_redirs;
