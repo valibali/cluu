@@ -35,7 +35,9 @@ impl BuiltinCommand for AliasBuiltin {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             for (k, v) in pairs {
-                stdout.write_all(format!("alias {}='{}'\n", k, v).as_bytes())?;
+                let line = format!("alias {}='{}'\n", k, v);
+                let _ = libcluu::debug_print(line.trim_end());
+                stdout.write_all(line.as_bytes())?;
             }
             return Ok(());
         }
@@ -50,10 +52,12 @@ impl BuiltinCommand for AliasBuiltin {
                 match context.aliases.get(a.as_str()) {
                     Some(v) => {
                         let line = format!("alias {}='{}'\n", a, v);
+                        let _ = libcluu::debug_print(line.trim_end());
                         stdout.write_all(line.as_bytes())?;
                     }
                     None => {
                         let line = format!("alias: {}: not found\n", a);
+                        let _ = libcluu::debug_print(line.trim_end());
                         stdout.write_all(line.as_bytes())?;
                     }
                 }

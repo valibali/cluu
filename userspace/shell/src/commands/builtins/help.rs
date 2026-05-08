@@ -56,6 +56,7 @@ impl BuiltinCommand for HelpBuiltin {
         _context: &mut CommandContext,
         _args: &[String],
     ) -> Result<()> {
+        let _ = libcluu::debug_print("Shell builtins:");
         stdout.write_all(b"Shell builtins:\n")?;
         let mut line = String::new();
         let mut col = 0usize;
@@ -123,12 +124,14 @@ impl BuiltinCommand for TypeBuiltin {
             // 1. Alias?
             if let Some(v) = context.aliases.get(name.as_str()) {
                 let line = format!("{} is aliased to '{}'\n", name, v);
+                let _ = libcluu::debug_print(line.trim_end());
                 stdout.write_all(line.as_bytes())?;
                 continue;
             }
             // 2. Builtin?
             if KNOWN_BUILTINS.iter().any(|b| *b == name.as_str()) {
                 let line = format!("{} is a shell builtin\n", name);
+                let _ = libcluu::debug_print(line.trim_end());
                 stdout.write_all(line.as_bytes())?;
                 continue;
             }
@@ -150,6 +153,7 @@ impl BuiltinCommand for TypeBuiltin {
             }
             if !found {
                 let line = format!("type: {}: not found\n", name);
+                let _ = libcluu::debug_print(line.trim_end());
                 stdout.write_all(line.as_bytes())?;
             }
         }
