@@ -103,8 +103,9 @@ impl ServiceWiring for ServiceKind {
                 tokens[TOKEN_EXTRA_0] = ctx.registry_endpoint;
             }
             ServiceKind::Timeserver => {
-                // Timeserver will create its own endpoint in Phase 3
-                tokens[TOKEN_EXTRA_0] = create_listen_endpoint(ctx.boot.root_token)?;
+                // Grantable so registry can derive send-only tokens for
+                // subscribers (clock_gettime / time / gettimeofday).
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
             }
             ServiceKind::Console => {
                 // Console will create its own endpoint in Phase 3
