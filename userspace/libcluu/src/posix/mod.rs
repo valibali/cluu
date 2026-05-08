@@ -29,6 +29,7 @@ mod fcntl;
 pub(crate) mod file;
 mod framebuffer;
 mod memory;
+pub mod jobs;
 pub mod pipe;
 mod poll;
 mod process;

@@ -163,6 +163,28 @@ pub const PROCMGR_PIPE_CREATE_LABEL: u32 = 38;
 /// Release the caller's tokens for a pipe. words[0]=pipe_id. Idempotent.
 pub const PROCMGR_PIPE_CLOSE_LABEL: u32 = 39;
 
+// Process-group / job-control IPC labels (Phase 4 Plan D).
+/// Create a new process group. Reply: words[0]=status, words[1]=pgid.
+pub const PROCMGR_PG_CREATE_LABEL: u32 = 80;
+/// Attach a pid to a pgid. words[0]=pgid, words[1]=pid. Fire-and-forget.
+pub const PROCMGR_PG_ATTACH_LABEL: u32 = 81;
+/// Deliver a signal to all members of a pgid.
+/// words[0]=pgid, words[1]=signum. Fire-and-forget.
+pub const PROCMGR_PG_SIGNAL_LABEL: u32 = 82;
+/// Suspend all threads of every pid in a pgid.
+/// words[0]=pgid. Fire-and-forget.
+pub const PROCMGR_PG_SUSPEND_LABEL: u32 = 83;
+/// Resume all threads of every pid in a pgid.
+/// words[0]=pgid. Fire-and-forget.
+pub const PROCMGR_PG_RESUME_LABEL: u32 = 84;
+/// Query the pgid of the process that owns a given tid.
+/// words[0]=tid. Reply: words[0]=status, words[1]=pgid (0 if not in any group).
+pub const PROCMGR_PID_PGID_QUERY_LABEL: u32 = 85;
+/// Async notification from procmgr to parent on job state change.
+/// words[0]=pgid, words[1]=pid, words[2]=state (1=Stopped,2=Continued),
+/// words[3]=exit_code.
+pub const PROCMGR_JOB_NOTIFY_LABEL: u32 = 86;
+
 // virtio-blk raw-block session IPC labels (Phase 6 of virtio-blk modern redesign).
 // `BLK_OPEN_SESSION` and `BLK_CLOSE_SESSION` go to the driver's listen endpoint.
 // `BLK_SUBMIT` is fire-and-forget into the driver. `BLK_COMPLETE` and

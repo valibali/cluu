@@ -5,6 +5,7 @@ extern crate alloc;
 
 mod envelopes;
 mod mount_policy;
+mod pg_table;
 
 use crate::mount_policy::{
     parse_mount_policies_raw, resolve_effective_policies, validate_cluufile_against_parent,
@@ -58,9 +59,17 @@ use libcluu::ipc::REDIR_MAGIC as SPAWN_REDIR_MAGIC;
 use libcluu::ipc::PROCMGR_CONTAINER_LIST_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_STATS_LABEL;
+use libcluu::ipc::PROCMGR_JOB_NOTIFY_LABEL;
+use libcluu::ipc::PROCMGR_PG_ATTACH_LABEL;
+use libcluu::ipc::PROCMGR_PG_CREATE_LABEL;
+use libcluu::ipc::PROCMGR_PG_RESUME_LABEL;
+use libcluu::ipc::PROCMGR_PG_SIGNAL_LABEL;
+use libcluu::ipc::PROCMGR_PG_SUSPEND_LABEL;
+use libcluu::ipc::PROCMGR_PID_PGID_QUERY_LABEL;
 use libcluu::ipc::PROCMGR_PROC_QUERY_LABEL;
 use libcluu::ipc::PROCMGR_QUERY_CTTY_LABEL;
 use libcluu::ipc::PROCMGR_SPAWN_SERVICE_LABEL;
+use crate::pg_table::PgTable;
 use libcluu::registry;
 use libcluu::syscall::{
     space_destroy, thread_destroy, thread_get_id, thread_resume, thread_set_fault_endpoint,
@@ -297,6 +306,10 @@ struct ProcessManager {
     login_attempts: BTreeMap<String, LoginAttempt>,
     /// Pipe table: index = lower 16 bits of pipe_id; `None` means free slot.
     pipes: Vec<Option<PipeEntry>>,
+    /// Process-group table: pgid → [pid] (Phase 4 Plan D job control).
+    pg_table: PgTable,
+    /// PIDs currently in the Stopped state (suspended via job control).
+    pid_stopped: BTreeSet<usize>,
 }
 
 impl ProcessManager {
@@ -362,6 +375,8 @@ impl ProcessManager {
             pending_restarts: BTreeSet::new(),
             login_attempts: BTreeMap::new(),
             pipes: Vec::new(),
+            pg_table: PgTable::new(),
+            pid_stopped: BTreeSet::new(),
         })
     }
 
@@ -2044,6 +2059,25 @@ impl ProcessManager {
         if msg.tag.label == libcluu::ipc::PROCMGR_PIPE_CLOSE_LABEL {
             return self.handle_pipe_close(msg, sender_tid);
         }
+        // Phase 4 Plan D — job control
+        if msg.tag.label == PROCMGR_PG_CREATE_LABEL {
+            return self.handle_pg_create(msg);
+        }
+        if msg.tag.label == PROCMGR_PG_ATTACH_LABEL {
+            return self.handle_pg_attach(msg);
+        }
+        if msg.tag.label == PROCMGR_PG_SUSPEND_LABEL {
+            return self.handle_pg_suspend(msg);
+        }
+        if msg.tag.label == PROCMGR_PG_RESUME_LABEL {
+            return self.handle_pg_resume(msg);
+        }
+        if msg.tag.label == PROCMGR_PG_SIGNAL_LABEL {
+            return self.handle_pg_signal(msg);
+        }
+        if msg.tag.label == PROCMGR_PID_PGID_QUERY_LABEL {
+            return self.handle_pid_pgid_query(msg);
+        }
         self.handle_spawn_message(msg, payload, sender_tid)
     }
 
@@ -3092,6 +3126,188 @@ impl ProcessManager {
         Ok(())
     }
 
+    // -------------------------------------------------------------------------
+    // Phase 4 Plan D — job control handlers
+    // -------------------------------------------------------------------------
+
+    /// PROCMGR_PG_CREATE_LABEL: allocate a new process group.
+    /// Reply: words[0]=0 (ok), words[1]=pgid.
+    fn handle_pg_create(&mut self, msg: &Message) -> Result<()> {
+        let reply_token = extract_reply_id(msg);
+        let pgid = self.pg_table.create();
+        let mut reply_msg = Message::new(PROCMGR_PG_CREATE_LABEL, [0; 6], 2);
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = pgid;
+        if let Some(tok) = reply_token {
+            let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+        }
+        Ok(())
+    }
+
+    /// PROCMGR_PG_ATTACH_LABEL: attach pid to pgid.
+    /// words[0]=pgid, words[1]=pid. Fire-and-forget.
+    fn handle_pg_attach(&mut self, msg: &Message) -> Result<()> {
+        let pgid = msg.words[0];
+        let pid  = msg.words[1];
+        self.pg_table.attach(pgid, pid);
+        let reply_token = extract_reply_id(msg);
+        if let Some(tok) = reply_token {
+            let mut reply_msg = Message::new(PROCMGR_PG_ATTACH_LABEL, [0; 6], 1);
+            reply_msg.words[0] = 0;
+            let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+        }
+        Ok(())
+    }
+
+    /// PROCMGR_PG_SUSPEND_LABEL: suspend all pids in a pgid.
+    /// words[0]=pgid.
+    fn handle_pg_suspend(&mut self, msg: &Message) -> Result<()> {
+        let pgid = msg.words[0];
+        let pids = self.pg_table.members(pgid);
+        for pid in pids {
+            if let Some(&cookie) = self.pid_to_cookie.get(&pid) {
+                if let Some(&thread_token) = self.exit_table.get(&cookie) {
+                    let _ = thread_suspend(thread_token);
+                }
+            }
+            self.pid_stopped.insert(pid);
+            // Send job notification to parent.
+            let notify_ep = self.exit_notify.get(&self.pid_to_cookie.get(&pid).copied().unwrap_or(0)).copied().unwrap_or(0);
+            if notify_ep != 0 {
+                let mut jn = Message::new(PROCMGR_JOB_NOTIFY_LABEL, [0; 6], 4);
+                jn.words[0] = pgid;
+                jn.words[1] = pid;
+                jn.words[2] = 1; // Stopped
+                jn.words[3] = 0;
+                let _ = send(notify_ep, &jn, IpcFlags::empty());
+            }
+        }
+        let reply_token = extract_reply_id(msg);
+        if let Some(tok) = reply_token {
+            let mut reply_msg = Message::new(PROCMGR_PG_SUSPEND_LABEL, [0; 6], 1);
+            reply_msg.words[0] = 0;
+            let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+        }
+        Ok(())
+    }
+
+    /// PROCMGR_PG_RESUME_LABEL: resume all pids in a pgid.
+    /// words[0]=pgid.
+    fn handle_pg_resume(&mut self, msg: &Message) -> Result<()> {
+        let pgid = msg.words[0];
+        let pids = self.pg_table.members(pgid);
+        for pid in pids {
+            if let Some(&cookie) = self.pid_to_cookie.get(&pid) {
+                if let Some(&thread_token) = self.exit_table.get(&cookie) {
+                    let _ = thread_resume(thread_token);
+                }
+            }
+            self.pid_stopped.remove(&pid);
+            // Send job notification to parent.
+            let notify_ep = self.exit_notify.get(&self.pid_to_cookie.get(&pid).copied().unwrap_or(0)).copied().unwrap_or(0);
+            if notify_ep != 0 {
+                let mut jn = Message::new(PROCMGR_JOB_NOTIFY_LABEL, [0; 6], 4);
+                jn.words[0] = pgid;
+                jn.words[1] = pid;
+                jn.words[2] = 2; // Continued
+                jn.words[3] = 0;
+                let _ = send(notify_ep, &jn, IpcFlags::empty());
+            }
+        }
+        let reply_token = extract_reply_id(msg);
+        if let Some(tok) = reply_token {
+            let mut reply_msg = Message::new(PROCMGR_PG_RESUME_LABEL, [0; 6], 1);
+            reply_msg.words[0] = 0;
+            let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+        }
+        Ok(())
+    }
+
+    /// PROCMGR_PG_SIGNAL_LABEL: send a signal to all pids in a pgid.
+    /// words[0]=pgid, words[1]=signum.
+    fn handle_pg_signal(&mut self, msg: &Message) -> Result<()> {
+        let pgid   = msg.words[0];
+        let signum = msg.words[1];
+        let pids   = self.pg_table.members(pgid);
+        for pid in pids {
+            if let Some(&cookie) = self.pid_to_cookie.get(&pid) {
+                if let Some(&thread_token) = self.exit_table.get(&cookie) {
+                    match signum {
+                        s if s == SIGSTOP || s == 17 /* SIGTSTP */ => {
+                            let _ = thread_suspend(thread_token);
+                            self.pid_stopped.insert(pid);
+                            let notify_ep = self.exit_notify.get(&cookie).copied().unwrap_or(0);
+                            if notify_ep != 0 {
+                                let mut jn = Message::new(PROCMGR_JOB_NOTIFY_LABEL, [0; 6], 4);
+                                jn.words[0] = pgid;
+                                jn.words[1] = pid;
+                                jn.words[2] = 1; // Stopped
+                                jn.words[3] = 0;
+                                let _ = send(notify_ep, &jn, IpcFlags::empty());
+                            }
+                        }
+                        s if s == SIGCONT => {
+                            let _ = thread_resume(thread_token);
+                            self.pid_stopped.remove(&pid);
+                            let notify_ep = self.exit_notify.get(&cookie).copied().unwrap_or(0);
+                            if notify_ep != 0 {
+                                let mut jn = Message::new(PROCMGR_JOB_NOTIFY_LABEL, [0; 6], 4);
+                                jn.words[0] = pgid;
+                                jn.words[1] = pid;
+                                jn.words[2] = 2; // Continued
+                                jn.words[3] = 0;
+                                let _ = send(notify_ep, &jn, IpcFlags::empty());
+                            }
+                        }
+                        s if s == SIGINT || s == SIGTERM || s == SIGKILL => {
+                            // Destructive signals: destroy thread, bookkeeping happens
+                            // through the normal exit path — just fire the destroy here.
+                            let _ = thread_destroy(thread_token);
+                        }
+                        _ => {
+                            // Other signals: log and skip (no async delivery mechanism yet).
+                            let _ = debug_print(&format!(
+                                "procmgr: pg_signal pgid={} pid={} sig={} (unhandled)",
+                                pgid, pid, signum
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let reply_token = extract_reply_id(msg);
+        if let Some(tok) = reply_token {
+            let mut reply_msg = Message::new(PROCMGR_PG_SIGNAL_LABEL, [0; 6], 1);
+            reply_msg.words[0] = 0;
+            let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+        }
+        Ok(())
+    }
+
+    /// PROCMGR_PID_PGID_QUERY_LABEL: query the pgid of the process owning `tid`.
+    /// words[0]=tid. Reply: words[0]=0, words[1]=pgid (0 if not in any group).
+    fn handle_pid_pgid_query(&mut self, msg: &Message) -> Result<()> {
+        let reply_token = extract_reply_id(msg);
+        let tid = msg.words[0];
+        let pid = self.tid_to_pid.get(&tid).copied().unwrap_or(0);
+        let pgid = if pid != 0 {
+            self.pg_table.pgid_of(pid).unwrap_or(0)
+        } else {
+            0
+        };
+        let mut reply_msg = Message::new(PROCMGR_PID_PGID_QUERY_LABEL, [0; 6], 2);
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = pgid;
+        if let Some(tok) = reply_token {
+            let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+        }
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // End of Phase 4 Plan D handlers
+    // -------------------------------------------------------------------------
+
     /// Handle PROCMGR_PROC_QUERY_LABEL: /proc file queries from VFS.
     ///
     /// words[0] = query_type (0=status, 1=stat, 2=cmdline, 3=list)
@@ -3807,6 +4023,12 @@ impl ProcessManager {
         self.pid_to_profile.remove(&pid);
         self.pid_to_view.remove(&pid);
         self.container_owner_pids.remove(&pid);
+        // Remove from job-control state if the process was stopped.
+        self.pid_stopped.remove(&pid);
+        // Detach from any process group it belonged to.
+        if let Some(pgid) = self.pg_table.pgid_of(pid) {
+            self.pg_table.detach(pgid, pid);
+        }
         if let Some(thread_tid) = self.pid_to_tid.remove(&pid) {
             self.tid_to_pid.remove(&thread_tid);
             self.broadcast_blk_tid_cleanup(thread_tid);
