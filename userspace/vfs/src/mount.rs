@@ -225,7 +225,7 @@ impl MountBackend for RemoteBackend {
 
     fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
         let req = Message::new(FS_READDIR, [rel_path.len(), 0, 0, 0, 0, 0], 1);
-        let mut reply_buf = [0u8; 4096];
+        let mut reply_buf = [0u8; 16384];
         let (reply, payload_len) =
             call_with_reply_buf(self.endpoint, &req, rel_path.as_bytes(), &mut reply_buf)?;
 
@@ -238,45 +238,39 @@ impl MountBackend for RemoteBackend {
         let data_start = size_of::<Message>();
         let data = &reply_buf[data_start..data_start + payload_len];
 
-        // Parse entries: [name_len: u8, is_dir: u8, name bytes...]
-        let mut name_list: Vec<(String, bool)> = Vec::new();
+        // Parse entries (wire format v2). Per entry:
+        //   [name_len: u8][is_dir: u8]
+        //   [size: u64 LE][mode: u32 LE][mtime: u64 LE]
+        //   [nlink: u32 LE][uid: u32 LE][gid: u32 LE]
+        //   [name: name_len bytes]
+        // = 38 + name_len bytes
+        let mut entries: Vec<DirEntry> = Vec::with_capacity(entry_count);
         let mut offset = 0;
         for _ in 0..entry_count {
-            if offset + 2 > data.len() {
-                break;
-            }
+            if offset + 38 > data.len() { break; }
             let name_len = data[offset] as usize;
             let is_dir = data[offset + 1] != 0;
             offset += 2;
-            if offset + name_len > data.len() {
-                break;
-            }
+            let size = u64::from_le_bytes(data[offset..offset+8].try_into().unwrap_or([0u8;8]));
+            offset += 8;
+            let mode = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0u8;4]));
+            offset += 4;
+            let mtime = u64::from_le_bytes(data[offset..offset+8].try_into().unwrap_or([0u8;8]));
+            offset += 8;
+            let nlink = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0u8;4]));
+            offset += 4;
+            let uid = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0u8;4]));
+            offset += 4;
+            let gid = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0u8;4]));
+            offset += 4;
+            if offset + name_len > data.len() { break; }
             if let Ok(name) = core::str::from_utf8(&data[offset..offset + name_len]) {
-                name_list.push((String::from(name), is_dir));
+                let blocks = (size + 511) / 512;
+                let stat = DirEntryStat { size, mode, mtime, nlink, uid, gid, blocks };
+                entries.push(DirEntry { name: String::from(name), is_dir, stat });
             }
             offset += name_len;
         }
-
-        // Enrich each entry with full stat via FS_OPEN + FS_STAT (N+1 IPC).
-        // Earlier diagnosis blamed this for ls hangs; real cause was
-        // clock_gettime blocking on a non-replying timeserver (fixed). N+1 is
-        // slow (2 IPCs × ~entries × block latency) but correct, so ls -l
-        // shows real mtime/uid/gid until virtio-blk's FS_READDIR is extended
-        // to batch stat into one round trip.
-        let mut entries = Vec::with_capacity(name_list.len());
-        for (name, is_dir) in name_list {
-            let entry_path = if rel_path.is_empty() || rel_path == "/" {
-                name.clone()
-            } else {
-                let mut p = String::from(rel_path.trim_end_matches('/'));
-                p.push('/');
-                p.push_str(&name);
-                p
-            };
-            let stat = self.stat_entry(&entry_path, is_dir);
-            entries.push(DirEntry { name, is_dir, stat });
-        }
-
         Ok(entries)
     }
 

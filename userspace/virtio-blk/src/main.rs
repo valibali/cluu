@@ -468,20 +468,43 @@ fn handle_fs_request(
 
         FS_READDIR => {
             // payload = path
+            // Wire format v2: per entry
+            //   [name_len: u8][is_dir: u8]
+            //   [size: u64 LE][mode: u32 LE][mtime: u64 LE]
+            //   [nlink: u32 LE][uid: u32 LE][gid: u32 LE]
+            //   [name: name_len bytes]
+            // 38 + name_len bytes per entry. Eliminates N+1 stat IPCs in
+            // VFS RemoteBackend.
             let path = core::str::from_utf8(payload).unwrap_or("");
             match fs.resolve_path(path) {
                 Ok(inode) => {
                     match fs.readdir(inode) {
                         Ok(entries) => {
-                            // Serialize entries
                             let mut data = Vec::new();
                             for entry in &entries {
                                 let name_bytes = entry.name.as_bytes();
                                 if name_bytes.len() > 255 {
                                     continue;
                                 }
+                                let stat = fs.stat(entry.inode).ok();
+                                let (size, mode, mtime, nlink, uid, gid) = match stat {
+                                    Some(s) => {
+                                        let mode = if s.is_dir { 0o040755u32 } else { 0o100644u32 };
+                                        (s.size, mode, s.mtime, s.nlink, s.uid, s.gid)
+                                    }
+                                    None => {
+                                        let mode = if entry.is_dir { 0o040755u32 } else { 0o100644u32 };
+                                        (0u64, mode, 0u64, 1u32, 0u32, 0u32)
+                                    }
+                                };
                                 data.push(name_bytes.len() as u8);
                                 data.push(if entry.is_dir { 1 } else { 0 });
+                                data.extend_from_slice(&size.to_le_bytes());
+                                data.extend_from_slice(&mode.to_le_bytes());
+                                data.extend_from_slice(&mtime.to_le_bytes());
+                                data.extend_from_slice(&nlink.to_le_bytes());
+                                data.extend_from_slice(&uid.to_le_bytes());
+                                data.extend_from_slice(&gid.to_le_bytes());
                                 data.extend_from_slice(name_bytes);
                             }
 
