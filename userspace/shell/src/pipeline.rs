@@ -88,26 +88,86 @@ impl PipelineExecutor {
         let image_name = name.strip_prefix("/bin/").unwrap_or(name);
         let cmd_line = argv.join(" ");
 
-        // Dispatch to builtin if registered.
-        // File-redir for builtins is deferred: WriteSink::File is not yet
-        // wired to the VFS write path. When a builtin has file redirects,
-        // fall through to the spawn path so the container handles it —
-        // preserving backward compat for `echo -e ... > file` which used
-        // the external echo container.
-        if cmd.redirs.is_empty() {
-            if let Some(builtin) = registry.find(image_name) {
-                let arg_refs: Vec<String> = argv.iter().skip(1).cloned().collect();
+        // Dispatch to builtin if registered. Three cases:
+        //   1) no redirs       → WriteSink::Tty
+        //   2) only stdout (>) → Capture sink, then VFS-write to file
+        //   3) any other redir → fall through to container spawn (legacy)
+        if let Some(builtin) = registry.find(image_name) {
+            let arg_refs: Vec<String> = argv.iter().skip(1).cloned().collect();
+
+            // Case 2: stdout redirected, no other redirs.
+            let stdout_redirs: Vec<&cluu_lang::ast::Redir> = cmd
+                .redirs
+                .iter()
+                .filter(|r| matches!(r.op, cluu_lang::ast::RedirOp::OutTrunc | cluu_lang::ast::RedirOp::OutAppend))
+                .collect();
+            let only_stdout_redir = !cmd.redirs.is_empty()
+                && cmd.redirs.len() == stdout_redirs.len()
+                && stdout_redirs.len() == 1;
+
+            if cmd.redirs.is_empty() {
                 let sink = WriteSink::Tty(stdout);
                 if let Err(e) = builtin.run_with_sink(&sink, context, &arg_refs) {
-                    let line = alloc::format!(
-                        "shell: builtin '{}' failed: {:?}\n",
-                        image_name, e
-                    );
+                    let line = alloc::format!("shell: builtin '{}' failed: {:?}\n", image_name, e);
                     let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
                     return Ok(1);
                 }
                 return Ok(0);
+            } else if only_stdout_redir {
+                let redir = stdout_redirs[0];
+                let target_path = render_word_public(context, &redir.target);
+                let append = matches!(redir.op, cluu_lang::ast::RedirOp::OutAppend);
+
+                // Capture builtin output into a stack-owned Vec.
+                let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+                let sink = WriteSink::Capture(&mut buf as *mut _);
+                if let Err(e) = builtin.run_with_sink(&sink, context, &arg_refs) {
+                    let line = alloc::format!("shell: builtin '{}' failed: {:?}\n", image_name, e);
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    return Ok(1);
+                }
+
+                // Flush captured bytes to VFS file at target_path.
+                let vfs_endpoint = match libcluu::registry::subscribe_output("vfs", "main") {
+                    Ok(ep) => ep,
+                    Err(e) => {
+                        let line = alloc::format!("shell: vfs unavailable: {:?}\n", e);
+                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                        return Ok(1);
+                    }
+                };
+                let vfs = match libcluu::fs::client::VfsClient::new_from_registry(vfs_endpoint) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let line = alloc::format!("shell: vfs client: {:?}\n", e);
+                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                        return Ok(1);
+                    }
+                };
+
+                // O_WRONLY=1, O_CREAT=0o1000, O_TRUNC=0o2000, O_APPEND=0o10.
+                let flags = 1 | 0o1000 | if append { 0o10 } else { 0o2000 };
+                let file = match vfs.open_with(&target_path, flags, 0o644) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let line = alloc::format!("shell: '{}': {:?}\n", target_path, e);
+                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                        return Ok(1);
+                    }
+                };
+
+                // For append, write at end-of-file (size). Otherwise at offset 0.
+                let off: usize = if append { file.size } else { 0 };
+                if let Err(e) = vfs.write(file, off, &buf) {
+                    let line = alloc::format!("shell: write '{}': {:?}\n", target_path, e);
+                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                }
+                let _ = vfs.close(file);
+                return Ok(0);
             }
+            // case 3: fall through (other redir kinds — stdin, stderr) to spawn
+            // path. Builtins don't currently have stdin or stderr file paths
+            // wired; reaches the spawn-not-found error below for now.
         }
 
         let arg_refs: Vec<&str> = argv.iter().skip(1).map(|s| s.as_str()).collect();

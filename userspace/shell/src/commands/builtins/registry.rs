@@ -288,20 +288,25 @@ impl CommandContext {
 /// Describes where a builtin should send its output.
 ///
 /// The shell builds one of these per stage of a pipeline — Tty for the last
-/// stage (or no pipe at all), Pipe for any stage feeding another command.
+/// stage (or no pipe at all), Pipe for any stage feeding another command,
+/// Capture for builtin + file-redir (output buffered, caller flushes to VFS).
 #[derive(Clone, Copy)]
 pub enum WriteSink {
-    /// Token writing TTY_WRITE_LABEL messages. Used for the shell's normal
-    /// console output and for the last stage of a pipeline if the user did
-    /// not redirect stdout.
     Tty(usize),
-    /// Token writing PIPE_DATA_LABEL messages. Used when this builtin's stage
-    /// feeds a downstream pipeline stage.
     Pipe(usize),
-    /// File write token. Deferred — see comment in run_single_with_redirs.
-    /// For now yields an error message rather than silently dropping output.
+    /// File-redir for builtins. Holds a raw pointer to a `Vec<u8>` owned by
+    /// the caller's stack frame; bytes are appended on `write_all`. The
+    /// caller flushes to VFS after the builtin returns. Lifetime safety
+    /// rests on the caller keeping the Vec alive across the builtin call.
+    Capture(*mut alloc::vec::Vec<u8>),
+    /// Reserved — direct file token. Unused for now; Capture is the path.
     File(usize),
 }
+
+// SAFETY: the raw pointer is only ever dereferenced from the same thread
+// that owns the Vec. WriteSink isn't sent across threads.
+unsafe impl Send for WriteSink {}
+unsafe impl Sync for WriteSink {}
 
 impl WriteSink {
     /// Write `bytes` to the sink.
@@ -321,6 +326,11 @@ impl WriteSink {
                 buf.extend_from_slice(&PIPE_DATA_LABEL.to_le_bytes());
                 buf.extend_from_slice(bytes);
                 libcluu::syscall::ipc_send(*tok, &buf).map(|_| ())
+            }
+            WriteSink::Capture(ptr) => {
+                // SAFETY: caller keeps the Vec alive for the builtin call.
+                unsafe { (**ptr).extend_from_slice(bytes); }
+                Ok(())
             }
             WriteSink::File(tok) => send_with_payload(*tok, TTY_WRITE_LABEL, bytes),
         }
