@@ -257,18 +257,16 @@ impl MountBackend for RemoteBackend {
             offset += name_len;
         }
 
-        // Enrich each entry with full stat via FS_STAT (N+1 IPC to remote).
+        // Build entries with synthesized default stat. Earlier code did N+1
+        // FS_OPEN+FS_STAT IPCs per entry which hung interactively (root listing
+        // of the userdisk produced multi-second pauses or full deadlock against
+        // virtio-blk reentrancy). Stat enrichment is deferred until virtio-blk's
+        // FS_READDIR is extended to return per-entry stat in one round trip.
+        // Until then `ls -l` shows synthetic size=0/mtime=0/uid=0/gid=0; `ls`
+        // (names only, columns) works fully.
         let mut entries = Vec::with_capacity(name_list.len());
         for (name, is_dir) in name_list {
-            let entry_path = if rel_path.is_empty() || rel_path == "/" {
-                name.clone()
-            } else {
-                let mut p = String::from(rel_path.trim_end_matches('/'));
-                p.push('/');
-                p.push_str(&name);
-                p
-            };
-            let stat = self.stat_entry(&entry_path, is_dir);
+            let stat = default_stat(is_dir, 0);
             entries.push(DirEntry { name, is_dir, stat });
         }
 
