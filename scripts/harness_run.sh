@@ -939,6 +939,39 @@ case "$MARKER_MODE" in
             "[1]"
         )
         ;;
+    l2_alias_basic)
+        # alias ll='ls -l' ; alias ll  →  prints "alias ll='ls -l'"
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "alias ll="
+        )
+        ;;
+    l2_type_basic)
+        # type cd  →  "cd is a shell builtin"
+        # type ls  →  "ls is /bin/ls"
+        # type nope  →  "type: nope: not found"
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "cd is a shell builtin"
+        )
+        ;;
+    l2_help_basic)
+        # help  →  "Shell builtins:" + list
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "Shell builtins:"
+        )
+        ;;
+    l2_exit_status)
+        # false ; echo $?  →  "1"
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+        )
+        ;;
     l2_fg)
         required_markers=(
             "TSC calibrated"

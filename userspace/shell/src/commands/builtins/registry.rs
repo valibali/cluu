@@ -5,7 +5,7 @@
 //! All builtin sub-modules reference this file for the shared traits.
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -46,6 +46,53 @@ pub(crate) struct BackgroundJob {
 
 // ─── CommandContext ───────────────────────────────────────────────────────────
 
+// ─── HistoryBuf ───────────────────────────────────────────────────────────────
+
+const HISTORY_CAP: usize = 1000;
+
+/// Ring buffer for shell command history.
+pub struct HistoryBuf {
+    entries: VecDeque<String>,
+}
+
+impl HistoryBuf {
+    pub fn new() -> Self {
+        Self { entries: VecDeque::new() }
+    }
+
+    pub fn push(&mut self, line: String) {
+        if line.trim().is_empty() {
+            return;
+        }
+        if self.entries.back().map(|l| l == &line).unwrap_or(false) {
+            return;
+        }
+        if self.entries.len() >= HISTORY_CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(line);
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &String> {
+        self.entries.iter()
+    }
+
+    pub fn replace_all(&mut self, lines: Vec<String>) {
+        self.entries.clear();
+        for l in lines {
+            if !l.trim().is_empty() {
+                self.entries.push_back(l);
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+// ─── CommandContext ───────────────────────────────────────────────────────────
+
 /// Per-shell execution context shared across command invocations.
 pub struct CommandContext {
     pub(crate) vars: BTreeMap<String, String>,
@@ -68,6 +115,15 @@ pub struct CommandContext {
     pub session_id: usize,
     /// TTY endpoint (same as stdout token — used for tty_set_fg).
     pub tty_stdout: usize,
+    // ── Plan F additions ─────────────────────────────────────────────────────
+    /// If set, the REPL will call _exit(code) after the current command.
+    pub exit_requested: Option<i32>,
+    /// Shell alias table. Keys are alias names, values are expansion strings.
+    pub aliases: BTreeMap<String, String>,
+    /// Command history ring buffer.
+    pub history: HistoryBuf,
+    /// Number of commands executed since last history save.
+    pub(crate) cmd_count: usize,
 }
 
 impl CommandContext {
@@ -84,6 +140,10 @@ impl CommandContext {
             shell_pgid: 0,
             session_id: 0,
             tty_stdout: 0,
+            exit_requested: None,
+            aliases: BTreeMap::new(),
+            history: HistoryBuf::new(),
+            cmd_count: 0,
         }
     }
 
@@ -442,6 +502,9 @@ impl CommandExecutor for BuiltinRegistry {
             for elem in command.words {
                 args.push(crate::commands::redirect::render_word(context, &elem));
             }
+            // Alias expansion: expand the first token repeatedly until stable
+            // (recursion-guarded by a seen set to break alias→alias chains).
+            expand_alias_first_token(&mut args, context);
             let Some(name) = args.first() else {
                 all_handled = false;
                 continue;
@@ -543,6 +606,37 @@ impl BuiltinProvider for ExternalBuiltinProvider {
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
+
+/// Expand the first token of `args` against `context.aliases`, iterating until
+/// the first token no longer matches any alias or it forms a cycle.
+fn expand_alias_first_token(args: &mut Vec<String>, context: &CommandContext) {
+    let mut seen = BTreeSet::new();
+    loop {
+        let first = match args.first() {
+            Some(f) => f.clone(),
+            None => break,
+        };
+        if seen.contains(&first) {
+            break;
+        }
+        match context.aliases.get(&first) {
+            Some(replacement) => {
+                seen.insert(first);
+                let parts: Vec<String> = replacement
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+                if parts.is_empty() {
+                    break;
+                }
+                // Replace the first element with the expansion parts;
+                // keep the rest of args after the splice.
+                args.splice(0..1, parts);
+            }
+            None => break,
+        }
+    }
+}
 
 struct ParsedCommand {
     assigns: Vec<Assign>,

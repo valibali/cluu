@@ -6,10 +6,9 @@ use alloc::string::String;
 use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL, PROCMGR_SHUTDOWN_LABEL};
 use libcluu::types::Message;
 use libcluu::{IpcFlags, Result};
-use libcluu::syscall;
 
 use super::registry::CommandContext;
-use super::registry::{BuiltinCommand, BuiltinRegistry};
+use super::registry::{BuiltinCommand, BuiltinRegistry, WriteSink};
 
 pub fn register(registry: &mut BuiltinRegistry) {
     registry.register(Box::new(ExitBuiltin));
@@ -24,9 +23,22 @@ impl BuiltinCommand for ExitBuiltin {
         "exit"
     }
 
-    fn run(&self, stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
-        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shell: exiting\n");
-        syscall::thread_exit(0);
+    fn run_with_sink(
+        &self,
+        _stdout: &WriteSink,
+        context: &mut CommandContext,
+        args: &[String],
+    ) -> Result<()> {
+        let code = match args.first() {
+            None => context.last_status,
+            Some(s) => s.parse::<i32>().unwrap_or(2),
+        };
+        context.exit_requested = Some(code);
+        Ok(())
+    }
+
+    fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
+        self.run_with_sink(&WriteSink::Tty(stdout), context, args)
     }
 }
 

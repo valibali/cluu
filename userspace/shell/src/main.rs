@@ -114,6 +114,12 @@ fn run() -> Result<()> {
         }
     }
 
+    // ── History: load from ~/.cluu_history ────────────────────────────────────
+    #[cfg(feature = "lang-parser")]
+    {
+        crate::commands::builtins::history::load_history(&mut command_context);
+    }
+
     // ── Job control init ──────────────────────────────────────────────────────
     // Set shell_pgid and register the shell's own process as fg.
     #[cfg(feature = "lang-parser")]
@@ -454,28 +460,50 @@ fn parse_and_execute_line(
 ) -> Result<()> {
     let line = strip_trailing_newline(payload);
     match core::str::from_utf8(line) {
-        Ok(text) => match cluu_lang::parse_program(text) {
-            Ok(ast) => {
-                let factory = BuiltinFactory::new();
-                let registry = factory.build();
-                match registry.execute(stdout, context, &ast) {
-                    Ok(ExecResult::Handled) => return Ok(()),
-                    Ok(ExecResult::NotHandled) => {}
-                    Err(err) => {
-                        let _ =
-                            send_with_payload(stdlog, TTY_WRITE_LABEL, err.to_string().as_bytes());
-                        let _ = debug_print(&format!("shell: builtin error {}", err));
-                        return Ok(());
+        Ok(text) => {
+            // Push non-empty lines into history before execution.
+            if !text.trim().is_empty() {
+                context.history.push(String::from(text));
+                context.cmd_count += 1;
+                if context.cmd_count % 10 == 0 {
+                    crate::commands::builtins::history::save_history(context);
+                }
+            }
+            match cluu_lang::parse_program(text) {
+                Ok(ast) => {
+                    let factory = BuiltinFactory::new();
+                    let registry = factory.build();
+                    match registry.execute(stdout, context, &ast) {
+                        Ok(ExecResult::Handled) => {}
+                        Ok(ExecResult::NotHandled) => {
+                            let _ = debug_print("shell: unsupported command");
+                            let _ = send_with_payload(
+                                stdlog,
+                                TTY_WRITE_LABEL,
+                                b"shell: unsupported command\n",
+                            );
+                        }
+                        Err(err) => {
+                            let _ = send_with_payload(
+                                stdlog,
+                                TTY_WRITE_LABEL,
+                                err.to_string().as_bytes(),
+                            );
+                            let _ = debug_print(&format!("shell: builtin error {}", err));
+                        }
+                    }
+                    // Check exit_requested flag set by `exit` builtin.
+                    if let Some(code) = context.exit_requested.take() {
+                        crate::commands::builtins::history::save_history(context);
+                        libcluu::posix::_exit(code);
                     }
                 }
-                let _ = debug_print("shell: unsupported command");
-                let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, b"shell: unsupported command\n");
+                Err(err) => {
+                    let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, err.to_string().as_bytes());
+                    let _ = debug_print(&format!("shell: parse error {}", err));
+                }
             }
-            Err(err) => {
-                let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, err.to_string().as_bytes());
-                let _ = debug_print(&format!("shell: parse error {}", err));
-            }
-        },
+        }
         Err(_) => {
             let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, b"shell: invalid utf-8\n");
             let _ = debug_print("shell: invalid utf-8");

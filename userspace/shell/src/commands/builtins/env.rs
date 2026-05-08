@@ -36,9 +36,20 @@ impl BuiltinCommand for SetBuiltin {
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
         let Some(name) = args.first() else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"set: missing name\n")?;
+            // No args: list all variables (POSIX baseline).
+            for (k, v) in context.entries() {
+                let line = format!("{}={}\n", k, v);
+                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            }
             return Ok(());
         };
+        // Reject unsupported POSIX option flags with a clear message.
+        if name.starts_with('-') || name.starts_with('+') {
+            let opt = name.chars().nth(1).unwrap_or('?');
+            let line = format!("set: option -{} not supported\n", opt);
+            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            return Ok(());
+        }
         let value = join_words(&args[1..]);
         context.set(name, value);
         Ok(())

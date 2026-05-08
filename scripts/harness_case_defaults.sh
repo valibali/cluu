@@ -142,6 +142,22 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="sleep 30 & ; kill %1"
                 ;;
+            l2_alias_basic)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="alias ll='ls -l' ; alias ll"
+                ;;
+            l2_type_basic)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="type cd ; type ls ; type nope"
+                ;;
+            l2_help_basic)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="help"
+                ;;
+            l2_exit_status)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="false ; echo \$?"
+                ;;
             l2_fg)
                 TEST_COMMAND="fg"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
