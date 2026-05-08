@@ -186,7 +186,29 @@ No dates. A phase is done when the capabilities exist, full stop.
 
 ---
 
-### Phase 4 — Network
+### Phase 4 — Userspace Polish & Coreutils ✅ DONE 2026-05-08
+
+Inserted between Phase 3 and the original Phase 4 (network). Network bumped to Phase 5; old Phase 5 (Ship) bumped to Phase 6.
+
+**Shipped:**
+
+- **Plan A (workspace cleanup):** 10 probe crates moved under `userspace/probes/`, dropped from `default-members` so default `cargo xtask build` no longer compiles them. `commands.rs` (3,612 LOC) split into `commands/` module hierarchy with a Builtin trait + registry. 19 test-only shell builtins culled from registry (47 → 28 entries) and rebuilt as 13 probe binaries; harness invocations updated to `container run <name>` form.
+- **Plan E (pipe Phase 1 reverify):** confirmed `l2_pipe_3stage` (`cat | grep | head`) green — the "wire protocol unfinished" memory was diagnostically wrong. Env propagation through pipeline stages closed (`pipeline.rs` no longer passes `&[]` for env). Sequential vs multiplexed wait decision documented.
+- **Plan C (ls + extended VfsStat):** VFS protocol bumped to v2 with `VfsStat { size, mode, mtime, nlink, uid, gid, blocks }`; `readdir` returns `(name, stat)` pairs in one round trip. `ls` rewritten 53 → ~520 LOC with `-l -a -h -R -1 -S -t -r --color=auto`. All backends (ext2, ramfs/memfs, procfs, devfs, virtio-blk) updated.
+- **Plan B (cli + utils):** new `libcluu::cli` POSIX-style argument parser (12 host-side unit tests). 11 existing utils (cat, cp, mv, rm, mkdir, touch, head, tail, wc, grep, ps) migrated to `cli` with GNU-close short-flag matrices. 15 new utils shipped: env, sleep, basename, dirname, date, kill, printf, which, sort, uniq, cut, tr, find, du, stat. **Plan B Stage 0 fix**: added `WriteSink` enum (Tty / Pipe / File) and `run_with_sink` on `BuiltinCommand` so builtins (echo, env, jobs, alias, type, help, etc.) pipe correctly to containers — `echo foo | cat` now works.
+- **Plan D (job control):** all userspace via existing kernel `ThreadSuspend`/`Resume` invoke ops — zero kernel commits. procmgr gained `PgTable` + 6 new IPC labels (`PROCMGR_PG_{CREATE,ATTACH,SUSPEND,RESUME,SIGNAL}_LABEL` + `PROCMGR_PID_PGID_QUERY_LABEL` + `PROCMGR_JOB_NOTIFY_LABEL`). TTY tracks `fg_pgid_per_session`, decodes Ctrl-C / Ctrl-Z to `SIGINT` / `SIGTSTP`. Shell gained `JobTable` + `jobs/fg/bg/wait/kill` builtins; pipeline executor creates pgid per pipeline, attaches every spawned pid, sets TTY foreground. Grammar fix: `&` was being consumed as bare word; now parses as `Pipeline { bg: true }`.
+- **Plan F (misc builtins):** `exit` (sets `ctx.exit_requested`), `alias`/`unalias` with first-token expansion + recursion guard, `type` (alias / builtin / external lookup), `help` (lists registered builtins), persistent `history` (`~/.cluu_history`, load on startup, save on exit + every 10 commands), `set`/`unset` cleanup (rejects unsupported `-e/-x/-u` with clear error).
+
+**Closing notes (2026-05-08):**
+- All 6 plans merged on `develop` across 23 commits.
+- ~30+ harness smokes added (`l2_<util>_basic` for new utils, `l2_pipe_*`, `l2_jobs_*`, `l2_alias_basic`, `l2_type_basic`, `l2_help_basic`, `l2_exit_status`, `l2_ls_long`, `l2_ls_color`, `l2_ls_recursive`).
+- Spec: `docs/superpowers/specs/2026-05-07-userspace-polish-design.md`. Per-plan plans: `docs/superpowers/plans/2026-05-07-phase4-{A..F}-*.md`.
+- Open TODOs tracked in `memory/project_phase4_plan_d_todos.md`: `& ;` separator quirk, SpawnBuiltin/legacy `bg_jobs` cleanup, Ctrl-Z input-injection harness, SIGTTIN on bg-stdin-read (TTY_READ_REQUEST wire format change), `$?` substitution, file-redir for builtins (WriteSink::File path).
+- Discovered & fixed mid-flight: `harness_run.sh` ignores positional `$1` (uses `MARKER_MODE` env); earlier "PASS" reports during sub-agent runs were false positives. Real verification requires `CLUU_SHELL_AUTOSTART_CMD=... MARKER_MODE=... bash scripts/harness_run.sh`. All Plan D & F smokes were reverified inline with the correct invocation.
+
+---
+
+### Phase 5 — Network
 
 **Goal:** the OS talks to the network.
 
@@ -201,11 +223,11 @@ No dates. A phase is done when the capabilities exist, full stop.
 
 **Allowed kernel work:** only if the virtio-net driver forces a kernel-side IRQ-delivery fix. Named fix rule applies.
 
-**Known unknowns & pivot triggers:** biggest risk in the whole plan. TCP is genuinely hard. **Pivot trigger:** if after 3 weeks of Phase 4 you do not have DHCP + ping, ship UDP-only and defer TCP to v1.1. Note the pivot decision somewhere durable — do not silently slip.
+**Known unknowns & pivot triggers:** biggest risk in the whole plan. TCP is genuinely hard. **Pivot trigger:** if after 3 weeks of Phase 5 you do not have DHCP + ping, ship UDP-only and defer TCP to v1.1. Note the pivot decision somewhere durable — do not silently slip.
 
 ---
 
-### Phase 5 — Ship
+### Phase 6 — Ship
 
 **Goal:** a stranger can run CLUU from a download link and see it work.
 
