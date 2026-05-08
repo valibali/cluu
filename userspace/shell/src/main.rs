@@ -121,22 +121,22 @@ fn run() -> Result<()> {
     }
 
     // ── Job control init ──────────────────────────────────────────────────────
-    // Set shell_pgid and register the shell's own process as fg.
+    // Set shell_pgid for use by background-pipeline machinery. We do NOT
+    // call tty_set_fg here: the shell holds only the TTY *write* token
+    // (info.tokens[TOKEN_STDOUT]); TTY_SET_FG_LABEL needs the TTY service
+    // control endpoint, which Plan D never plumbed through. The call was
+    // silently failing and confusing readers. Background pipelines that
+    // need fg switching set it via their own tty_endpoint inside
+    // pipeline.rs; the shell-level fg track is unnecessary for now.
     #[cfg(feature = "lang-parser")]
     {
         let session_id = info.params[PARAM_TTY_INSTANCE] as usize;
         command_context.tty_stdout = stdout;
         command_context.session_id = session_id;
 
-        // Create a pgid for the shell itself.
         if let Ok(ep) = command_context.procmgr_spawn_endpoint() {
             if let Ok(shell_pgid) = libcluu::posix::jobs::pg_create(ep) {
-                // Attach shell's own tid as a member.
-                // Shell is single-threaded; tid is not easily exposed but pgid
-                // with zero members is still valid for TTY fg purposes.
                 command_context.shell_pgid = shell_pgid;
-                // Claim TTY foreground for the shell.
-                let _ = libcluu::posix::jobs::tty_set_fg(stdout, session_id, shell_pgid);
             }
         }
     }

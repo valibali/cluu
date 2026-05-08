@@ -371,12 +371,17 @@ pub(crate) fn wait_for_exit_or_sigint(
             }
         }
     }
-    if let Err(err) = set_tty_foreground(tty_endpoint, 0, 0, TTY_FG_FLAG_FORWARD_CTRL_C) {
-        let _ = debug_print(&format!("shell: tty foreground restore failed {:?}", err));
-        if result.is_ok() {
-            result = Err(err);
+    // Guard the fg-restore call: if tty_endpoint is 0/bogus we silently skip
+    // rather than calling into a NULL receiver path.
+    if tty_endpoint != 0 {
+        if let Err(err) = set_tty_foreground(tty_endpoint, 0, 0, TTY_FG_FLAG_FORWARD_CTRL_C) {
+            let _ = debug_print(&format!("shell: tty foreground restore failed {:?}", err));
+            if result.is_ok() {
+                result = Err(err);
+            }
         }
     }
+    let _ = debug_print("shell: wait_for_exit_or_sigint return");
     result
 }
 

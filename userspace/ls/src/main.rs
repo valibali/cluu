@@ -415,6 +415,7 @@ fn list_recursive(
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     let argv = libcluu::args::args();
+    let _ = debug_print(&format!("ls: enter argc={}", argv.len()));
 
     let mut opts = LsOpts::default();
     let mut paths: Vec<String> = Vec::new();
@@ -484,15 +485,16 @@ pub extern "C" fn main() -> i32 {
     let multi = paths.len() > 1;
 
     let mut exit_code = 0i32;
+    let _ = debug_print(&format!("ls: paths={} cwd-resolved", paths.len()));
     for (idx, raw_path) in paths.iter().enumerate() {
         let path = libcluu::posix::resolve_path(raw_path);
+        let _ = debug_print(&format!("ls: listing '{}'", path));
 
         if idx > 0 { print_str("\n"); }
 
         if opts.recursive {
             list_recursive(&vfs, &path, &opts, color, now, width, 0);
         } else {
-            // Show header for multiple args.
             list_dir(&vfs, &path, &opts, color, now, width, multi);
         }
     }
