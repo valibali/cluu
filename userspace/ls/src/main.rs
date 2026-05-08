@@ -465,19 +465,24 @@ pub extern "C" fn main() -> i32 {
     }
 
     // Default path: cwd
+    let _ = debug_print("ls: pre-cwd");
     if paths.is_empty() {
         paths.push(libcluu::posix::current_dir_string());
     }
+    let _ = debug_print("ls: post-cwd");
 
     // Connect to VFS
+    let _ = debug_print("ls: pre-vfs-subscribe");
     let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
         Ok(e) => e,
-        Err(_) => { eprint_str("ls: vfs not available\n"); return 1; }
+        Err(_) => { eprint_str("ls: vfs not available\n"); let _ = debug_print("ls: vfs subscribe FAILED"); return 1; }
     };
+    let _ = debug_print("ls: post-vfs-subscribe");
     let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
         Ok(c) => c,
-        Err(_) => { eprint_str("ls: failed to create vfs client\n"); return 1; }
+        Err(_) => { eprint_str("ls: failed to create vfs client\n"); let _ = debug_print("ls: vfs client FAILED"); return 1; }
     };
+    let _ = debug_print("ls: vfs client OK");
 
     let color = color_enabled(opts.color_mode);
     let now = current_unix_time();
