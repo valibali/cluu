@@ -20,6 +20,7 @@ use libcluu::ipc::{
 use libcluu::syscall::endpoint_create;
 use libcluu::types::Message;
 use libcluu::{boot::process_info, debug_print, Error, IpcFlags, Result, TOKEN_IPC};
+use libcluu::posix::snapshot_env;
 
 struct PipeHandles {
     write_token: usize,
@@ -171,6 +172,22 @@ impl PipelineExecutor {
             return Err(e);
         }
 
+        // Build the env trailer once for all stages — same semantics as
+        // single-command spawn in commands/exec.rs: base from snapshot_env()
+        // overlaid with any exported shell vars.
+        let mut env_pairs: Vec<(String, String)> = snapshot_env();
+        for (k, v) in context.exported_pairs() {
+            if let Some(idx) = env_pairs.iter().position(|(ek, _)| ek == &k) {
+                env_pairs[idx].1 = v;
+            } else {
+                env_pairs.push((k, v));
+            }
+        }
+        let env_refs: Vec<(&str, &str)> = env_pairs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
         // Spawn each command with FDAC entries threading stdin/stdout.
         let mut notify_endpoints: Vec<usize> = Vec::with_capacity(n);
 
@@ -233,13 +250,8 @@ impl PipelineExecutor {
                 });
             }
 
-            // TODO(UE17+): pipeline stages currently spawn with the procmgr
-            // DEFAULT_ENV (since env is &[]). Single-command spawn in
-            // commands.rs propagates the shell's env via ENV trailer; lifting
-            // that into the pipe path is left for a follow-up — l2_envelope_user
-            // exercises the single-command path.
             let (payload, _argc, fdac_offset) =
-                build_container_run_payload_full(image_name, &arg_refs, &fdac, stage_redirs, &[]);
+                build_container_run_payload_full(image_name, &arg_refs, &fdac, stage_redirs, &env_refs);
 
             let notify_endpoint = match endpoint_create(process_info().tokens[TOKEN_IPC]) {
                 Ok(ep) => ep,
@@ -280,10 +292,16 @@ impl PipelineExecutor {
 
         // Wait for each child's exit notification in spawn order.
         //
-        // For `cat | head -3`: head finishes first, then cat sees EPIPE on its
-        // next write and exits. Waiting in order (cat first) is safe because
-        // cat WILL exit eventually — it's just slightly suboptimal. Phase 3
-        // simplicity: sequential wait is correct; multiplexed wait is Phase 5.
+        // Phase 4 Plan E decision: keep sequential. Multiplexed wait via
+        // poll() is technically possible (Phase 3 shipped poll), but only
+        // matters for pathological cases like `yes | head -1` where stage 0
+        // blocks on EPIPE before the shell drains. Correctness is unaffected.
+        // If a soak workload exposes a real hang, revisit.
+        //
+        // `cat | head -3` example:
+        //   - head finishes after 3 lines
+        //   - cat sees EPIPE on next write and exits
+        //   - we wait cat → head sequentially, both reaped
         let mut last_status: i32 = 0;
         let mut buf = [0u8; 256];
         for (i, &notify) in notify_endpoints.iter().enumerate() {
