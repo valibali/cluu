@@ -66,6 +66,14 @@ members = [
     "userspace/probes/blkprobe",
     "userspace/tpmd",
     "userspace/libcluu_syscalls",
+    "userspace/basename",
+    "userspace/date",
+    "userspace/dirname",
+    "userspace/env",
+    "userspace/kill",
+    "userspace/printf",
+    "userspace/sleep",
+    "userspace/which",
 
     # Language tooling
     "crates/cluu_lang",
@@ -108,6 +116,14 @@ default-members = [
     "userspace/virtio-core",
     "userspace/virtio-blk",
     "userspace/tpmd",
+    "userspace/basename",
+    "userspace/date",
+    "userspace/dirname",
+    "userspace/env",
+    "userspace/kill",
+    "userspace/printf",
+    "userspace/sleep",
+    "userspace/which",
 ]
 
 [workspace.package]
@@ -280,6 +296,30 @@ debug = 0
 [profile.dev.package."cluu-tpmd"]
 debug = 0
 
+[profile.dev.package."cluu-basename"]
+debug = 0
+
+[profile.dev.package."cluu-date"]
+debug = 0
+
+[profile.dev.package."cluu-dirname"]
+debug = 0
+
+[profile.dev.package."cluu-env"]
+debug = 0
+
+[profile.dev.package."cluu-kill"]
+debug = 0
+
+[profile.dev.package."cluu-printf"]
+debug = 0
+
+[profile.dev.package."cluu-sleep"]
+debug = 0
+
+[profile.dev.package."cluu-which"]
+debug = 0
+
 [profile.release]
 opt-level = 2
 lto = false
@@ -428,4 +468,28 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-tpmd"]
+debug = 0
+
+[profile.release.package."cluu-basename"]
+debug = 0
+
+[profile.release.package."cluu-date"]
+debug = 0
+
+[profile.release.package."cluu-dirname"]
+debug = 0
+
+[profile.release.package."cluu-env"]
+debug = 0
+
+[profile.release.package."cluu-kill"]
+debug = 0
+
+[profile.release.package."cluu-printf"]
+debug = 0
+
+[profile.release.package."cluu-sleep"]
+debug = 0
+
+[profile.release.package."cluu-which"]
 debug = 0

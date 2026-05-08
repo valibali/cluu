@@ -164,6 +164,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-basename"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-blkprobe"
 version = "0.1.0"
 dependencies = [
@@ -199,6 +206,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-date"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-detachprobe"
 version = "0.1.0"
 dependencies = [
@@ -206,7 +220,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-dirname"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-edit"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-env"
 version = "0.1.0"
 dependencies = [
  "libcluu",
@@ -302,6 +330,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-kill"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-killdeny"
 version = "0.1.0"
 dependencies = [
@@ -372,6 +407,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-printf"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-procmgr"
 version = "0.1.0"
 dependencies = [
@@ -425,6 +467,13 @@ name = "cluu-shell"
 version = "0.1.0"
 dependencies = [
  "cluu_lang",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-sleep"
+version = "0.1.0"
+dependencies = [
  "libcluu",
 ]
 
@@ -548,6 +597,13 @@ dependencies = [
 
 [[package]]
 name = "cluu-wc"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-which"
 version = "0.1.0"
 dependencies = [
  "libcluu",

@@ -1,0 +1,14 @@
+[package]
+name = "cluu-printf"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU printf utility"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "printf"
+path = "src/main.rs"

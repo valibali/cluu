@@ -1,0 +1,14 @@
+[package]
+name = "cluu-date"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU date utility"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "date"
+path = "src/main.rs"

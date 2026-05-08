@@ -1404,6 +1404,62 @@ case "$MARKER_MODE" in
             "grep: ok (exit 0)"
         )
         ;;
+    l2_basename_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "basename: ok (exit 0)"
+        )
+        ;;
+    l2_dirname_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "dirname: ok (exit 0)"
+        )
+        ;;
+    l2_sleep_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "sleep: ok (exit 0)"
+        )
+        ;;
+    l2_which_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "which: ok (exit 0)"
+        )
+        ;;
+    l2_printf_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "printf: ok (exit 0)"
+        )
+        ;;
+    l2_date_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "date: ok (exit 0)"
+        )
+        ;;
+    l2_env_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "env: ok (exit 0)"
+        )
+        ;;
+    l2_kill_basic)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "kill: ok (exit 0)"
+        )
+        ;;
     none)
         required_markers=()
         ;;

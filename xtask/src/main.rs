@@ -2262,6 +2262,14 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/ps",
         "userspace/touch",
         "userspace/tpmd",
+        "userspace/basename",
+        "userspace/date",
+        "userspace/dirname",
+        "userspace/env",
+        "userspace/kill",
+        "userspace/printf",
+        "userspace/sleep",
+        "userspace/which",
     ];
 
     let target_json = project_root().join("triplets/x86_64-cluu-user.json");

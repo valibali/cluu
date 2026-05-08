@@ -472,6 +472,54 @@ harness_derive_marker_defaults() {
                 # Verifies -r and -n flags via libcluu::cli.
                 SHELL_AUTOSTART_CMD_DEFAULT="grep -rn CLUU /etc"
                 ;;
+            l2_basename_basic)
+                TEST_COMMAND=""
+                # basename: strip directory from path.
+                SHELL_AUTOSTART_CMD_DEFAULT="basename /etc/users.toml"
+                EXPECTED_CONTAINS=("users.toml")
+                ;;
+            l2_dirname_basic)
+                TEST_COMMAND=""
+                # dirname: strip last component from path.
+                SHELL_AUTOSTART_CMD_DEFAULT="dirname /etc/users.toml"
+                EXPECTED_CONTAINS=("/etc")
+                ;;
+            l2_sleep_basic)
+                TEST_COMMAND=""
+                # sleep: delay then print done.
+                SHELL_AUTOSTART_CMD_DEFAULT="sleep 1; echo done"
+                EXPECTED_CONTAINS=("done")
+                ;;
+            l2_which_basic)
+                TEST_COMMAND=""
+                # which: find ls in PATH.
+                SHELL_AUTOSTART_CMD_DEFAULT="which ls"
+                EXPECTED_CONTAINS=("/bin/ls")
+                ;;
+            l2_printf_basic)
+                TEST_COMMAND=""
+                # printf: format string substitution.
+                SHELL_AUTOSTART_CMD_DEFAULT="printf '%s=%d\n' foo 42"
+                EXPECTED_CONTAINS=("foo=42")
+                ;;
+            l2_date_basic)
+                TEST_COMMAND=""
+                # date: print current date — just check year "20xx" appears.
+                SHELL_AUTOSTART_CMD_DEFAULT="date"
+                EXPECTED_CONTAINS=("20")
+                ;;
+            l2_env_basic)
+                TEST_COMMAND=""
+                # env: print environment — check at least one KEY=VALUE line.
+                SHELL_AUTOSTART_CMD_DEFAULT="env | head -1"
+                EXPECTED_CONTAINS=("=")
+                ;;
+            l2_kill_basic)
+                TEST_COMMAND=""
+                # kill --help: verify binary builds and parses --help.
+                SHELL_AUTOSTART_CMD_DEFAULT="kill --help"
+                EXPECTED_CONTAINS=("Usage")
+                ;;
             legacy_p1)
                 TEST_COMMAND="spawn minimal"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawn minimal"

@@ -1,0 +1,14 @@
+[package]
+name = "cluu-kill"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU kill utility"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "kill"
+path = "src/main.rs"
