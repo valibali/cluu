@@ -165,6 +165,7 @@ pub fn from_cluu_error(err: crate::Error) -> i32 {
         crate::Error::NotImplemented => ENOSYS,
         crate::Error::Busy => EBUSY,
         crate::Error::InvalidParameter => EINVAL,
+        crate::Error::TooManyLinks => ELOOP,
         crate::Error::Unknown => EIO,
     }
 }
