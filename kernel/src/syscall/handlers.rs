@@ -1399,6 +1399,10 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
 
     const MAP_DEVICE: u32 = 0x100;
     const MAP_FRAME_TOKEN: u32 = 0x400;
+    // MAP_DEVICE_WC (0x200) is intentionally NOT handled here — the
+    // single-page space_map invoke always calls elf::map_user_page
+    // regardless of MAP_DEVICE, so PCD/PWT bits are not set. Userspace
+    // framebuffer mapping uses space_map_range (multi-page) which honors WC.
 
     klibcluu::trace("invoke_space_map");
 
@@ -2024,6 +2028,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
     const MAP_DEVICE: u32 = 0x100;
+    const MAP_DEVICE_WC: u32 = 0x200;
     const MAP_SHARE_PHYS: u32 = 0x800;
     const MAP_TEST_FAILPOINT: u32 = 0x8000_0000;
     const MAP_TEST_FAIL_ON_MAP_STAGE: u32 = 0x4000_0000;
@@ -2065,6 +2070,11 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
     let executable = (flags & 0x04) != 0;
     let use_large_pages = (flags & MAP_LARGE_PAGES) != 0;
     let map_device = (flags & MAP_DEVICE) != 0;
+    let map_device_wc = (flags & MAP_DEVICE_WC) != 0;
+    if map_device && map_device_wc {
+        klibcluu::warn("invoke_space_map_range: MAP_DEVICE and MAP_DEVICE_WC are mutually exclusive");
+        return Err(Error::InvalidArgument);
+    }
     let map_share_phys = (flags & MAP_SHARE_PHYS) != 0;
     let fail_after_pages = if (flags & MAP_TEST_FAILPOINT) != 0 {
         let raw = ((flags & MAP_TEST_FAIL_AFTER_MASK) >> MAP_TEST_FAIL_AFTER_SHIFT) as usize;
@@ -2076,17 +2086,17 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
 
     // For device mapping, data_ptr is a physical address base
     // For regular mapping, validate data buffer if provided
-    if !map_device && data_ptr != 0 && data_len > 0 {
+    if !map_device && !map_device_wc && data_ptr != 0 && data_len > 0 {
         userptr::validate_user_buffer(data_ptr, data_len)?;
     }
-    let caller_page_table_root = if map_device {
+    let caller_page_table_root = if map_device || map_device_wc {
         None
     } else {
         Some(crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?)
     };
 
     // Device mapping requires page-aligned physical address and no data copy
-    if map_device {
+    if map_device || map_device_wc {
         if data_ptr == 0 || (data_ptr & 0xFFF) != 0 {
             klibcluu::warn("invoke_space_map_range: device mapping requires aligned phys addr");
             return Err(Error::InvalidArgument);
@@ -2117,7 +2127,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
             klibcluu::warn("invoke_space_map_range: SHARE_PHYS data_ptr not page-aligned");
             return Err(Error::InvalidArgument);
         }
-        if map_device {
+        if map_device || map_device_wc {
             klibcluu::warn("invoke_space_map_range: SHARE_PHYS incompatible with MAP_DEVICE");
             return Err(Error::InvalidArgument);
         }
@@ -2130,6 +2140,11 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
     // Device mapping: map physical address range directly
     if map_device {
         return map_device_range(space_id, virt_start, data_ptr as u64, num_pages, writable);
+    }
+
+    // WC device mapping (e.g. framebuffer): selects PAT[1] = WC.
+    if map_device_wc {
+        return map_device_range_wc(space_id, virt_start, data_ptr as u64, num_pages, writable);
     }
 
     // MAP_SHARE_PHYS: remap caller's physical frames read-only into target space.
@@ -2526,6 +2541,42 @@ fn map_device_range(
             }
             None => {
                 klibcluu::warn("map_device_range: space not found");
+                return Err(Error::NotFound);
+            }
+        }
+    }
+
+    Ok(num_pages)
+}
+
+/// Map a range of physical device memory write-combining (PAT[1] = WC).
+fn map_device_range_wc(
+    space_id: crate::token::scope::AddressSpaceId,
+    virt_start: u64,
+    phys_start: u64,
+    num_pages: usize,
+    writable: bool,
+) -> SyscallResult {
+    use crate::elf;
+    use crate::mm::space_repository;
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+    for page_idx in 0..num_pages {
+        let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
+        let phys_addr = phys_start + (page_idx * PAGE_SIZE) as u64;
+
+        let result = space_repository::with_space_mut(space_id, |space| unsafe {
+            elf::map_device_page_wc(virt_addr, phys_addr, writable, space.page_table_root)
+        });
+
+        match result {
+            Some(Ok(())) => {}
+            Some(Err(_)) => {
+                klibcluu::warn("map_device_range_wc: map_device_page_wc failed");
+                return Err(Error::OutOfMemory);
+            }
+            None => {
+                klibcluu::warn("map_device_range_wc: space not found");
                 return Err(Error::NotFound);
             }
         }
