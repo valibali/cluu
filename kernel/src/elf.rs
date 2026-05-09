@@ -490,6 +490,90 @@ pub(crate) unsafe fn map_device_page(
     Ok(())
 }
 
+/// Map a single MMIO page write-combining (WC).
+///
+/// PTE bits: PRESENT | USER | PWT | NO_EXECUTE | SHARED_PHYS [+ WRITABLE].
+/// PWT alone (PCD=0, PWT=1, PAT=0) selects PAT[1] = WC, configured by
+/// `mm::pat::init()` at boot.
+///
+/// Like `map_device_page`, the leaf PTE marks the frame so
+/// `teardown_user_pages` skips PMM free for it. We use SHARED_PHYS as
+/// the marker (the existing `map_device_page` relies on NO_CACHE; here
+/// we omit NO_CACHE so add SHARED_PHYS to retain the skip behavior).
+pub(crate) unsafe fn map_device_page_wc(
+    virt: u64,
+    phys: u64,
+    writable: bool,
+    page_table_root: PhysAddr,
+) -> Result<(), ElfLoadError> {
+    use crate::mm::vmm::pte_flags;
+    use core::ptr::write_bytes;
+
+    let pml4_idx = ((virt >> 39) & 0x1FF) as usize;
+    let pdpt_idx = ((virt >> 30) & 0x1FF) as usize;
+    let pd_idx = ((virt >> 21) & 0x1FF) as usize;
+    let pt_idx = ((virt >> 12) & 0x1FF) as usize;
+
+    let table_flags = pte_flags::PRESENT | pte_flags::WRITABLE | pte_flags::USER;
+
+    // WC pages: PRESENT | USER | WRITE_COMBINING(PWT) | NO_EXECUTE | SHARED_PHYS, optionally WRITABLE.
+    // Do NOT OR in NO_CACHE — that would flip PCD and select PAT[3] (UC), not PAT[1] (WC).
+    let mut page_flags = pte_flags::PRESENT
+        | pte_flags::USER
+        | pte_flags::WRITE_COMBINING
+        | pte_flags::NO_EXECUTE
+        | pte_flags::SHARED_PHYS;
+    if writable {
+        page_flags |= pte_flags::WRITABLE;
+    }
+
+    const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    let pml4_virt = crate::mm::physmap::phys_to_virt_u64(page_table_root.as_u64());
+    let pml4 = &mut *(pml4_virt as *mut [u64; 512]);
+
+    let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
+        pml4[pml4_idx] & PHYS_MASK
+    } else {
+        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let v = crate::mm::physmap::phys_to_virt_u64(p);
+        write_bytes(v as *mut u8, 0, 4096);
+        pml4[pml4_idx] = p | table_flags;
+        p
+    };
+
+    let pdpt = &mut *(crate::mm::physmap::phys_to_virt_u64(pdpt_phys) as *mut [u64; 512]);
+
+    let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
+        pdpt[pdpt_idx] & PHYS_MASK
+    } else {
+        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let v = crate::mm::physmap::phys_to_virt_u64(p);
+        write_bytes(v as *mut u8, 0, 4096);
+        pdpt[pdpt_idx] = p | table_flags;
+        p
+    };
+
+    let pd = &mut *(crate::mm::physmap::phys_to_virt_u64(pd_phys) as *mut [u64; 512]);
+
+    let pt_phys = if pd[pd_idx] & 0x1 != 0 {
+        pd[pd_idx] & PHYS_MASK
+    } else {
+        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let v = crate::mm::physmap::phys_to_virt_u64(p);
+        write_bytes(v as *mut u8, 0, 4096);
+        pd[pd_idx] = p | table_flags;
+        p
+    };
+
+    let pt = &mut *(crate::mm::physmap::phys_to_virt_u64(pt_phys) as *mut [u64; 512]);
+    pt[pt_idx] = phys | page_flags;
+
+    core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+
+    Ok(())
+}
+
 /// Map a 2MB large page into user address space
 ///
 /// Both virtual and physical addresses must be 2MB-aligned.
