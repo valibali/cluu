@@ -486,6 +486,32 @@ struct ReadRingSession {
 /// Default quota for per-container ephemeral MemFs (4 MiB).
 const DEFAULT_MEMFS_QUOTA: usize = 4 * 1024 * 1024;
 
+/// Single-path mutation kind: discriminator for handle_single_path_mutation.
+#[derive(Clone, Copy)]
+enum SinglePathOp {
+    Unlink,
+    Mkdir { mode: usize },
+    Rmdir,
+}
+
+impl SinglePathOp {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Unlink => "unlink",
+            Self::Mkdir { .. } => "mkdir",
+            Self::Rmdir => "rmdir",
+        }
+    }
+
+    fn reply_label(&self) -> u32 {
+        match self {
+            Self::Unlink => VFS_UNLINK,
+            Self::Mkdir { .. } => VFS_MKDIR,
+            Self::Rmdir => VFS_RMDIR,
+        }
+    }
+}
+
 struct VfsServer {
     endpoint: usize,
     space_token: usize,
@@ -856,8 +882,19 @@ impl VfsServer {
             }
         }
 
-        // Invalidate the file cache after deletions
-        self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
+        self.invalidate_cache_after_mutation();
+    }
+
+    /// Invalidate the file cache after a path-mutating operation (unlink,
+    /// mkdir, rmdir, rename, recursive_delete).
+    ///
+    /// FIXME(MAP_SHARE_PHYS): currently a no-op. Resetting CacheRegion
+    /// bookkeeping while sharer processes (e.g. console loaded via
+    /// MAP_SHARE_PHYS at boot) still hold PTEs into cache phys frames lets a
+    /// later cache_fill overwrite live text/.rodata of the sharers, causing
+    /// wild-jump faults. Revisit when refcount-aware invalidation lands.
+    fn invalidate_cache_after_mutation(&mut self) {
+        let _ = self;
     }
 
     /// Check a path against the client's VFS view, rewriting if needed.
@@ -1387,51 +1424,13 @@ impl VfsServer {
         reply_token: usize,
         caller_client: Option<usize>,
     ) -> Result<()> {
-        let mut reply_msg = Message::new(VFS_UNLINK, [0; 6], 1);
-        let client_id = match self.resolve_client_id("unlink", caller_client, msg.words[1]) {
-            Ok(id) => id,
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-            }
-        };
-        let path = match core::str::from_utf8(payload) {
-            Ok(p) => p,
-            Err(_) => {
-                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-            }
-        };
-        // View check (writable — unlink is a mutation).
-        let (real_path, target) = match self.view_check_path_writable_with_target(client_id, path) {
-            Ok(pt) => pt,
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-            }
-        };
-        if let view::MountTarget::MemFs { container_id } = target {
-            match self.get_container_memfs(container_id).and_then(|b| {
-                b.borrow_mut().unlink(&real_path)
-            }) {
-                Ok(()) => reply_msg.words[0] = 0,
-                Err(err) => reply_msg.words[0] = err.to_errno() as usize,
-            }
-            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-        }
-        if let Err(err) = self.ensure_mutation_allowed(client_id, path) {
-            reply_msg.words[0] = err.to_errno() as usize;
-            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-        }
-        match self.mounts.unlink(&real_path) {
-            Ok(()) => {
-                reply_msg.words[0] = 0;
-                self.clear_owner_path(path);
-                self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
-            }
-            Err(err) => reply_msg.words[0] = err.to_errno() as usize,
-        }
-        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+        self.handle_single_path_mutation(
+            msg,
+            payload,
+            reply_token,
+            caller_client,
+            SinglePathOp::Unlink,
+        )
     }
 
     fn handle_mkdir(
@@ -1441,52 +1440,14 @@ impl VfsServer {
         reply_token: usize,
         caller_client: Option<usize>,
     ) -> Result<()> {
-        let mut reply_msg = Message::new(VFS_MKDIR, [0; 6], 1);
-        let client_id = match self.resolve_client_id("mkdir", caller_client, msg.words[1]) {
-            Ok(id) => id,
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-            }
-        };
-        let path = match core::str::from_utf8(payload) {
-            Ok(p) => p,
-            Err(_) => {
-                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-            }
-        };
-        // View check (writable — mkdir is a mutation).
-        let (real_path, target) = match self.view_check_path_writable_with_target(client_id, path) {
-            Ok(pt) => pt,
-            Err(err) => {
-                reply_msg.words[0] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-            }
-        };
-        if let view::MountTarget::MemFs { container_id } = target {
-            match self.get_container_memfs(container_id).and_then(|b| {
-                b.borrow_mut().mkdir(&real_path)
-            }) {
-                Ok(()) => reply_msg.words[0] = 0,
-                Err(err) => reply_msg.words[0] = err.to_errno() as usize,
-            }
-            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-        }
-        if let Err(err) = self.ensure_create_allowed(client_id, path) {
-            reply_msg.words[0] = err.to_errno() as usize;
-            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-        }
         let mode = msg.words[2];
-        match self.mounts.mkdir(&real_path, mode) {
-            Ok(()) => {
-                reply_msg.words[0] = 0;
-                self.set_owner(path, client_id);
-                self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
-            }
-            Err(err) => reply_msg.words[0] = err.to_errno() as usize,
-        }
-        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+        self.handle_single_path_mutation(
+            msg,
+            payload,
+            reply_token,
+            caller_client,
+            SinglePathOp::Mkdir { mode },
+        )
     }
 
     fn handle_rmdir(
@@ -1496,8 +1457,28 @@ impl VfsServer {
         reply_token: usize,
         caller_client: Option<usize>,
     ) -> Result<()> {
-        let mut reply_msg = Message::new(VFS_RMDIR, [0; 6], 1);
-        let client_id = match self.resolve_client_id("rmdir", caller_client, msg.words[1]) {
+        self.handle_single_path_mutation(
+            msg,
+            payload,
+            reply_token,
+            caller_client,
+            SinglePathOp::Rmdir,
+        )
+    }
+
+    /// Shared body for unlink/mkdir/rmdir: parse path, view-check, dispatch to
+    /// MemFs or backing mount, run permission gate, perform the op, update
+    /// owner bookkeeping, invalidate cache, reply.
+    fn handle_single_path_mutation(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+        op: SinglePathOp,
+    ) -> Result<()> {
+        let mut reply_msg = Message::new(op.reply_label(), [0; 6], 1);
+        let client_id = match self.resolve_client_id(op.name(), caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
@@ -1511,7 +1492,6 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
-        // View check (writable — rmdir is a mutation).
         let (real_path, target) = match self.view_check_path_writable_with_target(client_id, path) {
             Ok(pt) => pt,
             Err(err) => {
@@ -1520,23 +1500,44 @@ impl VfsServer {
             }
         };
         if let view::MountTarget::MemFs { container_id } = target {
-            match self.get_container_memfs(container_id).and_then(|b| {
-                b.borrow_mut().rmdir(&real_path)
-            }) {
+            let memfs_result = self.get_container_memfs(container_id).and_then(|b| {
+                let mut backend = b.borrow_mut();
+                match op {
+                    SinglePathOp::Unlink => backend.unlink(&real_path),
+                    SinglePathOp::Mkdir { .. } => backend.mkdir(&real_path),
+                    SinglePathOp::Rmdir => backend.rmdir(&real_path),
+                }
+            });
+            match memfs_result {
                 Ok(()) => reply_msg.words[0] = 0,
                 Err(err) => reply_msg.words[0] = err.to_errno() as usize,
             }
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
-        if let Err(err) = self.ensure_mutation_allowed(client_id, path) {
+        let perm = match op {
+            SinglePathOp::Unlink | SinglePathOp::Rmdir => {
+                self.ensure_mutation_allowed(client_id, path)
+            }
+            SinglePathOp::Mkdir { .. } => self.ensure_create_allowed(client_id, path),
+        };
+        if let Err(err) = perm {
             reply_msg.words[0] = err.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         }
-        match self.mounts.rmdir(&real_path) {
+        let mount_result = match op {
+            SinglePathOp::Unlink => self.mounts.unlink(&real_path),
+            SinglePathOp::Mkdir { mode } => self.mounts.mkdir(&real_path, mode),
+            SinglePathOp::Rmdir => self.mounts.rmdir(&real_path),
+        };
+        match mount_result {
             Ok(()) => {
                 reply_msg.words[0] = 0;
-                self.clear_owner_subtree(path);
-                self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
+                match op {
+                    SinglePathOp::Unlink => self.clear_owner_path(path),
+                    SinglePathOp::Mkdir { .. } => self.set_owner(path, client_id),
+                    SinglePathOp::Rmdir => self.clear_owner_subtree(path),
+                }
+                self.invalidate_cache_after_mutation();
             }
             Err(err) => reply_msg.words[0] = err.to_errno() as usize,
         }
@@ -1620,7 +1621,7 @@ impl VfsServer {
             Ok(()) => {
                 reply_msg.words[0] = 0;
                 self.move_owner_subtree(old_path, new_path);
-                self.cache = FileCache::new(CACHE_BUF_BASE, CACHE_BUF_SIZE);
+                self.invalidate_cache_after_mutation();
             }
             Err(err) => reply_msg.words[0] = err.to_errno() as usize,
         }
@@ -3254,13 +3255,15 @@ impl VfsServer {
         }
 
         // Handle non-page-aligned segments (e.g., .bss after .tdata/.tbss).
-        // MAP_SHARE_PHYS disabled: shared frames don't track all consumers, so
-        // when a frame's mapping in *any* space is dropped the underlying frame
-        // can be returned to PMM and reused, silently corrupting other spaces
-        // that still map it. Reverting to fresh-frame copy on every spawn
-        // until the refcount path covers MAP_SHARE_PHYS too. Symptom this
-        // avoids: console wild-jump to 0x437720 after ls/edit/:w/:q/ls.
-        let final_flags = segment.page_flags;
+        // MAP_SHARE_PHYS re-enabled for the aliasing root-cause hunt. Audit
+        // asserts in pmm::list_push/list_remove will trip on the first
+        // double-alloc or double-free.
+        let writable = (segment.page_flags & 0x02) != 0;
+        let final_flags = if writable {
+            segment.page_flags
+        } else {
+            segment.page_flags | libcluu::syscall::MAP_SHARE_PHYS
+        };
 
         let page_offset = vaddr & (PAGE_SIZE - 1);
         if page_offset != 0 {
