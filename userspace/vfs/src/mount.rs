@@ -286,7 +286,7 @@ impl MountBackend for RemoteBackend {
             call_with_reply_buf(self.endpoint, &req, rel_path.as_bytes(), &mut reply_buf)?;
         let status = reply.words[0] as isize;
         if status < 0 {
-            return Err(Error::NotFound);
+            return Err(Error::from_errno(status));
         }
         let data_start = core::mem::size_of::<Message>();
         let bytes = &reply_buf[data_start..data_start + payload_len];
