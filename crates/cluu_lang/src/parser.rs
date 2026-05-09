@@ -93,8 +93,23 @@ fn build_stmt_list(pair: Pair<Rule>) -> Vec<Stmt> {
                 next_connector = crate::ast::Connector::Always;
             }
             Rule::logical_sep => {
-                // Inspect children for and_if / or_if; otherwise stays Always.
-                next_connector = sep_connector(inner);
+                // A separator may carry: connector (and_if/or_if), or a bg_amp
+                // marker that flags the previous pipeline as background.
+                // Multiple separators may chain (e.g. `cmd & ; jobs`); each is
+                // visited independently. Connector OR-ing rule: a non-Always
+                // connector wins over Always; later non-Always connectors
+                // overwrite earlier ones.
+                let info = inspect_sep(inner);
+                if info.bg {
+                    if let Some(last) = stmts.last_mut() {
+                        match last {
+                            Stmt::Pipeline(p) => p.bg = true,
+                        }
+                    }
+                }
+                if !matches!(info.connector, crate::ast::Connector::Always) {
+                    next_connector = info.connector;
+                }
             }
             _ => {}
         }
@@ -102,15 +117,25 @@ fn build_stmt_list(pair: Pair<Rule>) -> Vec<Stmt> {
     stmts
 }
 
-fn sep_connector(pair: Pair<Rule>) -> crate::ast::Connector {
+struct SepInfo {
+    connector: crate::ast::Connector,
+    bg: bool,
+}
+
+fn inspect_sep(pair: Pair<Rule>) -> SepInfo {
+    let mut info = SepInfo {
+        connector: crate::ast::Connector::Always,
+        bg: false,
+    };
     for child in pair.into_inner() {
         match child.as_rule() {
-            Rule::and_if => return crate::ast::Connector::AndIf,
-            Rule::or_if  => return crate::ast::Connector::OrIf,
+            Rule::and_if => info.connector = crate::ast::Connector::AndIf,
+            Rule::or_if => info.connector = crate::ast::Connector::OrIf,
+            Rule::bg_amp => info.bg = true,
             _ => {}
         }
     }
-    crate::ast::Connector::Always
+    info
 }
 
 fn set_connector(stmt: &mut Stmt, c: crate::ast::Connector) {
@@ -131,17 +156,14 @@ fn build_stmt(pair: Pair<Rule>) -> Stmt {
 
 fn build_pipeline(pair: Pair<Rule>) -> Pipeline {
     let mut commands = Vec::new();
-    let mut bg = false;
     for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::command => commands.push(build_command(inner)),
-            Rule::bg_amp => bg = true,
-            _ => {}
+        if inner.as_rule() == Rule::command {
+            commands.push(build_command(inner));
         }
     }
     Pipeline {
         commands,
-        bg,
+        bg: false,
         prev_connector: crate::ast::Connector::Always,
     }
 }
@@ -324,5 +346,92 @@ fn strip_quotes(raw: &str) -> String {
         raw.get(1..raw.len() - 1).unwrap_or("").to_string()
     } else {
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Connector;
+
+    fn parse(input: &str) -> Vec<Stmt> {
+        parse_program(input).expect("parse").stmts
+    }
+
+    fn pipeline(stmt: &Stmt) -> &Pipeline {
+        match stmt {
+            Stmt::Pipeline(p) => p,
+        }
+    }
+
+    #[test]
+    fn fg_single_stmt() {
+        let stmts = parse("sleep 30");
+        assert_eq!(stmts.len(), 1);
+        assert!(!pipeline(&stmts[0]).bg);
+    }
+
+    #[test]
+    fn bg_single_stmt() {
+        let stmts = parse("sleep 30 &");
+        assert_eq!(stmts.len(), 1);
+        assert!(pipeline(&stmts[0]).bg);
+    }
+
+    #[test]
+    fn bg_then_fg_no_separator() {
+        // The TODO #1 fix: `&` acts as both pipeline terminator and statement separator.
+        let stmts = parse("sleep 30 & jobs");
+        assert_eq!(stmts.len(), 2);
+        assert!(pipeline(&stmts[0]).bg);
+        assert!(!pipeline(&stmts[1]).bg);
+    }
+
+    #[test]
+    fn bg_then_fg_legacy_amp_semi() {
+        // Backwards compat: the historical workaround `& ;` keeps working.
+        let stmts = parse("sleep 30 & ; jobs");
+        assert_eq!(stmts.len(), 2);
+        assert!(pipeline(&stmts[0]).bg);
+        assert!(!pipeline(&stmts[1]).bg);
+    }
+
+    #[test]
+    fn and_if_not_eaten_as_amp() {
+        let stmts = parse("true && echo hi");
+        assert_eq!(stmts.len(), 2);
+        assert!(!pipeline(&stmts[0]).bg);
+        assert!(matches!(pipeline(&stmts[1]).prev_connector, Connector::AndIf));
+    }
+
+    #[test]
+    fn or_if_unaffected() {
+        let stmts = parse("false || echo hi");
+        assert_eq!(stmts.len(), 2);
+        assert!(matches!(pipeline(&stmts[1]).prev_connector, Connector::OrIf));
+    }
+
+    #[test]
+    fn multiple_bg_stmts_chained() {
+        let stmts = parse("sleep 5 & sleep 6 & jobs");
+        assert_eq!(stmts.len(), 3);
+        assert!(pipeline(&stmts[0]).bg);
+        assert!(pipeline(&stmts[1]).bg);
+        assert!(!pipeline(&stmts[2]).bg);
+    }
+
+    #[test]
+    fn bg_at_eof() {
+        let stmts = parse("sleep 5 &\n");
+        assert_eq!(stmts.len(), 1);
+        assert!(pipeline(&stmts[0]).bg);
+    }
+
+    #[test]
+    fn semicolon_between_stmts_unchanged() {
+        let stmts = parse("echo a ; echo b");
+        assert_eq!(stmts.len(), 2);
+        assert!(!pipeline(&stmts[0]).bg);
+        assert!(!pipeline(&stmts[1]).bg);
     }
 }

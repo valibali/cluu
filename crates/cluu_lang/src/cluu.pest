@@ -5,23 +5,33 @@ ws0 = _{ (WS | LINE_COMMENT)* }
 
 program = { SOI ~ ws0 ~ stmt_list? ~ ws0 ~ EOI }
 subprogram = { stmt_list? }
-stmt_list = { stmt ~ (logical_sep ~ stmt)* ~ trailing_sep? }
+// `&` is both a pipeline terminator (marks the preceding pipeline as bg) AND
+// a statement separator — `sleep 30 & jobs` parses the same as
+// `sleep 30 & ; jobs`. Achieved by lifting `&` out of `pipeline` and into
+// `logical_sep`, and allowing multiple consecutive separators (so the legacy
+// `& ;` form keeps working). When `bg_amp` appears in a separator chain the
+// parser flags the *previous* pipeline as bg.
+stmt_list = { stmt ~ (logical_sep+ ~ stmt)* ~ trailing_sep? }
 // Connectors between statements. and_if / or_if are short-circuit logical
 // operators evaluated by the executor; ; \n & are unconditional separators.
-logical_sep = { ws0 ~ (and_if | or_if | NL+ | ";" | bg_sep) ~ ws0 }
-trailing_sep = _{ logical_sep }
+// `&&` must be tried before `&` so `cmd && next` is not eaten as `cmd & & next`.
+logical_sep = { ws0 ~ (and_if | or_if | NL+ | ";" | bg_amp) ~ ws0 }
+trailing_sep = _{ logical_sep+ }
 and_if = { "&&" }
 or_if  = { "||" }
-bg_sep = _{ bg_amp }
 
 stmt = _{ pipeline }
-// `|` for pipe must NOT match the start of `||`. bg_amp matches a single `&`
-// not followed by another `&` (since `&&` is the and_if connector).
-pipeline = { command ~ (ws0 ~ pipe_op ~ ws0 ~ command)* ~ bg_amp? }
+// `|` for pipe must NOT match the start of `||`.
+pipeline = { command ~ (ws0 ~ pipe_op ~ ws0 ~ command)* }
 pipe_op = _{ "|" ~ !("|") }
-bg_amp = { ws0 ~ "&" ~ !("&") }
+bg_amp = { "&" ~ !("&") }
 
-command = { prefix_assign* ~ cmd_item? ~ (ws0 ~ cmd_item)* }
+// A command must have at least one part — either a prefix assignment or a
+// cmd_item. Allowing the empty match used to be harmless because `pipeline`
+// always consumed any trailing `&`, but now `&` is a between-statement
+// separator so a trailing `&` would otherwise be followed by an empty
+// pipeline ghost-stmt.
+command = { (prefix_assign ~ (ws0 ~ prefix_assign)* ~ (ws0 ~ cmd_item ~ (ws0 ~ cmd_item)*)?) | (cmd_item ~ (ws0 ~ cmd_item)*) }
 prefix_assign = { ident ~ "=" ~ word }
 cmd_item = { redir | cmd_elem }
 cmd_elem = { word | subshell }
