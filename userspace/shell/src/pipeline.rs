@@ -84,8 +84,15 @@ impl PipelineExecutor {
             let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shell: empty command\n");
             return Ok(2);
         }
+        let vfs_client = libcluu::registry::subscribe_output("vfs", "main")
+            .ok()
+            .and_then(|ep| libcluu::fs::client::VfsClient::new_from_registry(ep).ok());
         let name = argv[0].as_str();
-        let image_name = name.strip_prefix("/bin/").unwrap_or(name);
+        let image_name_owned = match vfs_client.as_ref() {
+            Some(vfs) => crate::path_lookup::resolve_to_image_name(name, vfs),
+            None => alloc::string::String::from(name),
+        };
+        let image_name = image_name_owned.as_str();
         let cmd_line = argv.join(" ");
 
         // Dispatch to builtin if registered. Three cases:
@@ -339,6 +346,13 @@ impl PipelineExecutor {
             let _ = tty_set_fg(context.tty_stdout, context.session_id, pipeline_pgid);
         }
 
+        // Build a VfsClient once for path → image-name resolution.
+        // Some pipelines may run before VFS is up; fall back to passing the
+        // raw name through (procmgr will reject invalid names).
+        let vfs_client = libcluu::registry::subscribe_output("vfs", "main")
+            .ok()
+            .and_then(|ep| libcluu::fs::client::VfsClient::new_from_registry(ep).ok());
+
         // Classify each stage as builtin or container. Builtin stages run
         // in-process; container stages are spawned via procmgr. We must
         // spawn container stages FIRST so they block on ipc_recv before we
@@ -348,7 +362,11 @@ impl PipelineExecutor {
         let mut is_builtin: Vec<bool> = Vec::with_capacity(n);
         for argv in &argvs {
             let name = argv[0].as_str();
-            let image_name = name.strip_prefix("/bin/").unwrap_or(name);
+            let image_name_owned = match vfs_client.as_ref() {
+                Some(vfs) => crate::path_lookup::resolve_to_image_name(name, vfs),
+                None => alloc::string::String::from(name),
+            };
+            let image_name = image_name_owned.as_str();
             is_builtin.push(registry.find(image_name).is_some());
         }
 
@@ -365,7 +383,11 @@ impl PipelineExecutor {
             }
 
             let name = argv[0].as_str();
-            let image_name = name.strip_prefix("/bin/").unwrap_or(name);
+            let image_name_owned = match vfs_client.as_ref() {
+                Some(vfs) => crate::path_lookup::resolve_to_image_name(name, vfs),
+                None => alloc::string::String::from(name),
+            };
+            let image_name = image_name_owned.as_str();
             let arg_refs: Vec<&str> = argv.iter().skip(1).map(|s| s.as_str()).collect();
 
             // Check for conflicts: a stage cannot have both a pipe-wired fd
@@ -471,7 +493,11 @@ impl PipelineExecutor {
                 continue;
             }
             let name = argv[0].as_str();
-            let image_name = name.strip_prefix("/bin/").unwrap_or(name);
+            let image_name_owned = match vfs_client.as_ref() {
+                Some(vfs) => crate::path_lookup::resolve_to_image_name(name, vfs),
+                None => alloc::string::String::from(name),
+            };
+            let image_name = image_name_owned.as_str();
             let builtin = match registry.find(image_name) {
                 Some(b) => b,
                 None => continue, // classified as builtin but not found; skip
