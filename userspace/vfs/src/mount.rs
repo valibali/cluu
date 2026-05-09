@@ -733,6 +733,28 @@ impl MountTable {
         self.resolve(path).ok().map(|(m, _)| m.backend.as_ref())
     }
 
+    /// Split `path` into (mount-prefix, rel-within-mount). Returns
+    /// `("/", path)` when no mount matches. Used by callers that need to
+    /// recombine a backend-relative result back into an absolute path.
+    pub fn split_path<'b>(&self, path: &'b str) -> (&'static str, &'b str) {
+        let mut best: (&'static str, &'b str) = ("/", path.trim_start_matches('/'));
+        for mount in &self.mounts {
+            if mount.prefix == "/" {
+                continue;
+            }
+            if path == mount.prefix {
+                if mount.prefix.len() > best.0.len() {
+                    best = (mount.prefix, "");
+                }
+            } else if let Some(rest) = path.strip_prefix(mount.prefix) {
+                if rest.starts_with('/') && mount.prefix.len() > best.0.len() {
+                    best = (mount.prefix, rest.trim_start_matches('/'));
+                }
+            }
+        }
+        best
+    }
+
     /// Resolve path to mount and relative path.
     fn resolve<'a>(&'a self, path: &'a str) -> Result<(&'a Mount, &'a str)> {
         let mut best: Option<(&'a Mount, &'a str)> = None;

@@ -16,8 +16,8 @@ use core::mem::size_of;
 use libcluu::elf::{ElfFile, LoadableSegment};
 use libcluu::fs::protocol::{
     VfsOp, VFS_CLOSE, VFS_FSTAT, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR,
-    VFS_READ_GRANT, VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK,
-    VFS_WRITE,
+    VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT,
+    VFS_UNLINK, VFS_WRITE,
 };
 use libcluu::ipc::{self, extract_reply_id, parse_message, reply_with_payload, SharedRing, SharedRingHeader};
 use libcluu::types::Message;
@@ -652,6 +652,9 @@ impl VfsServer {
             VfsOp::Rmdir => self.handle_rmdir(msg, payload, reply_token, authenticated_client),
             VfsOp::Rename => self.handle_rename(msg, payload, reply_token, authenticated_client),
             VfsOp::Link => self.handle_link(msg, payload, reply_token, authenticated_client),
+            VfsOp::Realpath => {
+                self.handle_realpath(msg, payload, reply_token, authenticated_client)
+            }
             VfsOp::RingSetup => {
                 self.handle_ring_setup(msg, payload, reply_token, authenticated_client)
             }
@@ -1403,6 +1406,68 @@ impl VfsServer {
                 ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
             }
         }
+    }
+
+    fn handle_realpath(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
+        let mut reply_msg = Message::new(VFS_REALPATH, [0; 6], 2);
+        let client_id = match self.resolve_client_id("realpath", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let path = match core::str::from_utf8(payload) {
+            Ok(p) => p,
+            Err(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let real_path = match self.view_check_path(client_id, path) {
+            Ok(rp) => rp,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let canon = match self.mounts.get_backend(&real_path) {
+            Some(backend) => {
+                let (prefix, rel) = self.mounts.split_path(&real_path);
+                match backend.realpath(rel) {
+                    Ok(rel_canon) => {
+                        if rel_canon.starts_with('/') {
+                            // Backend returned a path absolute within its
+                            // own mount; re-prefix into a globally absolute
+                            // path.
+                            let mut out = alloc::string::String::from(prefix);
+                            if out.ends_with('/') {
+                                out.pop();
+                            }
+                            out.push_str(&rel_canon);
+                            out
+                        } else {
+                            real_path.clone()
+                        }
+                    }
+                    Err(err) => {
+                        reply_msg.words[0] = err.to_errno() as usize;
+                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                }
+            }
+            None => real_path.clone(),
+        };
+        let bytes = canon.into_bytes();
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = bytes.len();
+        reply_with_payload(reply_token, &reply_msg, &bytes)
     }
 
     fn handle_fstat(
