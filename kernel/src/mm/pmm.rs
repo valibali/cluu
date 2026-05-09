@@ -135,6 +135,27 @@ impl BuddyAllocator {
 
     /// Push a block onto the front of an order's free list
     fn list_push(&mut self, frame: usize, order: usize) {
+        // AUDIT: every frame in the block must currently be marked USED
+        // (bitmap bit clear). If any bit is already set (free), the block is
+        // being pushed twice — a double-free. Only check post-buddy_ready,
+        // since phase-2 init paths (`add_region_to_buddy`) clear bitmap bits
+        // before calling list_push.
+        if self.buddy_ready {
+            let block_size = 1 << order;
+            for f in frame..frame + block_size {
+                if self.bitmap_is_free(f) {
+                    klibcluu::error("PMM AUDIT: list_push of already-free frame");
+                    klibcluu::log_hex(
+                        klibcluu::LogLevel::Error,
+                        "  phys=",
+                        (f as u64) * (PAGE_SIZE as u64),
+                    );
+                    klibcluu::log_dec(klibcluu::LogLevel::Error, "  order=", order as u64);
+                    panic!("PMM audit: double-free / list_push of free frame");
+                }
+            }
+        }
+
         let old_head = self.free_lists[order].head;
 
         // Write header into the free page
@@ -188,6 +209,27 @@ impl BuddyAllocator {
 
         // Mark frames as used in bitmap
         let block_size = 1 << order;
+
+        // AUDIT: every frame in the block must currently be marked FREE
+        // (bitmap bit set). If any bit is already clear (used), the block was
+        // somehow on the free list while also tracked as allocated — the
+        // canonical PMM corruption signature for the MAP_SHARE_PHYS aliasing
+        // bug.
+        if self.buddy_ready {
+            for f in frame..frame + block_size {
+                if !self.bitmap_is_free(f) {
+                    klibcluu::error("PMM AUDIT: list_remove of non-free frame");
+                    klibcluu::log_hex(
+                        klibcluu::LogLevel::Error,
+                        "  phys=",
+                        (f as u64) * (PAGE_SIZE as u64),
+                    );
+                    klibcluu::log_dec(klibcluu::LogLevel::Error, "  order=", order as u64);
+                    panic!("PMM audit: list_remove of non-free frame");
+                }
+            }
+        }
+
         self.bitmap_set_range_used(frame, block_size);
     }
 
