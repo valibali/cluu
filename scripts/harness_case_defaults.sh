@@ -550,9 +550,13 @@ harness_derive_marker_defaults() {
                 ;;
             l2_which_basic)
                 TEST_COMMAND=""
-                # which: find ls in PATH.
-                SHELL_AUTOSTART_CMD_DEFAULT="which ls"
-                EXPECTED_CONTAINS=("/bin/ls")
+                # which: find self in PATH. Each container's view maps
+                # /bin → /var/images/<self>/bin, so `which <other>` won't
+                # find binaries that don't ship with the which container.
+                # `which which` always works because /bin/which is the
+                # binary the container is running from.
+                SHELL_AUTOSTART_CMD_DEFAULT="which which"
+                EXPECTED_CONTAINS=("/bin/which")
                 ;;
             l2_printf_basic)
                 TEST_COMMAND=""

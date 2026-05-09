@@ -818,14 +818,14 @@ case "$MARKER_MODE" in
         required_markers=(
             "TSC calibrated"
             "[USER] shell: ready"
-            "ext2write: PASS path=/bin/hello"
+            "ext2write: PASS path=/home/root/ext2io_scratch"
         )
         ;;
     l2_ext2append)
         required_markers=(
             "TSC calibrated"
             "[USER] shell: ready"
-            "ext2append: PASS path=/bin/hello"
+            "ext2append: PASS path=/home/root/ext2io_scratch"
         )
         ;;
     l2_ext2mutate)

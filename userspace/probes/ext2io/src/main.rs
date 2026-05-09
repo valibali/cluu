@@ -1,8 +1,8 @@
 //! ext2io probe: ext2 filesystem I/O smoke tests.
 //!
 //! Subcmds (argv[1]):
-//!   write   — write one byte to a file (default: /bin/hello)
-//!   append  — append one byte past EOF (default: /bin/hello)
+//!   write   — write one byte to a file (default: /home/root/ext2io_scratch)
+//!   append  — append one byte past EOF (default: /home/root/ext2io_scratch)
 //!   mutate  — mkdir + rename + rmdir
 //!   unlink  — create + unlink + verify
 //!
@@ -58,12 +58,13 @@ fn get_vfs(tag: &str) -> Option<VfsClient> {
 }
 
 fn run_write(args: &[alloc::string::String]) -> i32 {
-    let path = args.get(2).map_or("/bin/hello", |s| s.as_str());
+    let path = args.get(2).map_or("/home/root/ext2io_scratch", |s| s.as_str());
     let Some(vfs) = get_vfs("ext2write") else {
         return 1;
     };
 
-    let file = match vfs.open(path) {
+    // O_RDWR | O_CREAT — scratch path may not exist on a fresh disk.
+    let file = match vfs.open_with(path, 2 | 0o1000, 0o644) {
         Ok(file) => file,
         Err(err) => {
             let line = format!("ext2write: FAIL open {} {:?}", path, err);
@@ -94,12 +95,13 @@ fn run_write(args: &[alloc::string::String]) -> i32 {
 }
 
 fn run_append(args: &[alloc::string::String]) -> i32 {
-    let path = args.get(2).map_or("/bin/hello", |s| s.as_str());
+    let path = args.get(2).map_or("/home/root/ext2io_scratch", |s| s.as_str());
     let Some(vfs) = get_vfs("ext2append") else {
         return 1;
     };
 
-    let file = match vfs.open(path) {
+    // O_RDWR | O_CREAT — scratch path may not exist on a fresh disk.
+    let file = match vfs.open_with(path, 2 | 0o1000, 0o644) {
         Ok(file) => file,
         Err(err) => {
             let line = format!("ext2append: FAIL open {} {:?}", path, err);
