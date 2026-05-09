@@ -188,6 +188,103 @@ impl<'a> Ext2Fs<'a> {
         Ok(current_inode)
     }
 
+    /// Maximum symlink hops permitted before returning `Error::TooManyLinks`.
+    /// Linux uses 40; 32 is plenty for our flat layouts.
+    pub const MAX_SYMLINK_HOPS: usize = 32;
+
+    /// Read the target of a symbolic-link inode. Handles both the fast
+    /// (inline, ≤60 bytes) and indirect (data block) forms.
+    pub fn read_symlink_target(&self, inode: &Inode) -> Result<Vec<u8>> {
+        if !inode.is_symlink() {
+            return Err(Error::InvalidArgument);
+        }
+        let size = inode.size() as usize;
+        if size == 0 || size > 4096 {
+            // 4096 cap: a single-block read is enough for any sane symlink.
+            return Err(Error::InvalidArgument);
+        }
+        // Fast symlinks: inode.blocks reports 0 sectors and target ≤ 60 bytes.
+        if inode.blocks == 0 && size <= 60 {
+            let raw = inode.inline_block_bytes();
+            return Ok(raw[..size].to_vec());
+        }
+        // Indirect symlinks: target lives in direct_blocks[0].
+        let phys = inode.direct_blocks[0];
+        if phys == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        let mut buf = alloc::vec![0u8; size];
+        let phys_byte_offset = (phys as usize) * self.block_size;
+        self.block.read_bytes(phys_byte_offset as u64, &mut buf)?;
+        Ok(buf)
+    }
+
+    /// Walk an absolute path following symlinks at every directory hop,
+    /// returning the canonical absolute path AND the inode it resolves to.
+    /// `path` must start with `/`. Components `.` and `..` are normalised.
+    pub fn realpath_canonical(&self, path: &str) -> Result<(String, u32)> {
+        if !path.starts_with('/') {
+            return Err(Error::InvalidArgument);
+        }
+        // Components left to consume, in reverse order (so `pop` walks forward).
+        let mut remaining: Vec<String> = path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|c| !c.is_empty() && *c != ".")
+            .rev()
+            .map(String::from)
+            .collect();
+        let mut canon: Vec<String> = Vec::new();
+        let mut current_inode: u32 = 2; // root
+        let mut hops: usize = 0;
+
+        while let Some(component) = remaining.pop() {
+            if component == ".." {
+                canon.pop();
+                // Re-resolve current_inode from root following canon.
+                current_inode = 2;
+                for part in &canon {
+                    let dir = self.read_inode(current_inode)?;
+                    current_inode = self.lookup_in_dir(&dir, part)?;
+                }
+                continue;
+            }
+            let dir_inode = self.read_inode(current_inode)?;
+            let child_inode_num = self.lookup_in_dir(&dir_inode, &component)?;
+            let child = self.read_inode(child_inode_num)?;
+            if child.is_symlink() {
+                hops += 1;
+                if hops > Self::MAX_SYMLINK_HOPS {
+                    return Err(Error::TooManyLinks);
+                }
+                let target_bytes = self.read_symlink_target(&child)?;
+                let target_str = core::str::from_utf8(&target_bytes)
+                    .map_err(|_| Error::InvalidArgument)?;
+                if target_str.starts_with('/') {
+                    canon.clear();
+                    current_inode = 2;
+                }
+                // Push target components in reverse so they pop in forward order.
+                let parts: Vec<String> = target_str
+                    .trim_start_matches('/')
+                    .split('/')
+                    .filter(|c| !c.is_empty() && *c != ".")
+                    .map(String::from)
+                    .collect();
+                for part in parts.into_iter().rev() {
+                    remaining.push(part);
+                }
+                continue;
+            }
+            canon.push(component);
+            current_inode = child_inode_num;
+        }
+
+        let mut out = String::from("/");
+        out.push_str(&canon.join("/"));
+        Ok((out, current_inode))
+    }
+
     /// Read file data into a buffer.
     ///
     /// Sequential-read fast path: walks the file's logical block numbers and
@@ -1114,6 +1211,18 @@ impl<'a> Filesystem for Ext2Fs<'a> {
     fn read(&self, inode: u64, offset: u64, buf: &mut [u8]) -> Result<usize> {
         let ino = self.read_inode(inode as u32)?;
         self.read_file(&ino, offset as usize, buf)
+    }
+
+    fn resolve_path(&self, path: &str) -> Result<u64> {
+        let p = if path.starts_with('/') {
+            String::from(path)
+        } else {
+            let mut s = String::from("/");
+            s.push_str(path);
+            s
+        };
+        let (_canon, inode) = self.realpath_canonical(&p)?;
+        Ok(inode as u64)
     }
 }
 

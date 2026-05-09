@@ -41,6 +41,8 @@ pub enum Error {
     Busy = -14,
     /// Invalid parameter (-15)
     InvalidParameter = -15,
+    /// Too many symbolic links (ELOOP, -40)
+    TooManyLinks = -40,
     /// Unknown error (not in kernel enum)
     Unknown = -999,
 }
@@ -64,6 +66,7 @@ impl Error {
             -13 => Error::NotImplemented,
             -14 => Error::Busy,
             -15 => Error::InvalidParameter,
+            -40 => Error::TooManyLinks,
             _ => Error::Unknown,
         }
     }
@@ -91,6 +94,7 @@ impl Error {
             Error::NotImplemented => "Not implemented",
             Error::Busy => "Busy",
             Error::InvalidParameter => "Invalid parameter",
+            Error::TooManyLinks => "Too many symbolic links",
             Error::Unknown => "Unknown error",
         }
     }
