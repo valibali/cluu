@@ -468,7 +468,17 @@ fn handle_fs_request(
         }
 
         FS_REALPATH => {
-            let path = core::str::from_utf8(payload).unwrap_or("");
+            let path_raw = core::str::from_utf8(payload).unwrap_or("");
+            // VFS RemoteBackend strips the mount prefix and leading slash before
+            // forwarding (e.g. "/bin/ls" → "bin/ls"); realpath_canonical wants an
+            // absolute path. Re-prepend "/" when needed.
+            let owned;
+            let path = if path_raw.starts_with('/') {
+                path_raw
+            } else {
+                owned = alloc::format!("/{}", path_raw);
+                owned.as_str()
+            };
             match fs.realpath_canonical(path) {
                 Ok((canon, _inode)) => {
                     let bytes = canon.into_bytes();
