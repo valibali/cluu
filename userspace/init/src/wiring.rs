@@ -476,9 +476,13 @@ fn fill_default_endpoints(token: usize, tokens: &mut [usize; 16]) -> Result<()> 
 /// For now, this provides basic thread control; elevated rights (THREAD_SUSPEND,
 /// DESTROY) are given to procmgr via its elevated token in TOKEN_EXTRA_1.
 fn derive_self_cap(token: usize) -> Result<usize> {
-    // Basic thread control for all processes
+    // Basic thread control + read for all processes. READ is required for
+    // global stat invokes that authenticate against any valid token bearing
+    // it (clock_now, clock_frequency, sched_get_overflow, pmm_get_stats).
+    // Without READ on TOKEN_SELF, /proc/{cpuinfo,meminfo,sched_overflow}
+    // and any time-based syscall via TOKEN_SELF return PermissionDenied.
     // TODO: Add THREAD_CONTROL right once kernel supports it for self-operations
-    let rights = Rights::CREATE | Rights::GRANT;
+    let rights = Rights::READ | Rights::CREATE | Rights::GRANT;
     token_derive(token, rights.bits() as usize, u64::MAX)
 }
 
