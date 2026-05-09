@@ -38,6 +38,7 @@ members = [
     "userspace/probes/escalateprobe",
     "userspace/probes/viewprobe",
     "userspace/probes/argvprobe",
+    "userspace/probes/console_blit_bench",
     "userspace/probes/jobchurn",
     "userspace/probes/jobmix",
     "userspace/probes/killdeny",
@@ -235,6 +236,9 @@ debug = 0
 [profile.dev.package."cluu-argvprobe"]
 debug = 0
 
+[profile.dev.package."cluu-console_blit_bench"]
+debug = 0
+
 [profile.dev.package."cluu-cp"]
 debug = 0
 
@@ -428,6 +432,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-argvprobe"]
+debug = 0
+
+[profile.release.package."cluu-console_blit_bench"]
 debug = 0
 
 [profile.release.package."cluu-cp"]

@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo build --manifest-path userspace/probes/console_blit_bench/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/console_blit_bench.elf /bin/console_blit_bench
+ENTRYPOINT /bin/console_blit_bench

@@ -199,6 +199,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-console_blit_bench"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-cp"
 version = "0.1.0"
 dependencies = [

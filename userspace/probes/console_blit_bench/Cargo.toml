@@ -1,0 +1,14 @@
+[package]
+name = "cluu-console_blit_bench"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU console/framebuffer blit microbenchmark"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu" }
+
+[[bin]]
+name = "console_blit_bench"
+path = "src/main.rs"
