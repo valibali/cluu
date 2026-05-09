@@ -48,6 +48,7 @@ const FS_RMDIR: u32 = 0x309;
 const FS_RENAME: u32 = 0x30A;
 const FS_CREATE: u32 = 0x30B;
 const FS_LINK: u32 = 0x30C;
+const FS_REALPATH: u32 = 0x30D;
 /// Zero-copy read into a caller-provided mapping (VFS grant buffer).
 const FS_READ_GRANT: u32 = 0x306;
 const IPC_MESSAGE_MAX: usize = 256;
@@ -463,6 +464,20 @@ fn handle_fs_request(
                     }
                 }
                 Err(_) => send_error_reply(reply_token, -3),
+            }
+        }
+
+        FS_REALPATH => {
+            let path = core::str::from_utf8(payload).unwrap_or("");
+            match fs.realpath_canonical(path) {
+                Ok((canon, _inode)) => {
+                    let bytes = canon.into_bytes();
+                    let reply_msg = Message::new(FS_REALPATH, [0, bytes.len(), 0, 0, 0, 0], 2);
+                    if let Some(token) = reply_token {
+                        let _ = reply_with_payload(token, &reply_msg, &bytes);
+                    }
+                }
+                Err(_) => send_error_reply(reply_token, -3), // NotFound
             }
         }
 
