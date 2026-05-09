@@ -3879,6 +3879,10 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
     println!("  Compiling {}...", source.display());
 
     let opt_flag = if profile == "dev" { "-O0" } else { "-O2" };
+    // Section flags + linker --gc-sections shrink C bins ~10x by dropping
+    // unreferenced newlib code (e.g. printf scaffolding pulled in for any
+    // <stdio.h> include). Always on — same flags work in dev and release.
+    let section_flags = ["-ffunction-sections", "-fdata-sections"];
 
     let compile_success = {
         // Try clang first
@@ -3889,8 +3893,9 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
             "-fno-stack-protector",
             "-nostdlib",
             opt_flag,
-            "-c",
         ]);
+        compile_cmd.args(section_flags);
+        compile_cmd.arg("-c");
 
         if have_newlib {
             compile_cmd.arg("-I").arg(newlib_include.to_str().unwrap());
@@ -3910,8 +3915,9 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
                     "-nostdlib",
                     "-mno-red-zone",
                     opt_flag,
-                    "-c",
                 ]);
+                gcc_cmd.args(section_flags);
+                gcc_cmd.arg("-c");
 
                 if have_newlib {
                     gcc_cmd.arg("-I").arg(newlib_include.to_str().unwrap());
@@ -3937,11 +3943,23 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
     // Link - try ld.lld first, fall back to ld
     println!("  Linking {}...", name);
 
+    // Strip debug + symbol info for non-dev builds: newlib is built with
+    // `-g`, so the `.debug_*` sections survive even after --gc-sections
+    // for everything that ends up referenced. Stripping recovers the rest
+    // of the win (4.5 MB → ~50 KB for hello-world C bins).
+    let strip_flag = if profile == "dev" { None } else { Some("--strip-all") };
+
     let link_success = {
         let mut link_cmd = Command::new("ld.lld");
         link_cmd.args([
             "-T",
             linker_script.to_str().unwrap(),
+            "--gc-sections",
+        ]);
+        if let Some(s) = strip_flag {
+            link_cmd.arg(s);
+        }
+        link_cmd.args([
             "-o",
             elf_file.to_str().unwrap(),
             crt0.to_str().unwrap(),
@@ -3967,6 +3985,12 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
                 ld_cmd.args([
                     "-T",
                     linker_script.to_str().unwrap(),
+                    "--gc-sections",
+                ]);
+                if let Some(s) = strip_flag {
+                    ld_cmd.arg(s);
+                }
+                ld_cmd.args([
                     "-o",
                     elf_file.to_str().unwrap(),
                     crt0.to_str().unwrap(),

@@ -80,7 +80,7 @@ if [ ! -f "Makefile" ]; then
         CC_FOR_TARGET="clang --target=${CLANG_TARGET} -ffreestanding -fno-stack-protector" \
         AR_FOR_TARGET="ar" \
         RANLIB_FOR_TARGET="ranlib" \
-        CFLAGS_FOR_TARGET="-O2 -g -nostdlib -fno-builtin"
+        CFLAGS_FOR_TARGET="-O2 -g -nostdlib -fno-builtin -ffunction-sections -fdata-sections"
 fi
 
 # Build newlib
