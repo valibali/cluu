@@ -66,8 +66,16 @@ pub mod pte_flags {
     /// In PDE: 1 = 2MB page, 0 = points to PT
     pub const HUGE: u64 = 1 << 7;
 
+    /// PAT bit for 4-KiB pages (bit 7 of last-level PTE).
+    /// NOTE: in PDEs this same bit is HUGE (1 GB / 2 MB page). Use only on PTEs.
+    pub const PAT_4K: u64 = 1 << 7;
+
     /// Page-level cache disable (bit 4) — set for device/MMIO mappings
     pub const NO_CACHE: u64 = 1 << 4;
+
+    /// Page-level write-through (bit 3). Combined with PCD (bit 4) and PAT
+    /// (bit 7) selects which of the 8 PAT MSR entries this page uses.
+    pub const PWT: u64 = 1 << 3;
 
     /// No execute (bit 63) - requires NX support
     pub const NO_EXECUTE: u64 = 1 << 63;
@@ -81,6 +89,11 @@ pub mod pte_flags {
     /// Mask to extract the physical address from a page table entry (bits 12-51).
     /// Strips flag bits (0-11) and reserved/NX bits (52-63).
     pub const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    /// Convenience combo: write-combining on a 4-KiB page.
+    /// Index into PAT MSR is (PAT<<2)|(PCD<<1)|PWT = 0b001 = 1.
+    /// Caller must have run `pat::init()` to put WC at PAT[1].
+    pub const WRITE_COMBINING: u64 = PWT;
 }
 
 // Common flag combinations for convenience
