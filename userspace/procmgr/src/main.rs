@@ -4761,6 +4761,15 @@ impl ProcessManager {
             if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
             return Ok(());
         }
+        if image_name.contains('/') {
+            let _ = debug_print(&format!(
+                "procmgr: container_run rejected: image name '{}' contains '/' (use bare name; resolve symlinks shell-side)",
+                image_name
+            ));
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
         let _ = debug_print(&format!("procmgr: container run '{}'", image_name));
 
         // Read manifest.toml from VFS
