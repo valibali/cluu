@@ -61,6 +61,8 @@ pub const VFS_READ_RING: u32 = 0x20D;
 pub const VFS_LINK: u32 = 0x20E;
 /// Flush all dirty buffers to disk.
 pub const VFS_FLUSH: u32 = 0x20F;
+/// Resolve a path to its canonical form, following symlinks.
+pub const VFS_REALPATH: u32 = 0x210;
 
 /// Structured enum for protocol routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +82,7 @@ pub enum VfsOp {
     RingSetup,
     ReadRing,
     Link,
+    Realpath,
 }
 
 impl VfsOp {
@@ -100,6 +103,7 @@ impl VfsOp {
             VFS_RING_SETUP => Some(Self::RingSetup),
             VFS_READ_RING => Some(Self::ReadRing),
             VFS_LINK => Some(Self::Link),
+            VFS_REALPATH => Some(Self::Realpath),
             _ => None,
         }
     }
