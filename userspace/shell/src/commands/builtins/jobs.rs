@@ -141,15 +141,6 @@ impl BuiltinCommand for JobsBuiltin {
             stdout.write_all(line.as_bytes())?;
             count += 1;
         }
-        // Fall through to legacy bg_jobs table until full JobTable wiring lands.
-        if count == 0 {
-            for line in ctx.bg_job_lines() {
-                let _ = libcluu::debug_print(line.trim_end());
-                stdout.write_all(line.as_bytes())?;
-                stdout.write_all(b"\n")?;
-                count += 1;
-            }
-        }
         if count == 0 {
             let _ = libcluu::debug_print("jobs: no jobs");
         }

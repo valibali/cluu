@@ -20,7 +20,9 @@ use alloc::string::ToString;
 #[cfg(feature = "lang-parser")]
 use alloc::vec::Vec;
 #[cfg(feature = "lang-parser")]
-use commands::{poll_background_jobs, BuiltinFactory, CommandContext, CommandExecutor, ExecResult};
+use commands::{BuiltinFactory, CommandContext, CommandExecutor, ExecResult};
+#[cfg(feature = "lang-parser")]
+use commands::builtins::jobs::{drain_job_notifications, reap_done_jobs};
 use libcluu::boot::{
     process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, PARAM_TTY_INSTANCE, TOKEN_STDERR, TOKEN_STDIN,
     TOKEN_STDLOG, TOKEN_STDOUT,
@@ -194,7 +196,8 @@ fn run() -> Result<()> {
             Err(Error::Timeout) => {
                 #[cfg(feature = "lang-parser")]
                 {
-                    let _ = poll_background_jobs(stdout, &mut command_context);
+                    drain_job_notifications(&mut command_context);
+                    reap_done_jobs(stdout, &mut command_context);
                 }
                 let _ = yield_cpu();
             }

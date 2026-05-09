@@ -25,23 +25,9 @@ pub enum ExecResult {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JobState {
-    Running,
-    Stopped,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ForegroundMode {
     SignalOnCtrlC,
     PassCtrlCToChild,
-}
-
-pub(crate) struct BackgroundJob {
-    pub(crate) notify_endpoint: usize,
-    pub(crate) stdin_endpoint: usize,
-    pub(crate) command: String,
-    pub(crate) state: JobState,
-    pub(crate) fg_mode: ForegroundMode,
 }
 
 // ─── CommandContext ───────────────────────────────────────────────────────────
@@ -102,12 +88,11 @@ pub struct CommandContext {
     pub(crate) exported: BTreeSet<String>,
     pub(crate) procmgr_spawn: usize,
     pub(crate) console_write: usize,
-    pub(crate) bg_jobs: BTreeMap<usize, BackgroundJob>,
     /// Exit status of the most recently executed builtin/command.
     /// Read by `echo $?` (Shell-B). `cd`/`pwd` write here.
     pub(crate) last_status: i32,
     // ── Job control (Phase 4 Plan D Stage 3) ─────────────────────────────────
-    /// Real job table replacing the primitive bg_jobs map.
+    /// Single source of truth for background and stopped jobs.
     pub jobs: crate::commands::builtins::jobs::JobTable,
     /// Shell's own process-group id (created at startup).
     pub shell_pgid: usize,
@@ -134,7 +119,6 @@ impl CommandContext {
             exported: BTreeSet::new(),
             procmgr_spawn: 0,
             console_write: 0,
-            bg_jobs: BTreeMap::new(),
             last_status: 0,
             jobs: crate::commands::builtins::jobs::JobTable::new(),
             shell_pgid: 0,
@@ -225,62 +209,6 @@ impl CommandContext {
         Ok(self.console_write)
     }
 
-    pub(crate) fn add_bg_job(
-        &mut self,
-        pid: usize,
-        notify_endpoint: usize,
-        stdin_endpoint: usize,
-        command: String,
-        fg_mode: ForegroundMode,
-    ) {
-        self.bg_jobs.insert(
-            pid,
-            BackgroundJob {
-                notify_endpoint,
-                stdin_endpoint,
-                command,
-                state: JobState::Running,
-                fg_mode,
-            },
-        );
-    }
-
-    pub(crate) fn remove_bg_job(&mut self, pid: usize) {
-        self.bg_jobs.remove(&pid);
-    }
-
-    pub(crate) fn take_bg_job(&mut self, pid: usize) -> Option<BackgroundJob> {
-        self.bg_jobs.remove(&pid)
-    }
-
-    pub(crate) fn bg_job_state(&self, pid: usize) -> Option<JobState> {
-        self.bg_jobs.get(&pid).map(|job| job.state)
-    }
-
-    pub(crate) fn set_bg_job_state(&mut self, pid: usize, state: JobState) -> bool {
-        if let Some(job) = self.bg_jobs.get_mut(&pid) {
-            job.state = state;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn latest_bg_pid(&self) -> Option<usize> {
-        self.bg_jobs.keys().next_back().copied()
-    }
-
-    pub(crate) fn bg_job_lines(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for (pid, job) in &self.bg_jobs {
-            let state = match job.state {
-                JobState::Running => "running",
-                JobState::Stopped => "stopped",
-            };
-            out.push(format!("[{}] {} {}", pid, state, job.command));
-        }
-        out
-    }
 }
 
 // ─── WriteSink ────────────────────────────────────────────────────────────────

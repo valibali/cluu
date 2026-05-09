@@ -24,7 +24,7 @@ use libcluu::types::Message;
 use libcluu::{debug_print, Error, IpcFlags, Result, TOKEN_IPC};
 use core::mem::size_of;
 
-use crate::commands::builtins::registry::{CommandContext, ExecResult, ForegroundMode, JobState};
+use crate::commands::builtins::registry::{CommandContext, ExecResult, ForegroundMode};
 
 const PROCMGR_KILL_LABEL: u32 = 3;
 const SIGINT: usize = 2;
@@ -41,50 +41,6 @@ pub(crate) fn infer_foreground_mode(path: &str) -> ForegroundMode {
         return ForegroundMode::PassCtrlCToChild;
     }
     ForegroundMode::SignalOnCtrlC
-}
-
-pub(crate) fn parse_spawn_args(args: &[String]) -> Option<(String, usize, ForegroundMode, Vec<String>)> {
-    if args.is_empty() {
-        return None;
-    }
-    let mut idx = 0usize;
-    let mut mode = ForegroundMode::SignalOnCtrlC;
-    let mut mode_explicit = false;
-    while idx < args.len() {
-        match args[idx].as_str() {
-            "-i" | "--interactive" => {
-                mode = ForegroundMode::PassCtrlCToChild;
-                mode_explicit = true;
-                idx += 1;
-            }
-            "-s" | "--signal" => {
-                mode = ForegroundMode::SignalOnCtrlC;
-                mode_explicit = true;
-                idx += 1;
-            }
-            _ => break,
-        }
-    }
-    let path = args.get(idx)?.clone();
-    idx += 1;
-
-    // Priority: if the next token parses as usize, consume it as priority. Else
-    // leave it for argv. This preserves backward compat (`spawn foo 5`) while
-    // allowing `spawn foo --help` to pass `--help` as argv[1].
-    let priority = match args.get(idx).and_then(|v| v.parse::<usize>().ok()) {
-        Some(p) => {
-            idx += 1;
-            p
-        }
-        None => DEFAULT_PRIORITY,
-    };
-
-    let argv_tail: Vec<String> = args[idx..].to_vec();
-
-    if !mode_explicit {
-        mode = infer_foreground_mode(path.as_str());
-    }
-    Some((path, priority, mode, argv_tail))
 }
 
 pub struct SpawnResult {
@@ -201,15 +157,6 @@ pub(crate) fn spawn_and_wait(
             Ok(1)
         }
     }
-}
-
-/// Build a `PROCMGR_CONTAINER_RUN_LABEL` payload of `name + CWD trailer`.
-///
-/// Procmgr reads the container image name from the start of the payload and
-/// strips the CWD trailer (last 8 bytes + cwd_len) before slicing argv/FDAC,
-/// so prepending the name and appending the trailer is safe even when the
-pub(crate) fn spawn_process(context: &mut CommandContext, name: &str, priority: usize) -> Result<SpawnResult> {
-    spawn_process_with_argv(context, name, priority, &[])
 }
 
 pub(crate) fn spawn_process_with_argv(
@@ -414,34 +361,6 @@ pub(crate) fn set_tty_foreground(
     Ok(())
 }
 
-/// Poll background job notify endpoints and emit async completion markers.
-pub fn poll_background_jobs(stdout: usize, context: &mut CommandContext) -> Result<()> {
-    let mut finished: Vec<(usize, i32)> = Vec::new();
-    let mut buf = [0u8; 128];
-
-    for (pid, job) in &context.bg_jobs {
-        match syscall::ipc_recv_nonblocking(job.notify_endpoint, &mut buf) {
-            Ok(len) => {
-                if let Some((msg, _payload)) = parse_ipc_message(&buf[..len]) {
-                    if msg.tag.label == 1 && msg.tag.words >= 2 {
-                        finished.push((*pid, msg.words[1] as i32));
-                    }
-                }
-            }
-            Err(Error::WouldBlock) => {}
-            Err(_) => {}
-        }
-    }
-
-    for (pid, code) in finished {
-        context.remove_bg_job(pid);
-        let line = format!("shell: bg done pid={} code={}\n", pid, code);
-        let _ = debug_print(line.trim_end());
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
-    }
-    Ok(())
-}
-
 pub(crate) fn parse_ipc_message(buf: &[u8]) -> Option<(Message, &[u8])> {
     if buf.len() < size_of::<Message>() {
         return None;
@@ -453,23 +372,6 @@ pub(crate) fn parse_ipc_message(buf: &[u8]) -> Option<(Message, &[u8])> {
         payload_len = 0;
     }
     Some((msg, &buf[header..header + payload_len]))
-}
-
-pub(crate) fn resolve_job_pid(context: &CommandContext, arg: Option<&String>) -> Option<usize> {
-    let Some(token) = arg else {
-        return context.latest_bg_pid();
-    };
-    let raw = token.strip_prefix('%').unwrap_or(token.as_str());
-    raw.parse::<usize>().ok()
-}
-
-pub(crate) fn ensure_bg_job_state(context: &mut CommandContext, pid: usize, state: JobState) -> Result<()> {
-    if context.set_bg_job_state(pid, state) {
-        return Ok(());
-    }
-    let line = format!("shell: invariant violation missing job pid={}", pid);
-    let _ = debug_print(line.as_str());
-    Err(Error::InvalidState)
 }
 
 pub(crate) fn parse_status(raw: usize) -> Result<()> {
