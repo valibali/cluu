@@ -6,8 +6,8 @@
 use crate::error::{Error, Result};
 use crate::fs::protocol::{
     VFS_CLOSE, VFS_FSTAT, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR,
-    VFS_READ_GRANT, VFS_READ_RING, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT, VFS_UNLINK,
-    VFS_WRITE,
+    VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR,
+    VFS_STAT, VFS_UNLINK, VFS_WRITE,
 };
 use crate::ipc::{self, make_payload_message};
 use crate::types::Message;
@@ -350,6 +350,22 @@ impl VfsClient {
         let mut stat_bytes = [0u8; 40];
         stat_bytes.copy_from_slice(&reply_buf[data_start..data_start + 40]);
         Ok(VfsStat::from_bytes(&stat_bytes))
+    }
+
+    /// Resolve `path` to its canonical absolute form, following symlinks.
+    /// Backends without symlinks (memfs, procfs, devfs, initrd) return the
+    /// input unchanged.
+    pub fn realpath(&self, path: &str) -> Result<String> {
+        let payload = path.as_bytes();
+        let msg = make_payload_message(VFS_REALPATH, payload.len(), &[self.client_id]);
+        let mut reply_buf = [0u8; 4096];
+        let (reply, payload_len) =
+            ipc::call_with_reply_buf(self.endpoint, &msg, payload, &mut reply_buf)?;
+        parse_status(reply.words[0])?;
+        let data_start = core::mem::size_of::<Message>();
+        let bytes = &reply_buf[data_start..data_start + payload_len];
+        let s = core::str::from_utf8(bytes).map_err(|_| Error::InvalidArgument)?;
+        Ok(String::from(s))
     }
 
     /// Stat an open file descriptor.
