@@ -69,10 +69,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 # Item #1 of open-work queue: /bin/ls is now a real ext2
                 # symlink that resolves through VFS realpath instead of the
-                # legacy strip_prefix("/bin/") hack. Listing root must show
-                # at least the bin entry the symlink itself lives in.
+                # legacy strip_prefix("/bin/") hack. ls output goes to the
+                # framebuffer, so harness_run.sh anchors on procmgr's
+                # `container 'ls' started` debug print on COM2 instead.
                 SHELL_AUTOSTART_CMD_DEFAULT="/bin/ls /"
-                EXPECTED_CONTAINS=("bin")
                 ;;
             l2_cd)
                 TEST_COMMAND=""

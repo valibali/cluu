@@ -786,6 +786,20 @@ case "$MARKER_MODE" in
             "procmgr: container 'cat' started"
         )
         ;;
+    l2_path_symlink_resolve)
+        # Item #1 of open-work queue: typing `/bin/ls /` exercises the
+        # new VFS realpath flow that replaced the four strip_prefix("/bin/")
+        # hacks in shell pipeline.rs. The shell calls vfs.realpath("/bin/ls")
+        # which follows the ext2 symlink to /var/images/ls/bin/ls, extracts
+        # image_name=ls, and dispatches via procmgr. ls's output prints to
+        # the framebuffer (not COM2), so we anchor on procmgr's debug print
+        # confirming a bare-name dispatch (same pattern as l2_bare_cmd).
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "procmgr: container 'ls' started"
+        )
+        ;;
     l2_cd)
         required_markers=(
             "TSC calibrated"
