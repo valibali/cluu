@@ -125,6 +125,14 @@ fn read_path_env() -> String {
 /// Spawn `name` with `args`, wait for exit, return the exit code (or
 /// `1` on internal error). Shared between `SpawnBuiltin::run` and
 /// UE17's PATH-dispatch fall-through.
+///
+/// Job control: a fresh pgid is created and the child attached to it before
+/// `wait_for_exit_or_sigint` blocks. The TTY's fg-pgid for this session is
+/// pointed at the child while it runs and restored to `shell_pgid` on
+/// return. Without this, Ctrl-Z (TTY → SIGTSTP via PROCMGR_PG_SIGNAL on the
+/// fg pgid) routed to whatever pgid the TTY had cached — usually the
+/// shell — and the child never stopped. Pipeline path already does the
+/// same dance in `pipeline.rs`; this brings parity for bare commands.
 pub(crate) fn spawn_and_wait(
     stdout: usize,
     context: &mut CommandContext,
@@ -134,10 +142,33 @@ pub(crate) fn spawn_and_wait(
     fg_mode: ForegroundMode,
 ) -> Result<i32> {
     let spawn = spawn_process_with_argv(context, name, priority, args)?;
-    match parse_status(spawn.status_word) {
+    let parsed = parse_status(spawn.status_word);
+    let procmgr_ep = spawn.procmgr_endpoint;
+
+    // Allocate a pgid and attach the child only on a successful spawn.
+    let pgid = if parsed.is_ok() {
+        let pg = libcluu::posix::jobs::pg_create(procmgr_ep).unwrap_or(0);
+        if pg != 0 {
+            let _ = libcluu::posix::jobs::pg_attach(procmgr_ep, pg, spawn.pid);
+        }
+        pg
+    } else {
+        0
+    };
+
+    let want_fg_swap = pgid != 0 && context.tty_stdout != 0 && context.session_id != 0;
+    if want_fg_swap {
+        let _ = libcluu::posix::jobs::tty_set_fg(
+            context.tty_stdout,
+            context.session_id,
+            pgid,
+        );
+    }
+
+    let result = match parsed {
         Ok(()) => {
             wait_for_exit_or_sigint(
-                spawn.procmgr_endpoint,
+                procmgr_ep,
                 stdout,
                 spawn.notify_endpoint,
                 spawn.stdin_endpoint,
@@ -145,10 +176,6 @@ pub(crate) fn spawn_and_wait(
                 stdout,
                 fg_mode,
             )?;
-            // wait_for_exit_or_sigint doesn't surface the child's exit
-            // code; we treat reaching here as success (status=0). Tighter
-            // exit-code threading is a follow-up if `$?` plumbing
-            // requires it.
             Ok(0)
         }
         Err(err) => {
@@ -156,7 +183,17 @@ pub(crate) fn spawn_and_wait(
             let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
             Ok(1)
         }
+    };
+
+    if want_fg_swap && context.shell_pgid != 0 {
+        let _ = libcluu::posix::jobs::tty_set_fg(
+            context.tty_stdout,
+            context.session_id,
+            context.shell_pgid,
+        );
     }
+
+    result
 }
 
 pub(crate) fn spawn_process_with_argv(
