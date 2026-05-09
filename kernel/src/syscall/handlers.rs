@@ -1399,7 +1399,7 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
 
     const MAP_DEVICE: u32 = 0x100;
     const MAP_FRAME_TOKEN: u32 = 0x400;
-    // MAP_DEVICE_WC (0x200) is intentionally NOT handled here — the
+    // MAP_DEVICE_WC (0x1000) is intentionally NOT handled here — the
     // single-page space_map invoke always calls elf::map_user_page
     // regardless of MAP_DEVICE, so PCD/PWT bits are not set. Userspace
     // framebuffer mapping uses space_map_range (multi-page) which honors WC.
@@ -2028,7 +2028,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
     use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
     const MAP_DEVICE: u32 = 0x100;
-    const MAP_DEVICE_WC: u32 = 0x200;
+    const MAP_DEVICE_WC: u32 = 0x1000;
     const MAP_SHARE_PHYS: u32 = 0x800;
     const MAP_TEST_FAILPOINT: u32 = 0x8000_0000;
     const MAP_TEST_FAIL_ON_MAP_STAGE: u32 = 0x4000_0000;
