@@ -472,12 +472,19 @@ fn handle_fs_request(
             match fs.realpath_canonical(path) {
                 Ok((canon, _inode)) => {
                     let bytes = canon.into_bytes();
-                    let reply_msg = Message::new(FS_REALPATH, [0, bytes.len(), 0, 0, 0, 0], 2);
-                    if let Some(token) = reply_token {
-                        let _ = reply_with_payload(token, &reply_msg, &bytes);
+                    let max_bytes = IPC_MESSAGE_MAX.saturating_sub(core::mem::size_of::<Message>());
+                    if bytes.len() > max_bytes {
+                        // path too long; no NameTooLong variant in libcluu::Error,
+                        // fall back to InvalidArgument (-1).
+                        send_error_reply(reply_token, Error::InvalidArgument.to_errno());
+                    } else {
+                        let reply_msg = Message::new(FS_REALPATH, [0, bytes.len(), 0, 0, 0, 0], 2);
+                        if let Some(token) = reply_token {
+                            let _ = reply_with_payload(token, &reply_msg, &bytes);
+                        }
                     }
                 }
-                Err(_) => send_error_reply(reply_token, -3), // NotFound
+                Err(err) => send_error_reply(reply_token, err.to_errno()),
             }
         }
 
