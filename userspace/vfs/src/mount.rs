@@ -736,6 +736,9 @@ impl MountTable {
     /// Split `path` into (mount-prefix, rel-within-mount). Returns
     /// `("/", path)` when no mount matches. Used by callers that need to
     /// recombine a backend-relative result back into an absolute path.
+    /// When no mount matches, the fallback is `("/", path-without-leading-slash)`
+    /// — note the rel side has its leading `/` trimmed. Callers that need to
+    /// reconstruct an absolute path must take this into account.
     pub fn split_path<'b>(&self, path: &'b str) -> (&'static str, &'b str) {
         let mut best: (&'static str, &'b str) = ("/", path.trim_start_matches('/'));
         for mount in &self.mounts {

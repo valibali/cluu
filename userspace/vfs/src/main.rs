@@ -1465,7 +1465,6 @@ impl VfsServer {
             None => real_path.clone(),
         };
         let bytes = canon.into_bytes();
-        reply_msg.words[0] = 0;
         reply_msg.words[1] = bytes.len();
         reply_with_payload(reply_token, &reply_msg, &bytes)
     }
