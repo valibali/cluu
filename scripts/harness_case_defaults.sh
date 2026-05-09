@@ -65,6 +65,15 @@ harness_derive_marker_defaults() {
                 # because /etc/motd's contents go to TTY/stdout, not to COM2.
                 SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd"
                 ;;
+            l2_path_symlink_resolve)
+                TEST_COMMAND=""
+                # Item #1 of open-work queue: /bin/ls is now a real ext2
+                # symlink that resolves through VFS realpath instead of the
+                # legacy strip_prefix("/bin/") hack. Listing root must show
+                # at least the bin entry the symlink itself lives in.
+                SHELL_AUTOSTART_CMD_DEFAULT="/bin/ls /"
+                EXPECTED_CONTAINS=("bin")
+                ;;
             l2_cd)
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="cd /; cd etc; pwd"
