@@ -6,7 +6,7 @@
 use super::c_int;
 use crate::boot::{space_token, APP_FB_BASE};
 use crate::ipc::CONSOLE_FB_INFO_LABEL;
-use crate::syscall::{self, MAP_DEVICE};
+use crate::syscall::{self, MAP_DEVICE_WC};
 use crate::types::Message;
 
 /// Framebuffer info returned to C callers.
@@ -66,8 +66,11 @@ pub extern "C" fn framebuffer_acquire(info: *mut FramebufferInfo) -> c_int {
     }
 
     // Step 3: Map the physical framebuffer into our address space.
+    // Use MAP_DEVICE_WC so PAT[1] (write-combining) is selected: SSE2 stores
+    // from the console double-buffer flush coalesce into 64-byte burst writes
+    // instead of one bus transaction per dword.
     let num_pages = fb_size.div_ceil(0x1000);
-    let flags = 0x03 | MAP_DEVICE; // read + write + device (uncacheable)
+    let flags = 0x03 | MAP_DEVICE_WC; // read + write + write-combining device mapping
     if syscall::space_map_range(space_token(), APP_FB_BASE, fb_phys, flags, num_pages, 0).is_err() {
         return -1;
     }

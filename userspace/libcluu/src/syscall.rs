@@ -131,6 +131,11 @@ pub const MAP_LARGE_PAGES: usize = 0x200;
 /// When set, arg4 (data_len) is reinterpreted as the frame token handle.
 pub const MAP_FRAME_TOKEN: usize = 0x400;
 
+/// Map device memory write-combining (MMIO that benefits from WC,
+/// e.g. linear framebuffers). Selects PAT[1] = WC programmed by the
+/// kernel at boot. Mutually exclusive with `MAP_DEVICE`.
+pub const MAP_DEVICE_WC: usize = 0x1000;
+
 /// Map the SAME physical frames as the source pages instead of allocating
 /// new frames + copying. Source pages must remain mapped (i.e., the caller
 /// must keep them alive) for as long as the target's mapping exists.
