@@ -1,0 +1,5 @@
+{
+  "fb_blit_wc_cycles":     4038127,
+  "fb_blit_wc_max_cycles": 4441940,
+  "_note": "Ratchet captured 2026-05-09 with framebuffer mapped MAP_DEVICE_WC under KVM. >10% regression = trip the b_console_blit fail rail. Measures full console IPC pipeline: probe stdout IPC -> tty -> console process -> framebuffer WC-mapped MMIO blit."
+}
