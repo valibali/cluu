@@ -95,13 +95,16 @@ pub struct SpawnResult {
     pub stdin_endpoint: usize,
 }
 
-/// UE17: bare-command PATH resolution + dispatch.
+/// UE17: bare-command PATH resolution + dispatch, plus path-with-slash
+/// dispatch for inputs like `/bin/ls` that resolve through ext2 symlinks.
 ///
-/// Called from `BuiltinRegistry::execute` when the first word didn't
-/// match any builtin and isn't a literal path (no `/` in `name`). On
-/// hit (i.e. `/var/images/<name>/manifest.toml` exists), dispatch the
-/// binary through the same code SpawnBuiltin uses and wait for exit.
-/// On miss, return NotHandled so the caller emits "unsupported command".
+/// Called from `BuiltinRegistry::execute` when the first word didn't match
+/// any builtin. For bare names, walks `$PATH` looking for an installed
+/// container manifest. For paths-with-slashes, asks VFS to canonicalise
+/// the path and recovers the bare image name from `/var/images/<name>/...`.
+/// On hit, dispatches through the same code SpawnBuiltin uses and waits
+/// for exit. On miss, returns NotHandled so the caller emits
+/// "unsupported command".
 pub(crate) fn try_path_dispatch(
     stdout: usize,
     context: &mut CommandContext,
@@ -117,8 +120,20 @@ pub(crate) fn try_path_dispatch(
         Ok(v) => v,
         Err(_) => return Ok(ExecResult::NotHandled),
     };
-    let Some(resolved_name) = crate::path_lookup::resolve(name, &path_env, &vfs) else {
-        return Ok(ExecResult::NotHandled);
+    // Path-with-slash: try VFS realpath → bare image name. Bare names: $PATH lookup.
+    let resolved_name = if name.contains('/') {
+        match vfs.realpath(name) {
+            Ok(canon) => match crate::path_lookup::image_name_from_canonical(&canon) {
+                Some(bare) => bare,
+                None => return Ok(ExecResult::NotHandled),
+            },
+            Err(_) => return Ok(ExecResult::NotHandled),
+        }
+    } else {
+        match crate::path_lookup::resolve(name, &path_env, &vfs) {
+            Some(n) => n,
+            None => return Ok(ExecResult::NotHandled),
+        }
     };
     let _ = debug_print(&format!(
         "shell: PATH resolved '{}' -> /var/images/{}",

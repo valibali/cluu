@@ -551,15 +551,15 @@ impl CommandExecutor for BuiltinRegistry {
             } else {
                 self.run_builtin(stdout, context, name, &args[1..])?
             };
-            // UE17: if the first word didn't match a builtin and isn't a
-            // path-like literal (no `/`), fall through to PATH-based
-            // resolution. PATH lookup checks /var/images/<name>/manifest.toml
-            // for an installed container image; on hit, dispatch the binary
-            // through the same code SpawnBuiltin uses (`spawn <name> args…`).
-            // On miss, leave `all_handled` false so the caller emits the
-            // "shell: unsupported command" diagnostic.
+            // UE17: if the first word didn't match a builtin, fall through
+            // to PATH/realpath-based resolution. try_path_dispatch handles
+            // both bare names (PATH walk for /var/images/<name>/manifest.toml)
+            // and paths-with-slashes (VFS realpath → bare image name when the
+            // path canonicalises into /var/images/<name>/...). On miss, leave
+            // `all_handled` false so the caller emits the "shell: unsupported
+            // command" diagnostic.
             let result = if let ExecResult::NotHandled = result {
-                if name.as_str() != "repeat" && !name.contains('/') {
+                if name.as_str() != "repeat" {
                     crate::commands::exec::try_path_dispatch(stdout, context, name, &args[1..])?
                 } else {
                     ExecResult::NotHandled
