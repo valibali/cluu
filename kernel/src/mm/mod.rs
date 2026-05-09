@@ -95,6 +95,9 @@ pub mod frame_registry;
 // Userspace physical memory mapping
 pub mod user_map;
 
+// Page Attribute Table programming (write-combining, UC-, etc.)
+pub mod pat;
+
 // Mock implementations for testing
 pub mod mock;
 
@@ -212,8 +215,19 @@ pub unsafe fn init(boot_info: &dyn boot::BootInfoProvider) {
         physmap::activate();
     }
 
-    // Step 6: Build buddy free lists (requires physmap)
-    klibcluu::info("Step 6: Building buddy allocator free lists...");
+    // Step 6: Program PAT MSR (write-combining at index 1)
+    klibcluu::info("Step 6: Programming PAT MSR...");
+    pat::init();
+    let pat_actual = pat::read();
+    let pat_expected = pat::expected();
+    if pat_actual == pat_expected {
+        klibcluu::info("[BOOT] PAT programmed: ok");
+    } else {
+        klibcluu::info("[BOOT] PAT programmed: MISMATCH");
+    }
+
+    // Step 7: Build buddy free lists (requires physmap)
+    klibcluu::info("Step 7: Building buddy allocator free lists...");
     pmm::init_buddy();
 
     klibcluu::info("========================================");
