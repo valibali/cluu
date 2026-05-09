@@ -30,6 +30,7 @@ const FS_RMDIR: u32 = 0x309;
 const FS_RENAME: u32 = 0x30A;
 const FS_CREATE: u32 = 0x30B;
 const FS_LINK: u32 = 0x30C;
+const FS_REALPATH: u32 = 0x30D;
 const IPC_MESSAGE_MAX: usize = 256;
 
 /// Build a minimal DirEntryStat for backends that can't provide full metadata.
@@ -114,6 +115,10 @@ pub trait MountBackend: Send + Sync {
     fn create_file(&self, rel_path: &str, mode: usize) -> Result<()> {
         let _ = (rel_path, mode);
         Err(Error::NotImplemented)
+    }
+
+    fn realpath(&self, rel_path: &str) -> Result<String> {
+        Ok(String::from(rel_path))
     }
 }
 
@@ -272,6 +277,22 @@ impl MountBackend for RemoteBackend {
             offset += name_len;
         }
         Ok(entries)
+    }
+
+    fn realpath(&self, rel_path: &str) -> Result<String> {
+        let req = Message::new(FS_REALPATH, [rel_path.len(), 0, 0, 0, 0, 0], 1);
+        let mut reply_buf = [0u8; 4096];
+        let (reply, payload_len) =
+            call_with_reply_buf(self.endpoint, &req, rel_path.as_bytes(), &mut reply_buf)?;
+        let status = reply.words[0] as isize;
+        if status < 0 {
+            return Err(Error::NotFound);
+        }
+        let data_start = core::mem::size_of::<Message>();
+        let bytes = &reply_buf[data_start..data_start + payload_len];
+        core::str::from_utf8(bytes)
+            .map(String::from)
+            .map_err(|_| Error::InvalidArgument)
     }
 
     fn read(&self, file: &OpenFile, offset: usize, len: usize) -> Result<Vec<u8>> {
