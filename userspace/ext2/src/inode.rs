@@ -97,6 +97,21 @@ impl Inode {
         self.size_hi = (size >> 32) as u32;
     }
 
+    /// Re-serialise the 60-byte i_block area (12 direct + indirect + double +
+    /// triple) as raw little-endian bytes. Used by fast-symlink reads where
+    /// the symlink target is stored inline instead of referenced by block
+    /// pointers.
+    pub fn inline_block_bytes(&self) -> [u8; 60] {
+        let mut buf = [0u8; 60];
+        for i in 0..12 {
+            buf[i * 4..i * 4 + 4].copy_from_slice(&self.direct_blocks[i].to_le_bytes());
+        }
+        buf[48..52].copy_from_slice(&self.indirect_block.to_le_bytes());
+        buf[52..56].copy_from_slice(&self.double_indirect.to_le_bytes());
+        buf[56..60].copy_from_slice(&self.triple_indirect.to_le_bytes());
+        buf
+    }
+
     /// Serialize inode fields back to raw bytes.
     pub fn write_to(&self, data: &mut [u8]) {
         write_u16(data, 0, self.mode);
