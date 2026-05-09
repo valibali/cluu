@@ -3878,6 +3878,8 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
     // Compile - try clang first, fall back to GCC
     println!("  Compiling {}...", source.display());
 
+    let opt_flag = if profile == "dev" { "-O0" } else { "-O2" };
+
     let compile_success = {
         // Try clang first
         let mut compile_cmd = Command::new("clang");
@@ -3886,6 +3888,7 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
             "-ffreestanding",
             "-fno-stack-protector",
             "-nostdlib",
+            opt_flag,
             "-c",
         ]);
 
@@ -3906,6 +3909,7 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
                     "-fno-stack-protector",
                     "-nostdlib",
                     "-mno-red-zone",
+                    opt_flag,
                     "-c",
                 ]);
 

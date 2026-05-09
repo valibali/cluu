@@ -717,7 +717,13 @@ fn execute_build(
     output_dir: &Path,
     container_name: &str,
 ) -> Result<()> {
-    println!("  BUILD \"{}\"", step.command);
+    // Inject release profile for cargo-shaped builds. Containers default to
+    // optimized binaries; debug builds were ~5-10x larger (e.g. ls.elf 4.6 MB
+    // → ~500 KB). Cluufiles still reference `debug/` paths for readability;
+    // we rewrite the lookup path here. Non-cargo BUILD commands pass through.
+    let (effective_command, effective_build_output) = promote_to_release(&step.command, &step.build_output);
+
+    println!("  BUILD \"{}\"", effective_command);
 
     // Container-scoped build output directory to avoid parallel build races.
     let build_dir = project_root
@@ -728,29 +734,29 @@ fn execute_build(
 
     let status = Command::new("sh")
         .arg("-c")
-        .arg(&step.command)
+        .arg(&effective_command)
         .current_dir(project_root)
         .env("CLUU_BUILD_OUTPUT_DIR", &build_dir)
         .status()
-        .with_context(|| format!("Failed to execute BUILD command: {}", step.command))?;
+        .with_context(|| format!("Failed to execute BUILD command: {}", effective_command))?;
 
     if !status.success() {
         bail!(
             "BUILD command failed (exit {}): {}",
             status.code().unwrap_or(-1),
-            step.command
+            effective_command
         );
     }
 
     // Look for the build output: first in the container-scoped dir, then the
     // original path.  The scoped dir is preferred because build tools that
     // honour CLUU_BUILD_OUTPUT_DIR write there, making parallel builds safe.
-    let filename = Path::new(&step.build_output)
+    let filename = Path::new(&effective_build_output)
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| step.build_output.clone());
+        .unwrap_or_else(|| effective_build_output.clone());
     let scoped_src = build_dir.join(&filename);
-    let original_src = project_root.join(&step.build_output);
+    let original_src = project_root.join(&effective_build_output);
 
     let src = if scoped_src.exists() {
         scoped_src
@@ -759,7 +765,7 @@ fn execute_build(
     } else {
         bail!(
             "BUILD output not found after command: {} (checked {} and {})",
-            step.build_output,
+            effective_build_output,
             scoped_src.display(),
             original_src.display(),
         );
@@ -773,8 +779,44 @@ fn execute_build(
     fs::copy(&src, &dst)
         .with_context(|| format!("Failed to copy build output {} → {}", src.display(), dst.display()))?;
 
-    println!("  BUILD {} → {}", step.build_output, step.container_path);
+    println!("  BUILD {} → {}", effective_build_output, step.container_path);
     Ok(())
+}
+
+/// Rewrite a BUILD command + output path to use an optimized profile when the
+/// command is a recognized cargo invocation.
+///
+/// Why: containers defaulted to debug-mode cargo builds, which produced
+/// 4-7 MB binaries (10x larger than release). Smaller container binaries
+/// reduce VFS cache pressure, disk reads, and fault-corruption blast radius.
+///
+/// Recognized shapes:
+///   - `cargo build ...`               → adds `--release`,                    debug/ → release/
+///   - `cargo xtask build-c NAME SRC`  → appends `--profile release`,         debug/ → release/
+/// Anything else passes through unchanged.
+fn promote_to_release(command: &str, build_output: &str) -> (String, String) {
+    let trimmed = command.trim_start();
+    let promoted_cmd = if let Some(rest) = trimmed.strip_prefix("cargo build ") {
+        if trimmed.contains(" --release") || trimmed.contains(" --profile ") {
+            command.to_string()
+        } else {
+            format!("cargo build --release {}", rest)
+        }
+    } else if let Some(rest) = trimmed.strip_prefix("cargo xtask build-c ") {
+        if trimmed.contains(" --profile ") {
+            command.to_string()
+        } else {
+            format!("cargo xtask build-c {} --profile release", rest)
+        }
+    } else {
+        return (command.to_string(), build_output.to_string());
+    };
+
+    let promoted_out = build_output.replace(
+        "target/x86_64-cluu-user/debug/",
+        "target/x86_64-cluu-user/release/",
+    );
+    (promoted_cmd, promoted_out)
 }
 
 /// Find the project root by walking up from the current directory looking for Cargo.toml
