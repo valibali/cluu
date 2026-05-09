@@ -93,6 +93,8 @@ pub mod pte_flags {
     /// Convenience combo: write-combining on a 4-KiB page.
     /// Index into PAT MSR is (PAT<<2)|(PCD<<1)|PWT = 0b001 = 1.
     /// Caller must have run `pat::init()` to put WC at PAT[1].
+    /// MUST NOT be OR'd with `NO_CACHE` — that flips PCD and selects
+    /// PAT[3] (UC) instead of PAT[1] (WC).
     pub const WRITE_COMBINING: u64 = PWT;
 }
 
