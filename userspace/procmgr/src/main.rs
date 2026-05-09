@@ -302,6 +302,10 @@ struct ProcessManager {
     pending_timers: Vec<TimerEntry>,
     /// Container IDs that have a pending deferred restart (prevents duplicates).
     pending_restarts: BTreeSet<u64>,
+    /// Persistent shared-ring region for VFS bulk reads. Allocated once on
+    /// first `load_from_vfs_ring` and reused for every subsequent call so
+    /// the VFS-side grant survives across loads.
+    vfs_read_ring: Option<libcluu::ipc::SharedRingRegion>,
     /// Per-user failed login attempt tracking for rate limiting.
     login_attempts: BTreeMap<String, LoginAttempt>,
     /// Pipe table: index = lower 16 bits of pipe_id; `None` means free slot.
@@ -343,6 +347,7 @@ impl ProcessManager {
             cookie_to_tokens: BTreeMap::new(),
             tty_endpoints: [0; VT_COUNT],
             requested_tty_mask: 0,
+            vfs_read_ring: None,
             vfs_endpoint: 0,
             blkdev_endpoint: 0,
             space_token: info.tokens[TOKEN_SPACE],
@@ -4529,30 +4534,35 @@ impl ProcessManager {
             file.fd, file.size
         ));
 
-        let region = match libcluu::ipc::alloc_shared_ring_region(
-            self.space_token,
-            RING_BYTES,
-            libcluu::ipc::SHARED_RING_DEFAULT_MAP_FLAGS,
-        ) {
-            Ok(region) => region,
-            Err(err) => {
-                let _ = debug_print(&format!("procmgr: ring alloc failed {:?}", err));
-                return None;
+        // Persistent ring: allocate region once and reuse across loads.
+        // Per-call alloc/free was creating fresh phys pages each time, which
+        // unbinds VFS's space_grant — the magic VFS writes is invisible
+        // here and SharedRing::attach fails with InvalidState.
+        if self.vfs_read_ring.is_none() {
+            match libcluu::ipc::alloc_shared_ring_region(
+                self.space_token,
+                RING_BYTES,
+                libcluu::ipc::SHARED_RING_DEFAULT_MAP_FLAGS,
+            ) {
+                Ok(region) => self.vfs_read_ring = Some(region),
+                Err(err) => {
+                    let _ = debug_print(&format!("procmgr: ring alloc failed {:?}", err));
+                    return None;
+                }
             }
-        };
+        }
+        let region = self.vfs_read_ring.as_ref().unwrap();
 
         let ring_meta = match client.setup_read_ring(self.space_token, region.base, region.bytes) {
             Ok(meta) => meta,
             Err(err) => {
                 let _ = debug_print(&format!("procmgr: ring setup failed {:?}", err));
-                let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
                 return None;
             }
         };
 
         if ring_meta.bytes > region.bytes {
             let _ = debug_print("procmgr: ring invalid bytes from vfs");
-            let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
             return None;
         }
 
@@ -4562,7 +4572,6 @@ impl ProcessManager {
             Ok(ring) => ring,
             Err(err) => {
                 let _ = debug_print(&format!("procmgr: ring attach failed {:?}", err));
-                let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
                 return None;
             }
         };
@@ -4580,7 +4589,6 @@ impl ProcessManager {
                 Ok(chunk) => chunk,
                 Err(err) => {
                     let _ = debug_print(&format!("procmgr: ring read failed {:?}", err));
-                    let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
                     return None;
                 }
             };
@@ -4596,7 +4604,6 @@ impl ProcessManager {
                     "procmgr: ring pop mismatch expected={} got={}",
                     chunk.len, popped
                 ));
-                let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
                 return None;
             }
 
@@ -4606,7 +4613,6 @@ impl ProcessManager {
             }
         }
 
-        let _ = libcluu::ipc::free_shared_ring_region(self.space_token, region);
         if data.is_empty() {
             return None;
         }
