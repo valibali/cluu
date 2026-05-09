@@ -826,6 +826,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::PmmAllocLarge => invoke_pmm_alloc_large(&token, obj_ref, args),
         InvokeOp::ClockNow => invoke_clock_now(&token, obj_ref, args),
         InvokeOp::ClockFrequency => invoke_clock_frequency(&token, obj_ref, args),
+        InvokeOp::PmmGetStats => invoke_pmm_get_stats(&token, obj_ref, args),
 
         // Frame operations
         InvokeOp::FrameAllocate => invoke_frame_allocate(&token, obj_ref, args),
@@ -1194,6 +1195,30 @@ fn invoke_sched_get_overflow(token: &Token, _obj_ref: ObjectRef, args: SyscallAr
     };
 
     Ok(value as usize)
+}
+
+/// Read the global buddy-allocator counters: used 4 KB frames, total 4 KB
+/// frames managed (i.e. RAM pages the buddy actually owns; excludes physmap-
+/// reserved + kernel-image spans). Selector via arg3:
+///   0 = used_frames
+///   1 = total_frames
+///
+/// Token requires READ. The values are global, not per-process — any caller
+/// with a token bearing READ may observe them. They feed /proc/meminfo and
+/// any future top/htop-style memory pressure UIs.
+fn invoke_pmm_get_stats(token: &Token, _obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
+    use crate::token::Rights;
+
+    if !token.has_right(Rights::READ) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let (used, total) = crate::mm::pmm::get_stats();
+    match args.arg3 {
+        0 => Ok(used),
+        1 => Ok(total),
+        _ => Err(Error::InvalidArgument),
+    }
 }
 
 fn invoke_endpoint_create(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {

@@ -105,6 +105,9 @@ pub enum InvokeOp {
     ClockNow = 60,
     ClockFrequency = 61,
 
+    // PMM statistics (selector via arg3)
+    PmmGetStats = 62,
+
     // Frame operations
     FrameAllocate = 70,
     FrameFree = 71,
@@ -1083,6 +1086,21 @@ pub const SCHED_OVERFLOW_PENDING_WAKE: usize = 1;   // H10
 /// the kernel only checks for the READ right.
 pub fn sched_get_overflow(token: usize, selector: usize) -> Result<u64> {
     let v = unsafe { invoke(token, InvokeOp::SchedGetOverflow, selector, 0, 0, 0) }?;
+    Ok(v as u64)
+}
+
+/// Selector values for `pmm_get_stats`. Counts are 4 KB physical frames the
+/// buddy allocator manages.
+pub const PMM_STATS_USED_FRAMES: usize = 0;
+pub const PMM_STATS_TOTAL_FRAMES: usize = 1;
+
+/// Read a global buddy-allocator counter (used or total 4 KB frames).
+///
+/// `token` may be any valid token bearing READ; the value is system-wide,
+/// not per-process. Two calls (used and total) are needed to derive
+/// `MemFree = (total - used) * 4 KB` for /proc/meminfo.
+pub fn pmm_get_stats(token: usize, selector: usize) -> Result<u64> {
+    let v = unsafe { invoke(token, InvokeOp::PmmGetStats, selector, 0, 0, 0) }?;
     Ok(v as u64)
 }
 

@@ -15,7 +15,8 @@ use core::mem::size_of;
 use libcluu::boot::{process_info, TOKEN_SELF};
 use libcluu::ipc::{call_with_reply_buf, PROCMGR_PROC_QUERY_LABEL};
 use libcluu::syscall::{
-    sched_get_overflow, SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
+    pmm_get_stats, sched_get_overflow, PMM_STATS_TOTAL_FRAMES, PMM_STATS_USED_FRAMES,
+    SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
 };
 use libcluu::types::Message;
 use libcluu::{Error, Result};
@@ -25,6 +26,8 @@ const QUERY_STATUS: usize = 0;
 const QUERY_STAT: usize = 1;
 const QUERY_CMDLINE: usize = 2;
 const QUERY_LIST: usize = 3;
+const QUERY_COMM: usize = 4;
+const QUERY_EXE: usize = 5;
 
 /// Names of static /proc files (no procmgr IPC needed).
 const STATIC_FILES: &[&str] = &[
@@ -38,7 +41,7 @@ const STATIC_FILES: &[&str] = &[
 ];
 
 /// Per-PID sub-files available under /proc/<pid>/ and /proc/self/.
-const PID_SUBFILES: &[&str] = &["status", "stat", "cmdline"];
+const PID_SUBFILES: &[&str] = &["status", "stat", "cmdline", "comm", "exe"];
 
 // ─── Static content generators (unchanged from original) ───────────────────
 
@@ -64,26 +67,103 @@ fn gen_uptime() -> Result<Vec<u8>> {
 }
 
 fn gen_meminfo() -> Result<Vec<u8>> {
-    let meminfo = String::from(
-        "MemTotal:       131072 kB\n\
-         MemFree:        100000 kB\n\
-         MemAvailable:   100000 kB\n\
-         Buffers:            0 kB\n\
-         Cached:             0 kB\n",
+    let self_token = process_info().tokens[TOKEN_SELF];
+    let used = pmm_get_stats(self_token, PMM_STATS_USED_FRAMES)?;
+    let total = pmm_get_stats(self_token, PMM_STATS_TOTAL_FRAMES)?;
+    let free = total.saturating_sub(used);
+    // PAGE_SIZE = 4 KB, so frames * 4 = kB directly.
+    let total_kb = total * 4;
+    let free_kb = free * 4;
+    let used_kb = used * 4;
+    let text = format!(
+        "MemTotal:       {:>8} kB\n\
+         MemFree:        {:>8} kB\n\
+         MemAvailable:   {:>8} kB\n\
+         MemUsed:        {:>8} kB\n\
+         Buffers:               0 kB\n\
+         Cached:                0 kB\n",
+        total_kb, free_kb, free_kb, used_kb,
     );
-    Ok(meminfo.into_bytes())
+    Ok(text.into_bytes())
 }
 
 fn gen_cpuinfo() -> Result<Vec<u8>> {
-    let cpuinfo = String::from(
+    use core::arch::x86_64::__cpuid;
+
+    let leaf0 = unsafe { __cpuid(0) };
+    let mut vendor = [0u8; 12];
+    vendor[0..4].copy_from_slice(&leaf0.ebx.to_le_bytes());
+    vendor[4..8].copy_from_slice(&leaf0.edx.to_le_bytes());
+    vendor[8..12].copy_from_slice(&leaf0.ecx.to_le_bytes());
+    let vendor_str = core::str::from_utf8(&vendor).unwrap_or("?");
+
+    let leaf1 = unsafe { __cpuid(1) };
+    let stepping = leaf1.eax & 0xF;
+    let base_model = (leaf1.eax >> 4) & 0xF;
+    let base_family = (leaf1.eax >> 8) & 0xF;
+    let ext_model = (leaf1.eax >> 16) & 0xF;
+    let ext_family = (leaf1.eax >> 20) & 0xFF;
+    let display_family = if base_family == 0xF { base_family + ext_family } else { base_family };
+    let display_model = if base_family == 0x6 || base_family == 0xF {
+        (ext_model << 4) | base_model
+    } else {
+        base_model
+    };
+
+    // Brand string: extended leaves 0x80000002-04 give 48 bytes ASCII.
+    let ext_max = unsafe { __cpuid(0x80000000) }.eax;
+    let mut brand = [0u8; 48];
+    let brand_str = if ext_max >= 0x80000004 {
+        for i in 0..3 {
+            let r = unsafe { __cpuid(0x80000002 + i as u32) };
+            let off = i * 16;
+            brand[off..off + 4].copy_from_slice(&r.eax.to_le_bytes());
+            brand[off + 4..off + 8].copy_from_slice(&r.ebx.to_le_bytes());
+            brand[off + 8..off + 12].copy_from_slice(&r.ecx.to_le_bytes());
+            brand[off + 12..off + 16].copy_from_slice(&r.edx.to_le_bytes());
+        }
+        let end = brand.iter().position(|&b| b == 0).unwrap_or(48);
+        core::str::from_utf8(&brand[..end]).unwrap_or("unknown").trim()
+    } else {
+        "unknown"
+    };
+
+    // Decode a useful subset of feature flags from leaf 1 EDX/ECX.
+    let mut flags = String::new();
+    let edx_flags: &[(u32, &str)] = &[
+        (0, "fpu"), (4, "tsc"), (5, "msr"), (9, "apic"),
+        (15, "cmov"), (19, "clflush"), (23, "mmx"),
+        (24, "fxsr"), (25, "sse"), (26, "sse2"),
+    ];
+    for &(bit, name) in edx_flags {
+        if leaf1.edx & (1 << bit) != 0 {
+            if !flags.is_empty() { flags.push(' '); }
+            flags.push_str(name);
+        }
+    }
+    let ecx_flags: &[(u32, &str)] = &[
+        (0, "sse3"), (9, "ssse3"), (19, "sse4_1"), (20, "sse4_2"),
+        (23, "popcnt"), (25, "aes"), (26, "xsave"), (28, "avx"),
+        (30, "rdrand"), (31, "hypervisor"),
+    ];
+    for &(bit, name) in ecx_flags {
+        if leaf1.ecx & (1 << bit) != 0 {
+            if !flags.is_empty() { flags.push(' '); }
+            flags.push_str(name);
+        }
+    }
+
+    let text = format!(
         "processor\t: 0\n\
-         vendor_id\t: CLUU\n\
-         model name\t: QEMU Virtual CPU\n\
-         cpu MHz\t\t: 2000.000\n\
-         cache size\t: 4096 KB\n\
-         flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic\n\n",
+         vendor_id\t: {}\n\
+         cpu family\t: {}\n\
+         model\t\t: {}\n\
+         stepping\t: {}\n\
+         model name\t: {}\n\
+         flags\t\t: {}\n\n",
+        vendor_str, display_family, display_model, stepping, brand_str, flags,
     );
-    Ok(cpuinfo.into_bytes())
+    Ok(text.into_bytes())
 }
 
 fn gen_mounts() -> Result<Vec<u8>> {
@@ -222,6 +302,8 @@ impl ProcfsBackend {
             "status" => QUERY_STATUS,
             "stat" => QUERY_STAT,
             "cmdline" => QUERY_CMDLINE,
+            "comm" => QUERY_COMM,
+            "exe" => QUERY_EXE,
             _ => QUERY_STATUS,
         }
     }

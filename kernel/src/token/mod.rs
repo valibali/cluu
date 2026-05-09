@@ -422,6 +422,9 @@ pub enum InvokeOp {
     ClockNow = 60,
     ClockFrequency = 61,
 
+    // PMM statistics (used/total frames; selector via arg3)
+    PmmGetStats = 62,
+
     // Frame operations
     FrameAllocate = 70,
     FrameFree = 71,
@@ -475,6 +478,7 @@ impl InvokeOp {
             59 => Some(Self::PmmAllocLarge),
             60 => Some(Self::ClockNow),
             61 => Some(Self::ClockFrequency),
+            62 => Some(Self::PmmGetStats),
             70 => Some(Self::FrameAllocate),
             71 => Some(Self::FrameFree),
             72 => Some(Self::FrameGetPhys),

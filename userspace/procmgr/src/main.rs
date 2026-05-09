@@ -3304,7 +3304,7 @@ impl ProcessManager {
 
     /// Handle PROCMGR_PROC_QUERY_LABEL: /proc file queries from VFS.
     ///
-    /// words[0] = query_type (0=status, 1=stat, 2=cmdline, 3=list)
+    /// words[0] = query_type (0=status, 1=stat, 2=cmdline, 3=list, 4=comm, 5=exe)
     /// words[1] = target_pid (0 = self, resolved via original_caller_tid)
     /// words[2] = original_caller_tid (forwarded by VFS)
     ///
@@ -3395,6 +3395,8 @@ impl ProcessManager {
             0 => self.proc_query_status(reply_token, &mut reply_msg, resolved_pid, inst),
             1 => self.proc_query_stat(reply_token, &mut reply_msg, resolved_pid, inst),
             2 => self.proc_query_cmdline(reply_token, &mut reply_msg, inst),
+            4 => self.proc_query_comm(reply_token, &mut reply_msg, inst),
+            5 => self.proc_query_exe(reply_token, &mut reply_msg, inst),
             _ => {
                 reply_msg.words[1] = Error::InvalidArgument.to_errno() as usize;
                 let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -3512,6 +3514,51 @@ impl ProcessManager {
         content.push(0);
 
         reply_msg.words[1] = 0; // errno success
+        reply_msg.words[2] = content.len();
+        let _ = ipc::reply_with_payload(reply_token, reply_msg, &content);
+        Ok(())
+    }
+
+    /// /proc/<pid>/comm: short process name, newline-terminated, capped at the
+    /// Linux convention of TASK_COMM_LEN-1 = 15 bytes of name plus '\n'.
+    fn proc_query_comm(
+        &self,
+        reply_token: usize,
+        reply_msg: &mut Message,
+        inst: Option<&ContainerInstance>,
+    ) -> Result<()> {
+        const COMM_MAX: usize = 15;
+        let name = inst.map(|i| i.name.as_str()).unwrap_or("");
+        let trunc_end = name.char_indices()
+            .take_while(|&(idx, ch)| idx + ch.len_utf8() <= COMM_MAX)
+            .last()
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .unwrap_or(0);
+        let trimmed = &name[..trunc_end];
+        let mut content = Vec::with_capacity(trimmed.len() + 1);
+        content.extend_from_slice(trimmed.as_bytes());
+        content.push(b'\n');
+
+        reply_msg.words[1] = 0;
+        reply_msg.words[2] = content.len();
+        let _ = ipc::reply_with_payload(reply_token, reply_msg, &content);
+        Ok(())
+    }
+
+    /// /proc/<pid>/exe: image path of the running binary, newline-terminated.
+    /// Linux exposes this as a symlink; we return the resolved path as plain text.
+    fn proc_query_exe(
+        &self,
+        reply_token: usize,
+        reply_msg: &mut Message,
+        inst: Option<&ContainerInstance>,
+    ) -> Result<()> {
+        let path = inst.map(|i| i.image_path.as_str()).unwrap_or("");
+        let mut content = Vec::with_capacity(path.len() + 1);
+        content.extend_from_slice(path.as_bytes());
+        content.push(b'\n');
+
+        reply_msg.words[1] = 0;
         reply_msg.words[2] = content.len();
         let _ = ipc::reply_with_payload(reply_token, reply_msg, &content);
         Ok(())
