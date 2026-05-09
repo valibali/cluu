@@ -3338,6 +3338,16 @@ impl ProcessManager {
             target_pid
         };
 
+        // Wire format:
+        //   words[0] = payload byte length (always; reply_with_payload clobbers
+        //              this to payload.len(), so don't use it for errno).
+        //   words[1] = errno (0 = success).
+        //   words[2] = type-specific count (e.g. pid_count for QUERY_LIST,
+        //              content_len for STATUS/STAT/CMDLINE).
+        // Older code put errno in words[0] which collided with the payload-len
+        // clobber and caused all /proc/* reads through procfs to look like
+        // failures (see ps producing zero PID rows pre-fix).
+
         // Query type 3 (list) doesn't need a specific target.
         if query_type == 3 {
             return self.proc_query_list(reply_token, &mut reply_msg, original_caller_tid, is_admin);
@@ -3345,7 +3355,7 @@ impl ProcessManager {
 
         // For types 0-2, resolved_pid must be valid.
         if resolved_pid == 0 {
-            reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+            reply_msg.words[1] = Error::NotFound.to_errno() as usize;
             let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             return Ok(());
         }
@@ -3371,7 +3381,7 @@ impl ProcessManager {
                 })
                 .unwrap_or(0);
             if caller_session_cid == 0 || caller_session_cid != target_session_cid {
-                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                reply_msg.words[1] = Error::PermissionDenied.to_errno() as usize;
                 let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                 return Ok(());
             }
@@ -3386,7 +3396,7 @@ impl ProcessManager {
             1 => self.proc_query_stat(reply_token, &mut reply_msg, resolved_pid, inst),
             2 => self.proc_query_cmdline(reply_token, &mut reply_msg, inst),
             _ => {
-                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                reply_msg.words[1] = Error::InvalidArgument.to_errno() as usize;
                 let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                 Ok(())
             }
@@ -3428,8 +3438,8 @@ impl ProcessManager {
             name, pid, state, profile.bits(), session_id, vt, cid
         );
 
-        reply_msg.words[0] = 0;
-        reply_msg.words[1] = content.len();
+        reply_msg.words[1] = 0; // errno success
+        reply_msg.words[2] = content.len();
         let _ = ipc::reply_with_payload(reply_token, reply_msg, content.as_bytes());
         Ok(())
     }
@@ -3463,8 +3473,8 @@ impl ProcessManager {
             pid, name, state_char, cpu_ticks, heap_pages, other_pages
         );
 
-        reply_msg.words[0] = 0;
-        reply_msg.words[1] = content.len();
+        reply_msg.words[1] = 0; // errno success
+        reply_msg.words[2] = content.len();
         let _ = ipc::reply_with_payload(reply_token, reply_msg, content.as_bytes());
         Ok(())
     }
@@ -3481,8 +3491,8 @@ impl ProcessManager {
         content.extend_from_slice(path.as_bytes());
         content.push(0);
 
-        reply_msg.words[0] = 0;
-        reply_msg.words[1] = content.len();
+        reply_msg.words[1] = 0; // errno success
+        reply_msg.words[2] = content.len();
         let _ = ipc::reply_with_payload(reply_token, reply_msg, &content);
         Ok(())
     }
@@ -3527,8 +3537,8 @@ impl ProcessManager {
             pid_count += 1;
         }
 
-        reply_msg.words[0] = 0;
-        reply_msg.words[1] = pid_count;
+        reply_msg.words[1] = 0; // errno success
+        reply_msg.words[2] = pid_count;
         let _ = ipc::reply_with_payload(reply_token, reply_msg, &pids);
         Ok(())
     }

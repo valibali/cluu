@@ -74,13 +74,16 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    // Print header based on format.
+    // GNU-style headers — fixed-width columns, plain whitespace-separated so
+    // common pipelines (`ps | grep`, `ps | awk`) work. Default mirrors the
+    // BSD/GNU `ps` short form: PID TTY TIME CMD. -f adds UID/PPID/C/STIME.
+    // -l keeps the verbose CLUU-specific layout for now.
     if long_format {
-        write_fd(1, b"  PID  NAME             STATE      CPU  HEAP OTHER\n");
+        write_fd(1, b"  PID NAME             STATE      CPU  HEAP OTHER\n");
     } else if full_format {
-        write_fd(1, b"  UID   PID  CMD              STATE      CPU    MEM\n");
+        write_fd(1, b"UID        PID  PPID C STIME TTY          TIME CMD\n");
     } else {
-        write_fd(1, b"  PID  NAME             STATE  TICKS     MEM\n");
+        write_fd(1, b"  PID TTY          TIME CMD\n");
     }
 
     let entries = match vfs.readdir("/proc") {
@@ -138,10 +141,13 @@ pub extern "C" fn main() -> i32 {
                         }
                     }
 
-                    let mem_kb = (line.heap_pages as u64 + line.other_pages as u64) * 4;
+                    let _mem_kb = (line.heap_pages as u64 + line.other_pages as u64) * 4;
+                    // CLUU has no controlling-tty per-process model yet;
+                    // ?+state means "no tty". Stub out -f STIME and CMD to
+                    // mirror real ps formatting until those fields land.
                     let row = if long_format {
                         format!(
-                            "{:>5}  {:<16} {:>5}  {:>8}  {:>4}  {:>5}\n",
+                            "{:>5} {:<16} {:>5}  {:>8}  {:>4}  {:>5}\n",
                             line.pid,
                             line.name,
                             line.state,
@@ -151,18 +157,20 @@ pub extern "C" fn main() -> i32 {
                         )
                     } else if full_format {
                         format!(
-                            "{:>5}  {:>5}  {:<16} {:>5}  {:>8}  {:>4}K\n",
+                            "{:<10} {:>4} {:>5} {} {:<5} {:<10} {:>5} {}\n",
                             "root",
                             line.pid,
-                            line.name,
-                            line.state,
+                            "?",
+                            "0",
+                            "?",
+                            "?",
                             line.cpu_ticks,
-                            mem_kb
+                            line.name,
                         )
                     } else {
                         format!(
-                            "{:>5}  {:<16} {:>5}  {:>8}  {:>4}K\n",
-                            line.pid, line.name, line.state, line.cpu_ticks, mem_kb
+                            "{:>5} {:<12} {:>4} {}\n",
+                            line.pid, "?", line.cpu_ticks, line.name,
                         )
                     };
                     write_fd(1, row.as_bytes());

@@ -52,8 +52,15 @@ fn gen_version() -> Result<Vec<u8>> {
 }
 
 fn gen_uptime() -> Result<Vec<u8>> {
-    let uptime = String::from("0.00 0.00\n");
-    Ok(uptime.into_bytes())
+    // Linux format: "<uptime_seconds>.<centi> <idle_seconds>.<centi>\n"
+    // Idle time tracking isn't wired through the kernel scheduler yet, so we
+    // report it as 0 for now. Once per-CPU idle counters land, plumb them
+    // through TIME_GETCLOCK or a dedicated query and replace the second field.
+    let (sec, nsec) = libcluu::time::query(libcluu::time::TIME_GETCLOCK)
+        .unwrap_or((0, 0));
+    let centi = (nsec / 10_000_000) as u32; // 0..99
+    let text = format!("{}.{:02} 0.00\n", sec, centi);
+    Ok(text.into_bytes())
 }
 
 fn gen_meminfo() -> Result<Vec<u8>> {
@@ -159,6 +166,11 @@ impl ProcfsBackend {
     }
 
     /// Query procmgr for process data. Returns payload bytes on success.
+    ///
+    /// Wire format (after `reply_with_payload` on the procmgr side):
+    /// - `reply.words[0]` = payload byte length (overwritten by the IPC layer).
+    /// - `reply.words[1]` = errno (0 = success, negative = errno).
+    /// - `reply.words[2]` = type-specific count, redundant with `payload_len`.
     fn query_procmgr(
         &self,
         query_type: usize,
@@ -174,8 +186,7 @@ impl ProcfsBackend {
         let (reply, payload_len) =
             call_with_reply_buf(self.procmgr_endpoint, &req, &[], &mut reply_buf)?;
 
-        // words[0] = errno (0 = success)
-        let errno = reply.words[0] as isize;
+        let errno = reply.words[1] as isize;
         if errno != 0 {
             return if errno == -2 {
                 Err(Error::NotFound)
@@ -216,6 +227,9 @@ impl ProcfsBackend {
     }
 
     /// Query procmgr for the PID list (visible to caller).
+    ///
+    /// Wire format: `words[1]` = errno, `words[2]` = pid_count, payload =
+    /// packed `u32 LE` pid array.
     fn query_pid_list(&self, caller_tid: usize) -> Result<Vec<u32>> {
         let req = Message::new(
             PROCMGR_PROC_QUERY_LABEL,
@@ -226,12 +240,12 @@ impl ProcfsBackend {
         let (reply, _payload_len) =
             call_with_reply_buf(self.procmgr_endpoint, &req, &[], &mut reply_buf)?;
 
-        let errno = reply.words[0] as isize;
+        let errno = reply.words[1] as isize;
         if errno != 0 {
             return Err(Error::InvalidOperation);
         }
 
-        let pid_count = reply.words[1];
+        let pid_count = reply.words[2];
         let data_start = size_of::<Message>();
         let mut pids = Vec::with_capacity(pid_count);
         for i in 0..pid_count {

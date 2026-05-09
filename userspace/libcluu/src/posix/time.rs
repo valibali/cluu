@@ -2,9 +2,7 @@
 
 use super::{c_int, c_void, clock_t, time_t};
 use crate::errno::{set_errno, EINVAL, ENOENT, ENOSYS};
-use crate::ipc;
-use crate::time::{TIME_GETCLOCK, TIME_GETTIMEOFDAY};
-use crate::types::Message;
+use crate::time::{self, TIME_GETCLOCK, TIME_GETTIMEOFDAY};
 
 /// Time value structure (seconds + microseconds).
 #[repr(C)]
@@ -315,16 +313,5 @@ fn timed_sleep_ms(ms: u64) -> bool {
 }
 
 fn query_time(label: u32) -> core::result::Result<(u64, u64), crate::Error> {
-    let endpoint = match crate::registry::lookup_service("timeserver:main") {
-        Some(ep) => ep,
-        None => return Err(crate::Error::NotFound),
-    };
-    let mut msg = Message::new(label, [0; 6], 1);
-    msg.words[0] = 0;
-    ipc::call(endpoint, &mut msg, crate::IpcFlags::empty())?;
-    let status = msg.words[0] as isize;
-    if status < 0 {
-        return Err(crate::Error::from_errno(status));
-    }
-    Ok((msg.words[1] as u64, msg.words[2] as u64))
+    time::query(label)
 }
