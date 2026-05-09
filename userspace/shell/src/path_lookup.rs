@@ -39,3 +39,31 @@ pub fn resolve(bare_name: &str, path_env: &str, vfs: &VfsClient) -> Option<Strin
         Err(_) => None,
     }
 }
+
+/// Pull the container image name out of a canonical absolute path, when the
+/// path lives inside `/var/images/<name>/...`. Returns `None` for any other
+/// shape, including the `/var/images` root itself.
+pub fn image_name_from_canonical(canonical: &str) -> Option<String> {
+    let rest = canonical.strip_prefix("/var/images/")?;
+    let (name, tail) = rest.split_once('/')?;
+    if name.is_empty() || tail.is_empty() {
+        return None;
+    }
+    Some(String::from(name))
+}
+
+/// Convert a user-typed command word into the bare image name procmgr
+/// expects. Bare names pass through; paths-with-slashes are resolved via
+/// `vfs.realpath` and then matched against `/var/images/<name>/...`.
+/// Returns the original input unchanged when realpath fails or the
+/// canonical path does not look like a CLUU image binary; the caller is
+/// responsible for downstream error reporting.
+pub fn resolve_to_image_name(name: &str, vfs: &VfsClient) -> String {
+    if !name.contains('/') {
+        return String::from(name);
+    }
+    match vfs.realpath(name) {
+        Ok(canon) => image_name_from_canonical(&canon).unwrap_or_else(|| String::from(name)),
+        Err(_) => String::from(name),
+    }
+}
