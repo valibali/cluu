@@ -2700,6 +2700,50 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
         }
     }
 
+    // Populate /bin with symlinks → /var/images/<image>/bin/<bin>. Each
+    // container's bin/ may hold one or more executables; expose every one
+    // under /bin so that PATH-based and full-path lookups (e.g. /bin/ls)
+    // both resolve through ext2 symlink following.
+    if var_images_dir.exists() {
+        if let Ok(image_entries) = fs::read_dir(&var_images_dir) {
+            for image_entry in image_entries.flatten() {
+                let image_path = image_entry.path();
+                if !image_path.is_dir() {
+                    continue;
+                }
+                let image_name = image_entry.file_name();
+                let image_bin = image_path.join("bin");
+                if !image_bin.is_dir() {
+                    continue;
+                }
+                let Ok(bin_entries) = fs::read_dir(&image_bin) else {
+                    continue;
+                };
+                for bin_entry in bin_entries.flatten() {
+                    if !bin_entry.path().is_file() {
+                        continue;
+                    }
+                    let bin_name = bin_entry.file_name();
+                    let target = format!(
+                        "/var/images/{}/bin/{}",
+                        image_name.to_string_lossy(),
+                        bin_name.to_string_lossy()
+                    );
+                    let link = bin_dir.join(&bin_name);
+                    let _ = fs::remove_file(&link);
+                    std::os::unix::fs::symlink(&target, &link).with_context(|| {
+                        format!(
+                            "Failed to create /bin symlink {} -> {}",
+                            link.display(),
+                            target
+                        )
+                    })?;
+                }
+            }
+        }
+        println!("  Populated /bin with symlinks");
+    }
+
     // Copy /etc/autostart.toml for procmgr service autostart
     let etc_dir = staging_dir.join("etc");
     fs::create_dir_all(&etc_dir)?;
