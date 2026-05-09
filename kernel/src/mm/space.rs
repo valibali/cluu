@@ -53,6 +53,16 @@ pub mod layout {
     pub const USER_STACK_TOP: u64 = 0x8000_0000;
     pub const USER_STACK_BOTTOM: u64 = USER_STACK_TOP - USER_STACK_SIZE as u64;
 
+    /// Upper bound (exclusive) for `space_grant` source/target VAs.
+    ///
+    /// Higher than `USER_STACK_TOP` so VFS-style services that need large
+    /// shared regions (cache, rings, bounce buffers) can place them above
+    /// the user stack without losing the ability to space_grant them to
+    /// peers. Must stay within PML4 entry 0 (≤ 512 GB) to remain in the
+    /// user half. 4 GB is enough headroom for current and near-future
+    /// per-service buffers without risking PML4 entry collisions.
+    pub const USER_GRANT_TOP: u64 = 0x1_0000_0000;
+
     // Physmap base (direct map of physical memory)
     pub const PHYS_MAP_BASE: u64 = 0xffff_8000_0000_0000;
 

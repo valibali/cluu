@@ -1831,11 +1831,11 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
         klibcluu::warn("invoke_space_grant: unsupported flags");
         return Err(Error::InvalidArgument);
     }
-    if !(layout::USER_NULL_REGION_END..layout::USER_STACK_TOP).contains(&source_virt) {
+    if !(layout::USER_NULL_REGION_END..layout::USER_GRANT_TOP).contains(&source_virt) {
         klibcluu::warn("invoke_space_grant: source not in user range");
         return Err(Error::InvalidArgument);
     }
-    if !(layout::USER_NULL_REGION_END..layout::USER_STACK_TOP).contains(&target_virt) {
+    if !(layout::USER_NULL_REGION_END..layout::USER_GRANT_TOP).contains(&target_virt) {
         klibcluu::warn("invoke_space_grant: target not in user range");
         return Err(Error::InvalidArgument);
     }

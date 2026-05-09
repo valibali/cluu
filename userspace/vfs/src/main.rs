@@ -44,6 +44,21 @@ const FS_WRITE: u32 = 0x305;
 const USIZE_BYTES: usize = size_of::<usize>();
 const TWO_USIZE_BYTES: usize = size_of::<usize>() * 2;
 
+// VFS region layout — kept at the legacy [0x6000_0000, 0x7900_0000) range.
+//
+// Empirically a relocation to [0x9000_0000, 0xE100_0000) breaks small-file
+// VFS reads from procmgr (e.g. /var/images/vt/manifest.toml returns size=0
+// silently between open and load_from_vfs_ring) even though every region
+// fits within the new USER_GRANT_TOP = 0x1_0000_0000 cap and grant_buf is
+// well within range. Root cause not isolated yet — relocation is therefore
+// gated on understanding that interaction. The kernel-side grant-cap bump
+// is still useful: it removes the structural ceiling so a future surgical
+// move (e.g. just CACHE_BUF_BASE up to 0x8400_0000 for 256 MB headroom)
+// becomes possible without touching grant or ring placement.
+//
+// Don't push CACHE_BUF_SIZE past 128 MB until ring/bounce are moved up too:
+// 0x6400_0000 + 256 MB = 0x7400_0000 collides with RING_POOL_BASE.
+
 /// Buffer base for file data reads (shared grant window).
 const READ_BUF_BASE: usize = 0x60000000;
 /// Size of the shared grant window in the VFS address space.
@@ -51,13 +66,13 @@ const READ_BUF_BASE: usize = 0x60000000;
 const GRANT_BUF_SIZE: usize = 4 * 1024 * 1024;
 /// Buffer base for the VFS read cache region.
 const CACHE_BUF_BASE: usize = 0x64000000;
-/// Size of the VFS read cache region. 256 MB headroom — eviction is
-/// disabled while MAP_SHARE_PHYS shares are pinned, so the budget must
-/// hold every binary that may ever be cached. Sum of containers in
-/// `/var/images` is well under 100 MB at v1; 256 MB leaves room.
+/// Size of the VFS read cache region. 256 MB headroom at the VA level —
+/// eviction is disabled while MAP_SHARE_PHYS shares are pinned, so the
+/// budget must hold every binary that may ever be cached. Sum of
+/// containers in `/var/images` is well under 100 MB at v1; 128 MB leaves
+/// room without overflowing the 256 MB gap before RING_POOL_BASE.
 const CACHE_BUF_SIZE: usize = 128 * 1024 * 1024;
 /// Dedicated per-client shared-ring pool (for ring bulk reads).
-/// Moved above CACHE_BUF top (0x64000000 + 256 MB = 0x74000000).
 const RING_POOL_BASE: usize = 0x74000000;
 const RING_SLOT_BYTES: usize = 64 * 1024;
 const RING_SLOT_COUNT: usize = 4;

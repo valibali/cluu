@@ -2852,7 +2852,7 @@ fn run_qemu(debug: bool) -> Result<()> {
         "-bios",
         ovmf,
         "-m",
-        "512M",
+        "1G",
         // KVM acceleration (hardware virtualization)
         "-accel",
         "kvm",

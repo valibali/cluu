@@ -364,7 +364,7 @@ echo "=== Starting QEMU (headless) ==="
 qemu_args=(
     -bios "$OVMF"
     -machine q35
-    -m 512M
+    -m 1G
     -accel kvm
     -cpu host
     -drive "file=$IMG,format=raw,if=ide,index=0"
