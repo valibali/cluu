@@ -16,13 +16,14 @@ use core::mem::size_of;
 use libcluu::elf::{ElfFile, LoadableSegment};
 use libcluu::fs::protocol::{
     VfsOp, VFS_CLOSE, VFS_FSTAT, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR,
-    VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT,
+    VFS_BOUNCE_SETUP, VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT,
     VFS_UNLINK, VFS_WRITE,
 };
 use libcluu::ipc::{self, extract_reply_id, parse_message, reply_with_payload, SharedRing, SharedRingHeader};
 use libcluu::types::Message;
 use libcluu::*;
 
+mod bulk_pool;
 mod fd_table;
 pub mod memfs;
 mod mount;
@@ -63,6 +64,17 @@ const RING_SLOT_COUNT: usize = 4;
 const RING_POOL_SIZE: usize = RING_SLOT_BYTES * RING_SLOT_COUNT;
 const RING_SLOT_CAPACITY: usize = RING_SLOT_BYTES - SharedRingHeader::bytes();
 const RING_MIN_REQUESTED_BYTES: usize = 8 * 1024;
+
+/// Per-client bounce-buffer pool for big single-shot reply payloads
+/// (readdir blobs, etc.). Each slot is a flat 64 KiB shared frame mapped
+/// into VFS at `BOUNCE_POOL_BASE + slot * BOUNCE_SLOT_BYTES` and granted
+/// to the client at its requested target_base. Reply carries
+/// `(used_bounce, len)`; client memcpys out. One outstanding RPC per
+/// client (synchronous IPC), so overwrite-on-reply is safe.
+const BOUNCE_POOL_BASE: usize = 0x78000000;
+const BOUNCE_SLOT_BYTES: usize = 64 * 1024;
+const BOUNCE_SLOT_COUNT: usize = 16;
+const BOUNCE_POOL_SIZE: usize = BOUNCE_SLOT_BYTES * BOUNCE_SLOT_COUNT;
 /// Cap for remote grant reads to avoid large transient allocations.
 const REMOTE_READ_CAP: usize = GRANT_BUF_SIZE;
 /// Maximum size of file to cache. 32 MB covers any single CLUU binary
@@ -179,6 +191,11 @@ fn run_vfs() -> Result<()> {
         "vfs: ring pool mapped base={:#x} size={}",
         ring_pool_base, RING_POOL_SIZE
     ));
+    let bounce_pool_base = map_bounce_pool(space_token)?;
+    let _ = debug_print(&format!(
+        "vfs: bounce pool mapped base={:#x} size={}",
+        bounce_pool_base, BOUNCE_POOL_SIZE
+    ));
     let vfs_space_map_token =
         token_derive(space_token, Rights::SPACE_MAP.bits() as usize, u64::MAX)?;
     let mut server = VfsServer::new(
@@ -192,6 +209,8 @@ fn run_vfs() -> Result<()> {
         CACHE_BUF_SIZE,
         ring_pool_base,
         RING_POOL_SIZE,
+        bounce_pool_base,
+        BOUNCE_POOL_SIZE,
         mounts,
     );
     let registry_endpoint = registry::control_endpoint();
@@ -562,6 +581,11 @@ struct VfsServer {
     client_containers: BTreeMap<usize, u64>,
     /// Per-container ephemeral in-memory filesystems (keyed by container_id).
     container_memfs: BTreeMap<u64, mount::MemFsBackend>,
+    /// Per-client bounce-buffer pool for big single-shot replies (readdir
+    /// blobs, etc.). Reply carries `(used_bounce, len)`; client memcpys
+    /// out. One outstanding RPC per client (sync IPC), so overwrite-on-reply
+    /// is safe.
+    bounce_pool: bulk_pool::BulkPool,
 }
 
 impl VfsServer {
@@ -577,6 +601,8 @@ impl VfsServer {
         cache_buf_size: usize,
         ring_pool_base: usize,
         ring_pool_size: usize,
+        bounce_pool_base: usize,
+        bounce_pool_size: usize,
         mounts: MountTable,
     ) -> Self {
         let mut free_ring_slots = Vec::new();
@@ -585,6 +611,10 @@ impl VfsServer {
             free_ring_slots.push(slot);
         }
         free_ring_slots.reverse();
+
+        let bounce_slots = bounce_pool_size / BOUNCE_SLOT_BYTES;
+        let bounce_pool = bulk_pool::BulkPool::new(bounce_pool_base, BOUNCE_SLOT_BYTES, bounce_slots);
+
         Self {
             endpoint,
             space_token,
@@ -603,6 +633,7 @@ impl VfsServer {
             view_manager_tid: None,
             client_containers: BTreeMap::new(),
             container_memfs: BTreeMap::new(),
+            bounce_pool,
         }
     }
 
@@ -659,6 +690,9 @@ impl VfsServer {
                 self.handle_ring_setup(msg, payload, reply_token, authenticated_client)
             }
             VfsOp::ReadRing => self.handle_read_ring(msg, reply_token, authenticated_client),
+            VfsOp::BounceSetup => {
+                self.handle_bounce_setup(msg, payload, reply_token, authenticated_client)
+            }
         };
         vfs_trace!("vfs: handled {:?} result={:?}", op, result);
         result
@@ -2039,6 +2073,51 @@ impl VfsServer {
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
+    /// Establish a per-client bounce buffer for big single-shot reply payloads.
+    /// Wire protocol:
+    ///   request words: [target_base_len_unused, client_id, target_space]
+    ///   request payload: target_base (usize LE bytes)
+    ///   reply words:    [status, bytes, slot]
+    /// Server-side bookkeeping lives in `BulkPool`; this handler only
+    /// adapts the IPC wire format and dispatches.
+    fn handle_bounce_setup(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
+        let mut reply_msg = Message::new(VFS_BOUNCE_SETUP, [0; 6], 3);
+        let client_id = match self.resolve_client_id("bounce_setup", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+        let Some(target_base) = parse_single_usize(payload) else {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        };
+        let target_space = msg.words[2];
+
+        match self
+            .bounce_pool
+            .setup(client_id, target_base, target_space, self.space_token)
+        {
+            Ok(session) => {
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = session.bytes;
+                reply_msg.words[2] = session.slot;
+                ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+            }
+        }
+    }
+
     fn handle_read_ring(
         &mut self,
         msg: &Message,
@@ -3092,14 +3171,27 @@ impl VfsServer {
         Ok(())
     }
 
+    /// Single-shot readdir with bounce-buffer fallback for big replies.
+    /// Wire protocol:
+    ///   request words: [path_len, client_id]
+    ///   reply words:   [blob_len, status, count, bounce_flag]
+    /// If `bounce_flag == 0`, blob follows inline as IPC payload.
+    /// If `bounce_flag == 1`, client must read `blob_len` bytes from its
+    /// bounce buffer at offset 0; IPC payload is empty.
+    /// If client has no bounce set up and blob > inline limit, reply with
+    /// status = BufferTooSmall (-10) so the client can set up a bounce
+    /// buffer and retry.
     fn handle_readdir(
-        &self,
+        &mut self,
         msg: &Message,
         payload: &[u8],
         reply_token: usize,
         caller_client: Option<usize>,
     ) -> Result<()> {
-        let mut reply_msg = Message::new(VFS_READDIR, [0; 6], 2);
+        // Inline budget: leave room for the Message header inside IPC_MESSAGE_MAX.
+        const INLINE_BUDGET: usize = 3584;
+
+        let mut reply_msg = Message::new(VFS_READDIR, [0; 6], 4);
         let client_id = match self.resolve_client_id("readdir", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
@@ -3116,7 +3208,6 @@ impl VfsServer {
             }
         };
 
-        // View check: resolve virtual path + target.
         let (real_path, target) = match self.view_check_path_with_target(client_id, path) {
             Ok(pt) => pt,
             Err(err) => {
@@ -3127,129 +3218,135 @@ impl VfsServer {
 
         vfs_trace!("vfs: readdir '{}'", path);
 
-        if let view::MountTarget::MemFs { container_id } = target {
-            return self.handle_readdir_memfs(
-                container_id,
-                &real_path,
-                client_id,
-                reply_token,
-                &mut reply_msg,
+        // Build blob + count.
+        let (blob, count) = if let view::MountTarget::MemFs { container_id } = target {
+            match self.build_readdir_blob_memfs(container_id, &real_path, client_id) {
+                Ok(blob) => {
+                    let count = count_readdir_entries(&blob);
+                    (blob, count)
+                }
+                Err(err) => {
+                    reply_msg.words[1] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            }
+        } else {
+            match self.mounts.readdir(&real_path, client_id) {
+                Ok(entries) => {
+                    let mut data = Vec::new();
+                    let mut count = 0usize;
+                    for entry in &entries {
+                        let name_bytes = entry.name.as_bytes();
+                        data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+                        let stat_bytes = entry_to_stat_bytes(entry);
+                        data.extend_from_slice(&stat_bytes);
+                        data.extend_from_slice(name_bytes);
+                        count += 1;
+                    }
+                    (data, count)
+                }
+                Err(err) => {
+                    reply_msg.words[1] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            }
+        };
+
+        // Inline path: blob fits in IPC payload.
+        if blob.len() <= INLINE_BUDGET {
+            reply_msg.words[0] = blob.len();
+            reply_msg.words[1] = 0;
+            reply_msg.words[2] = count;
+            reply_msg.words[3] = 0; // bounce_flag = 0
+            return reply_with_payload(reply_token, &reply_msg, &blob);
+        }
+
+        // Bounce path: copy into client's bounce buffer if one is set up.
+        // BufferTooSmall signals the client to call BOUNCE_SETUP and retry.
+        let bounce = match self.bounce_pool.get(client_id) {
+            Some(b) if blob.len() <= b.bytes => b,
+            _ => {
+                reply_msg.words[1] = Error::BufferTooSmall.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                blob.as_ptr(),
+                bounce.source_base as *mut u8,
+                blob.len(),
             );
         }
-
-        // Use unified mount table for readdir
-        match self.mounts.readdir(&real_path, client_id) {
-            Ok(entries) => {
-                // Serialize entries v2:
-                // [name_len: u32 LE][stat: 40 bytes][name: name_len bytes]
-                let mut data = Vec::new();
-                let mut count = 0usize;
-                for entry in &entries {
-                    let name_bytes = entry.name.as_bytes();
-                    data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-                    let stat_bytes = entry_to_stat_bytes(entry);
-                    data.extend_from_slice(&stat_bytes);
-                    data.extend_from_slice(name_bytes);
-                    count += 1;
-                }
-
-                reply_msg.words[1] = 0;
-                reply_msg.words[2] = count;
-                reply_with_payload(reply_token, &reply_msg, &data)
-            }
-            Err(err) => {
-                reply_msg.words[1] = err.to_errno() as usize;
-                ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
-            }
-        }
+        reply_msg.words[0] = blob.len();
+        reply_msg.words[1] = 0;
+        reply_msg.words[2] = count;
+        reply_msg.words[3] = 1; // bounce_flag
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    /// MemFs dispatch for handle_readdir.
-    fn handle_readdir_memfs(
+    /// Build the v2-format readdir blob for a MemFs-backed mount target.
+    /// Used by the paginator on cursor=0; subsequent chunks read from the
+    /// cached blob without rerunning this work.
+    fn build_readdir_blob_memfs(
         &self,
         container_id: u64,
         memfs_path: &str,
         client_id: usize,
-        reply_token: usize,
-        reply_msg: &mut Message,
-    ) -> Result<()> {
-        let memfs_backend = match self.get_container_memfs(container_id) {
-            Ok(b) => b,
-            Err(err) => {
-                reply_msg.words[1] = err.to_errno() as usize;
-                return ipc::reply(reply_token, reply_msg, IpcFlags::empty());
-            }
-        };
-        match memfs_backend.borrow().readdir(memfs_path) {
-            Ok(mut entries) => {
-                // For root readdir, merge in top-level dirs from the client's
-                // view mounts so `ls /` shows /bin, /lib, /dev, etc.
-                if memfs_path == "/" {
-                    if let Some(view) = self.views.get_view(client_id) {
-                        for m in &view.mounts {
-                            // Extract top-level component from dst (e.g. "/bin" → "bin")
-                            let top = m.dst.strip_prefix('/').unwrap_or(&m.dst);
-                            let top = match top.find('/') {
-                                Some(pos) => &top[..pos],
-                                None => top,
-                            };
-                            if top.is_empty() || top == "/" {
-                                continue;
-                            }
-                            // Only add if not already present from MemFs listing
-                            let already = entries.iter().any(|(name, _)| name == top);
-                            if !already {
-                                entries.push((alloc::string::String::from(top), true));
-                            }
-                        }
+    ) -> Result<Vec<u8>> {
+        let memfs_backend = self.get_container_memfs(container_id)?;
+        let mut entries = memfs_backend.borrow().readdir(memfs_path)?;
+
+        // For root readdir, merge in top-level dirs from the client's view
+        // mounts so `ls /` shows /bin, /lib, /dev, etc.
+        if memfs_path == "/" {
+            if let Some(view) = self.views.get_view(client_id) {
+                for m in &view.mounts {
+                    let top = m.dst.strip_prefix('/').unwrap_or(&m.dst);
+                    let top = match top.find('/') {
+                        Some(pos) => &top[..pos],
+                        None => top,
+                    };
+                    if top.is_empty() || top == "/" {
+                        continue;
+                    }
+                    let already = entries.iter().any(|(name, _)| name == top);
+                    if !already {
+                        entries.push((alloc::string::String::from(top), true));
                     }
                 }
-
-                // Serialize entries v2:
-                // [name_len: u32 LE][stat: 40 bytes][name: name_len bytes]
-                let fs_ref = memfs_backend.borrow();
-                let mut data = Vec::new();
-                let mut count = 0usize;
-                for (name, is_dir) in &entries {
-                    let name_bytes = name.as_bytes();
-                    // Build a full path for the entry to look up size.
-                    let entry_full = if memfs_path == "/" {
-                        alloc::format!("/{}", name)
-                    } else {
-                        alloc::format!("{}/{}", memfs_path.trim_end_matches('/'), name)
-                    };
-                    let (size, mode) = if *is_dir {
-                        (0u64, MODE_DIR as u32)
-                    } else {
-                        let sz = fs_ref.open(&entry_full)
-                            .map(|(_, s)| s as u64)
-                            .unwrap_or(0);
-                        (sz, MODE_FILE as u32)
-                    };
-                    let info = StatInfo {
-                        size,
-                        mode,
-                        mtime: 0,
-                        nlink: 1,
-                        uid: 0,
-                        gid: 0,
-                        blocks: (size + 511) / 512,
-                    };
-                    data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-                    data.extend_from_slice(&info.to_bytes());
-                    data.extend_from_slice(name_bytes);
-                    count += 1;
-                }
-                drop(fs_ref);
-                reply_msg.words[1] = 0;
-                reply_msg.words[2] = count;
-                reply_with_payload(reply_token, reply_msg, &data)
-            }
-            Err(err) => {
-                reply_msg.words[1] = err.to_errno() as usize;
-                ipc::reply(reply_token, reply_msg, IpcFlags::empty())
             }
         }
+
+        let fs_ref = memfs_backend.borrow();
+        let mut data = Vec::new();
+        for (name, is_dir) in &entries {
+            let name_bytes = name.as_bytes();
+            let entry_full = if memfs_path == "/" {
+                alloc::format!("/{}", name)
+            } else {
+                alloc::format!("{}/{}", memfs_path.trim_end_matches('/'), name)
+            };
+            let (size, mode) = if *is_dir {
+                (0u64, MODE_DIR as u32)
+            } else {
+                let sz = fs_ref.open(&entry_full).map(|(_, s)| s as u64).unwrap_or(0);
+                (sz, MODE_FILE as u32)
+            };
+            let info = StatInfo {
+                size,
+                mode,
+                mtime: 0,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                blocks: (size + 511) / 512,
+            };
+            data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(&info.to_bytes());
+            data.extend_from_slice(name_bytes);
+        }
+        Ok(data)
     }
 
     fn handle_map_elf(
@@ -3708,4 +3805,44 @@ fn map_ring_pool(space_token: usize) -> Result<usize> {
             Err(err)
         }
     }
+}
+
+fn map_bounce_pool(space_token: usize) -> Result<usize> {
+    let pages = BOUNCE_POOL_SIZE.div_ceil(PAGE_SIZE);
+    if pages == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    match syscall::space_map_range(space_token, BOUNCE_POOL_BASE, 0, 0x03, pages, 0) {
+        Ok(_) => {
+            let _ = debug_print("vfs: bounce pool space_map_range ok");
+            Ok(BOUNCE_POOL_BASE)
+        }
+        Err(Error::AlreadyExists) => {
+            let _ = debug_print("vfs: bounce pool already mapped");
+            Ok(BOUNCE_POOL_BASE)
+        }
+        Err(err) => {
+            let _ = debug_print(&format!("vfs: bounce pool map failed {:?}", err));
+            Err(err)
+        }
+    }
+}
+
+/// Count v2-format readdir entries in a serialized blob.
+fn count_readdir_entries(blob: &[u8]) -> usize {
+    let mut off = 0usize;
+    let mut count = 0usize;
+    while off + 44 <= blob.len() {
+        let name_len = u32::from_le_bytes([
+            blob[off], blob[off + 1], blob[off + 2], blob[off + 3],
+        ]) as usize;
+        let entry_size = 4 + 40 + name_len;
+        if off + entry_size > blob.len() {
+            break;
+        }
+        off += entry_size;
+        count += 1;
+    }
+    count
 }

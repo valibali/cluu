@@ -5,14 +5,15 @@
 
 use crate::error::{Error, Result};
 use crate::fs::protocol::{
-    VFS_CLOSE, VFS_FSTAT, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR,
-    VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR,
-    VFS_STAT, VFS_UNLINK, VFS_WRITE,
+    VFS_BOUNCE_SETUP, VFS_CLOSE, VFS_FSTAT, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN,
+    VFS_READDIR, VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP,
+    VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
 };
 use crate::ipc::{self, make_payload_message};
 use crate::types::Message;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 /// Handle to an open file in the VFS service.
 #[derive(Debug, Clone, Copy)]
@@ -127,6 +128,16 @@ pub struct VfsDirEntry {
 pub struct VfsClient {
     endpoint: usize,
     client_id: usize,
+    /// Lazy-init bounce buffer for big single-shot replies. `Cell` lets
+    /// `&self` methods install/upgrade the buffer on demand without
+    /// requiring a `&mut self` API change for callers.
+    bounce: Cell<Option<BounceBuffer>>,
+}
+
+#[derive(Clone, Copy)]
+struct BounceBuffer {
+    base: usize,
+    bytes: usize,
 }
 
 impl VfsClient {
@@ -135,6 +146,7 @@ impl VfsClient {
         Self {
             endpoint,
             client_id,
+            bounce: Cell::new(None),
         }
     }
 
@@ -147,7 +159,41 @@ impl VfsClient {
         Ok(Self {
             endpoint,
             client_id,
+            bounce: Cell::new(None),
         })
+    }
+
+    /// Lazy-allocate and register a bounce buffer for replies that exceed
+    /// the inline IPC limit. Idempotent: returns the cached buffer if one
+    /// is already established.
+    fn ensure_bounce(&self) -> Result<BounceBuffer> {
+        if let Some(b) = self.bounce.get() {
+            return Ok(b);
+        }
+        // Map a fresh region in this process's address space.
+        let info = crate::boot::process_info();
+        let space_token = info.tokens[crate::boot::TOKEN_SPACE];
+        let region = crate::ipc::alloc_shared_ring_region(
+            space_token,
+            64 * 1024,
+            crate::ipc::SHARED_RING_DEFAULT_MAP_FLAGS,
+        )?;
+
+        // Ask VFS to grant its source slot onto our region.
+        let payload = region.base.to_ne_bytes();
+        let msg = make_payload_message(
+            VFS_BOUNCE_SETUP,
+            payload.len(),
+            &[self.client_id, space_token],
+        );
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, &payload, &mut reply)?;
+        parse_status(reply.words[0])?;
+        let bytes = reply.words[1];
+
+        let buf = BounceBuffer { base: region.base, bytes };
+        self.bounce.set(Some(buf));
+        Ok(buf)
     }
 
     /// Open a path in the VFS service.
@@ -271,51 +317,47 @@ impl VfsClient {
     /// Returns a list of directory entries with full metadata (v2 wire format).
     /// Per-entry layout: [name_len: u32 LE][stat: 40 bytes][name: name_len bytes]
     pub fn readdir(&self, path: &str) -> Result<Vec<VfsDirEntry>> {
+        // First attempt: assume small reply fits inline. If VFS says
+        // BufferTooSmall, lazy-set-up the bounce buffer and retry once.
+        match self.readdir_once(path) {
+            Err(Error::BufferTooSmall) => {
+                self.ensure_bounce()?;
+                self.readdir_once(path)
+            }
+            other => other,
+        }
+    }
+
+    /// Single readdir RPC. Decodes inline or bounce-buffer reply based on
+    /// the `bounce_flag` returned by the server.
+    fn readdir_once(&self, path: &str) -> Result<Vec<VfsDirEntry>> {
         let payload = path.as_bytes();
         let msg = make_payload_message(VFS_READDIR, payload.len(), &[self.client_id]);
 
-        // Use larger buffer for reply with entry data
-        let mut reply_buf = [0u8; 8192];
+        let mut reply_buf = [0u8; 4096];
         let (reply, payload_len) =
             ipc::call_with_reply_buf(self.endpoint, &msg, payload, &mut reply_buf)?;
         parse_status(reply.words[1])?;
 
         let entry_count = reply.words[2];
-        let data_start = core::mem::size_of::<Message>();
-        let data = &reply_buf[data_start..data_start + payload_len];
+        let bounce_flag = reply.words[3];
+        let blob_len = reply.words[0];
 
-        // Parse entries (v2): [name_len: u32 LE][stat: 40 bytes][name: name_len bytes]
-        let mut entries = Vec::new();
-        let mut offset = 0;
-        for _ in 0..entry_count {
-            // Need at least 4 (name_len) + 40 (stat) bytes
-            if offset + 44 > data.len() {
-                break;
+        let entries = if bounce_flag == 0 {
+            let data_start = core::mem::size_of::<Message>();
+            let data = &reply_buf[data_start..data_start + payload_len];
+            parse_readdir_blob(data, entry_count)
+        } else {
+            // Read blob from our bounce buffer.
+            let bounce = self.bounce.get().ok_or(Error::InvalidState)?;
+            if blob_len > bounce.bytes {
+                return Err(Error::BufferTooSmall);
             }
-            let name_len = u32::from_le_bytes([
-                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-            ]) as usize;
-            offset += 4;
-
-            let mut stat_bytes = [0u8; 40];
-            stat_bytes.copy_from_slice(&data[offset..offset + 40]);
-            let stat = VfsStat::from_bytes(&stat_bytes);
-            offset += 40;
-
-            if offset + name_len > data.len() {
-                break;
-            }
-            if let Ok(name) = core::str::from_utf8(&data[offset..offset + name_len]) {
-                // S_IFDIR = 0o040000
-                let is_dir = (stat.mode & 0o170000) == 0o040000;
-                entries.push(VfsDirEntry {
-                    name: String::from(name),
-                    stat,
-                    is_dir,
-                });
-            }
-            offset += name_len;
-        }
+            let data = unsafe {
+                core::slice::from_raw_parts(bounce.base as *const u8, blob_len)
+            };
+            parse_readdir_blob(data, entry_count)
+        };
 
         Ok(entries)
     }
@@ -454,4 +496,38 @@ fn parse_status(raw: usize) -> Result<()> {
         return Err(Error::from_errno(signed));
     }
     Ok(())
+}
+
+/// Parse v2 readdir wire blob: `[name_len: u32 LE][stat: 40][name]` repeating.
+fn parse_readdir_blob(data: &[u8], entry_count: usize) -> Vec<VfsDirEntry> {
+    let mut entries = Vec::with_capacity(entry_count);
+    let mut offset = 0;
+    for _ in 0..entry_count {
+        if offset + 44 > data.len() {
+            break;
+        }
+        let name_len = u32::from_le_bytes([
+            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        let mut stat_bytes = [0u8; 40];
+        stat_bytes.copy_from_slice(&data[offset..offset + 40]);
+        let stat = VfsStat::from_bytes(&stat_bytes);
+        offset += 40;
+
+        if offset + name_len > data.len() {
+            break;
+        }
+        if let Ok(name) = core::str::from_utf8(&data[offset..offset + name_len]) {
+            let is_dir = (stat.mode & 0o170000) == 0o040000;
+            entries.push(VfsDirEntry {
+                name: String::from(name),
+                stat,
+                is_dir,
+            });
+        }
+        offset += name_len;
+    }
+    entries
 }

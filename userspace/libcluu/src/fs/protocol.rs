@@ -63,6 +63,8 @@ pub const VFS_LINK: u32 = 0x20E;
 pub const VFS_FLUSH: u32 = 0x20F;
 /// Resolve a path to its canonical form, following symlinks.
 pub const VFS_REALPATH: u32 = 0x210;
+/// Setup a per-client bounce buffer for big single-shot reply payloads.
+pub const VFS_BOUNCE_SETUP: u32 = 0x211;
 
 /// Structured enum for protocol routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +85,7 @@ pub enum VfsOp {
     ReadRing,
     Link,
     Realpath,
+    BounceSetup,
 }
 
 impl VfsOp {
@@ -104,6 +107,7 @@ impl VfsOp {
             VFS_READ_RING => Some(Self::ReadRing),
             VFS_LINK => Some(Self::Link),
             VFS_REALPATH => Some(Self::Realpath),
+            VFS_BOUNCE_SETUP => Some(Self::BounceSetup),
             _ => None,
         }
     }
