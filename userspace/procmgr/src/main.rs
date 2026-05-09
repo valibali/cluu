@@ -3468,9 +3468,29 @@ impl ProcessManager {
             (0, 0, 0)
         };
 
+        // CLUU /proc/<pid>/stat extension: include parent_pid (resolved via
+        // parent_container_id → pid), session_id, container_id, parent_cid.
+        // Format:
+        //   pid (name) state cpu_ticks heap_pages other_pages ppid sid cid pcid
+        // ppid is 0 if there is no parent container in the table, or no pid
+        // is currently associated with the parent.
+        let (sid, cid, pcid) = match inst {
+            Some(i) => (i.session_id, i.container_id, i.parent_container_id),
+            None => (0, 0, 0),
+        };
+        let ppid = if pcid != 0 {
+            self.pid_to_container_id
+                .iter()
+                .find_map(|(&p, &c)| if c == pcid { Some(p) } else { None })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
         let content = format!(
-            "{} ({}) {} {} {} {}\n",
-            pid, name, state_char, cpu_ticks, heap_pages, other_pages
+            "{} ({}) {} {} {} {} {} {} {} {}\n",
+            pid, name, state_char, cpu_ticks, heap_pages, other_pages,
+            ppid, sid, cid, pcid
         );
 
         reply_msg.words[1] = 0; // errno success

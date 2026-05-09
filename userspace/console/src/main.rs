@@ -166,7 +166,14 @@ fn handle_incoming<B: ConsoleBackend>(
                 // framebuffer_acquire in libcluu) can discover the FB layout.
                 let _ = console.handle_message(msg, payload);
             }
-            _ => {}
+            // Forward presentation-layer commands (clear, cursor move, blink
+            // toggle) so per-session shells can affect their own VT without
+            // needing the privileged control endpoint. The renderer uses
+            // `active_vt` internally, so the operation only takes visible
+            // effect when this VT is on screen — matching user expectation.
+            _ => {
+                let _ = console.handle_message(msg, payload);
+            }
         }
         Ok(())
     } else if index == VT_COUNT {

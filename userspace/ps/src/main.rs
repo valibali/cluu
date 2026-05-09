@@ -74,16 +74,16 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    // GNU-style headers — fixed-width columns, plain whitespace-separated so
-    // common pipelines (`ps | grep`, `ps | awk`) work. Default mirrors the
-    // BSD/GNU `ps` short form: PID TTY TIME CMD. -f adds UID/PPID/C/STIME.
-    // -l keeps the verbose CLUU-specific layout for now.
+    // GNU-close fixed-width columns, whitespace-separated. Default carries
+    // the CLUU-specific PPID / SID / CID columns so `ps | grep CID` lookups
+    // work without -f. -f adds the BSD/GNU long form. -l keeps the verbose
+    // memory/CPU layout.
     if long_format {
         write_fd(1, b"  PID NAME             STATE      CPU  HEAP OTHER\n");
     } else if full_format {
-        write_fd(1, b"UID        PID  PPID C STIME TTY          TIME CMD\n");
+        write_fd(1, b"UID         PID  PPID  SID  CID PCID STATE      TIME CMD\n");
     } else {
-        write_fd(1, b"  PID TTY          TIME CMD\n");
+        write_fd(1, b"  PID  PPID  SID  CID PCID STATE      TIME CMD\n");
     }
 
     let entries = match vfs.readdir("/proc") {
@@ -141,10 +141,6 @@ pub extern "C" fn main() -> i32 {
                         }
                     }
 
-                    let _mem_kb = (line.heap_pages as u64 + line.other_pages as u64) * 4;
-                    // CLUU has no controlling-tty per-process model yet;
-                    // ?+state means "no tty". Stub out -f STIME and CMD to
-                    // mirror real ps formatting until those fields land.
                     let row = if long_format {
                         format!(
                             "{:>5} {:<16} {:>5}  {:>8}  {:>4}  {:>5}\n",
@@ -157,20 +153,28 @@ pub extern "C" fn main() -> i32 {
                         )
                     } else if full_format {
                         format!(
-                            "{:<10} {:>4} {:>5} {} {:<5} {:<10} {:>5} {}\n",
+                            "{:<10} {:>4} {:>5} {:>4} {:>4} {:>4} {:<5} {:>9} {}\n",
                             "root",
                             line.pid,
-                            "?",
-                            "0",
-                            "?",
-                            "?",
+                            line.ppid,
+                            line.sid,
+                            line.cid,
+                            line.pcid,
+                            line.state,
                             line.cpu_ticks,
                             line.name,
                         )
                     } else {
                         format!(
-                            "{:>5} {:<12} {:>4} {}\n",
-                            line.pid, "?", line.cpu_ticks, line.name,
+                            "{:>5} {:>5} {:>4} {:>4} {:>4} {:<5} {:>9} {}\n",
+                            line.pid,
+                            line.ppid,
+                            line.sid,
+                            line.cid,
+                            line.pcid,
+                            line.state,
+                            line.cpu_ticks,
+                            line.name,
                         )
                     };
                     write_fd(1, row.as_bytes());
@@ -192,33 +196,35 @@ struct StatLine {
     cpu_ticks: String,
     heap_pages: u32,
     other_pages: u32,
+    ppid: String,
+    sid: String,
+    cid: String,
+    pcid: String,
 }
 
 fn parse_stat_line(text: &str) -> Option<StatLine> {
-    // Format: "pid (name) state cpu_ticks heap_pages other_pages"
-    // Split on the first '(' and last ')' to handle names with spaces.
+    // CLUU stat layout (extended past the original 6 fields):
+    //   pid (name) state cpu_ticks heap_pages other_pages ppid sid cid pcid
+    // Older procmgr builds emit only the first 6 fields; missing trailing
+    // columns default to "0" so older logs / mixed-version trees still parse.
     let paren_open = text.find('(')?;
     let paren_close = text.rfind(')')?;
     let pid = text[..paren_open].trim().to_string();
     let name = text[paren_open + 1..paren_close].to_string();
     let rest = text[paren_close + 1..].trim();
-    // rest: "state cpu_ticks heap_pages other_pages"
-    let parts: Vec<&str> = rest.splitn(4, ' ').collect();
+    let parts: Vec<&str> = rest.split_whitespace().collect();
     if parts.len() < 4 {
-        // Try with fewer parts (e.g. missing other_pages).
-        if parts.len() >= 3 {
-            let state = parts[0].to_string();
-            let cpu_ticks = parts[1].to_string();
-            let heap_pages = parts[2].parse::<u32>().unwrap_or(0);
-            return Some(StatLine { pid, name, state, cpu_ticks, heap_pages, other_pages: 0 });
-        }
         return None;
     }
     let state = parts[0].to_string();
     let cpu_ticks = parts[1].to_string();
     let heap_pages = parts[2].parse::<u32>().unwrap_or(0);
-    let other_pages = parts[3].trim().parse::<u32>().unwrap_or(0);
-    Some(StatLine { pid, name, state, cpu_ticks, heap_pages, other_pages })
+    let other_pages = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    let ppid = parts.get(4).map(|s| s.to_string()).unwrap_or_else(|| "0".to_string());
+    let sid = parts.get(5).map(|s| s.to_string()).unwrap_or_else(|| "0".to_string());
+    let cid = parts.get(6).map(|s| s.to_string()).unwrap_or_else(|| "0".to_string());
+    let pcid = parts.get(7).map(|s| s.to_string()).unwrap_or_else(|| "0".to_string());
+    Some(StatLine { pid, name, state, cpu_ticks, heap_pages, other_pages, ppid, sid, cid, pcid })
 }
 
 fn write_fd(fd: i32, data: &[u8]) {
