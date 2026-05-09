@@ -2,3 +2,4 @@ FROM minimal
 PROFILE ipc vfs registry
 BUILD "cargo build --manifest-path userspace/kill/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/kill.elf /bin/kill
 ENTRYPOINT /bin/kill
+PRELOAD

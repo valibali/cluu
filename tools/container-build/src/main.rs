@@ -61,6 +61,9 @@ struct Cluufile {
     /// `rw/readwrite` → Inherit+Rw. Duplicate paths are a parse error
     /// (caught in parse_cluufile).
     mount_policies: Vec<(String, String)>,
+    /// PRELOAD: hint to VFS to fill its ELF cache for this container's
+    /// binary at startup, so first-spawn pays the disk read upfront.
+    preload: bool,
 }
 
 fn parse_cluufile(path: &Path) -> Result<Cluufile> {
@@ -83,6 +86,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
     let mut detach = false;
     let mut restart_policy: Option<(String, Option<usize>, Option<u64>)> = None;
     let mut mount_policies: Vec<(String, String)> = Vec::new();
+    let mut preload = false;
     let mut saw_directive = false;
 
     for (line_idx, raw_line) in content.lines().enumerate() {
@@ -295,6 +299,12 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
                 }
                 detach = true;
             }
+            "PRELOAD" => {
+                if base.is_none() {
+                    bail!("{}:{}: FROM must appear before PRELOAD", path.display(), lineno);
+                }
+                preload = true;
+            }
             "RESTART" => {
                 if base.is_none() {
                     bail!("{}:{}: FROM must appear before RESTART", path.display(), lineno);
@@ -421,6 +431,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
         detach,
         restart_policy,
         mount_policies,
+        preload,
     })
 }
 
@@ -438,6 +449,9 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str, image_dirs:
     ));
     if cluufile.detach {
         out.push_str("detach = true\n");
+    }
+    if cluufile.preload {
+        out.push_str("preload = true\n");
     }
 
     // [profile] — only if capabilities specified
