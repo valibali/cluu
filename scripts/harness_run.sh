@@ -108,6 +108,7 @@ MIN_NOOP_SPAWN_SAMPLES="${MIN_NOOP_SPAWN_SAMPLES:-8}"
 MIN_NOOP_MAP_ELF_SAMPLES="${MIN_NOOP_MAP_ELF_SAMPLES:-8}"
 MAX_NOOP_SPAWN_REPLY_P95_CYCLES="${MAX_NOOP_SPAWN_REPLY_P95_CYCLES:-}"
 MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES="${MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES:-}"
+MAX_FB_BLIT_WC_CYCLES="${MAX_FB_BLIT_WC_CYCLES:-}"
 HARNESS_START_SECS=$SECONDS
 QEMU_START_SECS=0
 SHELL_READY_BASE_SECS=0
@@ -1353,6 +1354,13 @@ case "$MARKER_MODE" in
             "fbprobe: PASS"
         )
         ;;
+    b_console_blit)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "BENCH_CONSOLE_BLIT: cycles_per_full_screen="
+        )
+        ;;
     p4_mmap)
         required_markers=(
             "TSC calibrated"
@@ -2071,6 +2079,31 @@ if [ "$MARKER_MODE" = "l2_ext2unlink" ]; then
         echo "MISSING: ext2unlink reported failure"
         echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
         exit 1
+    fi
+fi
+
+if [ "$MARKER_MODE" = "b_console_blit" ]; then
+    # Extract cycles_per_full_screen from the serial log (-a: treat binary as text)
+    blit_cycles="$(grep -ao 'BENCH_CONSOLE_BLIT: cycles_per_full_screen=[0-9]*' "$SERIAL_LOG" \
+        | tail -1 \
+        | sed 's/.*cycles_per_full_screen=//')"
+    if [ -z "$blit_cycles" ]; then
+        echo "MISSING: could not parse BENCH_CONSOLE_BLIT cycles_per_full_screen"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+    echo "HARNESS fb_blit_wc_cycles=${blit_cycles}" >> "$SERIAL_LOG"
+    # Load ratchet limit: prefer env override, then perf_ratchet.json, then skip check
+    ratchet_max="${MAX_FB_BLIT_WC_CYCLES:-}"
+    if [ -z "$ratchet_max" ] && [ -f "scripts/perf_ratchet.json" ]; then
+        ratchet_max="$(grep -ao '"fb_blit_wc_max_cycles":[[:space:]]*[0-9]*' scripts/perf_ratchet.json \
+            | grep -ao '[0-9]*$' || true)"
+    fi
+    if [ -n "$ratchet_max" ]; then
+        check_metric_limit "$blit_cycles" "$ratchet_max" "fb_blit_wc_cycles"
+        echo "HARNESS fb_blit_wc_ratchet_max=${ratchet_max} actual=${blit_cycles} OK"
+    else
+        echo "HARNESS fb_blit_wc_cycles=${blit_cycles} (no ratchet limit set)"
     fi
 fi
 
