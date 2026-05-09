@@ -1153,11 +1153,6 @@ impl ProcessManager {
             .and_then(|t| t.get_array("persistent_dirs"))
             .map(|a| !a.is_empty())
             .unwrap_or(false);
-        let image_dirs: Vec<String> = doc
-            .table("storage")
-            .and_then(|t| t.get_array("image_dirs"))
-            .map(|a| a.iter().map(|s| s.clone()).collect())
-            .unwrap_or_default();
         if has_persistent_storage {
             if !self.create_container_dirs(container_id, image_name) {
                 container_id = 0;
@@ -1277,8 +1272,7 @@ impl ProcessManager {
         ) {
             Ok((_thread_token, cookie, pid, _child_stdin_send)) => {
                 let image_dir = format!("/var/images/{}", image_name);
-                let mut view_mounts = default_view_for_profile(requested_profile);
-                apply_image_dir_overrides(&mut view_mounts, image_name, &image_dirs);
+                let view_mounts = default_view_for_profile(requested_profile);
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
                 self.install_view_and_run(_thread_token, &view_mounts, requested_profile, container_id);
@@ -1483,10 +1477,6 @@ impl ProcessManager {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(DEFAULT_PRIORITY);
         let binary_vfs_path = format!("/var/images/{}{}", image_name, binary);
-        let image_dirs: Vec<String> = doc.table("storage")
-            .and_then(|t| t.get_array("image_dirs"))
-            .map(|a| a.iter().map(|s| s.clone()).collect())
-            .unwrap_or_default();
 
         // Endpoint setup (same as autostart)
         let endpoint_mode = doc.table("tokens").and_then(|t| t.get_str("endpoint_mode"));
@@ -1567,8 +1557,7 @@ impl ProcessManager {
             THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((new_thread_token, new_cookie, new_pid, _)) => {
-                let mut view_mounts = default_view_for_profile(requested_profile);
-                apply_image_dir_overrides(&mut view_mounts, image_name, &image_dirs);
+                let view_mounts = default_view_for_profile(requested_profile);
                 self.pid_to_container_id.insert(new_pid, container_id);
                 self.container_owner_pids.insert(new_pid);
                 self.install_view_and_run(new_thread_token, &view_mounts, requested_profile, container_id);
@@ -5119,14 +5108,12 @@ impl ProcessManager {
                         .unwrap_or_else(|| default_view_for_profile(requested_profile));
 
                     // Filter out denied paths
-                    let mut filtered: ViewMountList = caller_view.into_iter()
+                    let filtered: ViewMountList = caller_view.into_iter()
                         .filter(|(_, dst, _, _)| {
                             !deny_paths.iter().any(|deny| dst == deny || dst.starts_with(&format!("{}/", deny)))
                         })
                         .collect();
 
-                    // Apply image dir overrides (replace /bin, /lib etc with image versions)
-                    apply_image_dir_overrides(&mut filtered, image_name, &image_dirs);
                     filtered
                 } else if deny_inherit {
                     // deny_inherit = true: ONLY image dirs + container storage, no passthrough
@@ -5142,9 +5129,7 @@ impl ProcessManager {
                     mounts
                 } else {
                     // Top-level: default view (current behavior)
-                    let mut mounts = default_view_for_profile(requested_profile);
-                    apply_image_dir_overrides(&mut mounts, image_name, &image_dirs);
-                    mounts
+                    default_view_for_profile(requested_profile)
                 };
 
                 // Resolve effective mount policies (defaults + Cluufile overrides).
@@ -6174,38 +6159,6 @@ fn can_narrow_view(parent_view: &[(String, String, bool, u64)], child_view: &[(S
         }
     }
     true
-}
-
-/// Override default view mounts with per-image directory paths.
-///
-/// For each `image_dir` (e.g. "bin", "lib"), if there's a matching read-only
-/// mount with dst == "/<dir>", redirect its src to
-/// `/var/images/<image_name>/<dir>` so the container sees its own binaries
-/// instead of the global ones. If no matching mount exists (e.g. the parent
-/// view is just `("/", "/")`), insert a fresh read-only mount at the front so
-/// the image-local path takes precedence over the broader root mount.
-fn apply_image_dir_overrides(mounts: &mut ViewMountList, image_name: &str, image_dirs: &[String]) {
-    for dir in image_dirs {
-        let virtual_path = format!("/{}", dir);
-        let mut overridden = false;
-        for mount in mounts.iter_mut() {
-            if mount.1 == virtual_path && !mount.2 {
-                mount.0 = format!("/var/images/{}/{}", image_name, dir);
-                overridden = true;
-            }
-        }
-        if !overridden {
-            mounts.insert(
-                0,
-                (
-                    format!("/var/images/{}/{}", image_name, dir),
-                    virtual_path,
-                    false,
-                    0u64,
-                ),
-            );
-        }
-    }
 }
 
 /// Serialize and send a VFS_SET_VIEW message for a newly spawned child.
