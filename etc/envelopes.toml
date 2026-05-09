@@ -48,6 +48,7 @@ mounts = [
     "rw:/var",
     "rw:/tmp",
     "rw:/home",
+    "rw:/proc",
 ]
 
 [envelope.admin.env]

@@ -3247,7 +3247,69 @@ impl VfsServer {
             }
         } else {
             match self.mounts.readdir(&real_path, client_id) {
-                Ok(entries) => {
+                Ok(mut entries) => {
+                    // Merge in any view mount whose `dst` is a direct child of
+                    // the requested logical `path`. Mirrors Unix mount semantics
+                    // (mount point name appears in parent listing) but stays
+                    // bound to the caller's view, so a USER-profile session
+                    // sees /proc but not /dev, while DEVICE sees both.
+                    let parent = path.trim_end_matches('/');
+                    let parent = if parent.is_empty() { "/" } else { parent };
+                    let push_child = |entries: &mut alloc::vec::Vec<crate::mount::DirEntry>, name: &str| {
+                        if name.is_empty() || name.contains('/') {
+                            return;
+                        }
+                        if entries.iter().any(|e| e.name == name) {
+                            return;
+                        }
+                        entries.push(crate::mount::DirEntry {
+                            name: alloc::string::String::from(name),
+                            is_dir: true,
+                            stat: crate::mount::DirEntryStat {
+                                mode: 0o040555u32,
+                                nlink: 1,
+                                ..Default::default()
+                            },
+                        });
+                    };
+                    let mut wildcard_view = false;
+                    if let Some(view) = self.views.get_view(client_id) {
+                        for m in &view.mounts {
+                            // dst="/" means the view delegates everything to
+                            // the global mount table (supervisor-style). Don't
+                            // try to merge "/" itself; flag it so the global
+                            // mount table's direct children get merged below.
+                            if m.dst == "/" {
+                                wildcard_view = true;
+                                continue;
+                            }
+                            let rest = if parent == "/" {
+                                m.dst.strip_prefix('/')
+                            } else {
+                                m.dst.strip_prefix(parent)
+                                    .and_then(|r| r.strip_prefix('/'))
+                            };
+                            if let Some(rest) = rest {
+                                push_child(&mut entries, rest);
+                            }
+                        }
+                    }
+                    if wildcard_view {
+                        for prefix in self.mounts.mount_prefixes() {
+                            if prefix == "/" {
+                                continue;
+                            }
+                            let rest = if parent == "/" {
+                                prefix.strip_prefix('/')
+                            } else {
+                                prefix.strip_prefix(parent)
+                                    .and_then(|r| r.strip_prefix('/'))
+                            };
+                            if let Some(rest) = rest {
+                                push_child(&mut entries, rest);
+                            }
+                        }
+                    }
                     let mut data = Vec::new();
                     let mut count = 0usize;
                     for entry in &entries {

@@ -668,42 +668,17 @@ impl MountTable {
     }
 
     /// Read directory entries at the given absolute path.
-    ///
-    /// Mount points whose parent equals `path` are merged into the result
-    /// after the backend listing, so e.g. `readdir("/")` includes "proc",
-    /// "dev" entries even when the underlying root backend (ext2 etc.)
-    /// has no such directories. This mirrors Unix mount semantics where
-    /// the mount point name appears in the parent directory.
     pub fn readdir(&self, path: &str, caller_tid: usize) -> Result<Vec<DirEntry>> {
         let (mount, rel_path) = self.resolve(path)?;
-        let mut entries = mount.backend.readdir(rel_path, caller_tid)?;
-        let canonical = path.trim_end_matches('/');
-        let parent = if canonical.is_empty() { "/" } else { canonical };
-        for m in &self.mounts {
-            if m.prefix == "/" {
-                continue;
-            }
-            let rest = if parent == "/" {
-                m.prefix.strip_prefix('/')
-            } else {
-                m.prefix
-                    .strip_prefix(parent)
-                    .and_then(|r| r.strip_prefix('/'))
-            };
-            let Some(rest) = rest else { continue };
-            if rest.is_empty() || rest.contains('/') {
-                continue;
-            }
-            if entries.iter().any(|e| e.name == rest) {
-                continue;
-            }
-            entries.push(DirEntry {
-                name: String::from(rest),
-                is_dir: true,
-                stat: DirEntryStat { mode: 0o040555u32, nlink: 1, ..Default::default() },
-            });
-        }
-        Ok(entries)
+        mount.backend.readdir(rel_path, caller_tid)
+    }
+
+    /// Iterate over registered mount prefixes (e.g. "/", "/proc", "/dev").
+    /// Used by view-aware readdir merging when a view delegates the entire
+    /// global tree (supervisor-style) and needs to surface mount points
+    /// that don't exist as real directories in the underlying root.
+    pub fn mount_prefixes(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.mounts.iter().map(|m| m.prefix)
     }
 
     pub fn unlink(&self, path: &str) -> Result<()> {
