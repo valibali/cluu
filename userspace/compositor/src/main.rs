@@ -10,7 +10,6 @@ mod compose;
 mod hotkeys;
 mod status;
 
-use alloc::format;
 use libcluu::boot::{process_info, TOKEN_IPC};
 use libcluu::ipc::{extract_reply_id, reply, COMP_WIN_REGISTER_REPLY};
 use libcluu::types::{IpcFlags, Message};
@@ -30,8 +29,9 @@ pub extern "C" fn main() -> i32 {
     let info = process_info();
     let ipc_cap = info.tokens[TOKEN_IPC];
     comp.instance_id = 0;
-    let service_name = format!("compositor:{}", comp.instance_id);
-    if registry::init(&service_name).is_err() {
+    // Register as "compositor" (not "compositor:0") so lookup_service("compositor:client")
+    // resolves correctly: it splits on ':' to get service="compositor", output="client".
+    if registry::init("compositor").is_err() {
         let _ = debug_print("compositor: registry init failed");
         return -1;
     }
@@ -59,6 +59,10 @@ pub extern "C" fn main() -> i32 {
     let _ = debug_print("compositor: endpoints registered");
     let _ = debug_print("compositor: ready");
 
+    // v1: self-activate since vtmgr doesn't know about compositor yet.
+    // T25 routes kbd events to us; vt-switch wiring is deferred.
+    comp.handle_vt_activate();
+
     let tokens = [
         comp.client_endpoint,
         comp.input_endpoint_global,
@@ -67,10 +71,19 @@ pub extern "C" fn main() -> i32 {
     ];
     let mut buf = [0u8; 1024];
 
+    // Index of the registry endpoint in the tokens array.
+    const REGISTRY_TOKEN_IDX: usize = 3;
+
     loop {
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, 1000) {
-            Ok((_idx, len, sender_tid)) => {
+            Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) {
+                    // Registry control messages (grant requests from subscribers) must
+                    // be forwarded to the registry client so it can mint tokens.
+                    if idx == REGISTRY_TOKEN_IDX {
+                        let _ = registry::handle_incoming_message(&msg, payload);
+                        continue;
+                    }
                     let kind = protocol::parse(&msg);
                     match kind {
                         protocol::Incoming::WinRegister { req_w, req_h, title_len } => {

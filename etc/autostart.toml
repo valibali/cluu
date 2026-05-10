@@ -6,3 +6,9 @@ image = "vtmgr"
 
 [[service]]
 image = "kbd"
+
+[[service]]
+image = "compositor"
+
+[[service]]
+image = "compdemo"

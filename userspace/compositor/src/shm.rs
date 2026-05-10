@@ -7,6 +7,7 @@
 //! `space_map_range` with `MAP_FRAME_TOKEN` to map the same physical
 //! frames into their own address spaces.
 
+use libcluu::boot::space_token;
 use libcluu::syscall::{self, InvokeOp, MAP_FRAME_TOKEN};
 use libcluu::{Error, Result};
 
@@ -16,14 +17,17 @@ const PAGE_SIZE: usize = 4096;
 
 /// Allocate a frame token covering at least `bytes` (rounded up to 4 KiB).
 /// Returns `(token, allocated_bytes)`.
+///
+/// Uses the space token (which has CREATE right via the `space_grant`
+/// capability) rather than the root token (which is 0 for container processes).
 pub fn alloc_frame(bytes: usize) -> Result<(u64, usize)> {
     let rounded = (bytes + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let root = libcluu::boot::root_token_handle();
-    if root == 0 {
+    let sp = space_token();
+    if sp == 0 {
         return Err(Error::InvalidArgument);
     }
     let token =
-        unsafe { syscall::invoke(root, InvokeOp::FrameAllocate, rounded, 0, 0, 0)? };
+        unsafe { syscall::invoke(sp, InvokeOp::FrameAllocate, rounded, 0, 0, 0)? };
     Ok((token as u64, rounded))
 }
 
@@ -49,11 +53,13 @@ pub fn map_frame_rw(va: usize, token: u64, size: usize) -> Result<()> {
 }
 
 /// Free a frame token allocated via `alloc_frame`.
+///
+/// The `token` parameter is the frame token handle returned by `alloc_frame`.
+/// FrameFree is invoked on the frame token itself (not the space token).
 pub fn free_frame(token: u64) -> Result<()> {
-    let root = libcluu::boot::root_token_handle();
-    if root == 0 {
+    if token == 0 {
         return Err(Error::InvalidArgument);
     }
-    unsafe { syscall::invoke(root, InvokeOp::FrameFree, token as usize, 0, 0, 0)? };
+    unsafe { syscall::invoke(token as usize, InvokeOp::FrameFree, 0, 0, 0, 0)? };
     Ok(())
 }
