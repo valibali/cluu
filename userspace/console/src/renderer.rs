@@ -843,8 +843,8 @@ fn render_glyph<B: ConsoleBackend>(
     let py = y * GLYPH_H;
     let mut row_buffer = [0u32; GLYPH_W];
     for (row, line) in glyph.iter().enumerate() {
-        let mask = crate::atlas::mask_for_byte(*line);
-        crate::simd::blend_row(mask, fg, bg, &mut row_buffer);
+        let mask = libcluu::atlas::mask_for_byte(*line);
+        libcluu::simd::blend_row(mask, fg, bg, &mut row_buffer);
         backend.put_pixels_row(px, py + row, &row_buffer);
     }
 }

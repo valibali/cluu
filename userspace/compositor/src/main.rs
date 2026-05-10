@@ -126,6 +126,8 @@ pub extern "C" fn main() -> i32 {
                         }
                     }
                     compose::recompute_dirty(&mut comp);
+                    comp.flush_grid_to_backbuf();
+                    comp.flush_backbuf_to_fb();
                 }
             }
             Err(Error::Timeout) | Err(Error::WouldBlock) => {}

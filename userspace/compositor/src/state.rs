@@ -252,6 +252,84 @@ impl Compositor {
     }
 }
 
+impl Compositor {
+    /// Glyph-blit cells whose value differs from `prev_cell_grid` and write
+    /// the resulting pixels into `backbuf`. Caller must follow with
+    /// `flush_backbuf_to_fb` to push to the framebuffer.
+    pub fn flush_grid_to_backbuf(&mut self) {
+        let cols = self.cols as usize;
+        let rows = self.rows as usize;
+        let pitch_words = self.width_px as usize; // contiguous backbuf
+        let glyph_w = libcluu::atlas::GLYPH_W;
+        let glyph_h = libcluu::atlas::GLYPH_H;
+
+        for cy in 0..rows {
+            for cx in 0..cols {
+                let idx = cy * cols + cx;
+                let cell = self.cell_grid[idx];
+                if self.prev_cell_grid[idx] == cell {
+                    continue;
+                }
+                self.prev_cell_grid[idx] = cell;
+                let cp = (cell & 0x1F_FFFF) as u32;
+                let fg_idx = ((cell >> 21) & 0xFF) as u8;
+                let bg_idx = ((cell >> 29) & 0xFF) as u8;
+                let _attrs = ((cell >> 37) & 0x07) as u8; // bold/etc later
+                let fg = self.palette[fg_idx as usize];
+                let bg = self.palette[bg_idx as usize];
+
+                // Map Unicode → CP437 → font byte. Codepoints outside
+                // BMP-ASCII / CP437 fall back to '?' via the helper.
+                let ch = unicode_to_cp437(cp);
+                let glyph = font_glyph(ch);
+
+                let px = cx * glyph_w;
+                let py = cy * glyph_h;
+                let mut row_buffer = [0u32; 8];
+                for row in 0..glyph_h {
+                    let line = glyph[row];
+                    let mask = libcluu::atlas::mask_for_byte(line);
+                    libcluu::simd::blend_row(mask, fg, bg, &mut row_buffer);
+                    let off = (py + row) * pitch_words + px;
+                    self.backbuf[off..off + glyph_w].copy_from_slice(&row_buffer);
+                }
+            }
+        }
+    }
+
+    /// Push the entire backbuf to the framebuffer mapping. Plain memcpy under
+    /// WC; perf-bench in the FB workstream proved this is the fastest path
+    /// once writes are write-combined.
+    ///
+    /// No-op when `fb_ptr` is null (compositor spawned without FB mapping,
+    /// e.g. shell-spawn in test harness before T24 wires up procmgr autostart).
+    pub fn flush_backbuf_to_fb(&self) {
+        if self.fb_ptr.is_null() {
+            return;
+        }
+        let bytes = self.width_px as usize * self.height_px as usize * 4;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                self.backbuf.as_ptr() as *const u8,
+                self.fb_ptr,
+                bytes,
+            );
+        }
+    }
+}
+
+// Local helpers (later might be moved to libcluu if compdemo needs them).
+fn font_glyph(ch: u8) -> [u8; 16] {
+    // T13: empty glyphs — all-bg-coloured cells prove the blit pipeline
+    // end-to-end. Proper ASCII + CP437 font integration lands in T14.
+    let _ = ch;
+    [0u8; 16]
+}
+
+fn unicode_to_cp437(cp: u32) -> u8 {
+    if cp < 0x80 { cp as u8 } else { b'?' }
+}
+
 /// Build a standard xterm-256 ARGB palette.
 ///
 /// 0..16  : ANSI base colours
