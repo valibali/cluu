@@ -43,6 +43,10 @@ pub struct KbdContext {
     /// console:0 "control" endpoint for scroll commands.
     console_endpoint: usize,
     requested_console: bool,
+    /// compositor "input" endpoint for duplicated keyboard events (0 = not present).
+    pub compositor_input_ep: usize,
+    /// Whether we've requested the compositor:input subscription.
+    requested_compositor: bool,
 }
 
 impl KbdContext {
@@ -73,6 +77,8 @@ impl KbdContext {
             requested_procmgr: false,
             console_endpoint: 0,
             requested_console: false,
+            compositor_input_ep: 0,
+            requested_compositor: false,
         })
     }
 
@@ -102,6 +108,14 @@ impl KbdContext {
         if self.console_endpoint == 0 && !self.requested_console {
             if registry::request_subscription("console:0", "control").is_ok() {
                 self.requested_console = true;
+            }
+        }
+
+        // Subscribe to compositor:input to duplicate all kbd events there.
+        // Compositor only acts when active; 0 means compositor not yet up.
+        if self.compositor_input_ep == 0 && !self.requested_compositor {
+            if registry::request_subscription("compositor", "input").is_ok() {
+                self.requested_compositor = true;
             }
         }
 
@@ -146,12 +160,16 @@ impl KbdContext {
                     } else if name == "spawn" {
                         self.procmgr_endpoint = token;
                         let _ = debug_print("kbd: procmgr spawn subscribed");
+                    } else if name == "input" && service_name == "compositor" {
+                        self.compositor_input_ep = token;
+                        let _ = debug_print("kbd: compositor input subscribed");
                     }
                 }
                 registry::RegistryEvent::SubscribeStatus { code } => {
                     if code != 0 {
                         self.requested_tty = 0;
                         self.requested_vtmgr = false;
+                        self.requested_compositor = false;
                     }
                 }
             }

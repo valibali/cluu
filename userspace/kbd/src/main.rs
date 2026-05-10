@@ -109,6 +109,16 @@ fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: 
                 event.extended,
             );
             ctx.send_to_tty(&outbound);
+            // Duplicate to compositor:input (design A: route to both).
+            // Compositor only acts on events when active==true (T20), so
+            // events received while compositor's VT is inactive are no-ops.
+            if ctx.compositor_input_ep != 0 {
+                let _ = libcluu::ipc::send(
+                    ctx.compositor_input_ep,
+                    &outbound,
+                    libcluu::types::IpcFlags::empty(),
+                );
+            }
         }
     }
 }
