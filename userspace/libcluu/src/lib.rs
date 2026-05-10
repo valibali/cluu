@@ -33,6 +33,7 @@ pub mod crypto;
 pub mod device_io;
 pub mod elf;
 pub mod error;
+pub mod font;
 pub mod fs;
 pub mod ipc;
 pub mod mem;

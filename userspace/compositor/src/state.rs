@@ -363,16 +363,21 @@ impl Compositor {
     }
 }
 
-// Local helpers (later might be moved to libcluu if compdemo needs them).
+// Local helpers.
 fn font_glyph(ch: u8) -> [u8; 16] {
-    // T13: empty glyphs — all-bg-coloured cells prove the blit pipeline
-    // end-to-end. Proper ASCII + CP437 font integration lands in T14.
-    let _ = ch;
-    [0u8; 16]
+    libcluu::font::glyph_for_cp437(ch)
 }
 
 fn unicode_to_cp437(cp: u32) -> u8 {
-    if cp < 0x80 { cp as u8 } else { b'?' }
+    match cp {
+        0x0000..=0x007F => cp as u8,
+        0x2500 => 0xC4,                 // ─
+        0x2502 => 0xB3,                 // │
+        0x2550 => 0xCD,                 // ═
+        0x2551 => 0xBA,                 // ║
+        0xE000..=0xE00F => 0xF0u8 + (cp - 0xE000) as u8,
+        _ => b'?',
+    }
 }
 
 /// Build a standard xterm-256 ARGB palette.

@@ -23,7 +23,6 @@ extern crate alloc;
 /// The console attempts to use a double-buffered backend to reduce tearing.
 /// If the heap is too small for the backbuffer (~3MB), it falls back to
 /// direct framebuffer writes.
-mod font_arc;
 mod backend;
 mod context;
 mod protocol;
