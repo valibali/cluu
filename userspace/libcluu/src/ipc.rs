@@ -191,6 +191,32 @@ pub const PROCMGR_PID_PGID_QUERY_LABEL: u32 = 85;
 /// words[3]=exit_code.
 pub const PROCMGR_JOB_NOTIFY_LABEL: u32 = 86;
 
+// ──────────────────────────────────────────────────────────────────────
+// Compositor protocol (sub-project A — see
+// docs/superpowers/specs/2026-05-10-tui-compositor-design.md §7)
+// ──────────────────────────────────────────────────────────────────────
+
+/// App → compositor:client. Request a new window. Payload: title bytes.
+pub const COMP_WIN_REGISTER_LABEL: u32 = 90;
+/// Compositor → app reply.
+pub const COMP_WIN_REGISTER_REPLY: u32 = 91;
+/// App → compositor:client. Mark a damage rect on a registered window.
+pub const COMP_WIN_DAMAGE_LABEL: u32 = 92;
+/// App → compositor:client. Free a window.
+pub const COMP_WIN_DESTROY_LABEL: u32 = 93;
+/// App → compositor:client. Re-render chrome with a new title.
+pub const COMP_WIN_SET_TITLE_LABEL: u32 = 94;
+/// kbd → compositor:input. A raw key event while the compositor's VT is active.
+pub const COMP_KBD_EVENT_LABEL: u32 = 95;
+/// compositor → app input endpoint. Forwarded keystroke or close-request.
+pub const COMP_INPUT_FORWARD_LABEL: u32 = 96;
+/// vt mgr / init → compositor:control. Take fb ownership and repaint.
+pub const COMP_VT_ACTIVATE_LABEL: u32 = 97;
+/// vt mgr / init → compositor:control. Pause drawing; retain state.
+pub const COMP_VT_DEACTIVATE_LABEL: u32 = 98;
+/// init → compositor:control. Free all windows and exit cleanly.
+pub const COMP_SHUTDOWN_LABEL: u32 = 99;
+
 // virtio-blk raw-block session IPC labels (Phase 6 of virtio-blk modern redesign).
 // `BLK_OPEN_SESSION` and `BLK_CLOSE_SESSION` go to the driver's listen endpoint.
 // `BLK_SUBMIT` is fire-and-forget into the driver. `BLK_COMPLETE` and
