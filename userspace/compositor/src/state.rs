@@ -74,6 +74,58 @@ pub struct Compositor {
     pub clock_seconds: u64,
 }
 
+use libcluu::boot::{
+    process_info, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PHYS,
+    PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
+};
+use libcluu::Result;
+
+pub const GLYPH_W: u32 = 8;
+pub const GLYPH_H: u32 = 16;
+
+impl Compositor {
+    /// Construct from boot params. Allocates cell_grid + backbuf eagerly.
+    /// Does not yet open `/dev/fb0` for mmap — that runs after the registry
+    /// is ready (see `Compositor::open_fb` below, called from `main` once
+    /// the registry endpoint is known).
+    pub fn init() -> Result<Self> {
+        let info = process_info();
+        let fb_ptr = info.params[PARAM_FB_BASE] as *mut u8;
+        let fb_phys = info.params[PARAM_FB_PHYS];
+        let fb_size = info.params[PARAM_FB_SIZE] as usize;
+        let width_px = info.params[PARAM_FB_WIDTH] as u32;
+        let height_px = info.params[PARAM_FB_HEIGHT] as u32;
+        let pitch = info.params[PARAM_FB_PITCH] as u32;
+
+        let cols = (width_px / GLYPH_W) as u16;
+        let rows = (height_px / GLYPH_H) as u16;
+
+        let cell_count = cols as usize * rows as usize;
+        let pixel_count = (width_px * height_px) as usize;
+
+        Ok(Self {
+            fb_ptr,
+            fb_phys,
+            fb_size,
+            width_px,
+            height_px,
+            pitch,
+            cols,
+            rows,
+            cell_grid: alloc::vec![0u64; cell_count],
+            prev_cell_grid: alloc::vec![u64::MAX; cell_count],
+            cell_dirty: Vec::new(),
+            palette: xterm_256_palette(),
+            backbuf: alloc::vec![0u32; pixel_count],
+            windows: Vec::new(),
+            focused: None,
+            active: false,
+            next_id: 1,
+            clock_seconds: 0,
+        })
+    }
+}
+
 /// Build a standard xterm-256 ARGB palette.
 ///
 /// 0..16  : ANSI base colours
