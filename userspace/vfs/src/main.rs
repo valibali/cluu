@@ -3135,11 +3135,22 @@ impl VfsServer {
                 reply_msg.words[2] = 0;
                 Ok(())
             }
-            DeviceType::Fb { .. } => {
-                reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
-                reply_msg.words[1] = 0;
-                reply_msg.words[2] = 0;
-                Ok(())
+            DeviceType::Fb { phys, size, width, height, pitch, bpp } => {
+                // 40-byte little-endian FB geometry header:
+                //   u32 magic, u32 width, u32 height, u32 pitch, u32 bpp,
+                //   u32 reserved (zero), u64 size, u64 phys
+                const FB_HEADER_MAGIC: u32 = 0x4642_4630;
+                let mut payload = [0u8; 40];
+                payload[0..4].copy_from_slice(&FB_HEADER_MAGIC.to_le_bytes());
+                payload[4..8].copy_from_slice(&width.to_le_bytes());
+                payload[8..12].copy_from_slice(&height.to_le_bytes());
+                payload[12..16].copy_from_slice(&pitch.to_le_bytes());
+                payload[16..20].copy_from_slice(&bpp.to_le_bytes());
+                // bytes 20..24 reserved (zero)
+                payload[24..32].copy_from_slice(&size.to_le_bytes());
+                payload[32..40].copy_from_slice(&phys.to_le_bytes());
+                let n = requested.min(payload.len());
+                self.grant_data_to_caller(&payload[..n], target_base, target_space, reply_msg)
             }
         }
     }
