@@ -296,6 +296,26 @@ impl Compositor {
 }
 
 impl Compositor {
+    /// Update the title of a window and dirty the title row so chrome re-renders.
+    pub fn handle_win_set_title(&mut self, id: WindowId, title: &str) {
+        let win_idx = match self.windows.iter().position(|w| w.id == id) {
+            Some(i) => i,
+            None => return,
+        };
+        // Truncate to fit title strip (<=31 chars matches the storage cap
+        // in handle_win_register).
+        let safe = if title.len() > 31 { &title[..31] } else { title };
+        self.windows[win_idx].title.clear();
+        self.windows[win_idx].title.push_str(safe);
+        let win = &self.windows[win_idx];
+        let title_y = win.y + 1;
+        for cx in win.x..win.x.saturating_add(win.w) {
+            self.cell_dirty.push((cx, title_y));
+        }
+    }
+}
+
+impl Compositor {
     /// Free the window's frame, drop it from the list, repaint covered cells.
     /// Called explicitly via WIN_DESTROY. Implicit destroy on owner-exit is
     /// deferred — would need procmgr to broadcast exits to non-spawner

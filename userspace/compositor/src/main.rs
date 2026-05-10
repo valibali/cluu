@@ -123,6 +123,12 @@ pub extern "C" fn main() -> i32 {
                         protocol::Incoming::WinDamage { window_id, x, y, w, h } => {
                             comp.handle_win_damage(window_id, x, y, w, h);
                         }
+                        protocol::Incoming::WinSetTitle { window_id, title_len } => {
+                            let n = (title_len as usize).min(payload.len());
+                            if let Ok(s) = core::str::from_utf8(&payload[..n]) {
+                                comp.handle_win_set_title(window_id, s);
+                            }
+                        }
                         other => {
                             let _ = (other,);
                             let _ = debug_print("compositor: msg");
