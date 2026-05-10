@@ -7,6 +7,7 @@ mod state;
 mod shm;
 mod protocol;
 mod compose;
+mod hotkeys;
 
 use alloc::format;
 use libcluu::boot::{process_info, TOKEN_IPC};
@@ -129,9 +130,44 @@ pub extern "C" fn main() -> i32 {
                                 comp.handle_win_set_title(window_id, s);
                             }
                         }
-                        other => {
-                            let _ = (other,);
-                            let _ = debug_print("compositor: msg");
+                        protocol::Incoming::KbdEvent { ascii: _, modifiers, scancode, extended } => {
+                            if let Some(hk) = hotkeys::match_hotkey(modifiers, scancode, extended) {
+                                match hk {
+                                    hotkeys::Hotkey::FocusNext  => comp.focus_next(),
+                                    hotkeys::Hotkey::FocusPrev  => comp.focus_prev(),
+                                    hotkeys::Hotkey::MoveLeft   => comp.move_focused(-1, 0),
+                                    hotkeys::Hotkey::MoveRight  => comp.move_focused( 1, 0),
+                                    hotkeys::Hotkey::MoveUp     => comp.move_focused( 0,-1),
+                                    hotkeys::Hotkey::MoveDown   => comp.move_focused( 0, 1),
+                                    hotkeys::Hotkey::ResizeLeft  => comp.resize_focused(-1, 0),
+                                    hotkeys::Hotkey::ResizeRight => comp.resize_focused( 1, 0),
+                                    hotkeys::Hotkey::ResizeUp    => comp.resize_focused( 0,-1),
+                                    hotkeys::Hotkey::ResizeDown  => comp.resize_focused( 0, 1),
+                                    hotkeys::Hotkey::CloseRequest => {
+                                        let _ = debug_print(
+                                            "compositor: close-request hotkey (forward in T18)");
+                                    }
+                                    hotkeys::Hotkey::SpawnDemo => {
+                                        let _ = debug_print(
+                                            "compositor: spawn-demo hotkey (impl in T23)");
+                                    }
+                                }
+                            }
+                            // Non-hotkey events forward to focused window's
+                            // input endpoint in T18.
+                        }
+                        protocol::Incoming::VtActivate => {
+                            comp.active = true;
+                        }
+                        protocol::Incoming::VtDeactivate => {
+                            comp.active = false;
+                        }
+                        protocol::Incoming::Shutdown => {
+                            let _ = debug_print("compositor: shutdown");
+                            return 0;
+                        }
+                        protocol::Incoming::Other(_label) => {
+                            // Unknown message — ignore.
                         }
                     }
                     compose::recompute_dirty(&mut comp);

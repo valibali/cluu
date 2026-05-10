@@ -316,6 +316,115 @@ impl Compositor {
 }
 
 impl Compositor {
+    /// Cycle focus forward (Alt+Tab). The newly focused window is moved to the
+    /// top of the z-order (end of the `windows` Vec) and the grid is fully
+    /// dirtied so chrome repaints with the updated focus state.
+    pub fn focus_next(&mut self) {
+        if self.windows.is_empty() { return; }
+        let cur = self.focused;
+        let pos = cur
+            .and_then(|id| self.windows.iter().position(|w| w.id == id))
+            .unwrap_or(0);
+        let new = (pos + 1) % self.windows.len();
+        let win = self.windows.remove(new);
+        let id = win.id;
+        self.windows.push(win);
+        self.focused = Some(id);
+        self.repaint_all();
+    }
+
+    /// Cycle focus backward (Alt+Shift+Tab).
+    pub fn focus_prev(&mut self) {
+        if self.windows.is_empty() { return; }
+        let len = self.windows.len();
+        let pos = self.focused
+            .and_then(|id| self.windows.iter().position(|w| w.id == id))
+            .unwrap_or(0);
+        let new = (pos + len - 1) % len;
+        let win = self.windows.remove(new);
+        let id = win.id;
+        self.windows.push(win);
+        self.focused = Some(id);
+        self.repaint_all();
+    }
+
+    /// Move the focused window by (dx, dy) cells, clamped to screen bounds.
+    /// Row 0 is the status bar; window top edge may not go above row 1.
+    pub fn move_focused(&mut self, dx: i16, dy: i16) {
+        let Some(id) = self.focused else { return; };
+        let pos = match self.windows.iter().position(|w| w.id == id) {
+            Some(p) => p,
+            None => return,
+        };
+        let win = &self.windows[pos];
+        let new_x = (win.x as i32 + dx as i32)
+            .max(0)
+            .min(self.cols as i32 - win.w as i32) as u16;
+        let new_y = (win.y as i32 + dy as i32)
+            .max(1)
+            .min(self.rows as i32 - win.h as i32) as u16;
+        let old_x = win.x;
+        let old_y = win.y;
+        let w = win.w;
+        let h = win.h;
+        self.windows[pos].x = new_x;
+        self.windows[pos].y = new_y;
+        // Dirty old and new footprints.
+        for cy in old_y..old_y.saturating_add(h) {
+            for cx in old_x..old_x.saturating_add(w) {
+                self.cell_dirty.push((cx, cy));
+            }
+        }
+        for cy in new_y..new_y.saturating_add(h) {
+            for cx in new_x..new_x.saturating_add(w) {
+                self.cell_dirty.push((cx, cy));
+            }
+        }
+    }
+
+    /// Resize the focused window by (dw, dh) cells.
+    /// Minimum size is 5×5; maximum is clamped to the screen edge.
+    pub fn resize_focused(&mut self, dw: i16, dh: i16) {
+        let Some(id) = self.focused else { return; };
+        let pos = match self.windows.iter().position(|w| w.id == id) {
+            Some(p) => p,
+            None => return,
+        };
+        let win = &self.windows[pos];
+        let new_w = ((win.w as i32 + dw as i32)
+            .max(5)
+            .min(self.cols as i32 - win.x as i32)) as u16;
+        let new_h = ((win.h as i32 + dh as i32)
+            .max(5)
+            .min(self.rows as i32 - win.y as i32)) as u16;
+        let old_w = win.w;
+        let old_h = win.h;
+        let x = win.x;
+        let y = win.y;
+        self.windows[pos].w = new_w;
+        self.windows[pos].h = new_h;
+        // Dirty the union of old and new footprints.
+        let max_w = old_w.max(new_w);
+        let max_h = old_h.max(new_h);
+        for cy in y..y.saturating_add(max_h) {
+            for cx in x..x.saturating_add(max_w) {
+                self.cell_dirty.push((cx, cy));
+            }
+        }
+    }
+
+    /// Mark every cell on screen dirty (used after focus changes so chrome
+    /// repaints with correct focused/unfocused colours).
+    pub fn repaint_all(&mut self) {
+        for cy in 0..self.rows {
+            for cx in 0..self.cols {
+                self.cell_dirty.push((cx, cy));
+            }
+        }
+    }
+}
+
+impl Compositor {
     /// Free the window's frame, drop it from the list, repaint covered cells.
     /// Called explicitly via WIN_DESTROY. Implicit destroy on owner-exit is
     /// deferred — would need procmgr to broadcast exits to non-spawner

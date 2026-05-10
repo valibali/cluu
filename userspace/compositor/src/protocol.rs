@@ -4,9 +4,18 @@
 //! that the main event loop dispatches. Payload bytes (e.g. window
 //! titles) are NOT extracted here — the caller has the raw payload
 //! slice and decodes per-variant.
+//!
+//! Keyboard events: we use the kbd service's native KBD_EVENT_LABEL
+//! directly (label = 1). Word layout per kbd/src/protocol.rs:
+//!   words[1] = ASCII (0 if none)
+//!   words[2] = modifier bitmask (MOD_SHIFT=1<<0, MOD_CTRL=1<<1, MOD_ALT=1<<2, ...)
+//!   words[3] = raw scancode (press/release bit stripped)
+//!   words[4] = extended key code (0 for normal keys)
+//! COMP_KBD_EVENT_LABEL (95) is left reserved; kbd routes directly to the
+//! compositor's input endpoint, reusing the same message format (T25).
 
 use libcluu::ipc::{
-    COMP_KBD_EVENT_LABEL, COMP_SHUTDOWN_LABEL, COMP_VT_ACTIVATE_LABEL,
+    KBD_EVENT_LABEL, COMP_SHUTDOWN_LABEL, COMP_VT_ACTIVATE_LABEL,
     COMP_VT_DEACTIVATE_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL,
     COMP_WIN_REGISTER_LABEL, COMP_WIN_SET_TITLE_LABEL,
 };
@@ -18,7 +27,7 @@ pub enum Incoming {
     WinDamage { window_id: u64, x: u32, y: u32, w: u32, h: u32 },
     WinDestroy { window_id: u64 },
     WinSetTitle { window_id: u64, title_len: u32 },
-    KbdEvent { keycode: u32, modifiers: u32, codepoint: u32, kind: u32 },
+    KbdEvent { ascii: u8, modifiers: u8, scancode: u8, extended: u8 },
     VtActivate,
     VtDeactivate,
     Shutdown,
@@ -46,11 +55,11 @@ pub fn parse(msg: &Message) -> Incoming {
             window_id: msg.words[0] as u64,
             title_len: msg.words[1] as u32,
         },
-        COMP_KBD_EVENT_LABEL => Incoming::KbdEvent {
-            keycode: msg.words[0] as u32,
-            modifiers: msg.words[1] as u32,
-            codepoint: msg.words[2] as u32,
-            kind: msg.words[3] as u32,
+        KBD_EVENT_LABEL => Incoming::KbdEvent {
+            ascii:     msg.words[1] as u8,
+            modifiers: msg.words[2] as u8,
+            scancode:  msg.words[3] as u8,
+            extended:  msg.words[4] as u8,
         },
         COMP_VT_ACTIVATE_LABEL => Incoming::VtActivate,
         COMP_VT_DEACTIVATE_LABEL => Incoming::VtDeactivate,
