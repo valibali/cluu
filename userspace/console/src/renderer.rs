@@ -864,6 +864,11 @@ fn render_cursor_block<B: ConsoleBackend>(
 
 /// Load the glyph bitmap for a single ASCII character.
 fn font_glyph(ch: u8) -> [u8; GLYPH_H] {
+    // Tier-3 rounded corner sub-cells: CP437 0xF0..0xFF map directly to
+    // crate::font_arc::TIER3_CORNERS[0..16].
+    if (0xF0..=0xFF).contains(&ch) {
+        return crate::font_arc::TIER3_CORNERS[(ch - 0xF0) as usize];
+    }
     if let Some(glyph) = shade_glyph(ch) {
         return glyph;
     }
