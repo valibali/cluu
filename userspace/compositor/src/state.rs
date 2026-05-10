@@ -138,6 +138,97 @@ impl Compositor {
     }
 }
 
+impl Compositor {
+    /// Allocate a window per the request. Returns
+    /// `(id, frame_token, granted_w, granted_h)` on success.
+    ///
+    /// Granted dims are clamped to the screen minus row 0 (status bar).
+    /// `owner_pid` is the authenticated sender's tid (CLUU does not yet
+    /// distinguish tid from pid for one-thread apps).
+    /// `reply_endpoint` is where keystrokes will be forwarded.
+    pub fn handle_win_register(
+        &mut self,
+        owner_pid: u32,
+        req_w: u32,
+        req_h: u32,
+        title: &str,
+        reply_endpoint: usize,
+    ) -> Result<(WindowId, u64, u32, u32)> {
+        let granted_w = (req_w as u16).min(self.cols);
+        let granted_h = (req_h as u16).min(self.rows.saturating_sub(1));
+        if granted_w < 5 || granted_h < 5 {
+            return Err(libcluu::Error::InvalidArgument);
+        }
+
+        let cells_bytes = granted_w as usize * granted_h as usize * 8;
+        let header_bytes = core::mem::size_of::<WindowShm>();
+        let total_bytes = header_bytes + cells_bytes;
+        let (token, allocated) = crate::shm::alloc_frame(total_bytes)?;
+
+        let id = self.next_id;
+        self.next_id += 1;
+
+        // Per-window VA slot, well above APP_FB_BASE. Each id reserves a
+        // 4 MiB stride so neighbouring windows never collide regardless of
+        // their pixel dimensions. 256 MiB region total before we run out.
+        let va_base: usize = 0xC100_0000;
+        let va = va_base + (id as usize) * 0x40_0000;
+        crate::shm::map_frame_rw(va, token, allocated)?;
+
+        unsafe {
+            let hdr = va as *mut WindowShm;
+            (*hdr).magic = WIN_SHM_MAGIC;
+            (*hdr).version = WIN_SHM_VERSION;
+            (*hdr).width = granted_w as u32;
+            (*hdr).height = granted_h as u32;
+            (*hdr).cursor_x = 0;
+            (*hdr).cursor_y = 0;
+            (*hdr).cursor_visible = 0;
+            (*hdr).generation = 0;
+            // Zero cell area
+            let cells_ptr = (va + header_bytes) as *mut u8;
+            core::ptr::write_bytes(cells_ptr, 0, cells_bytes);
+        }
+
+        // Cascade window placement. Status bar reserves row 0, so y >= 1.
+        let offset = (id as u16) * 2;
+        let max_x = self.cols.saturating_sub(granted_w);
+        let max_y = self.rows.saturating_sub(granted_h);
+        let x = offset.min(max_x);
+        let y = (1 + offset).min(max_y.max(1));
+
+        let mut title_owned = alloc::string::String::new();
+        title_owned.push_str(title);
+        if title_owned.len() > 31 {
+            title_owned.truncate(31);
+        }
+
+        self.windows.push(Window {
+            id,
+            owner_pid,
+            title: title_owned,
+            x,
+            y,
+            w: granted_w,
+            h: granted_h,
+            shm_va: va as *mut u8,
+            shm_token: token,
+            shm_size: allocated,
+            last_gen: 0,
+            input_endpoint: reply_endpoint,
+        });
+        self.focused = Some(id);
+        // Mark all the window's cells dirty so the (eventual) compose pass
+        // emits chrome + interior.
+        for cy in y..y.saturating_add(granted_h) {
+            for cx in x..x.saturating_add(granted_w) {
+                self.cell_dirty.push((cx, cy));
+            }
+        }
+        Ok((id, token, granted_w as u32, granted_h as u32))
+    }
+}
+
 /// Build a standard xterm-256 ARGB palette.
 ///
 /// 0..16  : ANSI base colours
