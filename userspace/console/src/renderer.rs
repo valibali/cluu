@@ -470,7 +470,6 @@ pub struct Console<B: ConsoleBackend> {
     // ── Rendering state (framebuffer cursor tracking) ──
     last_cursor_x: usize,
     last_cursor_y: usize,
-    atlas: crate::atlas::GlyphAtlas,
 }
 
 impl<B: ConsoleBackend> Console<B> {
@@ -498,7 +497,6 @@ impl<B: ConsoleBackend> Console<B> {
             ],
             last_cursor_x: 0,
             last_cursor_y: 0,
-            atlas: crate::atlas::GlyphAtlas::from_font(&FONT8X16),
         };
         console.repaint_all();
         console
@@ -716,7 +714,7 @@ impl<B: ConsoleBackend> Console<B> {
                         let fg = row.fg[x];
                         let bg = row.bg[x];
                         if ch != b' ' || bg != COLOR_BG {
-                            render_glyph(&mut self.backend, &self.atlas, x, y, ch, fg, bg);
+                            render_glyph(&mut self.backend, x, y, ch, fg, bg);
                         }
                     }
                 }
@@ -730,7 +728,7 @@ impl<B: ConsoleBackend> Console<B> {
                         let fg = self.vt_screens[vt_idx].fg_cells[idx];
                         let bg = self.vt_screens[vt_idx].bg_cells[idx];
                         if ch != b' ' || bg != COLOR_BG {
-                            render_glyph(&mut self.backend, &self.atlas, x, y, ch, fg, bg);
+                            render_glyph(&mut self.backend, x, y, ch, fg, bg);
                         }
                     }
                 }
@@ -746,7 +744,7 @@ impl<B: ConsoleBackend> Console<B> {
                 let ch = self.vt_screens[vt_idx].cells[cidx];
                 let fg = self.vt_screens[vt_idx].fg_cells[cidx];
                 let bg = self.vt_screens[vt_idx].bg_cells[cidx];
-                render_cursor_block(&mut self.backend, &self.atlas, cx, cy, ch, fg, bg);
+                render_cursor_block(&mut self.backend, cx, cy, ch, fg, bg);
             }
         }
 
@@ -764,7 +762,7 @@ impl<B: ConsoleBackend> Console<B> {
             let ch = self.vt_screens[vt].cells[idx];
             let fg = self.vt_screens[vt].fg_cells[idx];
             let bg = self.vt_screens[vt].bg_cells[idx];
-            render_glyph(&mut self.backend, &self.atlas, x, y, ch, fg, bg);
+            render_glyph(&mut self.backend, x, y, ch, fg, bg);
         }
     }
 
@@ -784,7 +782,6 @@ impl<B: ConsoleBackend> Console<B> {
                 let bg = self.vt_screens[vt].bg_cells[old_idx];
                 render_glyph(
                     &mut self.backend,
-                    &self.atlas,
                     self.last_cursor_x,
                     self.last_cursor_y,
                     ch,
@@ -800,7 +797,7 @@ impl<B: ConsoleBackend> Console<B> {
             let ch = self.vt_screens[vt].cells[idx];
             let fg = self.vt_screens[vt].fg_cells[idx];
             let bg = self.vt_screens[vt].bg_cells[idx];
-            render_glyph(&mut self.backend, &self.atlas, cx, cy, ch, fg, bg);
+            render_glyph(&mut self.backend, cx, cy, ch, fg, bg);
         }
 
         // 3) Draw cursor block if visible.
@@ -808,7 +805,7 @@ impl<B: ConsoleBackend> Console<B> {
             let ch = self.vt_screens[vt].cells[idx];
             let fg = self.vt_screens[vt].fg_cells[idx];
             let bg = self.vt_screens[vt].bg_cells[idx];
-            render_cursor_block(&mut self.backend, &self.atlas, cx, cy, ch, fg, bg);
+            render_cursor_block(&mut self.backend, cx, cy, ch, fg, bg);
         }
 
         // 4) Update last cursor position.
@@ -820,18 +817,15 @@ impl<B: ConsoleBackend> Console<B> {
 // ── Free rendering helpers ─────────────────────────────────────────────
 
 /// Render a glyph bitmap to the backend at grid position (x, y).
-/// Uses the precomputed mask atlas + SSE2 blend_row for non-shade glyphs.
+/// Uses the static byte-mask LUT + SSE2 blend_row for non-shade glyphs.
 fn render_glyph<B: ConsoleBackend>(
     backend: &mut B,
-    atlas: &crate::atlas::GlyphAtlas,
     x: usize,
     y: usize,
     ch: u8,
     fg: u32,
     bg: u32,
 ) {
-    // Shade glyphs (0xB0/B1/B2/DB) bypass the atlas — they're computed at
-    // render time from a 2-byte pattern, not stored in FONT8X16.
     if let Some(glyph) = shade_glyph(ch) {
         let mut row_buffer = [0u32; GLYPH_W];
         for (row, line) in glyph.iter().enumerate() {
@@ -844,12 +838,13 @@ fn render_glyph<B: ConsoleBackend>(
         return;
     }
 
+    let glyph = font_glyph(ch);
     let px = x * GLYPH_W;
     let py = y * GLYPH_H;
     let mut row_buffer = [0u32; GLYPH_W];
-    for row in 0..GLYPH_H {
-        let mask_row = atlas.row(ch, row);
-        crate::simd::blend_row(mask_row, fg, bg, &mut row_buffer);
+    for (row, line) in glyph.iter().enumerate() {
+        let mask = crate::atlas::mask_for_byte(*line);
+        crate::simd::blend_row(mask, fg, bg, &mut row_buffer);
         backend.put_pixels_row(px, py + row, &row_buffer);
     }
 }
@@ -858,14 +853,13 @@ fn render_glyph<B: ConsoleBackend>(
 /// so the character remains visible inside the cursor.
 fn render_cursor_block<B: ConsoleBackend>(
     backend: &mut B,
-    atlas: &crate::atlas::GlyphAtlas,
     x: usize,
     y: usize,
     ch: u8,
     fg: u32,
     bg: u32,
 ) {
-    render_glyph(backend, atlas, x, y, ch, bg, fg);
+    render_glyph(backend, x, y, ch, bg, fg);
 }
 
 /// Load the glyph bitmap for a single ASCII character.
