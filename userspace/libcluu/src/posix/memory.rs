@@ -179,8 +179,91 @@ pub extern "C" fn _mmap(
     let is_anonymous = (flags & MAP_ANONYMOUS) != 0 || fd == -1;
     let is_file_backed = !is_anonymous;
 
-    // MAP_SHARED with file descriptor: not supported (requires write-back)
+    // MAP_SHARED with file descriptor: detect /dev/fb0 by probing for the FB
+    // header magic; if found, route to MAP_DEVICE_WC. All other cases return ENOSYS.
     if is_file_backed && (flags & MAP_SHARED) != 0 {
+        use super::file::{_lseek, _read, SEEK_CUR, SEEK_SET};
+        const FB_HEADER_MAGIC: u32 = 0x4642_4630;
+
+        let mut hdr = [0u8; 40];
+        let saved_pos = _lseek(fd, 0, SEEK_CUR);
+        if saved_pos >= 0 && _lseek(fd, 0, SEEK_SET) == 0 {
+            let n = _read(fd, hdr.as_mut_ptr() as *mut c_void, 40);
+            let _ = _lseek(fd, saved_pos, SEEK_SET); // best-effort restore
+            if n == 40 {
+                let magic = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+                if magic == FB_HEADER_MAGIC {
+                    let fb_size = u64::from_le_bytes([
+                        hdr[24], hdr[25], hdr[26], hdr[27],
+                        hdr[28], hdr[29], hdr[30], hdr[31],
+                    ]) as usize;
+                    let fb_phys = u64::from_le_bytes([
+                        hdr[32], hdr[33], hdr[34], hdr[35],
+                        hdr[36], hdr[37], hdr[38], hdr[39],
+                    ]);
+                    if length > fb_size {
+                        set_errno(EINVAL);
+                        return MAP_FAILED;
+                    }
+                    if offset != 0 {
+                        set_errno(EINVAL);
+                        return MAP_FAILED;
+                    }
+                    let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+                    let num_pages = aligned_len / PAGE_SIZE;
+                    let virt_addr = if (flags & MAP_FIXED) != 0 && !addr.is_null() {
+                        let a = addr as usize;
+                        if a & (PAGE_SIZE - 1) != 0 {
+                            set_errno(EINVAL);
+                            return MAP_FAILED;
+                        }
+                        let end = a.saturating_add(aligned_len);
+                        if a < MMAP_REGION_START || end > MMAP_REGION_END {
+                            set_errno(EINVAL);
+                            return MAP_FAILED;
+                        }
+                        if MMAP_REGIONS.lock().overlaps(a, end) {
+                            set_errno(EINVAL);
+                            return MAP_FAILED;
+                        }
+                        a
+                    } else {
+                        let Some(fit) = MMAP_REGIONS.lock().find_first_fit(aligned_len) else {
+                            set_errno(ENOMEM);
+                            return MAP_FAILED;
+                        };
+                        fit
+                    };
+                    let space_token = crate::boot::space_token();
+                    if space_token == 0 {
+                        set_errno(ENOMEM);
+                        return MAP_FAILED;
+                    }
+                    let mut kern_flags: usize = 0;
+                    if prot & PROT_READ  != 0 { kern_flags |= 0x01; }
+                    if prot & PROT_WRITE != 0 { kern_flags |= 0x02; }
+                    if prot & PROT_EXEC  != 0 { kern_flags |= 0x04; }
+                    if kern_flags == 0 { kern_flags = 0x01; }
+                    kern_flags |= crate::syscall::MAP_DEVICE_WC;
+                    match crate::syscall::space_map_range(
+                        space_token, virt_addr, fb_phys as usize, kern_flags, num_pages, 0,
+                    ) {
+                        Ok(_) => {}
+                        Err(_) => {
+                            set_errno(ENOMEM);
+                            return MAP_FAILED;
+                        }
+                    }
+                    let region = MmapRegion { addr: virt_addr, len: aligned_len, prot };
+                    if !MMAP_REGIONS.lock().insert(region) {
+                        let _ = crate::syscall::space_unmap(space_token, virt_addr, num_pages);
+                        set_errno(ENOMEM);
+                        return MAP_FAILED;
+                    }
+                    return virt_addr as *mut c_void;
+                }
+            }
+        }
         set_errno(ENOSYS);
         return MAP_FAILED;
     }
