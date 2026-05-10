@@ -35,9 +35,9 @@ use crate::backend::{ConsoleBackend, DoubleBufferBackend, FramebufferBackend};
 use crate::context::{ConsoleContext, VT_COUNT};
 use crate::protocol::parse_message;
 use crate::renderer::Console;
-use libcluu::boot::{
-    process_info, PARAM_CONSOLE_ACTIVE, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PHYS,
-    PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
+use libcluu::boot::{process_info, PARAM_CONSOLE_ACTIVE};
+use libcluu::posix::{
+    _close, _open, _read, mmap, c_void, O_RDWR, MAP_SHARED, PROT_READ, PROT_WRITE,
 };
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_ACTIVATE_LABEL, CONSOLE_CREATE_VT_LABEL,
@@ -63,13 +63,58 @@ pub extern "C" fn main() -> i32 {
 /// Initialize the console instance and enter the IPC-driven event loop.
 fn run() -> Result<()> {
     let info = process_info();
-    let fb = info.params[PARAM_FB_BASE] as *mut u8;
-    let width = info.params[PARAM_FB_WIDTH] as usize;
-    let height = info.params[PARAM_FB_HEIGHT] as usize;
-    let pitch = info.params[PARAM_FB_PITCH] as usize;
-    let fb_phys = info.params[PARAM_FB_PHYS];
-    let fb_size = info.params[PARAM_FB_SIZE];
     let start_active = info.params[PARAM_CONSOLE_ACTIVE] != 0;
+
+    // Open /dev/fb0 + read 40-byte geometry header + mmap.
+    // libcluu's mmap detects the FB magic and routes to MAP_DEVICE_WC.
+    const FB_HEADER_MAGIC: u32 = 0x4642_4630; // "FB0\0"
+    let path = b"/dev/fb0\0";
+    let fd = unsafe { _open(path.as_ptr() as *const i8, O_RDWR, 0) };
+    if fd < 0 {
+        let _ = debug_print("console: open /dev/fb0 failed");
+        return Err(Error::NotFound);
+    }
+    let mut hdr = [0u8; 40];
+    let n = unsafe { _read(fd, hdr.as_mut_ptr() as *mut c_void, 40) };
+    if n != 40 {
+        unsafe { _close(fd); }
+        let _ = debug_print("console: short read /dev/fb0");
+        return Err(Error::InvalidArgument);
+    }
+    let magic = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+    if magic != FB_HEADER_MAGIC {
+        unsafe { _close(fd); }
+        let _ = debug_print("console: bad fb header magic");
+        return Err(Error::InvalidArgument);
+    }
+    let width  = u32::from_le_bytes([hdr[ 4], hdr[ 5], hdr[ 6], hdr[ 7]]) as usize;
+    let height = u32::from_le_bytes([hdr[ 8], hdr[ 9], hdr[10], hdr[11]]) as usize;
+    let pitch  = u32::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]) as usize;
+    let fb_size = u64::from_le_bytes([
+        hdr[24], hdr[25], hdr[26], hdr[27],
+        hdr[28], hdr[29], hdr[30], hdr[31],
+    ]);
+    let fb_phys = u64::from_le_bytes([
+        hdr[32], hdr[33], hdr[34], hdr[35],
+        hdr[36], hdr[37], hdr[38], hdr[39],
+    ]);
+    let mapped = unsafe {
+        mmap(
+            core::ptr::null_mut::<c_void>(),
+            fb_size as usize,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    unsafe { _close(fd); }
+    if mapped as isize == -1 || mapped.is_null() {
+        let _ = debug_print("console: mmap /dev/fb0 failed");
+        return Err(Error::InvalidArgument);
+    }
+    let fb = mapped as *mut u8;
+    let _ = debug_print("console: /dev/fb0 mapped");
 
     // Try double buffering first, fall back to direct framebuffer if heap too small
     if let Some(backend) = DoubleBufferBackend::try_new(fb, width, height, pitch) {
