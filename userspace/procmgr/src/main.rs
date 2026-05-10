@@ -16,7 +16,6 @@ use core::mem::{size_of, take};
 use libcluu::boot::{
     process_info,
     ProcessInfo,
-    CONSOLE_FB_BASE,
     PARAM_CONSOLE_ACTIVE,
     PARAM_CONSOLE_INSTANCE,
     CWD_MAX,
@@ -24,12 +23,6 @@ use libcluu::boot::{
     PARAM_CWD_OFFSET,
     PARAM_REDIR_LEN,
     PARAM_REDIR_OFFSET,
-    PARAM_FB_BASE,
-    PARAM_FB_HEIGHT,
-    PARAM_FB_PHYS,
-    PARAM_FB_PITCH,
-    PARAM_FB_SIZE,
-    PARAM_FB_WIDTH,
     PARAM_INITRD_SIZE,
     PARAM_TTY_INSTANCE,
     PROCESS_INFO_ADDR,
@@ -288,9 +281,6 @@ struct ProcessManager {
     user_records: BTreeMap<String, UserRecord>,
     session_table: BTreeMap<u64, SessionEntry>,
     vt_to_session: [u64; VT_COUNT],
-    /// Framebuffer dimensions cached from /proc/fb; zero until console is spawned.
-    fb_width: u32,
-    fb_height: u32,
     /// Container ID of the vtmgr service (set during autostart).
     vtmgr_container_id: u64,
     shutting_down: bool,
@@ -369,8 +359,6 @@ impl ProcessManager {
             user_records: BTreeMap::new(),
             session_table: BTreeMap::new(),
             vt_to_session: [0; VT_COUNT],
-            fb_width: 0,
-            fb_height: 0,
             vtmgr_container_id: 0,
             shutting_down: false,
             shutdown_action: 0,
@@ -1211,43 +1199,10 @@ impl ProcessManager {
 
         // Instance params: console and vt share PARAM_CAP_PROFILE slot with their
         // instance ID, so we override after the profile is written.
-        // Console also needs framebuffer params from /proc/fb.
+        // Console opens /dev/fb0 directly; procmgr no longer injects FB params.
         let mut overrides_buf: [(usize, u64); 8] = [(0, 0); 8];
         let mut n_overrides = 0;
-        let mut fb_phys: u64 = 0;
-        let mut fb_size: u64 = 0;
         if image_name == "console" {
-            // Read framebuffer info from /proc/fb
-            if let Some(data) = self.read_file_from_vfs("/proc/fb") {
-                if let Ok(text) = core::str::from_utf8(&data) {
-                    for line in text.lines() {
-                        if let Some(v) = line.strip_prefix("phys=0x") {
-                            fb_phys = u64::from_str_radix(v, 16).unwrap_or(0);
-                        } else if let Some(v) = line.strip_prefix("size=") {
-                            fb_size = v.parse::<u64>().unwrap_or(0);
-                        } else if let Some(v) = line.strip_prefix("width=") {
-                            let w = v.parse::<u64>().unwrap_or(0);
-                            self.fb_width = w as u32;
-                            overrides_buf[n_overrides] = (PARAM_FB_WIDTH, w);
-                            n_overrides += 1;
-                        } else if let Some(v) = line.strip_prefix("height=") {
-                            let h = v.parse::<u64>().unwrap_or(0);
-                            self.fb_height = h as u32;
-                            overrides_buf[n_overrides] = (PARAM_FB_HEIGHT, h);
-                            n_overrides += 1;
-                        } else if let Some(v) = line.strip_prefix("pitch=") {
-                            overrides_buf[n_overrides] = (PARAM_FB_PITCH, v.parse::<u64>().unwrap_or(0));
-                            n_overrides += 1;
-                        }
-                    }
-                }
-            }
-            overrides_buf[n_overrides] = (PARAM_FB_BASE, CONSOLE_FB_BASE as u64);
-            n_overrides += 1;
-            overrides_buf[n_overrides] = (PARAM_FB_PHYS, fb_phys);
-            n_overrides += 1;
-            overrides_buf[n_overrides] = (PARAM_FB_SIZE, fb_size);
-            n_overrides += 1;
             overrides_buf[n_overrides] = (PARAM_CONSOLE_INSTANCE, 0);
             n_overrides += 1;
             overrides_buf[n_overrides] = (PARAM_CONSOLE_ACTIVE, 1);
@@ -1302,20 +1257,6 @@ impl ProcessManager {
                     quota: QuotaSpec::default(),
                     live_processes: 0,
                 });
-                // Map framebuffer into console's address space.
-                if image_name == "console" && fb_phys != 0 && fb_size != 0 {
-                    if let Some(&space_tok) = self.cookie_to_space.get(&cookie) {
-                        let num_pages = (fb_size as usize).div_ceil(PAGE_SIZE);
-                        let _ = space_map_range(
-                            space_tok,
-                            CONSOLE_FB_BASE,
-                            fb_phys as usize,
-                            0x03 | MAP_DEVICE, // read + write + device
-                            num_pages,
-                            0,
-                        );
-                    }
-                }
                 self.autostart_order.push(container_id);
                 let _ = debug_print(&format!(
                     "procmgr: autostart '{}' started pid={} cid={}",
@@ -1513,38 +1454,11 @@ impl ProcessManager {
         argv_payload.extend_from_slice(binary.as_bytes());
         argv_payload.push(0);
 
-        // Console-specific param overrides (framebuffer)
+        // Console-specific param overrides (VT instance/active only).
+        // Console opens /dev/fb0 directly; procmgr no longer injects FB params.
         let mut overrides_buf: [(usize, u64); 8] = [(0, 0); 8];
         let mut n_overrides = 0;
-        let mut fb_phys: u64 = 0;
-        let mut fb_size: u64 = 0;
         if image_name == "console" {
-            if let Some(data) = self.read_file_from_vfs("/proc/fb") {
-                if let Ok(text) = core::str::from_utf8(&data) {
-                    for line in text.lines() {
-                        if let Some(v) = line.strip_prefix("phys=0x") {
-                            fb_phys = u64::from_str_radix(v, 16).unwrap_or(0);
-                        } else if let Some(v) = line.strip_prefix("size=") {
-                            fb_size = v.parse::<u64>().unwrap_or(0);
-                        } else if let Some(v) = line.strip_prefix("width=") {
-                            overrides_buf[n_overrides] = (PARAM_FB_WIDTH, v.parse::<u64>().unwrap_or(0));
-                            n_overrides += 1;
-                        } else if let Some(v) = line.strip_prefix("height=") {
-                            overrides_buf[n_overrides] = (PARAM_FB_HEIGHT, v.parse::<u64>().unwrap_or(0));
-                            n_overrides += 1;
-                        } else if let Some(v) = line.strip_prefix("pitch=") {
-                            overrides_buf[n_overrides] = (PARAM_FB_PITCH, v.parse::<u64>().unwrap_or(0));
-                            n_overrides += 1;
-                        }
-                    }
-                }
-            }
-            overrides_buf[n_overrides] = (PARAM_FB_BASE, CONSOLE_FB_BASE as u64);
-            n_overrides += 1;
-            overrides_buf[n_overrides] = (PARAM_FB_PHYS, fb_phys);
-            n_overrides += 1;
-            overrides_buf[n_overrides] = (PARAM_FB_SIZE, fb_size);
-            n_overrides += 1;
             overrides_buf[n_overrides] = (PARAM_CONSOLE_INSTANCE, 0);
             n_overrides += 1;
             overrides_buf[n_overrides] = (PARAM_CONSOLE_ACTIVE, 1);
@@ -1561,7 +1475,7 @@ impl ProcessManager {
             extra_token, extra_token_1, param_overrides, None, &[], &[],
             THREAD_CREATE_START_SUSPENDED,
         ) {
-            Ok((new_thread_token, new_cookie, new_pid, _)) => {
+            Ok((new_thread_token, _new_cookie, new_pid, _)) => {
                 let view_mounts = default_view_for_profile(requested_profile);
                 self.pid_to_container_id.insert(new_pid, container_id);
                 self.container_owner_pids.insert(new_pid);
@@ -1570,21 +1484,6 @@ impl ProcessManager {
 
                 if let Some(container) = self.container_instances.get_mut(&container_id) {
                     container.pid = new_pid;
-                }
-
-                // Map framebuffer into console's restarted address space
-                if image_name == "console" && fb_phys != 0 && fb_size != 0 {
-                    if let Some(&space_tok) = self.cookie_to_space.get(&new_cookie) {
-                        let num_pages = (fb_size as usize).div_ceil(PAGE_SIZE);
-                        let _ = space_map_range(
-                            space_tok,
-                            CONSOLE_FB_BASE,
-                            fb_phys as usize,
-                            0x03 | MAP_DEVICE,
-                            num_pages,
-                            0,
-                        );
-                    }
                 }
 
                 let _ = debug_print(&format!(
@@ -4357,17 +4256,9 @@ impl ProcessManager {
             Err(_) => 0,
         };
 
-        // Inject framebuffer dimensions as defaults so all processes can compute
-        // terminal cols/rows.  Caller overrides are applied after, so e.g.
-        // the console service can still override with its explicit values.
-        let mut eo_buf = [(0usize, 0u64); 14];
+        // Apply caller-specified param overrides (console instance/active, etc.).
+        let mut eo_buf = [(0usize, 0u64); 12];
         let mut n_eo = 0usize;
-        if self.fb_width != 0 {
-            eo_buf[n_eo] = (PARAM_FB_WIDTH, self.fb_width as u64);
-            n_eo += 1;
-            eo_buf[n_eo] = (PARAM_FB_HEIGHT, self.fb_height as u64);
-            n_eo += 1;
-        }
         for &(idx, val) in param_overrides.iter().take(12) {
             eo_buf[n_eo] = (idx, val);
             n_eo += 1;
@@ -5860,7 +5751,7 @@ fn map_process_info_page(
     }
 
     let mut params = [0u64; 14];
-    // params[0] = pipe_mask for regular processes (shared with PARAM_FB_BASE for console)
+    // params[0] = pipe_mask for all processes
     params[0] = pipe_mask as u64;
     // NOTE: PARAM_CAP_PROFILE (slot 5) is NOT written here. The cap profile is
     // tracked server-side in pid_to_profile. Slot 5 is shared with
@@ -5925,10 +5816,7 @@ fn map_process_info_page(
         params[PARAM_REDIR_LEN] = redir_bytes.len() as u64;
     }
 
-    // Apply caller-specified param overrides LAST, so service-type callers can
-    // overwrite argv/env slots they don't use (e.g. console overrides slot 6
-    // with PARAM_FB_PHYS and slot 7 with PARAM_CONSOLE_ACTIVE — those services
-    // ignore argv/envp).
+    // Apply caller-specified param overrides LAST (e.g. console instance/active).
     for &(idx, val) in param_overrides {
         // Belt-and-suspenders: slots 10/11 (PARAM_CWD_OFFSET/LEN) and
         // slots 12/13 (PARAM_REDIR_OFFSET/LEN) are procmgr-trusted.
