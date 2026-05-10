@@ -2323,7 +2323,22 @@ impl VfsServer {
                         let data_len = payload_len.min(requested);
                         Ok(tty_buf[data_start..data_start + data_len].to_vec())
                     }
-                    DeviceType::Fb { .. } => Err(Error::NotImplemented),
+                    DeviceType::Fb { size, width, height, pitch, bpp, .. } => {
+                        // 24-byte little-endian geometry payload:
+                        //   u32 width, u32 height, u32 pitch, u32 bpp, u64 size
+                        let mut payload = [0u8; 24];
+                        payload[0..4].copy_from_slice(&width.to_le_bytes());
+                        payload[4..8].copy_from_slice(&height.to_le_bytes());
+                        payload[8..12].copy_from_slice(&pitch.to_le_bytes());
+                        payload[12..16].copy_from_slice(&bpp.to_le_bytes());
+                        payload[16..24].copy_from_slice(&size.to_le_bytes());
+                        let off = offset;
+                        if off >= payload.len() {
+                            return Ok(Vec::new());
+                        }
+                        let n = (payload.len() - off).min(requested);
+                        Ok(payload[off..off + n].to_vec())
+                    }
                 }
             }
             OpenFile::MemFs(entry) => {
