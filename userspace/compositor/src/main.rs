@@ -6,6 +6,7 @@ extern crate alloc;
 mod state;
 mod shm;
 mod protocol;
+mod compose;
 
 use alloc::format;
 use libcluu::boot::{process_info, TOKEN_IPC};
@@ -124,6 +125,7 @@ pub extern "C" fn main() -> i32 {
                             let _ = debug_print("compositor: msg");
                         }
                     }
+                    compose::recompute_dirty(&mut comp);
                 }
             }
             Err(Error::Timeout) | Err(Error::WouldBlock) => {}
