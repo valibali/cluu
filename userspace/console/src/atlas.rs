@@ -15,15 +15,15 @@ pub const ATLAS_STRIDE: usize = GLYPH_W * GLYPH_H;          // 128 u32 per glyph
 pub const ATLAS_LEN: usize = ATLAS_ENTRIES * ATLAS_STRIDE;  // 32 768 u32 = 128 KiB
 
 pub struct GlyphAtlas {
-    masks: Box<[u32; ATLAS_LEN]>,
+    masks: Box<[u32]>,
 }
 
 impl GlyphAtlas {
     /// Build a fresh atlas by expanding each font row byte into 8 u32 mask
     /// entries. `font_bits[ch * GLYPH_H + row]` provides the bit pattern.
     pub fn from_font(font_bits: &[u8]) -> Self {
-        // Heap-allocate so we don't blow the userspace stack.
-        let mut masks: Box<[u32; ATLAS_LEN]> = Box::new([0u32; ATLAS_LEN]);
+        // Allocate directly on the heap via Vec; no large stack temporary.
+        let mut masks: alloc::vec::Vec<u32> = alloc::vec![0u32; ATLAS_LEN];
         for ch in 0..ATLAS_ENTRIES {
             for row in 0..GLYPH_H {
                 let line = font_bits[ch * GLYPH_H + row];
@@ -34,14 +34,17 @@ impl GlyphAtlas {
                 }
             }
         }
-        Self { masks }
+        Self { masks: masks.into_boxed_slice() }
     }
 
     /// Borrow one row of the mask for `ch`.
     #[inline]
     pub fn row(&self, ch: u8, row: usize) -> &[u32; GLYPH_W] {
+        debug_assert!(row < GLYPH_H);
         let off = (ch as usize) * ATLAS_STRIDE + row * GLYPH_W;
-        // SAFETY: GLYPH_W == 8, off + 8 <= ATLAS_LEN by construction.
-        unsafe { &*(self.masks[off..off + GLYPH_W].as_ptr() as *const [u32; GLYPH_W]) }
+        // SAFETY: ch is u8 (< 256 = ATLAS_ENTRIES) and row < GLYPH_H by debug_assert
+        // above, so off + GLYPH_W <= ATLAS_LEN. Slice indexing also bounds-checks.
+        let slice: &[u32] = &self.masks[off..off + GLYPH_W];
+        unsafe { &*(slice.as_ptr() as *const [u32; GLYPH_W]) }
     }
 }
