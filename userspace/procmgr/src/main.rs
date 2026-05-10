@@ -4724,8 +4724,11 @@ impl ProcessManager {
             Err(err) => {
                 let _ = debug_print(&format!("procmgr: map_elf failed {:?}", err));
                 // Likely stale fd or VFS-side eviction: refresh once and retry.
+                // Bypass the cache on retry — re-entering cached_vfs_file on
+                // the error path produced a procmgr null-deref (CR2=0x298,
+                // RIP=0x494d00 in vfs_file_cache.len) once seen 2026-05-09.
                 self.invalidate_cached_vfs_file(&client, effective_path);
-                match self.cached_vfs_file(&client, effective_path) {
+                match client.open(effective_path) {
                     Ok(refreshed_file) => client.map_elf(refreshed_file, map_token).ok(),
                     Err(_) => None,
                 }
