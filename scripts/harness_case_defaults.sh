@@ -422,6 +422,10 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND="console_blit_bench"
                 SHELL_AUTOSTART_CMD_DEFAULT="console_blit_bench"
                 ;;
+            l2_devfb0)
+                TEST_COMMAND="devfb0_probe"
+                SHELL_AUTOSTART_CMD_DEFAULT="devfb0_probe"
+                ;;
             p4_mmap)
                 TEST_COMMAND="mmapprobe"
                 SHELL_AUTOSTART_CMD_DEFAULT="mmapprobe"

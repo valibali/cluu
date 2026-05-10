@@ -1361,6 +1361,13 @@ case "$MARKER_MODE" in
             "BENCH_CONSOLE_BLIT: cycles_per_full_screen="
         )
         ;;
+    l2_devfb0)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "DEVFB0: PASS"
+        )
+        ;;
     p4_mmap)
         required_markers=(
             "TSC calibrated"
