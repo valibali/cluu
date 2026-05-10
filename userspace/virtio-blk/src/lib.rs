@@ -47,6 +47,10 @@ pub struct DriverStateInner {
     /// to a `BLK_COMPLETE` send by either the main loop's IRQ handler or
     /// the spin-poll inside `read_bytes`.
     pub pending: BTreeMap<u64, PendingAsync>,
+    /// Completions whose cookie was neither owned by the current sync waiter
+    /// nor present in `pending` at observation time. Re-checked on every
+    /// drain so the rightful owner can pick them up later.
+    pub deferred: Vec<(u64 /*cookie*/, u8 /*status*/, u32 /*written*/)>,
 }
 
 pub struct DriverState {
@@ -62,6 +66,7 @@ impl DriverState {
             inner: Mutex::new(DriverStateInner {
                 bq,
                 pending: BTreeMap::new(),
+                deferred: Vec::new(),
             }),
             next_sync_rid: AtomicU64::new(1),
         }
@@ -75,18 +80,32 @@ impl DriverState {
 
     /// Drain the device used ring on IRQ wake, ack the device's ISR, and
     /// dispatch a `BLK_COMPLETE` for every async `BLK_SUBMIT` completion
-    /// found. Sync FS cookies are silently dropped here — the spin-poll
-    /// inside `read_bytes` is the canonical waiter and routes its own
-    /// completion before this is reached.
+    /// found. Also re-processes any previously deferred orphan completions
+    /// against `pending`. Sync FS cookies that arrive here are stashed in
+    /// `deferred` so the spin-poll in `read_bytes` can claim them on the
+    /// next iteration.
     pub fn drain_and_route(&self) {
         let mut async_replies: Vec<(usize, u64, u8, u32)> = Vec::new();
         {
             let mut inner = self.inner.lock();
             let _ = inner.bq.transport.isr_status();
+            // Re-check any previously deferred orphan completions against
+            // pending before draining new ones from the device ring.
+            let prev_deferred = core::mem::take(&mut inner.deferred);
+            for (cookie, status, blen) in prev_deferred {
+                if let Some(p) = inner.pending.remove(&cookie) {
+                    async_replies.push((p.comp_ep, p.rid, status, blen));
+                } else {
+                    inner.deferred.push((cookie, status, blen));
+                }
+            }
             let completions = inner.bq.drain_completions();
             for (cookie, status, blen) in completions {
                 if let Some(p) = inner.pending.remove(&cookie) {
                     async_replies.push((p.comp_ep, p.rid, status, blen));
+                } else {
+                    // Not a known async cookie — stash for the next pass.
+                    inner.deferred.push((cookie, status, blen));
                 }
             }
         }
@@ -181,15 +200,35 @@ impl BlockDevice for ModernBlkAdapter {
         let mut my_status: Option<u8> = None;
         let mut spins = 0u64;
         while my_status.is_none() {
+            // Re-check previously deferred completions first: one of them
+            // might be ours, or might now match a newly-added pending entry.
+            let prev_deferred = core::mem::take(&mut inner.deferred);
+            for (got, status, blen) in prev_deferred {
+                if got == cookie {
+                    my_status = Some(status);
+                } else if let Some(p) = inner.pending.remove(&got) {
+                    deferred_async.push((p.comp_ep, p.rid, status, blen));
+                } else {
+                    inner.deferred.push((got, status, blen));
+                }
+            }
+            if my_status.is_some() {
+                break;
+            }
             let completions = inner.bq.drain_completions();
             for (got, status, blen) in completions {
                 if got == cookie {
                     my_status = Some(status);
                 } else if let Some(p) = inner.pending.remove(&got) {
                     deferred_async.push((p.comp_ep, p.rid, status, blen));
+                } else {
+                    // Cookie matches neither our sync waiter nor a known async
+                    // pending entry — stash it so a future waiter can claim it.
+                    let _ = libcluu::debug_print(&alloc::format!(
+                        "virtio-blk: deferring orphan cookie {got:#x}"
+                    ));
+                    inner.deferred.push((got, status, blen));
                 }
-                // Cookies neither ours nor in pending are silently dropped
-                // (orphan completions from a closed session, etc.).
             }
             if my_status.is_some() {
                 break;
@@ -265,12 +304,30 @@ impl BlockDevice for ModernBlkAdapter {
             let mut my_status: Option<u8> = None;
             let mut spins = 0u64;
             while my_status.is_none() {
+                let prev_deferred = core::mem::take(&mut inner.deferred);
+                for (got, status, blen) in prev_deferred {
+                    if got == cookie {
+                        my_status = Some(status);
+                    } else if let Some(p) = inner.pending.remove(&got) {
+                        deferred_async.push((p.comp_ep, p.rid, status, blen));
+                    } else {
+                        inner.deferred.push((got, status, blen));
+                    }
+                }
+                if my_status.is_some() {
+                    break;
+                }
                 let completions = inner.bq.drain_completions();
                 for (got, status, blen) in completions {
                     if got == cookie {
                         my_status = Some(status);
                     } else if let Some(p) = inner.pending.remove(&got) {
                         deferred_async.push((p.comp_ep, p.rid, status, blen));
+                    } else {
+                        let _ = libcluu::debug_print(&alloc::format!(
+                            "virtio-blk: deferring orphan cookie {got:#x}"
+                        ));
+                        inner.deferred.push((got, status, blen));
                     }
                 }
                 if my_status.is_some() {
@@ -311,12 +368,30 @@ impl BlockDevice for ModernBlkAdapter {
         let mut my_status: Option<u8> = None;
         let mut spins = 0u64;
         while my_status.is_none() {
+            let prev_deferred = core::mem::take(&mut inner.deferred);
+            for (got, status, blen) in prev_deferred {
+                if got == cookie {
+                    my_status = Some(status);
+                } else if let Some(p) = inner.pending.remove(&got) {
+                    deferred_async.push((p.comp_ep, p.rid, status, blen));
+                } else {
+                    inner.deferred.push((got, status, blen));
+                }
+            }
+            if my_status.is_some() {
+                break;
+            }
             let completions = inner.bq.drain_completions();
             for (got, status, blen) in completions {
                 if got == cookie {
                     my_status = Some(status);
                 } else if let Some(p) = inner.pending.remove(&got) {
                     deferred_async.push((p.comp_ep, p.rid, status, blen));
+                } else {
+                    let _ = libcluu::debug_print(&alloc::format!(
+                        "virtio-blk: deferring orphan cookie {got:#x}"
+                    ));
+                    inner.deferred.push((got, status, blen));
                 }
             }
             if my_status.is_some() {
