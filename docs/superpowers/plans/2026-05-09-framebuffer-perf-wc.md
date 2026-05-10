@@ -405,13 +405,22 @@ git commit -m "kernel/syscall: MAP_DEVICE_WC flag + dispatch to WC mapper"
 
 ---
 
-## Task 5: Userspace probe — verify WC mapping works
+## Task 5: SUPERSEDED — existing `fbprobe` + `p4_framebuf` MARKER_MODE cover this
 
-**Files:**
-- Create: `userspace/probes/fb_wc_probe/Cargo.toml`
-- Create: `userspace/probes/fb_wc_probe/src/main.rs`
-- Create: `userspace/probes/fb_wc_probe/Cluufile`
-- Modify: workspace `Cargo.toml` (add member)
+**Status:** dropped on 2026-05-09 during execution. The existing C probe at
+`userspace/c-programs/fbprobe.c` (containers/fbprobe/Cluufile, autostart via
+`p4_framebuf` MARKER_MODE in `scripts/harness_case_defaults.sh:418-419`) already
+exercises framebuffer_acquire → write → readback → release. Once Task 6 flips
+`framebuffer_acquire` to MAP_DEVICE_WC, `p4_framebuf` becomes the
+end-to-end WC functional test with no new code needed.
+
+The original plan steps below are kept for archival but are not executed.
+
+**Files (NOT executed):**
+- ~~Create: `userspace/probes/fb_wc_probe/Cargo.toml`~~
+- ~~Create: `userspace/probes/fb_wc_probe/src/main.rs`~~
+- ~~Create: `userspace/probes/fb_wc_probe/Cluufile`~~
+- ~~Modify: workspace `Cargo.toml` (add member)~~
 
 - [ ] **Step 1: Cargo.toml**
 
