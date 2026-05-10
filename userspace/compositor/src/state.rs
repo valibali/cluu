@@ -275,6 +275,27 @@ impl Compositor {
 }
 
 impl Compositor {
+    /// App says "I redrew (x,y,w,h) inside my window's interior". Mark
+    /// the corresponding total-grid cells dirty.
+    pub fn handle_win_damage(&mut self, id: WindowId, x: u32, y: u32, w: u32, h: u32) {
+        let Some(win) = self.windows.iter().find(|w| w.id == id) else { return; };
+        let inner_w = win.w.saturating_sub(4);
+        let inner_h = win.h.saturating_sub(4);
+        let cx0 = (x as u16).min(inner_w);
+        let cy0 = (y as u16).min(inner_h);
+        let cx1 = ((x as u16).saturating_add(w as u16)).min(inner_w);
+        let cy1 = ((y as u16).saturating_add(h as u16)).min(inner_h);
+        for iy in cy0..cy1 {
+            for ix in cx0..cx1 {
+                let gx = win.x + 2 + ix;
+                let gy = win.y + 2 + iy;
+                self.cell_dirty.push((gx, gy));
+            }
+        }
+    }
+}
+
+impl Compositor {
     /// Free the window's frame, drop it from the list, repaint covered cells.
     /// Called explicitly via WIN_DESTROY. Implicit destroy on owner-exit is
     /// deferred — would need procmgr to broadcast exits to non-spawner
