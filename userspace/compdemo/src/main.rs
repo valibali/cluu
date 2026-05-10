@@ -93,9 +93,52 @@ pub extern "C" fn main() -> i32 {
     }
     let _ = debug_print("compdemo: window registered + SHM mapped");
 
-    // Keep alive for T22 — replaced in T22 with rainbow loop.
-    let _ = (win_id, gw, gh, comp_ep);
+    // Rainbow animation + DAMAGE loop.
+    // Honest scope note: full input plumbing requires compositor to
+    // remember per-window input_endpoint. For T22 we don't receive any
+    // INPUT_FORWARD messages — that wiring lands in T25.
+    // The loop below animates the rainbow and sends DAMAGE each frame.
+
+    let cells_ptr = (SHM_VA + 32) as *mut u64;
+    let mut frame: u32 = 0;
     loop {
+        // Fill cells with a slowly shifting rainbow pattern.
+        for iy in 0..gh {
+            for ix in 0..gw {
+                let color = (((ix + iy + frame) & 0xFF) as u8).wrapping_mul(3);
+                let cp = (b'#' as u64) & 0x1F_FFFF;
+                let fg = (color as u64) << 21;
+                let bg = 0u64 << 29;
+                let attrs = 0u64 << 37;
+                let cell = cp | fg | bg | attrs;
+                unsafe {
+                    core::ptr::write_volatile(
+                        cells_ptr.add((iy * gw + ix) as usize),
+                        cell,
+                    );
+                }
+            }
+        }
+        // Bump generation BEFORE sending DAMAGE (release-store).
+        unsafe {
+            let hdr = SHM_VA as *mut WindowShm;
+            let g = (*hdr).generation;
+            core::ptr::write_volatile(&mut (*hdr).generation as *mut u32, g.wrapping_add(1));
+        }
+        // Send full-window DAMAGE.
+        let dmg = Message::new(
+            COMP_WIN_DAMAGE_LABEL,
+            [win_id, 0, 0, gw as usize, gh as usize, 0],
+            5,
+        );
+        let _ = libcluu::ipc::send(comp_ep, &dmg, IpcFlags::empty());
+
+        frame = frame.wrapping_add(1);
+
+        // Yield so other processes get CPU. No timer subscription for v1.
+        for _ in 0..200_000 {
+            core::hint::spin_loop();
+        }
         let _ = syscall::yield_cpu();
     }
 }
