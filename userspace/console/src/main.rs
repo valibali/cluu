@@ -24,6 +24,7 @@ extern crate alloc;
 /// If the heap is too small for the backbuffer (~3MB), it falls back to
 /// direct framebuffer writes.
 mod atlas;
+mod font_arc;
 mod backend;
 mod context;
 mod protocol;

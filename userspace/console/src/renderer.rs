@@ -1039,6 +1039,10 @@ fn unicode_to_cp437(cp: u32) -> u8 {
         0x25A0 => 0xFE, // ■
         0x00A0 => 0xFF, // NBSP → CP437 0xFF
 
+        // Cluu private-use range for Tier-3 rounded corner sub-cells.
+        // See userspace/console/src/font_arc.rs.
+        0xE000..=0xE00F => 0xF0u8 + (cp - 0xE000) as u8,
+
         // Unmapped codepoint
         _ => b'?',
     }
