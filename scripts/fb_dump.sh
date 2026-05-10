@@ -100,7 +100,9 @@ fi
 echo "fb_dump: dumped $ACTUAL_BYTES bytes" >&2
 
 if command -v convert >/dev/null 2>&1; then
-    convert -size "${WIDTH}x${HEIGHT}" -depth 8 "bgra:$BIN" "$PNG"
+    # `-alpha off` drops the BGRA alpha channel so the PNG isn't shown as
+    # transparent in viewers that respect alpha. The fb is always opaque.
+    convert -size "${WIDTH}x${HEIGHT}" -depth 8 "bgra:$BIN" -alpha off "$PNG"
     echo "fb_dump: rendered $PNG" >&2
 else
     echo "fb_dump: imagemagick convert not found; skipping PNG render" >&2
