@@ -157,10 +157,12 @@ pub extern "C" fn main() -> i32 {
                             }
                         }
                         protocol::Incoming::VtActivate => {
-                            comp.active = true;
+                            comp.handle_vt_activate();
+                            let _ = debug_print("compositor: VT activate");
                         }
                         protocol::Incoming::VtDeactivate => {
-                            comp.active = false;
+                            comp.handle_vt_deactivate();
+                            let _ = debug_print("compositor: VT deactivate");
                         }
                         protocol::Incoming::Shutdown => {
                             let _ = debug_print("compositor: shutdown");

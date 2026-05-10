@@ -425,6 +425,19 @@ impl Compositor {
 }
 
 impl Compositor {
+    /// VT switch: compositor's VT became active — resume fb writes.
+    pub fn handle_vt_activate(&mut self) {
+        self.active = true;
+        self.repaint_all();
+    }
+
+    /// VT switch: compositor's VT became inactive — suppress fb writes.
+    pub fn handle_vt_deactivate(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Compositor {
     /// Forward a raw kbd event to the focused window's input endpoint.
     /// `ascii`/`mods`/`scancode`/`extended` come straight from the
     /// `KbdEvent` variant of `protocol::Incoming`.
