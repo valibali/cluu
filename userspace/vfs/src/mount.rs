@@ -424,16 +424,30 @@ impl RemoteBackend {
     }
 }
 
-/// Device backend - special device files (/dev/null, /dev/zero, /dev/urandom, /dev/tty*).
+/// Framebuffer geometry forwarded from boot params.
+#[derive(Clone, Copy)]
+pub struct FbInfo {
+    pub phys: u64,
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u32,
+}
+
+/// Device backend - special device files (/dev/null, /dev/zero, /dev/urandom, /dev/tty*, /dev/fb0).
 pub struct DeviceBackend {
     /// Endpoints for tty:0..tty:3 (resolved via registry at VFS startup).
     pub tty_endpoints: [usize; 4],
+    /// Primary framebuffer geometry; None if no framebuffer is available.
+    pub fb: Option<FbInfo>,
 }
 
 impl DeviceBackend {
     pub fn new() -> Self {
         Self {
             tty_endpoints: [0; 4],
+            fb: None,
         }
     }
 
@@ -442,6 +456,11 @@ impl DeviceBackend {
         if index < 4 {
             self.tty_endpoints[index] = endpoint;
         }
+    }
+
+    /// Set framebuffer geometry (called at VFS boot from PARAM_VFS_FB_* params).
+    pub fn set_fb(&mut self, info: FbInfo) {
+        self.fb = Some(info);
     }
 }
 
@@ -480,6 +499,19 @@ impl MountBackend for DeviceBackend {
             "console" => DeviceType::Console {
                 endpoint: self.tty_endpoints[0],
             },
+            "fb0" => {
+                let Some(info) = self.fb else {
+                    return Err(Error::NotFound);
+                };
+                DeviceType::Fb {
+                    phys: info.phys,
+                    size: info.size,
+                    width: info.width,
+                    height: info.height,
+                    pitch: info.pitch,
+                    bpp: info.bpp,
+                }
+            }
             _ => return Err(Error::NotFound),
         };
 
@@ -507,7 +539,7 @@ impl MountBackend for DeviceBackend {
 
         let names = [
             "null", "zero", "urandom", "random",
-            "tty0", "tty1", "tty2", "tty3", "tty4", "console",
+            "tty0", "tty1", "tty2", "tty3", "tty4", "console", "fb0",
         ];
         Ok(names.iter().map(|&n| DirEntry {
             name: String::from(n),

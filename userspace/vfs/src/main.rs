@@ -164,13 +164,32 @@ fn run_vfs() -> Result<()> {
     let initrd = map_initrd_slice(initrd_size);
 
     // Populate /proc/fb with framebuffer info from init
+    let fb_phys = info.params[PARAM_VFS_FB_PHYS];
+    let fb_size = info.params[PARAM_VFS_FB_SIZE];
+    let fb_width = info.params[PARAM_VFS_FB_WIDTH];
+    let fb_height = info.params[PARAM_VFS_FB_HEIGHT];
+    let fb_pitch = info.params[PARAM_VFS_FB_PITCH];
     procfs::set_fb_info(procfs::FbInfo {
-        phys: info.params[PARAM_VFS_FB_PHYS],
-        size: info.params[PARAM_VFS_FB_SIZE],
-        width: info.params[PARAM_VFS_FB_WIDTH],
-        height: info.params[PARAM_VFS_FB_HEIGHT],
-        pitch: info.params[PARAM_VFS_FB_PITCH],
+        phys: fb_phys,
+        size: fb_size,
+        width: fb_width,
+        height: fb_height,
+        pitch: fb_pitch,
     });
+
+    // Build FbInfo for /dev/fb0 — only if the framebuffer is present.
+    let dev_fb_info = if fb_phys != 0 {
+        Some(mount::FbInfo {
+            phys: fb_phys,
+            size: fb_size,
+            width: fb_width as u32,
+            height: fb_height as u32,
+            pitch: fb_pitch as u32,
+            bpp: 32, // CLUU framebuffer is BGRA32
+        })
+    } else {
+        None
+    };
 
     debug_print("vfs: registering...")?;
     registry::init("vfs")?;
@@ -185,7 +204,7 @@ fn run_vfs() -> Result<()> {
     }
 
     // Setup all mount points declaratively
-    let mounts = setup_mounts(initrd)?;
+    let mounts = setup_mounts(initrd, dev_fb_info)?;
 
     // Signal that ext2 is mounted (procmgr blocks on this for autostart)
     registry::register_output("mounted", endpoint)?;
@@ -261,7 +280,7 @@ fn run_vfs() -> Result<()> {
 /// Declarative mount point configuration.
 ///
 /// All mount points are defined here in one place.
-fn setup_mounts(initrd: &'static [u8]) -> Result<MountTable> {
+fn setup_mounts(initrd: &'static [u8], fb_info: Option<mount::FbInfo>) -> Result<MountTable> {
     debug_print("vfs: setup_mounts start")?;
     let mut mounts = MountTable::new();
 
@@ -283,8 +302,12 @@ fn setup_mounts(initrd: &'static [u8]) -> Result<MountTable> {
     mounts.mount("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
     debug_print("vfs: mounted /proc (procfs)")?;
 
-    // Device files: /dev/null, /dev/zero, /dev/urandom, /dev/tty*
-    mounts.mount("/dev", alloc::boxed::Box::new(mount::DeviceBackend::new()));
+    // Device files: /dev/null, /dev/zero, /dev/urandom, /dev/tty*, /dev/fb0
+    let mut dev_backend = mount::DeviceBackend::new();
+    if let Some(fb_info) = fb_info {
+        dev_backend.set_fb(fb_info);
+    }
+    mounts.mount("/dev", alloc::boxed::Box::new(dev_backend));
     debug_print("vfs: mounted /dev (devfs)")?;
 
     // ═══════════════════════════════════════════════════════════════════════
