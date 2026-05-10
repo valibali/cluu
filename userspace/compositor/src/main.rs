@@ -7,25 +7,59 @@ mod state;
 mod shm;
 mod protocol;
 
-use libcluu::{debug_print, syscall, Error};
+use alloc::format;
+use libcluu::boot::{process_info, TOKEN_IPC};
+use libcluu::{debug_print, registry, syscall, Error};
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     let _ = debug_print("compositor: init");
-    let mut _comp = match state::Compositor::init() {
+    let mut comp = match state::Compositor::init() {
         Ok(c) => c,
         Err(_) => {
             let _ = debug_print("compositor: init failed");
             return -1;
         }
     };
+
+    let info = process_info();
+    let ipc_cap = info.tokens[TOKEN_IPC];
+    comp.instance_id = 0;
+    let service_name = format!("compositor:{}", comp.instance_id);
+    if registry::init(&service_name).is_err() {
+        let _ = debug_print("compositor: registry init failed");
+        return -1;
+    }
+    if registry::register_default_outputs().is_err() {
+        let _ = debug_print("compositor: register_default_outputs failed");
+    }
+
+    comp.client_endpoint = match syscall::endpoint_create(ipc_cap) {
+        Ok(ep) => ep,
+        Err(_) => { let _ = debug_print("compositor: client endpoint failed"); return -1; }
+    };
+    comp.input_endpoint_global = match syscall::endpoint_create(ipc_cap) {
+        Ok(ep) => ep,
+        Err(_) => { let _ = debug_print("compositor: input endpoint failed"); return -1; }
+    };
+    comp.control_endpoint = match syscall::endpoint_create(ipc_cap) {
+        Ok(ep) => ep,
+        Err(_) => { let _ = debug_print("compositor: control endpoint failed"); return -1; }
+    };
+    let _ = registry::register_output("client", comp.client_endpoint);
+    let _ = registry::register_output("input", comp.input_endpoint_global);
+    let _ = registry::register_output("control", comp.control_endpoint);
+    comp.registry_endpoint = registry::control_endpoint();
+
+    let _ = debug_print("compositor: endpoints registered");
     let _ = debug_print("compositor: ready");
 
-    // Endpoint registration lands in T9. For now, allocate a placeholder
-    // 4-element token list and drive recv with all zeros — recv_any will
-    // return InvalidArgument and we fall through to yield. This proves the
-    // event loop compiles and doesn't crash; real wiring follows.
-    let tokens = [0usize; 4];
+    let tokens = [
+        comp.client_endpoint,
+        comp.input_endpoint_global,
+        comp.control_endpoint,
+        comp.registry_endpoint,
+    ];
     let mut buf = [0u8; 1024];
 
     loop {
@@ -37,14 +71,8 @@ pub extern "C" fn main() -> i32 {
                     let _ = (idx, payload, kind);
                 }
             }
-            Err(Error::Timeout) | Err(Error::WouldBlock) => {
-                // Tick path lives here once we wire status bar + clock.
-            }
-            Err(_) => {
-                // Quiet — at this point in the plan the tokens are zero,
-                // so every recv will fail. Don't spam the log.
-                let _ = syscall::yield_cpu();
-            }
+            Err(Error::Timeout) | Err(Error::WouldBlock) => {}
+            Err(_) => { let _ = syscall::yield_cpu(); }
         }
     }
 }

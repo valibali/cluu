@@ -72,6 +72,13 @@ pub struct Compositor {
     pub next_id: u64,
 
     pub clock_seconds: u64,
+
+    // Registry + IPC endpoints — filled in by main after registry::init().
+    pub instance_id: u64,
+    pub client_endpoint: usize,
+    pub input_endpoint_global: usize,
+    pub control_endpoint: usize,
+    pub registry_endpoint: usize,
 }
 
 use libcluu::boot::{
@@ -122,6 +129,11 @@ impl Compositor {
             active: false,
             next_id: 1,
             clock_seconds: 0,
+            instance_id: 0,
+            client_endpoint: 0,
+            input_endpoint_global: 0,
+            control_endpoint: 0,
+            registry_endpoint: 0,
         })
     }
 }
