@@ -125,6 +125,24 @@ fn title_cell(win: &Window, lx: u16, focused: bool) -> u64 {
     pack_cell(cp, fg, 0, attrs)
 }
 
+/// Lay the status bar string into cell row 0 of the compositor's cell_grid.
+/// Called after recompute_dirty so it overwrites any chrome/interior that
+/// landed on row 0.
+pub fn render_status_row(comp: &mut Compositor) {
+    let s = crate::status::render_status(comp);
+    let bytes = s.as_bytes();
+    for cx in 0..comp.cols {
+        let cp = if (cx as usize) < bytes.len() {
+            bytes[cx as usize] as u32
+        } else {
+            b' ' as u32
+        };
+        let cell = pack_cell(cp, 7, 0, 0);
+        let idx = cx as usize;
+        comp.cell_grid[idx] = cell;
+    }
+}
+
 fn read_shm_cell(win: &Window, ix: u16, iy: u16) -> u64 {
     if win.shm_va.is_null() {
         return BG_CELL;

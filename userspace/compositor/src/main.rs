@@ -8,6 +8,7 @@ mod shm;
 mod protocol;
 mod compose;
 mod hotkeys;
+mod status;
 
 use alloc::format;
 use libcluu::boot::{process_info, TOKEN_IPC};
@@ -170,11 +171,27 @@ pub extern "C" fn main() -> i32 {
                         }
                     }
                     compose::recompute_dirty(&mut comp);
-                    comp.flush_grid_to_backbuf();
-                    comp.flush_backbuf_to_fb();
+                    compose::render_status_row(&mut comp);
+                    if comp.active {
+                        comp.flush_grid_to_backbuf();
+                        comp.flush_backbuf_to_fb();
+                    }
                 }
             }
-            Err(Error::Timeout) | Err(Error::WouldBlock) => {}
+            Err(Error::Timeout) | Err(Error::WouldBlock) => {
+                if let Ok((s, _ns)) = libcluu::time::query(libcluu::time::TIME_GETCLOCK) {
+                    if s != comp.clock_seconds {
+                        comp.clock_seconds = s;
+                        for cx in 0..comp.cols { comp.cell_dirty.push((cx, 0)); }
+                        compose::recompute_dirty(&mut comp);
+                        compose::render_status_row(&mut comp);
+                        if comp.active {
+                            comp.flush_grid_to_backbuf();
+                            comp.flush_backbuf_to_fb();
+                        }
+                    }
+                }
+            }
             Err(_) => { let _ = syscall::yield_cpu(); }
         }
     }
