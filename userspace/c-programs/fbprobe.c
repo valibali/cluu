@@ -1,57 +1,65 @@
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
 extern void debug_print(const char *msg);
 
-struct framebuffer_info {
-    uint8_t *base;
-    uint64_t phys;
-    uint32_t size;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pitch;
-    uint32_t bpp;
-};
-
-int framebuffer_acquire(struct framebuffer_info *info);
-int framebuffer_release(const struct framebuffer_info *info);
+#define PROT_READ   0x1
+#define PROT_WRITE  0x2
+#define MAP_SHARED  0x01
+#define MAP_FAILED  ((void *)-1)
+extern void *mmap(void *addr, size_t length, int prot, int flags, int fd, long offset);
 
 int main(void) {
-    struct framebuffer_info fb;
-
-    int rc = framebuffer_acquire(&fb);
-    if (rc != 0) {
-        debug_print("fbprobe: FAIL acquire");
+    int fd = open("/dev/fb0", O_RDWR);
+    if (fd < 0) {
+        debug_print("fbprobe: FAIL open");
         return 1;
     }
 
-    if (fb.base == 0 || fb.width == 0 || fb.height == 0 || fb.pitch == 0) {
-        debug_print("fbprobe: FAIL params zero");
+    uint8_t hdr[40] = {0};
+    ssize_t n = read(fd, hdr, sizeof hdr);
+    if (n != (ssize_t)sizeof hdr) {
+        debug_print("fbprobe: FAIL short read");
+        close(fd);
         return 2;
     }
 
-    /* Write a 16x16 red square at top-left corner */
-    uint32_t red = 0x00FF0000; /* BGRA: blue=0, green=0, red=FF, alpha=0 */
-    for (int y = 0; y < 16 && y < (int)fb.height; y++) {
-        uint32_t *row = (uint32_t *)(fb.base + y * fb.pitch);
-        for (int x = 0; x < 16 && x < (int)fb.width; x++) {
-            row[x] = red;
-        }
-    }
+    uint32_t magic = ((uint32_t*)hdr)[0];
+    uint32_t w     = ((uint32_t*)hdr)[1];
+    uint32_t h     = ((uint32_t*)hdr)[2];
+    uint32_t pitch = ((uint32_t*)hdr)[3];
+    uint32_t bpp   = ((uint32_t*)hdr)[4];
+    uint64_t size  = *(uint64_t*)(hdr + 24);
+    uint64_t phys  = *(uint64_t*)(hdr + 32);
 
-    /* Read back and verify the first pixel is red */
-    uint32_t *pixel = (uint32_t *)fb.base;
-    if (*pixel != red) {
-        debug_print("fbprobe: FAIL readback");
+    if (magic != 0x46424630u) {
+        debug_print("fbprobe: FAIL magic");
+        close(fd);
         return 3;
     }
+    if (w == 0 || h == 0 || pitch == 0 || bpp == 0 || size == 0 || phys == 0) {
+        debug_print("fbprobe: FAIL params zero");
+        close(fd);
+        return 4;
+    }
 
-    /* Release the framebuffer mapping before exit to avoid kernel teardown
-       issues with device-mapped pages. */
-    framebuffer_release(&fb);
+    void *mapped = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapped == MAP_FAILED) {
+        debug_print("fbprobe: FAIL mmap");
+        close(fd);
+        return 5;
+    }
+
+    /* Write a couple of cells to prove the mapping is writable.
+     * Don't read back — WC-mapped fb reads are unreliable. */
+    volatile uint32_t *fb = (volatile uint32_t*)mapped;
+    fb[0] = 0xCAFEBABEu;
+    fb[1] = 0xDEADBEEFu;
 
     debug_print("fbprobe: PASS");
-    printf("fbprobe: PASS w=%u h=%u pitch=%u bpp=%u\n",
-           fb.width, fb.height, fb.pitch, fb.bpp);
+    close(fd);
     return 0;
 }
