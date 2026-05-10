@@ -229,6 +229,29 @@ impl Compositor {
     }
 }
 
+impl Compositor {
+    /// Free the window's frame, drop it from the list, repaint covered cells.
+    /// Called explicitly via WIN_DESTROY. Implicit destroy on owner-exit is
+    /// deferred — would need procmgr to broadcast exits to non-spawner
+    /// watchers (no such API today).
+    pub fn handle_win_destroy(&mut self, id: WindowId) {
+        let Some(pos) = self.windows.iter().position(|w| w.id == id) else {
+            return;
+        };
+        let win = self.windows.remove(pos);
+        let _ = crate::shm::free_frame(win.shm_token);
+        // Mark covered cells dirty so the next compose pass repaints bg.
+        for cy in win.y..win.y.saturating_add(win.h) {
+            for cx in win.x..win.x.saturating_add(win.w) {
+                self.cell_dirty.push((cx, cy));
+            }
+        }
+        if self.focused == Some(id) {
+            self.focused = self.windows.last().map(|w| w.id);
+        }
+    }
+}
+
 /// Build a standard xterm-256 ARGB palette.
 ///
 /// 0..16  : ANSI base colours

@@ -115,6 +115,10 @@ pub extern "C" fn main() -> i32 {
                                 }
                             }
                         }
+                        protocol::Incoming::WinDestroy { window_id } => {
+                            comp.handle_win_destroy(window_id);
+                            let _ = debug_print("compositor: window destroyed");
+                        }
                         other => {
                             let _ = (other,);
                             let _ = debug_print("compositor: msg");
