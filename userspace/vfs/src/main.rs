@@ -2300,6 +2300,7 @@ impl VfsServer {
                         let data_len = payload_len.min(requested);
                         Ok(tty_buf[data_start..data_start + data_len].to_vec())
                     }
+                    DeviceType::Fb { .. } => Err(Error::NotImplemented),
                 }
             }
             OpenFile::MemFs(entry) => {
@@ -3087,6 +3088,12 @@ impl VfsServer {
                     return self.grant_data_to_caller(data, target_base, target_space, reply_msg);
                 }
                 reply_msg.words[0] = 0;
+                reply_msg.words[1] = 0;
+                reply_msg.words[2] = 0;
+                Ok(())
+            }
+            DeviceType::Fb { .. } => {
+                reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
                 reply_msg.words[1] = 0;
                 reply_msg.words[2] = 0;
                 Ok(())

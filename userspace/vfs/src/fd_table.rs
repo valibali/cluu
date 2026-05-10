@@ -54,6 +54,15 @@ pub enum DeviceType {
     Console {
         endpoint: usize,
     },
+    /// /dev/fb0 — primary framebuffer device
+    Fb {
+        phys: u64,
+        size: u64,
+        width: u32,
+        height: u32,
+        pitch: u32,
+        bpp: u32,
+    },
 }
 
 /// A file entry backed by an in-memory filesystem (per-container tmpfs).
