@@ -192,6 +192,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-compdemo"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-compositor"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-console"
 version = "0.1.0"
 dependencies = [

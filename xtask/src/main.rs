@@ -2247,6 +2247,8 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/registry",
         "userspace/vfs",
         "userspace/ramfs",
+        "userspace/compositor",
+        "userspace/compdemo",
         "userspace/console",
         "userspace/kbd",
         "userspace/tty",

@@ -1,0 +1,7 @@
+FROM minimal
+PROFILE ipc registry device
+ENDPOINT grantable
+DEVICE framebuffer
+BUILD "cargo build --manifest-path userspace/compositor/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/compositor.elf /bin/compositor
+ENTRYPOINT /bin/compositor
+RESTART always
