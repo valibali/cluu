@@ -130,7 +130,7 @@ pub extern "C" fn main() -> i32 {
                                 comp.handle_win_set_title(window_id, s);
                             }
                         }
-                        protocol::Incoming::KbdEvent { ascii: _, modifiers, scancode, extended } => {
+                        protocol::Incoming::KbdEvent { ascii, modifiers, scancode, extended } => {
                             if let Some(hk) = hotkeys::match_hotkey(modifiers, scancode, extended) {
                                 match hk {
                                     hotkeys::Hotkey::FocusNext  => comp.focus_next(),
@@ -144,17 +144,16 @@ pub extern "C" fn main() -> i32 {
                                     hotkeys::Hotkey::ResizeUp    => comp.resize_focused( 0,-1),
                                     hotkeys::Hotkey::ResizeDown  => comp.resize_focused( 0, 1),
                                     hotkeys::Hotkey::CloseRequest => {
-                                        let _ = debug_print(
-                                            "compositor: close-request hotkey (forward in T18)");
+                                        comp.forward_close_request();
                                     }
                                     hotkeys::Hotkey::SpawnDemo => {
                                         let _ = debug_print(
                                             "compositor: spawn-demo hotkey (impl in T23)");
                                     }
                                 }
+                            } else {
+                                comp.forward_input_event(ascii, modifiers, scancode, extended);
                             }
-                            // Non-hotkey events forward to focused window's
-                            // input endpoint in T18.
                         }
                         protocol::Incoming::VtActivate => {
                             comp.active = true;

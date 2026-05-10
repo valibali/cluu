@@ -425,6 +425,43 @@ impl Compositor {
 }
 
 impl Compositor {
+    /// Forward a raw kbd event to the focused window's input endpoint.
+    /// `ascii`/`mods`/`scancode`/`extended` come straight from the
+    /// `KbdEvent` variant of `protocol::Incoming`.
+    pub fn forward_input_event(&self, ascii: u8, mods: u8, scancode: u8, extended: u8) {
+        let Some(id) = self.focused else { return; };
+        let Some(win) = self.windows.iter().find(|w| w.id == id) else { return; };
+        if win.input_endpoint == 0 { return; }
+        let msg = libcluu::types::Message::new(
+            libcluu::ipc::COMP_INPUT_FORWARD_LABEL,
+            [
+                id as usize,
+                ascii as usize,
+                mods as usize,
+                scancode as usize,
+                extended as usize,
+                0usize, // kind = 0 → ordinary input
+            ],
+            6,
+        );
+        let _ = libcluu::ipc::send(win.input_endpoint, &msg, libcluu::types::IpcFlags::empty());
+    }
+
+    /// Send a close-request to the focused window's input endpoint.
+    pub fn forward_close_request(&self) {
+        let Some(id) = self.focused else { return; };
+        let Some(win) = self.windows.iter().find(|w| w.id == id) else { return; };
+        if win.input_endpoint == 0 { return; }
+        let msg = libcluu::types::Message::new(
+            libcluu::ipc::COMP_INPUT_FORWARD_LABEL,
+            [id as usize, 0, 0, 0, 0, 99usize /* kind = 99 → close-request */],
+            6,
+        );
+        let _ = libcluu::ipc::send(win.input_endpoint, &msg, libcluu::types::IpcFlags::empty());
+    }
+}
+
+impl Compositor {
     /// Free the window's frame, drop it from the list, repaint covered cells.
     /// Called explicitly via WIN_DESTROY. Implicit destroy on owner-exit is
     /// deferred — would need procmgr to broadcast exits to non-spawner
