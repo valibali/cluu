@@ -3,6 +3,8 @@
 
 extern crate alloc;
 
+mod state;
+
 use libcluu::{debug_print, syscall};
 
 #[no_mangle]
