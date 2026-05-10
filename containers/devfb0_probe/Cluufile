@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc device
+BUILD "cargo xtask build-c devfb0_probe userspace/c-programs/devfb0_probe.c" target/x86_64-cluu-user/debug/devfb0_probe.elf /bin/devfb0_probe
+ENTRYPOINT /bin/devfb0_probe

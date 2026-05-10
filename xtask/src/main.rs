@@ -3695,6 +3695,7 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("pthreadprobe", "userspace/c-programs/pthreadprobe.c"),
         ("devprobe", "userspace/c-programs/devprobe.c"),
         ("fbprobe", "userspace/c-programs/fbprobe.c"),
+        ("devfb0_probe", "userspace/c-programs/devfb0_probe.c"),
         ("containerprobe", "userspace/c-programs/containerprobe.c"),
         ("pwdprobe", "userspace/c-programs/pwdprobe.c"),
     ];
