@@ -1,5 +1,5 @@
 {
-  "fb_blit_wc_cycles":     4038127,
-  "fb_blit_wc_max_cycles": 4441940,
-  "_note": "Ratchet captured 2026-05-09 with framebuffer mapped MAP_DEVICE_WC under KVM. >10% regression = trip the b_console_blit fail rail. Measures full console IPC pipeline: probe stdout IPC -> tty -> console process -> framebuffer WC-mapped MMIO blit."
+  "fb_blit_wc_cycles":     3967400,
+  "fb_blit_wc_max_cycles": 4400000,
+  "_note": "Ratchet captured 2026-05-10 with framebuffer mapped MAP_DEVICE_WC + 8 KiB byte-mask LUT (L1-resident) under KVM. Median of 4 runs (3.83M / 3.84M / 4.09M / 4.32M cycles). >10% regression trips b_console_blit fail rail. Measures full console IPC pipeline: probe stdout IPC -> tty -> console process -> framebuffer WC-mapped MMIO blit."
 }
