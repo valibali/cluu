@@ -81,33 +81,78 @@ pub struct Compositor {
     pub registry_endpoint: usize,
 }
 
-use libcluu::boot::{
-    process_info, PARAM_FB_BASE, PARAM_FB_HEIGHT, PARAM_FB_PHYS,
-    PARAM_FB_PITCH, PARAM_FB_SIZE, PARAM_FB_WIDTH,
+use libcluu::posix::{
+    _close, _open, _read, mmap, c_void, O_RDWR, MAP_SHARED, PROT_READ, PROT_WRITE,
 };
-use libcluu::Result;
+use libcluu::{Error, Result};
 
 pub const GLYPH_W: u32 = 8;
 pub const GLYPH_H: u32 = 16;
 
+const FB_HEADER_MAGIC: u32 = 0x4642_4630; // "FB0\0"
+
 impl Compositor {
-    /// Construct from boot params. Allocates cell_grid + backbuf eagerly.
-    /// Does not yet open `/dev/fb0` for mmap — that runs after the registry
-    /// is ready (see `Compositor::open_fb` below, called from `main` once
-    /// the registry endpoint is known).
+    /// Open `/dev/fb0`, read the 40-byte geometry header, mmap the
+    /// framebuffer write-combined, then close the fd.  Allocates
+    /// `cell_grid` and `backbuf` from the dimensions returned by the header.
     pub fn init() -> Result<Self> {
-        let info = process_info();
-        let fb_ptr = info.params[PARAM_FB_BASE] as *mut u8;
-        let fb_phys = info.params[PARAM_FB_PHYS];
-        let fb_size = info.params[PARAM_FB_SIZE] as usize;
-        let width_px = info.params[PARAM_FB_WIDTH] as u32;
-        let height_px = info.params[PARAM_FB_HEIGHT] as u32;
-        let pitch = info.params[PARAM_FB_PITCH] as u32;
+        // 1. Open /dev/fb0
+        let path = b"/dev/fb0\0";
+        let fd = unsafe { _open(path.as_ptr() as *const i8, O_RDWR, 0) };
+        if fd < 0 {
+            return Err(Error::NotFound);
+        }
+
+        // 2. Read 40-byte header
+        let mut hdr = [0u8; 40];
+        let n = unsafe { _read(fd, hdr.as_mut_ptr() as *mut c_void, 40) };
+        if n != 40 {
+            unsafe { _close(fd); }
+            return Err(Error::InvalidArgument);
+        }
+        let magic = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+        if magic != FB_HEADER_MAGIC {
+            unsafe { _close(fd); }
+            return Err(Error::InvalidArgument);
+        }
+        let width_px  = u32::from_le_bytes([hdr[ 4], hdr[ 5], hdr[ 6], hdr[ 7]]);
+        let height_px = u32::from_le_bytes([hdr[ 8], hdr[ 9], hdr[10], hdr[11]]);
+        let pitch     = u32::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]);
+        // hdr[16..20] = bpp (unused by compositor, framebuffer is always 32bpp)
+        // hdr[20..24] = reserved
+        let fb_size = u64::from_le_bytes([
+            hdr[24], hdr[25], hdr[26], hdr[27],
+            hdr[28], hdr[29], hdr[30], hdr[31],
+        ]) as usize;
+        let fb_phys = u64::from_le_bytes([
+            hdr[32], hdr[33], hdr[34], hdr[35],
+            hdr[36], hdr[37], hdr[38], hdr[39],
+        ]);
+
+        // 3. mmap — libcluu::posix::mmap detects the FB magic and routes to
+        //    MAP_DEVICE_WC automatically for MAP_SHARED + /dev/fb0 fds.
+        let mapped = unsafe {
+            mmap(
+                core::ptr::null_mut::<c_void>(),
+                fb_size,
+                PROT_READ | PROT_WRITE,
+                MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+
+        // 4. Close fd — mmap holds its own reference via the kernel mapping.
+        unsafe { _close(fd); }
+
+        if mapped as isize == -1 || mapped.is_null() {
+            return Err(Error::InvalidArgument);
+        }
+        let fb_ptr = mapped as *mut u8;
 
         let cols = (width_px / GLYPH_W) as u16;
         let rows = (height_px / GLYPH_H) as u16;
-
-        let cell_count = cols as usize * rows as usize;
+        let cell_count  = cols as usize * rows as usize;
         let pixel_count = (width_px * height_px) as usize;
 
         Ok(Self {
