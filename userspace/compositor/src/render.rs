@@ -32,6 +32,27 @@ impl Compositor {
         self.flush_backbuf_to_fb();
         self.deadlines.next_frame_ms = now_ms + MIN_FRAME_MS;
         self.last_flush_at = now_ms;
+
+        // One-shot benchmark: after 100 flushes report cycles-per-frame on
+        // COM2.  The compositor is single-threaded so these static muts are
+        // safe (no concurrent access).
+        #[allow(static_mut_refs)]
+        unsafe {
+            static mut FRAME_COUNT: u32 = 0;
+            static mut FRAME_START_TSC: u64 = 0;
+            FRAME_COUNT += 1;
+            if FRAME_COUNT == 1 {
+                FRAME_START_TSC = read_tsc();
+            } else if FRAME_COUNT == 101 {
+                let end = read_tsc();
+                let cycles_per_frame = (end - FRAME_START_TSC) / 100;
+                let _ = libcluu::debug_print(&alloc::format!(
+                    "BENCH_COMP_BLIT: cycles_per_frame={}",
+                    cycles_per_frame
+                ));
+            }
+        }
+
         true
     }
 
@@ -161,6 +182,12 @@ impl Compositor {
 }
 
 // Local helpers (file-private).
+
+/// Read the CPU's time-stamp counter. Used only for the bench one-shot.
+#[inline]
+fn read_tsc() -> u64 {
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
 fn font_glyph(ch: u8) -> [u8; 16] {
     libcluu::font::glyph_for_cp437(ch)
 }
