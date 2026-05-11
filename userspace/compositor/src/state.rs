@@ -201,7 +201,8 @@ impl Compositor {
     ) -> Result<(WindowId, u64, u32, u32)> {
         let granted_w = (req_w as u16).min(self.cols);
         let granted_h = (req_h as u16).min(self.rows.saturating_sub(1));
-        if granted_w < 5 || granted_h < 5 {
+        // Minimum 3×3: 1-cell chrome on each side + at least 1 interior cell.
+        if granted_w < 3 || granted_h < 3 {
             return Err(libcluu::Error::InvalidArgument);
         }
 
@@ -277,18 +278,20 @@ impl Compositor {
 impl Compositor {
     /// App says "I redrew (x,y,w,h) inside my window's interior". Mark
     /// the corresponding total-grid cells dirty.
+    ///
+    /// Chrome is 1 cell on each side, so interior starts at local (1,1).
     pub fn handle_win_damage(&mut self, id: WindowId, x: u32, y: u32, w: u32, h: u32) {
         let Some(win) = self.windows.iter().find(|w| w.id == id) else { return; };
-        let inner_w = win.w.saturating_sub(4);
-        let inner_h = win.h.saturating_sub(4);
+        let inner_w = win.w.saturating_sub(2); // 1 chrome col each side
+        let inner_h = win.h.saturating_sub(2); // 1 chrome row each side
         let cx0 = (x as u16).min(inner_w);
         let cy0 = (y as u16).min(inner_h);
         let cx1 = ((x as u16).saturating_add(w as u16)).min(inner_w);
         let cy1 = ((y as u16).saturating_add(h as u16)).min(inner_h);
         for iy in cy0..cy1 {
             for ix in cx0..cx1 {
-                let gx = win.x + 2 + ix;
-                let gy = win.y + 2 + iy;
+                let gx = win.x + 1 + ix;
+                let gy = win.y + 1 + iy;
                 self.cell_dirty.push((gx, gy));
             }
         }
@@ -308,7 +311,8 @@ impl Compositor {
         self.windows[win_idx].title.clear();
         self.windows[win_idx].title.push_str(safe);
         let win = &self.windows[win_idx];
-        let title_y = win.y + 1;
+        // Title is in the top chrome row (ly=0), so global y = win.y.
+        let title_y = win.y;
         for cx in win.x..win.x.saturating_add(win.w) {
             self.cell_dirty.push((cx, title_y));
         }
@@ -392,10 +396,10 @@ impl Compositor {
         };
         let win = &self.windows[pos];
         let new_w = ((win.w as i32 + dw as i32)
-            .max(5)
+            .max(3)
             .min(self.cols as i32 - win.x as i32)) as u16;
         let new_h = ((win.h as i32 + dh as i32)
-            .max(5)
+            .max(3)
             .min(self.rows as i32 - win.y as i32)) as u16;
         let old_w = win.w;
         let old_h = win.h;
@@ -575,7 +579,11 @@ fn unicode_to_cp437(cp: u32) -> u8 {
         0x2502 => 0xB3,                 // │
         0x2550 => 0xCD,                 // ═
         0x2551 => 0xBA,                 // ║
-        0xE000..=0xE00F => 0xF0u8 + (cp - 0xE000) as u8,
+        // Sharp box-drawing corners (CP437 standard).
+        0x250C => 0xDA,                 // ┌
+        0x2510 => 0xBF,                 // ┐
+        0x2514 => 0xC0,                 // └
+        0x2518 => 0xD9,                 // ┘
         _ => b'?',
     }
 }

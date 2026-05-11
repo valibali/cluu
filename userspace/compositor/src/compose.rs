@@ -2,17 +2,16 @@
 //!
 //! For each dirty cell, walk windows top→bottom (last in vec = top of
 //! z-order). The first window whose total rect contains the cell decides
-//! the output. Inside the chrome strip (top 2 rows, bottom 2 rows, left
-//! 2 cols, right 2 cols of the window) we currently emit BG_CELL — chrome
-//! rendering lands in T14. Inside the interior we read the cell from the
-//! window's SHM region, generation-acquire-loaded.
+//! the output. Inside the single-cell chrome strip (top 1, bottom 1,
+//! left 1, right 1) we emit arc corner or bar glyphs. Inside the interior
+//! we read the cell from the window's SHM region.
 
 use crate::state::{Compositor, Window, WindowShm, WIN_SHM_MAGIC};
 
-const CHROME_TOP: u16 = 2;
-const CHROME_BOTTOM: u16 = 2;
-const CHROME_LEFT: u16 = 2;
-const CHROME_RIGHT: u16 = 2;
+const CHROME_TOP: u16 = 1;
+const CHROME_BOTTOM: u16 = 1;
+const CHROME_LEFT: u16 = 1;
+const CHROME_RIGHT: u16 = 1;
 
 /// Default desktop background cell: codepoint 0x20 (space), fg 0, bg 0.
 pub const BG_CELL: u64 = pack_cell(b' ' as u32, 0, 0, 0);
@@ -67,43 +66,28 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
 fn chrome_glyph(win: &Window, lx: u16, ly: u16, focused: bool) -> u64 {
     let w = win.w;
     let h = win.h;
-    // PUA codepoints for Tier-3 corners (mapped to CP437 0xF0..0xFF
-    // via unicode_to_cp437 in flush_grid_to_backbuf).
-    const TL_NW: u32 = 0xE000; const TL_NE: u32 = 0xE001;
-    const TL_SW: u32 = 0xE002; const TL_SE: u32 = 0xE003;
-    const TR_NW: u32 = 0xE004; const TR_NE: u32 = 0xE005;
-    const TR_SW: u32 = 0xE006; const TR_SE: u32 = 0xE007;
-    const BL_NW: u32 = 0xE008; const BL_NE: u32 = 0xE009;
-    const BL_SW: u32 = 0xE00A; const BL_SE: u32 = 0xE00B;
-    const BR_NW: u32 = 0xE00C; const BR_NE: u32 = 0xE00D;
-    const BR_SW: u32 = 0xE00E; const BR_SE: u32 = 0xE00F;
+    // CP437 sharp box-drawing corners (U+250C/U+2510/U+2514/U+2518).
+    const TL: u32 = 0x250C; // ┌ top-left
+    const TR: u32 = 0x2510; // ┐ top-right
+    const BL: u32 = 0x2514; // └ bottom-left
+    const BR: u32 = 0x2518; // ┘ bottom-right
     const H_BAR: u32 = 0x2500; // ─
     const V_BAR: u32 = 0x2502; // │
 
+    // Title row is lx=1..w-2, ly=0 (between TL and TR corners).
     let cp = match (lx, ly) {
-        (0, 0) => TL_NW,
-        (1, 0) => TL_NE,
-        (0, 1) => TL_SW,
-        (1, 1) => TL_SE,
-        (x, 0) if x == w.saturating_sub(2) => TR_NW,
-        (x, 0) if x == w.saturating_sub(1) => TR_NE,
-        (x, 1) if x == w.saturating_sub(2) => TR_SW,
-        (x, 1) if x == w.saturating_sub(1) => TR_SE,
-        (0, y) if y == h.saturating_sub(2) => BL_NW,
-        (1, y) if y == h.saturating_sub(2) => BL_NE,
-        (0, y) if y == h.saturating_sub(1) => BL_SW,
-        (1, y) if y == h.saturating_sub(1) => BL_SE,
-        (x, y) if x == w.saturating_sub(2) && y == h.saturating_sub(2) => BR_NW,
-        (x, y) if x == w.saturating_sub(1) && y == h.saturating_sub(2) => BR_NE,
-        (x, y) if x == w.saturating_sub(2) && y == h.saturating_sub(1) => BR_SW,
-        (x, y) if x == w.saturating_sub(1) && y == h.saturating_sub(1) => BR_SE,
-        (_, 0) => H_BAR,
-        (_, 1) => return title_cell(win, lx, focused),
-        (_, y) if y == h.saturating_sub(1) => H_BAR,
-        (0, _) => V_BAR,
-        (x, _) if x == w.saturating_sub(1) => V_BAR,
-        (_, y) if y == h.saturating_sub(2) => H_BAR,
-        _ => H_BAR,
+        (0, 0)                                        => TL,
+        (x, 0) if x == w.saturating_sub(1)           => TR,
+        (0, y) if y == h.saturating_sub(1)           => BL,
+        (x, y) if x == w.saturating_sub(1) && y == h.saturating_sub(1) => BR,
+        // Top row: title cells between corners.
+        (_, 0) => return title_cell(win, lx, focused),
+        // Bottom row: horizontal bar.
+        (_, y) if y == h.saturating_sub(1)           => H_BAR,
+        // Left/right columns: vertical bars.
+        (0, _)                                        => V_BAR,
+        (x, _) if x == w.saturating_sub(1)           => V_BAR,
+        _                                             => H_BAR, // fallback
     };
     let attrs = if focused { 0b001 } else { 0 };
     let fg = if focused { 15 } else { 7 };
@@ -111,8 +95,9 @@ fn chrome_glyph(win: &Window, lx: u16, ly: u16, focused: bool) -> u64 {
 }
 
 fn title_cell(win: &Window, lx: u16, focused: bool) -> u64 {
-    let title_start: u16 = 3;
-    let title_end = win.w.saturating_sub(3);
+    // lx=0 is TL corner, lx=w-1 is TR corner; title occupies lx=1..w-2.
+    let title_start: u16 = 1;
+    let title_end = win.w.saturating_sub(1);
     if lx < title_start || lx >= title_end {
         let fg = if focused { 15 } else { 7 };
         return pack_cell(b' ' as u32, fg, 0, 0);
@@ -149,7 +134,8 @@ fn read_shm_cell(win: &Window, ix: u16, iy: u16) -> u64 {
     }
     unsafe {
         let hdr = win.shm_va as *const WindowShm;
-        if (*hdr).magic != WIN_SHM_MAGIC {
+        let magic = (*hdr).magic;
+        if magic != WIN_SHM_MAGIC {
             return BG_CELL;
         }
         let inner_w = (*hdr).width as u16;

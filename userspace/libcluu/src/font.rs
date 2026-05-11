@@ -1,8 +1,8 @@
-//! 8x16 CP437 font + Tier-3 (2x2-cell) rounded corner overrides.
+//! 8x16 CP437 font + single-cell rounded arc corner overrides.
 //!
 //! FONT8X16 is the standard 256x16 CP437 bitmap font (4 KiB). Bytes are
-//! read MSB-first as 8-pixel rows. TIER3_CORNERS overrides CP437 indices
-//! 0xF0..0xFF with the 16 rounded-corner sub-cell bitmaps.
+//! read MSB-first as 8-pixel rows. ARC_CORNERS overrides CP437 indices
+//! 0xF0..0xF3 with 4 single-cell Unicode arc corner bitmaps (U+256D..U+2570).
 //!
 //! Always go through `glyph_for_cp437`; it folds the overrides in.
 
@@ -268,114 +268,99 @@ pub const FONT8X16: [u8; 4096] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// Tier-3 (2x2-cell) rounded corner bitmaps.
+/// Single-cell Unicode arc corner bitmaps (╭╮╰╯, U+256D..U+2570).
 ///
-/// 16 sub-cell glyphs mapped to CP437 indices 0xF0..=0xFF (private-use
-/// range). Unicode U+E000..=U+E00F are mapped to these slots by
-/// `unicode_to_cp437` in the compositor / console.
-pub const TIER3_CORNERS: [[u8; GLYPH_H]; 16] = [
-    // 0xE000 TL_NW
+/// 4 glyphs mapped to CP437 indices 0xF0..=0xF3 (private-use range).
+/// Unicode U+E000..=U+E003 map to these slots via `unicode_to_cp437`.
+///
+/// Bitmap format: 16 bytes, each byte is one 8-pixel row, MSB = leftmost pixel.
+pub const ARC_CORNERS: [[u8; GLYPH_H]; 4] = [
+    // 0xE000  ╭  top-left arc: horizontal tail from left-mid, curves down to right
     [
-        0b00000000, 0b00000000, 0b00000000, 0b00000001,
-        0b00000011, 0b00000111, 0b00001110, 0b00011100,
-        0b00111000, 0b01110000, 0b01100000, 0b11100000,
-        0b11000000, 0b11000000, 0b10000000, 0b10000000,
+        0b00000000, // row  0
+        0b00000000, // row  1
+        0b00000000, // row  2
+        0b00000000, // row  3
+        0b00011111, // row  4  ─────
+        0b00100000, // row  5  curve start
+        0b01000000, // row  6  curve
+        0b01000000, // row  7  |
+        0b01000000, // row  8  |
+        0b01000000, // row  9  |
+        0b01000000, // row 10  |
+        0b01000000, // row 11  |
+        0b01000000, // row 12  |
+        0b01000000, // row 13  |
+        0b01000000, // row 14  |
+        0b01000000, // row 15  |
     ],
-    // 0xE001 TL_NE
+    // 0xE001  ╮  top-right arc: horizontal tail from right-mid, curves down to left
     [
-        0b00000000, 0b00000000, 0b00000000, 0b11000000,
-        0b11100000, 0b01110000, 0b00111000, 0b00011100,
-        0b00001110, 0b00000111, 0b00000011, 0b00000001,
-        0b00000001, 0b00000000, 0b00000000, 0b00000000,
+        0b00000000, // row  0
+        0b00000000, // row  1
+        0b00000000, // row  2
+        0b00000000, // row  3
+        0b11111000, // row  4  ─────
+        0b00000100, // row  5  curve start
+        0b00000010, // row  6  curve
+        0b00000010, // row  7  |
+        0b00000010, // row  8  |
+        0b00000010, // row  9  |
+        0b00000010, // row 10  |
+        0b00000010, // row 11  |
+        0b00000010, // row 12  |
+        0b00000010, // row 13  |
+        0b00000010, // row 14  |
+        0b00000010, // row 15  |
     ],
-    // 0xE002 TL_SW
+    // 0xE002  ╰  bottom-left arc: vertical tail going up, curves right at bottom
     [
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
+        0b01000000, // row  0  |
+        0b01000000, // row  1  |
+        0b01000000, // row  2  |
+        0b01000000, // row  3  |
+        0b01000000, // row  4  |
+        0b01000000, // row  5  |
+        0b01000000, // row  6  |
+        0b01000000, // row  7  |
+        0b01000000, // row  8  |
+        0b01000000, // row  9  |
+        0b01000000, // row 10  |
+        0b00100000, // row 11  curve
+        0b00011111, // row 12  ─────
+        0b00000000, // row 13
+        0b00000000, // row 14
+        0b00000000, // row 15
     ],
-    // 0xE003 TL_SE
-    [0; 16],
-    // 0xE004 TR_NW
-    [0; 16],
-    // 0xE005 TR_NE
+    // 0xE003  ╯  bottom-right arc: vertical tail going up, curves left at bottom
     [
-        0b00000000, 0b00000000, 0b00000000, 0b10000000,
-        0b11000000, 0b11100000, 0b01110000, 0b00111000,
-        0b00011100, 0b00001110, 0b00000110, 0b00000111,
-        0b00000011, 0b00000011, 0b00000001, 0b00000001,
-    ],
-    // 0xE006 TR_SW
-    [0; 16],
-    // 0xE007 TR_SE
-    [
-        0b00000001, 0b00000001, 0b00000001, 0b00000001,
-        0b00000001, 0b00000001, 0b00000001, 0b00000001,
-        0b00000001, 0b00000001, 0b00000001, 0b00000001,
-        0b00000001, 0b00000001, 0b00000001, 0b00000001,
-    ],
-    // 0xE008 BL_NW
-    [
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-    ],
-    // 0xE009 BL_NE
-    [0; 16],
-    // 0xE00A BL_SW
-    [
-        0b10000000, 0b10000000, 0b11000000, 0b11100000,
-        0b01100000, 0b01110000, 0b00111000, 0b00011100,
-        0b00001110, 0b00000111, 0b00000011, 0b00000001,
-        0b00000000, 0b00000000, 0b00000000, 0b00000000,
-    ],
-    // 0xE00B BL_SE
-    [
-        0b00000001, 0b00000001, 0b00000011, 0b00000111,
-        0b00001110, 0b00011100, 0b00111000, 0b01110000,
-        0b11100000, 0b11000000, 0b10000000, 0b00000000,
-        0b00000000, 0b00000000, 0b00000000, 0b00000000,
-    ],
-    // 0xE00C BR_NW
-    [
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-        0b10000000, 0b10000000, 0b10000000, 0b10000000,
-    ],
-    // 0xE00D BR_NE
-    [
-        0b00000001, 0b00000001, 0b00000001, 0b00000001,
-        0b00000001, 0b00000001, 0b00000001, 0b00000001,
-        0b00000001, 0b00000001, 0b00000001, 0b00000001,
-        0b00000001, 0b00000001, 0b00000001, 0b00000001,
-    ],
-    // 0xE00E BR_SW
-    [
-        0b10000000, 0b10000000, 0b11000000, 0b11100000,
-        0b01100000, 0b01110000, 0b00111000, 0b00011100,
-        0b00001110, 0b00000111, 0b00000011, 0b00000001,
-        0b00000000, 0b00000000, 0b00000000, 0b00000000,
-    ],
-    // 0xE00F BR_SE
-    [
-        0b00000001, 0b00000001, 0b00000011, 0b00000111,
-        0b00001110, 0b00011100, 0b00111000, 0b01110000,
-        0b11100000, 0b11000000, 0b10000000, 0b00000000,
-        0b00000000, 0b00000000, 0b00000000, 0b00000000,
+        0b00000010, // row  0  |
+        0b00000010, // row  1  |
+        0b00000010, // row  2  |
+        0b00000010, // row  3  |
+        0b00000010, // row  4  |
+        0b00000010, // row  5  |
+        0b00000010, // row  6  |
+        0b00000010, // row  7  |
+        0b00000010, // row  8  |
+        0b00000010, // row  9  |
+        0b00000010, // row 10  |
+        0b00000100, // row 11  curve
+        0b11111000, // row 12  ─────
+        0b00000000, // row 13
+        0b00000000, // row 14
+        0b00000000, // row 15
     ],
 ];
 
 /// Return the 16-row glyph bitmap for a CP437 byte value.
 ///
-/// CP437 0xF0..=0xFF are overridden with Tier-3 rounded-corner bitmaps.
-/// All other values come directly from FONT8X16.
+/// CP437 0xF0..=0xF3 are overridden with single-cell arc corner bitmaps
+/// (╭╮╰╯). All other values come directly from FONT8X16.
 #[inline]
 pub fn glyph_for_cp437(ch: u8) -> [u8; GLYPH_H] {
-    if (0xF0..=0xFF).contains(&ch) {
-        return TIER3_CORNERS[(ch - 0xF0) as usize];
+    if (0xF0..=0xF3).contains(&ch) {
+        return ARC_CORNERS[(ch - 0xF0) as usize];
     }
     let idx = (ch as usize) * GLYPH_H;
     let mut glyph = [0u8; GLYPH_H];
