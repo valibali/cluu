@@ -12,3 +12,6 @@ image = "compositor"
 
 [[service]]
 image = "compdemo"
+
+[[service]]
+image = "compdemo"

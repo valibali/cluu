@@ -156,6 +156,7 @@ impl Compositor {
         let id = win.id;
         self.windows.push(win);
         self.focused = Some(id);
+        let _ = libcluu::debug_print(&alloc::format!("compositor: focus -> {}", id));
         self.repaint_all();
     }
 
@@ -171,6 +172,7 @@ impl Compositor {
         let id = win.id;
         self.windows.push(win);
         self.focused = Some(id);
+        let _ = libcluu::debug_print(&alloc::format!("compositor: focus -> {}", id));
         self.repaint_all();
     }
 
