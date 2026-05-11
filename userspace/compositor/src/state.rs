@@ -13,6 +13,36 @@ use alloc::vec::Vec;
 
 pub type WindowId = u64;
 
+/// Per-task next-fire deadlines, absolute monotonic milliseconds.
+///
+/// `u64::MAX` means "task currently inactive — never fire". Each task
+/// self-resets its own deadline after firing.
+pub struct Deadlines {
+    /// Next frame-flush deadline. Set to `now + MIN_FRAME_MS` after a flush.
+    /// Set to `u64::MAX` when no dirty cells pending OR compositor inactive.
+    pub next_frame_ms: u64,
+
+    /// Next status-bar clock update deadline. Set to `now + 1000` after each
+    /// clock tick.
+    pub next_clock_ms: u64,
+}
+
+impl Deadlines {
+    pub const fn new() -> Self {
+        Self {
+            next_frame_ms: u64::MAX,
+            next_clock_ms: 0, // fire immediately on first iteration
+        }
+    }
+
+    /// Time in ms until the earliest deadline. Saturates to 0 if any deadline
+    /// is already due.
+    pub fn next_timeout_ms(&self, now_ms: u64) -> u64 {
+        let next = self.next_frame_ms.min(self.next_clock_ms);
+        next.saturating_sub(now_ms)
+    }
+}
+
 /// On-the-wire SHM region header. Layout MUST stay stable across
 /// compositor + client crates — both projects copy this definition.
 /// The cells (`u64` per cell, `width * height` of them) follow at byte
@@ -74,9 +104,11 @@ pub struct Compositor {
     pub clock_seconds: u64,
 
     /// Monotonic millisecond timestamp of the last flush+broadcast.
-    /// Used to cap the frame rate at ~60 Hz (16 ms minimum interval).
-    /// Initialised to 0 so the very first frame always flushes immediately.
+    /// Updated by `tick_frame` after each successful flush.
     pub last_flush_at: u64,
+
+    /// Per-task deadline table for the event loop.
+    pub deadlines: Deadlines,
 
     // Registry + IPC endpoints — filled in by main after registry::init().
     pub instance_id: u64,
@@ -180,6 +212,7 @@ impl Compositor {
             next_id: 1,
             clock_seconds: 0,
             last_flush_at: 0,
+            deadlines: Deadlines::new(),
             instance_id: 0,
             client_endpoint: 0,
             input_endpoint_global: 0,
@@ -507,26 +540,54 @@ impl Compositor {
     }
 }
 
+const MIN_FRAME_MS: u64 = 16;
+const CLOCK_PERIOD_MS: u64 = 1000;
+
 impl Compositor {
-    /// Flush to the framebuffer if at least `min_frame_ms` milliseconds have
-    /// elapsed since the last flush.  Returns `true` when a flush happened
-    /// (caller should then broadcast FRAME_READY), `false` when still within
-    /// the throttle window.
-    ///
-    /// `now_ms` must be obtained from `clock_now_ms` in the caller; it is
-    /// passed in rather than re-queried so the same timestamp drives both the
-    /// flush decision and the `last_flush_at` update.
-    pub fn flush_if_due(&mut self, now_ms: u64, min_frame_ms: u64) -> bool {
+    /// Tick the frame deadline. If active + dirty cells pending and the
+    /// deadline has passed, flush + broadcast + reset the deadline.
+    /// Returns `true` if a flush happened (caller should broadcast).
+    pub fn tick_frame(&mut self, now_ms: u64) -> bool {
         if !self.active {
             return false;
         }
-        if now_ms.saturating_sub(self.last_flush_at) < min_frame_ms {
+        if self.cell_dirty.is_empty() && self.prev_cell_grid == self.cell_grid {
+            // No work to do; let deadline sleep.
+            self.deadlines.next_frame_ms = u64::MAX;
             return false;
+        }
+        if now_ms < self.deadlines.next_frame_ms {
+            return false; // not yet
         }
         self.flush_grid_to_backbuf();
         self.flush_backbuf_to_fb();
+        self.deadlines.next_frame_ms = now_ms + MIN_FRAME_MS;
         self.last_flush_at = now_ms;
         true
+    }
+
+    /// Tick the clock deadline. If due, refresh `clock_seconds`, dirty the
+    /// status row, and reset the deadline.
+    pub fn tick_clock(&mut self, now_ms: u64, now_secs: u64) {
+        if now_ms < self.deadlines.next_clock_ms {
+            return;
+        }
+        if now_secs != self.clock_seconds {
+            self.clock_seconds = now_secs;
+            for cx in 0..self.cols {
+                self.cell_dirty.push((cx, 0));
+            }
+        }
+        self.deadlines.next_clock_ms = now_ms + CLOCK_PERIOD_MS;
+    }
+
+    /// Set the frame deadline to now+MIN_FRAME_MS (next loop iteration flushes)
+    /// when new dirty cells arrive. Idempotent — leaves existing deadline alone
+    /// if already set.
+    pub fn schedule_frame(&mut self, now_ms: u64) {
+        if self.deadlines.next_frame_ms == u64::MAX {
+            self.deadlines.next_frame_ms = now_ms.saturating_add(MIN_FRAME_MS);
+        }
     }
 }
 

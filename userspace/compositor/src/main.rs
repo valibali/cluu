@@ -32,26 +32,6 @@ fn broadcast_frame_ready(comp: &state::Compositor) {
     }
 }
 
-/// Query the timeserver for monotonic seconds, caching the endpoint after the
-/// first successful lookup so repeated calls never hit the registry.
-fn clock_seconds_cached(cached_ep: &mut usize) -> Option<u64> {
-    if *cached_ep == 0 {
-        if let Some(ep) = registry::lookup_service("timeserver:main") {
-            *cached_ep = ep;
-        } else {
-            return None;
-        }
-    }
-    match libcluu::time::query_endpoint(*cached_ep, libcluu::time::TIME_GETCLOCK) {
-        Ok((s, _)) => Some(s),
-        Err(_) => {
-            // Endpoint may have died; force re-lookup next tick.
-            *cached_ep = 0;
-            None
-        }
-    }
-}
-
 /// Return the current monotonic time in milliseconds.
 /// Reuses the already-cached timeserver endpoint to avoid a registry lookup.
 /// Returns 0 if the endpoint is not yet resolved.
@@ -72,38 +52,6 @@ fn clock_now_ms(cached_ep: &mut usize) -> u64 {
     }
 }
 
-/// Minimum interval between flush+broadcast passes: 16 ms ≈ 60 Hz.
-const MIN_FRAME_MS: u64 = 16;
-
-/// Default recv timeout when there is nothing pending: 1 Hz clock-tick.
-const DEFAULT_TICK_MS: u64 = 1000;
-
-/// Compute how long to block in `ipc_recv_any` before the next flush is due.
-///
-/// - If the compositor is inactive or has no pending dirty cells, we use the
-///   full 1-second tick (nothing to flush).
-/// - If dirty cells are pending and the throttle window has already elapsed,
-///   return 1 ms so the loop re-enters almost immediately after processing a
-///   message that was throttled.
-/// - Otherwise return the remaining time until the throttle releases
-///   (MIN_FRAME_MS − elapsed).
-///
-/// This prevents the 1-second stall that used to happen when a DAMAGE event
-/// arrived but was deferred by the throttle: without this the loop blocked on
-/// recv for a full second before the flush became eligible.
-fn next_recv_timeout_ms(comp: &state::Compositor, time_ep: &mut usize) -> u64 {
-    if !comp.active || comp.cell_dirty.is_empty() {
-        return DEFAULT_TICK_MS;
-    }
-    let now = clock_now_ms(time_ep);
-    let elapsed = now.saturating_sub(comp.last_flush_at);
-    if elapsed >= MIN_FRAME_MS {
-        // Throttle would allow a flush right now — use a minimal timeout so
-        // we re-enter the loop and flush without waiting.
-        return 1;
-    }
-    MIN_FRAME_MS - elapsed
-}
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -166,7 +114,11 @@ pub extern "C" fn main() -> i32 {
     const REGISTRY_TOKEN_IDX: usize = 3;
 
     loop {
-        let timeout_ms = next_recv_timeout_ms(&comp, &mut time_ep);
+        let now_ms = clock_now_ms(&mut time_ep);
+        let now_secs = now_ms / 1000;
+
+        let timeout_ms = comp.deadlines.next_timeout_ms(now_ms);
+
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout_ms) {
             Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) {
@@ -292,43 +244,29 @@ pub extern "C" fn main() -> i32 {
                             // Unknown message — ignore.
                         }
                     }
-                    // Update clock on every message iteration so a busy
-                    // compdemo DAMAGE flood never starves the clock display.
-                    if let Some(s) = clock_seconds_cached(&mut time_ep) {
-                        if s != comp.clock_seconds {
-                            comp.clock_seconds = s;
-                            for cx in 0..comp.cols { comp.cell_dirty.push((cx, 0)); }
-                        }
+                    // Any state-changing message may have dirtied cells; arm
+                    // the frame deadline so tick_frame fires promptly.
+                    if !comp.cell_dirty.is_empty() {
+                        comp.schedule_frame(now_ms);
                     }
-                    compose::recompute_dirty(&mut comp);
-                    compose::render_status_row(&mut comp);
-                    let now_ms = clock_now_ms(&mut time_ep);
-                    if comp.flush_if_due(now_ms, MIN_FRAME_MS) {
-                        broadcast_frame_ready(&comp);
-                    }
-                    // else: throttled — cell_dirty accumulates; next_recv_timeout_ms
-                    // will return the remaining wait so we don't stall for 1 s.
                 }
             }
             Err(Error::Timeout) | Err(Error::WouldBlock) => {
-                // Timeout fires either at the 1-Hz clock tick (idle) or at the
-                // remaining throttle window (dirty cells pending).  Either way,
-                // update the clock then attempt a flush — flush_if_due is cheap
-                // when the throttle hasn't elapsed yet.
-                if let Some(s) = clock_seconds_cached(&mut time_ep) {
-                    if s != comp.clock_seconds {
-                        comp.clock_seconds = s;
-                        for cx in 0..comp.cols { comp.cell_dirty.push((cx, 0)); }
-                    }
-                }
-                compose::recompute_dirty(&mut comp);
-                compose::render_status_row(&mut comp);
-                let now_ms = clock_now_ms(&mut time_ep);
-                if comp.flush_if_due(now_ms, MIN_FRAME_MS) {
-                    broadcast_frame_ready(&comp);
-                }
+                // Fall through to deadline handling below.
             }
-            Err(_) => { let _ = syscall::yield_cpu(); }
+            Err(_) => {
+                let _ = syscall::yield_cpu();
+                continue;
+            }
+        }
+
+        // Fire whichever deadlines expired this iteration.
+        comp.tick_clock(now_ms, now_secs);
+        compose::recompute_dirty(&mut comp);
+        compose::render_status_row(&mut comp);
+
+        if comp.tick_frame(now_ms) {
+            broadcast_frame_ready(&comp);
         }
     }
 }
