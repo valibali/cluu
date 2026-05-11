@@ -52,6 +52,29 @@ fn clock_seconds_cached(cached_ep: &mut usize) -> Option<u64> {
     }
 }
 
+/// Return the current monotonic time in milliseconds.
+/// Reuses the already-cached timeserver endpoint to avoid a registry lookup.
+/// Returns 0 if the endpoint is not yet resolved.
+fn clock_now_ms(cached_ep: &mut usize) -> u64 {
+    if *cached_ep == 0 {
+        if let Some(ep) = registry::lookup_service("timeserver:main") {
+            *cached_ep = ep;
+        } else {
+            return 0;
+        }
+    }
+    match libcluu::time::query_endpoint(*cached_ep, libcluu::time::TIME_GETCLOCK) {
+        Ok((s, ns)) => s * 1_000 + ns / 1_000_000,
+        Err(_) => {
+            *cached_ep = 0;
+            0
+        }
+    }
+}
+
+/// Minimum interval between flush+broadcast passes: 16 ms ≈ 60 Hz.
+const MIN_FRAME_MS: u64 = 16;
+
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     let _ = debug_print("compositor: init");
@@ -249,9 +272,15 @@ pub extern "C" fn main() -> i32 {
                     compose::recompute_dirty(&mut comp);
                     compose::render_status_row(&mut comp);
                     if comp.active {
-                        comp.flush_grid_to_backbuf();
-                        comp.flush_backbuf_to_fb();
-                        broadcast_frame_ready(&comp);
+                        let now_ms = clock_now_ms(&mut time_ep);
+                        if now_ms.saturating_sub(comp.last_flush_at) >= MIN_FRAME_MS {
+                            comp.flush_grid_to_backbuf();
+                            comp.flush_backbuf_to_fb();
+                            broadcast_frame_ready(&comp);
+                            comp.last_flush_at = now_ms;
+                        }
+                        // else: defer; cell_dirty accumulates; next eligible
+                        // event or tick will pick up all pending damage.
                     }
                 }
             }
@@ -263,9 +292,13 @@ pub extern "C" fn main() -> i32 {
                         compose::recompute_dirty(&mut comp);
                         compose::render_status_row(&mut comp);
                         if comp.active {
-                            comp.flush_grid_to_backbuf();
-                            comp.flush_backbuf_to_fb();
-                            broadcast_frame_ready(&comp);
+                            let now_ms = clock_now_ms(&mut time_ep);
+                            if now_ms.saturating_sub(comp.last_flush_at) >= MIN_FRAME_MS {
+                                comp.flush_grid_to_backbuf();
+                                comp.flush_backbuf_to_fb();
+                                broadcast_frame_ready(&comp);
+                                comp.last_flush_at = now_ms;
+                            }
                         }
                     }
                 }

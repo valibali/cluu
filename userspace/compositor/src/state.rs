@@ -73,6 +73,11 @@ pub struct Compositor {
 
     pub clock_seconds: u64,
 
+    /// Monotonic millisecond timestamp of the last flush+broadcast.
+    /// Used to cap the frame rate at ~60 Hz (16 ms minimum interval).
+    /// Initialised to 0 so the very first frame always flushes immediately.
+    pub last_flush_at: u64,
+
     // Registry + IPC endpoints — filled in by main after registry::init().
     pub instance_id: u64,
     pub client_endpoint: usize,
@@ -174,6 +179,7 @@ impl Compositor {
             active: false,
             next_id: 1,
             clock_seconds: 0,
+            last_flush_at: 0,
             instance_id: 0,
             client_endpoint: 0,
             input_endpoint_global: 0,
