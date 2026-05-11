@@ -301,6 +301,32 @@ impl Compositor {
 }
 
 impl Compositor {
+    /// Spawn a new compdemo container via procmgr. The new compdemo
+    /// auto-registers a window with the compositor on startup.
+    /// Uses the same payload format as vtmgr's spawn_vt_container:
+    /// NUL-terminated image name, no param overrides.
+    pub fn spawn_demo(&self) {
+        let ep = match libcluu::registry::lookup_service("procmgr:spawn") {
+            Some(ep) => ep,
+            None => {
+                let _ = libcluu::debug_print("compositor: spawn_demo: no procmgr:spawn");
+                return;
+            }
+        };
+        // Payload: "compdemo\0" (NUL-terminated image name, no param overrides).
+        // Wire format: words[0]=payload_len, words[3]=name_nul_term_len, words[4]=param_count.
+        let payload = b"compdemo\0";
+        let msg = libcluu::types::Message::new(
+            libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL,
+            [payload.len(), 0, 0, payload.len(), 0, 0],
+            5,
+        );
+        let _ = libcluu::ipc::send_msg_with_payload(ep, &msg, payload);
+        let _ = libcluu::debug_print("compositor: spawn_demo: requested compdemo");
+    }
+}
+
+impl Compositor {
     /// Free the window's frame, drop it from the list, repaint covered cells.
     /// Called explicitly via WIN_DESTROY. Implicit destroy on owner-exit is
     /// deferred — would need procmgr to broadcast exits to non-spawner

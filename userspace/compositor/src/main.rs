@@ -222,8 +222,7 @@ pub extern "C" fn main() -> i32 {
                                         comp.forward_close_request();
                                     }
                                     hotkeys::Hotkey::SpawnDemo => {
-                                        let _ = debug_print(
-                                            "compositor: spawn-demo hotkey (impl in T23)");
+                                        comp.spawn_demo();
                                     }
                                 }
                             } else {
