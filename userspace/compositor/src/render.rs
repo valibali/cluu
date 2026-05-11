@@ -2,10 +2,8 @@
 //!
 //! All methods are `impl Compositor` blocks; the type itself lives in `state`.
 
+use crate::config::{CLOCK_PERIOD_MS, MIN_FRAME_MS};
 use crate::state::{Compositor, PixelRect};
-
-const MIN_FRAME_MS: u64 = 16;
-const CLOCK_PERIOD_MS: u64 = 1000;
 
 impl Compositor {
     /// Tick the frame deadline. If active + dirty cells pending and the

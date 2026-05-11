@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod config;
 mod state;
 mod shm;
 mod protocol;

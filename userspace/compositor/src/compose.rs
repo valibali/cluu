@@ -6,6 +6,7 @@
 //! left 1, right 1) we emit arc corner or bar glyphs. Inside the interior
 //! we read the cell from the window's SHM region.
 
+use crate::config::{FOCUSED_BOLD_ATTR, FOCUSED_FG, PLAIN_FG};
 use crate::state::{Compositor, Window};
 
 const CHROME_TOP: u16 = 1;
@@ -153,8 +154,8 @@ fn title_overlay_at(win: &Window, lx: u16, focused: bool) -> Option<u64> {
 }
 
 fn pack_chrome_cell(cp: u32, focused: bool) -> u64 {
-    let attrs = if focused { 0b001 } else { 0 };
-    let fg = if focused { 15 } else { 7 };
+    let attrs = if focused { FOCUSED_BOLD_ATTR } else { 0 };
+    let fg = if focused { FOCUSED_FG } else { PLAIN_FG };
     pack_cell(cp, fg, 0, attrs)
 }
 

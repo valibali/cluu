@@ -193,7 +193,7 @@ use libcluu::{Error, Result};
 pub const GLYPH_W: u32 = 8;
 pub const GLYPH_H: u32 = 16;
 
-const FB_HEADER_MAGIC: u32 = 0x4642_4630; // "FB0\0"
+use crate::config::FB_HEADER_MAGIC;
 
 impl Compositor {
     /// Open `/dev/fb0`, read the 40-byte geometry header, mmap the
