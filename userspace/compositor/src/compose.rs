@@ -83,7 +83,7 @@ fn chrome_glyph(win: &Window, lx: u16, ly: u16, focused: bool) -> u64 {
         _ => None,
     };
     if let Some(cp) = corner {
-        return pack_chrome(cp, focused);
+        return pack_chrome_cell(cp, focused);
     }
 
     // Top horizontal edge: centered title overlay, otherwise H_BAR.
@@ -91,21 +91,21 @@ fn chrome_glyph(win: &Window, lx: u16, ly: u16, focused: bool) -> u64 {
         if let Some(cp) = title_overlay_at(win, lx, focused) {
             return cp;
         }
-        return pack_chrome(H_BAR, focused);
+        return pack_chrome_cell(H_BAR, focused);
     }
 
     // Bottom horizontal edge.
     if ly == h - 1 {
-        return pack_chrome(H_BAR, focused);
+        return pack_chrome_cell(H_BAR, focused);
     }
 
     // Left + right vertical edges.
     if lx == 0 || lx == w - 1 {
-        return pack_chrome(V_BAR, focused);
+        return pack_chrome_cell(V_BAR, focused);
     }
 
     // Unreachable: caller checks in_chrome.
-    pack_chrome(H_BAR, focused)
+    pack_chrome_cell(H_BAR, focused)
 }
 
 /// If `lx` (in row 0, exclusive of corners) maps to a title slot, return the
@@ -149,16 +149,10 @@ fn title_overlay_at(win: &Window, lx: u16, focused: bool) -> Option<u64> {
             b' ' as u32
         }
     };
-    Some(pack_title(cp, focused))
+    Some(pack_chrome_cell(cp, focused))
 }
 
-fn pack_chrome(cp: u32, focused: bool) -> u64 {
-    let attrs = if focused { 0b001 } else { 0 };
-    let fg = if focused { 15 } else { 7 };
-    pack_cell(cp, fg, 0, attrs)
-}
-
-fn pack_title(cp: u32, focused: bool) -> u64 {
+fn pack_chrome_cell(cp: u32, focused: bool) -> u64 {
     let attrs = if focused { 0b001 } else { 0 };
     let fg = if focused { 15 } else { 7 };
     pack_cell(cp, fg, 0, attrs)
