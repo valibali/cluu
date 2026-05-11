@@ -50,6 +50,7 @@ pub mod toml;
 pub mod types;
 pub mod vfs_view;
 pub mod vspace;
+pub mod window_shm;
 
 // POSIX syscall stubs (feature-gated for newlib compatibility)
 #[cfg(feature = "posix")]

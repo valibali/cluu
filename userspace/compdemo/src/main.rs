@@ -11,23 +11,7 @@ use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall};
 use libcluu::boot::{process_info, space_token, TOKEN_IPC};
 use libcluu::syscall::MAP_FRAME_TOKEN;
-
-#[repr(C)]
-struct WindowShm {
-    magic: u32,
-    version: u32,
-    width: u32,
-    height: u32,
-    cursor_x: u32,
-    cursor_y: u32,
-    cursor_visible: u32,
-    generation: u32,
-}
-
-#[allow(dead_code)]
-const WIN_SHM_MAGIC: u32 = 0x57494e44;
-#[allow(dead_code)]
-const WIN_SHM_VERSION: u32 = 1;
+use libcluu::window_shm::WindowShm;
 
 const FLAGS_USER_RW: usize = 0x07;
 const SHM_VA: usize = 0xD000_0000;

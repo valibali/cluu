@@ -64,24 +64,7 @@ impl Deadlines {
     }
 }
 
-/// On-the-wire SHM region header. Layout MUST stay stable across
-/// compositor + client crates — both projects copy this definition.
-/// The cells (`u64` per cell, `width * height` of them) follow at byte
-/// offset 32, contiguous in the same SHM region.
-#[repr(C)]
-pub struct WindowShm {
-    pub magic: u32,
-    pub version: u32,
-    pub width: u32,
-    pub height: u32,
-    pub cursor_x: u32,
-    pub cursor_y: u32,
-    pub cursor_visible: u32,
-    pub generation: u32,
-}
-
-pub const WIN_SHM_MAGIC: u32 = 0x57494e44; // "WIND"
-pub const WIN_SHM_VERSION: u32 = 1;
+pub use libcluu::window_shm::{WindowShm, WIN_SHM_MAGIC, WIN_SHM_VERSION};
 
 /// Compositor's view of one tenant window.
 pub struct Window {
