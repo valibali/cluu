@@ -508,6 +508,29 @@ impl Compositor {
 }
 
 impl Compositor {
+    /// Flush to the framebuffer if at least `min_frame_ms` milliseconds have
+    /// elapsed since the last flush.  Returns `true` when a flush happened
+    /// (caller should then broadcast FRAME_READY), `false` when still within
+    /// the throttle window.
+    ///
+    /// `now_ms` must be obtained from `clock_now_ms` in the caller; it is
+    /// passed in rather than re-queried so the same timestamp drives both the
+    /// flush decision and the `last_flush_at` update.
+    pub fn flush_if_due(&mut self, now_ms: u64, min_frame_ms: u64) -> bool {
+        if !self.active {
+            return false;
+        }
+        if now_ms.saturating_sub(self.last_flush_at) < min_frame_ms {
+            return false;
+        }
+        self.flush_grid_to_backbuf();
+        self.flush_backbuf_to_fb();
+        self.last_flush_at = now_ms;
+        true
+    }
+}
+
+impl Compositor {
     /// Glyph-blit cells whose value differs from `prev_cell_grid` and write
     /// the resulting pixels into `backbuf`. Caller must follow with
     /// `flush_backbuf_to_fb` to push to the framebuffer.

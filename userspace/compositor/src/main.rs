@@ -75,6 +75,36 @@ fn clock_now_ms(cached_ep: &mut usize) -> u64 {
 /// Minimum interval between flush+broadcast passes: 16 ms ≈ 60 Hz.
 const MIN_FRAME_MS: u64 = 16;
 
+/// Default recv timeout when there is nothing pending: 1 Hz clock-tick.
+const DEFAULT_TICK_MS: u64 = 1000;
+
+/// Compute how long to block in `ipc_recv_any` before the next flush is due.
+///
+/// - If the compositor is inactive or has no pending dirty cells, we use the
+///   full 1-second tick (nothing to flush).
+/// - If dirty cells are pending and the throttle window has already elapsed,
+///   return 1 ms so the loop re-enters almost immediately after processing a
+///   message that was throttled.
+/// - Otherwise return the remaining time until the throttle releases
+///   (MIN_FRAME_MS − elapsed).
+///
+/// This prevents the 1-second stall that used to happen when a DAMAGE event
+/// arrived but was deferred by the throttle: without this the loop blocked on
+/// recv for a full second before the flush became eligible.
+fn next_recv_timeout_ms(comp: &state::Compositor, time_ep: &mut usize) -> u64 {
+    if !comp.active || comp.cell_dirty.is_empty() {
+        return DEFAULT_TICK_MS;
+    }
+    let now = clock_now_ms(time_ep);
+    let elapsed = now.saturating_sub(comp.last_flush_at);
+    if elapsed >= MIN_FRAME_MS {
+        // Throttle would allow a flush right now — use a minimal timeout so
+        // we re-enter the loop and flush without waiting.
+        return 1;
+    }
+    MIN_FRAME_MS - elapsed
+}
+
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     let _ = debug_print("compositor: init");
@@ -136,7 +166,8 @@ pub extern "C" fn main() -> i32 {
     const REGISTRY_TOKEN_IDX: usize = 3;
 
     loop {
-        match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, 1000) {
+        let timeout_ms = next_recv_timeout_ms(&comp, &mut time_ep);
+        match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout_ms) {
             Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) {
                     // Registry control messages (grant requests from subscribers) must
@@ -271,36 +302,30 @@ pub extern "C" fn main() -> i32 {
                     }
                     compose::recompute_dirty(&mut comp);
                     compose::render_status_row(&mut comp);
-                    if comp.active {
-                        let now_ms = clock_now_ms(&mut time_ep);
-                        if now_ms.saturating_sub(comp.last_flush_at) >= MIN_FRAME_MS {
-                            comp.flush_grid_to_backbuf();
-                            comp.flush_backbuf_to_fb();
-                            broadcast_frame_ready(&comp);
-                            comp.last_flush_at = now_ms;
-                        }
-                        // else: defer; cell_dirty accumulates; next eligible
-                        // event or tick will pick up all pending damage.
+                    let now_ms = clock_now_ms(&mut time_ep);
+                    if comp.flush_if_due(now_ms, MIN_FRAME_MS) {
+                        broadcast_frame_ready(&comp);
                     }
+                    // else: throttled — cell_dirty accumulates; next_recv_timeout_ms
+                    // will return the remaining wait so we don't stall for 1 s.
                 }
             }
             Err(Error::Timeout) | Err(Error::WouldBlock) => {
+                // Timeout fires either at the 1-Hz clock tick (idle) or at the
+                // remaining throttle window (dirty cells pending).  Either way,
+                // update the clock then attempt a flush — flush_if_due is cheap
+                // when the throttle hasn't elapsed yet.
                 if let Some(s) = clock_seconds_cached(&mut time_ep) {
                     if s != comp.clock_seconds {
                         comp.clock_seconds = s;
                         for cx in 0..comp.cols { comp.cell_dirty.push((cx, 0)); }
-                        compose::recompute_dirty(&mut comp);
-                        compose::render_status_row(&mut comp);
-                        if comp.active {
-                            let now_ms = clock_now_ms(&mut time_ep);
-                            if now_ms.saturating_sub(comp.last_flush_at) >= MIN_FRAME_MS {
-                                comp.flush_grid_to_backbuf();
-                                comp.flush_backbuf_to_fb();
-                                broadcast_frame_ready(&comp);
-                                comp.last_flush_at = now_ms;
-                            }
-                        }
                     }
+                }
+                compose::recompute_dirty(&mut comp);
+                compose::render_status_row(&mut comp);
+                let now_ms = clock_now_ms(&mut time_ep);
+                if comp.flush_if_due(now_ms, MIN_FRAME_MS) {
+                    broadcast_frame_ready(&comp);
                 }
             }
             Err(_) => { let _ = syscall::yield_cpu(); }
