@@ -4,12 +4,12 @@
 extern crate alloc;
 
 use libcluu::ipc::{
-    call_with_payload, make_payload_message, COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL,
-    COMP_WIN_REGISTER_REPLY,
+    COMP_FRAME_READY_LABEL, COMP_INPUT_FORWARD_LABEL,
+    COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall};
-use libcluu::boot::space_token;
+use libcluu::boot::{process_info, space_token, TOKEN_IPC};
 use libcluu::syscall::MAP_FRAME_TOKEN;
 
 #[repr(C)]
@@ -45,6 +45,17 @@ pub extern "C" fn main() -> i32 {
         return 1;
     }
 
+    // Allocate a long-lived endpoint for FRAME_READY + INPUT_FORWARD signals.
+    let info = process_info();
+    let ipc_cap = info.tokens[TOKEN_IPC];
+    let my_ep = match syscall::endpoint_create(ipc_cap) {
+        Ok(ep) => ep,
+        Err(_) => {
+            let _ = debug_print("compdemo: endpoint_create failed");
+            return 6;
+        }
+    };
+
     // Look up compositor's client endpoint via registry.
     let comp_ep = match registry::lookup_service("compositor:client") {
         Some(ep) => ep,
@@ -55,16 +66,23 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Build the WIN_REGISTER request. Payload is the title bytes.
-    // Protocol: words[0]=payload_len (per parse_message convention),
-    //           words[1]=req_w, words[2]=req_h.
+    // Protocol: words[0]=payload_len, words[1]=req_w, words[2]=req_h,
+    //           words[3]=app_input_endpoint (FRAME_READY + INPUT_FORWARD).
     let title = b"demo";
-    let req = make_payload_message(
+    let req = Message::new(
         COMP_WIN_REGISTER_LABEL,
-        title.len(),
-        &[REQ_W as usize, REQ_H as usize],
+        [
+            title.len(),        // words[0] = payload_len
+            REQ_W as usize,     // words[1] = req_w
+            REQ_H as usize,     // words[2] = req_h
+            my_ep,              // words[3] = app input/frame endpoint
+            0,                  // words[4] = reserved
+            0,                  // words[5] = reserved
+        ],
+        4,
     );
     let mut reply = Message::new(0, [0; 6], 0);
-    if call_with_payload(comp_ep, &req, title, &mut reply).is_err() {
+    if libcluu::ipc::call_with_payload(comp_ep, &req, title, &mut reply).is_err() {
         let _ = debug_print("compdemo: WIN_REGISTER call failed");
         return 2;
     }
@@ -95,27 +113,23 @@ pub extern "C" fn main() -> i32 {
     }
     let _ = debug_print("compdemo: window registered + SHM mapped");
 
-    // Rainbow animation + DAMAGE loop.
-    // Honest scope note: full input plumbing requires compositor to
-    // remember per-window input_endpoint. For T22 we don't receive any
-    // INPUT_FORWARD messages — that wiring lands in T25.
-    // The loop below animates the rainbow and sends DAMAGE each frame.
-
+    // Render loop: wait for FRAME_READY (pacing signal from compositor), then
+    // render one frame and send DAMAGE. This replaces the busy spin-loop with
+    // an event-driven design — compdemo sleeps until the compositor says "go".
     let cells_ptr = (SHM_VA + 32) as *mut u64;
     let mut frame: u32 = 0;
+    let mut recv_buf = [0u8; 256];
+    let tokens = [my_ep];
+
     loop {
-        // Fill cells with a slowly shifting rainbow pattern.
-        // Use filled-background (space glyph) with cycling xterm-256 bg index
-        // so blocks of colour are visible. Cycle through indices 16..232
-        // (the 6x6x6 RGB cube) for vivid coverage.
+        // 1. Render cells with a slowly shifting rainbow pattern.
         for iy in 0..gh {
             for ix in 0..gw {
-                let raw = ((ix + iy + frame) as usize) % 216;
-                let bg = (16 + raw) as u64;
-                let cell = (b' ' as u64 & 0x1F_FFFF)
-                    | (15u64 << 21)   // fg = white (irrelevant for space)
-                    | (bg  << 29)     // bg = cycling palette index
-                    | (0u64 << 37);
+                let bg_idx = 16u64 + ((ix as u64 + iy as u64 + frame as u64) % 216);
+                let cp = b' ' as u64 & 0x1F_FFFF;
+                let fg = 15u64 << 21;
+                let bg = bg_idx << 29;
+                let cell = cp | fg | bg | (0u64 << 37);
                 unsafe {
                     core::ptr::write_volatile(
                         cells_ptr.add((iy * gw + ix) as usize),
@@ -124,13 +138,16 @@ pub extern "C" fn main() -> i32 {
                 }
             }
         }
-        // Bump generation BEFORE sending DAMAGE (release-store).
+
+        // 2. Bump generation (release-store so compositor sees updated cells).
         unsafe {
             let hdr = SHM_VA as *mut WindowShm;
             let g = (*hdr).generation;
             core::ptr::write_volatile(&mut (*hdr).generation as *mut u32, g.wrapping_add(1));
         }
-        // Send full-window DAMAGE.
+
+        // 3. Send DAMAGE — words[0]=win_id, words[1]=x, words[2]=y, words[3]=w, words[4]=h
+        //    (matches protocol::parse COMP_WIN_DAMAGE_LABEL arm in compositor).
         let dmg = Message::new(
             COMP_WIN_DAMAGE_LABEL,
             [win_id, 0, 0, gw as usize, gh as usize, 0],
@@ -140,10 +157,28 @@ pub extern "C" fn main() -> i32 {
 
         frame = frame.wrapping_add(1);
 
-        // Yield so other processes get CPU. No timer subscription for v1.
-        for _ in 0..200_000 {
-            core::hint::spin_loop();
+        // 4. Block waiting for FRAME_READY or INPUT_FORWARD.
+        //    timeout_ms=60_000 → block up to 60 s; in practice compositor
+        //    sends FRAME_READY right after every flush, so latency is negligible.
+        match syscall::ipc_recv_any(&tokens, &mut recv_buf, 60_000) {
+            Ok((_idx, len)) => {
+                if let Some((msg, _payload)) = libcluu::ipc::parse_message(&recv_buf[..len]) {
+                    if msg.tag.label == COMP_INPUT_FORWARD_LABEL {
+                        // words[5] = kind: 99 = close-request.
+                        let kind = msg.words[5] as u32;
+                        if kind == 99 {
+                            let _ = debug_print("compdemo: close-request received, exiting");
+                            return 0;
+                        }
+                        // Other input: handled (key presses, etc.) — just loop back.
+                    }
+                    // FRAME_READY (label == 100) or any other label → proceed to next frame.
+                }
+            }
+            Err(_) => {
+                // Timeout or error — yield briefly and retry.
+                let _ = syscall::yield_cpu();
+            }
         }
-        let _ = syscall::yield_cpu();
     }
 }
