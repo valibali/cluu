@@ -39,4 +39,24 @@ mod tests {
         let evs = collect(b"\x1b[A");
         assert_eq!(evs, vec![Event::MoveCursorUp(1)]);
     }
+
+    #[test]
+    fn sgr_red_fg() {
+        let evs = collect(b"\x1b[31m");
+        let attr = match &evs[..] {
+            [Event::SetAttr(a)] => *a,
+            _ => panic!("got {:?}", evs),
+        };
+        assert_eq!(attr.fg, 0x00AA0000);
+    }
+
+    #[test]
+    fn erase_line() {
+        assert_eq!(collect(b"\x1b[K"), vec![Event::EraseLine]);
+    }
+
+    #[test]
+    fn erase_display() {
+        assert_eq!(collect(b"\x1b[2J"), vec![Event::EraseDisplay]);
+    }
 }
