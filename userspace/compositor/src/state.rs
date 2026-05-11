@@ -575,6 +575,11 @@ impl Compositor {
     /// Returns `true` if a flush happened (caller should broadcast).
     pub fn tick_frame(&mut self, now_ms: u64) -> bool {
         if !self.active {
+            // Park the frame deadline so the event loop blocks on recv
+            // instead of tight-spinning at next_timeout_ms == 0 while VT4
+            // is hidden. handle_vt_activate re-arms via schedule_frame
+            // after repaint_all dirties cells again.
+            self.deadlines.next_frame_ms = u64::MAX;
             return false;
         }
         if self.cell_dirty.is_empty() && self.prev_cell_grid == self.cell_grid {
