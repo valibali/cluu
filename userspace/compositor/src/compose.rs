@@ -196,6 +196,10 @@ fn read_shm_cell(win: &Window, ix: u16, iy: u16) -> u64 {
         if ix >= inner_w {
             return BG_CELL;
         }
+        let inner_h = (*hdr).height as u16;
+        if iy >= inner_h {
+            return BG_CELL;
+        }
         let header_bytes = core::mem::size_of::<WindowShm>();
         let cells_ptr = (win.shm_va as usize + header_bytes) as *const u64;
         let off = iy as usize * inner_w as usize + ix as usize;
