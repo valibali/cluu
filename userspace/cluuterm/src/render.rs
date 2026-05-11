@@ -5,6 +5,19 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use crate::tty_backend::Cluuterm;
+
+/// Blit the cell grid to the compositor SHM window.
+///
+/// Task 17 fills the actual pixel-writing body. For now this is a no-op so
+/// the cluuterm binary compiles cleanly with the Task 15 recv loop in place.
+#[allow(unused_variables)]
+pub fn render(_term: &mut Cluuterm) {
+    // TODO(task17): walk term.cells / term.fg_cells / term.bg_cells and blit
+    // glyphs into term.shm.  After blitting send COMP_WIN_DAMAGE to
+    // term.comp_ep and await COMP_FRAME_READY before returning.
+}
+
 /// Build the `/dev/pts/<id>` path string at runtime.
 ///
 /// Returns a null-terminated byte vector suitable for passing to POSIX APIs.

@@ -1548,10 +1548,33 @@ impl VfsServer {
                     reply_msg.words[1] = 0;
                 }
             }
-            // PTS write: stub until Task 15 wires owner-routed IPC.
-            OpenFile::Pts(_) => {
-                reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
-                reply_msg.words[1] = 0;
+            // PTS write: forward to the owning cluuterm via PTS_WRITE_LABEL.
+            OpenFile::Pts(pts) => {
+                let id = pts.pts_id;
+                let ep = match self.pts_registry.notify_endpoint(id) {
+                    Some(ep) if ep != 0 => ep,
+                    _ => {
+                        reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                        reply_msg.words[1] = 0;
+                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                };
+                let req = Message::new(
+                    libcluu::ipc::PTS_WRITE_LABEL,
+                    [id as usize, data.len(), 0, 0, 0, 0],
+                    2,
+                );
+                let mut fw_reply = Message::new(0, [0; 6], 0);
+                match ipc::call_with_payload(ep, &req, data, &mut fw_reply) {
+                    Ok(_) => {
+                        reply_msg.words[0] = 0;
+                        reply_msg.words[1] = data.len();
+                    }
+                    Err(err) => {
+                        reply_msg.words[0] = err.to_errno() as usize;
+                        reply_msg.words[1] = 0;
+                    }
+                }
             }
         }
 
@@ -2493,8 +2516,29 @@ impl VfsServer {
                     None => Err(Error::NotFound),
                 }
             }
-            // PTS read: stub until Task 15 wires owner-routed IPC.
-            OpenFile::Pts(_) => Err(Error::NotImplemented),
+            // PTS read: forward to the owning cluuterm via PTS_READ_LABEL.
+            OpenFile::Pts(pts) => {
+                let ep = match self.pts_registry.notify_endpoint(pts.pts_id) {
+                    Some(ep) if ep != 0 => ep,
+                    _ => return Err(Error::NotFound),
+                };
+                let req = Message::new(
+                    libcluu::ipc::PTS_READ_LABEL,
+                    [pts.pts_id as usize, requested, 0, 0, 0, 0],
+                    2,
+                );
+                // PTS_WRITE_MAX +header is well under our IPC buffer cap.
+                const PTS_REPLY_BUF: usize = 1024;
+                let mut reply_buf = alloc::vec![0u8; PTS_REPLY_BUF];
+                let (_reply, payload_len) =
+                    ipc::call_with_reply_buf(ep, &req, &[], &mut reply_buf)?;
+                let data_start = core::mem::size_of::<Message>();
+                let data_len = payload_len.min(requested);
+                if data_start + data_len > reply_buf.len() {
+                    return Err(Error::InvalidState);
+                }
+                Ok(reply_buf[data_start..data_start + data_len].to_vec())
+            }
         }
     }
 

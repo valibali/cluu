@@ -219,6 +219,9 @@ pub const COMP_SHUTDOWN_LABEL: u32 = 99;
 /// compositor → app input endpoint. "You may present a new frame now."
 /// Pacing signal: app blocks until this arrives, then renders one frame.
 pub const COMP_FRAME_READY_LABEL: u32 = 100;
+/// compositor → app input endpoint. User or compositor requested window close.
+/// App should unregister its PTS, destroy the window, and exit cleanly.
+pub const COMP_CLOSE_REQUEST_LABEL: u32 = 101;
 
 // ──────────────────────────────────────────────────────────────────────
 // PTS (pseudo-terminal slave) protocol.
