@@ -48,6 +48,7 @@ pub mod syscall;
 pub mod tar;
 pub mod time;
 pub mod toml;
+pub mod tty_core;
 pub mod types;
 pub mod vfs_view;
 pub mod vspace;
