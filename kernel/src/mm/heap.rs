@@ -96,7 +96,7 @@ unsafe impl GlobalAlloc for LoggingAllocator {
             unsafe {
                 core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags));
             }
-            for i in 0..5 {
+            for i in 0..16 {
                 if rbp == 0 || (rbp & 0x7) != 0 {
                     break;
                 }

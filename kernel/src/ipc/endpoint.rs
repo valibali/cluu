@@ -230,11 +230,17 @@ impl QueueEndpoint {
         buf_len: usize,
         page_table_root: x86_64::PhysAddr,
     ) {
+        // Dedupe by thread_id alone: a fresh sys_recv bumps the receiver's ticket,
+        // invalidating any prior waiter entry for the same thread. Matching only on
+        // (thread_id, ticket) leaked stale entries on every recv timeout retry —
+        // observed as a VecDeque<RecvWaiter> doubling 1.25 MiB → 2.5 MiB during
+        // boot once the compositor's deadline-based event loop started running.
         if let Some(waiter) = self
             .waiting_receivers
             .iter_mut()
-            .find(|waiter| waiter.thread_id == receiver && waiter.ticket == ticket)
+            .find(|waiter| waiter.thread_id == receiver)
         {
+            waiter.ticket = ticket;
             waiter.buf_ptr = buf_ptr;
             waiter.buf_len = buf_len;
             waiter.page_table_root = page_table_root;
