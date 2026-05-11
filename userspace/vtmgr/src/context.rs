@@ -8,15 +8,16 @@ use alloc::format;
 use libcluu::boot::PARAM_TTY_INSTANCE;
 use libcluu::boot::{process_info, TOKEN_EXTRA_0};
 use libcluu::ipc::{
-    send, send_msg_with_payload, CONSOLE_CREATE_VT_LABEL, CONSOLE_SWITCH_VT_LABEL,
-    PROCMGR_CONTAINER_RUN_LABEL,
+    send, send_msg_with_payload, COMP_VT_ACTIVATE_LABEL, COMP_VT_DEACTIVATE_LABEL,
+    CONSOLE_ACTIVATE_LABEL, CONSOLE_CREATE_VT_LABEL, CONSOLE_DEACTIVATE_LABEL,
+    CONSOLE_SWITCH_VT_LABEL, PROCMGR_CONTAINER_RUN_LABEL,
 };
 use libcluu::registry;
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, yield_cpu, Result};
 
-/// Number of virtual terminals supported.
-const VT_COUNT: usize = 4;
+/// Number of virtual terminals supported (0-3 = console, 4 = compositor).
+const VT_COUNT: usize = 5;
 
 /// Shared state for the VT manager runtime.
 pub struct VtmgrContext {
@@ -38,6 +39,10 @@ pub struct VtmgrContext {
     requested_console: bool,
     /// Whether procmgr spawn subscription was requested.
     requested_procmgr_spawn: bool,
+    /// Compositor "control" endpoint (for COMP_VT_ACTIVATE/DEACTIVATE).
+    compositor_control: usize,
+    /// Whether compositor control subscription was requested.
+    requested_compositor: bool,
 }
 
 impl VtmgrContext {
@@ -64,6 +69,8 @@ impl VtmgrContext {
             vt_spawned: 0, // vt:0 will be spawned by us once procmgr is available
             requested_console: false,
             requested_procmgr_spawn: false,
+            compositor_control: 0,
+            requested_compositor: false,
         })
     }
 
@@ -82,14 +89,25 @@ impl VtmgrContext {
                 self.requested_procmgr_spawn = true;
             }
         }
+
+        // Subscribe to compositor's control endpoint (for VT activate/deactivate).
+        if self.compositor_control == 0 && !self.requested_compositor {
+            if registry::request_subscription("compositor", "control").is_ok() {
+                self.requested_compositor = true;
+            }
+        }
     }
 
     /// Handle registry control messages and update subscriptions.
     pub fn handle_registry_message(&mut self, msg: &Message, payload: &[u8]) {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             match event {
-                registry::RegistryEvent::Grant { service_name: _, name, token } => {
-                    if name == "control" {
+                registry::RegistryEvent::Grant { service_name, name, token } => {
+                    if service_name == "compositor" && name == "control" {
+                        self.compositor_control = token;
+                        let _ = debug_print("vtmgr: compositor control subscribed");
+                    } else if name == "control" {
+                        // console:0 control endpoint
                         self.console_endpoint = token;
                         let _ = debug_print("vtmgr: console control subscribed");
                     } else if name == "spawn" {
@@ -105,6 +123,7 @@ impl VtmgrContext {
                     if code != 0 {
                         self.requested_console = false;
                         self.requested_procmgr_spawn = false;
+                        self.requested_compositor = false;
                     }
                 }
             }
@@ -113,30 +132,72 @@ impl VtmgrContext {
 
     /// Switch to a different virtual terminal.
     ///
-    /// If the target VT doesn't exist yet, creates it in console and spawns
-    /// a vt:N container via procmgr.
+    /// VT4 is the compositor. VTs 0-3 are console-backed. On each switch,
+    /// vtmgr deactivates the old owner and activates the new one so only
+    /// one fb writer is live at a time.
     pub fn switch_vt(&mut self, new_vt: usize) {
         if new_vt >= VT_COUNT || new_vt == self.active_vt {
             return;
         }
 
-        // Create VT buffer in console if not yet done.
-        let vt_bit = 1u8 << new_vt;
-        if (self.vt_created & vt_bit) == 0 {
-            self.create_vt(new_vt);
-        }
-
-        // Spawn vt:N container if not yet done.
-        if (self.vt_spawned & vt_bit) == 0 {
-            self.spawn_vt_container(new_vt);
-        }
-
         let old = self.active_vt;
+        let old_is_compositor = old == 4;
+        let new_is_compositor = new_vt == 4;
 
-        // Atomic VT switch: single message, no intermediate state.
-        if self.console_endpoint != 0 {
-            let msg = Message::new(CONSOLE_SWITCH_VT_LABEL, [old, new_vt, 0, 0, 0, 0], 2);
-            let _ = send(self.console_endpoint, &msg, IpcFlags::empty());
+        if old_is_compositor && !new_is_compositor {
+            // Compositor → Console: deactivate compositor, reactivate console.
+            if self.compositor_control != 0 {
+                let msg = Message::new(
+                    COMP_VT_DEACTIVATE_LABEL,
+                    [0; 6], 0,
+                );
+                let _ = send(self.compositor_control, &msg, IpcFlags::empty());
+            }
+            if self.console_endpoint != 0 {
+                // Reactivate console at the requested VT index.
+                let act = Message::new(
+                    CONSOLE_ACTIVATE_LABEL,
+                    [new_vt, 0, 0, 0, 0, 0], 1,
+                );
+                let _ = send(self.console_endpoint, &act, IpcFlags::empty());
+                let sw = Message::new(
+                    CONSOLE_SWITCH_VT_LABEL,
+                    [old, new_vt, 0, 0, 0, 0], 2,
+                );
+                let _ = send(self.console_endpoint, &sw, IpcFlags::empty());
+            }
+        } else if !old_is_compositor && new_is_compositor {
+            // Console → Compositor: deactivate console, activate compositor.
+            if self.console_endpoint != 0 {
+                let de = Message::new(
+                    CONSOLE_DEACTIVATE_LABEL,
+                    [old, 0, 0, 0, 0, 0], 1,
+                );
+                let _ = send(self.console_endpoint, &de, IpcFlags::empty());
+            }
+            if self.compositor_control != 0 {
+                let msg = Message::new(
+                    COMP_VT_ACTIVATE_LABEL,
+                    [0; 6], 0,
+                );
+                let _ = send(self.compositor_control, &msg, IpcFlags::empty());
+            }
+        } else {
+            // Console ↔ Console: create + spawn VT if needed, then switch.
+            let vt_bit = 1u8 << new_vt;
+            if (self.vt_created & vt_bit) == 0 {
+                self.create_vt(new_vt);
+            }
+            if (self.vt_spawned & vt_bit) == 0 {
+                self.spawn_vt_container(new_vt);
+            }
+            if self.console_endpoint != 0 {
+                let msg = Message::new(
+                    CONSOLE_SWITCH_VT_LABEL,
+                    [old, new_vt, 0, 0, 0, 0], 2,
+                );
+                let _ = send(self.console_endpoint, &msg, IpcFlags::empty());
+            }
         }
 
         self.active_vt = new_vt;

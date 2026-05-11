@@ -93,12 +93,13 @@ impl ScancodeDecoder {
             return None;
         }
         let code = scancode & 0x7F;
-        // Set-1 scancodes: F1=0x3B, F2=0x3C, F3=0x3D, F4=0x3E
+        // Set-1 scancodes: F1=0x3B, F2=0x3C, F3=0x3D, F4=0x3E, F5=0x3F
         match code {
             0x3B => Some(0),
             0x3C => Some(1),
             0x3D => Some(2),
             0x3E => Some(3),
+            0x3F => Some(4),    // F5 → VT4 (compositor)
             _ => None,
         }
     }

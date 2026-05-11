@@ -59,9 +59,8 @@ pub extern "C" fn main() -> i32 {
     let _ = debug_print("compositor: endpoints registered");
     let _ = debug_print("compositor: ready");
 
-    // v1: self-activate since vtmgr doesn't know about compositor yet.
-    // T25 routes kbd events to us; vt-switch wiring is deferred.
-    comp.handle_vt_activate();
+    // vtmgr owns fb arbitration: compositor starts inactive and waits
+    // for COMP_VT_ACTIVATE_LABEL from vtmgr (Ctrl+Alt+F5).
 
     let tokens = [
         comp.client_endpoint,
