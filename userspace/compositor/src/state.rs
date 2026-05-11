@@ -190,14 +190,14 @@ impl Compositor {
     /// Granted dims are clamped to the screen minus row 0 (status bar).
     /// `owner_pid` is the authenticated sender's tid (CLUU does not yet
     /// distinguish tid from pid for one-thread apps).
-    /// `reply_endpoint` is where keystrokes will be forwarded.
+    /// `input_endpoint` is the app's long-lived endpoint for FRAME_READY and INPUT_FORWARD.
     pub fn handle_win_register(
         &mut self,
         owner_pid: u32,
         req_w: u32,
         req_h: u32,
         title: &str,
-        reply_endpoint: usize,
+        input_endpoint: usize,
     ) -> Result<(WindowId, u64, u32, u32)> {
         let granted_w = (req_w as u16).min(self.cols);
         let granted_h = (req_h as u16).min(self.rows.saturating_sub(1));
@@ -261,7 +261,7 @@ impl Compositor {
             shm_token: token,
             shm_size: allocated,
             last_gen: 0,
-            input_endpoint: reply_endpoint,
+            input_endpoint,
         });
         self.focused = Some(id);
         // Mark all the window's cells dirty so the (eventual) compose pass

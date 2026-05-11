@@ -11,9 +11,26 @@ mod hotkeys;
 mod status;
 
 use libcluu::boot::{process_info, TOKEN_IPC};
-use libcluu::ipc::{extract_reply_id, reply, COMP_WIN_REGISTER_REPLY};
+use libcluu::ipc::{
+    extract_reply_id, reply, COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL,
+};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
+
+/// Send COMP_FRAME_READY_LABEL to every window's input_endpoint after a flush.
+/// Apps block on their endpoint waiting for this signal, then render the next frame.
+/// Windows with input_endpoint == 0 (legacy / no endpoint) are skipped silently.
+fn broadcast_frame_ready(comp: &state::Compositor) {
+    for win in comp.windows.iter() {
+        if win.input_endpoint == 0 { continue; }
+        let msg = libcluu::types::Message::new(
+            COMP_FRAME_READY_LABEL,
+            [win.id as usize, 0, 0, 0, 0, 0],
+            1,
+        );
+        let _ = libcluu::ipc::send(win.input_endpoint, &msg, libcluu::types::IpcFlags::empty());
+    }
+}
 
 /// Query the timeserver for monotonic seconds, caching the endpoint after the
 /// first successful lookup so repeated calls never hit the registry.
@@ -107,7 +124,7 @@ pub extern "C" fn main() -> i32 {
                     }
                     let kind = protocol::parse(&msg);
                     match kind {
-                        protocol::Incoming::WinRegister { req_w, req_h, title_len } => {
+                        protocol::Incoming::WinRegister { req_w, req_h, title_len, input_endpoint } => {
                             let title_len_usize = (title_len as usize).min(payload.len());
                             let title_bytes = &payload[..title_len_usize];
                             let title = core::str::from_utf8(title_bytes).unwrap_or("");
@@ -122,7 +139,7 @@ pub extern "C" fn main() -> i32 {
                                 req_w,
                                 req_h,
                                 title,
-                                reply_token,
+                                input_endpoint,
                             ) {
                                 Ok((id, token, gw, gh)) => {
                                     let reply_msg = Message::new(
@@ -135,6 +152,21 @@ pub extern "C" fn main() -> i32 {
                                         &reply_msg,
                                         IpcFlags::empty(),
                                     );
+                                    // Send a synthetic FRAME_READY so the app can
+                                    // render its first frame without deadlocking
+                                    // (it blocks on FRAME_READY before its first DAMAGE).
+                                    if input_endpoint != 0 {
+                                        let fr_msg = Message::new(
+                                            COMP_FRAME_READY_LABEL,
+                                            [id as usize, 0, 0, 0, 0, 0],
+                                            1,
+                                        );
+                                        let _ = libcluu::ipc::send(
+                                            input_endpoint,
+                                            &fr_msg,
+                                            IpcFlags::empty(),
+                                        );
+                                    }
                                     let _ = debug_print("compositor: window registered");
                                 }
                                 Err(_) => {
@@ -219,6 +251,7 @@ pub extern "C" fn main() -> i32 {
                     if comp.active {
                         comp.flush_grid_to_backbuf();
                         comp.flush_backbuf_to_fb();
+                        broadcast_frame_ready(&comp);
                     }
                 }
             }
@@ -232,6 +265,7 @@ pub extern "C" fn main() -> i32 {
                         if comp.active {
                             comp.flush_grid_to_backbuf();
                             comp.flush_backbuf_to_fb();
+                            broadcast_frame_ready(&comp);
                         }
                     }
                 }
