@@ -40,6 +40,12 @@ HARNESS_CLEAN_REBUILD="${HARNESS_CLEAN_REBUILD:-0}"
 RUN_WAIT="${RUN_WAIT:-12}"
 POST_SENDKEY="${POST_SENDKEY:-}"
 POST_SENDKEY_DELAY="${POST_SENDKEY_DELAY:-1}"
+# Multi-step raw-monitor sendkey sequence (newline-separated).
+# Each line is either "sendkey <name>" or "sleep <n>" (integer seconds).
+# Processed in order after POST_SENDKEY. Set via SENDKEY_SEQUENCE or
+# SENDKEY_SEQUENCE_DEFAULT (the latter is set by harness_case_defaults.sh).
+SENDKEY_SEQUENCE="${SENDKEY_SEQUENCE:-}"
+SENDKEY_SEQUENCE_DEFAULT=""
 TEST_COMMAND_WAS_UNSET=0
 # Preserve explicit empty TEST_COMMAND; only auto-fill when it is truly unset.
 if [ -z "${TEST_COMMAND+x}" ]; then
@@ -92,6 +98,9 @@ if [ -z "${CLUU_SHELL_AUTOSTART_CMD:-}" ]; then
 fi
 if [ -n "$POST_SENDKEY_DEFAULT" ] && [ -z "$POST_SENDKEY" ]; then
     POST_SENDKEY="$POST_SENDKEY_DEFAULT"
+fi
+if [ -n "$SENDKEY_SEQUENCE_DEFAULT" ] && [ -z "$SENDKEY_SEQUENCE" ]; then
+    SENDKEY_SEQUENCE="$SENDKEY_SEQUENCE_DEFAULT"
 fi
 REQUIRED_MARKERS="${REQUIRED_MARKERS:-}"
 MIN_EXIT_COOKIES="${MIN_EXIT_COOKIES:-3}"
@@ -424,7 +433,7 @@ wait_for_shell_ready() {
     return 1
 }
 
-if [ "${#TYPED_COMMANDS[@]}" -gt 0 ] || [ -n "$POST_SENDKEY" ]; then
+if [ "${#TYPED_COMMANDS[@]}" -gt 0 ] || [ -n "$POST_SENDKEY" ] || [ -n "$SENDKEY_SEQUENCE" ]; then
     echo "Waiting up to ${SHELL_READY_WAIT}s for shell readiness marker..."
     if ! wait_for_shell_ready; then
         echo "ERROR: shell readiness marker not observed within ${SHELL_READY_WAIT}s"
@@ -541,6 +550,32 @@ if [ -n "$POST_SENDKEY" ]; then
     echo "Sending post key: '$POST_SENDKEY'"
     queue_key "$POST_SENDKEY"
     flush_fast_batch
+fi
+
+# SENDKEY_SEQUENCE: newline-separated list of "sendkey <name>" or "sleep <n>".
+# Executed in order after POST_SENDKEY. Used by compositor harness modes that
+# need to inject multiple raw monitor commands (e.g., Ctrl+Alt+F5 then F1).
+if [ -n "$SENDKEY_SEQUENCE" ]; then
+    echo "Executing SENDKEY_SEQUENCE..."
+    while IFS= read -r seq_line || [ -n "$seq_line" ]; do
+        seq_line="${seq_line%$'\r'}"
+        [ -z "$seq_line" ] && continue
+        case "$seq_line" in
+            sendkey\ *)
+                local_key="${seq_line#sendkey }"
+                echo "  sendkey $local_key"
+                send_key "$local_key"
+                ;;
+            sleep\ *)
+                local_secs="${seq_line#sleep }"
+                echo "  sleep $local_secs"
+                sleep "$local_secs"
+                ;;
+            *)
+                echo "  WARN: unknown SENDKEY_SEQUENCE line: $seq_line"
+                ;;
+        esac
+    done <<< "$SENDKEY_SEQUENCE"
 fi
 
 # --- Step 6: Wait for the test to run (streaming, deferred) ---
@@ -1623,6 +1658,44 @@ case "$MARKER_MODE" in
             "find: ok (exit 0)"
         )
         ;;
+    l2_compositor_smoke)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "compositor: ready"
+            "compositor: window registered"
+        )
+        ;;
+    l2_compositor_focus)
+        required_markers=(
+            "TSC calibrated"
+            "compositor: window registered"
+            "compositor: focus -> "
+        )
+        ;;
+    l2_compositor_destroy)
+        required_markers=(
+            "TSC calibrated"
+            "compositor: window registered"
+            "compositor: window destroyed"
+        )
+        ;;
+    l2_compositor_legacy_vt)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "vtmgr: vt switch 0 -> 4"
+            "compositor: VT activate"
+            "vtmgr: vt switch 4 -> 0"
+        )
+        ;;
+    b_compositor_blit)
+        required_markers=(
+            "TSC calibrated"
+            "compositor: VT activate"
+            "BENCH_COMP_BLIT: cycles_per_frame="
+        )
+        ;;
     none)
         required_markers=()
         ;;
@@ -2111,6 +2184,26 @@ if [ "$MARKER_MODE" = "b_console_blit" ]; then
         echo "HARNESS fb_blit_wc_ratchet_max=${ratchet_max} actual=${blit_cycles} OK"
     else
         echo "HARNESS fb_blit_wc_cycles=${blit_cycles} (no ratchet limit set)"
+    fi
+fi
+
+if [ "$MARKER_MODE" = "b_compositor_blit" ]; then
+    comp_cycles="$(grep -ao 'BENCH_COMP_BLIT: cycles_per_frame=[0-9]*' "$SERIAL_LOG" \
+        | tail -1 \
+        | sed 's/.*cycles_per_frame=//')"
+    if [ -z "$comp_cycles" ]; then
+        echo "MISSING: could not parse BENCH_COMP_BLIT cycles_per_frame"
+        echo "*** REQUIRED SUCCESS MARKERS MISSING ***"
+        exit 1
+    fi
+    echo "HARNESS compositor_blit_cycles=${comp_cycles}" >> "$SERIAL_LOG"
+    ratchet_max="$(grep -ao '"compositor_blit_max_cycles":[[:space:]]*[0-9]*' scripts/perf_ratchet.json \
+        | grep -ao '[0-9]*$' || true)"
+    if [ -n "$ratchet_max" ]; then
+        check_metric_limit "$comp_cycles" "$ratchet_max" "compositor_blit_cycles"
+        echo "HARNESS compositor_blit_ratchet_max=${ratchet_max} actual=${comp_cycles} OK"
+    else
+        echo "HARNESS compositor_blit_cycles=${comp_cycles} (no ratchet limit set)"
     fi
 fi
 

@@ -632,6 +632,34 @@ harness_derive_marker_defaults() {
                 SHELL_AUTOSTART_CMD_DEFAULT="mkdir -p /tmp/f; touch /tmp/f/a.txt; find /tmp/f -name '*.txt'"
                 EXPECTED_CONTAINS=("/tmp/f/a.txt")
                 ;;
+            l2_compositor_smoke)
+                TEST_COMMAND=""
+                # No TEST_COMMAND needed — compositor + compdemo autostart from
+                # etc/autostart.toml at boot; markers fire without shell command.
+                ;;
+            l2_compositor_focus)
+                TEST_COMMAND=""
+                # Two compdemos autostart (second entry in autostart.toml); the
+                # harness injects Alt+Tab via SENDKEY_SEQUENCE_DEFAULT to trigger
+                # focus_next and emit "compositor: focus -> ".
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey alt-tab'
+                ;;
+            l2_compositor_destroy)
+                TEST_COMMAND=""
+                # compositor + compdemo autostart; harness injects Ctrl+Alt+N
+                # (spawn second) then Ctrl+Alt+Q (close-request → WIN_DESTROY).
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-q'
+                ;;
+            l2_compositor_legacy_vt)
+                TEST_COMMAND=""
+                # Switch to compositor VT (Ctrl+Alt+F5), then back (Ctrl+Alt+F1).
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-f5\nsleep 3\nsendkey ctrl-alt-f1'
+                ;;
+            b_compositor_blit)
+                TEST_COMMAND=""
+                # Switch to compositor VT so tick_frame runs; bench fires after 100 frames.
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-f5'
+                ;;
             legacy_p1)
                 TEST_COMMAND="minimal"
                 SHELL_AUTOSTART_CMD_DEFAULT="minimal"
