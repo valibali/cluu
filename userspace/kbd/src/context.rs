@@ -20,7 +20,13 @@ use libcluu::{debug_print, irq_attach, yield_cpu, Error, Result};
 
 const KEYBOARD_IRQ: usize = 1;
 /// Number of virtual terminals supported.
-pub const VT_COUNT: usize = 4;
+/// Total VT slots kbd can route input to. Slots 0..=3 are console-owned and
+/// have a `tty:N` registry entry; slot 4 is compositor-owned (no tty) and is
+/// reached via `compositor:input` instead. Bumped from 4 → 5 for compositor.
+pub const VT_COUNT: usize = 5;
+/// Highest VT index that has an associated `tty:N`. Kept separate so the
+/// tty-subscription loop doesn't chase a non-existent `tty:4`.
+pub const TTY_VT_COUNT: usize = 4;
 
 /// Shared state for the keyboard service runtime.
 pub struct KbdContext {
@@ -120,7 +126,8 @@ impl KbdContext {
         }
 
         // Subscribe to any additional VT ttys that may have been spawned.
-        for i in 1..VT_COUNT {
+        // Skip slot 4 (compositor-owned, no tty).
+        for i in 1..TTY_VT_COUNT {
             self.try_subscribe_tty(i);
         }
     }
@@ -146,7 +153,7 @@ impl KbdContext {
                     if name == "main" {
                         // tty grant — use service name to determine VT index.
                         if let Some(idx) = parse_tty_index(&service_name) {
-                            if idx < VT_COUNT {
+                            if idx < TTY_VT_COUNT {
                                 self.tty_endpoints[idx] = token;
                                 let _ = debug_print(&format!("kbd: tty:{} subscribed", idx));
                             }

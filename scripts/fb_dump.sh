@@ -62,8 +62,11 @@ if [ ! -S "$MONITOR_SOCK" ]; then
     exit 2
 fi
 
-if ! command -v socat >/dev/null 2>&1; then
-    echo "fb_dump: socat not found; install it (apt install socat)" >&2
+SOCAT_OK=0
+if command -v socat >/dev/null 2>&1; then
+    SOCAT_OK=1
+elif ! command -v nc >/dev/null 2>&1; then
+    echo "fb_dump: neither socat nor nc found; install one (apt install socat)" >&2
     exit 3
 fi
 
@@ -76,10 +79,15 @@ SIZE_DEC=$(printf '%d' "$SIZE")
 
 # pmemsave addr size filename — filename is from the QEMU process's perspective.
 # QEMU monitor protocol: send command, read greeting+response, then disconnect.
-{
-    printf 'pmemsave %s %s "%s"\n' "$PHYS" "$SIZE_DEC" "$BIN"
-    sleep 0.2
-} | socat - "UNIX-CONNECT:$MONITOR_SOCK" >/dev/null 2>&1 || true
+if [ "$SOCAT_OK" = "1" ]; then
+    {
+        printf 'pmemsave %s %s "%s"\n' "$PHYS" "$SIZE_DEC" "$BIN"
+        sleep 0.2
+    } | socat - "UNIX-CONNECT:$MONITOR_SOCK" >/dev/null 2>&1 || true
+else
+    printf 'pmemsave %s %s "%s"\n' "$PHYS" "$SIZE_DEC" "$BIN" \
+        | nc -U -q0 "$MONITOR_SOCK" >/dev/null 2>&1 || true
+fi
 
 # Wait briefly for QEMU to flush the file.
 for _ in 1 2 3 4 5; do
