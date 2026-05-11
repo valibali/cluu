@@ -2278,6 +2278,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/tr",
         "userspace/find",
         "userspace/du",
+        "userspace/login",
         "userspace/stat",
     ];
 

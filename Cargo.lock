@@ -386,6 +386,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-login"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-ls"
 version = "0.1.0"
 dependencies = [

@@ -83,6 +83,7 @@ members = [
     "userspace/tr",
     "userspace/find",
     "userspace/du",
+    "userspace/login",
     "userspace/stat",
 
     # Language tooling
@@ -142,6 +143,7 @@ default-members = [
     "userspace/tr",
     "userspace/find",
     "userspace/du",
+    "userspace/login",
     "userspace/stat",
 ]
 
@@ -247,6 +249,9 @@ debug = 0
 debug = 0
 
 [profile.dev.package."cluu-edit"]
+debug = 0
+
+[profile.dev.package."cluu-login"]
 debug = 0
 
 [profile.dev.package."cluu-mkdir"]
@@ -445,6 +450,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-edit"]
+debug = 0
+
+[profile.release.package."cluu-login"]
 debug = 0
 
 [profile.release.package."cluu-mkdir"]
