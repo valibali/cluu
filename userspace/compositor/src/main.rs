@@ -9,6 +9,8 @@ mod protocol;
 mod compose;
 mod hotkeys;
 mod status;
+mod window_mgr;
+mod render;
 
 use libcluu::boot::{process_info, TOKEN_IPC};
 use libcluu::ipc::{
