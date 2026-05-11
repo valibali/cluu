@@ -14,6 +14,14 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// Opaque identifier for a compositor-managed window.
+///
+/// Assigned monotonically from `Compositor::next_id` and returned to the
+/// registering client in the `WIN_REGISTER_REPLY` message. Clients use it
+/// as an argument in `WIN_DAMAGE`, `WIN_DESTROY`, and `WIN_SET_TITLE`.
+///
+/// Note: still a plain `u64` alias — a newtype refactor is deferred (T52-A)
+/// because the churn-to-value ratio is low relative to the current codebase size.
 pub type WindowId = u64;
 
 /// Axis-aligned pixel rectangle used to track the dirty region of the
@@ -52,6 +60,8 @@ pub struct Deadlines {
 }
 
 impl Deadlines {
+    /// Create a `Deadlines` with the clock task armed immediately (fires on
+    /// first event-loop iteration) and the frame task parked at `u64::MAX`.
     pub const fn new() -> Self {
         Self {
             next_frame_ms: u64::MAX,
@@ -125,49 +135,85 @@ impl ShmMapping {
     }
 }
 
-/// Compositor's view of one tenant window.
+/// Compositor's view of one registered tenant window.
+///
+/// Created by `handle_win_register`, destroyed by `handle_win_destroy`.
+/// Stored in `Compositor::windows` in z-order (last = top).
 pub struct Window {
+    /// Unique opaque identifier for this window.
     pub id: WindowId,
+    /// TID of the registering thread (used as a pid surrogate until
+    /// a real pid-from-tid lookup API exists — spec §10).
     pub owner_pid: u32,
+    /// Window title shown in the top chrome row.  At most 31 bytes.
     pub title: String,
+    /// Top-left cell position in the compositor grid (column, row).
     pub x: u16,
     pub y: u16,
+    /// Total window size in cells, *including* the 1-cell chrome border.
     pub w: u16,
     pub h: u16,
     /// Shared-memory mapping for this window's cell buffer.
     pub mapping: ShmMapping,
+    /// Frame token handle used to unmap the SHM on destroy.
     pub shm_token: u64,
+    /// Last observed `WindowShm::generation` (used to detect stale frames).
     pub last_gen: u32,
+    /// Client endpoint for FRAME_READY + INPUT_FORWARD signals.
+    /// 0 = legacy window that does not use the frame-callback protocol.
     pub input_endpoint: usize,
 }
 
-/// Long-lived compositor state. Single instance per process.
+/// Long-lived compositor state.  Single instance per process, owned by `main`.
+///
+/// Initialised by `Compositor::init` (opens `/dev/fb0`, sets up buffers and
+/// palette).  All other fields are populated by `main` after registry init.
+///
+/// Methods are split across `window_mgr` (window lifecycle + input) and
+/// `render` (glyph blit, flush, frame/clock timing).
 pub struct Compositor {
+    /// Write-combined mapping of the hardware framebuffer (via `/dev/fb0` mmap).
     pub fb_ptr: *mut u8,
+    /// Physical base address of the framebuffer (from /dev/fb0 header, for debug).
     pub fb_phys: u64,
+    /// Total byte length of the fb mapping.
     pub fb_size: usize,
+    /// Screen dimensions in pixels.
     pub width_px: u32,
     pub height_px: u32,
+    /// Framebuffer row pitch in *bytes* (may differ from `width_px * 4`).
     pub pitch: u32,
 
+    /// Screen dimensions in cell units.
     pub cols: u16,
     pub rows: u16,
+    /// Current composed cell grid (cols×rows packed u64 cells).
     pub cell_grid: Vec<u64>,
+    /// Shadow copy of the last-flushed grid; used to skip unchanged cells.
     pub prev_cell_grid: Vec<u64>,
+    /// Cells marked dirty since the last compose pass; drained by `recompute_dirty`.
     pub cell_dirty: Vec<(u16, u16)>,
 
+    /// xterm-256 ARGB palette; index = colour number from cell fg/bg fields.
     pub palette: [u32; 256],
+    /// Software backbuffer (width_px×height_px u32 ARGB).  Written by
+    /// `flush_grid_to_backbuf`; pushed to `fb_ptr` by `flush_backbuf_to_fb`.
     pub backbuf: Vec<u32>,
 
     /// Pixel-level bounding box of cells blitted since the last fb flush.
     /// `None` means nothing was redrawn; `flush_backbuf_to_fb` is a no-op.
     pub dirty_rect: Option<PixelRect>,
 
+    /// Window list in z-order; last entry is the topmost (focused) window.
     pub windows: Vec<Window>,
+    /// `WindowId` of the currently focused window, or `None` if no windows exist.
     pub focused: Option<WindowId>,
+    /// `true` while the compositor's VT is the active VT; `false` when hidden.
     pub active: bool,
+    /// Monotonically increasing counter used to assign `WindowId`s.
     pub next_id: u64,
 
+    /// Monotonic seconds from boot, refreshed by `tick_clock` each second.
     pub clock_seconds: u64,
 
     /// Monotonic millisecond timestamp of the last flush+broadcast.
@@ -178,10 +224,15 @@ pub struct Compositor {
     pub deadlines: Deadlines,
 
     // Registry + IPC endpoints — filled in by main after registry::init().
+    /// Instance number (currently always 0; reserved for multi-compositor).
     pub instance_id: u64,
+    /// Endpoint for `WIN_REGISTER`, `WIN_DAMAGE`, `WIN_DESTROY`, etc.
     pub client_endpoint: usize,
+    /// Global input endpoint (kbd driver sends raw key events here).
     pub input_endpoint_global: usize,
+    /// Control endpoint for VT activate/deactivate signals from vtmgr.
     pub control_endpoint: usize,
+    /// Registry endpoint for forwarding grant-request control messages.
     pub registry_endpoint: usize,
 }
 
