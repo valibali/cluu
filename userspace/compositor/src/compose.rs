@@ -6,7 +6,7 @@
 //! left 1, right 1) we emit arc corner or bar glyphs. Inside the interior
 //! we read the cell from the window's SHM region.
 
-use crate::state::{Compositor, Window, WindowShm, WIN_SHM_MAGIC};
+use crate::state::{Compositor, Window};
 
 const CHROME_TOP: u16 = 1;
 const CHROME_BOTTOM: u16 = 1;
@@ -177,26 +177,5 @@ pub fn render_status_row(comp: &mut Compositor) {
 }
 
 fn read_shm_cell(win: &Window, ix: u16, iy: u16) -> u64 {
-    if win.shm_va.is_null() {
-        return BG_CELL;
-    }
-    unsafe {
-        let hdr = win.shm_va as *const WindowShm;
-        let magic = (*hdr).magic;
-        if magic != WIN_SHM_MAGIC {
-            return BG_CELL;
-        }
-        let inner_w = (*hdr).width as u16;
-        if ix >= inner_w {
-            return BG_CELL;
-        }
-        let inner_h = (*hdr).height as u16;
-        if iy >= inner_h {
-            return BG_CELL;
-        }
-        let header_bytes = core::mem::size_of::<WindowShm>();
-        let cells_ptr = (win.shm_va as usize + header_bytes) as *const u64;
-        let off = iy as usize * inner_w as usize + ix as usize;
-        core::ptr::read_volatile(cells_ptr.add(off))
-    }
+    win.mapping.read_cell(ix, iy).unwrap_or(BG_CELL)
 }

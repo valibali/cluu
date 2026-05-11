@@ -2,7 +2,7 @@
 //!
 //! All methods are `impl Compositor` blocks; the type itself lives in `state`.
 
-use crate::state::{Compositor, Window, WindowId, WindowShm, WIN_SHM_MAGIC, WIN_SHM_VERSION};
+use crate::state::{Compositor, ShmMapping, Window, WindowId, WindowShm, WIN_SHM_MAGIC, WIN_SHM_VERSION};
 use libcluu::Result;
 
 impl Compositor {
@@ -43,8 +43,13 @@ impl Compositor {
         let va = va_base + (id as usize) * 0x40_0000;
         crate::shm::map_frame_rw(va, token, allocated)?;
 
+        // Build the ShmMapping before we initialise the header — we need
+        // as_ptr() to write the WindowShm fields.
+        let mapping = ShmMapping::new(va, allocated)
+            .ok_or(libcluu::Error::InvalidArgument)?;
+
         unsafe {
-            let hdr = va as *mut WindowShm;
+            let hdr = mapping.as_ptr() as *mut WindowShm;
             (*hdr).magic = WIN_SHM_MAGIC;
             (*hdr).version = WIN_SHM_VERSION;
             (*hdr).width = granted_w as u32;
@@ -54,7 +59,7 @@ impl Compositor {
             (*hdr).cursor_visible = 0;
             (*hdr).generation = 0;
             // Zero cell area
-            let cells_ptr = (va + header_bytes) as *mut u8;
+            let cells_ptr = mapping.as_ptr().add(header_bytes);
             core::ptr::write_bytes(cells_ptr, 0, cells_bytes);
         }
 
@@ -79,9 +84,8 @@ impl Compositor {
             y,
             w: granted_w,
             h: granted_h,
-            shm_va: va as *mut u8,
+            mapping,
             shm_token: token,
-            shm_size: allocated,
             last_gen: 0,
             input_endpoint,
         });

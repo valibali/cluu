@@ -69,6 +69,62 @@ impl Deadlines {
 
 pub use libcluu::window_shm::{WindowShm, WIN_SHM_MAGIC, WIN_SHM_VERSION};
 
+/// A mapped SHM region shared between the compositor and one window client.
+///
+/// Wraps the raw `*mut u8` pointer so that all unsafe pointer arithmetic is
+/// centralised here. Callers use the safe `header()` and `read_cell()`
+/// accessors instead of scattering `unsafe` blocks across the codebase.
+pub struct ShmMapping {
+    ptr: core::ptr::NonNull<u8>,
+    pub size: usize,
+}
+
+impl ShmMapping {
+    /// Construct from a raw virtual address + size.
+    ///
+    /// Returns `None` if `va == 0` (null pointer would be unsound).
+    pub fn new(va: usize, size: usize) -> Option<Self> {
+        core::ptr::NonNull::new(va as *mut u8).map(|ptr| Self { ptr, size })
+    }
+
+    /// Raw pointer to byte 0 of the mapping.
+    ///
+    /// Exposed for the kernel/syscall call-site in `window_mgr::handle_win_register`
+    /// that initialises the WindowShm header immediately after mapping.
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+
+    /// Read-only reference to the `WindowShm` header at the base of the mapping.
+    ///
+    /// SAFETY: the mapping was established by `shm::map_frame_rw` with a size
+    /// that includes at least `size_of::<WindowShm>()` bytes, and the region
+    /// is never unmapped for the lifetime of this `ShmMapping`.
+    pub fn header(&self) -> &WindowShm {
+        unsafe { &*(self.ptr.as_ptr() as *const WindowShm) }
+    }
+
+    /// Read one packed cell at `(ix, iy)` from the cell array following the header.
+    ///
+    /// Returns `None` if the magic check fails or the coordinates are out of
+    /// the bounds advertised in the header.
+    pub fn read_cell(&self, ix: u16, iy: u16) -> Option<u64> {
+        let hdr = self.header();
+        if hdr.magic != WIN_SHM_MAGIC {
+            return None;
+        }
+        let inner_w = hdr.width as u16;
+        let inner_h = hdr.height as u16;
+        if ix >= inner_w || iy >= inner_h {
+            return None;
+        }
+        let header_size = core::mem::size_of::<WindowShm>();
+        let cells_ptr = unsafe { self.ptr.as_ptr().add(header_size) as *const u64 };
+        let off = iy as usize * inner_w as usize + ix as usize;
+        Some(unsafe { core::ptr::read_volatile(cells_ptr.add(off)) })
+    }
+}
+
 /// Compositor's view of one tenant window.
 pub struct Window {
     pub id: WindowId,
@@ -78,9 +134,9 @@ pub struct Window {
     pub y: u16,
     pub w: u16,
     pub h: u16,
-    pub shm_va: *mut u8,
+    /// Shared-memory mapping for this window's cell buffer.
+    pub mapping: ShmMapping,
     pub shm_token: u64,
-    pub shm_size: usize,
     pub last_gen: u32,
     pub input_endpoint: usize,
 }
