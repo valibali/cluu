@@ -83,6 +83,16 @@ pub struct DeviceFile {
     pub path: String,
 }
 
+/// A pseudo-terminal slave file handle.
+#[derive(Clone)]
+pub struct PtsFile {
+    /// The pts id (matches the number in `/dev/pts/<id>`).
+    pub pts_id: u32,
+    /// Full path, e.g. `/dev/pts/5`.
+    #[allow(dead_code)]
+    pub path: String,
+}
+
 /// Open file handle.
 #[derive(Clone)]
 pub enum OpenFile {
@@ -96,6 +106,8 @@ pub enum OpenFile {
     Device(DeviceFile),
     /// In-memory filesystem file (per-container tmpfs)
     MemFs(MemFsEntry),
+    /// Pseudo-terminal slave (`/dev/pts/<id>`).
+    Pts(PtsFile),
 }
 
 impl OpenFile {
@@ -106,6 +118,7 @@ impl OpenFile {
             OpenFile::Virtual(v) => v.data.len(),
             OpenFile::Device(_) => 0,
             OpenFile::MemFs(e) => e.size,
+            OpenFile::Pts(_) => 0,
         }
     }
 
@@ -118,6 +131,7 @@ impl OpenFile {
             OpenFile::Memory(_) => None,
             OpenFile::Device(d) => Some(d.path.as_str()),
             OpenFile::MemFs(_) => None,
+            OpenFile::Pts(_) => Some("/dev/pts"),
         }
     }
 }

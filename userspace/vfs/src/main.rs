@@ -19,7 +19,10 @@ use libcluu::fs::protocol::{
     VFS_BOUNCE_SETUP, VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT,
     VFS_UNLINK, VFS_WRITE,
 };
-use libcluu::ipc::{self, extract_reply_id, parse_message, reply_with_payload, SharedRing, SharedRingHeader};
+use libcluu::ipc::{
+    self, extract_reply_id, parse_message, reply_with_payload, SharedRing, SharedRingHeader,
+    PTS_REGISTER_LABEL, PTS_UNREGISTER_LABEL, PTS_CLOSED_LABEL,
+};
 use libcluu::types::Message;
 use libcluu::*;
 
@@ -28,6 +31,7 @@ mod fd_table;
 pub mod memfs;
 mod mount;
 mod procfs;
+mod pts;
 mod view;
 
 use fd_table::{FdTable, OpenFile};
@@ -624,6 +628,9 @@ struct VfsServer {
     /// out. One outstanding RPC per client (sync IPC), so overwrite-on-reply
     /// is safe.
     bounce_pool: bulk_pool::BulkPool,
+    /// Registry of live `/dev/pts/<id>` pseudo-terminal slaves.
+    /// Heap-allocated so the address is stable for the `PtsBackend` raw pointer.
+    pts_registry: alloc::boxed::Box<pts::PtsRegistry>,
 }
 
 impl VfsServer {
@@ -641,7 +648,7 @@ impl VfsServer {
         ring_pool_size: usize,
         bounce_pool_base: usize,
         bounce_pool_size: usize,
-        mounts: MountTable,
+        mut mounts: MountTable,
     ) -> Self {
         let mut free_ring_slots = Vec::new();
         let ring_slots = ring_pool_size / RING_SLOT_BYTES;
@@ -652,6 +659,16 @@ impl VfsServer {
 
         let bounce_slots = bounce_pool_size / BOUNCE_SLOT_BYTES;
         let bounce_pool = bulk_pool::BulkPool::new(bounce_pool_base, BOUNCE_SLOT_BYTES, bounce_slots);
+
+        // Allocate the PTS registry on the heap so its address is stable for
+        // the duration of the VFS service.  The raw pointer is passed to
+        // PtsBackend; it remains valid because pts_registry lives in Self.
+        let pts_registry = alloc::boxed::Box::new(pts::PtsRegistry::new());
+        let pts_reg_ptr: *const pts::PtsRegistry = &*pts_registry;
+        mounts.mount(
+            "/dev/pts",
+            alloc::boxed::Box::new(pts::PtsBackend::new(pts_reg_ptr)),
+        );
 
         Self {
             endpoint,
@@ -672,6 +689,7 @@ impl VfsServer {
             client_containers: BTreeMap::new(),
             container_memfs: BTreeMap::new(),
             bounce_pool,
+            pts_registry,
         }
     }
 
@@ -697,6 +715,13 @@ impl VfsServer {
         }
         if msg.tag.label == libcluu::fs::protocol::VFS_FLUSH {
             return self.handle_flush();
+        }
+        // PTS control messages.
+        if msg.tag.label == PTS_REGISTER_LABEL {
+            return self.handle_pts_register(msg, sender_tid);
+        }
+        if msg.tag.label == PTS_UNREGISTER_LABEL {
+            return self.handle_pts_unregister(msg, sender_tid);
         }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
@@ -892,6 +917,104 @@ impl VfsServer {
     fn handle_flush(&self) -> Result<()> {
         let _ = debug_print("vfs: flush requested (ext2 writes are synchronous, no-op)");
         Ok(())
+    }
+
+    // ── PTS handlers ─────────────────────────────────────────────────────────
+
+    /// Handle PTS_REGISTER_LABEL: allocate a new `/dev/pts/<id>` slot.
+    ///
+    /// Wire format:
+    ///   words[0] = notify_endpoint (usize): VFS sends PTS_CLOSED_LABEL here
+    ///              when the last fd on the pts is closed.
+    ///
+    /// Reply (via reply_token embedded in the message):
+    ///   words[0] = errno  (0 = ok, non-zero = libcluu errno)
+    ///   words[1] = id     (u32, valid only when errno == 0)
+    fn handle_pts_register(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
+        let reply_token = extract_reply_id(msg).unwrap_or(self.endpoint);
+        let mut reply_msg = Message::new(PTS_REGISTER_LABEL, [0; 6], 2);
+
+        if sender_tid == 0 {
+            reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+
+        let notify_endpoint = msg.words[0];
+
+        match self.pts_registry.register(sender_tid, notify_endpoint) {
+            Some(id) => {
+                let _ = debug_print(&format!(
+                    "vfs: pts_register owner_tid={} id={}", sender_tid, id
+                ));
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = id as usize;
+            }
+            None => {
+                let _ = debug_print("vfs: pts_register pool exhausted");
+                reply_msg.words[0] = Error::OutOfMemory.to_errno() as usize;
+            }
+        }
+
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    /// Handle PTS_UNREGISTER_LABEL: release a `/dev/pts/<id>` slot.
+    ///
+    /// Wire format:
+    ///   words[0] = id (u32)
+    ///
+    /// Only the original registrant (matched by sender_tid) may unregister.
+    ///
+    /// Reply:
+    ///   words[0] = errno (0 = ok)
+    fn handle_pts_unregister(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
+        let reply_token = extract_reply_id(msg).unwrap_or(self.endpoint);
+        let mut reply_msg = Message::new(PTS_UNREGISTER_LABEL, [0; 6], 1);
+
+        let id = msg.words[0] as u32;
+
+        // Ownership check: only the registrant may unregister.
+        match self.pts_registry.owner_tid(id) {
+            None => {
+                // Not found — treat as success (idempotent).
+                reply_msg.words[0] = 0;
+            }
+            Some(owner) if sender_tid != 0 && owner != sender_tid => {
+                let _ = debug_print(&format!(
+                    "vfs: pts_unregister denied id={} owner={} caller={}",
+                    id, owner, sender_tid
+                ));
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+            _ => {
+                self.pts_registry.unregister(id);
+                let _ = debug_print(&format!("vfs: pts_unregister id={}", id));
+                reply_msg.words[0] = 0;
+            }
+        }
+
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    /// Called by handle_open after a successful open of `/dev/pts/<id>`.
+    /// Increments the refcount for the pts id.
+    fn pts_on_open(&mut self, id: u32) {
+        let _ = self.pts_registry.inc_ref(id);
+    }
+
+    /// Called by handle_close when the closed fd is a Pts file.
+    /// Decrements the refcount; if it reaches zero, fires PTS_CLOSED_LABEL to
+    /// the owner's notify_endpoint.
+    fn pts_on_close(&mut self, id: u32) {
+        if let Some((new_refcount, notify_endpoint)) = self.pts_registry.dec_ref(id) {
+            if new_refcount == 0 && notify_endpoint != 0 {
+                // Fire-and-forget: owner is notified that all fds are closed.
+                let msg = Message::new(PTS_CLOSED_LABEL, [id as usize, 0, 0, 0, 0, 0], 1);
+                let _ = ipc::send(notify_endpoint, &msg, IpcFlags::empty());
+                let _ = debug_print(&format!("vfs: pts_closed id={}", id));
+            }
+        }
     }
 
     fn handle_container_cleanup(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
@@ -1173,8 +1296,13 @@ impl VfsServer {
                     reply_msg.words[0] = Error::AlreadyExists.to_errno() as usize;
                     return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                 }
+                // Track pts refcount before moving the file into the fd table.
+                let pts_id = if let OpenFile::Pts(ref p) = file { Some(p.pts_id) } else { None };
                 let size = file.size();
                 let fd = self.files.open(client_id, file);
+                if let Some(id) = pts_id {
+                    self.pts_on_open(id);
+                }
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = fd;
                 reply_msg.words[2] = size;
@@ -1293,7 +1421,15 @@ impl VfsServer {
             }
         };
         let fd = msg.words[2];
+        // If this is a PTS fd, decrement the refcount before removing it.
+        let pts_id = self
+            .files
+            .get(client_id, fd)
+            .and_then(|f| if let OpenFile::Pts(ref p) = f { Some(p.pts_id) } else { None });
         self.files.close(client_id, fd);
+        if let Some(id) = pts_id {
+            self.pts_on_close(id);
+        }
         reply_msg.words[0] = 0;
         if let Err(err) = ipc::reply(reply_token, &reply_msg, IpcFlags::empty()) {
             vfs_trace!("vfs: close reply failed {:?}", err);
@@ -1411,6 +1547,11 @@ impl VfsServer {
                     reply_msg.words[0] = Error::NotFound.to_errno() as usize;
                     reply_msg.words[1] = 0;
                 }
+            }
+            // PTS write: stub until Task 15 wires owner-routed IPC.
+            OpenFile::Pts(_) => {
+                reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
+                reply_msg.words[1] = 0;
             }
         }
 
@@ -2352,6 +2493,8 @@ impl VfsServer {
                     None => Err(Error::NotFound),
                 }
             }
+            // PTS read: stub until Task 15 wires owner-routed IPC.
+            OpenFile::Pts(_) => Err(Error::NotImplemented),
         }
     }
 
@@ -2554,6 +2697,10 @@ impl VfsServer {
                         reply_msg.words[0] = err.to_errno() as usize;
                     }
                 }
+            }
+            // PTS read_grant: stub until Task 15.
+            OpenFile::Pts(_) => {
+                reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
             }
         }
 
@@ -3572,7 +3719,7 @@ impl VfsServer {
                 reply_msg.words[1] = elf.entry_point as usize;
                 reply_msg.words[2] = entry.size;
             }
-            OpenFile::Virtual(_) | OpenFile::Device(_) | OpenFile::MemFs(_) => {
+            OpenFile::Virtual(_) | OpenFile::Device(_) | OpenFile::MemFs(_) | OpenFile::Pts(_) => {
                 reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
             }
         }

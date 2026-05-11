@@ -220,6 +220,46 @@ pub const COMP_SHUTDOWN_LABEL: u32 = 99;
 /// Pacing signal: app blocks until this arrives, then renders one frame.
 pub const COMP_FRAME_READY_LABEL: u32 = 100;
 
+// ──────────────────────────────────────────────────────────────────────
+// PTS (pseudo-terminal slave) protocol.
+//
+// PTS_REGISTER_LABEL   — cluuterm → VFS: allocate a new /dev/pts/<id>.
+//     words[0] = notify_endpoint (usize): VFS sends PTS_CLOSED_LABEL here
+//                when the last fd on the pts is closed.
+//     Reply: words[0] = errno (0 = ok), words[1] = id (u32).
+//
+// PTS_UNREGISTER_LABEL — cluuterm → VFS: explicitly release a pts id.
+//     words[0] = id (u32).
+//     Only the original registrant (matched by sender_tid) may unregister.
+//     Reply: words[0] = errno.
+//
+// PTS_READ_LABEL  — client → VFS → forwarded to owner: read from pts.
+//     words[0] = id (u32), words[1] = len.
+//     Reply forwarded back.
+//
+// PTS_WRITE_LABEL — client → VFS → forwarded to owner: write to pts.
+//     words[0] = id (u32).  Payload = bytes.
+//     Reply forwarded back.
+//
+// PTS_IOCTL_LABEL — client → VFS → forwarded to owner: ioctl on pts.
+//     words[0] = id (u32), words[1] = request code.
+//     Reply forwarded back.
+//
+// PTS_POLL_LABEL  — client → VFS → forwarded to owner: poll readiness.
+//     words[0] = id (u32).
+//     Reply forwarded back.
+//
+// PTS_CLOSED_LABEL — VFS → owner (notify_endpoint): last fd closed.
+//     words[0] = id (u32).  Fire-and-forget (no reply expected).
+// ──────────────────────────────────────────────────────────────────────
+pub const PTS_REGISTER_LABEL: u32   = 0x70;
+pub const PTS_UNREGISTER_LABEL: u32 = 0x71;
+pub const PTS_READ_LABEL: u32       = 0x72;
+pub const PTS_WRITE_LABEL: u32      = 0x73;
+pub const PTS_IOCTL_LABEL: u32      = 0x74;
+pub const PTS_POLL_LABEL: u32       = 0x75;
+pub const PTS_CLOSED_LABEL: u32     = 0x76;
+
 // virtio-blk raw-block session IPC labels (Phase 6 of virtio-blk modern redesign).
 // `BLK_OPEN_SESSION` and `BLK_CLOSE_SESSION` go to the driver's listen endpoint.
 // `BLK_SUBMIT` is fire-and-forget into the driver. `BLK_COMPLETE` and
