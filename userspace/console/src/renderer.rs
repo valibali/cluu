@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 
 use crate::backend::ConsoleBackend;
 use libcluu::ansi::{EraseMode, Event, Parser};
+use libcluu::tty_core::{HistoryRow, Scrollback};
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL,
     CONSOLE_FB_INFO_LABEL, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
@@ -53,13 +54,6 @@ const VT_COUNT: usize = 4;
 const SCROLLBACK_LINES: usize = 200;
 const SCROLL_PAGE_LINES: usize = 10;
 
-/// A single row saved in the scrollback history buffer.
-struct HistoryRow {
-    chars: Vec<u8>,
-    fg: Vec<u32>,
-    bg: Vec<u32>,
-}
-
 /// Self-contained virtual terminal screen.
 ///
 /// Each VtScreen owns its cell grid, cursor state, ANSI parser, and colors.
@@ -82,10 +76,8 @@ struct VtScreen {
     needs_repaint: bool,
     /// ANSI / CSI byte-stream parser (libcluu::ansi).
     parser: Parser,
-    /// Ring buffer of scrolled-off rows.
-    history: Vec<HistoryRow>,
-    history_start: usize,
-    history_len: usize,
+    /// Ring buffer of scrolled-off rows (shared libcluu impl).
+    scrollback: Scrollback,
     /// 0 = live view, >0 = scrolled back N lines into history.
     viewport_offset: usize,
 }
@@ -107,9 +99,7 @@ impl VtScreen {
             dirty_cells: Vec::new(),
             needs_repaint: false,
             parser: Parser::new(),
-            history: Vec::new(),
-            history_start: 0,
-            history_len: 0,
+            scrollback: Scrollback::new(SCROLLBACK_LINES),
             viewport_offset: 0,
         }
     }
@@ -348,7 +338,7 @@ impl VtScreen {
         self.cursor_y = self.rows - 1;
     }
 
-    /// Save the top row (row 0) to the scrollback history ring buffer.
+    /// Save the top row (row 0) to the scrollback ring buffer.
     fn push_history_row(&mut self) {
         let w = self.cols;
         let row = HistoryRow {
@@ -356,15 +346,7 @@ impl VtScreen {
             fg: self.fg_cells[..w].to_vec(),
             bg: self.bg_cells[..w].to_vec(),
         };
-        if self.history.len() < SCROLLBACK_LINES {
-            self.history.push(row);
-            self.history_len = self.history.len();
-        } else {
-            let idx = (self.history_start + self.history_len) % SCROLLBACK_LINES;
-            self.history[idx] = row;
-            self.history_start = (self.history_start + 1) % SCROLLBACK_LINES;
-            // history_len stays at SCROLLBACK_LINES
-        }
+        self.scrollback.push(row);
     }
 
     /// Adjust the viewport offset for scrollback navigation.
@@ -372,7 +354,7 @@ impl VtScreen {
     fn scroll_viewport(&mut self, delta: isize) {
         let new_offset = (self.viewport_offset as isize + delta)
             .max(0)
-            .min(self.history_len as isize) as usize;
+            .min(self.scrollback.len() as isize) as usize;
         if new_offset != self.viewport_offset {
             self.viewport_offset = new_offset;
             self.needs_repaint = true;
@@ -646,20 +628,17 @@ impl<B: ConsoleBackend> Console<B> {
             .fill_rect(0, 0, self.width, self.height, COLOR_BG);
 
         let offset = self.vt_screens[vt_idx].viewport_offset;
-        let hist_len = self.vt_screens[vt_idx].history_len;
-        let hist_start = self.vt_screens[vt_idx].history_start;
+        let hist_len = self.vt_screens[vt_idx].scrollback.len();
 
         for y in 0..rows {
             // With offset=N: first N screen rows come from history, rest from current.
             // Screen row y maps to:
-            //   if y < offset: history row (hist_len - offset + y)
+            //   if y < offset: history row (hist_len - offset + y)  [idx from oldest]
             //   else: current screen row (y - offset)
             if y < offset && offset <= hist_len {
-                // Render from history
+                // Render from scrollback via shared API (idx_from_oldest).
                 let h_idx = hist_len - offset + y;
-                let ring_idx = (hist_start + h_idx) % self.vt_screens[vt_idx].history.len().max(1);
-                if ring_idx < self.vt_screens[vt_idx].history.len() {
-                    let row = &self.vt_screens[vt_idx].history[ring_idx];
+                if let Some(row) = self.vt_screens[vt_idx].scrollback.row(h_idx) {
                     for x in 0..cols.min(row.chars.len()) {
                         let ch = row.chars[x];
                         let fg = row.fg[x];
