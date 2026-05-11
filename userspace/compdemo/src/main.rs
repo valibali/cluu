@@ -5,7 +5,8 @@ extern crate alloc;
 
 use libcluu::ipc::{
     COMP_FRAME_READY_LABEL, COMP_INPUT_FORWARD_LABEL,
-    COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY,
+    COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL,
+    COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall};
@@ -152,6 +153,15 @@ pub extern "C" fn main() -> i32 {
                         let kind = msg.words[5] as u32;
                         if kind == 99 {
                             let _ = debug_print("compdemo: close-request received, exiting");
+                            // Send WIN_DESTROY so the compositor frees the window entry.
+                            let destroy_msg = Message::new(
+                                COMP_WIN_DESTROY_LABEL,
+                                [win_id, 0, 0, 0, 0, 0],
+                                1,
+                            );
+                            let _ = libcluu::ipc::send(
+                                comp_ep, &destroy_msg, IpcFlags::empty(),
+                            );
                             return 0;
                         }
                         // Other input: handled (key presses, etc.) — just loop back.
