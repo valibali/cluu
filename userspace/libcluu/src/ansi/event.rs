@@ -11,6 +11,17 @@ impl Attr {
     }
 }
 
+/// Sub-mode for CSI K (EraseLine) and CSI J (EraseDisplay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraseMode {
+    /// CSI 0 — from cursor to end (default if no param)
+    ToEnd,
+    /// CSI 1 — from start to cursor
+    ToStart,
+    /// CSI 2 — full line / full display
+    All,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Print(u8),
@@ -24,8 +35,8 @@ pub enum Event {
     MoveCursorRight(u16),
     MoveCursorLeft(u16),
     MoveCursorAbs { row: u16, col: u16 },
-    EraseLine,
-    EraseDisplay,
+    EraseLine(EraseMode),
+    EraseDisplay(EraseMode),
     SetAttr(Attr),
     ResetAttr,
     Scroll(i16),

@@ -13,7 +13,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::backend::ConsoleBackend;
-use libcluu::ansi::{Event, Parser};
+use libcluu::ansi::{EraseMode, Event, Parser};
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL,
     CONSOLE_FB_INFO_LABEL, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
@@ -203,9 +203,18 @@ impl VtScreen {
                 }
             }
             Event::Tab => {
-                // Advance to the next tab stop (every 8 columns).
-                let next = (self.cursor_x / 8 + 1) * 8;
-                self.cursor_x = next.min(self.cols.saturating_sub(1));
+                // Preserve prior console behaviour: print tab as literal CP437 glyph.
+                self.set_cell(
+                    self.cursor_x,
+                    self.cursor_y,
+                    b'\t',
+                    self.current_fg,
+                    self.current_bg,
+                );
+                self.cursor_x += 1;
+                if self.cursor_x >= self.cols {
+                    self.newline();
+                }
             }
             Event::Bell => {
                 // No audible bell; no-op.
@@ -231,16 +240,48 @@ impl VtScreen {
                 self.cursor_y = r.min(self.rows.saturating_sub(1));
                 self.cursor_x = c.min(self.cols.saturating_sub(1));
             }
-            Event::EraseLine => {
-                // Erase the entire current row (CSI K, all sub-modes collapsed).
-                for x in 0..self.cols {
-                    self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+            Event::EraseLine(mode) => match mode {
+                EraseMode::ToEnd => {
+                    for x in self.cursor_x..self.cols {
+                        self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                    }
                 }
-            }
-            Event::EraseDisplay => {
-                // Erase the entire display (CSI J, all sub-modes collapsed).
-                self.clear();
-            }
+                EraseMode::ToStart => {
+                    for x in 0..=self.cursor_x.min(self.cols.saturating_sub(1)) {
+                        self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                    }
+                }
+                EraseMode::All => {
+                    for x in 0..self.cols {
+                        self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                    }
+                }
+            },
+            Event::EraseDisplay(mode) => match mode {
+                EraseMode::ToEnd => {
+                    for x in self.cursor_x..self.cols {
+                        self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                    }
+                    for y in (self.cursor_y + 1)..self.rows {
+                        for x in 0..self.cols {
+                            self.set_cell(x, y, b' ', self.current_fg, self.current_bg);
+                        }
+                    }
+                }
+                EraseMode::ToStart => {
+                    for y in 0..self.cursor_y {
+                        for x in 0..self.cols {
+                            self.set_cell(x, y, b' ', self.current_fg, self.current_bg);
+                        }
+                    }
+                    for x in 0..=self.cursor_x.min(self.cols.saturating_sub(1)) {
+                        self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                    }
+                }
+                EraseMode::All => {
+                    self.clear();
+                }
+            },
             Event::SetAttr(attr) => {
                 self.current_fg = attr.fg;
                 self.current_bg = attr.bg;

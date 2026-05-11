@@ -6,7 +6,7 @@ extern crate alloc;
 mod event;
 mod state;
 
-pub use event::{Attr, Event};
+pub use event::{Attr, EraseMode, Event};
 pub use state::Parser;
 
 #[cfg(test)]
@@ -52,11 +52,21 @@ mod tests {
 
     #[test]
     fn erase_line() {
-        assert_eq!(collect(b"\x1b[K"), vec![Event::EraseLine]);
+        assert_eq!(collect(b"\x1b[K"), vec![Event::EraseLine(EraseMode::ToEnd)]);
     }
 
     #[test]
     fn erase_display() {
-        assert_eq!(collect(b"\x1b[2J"), vec![Event::EraseDisplay]);
+        assert_eq!(collect(b"\x1b[2J"), vec![Event::EraseDisplay(EraseMode::All)]);
+    }
+
+    #[test]
+    fn erase_line_full() {
+        assert_eq!(collect(b"\x1b[2K"), vec![Event::EraseLine(EraseMode::All)]);
+    }
+
+    #[test]
+    fn erase_line_to_start() {
+        assert_eq!(collect(b"\x1b[1K"), vec![Event::EraseLine(EraseMode::ToStart)]);
     }
 }

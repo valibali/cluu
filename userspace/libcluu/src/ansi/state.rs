@@ -1,4 +1,4 @@
-use super::event::{Attr, Event};
+use super::event::{Attr, EraseMode, Event};
 
 #[derive(Clone, Copy, PartialEq)]
 enum EscState {
@@ -126,12 +126,22 @@ impl Parser {
             }
             b'K' => {
                 self.push_param();
-                emit(Event::EraseLine);
+                let mode = match self.param(0, 0) {
+                    1 => EraseMode::ToStart,
+                    2 => EraseMode::All,
+                    _ => EraseMode::ToEnd,
+                };
+                emit(Event::EraseLine(mode));
                 self.reset();
             }
             b'J' => {
                 self.push_param();
-                emit(Event::EraseDisplay);
+                let mode = match self.param(0, 0) {
+                    1 => EraseMode::ToStart,
+                    2 => EraseMode::All,
+                    _ => EraseMode::ToEnd,
+                };
+                emit(Event::EraseDisplay(mode));
                 self.reset();
             }
             b'm' => {
