@@ -3,5 +3,6 @@
 
 pub mod keymap;
 pub mod line_discipline;
+pub mod scrollback;
 pub use line_discipline::{LineDiscipline, EchoAction, LineEffect, TermMode};
-// pub mod scrollback;       — added in Task 9
+pub use scrollback::{HistoryRow, Scrollback};
