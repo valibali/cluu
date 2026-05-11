@@ -37,9 +37,11 @@ pub enum Incoming {
 pub fn parse(msg: &Message) -> Incoming {
     match msg.tag.label {
         COMP_WIN_REGISTER_LABEL => Incoming::WinRegister {
-            req_w: msg.words[0] as u32,
-            req_h: msg.words[1] as u32,
-            title_len: msg.words[2] as u32,
+            // words[0] = payload_len (title byte count, per parse_message convention)
+            // words[1] = req_w, words[2] = req_h
+            req_w: msg.words[1] as u32,
+            req_h: msg.words[2] as u32,
+            title_len: msg.words[0] as u32,
         },
         COMP_WIN_DAMAGE_LABEL => Incoming::WinDamage {
             window_id: msg.words[0] as u64,

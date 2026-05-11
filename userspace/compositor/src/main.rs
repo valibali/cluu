@@ -15,6 +15,26 @@ use libcluu::ipc::{extract_reply_id, reply, COMP_WIN_REGISTER_REPLY};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
 
+/// Query the timeserver for monotonic seconds, caching the endpoint after the
+/// first successful lookup so repeated calls never hit the registry.
+fn clock_seconds_cached(cached_ep: &mut usize) -> Option<u64> {
+    if *cached_ep == 0 {
+        if let Some(ep) = registry::lookup_service("timeserver:main") {
+            *cached_ep = ep;
+        } else {
+            return None;
+        }
+    }
+    match libcluu::time::query_endpoint(*cached_ep, libcluu::time::TIME_GETCLOCK) {
+        Ok((s, _)) => Some(s),
+        Err(_) => {
+            // Endpoint may have died; force re-lookup next tick.
+            *cached_ep = 0;
+            None
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     let _ = debug_print("compositor: init");
@@ -69,6 +89,8 @@ pub extern "C" fn main() -> i32 {
         comp.registry_endpoint,
     ];
     let mut buf = [0u8; 1024];
+    // Cached timeserver endpoint — 0 means not yet resolved.
+    let mut time_ep: usize = 0;
 
     // Index of the registry endpoint in the tokens array.
     const REGISTRY_TOKEN_IDX: usize = 3;
@@ -184,6 +206,14 @@ pub extern "C" fn main() -> i32 {
                             // Unknown message — ignore.
                         }
                     }
+                    // Update clock on every message iteration so a busy
+                    // compdemo DAMAGE flood never starves the clock display.
+                    if let Some(s) = clock_seconds_cached(&mut time_ep) {
+                        if s != comp.clock_seconds {
+                            comp.clock_seconds = s;
+                            for cx in 0..comp.cols { comp.cell_dirty.push((cx, 0)); }
+                        }
+                    }
                     compose::recompute_dirty(&mut comp);
                     compose::render_status_row(&mut comp);
                     if comp.active {
@@ -193,7 +223,7 @@ pub extern "C" fn main() -> i32 {
                 }
             }
             Err(Error::Timeout) | Err(Error::WouldBlock) => {
-                if let Ok((s, _ns)) = libcluu::time::query(libcluu::time::TIME_GETCLOCK) {
+                if let Some(s) = clock_seconds_cached(&mut time_ep) {
                     if s != comp.clock_seconds {
                         comp.clock_seconds = s;
                         for cx in 0..comp.cols { comp.cell_dirty.push((cx, 0)); }

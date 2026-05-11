@@ -16,6 +16,16 @@ pub const TIME_GETCLOCK: u32 = 0x511;
 /// Returns `Error::NotFound` if the timeserver isn't registered yet.
 pub fn query(label: u32) -> Result<(u64, u64), Error> {
     let endpoint = registry::lookup_service("timeserver:main").ok_or(Error::NotFound)?;
+    query_endpoint(endpoint, label)
+}
+
+/// Query the timeserver using a pre-resolved endpoint (avoids repeated registry lookups).
+///
+/// Returns `Error::NotFound` if `endpoint` is 0.
+pub fn query_endpoint(endpoint: usize, label: u32) -> Result<(u64, u64), Error> {
+    if endpoint == 0 {
+        return Err(Error::NotFound);
+    }
     let mut msg = Message::new(label, [0; 6], 1);
     ipc::call(endpoint, &mut msg, IpcFlags::empty())?;
     let status = msg.words[0] as isize;
