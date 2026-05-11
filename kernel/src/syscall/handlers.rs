@@ -2030,6 +2030,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
     const MAP_DEVICE: u32 = 0x100;
     const MAP_DEVICE_WC: u32 = 0x1000;
     const MAP_SHARE_PHYS: u32 = 0x800;
+    const MAP_FRAME_TOKEN: u32 = 0x400;
     const MAP_TEST_FAILPOINT: u32 = 0x8000_0000;
     const MAP_TEST_FAIL_ON_MAP_STAGE: u32 = 0x4000_0000;
     const MAP_TEST_FAIL_AFTER_SHIFT: u32 = 16;
@@ -2071,6 +2072,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
     let use_large_pages = (flags & MAP_LARGE_PAGES) != 0;
     let map_device = (flags & MAP_DEVICE) != 0;
     let map_device_wc = (flags & MAP_DEVICE_WC) != 0;
+    let map_frame_token = (flags & MAP_FRAME_TOKEN) != 0;
     if map_device && map_device_wc {
         klibcluu::warn("invoke_space_map_range: MAP_DEVICE and MAP_DEVICE_WC are mutually exclusive");
         return Err(Error::InvalidArgument);
@@ -2157,6 +2159,62 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
             executable,
             caller_page_table_root: caller_page_table_root.ok_or(Error::InvalidState)?,
         });
+    }
+
+    // MAP_FRAME_TOKEN: map a previously allocated frame (by token handle) into
+    // target space. The frame token handle is passed in data_ptr. Both the
+    // source (token owner) and target (caller) get read/write access to the
+    // same physical pages, enabling shared memory between processes.
+    if map_frame_token {
+        use crate::mm::{frame_registry, space_repository};
+        use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+        let frame_token_handle = TokenHandle::from_raw(data_ptr);
+        let (frame_tok, frame_obj_ref) =
+            crate::token::lookup_token(frame_token_handle).map_err(|_| {
+                klibcluu::warn("invoke_space_map_range MAP_FRAME_TOKEN: bad token handle");
+                Error::InvalidArgument
+            })?;
+        if !frame_tok.has_right(Rights::MAP) {
+            return Err(Error::PermissionDenied);
+        }
+        let frame_id = if let ObjectRef::Frame(id) = frame_obj_ref {
+            id
+        } else {
+            klibcluu::warn("invoke_space_map_range MAP_FRAME_TOKEN: token is not a Frame");
+            return Err(Error::InvalidArgument);
+        };
+        let phys_base = frame_registry::get_phys(frame_id).ok_or(Error::NotFound)?;
+        frame_registry::inc_map_count(frame_id);
+
+        // Map the physical pages contiguously starting at phys_base.
+        for page_idx in 0..num_pages {
+            let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
+            let phys_addr = phys_base + (page_idx * PAGE_SIZE) as u64;
+            let map_result = space_repository::with_space_mut(space_id, |space| unsafe {
+                crate::elf::map_user_page(
+                    virt_addr,
+                    phys_addr,
+                    writable,
+                    executable,
+                    space.page_table_root,
+                )
+            });
+            match map_result {
+                Some(Ok(())) => {}
+                Some(Err(_)) => {
+                    frame_registry::dec_map_count(frame_id);
+                    klibcluu::warn("invoke_space_map_range MAP_FRAME_TOKEN: map_user_page failed");
+                    return Err(Error::OutOfMemory);
+                }
+                None => {
+                    frame_registry::dec_map_count(frame_id);
+                    klibcluu::warn("invoke_space_map_range MAP_FRAME_TOKEN: space not found");
+                    return Err(Error::NotFound);
+                }
+            }
+        }
+        return Ok(num_pages);
     }
 
     // Check if we can use large pages:

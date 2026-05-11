@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use libcluu::ipc::{
-    call_with_payload, COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL,
+    call_with_payload, make_payload_message, COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL,
     COMP_WIN_REGISTER_REPLY,
 };
 use libcluu::types::{IpcFlags, Message};
@@ -55,11 +55,13 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Build the WIN_REGISTER request. Payload is the title bytes.
+    // Protocol: words[0]=payload_len (per parse_message convention),
+    //           words[1]=req_w, words[2]=req_h.
     let title = b"demo";
-    let req = Message::new(
+    let req = make_payload_message(
         COMP_WIN_REGISTER_LABEL,
-        [REQ_W as usize, REQ_H as usize, title.len(), 0, 0, 0],
-        title.len() as u8,
+        title.len(),
+        &[REQ_W as usize, REQ_H as usize],
     );
     let mut reply = Message::new(0, [0; 6], 0);
     if call_with_payload(comp_ep, &req, title, &mut reply).is_err() {
@@ -103,14 +105,17 @@ pub extern "C" fn main() -> i32 {
     let mut frame: u32 = 0;
     loop {
         // Fill cells with a slowly shifting rainbow pattern.
+        // Use filled-background (space glyph) with cycling xterm-256 bg index
+        // so blocks of colour are visible. Cycle through indices 16..232
+        // (the 6x6x6 RGB cube) for vivid coverage.
         for iy in 0..gh {
             for ix in 0..gw {
-                let color = (((ix + iy + frame) & 0xFF) as u8).wrapping_mul(3);
-                let cp = (b'#' as u64) & 0x1F_FFFF;
-                let fg = (color as u64) << 21;
-                let bg = 0u64 << 29;
-                let attrs = 0u64 << 37;
-                let cell = cp | fg | bg | attrs;
+                let raw = ((ix + iy + frame) as usize) % 216;
+                let bg = (16 + raw) as u64;
+                let cell = (b' ' as u64 & 0x1F_FFFF)
+                    | (15u64 << 21)   // fg = white (irrelevant for space)
+                    | (bg  << 29)     // bg = cycling palette index
+                    | (0u64 << 37);
                 unsafe {
                     core::ptr::write_volatile(
                         cells_ptr.add((iy * gw + ix) as usize),
