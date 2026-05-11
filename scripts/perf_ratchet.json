@@ -1,5 +1,7 @@
 {
   "fb_blit_wc_cycles":     3967400,
   "fb_blit_wc_max_cycles": 4400000,
-  "_note": "Ratchet captured 2026-05-10 with framebuffer mapped MAP_DEVICE_WC + 8 KiB byte-mask LUT (L1-resident) under KVM. Median of 4 runs (3.83M / 3.84M / 4.09M / 4.32M cycles). >10% regression trips b_console_blit fail rail. Measures full console IPC pipeline: probe stdout IPC -> tty -> console process -> framebuffer WC-mapped MMIO blit."
+  "compositor_blit_cycles":     94220924,
+  "compositor_blit_max_cycles": 141000000,
+  "_note": "fb_blit_wc: captured 2026-05-10 with WC mapping + 8 KiB LUT (L1-resident) under KVM. Median of 4 runs. compositor_blit: captured 2026-05-11, 3 runs (94.0M / 94.3M / 94.2M cycles), median 94.2M. 1.5x headroom (141M). Measures compositor tick_frame pipeline: cell-grid compose + glyph blit + dirty-rect WC flush, driven by 2 compdemos at ~32Hz."
 }
