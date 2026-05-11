@@ -3108,13 +3108,13 @@ fn invoke_clock_frequency(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs
 ///
 /// # Arguments
 /// - token: Space token (requires CREATE right, used to identify owner)
-/// - arg3: unused
+/// - arg3: size in bytes (rounded up to page count); pass 0 or 4096 for a
+///         single page. Values above 2 MiB (order 9) are rejected.
 ///
 /// # Returns
-/// - Ok(frame_token_handle): Token handle for the new frame
-///   The physical address is returned packed: upper 32 bits in arg4 style
-///   Actually we return frame_token in rax and caller can use FrameGetPhys.
-fn invoke_frame_allocate(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
+/// - Ok(frame_token_handle): Token handle for the new frame.
+///   Caller uses FrameGetPhys to retrieve the physical base address.
+fn invoke_frame_allocate(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::mm::frame_registry;
     use crate::token::{
         create_token, scope::OpaqueScope, Issuer, ObjectRef, ObjectType, Rights, Timestamp,
@@ -3133,7 +3133,13 @@ fn invoke_frame_allocate(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) 
         return Err(Error::InvalidArgument);
     };
 
-    let (frame_id, _phys) = frame_registry::alloc_frame(space_id).ok_or(Error::OutOfMemory)?;
+    // arg3 is the requested size in bytes (as passed by userspace shm::alloc_frame).
+    // Compute the page count, clamping to at least 1.
+    let bytes = args.arg3;
+    let n_pages = ((bytes + 4095) / 4096).max(1);
+
+    let (frame_id, _phys) =
+        frame_registry::alloc_frame_n(space_id, n_pages).ok_or(Error::OutOfMemory)?;
 
     // Create a frame token with all rights
     let obj_ref = ObjectRef::Frame(frame_id);

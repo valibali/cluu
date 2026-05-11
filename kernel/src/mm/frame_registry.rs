@@ -23,6 +23,10 @@ pub struct FrameEntry {
     /// True for entries created implicitly by `invoke_space_grant` to
     /// track shared mappings across address spaces.
     pub auto_free: bool,
+    /// Number of contiguous 4 KiB pages in this allocation.
+    /// Always a power of two (rounded up by buddy allocator).
+    /// 1 for single-page allocations (the common case).
+    pub page_count: u32,
 }
 
 /// Forward map: FrameId → FrameEntry
@@ -52,6 +56,7 @@ pub fn alloc_frame(owner: AddressSpaceId) -> Option<(FrameId, u64)> {
         owner_space: owner,
         map_count: 0,
         auto_free: false,
+        page_count: 1,
     };
 
     FRAME_REGISTRY.lock().insert(id, entry);
@@ -91,6 +96,7 @@ pub fn register_grant_mapping(phys: u64, owner: AddressSpaceId) -> FrameId {
             // Source already had the frame mapped; new target adds one more.
             map_count: 2,
             auto_free: true,
+            page_count: 1,
         },
     );
     phys_map.insert(phys, id);
@@ -115,11 +121,13 @@ pub fn dec_and_maybe_free(frame_id: FrameId) {
     }
 
     let phys = entry.phys_addr;
+    let page_count = entry.page_count;
     reg.remove(&frame_id);
     drop(reg);
 
     PHYS_TO_FRAME.lock().remove(&phys);
-    crate::mm::pmm::free_frame(phys);
+    let order = ceil_log2_pages(page_count as usize);
+    crate::mm::pmm::free_order(phys, order as usize);
 }
 
 /// Free a tracked frame. Fails if `map_count > 0`.
@@ -134,11 +142,13 @@ pub fn free_frame(frame_id: FrameId) -> Result<(), FrameRegistryError> {
     }
 
     let phys = entry.phys_addr;
+    let page_count = entry.page_count;
     reg.remove(&frame_id);
     drop(reg);
 
     PHYS_TO_FRAME.lock().remove(&phys);
-    crate::mm::pmm::free_frame(phys);
+    let order = ceil_log2_pages(page_count as usize);
+    crate::mm::pmm::free_order(phys, order as usize);
     Ok(())
 }
 
@@ -180,4 +190,44 @@ pub fn total_map_count() -> u64 {
         .values()
         .map(|entry| entry.map_count as u64)
         .sum()
+}
+
+/// Allocate `n_pages` contiguous physical pages and register them as one frame.
+///
+/// Uses the buddy allocator's `alloc_order` to obtain a power-of-two block
+/// large enough for `n_pages`. The allocated `page_count` is the rounded-up
+/// power of two (e.g. 5 pages → order 3 → 8 pages allocated).
+///
+/// Returns `(FrameId, phys_base)`.
+pub fn alloc_frame_n(owner: AddressSpaceId, n_pages: usize) -> Option<(FrameId, u64)> {
+    if n_pages == 0 {
+        return None;
+    }
+    let order = ceil_log2_pages(n_pages);
+    if order > 9 {
+        return None; // buddy max = order 9 (2 MiB)
+    }
+    let phys = crate::mm::pmm::alloc_order(order as usize)?;
+    let id = FrameId::new(NEXT_FRAME_ID.fetch_add(1, Ordering::SeqCst));
+    let allocated_pages: u32 = 1u32 << order;
+    let entry = FrameEntry {
+        phys_addr: phys,
+        owner_space: owner,
+        map_count: 0,
+        auto_free: false,
+        page_count: allocated_pages,
+    };
+    FRAME_REGISTRY.lock().insert(id, entry);
+    PHYS_TO_FRAME.lock().insert(phys, id);
+    Some((id, phys))
+}
+
+/// `ceil(log2(n))` for `n >= 1`. Returns 0 for n = 1.
+///
+/// n=1 → 0, n=2 → 1, n=3..4 → 2, n=5..8 → 3, ...
+fn ceil_log2_pages(n: usize) -> u32 {
+    if n <= 1 {
+        return 0;
+    }
+    (usize::BITS - (n - 1).leading_zeros()) as u32
 }
