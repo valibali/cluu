@@ -13,6 +13,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::backend::ConsoleBackend;
+use libcluu::ansi::{Event, Parser};
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_BLINK_LABEL, CONSOLE_CLEAR_LABEL, CONSOLE_CURSOR_LABEL,
     CONSOLE_FB_INFO_LABEL, CONSOLE_WRITE_LABEL, CONSOLE_WRITE_SYNC_LABEL,
@@ -59,17 +60,6 @@ struct HistoryRow {
     bg: Vec<u32>,
 }
 
-/// ANSI escape sequence parser state.
-#[derive(Clone, Copy, PartialEq)]
-enum EscState {
-    /// Normal character processing.
-    Normal,
-    /// Seen ESC (0x1B), waiting for '[' or other sequence introducer.
-    Escape,
-    /// Inside a CSI sequence (ESC [ ...), accumulating parameters.
-    Csi,
-}
-
 /// Self-contained virtual terminal screen.
 ///
 /// Each VtScreen owns its cell grid, cursor state, ANSI parser, and colors.
@@ -90,10 +80,8 @@ struct VtScreen {
     dirty_cells: Vec<(usize, usize)>,
     /// Set when a full repaint is needed (e.g., after scroll or clear).
     needs_repaint: bool,
-    esc_state: EscState,
-    esc_params: [u16; 4],
-    esc_param_count: usize,
-    esc_current_param: u16,
+    /// ANSI / CSI byte-stream parser (libcluu::ansi).
+    parser: Parser,
     /// Ring buffer of scrolled-off rows.
     history: Vec<HistoryRow>,
     history_start: usize,
@@ -118,10 +106,7 @@ impl VtScreen {
             current_bg: COLOR_BG,
             dirty_cells: Vec::new(),
             needs_repaint: false,
-            esc_state: EscState::Normal,
-            esc_params: [0; 4],
-            esc_param_count: 0,
-            esc_current_param: 0,
+            parser: Parser::new(),
             history: Vec::new(),
             history_start: 0,
             history_len: 0,
@@ -133,6 +118,9 @@ impl VtScreen {
     ///
     /// This only modifies the in-memory cell grid — no framebuffer writes.
     /// The caller (Console) is responsible for rendering after this returns.
+    ///
+    /// Multi-byte UTF-8 sequences are decoded to CP437 before the byte is
+    /// handed to the ANSI parser, so the parser always sees single bytes.
     fn write_bytes(&mut self, bytes: &[u8]) {
         self.dirty_cells.clear();
 
@@ -141,11 +129,14 @@ impl VtScreen {
             let b = bytes[i];
 
             if b < 0x80 {
-                self.put_char(b);
+                // ASCII byte: feed directly through the parser.
+                self.feed_byte(b);
                 i += 1;
                 continue;
             }
 
+            // Multi-byte UTF-8 sequence: decode to codepoint, map to CP437,
+            // then feed the resulting single byte as Event::Print.
             let (codepoint, seq_len) = if b & 0xE0 == 0xC0 && i + 1 < bytes.len() {
                 let cp = ((b as u32 & 0x1F) << 6) | (bytes[i + 1] as u32 & 0x3F);
                 (cp, 2)
@@ -161,13 +152,106 @@ impl VtScreen {
                     | (bytes[i + 3] as u32 & 0x3F);
                 (cp, 4)
             } else {
-                self.put_char(b'?');
+                // Invalid / truncated UTF-8: substitute '?'.
+                self.apply_event(Event::Print(b'?'));
                 i += 1;
                 continue;
             };
 
-            self.put_char(unicode_to_cp437(codepoint));
+            self.apply_event(Event::Print(unicode_to_cp437(codepoint)));
             i += seq_len;
+        }
+    }
+
+    /// Feed a single ASCII byte through the ANSI parser.
+    ///
+    /// Uses `mem::replace` to work around the double-borrow: the parser is
+    /// temporarily moved out of `self` so that the closure can call
+    /// `self.apply_event` without aliasing the `self.parser` field.
+    fn feed_byte(&mut self, b: u8) {
+        let mut parser = core::mem::replace(&mut self.parser, Parser::new());
+        parser.feed(&[b], |ev| self.apply_event(ev));
+        self.parser = parser;
+    }
+
+    /// Apply a single parsed ANSI event to the cell grid and cursor state.
+    fn apply_event(&mut self, ev: Event) {
+        match ev {
+            Event::Print(ch) => {
+                self.set_cell(
+                    self.cursor_x,
+                    self.cursor_y,
+                    ch,
+                    self.current_fg,
+                    self.current_bg,
+                );
+                self.cursor_x += 1;
+                if self.cursor_x >= self.cols {
+                    self.newline();
+                }
+            }
+            Event::Newline => self.newline(),
+            Event::CarriageReturn => {
+                self.cursor_x = 0;
+            }
+            Event::Backspace => {
+                if self.cursor_x > 0 {
+                    self.cursor_x -= 1;
+                } else if self.cursor_y > 0 {
+                    self.cursor_y -= 1;
+                    self.cursor_x = self.cols.saturating_sub(1);
+                }
+            }
+            Event::Tab => {
+                // Advance to the next tab stop (every 8 columns).
+                let next = (self.cursor_x / 8 + 1) * 8;
+                self.cursor_x = next.min(self.cols.saturating_sub(1));
+            }
+            Event::Bell => {
+                // No audible bell; no-op.
+            }
+            Event::MoveCursorUp(n) => {
+                self.cursor_y = self.cursor_y.saturating_sub(n as usize);
+            }
+            Event::MoveCursorDown(n) => {
+                self.cursor_y =
+                    (self.cursor_y + n as usize).min(self.rows.saturating_sub(1));
+            }
+            Event::MoveCursorRight(n) => {
+                self.cursor_x =
+                    (self.cursor_x + n as usize).min(self.cols.saturating_sub(1));
+            }
+            Event::MoveCursorLeft(n) => {
+                self.cursor_x = self.cursor_x.saturating_sub(n as usize);
+            }
+            Event::MoveCursorAbs { row, col } => {
+                // ANSI row/col are 1-based; convert to 0-based and clamp.
+                let r = (row as usize).saturating_sub(1);
+                let c = (col as usize).saturating_sub(1);
+                self.cursor_y = r.min(self.rows.saturating_sub(1));
+                self.cursor_x = c.min(self.cols.saturating_sub(1));
+            }
+            Event::EraseLine => {
+                // Erase the entire current row (CSI K, all sub-modes collapsed).
+                for x in 0..self.cols {
+                    self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                }
+            }
+            Event::EraseDisplay => {
+                // Erase the entire display (CSI J, all sub-modes collapsed).
+                self.clear();
+            }
+            Event::SetAttr(attr) => {
+                self.current_fg = attr.fg;
+                self.current_bg = attr.bg;
+            }
+            Event::ResetAttr => {
+                self.current_fg = COLOR_FG;
+                self.current_bg = COLOR_BG;
+            }
+            Event::Scroll(_) => {
+                // libcluu does not currently emit Scroll events from CSI input.
+            }
         }
     }
 
@@ -182,180 +266,6 @@ impl VtScreen {
         self.cursor_x = 0;
         self.cursor_y = 0;
         self.needs_repaint = true;
-    }
-
-    fn put_char(&mut self, ch: u8) {
-        match self.esc_state {
-            EscState::Normal => match ch {
-                0x1B => {
-                    self.esc_state = EscState::Escape;
-                }
-                b'\n' => self.newline(),
-                b'\r' => {
-                    self.cursor_x = 0;
-                }
-                0x08 => {
-                    if self.cursor_x > 0 {
-                        self.cursor_x -= 1;
-                    } else if self.cursor_y > 0 {
-                        self.cursor_y -= 1;
-                        self.cursor_x = self.cols.saturating_sub(1);
-                    }
-                }
-                _ => {
-                    self.set_cell(
-                        self.cursor_x,
-                        self.cursor_y,
-                        ch,
-                        self.current_fg,
-                        self.current_bg,
-                    );
-                    self.cursor_x += 1;
-                    if self.cursor_x >= self.cols {
-                        self.newline();
-                    }
-                }
-            },
-            EscState::Escape => match ch {
-                b'[' => {
-                    self.esc_state = EscState::Csi;
-                    self.esc_params = [0; 4];
-                    self.esc_param_count = 0;
-                    self.esc_current_param = 0;
-                }
-                _ => {
-                    self.esc_state = EscState::Normal;
-                }
-            },
-            EscState::Csi => {
-                if ch.is_ascii_digit() {
-                    self.esc_current_param = self
-                        .esc_current_param
-                        .saturating_mul(10)
-                        .saturating_add((ch - b'0') as u16);
-                } else if ch == b';' {
-                    if self.esc_param_count < self.esc_params.len() {
-                        self.esc_params[self.esc_param_count] = self.esc_current_param;
-                        self.esc_param_count += 1;
-                    }
-                    self.esc_current_param = 0;
-                } else if ch == b'~' {
-                    if self.esc_param_count < self.esc_params.len() {
-                        self.esc_params[self.esc_param_count] = self.esc_current_param;
-                        self.esc_param_count += 1;
-                    }
-                    self.esc_state = EscState::Normal;
-                } else if (0x40..=0x7E).contains(&ch) {
-                    if self.esc_param_count < self.esc_params.len() {
-                        self.esc_params[self.esc_param_count] = self.esc_current_param;
-                        self.esc_param_count += 1;
-                    }
-                    self.dispatch_csi(ch);
-                    self.esc_state = EscState::Normal;
-                } else {
-                    self.esc_state = EscState::Normal;
-                }
-            }
-        }
-    }
-
-    fn dispatch_csi(&mut self, cmd: u8) {
-        let p0 = if self.esc_param_count > 0 {
-            self.esc_params[0]
-        } else {
-            0
-        };
-        let p1 = if self.esc_param_count > 1 {
-            self.esc_params[1]
-        } else {
-            0
-        };
-
-        match cmd {
-            b'A' => {
-                let n = if p0 == 0 { 1 } else { p0 as usize };
-                self.cursor_y = self.cursor_y.saturating_sub(n);
-            }
-            b'B' => {
-                let n = if p0 == 0 { 1 } else { p0 as usize };
-                self.cursor_y = (self.cursor_y + n).min(self.rows.saturating_sub(1));
-            }
-            b'C' => {
-                let n = if p0 == 0 { 1 } else { p0 as usize };
-                self.cursor_x = (self.cursor_x + n).min(self.cols.saturating_sub(1));
-            }
-            b'D' => {
-                let n = if p0 == 0 { 1 } else { p0 as usize };
-                self.cursor_x = self.cursor_x.saturating_sub(n);
-            }
-            b'H' => {
-                let row = if p0 == 0 { 1 } else { p0 as usize };
-                let col = if p1 == 0 { 1 } else { p1 as usize };
-                self.cursor_y = (row - 1).min(self.rows.saturating_sub(1));
-                self.cursor_x = (col - 1).min(self.cols.saturating_sub(1));
-            }
-            b'J' => {
-                match p0 {
-                    2 => {
-                        self.clear();
-                    }
-                    0 => {
-                        for x in self.cursor_x..self.cols {
-                            self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
-                        }
-                        for y in (self.cursor_y + 1)..self.rows {
-                            for x in 0..self.cols {
-                                self.set_cell(x, y, b' ', self.current_fg, self.current_bg);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            b'K' => {
-                match p0 {
-                    0 => {
-                        for x in self.cursor_x..self.cols {
-                            self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
-                        }
-                    }
-                    1 => {
-                        for x in 0..=self.cursor_x.min(self.cols.saturating_sub(1)) {
-                            self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
-                        }
-                    }
-                    2 => {
-                        for x in 0..self.cols {
-                            self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            b'm' => {
-                if self.esc_param_count == 0 {
-                    self.current_fg = COLOR_FG;
-                    self.current_bg = COLOR_BG;
-                    return;
-                }
-
-                for idx in 0..self.esc_param_count {
-                    let p = self.esc_params[idx];
-                    match p {
-                        0 => {
-                            self.current_fg = COLOR_FG;
-                            self.current_bg = COLOR_BG;
-                        }
-                        30..=37 => self.current_fg = ANSI_COLORS[(p - 30) as usize],
-                        40..=47 => self.current_bg = ANSI_COLORS[(p - 40) as usize],
-                        90..=97 => self.current_fg = ANSI_BRIGHT_COLORS[(p - 90) as usize],
-                        100..=107 => self.current_bg = ANSI_BRIGHT_COLORS[(p - 100) as usize],
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
     }
 
     fn newline(&mut self) {
