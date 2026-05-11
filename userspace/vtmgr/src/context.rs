@@ -16,8 +16,12 @@ use libcluu::registry;
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, yield_cpu, Result};
 
-/// Number of virtual terminals supported (0-3 = console, 4 = compositor).
+/// Number of virtual terminals supported (0-3 = console text VTs, 4 = compositor).
 const VT_COUNT: usize = 5;
+
+/// VT index reserved for the compositor when no explicit pin has been received yet.
+/// This default is overridden as soon as the compositor sends VTMGR_PIN_VT_LABEL.
+const DEFAULT_COMPOSITOR_VT: usize = 4;
 
 /// Shared state for the VT manager runtime.
 pub struct VtmgrContext {
@@ -43,6 +47,9 @@ pub struct VtmgrContext {
     compositor_control: usize,
     /// Whether compositor control subscription was requested.
     requested_compositor: bool,
+    /// VT index pinned to the compositor via VTMGR_PIN_VT_LABEL.
+    /// Defaults to DEFAULT_COMPOSITOR_VT; updated when compositor sends the pin message.
+    compositor_vt: usize,
 }
 
 impl VtmgrContext {
@@ -71,6 +78,7 @@ impl VtmgrContext {
             requested_procmgr_spawn: false,
             compositor_control: 0,
             requested_compositor: false,
+            compositor_vt: DEFAULT_COMPOSITOR_VT,
         })
     }
 
@@ -130,19 +138,39 @@ impl VtmgrContext {
         }
     }
 
+    /// Record a named VT pin sent by a service at startup.
+    ///
+    /// Called when a service sends `VTMGR_PIN_VT_LABEL`.  Currently only the
+    /// "compositor" service name is handled — it updates `compositor_vt` so
+    /// that `switch_vt` routes VT requests dynamically rather than relying on
+    /// the hardcoded default (4).  Unknown service names are silently ignored.
+    pub fn handle_pin_vt(&mut self, vt_index: usize, service_name: &str) {
+        if service_name == "compositor" {
+            if vt_index < VT_COUNT {
+                self.compositor_vt = vt_index;
+                let _ = debug_print(&format!(
+                    "vtmgr: compositor pinned to VT{}",
+                    vt_index
+                ));
+            }
+        }
+    }
+
     /// Switch to a different virtual terminal.
     ///
-    /// VT4 is the compositor. VTs 0-3 are console-backed. On each switch,
-    /// vtmgr deactivates the old owner and activates the new one so only
-    /// one fb writer is live at a time.
+    /// The compositor VT index is determined by `compositor_vt` (set via
+    /// `VTMGR_PIN_VT_LABEL`, defaulting to `DEFAULT_COMPOSITOR_VT = 4`).
+    /// VTs that are not the compositor slot are console-backed text VTs.
+    /// On each switch, vtmgr deactivates the old owner and activates the new
+    /// one so only one framebuffer writer is live at a time.
     pub fn switch_vt(&mut self, new_vt: usize) {
         if new_vt >= VT_COUNT || new_vt == self.active_vt {
             return;
         }
 
         let old = self.active_vt;
-        let old_is_compositor = old == 4;
-        let new_is_compositor = new_vt == 4;
+        let old_is_compositor = old == self.compositor_vt;
+        let new_is_compositor = new_vt == self.compositor_vt;
 
         if old_is_compositor && !new_is_compositor {
             // Compositor → Console: deactivate compositor, reactivate console.

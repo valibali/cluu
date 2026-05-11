@@ -14,7 +14,7 @@ extern crate alloc;
 mod context;
 
 use context::VtmgrContext;
-use libcluu::ipc::{parse_message, VTMGR_SWITCH_VT_LABEL};
+use libcluu::ipc::{parse_message, VTMGR_PIN_VT_LABEL, VTMGR_SWITCH_VT_LABEL};
 use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Result};
 
@@ -47,7 +47,7 @@ fn run() -> Result<()> {
                     continue;
                 }
 
-                handle_vtmgr_message(&mut ctx, &msg);
+                handle_vtmgr_message(&mut ctx, &msg, payload);
             }
             Err(err) => {
                 if err != libcluu::Error::WouldBlock && !saw_error {
@@ -60,10 +60,20 @@ fn run() -> Result<()> {
     }
 }
 
-fn handle_vtmgr_message(ctx: &mut VtmgrContext, msg: &Message) {
-    if msg.tag.label == VTMGR_SWITCH_VT_LABEL && msg.tag.words >= 1 {
-        let target_vt = msg.words[0];
-        ctx.switch_vt(target_vt);
+fn handle_vtmgr_message(ctx: &mut VtmgrContext, msg: &Message, payload: &[u8]) {
+    match msg.tag.label {
+        VTMGR_SWITCH_VT_LABEL if msg.tag.words >= 1 => {
+            let target_vt = msg.words[0];
+            ctx.switch_vt(target_vt);
+        }
+        VTMGR_PIN_VT_LABEL if msg.tag.words >= 1 => {
+            let vt_index = msg.words[0];
+            // Payload is the service name as raw UTF-8 bytes (no NUL terminator).
+            if let Ok(name) = core::str::from_utf8(payload) {
+                ctx.handle_pin_vt(vt_index, name);
+            }
+        }
+        _ => {}
     }
 }
 

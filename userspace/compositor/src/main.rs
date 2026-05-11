@@ -15,7 +15,8 @@ mod render;
 
 use libcluu::boot::{process_info, TOKEN_IPC};
 use libcluu::ipc::{
-    extract_reply_id, reply, COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL,
+    extract_reply_id, reply, send_msg_with_payload,
+    COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL, VTMGR_PIN_VT_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
@@ -98,6 +99,25 @@ pub extern "C" fn main() -> i32 {
     comp.registry_endpoint = registry::control_endpoint();
 
     let _ = debug_print("compositor: endpoints registered");
+
+    // Pin ourselves to VT4 in vtmgr so the slot is explicit and stable
+    // regardless of service-launch order.  This is a best-effort fire-and-forget:
+    // if vtmgr isn't up yet the message is dropped and vtmgr falls back to the
+    // DEFAULT_COMPOSITOR_VT constant (also 4).
+    const COMPOSITOR_VT: usize = 4;
+    const SERVICE_NAME: &[u8] = b"compositor";
+    if let Some(vtmgr_ep) = registry::lookup_service("vtmgr:control") {
+        let pin_msg = Message::new(
+            VTMGR_PIN_VT_LABEL,
+            [COMPOSITOR_VT, 0, 0, 0, 0, 0],
+            1,
+        );
+        let _ = send_msg_with_payload(vtmgr_ep, &pin_msg, SERVICE_NAME);
+        let _ = debug_print("compositor: pinned to VT4");
+    } else {
+        let _ = debug_print("compositor: vtmgr not yet available, relying on default VT4 pin");
+    }
+
     let _ = debug_print("compositor: ready");
 
     // vtmgr owns fb arbitration: compositor starts inactive and waits

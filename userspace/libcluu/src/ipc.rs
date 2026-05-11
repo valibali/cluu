@@ -59,6 +59,12 @@ pub const PROCMGR_QUERY_CTTY_LABEL: u32 = 11;
 /// kbd → vtmgr: request VT switch.
 /// words[0] = target VT index (0-3).
 pub const VTMGR_SWITCH_VT_LABEL: u32 = 15;
+/// service → vtmgr: pin a named service to a specific VT slot.
+/// words[0] = VT index to pin.  Payload = service name (UTF-8, no NUL).
+/// Sent once at startup by the service that owns a non-text VT (e.g. compositor → 4).
+/// vtmgr uses this to route switch requests to the right backend without relying
+/// on magic numbers in its own source.
+pub const VTMGR_PIN_VT_LABEL: u32 = 16;
 /// vtmgr → console: create a new VT buffer.
 /// words[0] = VT index (0-3).
 pub const CONSOLE_CREATE_VT_LABEL: u32 = 17;
