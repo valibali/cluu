@@ -252,26 +252,13 @@ fn handle_key(ctx: &mut TtyContext, discipline: &mut LineDiscipline, ch: u8, ext
         handle_login_key(ctx, ch, extended);
         return;
     }
-    // Convert extended key codes to ANSI escape sequences before processing
-    let bytes: &[u8] = match extended {
-        1 => b"\x1b[A",  // KEY_UP
-        2 => b"\x1b[B",  // KEY_DOWN
-        3 => b"\x1b[D",  // KEY_LEFT  (D = left in ANSI)
-        4 => b"\x1b[C",  // KEY_RIGHT (C = right in ANSI)
-        5 => b"\x1b[H",  // KEY_HOME
-        6 => b"\x1b[F",  // KEY_END
-        7 => b"\x1b[3~", // KEY_DELETE
-        _ => {
-            // Normal ASCII byte
-            let effect = discipline.handle_byte(ch);
+    if let Some(bytes) = libcluu::tty_core::keymap::encode_extended(extended) {
+        for &b in bytes {
+            let effect = discipline.handle_byte(b);
             apply_effect(ctx, discipline, effect);
-            return;
         }
-    };
-
-    // Feed each byte of the escape sequence through the discipline
-    for &b in bytes {
-        let effect = discipline.handle_byte(b);
+    } else {
+        let effect = discipline.handle_byte(ch);
         apply_effect(ctx, discipline, effect);
     }
 }
