@@ -9,7 +9,6 @@
 extern crate alloc;
 
 mod context;
-mod line_discipline;
 mod protocol;
 
 use context::{TtyContext, TtyMode, LoginState};
@@ -21,7 +20,7 @@ use libcluu::ipc::{
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{yield_cpu, Error, Result};
-use line_discipline::{EchoAction, LineDiscipline};
+use libcluu::tty_core::{EchoAction, LineDiscipline, LineEffect, TermMode};
 use protocol::{decode_kbd_event, parse_message};
 
 /// POSIX signal numbers used for job-control keystroke routing.
@@ -151,7 +150,7 @@ fn handle_one_message(
                     1 => {
                         // setattr: update discipline mode
                         let lflag = msg.words[4];
-                        let new_mode = line_discipline::TermMode {
+                        let new_mode = TermMode {
                             canonical: (lflag & 0x02) != 0,
                             echo: (lflag & 0x08) != 0,
                         };
@@ -189,7 +188,7 @@ fn handle_one_message(
             if foreground_endpoint == 0 {
                 // Foreground returned to shell: force canonical+echo so
                 // shell input cannot get stuck in child raw mode.
-                discipline.set_mode(line_discipline::TermMode::default());
+                discipline.set_mode(TermMode::default());
             }
             if let Some(reply_token) = extract_reply_id(&msg) {
                 let reply_msg = Message::new(TTY_REGISTER_LABEL, [0; 6], 0);
@@ -214,7 +213,7 @@ fn handle_one_message(
         }
         libcluu::ipc::PROCMGR_SESSION_DEATH_LABEL => {
             ctx.handle_session_death();
-            discipline.set_mode(line_discipline::TermMode::default());
+            discipline.set_mode(TermMode::default());
         }
         TTY_SET_FG_LABEL => {
             // Set the foreground pgid for a session.
@@ -312,7 +311,7 @@ fn handle_login_key(ctx: &mut TtyContext, ch: u8, extended: u8) {
 }
 
 /// Apply a line discipline effect: echo and deliver line/raw data.
-fn apply_effect(ctx: &mut TtyContext, discipline: &mut line_discipline::LineDiscipline, effect: line_discipline::LineEffect) {
+fn apply_effect(ctx: &mut TtyContext, discipline: &mut LineDiscipline, effect: LineEffect) {
     match effect.echo {
         EchoAction::None => {}
         EchoAction::Bytes(bytes) => ctx.forward_to_console(bytes),
