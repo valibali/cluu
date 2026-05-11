@@ -216,6 +216,9 @@ pub const COMP_VT_ACTIVATE_LABEL: u32 = 97;
 pub const COMP_VT_DEACTIVATE_LABEL: u32 = 98;
 /// init → compositor:control. Free all windows and exit cleanly.
 pub const COMP_SHUTDOWN_LABEL: u32 = 99;
+/// compositor → app input endpoint. "You may present a new frame now."
+/// Pacing signal: app blocks until this arrives, then renders one frame.
+pub const COMP_FRAME_READY_LABEL: u32 = 100;
 
 // virtio-blk raw-block session IPC labels (Phase 6 of virtio-blk modern redesign).
 // `BLK_OPEN_SESSION` and `BLK_CLOSE_SESSION` go to the driver's listen endpoint.
