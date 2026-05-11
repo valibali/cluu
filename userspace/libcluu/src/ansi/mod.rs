@@ -1,0 +1,42 @@
+//! ANSI / CSI byte-stream parser. Emits `Event`s; the consumer applies them
+//! to its own cell grid. No knowledge of the rendering target.
+
+extern crate alloc;
+
+mod event;
+mod state;
+
+pub use event::{Attr, Event};
+pub use state::Parser;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn collect(bytes: &[u8]) -> Vec<Event> {
+        let mut p = Parser::new();
+        let mut out = Vec::new();
+        p.feed(bytes, |ev| out.push(ev));
+        out
+    }
+
+    #[test]
+    fn print_ascii() {
+        let evs = collect(b"hi");
+        assert_eq!(evs, vec![Event::Print(b'h'), Event::Print(b'i')]);
+    }
+
+    #[test]
+    fn csi_cursor_up() {
+        let evs = collect(b"\x1b[3A");
+        assert_eq!(evs, vec![Event::MoveCursorUp(3)]);
+    }
+
+    #[test]
+    fn csi_default_param_is_one() {
+        let evs = collect(b"\x1b[A");
+        assert_eq!(evs, vec![Event::MoveCursorUp(1)]);
+    }
+}

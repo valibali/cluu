@@ -23,6 +23,7 @@
 extern crate alloc;
 
 pub mod allocator;
+pub mod ansi;
 pub mod cli;
 pub mod args;
 pub mod atlas;
