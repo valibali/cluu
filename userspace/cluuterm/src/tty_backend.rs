@@ -7,8 +7,8 @@ use alloc::vec::Vec;
 
 use libcluu::ansi::{Attr, EraseMode, Event, Parser};
 use libcluu::ipc::{
-    self, COMP_INPUT_FORWARD_LABEL, COMP_WIN_DESTROY_LABEL, PTS_CLOSED_LABEL,
-    PTS_READ_LABEL, PTS_UNREGISTER_LABEL, PTS_WRITE_LABEL,
+    self, COMP_INPUT_FORWARD_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL,
+    PTS_CLOSED_LABEL, PTS_READ_LABEL, PTS_UNREGISTER_LABEL, PTS_WRITE_LABEL,
 };
 use libcluu::ipc::COMP_CLOSE_REQUEST_LABEL;
 use libcluu::tty_core::{HistoryRow, LineDiscipline, Scrollback};
@@ -254,9 +254,25 @@ impl Cluuterm {
     }
 
     fn render_and_publish(&mut self) {
-        // Task 17 fills the blit body.
+        // Blit the terminal cell grid into the compositor SHM.
         crate::render::render(self);
-        // TODO(task17): send COMP_WIN_DAMAGE + await COMP_FRAME_READY.
+
+        // Notify the compositor that the full window interior has changed.
+        // Protocol: words[0]=win_id, words[1]=x, words[2]=y, words[3]=w, words[4]=h
+        // x/y/w/h are in interior cell coordinates (chrome-relative origin 0,0).
+        let dmg = libcluu::types::Message::new(
+            COMP_WIN_DAMAGE_LABEL,
+            [
+                self.window_id as usize,
+                0,                 // x
+                0,                 // y
+                self.cols,         // w  (full interior width)
+                self.rows,         // h  (full interior height)
+                0,
+            ],
+            5,
+        );
+        let _ = ipc::send(self.comp_ep, &dmg, libcluu::types::IpcFlags::empty());
     }
 
     // ── PTS_READ — shell reads stdin ────────────────────────────────────

@@ -29,10 +29,12 @@ use libcluu::{debug_print, registry, syscall};
 
 const COLS: usize = 80;
 const ROWS: usize = 24;
-const GLYPH_W: usize = 8;
-const GLYPH_H: usize = 16;
-const WIN_W: u32 = (COLS * GLYPH_W) as u32;
-const WIN_H: u32 = (ROWS * GLYPH_H) as u32;
+
+// Request cell dimensions: terminal interior (COLS×ROWS) + 1-cell chrome on
+// each side. The compositor's WIN_REGISTER protocol expects cell counts, not
+// pixel dimensions. Chrome is 1 cell wide/tall on each edge.
+const WIN_W: u32 = (COLS + 2) as u32;
+const WIN_H: u32 = (ROWS + 2) as u32;
 
 /// Virtual address at which the compositor SHM is mapped.
 /// Must not overlap with other well-known regions (compdemo uses 0xD000_0000).
