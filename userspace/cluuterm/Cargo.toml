@@ -1,0 +1,14 @@
+[package]
+name = "cluu-cluuterm"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU terminal emulator — compositor window + pts + /bin/login spawn"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[[bin]]
+name = "cluuterm"
+path = "src/main.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }

@@ -2280,6 +2280,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/du",
         "userspace/login",
         "userspace/stat",
+        "userspace/cluuterm",
     ];
 
     let target_json = project_root().join("triplets/x86_64-cluu-user.json");

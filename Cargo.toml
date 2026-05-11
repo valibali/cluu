@@ -85,6 +85,7 @@ members = [
     "userspace/du",
     "userspace/login",
     "userspace/stat",
+    "userspace/cluuterm",
 
     # Language tooling
     "crates/cluu_lang",
@@ -145,6 +146,7 @@ default-members = [
     "userspace/du",
     "userspace/login",
     "userspace/stat",
+    "userspace/cluuterm",
 ]
 
 [workspace.package]
@@ -252,6 +254,9 @@ debug = 0
 debug = 0
 
 [profile.dev.package."cluu-login"]
+debug = 0
+
+[profile.dev.package."cluu-cluuterm"]
 debug = 0
 
 [profile.dev.package."cluu-mkdir"]
@@ -453,6 +458,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-login"]
+debug = 0
+
+[profile.release.package."cluu-cluuterm"]
 debug = 0
 
 [profile.release.package."cluu-mkdir"]
