@@ -50,6 +50,10 @@ pub struct VtmgrContext {
     /// VT index pinned to the compositor via VTMGR_PIN_VT_LABEL.
     /// Defaults to DEFAULT_COMPOSITOR_VT; updated when compositor sends the pin message.
     compositor_vt: usize,
+    /// Set when the compositor sends VTMGR_PIN_VT_LABEL but the compositor
+    /// control endpoint is not yet available.  Cleared and acted on as soon
+    /// as the compositor control grant arrives so boot lands on VT4.
+    boot_switch_pending: bool,
 }
 
 impl VtmgrContext {
@@ -79,6 +83,7 @@ impl VtmgrContext {
             compositor_control: 0,
             requested_compositor: false,
             compositor_vt: DEFAULT_COMPOSITOR_VT,
+            boot_switch_pending: false,
         })
     }
 
@@ -114,6 +119,13 @@ impl VtmgrContext {
                     if service_name == "compositor" && name == "control" {
                         self.compositor_control = token;
                         let _ = debug_print("vtmgr: compositor control subscribed");
+                        // If compositor pinned its VT before the control endpoint
+                        // arrived, execute the deferred boot switch now.
+                        if self.boot_switch_pending {
+                            self.boot_switch_pending = false;
+                            let target = self.compositor_vt;
+                            self.switch_vt(target);
+                        }
                     } else if name == "control" {
                         // console:0 control endpoint
                         self.console_endpoint = token;
@@ -140,10 +152,13 @@ impl VtmgrContext {
 
     /// Record a named VT pin sent by a service at startup.
     ///
-    /// Called when a service sends `VTMGR_PIN_VT_LABEL`.  Currently only the
-    /// "compositor" service name is handled — it updates `compositor_vt` so
-    /// that `switch_vt` routes VT requests dynamically rather than relying on
-    /// the hardcoded default (4).  Unknown service names are silently ignored.
+    /// Called when a service sends `VTMGR_PIN_VT_LABEL`.  Only the
+    /// "compositor" service name is handled — it updates `compositor_vt` and
+    /// immediately switches the active VT to the compositor so boot lands on
+    /// the compositor screen.  If the compositor control endpoint is not yet
+    /// available the switch is deferred via `boot_switch_pending` and applied
+    /// as soon as the compositor control grant arrives.  Unknown service names
+    /// are silently ignored.
     pub fn handle_pin_vt(&mut self, vt_index: usize, service_name: &str) {
         if service_name == "compositor" {
             if vt_index < VT_COUNT {
@@ -152,6 +167,14 @@ impl VtmgrContext {
                     "vtmgr: compositor pinned to VT{}",
                     vt_index
                 ));
+                if self.compositor_control != 0 {
+                    // Control endpoint already available — switch immediately.
+                    self.switch_vt(vt_index);
+                } else {
+                    // Defer until handle_registry_message delivers the grant.
+                    self.boot_switch_pending = true;
+                    let _ = debug_print("vtmgr: boot switch to compositor VT pending");
+                }
             }
         }
     }
