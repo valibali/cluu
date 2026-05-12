@@ -68,6 +68,8 @@ procmgr autostart: getty@vt0, getty@vt1, getty@vt2, getty@vt3
 
 ### 4.1 vtmgr — boot VT race fix
 
+**Status:** done in plan 2026-05-12-vtmgr-boot-vt-fix (commits 72006d6..7dee34e). Visual smoke 2026-05-12 confirmed compositor renders at boot.
+
 **File:** `userspace/vtmgr/src/context.rs`
 
 - `active_vt: 0` → `active_vt: DEFAULT_COMPOSITOR_VT` at construction.
