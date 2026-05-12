@@ -185,5 +185,4 @@ impl FdTable {
             table.entries.remove(&fd);
         }
     }
-
 }
