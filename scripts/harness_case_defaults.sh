@@ -632,6 +632,63 @@ harness_derive_marker_defaults() {
                 SHELL_AUTOSTART_CMD_DEFAULT="mkdir -p /tmp/f; touch /tmp/f/a.txt; find /tmp/f -name '*.txt'"
                 EXPECTED_CONTAINS=("/tmp/f/a.txt")
                 ;;
+            l2_vt4_default)
+                TEST_COMMAND=""
+                # Pure boot-time marker: compositor is pinned to VT4 at boot
+                # (Task 20). No keyboard input needed.
+                ;;
+            l2_cluuterm_smoke)
+                TEST_COMMAND=""
+                # autostart.toml boots cluuterm at VT4; all markers fire at
+                # boot without any keyboard input.
+                ;;
+            l2_cluuterm_login)
+                TEST_COMMAND=""
+                # After boot, wait for login prompt then inject credentials.
+                # Cluuterm is the focused window on VT4; compositor forwards
+                # keystrokes to it.
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
+                ;;
+            l2_cluuterm_ansi)
+                TEST_COMMAND=""
+                # After login, run printf with a red SGR escape.  The harness
+                # types the command after the shell prompt is ready.
+                # printf '\033[31mred\033[0m'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey p\nsendkey r\nsendkey i\nsendkey n\nsendkey t\nsendkey f\nsendkey spc\nsendkey apostrophe\nsendkey backslash\nsendkey 0\nsendkey 3\nsendkey 3\nsendkey bracket_left\nsendkey 3\nsendkey 1\nsendkey m\nsendkey r\nsendkey e\nsendkey d\nsendkey backslash\nsendkey 0\nsendkey 3\nsendkey 3\nsendkey bracket_left\nsendkey 0\nsendkey m\nsendkey apostrophe\nsendkey ret'
+                ;;
+            l2_cluuterm_keymap)
+                TEST_COMMAND=""
+                # After login, press Up arrow.  The compositor forwards the
+                # extended key to cluuterm which logs the CSI sequence.
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey up'
+                ;;
+            l2_cluuterm_exit)
+                TEST_COMMAND=""
+                # After login, type `exit` to close the shell.
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey e\nsendkey x\nsendkey i\nsendkey t\nsendkey ret'
+                ;;
+            l2_cluuterm_two_windows)
+                TEST_COMMAND=""
+                # Press Ctrl+Alt+N to ask compositor to spawn a second cluuterm.
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-n'
+                ;;
+            l2_cluuterm_raw_mode)
+                TEST_COMMAND=""
+                # MicroPython calls tcsetattr(raw) for its REPL on stdin.
+                # This reaches the legacy tty's LineDiscipline via TTY_CTL_LABEL,
+                # which calls set_mode() and emits the raw-mode marker.
+                # Use `mp -c ...` so the process exits and the shell can
+                # observe line_discipline: mode=canonical on restore, but we
+                # only require the initial raw-mode switch.
+                SHELL_AUTOSTART_CMD_DEFAULT="micropython"
+                ;;
+            l2_vt_legacy_preserved)
+                TEST_COMMAND=""
+                # vtmgr boots at active_vt=0 regardless of compositor pin.
+                # First switch TO compositor VT4 (ctrl-alt-f5), then back to
+                # legacy VT0 (ctrl-alt-f1), confirming full round-trip.
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-f5\nsleep 3\nsendkey ctrl-alt-f1'
+                ;;
             l2_compositor_smoke)
                 TEST_COMMAND=""
                 # No TEST_COMMAND needed — compositor + compdemo autostart from

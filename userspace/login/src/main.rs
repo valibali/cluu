@@ -21,6 +21,7 @@ use libcluu::runtime as _;
 
 use libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL;
 use libcluu::posix::{_read, _write};
+use libcluu::syscall::debug_print as dp;
 use libcluu::types::Message;
 
 // ─── I/O helpers ─────────────────────────────────────────────────────────────
@@ -170,6 +171,7 @@ pub extern "C" fn main() -> i32 {
 
         match try_login(&user, &pass) {
             Ok(()) => {
+                let _ = dp("login: user authenticated");
                 spawn_shell();
                 return 0;
             }

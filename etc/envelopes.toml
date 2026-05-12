@@ -23,6 +23,7 @@ mounts = [
     "rw:/var/log",
     "rw:/tmp",
     "rw:/home",
+    "rw:/dev/pts",
 ]
 
 [envelope.user.env]
@@ -49,6 +50,7 @@ mounts = [
     "rw:/tmp",
     "rw:/home",
     "rw:/proc",
+    "rw:/dev/pts",
 ]
 
 [envelope.admin.env]
@@ -77,6 +79,7 @@ mounts = [
     "rw:/var",
     "rw:/tmp",
     "rw:/home",
+    "rw:/dev/pts",
 ]
 
 [envelope.supervisor.env]

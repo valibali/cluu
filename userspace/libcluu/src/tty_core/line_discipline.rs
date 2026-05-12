@@ -11,6 +11,7 @@ extern crate alloc;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use crate::syscall::debug_print as dp;
 
 const BACKSPACE_SEQ: &[u8] = b"\x08 \x08";
 const HISTORY_CAP: usize = 32;
@@ -104,6 +105,11 @@ impl LineDiscipline {
 
     /// Update the terminal mode.
     pub fn set_mode(&mut self, mode: TermMode) {
+        if !mode.canonical && self.mode.canonical {
+            let _ = dp("line_discipline: mode=raw");
+        } else if mode.canonical && !self.mode.canonical {
+            let _ = dp("line_discipline: mode=canonical");
+        }
         self.mode = mode;
         // When switching to raw mode, flush any buffered canonical input
         if !mode.canonical && !self.buffer.is_empty() {

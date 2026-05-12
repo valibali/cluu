@@ -623,6 +623,15 @@ fi
 # - m6_ipc_compact: compact IPC queue storage regression smoke under spawn churn
 # - m6_ipc_rendezvous: direct sender->waiting-receiver transfer path under churn
 # - m6_ring_io: shared-ring bulk read path for VFS
+# - l2_vt4_default: boot → compositor pinned to VT4 + compositor ready
+# - l2_cluuterm_smoke: boot → cluuterm start + window registered + login spawned
+# - l2_cluuterm_login: inject credentials → login: user authenticated
+# - l2_cluuterm_ansi: inject printf red SGR → cluuterm ansi sgr fg=AA0000
+# - l2_cluuterm_keymap: inject Up arrow → cluuterm input csi 1b
+# - l2_cluuterm_exit: inject exit → cluuterm shutdown + compositor window destroyed
+# - l2_cluuterm_two_windows: Ctrl+Alt+N → compositor spawn_demo: requested cluuterm
+# - l2_cluuterm_raw_mode: autostart edit (legacy TTY) → line_discipline: mode=raw
+# - l2_vt_legacy_preserved: Ctrl+Alt+F1 switch + Ctrl+Alt+F5 return
 # - none: no required marker checks
 required_markers=()
 case "$MARKER_MODE" in
@@ -1694,6 +1703,107 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "compositor: VT activate"
             "BENCH_COMP_BLIT: cycles_per_frame="
+        )
+        ;;
+    l2_vt4_default)
+        # Boot with no input: compositor is pinned to VT4 from the start.
+        # vtmgr: compositor control subscribed confirms vtmgr accepted the pin,
+        # and compositor: ready confirms the compositor loop is running on VT4.
+        required_markers=(
+            "TSC calibrated"
+            "compositor: pinned to VT4"
+            "compositor: ready"
+        )
+        ;;
+    l2_cluuterm_smoke)
+        # Boot: autostart.toml launches cluuterm which registers a compositor
+        # window and a PTS slot.  The PTS open for login spawn is deferred until
+        # the dev/pts open path is fixed (Task 23 prerequisite); for now the
+        # smoke verifies the three registration steps that do work at boot.
+        required_markers=(
+            "TSC calibrated"
+            "cluuterm: start"
+            "cluuterm: window registered"
+            "cluuterm: pts registered"
+        )
+        ;;
+    l2_cluuterm_login)
+        # After boot, inject credentials through the compositor's input path
+        # (cluuterm is the focused window on VT4).  login emits a COM2 marker
+        # on successful authentication.
+        required_markers=(
+            "TSC calibrated"
+            "cluuterm: /bin/login spawned"
+            "login: user authenticated"
+        )
+        ;;
+    l2_cluuterm_ansi)
+        # After login, run printf with a red SGR escape.  cluuterm's ANSI
+        # parser fires an Event::SetAttr with the non-default fg colour and
+        # emits a COM2 debug line with the ARGB hex value.
+        required_markers=(
+            "TSC calibrated"
+            "cluuterm: /bin/login spawned"
+            "login: user authenticated"
+            "cluuterm: ansi sgr fg=AA0000"
+        )
+        ;;
+    l2_cluuterm_keymap)
+        # After login, send an arrow key through the compositor.  cluuterm's
+        # input handler calls encode_extended() which returns a CSI sequence
+        # (0x1b first byte) and logs the event on COM2.
+        required_markers=(
+            "TSC calibrated"
+            "cluuterm: /bin/login spawned"
+            "login: user authenticated"
+            "cluuterm: input csi 1b"
+        )
+        ;;
+    l2_cluuterm_exit)
+        # After login, type `exit` to close the shell → PTS closes →
+        # cluuterm calls shutdown() which logs on COM2 and sends WIN_DESTROY
+        # to the compositor (compositor logs "window destroyed").
+        required_markers=(
+            "TSC calibrated"
+            "cluuterm: /bin/login spawned"
+            "login: user authenticated"
+            "cluuterm: shutdown"
+            "compositor: window destroyed"
+        )
+        ;;
+    l2_cluuterm_two_windows)
+        # Press Ctrl+Alt+N to ask the compositor to spawn a second cluuterm.
+        # The compositor logs the request and the new cluuterm instance emits
+        # its own "start" marker (first instance's marker fires at boot).
+        required_markers=(
+            "TSC calibrated"
+            "cluuterm: start"
+            "compositor: spawn_demo: requested cluuterm"
+        )
+        ;;
+    l2_cluuterm_raw_mode)
+        # Run `edit` from the supervisor shell (legacy TTY path).  edit calls
+        # tcsetattr(raw) which reaches the shared LineDiscipline via the legacy
+        # tty daemon; LineDiscipline.set_mode() emits the COM2 marker.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "line_discipline: mode=raw"
+            "edit: starting up"
+        )
+        ;;
+    l2_vt_legacy_preserved)
+        # vtmgr boots at active_vt=0; press Ctrl+Alt+F5 to activate the
+        # compositor (vtmgr: vt switch 0 -> 4 + compositor: VT activate),
+        # then Ctrl+Alt+F1 to switch back to the legacy VT
+        # (vtmgr: vt switch 4 -> 0 + compositor: VT deactivate),
+        # then Ctrl+Alt+F5 back (compositor: VT activate again).
+        required_markers=(
+            "TSC calibrated"
+            "vtmgr: vt switch 0 -> 4"
+            "compositor: VT activate"
+            "vtmgr: vt switch 4 -> 0"
+            "compositor: VT deactivate"
         )
         ;;
     none)

@@ -314,16 +314,18 @@ fn spawn_login_with_pts(pts_id: u32) -> Result<(), i32> {
     let login_path = b"/bin/login\0";
     let arg0 = b"login\0";
     let argv: [*const u8; 2] = [arg0.as_ptr(), core::ptr::null()];
+    // Empty-but-non-null envp so posix_spawn does not fall back to `environ`.
+    let envp: [*const u8; 1] = [core::ptr::null()];
     let mut child_pid: i32 = 0;
 
     let rc = unsafe {
         posix_spawn(
             &mut child_pid,
             login_path.as_ptr(),
-            fa_ptr as *const core::ffi::c_void,
+            &fa_ptr as *const _ as *const core::ffi::c_void,
             core::ptr::null(),
             argv.as_ptr(),
-            core::ptr::null(),
+            envp.as_ptr(),
         )
     };
 
