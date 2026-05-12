@@ -2152,14 +2152,29 @@ impl ProcessManager {
         let _ = debug_print(&format!("procmgr: session login user='{}' vt={}", username, vt_index));
 
         // Reject if a session is already active on this VT.
-        if vt_index < VT_COUNT && self.vt_to_session[vt_index] != 0 {
+        // vt_index >= VT_COUNT means "pts-backed / non-legacy-VT login".
+        // The caller (e.g. cluuterm's /bin/login) manages its own I/O via a
+        // pts fd; procmgr only needs to verify credentials, not create a VT
+        // session.  Return OK immediately so the caller can emit its marker
+        // and posix_spawn its own shell.
+        if vt_index >= VT_COUNT {
+            let _ = debug_print(&format!(
+                "procmgr: auth-only login user='{}' (non-VT pts, vt={})",
+                username, vt_index
+            ));
+            reply_msg.words[0] = 0;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        if self.vt_to_session[vt_index] != 0 {
             let _ = debug_print(&format!("procmgr: login rejected, vt={} has active session", vt_index));
             reply_msg.words[0] = Error::AlreadyExists.to_errno() as usize;
             if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
             return Ok(());
         }
 
-        let tty_ep = if vt_index < VT_COUNT { self.tty_endpoints[vt_index] } else { self.tty_endpoints[0] };
+        let tty_ep = self.tty_endpoints[vt_index];
         if tty_ep == 0 {
             let _ = debug_print(&format!("procmgr: login vt={}: no tty endpoint", vt_index));
             reply_msg.words[0] = Error::NotFound.to_errno() as usize;
@@ -4203,9 +4218,15 @@ impl ProcessManager {
 
                     let is_pipe = (flags & 0x01) != 0;
                     // Validate + narrow: stdin needs recv, others need send.
+                    // IPC_CALL is added for stdout/stderr so that read_tty()
+                    // (which sends TTY_READ_REQUEST_LABEL as a synchronous call
+                    // via fd 1's endpoint) can complete successfully.
+                    // GRANT is included so that descendants (login → shell) can
+                    // re-derive via FDAC.  Mirrors the pre-existing pipe-endpoint
+                    // pattern at main.rs:2901-2924.
                     let probe_rights = match target_fd {
-                        0 => Rights::IPC_RECV.bits() as usize,
-                        _ => Rights::IPC_SEND.bits() as usize,
+                        0 => (Rights::IPC_RECV | Rights::GRANT).bits() as usize,
+                        _ => (Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT).bits() as usize,
                     };
                     match token_derive(endpoint, probe_rights, u64::MAX) {
                         Ok(derived) => {
