@@ -142,9 +142,10 @@ Today's binary is text-mode over fd 0/1. New version:
   `14282b0` commits). Initial size = full VT4 cell dims; redraw on
   WIN_RESIZE.
 - Render: centered box w/ "CLUU login", username field (echoed),
-  password field (masked), Tab toggles focus, Enter submits.
-- Input: compositor INPUT_FORWARD events; reuse cluuterm's keymap
-  decoder; mouse click on field switches focus.
+  password field (masked), Tab toggles field focus, Enter submits.
+- Input: compositor INPUT_FORWARD (keyboard) events; reuse cluuterm's
+  keymap decoder. Mouse-click focus deferred until compositor
+  sub-project C lands.
 - Auth: `PROCMGR_SESSION_LOGIN_LABEL` w/ `session_kind=1`.
 - Success: process exits; procmgr does the rest. Compositor destroys
   modal on WIN_UNREGISTER. Procmgr separately tells compositor "a
@@ -154,27 +155,28 @@ Today's binary is text-mode over fd 0/1. New version:
 
 ### 4.6 compositor — scope additions
 
-**File:** `userspace/compositor/src/main.rs` (+ helpers)
+**Reference:** `docs/superpowers/specs/2026-05-10-tui-compositor-design.md` is the base
+spec. Focus management, window move (Super+Arrow), window resize
+(Super+Shift+Arrow), focused-vs-unfocused chrome, status bar, and
+INPUT_FORWARD (keyboard) are already specified there. Mouse support +
+pointer overlay + click-to-focus + drag-to-move/resize are listed as
+**sub-project C** in §14, gated on Phase 5 raw-input.
 
-Additions required by spec, beyond what already shipped:
+**Delta this spec adds** on top of the base spec:
 
-| Capability             | Status    | Notes                                                  |
-|------------------------|-----------|--------------------------------------------------------|
-| WIN_REGISTER + blit    | shipped   | Cell-grid via SHM, WIN_DAMAGE                          |
-| Multi-window           | partial   | Confirm n>1 windows render + z-order                   |
-| Modal / fullscreen     | new       | Flag on WIN_REGISTER; modal locks focus to that window |
-| Focus management       | new       | One focused window at a time; INPUT_FORWARD to focus   |
-| Focus indicator        | new       | Different chrome (border/title) for focused vs not     |
-| Window move (drag)     | new       | Mouse drag on title row → reposition                   |
-| Window resize          | new       | Mouse drag on bottom-right corner → resize             |
-| Mouse events           | new       | INPUT_FORWARD carries x/y/button/wheel                 |
-| Cursor                 | new       | Single text-cell cursor, software-drawn                |
+| Capability               | Notes                                                            |
+|--------------------------|------------------------------------------------------------------|
+| Modal / fullscreen flag  | New on `WIN_REGISTER`. Compositor enforces: modal window keeps focus until destroyed; other clients' `WIN_REGISTER` accepted but queued, no input until modal dismissed. |
+| WIN_RESIZE app notify    | New compositor→client message. Existing spec resizes via hotkey but doesn't notify app of new dims; needed so /bin/login and cluuterm can re-allocate SHM. |
+| Text cursor              | New. Single text-cell cursor in focused window's interior, software-drawn at `(cursor_x, cursor_y)` from `WindowShm` header (already exists). Compositor toggles blink on 500 ms timer. |
+| Mouse (deferred until C) | Spec calls for mouse; honoured by mouse-driven path in sub-project C. v1 login modal usable with keyboard only (Tab switches field, Enter submits). |
 
 Scope decisions:
-- All windows are cell-grid (no pixel windows yet).
-- Mouse coords delivered in cell units (round to nearest cell).
-- Resize fires WIN_RESIZE w/ new cell dims; client re-allocates SHM.
-- Move is purely compositor-internal — client never knows position.
+- Cell-grid only (consistent with base spec).
+- Modal-lock is compositor-enforced (security: a rogue client cannot
+  steal focus during login).
+- Mouse delivery deferred to sub-project C; login modal works without
+  mouse via Tab/Enter.
 
 ### 4.7 getty — VT0–VT3 raw console
 
@@ -225,7 +227,7 @@ restarts → banner + login. No compositor involvement.
 | `WIN_REGISTER` (compositor)        | client→comp     | add fullscreen+modal flags |
 | `WIN_RESIZE`                       | comp→client     | new           |
 | `WIN_FOCUS` / `WIN_BLUR`           | comp→client     | new           |
-| `INPUT_FORWARD`                    | comp→client     | extend w/ mouse (x,y,button,wheel) |
+| `INPUT_FORWARD`                    | comp→client     | unchanged for v1; mouse extension under sub-project C |
 
 ## 6. Failure / retry UX
 
