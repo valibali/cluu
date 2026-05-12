@@ -67,28 +67,27 @@ impl VtmgrContext {
         registry::register_output("control", endpoint)?;
         let registry_endpoint = registry::control_endpoint();
 
-        debug_print(&format!(
-            "vtmgr: ready active_vt={} compositor_vt={}",
-            DEFAULT_COMPOSITOR_VT,  // post-fix value; before fix this prints 0
-            DEFAULT_COMPOSITOR_VT,
-        ))?;
-        yield_cpu()?;
-
-        Ok(Self {
+        let ctx = Self {
             endpoint,
             registry_endpoint,
             console_endpoint: 0,
             procmgr_spawn_endpoint: 0,
-            active_vt: 0,
-            vt_created: 1,  // VT 0 console buffer is created at boot by console:0
-            vt_spawned: 0, // vt:0 will be spawned by us once procmgr is available
+            active_vt: DEFAULT_COMPOSITOR_VT,
+            vt_created: 1,
+            vt_spawned: 0,
             requested_console: false,
             requested_procmgr_spawn: false,
             compositor_control: 0,
             requested_compositor: false,
             compositor_vt: DEFAULT_COMPOSITOR_VT,
             boot_switch_pending: false,
-        })
+        };
+        debug_print(&format!(
+            "vtmgr: ready active_vt={} compositor_vt={}",
+            ctx.active_vt, ctx.compositor_vt
+        ))?;
+        yield_cpu()?;
+        Ok(ctx)
     }
 
     /// Request subscriptions for services we need.
