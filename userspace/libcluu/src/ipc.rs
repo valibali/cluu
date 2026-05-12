@@ -726,6 +726,7 @@ pub fn call_with_payload(
         buffer[header.len()..total_len].copy_from_slice(payload);
         loop {
             match syscall::ipc_call(endpoint_token, &buffer[..total_len], reply_bytes) {
+                Ok(0) => { let _ = syscall::yield_cpu(); }  // kernel spurious wake — reply not delivered
                 Ok(_) => return Ok(()),
                 Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
                 Err(err) => return Err(err),
@@ -738,6 +739,7 @@ pub fn call_with_payload(
     buffer.extend_from_slice(payload);
     loop {
         match syscall::ipc_call(endpoint_token, &buffer, reply_bytes) {
+            Ok(0) => { let _ = syscall::yield_cpu(); }  // kernel spurious wake — reply not delivered
             Ok(_) => return Ok(()),
             Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
             Err(err) => return Err(err),
@@ -768,6 +770,7 @@ pub fn call(endpoint_token: usize, msg: &mut Message, _flags: IpcFlags) -> Resul
     let reply_bytes = msg.as_bytes_mut();
     loop {
         match syscall::ipc_call(endpoint_token, send_bytes, reply_bytes) {
+            Ok(0) => { let _ = syscall::yield_cpu(); }  // kernel spurious wake — reply not delivered
             Ok(_) => return Ok(()),
             Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
             Err(err) => return Err(err),
@@ -794,6 +797,7 @@ pub fn call_with_timeout(
     let reply_bytes = msg.as_bytes_mut();
     loop {
         match syscall::ipc_call_timeout(endpoint_token, send_bytes, reply_bytes, timeout_ms) {
+            Ok(0) => { let _ = syscall::yield_cpu(); }  // kernel spurious wake — reply not delivered
             Ok(_) => return Ok(()),
             Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
             Err(err) => return Err(err),
@@ -879,7 +883,14 @@ pub fn call_with_reply_buf(
     buffer.extend_from_slice(header);
     buffer.extend_from_slice(send_payload);
 
-    let bytes_received = syscall::ipc_call(endpoint_token, &buffer, reply_buf)?;
+    let bytes_received = loop {
+        match syscall::ipc_call(endpoint_token, &buffer, reply_buf) {
+            Ok(0) => { let _ = syscall::yield_cpu(); }  // kernel spurious wake — reply not delivered
+            Ok(n) => break n,
+            Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
+            Err(err) => return Err(err),
+        }
+    };
 
     if bytes_received < size_of::<Message>() {
         return Err(Error::InvalidState);
