@@ -531,9 +531,11 @@ const FDAC_FLAG_PIPE: u32 = 0x01;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FdAction {
-    target_fd: u32,
-    flags: u32,
-    endpoint: usize,
+    target_fd:     u32,    // bytes 0–3
+    flags:         u32,    // bytes 4–7
+    endpoint:      usize,  // bytes 8–15  (legacy path: pipes, tty)
+    vfs_client_id: usize,  // bytes 16–23 (0 = not VFS-backed)
+    vfs_remote_fd: usize,  // bytes 24–31 (VFS-side fd number; 0 = not VFS-backed)
 }
 
 /// Initialize file actions — heap-allocates the inner struct.
@@ -548,9 +550,11 @@ pub extern "C" fn posix_spawn_file_actions_init(actions: *mut *mut FileActionsIn
         count: 0,
         _pad: [0; 7],
         actions: [FdAction {
-            target_fd: 0,
-            flags: 0,
-            endpoint: 0,
+            target_fd:     0,
+            flags:         0,
+            endpoint:      0,
+            vfs_client_id: 0,
+            vfs_remote_fd: 0,
         }; MAX_FD_ACTIONS],
     });
     unsafe {
@@ -613,12 +617,16 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
         flags |= FDAC_FLAG_PIPE;
     }
     let endpoint = entry.endpoint;
+    let vfs_client_id = entry.client_id;
+    let vfs_remote_fd = entry.remote_fd.unwrap_or(0);
     drop(table);
 
     inner.actions[count] = FdAction {
         target_fd: newfd as u32,
         flags,
         endpoint,
+        vfs_client_id,
+        vfs_remote_fd,
     };
     inner.count = (count + 1) as u8;
     0

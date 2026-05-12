@@ -21,7 +21,7 @@ use libcluu::fs::protocol::{
 };
 use libcluu::ipc::{
     self, extract_reply_id, parse_message, reply_with_payload, SharedRing, SharedRingHeader,
-    PTS_REGISTER_LABEL, PTS_UNREGISTER_LABEL, PTS_CLOSED_LABEL,
+    PTS_REGISTER_LABEL, PTS_UNREGISTER_LABEL, PTS_CLOSED_LABEL, VFS_DERIVE_CHILD_FD_LABEL,
 };
 use libcluu::types::Message;
 use libcluu::*;
@@ -723,6 +723,9 @@ impl VfsServer {
         if msg.tag.label == PTS_UNREGISTER_LABEL {
             return self.handle_pts_unregister(msg, sender_tid);
         }
+        if msg.tag.label == VFS_DERIVE_CHILD_FD_LABEL {
+            return self.handle_derive_child_fd(msg);
+        }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
             return Ok(());
@@ -994,6 +997,82 @@ impl VfsServer {
             }
         }
 
+        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    /// Handle `VFS_DERIVE_CHILD_FD_LABEL` — clone a parent's open file to a
+    /// child client_id and mint a narrowed VFS token from VFS's own full-rights
+    /// endpoint.
+    ///
+    /// Called by procmgr's FDAC handler during `posix_spawn` when the parent
+    /// has a VFS-backed fd (pts, ext2, memfs) in its file-action list.
+    ///
+    /// Wire format (see `libcluu::ipc::VFS_DERIVE_CHILD_FD_LABEL`):
+    ///
+    /// Request:
+    ///   words[0] = parent_client_id
+    ///   words[1] = parent_remote_fd
+    ///   words[2] = child_rights   (rights bits to narrow to)
+    ///   words[3] = child_tid      (becomes the child's client_id)
+    ///
+    /// Reply:
+    ///   words[0] = status (0 or errno)
+    ///   words[1] = derived token handle
+    ///   words[2] = child_client_id (echo of child_tid)
+    ///   words[3] = child_remote_fd (freshly allocated under child_client_id)
+    fn handle_derive_child_fd(&mut self, msg: &Message) -> Result<()> {
+        let reply_token = extract_reply_id(msg).unwrap_or(self.endpoint);
+        let mut reply_msg = Message::new(VFS_DERIVE_CHILD_FD_LABEL, [0; 6], 4);
+
+        let parent_cid  = msg.words[0];
+        let parent_fd   = msg.words[1];
+        let child_rights = msg.words[2];
+        let child_tid   = msg.words[3];
+
+        // 1. Look up the parent's open file.
+        let cloned: OpenFile = match self.files.get(parent_cid, parent_fd) {
+            Some(f) => f.clone(),
+            None => {
+                let _ = debug_print(&alloc::format!(
+                    "vfs: derive_child_fd lookup miss parent_cid={} parent_fd={}",
+                    parent_cid, parent_fd
+                ));
+                reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        // 2. For Pts, bump refcount so the slot lives past the parent's close.
+        if let OpenFile::Pts(ref pts) = cloned {
+            let _ = self.pts_registry.inc_ref(pts.pts_id);
+        }
+
+        // 3. Install the clone under the child's client_id.
+        let child_fd = self.files.open(child_tid, cloned);
+
+        // 4. Derive a narrowed token from VFS's own full-rights endpoint.
+        let derived = match token_derive(self.endpoint, child_rights, u64::MAX) {
+            Ok(t) => t,
+            Err(e) => {
+                // Roll back the file table entry on derive failure.
+                self.files.close(child_tid, child_fd);
+                let _ = debug_print(&format!(
+                    "vfs: derive_child_fd token_derive failed {:?}", e
+                ));
+                reply_msg.words[0] = e.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        let _ = debug_print(&format!(
+            "vfs: derive_child_fd parent_cid={} parent_fd={} child_tid={} child_fd={}",
+            parent_cid, parent_fd, child_tid, child_fd
+        ));
+
+        reply_msg.words[0] = 0;
+        reply_msg.words[1] = derived;
+        reply_msg.words[2] = child_tid;
+        reply_msg.words[3] = child_fd;
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
     }
 
@@ -3696,7 +3775,6 @@ impl VfsServer {
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
-
         let Some(file) = self.files.get(client_id, fd).cloned() else {
             reply_msg.words[0] = Error::NotFound.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());

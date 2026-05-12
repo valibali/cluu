@@ -424,17 +424,21 @@ impl PipelineExecutor {
             // Wire read end of upstream pipe as stdin (not for first stage).
             if i > 0 {
                 fdac.push(FdAction {
-                    target_fd: 0,
-                    is_pipe: true,
-                    endpoint: pipes[i - 1].read_token,
+                    target_fd:     0,
+                    is_pipe:       true,
+                    endpoint:      pipes[i - 1].read_token,
+                    vfs_client_id: 0,
+                    vfs_remote_fd: 0,
                 });
             }
             // Wire write end of downstream pipe as stdout (not for last stage).
             if i < n - 1 {
                 fdac.push(FdAction {
-                    target_fd: 1,
-                    is_pipe: true,
-                    endpoint: pipes[i].write_token,
+                    target_fd:     1,
+                    is_pipe:       true,
+                    endpoint:      pipes[i].write_token,
+                    vfs_client_id: 0,
+                    vfs_remote_fd: 0,
                 });
             }
 

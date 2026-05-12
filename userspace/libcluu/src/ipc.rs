@@ -269,6 +269,29 @@ pub const PTS_IOCTL_LABEL: u32      = 0x74;
 pub const PTS_POLL_LABEL: u32       = 0x75;
 pub const PTS_CLOSED_LABEL: u32     = 0x76;
 
+// ──────────────────────────────────────────────────────────────────────
+// VFS_DERIVE_CHILD_FD_LABEL — procmgr → VFS: clone an open file to a
+// new client_id and mint a narrowed VFS token for the child.
+//
+// Sent by procmgr's FDAC handler when spawning a child that inherits a
+// VFS-backed fd (pts, ext2, memfs).  VFS mints the derived token from
+// its own full-rights endpoint (`self.endpoint`), which it holds
+// legitimately via `endpoint_create` at boot.
+//
+// Request words:
+//     words[0] = parent_client_id  — caller's (parent process) client_id in VFS
+//     words[1] = parent_remote_fd  — VFS-side fd number for the parent's open file
+//     words[2] = child_rights      — rights bits to narrow to (e.g. READ|WRITE)
+//     words[3] = child_tid         — new thread id; used as new client_id for child
+//
+// Reply words:
+//     words[0] = status            — 0 on success; errno cast to usize on error
+//     words[1] = derived_handle    — narrowed VFS token scoped to vfs:main
+//     words[2] = child_client_id   — echo of child_tid passed in
+//     words[3] = child_remote_fd   — freshly allocated fd slot under child_client_id
+// ──────────────────────────────────────────────────────────────────────
+pub const VFS_DERIVE_CHILD_FD_LABEL: u32 = 0x77;
+
 // virtio-blk raw-block session IPC labels (Phase 6 of virtio-blk modern redesign).
 // `BLK_OPEN_SESSION` and `BLK_CLOSE_SESSION` go to the driver's listen endpoint.
 // `BLK_SUBMIT` is fire-and-forget into the driver. `BLK_COMPLETE` and
@@ -975,10 +998,21 @@ pub const ENV_MAGIC: u32 = 0x2056_4E45;
 /// FDAC = "File Descriptor Action" — each entry overrides one of the child's
 /// standard file descriptors (0=stdin, 1=stdout, 2=stderr, 3=stdlog) with a
 /// caller-supplied endpoint token.
+///
+/// Wire format per entry (32 bytes):
+///   bytes  0– 3: target_fd (u32 LE)
+///   bytes  4– 7: flags     (u32 LE; bit 0 = IS_PIPE)
+///   bytes  8–15: endpoint  (usize LE; legacy path: pipes, tty)
+///   bytes 16–23: vfs_client_id (usize LE; 0 = not VFS-backed)
+///   bytes 24–31: vfs_remote_fd (usize LE; 0 = not VFS-backed)
 pub struct FdAction {
-    pub target_fd: u32,
-    pub is_pipe: bool,
-    pub endpoint: usize,
+    pub target_fd:     u32,
+    pub is_pipe:       bool,
+    pub endpoint:      usize,
+    /// VFS client ID for the source fd (0 for non-VFS fds such as pipes/tty).
+    pub vfs_client_id: usize,
+    /// VFS-side fd number for the source fd (0 for non-VFS fds).
+    pub vfs_remote_fd: usize,
 }
 
 /// One file redirection entry packed into a `CONTAINER_RUN` payload.
@@ -995,7 +1029,7 @@ pub struct RedirAction {
 ///
 /// Wire format (in order):
 ///   `[name_bytes]`
-///   `[u32 FDAC_MAGIC LE][u32 count LE][(u32 fd, u32 flags, u64 ep) * count]`
+///   `[u32 FDAC_MAGIC LE][u32 count LE][(u32 fd, u32 flags, u64 ep, u64 vfs_client_id, u64 vfs_remote_fd) * count]`
 ///   `[argv[0]\0][argv[1]\0]...[u32 argv_bytes_len LE][u32 ARGV_MAGIC LE]`
 ///   `[cwd_bytes][u32 cwd_len LE][u32 CWD_MAGIC LE]`
 ///
@@ -1020,7 +1054,7 @@ pub fn build_container_run_payload_with_argv_and_fdac(
     let argc = args.len();
     let argv_bytes_est: usize = args.iter().map(|a| a.len() + 1).sum();
     let mut payload =
-        Vec::with_capacity(name.len() + argv_bytes_est + 16 * fdac.len() + 16 + CWD_MAX + 24);
+        Vec::with_capacity(name.len() + argv_bytes_est + 32 * fdac.len() + 16 + CWD_MAX + 24);
     payload.extend_from_slice(name.as_bytes());
 
     // FDAC blob immediately after the image name — before ARGV trailer.
@@ -1033,10 +1067,17 @@ pub fn build_container_run_payload_with_argv_and_fdac(
         payload.extend_from_slice(&FDAC_MAGIC.to_le_bytes());
         payload.extend_from_slice(&(fdac.len() as u32).to_le_bytes());
         for entry in fdac {
+            // bytes 0–3: target_fd
             payload.extend_from_slice(&entry.target_fd.to_le_bytes());
+            // bytes 4–7: flags
             let flags: u32 = if entry.is_pipe { 0x01 } else { 0 };
             payload.extend_from_slice(&flags.to_le_bytes());
+            // bytes 8–15: endpoint
             payload.extend_from_slice(&(entry.endpoint as u64).to_le_bytes());
+            // bytes 16–23: vfs_client_id
+            payload.extend_from_slice(&(entry.vfs_client_id as u64).to_le_bytes());
+            // bytes 24–31: vfs_remote_fd
+            payload.extend_from_slice(&(entry.vfs_remote_fd as u64).to_le_bytes());
         }
     }
 
@@ -1068,7 +1109,7 @@ pub fn build_container_run_payload_with_argv_and_fdac(
 ///
 /// Wire format (in order):
 ///   `[name_bytes]`
-///   `[u32 FDAC_MAGIC LE][u32 count LE][(u32 fd, u32 flags, u64 ep) * count]`
+///   `[u32 FDAC_MAGIC LE][u32 count LE][(u32 fd, u32 flags, u64 ep, u64 vfs_client_id, u64 vfs_remote_fd) * count]`
 ///   `[argv[0]\0][argv[1]\0]...[u32 argv_bytes_len LE][u32 ARGV_MAGIC LE]`
 ///   `[redir entries...][u32 entries_len LE][u32 REDIR_MAGIC LE]`
 ///   `[env_bytes][u32 env_bytes_len LE][u32 ENV_MAGIC LE]`
@@ -1099,7 +1140,7 @@ pub fn build_container_run_payload_full(
     let redir_bytes_est: usize = redirs.iter().map(|r| 4 + r.path.len().min(255)).sum();
     let env_bytes_est: usize = env.iter().map(|(k, v)| k.len() + v.len() + 2).sum();
     let mut payload =
-        Vec::with_capacity(name.len() + argv_bytes_est + 16 * fdac.len() + redir_bytes_est + env_bytes_est + 24 + CWD_MAX + 24);
+        Vec::with_capacity(name.len() + argv_bytes_est + 32 * fdac.len() + redir_bytes_est + env_bytes_est + 24 + CWD_MAX + 24);
     payload.extend_from_slice(name.as_bytes());
 
     // FDAC blob immediately after the image name.
@@ -1109,10 +1150,17 @@ pub fn build_container_run_payload_full(
         payload.extend_from_slice(&FDAC_MAGIC.to_le_bytes());
         payload.extend_from_slice(&(fdac.len() as u32).to_le_bytes());
         for entry in fdac {
+            // bytes 0–3: target_fd
             payload.extend_from_slice(&entry.target_fd.to_le_bytes());
+            // bytes 4–7: flags
             let flags: u32 = if entry.is_pipe { 0x01 } else { 0 };
             payload.extend_from_slice(&flags.to_le_bytes());
+            // bytes 8–15: endpoint
             payload.extend_from_slice(&(entry.endpoint as u64).to_le_bytes());
+            // bytes 16–23: vfs_client_id
+            payload.extend_from_slice(&(entry.vfs_client_id as u64).to_le_bytes());
+            // bytes 24–31: vfs_remote_fd
+            payload.extend_from_slice(&(entry.vfs_remote_fd as u64).to_le_bytes());
         }
     }
 

@@ -16,7 +16,7 @@ pub fn map_process_info(
     exit_cookie: usize,
     pid: usize,
     tokens: &[usize; 16],
-    params: &[u64; 14],
+    params: &[u64; 16],
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);

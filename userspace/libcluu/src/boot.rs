@@ -64,7 +64,8 @@ pub struct ProcessInfo {
     /// Slots 0-9: existing (see PARAM_* constants below).
     /// Slots 10-11: cwd offset / length (Shell-A).
     /// Slots 12-13: redir offset / length (file redirection).
-    pub params: [u64; 14],
+    /// Slots 14-15: VFS fd trailer offset / length (FDAC VFS-backed fd handoff).
+    pub params: [u64; 16],
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -216,6 +217,19 @@ pub const PARAM_REDIR_OFFSET: usize = 12;
 /// Redirection trailer length (excludes the magic+len_marker; just the entries).
 pub const PARAM_REDIR_LEN: usize = 13;
 
+/// VFS fd trailer offset within the ProcessInfo page.
+///
+/// Points to a 64-byte block (4 × 16 bytes) that carries per-fd VFS metadata
+/// for fds 0..3.  Each entry is `(u64 vfs_client_id, u64 vfs_remote_fd)`.
+/// `vfs_client_id == 0` means the fd is NOT VFS-backed (legacy tty/pipe path).
+///
+/// Written by procmgr's FDAC handler when the parent used
+/// `posix_spawn_file_actions_adddup2` on a VFS-backed fd (e.g. `/dev/pts/*`).
+/// Read by `libcluu::fd_table::init_stdio` to build `FdEntry::file(...)`.
+pub const PARAM_FD_VFS_OFFSET: usize = 14;
+/// VFS fd trailer length.  64 when present (4 fds × 16 bytes), 0 when absent.
+pub const PARAM_FD_VFS_LEN: usize = 15;
+
 /// Read the process info structure.
 pub fn process_info() -> &'static ProcessInfo {
     unsafe { &*(PROCESS_INFO_ADDR as *const ProcessInfo) }
@@ -294,7 +308,7 @@ pub fn pid() -> usize {
 
 const _: () = {
     let size = core::mem::size_of::<ProcessInfo>();
-    // 3 * usize + 16 * usize + 14 * u64 on x86_64 = 24 + 128 + 112 = 264 bytes.
-    // Page is 4096; plenty of room for argv/env/cwd/redir payloads after the header.
+    // 3 * usize + 16 * usize + 16 * u64 on x86_64 = 24 + 128 + 128 = 280 bytes.
+    // Page is 4096; plenty of room for argv/env/cwd/redir/fd-vfs payloads after the header.
     assert!(size <= 512, "ProcessInfo grew unexpectedly large");
 };

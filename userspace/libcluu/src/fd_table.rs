@@ -327,16 +327,83 @@ pub static FD_TABLE: Mutex<FdTable> = Mutex::new(FdTable::new());
 ///
 /// This should be called once at process startup from `__cluu_init()`.
 /// Reads pipe_mask from PARAM_FD_PIPE_MASK to detect pipe-backed fds.
+///
+/// If the ProcessInfo page contains a VFS fd trailer (PARAM_FD_VFS_OFFSET /
+/// PARAM_FD_VFS_LEN), fds with non-zero vfs_client_id are rehydrated as
+/// `FdEntry::file(...)` so that reads/writes use the VFS protocol path
+/// (`VFS_READ_LABEL` / `VFS_WRITE_LABEL`) rather than the TTY path.
 pub fn init_stdio() {
     let info = crate::boot::process_info();
     let pipe_mask = info.params[crate::boot::PARAM_FD_PIPE_MASK] as u8;
-    FD_TABLE.lock().init_stdio(
-        info.tokens[crate::boot::TOKEN_STDIN],
-        info.tokens[crate::boot::TOKEN_STDOUT],
-        info.tokens[crate::boot::TOKEN_STDERR],
-        info.tokens[crate::boot::TOKEN_STDLOG],
-        pipe_mask,
-    );
+
+    // Read the optional VFS fd trailer.  Layout:
+    //   4 × 16 bytes = 64 bytes total
+    //   entry i (fd i): [u64 vfs_client_id LE][u64 vfs_remote_fd LE]
+    //   vfs_client_id == 0 → fd is not VFS-backed (legacy tty/pipe path).
+    let trailer_off = info.params[crate::boot::PARAM_FD_VFS_OFFSET] as usize;
+    let trailer_len = info.params[crate::boot::PARAM_FD_VFS_LEN] as usize;
+
+    let vfs_meta: [(usize, usize); 4] = if trailer_len >= 64 && trailer_off != 0 {
+        // Safety: PROCESS_INFO_ADDR is a read-only page mapped by procmgr before
+        // this process started.  trailer_off is a byte offset within that 4 KB
+        // page, written by procmgr and bounded by the page-fit check there.
+        let base = (crate::boot::PROCESS_INFO_ADDR + trailer_off) as *const u8;
+        let mut out = [(0usize, 0usize); 4];
+        unsafe {
+            for i in 0..4 {
+                let p = base.add(i * 16) as *const u64;
+                out[i].0 = p.read_unaligned() as usize;          // vfs_client_id
+                out[i].1 = p.add(1).read_unaligned() as usize;   // vfs_remote_fd
+            }
+        }
+        out
+    } else {
+        [(0usize, 0usize); 4]
+    };
+
+    let stdin  = info.tokens[crate::boot::TOKEN_STDIN];
+    let stdout = info.tokens[crate::boot::TOKEN_STDOUT];
+    let stderr = info.tokens[crate::boot::TOKEN_STDERR];
+    let stdlog = info.tokens[crate::boot::TOKEN_STDLOG];
+
+    let mut table = FD_TABLE.lock();
+
+    // fd (num, token, readable, writable)
+    let fds: [(i32, usize, bool, bool); 4] = [
+        (0, stdin,  true,  false),
+        (1, stdout, false, true),
+        (2, stderr, false, true),
+        (3, stdlog, false, true),
+    ];
+
+    for &(fd_num, token, readable, writable) in &fds {
+        let (vcid, vfd) = vfs_meta[fd_num as usize];
+        let entry = if vcid != 0 && vfd != 0 {
+            // VFS-backed fd: build a file entry so reads/writes use VFS protocol.
+            FdEntry::file(token, vfd, vcid, readable, writable)
+        } else if pipe_mask & (1 << fd_num) != 0 {
+            // Inherited pipe endpoint.
+            let caps = if readable {
+                FdCaps::READ | FdCaps::IS_PIPE
+            } else {
+                FdCaps::WRITE | FdCaps::IS_PIPE
+            };
+            FdEntry {
+                endpoint: token,
+                caps,
+                position: 0,
+                remote_fd: None,
+                client_id: 0,
+                file_size: None,
+                file_mode: None,
+                pipe_id: None,
+            }
+        } else {
+            FdEntry::tty(token, readable, writable)
+        };
+        table.entries.insert(fd_num, entry);
+    }
+    table.next_fd = 4;
 }
 
 #[cfg(test)]

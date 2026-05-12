@@ -23,6 +23,8 @@ use libcluu::boot::{
     PARAM_CWD_OFFSET,
     PARAM_REDIR_LEN,
     PARAM_REDIR_OFFSET,
+    PARAM_FD_VFS_OFFSET,
+    PARAM_FD_VFS_LEN,
     PARAM_INITRD_SIZE,
     PARAM_TTY_INSTANCE,
     PROCESS_INFO_ADDR,
@@ -3623,7 +3625,7 @@ impl ProcessManager {
             .unwrap_or(payload.len())
             + 1;
         let param_data = &payload[path_nul_end..];
-        let mut params = [0u64; 14];
+        let mut params = [0u64; 16];
         for i in 0..param_count {
             let offset = i * 10; // 2 bytes index + 8 bytes value
             if offset + 10 > param_data.len() {
@@ -3633,18 +3635,19 @@ impl ProcessManager {
             let idx = u16::from_le_bytes([param_data[offset], param_data[offset + 1]]) as usize;
 
             // ── Policy: validate param index bounds ──
-            if idx >= 14 {
+            if idx >= 16 {
                 let _ = debug_print(&format!(
                     "procmgr: service spawn rejected: param index {} out of range",
                     idx
                 ));
                 return Ok(());
             }
-            // ── Policy: slots 10/11 (PARAM_CWD_OFFSET/LEN) and 12/13 (PARAM_REDIR_OFFSET/LEN)
-            // are procmgr-trusted. They are written by procmgr itself from the spawn
-            // IPC trailers; external callers must not forge these metadata slots.
+            // ── Policy: slots 10/11 (PARAM_CWD_OFFSET/LEN), 12/13 (PARAM_REDIR_OFFSET/LEN),
+            // and 14/15 (PARAM_FD_VFS_OFFSET/LEN) are procmgr-trusted. They are written by
+            // procmgr itself; external callers must not forge these metadata slots.
             if idx == PARAM_CWD_OFFSET || idx == PARAM_CWD_LEN
                 || idx == PARAM_REDIR_OFFSET || idx == PARAM_REDIR_LEN
+                || idx == PARAM_FD_VFS_OFFSET || idx == PARAM_FD_VFS_LEN
             {
                 let _ = debug_print(&format!(
                     "procmgr: service spawn rejected: reserved metadata slot {}",
@@ -4174,12 +4177,32 @@ impl ProcessManager {
         let proc_cap = derive_slot(self.token, slot_rights[TOKEN_IPC])?;
         let self_cap = derive_slot(self.token, slot_rights[TOKEN_SELF])?;
         let child_space_token = derive_slot(space_token, slot_rights[TOKEN_SPACE])?;
-        // Parse FDAC (fd actions) to override child stdio endpoints
+
+        // Create the child thread SUSPENDED before FDAC parsing so that the child's TID
+        // is available for VFS derive_child_fd (which registers the fd slot under child_tid).
+        // The thread stays suspended until install_view_and_run → thread_resume.
+        let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority, thread_flags)?;
+        // Set fault endpoint so the kernel forwards faults to us instead of silently killing.
+        if self.fault_endpoint != 0 {
+            if let Err(err) = thread_set_fault_endpoint(thread_token, self.fault_endpoint) {
+                let _ = debug_print(&format!(
+                    "procmgr: thread_set_fault_endpoint failed token={} ep={} err={:?}",
+                    thread_token, self.fault_endpoint, err
+                ));
+            }
+        }
+        let thread_tid = thread_get_id(thread_token)?;
+        self.log_spawn_stage(spawn_seq, "thread_start_done", spawn_start);
+
+        // Parse FDAC (fd actions) to override child stdio endpoints.
+        // fd_vfs_meta[i] = (child_vfs_client_id, child_vfs_remote_fd) for fd i.
+        // Set to (0, 0) for legacy (tty/pipe) fds; non-zero means VFS-backed.
         let mut pipe_mask: u8 = 0;
         let mut stdin_ep = stdin_endpoint;
         let mut stdout_ep = stdout_endpoint;
         let mut stderr_ep = stderr_endpoint;
         let mut stdlog_ep = stdlog_endpoint;
+        let mut fd_vfs_meta: [(usize, usize); 4] = [(0, 0); 4];
 
         if fdac_data.len() >= 8 {
             let magic =
@@ -4187,10 +4210,15 @@ impl ProcessManager {
             let count = u32::from_le_bytes([fdac_data[4], fdac_data[5], fdac_data[6], fdac_data[7]])
                 as usize;
             if magic == 0x46444143 && count <= 4 {
-                // Each FdAction is 16 bytes: u32 target_fd + u32 flags + usize endpoint
+                // Each FdAction is 32 bytes:
+                //   bytes  0– 3: u32 target_fd
+                //   bytes  4– 7: u32 flags
+                //   bytes  8–15: usize endpoint  (legacy: pipes/tty)
+                //   bytes 16–23: usize vfs_client_id (0 = not VFS-backed)
+                //   bytes 24–31: usize vfs_remote_fd  (0 = not VFS-backed)
                 for i in 0..count {
-                    let base = 8 + i * 16;
-                    if base + 16 > fdac_data.len() {
+                    let base = 8 + i * 32;
+                    if base + 32 > fdac_data.len() {
                         break;
                     }
                     let target_fd = u32::from_le_bytes([
@@ -4215,6 +4243,26 @@ impl ProcessManager {
                         fdac_data[base + 14],
                         fdac_data[base + 15],
                     ]);
+                    let vfs_client_id = usize::from_le_bytes([
+                        fdac_data[base + 16],
+                        fdac_data[base + 17],
+                        fdac_data[base + 18],
+                        fdac_data[base + 19],
+                        fdac_data[base + 20],
+                        fdac_data[base + 21],
+                        fdac_data[base + 22],
+                        fdac_data[base + 23],
+                    ]);
+                    let vfs_remote_fd = usize::from_le_bytes([
+                        fdac_data[base + 24],
+                        fdac_data[base + 25],
+                        fdac_data[base + 26],
+                        fdac_data[base + 27],
+                        fdac_data[base + 28],
+                        fdac_data[base + 29],
+                        fdac_data[base + 30],
+                        fdac_data[base + 31],
+                    ]);
 
                     let is_pipe = (flags & 0x01) != 0;
                     // Validate + narrow: stdin needs recv, others need send.
@@ -4228,35 +4276,74 @@ impl ProcessManager {
                         0 => (Rights::IPC_RECV | Rights::GRANT).bits() as usize,
                         _ => (Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT).bits() as usize,
                     };
-                    match token_derive(endpoint, probe_rights, u64::MAX) {
-                        Ok(derived) => {
-                            match target_fd {
-                                0 => {
-                                    stdin_ep = derived;
-                                    if is_pipe { pipe_mask |= 1 << 0; }
-                                }
-                                1 => {
-                                    stdout_ep = derived;
-                                    if is_pipe { pipe_mask |= 1 << 1; }
-                                }
-                                2 => {
-                                    stderr_ep = derived;
-                                    if is_pipe { pipe_mask |= 1 << 2; }
-                                }
-                                3 => {
-                                    stdlog_ep = derived;
-                                    if is_pipe { pipe_mask |= 1 << 3; }
-                                }
-                                _ => {}
+
+                    // Branch: VFS-backed fd → ask VFS to mint a child token from its own endpoint.
+                    // Legacy path (pipes, tty) → direct token_derive as before.
+                    let (derived, child_cid, child_rfd) = if vfs_remote_fd != 0 {
+                        // Ensure we have a VFS endpoint before deriving (lazy init).
+                        if self.vfs_endpoint == 0 {
+                            let _ = self.ensure_vfs_endpoint();
+                        }
+                        // VFS keys self.files by authenticated sender_tid. libcluu stored
+                        // registry::control_endpoint() as `vfs_client_id` (FdEntry::client_id),
+                        // but VFS authenticates by kernel-supplied sender_tid. Override here.
+                        let parent_cid_for_vfs = if owner_tid != 0 { owner_tid } else { vfs_client_id };
+                        // VFS-backed fd: procmgr asks VFS to clone the open file to the child.
+                        // child_tid is the new client_id for the child in VFS — this is the TID
+                        // the kernel will report as sender_tid when the child sends VFS requests.
+                        match vfs_derive_child_fd(
+                            self.vfs_endpoint,
+                            parent_cid_for_vfs,
+                            vfs_remote_fd,
+                            probe_rights,
+                            thread_tid,
+                        ) {
+                            Ok((tok, cid, rfd)) => (tok, cid, rfd),
+                            Err(e) => {
+                                let _ = debug_print(&format!(
+                                    "procmgr: FDAC vfs_derive_child_fd failed fd={} parent_cid={} rfd={} err={:?}",
+                                    target_fd, parent_cid_for_vfs, vfs_remote_fd, e
+                                ));
+                                return Err(Error::PermissionDenied);
                             }
                         }
-                        Err(_) => {
-                            let _ = debug_print(&format!(
-                                "procmgr: FDAC rejected: endpoint {} for fd {} failed derive",
-                                endpoint, target_fd
-                            ));
-                            return Err(Error::PermissionDenied);
+                    } else {
+                        // Legacy path: direct token_derive (pipes, tty endpoints).
+                        match token_derive(endpoint, probe_rights, u64::MAX) {
+                            Ok(derived) => (derived, 0usize, 0usize),
+                            Err(_) => {
+                                let _ = debug_print(&format!(
+                                    "procmgr: FDAC rejected: endpoint {} for fd {} failed derive",
+                                    endpoint, target_fd
+                                ));
+                                return Err(Error::PermissionDenied);
+                            }
                         }
+                    };
+
+                    // Stash VFS metadata (non-zero only for VFS-backed fds).
+                    if target_fd < 4 {
+                        fd_vfs_meta[target_fd as usize] = (child_cid, child_rfd);
+                    }
+
+                    match target_fd {
+                        0 => {
+                            stdin_ep = derived;
+                            if is_pipe { pipe_mask |= 1 << 0; }
+                        }
+                        1 => {
+                            stdout_ep = derived;
+                            if is_pipe { pipe_mask |= 1 << 1; }
+                        }
+                        2 => {
+                            stderr_ep = derived;
+                            if is_pipe { pipe_mask |= 1 << 2; }
+                        }
+                        3 => {
+                            stdlog_ep = derived;
+                            if is_pipe { pipe_mask |= 1 << 3; }
+                        }
+                        _ => {}
                     }
                 }
                 let _ = debug_print(&format!(
@@ -4311,21 +4398,11 @@ impl ProcessManager {
             effective_overrides,
             cwd_bytes,
             redir_bytes,
+            &fd_vfs_meta,
         )?;
 
-        let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority, thread_flags)?;
-        // Set fault endpoint so the kernel forwards faults to us instead of silently killing.
-        if self.fault_endpoint != 0 {
-            if let Err(err) = thread_set_fault_endpoint(thread_token, self.fault_endpoint) {
-                let _ = debug_print(&format!(
-                    "procmgr: thread_set_fault_endpoint failed token={} ep={} err={:?}",
-                    thread_token, self.fault_endpoint, err
-                ));
-            }
-        }
-        let thread_tid = thread_get_id(thread_token)?;
-        self.log_spawn_stage(spawn_seq, "thread_start_done", spawn_start);
-
+        // thread_token and thread_tid were obtained above (before FDAC) so the
+        // child TID could be used as the VFS client_id during derive_child_fd.
         self.exit_table.insert(cookie, thread_token);
         self.pid_to_cookie.insert(pid, cookie);
         self.cookie_to_pid.insert(cookie, pid);
@@ -4628,7 +4705,6 @@ impl ProcessManager {
             Ok(file) => file,
             Err(_) => return Ok(None),
         };
-
         let map_token = token_derive(space_token, Rights::SPACE_MAP.bits() as usize, u64::MAX)?;
         let first_attempt = client.map_elf(file, map_token);
         let entry = match first_attempt {
@@ -5720,6 +5796,44 @@ fn split_redir_trailer(payload: &[u8]) -> (&[u8], &[u8]) {
     (&payload[..entries_start], &payload[entries_start..len_pos])
 }
 
+/// Ask VFS to clone a parent's open file to a child client_id and mint a
+/// narrowed VFS token.
+///
+/// `vfs_endpoint`   — procmgr's IPC_SEND|IPC_CALL token to vfs:main
+/// `parent_cid`     — parent's client_id in VFS (= parent's thread TID)
+/// `parent_rfd`     — VFS-side fd number for the parent's open file
+/// `child_rights`   — rights bits to narrow to (e.g. READ|WRITE)
+/// `child_tid`      — new thread id; used as new client_id for the child in VFS
+///
+/// Returns `(derived_handle, child_client_id, child_remote_fd)` on success.
+///
+/// VFS reply wire:
+///   words[0] = status (0 or errno)
+///   words[1] = derived token handle
+///   words[2] = child_client_id (echo of child_tid)
+///   words[3] = child_remote_fd (freshly allocated fd slot under child_client_id)
+fn vfs_derive_child_fd(
+    vfs_endpoint: usize,
+    parent_cid: usize,
+    parent_rfd: usize,
+    child_rights: usize,
+    child_tid: usize,
+) -> Result<(usize, usize, usize)> {
+    if vfs_endpoint == 0 {
+        return Err(Error::NotFound);
+    }
+    let mut msg = Message::new(
+        ipc::VFS_DERIVE_CHILD_FD_LABEL,
+        [parent_cid, parent_rfd, child_rights, child_tid, 0, 0],
+        4,
+    );
+    ipc::call(vfs_endpoint, &mut msg, IpcFlags::empty())?;
+    if msg.words[0] != 0 {
+        return Err(Error::from_errno(msg.words[0] as isize));
+    }
+    Ok((msg.words[1], msg.words[2], msg.words[3]))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn map_process_info_page(
     space_token: usize,
@@ -5746,6 +5860,11 @@ fn map_process_info_page(
     param_overrides: &[(usize, u64)],
     cwd_bytes: &[u8],
     redir_bytes: &[u8],
+    // Per-fd VFS metadata for fds 0..3.  Each entry is `(client_id, remote_fd)`.
+    // Both fields are 0 for legacy (tty/pipe) fds.  Written into the ProcessInfo
+    // page trailer at PARAM_FD_VFS_OFFSET so that the child's init_stdio can
+    // build FdEntry::file(...) for VFS-backed fds.
+    fd_vfs_meta: &[(usize, usize); 4],
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
@@ -5771,7 +5890,7 @@ fn map_process_info_page(
         tokens[TOKEN_EXTRA_1] = extra_token_1;
     }
 
-    let mut params = [0u64; 14];
+    let mut params = [0u64; 16];
     // params[0] = pipe_mask for all processes
     params[0] = pipe_mask as u64;
     // NOTE: PARAM_CAP_PROFILE (slot 5) is NOT written here. The cap profile is
@@ -5837,14 +5956,35 @@ fn map_process_info_page(
         params[PARAM_REDIR_LEN] = redir_bytes.len() as u64;
     }
 
+    // Place VFS fd trailer AFTER redir bytes (if any VFS-backed fds present).
+    // Layout: 4 × 16 bytes = 64 bytes total.
+    //   entry i (fd i): [u64 vfs_client_id LE][u64 vfs_remote_fd LE]
+    // Entry with vfs_client_id == 0 means fd i is NOT VFS-backed.
+    const FD_VFS_TRAILER_SIZE: usize = 4 * 16; // 64 bytes
+    let vfs_trailer_data_offset = if redir_fits {
+        redir_data_offset + redir_bytes.len()
+    } else {
+        redir_data_offset
+    };
+    let vfs_trailer_end = vfs_trailer_data_offset + FD_VFS_TRAILER_SIZE;
+    // Only write VFS trailer if any fd has non-zero client_id (i.e. is VFS-backed).
+    let any_vfs = fd_vfs_meta.iter().any(|&(cid, _)| cid != 0);
+    let vfs_trailer_fits = any_vfs && vfs_trailer_end <= PAGE_SIZE;
+
+    if vfs_trailer_fits {
+        params[PARAM_FD_VFS_OFFSET] = vfs_trailer_data_offset as u64;
+        params[PARAM_FD_VFS_LEN] = FD_VFS_TRAILER_SIZE as u64;
+    }
+
     // Apply caller-specified param overrides LAST (e.g. console instance/active).
     for &(idx, val) in param_overrides {
-        // Belt-and-suspenders: slots 10/11 (PARAM_CWD_OFFSET/LEN) and
-        // slots 12/13 (PARAM_REDIR_OFFSET/LEN) are procmgr-trusted.
-        // Callers that reach this loop are already vetted, but keep the guard
-        // so a future caller can't accidentally forge these metadata slots.
+        // Belt-and-suspenders: slots 10/11 (PARAM_CWD_OFFSET/LEN),
+        // slots 12/13 (PARAM_REDIR_OFFSET/LEN), and slots 14/15 (PARAM_FD_VFS_OFFSET/LEN)
+        // are procmgr-trusted.  Callers that reach this loop are already vetted, but keep
+        // the guard so a future caller can't accidentally forge these metadata slots.
         if idx == PARAM_CWD_OFFSET || idx == PARAM_CWD_LEN
             || idx == PARAM_REDIR_OFFSET || idx == PARAM_REDIR_LEN
+            || idx == PARAM_FD_VFS_OFFSET || idx == PARAM_FD_VFS_LEN
         {
             continue;
         }
@@ -5888,6 +6028,17 @@ fn map_process_info_page(
     // Write redir bytes after cwd
     if redir_fits {
         page[redir_data_offset..redir_end].copy_from_slice(redir_bytes);
+    }
+
+    // Write VFS fd trailer after redir bytes.
+    // Each entry: [u64 vfs_client_id LE][u64 vfs_remote_fd LE]
+    if vfs_trailer_fits {
+        let dst = &mut page[vfs_trailer_data_offset..vfs_trailer_end];
+        for (i, &(cid, rfd)) in fd_vfs_meta.iter().enumerate() {
+            let off = i * 16;
+            dst[off..off + 8].copy_from_slice(&(cid as u64).to_le_bytes());
+            dst[off + 8..off + 16].copy_from_slice(&(rfd as u64).to_le_bytes());
+        }
     }
 
     space_map(
