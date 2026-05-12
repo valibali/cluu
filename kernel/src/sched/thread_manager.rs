@@ -780,15 +780,9 @@ impl ThreadManager {
     }
 
     pub fn is_thread_recv_waiting_ticket(thread_id: ThreadId, ticket: u64) -> bool {
-        // Must be actively recv-wait-armed. `is_blocked()` is NOT sufficient —
-        // a thread can be blocked in sys_call (waiting on a reply) while its
-        // recv_wait_ticket holds a stale value from a prior sys_recv that has
-        // already returned. Direct-delivering to such a thread spuriously
-        // wakes it out of sys_call with rax=0, surfacing as VfsFile{fd:0} and
-        // similar zero-replies in callers. Require armed=true to scope this
-        // strictly to active recv-waiters.
         Self::with_thread(thread_id, |thread| {
-            thread.recv_wait_ticket() == ticket && thread.is_recv_wait_armed()
+            thread.recv_wait_ticket() == ticket
+                && (thread.is_blocked() || thread.is_recv_wait_armed())
         })
         .unwrap_or(false)
     }
@@ -845,8 +839,6 @@ impl ThreadManager {
         .flatten()
     }
 
-    /// Wake a thread. Tries to wake immediately; falls back to pending-wake queue
-    /// if either THREAD_REPOSITORY or SCHEDULER is contended.
     pub fn wake_thread(thread_id: ThreadId) {
         // Try to wake immediately if locks are available
         let priority = {
