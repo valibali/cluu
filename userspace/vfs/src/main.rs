@@ -3776,6 +3776,7 @@ impl VfsServer {
             }
         };
         let Some(file) = self.files.get(client_id, fd).cloned() else {
+            let _ = debug_print(&format!("vfs: map_elf miss client_id={} fd={}", client_id, fd));
             reply_msg.words[0] = Error::NotFound.to_errno() as usize;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
         };

@@ -2104,21 +2104,23 @@ impl ProcessManager {
         let mut reply_msg = Message::new(libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL, [0; 6], 5);
         let vt_index = msg.words[1];
 
-        // Parse username\0password\0 from payload
+        // Parse username\0password\0 from payload.
+        // Own both as String immediately so that spawn_service_with_env (which
+        // calls VFS IPC) cannot trash the kernel recv buffer they point into.
         let payload_str = core::str::from_utf8(payload).unwrap_or("");
         let mut parts = payload_str.splitn(3, '\0');
-        let username = match parts.next() {
-            Some(u) if !u.is_empty() => u,
+        let username: alloc::string::String = match parts.next() {
+            Some(u) if !u.is_empty() => alloc::string::String::from(u),
             _ => {
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                 return Ok(());
             }
         };
-        let password = parts.next().unwrap_or("");
+        let password: alloc::string::String = alloc::string::String::from(parts.next().unwrap_or(""));
 
         // Rate limit check (before any password verification)
-        if self.is_rate_limited(username) {
+        if self.is_rate_limited(&username) {
             let _ = debug_print(&format!("procmgr: login rate-limited for '{}'", username));
             self.audit_log("WARN", "AUTH_LOGIN_RATE", &format!("user={}", username));
             reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
@@ -2127,12 +2129,12 @@ impl ProcessManager {
         }
 
         // Look up user record — extract all owned values so reference is dropped
-        let (stored_pw, profile, profile_name) = match self.user_records.get(username) {
+        let (stored_pw, profile, profile_name) = match self.user_records.get(username.as_str()) {
             Some(r) => (r.password.clone(), r.profile, r.profile_name.clone()),
             None => {
                 let _ = debug_print(&format!("procmgr: login failed, unknown user '{}'", username));
                 self.audit_log("WARN", "AUTH_LOGIN_FAIL", &format!("user={} reason=unknown_user", username));
-                self.record_auth_failure(username);
+                self.record_auth_failure(&username);
                 reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                 return Ok(());
@@ -2140,16 +2142,16 @@ impl ProcessManager {
         };
 
         // Verify password (no reference to self.user_records alive)
-        if !crypto::verify_password(password, &stored_pw) {
+        if !crypto::verify_password(&password, &stored_pw) {
             let _ = debug_print(&format!("procmgr: login rejected: bad password for '{}'", username));
             self.audit_log("WARN", "AUTH_LOGIN_FAIL", &format!("user={} vt={} reason=bad_password", username, vt_index));
-            self.record_auth_failure(username);
+            self.record_auth_failure(&username);
             reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
             if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
             return Ok(());
         }
 
-        self.clear_auth_failures(username);
+        self.clear_auth_failures(&username);
         self.audit_log("INFO", "AUTH_LOGIN_OK", &format!("user={} vt={}", username, vt_index));
         let _ = debug_print(&format!("procmgr: session login user='{}' vt={}", username, vt_index));
 
@@ -2203,7 +2205,7 @@ impl ProcessManager {
             }
         };
         let view_mounts = Self::build_view_from_envelope(&envelope);
-        let resolved_env = envelopes::resolve_env(&envelope, username);
+        let resolved_env = envelopes::resolve_env(&envelope, &username);
 
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
@@ -2268,7 +2270,7 @@ impl ProcessManager {
                     container_id: session_cid,
                     shell_cid,
                     pid,
-                    username: String::from(username),
+                    username: username.clone(),
                     profile,
                     vt_index,
                     stdin_endpoint: stdin_send,
@@ -2306,11 +2308,14 @@ impl ProcessManager {
         let mut reply_msg = Message::new(libcluu::ipc::PROCMGR_ESCALATE_LABEL, [0; 6], 5);
 
         // Parse payload: password\0command\0
+        // Own command_path as String immediately — spawn_service_with_env calls
+        // VFS IPC which overwrites the kernel recv buffer that payload_str
+        // points into.
         let payload_str = core::str::from_utf8(payload).unwrap_or("");
         let mut parts = payload_str.splitn(3, '\0');
-        let password = parts.next().unwrap_or("");
-        let command_path = match parts.next() {
-            Some(p) if !p.is_empty() => p,
+        let password = alloc::string::String::from(parts.next().unwrap_or(""));
+        let command_path: alloc::string::String = match parts.next() {
+            Some(p) if !p.is_empty() => alloc::string::String::from(p),
             _ => {
                 let _ = debug_print("procmgr: escalate rejected: missing command path");
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
@@ -2357,7 +2362,7 @@ impl ProcessManager {
         };
 
         // Verify password (no reference to self.user_records alive)
-        if !crypto::verify_password(password, &stored_pw) {
+        if !crypto::verify_password(&password, &stored_pw) {
             let _ = debug_print(&format!(
                 "procmgr: escalate rejected: bad password for '{}'", username
             ));
@@ -2428,7 +2433,7 @@ impl ProcessManager {
         let spawn_start = self.clock_sample();
 
         // Build argv: use basename of command as argv[0]
-        let basename = command_path.rsplit('/').next().unwrap_or(command_path);
+        let basename = command_path.rsplit('/').next().unwrap_or(command_path.as_str());
         let mut argv_payload = Vec::new();
         argv_payload.extend_from_slice(basename.as_bytes());
         argv_payload.push(0);
@@ -2439,7 +2444,7 @@ impl ProcessManager {
         let caller_view_owned = self.pid_to_view.get(&caller_pid).cloned();
 
         match self.spawn_service_with_env(
-            command_path,
+            &command_path,
             DEFAULT_PRIORITY,
             &argv_payload,
             argc,
@@ -2535,10 +2540,12 @@ impl ProcessManager {
         let mut reply_msg = Message::new(libcluu::ipc::PROCMGR_SU_LABEL, [0; 6], 5);
 
         // Parse payload: target_username\0password\0
+        // Own both as String immediately — spawn_service_with_env calls VFS IPC
+        // which overwrites the kernel recv buffer that payload_str borrows from.
         let payload_str = core::str::from_utf8(payload).unwrap_or("");
         let mut parts = payload_str.splitn(3, '\0');
-        let target_username = match parts.next() {
-            Some(u) if !u.is_empty() => u,
+        let target_username: alloc::string::String = match parts.next() {
+            Some(u) if !u.is_empty() => alloc::string::String::from(u),
             _ => {
                 let _ = debug_print("procmgr: su rejected: missing target username");
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
@@ -2546,10 +2553,10 @@ impl ProcessManager {
                 return Ok(());
             }
         };
-        let password = parts.next().unwrap_or("");
+        let password: alloc::string::String = alloc::string::String::from(parts.next().unwrap_or(""));
 
         // Rate limit check
-        if self.is_rate_limited(target_username) {
+        if self.is_rate_limited(&target_username) {
             let _ = debug_print(&format!("procmgr: su rate-limited for '{}'", target_username));
             reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
             if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
@@ -2557,7 +2564,7 @@ impl ProcessManager {
         }
 
         // Look up target user record — extract owned values so reference is dropped
-        let (stored_pw, target_profile, target_profile_name) = match self.user_records.get(target_username) {
+        let (stored_pw, target_profile, target_profile_name) = match self.user_records.get(target_username.as_str()) {
             Some(record) => (
                 record.password.clone(),
                 record.profile,
@@ -2567,7 +2574,7 @@ impl ProcessManager {
                 let _ = debug_print(&format!(
                     "procmgr: su rejected: unknown user '{}'", target_username
                 ));
-                self.record_auth_failure(target_username);
+                self.record_auth_failure(&target_username);
                 reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
                 if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                 return Ok(());
@@ -2575,19 +2582,19 @@ impl ProcessManager {
         };
 
         // Verify target user's password (no reference to self.user_records alive)
-        if !crypto::verify_password(password, &stored_pw) {
+        if !crypto::verify_password(&password, &stored_pw) {
             let _ = debug_print(&format!(
                 "procmgr: su rejected: bad password for '{}'", target_username
             ));
             let caller_user = self.resolve_caller_session(sender_tid)
                 .map(|s| s.username.clone()).unwrap_or_else(|| String::from("?"));
             self.audit_log("WARN", "AUTH_SU_FAIL", &format!("from={} to={} reason=bad_password", caller_user, target_username));
-            self.record_auth_failure(target_username);
+            self.record_auth_failure(&target_username);
             reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
             if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
             return Ok(());
         }
-        self.clear_auth_failures(target_username);
+        self.clear_auth_failures(&target_username);
 
         // Approach C: caller must strictly outrank target (capability narrowing only)
         let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0);
@@ -2631,7 +2638,7 @@ impl ProcessManager {
         };
         // Build view from envelope mounts (UE10 pattern).
         let view_mounts = Self::build_view_from_envelope(&envelope);
-        let resolved_env = envelopes::resolve_env(&envelope, target_username);
+        let resolved_env = envelopes::resolve_env(&envelope, &target_username);
 
         // Determine caller's container for parenting (cascading)
         let caller_container_id = self.pid_to_container_id.get(&caller_pid).copied().unwrap_or(0);
@@ -3600,9 +3607,11 @@ impl ProcessManager {
             return Ok(());
         }
 
-        // Parse path from payload.
+        // Parse path from payload — copy to owned String immediately so that
+        // subsequent outbound IPC calls (VFS open, map_elf, etc.) cannot trash
+        // the borrowed slice that `parse_cstr` points into.
         let path = match parse_cstr(payload) {
-            Some(p) => p,
+            Some(p) => alloc::string::String::from(p),
             None => {
                 let _ = debug_print("procmgr: service spawn rejected: no path");
                 return Ok(());
@@ -3680,7 +3689,7 @@ impl ProcessManager {
         // Load and parse ELF from initrd.
         let initrd =
             unsafe { core::slice::from_raw_parts(INITRD_USER_BASE as *const u8, self.initrd_size) };
-        let service_bytes = find_member(initrd, path).ok_or(Error::NotFound)?;
+        let service_bytes = find_member(initrd, &path).ok_or(Error::NotFound)?;
         let elf = ElfFile::parse(service_bytes)?;
 
         let space_token = space_create(self.token)?;
@@ -3830,8 +3839,12 @@ impl ProcessManager {
             return Ok(());
         }
 
+        // Copy path to owned String immediately — subsequent outbound IPC calls
+        // (VFS open, map_elf, etc.) reuse the same syscall buffer that payload
+        // borrows from, so any &str/&[u8] derived from payload must be owned
+        // before the first IPC call.
         let path = match parse_cstr(payload) {
-            Some(value) => value,
+            Some(value) => alloc::string::String::from(value),
             None => {
                 let _ = debug_print("procmgr: spawn request missing path");
                 reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
@@ -3880,41 +3893,44 @@ impl ProcessManager {
         let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
 
         // Strip the CWD trailer first so argv/fdac slices don't extend into it.
-        let (effective_payload, cwd_bytes) = split_cwd_trailer(payload);
+        // Own all slices before any outbound IPC (argv_data, fdac_data, cwd_bytes
+        // all point into the kernel recv buffer which VFS calls will overwrite).
+        let (effective_payload, cwd_bytes_ref) = split_cwd_trailer(payload);
 
         let path_nul_end = effective_payload
             .iter()
             .position(|b| *b == 0)
             .unwrap_or(effective_payload.len())
             + 1;
-        let argv_data = if argc > 0 && path_nul_end < effective_payload.len() {
-            &effective_payload[path_nul_end..]
+        let argv_data: alloc::vec::Vec<u8> = if argc > 0 && path_nul_end < effective_payload.len() {
+            effective_payload[path_nul_end..].to_vec()
         } else {
-            &[]
+            alloc::vec::Vec::new()
         };
-        let fdac_data = if fdac_offset > 0 && fdac_offset < effective_payload.len() {
-            &effective_payload[fdac_offset..]
+        let fdac_data: alloc::vec::Vec<u8> = if fdac_offset > 0 && fdac_offset < effective_payload.len() {
+            effective_payload[fdac_offset..].to_vec()
         } else {
-            &[]
+            alloc::vec::Vec::new()
         };
+        let cwd_bytes: alloc::vec::Vec<u8> = cwd_bytes_ref.to_vec();
 
         match self.spawn_service_with_env(
-            path,
+            &path,
             priority,
-            argv_data,
+            &argv_data,
             argc,
             &[],
             0,
             sender_tid,
             spawn_seq,
             spawn_start,
-            fdac_data,
+            &fdac_data,
             child_profile,
             0,
             0,
             &[],
             Some(&child_view_mounts),
-            cwd_bytes,
+            &cwd_bytes,
             &[], // no redir for posix_spawn path
             THREAD_CREATE_START_SUSPENDED,
         ) {
@@ -4123,10 +4139,18 @@ impl ProcessManager {
 
         if !path.starts_with("/dev/initrd/") {
             self.log_spawn_stage(spawn_seq, "elf_fetch_start", spawn_start);
-            if let Ok(Some(entry)) = self.map_elf_from_vfs(path, space_token, caller_view) {
-                entry_point = entry;
-                mapped = true;
-                self.log_spawn_stage(spawn_seq, "elf_fetch_done", spawn_start);
+            match self.map_elf_from_vfs(path, space_token, caller_view) {
+                Ok(Some(entry)) => {
+                    entry_point = entry;
+                    mapped = true;
+                    self.log_spawn_stage(spawn_seq, "elf_fetch_done", spawn_start);
+                }
+                Ok(None) => {
+                    let _ = debug_print(&format!("procmgr: map_elf_from_vfs returned None for {}", path));
+                }
+                Err(ref e) => {
+                    let _ = debug_print(&format!("procmgr: map_elf_from_vfs error for {} {:?}", path, e));
+                }
             }
         }
 
@@ -4490,6 +4514,7 @@ impl ProcessManager {
         };
 
         if file.size == 0 {
+            let _ = debug_print(&format!("procmgr: load_from_vfs size=0 for {}", path));
             let _ = client.close(file);
             return None;
         }
@@ -4703,9 +4728,19 @@ impl ProcessManager {
         let client = VfsClient::new(self.vfs_endpoint, client_id);
         let file = match self.cached_vfs_file(&client, effective_path) {
             Ok(file) => file,
-            Err(_) => return Ok(None),
+            Err(e) => {
+                let _ = debug_print(&format!("procmgr: cached_vfs_file failed path={} err={:?}", effective_path, e));
+                return Ok(None);
+            }
         };
-        let map_token = token_derive(space_token, Rights::SPACE_MAP.bits() as usize, u64::MAX)?;
+        let _ = debug_print(&format!("procmgr: map_elf attempt path={} fd={}", effective_path, file.fd));
+        let map_token = match token_derive(space_token, Rights::SPACE_MAP.bits() as usize, u64::MAX) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&format!("procmgr: map_elf token_derive failed {:?}", e));
+                return Err(e);
+            }
+        };
         let first_attempt = client.map_elf(file, map_token);
         let entry = match first_attempt {
             Ok(entry) => Some(entry),
@@ -4717,7 +4752,16 @@ impl ProcessManager {
                 // RIP=0x494d00 in vfs_file_cache.len) once seen 2026-05-09.
                 self.invalidate_cached_vfs_file(&client, effective_path);
                 match client.open(effective_path) {
-                    Ok(refreshed_file) => client.map_elf(refreshed_file, map_token).ok(),
+                    Ok(refreshed_file) => {
+                        let _ = debug_print(&format!("procmgr: map_elf retry fd={}", refreshed_file.fd));
+                        match client.map_elf(refreshed_file, map_token) {
+                            Ok(e) => Some(e),
+                            Err(err) => {
+                                let _ = debug_print(&format!("procmgr: map_elf retry failed {:?}", err));
+                                None
+                            }
+                        }
+                    }
                     Err(_) => None,
                 }
             }
@@ -4766,19 +4810,19 @@ impl ProcessManager {
         let reply_token = extract_reply_id(msg);
         let mut reply_msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 5);
 
-        // Strip the optional CWD trailer first; FDAC/param offsets refer into
-        // the pre-trailer view, identical to the posix_spawn payload contract.
-        let (effective_payload, cwd_bytes) = split_cwd_trailer(payload);
-        // ENV trailer sits between the REDIR trailer and the CWD trailer on
-        // the wire (UE16). Strip immediately after CWD so REDIR/ARGV strips
-        // continue to operate on the same view as before this trailer was
-        // introduced.
-        let (effective_payload, env_bytes) = split_env_trailer(effective_payload);
-        // REDIR trailer sits between the ARGV block and the ENV trailer.
-        let (effective_payload, redir_bytes) = split_redir_trailer(effective_payload);
-        // ARGV trailer sits between the argv block and the REDIR trailer in the
-        // wire format, so CWD/ENV/REDIR must be stripped first.
-        let (effective_payload, argv_extra_bytes) = split_argv_trailer(effective_payload);
+        // Strip trailers from the kernel recv buffer.  All derived slices are
+        // owned (Vec<u8>) immediately so that subsequent VFS IPC calls cannot
+        // trash the buffer they point into before spawn_service_with_env
+        // consumes them.
+        let (effective_payload, cwd_bytes_ref) = split_cwd_trailer(payload);
+        let (effective_payload, env_bytes_ref) = split_env_trailer(effective_payload);
+        let (effective_payload, redir_bytes_ref) = split_redir_trailer(effective_payload);
+        let (effective_payload, argv_extra_bytes_ref) = split_argv_trailer(effective_payload);
+
+        let cwd_bytes: alloc::vec::Vec<u8> = cwd_bytes_ref.to_vec();
+        let env_bytes: alloc::vec::Vec<u8> = env_bytes_ref.to_vec();
+        let redir_bytes: alloc::vec::Vec<u8> = redir_bytes_ref.to_vec();
+        let argv_extra_bytes: alloc::vec::Vec<u8> = argv_extra_bytes_ref.to_vec();
 
         // Count env entries (one NUL per "KEY=VALUE\0" record).
         let envc = env_bytes.iter().filter(|&&b| b == 0).count();
@@ -4796,8 +4840,11 @@ impl ProcessManager {
         } else {
             effective_payload.len()
         };
-        let image_name = match core::str::from_utf8(&effective_payload[..name_end]) {
-            Ok(s) => s.trim_end_matches('\0').trim(),
+        // Own the image_name String immediately — VFS calls (read_file_from_vfs,
+        // spawn_service_with_env → map_elf_from_vfs) overwrite the kernel recv
+        // buffer that effective_payload borrows from.
+        let image_name: alloc::string::String = match core::str::from_utf8(&effective_payload[..name_end]) {
+            Ok(s) => alloc::string::String::from(s.trim_end_matches('\0').trim()),
             Err(_) => {
                 let _ = debug_print(&format!(
                     "procmgr: container_run rejected: payload not UTF-8 (len={} name_end={})",
@@ -4809,11 +4856,12 @@ impl ProcessManager {
             }
         };
 
-        // Extract FDAC data from payload (after image name, before trailer)
-        let fdac_data = if fdac_offset > 0 && fdac_offset < effective_payload.len() {
-            &effective_payload[fdac_offset..]
+        // Extract FDAC data from payload (after image name, before trailer).
+        // Own the slice so the IPC buffer reuse does not corrupt it.
+        let fdac_data: alloc::vec::Vec<u8> = if fdac_offset > 0 && fdac_offset < effective_payload.len() {
+            effective_payload[fdac_offset..].to_vec()
         } else {
-            &[]
+            alloc::vec::Vec::new()
         };
         if image_name.is_empty() {
             let _ = debug_print(&format!(
@@ -5025,7 +5073,7 @@ impl ProcessManager {
         }
 
         if has_persistent_storage {
-            if !self.create_container_dirs(container_id, image_name) {
+            if !self.create_container_dirs(container_id, &image_name) {
                 let _ = debug_print(&format!(
                     "procmgr: container '{}' dir creation failed",
                     image_name
@@ -5116,7 +5164,7 @@ impl ProcessManager {
         // argv_extra_bytes is a concatenation of NUL-terminated argv[0..] strings
         // from the shell. Append verbatim and count NULs to derive argc.
         if !argv_extra_bytes.is_empty() {
-            argv_payload.extend_from_slice(argv_extra_bytes);
+            argv_payload.extend_from_slice(&argv_extra_bytes);
             argc += argv_extra_bytes.iter().filter(|&&b| b == 0).count();
         }
 
@@ -5157,19 +5205,19 @@ impl ProcessManager {
             priority,
             &argv_payload,
             argc,
-            env_bytes,
+            &env_bytes,
             envc,
             sender_tid,
             spawn_seq,
             spawn_start,
-            fdac_data,
+            &fdac_data,
             requested_profile,
             extra_token,
             extra_token_1,
             param_overrides,
             None, // no caller view (container run uses absolute /var/images/ paths)
-            cwd_bytes,
-            redir_bytes,
+            &cwd_bytes,
+            &redir_bytes,
             THREAD_CREATE_START_SUSPENDED,
         ) {
             Ok((thread_token, cookie, pid, child_stdin_send)) => {
@@ -5288,7 +5336,7 @@ impl ProcessManager {
                         .unwrap_or(0);
                     format!("vt:{}", inst_idx)
                 } else {
-                    String::from(image_name)
+                    image_name.clone()
                 };
                 let effective_parent = if image_name == "vt" && parent_cid == 0 && self.vtmgr_container_id != 0 {
                     self.vtmgr_container_id
