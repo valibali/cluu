@@ -122,17 +122,26 @@ impl VtmgrContext {
                     if service_name == "compositor" && name == "control" {
                         self.compositor_control = token;
                         let _ = debug_print("vtmgr: compositor control subscribed");
-                        // If compositor pinned its VT before the control endpoint
-                        // arrived, execute the deferred boot switch now.
-                        if self.boot_switch_pending {
-                            self.boot_switch_pending = false;
-                            let target = self.compositor_vt;
-                            self.switch_vt(target);
+                        if self.active_vt == self.compositor_vt {
+                            let msg = Message::new(
+                                COMP_VT_ACTIVATE_LABEL,
+                                [0; 6], 0,
+                            );
+                            let _ = send(self.compositor_control, &msg, IpcFlags::empty());
+                            let _ = debug_print("vtmgr: boot COMP_VT_ACTIVATE sent");
                         }
                     } else if name == "control" {
                         // console:0 control endpoint
                         self.console_endpoint = token;
                         let _ = debug_print("vtmgr: console control subscribed");
+                        if self.active_vt != 0 {
+                            let de = Message::new(
+                                CONSOLE_DEACTIVATE_LABEL,
+                                [0, 0, 0, 0, 0, 0], 1,
+                            );
+                            let _ = send(self.console_endpoint, &de, IpcFlags::empty());
+                            let _ = debug_print("vtmgr: boot CONSOLE_DEACTIVATE(0) sent");
+                        }
                     } else if name == "spawn" {
                         self.procmgr_spawn_endpoint = token;
                         let _ = debug_print("vtmgr: procmgr spawn subscribed");
