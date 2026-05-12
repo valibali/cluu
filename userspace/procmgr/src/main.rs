@@ -1025,6 +1025,13 @@ impl ProcessManager {
 
     fn try_auto_login(&mut self) {
         if self.auto_login_done { return; }
+        if SHELL_AUTOSTART_CMD.is_empty() {
+            // Gate diagnostic: production builds (no CLUU_SHELL_AUTOSTART_CMD)
+            // never auto-login; harness builds bake a command and do.
+            let _ = debug_print("procmgr: autologin skipped (no autostart cmd)");
+            self.auto_login_done = true;
+            return;
+        }
         if self.user_records.is_empty() { return; }
         if self.tty_endpoints[0] == 0 { return; }
 
