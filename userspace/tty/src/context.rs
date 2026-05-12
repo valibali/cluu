@@ -124,7 +124,7 @@ impl TtyContext {
             procmgr_spawn: 0,
             requested_procmgr: false,
             shell_spawn_requested: false,
-            auto_login_pending: instance_id == 0,
+            auto_login_pending: instance_id == 0 && libcluu::build_env::HARNESS_AUTOLOGIN_ARMED,
             pending_console_output: Vec::new(),
             console_credit: CONSOLE_CREDIT_WINDOW,
             pending_reads: VecDeque::new(),

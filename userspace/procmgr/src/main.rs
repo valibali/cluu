@@ -190,10 +190,7 @@ const SERVICE_STACK_TOP: usize = SERVICE_STACK_BASE + SERVICE_STACK_SIZE;
 const STACK_FLAGS: usize = 0x03; // read + write
                                  // PAGE_SIZE is imported from libcluu::*
 const SERVICE_PATH: &str = "/var/images/vt/bin/shell";
-const SHELL_AUTOSTART_CMD: &str = match option_env!("CLUU_SHELL_AUTOSTART_CMD") {
-    Some(cmd) => cmd,
-    None => "",
-};
+use libcluu::build_env::SHELL_AUTOSTART_CMD;
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
 const PROCMGR_KILL_LABEL: u32 = 3;
