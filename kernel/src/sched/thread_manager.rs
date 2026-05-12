@@ -636,6 +636,13 @@ impl ThreadManager {
             None => return,
         };
         Self::with_thread_mut(current, |thread| {
+            // Non-recv block: thread is entering sys_call / futex / notification
+            // wait, not a recv-wait. Any leftover recv_wait_ticket from a prior
+            // sys_recv is now stale — clear it so that pop_next_receiver_to_wake
+            // on a prior endpoint scrubs the leftover waiter instead of
+            // direct-delivering to this thread spuriously (rax=0 from sys_call,
+            // VfsFile{fd:0} downstream).
+            thread.recv_wait_ticket = 0;
             thread.make_blocked();
         });
     }
@@ -675,6 +682,8 @@ impl ThreadManager {
         klibcluu::trace(" current_tick=");
         klibcluu::log_dec(klibcluu::LogLevel::Trace, "", Self::current_tick());
         Self::with_thread_mut(current, |thread| {
+            // See block_current: clear stale recv-wait ticket on non-recv block.
+            thread.recv_wait_ticket = 0;
             thread.set_timeout_deadline(deadline);
             thread.make_blocked();
         });
