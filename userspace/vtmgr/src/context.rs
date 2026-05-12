@@ -67,7 +67,11 @@ impl VtmgrContext {
         registry::register_output("control", endpoint)?;
         let registry_endpoint = registry::control_endpoint();
 
-        debug_print("vtmgr: ready")?;
+        debug_print(&format!(
+            "vtmgr: ready active_vt={} compositor_vt={}",
+            DEFAULT_COMPOSITOR_VT,  // post-fix value; before fix this prints 0
+            DEFAULT_COMPOSITOR_VT,
+        ))?;
         yield_cpu()?;
 
         Ok(Self {
