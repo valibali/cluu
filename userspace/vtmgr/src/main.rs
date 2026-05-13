@@ -4,7 +4,7 @@
 //! Virtual Terminal Manager for CLUU.
 //!
 //! vtmgr is a pure IPC coordinator that owns VT lifecycle. It receives
-//! switch requests from kbd (VTMGR_SWITCH_VT_LABEL), asks console to
+//! switch requests from kbd (VTMGR_REQUEST_VT_SWITCH_LABEL), asks console to
 //! create VT buffers (CONSOLE_CREATE_VT_LABEL), asks procmgr to spawn
 //! tty:N (via PROCMGR_SPAWN_SERVICE_LABEL), and sends CONSOLE_ACTIVATE/DEACTIVATE
 //! to switch the visible VT.
@@ -17,7 +17,6 @@ mod input_routing;
 use context::VtmgrContext;
 use libcluu::ipc::{
     parse_message, KBD_EVENT_LABEL, VTMGR_PIN_VT_LABEL, VTMGR_REQUEST_VT_SWITCH_LABEL,
-    VTMGR_SWITCH_VT_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, yield_cpu, Result};
@@ -68,10 +67,6 @@ fn handle_vtmgr_message(ctx: &mut VtmgrContext, msg: &Message, payload: &[u8]) {
     match msg.tag.label {
         KBD_EVENT_LABEL => {
             ctx.router.forward(&msg, |kind| ctx.lookup_target_endpoint(kind));
-        }
-        VTMGR_SWITCH_VT_LABEL if msg.tag.words >= 1 => {
-            let target_vt = msg.words[0];
-            ctx.switch_vt(target_vt);
         }
         VTMGR_REQUEST_VT_SWITCH_LABEL => {
             let new_vt = msg.words[0];

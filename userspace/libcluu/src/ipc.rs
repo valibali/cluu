@@ -56,9 +56,6 @@ pub const TTY_GET_FG_LABEL: u32 = 41;
 pub const CONSOLE_ACTIVATE_LABEL: u32 = 8;
 pub const CONSOLE_DEACTIVATE_LABEL: u32 = 9;
 pub const PROCMGR_QUERY_CTTY_LABEL: u32 = 11;
-/// kbd → vtmgr: request VT switch.
-/// words[0] = target VT index (0-3).
-pub const VTMGR_SWITCH_VT_LABEL: u32 = 15;
 /// service → vtmgr: pin a named service to a specific VT slot.
 /// words[0] = VT index to pin.  Payload = service name (UTF-8, no NUL).
 /// Sent once at startup by the service that owns a non-text VT (e.g. compositor → 4).
