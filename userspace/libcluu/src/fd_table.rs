@@ -347,7 +347,8 @@ pub fn init_stdio() {
         // Safety: PROCESS_INFO_ADDR is a read-only page mapped by procmgr before
         // this process started.  trailer_off is a byte offset within that 4 KB
         // page, written by procmgr and bounded by the page-fit check there.
-        let base = (crate::boot::PROCESS_INFO_ADDR + trailer_off) as *const u8;
+        let page_base = crate::boot::PROCESS_INFO_ADDR & !(4096 - 1);
+        let base = (page_base + trailer_off) as *const u8;
         let mut out = [(0usize, 0usize); 4];
         unsafe {
             for i in 0..4 {
