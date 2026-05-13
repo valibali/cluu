@@ -88,6 +88,7 @@ impl Compositor {
             shm_token: token,
             last_gen: 0,
             input_endpoint,
+            pending_frame_ready: false,
         });
         self.focused = Some(id);
         // Mark all the window's cells dirty so the (eventual) compose pass
@@ -107,17 +108,20 @@ impl Compositor {
     ///
     /// Chrome is 1 cell on each side, so interior starts at local (1,1).
     pub fn handle_win_damage(&mut self, id: WindowId, x: u32, y: u32, w: u32, h: u32) {
-        let Some(win) = self.windows.iter().find(|w| w.id == id) else { return; };
+        let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else { return; };
         let inner_w = win.w.saturating_sub(2); // 1 chrome col each side
         let inner_h = win.h.saturating_sub(2); // 1 chrome row each side
         let cx0 = (x as u16).min(inner_w);
         let cy0 = (y as u16).min(inner_h);
         let cx1 = ((x as u16).saturating_add(w as u16)).min(inner_w);
         let cy1 = ((y as u16).saturating_add(h as u16)).min(inner_h);
+        // Window has new content — arm FRAME_READY for this window.
+        win.pending_frame_ready = true;
+        let (win_x, win_y) = (win.x, win.y);
         for iy in cy0..cy1 {
             for ix in cx0..cx1 {
-                let gx = win.x + 1 + ix;
-                let gy = win.y + 1 + iy;
+                let gx = win_x + 1 + ix;
+                let gy = win_y + 1 + iy;
                 self.cell_dirty.push((gx, gy));
             }
         }

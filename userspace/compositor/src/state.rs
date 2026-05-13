@@ -162,6 +162,12 @@ pub struct Window {
     /// Client endpoint for FRAME_READY + INPUT_FORWARD signals.
     /// 0 = legacy window that does not use the frame-callback protocol.
     pub input_endpoint: usize,
+    /// Set when a WIN_DAMAGE event (or SHM generation advance) has been
+    /// processed for this window since the last FRAME_READY broadcast.
+    /// Cleared by `broadcast_frame_ready` after the message is sent.
+    /// Windows with this flag clear are skipped in the broadcast, preventing
+    /// the 60 Hz flood when the window hasn't rendered a new frame.
+    pub pending_frame_ready: bool,
 }
 
 /// Long-lived compositor state.  Single instance per process, owned by `main`.

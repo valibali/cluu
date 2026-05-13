@@ -21,12 +21,24 @@ use libcluu::ipc::{
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
 
-/// Send COMP_FRAME_READY_LABEL to every window's input_endpoint after a flush.
-/// Apps block on their endpoint waiting for this signal, then render the next frame.
-/// Windows with input_endpoint == 0 (legacy / no endpoint) are skipped silently.
-fn broadcast_frame_ready(comp: &state::Compositor) {
-    for win in comp.windows.iter() {
+/// Send COMP_FRAME_READY_LABEL to windows that have pending damage since the
+/// last broadcast.  A window is eligible if:
+///   (a) it sent a WIN_DAMAGE event since the last broadcast (`pending_frame_ready`), OR
+///   (b) its SHM `generation` counter advanced past the snapshot in `last_gen`
+///       (catches apps that write to SHM without a WIN_DAMAGE message).
+/// This gates the 60 Hz ticker so windows that haven't rendered a new frame
+/// don't accumulate FRAME_READY messages in their endpoint queue.
+fn broadcast_frame_ready(comp: &mut state::Compositor) {
+    for win in comp.windows.iter_mut() {
         if win.input_endpoint == 0 { continue; }
+        // Check SHM generation as a secondary damage signal.
+        let current_gen = win.mapping.header().generation;
+        let gen_advanced = current_gen != win.last_gen;
+        if !win.pending_frame_ready && !gen_advanced { continue; }
+        // Update snapshots before sending so a re-entrant damage during send
+        // is not silently dropped (pending_frame_ready stays armed).
+        win.pending_frame_ready = false;
+        win.last_gen = current_gen;
         let msg = libcluu::types::Message::new(
             COMP_FRAME_READY_LABEL,
             [win.id as usize, 0, 0, 0, 0, 0],
@@ -288,7 +300,7 @@ pub extern "C" fn main() -> i32 {
         compose::render_status_row(&mut comp);
 
         if comp.tick_frame(now_ms) {
-            broadcast_frame_ready(&comp);
+            broadcast_frame_ready(&mut comp);
         }
     }
 }
