@@ -226,6 +226,11 @@ pub struct Compositor {
     /// the status bar shows `--:--:--` in that state.
     pub clock_ready: bool,
 
+    /// Last monotonic millisecond timestamp delivered by a TIME_TICK push message.
+    /// Replaces per-iteration `clock_now_ms()` polling once push-mode is armed.
+    /// Zero until the first tick arrives.
+    pub last_clock_now_ms: u64,
+
     /// Monotonic millisecond timestamp of the last flush+broadcast.
     /// Updated by `tick_frame` after each successful flush.
     pub last_flush_at: u64,
@@ -341,6 +346,7 @@ impl Compositor {
             next_id: 1,
             clock_seconds: 0,
             clock_ready: false,
+            last_clock_now_ms: 0,
             last_flush_at: 0,
             deadlines: Deadlines::new(),
             instance_id: 0,

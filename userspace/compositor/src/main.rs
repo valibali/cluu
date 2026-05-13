@@ -155,12 +155,14 @@ pub extern "C" fn main() -> i32 {
         requested_timeserver = true;
         let _ = debug_print("compositor: timeserver subscription requested");
     }
+    // Armed once we successfully send TIME_SUBSCRIBE_PERIODIC to timeserver.
+    let mut pushmode_armed = false;
 
     // Index of the registry endpoint in the tokens array.
     const REGISTRY_TOKEN_IDX: usize = 3;
 
     loop {
-        let now_ms = clock_now_ms(&mut time_ep);
+        let now_ms = comp.last_clock_now_ms;
         let now_secs = now_ms / 1000;
 
         let timeout_ms = comp.deadlines.next_timeout_ms(now_ms);
@@ -168,6 +170,19 @@ pub extern "C" fn main() -> i32 {
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout_ms) {
             Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) {
+                    // TIME_TICK from timeserver push-mode subscription.
+                    // Arrives on input_endpoint_global (idx=1). Handle before
+                    // protocol::parse() so it never falls into the Other(_) arm.
+                    if msg.tag.label == libcluu::time::TIME_TICK_LABEL && idx != REGISTRY_TOKEN_IDX {
+                        let now_ms_from_tick = msg.words[1] as u64;
+                        comp.last_clock_now_ms = now_ms_from_tick;
+                        comp.tick_clock(now_ms_from_tick, now_ms_from_tick / 1000);
+                        if comp.prev_cell_grid != comp.cell_grid {
+                            comp.schedule_frame(now_ms_from_tick);
+                        }
+                        continue;
+                    }
+
                     // Registry control messages (grant requests from subscribers) must
                     // be forwarded to the registry client so it can mint tokens.
                     if idx == REGISTRY_TOKEN_IDX {
@@ -177,6 +192,21 @@ pub extern "C" fn main() -> i32 {
                                     if service_name == "timeserver" && name == "main" {
                                         time_ep = token;
                                         let _ = debug_print("compositor: timeserver subscribed");
+                                        // Arm push-mode: subscribe for 1Hz ticks on the input endpoint.
+                                        if !pushmode_armed && time_ep != 0 {
+                                            let notify_ep = comp.input_endpoint_global;
+                                            let mut sub = libcluu::types::Message::new(
+                                                libcluu::time::TIME_SUBSCRIBE_PERIODIC_LABEL,
+                                                [1000, notify_ep, 0, 0, 0, 0],
+                                                3,
+                                            );
+                                            if libcluu::ipc::call(time_ep, &mut sub, IpcFlags::empty()).is_ok()
+                                                && sub.words[0] == 0
+                                            {
+                                                pushmode_armed = true;
+                                                let _ = debug_print("compositor: subscribed to timeserver pushmode 1000ms");
+                                            }
+                                        }
                                     }
                                 }
                                 RegistryEvent::SubscribeStatus { code } => {
@@ -328,8 +358,7 @@ pub extern "C" fn main() -> i32 {
             }
         }
 
-        // Fire whichever deadlines expired this iteration.
-        comp.tick_clock(now_ms, now_secs);
+        // Recompute dirty cells (tick_clock is now fired by TIME_TICK push arm).
         compose::recompute_dirty(&mut comp);
         compose::render_status_row(&mut comp);
         // Arm the frame deadline if the clock tick or status render dirtied
