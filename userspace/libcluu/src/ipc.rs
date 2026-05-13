@@ -229,6 +229,15 @@ pub const COMP_FRAME_READY_LABEL: u32 = 100;
 /// App should unregister its PTS, destroy the window, and exit cleanly.
 pub const COMP_CLOSE_REQUEST_LABEL: u32 = 101;
 
+// --- Input routing (vtmgr today; inputd post-extraction). ---
+// client → vtmgr: request a VT switch. vtmgr decides per policy.
+// Words: [vt: u32]. Reply: words[0] = errno (0 ok).
+pub const VTMGR_REQUEST_VT_SWITCH_LABEL: u32 = 110;
+// compositor → vtmgr: take/release modal lock on VT switching.
+// Reserved per login-flow §4.6; impl is stub today.
+pub const VTMGR_LOCK_VT_SWITCH_LABEL:   u32 = 111;
+pub const VTMGR_UNLOCK_VT_SWITCH_LABEL: u32 = 112;
+
 // ──────────────────────────────────────────────────────────────────────
 // PTS (pseudo-terminal slave) protocol.
 //
