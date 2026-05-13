@@ -462,7 +462,12 @@ impl<B: ConsoleBackend> Console<B> {
 
     /// Switch the active VT display.
     pub fn switch_vt(&mut self, new_vt: usize) {
-        if new_vt >= VT_COUNT || new_vt == self.active_vt {
+        if new_vt >= VT_COUNT {
+            return;
+        }
+        // Allow re-entry into the same VT when we're currently inactive
+        // (e.g. compositor took over via VT_DEACTIVATE and is handing back).
+        if new_vt == self.active_vt && self.active {
             return;
         }
         self.active_vt = new_vt;
