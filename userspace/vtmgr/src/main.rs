@@ -15,8 +15,11 @@ mod context;
 mod input_routing;
 
 use context::VtmgrContext;
-use libcluu::ipc::{parse_message, KBD_EVENT_LABEL, VTMGR_PIN_VT_LABEL, VTMGR_SWITCH_VT_LABEL};
-use libcluu::types::Message;
+use libcluu::ipc::{
+    parse_message, KBD_EVENT_LABEL, VTMGR_PIN_VT_LABEL, VTMGR_REQUEST_VT_SWITCH_LABEL,
+    VTMGR_SWITCH_VT_LABEL,
+};
+use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, yield_cpu, Result};
 
 #[no_mangle]
@@ -69,6 +72,24 @@ fn handle_vtmgr_message(ctx: &mut VtmgrContext, msg: &Message, payload: &[u8]) {
         VTMGR_SWITCH_VT_LABEL if msg.tag.words >= 1 => {
             let target_vt = msg.words[0];
             ctx.switch_vt(target_vt);
+        }
+        VTMGR_REQUEST_VT_SWITCH_LABEL => {
+            let new_vt = msg.words[0];
+            let allowed = ctx.router.should_allow_switch(
+                ctx.active_vt as u8, new_vt as u8
+            );
+            let err: u64 = if !allowed {
+                16 // EBUSY
+            } else if new_vt >= context::VT_COUNT {
+                22 // EINVAL
+            } else {
+                ctx.switch_vt(new_vt);
+                0
+            };
+            if let Some(reply_id) = libcluu::ipc::extract_reply_id(&msg) {
+                let reply = Message::new(0, [err as usize, 0, 0, 0, 0, 0], 1);
+                let _ = libcluu::ipc::reply(reply_id, &reply, IpcFlags::empty());
+            }
         }
         VTMGR_PIN_VT_LABEL if msg.tag.words >= 1 => {
             let vt_index = msg.words[0];

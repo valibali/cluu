@@ -17,7 +17,7 @@ use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, yield_cpu, Result};
 
 /// Number of virtual terminals supported (0-3 = console text VTs, 4 = compositor).
-const VT_COUNT: usize = 5;
+pub const VT_COUNT: usize = 5;
 
 /// VT index reserved for the compositor when no explicit pin has been received yet.
 /// This default is overridden as soon as the compositor sends VTMGR_PIN_VT_LABEL.
@@ -34,7 +34,7 @@ pub struct VtmgrContext {
     /// Procmgr "spawn" endpoint for tty spawn requests.
     procmgr_spawn_endpoint: usize,
     /// Currently active VT index.
-    active_vt: usize,
+    pub active_vt: usize,
     /// Bitmask: bit N = VT N has been created in console.
     vt_created: u8,
     /// Bitmask: bit N = vt:N container spawn was requested from procmgr.
