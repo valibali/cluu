@@ -32,6 +32,13 @@ const MODAL_W: u32 = 52;
 /// Height of the login modal box in cells (border-inclusive).
 const MODAL_H: u32 = 10;
 
+/// Banner text from shell — rendered above the modal.
+const BANNER: &str = include_str!("../../shell/src/banner.txt");
+/// Number of banner text lines (9 content rows).
+const BANNER_H: u32 = 9;
+/// Gap (blank rows) between banner bottom and modal top.
+const BANNER_GAP: u32 = 1;
+
 /// Virtual address for the compositor SHM frame.
 /// Distinct from cluuterm (0xD100_0000) and compdemo (0xD000_0000).
 const SHM_VA: usize = 0xD200_0000;
@@ -192,9 +199,13 @@ unsafe fn write_str(
 
 /// Render the full-screen login window into the SHM cell buffer.
 ///
-/// The window is `cols × rows` cells (full compositor grid). The login modal
-/// box (MODAL_W=52 × MODAL_H=10) is centered inside:
-///   mx = (cols - MODAL_W) / 2,  my = (rows - MODAL_H) / 2
+/// The window is `cols × rows` cells (full compositor grid). The banner (9
+/// rows) plus a 1-row gap plus the login modal (MODAL_W=52 × MODAL_H=10) are
+/// vertically stacked and centered together:
+///   total_h = BANNER_H + BANNER_GAP + MODAL_H = 20
+///   stack_y = (rows - total_h) / 2
+///   banner_y_top = stack_y
+///   modal_y_top  = stack_y + BANNER_H + BANNER_GAP
 ///
 /// Modal layout (relative to modal top-left):
 ///   Row 0   : top border    "╔══…══╗"
@@ -213,9 +224,30 @@ unsafe fn render_modal(cells: *mut u64, w: u32, h: u32, state: &LoginState) {
     // Fill entire screen with black background cells.
     fill_run(cells, 0, 0, w, w * h, b' ' as u32, WHITE, BLACK, 0);
 
-    // Center the modal box.
+    // Compute stacked layout: banner + gap + modal, all centered vertically.
+    let total_h = BANNER_H + BANNER_GAP + MODAL_H;
+    let stack_y = h.saturating_sub(total_h) / 2;
+    let banner_y_top = stack_y;
+    let modal_y_top = stack_y + BANNER_H + BANNER_GAP;
+
+    // ── Banner: render each line centered horizontally ────────────────────────
+    for (i, line) in BANNER.lines().enumerate() {
+        let chars: alloc::vec::Vec<char> = line.chars().collect();
+        let lx = (w.saturating_sub(chars.len() as u32)) / 2;
+        let ly = banner_y_top + i as u32;
+        for (j, ch) in chars.iter().enumerate() {
+            let cp = *ch as u32;
+            let cell = pack_cell(cp, BR_WHITE, BLACK, 0);
+            core::ptr::write_volatile(
+                cells.add((ly * w + lx + j as u32) as usize),
+                cell,
+            );
+        }
+    }
+
+    // Center the modal box horizontally; use modal_y_top for vertical.
     let mx = (w.saturating_sub(MODAL_W)) / 2;
-    let my = (h.saturating_sub(MODAL_H)) / 2;
+    let my = modal_y_top;
     let mw = MODAL_W;
     let mh = MODAL_H;
 
@@ -491,9 +523,13 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     };
     let _ = debug_print("login: window registered");
 
-    // Compute modal top-left position (centered in the granted full-screen dims).
+    // Compute modal top-left position using the stacked banner+gap+modal layout.
+    // This must match the computation in render_modal so render_fields targets
+    // the same modal origin.
+    let total_h = BANNER_H + BANNER_GAP + MODAL_H;
+    let stack_y = gh.saturating_sub(total_h) / 2;
     let modal_mx = (gw.saturating_sub(MODAL_W)) / 2;
-    let modal_my = (gh.saturating_sub(MODAL_H)) / 2;
+    let modal_my = stack_y + BANNER_H + BANNER_GAP;
 
     // Initialise WindowShm header at SHM_VA.
     let shm_ptr = SHM_VA as *mut WindowShm;

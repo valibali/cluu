@@ -148,7 +148,6 @@ fn run() -> Result<()> {
 
     debug_print("shell: ready")?;
     write_stdout(b"\x1b[2J\x1b[H");
-    let _ = print_banner(stdout);
     let _ = print_prompt(stdout);
     #[cfg(feature = "lang-parser")]
     {
