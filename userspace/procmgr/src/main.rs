@@ -2119,13 +2119,186 @@ impl ProcessManager {
             }
         };
 
-        // session_kind=1 (compositor): auth is handled by cluuterm (T6); just
-        // acknowledge with errno=0 so /bin/login can proceed.
+        // session_kind=1 (compositor): validate credentials, resolve user envelope,
+        // spawn cluuterm under the authenticated user's profile, track session.
         if session_kind == 1 {
-            let _ = debug_print(
-                "procmgr: SESSION_LOGIN session_kind=1 (compositor) — STUB OK"
+            // Parse username\0password\0 from cred_payload.
+            // Own both as String immediately so VFS IPC cannot trash the recv buffer.
+            let payload_str = core::str::from_utf8(cred_payload).unwrap_or("");
+            let mut parts = payload_str.splitn(3, '\0');
+            let username: alloc::string::String = match parts.next() {
+                Some(u) if !u.is_empty() => alloc::string::String::from(u),
+                _ => {
+                    reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                    if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                    return Ok(());
+                }
+            };
+            let password: alloc::string::String =
+                alloc::string::String::from(parts.next().unwrap_or(""));
+
+            // Rate-limit check.
+            if self.is_rate_limited(&username) {
+                let _ = debug_print(&format!(
+                    "procmgr: SESSION_LOGIN session_kind=1 rate-limited for '{}'", username
+                ));
+                self.audit_log("WARN", "AUTH_LOGIN_RATE", &format!("user={}", username));
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+
+            // Look up user record — extract owned values so reference is dropped.
+            let (stored_pw, profile, profile_name) =
+                match self.user_records.get(username.as_str()) {
+                    Some(r) => (r.password.clone(), r.profile, r.profile_name.clone()),
+                    None => {
+                        let _ = debug_print(&format!(
+                            "procmgr: SESSION_LOGIN session_kind=1 unknown user '{}'", username
+                        ));
+                        self.audit_log(
+                            "WARN",
+                            "AUTH_LOGIN_FAIL",
+                            &format!("user={} reason=unknown_user kind=1", username),
+                        );
+                        self.record_auth_failure(&username);
+                        reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                        if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                        return Ok(());
+                    }
+                };
+
+            // Verify password (no reference to self.user_records alive).
+            if !crypto::verify_password(&password, &stored_pw) {
+                let _ = debug_print(&format!(
+                    "procmgr: SESSION_LOGIN session_kind=1 bad password for '{}'", username
+                ));
+                self.audit_log(
+                    "WARN",
+                    "AUTH_LOGIN_FAIL",
+                    &format!("user={} reason=bad_password kind=1", username),
+                );
+                self.record_auth_failure(&username);
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+
+            self.clear_auth_failures(&username);
+            self.audit_log(
+                "INFO",
+                "AUTH_LOGIN_OK",
+                &format!("user={} kind=1", username),
             );
-            reply_msg.words[0] = 0;
+
+            // Resolve user envelope.
+            let envelope = match envelopes::lookup_envelope(&self.envelopes, &profile_name) {
+                Some(e) => e.clone(),
+                None => {
+                    let _ = debug_print(&format!(
+                        "procmgr: SESSION_LOGIN session_kind=1 no envelope for profile '{}'",
+                        profile_name
+                    ));
+                    self.audit_log(
+                        "WARN",
+                        "AUTH_LOGIN_FAIL",
+                        &format!("user={} reason=no_envelope kind=1", username),
+                    );
+                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                    if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                    return Ok(());
+                }
+            };
+            let view_mounts = Self::build_view_from_envelope(&envelope);
+            let resolved_env = envelopes::resolve_env(&envelope, &username);
+            let (user_env, user_envc) = build_envelope_env_payload(&resolved_env);
+
+            // Build a minimal argv for cluuterm: just the binary name.
+            let mut cluuterm_argv: Vec<u8> = Vec::new();
+            cluuterm_argv.extend_from_slice(b"cluuterm\0");
+            let cluuterm_argc = 1usize;
+
+            const CLUUTERM_BIN: &str = "/var/images/cluuterm/bin/cluuterm";
+
+            let spawn_seq = self.next_spawn_seq();
+            let spawn_start = self.clock_sample();
+
+            match self.spawn_service_with_env(
+                CLUUTERM_BIN,
+                DEFAULT_PRIORITY,
+                &cluuterm_argv,
+                cluuterm_argc,
+                &user_env,
+                user_envc,
+                1, // non-zero owner_tid to use caller_env_data
+                spawn_seq,
+                spawn_start,
+                &[],
+                profile,
+                0,
+                0,
+                &[],
+                None,  // no caller view
+                &[],
+                &[],   // no redir
+                THREAD_CREATE_START_SUSPENDED,
+            ) {
+                Ok((thread_token, _cookie, pid, _stdin_send)) => {
+                    let session_cid = self.next_container_id();
+                    let cluuterm_cid = self.next_container_id();
+                    self.pid_to_container_id.insert(pid, cluuterm_cid);
+                    self.container_owner_pids.insert(pid);
+
+                    self.install_view_and_run(thread_token, &view_mounts, profile, cluuterm_cid);
+                    self.pid_to_view.insert(pid, view_mounts);
+
+                    let inst_name = self.next_instance_name(session_cid, "cluuterm");
+                    self.container_instances.insert(cluuterm_cid, ContainerInstance {
+                        name: String::from("cluuterm"),
+                        instance_name: inst_name,
+                        session_id: session_cid,
+                        container_id: cluuterm_cid,
+                        parent_container_id: session_cid,
+                        pid,
+                        image_path: String::from("/var/images/cluuterm"),
+                        mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                        restart_policy: RestartPolicy::Never,
+                        restart_count: 0,
+                        last_exit_code: 0,
+                        restart_attempt_start: 0,
+                        quota: QuotaSpec::default(),
+                        live_processes: 0,
+                    });
+
+                    self.container_children.entry(session_cid)
+                        .or_insert_with(Vec::new).push(cluuterm_cid);
+
+                    self.session_table.insert(session_cid, SessionEntry {
+                        container_id: session_cid,
+                        shell_cid: cluuterm_cid,
+                        pid,
+                        username: username.clone(),
+                        profile,
+                        vt_index: usize::MAX, // compositor session — no legacy VT
+                        stdin_endpoint: 0,    // cluuterm manages its own I/O
+                    });
+
+                    let _ = debug_print(&format!(
+                        "procmgr: SESSION_LOGIN session_kind=1 user='{}' pid={} session_cid={} cluuterm_cid={}",
+                        username, pid, session_cid, cluuterm_cid
+                    ));
+
+                    reply_msg.words[0] = 0;
+                    reply_msg.words[1] = session_cid as usize;
+                }
+                Err(e) => {
+                    let _ = debug_print(&format!(
+                        "procmgr: SESSION_LOGIN session_kind=1 spawn failed: {:?}", e
+                    ));
+                    reply_msg.words[0] = e.to_errno() as usize;
+                }
+            }
+
             if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
             return Ok(());
         }
