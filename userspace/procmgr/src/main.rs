@@ -1624,7 +1624,13 @@ impl ProcessManager {
             registry_endpoint,
             self.fault_endpoint,
         ];
-        let mut buf = [0u8; 256];
+        // Buffer must fit the largest message procmgr can receive on any of
+        // its four endpoints. PROCMGR_SPAWN_LABEL with FDAC + envp + cwd
+        // trailer can exceed 256 bytes; kernel `recv_to_user_nonblocking`
+        // pops the message and returns BufferTooSmall if it overflows,
+        // dropping the message permanently. 4 KiB matches the inline IPC
+        // upper bound used elsewhere in libcluu.
+        let mut buf = [0u8; 4096];
         // Compute timeout: wake up when the soonest timer expires (or block forever).
         let timeout = if self.pending_timers.is_empty() {
             u64::MAX
