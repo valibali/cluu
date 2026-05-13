@@ -1,11 +1,11 @@
 //! /bin/login — compositor client: login modal window.
 //!
-//! Task T3: INPUT_FORWARD handling, field focus, Tab/Backspace/Enter.
+//! Task T4: SESSION_LOGIN submit via PROCMGR_SESSION_LOGIN_LABEL.
 //!
 //! Registers a window with the compositor, maps the SHM frame, renders a
 //! centered login modal (username + password fields), sends WIN_DAMAGE, then
 //! loops on ipc_recv_any handling COMP_INPUT_FORWARD_LABEL keystrokes.
-//! No SESSION_LOGIN submit yet (Task T4).
+//! On Enter-in-password: sends SESSION_LOGIN to procmgr with session_kind=1.
 
 #![no_std]
 #![no_main]
@@ -18,7 +18,7 @@ use libcluu::runtime as _;
 use libcluu::boot::{process_info, space_token, TOKEN_IPC};
 use libcluu::ipc::{
     COMP_INPUT_FORWARD_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL,
-    COMP_WIN_REGISTER_REPLY,
+    COMP_WIN_REGISTER_REPLY, PROCMGR_SESSION_LOGIN_LABEL,
 };
 use libcluu::syscall::MAP_FRAME_TOKEN;
 use libcluu::types::{IpcFlags, Message};
@@ -69,6 +69,8 @@ const BR_WHITE:  u8 = 15;
 const DARK_GREY: u8 = 8;
 /// Colour index 2 = green (hint text).
 const GREEN:     u8 = 2;
+/// Colour index 1 = red (error text).
+const RED:       u8 = 1;
 /// Colour index 11 = bright yellow (focused-field highlight).
 const YELLOW:    u8 = 11;
 
@@ -90,6 +92,8 @@ struct LoginState {
     username: alloc::vec::Vec<u8>,
     password: alloc::vec::Vec<u8>,
     focus: Focus,
+    /// True while "login incorrect" error banner should be shown on row 8.
+    show_error: bool,
 }
 
 impl LoginState {
@@ -98,11 +102,14 @@ impl LoginState {
             username: alloc::vec::Vec::new(),
             password: alloc::vec::Vec::new(),
             focus: Focus::Username,
+            show_error: false,
         }
     }
 
     /// Append a printable ASCII character to the active field (capped at FIELD_MAX).
+    /// Clears the error banner on first keystroke after a failed login.
     fn handle_char(&mut self, c: u8) {
+        self.show_error = false;
         let field = match self.focus {
             Focus::Username => &mut self.username,
             Focus::Password => &mut self.password,
@@ -113,7 +120,9 @@ impl LoginState {
     }
 
     /// Delete the last character from the active field.
+    /// Clears the error banner on first keystroke after a failed login.
     fn handle_backspace(&mut self) {
+        self.show_error = false;
         match self.focus {
             Focus::Username => { self.username.pop(); }
             Focus::Password => { self.password.pop(); }
@@ -243,18 +252,15 @@ unsafe fn render_modal(cells: *mut u64, w: u32, h: u32, state: &LoginState) {
     let title_x = (w - title.len() as u32) / 2;
     write_str(cells, title_x, 2, w, title, BR_WHITE, BLACK, 1 /* bold */);
 
-    // ── Row 8: hint ────────────────────────────────────────────────────────────
-    let hint = b"[Tab] focus  [Enter] login";
-    write_str(cells, 2, 8, w, hint, GREEN, BLACK, 0);
-
-    // ── Rows 4 and 6: interactive field content ────────────────────────────────
+    // ── Rows 4, 6, and 8: interactive content (fields + hint/error) ───────────
     render_fields(cells, w, state);
 }
 
-/// Re-render only the username (row 4) and password (row 6) field rows.
+/// Re-render the username (row 4), password (row 6), and hint/error (row 8)
+/// rows.
 ///
 /// Called both from `render_modal` (initial paint) and from the input loop
-/// (per-keystroke update).  The chrome rows (borders, title, hint) are left
+/// (per-keystroke update).  The chrome rows (borders, title) are left
 /// untouched.
 ///
 /// Field layout (field_x = 2 + prompt.len() = 12, field_w = 10):
@@ -306,6 +312,56 @@ unsafe fn render_fields(cells: *mut u64, w: u32, state: &LoginState) {
     // Underscore placeholders.
     if plen < FIELD_W {
         fill_run(cells, FIELD_X + plen, 6, w, FIELD_W - plen, b'_' as u32, pfg, DARK_GREY, 0);
+    }
+
+    // ── Row 8: hint or error banner ────────────────────────────────────────────
+    // Clear the interior of row 8 first (preserve side borders painted by render_modal).
+    fill_run(cells, 1, 8, w, w - 2, b' ' as u32, WHITE, BLACK, 0);
+    if state.show_error {
+        let err_msg = b"login incorrect";
+        // Centre the error message within the interior (w-2 cells starting at col 1).
+        let interior = w - 2;
+        let msg_len = err_msg.len() as u32;
+        let err_x = 1 + (interior.saturating_sub(msg_len)) / 2;
+        write_str(cells, err_x, 8, w, err_msg, RED, BLACK, 0);
+    } else {
+        let hint = b"[Tab] focus  [Enter] login";
+        write_str(cells, 2, 8, w, hint, GREEN, BLACK, 0);
+    }
+}
+
+// ─── Session login IPC ────────────────────────────────────────────────────────
+
+/// Send `PROCMGR_SESSION_LOGIN_LABEL` to `procmgr_spawn` and return `Ok(())`
+/// on authentication success or `Err(errno)` on failure.
+///
+/// Payload wire format:
+///   `session_kind (1 byte = 1) + username\0 + password\0`
+///
+/// Reply: `words[0] == 0` → success; `words[0] != 0` → errno.
+fn try_login(procmgr_spawn: usize, username: &[u8], password: &[u8]) -> Result<(), usize> {
+    let mut payload: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    payload.push(1); // session_kind = compositor
+    payload.extend_from_slice(username);
+    payload.push(0);
+    payload.extend_from_slice(password);
+    payload.push(0);
+
+    let msg = libcluu::types::Message::new(
+        PROCMGR_SESSION_LOGIN_LABEL,
+        [payload.len(), 0 /* instance_id */, 0, 0, 0, 0],
+        2,
+    );
+    let mut reply = libcluu::types::Message::new(0, [0; 6], 0);
+    match libcluu::ipc::call_with_payload(procmgr_spawn, &msg, &payload, &mut reply) {
+        Err(_) => Err(usize::MAX),
+        Ok(()) => {
+            if reply.words[0] == 0 {
+                Ok(())
+            } else {
+                Err(reply.words[0])
+            }
+        }
     }
 }
 
@@ -385,6 +441,15 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         let _ = debug_print("login: registry init failed");
         return 1;
     }
+
+    // Look up procmgr:spawn endpoint once at startup (cached for the submit call).
+    let procmgr_spawn = match registry::lookup_service("procmgr:spawn") {
+        Some(ep) => ep,
+        None => {
+            let _ = debug_print("login: no procmgr:spawn in registry");
+            return 1;
+        }
+    };
 
     // Allocate a long-lived endpoint (compositor pacing + input events).
     let info = process_info();
@@ -498,10 +563,22 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                     0x0A | 0x0D => {
                         let submit = state.handle_enter();
                         if submit {
-                            // Task T4 will wire PROCMGR_SESSION_LOGIN here.
-                            let _ = debug_print("login: submit-pending");
-                            // Do not re-render or send damage on submit stub.
-                            continue;
+                            let username = state.username.clone();
+                            let password = state.password.clone();
+                            match try_login(procmgr_spawn, &username, &password) {
+                                Ok(()) => {
+                                    let _ = debug_print("login: user authenticated");
+                                    return 0;
+                                }
+                                Err(_errno) => {
+                                    // Clear credentials, show error banner, refocus username.
+                                    state.username.clear();
+                                    state.password.clear();
+                                    state.focus = Focus::Username;
+                                    state.show_error = true;
+                                }
+                            }
+                            // Fall through to re-render (shows error banner or clears fields).
                         }
                         // Moved focus to password — fall through to re-render.
                     }
