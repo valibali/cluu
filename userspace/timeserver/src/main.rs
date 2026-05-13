@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+mod subscribers;
+
 extern crate alloc;
 
 use libcluu::boot::{process_info, TOKEN_CLOCK, TOKEN_EXTRA_0};
