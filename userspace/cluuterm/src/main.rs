@@ -85,12 +85,12 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     };
     let _ = debug_print("cluuterm: pts registered");
 
-    // Phase 3: spawn /bin/login with fd 0/1/2 wired to /dev/pts/<id>.
-    if let Err(code) = spawn_login_with_pts(pts_id) {
-        let _ = debug_print("cluuterm: spawn /bin/login failed");
+    // Phase 3: spawn /bin/shell with fd 0/1/2 wired to /dev/pts/<id>.
+    if let Err(code) = spawn_shell_with_pts(pts_id) {
+        let _ = debug_print("cluuterm: spawn /bin/shell failed");
         return code;
     }
-    let _ = debug_print("cluuterm: /bin/login spawned");
+    let _ = debug_print("cluuterm: /bin/shell spawned");
 
     // Phase 4: run main loop (stub recv loop — Task 15 fills the real body).
     let shm_ptr = SHM_VA as *mut WindowShm;
@@ -224,9 +224,9 @@ fn register_pts(my_ep: usize) -> Result<u32, i32> {
     Ok(id)
 }
 
-// ─── spawn /bin/login ─────────────────────────────────────────────────────────
+// ─── spawn /bin/shell ─────────────────────────────────────────────────────────
 
-/// Spawn `/bin/login` with fd 0, 1, 2 bound to `/dev/pts/<pts_id>`.
+/// Spawn `/bin/shell` with fd 0, 1, 2 bound to `/dev/pts/<pts_id>`.
 ///
 /// Strategy: open /dev/pts/<id> three times (for stdin, stdout, stderr),
 /// then use posix_spawn_file_actions_adddup2 to redirect the child's
@@ -238,7 +238,7 @@ fn register_pts(my_ep: usize) -> Result<u32, i32> {
 /// NOTE: The file_actions adddup2 only accepts newfd in 0-3 (libcluu
 /// constraint: `!(0..=3).contains(&newfd)` → EINVAL).  We open the pts fd
 /// once and dup2 it to 0, 1, and 2 separately.
-fn spawn_login_with_pts(pts_id: u32) -> Result<(), i32> {
+fn spawn_shell_with_pts(pts_id: u32) -> Result<(), i32> {
     extern "C" {
         fn posix_spawn(
             pid: *mut i32,
@@ -311,8 +311,8 @@ fn spawn_login_with_pts(pts_id: u32) -> Result<(), i32> {
         return Err(12);
     }
 
-    let login_path = b"/bin/login\0";
-    let arg0 = b"login\0";
+    let login_path = b"/bin/shell\0";
+    let arg0 = b"shell\0";
     let argv: [*const u8; 2] = [arg0.as_ptr(), core::ptr::null()];
     // Empty-but-non-null envp so posix_spawn does not fall back to `environ`.
     let envp: [*const u8; 1] = [core::ptr::null()];
