@@ -1,11 +1,11 @@
 //! /bin/login — compositor client: login modal window.
 //!
-//! Task T2: WIN_REGISTER + static modal scaffold.
+//! Task T3: INPUT_FORWARD handling, field focus, Tab/Backspace/Enter.
 //!
 //! Registers a window with the compositor, maps the SHM frame, renders a
 //! centered login modal (username + password fields), sends WIN_DAMAGE, then
-//! loops forever on ipc_recv_any.  No input handling (Task T3), no
-//! SESSION_LOGIN submit (Task T4).
+//! loops on ipc_recv_any handling COMP_INPUT_FORWARD_LABEL keystrokes.
+//! No SESSION_LOGIN submit yet (Task T4).
 
 #![no_std]
 #![no_main]
@@ -17,7 +17,8 @@ use libcluu::runtime as _;
 
 use libcluu::boot::{process_info, space_token, TOKEN_IPC};
 use libcluu::ipc::{
-    COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY,
+    COMP_INPUT_FORWARD_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL,
+    COMP_WIN_REGISTER_REPLY,
 };
 use libcluu::syscall::MAP_FRAME_TOKEN;
 use libcluu::types::{IpcFlags, Message};
@@ -68,6 +69,77 @@ const BR_WHITE:  u8 = 15;
 const DARK_GREY: u8 = 8;
 /// Colour index 2 = green (hint text).
 const GREEN:     u8 = 2;
+/// Colour index 11 = bright yellow (focused-field highlight).
+const YELLOW:    u8 = 11;
+
+// ─── Maximum field length ─────────────────────────────────────────────────────
+
+/// Maximum number of characters accepted in username or password field.
+const FIELD_MAX: usize = 20;
+
+// ─── Field-focus state ────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum Focus {
+    Username,
+    Password,
+}
+
+/// Mutable state for the login form.
+struct LoginState {
+    username: alloc::vec::Vec<u8>,
+    password: alloc::vec::Vec<u8>,
+    focus: Focus,
+}
+
+impl LoginState {
+    fn new() -> Self {
+        Self {
+            username: alloc::vec::Vec::new(),
+            password: alloc::vec::Vec::new(),
+            focus: Focus::Username,
+        }
+    }
+
+    /// Append a printable ASCII character to the active field (capped at FIELD_MAX).
+    fn handle_char(&mut self, c: u8) {
+        let field = match self.focus {
+            Focus::Username => &mut self.username,
+            Focus::Password => &mut self.password,
+        };
+        if field.len() < FIELD_MAX && c.is_ascii_graphic() {
+            field.push(c);
+        }
+    }
+
+    /// Delete the last character from the active field.
+    fn handle_backspace(&mut self) {
+        match self.focus {
+            Focus::Username => { self.username.pop(); }
+            Focus::Password => { self.password.pop(); }
+        }
+    }
+
+    /// Toggle focus between username and password.
+    fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Username => Focus::Password,
+            Focus::Password => Focus::Username,
+        };
+    }
+
+    /// Handle Enter: advance focus from username→password, return true if on
+    /// password (submit intent).
+    fn handle_enter(&mut self) -> bool {
+        match self.focus {
+            Focus::Username => {
+                self.focus = Focus::Password;
+                false
+            }
+            Focus::Password => true,
+        }
+    }
+}
 
 // ─── Modal rendering ──────────────────────────────────────────────────────────
 
@@ -109,7 +181,7 @@ unsafe fn write_str(
     }
 }
 
-/// Render the static login modal into the SHM cell buffer.
+/// Render the static login modal chrome into the SHM cell buffer (once at startup).
 ///
 /// Layout (WIN_W=52, WIN_H=10):
 ///   Row 0   : top chrome bar  "╔══…══ CLUU login ══…══╗"
@@ -122,7 +194,7 @@ unsafe fn write_str(
 ///   Row 7   : blank           "║                      ║"
 ///   Row 8   : hint line       "║  [Enter] login         ║"
 ///   Row 9   : bottom chrome   "╚══…══════════════════╝"
-unsafe fn render_modal(cells: *mut u64, w: u32, h: u32) {
+unsafe fn render_modal(cells: *mut u64, w: u32, h: u32, state: &LoginState) {
     // Background: fill whole window with blank dark cells.
     fill_run(cells, 0, 0, w, w * h, b' ' as u32, WHITE, BLACK, 0);
 
@@ -171,20 +243,70 @@ unsafe fn render_modal(cells: *mut u64, w: u32, h: u32) {
     let title_x = (w - title.len() as u32) / 2;
     write_str(cells, title_x, 2, w, title, BR_WHITE, BLACK, 1 /* bold */);
 
-    // ── Row 4: username prompt + blank field ───────────────────────────────────
-    let user_prompt = b"username: ";
-    write_str(cells, 2, 4, w, user_prompt, WHITE, BLACK, 0);
-    let field_x = 2 + user_prompt.len() as u32;
-    fill_run(cells, field_x, 4, w, 10, b'_' as u32, WHITE, DARK_GREY, 0);
-
-    // ── Row 6: password prompt + blank field ───────────────────────────────────
-    let pass_prompt = b"password: ";
-    write_str(cells, 2, 6, w, pass_prompt, WHITE, BLACK, 0);
-    fill_run(cells, field_x, 6, w, 10, b'_' as u32, WHITE, DARK_GREY, 0);
-
     // ── Row 8: hint ────────────────────────────────────────────────────────────
-    let hint = b"[Enter] login";
+    let hint = b"[Tab] focus  [Enter] login";
     write_str(cells, 2, 8, w, hint, GREEN, BLACK, 0);
+
+    // ── Rows 4 and 6: interactive field content ────────────────────────────────
+    render_fields(cells, w, state);
+}
+
+/// Re-render only the username (row 4) and password (row 6) field rows.
+///
+/// Called both from `render_modal` (initial paint) and from the input loop
+/// (per-keystroke update).  The chrome rows (borders, title, hint) are left
+/// untouched.
+///
+/// Field layout (field_x = 2 + prompt.len() = 12, field_w = 10):
+///   - Filled characters at positions [0..len).
+///   - Underscore placeholders at positions [len..FIELD_W).
+/// The focused field uses YELLOW fg on DARK_GREY bg; the unfocused one uses
+/// WHITE fg on DARK_GREY bg.
+unsafe fn render_fields(cells: *mut u64, w: u32, state: &LoginState) {
+    const FIELD_X: u32 = 12; // 2 indent + "username: ".len() = 12
+    const FIELD_W: u32 = 10; // visible field width
+
+    let user_prompt = b"username: ";
+    let pass_prompt = b"password: ";
+
+    // ── Row 4: username ────────────────────────────────────────────────────────
+    let (ufg, pfg) = if state.focus == Focus::Username {
+        (YELLOW, WHITE)
+    } else {
+        (WHITE, YELLOW)
+    };
+
+    // Re-draw prompt in the correct colour to show focus on the label too.
+    write_str(cells, 2, 4, w, user_prompt, ufg, BLACK, 0);
+
+    let ulen = state.username.len() as u32;
+    // Typed characters (shown as-is for username).
+    for (i, &c) in state.username.iter().enumerate() {
+        core::ptr::write_volatile(
+            cells.add((4 * w + FIELD_X + i as u32) as usize),
+            pack_cell(c as u32, ufg, DARK_GREY, 0),
+        );
+    }
+    // Underscore placeholders for remaining positions.
+    if ulen < FIELD_W {
+        fill_run(cells, FIELD_X + ulen, 4, w, FIELD_W - ulen, b'_' as u32, ufg, DARK_GREY, 0);
+    }
+
+    // ── Row 6: password ────────────────────────────────────────────────────────
+    write_str(cells, 2, 6, w, pass_prompt, pfg, BLACK, 0);
+
+    let plen = state.password.len() as u32;
+    // Password characters are masked as '*'.
+    for i in 0..plen {
+        core::ptr::write_volatile(
+            cells.add((6 * w + FIELD_X + i) as usize),
+            pack_cell(b'*' as u32, pfg, DARK_GREY, 0),
+        );
+    }
+    // Underscore placeholders.
+    if plen < FIELD_W {
+        fill_run(cells, FIELD_X + plen, 6, w, FIELD_W - plen, b'_' as u32, pfg, DARK_GREY, 0);
+    }
 }
 
 // ─── WIN_REGISTER ─────────────────────────────────────────────────────────────
@@ -264,7 +386,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         return 1;
     }
 
-    // Allocate a long-lived endpoint (compositor pacing + future input events).
+    // Allocate a long-lived endpoint (compositor pacing + input events).
     let info = process_info();
     let ipc_cap = info.tokens[TOKEN_IPC];
     let my_ep = match syscall::endpoint_create(ipc_cap) {
@@ -302,32 +424,103 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         core::ptr::write_volatile(&mut (*shm_ptr).generation as *mut u32, 0);
     }
 
-    // Render the static login modal into the cell buffer (offset 32 into SHM).
+    // Initial form state (focus = Username, both fields empty).
+    let mut state = LoginState::new();
+
+    // Render the login modal (chrome + initial empty fields) into the cell buffer.
     let cells_ptr = (SHM_VA + 32) as *mut u64;
     unsafe {
-        render_modal(cells_ptr, gw, gh);
+        render_modal(cells_ptr, gw, gh, &state);
     }
 
-    // Bump generation so compositor knows cells are ready.
-    unsafe {
-        let g = (*shm_ptr).generation;
-        core::ptr::write_volatile(&mut (*shm_ptr).generation as *mut u32, g.wrapping_add(1));
-    }
+    // Helper closure: bump generation + send WIN_DAMAGE.
+    let send_damage = |shm_ptr: *mut WindowShm| {
+        unsafe {
+            let g = (*shm_ptr).generation;
+            core::ptr::write_volatile(
+                &mut (*shm_ptr).generation as *mut u32,
+                g.wrapping_add(1),
+            );
+        }
+        let dmg = Message::new(
+            COMP_WIN_DAMAGE_LABEL,
+            [win_id as usize, 0, 0, gw as usize, gh as usize, 0],
+            5,
+        );
+        let _ = libcluu::ipc::send(comp_ep, &dmg, IpcFlags::empty());
+    };
 
-    // Send WIN_DAMAGE for the full window.
-    let dmg = Message::new(
-        COMP_WIN_DAMAGE_LABEL,
-        [win_id as usize, 0, 0, gw as usize, gh as usize, 0],
-        5,
-    );
-    let _ = libcluu::ipc::send(comp_ep, &dmg, IpcFlags::empty());
+    // Initial damage flush.
+    send_damage(shm_ptr);
 
-    let _ = debug_print("login: window registered");
-
-    // Event loop stub — Task T3 will add INPUT_FORWARD handling.
+    // ── Event loop ────────────────────────────────────────────────────────────
+    //
+    // Wire layout for COMP_INPUT_FORWARD_LABEL (from libcluu/cluuterm/src/input.rs):
+    //   words[0] = window_id
+    //   words[1] = ascii      (printable/control byte; 0 if none)
+    //   words[2] = mods       (modifier bitmask; unused here)
+    //   words[3] = scancode   (hardware scancode; unused here)
+    //   words[4] = extended   (KEY_* enum; arrow keys etc.)
+    //   words[5] = kind       (0 = ordinary; 99 = close-request)
+    //
+    // We only care about ascii (words[1]):
+    //   0x09        Tab        → toggle focus
+    //   0x08/0x7F   Backspace  → pop last char from active field
+    //   0x0A/0x0D   Enter      → username: advance to password; password: submit
+    //   graphic     printable  → append to active field
     let tokens = [my_ep];
     let mut recv_buf = [0u8; 256];
+
     loop {
-        let _ = syscall::ipc_recv_any(&tokens, &mut recv_buf, u64::MAX);
+        let (_, len) = match syscall::ipc_recv_any(&tokens, &mut recv_buf, u64::MAX) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let Some((msg, _payload)) = libcluu::ipc::parse_message(&recv_buf[..len]) else {
+            continue;
+        };
+
+        match msg.tag.label {
+            COMP_INPUT_FORWARD_LABEL => {
+                let ascii = msg.words[1] as u8;
+
+                match ascii {
+                    // Tab: toggle focus between username and password.
+                    0x09 => {
+                        state.toggle_focus();
+                    }
+                    // Backspace (BS=0x08, DEL=0x7F): delete last char in active field.
+                    0x08 | 0x7F => {
+                        state.handle_backspace();
+                    }
+                    // Enter (LF=0x0A, CR=0x0D).
+                    0x0A | 0x0D => {
+                        let submit = state.handle_enter();
+                        if submit {
+                            // Task T4 will wire PROCMGR_SESSION_LOGIN here.
+                            let _ = debug_print("login: submit-pending");
+                            // Do not re-render or send damage on submit stub.
+                            continue;
+                        }
+                        // Moved focus to password — fall through to re-render.
+                    }
+                    // Printable ASCII: append to active field.
+                    _ if ascii.is_ascii_graphic() => {
+                        state.handle_char(ascii);
+                    }
+                    // Other control characters: ignore.
+                    _ => continue,
+                }
+
+                // Re-render the field rows and send WIN_DAMAGE.
+                unsafe {
+                    render_fields(cells_ptr, gw, &state);
+                }
+                send_damage(shm_ptr);
+            }
+            // All other labels are silently dropped.
+            _ => {}
+        }
     }
 }
