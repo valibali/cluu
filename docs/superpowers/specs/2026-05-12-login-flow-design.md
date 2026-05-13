@@ -180,6 +180,8 @@ Scope decisions:
 - Mouse delivery deferred to sub-project C; login modal works without
   mouse via Tab/Enter.
 
+**Input routing**: kbd → vtmgr → target (compositor:input or tty:N:main). vtmgr is the sole router. Implemented per plan `2026-05-13-input-routing-vtmgr.md` (commits cd4d831..d607151). Modal-lock labels VTMGR_LOCK_VT_SWITCH / UNLOCK reserved; policy hook stubbed (always allows). Visual confirmation deferred until compositor FRAME_READY backpressure to cluuterm (bug #5) is resolved.
+
 ### 4.7 getty — VT0–VT3 raw console
 
 **Files (new):**
