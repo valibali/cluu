@@ -20,6 +20,7 @@ use libcluu::ipc::{
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
+use registry::RegistryEvent;
 
 /// Send COMP_FRAME_READY_LABEL to windows that have pending damage since the
 /// last broadcast.  A window is eligible if:
@@ -146,6 +147,14 @@ pub extern "C" fn main() -> i32 {
     let mut buf = [0u8; 1024];
     // Cached timeserver endpoint — 0 means not yet resolved.
     let mut time_ep: usize = 0;
+    // Whether we have already sent a subscription request for timeserver:main.
+    let mut requested_timeserver = false;
+
+    // Subscribe to timeserver:main up-front so we get a Grant when it registers.
+    if registry::request_subscription("timeserver", "main").is_ok() {
+        requested_timeserver = true;
+        let _ = debug_print("compositor: timeserver subscription requested");
+    }
 
     // Index of the registry endpoint in the tokens array.
     const REGISTRY_TOKEN_IDX: usize = 3;
@@ -162,7 +171,22 @@ pub extern "C" fn main() -> i32 {
                     // Registry control messages (grant requests from subscribers) must
                     // be forwarded to the registry client so it can mint tokens.
                     if idx == REGISTRY_TOKEN_IDX {
-                        let _ = registry::handle_incoming_message(&msg, payload);
+                        if let Ok(Some(event)) = registry::handle_incoming_message(&msg, payload) {
+                            match event {
+                                RegistryEvent::Grant { service_name, name, token } => {
+                                    if service_name == "timeserver" && name == "main" {
+                                        time_ep = token;
+                                        let _ = debug_print("compositor: timeserver subscribed");
+                                    }
+                                }
+                                RegistryEvent::SubscribeStatus { code } => {
+                                    if code != 0 {
+                                        // Subscription failed; retry next iteration.
+                                        requested_timeserver = false;
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
                     let kind = protocol::parse(&msg);
@@ -296,10 +320,24 @@ pub extern "C" fn main() -> i32 {
             }
         }
 
+        // Retry timeserver subscription if not yet requested (e.g. registry
+        // was unavailable at startup).
+        if !requested_timeserver && time_ep == 0 {
+            if registry::request_subscription("timeserver", "main").is_ok() {
+                requested_timeserver = true;
+            }
+        }
+
         // Fire whichever deadlines expired this iteration.
         comp.tick_clock(now_ms, now_secs);
         compose::recompute_dirty(&mut comp);
         compose::render_status_row(&mut comp);
+        // Arm the frame deadline if the clock tick or status render dirtied
+        // the cell grid.  (The message-receive arm above only covers
+        // protocol-message-driven dirt; clock-tick dirt arrives here.)
+        if comp.prev_cell_grid != comp.cell_grid {
+            comp.schedule_frame(now_ms);
+        }
 
         if comp.tick_frame(now_ms) {
             broadcast_frame_ready(&mut comp);

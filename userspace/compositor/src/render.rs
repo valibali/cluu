@@ -54,19 +54,29 @@ impl Compositor {
         true
     }
 
-    /// Tick the clock deadline. If due, refresh `clock_seconds`, dirty the
-    /// status row, and reset the deadline.
+    /// Tick the clock deadline. If due, update `clock_seconds` and always
+    /// dirty row 0 so the status bar re-blits each second regardless of
+    /// whether the seconds value changed (covers the `now_ms == 0` placeholder
+    /// case and ensures the clock string is live once timeserver resolves).
     pub fn tick_clock(&mut self, now_ms: u64, now_secs: u64) {
         if now_ms < self.deadlines.next_clock_ms {
             return;
         }
-        if now_secs != self.clock_seconds {
-            self.clock_seconds = now_secs;
-            for cx in 0..self.cols {
-                self.cell_dirty.push((cx, 0));
-            }
+        // Track whether the timeserver is available (now_ms > 0 means a real
+        // timestamp was returned by clock_now_ms).
+        if now_ms > 0 {
+            self.clock_ready = true;
         }
-        self.deadlines.next_clock_ms = now_ms + CLOCK_PERIOD_MS;
+        // Always update the stored seconds and mark the status row dirty so
+        // the status bar re-blits every second whether timeserver is pending
+        // (placeholder) or live (real time).
+        self.clock_seconds = now_secs;
+        for cx in 0..self.cols {
+            self.cell_dirty.push((cx, 0));
+        }
+        // Advance the deadline; guard against the now_ms==0 case so the
+        // deadline does not stay at 0 and spin.
+        self.deadlines.next_clock_ms = now_ms.max(1) + CLOCK_PERIOD_MS;
     }
 
     /// Set the frame deadline to now+MIN_FRAME_MS (next loop iteration flushes)

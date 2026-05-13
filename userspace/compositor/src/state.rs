@@ -221,6 +221,10 @@ pub struct Compositor {
 
     /// Monotonic seconds from boot, refreshed by `tick_clock` each second.
     pub clock_seconds: u64,
+    /// `true` once the timeserver endpoint is resolved and `clock_seconds`
+    /// reflects a real timestamp. `false` while timeserver is pending;
+    /// the status bar shows `--:--:--` in that state.
+    pub clock_ready: bool,
 
     /// Monotonic millisecond timestamp of the last flush+broadcast.
     /// Updated by `tick_frame` after each successful flush.
@@ -336,6 +340,7 @@ impl Compositor {
             active: false,
             next_id: 1,
             clock_seconds: 0,
+            clock_ready: false,
             last_flush_at: 0,
             deadlines: Deadlines::new(),
             instance_id: 0,
