@@ -11,4 +11,4 @@ image = "kbd"
 image = "compositor"
 
 [[service]]
-image = "cluuterm"
+image = "login"
