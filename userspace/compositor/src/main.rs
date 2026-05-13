@@ -171,16 +171,18 @@ pub extern "C" fn main() -> i32 {
             Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) {
                     // TIME_TICK from timeserver push-mode subscription.
-                    // Arrives on input_endpoint_global (idx=1). Handle before
-                    // protocol::parse() so it never falls into the Other(_) arm.
+                    // Arrives on input_endpoint_global (idx=1). Update the
+                    // cached clock and fire tick_clock (which marks row 0
+                    // dirty in cell_dirty), then FALL THROUGH so the
+                    // post-recv block runs recompute_dirty + render_status_row
+                    // to actually rewrite the clock string into cell_grid.
+                    // Without falling through, cells stay dirty but the grid
+                    // is never updated → status bar shows stale "--:--:--".
                     if msg.tag.label == libcluu::time::TIME_TICK_LABEL && idx != REGISTRY_TOKEN_IDX {
                         let now_ms_from_tick = msg.words[1] as u64;
                         comp.last_clock_now_ms = now_ms_from_tick;
                         comp.tick_clock(now_ms_from_tick, now_ms_from_tick / 1000);
-                        if comp.prev_cell_grid != comp.cell_grid {
-                            comp.schedule_frame(now_ms_from_tick);
-                        }
-                        continue;
+                        // Do NOT continue — fall through to post-recv block.
                     }
 
                     // Registry control messages (grant requests from subscribers) must
