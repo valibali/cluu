@@ -262,8 +262,14 @@ impl Compositor {
 
 impl Compositor {
     /// VT switch: compositor's VT became active — resume fb writes.
+    /// Invalidate `prev_cell_grid` to force every cell to re-blit, since the
+    /// console (or another VT owner) overwrote the framebuffer while we were
+    /// inactive; our cached grid no longer matches what's on-screen.
     pub fn handle_vt_activate(&mut self) {
         self.active = true;
+        for slot in self.prev_cell_grid.iter_mut() {
+            *slot = u64::MAX;
+        }
         self.repaint_all();
     }
 
