@@ -15,7 +15,7 @@ mod context;
 mod input_routing;
 
 use context::VtmgrContext;
-use libcluu::ipc::{parse_message, VTMGR_PIN_VT_LABEL, VTMGR_SWITCH_VT_LABEL};
+use libcluu::ipc::{parse_message, KBD_EVENT_LABEL, VTMGR_PIN_VT_LABEL, VTMGR_SWITCH_VT_LABEL};
 use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Result};
 
@@ -63,6 +63,9 @@ fn run() -> Result<()> {
 
 fn handle_vtmgr_message(ctx: &mut VtmgrContext, msg: &Message, payload: &[u8]) {
     match msg.tag.label {
+        KBD_EVENT_LABEL => {
+            ctx.router.forward(&msg, |kind| ctx.lookup_target_endpoint(kind));
+        }
         VTMGR_SWITCH_VT_LABEL if msg.tag.words >= 1 => {
             let target_vt = msg.words[0];
             ctx.switch_vt(target_vt);

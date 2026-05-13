@@ -59,7 +59,7 @@ pub struct VtmgrContext {
     /// Bitmask: bit N = tty:N:main subscription was requested.
     requested_tty_main: u8,
     /// Input router: tracks active target and forwards events.
-    router: crate::input_routing::InputRouter,
+    pub router: crate::input_routing::InputRouter,
 }
 
 impl VtmgrContext {
