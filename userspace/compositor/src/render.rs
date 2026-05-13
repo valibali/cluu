@@ -6,29 +6,28 @@ use crate::config::{CLOCK_PERIOD_MS, MIN_FRAME_MS};
 use crate::state::{Compositor, PixelRect};
 
 impl Compositor {
-    /// Tick the frame deadline. If active + dirty cells pending and the
-    /// deadline has passed, flush + broadcast + reset the deadline.
-    /// Returns `true` if a flush happened (caller should broadcast).
+    /// Flush dirty cells to the framebuffer if active.
+    ///
+    /// Push-mode: `now_ms` (= cached `last_clock_now_ms`) only advances on
+    /// TIME_TICK arrivals (1 Hz). Using it as a deadline gates rendering to
+    /// 1 fps, which clobbers per-keystroke echo. Instead: flush on demand
+    /// whenever there's dirty work. Frame rate naturally throttled by
+    /// WIN_DAMAGE arrival rate.
+    ///
+    /// Returns `true` if a flush happened.
     pub fn tick_frame(&mut self, now_ms: u64) -> bool {
         if !self.active {
-            // Park the frame deadline so the event loop blocks on recv
-            // instead of tight-spinning at next_timeout_ms == 0 while VT4
-            // is hidden. handle_vt_activate re-arms via schedule_frame
-            // after repaint_all dirties cells again.
             self.deadlines.next_frame_ms = u64::MAX;
             return false;
         }
         if self.cell_dirty.is_empty() && self.prev_cell_grid == self.cell_grid {
-            // No work to do; let deadline sleep.
             self.deadlines.next_frame_ms = u64::MAX;
             return false;
         }
-        if now_ms < self.deadlines.next_frame_ms {
-            return false; // not yet
-        }
+        // Flush immediately — message arrival is the throttle.
         self.flush_grid_to_backbuf();
         self.flush_backbuf_to_fb();
-        self.deadlines.next_frame_ms = now_ms + MIN_FRAME_MS;
+        self.deadlines.next_frame_ms = u64::MAX;
         self.last_flush_at = now_ms;
 
         // One-shot benchmark: after 100 flushes report cycles-per-frame on
