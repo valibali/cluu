@@ -1628,6 +1628,21 @@ impl VfsServer {
                 }
             }
             // PTS write: forward to the owning cluuterm via PTS_WRITE_LABEL.
+            //
+            // Fire-and-forget: VFS uses `send_with_payload`, not
+            // `call_with_payload`. PTS write is naturally async — the
+            // writer (e.g. /bin/login) does not need cluuterm's render
+            // ack to make progress, and waiting for it creates a cross-
+            // process sync-cross-call deadlock when cluuterm is itself
+            // blocked on a VFS call (e.g., during its startup
+            // posix_spawn/_close path).
+            //
+            // Tradeoff: we report all bytes as written even if cluuterm
+            // never drains. Acceptable for PTS (cluuterm's recv queue
+            // is per-window and not shared). Backpressure on cluuterm
+            // queue overflow would manifest as kernel-level block of the
+            // VFS thread inside `send_with_payload`; this is a known
+            // limit, no worse than the prior blocking-call form.
             OpenFile::Pts(pts) => {
                 let id = pts.pts_id;
                 let ep = match self.pts_registry.notify_endpoint(id) {
@@ -1643,8 +1658,7 @@ impl VfsServer {
                     [id as usize, data.len(), 0, 0, 0, 0],
                     2,
                 );
-                let mut fw_reply = Message::new(0, [0; 6], 0);
-                match ipc::call_with_payload(ep, &req, data, &mut fw_reply) {
+                match ipc::send_msg_with_payload(ep, &req, data) {
                     Ok(_) => {
                         reply_msg.words[0] = 0;
                         reply_msg.words[1] = data.len();
