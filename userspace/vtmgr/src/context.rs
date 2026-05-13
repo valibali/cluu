@@ -69,6 +69,8 @@ impl VtmgrContext {
         registry::register_default_outputs()?;
         // Expose a "control" output for kbd to subscribe to.
         registry::register_output("control", endpoint)?;
+        // Input event ingress for the router. kbd subscribes here.
+        registry::register_output("input", endpoint)?;
         let registry_endpoint = registry::control_endpoint();
 
         let ctx = Self {
