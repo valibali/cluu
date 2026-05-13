@@ -247,7 +247,7 @@ impl WriteSink {
     /// data, producing garbage characters before the actual payload.
     pub fn write_all(&self, bytes: &[u8]) -> Result<()> {
         match self {
-            WriteSink::Tty(tok) => send_with_payload(*tok, TTY_WRITE_LABEL, bytes),
+            WriteSink::Tty(_tok) => { crate::write_stdout(bytes); Ok(()) },
             WriteSink::Pipe(tok) => {
                 use alloc::vec::Vec;
                 let mut buf: Vec<u8> = Vec::with_capacity(4 + bytes.len());

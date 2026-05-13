@@ -214,11 +214,11 @@ fn run() -> Result<()> {
     }
 }
 
-fn print_prompt(endpoint: usize) -> Result<()> {
+fn print_prompt(_endpoint: usize) -> Result<()> {
     let user = read_env_var("USER").unwrap_or_else(|| String::from("cluu"));
     let cwd = libcluu::posix::current_dir_string();
     let prompt = format!("{}:{}> ", user, cwd);
-    send_with_payload(endpoint, TTY_WRITE_LABEL, prompt.as_bytes())?;
+    crate::write_stdout(prompt.as_bytes());
     Ok(())
 }
 
@@ -485,15 +485,15 @@ fn startup_command_from_process_info() -> Option<String> {
     }
 }
 
-fn print_banner(tty_endpoint: usize) -> Result<()> {
+fn print_banner(_tty_endpoint: usize) -> Result<()> {
     // ASCII-only banner, stored in a separate file for easy editing.
     const BANNER: &str = include_str!("banner.txt");
     // Send per line to avoid splitting UTF-8 sequences across IPC messages.
     for line in BANNER.lines() {
-        send_with_payload(tty_endpoint, TTY_WRITE_LABEL, line.as_bytes())?;
-        send_with_payload(tty_endpoint, TTY_WRITE_LABEL, b"\n")?;
+        crate::write_stdout(line.as_bytes());
+        crate::write_stdout(b"\n");
     }
-    send_with_payload(tty_endpoint, TTY_WRITE_LABEL, b"\n")?;
+    crate::write_stdout(b"\n");
     Ok(())
 }
 
