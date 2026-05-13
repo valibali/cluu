@@ -35,16 +35,18 @@ fn broadcast_frame_ready(comp: &mut state::Compositor) {
         let current_gen = win.mapping.header().generation;
         let gen_advanced = current_gen != win.last_gen;
         if !win.pending_frame_ready && !gen_advanced { continue; }
-        // Update snapshots before sending so a re-entrant damage during send
-        // is not silently dropped (pending_frame_ready stays armed).
-        win.pending_frame_ready = false;
-        win.last_gen = current_gen;
         let msg = libcluu::types::Message::new(
             COMP_FRAME_READY_LABEL,
             [win.id as usize, 0, 0, 0, 0, 0],
             1,
         );
-        let _ = libcluu::ipc::send(win.input_endpoint, &msg, libcluu::types::IpcFlags::empty());
+        // Only clear damage flag + advance gen snapshot on successful send,
+        // so a transient send error doesn't strand the window's pending
+        // damage forever.
+        if libcluu::ipc::send(win.input_endpoint, &msg, libcluu::types::IpcFlags::empty()).is_ok() {
+            win.pending_frame_ready = false;
+            win.last_gen = current_gen;
+        }
     }
 }
 
