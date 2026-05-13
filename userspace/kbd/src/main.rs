@@ -4,9 +4,10 @@
 //! Keyboard service for CLUU.
 //!
 //! This service receives raw IRQ scancodes, tracks modifier state, converts
-//! scancodes to ASCII, and forwards key events to the active VT's tty via
-//! the registry.  VT switching is intercepted here: Ctrl+Alt+F1..F4 triggers
-//! a switch without forwarding the key event.
+//! scancodes to ASCII, and forwards all key events to vtmgr:input for
+//! routing to the active VT's tty or compositor.  VT switching combos
+//! (Ctrl+Alt+F1..F5) are sent to vtmgr:control as switch requests rather
+//! than being forwarded as key events.
 
 extern crate alloc;
 
@@ -33,7 +34,7 @@ pub extern "C" fn main() -> i32 {
     }
 }
 
-/// Main service loop: subscribe to tty, decode scancodes, emit key events.
+/// Main service loop: subscribe to vtmgr, decode scancodes, emit key events.
 fn run() -> Result<()> {
     let mut ctx = KbdContext::new()?;
     let mut decoder = ScancodeDecoder::new();
@@ -64,8 +65,8 @@ fn run() -> Result<()> {
 
 /// Decode a keyboard IRQ message into an ASCII event and forward it.
 ///
-/// VT switch combos (Ctrl+Alt+F1..F4) are intercepted and consumed —
-/// the key event is *not* forwarded to the tty.
+/// VT switch combos (Ctrl+Alt+F1..F5) are intercepted and sent to
+/// vtmgr:control as switch requests — the key event is *not* forwarded.
 fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: &Message) {
     if msg.tag.label != KBD_EVENT_LABEL || msg.tag.words < 1 {
         return;
@@ -76,7 +77,7 @@ fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: 
     // Check for VT switch *before* updating decoder state so current
     // modifier state (ctrl+alt already held) is visible.
     if let Some(target_vt) = decoder.detect_vt_switch(scancode) {
-        ctx.switch_vt(target_vt as usize);
+        ctx.request_vt_switch(target_vt as usize);
         // Consume the scancode so it doesn't produce a key event.
         let _ = decoder.handle_scancode(scancode);
         return;
@@ -108,17 +109,7 @@ fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: 
                 event.modifiers.as_bits(),
                 event.extended,
             );
-            ctx.send_to_tty(&outbound);
-            // Duplicate to compositor:input (design A: route to both).
-            // Compositor only acts on events when active==true (T20), so
-            // events received while compositor's VT is inactive are no-ops.
-            if ctx.compositor_input_ep != 0 {
-                let _ = libcluu::ipc::send(
-                    ctx.compositor_input_ep,
-                    &outbound,
-                    libcluu::types::IpcFlags::empty(),
-                );
-            }
+            ctx.send_to_router(&outbound);
         }
     }
 }
