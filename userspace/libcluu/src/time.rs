@@ -10,6 +10,16 @@ pub const TIME_GETTIMEOFDAY: u32 = 0x510;
 /// Get monotonic time (seconds + nanoseconds since boot).
 pub const TIME_GETCLOCK: u32 = 0x511;
 
+// --- Timeserver push-mode (periodic-tick subscriptions). ---
+// Subscribe to periodic ticks. Words: [period_ms: u32, notify_ep: u64].
+// Reply words[0]: errno (0 ok, EINVAL if period_ms == 0 or > 60_000).
+pub const TIME_SUBSCRIBE_PERIODIC_LABEL: u32 = 120;
+// Unsubscribe. Timeserver matches on sender_tid. Words: [].
+pub const TIME_UNSUBSCRIBE_LABEL: u32 = 121;
+// Push from timeserver. Words: [tick_count_since_subscribe: u64, now_monotonic_ms: u64].
+// Fire-and-forget; subscriber MUST NOT reply.
+pub const TIME_TICK_LABEL: u32 = 122;
+
 /// Query the timeserver for `(seconds, nanoseconds)` of the given clock.
 ///
 /// `label` should be one of `TIME_GETTIMEOFDAY` or `TIME_GETCLOCK`.
