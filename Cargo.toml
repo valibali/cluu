@@ -67,6 +67,7 @@ members = [
     "userspace/virtio-blk",
     "userspace/probes/vqprobe",
     "userspace/probes/blkprobe",
+    "userspace/probes/timetick_probe",
     "userspace/tpmd",
     "userspace/libcluu_syscalls",
     "userspace/basename",

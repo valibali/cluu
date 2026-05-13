@@ -717,6 +717,10 @@ harness_derive_marker_defaults() {
                 # Switch to compositor VT so tick_frame runs; bench fires after 100 frames.
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-f5'
                 ;;
+            l2_timeserver_pushmode_tick)
+                TEST_COMMAND=""
+                SHELL_AUTOSTART_CMD_DEFAULT="timetick_probe"
+                ;;
             legacy_p1)
                 TEST_COMMAND="minimal"
                 SHELL_AUTOSTART_CMD_DEFAULT="minimal"

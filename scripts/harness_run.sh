@@ -1806,6 +1806,12 @@ case "$MARKER_MODE" in
             "compositor: VT deactivate"
         )
         ;;
+    l2_timeserver_pushmode_tick)
+        required_markers=(
+            "TSC calibrated"
+            "TIMETICK_PROBE: count=10"
+        )
+        ;;
     none)
         required_markers=()
         ;;
