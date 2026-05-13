@@ -314,10 +314,11 @@ fn spawn_shell_with_pts(pts_id: u32) -> Result<(), i32> {
     let login_path = b"/bin/shell\0";
     let arg0 = b"shell\0";
     let argv: [*const u8; 2] = [arg0.as_ptr(), core::ptr::null()];
-    // Empty-but-non-null envp so posix_spawn does not fall back to `environ`.
-    let envp: [*const u8; 1] = [core::ptr::null()];
     let mut child_pid: i32 = 0;
 
+    // Pass envp = NULL so libcluu's posix_spawn inherits the caller's
+    // (cluuterm's) `environ`. cluuterm's environ contains HOME, USER,
+    // PATH, etc., as populated by procmgr at session_kind=1 spawn time.
     let rc = unsafe {
         posix_spawn(
             &mut child_pid,
@@ -325,7 +326,7 @@ fn spawn_shell_with_pts(pts_id: u32) -> Result<(), i32> {
             &fa_ptr as *const _ as *const core::ffi::c_void,
             core::ptr::null(),
             argv.as_ptr(),
-            envp.as_ptr(),
+            core::ptr::null(),
         )
     };
 
