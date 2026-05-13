@@ -568,6 +568,17 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                             match try_login(procmgr_spawn, &username, &password) {
                                 Ok(()) => {
                                     let _ = debug_print("login: user authenticated");
+                                    // Tell the compositor to destroy our window
+                                    // before we exit so the user immediately
+                                    // sees just the cluuterm window. Without
+                                    // this the modal lingers until procmgr's
+                                    // PROC_EXIT path reaches the compositor.
+                                    let destroy = libcluu::types::Message::new(
+                                        libcluu::ipc::COMP_WIN_DESTROY_LABEL,
+                                        [win_id as usize, 0, 0, 0, 0, 0],
+                                        1,
+                                    );
+                                    let _ = libcluu::ipc::send(comp_ep, &destroy, IpcFlags::empty());
                                     return 0;
                                 }
                                 Err(_errno) => {
