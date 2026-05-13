@@ -13,9 +13,8 @@ use cluu_lang::ast::{CmdElem, Pipeline};
 
 use crate::commands::{build_redir_actions, render_word_public, spawn_process_with_argv_and_redirs, BuiltinRegistry, CommandContext, WriteSink};
 use libcluu::ipc::{
-    build_container_run_payload_full, call_with_payload, send_with_payload,
+    build_container_run_payload_full, call_with_payload,
     FdAction, PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL,
-    TTY_WRITE_LABEL,
 };
 use libcluu::posix::jobs::{pg_attach, pg_create, tty_set_fg};
 use libcluu::syscall::endpoint_create;
@@ -75,13 +74,13 @@ impl PipelineExecutor {
             match elem {
                 CmdElem::Word(w) => argv.push(render_word_public(context, w)),
                 CmdElem::Subshell(_) => {
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shell: subshells not supported\n");
+                    crate::write_stdout(b"shell: subshells not supported\n");
                     return Ok(2);
                 }
             }
         }
         if argv.is_empty() {
-            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shell: empty command\n");
+            crate::write_stdout(b"shell: empty command\n");
             return Ok(2);
         }
         let vfs_client = libcluu::registry::subscribe_output("vfs", "main")
@@ -116,7 +115,7 @@ impl PipelineExecutor {
                 let sink = WriteSink::Tty(stdout);
                 if let Err(e) = builtin.run_with_sink(&sink, context, &arg_refs) {
                     let line = alloc::format!("shell: builtin '{}' failed: {:?}\n", image_name, e);
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    crate::write_stdout(line.as_bytes());
                     return Ok(1);
                 }
                 return Ok(0);
@@ -132,7 +131,7 @@ impl PipelineExecutor {
                 let sink = WriteSink::Capture(&mut buf as *mut _);
                 if let Err(e) = builtin.run_with_sink(&sink, context, &arg_refs) {
                     let line = alloc::format!("shell: builtin '{}' failed: {:?}\n", image_name, e);
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    crate::write_stdout(line.as_bytes());
                     return Ok(1);
                 }
 
@@ -141,7 +140,7 @@ impl PipelineExecutor {
                     Ok(ep) => ep,
                     Err(e) => {
                         let line = alloc::format!("shell: vfs unavailable: {:?}\n", e);
-                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                        crate::write_stdout(line.as_bytes());
                         return Ok(1);
                     }
                 };
@@ -149,7 +148,7 @@ impl PipelineExecutor {
                     Ok(c) => c,
                     Err(e) => {
                         let line = alloc::format!("shell: vfs client: {:?}\n", e);
-                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                        crate::write_stdout(line.as_bytes());
                         return Ok(1);
                     }
                 };
@@ -160,7 +159,7 @@ impl PipelineExecutor {
                     Ok(f) => f,
                     Err(e) => {
                         let line = alloc::format!("shell: '{}': {:?}\n", target_path, e);
-                        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                        crate::write_stdout(line.as_bytes());
                         return Ok(1);
                     }
                 };
@@ -169,7 +168,7 @@ impl PipelineExecutor {
                 let off: usize = if append { file.size } else { 0 };
                 if let Err(e) = vfs.write(file, off, &buf) {
                     let line = alloc::format!("shell: write '{}': {:?}\n", target_path, e);
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    crate::write_stdout(line.as_bytes());
                 }
                 let _ = vfs.close(file);
                 return Ok(0);
@@ -186,13 +185,13 @@ impl PipelineExecutor {
             Ok(s) => s,
             Err(e) => {
                 let line = alloc::format!("shell: spawn error {:?}\n", e);
-                let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                crate::write_stdout(line.as_bytes());
                 return Ok(127);
             }
         };
         if spawn.status_word != 0 {
             let line = alloc::format!("shell: '{}' failed to start (status={})\n", image_name, spawn.status_word);
-            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+            crate::write_stdout(line.as_bytes());
             return Ok(127);
         }
 
@@ -223,7 +222,7 @@ impl PipelineExecutor {
             );
             let line = format!("[{}] {}", job_id, spawn.pid);
             let _ = libcluu::debug_print(&line);
-            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, (line + "\n").as_bytes());
+            crate::write_stdout((line + "\n").as_bytes());
             return Ok(0);
         }
 
@@ -275,21 +274,13 @@ impl PipelineExecutor {
                         argv.push(render_word_public(context, w));
                     }
                     CmdElem::Subshell(_) => {
-                        let _ = send_with_payload(
-                            stdout,
-                            TTY_WRITE_LABEL,
-                            b"shell: subshells inside pipelines not supported\n",
-                        );
+                        crate::write_stdout(b"shell: subshells inside pipelines not supported\n");
                         return Ok(2);
                     }
                 }
             }
             if argv.is_empty() {
-                let _ = send_with_payload(
-                    stdout,
-                    TTY_WRITE_LABEL,
-                    b"shell: empty command in pipeline\n",
-                );
+                crate::write_stdout(b"shell: empty command in pipeline\n");
                 return Ok(2);
             }
             argvs.push(argv);
@@ -399,7 +390,7 @@ impl PipelineExecutor {
                         "shell: pipeline stage {} ('{}') cannot redirect stdin and receive pipe input\n",
                         i, image_name
                     );
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    crate::write_stdout(line.as_bytes());
                     for p in &pipes {
                         let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
                     }
@@ -412,7 +403,7 @@ impl PipelineExecutor {
                         "shell: pipeline stage {} ('{}') cannot redirect stdout and feed pipe output\n",
                         i, image_name
                     );
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    crate::write_stdout(line.as_bytes());
                     for p in &pipes {
                         let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
                     }
@@ -473,7 +464,7 @@ impl PipelineExecutor {
                     "shell: pipeline stage {} ('{}') failed to start (status={})\n",
                     i, image_name, status
                 );
-                let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                crate::write_stdout(line.as_bytes());
                 for p in &pipes {
                     let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
                 }
@@ -517,7 +508,7 @@ impl PipelineExecutor {
                     "shell: builtin '{}' failed: {:?}\n",
                     image_name, e
                 );
-                let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                crate::write_stdout(line.as_bytes());
                 last_builtin_status = 1;
             }
             // Send EOF on the downstream pipe so the next stage sees EOF.
@@ -598,7 +589,7 @@ impl PipelineExecutor {
             let first_pid = spawned_pids.first().copied().unwrap_or(0);
             let line = format!("[{}] {}", job_id, first_pid);
             let _ = libcluu::debug_print(&line);
-            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, (line + "\n").as_bytes());
+            crate::write_stdout((line + "\n").as_bytes());
             // Restore TTY foreground to shell.
             if context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
                 let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);

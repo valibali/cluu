@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
+
 use libcluu::Result;
 
 use super::registry::CommandContext;
@@ -28,7 +28,7 @@ impl BuiltinCommand for ExprBuiltin {
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
         let Some((lhs, op, rhs)) = parse_expr_tokens(args) else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"expr: invalid expression\n")?;
+            crate::write_stdout(b"expr: invalid expression\n");
             return Ok(());
         };
         match op.as_str() {
@@ -37,7 +37,7 @@ impl BuiltinCommand for ExprBuiltin {
             "*" => arithmetic_op(stdout, context, &[lhs, rhs], |a, b| a * b),
             "/" => div_op(stdout, context, &lhs, &rhs),
             _ => {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"expr: unknown op\n")?;
+                crate::write_stdout(b"expr: unknown op\n");
                 Ok(())
             }
         }
@@ -57,7 +57,7 @@ impl BuiltinCommand for LetBuiltin {
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
         if args.is_empty() {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"let: missing name\n")?;
+            crate::write_stdout(b"let: missing name\n");
             return Ok(());
         }
 
@@ -67,22 +67,22 @@ impl BuiltinCommand for LetBuiltin {
         if args.len() == 1 {
             if let Some((lhs, rhs)) = args[0].split_once('=') {
                 if lhs.is_empty() || rhs.is_empty() {
-                    send_with_payload(stdout, TTY_WRITE_LABEL, b"let: expected NAME=EXPR\n")?;
+                    crate::write_stdout(b"let: expected NAME=EXPR\n");
                     return Ok(());
                 }
                 name = lhs;
                 expr_tokens.push(rhs.to_string());
             } else {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"let: missing =\n")?;
+                crate::write_stdout(b"let: missing =\n");
                 return Ok(());
             }
         } else {
             let Some(eq) = args.get(1) else {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"let: missing =\n")?;
+                crate::write_stdout(b"let: missing =\n");
                 return Ok(());
             };
             if eq.as_str() != "=" {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"let: expected =\n")?;
+                crate::write_stdout(b"let: expected =\n");
                 return Ok(());
             }
             expr_tokens.extend_from_slice(&args[2..]);
@@ -90,7 +90,7 @@ impl BuiltinCommand for LetBuiltin {
 
         let expr_args = expr_tokens.as_slice();
         let Some((lhs, op, rhs)) = parse_expr_tokens(expr_args) else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"let: invalid expression\n")?;
+            crate::write_stdout(b"let: invalid expression\n");
             return Ok(());
         };
         let value = match op.as_str() {
@@ -99,15 +99,15 @@ impl BuiltinCommand for LetBuiltin {
             "*" => calc_value(context, &lhs, &rhs, |a, b| a * b),
             "/" => {
                 let Some(a) = parse_value(context, &lhs) else {
-                    send_with_payload(stdout, TTY_WRITE_LABEL, b"let: invalid lhs\n")?;
+                    crate::write_stdout(b"let: invalid lhs\n");
                     return Ok(());
                 };
                 let Some(b) = parse_value(context, &rhs) else {
-                    send_with_payload(stdout, TTY_WRITE_LABEL, b"let: invalid rhs\n")?;
+                    crate::write_stdout(b"let: invalid rhs\n");
                     return Ok(());
                 };
                 if b == 0 {
-                    send_with_payload(stdout, TTY_WRITE_LABEL, b"let: divide by zero\n")?;
+                    crate::write_stdout(b"let: divide by zero\n");
                     return Ok(());
                 }
                 Some((a / b).to_string())
@@ -119,7 +119,7 @@ impl BuiltinCommand for LetBuiltin {
                 context.set(name, result);
             }
             None => {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"let: invalid expression\n")?;
+                crate::write_stdout(b"let: invalid expression\n");
             }
         }
         Ok(())
@@ -140,35 +140,35 @@ where
     F: FnOnce(i64, i64) -> i64,
 {
     let Some(a) = parse_value(context, args.first().unwrap_or(&String::new())) else {
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"arith: invalid lhs\n")?;
+        crate::write_stdout(b"arith: invalid lhs\n");
         return Ok(());
     };
     let Some(b) = parse_value(context, args.get(1).unwrap_or(&String::new())) else {
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"arith: invalid rhs\n")?;
+        crate::write_stdout(b"arith: invalid rhs\n");
         return Ok(());
     };
     let result = op(a, b).to_string();
-    send_with_payload(stdout, TTY_WRITE_LABEL, result.as_bytes())?;
-    send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
+    crate::write_stdout(result.as_bytes());
+    crate::write_stdout(b"\n");
     Ok(())
 }
 
 fn div_op(stdout: usize, context: &mut CommandContext, lhs: &str, rhs: &str) -> Result<()> {
     let Some(a) = parse_value(context, lhs) else {
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"div: invalid lhs\n")?;
+        crate::write_stdout(b"div: invalid lhs\n");
         return Ok(());
     };
     let Some(b) = parse_value(context, rhs) else {
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"div: invalid rhs\n")?;
+        crate::write_stdout(b"div: invalid rhs\n");
         return Ok(());
     };
     if b == 0 {
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"div: divide by zero\n")?;
+        crate::write_stdout(b"div: divide by zero\n");
         return Ok(());
     }
     let result = (a / b).to_string();
-    send_with_payload(stdout, TTY_WRITE_LABEL, result.as_bytes())?;
-    send_with_payload(stdout, TTY_WRITE_LABEL, b"\n")?;
+    crate::write_stdout(result.as_bytes());
+    crate::write_stdout(b"\n");
     Ok(())
 }
 

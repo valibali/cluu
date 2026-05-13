@@ -10,10 +10,10 @@ use alloc::vec::Vec;
 use libcluu::boot::process_info;
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
-    build_container_run_payload_full, call, call_with_payload, send_with_payload,
+    build_container_run_payload_full, call, call_with_payload,
     RedirAction, PROCMGR_CONTAINER_RUN_LABEL,
     TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
-    TTY_REGISTER_LABEL, TTY_WRITE_LABEL,
+    TTY_REGISTER_LABEL,
 };
 use libcluu::posix::tty::{
     get_lflag as tty_get_lflag, set_lflag as tty_set_lflag,
@@ -180,7 +180,7 @@ pub(crate) fn spawn_and_wait(
         }
         Err(err) => {
             let line = format!("spawn: {:?}\n", err);
-            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+            crate::write_stdout(line.as_bytes());
             Ok(1)
         }
     };
@@ -267,11 +267,7 @@ pub(crate) fn wait_for_exit_or_sigint(
     mode: ForegroundMode,
 ) -> Result<()> {
     if child_stdin_endpoint == 0 {
-        let _ = send_with_payload(
-            stdout,
-            TTY_WRITE_LABEL,
-            b"spawn: invalid child stdin route\n",
-        );
+        crate::write_stdout(b"spawn: invalid child stdin route\n");
         return Err(Error::InvalidState);
     }
 
@@ -339,10 +335,10 @@ pub(crate) fn wait_for_exit_or_sigint(
                         _ => "Signal",
                     };
                     let line = format!("{} (signal {})\n", sig_name, sig);
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    crate::write_stdout(line.as_bytes());
                 } else if exit_code != 0 {
                     let line = format!("Exited with status {}\n", exit_code);
-                    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                    crate::write_stdout(line.as_bytes());
                 }
                 break Ok(());
             }
@@ -357,7 +353,7 @@ pub(crate) fn wait_for_exit_or_sigint(
             let _ = signal_process(procmgr_endpoint, child_pid, SIGINT);
             let line = format!("spawn: SIGINT pid={}\n", child_pid);
             let _ = debug_print(line.trim_end());
-            let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+            crate::write_stdout(line.as_bytes());
         }
     };
 

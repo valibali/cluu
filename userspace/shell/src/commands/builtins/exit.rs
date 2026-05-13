@@ -3,7 +3,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL, PROCMGR_SHUTDOWN_LABEL};
+use libcluu::ipc::PROCMGR_SHUTDOWN_LABEL;
 use libcluu::types::Message;
 use libcluu::{IpcFlags, Result};
 
@@ -50,7 +50,7 @@ impl BuiltinCommand for PoweroffBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
-        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"Powering off...\n");
+        crate::write_stdout(b"Powering off...\n");
         let ep = context.procmgr_spawn_endpoint()?;
         let msg = Message::new(PROCMGR_SHUTDOWN_LABEL, [0, 0, 0, 0, 0, 0], 1);
         let _ = libcluu::ipc::send(ep, &msg, IpcFlags::empty());
@@ -66,7 +66,7 @@ impl BuiltinCommand for RebootBuiltin {
     }
 
     fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
-        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"Rebooting...\n");
+        crate::write_stdout(b"Rebooting...\n");
         let ep = context.procmgr_spawn_endpoint()?;
         let msg = Message::new(PROCMGR_SHUTDOWN_LABEL, [1, 0, 0, 0, 0, 0], 1);
         let _ = libcluu::ipc::send(ep, &msg, IpcFlags::empty());

@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 
-use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
+
 use libcluu::Result;
 
 use super::registry::CommandContext;
@@ -24,7 +24,7 @@ impl BuiltinCommand for CdBuiltin {
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
         if args.len() > 1 {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"cd: too many arguments\n")?;
+            crate::write_stdout(b"cd: too many arguments\n");
             context.set_last_status(1);
             return Ok(());
         }
@@ -41,7 +41,7 @@ impl BuiltinCommand for CdBuiltin {
             }
             Err(errno) => {
                 let line = format!("cd: {}: errno {}\n", target, errno);
-                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                crate::write_stdout(line.as_bytes());
                 context.set_last_status(1);
             }
         }

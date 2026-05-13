@@ -5,12 +5,15 @@ extern crate alloc;
 
 #[cfg(feature = "lang-parser")]
 mod commands;
+mod io;
 #[cfg(feature = "lang-parser")]
 mod path_lookup;
 #[cfg(feature = "lang-parser")]
 mod pipeline;
 #[cfg(feature = "lang-parser")]
 mod shellrc;
+
+use io::write_stdout;
 
 use alloc::format;
 #[cfg(feature = "lang-parser")]
@@ -144,7 +147,7 @@ fn run() -> Result<()> {
     }
 
     debug_print("shell: ready")?;
-    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"\x1b[2J\x1b[H");
+    write_stdout(b"\x1b[2J\x1b[H");
     let _ = print_banner(stdout);
     let _ = print_prompt(stdout);
     #[cfg(feature = "lang-parser")]
@@ -363,11 +366,11 @@ fn emit_tab_list(stdout: usize, matches: &[&libcluu::fs::client::VfsDirEntry], b
         }
     }
     out.push_str("\r\n");
-    let _ = send_with_payload(stdout, TTY_WRITE_LABEL, out.as_bytes());
+    write_stdout(out.as_bytes());
 
     let _ = print_prompt(stdout);
     if !buf.is_empty() {
-        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, buf.as_bytes());
+        write_stdout(buf.as_bytes());
     }
 }
 

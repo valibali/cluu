@@ -5,7 +5,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 
 use libcluu::fs::client::VfsClient;
-use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
+
 use libcluu::registry;
 use libcluu::Result;
 
@@ -39,7 +39,7 @@ impl BuiltinCommand for SetBuiltin {
             // No args: list all variables (POSIX baseline).
             for (k, v) in context.entries() {
                 let line = format!("{}={}\n", k, v);
-                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                crate::write_stdout(line.as_bytes());
             }
             return Ok(());
         };
@@ -47,7 +47,7 @@ impl BuiltinCommand for SetBuiltin {
         if name.starts_with('-') || name.starts_with('+') {
             let opt = name.chars().nth(1).unwrap_or('?');
             let line = format!("set: option -{} not supported\n", opt);
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            crate::write_stdout(line.as_bytes());
             return Ok(());
         }
         let value = join_words(&args[1..]);
@@ -69,7 +69,7 @@ impl BuiltinCommand for UnsetBuiltin {
 
     fn run(&self, stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
         let Some(name) = args.first() else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"unset: missing name\n")?;
+            crate::write_stdout(b"unset: missing name\n");
             return Ok(());
         };
         context.unset(name);
@@ -92,7 +92,7 @@ impl BuiltinCommand for ExportBuiltin {
         if args.is_empty() {
             for (k, v) in context.exported_pairs() {
                 let line = format!("export {}={}\n", k, v);
-                let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+                crate::write_stdout(line.as_bytes());
             }
             return Ok(());
         }
@@ -101,11 +101,7 @@ impl BuiltinCommand for ExportBuiltin {
                 let name = &arg[..eq];
                 let value = &arg[eq + 1..];
                 if name.is_empty() {
-                    let _ = send_with_payload(
-                        stdout,
-                        TTY_WRITE_LABEL,
-                        b"export: missing name before '='\n",
-                    );
+                    crate::write_stdout(b"export: missing name before '='\n");
                     continue;
                 }
                 context.set(name, value.to_string());
@@ -203,7 +199,7 @@ impl BuiltinCommand for TestBuiltin {
             match args.last() {
                 Some(last) if last == "]" => &args[..args.len() - 1],
                 _ => {
-                    send_with_payload(stdout, TTY_WRITE_LABEL, b"[: missing closing ']'\n")?;
+                    crate::write_stdout(b"[: missing closing ']'\n");
                     context.set_last_status(2);
                     return Ok(());
                 }
@@ -226,7 +222,7 @@ impl BuiltinCommand for TestBuiltin {
                         self.name(),
                         parser.peek().unwrap_or("")
                     );
-                    send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                    crate::write_stdout(line.as_bytes());
                     context.set_last_status(2);
                     return Ok(());
                 }
@@ -234,7 +230,7 @@ impl BuiltinCommand for TestBuiltin {
             }
             Err(msg) => {
                 let line = format!("{}: {}\n", self.name(), msg);
-                send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+                crate::write_stdout(line.as_bytes());
                 context.set_last_status(2);
             }
         }

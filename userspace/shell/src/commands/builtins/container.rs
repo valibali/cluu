@@ -9,8 +9,8 @@ use core::mem::size_of;
 use libcluu::boot::{process_info, TOKEN_STDIN};
 use libcluu::ipc::{
     build_container_run_payload_with_argv, call, call_with_payload, call_with_reply_buf, recv,
-    send_with_payload, PROCMGR_CONTAINER_LIST_LABEL, PROCMGR_CONTAINER_RUN_LABEL,
-    TTY_FG_FLAG_FORWARD_CTRL_C, TTY_WRITE_LABEL,
+    PROCMGR_CONTAINER_LIST_LABEL, PROCMGR_CONTAINER_RUN_LABEL,
+    TTY_FG_FLAG_FORWARD_CTRL_C,
 };
 use libcluu::syscall;
 use libcluu::types::Message;
@@ -45,7 +45,7 @@ impl BuiltinCommand for HeapBuiltin {
             "heap: used={} total={} peak={} free={}\n",
             stats.used, stats.total, stats.peak, stats.free
         );
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        crate::write_stdout(line.as_bytes());
         Ok(())
     }
 }
@@ -68,11 +68,7 @@ impl BuiltinCommand for ContainerBuiltin {
             "list" => container_list(stdout, context),
             "stop" => container_stop(stdout, context, &args[1..]),
             _ => {
-                send_with_payload(
-                    stdout,
-                    TTY_WRITE_LABEL,
-                    b"usage: container run|list|stop\n",
-                )?;
+                crate::write_stdout(b"usage: container run|list|stop\n");
                 Ok(())
             }
         }
@@ -85,7 +81,7 @@ fn build_container_run_payload(name: &str) -> Vec<u8> {
 
 fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
     let Some(name) = args.first() else {
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"container run: missing image name\n")?;
+        crate::write_stdout(b"container run: missing image name\n");
         return Ok(());
     };
 
@@ -103,14 +99,14 @@ fn container_run(stdout: usize, context: &mut CommandContext, args: &[String]) -
     let status = reply.words[0];
     if status != 0 {
         let line = format!("container run: error {}\n", status);
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        crate::write_stdout(line.as_bytes());
     } else {
         let pid = reply.words[1];
         let _cookie = reply.words[2];
         let cid = reply.words[3];
         let child_stdin = reply.words[4];
         let line = format!("container '{}' started pid={} cid={}\n", name, pid, cid);
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        crate::write_stdout(line.as_bytes());
 
         if child_stdin != 0 {
             set_tty_foreground(stdout, child_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C)?;
@@ -138,24 +134,24 @@ fn container_list(stdout: usize, context: &mut CommandContext) -> Result<()> {
 
     if reply_msg.words[1] != 0 {
         let line = format!("container list: error {}\n", reply_msg.words[1]);
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        crate::write_stdout(line.as_bytes());
         return Ok(());
     }
 
     if payload_len == 0 {
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"no containers running\n")?;
+        crate::write_stdout(b"no containers running\n");
         return Ok(());
     }
 
     let hdr_len = size_of::<Message>();
     let payload = &reply_buf[hdr_len..hdr_len + payload_len];
-    send_with_payload(stdout, TTY_WRITE_LABEL, payload)?;
+    crate::write_stdout(payload);
     Ok(())
 }
 
 fn container_stop(stdout: usize, context: &mut CommandContext, args: &[String]) -> Result<()> {
     let Some(name) = args.first() else {
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"container stop: missing name\n")?;
+        crate::write_stdout(b"container stop: missing name\n");
         return Ok(());
     };
 
@@ -166,7 +162,7 @@ fn container_stop(stdout: usize, context: &mut CommandContext, args: &[String]) 
         call_with_reply_buf(procmgr_endpoint, &msg, &[], &mut reply_buf)?;
 
     if reply_msg.words[1] != 0 || payload_len == 0 {
-        send_with_payload(stdout, TTY_WRITE_LABEL, b"container stop: no containers found\n")?;
+        crate::write_stdout(b"container stop: no containers found\n");
         return Ok(());
     }
 
@@ -198,7 +194,7 @@ fn container_stop(stdout: usize, context: &mut CommandContext, args: &[String]) 
 
     let Some(pid) = target_pid else {
         let line = format!("container stop: '{}' not found\n", name);
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        crate::write_stdout(line.as_bytes());
         return Ok(());
     };
 
@@ -209,10 +205,10 @@ fn container_stop(stdout: usize, context: &mut CommandContext, args: &[String]) 
 
     if kill_msg.words[0] != 0 {
         let line = format!("container stop: kill failed ({})\n", kill_msg.words[0]);
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        crate::write_stdout(line.as_bytes());
     } else {
         let line = format!("container '{}' (pid={}) stopped\n", name, pid);
-        send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+        crate::write_stdout(line.as_bytes());
     }
     Ok(())
 }

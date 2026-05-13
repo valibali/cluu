@@ -373,18 +373,18 @@ impl BuiltinRegistry {
         args: &[String],
     ) -> Result<ExecResult> {
         let Some(count_token) = args.first() else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"repeat: missing count\n")?;
+            crate::write_stdout(b"repeat: missing count\n");
             return Ok(ExecResult::Handled);
         };
         let count = match parse_value(context, count_token) {
             Some(value) if value >= 0 => value as usize,
             _ => {
-                send_with_payload(stdout, TTY_WRITE_LABEL, b"repeat: invalid count\n")?;
+                crate::write_stdout(b"repeat: invalid count\n");
                 return Ok(ExecResult::Handled);
             }
         };
         let Some(command_name) = args.get(1) else {
-            send_with_payload(stdout, TTY_WRITE_LABEL, b"repeat: missing command\n")?;
+            crate::write_stdout(b"repeat: missing command\n");
             return Ok(ExecResult::Handled);
         };
         let rest = &args[2..];
@@ -392,7 +392,7 @@ impl BuiltinRegistry {
             match self.run_builtin(stdout, context, command_name, rest)? {
                 ExecResult::Handled => {}
                 ExecResult::NotHandled => {
-                    send_with_payload(stdout, TTY_WRITE_LABEL, b"repeat: unknown command\n")?;
+                    crate::write_stdout(b"repeat: unknown command\n");
                     break;
                 }
             }

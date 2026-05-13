@@ -10,7 +10,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use libcluu::ipc::{send_with_payload, PROCMGR_JOB_NOTIFY_LABEL, TTY_WRITE_LABEL};
+use libcluu::ipc::PROCMGR_JOB_NOTIFY_LABEL;
 use libcluu::posix::jobs::{pg_resume, pg_signal, tty_set_fg};
 use libcluu::syscall;
 use libcluu::Result;
@@ -528,7 +528,7 @@ pub fn reap_done_jobs(stdout: usize, ctx: &mut CommandContext) {
     }
     for (id, cmd) in done_ids {
         let line = format!("[{}]+  Done\t{}\n", id, cmd);
-        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes());
+        crate::write_stdout(line.as_bytes());
     }
     ctx.jobs.remove_done();
 }
@@ -548,7 +548,7 @@ impl BuiltinCommand for ShellCrashBuiltin {
         _context: &mut CommandContext,
         _args: &[String],
     ) -> Result<()> {
-        let _ = send_with_payload(stdout, TTY_WRITE_LABEL, b"shellcrash: triggering fault\n");
+        crate::write_stdout(b"shellcrash: triggering fault\n");
         let _ = libcluu::debug_print("shellcrash: triggering null-write fault");
         unsafe {
             core::ptr::write_volatile(0 as *mut u8, 0);

@@ -9,7 +9,7 @@ use libcluu::boot::{process_info, TOKEN_STDIN};
 use libcluu::ipc::{
     recv, send_with_payload, call_with_payload,
     PROCMGR_ESCALATE_LABEL, PROCMGR_SU_LABEL,
-    TTY_FG_FLAG_FORWARD_CTRL_C, TTY_READ_LABEL, TTY_WRITE_LABEL,
+    TTY_FG_FLAG_FORWARD_CTRL_C, TTY_READ_LABEL,
 };
 use libcluu::syscall;
 use libcluu::types::Message;
@@ -63,7 +63,7 @@ impl BuiltinCommand for SudoBuiltin {
         let status = reply.words[0];
         if status != 0 {
             let line = format!("sudo: permission denied (error {})\n", status);
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            crate::write_stdout(line.as_bytes());
             return Ok(());
         }
 
@@ -104,11 +104,7 @@ impl BuiltinCommand for SuBuiltin {
         let username = match args.first() {
             Some(u) => u.as_str(),
             None => {
-                send_with_payload(
-                    stdout,
-                    TTY_WRITE_LABEL,
-                    b"usage: su <username> [-c <command>]\n",
-                )?;
+                crate::write_stdout(b"usage: su <username> [-c <command>]\n");
                 return Ok(());
             }
         };
@@ -116,11 +112,7 @@ impl BuiltinCommand for SuBuiltin {
         let inline_command: Option<String> = match args.get(1).map(|s| s.as_str()) {
             Some("-c") => {
                 if args.len() < 3 {
-                    send_with_payload(
-                        stdout,
-                        TTY_WRITE_LABEL,
-                        b"usage: su <username> -c <command>\n",
-                    )?;
+                    crate::write_stdout(b"usage: su <username> -c <command>\n");
                     return Ok(());
                 }
                 Some(args[2..].join(" "))
@@ -149,7 +141,7 @@ impl BuiltinCommand for SuBuiltin {
         let status = reply.words[0];
         if status != 0 {
             let line = format!("su: authentication failure (error {})\n", status);
-            send_with_payload(stdout, TTY_WRITE_LABEL, line.as_bytes())?;
+            crate::write_stdout(line.as_bytes());
             return Ok(());
         }
 
