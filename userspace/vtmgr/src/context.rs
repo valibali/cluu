@@ -58,6 +58,8 @@ pub struct VtmgrContext {
     requested_compositor_input: bool,
     /// Bitmask: bit N = tty:N:main subscription was requested.
     requested_tty_main: u8,
+    /// Input router: tracks active target and forwards events.
+    router: crate::input_routing::InputRouter,
 }
 
 impl VtmgrContext {
@@ -90,6 +92,7 @@ impl VtmgrContext {
             tty_main_eps: [0; VT_COUNT],
             requested_compositor_input: false,
             requested_tty_main: 0,
+            router: crate::input_routing::InputRouter::new(),
         };
         debug_print(&format!(
             "vtmgr: ready active_vt={} compositor_vt={}",
@@ -169,6 +172,13 @@ impl VtmgrContext {
                             let _ = send(self.compositor_control, &msg, IpcFlags::empty());
                             let _ = debug_print("vtmgr: boot COMP_VT_ACTIVATE sent");
                         }
+                        use libcluu::input_routing::RoutingTargetKind;
+                        let target_kind = if self.active_vt == self.compositor_vt {
+                            RoutingTargetKind::Compositor
+                        } else {
+                            RoutingTargetKind::Tty(self.active_vt as u8)
+                        };
+                        self.router.set_active(target_kind);
                     } else if name == "control" {
                         // console:0 control endpoint
                         self.console_endpoint = token;
@@ -181,6 +191,13 @@ impl VtmgrContext {
                             let _ = send(self.console_endpoint, &de, IpcFlags::empty());
                             let _ = debug_print("vtmgr: boot CONSOLE_DEACTIVATE(0) sent");
                         }
+                        use libcluu::input_routing::RoutingTargetKind;
+                        let target_kind = if self.active_vt == self.compositor_vt {
+                            RoutingTargetKind::Compositor
+                        } else {
+                            RoutingTargetKind::Tty(self.active_vt as u8)
+                        };
+                        self.router.set_active(target_kind);
                     } else if name == "spawn" {
                         self.procmgr_spawn_endpoint = token;
                         let _ = debug_print("vtmgr: procmgr spawn subscribed");
@@ -293,6 +310,13 @@ impl VtmgrContext {
         }
 
         self.active_vt = new_vt;
+        use libcluu::input_routing::RoutingTargetKind;
+        let target_kind = if new_vt == self.compositor_vt {
+            RoutingTargetKind::Compositor
+        } else {
+            RoutingTargetKind::Tty(new_vt as u8)
+        };
+        self.router.set_active(target_kind);
         let _ = debug_print(&format!("vtmgr: vt switch {} -> {}", old, new_vt));
     }
 
@@ -334,5 +358,17 @@ impl VtmgrContext {
         let _ = send_msg_with_payload(self.procmgr_spawn_endpoint, &msg, &payload);
         self.vt_spawned |= 1u8 << vt_index;
         let _ = debug_print(&format!("vtmgr: requested vt:{} container", vt_index));
+    }
+
+    pub fn lookup_target_endpoint(&self, kind: libcluu::input_routing::RoutingTargetKind) -> usize {
+        use libcluu::input_routing::RoutingTargetKind;
+        match kind {
+            RoutingTargetKind::None => 0,
+            RoutingTargetKind::Compositor => self.compositor_input_ep,
+            RoutingTargetKind::Tty(n) => {
+                let idx = n as usize;
+                if idx < VT_COUNT { self.tty_main_eps[idx] } else { 0 }
+            }
+        }
     }
 }

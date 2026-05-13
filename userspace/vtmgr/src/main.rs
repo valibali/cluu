@@ -12,6 +12,7 @@
 extern crate alloc;
 
 mod context;
+mod input_routing;
 
 use context::VtmgrContext;
 use libcluu::ipc::{parse_message, VTMGR_PIN_VT_LABEL, VTMGR_SWITCH_VT_LABEL};
