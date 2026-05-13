@@ -2108,10 +2108,33 @@ impl ProcessManager {
         let mut reply_msg = Message::new(libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL, [0; 6], 5);
         let vt_index = msg.words[1];
 
-        // Parse username\0password\0 from payload.
+        // Read session_kind from the first byte: 0 = tty, 1 = compositor.
+        // Both tty/context.rs and login/src/main.rs now send this prefix byte.
+        let (session_kind, cred_payload) = match payload.split_first() {
+            Some((&k, rest)) if k <= 1 => (k, rest),
+            _ => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
+        };
+
+        // session_kind=1 (compositor): auth is handled by cluuterm (T6); just
+        // acknowledge with errno=0 so /bin/login can proceed.
+        if session_kind == 1 {
+            let _ = debug_print(
+                "procmgr: SESSION_LOGIN session_kind=1 (compositor) — STUB OK"
+            );
+            reply_msg.words[0] = 0;
+            if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+            return Ok(());
+        }
+
+        // session_kind=0 (tty): existing credential-verification + session-spawn path.
+        // Parse username\0password\0 from cred_payload.
         // Own both as String immediately so that spawn_service_with_env (which
         // calls VFS IPC) cannot trash the kernel recv buffer they point into.
-        let payload_str = core::str::from_utf8(payload).unwrap_or("");
+        let payload_str = core::str::from_utf8(cred_payload).unwrap_or("");
         let mut parts = payload_str.splitn(3, '\0');
         let username: alloc::string::String = match parts.next() {
             Some(u) if !u.is_empty() => alloc::string::String::from(u),

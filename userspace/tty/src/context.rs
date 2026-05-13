@@ -408,6 +408,7 @@ impl TtyContext {
             return;
         }
         let mut payload = Vec::new();
+        payload.push(0); // session_kind = 0 (tty)
         payload.extend_from_slice(&self.login_username);
         payload.push(0);
         payload.extend_from_slice(&self.login_password);

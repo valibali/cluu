@@ -136,8 +136,11 @@ pub const ARGV_MAGIC: u32 = 0x5647_5241;
 /// Reply: payload = "name pid container_id\n" lines.
 pub const PROCMGR_CONTAINER_LIST_LABEL: u32 = 25;
 
-/// Session login: tty → procmgr (call). words[0]=vt_instance. Payload: username\0password\0.
-/// Reply: words[0]=errno (0=ok), words[1]=container_id.
+/// Session login: caller → procmgr (call). words[0]=payload_len, words[1]=vt_instance.
+/// Payload wire format: `session_kind(u8) + username\0 + password\0`
+///   session_kind 0 = tty  (sent by tty/context.rs; procmgr spawns a shell on the VT)
+///   session_kind 1 = compositor (sent by /bin/login; procmgr stubs OK — T6 fills spawn)
+/// Reply: words[0]=errno (0=ok), words[1]=container_id (tty path) or 0 (compositor stub).
 pub const PROCMGR_SESSION_LOGIN_LABEL: u32 = 30;
 /// Session death: procmgr → tty (send). words[0]=vt_instance.
 pub const PROCMGR_SESSION_DEATH_LABEL: u32 = 31;
