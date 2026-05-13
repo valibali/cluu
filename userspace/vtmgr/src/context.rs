@@ -50,6 +50,14 @@ pub struct VtmgrContext {
     /// VT index pinned to the compositor via VTMGR_PIN_VT_LABEL.
     /// Defaults to DEFAULT_COMPOSITOR_VT; updated when compositor sends the pin message.
     compositor_vt: usize,
+    /// Compositor "input" endpoint (for forwarding kbd events to compositor).
+    compositor_input_ep: usize,
+    /// Per-VT tty "main" endpoints (for forwarding kbd events to each tty).
+    tty_main_eps: [usize; VT_COUNT],
+    /// Whether compositor:input subscription was requested.
+    requested_compositor_input: bool,
+    /// Bitmask: bit N = tty:N:main subscription was requested.
+    requested_tty_main: u8,
 }
 
 impl VtmgrContext {
@@ -76,6 +84,10 @@ impl VtmgrContext {
             compositor_control: 0,
             requested_compositor: false,
             compositor_vt: DEFAULT_COMPOSITOR_VT,
+            compositor_input_ep: 0,
+            tty_main_eps: [0; VT_COUNT],
+            requested_compositor_input: false,
+            requested_tty_main: 0,
         };
         debug_print(&format!(
             "vtmgr: ready active_vt={} compositor_vt={}",
@@ -107,6 +119,24 @@ impl VtmgrContext {
                 self.requested_compositor = true;
             }
         }
+
+        // Subscribe to compositor's input endpoint (for forwarding kbd events).
+        if !self.requested_compositor_input && self.compositor_input_ep == 0 {
+            if registry::request_subscription("compositor", "input").is_ok() {
+                self.requested_compositor_input = true;
+            }
+        }
+
+        // Subscribe to each tty:N's main endpoint (for forwarding kbd events).
+        for vt in 0..VT_COUNT {
+            let bit = 1u8 << vt;
+            if (self.requested_tty_main & bit) == 0 && self.tty_main_eps[vt] == 0 {
+                let svc = format!("tty:{}", vt);
+                if registry::request_subscription(&svc, "main").is_ok() {
+                    self.requested_tty_main |= bit;
+                }
+            }
+        }
     }
 
     /// Handle registry control messages and update subscriptions.
@@ -114,7 +144,19 @@ impl VtmgrContext {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             match event {
                 registry::RegistryEvent::Grant { service_name, name, token } => {
-                    if service_name == "compositor" && name == "control" {
+                    if service_name == "compositor" && name == "input" {
+                        self.compositor_input_ep = token;
+                        let _ = debug_print("vtmgr: compositor input subscribed");
+                    } else if let Some(idx) = service_name.strip_prefix("tty:")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
+                        if name == "main" && idx < VT_COUNT {
+                            self.tty_main_eps[idx] = token;
+                            let _ = debug_print(&format!(
+                                "vtmgr: tty:{} main subscribed", idx
+                            ));
+                        }
+                    } else if service_name == "compositor" && name == "control" {
                         self.compositor_control = token;
                         let _ = debug_print("vtmgr: compositor control subscribed");
                         if self.active_vt == self.compositor_vt {
@@ -151,6 +193,8 @@ impl VtmgrContext {
                         self.requested_console = false;
                         self.requested_procmgr_spawn = false;
                         self.requested_compositor = false;
+                        self.requested_compositor_input = false;
+                        self.requested_tty_main = 0;
                     }
                 }
             }
