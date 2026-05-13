@@ -17,8 +17,8 @@ use libcluu::runtime as _;
 
 use libcluu::boot::{process_info, space_token, TOKEN_IPC};
 use libcluu::ipc::{
-    COMP_INPUT_FORWARD_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL,
-    COMP_WIN_REGISTER_REPLY, PROCMGR_SESSION_LOGIN_LABEL,
+    COMP_INPUT_FORWARD_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_FLAG_FULLSCREEN,
+    COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY, PROCMGR_SESSION_LOGIN_LABEL,
 };
 use libcluu::syscall::MAP_FRAME_TOKEN;
 use libcluu::types::{IpcFlags, Message};
@@ -27,10 +27,10 @@ use libcluu::{debug_print, registry, syscall};
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
-/// Width of the login modal window in cells (interior + 1-cell chrome each side).
-const WIN_W: u32 = 52;
-/// Height of the login modal window in cells.
-const WIN_H: u32 = 10;
+/// Width of the login modal box in cells (border-inclusive).
+const MODAL_W: u32 = 52;
+/// Height of the login modal box in cells (border-inclusive).
+const MODAL_H: u32 = 10;
 
 /// Virtual address for the compositor SHM frame.
 /// Distinct from cluuterm (0xD100_0000) and compdemo (0xD000_0000).
@@ -190,90 +190,109 @@ unsafe fn write_str(
     }
 }
 
-/// Render the static login modal chrome into the SHM cell buffer (once at startup).
+/// Render the full-screen login window into the SHM cell buffer.
 ///
-/// Layout (WIN_W=52, WIN_H=10):
-///   Row 0   : top chrome bar  "╔══…══ CLUU login ══…══╗"
-///   Row 1   : blank line      "║                      ║"
-///   Row 2   : title line      "║      CLUU login       ║"
-///   Row 3   : blank           "║                      ║"
-///   Row 4   : username field  "║  username: __________  ║"
-///   Row 5   : blank           "║                      ║"
-///   Row 6   : password field  "║  password: __________  ║"
-///   Row 7   : blank           "║                      ║"
-///   Row 8   : hint line       "║  [Enter] login         ║"
-///   Row 9   : bottom chrome   "╚══…══════════════════╝"
+/// The window is `cols × rows` cells (full compositor grid). The login modal
+/// box (MODAL_W=52 × MODAL_H=10) is centered inside:
+///   mx = (cols - MODAL_W) / 2,  my = (rows - MODAL_H) / 2
+///
+/// Modal layout (relative to modal top-left):
+///   Row 0   : top border    "╔══…══╗"
+///   Row 1   : blank         "║    ║"
+///   Row 2   : title         "║  CLUU login  ║"
+///   Row 3   : blank         "║    ║"
+///   Row 4   : username      "║  username: __________  ║"
+///   Row 5   : blank         "║    ║"
+///   Row 6   : password      "║  password: __________  ║"
+///   Row 7   : blank         "║    ║"
+///   Row 8   : hint/error    "║  [Tab] focus  [Enter] login  ║"
+///   Row 9   : bottom border "╚══…══╝"
+///
+/// All cells outside the modal box are black spaces.
 unsafe fn render_modal(cells: *mut u64, w: u32, h: u32, state: &LoginState) {
-    // Background: fill whole window with blank dark cells.
+    // Fill entire screen with black background cells.
     fill_run(cells, 0, 0, w, w * h, b' ' as u32, WHITE, BLACK, 0);
 
-    // ── Row 0: top border ────────────────────────────────────────────────────
-    // ╔ + (w-2) × ═ + ╗
+    // Center the modal box.
+    let mx = (w.saturating_sub(MODAL_W)) / 2;
+    let my = (h.saturating_sub(MODAL_H)) / 2;
+    let mw = MODAL_W;
+    let mh = MODAL_H;
+
+    // ── Modal row 0 (my+0): top border ╔═…═╗ ────────────────────────────────
     core::ptr::write_volatile(
-        cells.add((0 * w) as usize),
+        cells.add(((my) * w + mx) as usize),
         pack_cell(0x2554, BR_WHITE, BLUE, 0), // ╔
     );
-    fill_run(cells, 1, 0, w, w - 2, 0x2550, BR_WHITE, BLUE, 0); // ═
+    fill_run(cells, mx + 1, my, w, mw - 2, 0x2550, BR_WHITE, BLUE, 0); // ═
     core::ptr::write_volatile(
-        cells.add((0 * w + w - 1) as usize),
+        cells.add(((my) * w + mx + mw - 1) as usize),
         pack_cell(0x2557, BR_WHITE, BLUE, 0), // ╗
     );
 
-    // ── Row 9: bottom border ─────────────────────────────────────────────────
-    let last = h - 1;
+    // ── Modal row (my+mh-1): bottom border ╚═…═╝ ────────────────────────────
+    let last_row = my + mh - 1;
     core::ptr::write_volatile(
-        cells.add((last * w) as usize),
+        cells.add((last_row * w + mx) as usize),
         pack_cell(0x255A, BR_WHITE, BLUE, 0), // ╚
     );
-    fill_run(cells, 1, last, w, w - 2, 0x2550, BR_WHITE, BLUE, 0); // ═
+    fill_run(cells, mx + 1, last_row, w, mw - 2, 0x2550, BR_WHITE, BLUE, 0); // ═
     core::ptr::write_volatile(
-        cells.add((last * w + w - 1) as usize),
+        cells.add((last_row * w + mx + mw - 1) as usize),
         pack_cell(0x255D, BR_WHITE, BLUE, 0), // ╝
     );
 
-    // ── Interior rows 1..h-2: side borders + bg ───────────────────────────────
-    for row in 1..h - 1 {
+    // ── Interior rows (my+1)..(my+mh-1): side borders + bg ───────────────────
+    for r in 1..mh - 1 {
+        let row = my + r;
         // Left border ║
         core::ptr::write_volatile(
-            cells.add((row * w) as usize),
+            cells.add((row * w + mx) as usize),
             pack_cell(0x2551, BR_WHITE, BLUE, 0),
         );
         // Interior: blank on dark background
-        fill_run(cells, 1, row, w, w - 2, b' ' as u32, WHITE, BLACK, 0);
+        fill_run(cells, mx + 1, row, w, mw - 2, b' ' as u32, WHITE, BLACK, 0);
         // Right border ║
         core::ptr::write_volatile(
-            cells.add((row * w + w - 1) as usize),
+            cells.add((row * w + mx + mw - 1) as usize),
             pack_cell(0x2551, BR_WHITE, BLUE, 0),
         );
     }
 
-    // ── Row 2: centred title "CLUU login" ─────────────────────────────────────
+    // ── Modal row 2: centred title "CLUU login" ───────────────────────────────
     let title = b"CLUU login";
-    let title_x = (w - title.len() as u32) / 2;
-    write_str(cells, title_x, 2, w, title, BR_WHITE, BLACK, 1 /* bold */);
+    let title_x = mx + (mw - title.len() as u32) / 2;
+    write_str(cells, title_x, my + 2, w, title, BR_WHITE, BLACK, 1 /* bold */);
 
-    // ── Rows 4, 6, and 8: interactive content (fields + hint/error) ───────────
-    render_fields(cells, w, state);
+    // ── Modal rows 4, 6, and 8: interactive content (fields + hint/error) ─────
+    render_fields(cells, w, mx, my, state);
 }
 
-/// Re-render the username (row 4), password (row 6), and hint/error (row 8)
-/// rows.
+/// Re-render the username (modal row 4), password (modal row 6), and
+/// hint/error (modal row 8) rows.
+///
+/// `w` is the full screen width (stride for cell addressing).
+/// `mx`/`my` are the modal top-left position on the full-screen grid.
 ///
 /// Called both from `render_modal` (initial paint) and from the input loop
 /// (per-keystroke update).  The chrome rows (borders, title) are left
 /// untouched.
 ///
-/// Field layout (field_x = 2 + prompt.len() = 12, field_w = 10):
+/// Field layout (field_x = mx + 2 + prompt.len() = mx + 12, field_w = 10):
 ///   - Filled characters at positions [0..len).
 ///   - Underscore placeholders at positions [len..FIELD_W).
 /// The focused field uses YELLOW fg on DARK_GREY bg; the unfocused one uses
 /// WHITE fg on DARK_GREY bg.
-unsafe fn render_fields(cells: *mut u64, w: u32, state: &LoginState) {
-    const FIELD_X: u32 = 12; // 2 indent + "username: ".len() = 12
-    const FIELD_W: u32 = 10; // visible field width
+unsafe fn render_fields(cells: *mut u64, w: u32, mx: u32, my: u32, state: &LoginState) {
+    const FIELD_INDENT: u32 = 12; // 2 indent + "username: ".len() = 12
+    const FIELD_W: u32 = 10;      // visible field width
 
     let user_prompt = b"username: ";
     let pass_prompt = b"password: ";
+
+    let row4 = my + 4;
+    let row6 = my + 6;
+    let row8 = my + 8;
 
     // ── Row 4: username ────────────────────────────────────────────────────────
     let (ufg, pfg) = if state.focus == Focus::Username {
@@ -283,50 +302,50 @@ unsafe fn render_fields(cells: *mut u64, w: u32, state: &LoginState) {
     };
 
     // Re-draw prompt in the correct colour to show focus on the label too.
-    write_str(cells, 2, 4, w, user_prompt, ufg, BLACK, 0);
+    write_str(cells, mx + 2, row4, w, user_prompt, ufg, BLACK, 0);
 
+    let field_x = mx + FIELD_INDENT;
     let ulen = state.username.len() as u32;
     // Typed characters (shown as-is for username).
     for (i, &c) in state.username.iter().enumerate() {
         core::ptr::write_volatile(
-            cells.add((4 * w + FIELD_X + i as u32) as usize),
+            cells.add((row4 * w + field_x + i as u32) as usize),
             pack_cell(c as u32, ufg, DARK_GREY, 0),
         );
     }
     // Underscore placeholders for remaining positions.
     if ulen < FIELD_W {
-        fill_run(cells, FIELD_X + ulen, 4, w, FIELD_W - ulen, b'_' as u32, ufg, DARK_GREY, 0);
+        fill_run(cells, field_x + ulen, row4, w, FIELD_W - ulen, b'_' as u32, ufg, DARK_GREY, 0);
     }
 
     // ── Row 6: password ────────────────────────────────────────────────────────
-    write_str(cells, 2, 6, w, pass_prompt, pfg, BLACK, 0);
+    write_str(cells, mx + 2, row6, w, pass_prompt, pfg, BLACK, 0);
 
     let plen = state.password.len() as u32;
     // Password characters are masked as '*'.
     for i in 0..plen {
         core::ptr::write_volatile(
-            cells.add((6 * w + FIELD_X + i) as usize),
+            cells.add((row6 * w + field_x + i) as usize),
             pack_cell(b'*' as u32, pfg, DARK_GREY, 0),
         );
     }
     // Underscore placeholders.
     if plen < FIELD_W {
-        fill_run(cells, FIELD_X + plen, 6, w, FIELD_W - plen, b'_' as u32, pfg, DARK_GREY, 0);
+        fill_run(cells, field_x + plen, row6, w, FIELD_W - plen, b'_' as u32, pfg, DARK_GREY, 0);
     }
 
     // ── Row 8: hint or error banner ────────────────────────────────────────────
-    // Clear the interior of row 8 first (preserve side borders painted by render_modal).
-    fill_run(cells, 1, 8, w, w - 2, b' ' as u32, WHITE, BLACK, 0);
+    // Clear the modal interior of row 8 (preserve side borders from render_modal).
+    fill_run(cells, mx + 1, row8, w, MODAL_W - 2, b' ' as u32, WHITE, BLACK, 0);
     if state.show_error {
         let err_msg = b"login incorrect";
-        // Centre the error message within the interior (w-2 cells starting at col 1).
-        let interior = w - 2;
+        let interior = MODAL_W - 2;
         let msg_len = err_msg.len() as u32;
-        let err_x = 1 + (interior.saturating_sub(msg_len)) / 2;
-        write_str(cells, err_x, 8, w, err_msg, RED, BLACK, 0);
+        let err_x = mx + 1 + (interior.saturating_sub(msg_len)) / 2;
+        write_str(cells, err_x, row8, w, err_msg, RED, BLACK, 0);
     } else {
         let hint = b"[Tab] focus  [Enter] login";
-        write_str(cells, 2, 8, w, hint, GREEN, BLACK, 0);
+        write_str(cells, mx + 2, row8, w, hint, GREEN, BLACK, 0);
     }
 }
 
@@ -384,14 +403,14 @@ fn register_window(my_ep: usize) -> Result<(u32, usize, u32, u32), i32> {
     let req = Message::new(
         COMP_WIN_REGISTER_LABEL,
         [
-            title.len(),      // words[0] = payload_len
-            WIN_W as usize,   // words[1] = req_w
-            WIN_H as usize,   // words[2] = req_h
-            my_ep,            // words[3] = app input/frame endpoint
-            0,                // words[4] = reserved
-            0,                // words[5] = reserved
+            title.len(),                        // words[0] = payload_len
+            0,                                  // words[1] = req_w (ignored: fullscreen)
+            0,                                  // words[2] = req_h (ignored: fullscreen)
+            my_ep,                              // words[3] = app input/frame endpoint
+            COMP_WIN_FLAG_FULLSCREEN as usize,  // words[4] = flags
+            0,                                  // words[5] = reserved
         ],
-        4,
+        5,
     );
     let mut reply = Message::new(0, [0; 6], 0);
     if libcluu::ipc::call_with_payload(comp_ep, &req, title, &mut reply).is_err() {
@@ -471,6 +490,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         }
     };
     let _ = debug_print("login: window registered");
+
+    // Compute modal top-left position (centered in the granted full-screen dims).
+    let modal_mx = (gw.saturating_sub(MODAL_W)) / 2;
+    let modal_my = (gh.saturating_sub(MODAL_H)) / 2;
 
     // Initialise WindowShm header at SHM_VA.
     let shm_ptr = SHM_VA as *mut WindowShm;
@@ -603,7 +626,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
                 // Re-render the field rows and send WIN_DAMAGE.
                 unsafe {
-                    render_fields(cells_ptr, gw, &state);
+                    render_fields(cells_ptr, gw, modal_mx, modal_my, &state);
                 }
                 send_damage(shm_ptr);
             }

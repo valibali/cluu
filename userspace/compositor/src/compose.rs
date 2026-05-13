@@ -38,7 +38,14 @@ pub fn recompute_dirty(comp: &mut Compositor) {
     }
 }
 
+/// Return true if the currently focused window is fullscreen.
+fn focused_is_fullscreen(comp: &Compositor) -> bool {
+    let Some(id) = comp.focused else { return false; };
+    comp.windows.iter().any(|w| w.id == id && w.fullscreen)
+}
+
 fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
+    let fullscreen_mode = focused_is_fullscreen(comp);
     // Walk top→bottom (last is top).
     for win in comp.windows.iter().rev() {
         if cx < win.x || cx >= win.x.saturating_add(win.w) {
@@ -49,16 +56,28 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
         }
         let local_x = cx - win.x;
         let local_y = cy - win.y;
-        let in_chrome = local_x < CHROME_LEFT
-            || local_x >= win.w.saturating_sub(CHROME_RIGHT)
-            || local_y < CHROME_TOP
-            || local_y >= win.h.saturating_sub(CHROME_BOTTOM);
+        // Fullscreen windows have no chrome — treat every cell as interior.
+        // When any window is fullscreen-focused, suppress chrome on all windows
+        // (the fullscreen window's interior covers the whole screen anyway).
+        let in_chrome = if win.fullscreen || fullscreen_mode {
+            false
+        } else {
+            local_x < CHROME_LEFT
+                || local_x >= win.w.saturating_sub(CHROME_RIGHT)
+                || local_y < CHROME_TOP
+                || local_y >= win.h.saturating_sub(CHROME_BOTTOM)
+        };
         if in_chrome {
             let focused = comp.focused == Some(win.id);
             return chrome_glyph(win, local_x, local_y, focused);
         }
-        let ix = local_x - CHROME_LEFT;
-        let iy = local_y - CHROME_TOP;
+        // For fullscreen windows the SHM interior coordinate equals the local
+        // coordinate directly (no chrome offset).
+        let (ix, iy) = if win.fullscreen {
+            (local_x, local_y)
+        } else {
+            (local_x - CHROME_LEFT, local_y - CHROME_TOP)
+        };
         return read_shm_cell(win, ix, iy);
     }
     BG_CELL
@@ -162,7 +181,12 @@ fn pack_chrome_cell(cp: u32, focused: bool) -> u64 {
 /// Lay the status bar string into cell row 0 of the compositor's cell_grid.
 /// Called after recompute_dirty so it overwrites any chrome/interior that
 /// landed on row 0.
+/// Skipped entirely when a fullscreen window is focused — the fullscreen
+/// window's content (row 0 of its SHM buffer) is already in cell_grid[row 0].
 pub fn render_status_row(comp: &mut Compositor) {
+    if focused_is_fullscreen(comp) {
+        return;
+    }
     let s = crate::status::render_status(comp);
     let bytes = s.as_bytes();
     for cx in 0..comp.cols {

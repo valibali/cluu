@@ -203,9 +203,16 @@ pub const PROCMGR_JOB_NOTIFY_LABEL: u32 = 86;
 // ──────────────────────────────────────────────────────────────────────
 
 /// App → compositor:client. Request a new window. Payload: title bytes.
+/// Wire layout: words[0]=payload_len (title), words[1]=req_w, words[2]=req_h,
+/// words[3]=app_input_endpoint, words[4]=flags (see COMP_WIN_FLAG_*).
 pub const COMP_WIN_REGISTER_LABEL: u32 = 90;
 /// Compositor → app reply.
 pub const COMP_WIN_REGISTER_REPLY: u32 = 91;
+
+/// WIN_REGISTER flag: no compositor chrome (border/title); status bar row 0
+/// suppressed while this window is focused.  Compositor sizes the window to
+/// the full cell grid regardless of req_w/req_h.
+pub const COMP_WIN_FLAG_FULLSCREEN: u32 = 1 << 0;
 /// App → compositor:client. Mark a damage rect on a registered window.
 pub const COMP_WIN_DAMAGE_LABEL: u32 = 92;
 /// App → compositor:client. Free a window.

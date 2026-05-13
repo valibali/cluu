@@ -23,7 +23,7 @@ use libcluu::types::Message;
 
 #[derive(Debug)]
 pub enum Incoming {
-    WinRegister { req_w: u32, req_h: u32, title_len: u32, input_endpoint: usize },
+    WinRegister { req_w: u32, req_h: u32, title_len: u32, input_endpoint: usize, flags: u32 },
     WinDamage { window_id: u64, x: u32, y: u32, w: u32, h: u32 },
     WinDestroy { window_id: u64 },
     WinSetTitle { window_id: u64, title_len: u32 },
@@ -39,10 +39,12 @@ pub fn parse(msg: &Message) -> Incoming {
         COMP_WIN_REGISTER_LABEL => Incoming::WinRegister {
             // words[0] = payload_len (title byte count, per parse_message convention)
             // words[1] = req_w, words[2] = req_h, words[3] = app_input_endpoint
+            // words[4] = flags (COMP_WIN_FLAG_*)
             req_w: msg.words[1] as u32,
             req_h: msg.words[2] as u32,
             title_len: msg.words[0] as u32,
             input_endpoint: msg.words[3],
+            flags: msg.words[4] as u32,
         },
         COMP_WIN_DAMAGE_LABEL => Incoming::WinDamage {
             window_id: msg.words[0] as u64,

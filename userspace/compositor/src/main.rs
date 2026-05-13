@@ -223,7 +223,7 @@ pub extern "C" fn main() -> i32 {
                     }
                     let kind = protocol::parse(&msg);
                     match kind {
-                        protocol::Incoming::WinRegister { req_w, req_h, title_len, input_endpoint } => {
+                        protocol::Incoming::WinRegister { req_w, req_h, title_len, input_endpoint, flags } => {
                             let title_len_usize = (title_len as usize).min(payload.len());
                             let title_bytes = &payload[..title_len_usize];
                             let title = core::str::from_utf8(title_bytes).unwrap_or("");
@@ -239,6 +239,7 @@ pub extern "C" fn main() -> i32 {
                                 req_h,
                                 title,
                                 input_endpoint,
+                                flags,
                             ) {
                                 Ok((id, token, gw, gh)) => {
                                     let reply_msg = Message::new(

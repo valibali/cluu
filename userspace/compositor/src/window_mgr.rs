@@ -9,7 +9,10 @@ impl Compositor {
     /// Allocate a window per the request. Returns
     /// `(id, frame_token, granted_w, granted_h)` on success.
     ///
-    /// Granted dims are clamped to the screen minus row 0 (status bar).
+    /// Granted dims are clamped to the screen minus row 0 (status bar) for
+    /// normal windows. If `flags` has `COMP_WIN_FLAG_FULLSCREEN` set, the
+    /// window covers the full cell grid (x=0, y=0, w=cols, h=rows) and no
+    /// chrome or status bar will be drawn while it is focused.
     /// `owner_pid` is the authenticated sender's tid (CLUU does not yet
     /// distinguish tid from pid for one-thread apps).
     /// `input_endpoint` is the app's long-lived endpoint for FRAME_READY and INPUT_FORWARD.
@@ -20,9 +23,16 @@ impl Compositor {
         req_h: u32,
         title: &str,
         input_endpoint: usize,
+        flags: u32,
     ) -> Result<(WindowId, u64, u32, u32)> {
-        let granted_w = (req_w as u16).min(self.cols);
-        let granted_h = (req_h as u16).min(self.rows.saturating_sub(1));
+        let fullscreen = (flags & libcluu::ipc::COMP_WIN_FLAG_FULLSCREEN) != 0;
+        let (granted_w, granted_h) = if fullscreen {
+            (self.cols, self.rows)
+        } else {
+            let gw = (req_w as u16).min(self.cols);
+            let gh = (req_h as u16).min(self.rows.saturating_sub(1));
+            (gw, gh)
+        };
         // Minimum 3×3: 1-cell chrome on each side + at least 1 interior cell.
         if granted_w < 3 || granted_h < 3 {
             return Err(libcluu::Error::InvalidArgument);
@@ -63,12 +73,18 @@ impl Compositor {
             core::ptr::write_bytes(cells_ptr, 0, cells_bytes);
         }
 
-        // Cascade window placement. Status bar reserves row 0, so y >= 1.
-        let offset = (id as u16) * 2;
-        let max_x = self.cols.saturating_sub(granted_w);
-        let max_y = self.rows.saturating_sub(granted_h);
-        let x = offset.min(max_x);
-        let y = (1 + offset).min(max_y.max(1));
+        // Fullscreen windows are pinned at (0, 0). Normal windows cascade,
+        // respecting row 0 as the status bar (y >= 1).
+        let (x, y) = if fullscreen {
+            (0u16, 0u16)
+        } else {
+            let offset = (id as u16) * 2;
+            let max_x = self.cols.saturating_sub(granted_w);
+            let max_y = self.rows.saturating_sub(granted_h);
+            let x = offset.min(max_x);
+            let y = (1 + offset).min(max_y.max(1));
+            (x, y)
+        };
 
         let mut title_owned = alloc::string::String::new();
         title_owned.push_str(title);
@@ -89,6 +105,7 @@ impl Compositor {
             last_gen: 0,
             input_endpoint,
             pending_frame_ready: false,
+            fullscreen,
         });
         self.focused = Some(id);
         // Mark all the window's cells dirty so the (eventual) compose pass
