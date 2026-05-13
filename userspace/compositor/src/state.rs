@@ -60,20 +60,26 @@ pub struct Deadlines {
 }
 
 impl Deadlines {
-    /// Create a `Deadlines` with the clock task armed immediately (fires on
-    /// first event-loop iteration) and the frame task parked at `u64::MAX`.
+    /// Create a `Deadlines` with both tasks parked at `u64::MAX`. The clock
+    /// task is push-mode (timeserver TIME_TICK arrival), so its deadline is
+    /// not used to drive the recv timeout — it's kept for legacy tick_clock
+    /// guard arithmetic only.
     pub const fn new() -> Self {
         Self {
             next_frame_ms: u64::MAX,
-            next_clock_ms: 0, // fire immediately on first iteration
+            next_clock_ms: u64::MAX,
         }
     }
 
     /// Time in ms until the earliest deadline. Saturates to 0 if any deadline
     /// is already due.
+    ///
+    /// Push-mode: `next_clock_ms` is NOT included — timeserver pushes
+    /// TIME_TICK directly, so the recv loop wakes on the IPC, not a timeout.
+    /// Including next_clock_ms here causes a busy-spin when its initial value
+    /// is 0 (timeout = 0 → poll-mode recv).
     pub fn next_timeout_ms(&self, now_ms: u64) -> u64 {
-        let next = self.next_frame_ms.min(self.next_clock_ms);
-        next.saturating_sub(now_ms)
+        self.next_frame_ms.saturating_sub(now_ms)
     }
 }
 
