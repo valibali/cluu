@@ -215,13 +215,17 @@ impl VfsClient {
     }
 
     /// Close a file descriptor in the VFS service.
+    ///
+    /// Uses `call_with_timeout` (5s) so a transiently backlogged VFS recv
+    /// queue cannot wedge the caller indefinitely. Close is best-effort —
+    /// on timeout the fd may leak in VFS bookkeeping until the calling
+    /// process exits (procmgr's PROC_EXIT teardown reclaims).
     pub fn close(&self, file: VfsFile) -> Result<()> {
         let mut msg = Message::new(VFS_CLOSE, [0; 6], 3);
         msg.words[0] = 0;
         msg.words[1] = self.client_id;
         msg.words[2] = file.fd;
-        ipc::call(self.endpoint, &mut msg, crate::IpcFlags::empty())?;
-        // call() already wrote reply into msg; use msg as reply for consistency.
+        ipc::call_with_timeout(self.endpoint, &mut msg, crate::IpcFlags::empty(), 5000)?;
         parse_status(msg.words[0])?;
         Ok(())
     }
