@@ -559,6 +559,25 @@ impl ProcessManager {
         }).collect()
     }
 
+    /// Build a ViewMountList from already-resolved mount strings.
+    /// Each entry is "mode:path". Unknown modes or malformed entries are skipped.
+    fn build_view_from_mount_strings(strings: &[String]) -> ViewMountList {
+        let mut mounts = ViewMountList::new();
+        for raw in strings {
+            let (mode_str, path) = match raw.split_once(':') {
+                Some(p) => p,
+                None => continue,
+            };
+            let writable = match mode_str {
+                "ro" | "readonly"  => false,
+                "rw" | "readwrite" => true,
+                _ => continue,
+            };
+            mounts.push((String::from(path), String::from(path), writable, 0u64));
+        }
+        mounts
+    }
+
     /// Compute nesting depth of a container (0 for top-level/detached).
     fn container_depth(&self, container_id: u64) -> u32 {
         let mut depth = 0u32;
@@ -2296,7 +2315,12 @@ impl ProcessManager {
                     return Ok(());
                 }
             };
-            let view_mounts = Self::build_view_from_envelope(&envelope);
+            // TODO: thread vt through from caller
+            let vt_index_graphical = 4usize;
+            let resolved_mounts = envelopes::resolve_session_mounts(
+                &envelope, /* session_kind */ 1, vt_index_graphical, &username,
+            );
+            let view_mounts = Self::build_view_from_mount_strings(&resolved_mounts);
             let resolved_env = envelopes::resolve_env(&envelope, &username);
             let (user_env, user_envc) = build_envelope_env_payload(&resolved_env);
 
@@ -2491,7 +2515,10 @@ impl ProcessManager {
                 return Ok(());
             }
         };
-        let view_mounts = Self::build_view_from_envelope(&envelope);
+        let resolved_mounts = envelopes::resolve_session_mounts(
+            &envelope, /* session_kind */ 0, vt_index, &username,
+        );
+        let view_mounts = Self::build_view_from_mount_strings(&resolved_mounts);
         let resolved_env = envelopes::resolve_env(&envelope, &username);
 
         let spawn_seq = self.next_spawn_seq();

@@ -646,9 +646,13 @@ harness_derive_marker_defaults() {
                 ;;
             l2_cluuterm_login)
                 TEST_COMMAND=""
-                # After boot, wait for login prompt then inject credentials.
-                # Cluuterm is the focused window on VT4; compositor forwards
-                # keystrokes to it.
+                # After boot, inject credentials into the login modal.
+                # The login modal spawns BEFORE any shell, so `shell: ready`
+                # cannot gate keystroke injection — fire keys unconditionally.
+                #   sleep 5: compositor + login modal ready by ~5s.
+                #   sleep 2: password field appears after username Enter.
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
                 ;;
             l2_cluuterm_ansi)
