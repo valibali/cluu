@@ -877,58 +877,82 @@ impl ProcessManager {
     ///
     /// # Monotone-view assertion (debug builds only)
     ///
-    /// In debug builds this function looks up the parent container's recorded
-    /// view and asserts that `mounts` does not widen it.
+    /// In debug builds this function asserts that `mounts` does not widen the
+    /// parent container's recorded view.
     ///
-    /// **Exemptions** (view may differ from / be broader than the parent's
-    /// recorded view):
-    /// - `container_id == 0` — top-level service spawned directly by procmgr
-    ///   (procmgr's own SUPERVISOR view is always the root; no stored parent).
-    /// - Sites that perform an *authenticated identity switch* (escalate/sudo,
-    ///   su) — the new view is determined by the target user's pre-authorized
-    ///   envelope, not by the calling process.  The procmgr root-view is still
-    ///   the authoritative parent in those cases, not `pid_to_view[caller]`.
+    /// **Callers must pass the correct `parent_container_id` and
+    /// `is_identity_switch`**:
+    /// - Pass `parent_container_id = 0` (and `is_identity_switch = false`) for
+    ///   top-level spawns where procmgr is the authoritative root.
+    /// - Pass the actual parent container ID (and `is_identity_switch = false`)
+    ///   for nested containers (POSIX spawn, CONTAINER_RUN without detach).
+    /// - Pass the caller's container ID (and `is_identity_switch = true`) for
+    ///   authenticated identity switches (escalate/sudo, su).  The assertion is
+    ///   explicitly skipped for these paths because the target view is
+    ///   authorized by procmgr policy, not constrained by the caller's view.
     ///
-    /// TODO(plan2-task7): the parent_container_id is not threaded into this
-    /// function today, so we look it up via `container_instances`.  If this
-    /// becomes too expensive, thread parent_cid as a parameter instead.
+    /// **Why the parameter, not a registry lookup**: this function is called
+    /// *before* the child's `container_instances` entry is inserted, so
+    /// `container_instances[container_id]` does not exist yet.  Looking up the
+    /// parent through the child would always return `None`, making the
+    /// assertion permanently dead.
+    ///
+    /// **Exemptions** (assertion skipped):
+    /// - `parent_container_id == 0` — top-level service; procmgr's SUPERVISOR
+    ///   view is always the root.  No parent to check against.
+    /// - `is_identity_switch == true` — escalate/sudo or su: caller's view is
+    ///   irrelevant; the new view is determined by the *target user's*
+    ///   pre-authorized envelope.  Procmgr is the authoritative spawner.
     fn install_view_and_run(
         &mut self,
         thread_token: usize,
         mounts: &[(String, String, bool, u64)],
         profile: CapProfile,
         container_id: u64,
+        parent_container_id: u64,
+        is_identity_switch: bool,
     ) {
         // ── monotone-view debug assertion ─────────────────────────────────────
         #[cfg(debug_assertions)]
-        if container_id != 0 {
-            // Find the parent container_id from the container registry.
-            let parent_cid = self.container_instances
-                .get(&container_id)
-                .map(|c| c.parent_container_id)
-                .unwrap_or(0);
+        if parent_container_id != 0 && !is_identity_switch {
+            // Look up a pid that owns the parent container to get its recorded view.
+            let parent_view_opt = self.container_instances
+                .get(&parent_container_id)
+                .and_then(|c| self.pid_to_view.get(&c.pid));
 
-            if parent_cid != 0 {
-                // Look up a pid that owns the parent container to get its view.
-                let parent_view_opt = self.container_instances
-                    .get(&parent_cid)
-                    .and_then(|c| self.pid_to_view.get(&c.pid));
+            if let Some(parent_view) = parent_view_opt {
+                // Strip procmgr-injected per-container infrastructure mounts before
+                // checking.  These are private to the child and never represent
+                // capability widening relative to the parent:
+                //   • MemFs-backed entries (memfs_cid != 0) — always a fresh
+                //     per-container MemFs; no parent resource exposed.
+                //   • Container-anchored MountTable paths (src starts with
+                //     `/var/containers/c-`) — the child's own persistent storage.
+                let checkable_mounts: ViewMountList = mounts
+                    .iter()
+                    .filter(|(src, _, _, memfs_cid)| {
+                        *memfs_cid == 0
+                            && !src.starts_with("/var/containers/c-")
+                    })
+                    .cloned()
+                    .collect();
 
-                if let Some(parent_view) = parent_view_opt {
-                    if !can_narrow_view(parent_view, mounts) {
-                        let _ = debug_print(&format!(
-                            "procmgr: MONOTONE VIOLATION cid={} parent_cid={} \
-                             child view is not a subset of parent view",
-                            container_id, parent_cid
-                        ));
-                        // In a debug build this is a hard panic so the violation
-                        // is caught immediately rather than silently propagating.
-                        panic!(
-                            "monotone violation: child container {} view is not a \
-                             subset of parent {} view",
-                            container_id, parent_cid
-                        );
-                    }
+                if let Some((bad_src, bad_dst, bad_w)) =
+                    first_view_violation(parent_view, &checkable_mounts)
+                {
+                    let _ = debug_print(&format!(
+                        "procmgr: MONOTONE VIOLATION cid={} parent_cid={} \
+                         path {}→{} writable={} not covered by parent view",
+                        container_id, parent_container_id,
+                        bad_src, bad_dst, bad_w
+                    ));
+                    // In a debug build this is a hard panic so the violation
+                    // is caught immediately rather than silently propagating.
+                    panic!(
+                        "monotone violation: child cid={} parent cid={} \
+                         violating path: {}",
+                        container_id, parent_container_id, bad_src
+                    );
                 }
             }
         }
@@ -1217,7 +1241,10 @@ impl ProcessManager {
                 let shell_cid = self.next_container_id();
                 self.pid_to_container_id.insert(pid, shell_cid);
                 self.container_owner_pids.insert(pid);
-                self.install_view_and_run(thread_token, &view_mounts, profile, shell_cid);
+                // parent_container_id=0, is_identity_switch=false: procmgr is the
+                // authoritative spawner for auto-login shell; session_cid is a
+                // just-allocated local ID, not yet a container with a recorded view.
+                self.install_view_and_run(thread_token, &view_mounts, profile, shell_cid, 0, false);
                 self.pid_to_view.insert(pid, view_mounts);
                 let inst_name = self.next_instance_name(session_cid, "shell");
                 self.container_instances.insert(shell_cid, ContainerInstance {
@@ -1393,7 +1420,9 @@ impl ProcessManager {
                 let view_mounts = default_view_for_profile(requested_profile);
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
-                self.install_view_and_run(_thread_token, &view_mounts, requested_profile, container_id);
+                // parent_container_id=0, is_identity_switch=false: autostart binaries
+                // are top-level; procmgr is root.
+                self.install_view_and_run(_thread_token, &view_mounts, requested_profile, container_id, 0, false);
                 self.pid_to_view.insert(pid, view_mounts);
                 if image_name == "vtmgr" {
                     self.vtmgr_container_id = container_id;
@@ -1635,9 +1664,16 @@ impl ProcessManager {
         ) {
             Ok((new_thread_token, _new_cookie, new_pid, _)) => {
                 let view_mounts = default_view_for_profile(requested_profile);
+                // Restart: container_instances[container_id] already exists —
+                // extract the recorded parent before calling install_view_and_run.
+                // For top-level autostart containers parent is 0 (correct: skip assertion).
+                let restart_parent_cid = self.container_instances
+                    .get(&container_id)
+                    .map(|c| c.parent_container_id)
+                    .unwrap_or(0);
                 self.pid_to_container_id.insert(new_pid, container_id);
                 self.container_owner_pids.insert(new_pid);
-                self.install_view_and_run(new_thread_token, &view_mounts, requested_profile, container_id);
+                self.install_view_and_run(new_thread_token, &view_mounts, requested_profile, container_id, restart_parent_cid, false);
                 self.pid_to_view.insert(new_pid, view_mounts);
 
                 if let Some(container) = self.container_instances.get_mut(&container_id) {
@@ -2412,7 +2448,10 @@ impl ProcessManager {
                     self.pid_to_container_id.insert(pid, cluuterm_cid);
                     self.container_owner_pids.insert(pid);
 
-                    self.install_view_and_run(thread_token, &view_mounts, profile, cluuterm_cid);
+                    // parent_container_id=0, is_identity_switch=false: procmgr is the
+                    // authoritative spawner for graphical session cluuterm; session_cid is
+                    // newly allocated, no view yet.
+                    self.install_view_and_run(thread_token, &view_mounts, profile, cluuterm_cid, 0, false);
                     self.pid_to_view.insert(pid, view_mounts);
 
                     let inst_name = self.next_instance_name(session_cid, "cluuterm");
@@ -2643,7 +2682,10 @@ impl ProcessManager {
                 self.pid_to_container_id.insert(pid, shell_cid);
                 self.container_owner_pids.insert(pid);
 
-                self.install_view_and_run(thread_token, &view_mounts, profile, shell_cid);
+                // parent_container_id=0, is_identity_switch=false: procmgr is the
+                // authoritative spawner for tty session shell; session_cid is newly
+                // allocated, no view yet.
+                self.install_view_and_run(thread_token, &view_mounts, profile, shell_cid, 0, false);
                 self.pid_to_view.insert(pid, view_mounts);
 
                 let inst_name = self.next_instance_name(session_cid, "shell");
@@ -2867,7 +2909,10 @@ impl ProcessManager {
                 let container_id = self.next_container_id();
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
-                self.install_view_and_run(thread_token, &view_mounts, escalate_profile, container_id);
+                // is_identity_switch=true: escalate is an authenticated identity switch;
+                // the target view is authorized by procmgr policy, not constrained by
+                // the caller's view.  Pass caller_container_id for audit trail.
+                self.install_view_and_run(thread_token, &view_mounts, escalate_profile, container_id, caller_container_id, true);
                 self.pid_to_view.insert(pid, view_mounts);
 
                 let sudo_session_id = self.resolve_caller_session(sender_tid)
@@ -3103,7 +3148,10 @@ impl ProcessManager {
                 let container_id = self.next_container_id();
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
-                self.install_view_and_run(thread_token, &view_mounts, target_profile, container_id);
+                // is_identity_switch=true: su is an authenticated identity switch;
+                // the target view is authorized by procmgr policy, not constrained by
+                // the caller's view.  Pass caller_container_id for audit trail.
+                self.install_view_and_run(thread_token, &view_mounts, target_profile, container_id, caller_container_id, true);
                 self.pid_to_view.insert(pid, view_mounts);
 
                 let su_session_id = self.resolve_caller_session(sender_tid)
@@ -4169,8 +4217,10 @@ impl ProcessManager {
 
         // Register VFS view for the service based on its profile.
         // System services (pid=0) don't get private storage — container_id=0.
+        // parent_container_id=0, is_identity_switch=false: procmgr is spawner;
+        // no parent to check against.
         let view_mounts = default_view_for_profile(requested_profile);
-        self.install_view_and_run(thread_token, &view_mounts, requested_profile, 0);
+        self.install_view_and_run(thread_token, &view_mounts, requested_profile, 0, 0, false);
 
         let _ = debug_print(&format!("procmgr: service '{}' spawned", path));
         Ok(())
@@ -4344,7 +4394,10 @@ impl ProcessManager {
                 if let Some(container) = self.container_instances.get_mut(&caller_container_id) {
                     container.live_processes = container.live_processes.saturating_add(1);
                 }
-                self.install_view_and_run(thread_token, &child_view_mounts, child_profile, caller_container_id);
+                // parent_container_id=caller_container_id: POSIX spawn child inherits the
+                // caller's container and view.  Assert the cloned view is not wider than
+                // the parent's recorded view (it should always be equal — but check).
+                self.install_view_and_run(thread_token, &child_view_mounts, child_profile, caller_container_id, caller_container_id, false);
                 self.pid_to_view.insert(pid, child_view_mounts.clone());
                 if sender_tid != 0 {
                     let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
@@ -5722,7 +5775,9 @@ impl ProcessManager {
 
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
-                self.install_view_and_run(thread_token, &view_mounts, requested_profile, container_id);
+                // parent_cid is caller_container_id (or 0 if detach=true) — set
+                // at the top of handle_container_run.  Assert child view ⊆ parent.
+                self.install_view_and_run(thread_token, &view_mounts, requested_profile, container_id, parent_cid, false);
                 self.pid_to_view.insert(pid, view_mounts);
                 // Fix C: removed redundant pid_to_profile insert (spawn_service_with_env already does it)
 
@@ -6733,6 +6788,15 @@ fn policy_driven_memfs_mounts(
 /// An empty child view is always valid (child requests no access).
 #[allow(dead_code)]
 fn can_narrow_view(parent_view: &[(String, String, bool, u64)], child_view: &[(String, String, bool, u64)]) -> bool {
+    first_view_violation(parent_view, child_view).is_none()
+}
+
+/// Return the first child mount that is not covered by `parent_view`, or `None`
+/// if the child view is a valid narrowing.  Returns `(src, dst, writable)`.
+fn first_view_violation<'a>(
+    parent_view: &[(String, String, bool, u64)],
+    child_view: &'a [(String, String, bool, u64)],
+) -> Option<(&'a str, &'a str, bool)> {
     for (child_src, child_dst, child_writable, _child_memfs_cid) in child_view {
         let covered = parent_view.iter().any(|(p_src, p_dst, p_writable, _p_memfs_cid)| {
             // Child prefix must be under (or equal to) parent prefix.
@@ -6749,10 +6813,10 @@ fn can_narrow_view(parent_view: &[(String, String, bool, u64)], child_view: &[(S
             src_ok && dst_ok && write_ok
         });
         if !covered {
-            return false;
+            return Some((child_src.as_str(), child_dst.as_str(), *child_writable));
         }
     }
-    true
+    None
 }
 
 /// Serialize and send a VFS_SET_VIEW message for a newly spawned child.

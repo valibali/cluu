@@ -111,6 +111,30 @@ A `#[cfg(debug_assertions)]` check has been added to
 against the parent's recorded view, with the escalate/su exemption documented
 inline.
 
+### Skip mechanism (post-fix)
+
+The assertion has two explicit skip conditions, passed as parameters to
+`install_view_and_run`:
+
+- `parent_container_id == 0` — top-level/init spawns where procmgr is the
+  authority; no parent view to check against.
+- `is_identity_switch == true` — escalate/su paths (sites 7 and 8 above);
+  the new view is authorized by procmgr policy, not constrained by the
+  caller's envelope.  These callers pass `caller_container_id` as the parent
+  but set `is_identity_switch = true` to suppress the assertion.
+
+Prior to the fix in commit after `aaf754c`, the assertion was **non-functional**:
+it attempted to look up the *child*'s `container_instances` entry to find
+`parent_container_id`, but the child has not yet been inserted into
+`container_instances` at the time of the call.  The lookup always returned
+`None`, the `if parent_cid != 0` branch never executed, and the assertion
+never fired.  The fix passes `parent_container_id` explicitly from every call
+site so the lookup uses the *parent*, which is already registered.
+
+Call sites 9 (posix_spawn, `main.rs:4400`) and 10 (container_run,
+`main.rs:5780`) were also missing the `is_identity_switch` argument
+(compile error after the 6-arg signature was added); both now pass `false`.
+
 See the assertion at `userspace/procmgr/src/main.rs` inside
 `install_view_and_run`, and the TODO comment in `userspace/vfs/src/view.rs`.
 
