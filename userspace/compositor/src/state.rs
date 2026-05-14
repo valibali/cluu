@@ -174,6 +174,9 @@ pub struct Window {
     /// Windows with this flag clear are skipped in the broadcast, preventing
     /// the 60 Hz flood when the window hasn't rendered a new frame.
     pub pending_frame_ready: bool,
+    /// When true: window covers the full cell grid (x=0, y=0, w=cols, h=rows).
+    /// Compositor skips chrome rendering and status bar for this window while focused.
+    pub fullscreen: bool,
 }
 
 /// Long-lived compositor state.  Single instance per process, owned by `main`.
