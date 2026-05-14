@@ -12,7 +12,7 @@ use libcluu::boot::{process_info, PARAM_TTY_INSTANCE, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::{
     send_with_retry_timeout, CONSOLE_WRITE_LABEL, IPC_CHUNK_BYTES_DEFAULT,
-    IPC_SEND_RETRIES_DEFAULT, TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C,
+    IPC_SEND_RETRIES_DEFAULT,
 };
 use libcluu::registry;
 use libcluu::types::Message;
@@ -42,12 +42,6 @@ pub struct TtyContext {
     pub endpoint: usize,
     pub registry_endpoint: usize,
     pub console_endpoint: usize,
-    /// Current routing target for line-delivery fallback (legacy shell path).
-    pub shell_stdin: usize,
-    /// Last granted shell stdin endpoint discovered via registry subscription.
-    /// Kept separate from `shell_stdin` so foreground handoff can set
-    /// `shell_stdin=0` without triggering auto re-binding.
-    shell_registered_stdin: usize,
     requested_console: bool,
     /// Instance index (0-3) for this tty, used to subscribe to the matching console.
     instance_id: u64,
@@ -65,10 +59,6 @@ pub struct TtyContext {
     pub pending_reads: VecDeque<PendingRead>,
     /// Input bytes queued for pending readers (raw mode or canonical leftovers).
     pub input_queue: VecDeque<u8>,
-    /// Optional endpoint notified when Ctrl-C is pressed while a foreground route is active.
-    pub ctrl_c_notify: usize,
-    /// Whether Ctrl-C should be forwarded to the current foreground input route.
-    pub forward_ctrl_c: bool,
     pub mode: TtyMode,
     pub login_username: Vec<u8>,
     pub login_password: Vec<u8>,
@@ -117,8 +107,6 @@ impl TtyContext {
             endpoint,
             registry_endpoint,
             console_endpoint: 0,
-            shell_stdin: 0,
-            shell_registered_stdin: 0,
             requested_console: false,
             instance_id,
             procmgr_spawn: 0,
@@ -129,8 +117,6 @@ impl TtyContext {
             console_credit: CONSOLE_CREDIT_WINDOW,
             pending_reads: VecDeque::new(),
             input_queue: VecDeque::new(),
-            ctrl_c_notify: 0,
-            forward_ctrl_c: true,
             mode: TtyMode::Login(LoginState::Username),
             login_username: Vec::new(),
             login_password: Vec::new(),
@@ -216,46 +202,15 @@ impl TtyContext {
         }
     }
 
-    /// Override shell stdin route for foreground handoff.
+    /// Configure foreground route (Path A: no-op — input is delivered via POSIX read(0)).
     ///
-    /// Passing `0` disables legacy shell delivery and leaves input queued for
-    /// pending readers (foreground process path). Passing a non-zero endpoint
-    /// only updates the active route.
-    pub fn set_shell_stdin_route(&mut self, endpoint: usize) {
-        self.shell_stdin = endpoint;
-    }
-
-    /// Configure foreground route and Ctrl-C policy.
-    ///
-    /// `endpoint` is the active stdin delivery route.
-    /// Passing 0 restores the registered shell stdin route.
-    /// `ctrl_c_notify` receives an out-of-band Ctrl-C marker when enabled.
-    /// `flags` controls whether Ctrl-C is forwarded to the route and/or notified.
-    pub fn configure_foreground(&mut self, endpoint: usize, ctrl_c_notify: usize, flags: usize) {
-        // Foreground switches define a new input session boundary. Drop stale
-        // buffered bytes from the previous foreground owner but preserve
-        // pending read waiters — the new foreground process may have already
-        // enqueued a read (race between container start and fire-and-forget
-        // TTY_REGISTER). Stale reads from dead processes are harmless:
-        // try_satisfy_reads() handles reply failures by dropping the waiter
-        // without consuming input data.
+    /// The TTY_READ_LABEL push path was retired in favour of fd-0-based
+    /// delivery.  TTY_REGISTER messages are still accepted for compatibility
+    /// (Ctrl-C / SIGTSTP routing etc.) but the stdin-routing side is ignored.
+    pub fn configure_foreground(&mut self, _endpoint: usize, _ctrl_c_notify: usize, _flags: usize) {
+        // Drop stale buffered bytes from the previous foreground owner.
         self.input_queue.clear();
-
-        if endpoint == 0 {
-            if self.shell_registered_stdin != 0 {
-                self.set_shell_stdin_route(self.shell_registered_stdin);
-            } else {
-                self.set_shell_stdin_route(0);
-            }
-        } else {
-            self.set_shell_stdin_route(endpoint);
-        }
-        self.ctrl_c_notify = if (flags & TTY_FG_FLAG_NOTIFY_CTRL_C) != 0 {
-            ctrl_c_notify
-        } else {
-            0
-        };
-        self.forward_ctrl_c = (flags & TTY_FG_FLAG_FORWARD_CTRL_C) != 0;
+        let _ = debug_print("tty: TTY_REGISTER_LABEL push-config ignored (Path A)");
     }
 
     /// Queue output for the console — actual send is deferred to
@@ -301,6 +256,12 @@ impl TtyContext {
     /// Drains bytes from `input_queue` into the oldest pending read,
     /// replies via `reply_with_payload`, and removes the satisfied request.
     pub fn try_satisfy_reads(&mut self) {
+        if !self.pending_reads.is_empty() && !self.input_queue.is_empty() {
+            let _ = debug_print(&format!(
+                "tty: try_satisfy_reads pending={} queue_len={}",
+                self.pending_reads.len(), self.input_queue.len()
+            ));
+        }
         while !self.pending_reads.is_empty() && !self.input_queue.is_empty() {
             let pending = match self.pending_reads.front() {
                 Some(p) => p,
@@ -328,38 +289,6 @@ impl TtyContext {
                     let _ = self.pending_reads.pop_front();
                 }
             }
-        }
-    }
-
-    /// Deliver a line to the current shell route, with self-healing fallback.
-    pub fn deliver_shell_line(&mut self, line: &[u8]) {
-        if self.shell_stdin == 0 {
-            return;
-        }
-
-        if send_with_retry_timeout(
-            self.shell_stdin,
-            libcluu::ipc::TTY_READ_LABEL,
-            line,
-            IPC_SEND_RETRIES_DEFAULT,
-        )
-        .is_ok()
-        {
-            return;
-        }
-
-        if self.shell_registered_stdin != 0
-            && self.shell_registered_stdin != self.shell_stdin
-            && send_with_retry_timeout(
-                self.shell_registered_stdin,
-                libcluu::ipc::TTY_READ_LABEL,
-                line,
-                IPC_SEND_RETRIES_DEFAULT,
-            )
-            .is_ok()
-        {
-            self.shell_stdin = self.shell_registered_stdin;
-            let _ = debug_print("tty: repaired shell stdin route");
         }
     }
 
@@ -437,12 +366,7 @@ impl TtyContext {
                     self.login_username.clear();
                     self.write_to_console(b"Login incorrect\r\nlogin: ");
                 } else {
-                    // Login succeeded — wire shell stdin from reply and enter Terminal mode.
-                    let stdin_ep = reply_msg.words[2];
-                    if stdin_ep != 0 {
-                        self.shell_registered_stdin = stdin_ep;
-                        self.shell_stdin = stdin_ep;
-                    }
+                    // Login succeeded — enter Terminal mode (Path A: stdin via fd 0, not push).
                     self.mode = TtyMode::Terminal;
                     let _ = debug_print(&format!(
                         "tty:{}: login success, terminal mode", self.instance_id
@@ -457,24 +381,20 @@ impl TtyContext {
         }
     }
 
-    /// Wire shell stdin directly (called when procmgr sends TTY_REGISTER for auto-login).
-    pub fn wire_shell_stdin(&mut self, endpoint: usize) {
-        self.shell_registered_stdin = endpoint;
-        self.shell_stdin = endpoint;
+    /// Enter Terminal mode (called on auto-login TTY_REGISTER; Path A — push wiring dropped).
+    pub fn enter_terminal_mode(&mut self) {
         self.auto_login_pending = false;
         if self.mode != TtyMode::Terminal {
             self.mode = TtyMode::Terminal;
             self.shell_spawn_requested = true;
             let _ = debug_print(&format!(
-                "tty:{}: auto-login wired, terminal mode", self.instance_id
+                "tty:{}: auto-login, terminal mode (Path A)", self.instance_id
             ));
         }
     }
 
     pub fn handle_session_death(&mut self) {
         let _ = debug_print(&format!("tty:{}: session died, returning to login", self.instance_id));
-        self.shell_stdin = 0;
-        self.shell_registered_stdin = 0;
         self.auto_login_pending = false;
         // Show login prompt and mark as requested so maybe_show_login_prompt
         // doesn't fire a duplicate on the next loop iteration.

@@ -14,8 +14,8 @@ mod protocol;
 use context::{TtyContext, TtyMode, LoginState};
 use libcluu::ipc::{
     extract_reply_id, reply, CONSOLE_CREDIT_REFILL_LABEL, KBD_EVENT_LABEL, TTY_CTL_LABEL,
-    TTY_FG_FLAG_FORWARD_CTRL_C, TTY_GET_FG_LABEL, TTY_POLL_QUERY_LABEL, TTY_READ_LABEL,
-    TTY_READ_REQUEST_LABEL, TTY_REGISTER_LABEL, TTY_SET_FG_LABEL, TTY_TAB_QUERY_LABEL,
+    TTY_GET_FG_LABEL, TTY_POLL_QUERY_LABEL,
+    TTY_READ_REQUEST_LABEL, TTY_REGISTER_LABEL, TTY_SET_FG_LABEL,
     TTY_WRITE_LABEL, TTY_WRITE_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
@@ -111,11 +111,17 @@ fn handle_one_message(
             // A process called read(0, buf, n) — enqueue the request
             if let Some(reply_token) = extract_reply_id(&msg) {
                 let max_bytes = msg.words[0];
+                let _ = libcluu::debug_print(&alloc::format!(
+                    "tty: TTY_READ_REQUEST reply_token={} max_bytes={} input_queue_len={}",
+                    reply_token, max_bytes, ctx.input_queue.len()
+                ));
                 ctx.pending_reads.push_back(context::PendingRead {
                     reply_token,
                     max_bytes,
                 });
                 ctx.try_satisfy_reads();
+            } else {
+                let _ = libcluu::debug_print("tty: TTY_READ_REQUEST no reply_token");
             }
         }
         TTY_WRITE_LABEL => {
@@ -170,8 +176,8 @@ fn handle_one_message(
             // words>=3: set route + Ctrl-C notify endpoint + policy flags.
             let foreground_endpoint = msg.words[0];
             if ctx.mode != TtyMode::Terminal && foreground_endpoint != 0 {
-                // Auto-login: procmgr wired shell stdin directly.
-                ctx.wire_shell_stdin(foreground_endpoint);
+                // Auto-login: enter Terminal mode (Path A — push wiring dropped).
+                ctx.enter_terminal_mode();
             } else if msg.tag.words >= 3 {
                 ctx.configure_foreground(
                     foreground_endpoint,
@@ -179,11 +185,7 @@ fn handle_one_message(
                     msg.words[2],
                 );
             } else {
-                ctx.configure_foreground(
-                    foreground_endpoint,
-                    0,
-                    TTY_FG_FLAG_FORWARD_CTRL_C,
-                );
+                ctx.configure_foreground(foreground_endpoint, 0, 0);
             }
             if foreground_endpoint == 0 {
                 // Foreground returned to shell: force canonical+echo so
@@ -324,26 +326,18 @@ fn apply_effect(ctx: &mut TtyContext, discipline: &mut LineDiscipline, effect: L
         ctx.try_satisfy_reads();
     }
 
-    if let Some((partial, tab_count)) = effect.tab_request {
-        if let Some(completion) = compute_path_completion(&partial, tab_count, ctx) {
-            // Echo the completion bytes and append to the line buffer so the
-            // user sees the suffix and the line ready-event will pick it up.
-            // For double-tab list mode the shell wrote the redraw via stdout
-            // and replies with empty payload, so this branch is skipped.
-            ctx.forward_to_console(&completion);
-            discipline.append_completion(&completion);
-        }
-    }
+    // TAB completion through the shell required a recv loop on the shell's
+    // stdin endpoint, which Path A retired. Re-wire later via fd-0-based
+    // completion (separate spec). For now, just drop the tab event.
+    let _ = effect.tab_request;
 
     if let Some(line) = effect.line_ready {
         let is_ctrl_c = line.len() == 1 && line[0] == 0x03;
         let is_ctrl_z = line.len() == 1 && line[0] == 0x1A;
 
         if is_ctrl_c {
-            // Existing ctrl_c_notify path: out-of-band notification to foreground.
-            if ctx.ctrl_c_notify != 0 {
-                let _ = libcluu::ipc::send_with_payload(ctx.ctrl_c_notify, TTY_READ_LABEL, &[0x03]);
-            }
+            // Out-of-band Ctrl-C notify retired with the TTY_READ_LABEL push.
+            // Job-control signal delivery via PROCMGR_PG_SIGNAL handles SIGINT.
             // Job-control: send SIGINT to the foreground pgid for this session.
             let session = ctx.session_id();
             if let Some(&pgid) = ctx.fg_pgid_per_session.get(&session) {
@@ -351,9 +345,8 @@ fn apply_effect(ctx: &mut TtyContext, discipline: &mut LineDiscipline, effect: L
                     let _ = send_pg_signal(ctx.procmgr_main, pgid, SIGINT);
                 }
             }
-            if !ctx.forward_ctrl_c {
-                return;
-            }
+            // Do not deliver Ctrl-C byte to readers.
+            return;
         }
 
         if is_ctrl_z {
@@ -386,56 +379,6 @@ fn send_pg_signal(procmgr_ep: usize, pgid: usize, signum: i32) -> Result<()> {
     libcluu::ipc::send(procmgr_ep, &msg, IpcFlags::empty())
 }
 
-/// Resolve a TAB press to a completion suffix or trigger a list redraw.
-///
-/// Synchronously calls shell's stdin endpoint with the whole partial buffer
-/// and the consecutive-TAB count. Shell parses the last token, does the
-/// readdir using its own VFS view + CWD (which TTY can't see), and either:
-/// - mode=complete (count=1): replies with a suffix to append, or empty.
-/// - mode=list (count>=2): writes the list + redrawn prompt via its own
-///   stdout endpoint, replies with an empty payload.
-///
-/// Returns `Some(bytes)` for a suffix to echo, `None` for "no completion /
-/// shell unavailable / list already drawn by shell" — all silent here.
-///
-/// 250 ms timeout: shell typically replies in well under a millisecond,
-/// but if it's mid-pipeline we'd rather drop the TAB than freeze TTY.
-fn compute_path_completion(
-    partial: &[u8],
-    tab_count: u8,
-    ctx: &mut TtyContext,
-) -> Option<alloc::vec::Vec<u8>> {
-    if ctx.shell_stdin == 0 {
-        return None;
-    }
-
-    // Mode: 0 = complete (single TAB), 1 = list (double+ TAB).
-    let mode: usize = if tab_count >= 2 { 1 } else { 0 };
-
-    let mut req = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 2);
-    req.words[0] = partial.len();
-    req.words[1] = mode;
-    let header = req.as_bytes();
-    let mut send_buf = alloc::vec::Vec::with_capacity(header.len() + partial.len());
-    send_buf.extend_from_slice(header);
-    send_buf.extend_from_slice(partial);
-
-    let mut reply_buf = [0u8; 256];
-    let bytes_recv = libcluu::syscall::ipc_call_timeout(
-        ctx.shell_stdin,
-        &send_buf,
-        &mut reply_buf,
-        250,
-    )
-    .ok()?;
-
-    let (msg, payload) = libcluu::ipc::parse_message(&reply_buf[..bytes_recv])?;
-    if msg.tag.label != TTY_TAB_QUERY_LABEL || payload.is_empty() {
-        return None;
-    }
-    Some(payload.to_vec())
-}
-
 /// Deliver a completed line by queueing it for the next TTY_READ_REQUEST.
 ///
 /// Path A unification: the shell (and any other reader) opens /dev/ttyN
@@ -443,6 +386,10 @@ fn compute_path_completion(
 /// TTY_READ_REQUEST_LABEL. There is no longer a TTY_READ_LABEL push path —
 /// bytes always sit in input_queue until a pending read drains them.
 fn deliver_line(ctx: &mut TtyContext, line: &[u8]) {
+    let _ = libcluu::debug_print(&alloc::format!(
+        "tty: deliver_line len={} pending_reads={}",
+        line.len(), ctx.pending_reads.len()
+    ));
     for &b in line {
         ctx.input_queue.push_back(b);
     }
