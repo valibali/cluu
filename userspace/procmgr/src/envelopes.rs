@@ -113,6 +113,7 @@ pub fn lookup_envelope<'a>(envelopes: &'a [Envelope], name: &str) -> Option<&'a 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     const SAMPLE: &str = r#"
 [envelope.user]
@@ -154,5 +155,34 @@ HOME = "/home/{user}"
 mounts = ["weird:/etc"]
 "#;
         assert!(parse_envelopes(bad).is_err());
+    }
+
+    #[test]
+    fn vt_substitution_in_mount_paths() {
+        let toml_input = r#"
+[envelope.user]
+[envelope.user.env]
+SHELL = "/bin/shell"
+[envelope.user.env_template]
+HOME = "/home/{user}"
+[envelope.user.vt_text]
+mounts = ["ro:/dev/tty{vt}", "ro:/dev/null"]
+[envelope.user.vt_graphical]
+mounts = ["rw:/dev/pts", "rw:/dev/fb0"]
+"#;
+        let envs = parse_envelopes(toml_input).expect("parse must succeed");
+        let env = &envs[0];
+
+        let mounts_text = resolve_session_mounts(env, /* session_kind */ 0, /* vt */ 2);
+        assert_eq!(mounts_text, vec![
+            String::from("ro:/dev/tty2"),
+            String::from("ro:/dev/null"),
+        ]);
+
+        let mounts_graphical = resolve_session_mounts(env, /* session_kind */ 1, /* vt */ 4);
+        assert_eq!(mounts_graphical, vec![
+            String::from("rw:/dev/pts"),
+            String::from("rw:/dev/fb0"),
+        ]);
     }
 }
