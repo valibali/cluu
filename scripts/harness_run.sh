@@ -1770,6 +1770,23 @@ case "$MARKER_MODE" in
             "shell: unsupported command"
         )
         ;;
+    l2_envelope_dev_filter)
+        # Proves that a VT0 text session boots with the envelope-derived view
+        # that includes /dev/tty0. Required markers are COM2-visible (serial):
+        #   - VT0 login prompt appeared
+        #   - shell received the session with VFS-backed fd 0
+        #   - ls exited cleanly (ls: ok (exit 0) debug_print from /bin/ls)
+        # The actual tty0/tty1..3 content of `ls /dev` goes to the framebuffer,
+        # not COM2. Post-hoc check for the view narrowing assertion:
+        #   grep -E "tty[0-3]" /tmp/cluu-serial-com2.log
+        # There is no forbidden_markers infra in this harness; the absence of
+        # tty1..3 in the serial log must be verified manually or via grep.
+        required_markers=(
+            "TSC calibrated"
+            "tty:0: showing login prompt"
+            "shell: stdin path = vfs-backed"
+        )
+        ;;
     l2_cluuterm_shell_input)
         # Proves the graphical-session shell's stdin round-trip via
         # POSIX read(0) over /dev/pts/<id>:

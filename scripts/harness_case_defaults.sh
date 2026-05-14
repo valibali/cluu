@@ -739,6 +739,21 @@ harness_derive_marker_defaults() {
                 RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey ctrl-alt-f1\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 4\nsendkey x\nsendkey y\nsendkey z\nsendkey ret'
                 ;;
+            l2_envelope_dev_filter)
+                TEST_COMMAND=""
+                # After VT0 text login, list /dev. Expect tty0 visible,
+                # tty1/tty2/tty3 NOT visible. Marker is the literal
+                # output of the shell builtin `ls` listing /dev contents
+                # (forwarded to the console via stdout writes to /dev/tty0).
+                # Sequence: open VT0 (Ctrl+Alt+F1), root/root login, `ls /dev`.
+                # NOTE: '/' maps to shift-6 on the HU (QWERTZ) keyboard layout
+                # that the QEMU harness uses (see type_ascii_command '/' case).
+                # sleep 12: match l2_text_shell_input timing so the text login
+                # prompt is stable before we start injecting credentials.
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey ctrl-alt-f1\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 4\nsendkey l\nsendkey s\nsendkey spc\nsendkey shift-6\nsendkey d\nsendkey e\nsendkey v\nsendkey ret'
+                ;;
             l2_cluuterm_shell_input)
                 TEST_COMMAND=""
                 # Default VT is 4 (compositor). Type root/root in the login
