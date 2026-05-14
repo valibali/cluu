@@ -123,13 +123,14 @@ fn parse_raw_mounts(doc: &libcluu::toml::TomlDoc, table_name: &str) -> Vec<Strin
     Vec::new()
 }
 
-/// Resolve the mount list for a session, applying `{vt}` substitution.
+/// Resolve the mount list for a session, applying `{vt}` and `{user}` substitution.
 ///
 /// - `session_kind == 1` selects the graphical mount list; any other value selects text.
 /// - If the selected list is empty, falls back to the legacy `env.mounts` field.
 /// - `{vt}` in every entry is replaced with the decimal representation of `vt`.
+/// - `{user}` in every entry is replaced with the provided `user` string.
 #[allow(dead_code)]
-pub fn resolve_session_mounts(env: &Envelope, session_kind: u8, vt: usize) -> Vec<String> {
+pub fn resolve_session_mounts(env: &Envelope, session_kind: u8, vt: usize, user: &str) -> Vec<String> {
     use alloc::format;
 
     let chosen = if session_kind == 1 {
@@ -141,7 +142,7 @@ pub fn resolve_session_mounts(env: &Envelope, session_kind: u8, vt: usize) -> Ve
     let vt_str = format!("{}", vt);
 
     if !chosen.is_empty() {
-        chosen.iter().map(|s| s.replace("{vt}", &vt_str)).collect()
+        chosen.iter().map(|s| s.replace("{vt}", &vt_str).replace("{user}", user)).collect()
     } else {
         // Fall back to legacy mounts.
         env.mounts.iter().map(|m| {
@@ -149,7 +150,9 @@ pub fn resolve_session_mounts(env: &Envelope, session_kind: u8, vt: usize) -> Ve
                 MountMode::Ro => "ro",
                 MountMode::Rw => "rw",
             };
-            format!("{}:{}", prefix, m.path).replace("{vt}", &vt_str)
+            format!("{}:{}", prefix, m.path)
+                .replace("{vt}", &vt_str)
+                .replace("{user}", user)
         }).collect()
     }
 }
@@ -223,16 +226,32 @@ mounts = ["rw:/dev/pts", "rw:/dev/fb0"]
         let envs = parse_envelopes(toml_input).expect("parse must succeed");
         let env = &envs[0];
 
-        let mounts_text = resolve_session_mounts(env, /* session_kind */ 0, /* vt */ 2);
+        let mounts_text = resolve_session_mounts(env, /* session_kind */ 0, /* vt */ 2, "x");
         assert_eq!(mounts_text, vec![
             String::from("ro:/dev/tty2"),
             String::from("ro:/dev/null"),
         ]);
 
-        let mounts_graphical = resolve_session_mounts(env, /* session_kind */ 1, /* vt */ 4);
+        let mounts_graphical = resolve_session_mounts(env, /* session_kind */ 1, /* vt */ 4, "x");
         assert_eq!(mounts_graphical, vec![
             String::from("rw:/dev/pts"),
             String::from("rw:/dev/fb0"),
+        ]);
+    }
+
+    #[test]
+    fn user_substitution_in_mount_paths() {
+        let toml_input = r#"
+[envelope.user]
+[envelope.user.env]
+[envelope.user.vt_text]
+mounts = ["rw:/home/{user}", "rw:/tmp/{user}"]
+"#;
+        let envs = parse_envelopes(toml_input).expect("parse must succeed");
+        let mounts = resolve_session_mounts(&envs[0], 0, 0, "alice");
+        assert_eq!(mounts, vec![
+            String::from("rw:/home/alice"),
+            String::from("rw:/tmp/alice"),
         ]);
     }
 }
