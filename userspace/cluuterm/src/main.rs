@@ -314,8 +314,10 @@ fn spawn_shell_with_pts(pts_id: u32) -> Result<(), i32> {
     let login_path = b"/bin/shell\0";
     let arg0 = b"shell\0";
     let argv: [*const u8; 2] = [arg0.as_ptr(), core::ptr::null()];
-    // Empty-but-non-null envp so posix_spawn does not fall back to `environ`.
-    let envp: [*const u8; 1] = [core::ptr::null()];
+    // envp = NULL tells libcluu's posix_spawn to fall back to our `environ`,
+    // which procmgr seeded from the user envelope at SESSION_LOGIN spawn.
+    // That carries HOME/USER/PATH down to the shell so .shellrc resolves
+    // and the prompt renders the right user/cwd.
     let mut child_pid: i32 = 0;
 
     let rc = unsafe {
@@ -325,7 +327,7 @@ fn spawn_shell_with_pts(pts_id: u32) -> Result<(), i32> {
             &fa_ptr as *const _ as *const core::ffi::c_void,
             core::ptr::null(),
             argv.as_ptr(),
-            envp.as_ptr(),
+            core::ptr::null(),
         )
     };
 
