@@ -6673,7 +6673,9 @@ fn resolve_path_in_view(path: &str, view: &[(String, String, bool, u64)]) -> Opt
     for (src, dst, _writable, _memfs_cid) in view {
         // Root mount matches everything
         if dst == "/" {
-            return Some(format!("{}{}", src, path));
+            // Strip trailing slash on src to avoid producing "//bin/shell"
+            // when src == "/" and path starts with "/".
+            return Some(format!("{}{}", src.trim_end_matches('/'), path));
         }
         // Exact match: path == dst
         if path == dst {
