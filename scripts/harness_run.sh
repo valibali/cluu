@@ -1803,6 +1803,19 @@ case "$MARKER_MODE" in
             "shell: unsupported command"
         )
         ;;
+    l2_envelope_home_propagated)
+        # Proves HOME=/home/root is correctly propagated to the graphical-
+        # session shell after login (Bug B regression guard).  The load-
+        # bearing marker is shellrc sourcing from /home/root/.shellrc (not
+        # //.shellrc — the pre-fix Bug B symptom).  No extra keystrokes
+        # needed: the boot-time shellrc-sourcing log fires automatically
+        # when the shell spawns.
+        required_markers=(
+            "TSC calibrated"
+            "shell: stdin path = vfs-backed"
+            "shellrc: sourcing /home/root/.shellrc"
+        )
+        ;;
     l2_cluuterm_ansi)
         # After login, run printf with a red SGR escape.  cluuterm's ANSI
         # parser fires an Event::SetAttr with the non-default fg colour and

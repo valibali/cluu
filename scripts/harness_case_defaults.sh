@@ -655,6 +655,17 @@ harness_derive_marker_defaults() {
                 RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
                 ;;
+            l2_envelope_home_propagated)
+                TEST_COMMAND=""
+                # After graphical login (VT4 cluuterm session), shell prints
+                # /home/root upon `echo $HOME`. Marker is the literal
+                # `vfs: open '/home/root/.shellrc'` from shellrc loading
+                # (proves HOME was populated by procmgr envelope substitution
+                # AND propagated through posix_spawn env trailer to the shell).
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
+                ;;
             l2_cluuterm_ansi)
                 TEST_COMMAND=""
                 # After login, run printf with a red SGR escape.  The harness
