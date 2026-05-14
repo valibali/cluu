@@ -36,40 +36,6 @@ use libcluu::{debug_print, yield_cpu, Result};
 
 extern "C" {
     fn _read(fd: core::ffi::c_int, buf: *mut core::ffi::c_void, count: usize) -> isize;
-    fn _open(path: *const u8, flags: core::ffi::c_int, mode: u32) -> core::ffi::c_int;
-    fn _dup2(oldfd: core::ffi::c_int, newfd: core::ffi::c_int) -> core::ffi::c_int;
-    fn _close(fd: core::ffi::c_int) -> core::ffi::c_int;
-}
-
-/// When started as a legacy VT shell, procmgr wires fd 0 to a TOKEN_STDIN
-/// IPC endpoint. Open `/dev/ttyN` ourselves and `dup2` it over fd 0/1/2 so
-/// the rest of the shell can use POSIX read/write — the same code path the
-/// cluuterm pts shell already uses. Returns true if rebound, false if the
-/// VT index was out of range or open/dup failed (caller falls back).
-fn rebind_stdio_to_devtty(vt_instance: usize) -> bool {
-    if vt_instance >= 4 {
-        return false;
-    }
-    let path = match vt_instance {
-        0 => b"/dev/tty0\0".as_ptr(),
-        1 => b"/dev/tty1\0".as_ptr(),
-        2 => b"/dev/tty2\0".as_ptr(),
-        3 => b"/dev/tty3\0".as_ptr(),
-        _ => return false,
-    };
-    const O_RDWR: core::ffi::c_int = 2;
-    let fd = unsafe { _open(path, O_RDWR, 0) };
-    if fd < 0 {
-        let _ = debug_print(&format!(
-            "shell: open /dev/tty{} failed; staying on TOKEN_STDIN push path", vt_instance
-        ));
-        return false;
-    }
-    let ok = unsafe {
-        _dup2(fd, 0) >= 0 && _dup2(fd, 1) >= 0 && _dup2(fd, 2) >= 0
-    };
-    unsafe { _close(fd); }
-    ok
 }
 
 #[no_mangle]
@@ -94,23 +60,19 @@ fn run() -> Result<()> {
         libcluu::fd_table::patch_vfs_stdio_endpoints(vfs_ep);
     }
 
-    // Step 3 Path A: unify stdin on POSIX fd 0. If fd 0 isn't already
-    // VFS-backed (cluuterm pts path already is), open /dev/ttyN ourselves
-    // and dup2 over fd 0/1/2. After this, both the legacy VT and cluuterm
-    // shells use POSIX read(0) — the TTY_READ_LABEL push protocol is dead.
+    // Procmgr seeds fd 0/1/2 via FDAC at every spawn. Shell unconditionally
+    // reads stdin via POSIX read(0). If the assertion ever trips, procmgr
+    // failed to wire FDAC and the child should exit rather than spin.
     let fd0_is_vfs_backed = libcluu::fd_table::FD_TABLE
         .lock()
         .get(0)
         .map(|e| e.remote_fd.is_some())
         .unwrap_or(false);
     if !fd0_is_vfs_backed {
-        let vt = info.params[PARAM_TTY_INSTANCE] as usize;
-        let _ = rebind_stdio_to_devtty(vt);
+        let _ = debug_print("shell: FATAL fd 0 not VFS-backed; parent FDAC missing");
+        return Err(libcluu::Error::InvalidState);
     }
-    let _ = debug_print(&format!(
-        "shell: stdin path = {}",
-        if fd0_is_vfs_backed { "vfs-backed" } else { "rebind-attempt" }
-    ));
+    let _ = debug_print("shell: stdin path = vfs-backed");
 
     let _stdin = info.tokens[TOKEN_STDIN];
     let _stderr = info.tokens[TOKEN_STDERR];
