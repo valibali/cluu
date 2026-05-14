@@ -38,6 +38,7 @@ SHELL_READY_WAIT_MAX="${SHELL_READY_WAIT_MAX:-45}"
 ALLOW_SLOW_SHELL_WAIT="${ALLOW_SLOW_SHELL_WAIT:-0}"
 HARNESS_CLEAN_REBUILD="${HARNESS_CLEAN_REBUILD:-0}"
 RUN_WAIT="${RUN_WAIT:-12}"
+RUN_WAIT_DEFAULT=""
 POST_SENDKEY="${POST_SENDKEY:-}"
 POST_SENDKEY_DELAY="${POST_SENDKEY_DELAY:-1}"
 # Multi-step raw-monitor sendkey sequence (newline-separated).
@@ -46,6 +47,11 @@ POST_SENDKEY_DELAY="${POST_SENDKEY_DELAY:-1}"
 # SENDKEY_SEQUENCE_DEFAULT (the latter is set by harness_case_defaults.sh).
 SENDKEY_SEQUENCE="${SENDKEY_SEQUENCE:-}"
 SENDKEY_SEQUENCE_DEFAULT=""
+# When 1, SENDKEY_SEQUENCE fires immediately after QEMU starts without waiting
+# for the "shell: ready" marker. Use for login-flow tests where there is no
+# shell yet at the time keystrokes need to be injected.
+SENDKEY_SEQUENCE_NOWAIT="${SENDKEY_SEQUENCE_NOWAIT:-0}"
+SENDKEY_SEQUENCE_NOWAIT_DEFAULT="0"
 TEST_COMMAND_WAS_UNSET=0
 # Preserve explicit empty TEST_COMMAND; only auto-fill when it is truly unset.
 if [ -z "${TEST_COMMAND+x}" ]; then
@@ -101,6 +107,12 @@ if [ -n "$POST_SENDKEY_DEFAULT" ] && [ -z "$POST_SENDKEY" ]; then
 fi
 if [ -n "$SENDKEY_SEQUENCE_DEFAULT" ] && [ -z "$SENDKEY_SEQUENCE" ]; then
     SENDKEY_SEQUENCE="$SENDKEY_SEQUENCE_DEFAULT"
+fi
+if [ "$SENDKEY_SEQUENCE_NOWAIT" = "0" ] && [ "$SENDKEY_SEQUENCE_NOWAIT_DEFAULT" = "1" ]; then
+    SENDKEY_SEQUENCE_NOWAIT="1"
+fi
+if [ -n "$RUN_WAIT_DEFAULT" ] && [ "$RUN_WAIT" = "12" ]; then
+    RUN_WAIT="$RUN_WAIT_DEFAULT"
 fi
 REQUIRED_MARKERS="${REQUIRED_MARKERS:-}"
 MIN_EXIT_COOKIES="${MIN_EXIT_COOKIES:-3}"
@@ -433,7 +445,14 @@ wait_for_shell_ready() {
     return 1
 }
 
-if [ "${#TYPED_COMMANDS[@]}" -gt 0 ] || [ -n "$POST_SENDKEY" ] || [ -n "$SENDKEY_SEQUENCE" ]; then
+_need_shell_ready=0
+if [ "${#TYPED_COMMANDS[@]}" -gt 0 ] || [ -n "$POST_SENDKEY" ]; then
+    _need_shell_ready=1
+fi
+if [ -n "$SENDKEY_SEQUENCE" ] && [ "$SENDKEY_SEQUENCE_NOWAIT" != "1" ]; then
+    _need_shell_ready=1
+fi
+if [ "$_need_shell_ready" = "1" ]; then
     echo "Waiting up to ${SHELL_READY_WAIT}s for shell readiness marker..."
     if ! wait_for_shell_ready; then
         echo "ERROR: shell readiness marker not observed within ${SHELL_READY_WAIT}s"

@@ -15,6 +15,8 @@
 harness_derive_marker_defaults() {
     SHELL_AUTOSTART_CMD_DEFAULT=""
     POST_SENDKEY_DEFAULT=""
+    SENDKEY_SEQUENCE_NOWAIT_DEFAULT="0"
+    RUN_WAIT_DEFAULT=""
     if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         case "$MARKER_MODE" in
             m3_mapfail) TEST_COMMAND="mapfail 12 4" ;;
@@ -729,7 +731,14 @@ harness_derive_marker_defaults() {
                 # captured on COM2 since console writes mirror there). If the
                 # shell never receives the line, the marker never fires and the
                 # harness times out.
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-f1\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey e\nsendkey c\nsendkey h\nsendkey o\nsendkey spc\nsendkey h\nsendkey i\nsendkey minus\nsendkey f\nsendkey r\nsendkey o\nsendkey m\nsendkey minus\nsendkey v\nsendkey t\nsendkey 0\nsendkey ret'
+                # NOWAIT: keystrokes fire immediately after QEMU monitor is
+                # ready — there is no shell yet; the sequence IS the login.
+                # sleep 8: QEMU monitor ready at ~2s, OS boots at ~8s; sleep
+                # 8 ensures kbd+vtmgr+tty are all up before the first key.
+                # RUN_WAIT=30: 10s boot + 11s seq sleeps + 3s shell spawn.
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="30"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 8\nsendkey ctrl-alt-f1\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey e\nsendkey c\nsendkey h\nsendkey o\nsendkey spc\nsendkey h\nsendkey i\nsendkey minus\nsendkey f\nsendkey r\nsendkey o\nsendkey m\nsendkey minus\nsendkey v\nsendkey t\nsendkey 0\nsendkey ret'
                 ;;
             legacy_p1)
                 TEST_COMMAND="minimal"

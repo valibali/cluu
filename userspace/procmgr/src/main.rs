@@ -2499,9 +2499,44 @@ impl ProcessManager {
         let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
         let (user_env, user_envc) = build_envelope_env_payload(&resolved_env);
 
-        // Temporarily wire stdout to target VT's tty
-        let saved = self.tty_endpoints[0];
-        self.tty_endpoints[0] = tty_ep;
+        // Open /dev/tty<vt> via procmgr's VFS client so the child shell's
+        // fd 0/1/2 are VFS-backed handles to the tty service, served via
+        // TTY_READ_REQUEST_LABEL on read(2). This retires the old
+        // TOKEN_STDIN push pattern for the legacy VT path.
+        let (tty_client_id, tty_remote_fd) = match self.open_dev_tty_for_session(vt_index) {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: open /dev/tty{} failed: {:?}; aborting login",
+                    vt_index, e
+                ));
+                reply_msg.words[0] = e.to_errno() as usize;
+                if let Some(tok) = reply_token {
+                    let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+                }
+                return Ok(());
+            }
+        };
+        let fdac_data = self.build_devtty_fdac(tty_client_id, tty_remote_fd);
+        let procmgr_main_tid = match self.procmgr_main_tid() {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: procmgr_main_tid lookup failed: {:?}", e
+                ));
+                reply_msg.words[0] = e.to_errno() as usize;
+                if let Some(tok) = reply_token {
+                    let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty());
+                }
+                return Ok(());
+            }
+        };
+
+        // Note: we no longer need to temporarily swap self.tty_endpoints[0]
+        // because FDAC fully describes fd 0/1/2. Keep the swap commented in
+        // case future stdout/log routing wants a fallback when FDAC parse
+        // fails — for now, FDAC is the only source of truth.
+        let _ = tty_ep; // suppress unused-warning until removed in Task 9
 
         match self.spawn_service_with_env(
             SERVICE_PATH,
@@ -2510,15 +2545,15 @@ impl ProcessManager {
             shell_argc,
             &user_env,
             user_envc,
-            1, // non-zero owner_tid to use caller_env_data
+            procmgr_main_tid, // VFS will see opens under this tid
             spawn_seq,
             spawn_start,
-            &[],
+            &fdac_data,
             profile,
             0,
             0,
             &[],
-            None, // no caller view (session login uses SERVICE_PATH constant)
+            None,
             &[],
             &[], // no redir
             THREAD_CREATE_START_SUSPENDED,
@@ -2581,7 +2616,6 @@ impl ProcessManager {
             }
         }
 
-        self.tty_endpoints[0] = saved;
         if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
         Ok(())
     }
