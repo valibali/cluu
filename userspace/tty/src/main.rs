@@ -111,17 +111,11 @@ fn handle_one_message(
             // A process called read(0, buf, n) — enqueue the request
             if let Some(reply_token) = extract_reply_id(&msg) {
                 let max_bytes = msg.words[0];
-                let _ = libcluu::debug_print(&alloc::format!(
-                    "tty: TTY_READ_REQUEST reply_token={} max_bytes={} input_queue_len={}",
-                    reply_token, max_bytes, ctx.input_queue.len()
-                ));
                 ctx.pending_reads.push_back(context::PendingRead {
                     reply_token,
                     max_bytes,
                 });
                 ctx.try_satisfy_reads();
-            } else {
-                let _ = libcluu::debug_print("tty: TTY_READ_REQUEST no reply_token");
             }
         }
         TTY_WRITE_LABEL => {
