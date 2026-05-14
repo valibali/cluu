@@ -735,6 +735,25 @@ harness_derive_marker_defaults() {
                 RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey ctrl-alt-f1\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 4\nsendkey x\nsendkey y\nsendkey z\nsendkey ret'
                 ;;
+            l2_cluuterm_shell_input)
+                TEST_COMMAND=""
+                # Default VT is 4 (compositor). Type root/root in the login
+                # modal, wait for cluuterm to take over and spawn /bin/shell,
+                # then type `xyz\n` so shell emits `shell: read 4 bytes`
+                # + `shell: unsupported command` debug_prints. Proves the
+                # cluuterm pts -> shell read(0) round-trip works.
+                #
+                # SENDKEY_SEQUENCE_NOWAIT_DEFAULT=1: the login modal spawns
+                # BEFORE any shell, so `shell: ready` cannot gate keystroke
+                # injection — we must fire keys unconditionally. The sleep
+                # values inside the sequence handle the timing:
+                #   sleep 5: compositor + login modal are ready by ~5s.
+                #   sleep 2: password field appears after username Enter.
+                #   sleep 3: cluuterm + shell start up after auth (~3s).
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 8\nsendkey x\nsendkey y\nsendkey z\nsendkey ret'
+                ;;
             legacy_p1)
                 TEST_COMMAND="minimal"
                 SHELL_AUTOSTART_CMD_DEFAULT="minimal"

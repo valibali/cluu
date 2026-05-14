@@ -1770,6 +1770,22 @@ case "$MARKER_MODE" in
             "shell: unsupported command"
         )
         ;;
+    l2_cluuterm_shell_input)
+        # Proves the graphical-session shell's stdin round-trip via
+        # POSIX read(0) over /dev/pts/<id>:
+        #   - login authenticates root on VT4
+        #   - cluuterm spawns /bin/shell with fd 0/1/2 bound to /dev/pts/0
+        #   - shell starts with fd 0 VFS-backed (patch_vfs_stdio_endpoints worked)
+        #   - shell receives and parses the typed line
+        required_markers=(
+            "TSC calibrated"
+            "login: user authenticated"
+            "cluuterm: /bin/shell spawned"
+            "shell: stdin path = vfs-backed"
+            "shell: read 4 bytes from fd 0"
+            "shell: unsupported command"
+        )
+        ;;
     l2_cluuterm_ansi)
         # After login, run printf with a red SGR escape.  cluuterm's ANSI
         # parser fires an Event::SetAttr with the non-default fg colour and

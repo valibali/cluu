@@ -256,6 +256,14 @@ fn run_vfs() -> Result<()> {
 
     debug_print("vfs: ready")?;
 
+    // Subscribe to tty:N main endpoints so /dev/tty* reads can forward
+    // TTY_READ_REQUEST to the live tty service.  Grants arrive asynchronously
+    // as RegistryEvent::Grant in the main loop and populate tty_endpoints[N].
+    for i in 0..4usize {
+        let name = alloc::format!("tty:{}", i);
+        let _ = registry::request_subscription(&name, "main");
+    }
+
     // FIXME(preload): startup-time PRELOAD activation is currently disabled
     // because the synchronous FS_READ_GRANT path has ~1s per-IPC overhead
     // regardless of payload size, so preloading ~28 binaries adds ~26s to
@@ -631,6 +639,11 @@ struct VfsServer {
     /// Registry of live `/dev/pts/<id>` pseudo-terminal slaves.
     /// Heap-allocated so the address is stable for the `PtsBackend` raw pointer.
     pts_registry: alloc::boxed::Box<pts::PtsRegistry>,
+    /// Live tty:N main endpoints.  Populated lazily as registry grants arrive.
+    /// Index 0 = tty:0 (VT0).  Used to satisfy read/write on /dev/tty* and
+    /// /dev/tty0 when the DeviceBackend was opened before the tty service
+    /// registered (i.e. endpoint was 0 at open-time).
+    tty_endpoints: [usize; 4],
 }
 
 impl VfsServer {
@@ -690,6 +703,7 @@ impl VfsServer {
             container_memfs: BTreeMap::new(),
             bounce_pool,
             pts_registry,
+            tty_endpoints: [0usize; 4],
         }
     }
 
@@ -765,7 +779,24 @@ impl VfsServer {
     }
 
     fn handle_registry_message(&mut self, msg: &Message, payload: &[u8], _sender_tid: usize) {
-        let _ = registry::handle_incoming_message(msg, payload);
+        if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
+            if let registry::RegistryEvent::Grant { service_name, name, token } = event {
+                // Populate /dev/tty* endpoints when tty:N/main grants arrive.
+                if name == "main" {
+                    if let Some(idx) = service_name
+                        .strip_prefix("tty:")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
+                        if idx < 4 {
+                            self.tty_endpoints[idx] = token;
+                            let _ = debug_print(&format!(
+                                "vfs: tty:{} main endpoint={}", idx, token
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Handle VFS_SET_VIEW_LABEL: register a per-client filesystem view.
@@ -1564,14 +1595,26 @@ impl VfsServer {
             OpenFile::Device(device) => {
                 use fd_table::DeviceType;
                 match device.device_type {
-                    DeviceType::Tty { endpoint, .. }
-                    | DeviceType::Tty0 { endpoint }
-                    | DeviceType::Console { endpoint }
-                        if endpoint != 0 =>
-                    {
-                        // Forward write to tty endpoint.
-                        let _ =
-                            ipc::send_with_payload(endpoint, libcluu::ipc::TTY_WRITE_LABEL, data);
+                    DeviceType::Tty { .. }
+                    | DeviceType::Tty0 { .. }
+                    | DeviceType::Console { .. } => {
+                        let (stored_ep, vt_idx) = match &device.device_type {
+                            DeviceType::Tty { vt_index, endpoint } => (*endpoint, *vt_index as usize),
+                            DeviceType::Tty0 { endpoint } => (*endpoint, 0usize),
+                            DeviceType::Console { endpoint } => (*endpoint, 0usize),
+                            _ => unreachable!(),
+                        };
+                        // Fallback to server-level tty_endpoints when stored_ep is 0
+                        // (device was opened before the tty service registered).
+                        let ep = if stored_ep != 0 {
+                            stored_ep
+                        } else {
+                            self.tty_endpoints.get(vt_idx).copied().unwrap_or(0)
+                        };
+                        if ep != 0 {
+                            // Forward write to tty endpoint.
+                            let _ = ipc::send_with_payload(ep, libcluu::ipc::TTY_WRITE_LABEL, data);
+                        }
                         reply_msg.words[0] = 0;
                         reply_msg.words[1] = data.len();
                     }
@@ -2561,10 +2604,21 @@ impl VfsServer {
                         unsafe { fill_random(buf.as_mut_ptr(), len) };
                         Ok(buf)
                     }
-                    DeviceType::Tty { endpoint, .. }
-                    | DeviceType::Tty0 { endpoint }
-                    | DeviceType::Console { endpoint } => {
-                        if endpoint == 0 {
+                    DeviceType::Tty { .. }
+                    | DeviceType::Tty0 { .. }
+                    | DeviceType::Console { .. } => {
+                        let (stored_ep, vt_idx) = match &device.device_type {
+                            DeviceType::Tty { vt_index, endpoint } => (*endpoint, *vt_index as usize),
+                            DeviceType::Tty0 { endpoint } => (*endpoint, 0usize),
+                            DeviceType::Console { endpoint } => (*endpoint, 0usize),
+                            _ => unreachable!(),
+                        };
+                        let ep = if stored_ep != 0 {
+                            stored_ep
+                        } else {
+                            self.tty_endpoints.get(vt_idx).copied().unwrap_or(0)
+                        };
+                        if ep == 0 {
                             return Err(Error::InvalidState);
                         }
                         // Forward read to tty via IPC.
@@ -2575,7 +2629,7 @@ impl VfsServer {
                         );
                         let mut tty_buf = [0u8; 256];
                         let (_reply, payload_len) =
-                            ipc::call_with_reply_buf(endpoint, &req, &[], &mut tty_buf)?;
+                            ipc::call_with_reply_buf(ep, &req, &[], &mut tty_buf)?;
                         let data_start = core::mem::size_of::<Message>();
                         let data_len = payload_len.min(requested);
                         Ok(tty_buf[data_start..data_start + data_len].to_vec())
@@ -2799,6 +2853,10 @@ impl VfsServer {
                 )?;
             }
             OpenFile::Device(device) => {
+                let _ = debug_print(&format!(
+                    "vfs: read_grant device client={} fd={} device_type={:?}",
+                    client_id, fd, core::mem::discriminant(&device.device_type)
+                ));
                 self.read_grant_device(
                     &device,
                     requested,
@@ -2806,6 +2864,10 @@ impl VfsServer {
                     target_space,
                     &mut reply_msg,
                 )?;
+                let _ = debug_print(&format!(
+                    "vfs: read_grant device done client={} fd={} result={}",
+                    client_id, fd, reply_msg.words[0]
+                ));
             }
             OpenFile::MemFs(entry) => {
                 let read_result: Result<Vec<u8>> = {
@@ -2835,9 +2897,44 @@ impl VfsServer {
                     }
                 }
             }
-            // PTS read_grant: stub until Task 15.
-            OpenFile::Pts(_) => {
-                reply_msg.words[0] = Error::NotImplemented.to_errno() as usize;
+            // PTS read_grant: forward to owning cluuterm via PTS_READ_LABEL,
+            // then copy the returned bytes into the caller's grant buffer.
+            // This unblocks shell read(0) on /dev/pts/<id>.
+            OpenFile::Pts(pts) => {
+                let ep = match self.pts_registry.notify_endpoint(pts.pts_id) {
+                    Some(ep) if ep != 0 => ep,
+                    _ => {
+                        reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                };
+                let req = Message::new(
+                    libcluu::ipc::PTS_READ_LABEL,
+                    [pts.pts_id as usize, requested, 0, 0, 0, 0],
+                    2,
+                );
+                const PTS_REPLY_BUF: usize = 1024;
+                let mut pts_buf = alloc::vec![0u8; PTS_REPLY_BUF];
+                match ipc::call_with_reply_buf(ep, &req, &[], &mut pts_buf) {
+                    Ok((_, payload_len)) => {
+                        let data_start = core::mem::size_of::<Message>();
+                        let data_len = payload_len.min(requested);
+                        if data_start + data_len <= pts_buf.len() {
+                            let data = pts_buf[data_start..data_start + data_len].to_vec();
+                            self.grant_data_to_caller(
+                                &data,
+                                target_base,
+                                target_space,
+                                &mut reply_msg,
+                            )?;
+                        } else {
+                            reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
+                        }
+                    }
+                    Err(err) => {
+                        reply_msg.words[0] = err.to_errno() as usize;
+                    }
+                }
             }
         }
 
@@ -3391,14 +3488,32 @@ impl VfsServer {
                 }
                 self.grant_buf_to_caller(len, target_base, target_space, reply_msg)
             }
-            DeviceType::Tty { endpoint, .. }
-            | DeviceType::Tty0 { endpoint }
-            | DeviceType::Console { endpoint } => {
+            DeviceType::Tty { .. }
+            | DeviceType::Tty0 { .. }
+            | DeviceType::Console { .. } => {
                 // TTY devices: forward read to the tty endpoint via IPC.
                 // For grant-based reads, we proxy through IPC_CALL to the tty.
-                if endpoint == 0 {
+                // Resolve vt_index and stored endpoint from the device type.
+                let (stored_ep, vt_idx) = match &device.device_type {
+                    DeviceType::Tty { vt_index, endpoint } => (*endpoint, *vt_index as usize),
+                    DeviceType::Tty0 { endpoint } => (*endpoint, 0usize),
+                    DeviceType::Console { endpoint } => (*endpoint, 0usize),
+                    _ => unreachable!(),
+                };
+                // Fall back to server-level tty_endpoints when the stored endpoint
+                // is 0 (device was opened before the tty service registered).
+                let ep = if stored_ep != 0 {
+                    stored_ep
+                } else {
+                    self.tty_endpoints.get(vt_idx).copied().unwrap_or(0)
+                };
+                if ep == 0 {
                     return Err(Error::InvalidState);
                 }
+                let _ = debug_print(&format!(
+                    "vfs: read_grant_device tty ep={} vt_idx={} req={}",
+                    ep, vt_idx, requested
+                ));
                 // Send TTY_READ_REQUEST to the tty endpoint and wait for reply.
                 let req = Message::new(
                     libcluu::ipc::TTY_READ_REQUEST_LABEL,
@@ -3406,8 +3521,12 @@ impl VfsServer {
                     1,
                 );
                 let mut tty_buf = [0u8; 256];
-                let (_reply_msg_out, payload_len) =
-                    ipc::call_with_reply_buf(endpoint, &req, &[], &mut tty_buf)?;
+                let call_result = ipc::call_with_reply_buf(ep, &req, &[], &mut tty_buf);
+                let _ = debug_print(&format!(
+                    "vfs: read_grant_device tty call returned ok={}",
+                    call_result.is_ok()
+                ));
+                let (_reply_msg_out, payload_len) = call_result?;
                 let data_start = core::mem::size_of::<Message>();
                 let data_len = payload_len.min(requested);
                 if data_len > 0 {
