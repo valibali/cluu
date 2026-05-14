@@ -108,7 +108,6 @@ pub use boot::{
     TOKEN_EXTRA_0,
     TOKEN_EXTRA_1,
     TOKEN_EXTRA_2,
-    TOKEN_EXTRA_3,
     TOKEN_EXTRA_4,
     TOKEN_EXTRA_5,
     TOKEN_EXTRA_6,

@@ -137,8 +137,6 @@ pub const TOKEN_EXTRA_0: usize = 9;
 pub const TOKEN_EXTRA_1: usize = 10;
 /// Extra capability slot 2 (slot 11) - e.g., DMA capability
 pub const TOKEN_EXTRA_2: usize = 11;
-/// Extra capability slot 3 (slot 12)
-pub const TOKEN_EXTRA_3: usize = 12;
 /// Extra capability slot 4 (slot 13)
 pub const TOKEN_EXTRA_4: usize = 13;
 /// Extra capability slot 5 (slot 14)
@@ -146,11 +144,11 @@ pub const TOKEN_EXTRA_5: usize = 14;
 /// Extra capability slot 6 (slot 15)
 pub const TOKEN_EXTRA_6: usize = 15;
 
-/// Thread-typed capability for the process's main thread (slot 12).
-///
-/// Currently only populated for procmgr (so it can call `thread_get_id` on
-/// itself to obtain its own tid for VFS-backed FDAC injection).  Zero in all
-/// other processes — do not read this slot unless you are procmgr.
+/// Thread-typed capability for the process's main thread. Only populated
+/// for procmgr — the thread_token is produced by `thread_create()` *after*
+/// the tokens array is built, so init does an explicit post-create patch
+/// (via THREAD_CREATE_START_SUSPENDED + ProcessInfo re-map + thread_resume)
+/// for procmgr alone. Zero in all other processes.
 pub const TOKEN_SELF_THREAD: usize = 12;
 
 // ─── Slot Ranges ────────────────────────────────────────────────────────────
