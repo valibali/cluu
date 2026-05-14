@@ -68,6 +68,21 @@ impl VfsViewTable {
     }
 
     /// Register a view for a client.
+    ///
+    /// # Monotone rule
+    ///
+    /// Every child view must be a subset of its parent's view (paths present
+    /// and write-permission no broader).  VFS does **not** enforce this here
+    /// because `set_view` has no knowledge of the parent–child relationship —
+    /// that lives entirely in procmgr (`pid_to_container_id`, `pid_to_view`).
+    ///
+    /// The assertion is therefore placed at the **procmgr call site**
+    /// (`install_view_and_run`) where both the parent view and the proposed
+    /// child view are available before the IPC is sent.
+    ///
+    /// TODO(plan2-task7): if/when a future refactor threads `parent_client_id`
+    /// through the `VFS_SET_VIEW_LABEL` wire protocol, add a
+    /// `#[cfg(debug_assertions)]` check here using `get_view(parent_client_id)`.
     pub fn set_view(&mut self, client_id: usize, view: VfsView) {
         self.views.insert(client_id, view);
     }

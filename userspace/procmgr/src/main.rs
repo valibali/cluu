@@ -874,6 +874,24 @@ impl ProcessManager {
     ///
     /// On thread_resume failure, logs and best-effort destroys the thread —
     /// otherwise we'd leak a forever-suspended thread.
+    ///
+    /// # Monotone-view assertion (debug builds only)
+    ///
+    /// In debug builds this function looks up the parent container's recorded
+    /// view and asserts that `mounts` does not widen it.
+    ///
+    /// **Exemptions** (view may differ from / be broader than the parent's
+    /// recorded view):
+    /// - `container_id == 0` — top-level service spawned directly by procmgr
+    ///   (procmgr's own SUPERVISOR view is always the root; no stored parent).
+    /// - Sites that perform an *authenticated identity switch* (escalate/sudo,
+    ///   su) — the new view is determined by the target user's pre-authorized
+    ///   envelope, not by the calling process.  The procmgr root-view is still
+    ///   the authoritative parent in those cases, not `pid_to_view[caller]`.
+    ///
+    /// TODO(plan2-task7): the parent_container_id is not threaded into this
+    /// function today, so we look it up via `container_instances`.  If this
+    /// becomes too expensive, thread parent_cid as a parameter instead.
     fn install_view_and_run(
         &mut self,
         thread_token: usize,
@@ -881,6 +899,40 @@ impl ProcessManager {
         profile: CapProfile,
         container_id: u64,
     ) {
+        // ── monotone-view debug assertion ─────────────────────────────────────
+        #[cfg(debug_assertions)]
+        if container_id != 0 {
+            // Find the parent container_id from the container registry.
+            let parent_cid = self.container_instances
+                .get(&container_id)
+                .map(|c| c.parent_container_id)
+                .unwrap_or(0);
+
+            if parent_cid != 0 {
+                // Look up a pid that owns the parent container to get its view.
+                let parent_view_opt = self.container_instances
+                    .get(&parent_cid)
+                    .and_then(|c| self.pid_to_view.get(&c.pid));
+
+                if let Some(parent_view) = parent_view_opt {
+                    if !can_narrow_view(parent_view, mounts) {
+                        let _ = debug_print(&format!(
+                            "procmgr: MONOTONE VIOLATION cid={} parent_cid={} \
+                             child view is not a subset of parent view",
+                            container_id, parent_cid
+                        ));
+                        // In a debug build this is a hard panic so the violation
+                        // is caught immediately rather than silently propagating.
+                        panic!(
+                            "monotone violation: child container {} view is not a \
+                             subset of parent {} view",
+                            container_id, parent_cid
+                        );
+                    }
+                }
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
         self.register_vfs_view_for_thread(thread_token, mounts, profile, container_id);
         if let Err(err) = thread_resume(thread_token) {
             let _ = debug_print(&format!(
