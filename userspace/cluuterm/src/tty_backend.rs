@@ -155,6 +155,11 @@ impl Cluuterm {
                 }
             }
             Event::Newline => {
+                // Treat bare LF as CR+LF (ONLCR semantics). Shell writes
+                // typically include only `\n` after a line, and there is
+                // no kernel tty driver in the pts data path to translate
+                // for us, so without this every line cascades right.
+                s.cursor_x = 0;
                 s.cursor_y += 1;
                 if s.cursor_y >= rows {
                     s.scroll_up();
