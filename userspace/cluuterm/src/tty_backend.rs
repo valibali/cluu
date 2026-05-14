@@ -51,6 +51,10 @@ pub struct Cluuterm {
     pub current_attr: Attr,
     /// Bytes queued for the next PTS_READ from VFS (shell stdin).
     pub stdin_buf: VecDeque<u8>,
+    /// Deferred PTS_READ reply when `stdin_buf` was empty at request time.
+    /// Held until input arrives so shell `read(0, ...)` blocks like a TTY
+    /// instead of getting an immediate 0-byte (EOF-looking) reply.
+    pending_pts_read: Option<(usize, usize)>,
 }
 
 // SAFETY: Cluuterm is single-threaded (cluuterm never spawns threads).
@@ -86,7 +90,30 @@ impl Cluuterm {
             cursor_y: 0,
             current_attr: default_attr,
             stdin_buf: VecDeque::new(),
+            pending_pts_read: None,
         }
+    }
+
+    /// Fulfill a deferred PTS_READ if one is pending and stdin now has data.
+    /// Called whenever new bytes land in `stdin_buf` (line discipline output,
+    /// raw byte injection, etc.).
+    pub fn try_flush_pending_pts_read(&mut self) {
+        let (reply_token, max) = match self.pending_pts_read.take() {
+            Some(p) => p,
+            None => return,
+        };
+        if self.stdin_buf.is_empty() {
+            // Re-arm and wait for more input.
+            self.pending_pts_read = Some((reply_token, max));
+            return;
+        }
+        let data = self.handle_pts_read(max);
+        let reply = Message::new(
+            PTS_READ_LABEL,
+            [0, data.len(), 0, 0, 0, 0],
+            2,
+        );
+        let _ = libcluu::ipc::reply_with_payload(reply_token, &reply, &data);
     }
 
     // ── PTS_WRITE — shell/app output → cell grid ───────────────────────
@@ -360,10 +387,17 @@ impl Cluuterm {
                 // ── Shell → VFS → cluuterm: read stdin bytes ─────────────
                 PTS_READ_LABEL => {
                     let max = msg.words[1].max(1);
-                    let data = self.handle_pts_read(max);
                     let reply_token = libcluu::ipc::extract_reply_id(&msg).unwrap_or(0);
-                    if reply_token != 0 {
-                        // Reply: words[0]=errno, words[1]=len; payload=bytes.
+                    if reply_token == 0 {
+                        // No reply slot — drop silently.
+                    } else if self.stdin_buf.is_empty() {
+                        // POSIX terminal read: block until at least one byte
+                        // is available. Defer reply; input.rs flushes via
+                        // try_flush_pending_pts_read when bytes arrive.
+                        // Most-recent caller wins if multiple pile up.
+                        self.pending_pts_read = Some((reply_token, max));
+                    } else {
+                        let data = self.handle_pts_read(max);
                         let reply = Message::new(
                             PTS_READ_LABEL,
                             [0, data.len(), 0, 0, 0, 0],

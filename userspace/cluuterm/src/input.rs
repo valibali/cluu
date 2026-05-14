@@ -73,6 +73,7 @@ fn apply_effect(term: &mut Cluuterm, effect: LineEffect) {
     // ── Raw mode: deliver byte immediately to stdin ─────────────────────────
     if let Some(raw) = effect.raw_byte {
         term.stdin_buf.push_back(raw);
+        term.try_flush_pending_pts_read();
     }
 
     // ── TAB completion: not supported in v1 ────────────────────────────────
@@ -104,5 +105,6 @@ fn apply_effect(term: &mut Cluuterm, effect: LineEffect) {
         for b in line {
             term.stdin_buf.push_back(b);
         }
+        term.try_flush_pending_pts_read();
     }
 }
