@@ -436,33 +436,15 @@ fn compute_path_completion(
     Some(payload.to_vec())
 }
 
-/// Deliver a completed line to pending readers or the shell.
+/// Deliver a completed line by queueing it for the next TTY_READ_REQUEST.
+///
+/// Path A unification: the shell (and any other reader) opens /dev/ttyN
+/// and calls POSIX read(0); VFS forwards the request here as
+/// TTY_READ_REQUEST_LABEL. There is no longer a TTY_READ_LABEL push path —
+/// bytes always sit in input_queue until a pending read drains them.
 fn deliver_line(ctx: &mut TtyContext, line: &[u8]) {
-    // If there are pending read() requests, satisfy them first
-    if !ctx.pending_reads.is_empty() {
-        for &b in line {
-            ctx.input_queue.push_back(b);
-        }
-        ctx.try_satisfy_reads();
-        // If pending readers were stale and dropped, hand remaining bytes back
-        // to shell delivery so input does not disappear after foreground exit.
-        if ctx.pending_reads.is_empty() && ctx.shell_stdin != 0 && !ctx.input_queue.is_empty() {
-            let buffered: alloc::vec::Vec<u8> = ctx.input_queue.drain(..).collect();
-            ctx.deliver_shell_line(&buffered);
-        }
-        return;
+    for &b in line {
+        ctx.input_queue.push_back(b);
     }
-
-    // If shell stdin routing is disabled (foreground child handover),
-    // keep bytes queued until a reader calls TTY_READ_REQUEST.
-    if ctx.shell_stdin == 0 {
-        for &b in line {
-            ctx.input_queue.push_back(b);
-        }
-        ctx.try_satisfy_reads();
-        return;
-    }
-
-    // Otherwise push to the shell (backward compat), with route repair.
-    ctx.deliver_shell_line(line);
+    ctx.try_satisfy_reads();
 }

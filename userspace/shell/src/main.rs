@@ -30,13 +30,47 @@ use libcluu::boot::{
     process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, PARAM_TTY_INSTANCE, TOKEN_STDERR, TOKEN_STDIN,
     TOKEN_STDLOG, TOKEN_STDOUT,
 };
-use libcluu::ipc::{
-    extract_reply_id, parse_message, reply_with_payload, send_with_payload, TTY_READ_LABEL,
-    TTY_TAB_QUERY_LABEL, TTY_WRITE_LABEL,
-};
+use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
 use libcluu::registry;
-use libcluu::types::Message;
-use libcluu::{debug_print, yield_cpu, Error, Result};
+use libcluu::{debug_print, yield_cpu, Result};
+
+extern "C" {
+    fn _read(fd: core::ffi::c_int, buf: *mut core::ffi::c_void, count: usize) -> isize;
+    fn _open(path: *const u8, flags: core::ffi::c_int, mode: u32) -> core::ffi::c_int;
+    fn _dup2(oldfd: core::ffi::c_int, newfd: core::ffi::c_int) -> core::ffi::c_int;
+    fn _close(fd: core::ffi::c_int) -> core::ffi::c_int;
+}
+
+/// When started as a legacy VT shell, procmgr wires fd 0 to a TOKEN_STDIN
+/// IPC endpoint. Open `/dev/ttyN` ourselves and `dup2` it over fd 0/1/2 so
+/// the rest of the shell can use POSIX read/write — the same code path the
+/// cluuterm pts shell already uses. Returns true if rebound, false if the
+/// VT index was out of range or open/dup failed (caller falls back).
+fn rebind_stdio_to_devtty(vt_instance: usize) -> bool {
+    if vt_instance >= 4 {
+        return false;
+    }
+    let path = match vt_instance {
+        0 => b"/dev/tty0\0".as_ptr(),
+        1 => b"/dev/tty1\0".as_ptr(),
+        2 => b"/dev/tty2\0".as_ptr(),
+        3 => b"/dev/tty3\0".as_ptr(),
+        _ => return false,
+    };
+    const O_RDWR: core::ffi::c_int = 2;
+    let fd = unsafe { _open(path, O_RDWR, 0) };
+    if fd < 0 {
+        let _ = debug_print(&format!(
+            "shell: open /dev/tty{} failed; staying on TOKEN_STDIN push path", vt_instance
+        ));
+        return false;
+    }
+    let ok = unsafe {
+        _dup2(fd, 0) >= 0 && _dup2(fd, 1) >= 0 && _dup2(fd, 2) >= 0
+    };
+    unsafe { _close(fd); }
+    ok
+}
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -50,7 +84,22 @@ fn run() -> Result<()> {
     let info = process_info();
     registry::init("shell")?;
     registry::register_default_outputs()?;
-    let stdin = info.tokens[TOKEN_STDIN];
+
+    // Step 3 Path A: unify stdin on POSIX fd 0. If fd 0 isn't already
+    // VFS-backed (cluuterm pts path already is), open /dev/ttyN ourselves
+    // and dup2 over fd 0/1/2. After this, both the legacy VT and cluuterm
+    // shells use POSIX read(0) — the TTY_READ_LABEL push protocol is dead.
+    let fd0_is_vfs_backed = libcluu::fd_table::FD_TABLE
+        .lock()
+        .get(0)
+        .map(|e| e.remote_fd.is_some())
+        .unwrap_or(false);
+    if !fd0_is_vfs_backed {
+        let vt = info.params[PARAM_TTY_INSTANCE] as usize;
+        let _ = rebind_stdio_to_devtty(vt);
+    }
+
+    let _stdin = info.tokens[TOKEN_STDIN];
     let _stderr = info.tokens[TOKEN_STDERR];
     let stdlog = info.tokens[TOKEN_STDLOG];
     // stdout is already connected to the correct tty:N by procmgr.
@@ -160,55 +209,36 @@ fn run() -> Result<()> {
         }
     }
 
-    let mut buf = [0u8; 128];
+    // ── Main loop: POSIX read(0) ────────────────────────────────────────────
+    // Path A: stdin is fd 0, served by either cluuterm (pts) or the tty
+    // service (via /dev/ttyN through VFS). Both block our read until at
+    // least one byte is available, so no busy-poll is needed.
+    //
+    // Registry control traffic is drained on demand by the various
+    // `registry::subscribe_output` calls inside builtins (each one calls
+    // `wait_for_grant` which pops grant messages from our control endpoint).
+    // Job-control notifications are drained between commands. With the
+    // recv_any-on-stdin loop gone there is no longer a periodic timeout
+    // to reap background jobs proactively; that's acceptable for v1 and
+    // can be reintroduced via a poll() with timeout once /dev/ttyN poll
+    // semantics are wired (see plan 2026-05-14-shell-stdio-posix-unify).
+    let _ = registry_endpoint; // silence warning until something needs it again
+    let mut buf = [0u8; 256];
     loop {
-        // Wait for either keyboard input via stdin or registry control traffic.
-        let tokens = [stdin, registry_endpoint];
-        match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, 250) {
-            Ok((index, len)) => {
-                if let Some((msg, payload)) = parse_message(&buf[..len]) {
-                    if index == 1 {
-                        // Registry control messages (grants/status).
-                        let _ = registry::handle_incoming_message(&msg, payload);
-                        continue;
-                    }
-                    if msg.tag.label == TTY_READ_LABEL {
-                        if !payload.is_empty() {
-                            handle_line_payload(stdout, stdlog, &mut command_context, payload)?;
-                        } else if msg.tag.words >= 2 {
-                            let ch = msg.words[1] as u8;
-                            handle_line_payload(stdout, stdlog, &mut command_context, &[ch])?;
-                        }
-                    } else if msg.tag.label == TTY_TAB_QUERY_LABEL {
-                        // TTY asked us to compute a tab completion using OUR
-                        // view + CWD (which TTY can't see).  Sync reply over
-                        // the call mechanism — typical readdir is sub-ms.
-                        // words[1] = mode: 0 = complete (single TAB), 1 = list
-                        // (double TAB). For list mode we write the redraw via
-                        // stdout and reply empty.
-                        if let Some(rid) = extract_reply_id(&msg) {
-                            let mode = msg.words[1] as u32;
-                            let suffix = handle_tab_query(payload, mode, stdout);
-                            let reply_msg = Message::new(TTY_TAB_QUERY_LABEL, [0; 6], 1);
-                            let _ = reply_with_payload(rid, &reply_msg, &suffix);
-                        }
-                    }
-                }
+        let n = unsafe { _read(0, buf.as_mut_ptr() as *mut core::ffi::c_void, buf.len()) };
+        if n > 0 {
+            handle_line_payload(stdout, stdlog, &mut command_context, &buf[..n as usize])?;
+            #[cfg(feature = "lang-parser")]
+            {
+                drain_job_notifications(&mut command_context);
+                reap_done_jobs(stdout, &mut command_context);
             }
-            Err(Error::Timeout) => {
-                #[cfg(feature = "lang-parser")]
-                {
-                    drain_job_notifications(&mut command_context);
-                    reap_done_jobs(stdout, &mut command_context);
-                }
-                let _ = yield_cpu();
-            }
-            Err(Error::WouldBlock) => {
-                let _ = yield_cpu();
-            }
-            Err(_) => {
-                let _ = yield_cpu();
-            }
+        } else if n == 0 {
+            // EOF on stdin (pts owner / tty service gone). Exit cleanly.
+            return Ok(());
+        } else {
+            // Negative = errno set. Yield and retry — typically transient.
+            let _ = yield_cpu();
         }
     }
 }
@@ -223,21 +253,11 @@ fn print_prompt(_endpoint: usize) -> Result<()> {
 
 /// Resolve a tab-completion query forwarded from TTY.
 ///
-/// Input: `payload` is the whole partial line buffer the user is typing.
-/// `mode` is 0 for single-TAB (complete) or 1 for double-TAB (list).
-/// `stdout` is the TTY write endpoint — used in list mode to emit the
-/// list + redrawn prompt directly.
-///
-/// Output (returned bytes): the suffix to append after the current token
-/// (with trailing '/' for directories or ' ' for files when uniquely matched,
-/// or the common-prefix extension for ambiguous matches), or empty for
-/// "no unique completion / list mode handled / no matches."
-///
-/// Splits the last token at the rightmost '/' into (parent_dir, prefix).
-/// If parent_dir is absent or relative, resolves against shell's CWD —
-/// which is exactly the TTY-side limitation we're working around. Calls
-/// VFS readdir using shell's view, so /etc and /var (and anything else
-/// the user's envelope grants) are visible to tab.
+/// Currently unreachable: the TTY_TAB_QUERY_LABEL recv path was removed
+/// with the shell stdin migration to POSIX read(0). Kept for the future
+/// fd-0-based completion plumbing (cluuterm or /dev/ttyN); will be wired
+/// up again once a TAB injection mechanism exists on the new path.
+#[allow(dead_code)]
 fn handle_tab_query(payload: &[u8], mode: u32, stdout: usize) -> Vec<u8> {
     let buf = match core::str::from_utf8(payload) {
         Ok(s) => s,
@@ -322,6 +342,7 @@ fn handle_tab_query(payload: &[u8], mode: u32, stdout: usize) -> Vec<u8> {
 
 /// Length of the longest string prefix shared by all `names`. Empty if no
 /// common prefix or `names` is empty.
+#[allow(dead_code)]
 fn longest_common_prefix<'a, I: IntoIterator<Item = &'a str>>(names: I) -> String {
     let mut iter = names.into_iter();
     let first = match iter.next() {
@@ -351,6 +372,7 @@ fn longest_common_prefix<'a, I: IntoIterator<Item = &'a str>>(names: I) -> Strin
 
 /// Emit the double-TAB redraw: newline, formatted match list, newline,
 /// fresh prompt, then the current buffer so the user can keep typing.
+#[allow(dead_code)]
 fn emit_tab_list(stdout: usize, matches: &[&libcluu::fs::client::VfsDirEntry], buf: &str) {
     let mut out = String::from("\r\n");
     let mut first = true;
@@ -380,6 +402,7 @@ fn emit_tab_list(stdout: usize, matches: &[&libcluu::fs::client::VfsDirEntry], b
 /// Shell is single-threaded, so the cache uses a plain AtomicUsize:
 ///   0  = not yet acquired (first call should fetch)
 ///   !0 = endpoint token (reuse forever)
+#[allow(dead_code)]
 fn cached_vfs_endpoint() -> Option<usize> {
     use core::sync::atomic::{AtomicUsize, Ordering};
     static VFS_ENDPOINT: AtomicUsize = AtomicUsize::new(0);
@@ -484,6 +507,7 @@ fn startup_command_from_process_info() -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 fn print_banner(_tty_endpoint: usize) -> Result<()> {
     // ASCII-only banner, stored in a separate file for easy editing.
     const BANNER: &str = include_str!("banner.txt");
