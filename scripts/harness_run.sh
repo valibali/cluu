@@ -1733,7 +1733,7 @@ case "$MARKER_MODE" in
         # on successful authentication.
         required_markers=(
             "TSC calibrated"
-            "cluuterm: /bin/login spawned"
+            "cluuterm: /bin/shell spawned"
             "login: user authenticated"
         )
         ;;
@@ -1755,7 +1755,7 @@ case "$MARKER_MODE" in
         # emits a COM2 debug line with the ARGB hex value.
         required_markers=(
             "TSC calibrated"
-            "cluuterm: /bin/login spawned"
+            "cluuterm: /bin/shell spawned"
             "login: user authenticated"
             "cluuterm: ansi sgr fg=AA0000"
         )
@@ -1766,7 +1766,7 @@ case "$MARKER_MODE" in
         # (0x1b first byte) and logs the event on COM2.
         required_markers=(
             "TSC calibrated"
-            "cluuterm: /bin/login spawned"
+            "cluuterm: /bin/shell spawned"
             "login: user authenticated"
             "cluuterm: input csi 1b"
         )
@@ -1777,7 +1777,7 @@ case "$MARKER_MODE" in
         # to the compositor (compositor logs "window destroyed").
         required_markers=(
             "TSC calibrated"
-            "cluuterm: /bin/login spawned"
+            "cluuterm: /bin/shell spawned"
             "login: user authenticated"
             "cluuterm: shutdown"
             "compositor: window destroyed"
