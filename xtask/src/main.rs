@@ -2545,12 +2545,7 @@ fn manifest_rights_mask(path: &str) -> u32 {
                 | RIGHT_IRQ_HANDLE
                 | RIGHT_IRQ_ACK
         }
-        "sys/tpmd" => {
-            RIGHT_SPACE_MAP
-                | RIGHT_IPC_SEND
-                | RIGHT_IPC_RECV
-                | RIGHT_CREATE
-        }
+        "sys/tpmd" => RIGHT_SPACE_MAP | RIGHT_IPC_SEND | RIGHT_IPC_RECV | RIGHT_CREATE,
         _ => ALL_RIGHTS_MASK,
     }
 }
@@ -2614,7 +2609,7 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     // Create bootboot config file. Optional extra BOOTBOOT environment lines
     // can be injected via CLUU_BOOTBOOT_ENV (newline or ';' separated).
     let mut bootboot_config =
-        String::from("// BOOTBOOT configuration\nscreen=1920x1080\nkernel=sys/core\n");
+        String::from("// BOOTBOOT configuration\nscreen=1280x720\nkernel=sys/core\n");
     if let Ok(extra_env) = std::env::var("CLUU_BOOTBOOT_ENV") {
         for line in extra_env
             .split(['\n', ';'])
@@ -3952,15 +3947,15 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
     // `-g`, so the `.debug_*` sections survive even after --gc-sections
     // for everything that ends up referenced. Stripping recovers the rest
     // of the win (4.5 MB → ~50 KB for hello-world C bins).
-    let strip_flag = if profile == "dev" { None } else { Some("--strip-all") };
+    let strip_flag = if profile == "dev" {
+        None
+    } else {
+        Some("--strip-all")
+    };
 
     let link_success = {
         let mut link_cmd = Command::new("ld.lld");
-        link_cmd.args([
-            "-T",
-            linker_script.to_str().unwrap(),
-            "--gc-sections",
-        ]);
+        link_cmd.args(["-T", linker_script.to_str().unwrap(), "--gc-sections"]);
         if let Some(s) = strip_flag {
             link_cmd.arg(s);
         }
@@ -3987,11 +3982,7 @@ fn build_c_program(name: &str, source: &Path, profile: &str) -> Result<()> {
                 // Fall back to GNU ld
                 println!("  ld.lld not found, trying x86_64-linux-gnu-ld...");
                 let mut ld_cmd = Command::new("x86_64-linux-gnu-ld");
-                ld_cmd.args([
-                    "-T",
-                    linker_script.to_str().unwrap(),
-                    "--gc-sections",
-                ]);
+                ld_cmd.args(["-T", linker_script.to_str().unwrap(), "--gc-sections"]);
                 if let Some(s) = strip_flag {
                     ld_cmd.arg(s);
                 }

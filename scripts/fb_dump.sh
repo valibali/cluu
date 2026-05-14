@@ -23,8 +23,8 @@
 set -euo pipefail
 
 MONITOR_SOCK="${MONITOR_SOCK:-/tmp/cluu-qemu-monitor.sock}"
-WIDTH="${FB_WIDTH:-1920}"
-HEIGHT="${FB_HEIGHT:-1080}"
+WIDTH="${FB_WIDTH:-1280}"
+HEIGHT="${FB_HEIGHT:-720}"
 SIZE="${FB_SIZE:-}"
 PHYS="${FB_PHYS:-}"
 OUT="${OUT:-/tmp/fb_dump}"
