@@ -30,6 +30,8 @@ pub struct Envelope {
     pub mounts: Vec<MountSpec>,
     pub env: BTreeMap<String, String>,
     pub env_template: BTreeMap<String, String>,
+    pub vt_text_mounts: Vec<String>,
+    pub vt_graphical_mounts: Vec<String>,
 }
 
 /// Apply `{user}` substitution to env_template, merging with static env.
@@ -64,29 +66,36 @@ pub fn parse_envelopes(toml_str: &str) -> Result<Vec<Envelope>, String> {
 
         let name = suffix.to_string();
 
-        // Parse mounts from "mode:path" string array.
-        let mounts_raw = table.get_array("mounts")
-            .ok_or_else(|| format!("envelope '{}' missing mounts array", name))?;
-        let mut mounts = Vec::with_capacity(mounts_raw.len());
-        for (idx, raw) in mounts_raw.iter().enumerate() {
-            let (mode_str, path) = raw.split_once(':')
-                .ok_or_else(|| format!("envelope '{}' mount {} not in 'mode:path' form: '{}'", name, idx, raw))?;
-            let mode = match mode_str {
-                "ro" | "readonly" => MountMode::Ro,
-                "rw" | "readwrite" => MountMode::Rw,
-                other => return Err(format!("envelope '{}' mount {} unknown mode '{}'", name, idx, other)),
-            };
-            if path.is_empty() {
-                return Err(format!("envelope '{}' mount {} has empty path", name, idx));
+        // Parse mounts from "mode:path" string array (optional; defaults to empty).
+        let mounts = if let Some(mounts_raw) = table.get_array("mounts") {
+            let mut parsed = Vec::with_capacity(mounts_raw.len());
+            for (idx, raw) in mounts_raw.iter().enumerate() {
+                let (mode_str, path) = raw.split_once(':')
+                    .ok_or_else(|| format!("envelope '{}' mount {} not in 'mode:path' form: '{}'", name, idx, raw))?;
+                let mode = match mode_str {
+                    "ro" | "readonly" => MountMode::Ro,
+                    "rw" | "readwrite" => MountMode::Rw,
+                    other => return Err(format!("envelope '{}' mount {} unknown mode '{}'", name, idx, other)),
+                };
+                if path.is_empty() {
+                    return Err(format!("envelope '{}' mount {} has empty path", name, idx));
+                }
+                parsed.push(MountSpec { path: path.to_string(), mode });
             }
-            mounts.push(MountSpec { path: path.to_string(), mode });
-        }
+            parsed
+        } else {
+            Vec::new()
+        };
+
+        // Parse vt_text and vt_graphical sub-tables' mounts arrays (raw strings).
+        let vt_text_mounts = parse_raw_mounts(&doc, &format!("envelope.{}.vt_text", name));
+        let vt_graphical_mounts = parse_raw_mounts(&doc, &format!("envelope.{}.vt_graphical", name));
 
         // Parse env and env_template from the corresponding sub-tables.
         let env = parse_string_table(&doc, &format!("envelope.{}.env", name));
         let env_template = parse_string_table(&doc, &format!("envelope.{}.env_template", name));
 
-        envelopes.push(Envelope { name, mounts, env, env_template });
+        envelopes.push(Envelope { name, mounts, env, env_template, vt_text_mounts, vt_graphical_mounts });
     }
     Ok(envelopes)
 }
@@ -102,6 +111,47 @@ fn parse_string_table(doc: &libcluu::toml::TomlDoc, name: &str) -> BTreeMap<Stri
         }
     }
     out
+}
+
+/// Helper: pull the `mounts` array from a named sub-table as raw strings.
+fn parse_raw_mounts(doc: &libcluu::toml::TomlDoc, table_name: &str) -> Vec<String> {
+    if let Some(table) = doc.table(table_name) {
+        if let Some(raw_vec) = table.get_array("mounts") {
+            return raw_vec.into_iter().map(|s| s.clone()).collect();
+        }
+    }
+    Vec::new()
+}
+
+/// Resolve the mount list for a session, applying `{vt}` substitution.
+///
+/// - `session_kind == 1` selects the graphical mount list; any other value selects text.
+/// - If the selected list is empty, falls back to the legacy `env.mounts` field.
+/// - `{vt}` in every entry is replaced with the decimal representation of `vt`.
+#[allow(dead_code)]
+pub fn resolve_session_mounts(env: &Envelope, session_kind: u8, vt: usize) -> Vec<String> {
+    use alloc::format;
+
+    let chosen = if session_kind == 1 {
+        &env.vt_graphical_mounts
+    } else {
+        &env.vt_text_mounts
+    };
+
+    let vt_str = format!("{}", vt);
+
+    if !chosen.is_empty() {
+        chosen.iter().map(|s| s.replace("{vt}", &vt_str)).collect()
+    } else {
+        // Fall back to legacy mounts.
+        env.mounts.iter().map(|m| {
+            let prefix = match m.mode {
+                MountMode::Ro => "ro",
+                MountMode::Rw => "rw",
+            };
+            format!("{}:{}", prefix, m.path).replace("{vt}", &vt_str)
+        }).collect()
+    }
 }
 
 /// Look up an envelope by name in a parsed list.

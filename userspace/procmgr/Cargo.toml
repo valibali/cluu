@@ -9,6 +9,13 @@ license = "MIT"
 [dependencies]
 libcluu = { path = "../libcluu" }
 
+[dev-dependencies]
+libcluu = { path = "../libcluu", features = ["host-test"] }
+
+[features]
+default = []
+host-test = ["libcluu/host-test"]  # enables std for unit tests on host
+
 [lib]
 name = "procmgr"
 path = "src/lib.rs"
