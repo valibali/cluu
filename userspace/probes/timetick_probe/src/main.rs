@@ -1,8 +1,13 @@
 //! Periodic-tick subscription smoke test.
 //!
-//! Subscribes to the timeserver with period_ms=100, counts 10 TIME_TICK
-//! push messages, then prints `TIMETICK_PROBE: count=10` and exits.
+//! Default mode: subscribes with period_ms=100, counts 10 TIME_TICK push
+//! messages, then prints `TIMETICK_PROBE: count=10` and exits.
 //! Maps to harness marker mode `l2_timeserver_pushmode_tick`.
+//!
+//! Die mode (`argv[1] == "die"`): subscribes with period_ms=50, prints
+//! `TIMETICK_PROBE: die-mode subscribed` and exits immediately WITHOUT
+//! unsubscribing. The timeserver will detect 3 consecutive send failures and
+//! auto-remove the subscriber. Maps to `l2_timeserver_pushmode_revoke`.
 
 #![no_std]
 #![no_main]
@@ -28,6 +33,10 @@ fn fail(msg: &str) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
+    // Detect die mode: argv[1] == "die".
+    let args = libcluu::args::args();
+    let die_mode = args.iter().any(|a| a == "die");
+
     // Init registry so subscribe_output can resolve "timeserver".
     if registry::init("timetick_probe").is_err() {
         return fail("registry::init");
@@ -47,11 +56,14 @@ pub extern "C" fn main() -> i32 {
         Err(_) => return fail("endpoint_create"),
     };
 
+    // Choose period: 50 ms in die mode, 100 ms in normal mode.
+    let period_ms = if die_mode { 50 } else { 100 };
+
     // Send TIME_SUBSCRIBE_PERIODIC.
     // Wire: words[0]=period_ms  words[1]=notify_ep
     let mut msg = Message::new(
         TIME_SUBSCRIBE_PERIODIC_LABEL,
-        [100, notify_ep, 0, 0, 0, 0],
+        [period_ms, notify_ep, 0, 0, 0, 0],
         2,
     );
     if libcluu::ipc::call(time_ep, &mut msg, IpcFlags::empty()).is_err() {
@@ -59,6 +71,13 @@ pub extern "C" fn main() -> i32 {
     }
     if msg.words[0] != 0 {
         return fail(&format!("subscribe errno={}", msg.words[0]));
+    }
+
+    if die_mode {
+        // Exit immediately without unsubscribing. The timeserver will detect
+        // 3 consecutive send failures (~3 × 50 ms) and remove the subscriber.
+        let _ = debug_print("TIMETICK_PROBE: die-mode subscribed, exiting");
+        return 0;
     }
 
     // Receive 10 TIME_TICK push messages.
