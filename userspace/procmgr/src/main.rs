@@ -256,6 +256,9 @@ struct ProcessManager {
     /// Bitmask: bit N set means subscription for tty:N was requested.
     requested_tty_mask: u8,
     vfs_endpoint: usize,    // VFS service endpoint
+    /// Cached value of procmgr's main-thread tid; 0 means not yet looked up.
+    /// Used by VFS-backed FDAC injection (see `procmgr_main_tid`).
+    cached_main_tid: usize,
     /// virtio-blk listen endpoint for BLK_TID_CLEANUP broadcasts. Resolved
     /// lazily on first cleanup so we don't depend on blkdev boot order.
     blkdev_endpoint: usize,
@@ -338,6 +341,7 @@ impl ProcessManager {
             requested_tty_mask: 0,
             vfs_read_ring: None,
             vfs_endpoint: 0,
+            cached_main_tid: 0,
             blkdev_endpoint: 0,
             space_token: info.tokens[TOKEN_SPACE],
             grant_base_next: 0x50100000, // Start after virtqueue region
@@ -762,6 +766,55 @@ impl ProcessManager {
         self.register_manager_vfs_view();
         self.flush_pending_vfs_views();
         Ok(())
+    }
+
+    /// Open `/dev/tty<vt>` via procmgr's own VFS client. Used at session-login
+    /// to seed FDAC entries for the legacy text shell.
+    ///
+    /// Returns `(client_id, remote_fd)` — the pair that the FDAC parser
+    /// expects on a VFS-backed FdAction. `client_id` is procmgr's main-thread
+    /// tid (what VFS authenticated the open under); `remote_fd` is VFS's
+    /// table fd for the open. Both nonzero on success.
+    fn open_dev_tty_for_session(&mut self, vt: usize) -> Result<(usize, usize)> {
+        if vt >= 4 {
+            return Err(Error::InvalidArgument);
+        }
+        if self.vfs_endpoint == 0 {
+            self.ensure_vfs_endpoint()?;
+        }
+        // VFS authenticates by kernel sender_tid; pass 0 as the client-id
+        // hint, VFS will overwrite with procmgr's authenticated tid.
+        let client = VfsClient::new(self.vfs_endpoint, 0);
+        let path = match vt {
+            0 => "/dev/tty0",
+            1 => "/dev/tty1",
+            2 => "/dev/tty2",
+            3 => "/dev/tty3",
+            _ => unreachable!(),
+        };
+        const O_RDWR: usize = 2;
+        let file = client.open_with(path, O_RDWR, 0)?;
+        // Procmgr's main-thread tid is the sender_tid the kernel uses for
+        // every IPC from procmgr's main loop. Capture once and cache.
+        let procmgr_tid = self.procmgr_main_tid()?;
+        Ok((procmgr_tid, file.fd))
+    }
+
+    /// Return procmgr's main-thread tid, caching after first lookup.
+    /// Used by VFS-backed FDAC injection so the FDAC parser knows which
+    /// client_id VFS keys the open under.
+    fn procmgr_main_tid(&mut self) -> Result<usize> {
+        if self.cached_main_tid != 0 {
+            return Ok(self.cached_main_tid);
+        }
+        // self.token is TOKEN_SELF (process cap), not a thread token. We need
+        // the *thread* cap for the main thread. libcluu exposes one via the
+        // current ProcessInfo.tokens[TOKEN_SELF] slot at boot; procmgr keeps
+        // that as `self.token` already. thread_get_id accepts any thread cap;
+        // pass it through and the kernel returns the calling thread's tid.
+        let tid = thread_get_id(self.token)?;
+        self.cached_main_tid = tid;
+        Ok(tid)
     }
 
     /// Install a VFS view for a thread, then resume it.
