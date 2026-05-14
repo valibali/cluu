@@ -14,17 +14,6 @@
 # See docs/superpowers/specs/2026-04-28-user-envelope-design.md.
 
 [envelope.user]
-mounts = [
-    "ro:/",
-    "ro:/etc",
-    "ro:/lib",
-    "ro:/usr",
-    "ro:/bin",
-    "rw:/var/log",
-    "rw:/tmp",
-    "rw:/home",
-    "rw:/dev/pts",
-]
 
 [envelope.user.env]
 SHELL = "/bin/shell"
@@ -33,25 +22,34 @@ PATH = "/bin:/usr/bin"
 LANG = "C"
 
 [envelope.user.env_template]
-HOME = "/home/{user}"
-USER = "{user}"
+HOME    = "/home/{user}"
+USER    = "{user}"
 LOGNAME = "{user}"
-PWD = "/home/{user}"
+PWD     = "/home/{user}"
+
+[envelope.user.vt_text]
+mounts = [
+    "ro:/bin", "ro:/usr", "ro:/lib", "ro:/etc",
+    "ro:/dev/tty{vt}",
+    "ro:/dev/null", "ro:/dev/zero", "ro:/dev/urandom",
+    "rw:/home/{user}",
+    "rw:/tmp",
+    "ro:/proc",
+]
+
+[envelope.user.vt_graphical]
+mounts = [
+    "ro:/bin", "ro:/usr", "ro:/lib", "ro:/etc",
+    "rw:/dev/pts",
+    "rw:/dev/fb0",
+    "ro:/dev/null", "ro:/dev/zero", "ro:/dev/urandom",
+    "rw:/home/{user}",
+    "rw:/tmp",
+    "ro:/proc",
+]
 
 
 [envelope.admin]
-mounts = [
-    "rw:/",
-    "rw:/etc",
-    "rw:/lib",
-    "rw:/usr",
-    "rw:/bin",
-    "rw:/var",
-    "rw:/tmp",
-    "rw:/home",
-    "rw:/proc",
-    "rw:/dev/pts",
-]
 
 [envelope.admin.env]
 SHELL = "/bin/shell"
@@ -60,27 +58,36 @@ PATH = "/sbin:/bin:/usr/sbin:/usr/bin"
 LANG = "C"
 
 [envelope.admin.env_template]
-HOME = "/home/{user}"
-USER = "{user}"
+HOME    = "/home/{user}"
+USER    = "{user}"
 LOGNAME = "{user}"
-PWD = "/home/{user}"
+PWD     = "/home/{user}"
+
+[envelope.admin.vt_text]
+mounts = [
+    "rw:/", "rw:/etc", "rw:/lib", "rw:/usr", "rw:/bin", "rw:/var",
+    "rw:/tmp", "rw:/home",
+    "rw:/dev/tty{vt}",
+    "rw:/dev/null", "rw:/dev/zero", "rw:/dev/urandom",
+    "rw:/dev/console",
+    "rw:/proc",
+]
+
+[envelope.admin.vt_graphical]
+mounts = [
+    "rw:/", "rw:/etc", "rw:/lib", "rw:/usr", "rw:/bin", "rw:/var",
+    "rw:/tmp", "rw:/home",
+    "rw:/dev/pts", "rw:/dev/fb0",
+    "rw:/dev/null", "rw:/dev/zero", "rw:/dev/urandom",
+    "rw:/dev/console",
+    "rw:/proc",
+]
 
 
 [envelope.supervisor]
 # Same as admin — supervisor profile maps to admin envelope. CLUU's
 # users.toml uses "supervisor" as the highest privilege class; alias
 # until we have a fourth envelope category that needs to differ.
-mounts = [
-    "rw:/",
-    "rw:/etc",
-    "rw:/lib",
-    "rw:/usr",
-    "rw:/bin",
-    "rw:/var",
-    "rw:/tmp",
-    "rw:/home",
-    "rw:/dev/pts",
-]
 
 [envelope.supervisor.env]
 SHELL = "/bin/shell"
@@ -89,10 +96,30 @@ PATH = "/sbin:/bin:/usr/sbin:/usr/bin"
 LANG = "C"
 
 [envelope.supervisor.env_template]
-HOME = "/home/{user}"
-USER = "{user}"
+HOME    = "/home/{user}"
+USER    = "{user}"
 LOGNAME = "{user}"
-PWD = "/home/{user}"
+PWD     = "/home/{user}"
+
+[envelope.supervisor.vt_text]
+mounts = [
+    "rw:/", "rw:/etc", "rw:/lib", "rw:/usr", "rw:/bin", "rw:/var",
+    "rw:/tmp", "rw:/home",
+    "rw:/dev/tty{vt}",
+    "rw:/dev/null", "rw:/dev/zero", "rw:/dev/urandom",
+    "rw:/dev/console",
+    "rw:/proc",
+]
+
+[envelope.supervisor.vt_graphical]
+mounts = [
+    "rw:/", "rw:/etc", "rw:/lib", "rw:/usr", "rw:/bin", "rw:/var",
+    "rw:/tmp", "rw:/home",
+    "rw:/dev/pts", "rw:/dev/fb0",
+    "rw:/dev/null", "rw:/dev/zero", "rw:/dev/urandom",
+    "rw:/dev/console",
+    "rw:/proc",
+]
 
 
 [envelope.service]
