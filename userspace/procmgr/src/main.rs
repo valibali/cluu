@@ -4342,10 +4342,12 @@ impl ProcessManager {
         let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
         let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
 
-        // Strip the CWD trailer first so argv/fdac slices don't extend into it.
-        // Own all slices before any outbound IPC (argv_data, fdac_data, cwd_bytes
-        // all point into the kernel recv buffer which VFS calls will overwrite).
+        // Strip the CWD trailer first, then ENV trailer, so argv/fdac slices
+        // don't extend into them.  Own all slices before any outbound IPC
+        // (all slices point into the kernel recv buffer which VFS calls will
+        // overwrite).
         let (effective_payload, cwd_bytes_ref) = split_cwd_trailer(payload);
+        let (effective_payload, env_bytes_ref) = split_env_trailer(effective_payload);
 
         let path_nul_end = effective_payload
             .iter()
@@ -4363,14 +4365,18 @@ impl ProcessManager {
             alloc::vec::Vec::new()
         };
         let cwd_bytes: alloc::vec::Vec<u8> = cwd_bytes_ref.to_vec();
+        // Own env bytes immediately — subsequent VFS IPC calls overwrite the
+        // kernel recv buffer that env_bytes_ref borrows from.
+        let env_bytes: alloc::vec::Vec<u8> = env_bytes_ref.to_vec();
+        let caller_envc = env_bytes.iter().filter(|&&b| b == 0).count();
 
         match self.spawn_service_with_env(
             &path,
             priority,
             &argv_data,
             argc,
-            &[],
-            0,
+            &env_bytes,
+            caller_envc,
             sender_tid,
             spawn_seq,
             spawn_start,

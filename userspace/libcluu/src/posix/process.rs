@@ -429,11 +429,15 @@ pub extern "C" fn posix_spawn(
         }
     }
 
-    // Serialize environment variables into payload after argv data
-    let env_payload_offset = payload.len();
-    let mut envc = 0usize;
+    // Serialize fd actions (FDAC) immediately after argv data.
+    let fdac_offset = serialize_fd_actions(_file_actions, &mut payload);
 
-    // Use envp parameter if provided, otherwise use current environ
+    // Append the ENV magic trailer after FDAC, before CWD.
+    // Wire format: [env_bytes][u32 env_bytes_len LE][u32 ENV_MAGIC LE]
+    // where env_bytes is "KEY=VALUE\0KEY=VALUE\0..." packed.
+    // procmgr strips this with split_env_trailer (after split_cwd_trailer).
+    //
+    // Use envp parameter if provided, otherwise fall through to parent environ.
     let envp_to_use = if !_envp.is_null() {
         _envp
     } else {
@@ -441,6 +445,8 @@ pub extern "C" fn posix_spawn(
     };
 
     if !envp_to_use.is_null() {
+        let env_start = payload.len();
+        let mut envc = 0usize;
         unsafe {
             let mut p = envp_to_use;
             while !(*p).is_null() {
@@ -449,18 +455,19 @@ pub extern "C" fn posix_spawn(
                 p = p.add(1);
             }
         }
+        if envc > 0 {
+            let env_bytes_len = (payload.len() - env_start) as u32;
+            payload.extend_from_slice(&env_bytes_len.to_le_bytes());
+            payload.extend_from_slice(&ENV_MAGIC.to_le_bytes());
+        }
     }
 
-    // Serialize fd actions (FDAC) after env data
-    let fdac_offset = serialize_fd_actions(_file_actions, &mut payload);
-
-    // Append the CWD magic trailer so procmgr can seed the child's cwd.
+    // Append the CWD magic trailer last.
     // Layout: [cwd_bytes][u32 cwd_len LE][u32 CWD_MAGIC LE].
     //
-    // IMPORTANT: this must stay AFTER serialize_fd_actions above. `fdac_offset`
-    // (and `env_payload_offset`) are offsets into the pre-trailer payload, and
-    // procmgr reconstructs the same view by stripping the trailer with
-    // split_cwd_trailer. Reordering this append breaks that contract silently.
+    // IMPORTANT: this must stay AFTER the ENV trailer above. procmgr strips
+    // trailers outermost-first (CWD → ENV) via split_cwd_trailer then
+    // split_env_trailer. Reordering breaks that contract silently.
     let cwd_string = crate::posix::dir::current_dir_string();
     let cwd_bytes = cwd_string.as_bytes();
     let cwd_len = cwd_bytes.len().min(crate::boot::CWD_MAX);
@@ -468,13 +475,11 @@ pub extern "C" fn posix_spawn(
     payload.extend_from_slice(&(cwd_len as u32).to_le_bytes());
     payload.extend_from_slice(&CWD_MAGIC.to_le_bytes());
 
-    let mut msg = crate::types::Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 6);
+    let mut msg = crate::types::Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
     msg.words[0] = payload.len();
     msg.words[1] = argc;
     msg.words[2] = fdac_offset; // FDAC payload offset (0 = no fd actions)
     msg.words[3] = notify_endpoint;
-    msg.words[4] = envc;
-    msg.words[5] = if envc > 0 { env_payload_offset } else { 0 };
 
     let mut reply = crate::types::Message::new(0, [0; 6], 0);
     let mut try_call =
@@ -524,7 +529,7 @@ const MAX_FD_ACTIONS: usize = 4;
 const FDAC_MAGIC: u32 = 0x46444143; // "FDAC"
 /// Re-exported for clarity at the call site; canonical definition lives in
 /// `libcluu::ipc::CWD_MAGIC` since it is part of the spawn IPC contract.
-use crate::ipc::CWD_MAGIC;
+use crate::ipc::{CWD_MAGIC, ENV_MAGIC};
 const FDAC_FLAG_PIPE: u32 = 0x01;
 
 /// A single fd redirection action.
