@@ -1737,6 +1737,18 @@ case "$MARKER_MODE" in
             "login: user authenticated"
         )
         ;;
+    l2_text_shell_input)
+        # Text VT0 shell receives a typed line via POSIX read(fd 0) over
+        # /dev/tty0. The shell echoes `hi-from-vt0` to fd 1 (= /dev/tty0)
+        # whose write path forwards to the console service, which mirrors
+        # to COM2. If the marker fires we know stdin round-trips end to
+        # end through Path A on the legacy VT.
+        required_markers=(
+            "TSC calibrated"
+            "tty:0: showing login prompt"
+            "hi-from-vt0"
+        )
+        ;;
     l2_cluuterm_ansi)
         # After login, run printf with a red SGR escape.  cluuterm's ANSI
         # parser fires an Event::SetAttr with the non-default fg colour and

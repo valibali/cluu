@@ -721,6 +721,16 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SHELL_AUTOSTART_CMD_DEFAULT="timetick_probe"
                 ;;
+            l2_text_shell_input)
+                TEST_COMMAND=""
+                # VT0 text login flow: ctrl-alt-f1 to switch to VT0, type root +
+                # password, then type `echo hi-from-vt0` and Enter. Marker is
+                # the literal echoed back through tty -> /dev/console (which is
+                # captured on COM2 since console writes mirror there). If the
+                # shell never receives the line, the marker never fires and the
+                # harness times out.
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-f1\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey e\nsendkey c\nsendkey h\nsendkey o\nsendkey spc\nsendkey h\nsendkey i\nsendkey minus\nsendkey f\nsendkey r\nsendkey o\nsendkey m\nsendkey minus\nsendkey v\nsendkey t\nsendkey 0\nsendkey ret'
+                ;;
             legacy_p1)
                 TEST_COMMAND="minimal"
                 SHELL_AUTOSTART_CMD_DEFAULT="minimal"
