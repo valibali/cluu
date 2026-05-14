@@ -820,6 +820,31 @@ impl ProcessManager {
         Ok(tid)
     }
 
+    /// Build an FDAC payload that targets fd 0/1/2 at the same VFS-backed
+    /// file. Used by the legacy text-VT session spawn.
+    ///
+    /// Layout (matches libcluu/src/posix/process.rs):
+    ///   u32 magic = 0x46444143
+    ///   u32 count = 3
+    ///   3 × FdAction { u32 target_fd, u32 flags, usize endpoint,
+    ///                  usize vfs_client_id, usize vfs_remote_fd }
+    fn build_devtty_fdac(&self, vfs_client_id: usize, vfs_remote_fd: usize)
+        -> Vec<u8>
+    {
+        const FDAC_MAGIC: u32 = 0x46444143;
+        let mut out = Vec::with_capacity(8 + 3 * 32);
+        out.extend_from_slice(&FDAC_MAGIC.to_le_bytes());
+        out.extend_from_slice(&3u32.to_le_bytes());
+        for target_fd in 0u32..=2u32 {
+            out.extend_from_slice(&target_fd.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());           // flags
+            out.extend_from_slice(&0usize.to_le_bytes());         // endpoint (unused for VFS-backed)
+            out.extend_from_slice(&vfs_client_id.to_le_bytes());
+            out.extend_from_slice(&vfs_remote_fd.to_le_bytes());
+        }
+        out
+    }
+
     /// Install a VFS view for a thread, then resume it.
     ///
     /// Used in conjunction with `THREAD_CREATE_START_SUSPENDED` to close the
