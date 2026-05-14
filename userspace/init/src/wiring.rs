@@ -31,8 +31,10 @@ use libcluu::boot::{
     TOKEN_IPC,
     TOKEN_REGISTRY,
     TOKEN_SELF,
+    TOKEN_SELF_THREAD,
     TOKEN_SPACE,
 };
+use libcluu::syscall::{thread_resume, THREAD_CREATE_START_SUSPENDED};
 use libcluu::boot_manifest::BootManifest;
 use libcluu::elf::ElfFile;
 use libcluu::tar::find_member;
@@ -288,14 +290,29 @@ pub fn launch_service(
     service.kind.map_resources(ctx, space_token, &params)?;
     t.mark("map_resources");
 
+    // For procmgr we need a Thread-typed token for TOKEN_SELF_THREAD so that
+    // procmgr can call thread_get_id on itself.  Create it suspended, patch the
+    // ProcessInfo page with the thread token, then resume.
+    let is_procmgr = service.name == "procmgr";
+    let create_flags = if is_procmgr { THREAD_CREATE_START_SUSPENDED } else { 0 };
     let thread_token = thread_create(
         space_token,
         elf.entry_point as usize,
         stack_top,
         service.priority,
-        0,
+        create_flags,
     )?;
-    let _ = thread_token;
+    if is_procmgr {
+        // Patch TOKEN_SELF_THREAD into the tokens array and re-map the
+        // ProcessInfo page before the thread is allowed to run.  The kernel
+        // permits re-mapping (overwrites the PTE) and the thread is suspended
+        // so there is no race.
+        tokens[TOKEN_SELF_THREAD] = thread_token;
+        let exit_token = if exit_cookie != 0 { ctx.primordial_exit_send } else { 0 };
+        map_process_info(space_token, exit_token, exit_cookie, 0, &tokens, &params)?;
+        thread_resume(thread_token)?;
+        t.mark("thread_resume");
+    }
     t.mark("thread_create");
 
     // "<name> ready" line is emitted by the StageTimer report below

@@ -35,6 +35,7 @@ use libcluu::boot::{
     TOKEN_IPC,
     TOKEN_REGISTRY,
     TOKEN_SELF,
+    TOKEN_SELF_THREAD,
     TOKEN_SPACE,
     TOKEN_STDERR,
     TOKEN_STDIN,
@@ -801,18 +802,20 @@ impl ProcessManager {
     }
 
     /// Return procmgr's main-thread tid, caching after first lookup.
-    /// Used by VFS-backed FDAC injection so the FDAC parser knows which
-    /// client_id VFS keys the open under.
+    ///
+    /// init populates TOKEN_SELF_THREAD with a Thread-typed capability for
+    /// procmgr's main thread before resuming it.  We call `thread_get_id` on
+    /// that capability to obtain the tid that VFS keys client_id entries under.
     fn procmgr_main_tid(&mut self) -> Result<usize> {
         if self.cached_main_tid != 0 {
             return Ok(self.cached_main_tid);
         }
-        // self.token is TOKEN_SELF (process cap), not a thread token. We need
-        // the *thread* cap for the main thread. libcluu exposes one via the
-        // current ProcessInfo.tokens[TOKEN_SELF] slot at boot; procmgr keeps
-        // that as `self.token` already. thread_get_id accepts any thread cap;
-        // pass it through and the kernel returns the calling thread's tid.
-        let tid = thread_get_id(self.token)?;
+        let info = libcluu::boot::process_info();
+        let thread_token = info.tokens[TOKEN_SELF_THREAD];
+        if thread_token == 0 {
+            return Err(Error::InvalidState);
+        }
+        let tid = thread_get_id(thread_token)?;
         self.cached_main_tid = tid;
         Ok(tid)
     }

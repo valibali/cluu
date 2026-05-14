@@ -146,6 +146,13 @@ pub const TOKEN_EXTRA_5: usize = 14;
 /// Extra capability slot 6 (slot 15)
 pub const TOKEN_EXTRA_6: usize = 15;
 
+/// Thread-typed capability for the process's main thread (slot 12).
+///
+/// Currently only populated for procmgr (so it can call `thread_get_id` on
+/// itself to obtain its own tid for VFS-backed FDAC injection).  Zero in all
+/// other processes — do not read this slot unless you are procmgr.
+pub const TOKEN_SELF_THREAD: usize = 12;
+
 // ─── Slot Ranges ────────────────────────────────────────────────────────────
 /// First standard I/O slot
 pub const TOKEN_STDIO_START: usize = 0;
