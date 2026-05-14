@@ -1757,15 +1757,17 @@ case "$MARKER_MODE" in
         )
         ;;
     l2_text_shell_input)
-        # Text VT0 shell receives a typed line via POSIX read(fd 0) over
-        # /dev/tty0. The shell echoes `hi-from-vt0` to fd 1 (= /dev/tty0)
-        # whose write path forwards to the console service, which mirrors
-        # to COM2. If the marker fires we know stdin round-trips end to
-        # end through Path A on the legacy VT.
+        # Three serial-visible proof points that the legacy VT0 stdin
+        # round-trip works via POSIX read(0) -> /dev/tty0 -> tty service:
+        #   - shell starts with fd 0 already VFS-backed (procmgr FDAC worked)
+        #   - shell's handle_line_payload received at least one line
+        #   - shell parsed the line and dispatched to the (empty) builtin set
         required_markers=(
             "TSC calibrated"
             "tty:0: showing login prompt"
-            "hi-from-vt0"
+            "shell: stdin path = vfs-backed"
+            "shell: read 4 bytes from fd 0"
+            "shell: unsupported command"
         )
         ;;
     l2_cluuterm_ansi)

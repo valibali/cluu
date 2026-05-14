@@ -725,20 +725,15 @@ harness_derive_marker_defaults() {
                 ;;
             l2_text_shell_input)
                 TEST_COMMAND=""
-                # VT0 text login flow: ctrl-alt-f1 to switch to VT0, type root +
-                # password, then type `echo hi-from-vt0` and Enter. Marker is
-                # the literal echoed back through tty -> /dev/console (which is
-                # captured on COM2 since console writes mirror there). If the
-                # shell never receives the line, the marker never fires and the
-                # harness times out.
-                # NOWAIT: keystrokes fire immediately after QEMU monitor is
-                # ready — there is no shell yet; the sequence IS the login.
-                # sleep 8: QEMU monitor ready at ~2s, OS boots at ~8s; sleep
-                # 8 ensures kbd+vtmgr+tty are all up before the first key.
-                # RUN_WAIT=30: 10s boot + 11s seq sleeps + 3s shell spawn.
+                # VT0 text login flow: switch to VT0, log in as root,
+                # then type `xyz\n` (an unknown command) so shell emits
+                # `shell: read 4 bytes from fd 0` + `shell: unsupported command`
+                # debug_prints — both serial-visible. The previous marker
+                # design tried to read shell stdout via the COM2 mirror,
+                # but tty/console writes only reach the framebuffer.
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
-                RUN_WAIT_DEFAULT="30"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 8\nsendkey ctrl-alt-f1\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey e\nsendkey c\nsendkey h\nsendkey o\nsendkey spc\nsendkey h\nsendkey i\nsendkey minus\nsendkey f\nsendkey r\nsendkey o\nsendkey m\nsendkey minus\nsendkey v\nsendkey t\nsendkey 0\nsendkey ret'
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey ctrl-alt-f1\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 1\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 4\nsendkey x\nsendkey y\nsendkey z\nsendkey ret'
                 ;;
             legacy_p1)
                 TEST_COMMAND="minimal"

@@ -407,6 +407,30 @@ pub fn init_stdio() {
     table.next_fd = 4;
 }
 
+/// Patch VFS-backed stdio fds (0-3) so their `endpoint` field holds the real
+/// VFS endpoint instead of the stdin/stdout IPC token that `init_stdio` stored.
+///
+/// `init_stdio` runs from `__cluu_init()` before the registry is available, so
+/// it cannot look up `vfs:main`.  Call this function once after
+/// `registry::init()` succeeds; it replaces `endpoint` on every VFS-backed fd
+/// (those with `remote_fd.is_some()` and `!is_tty()`) with `vfs_ep`.
+///
+/// If `vfs_ep == 0` the function is a no-op (safe to call even on paths where
+/// VFS isn't available, e.g. early boot binaries).
+pub fn patch_vfs_stdio_endpoints(vfs_ep: usize) {
+    if vfs_ep == 0 {
+        return;
+    }
+    let mut table = FD_TABLE.lock();
+    for fd_num in 0i32..4i32 {
+        if let Some(entry) = table.entries.get_mut(&fd_num) {
+            if entry.remote_fd.is_some() && !entry.caps.contains(FdCaps::IS_TTY) {
+                entry.endpoint = vfs_ep;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

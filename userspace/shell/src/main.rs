@@ -85,6 +85,15 @@ fn run() -> Result<()> {
     registry::init("shell")?;
     registry::register_default_outputs()?;
 
+    // Patch VFS-backed stdio fds: init_stdio() runs before the registry is
+    // available so it stores stdin/stdout IPC tokens in FdEntry::endpoint.
+    // After registry::init() we can resolve the real VFS endpoint and fix up
+    // any fds that carry a remote_fd (those need to send FS_READ_GRANT to VFS,
+    // not to the stdin IPC token).
+    if let Some(vfs_ep) = registry::lookup_service("vfs:main") {
+        libcluu::fd_table::patch_vfs_stdio_endpoints(vfs_ep);
+    }
+
     // Step 3 Path A: unify stdin on POSIX fd 0. If fd 0 isn't already
     // VFS-backed (cluuterm pts path already is), open /dev/ttyN ourselves
     // and dup2 over fd 0/1/2. After this, both the legacy VT and cluuterm
@@ -98,6 +107,10 @@ fn run() -> Result<()> {
         let vt = info.params[PARAM_TTY_INSTANCE] as usize;
         let _ = rebind_stdio_to_devtty(vt);
     }
+    let _ = debug_print(&format!(
+        "shell: stdin path = {}",
+        if fd0_is_vfs_backed { "vfs-backed" } else { "rebind-attempt" }
+    ));
 
     let _stdin = info.tokens[TOKEN_STDIN];
     let _stderr = info.tokens[TOKEN_STDERR];
@@ -224,9 +237,11 @@ fn run() -> Result<()> {
     // semantics are wired (see plan 2026-05-14-shell-stdio-posix-unify).
     let _ = registry_endpoint; // silence warning until something needs it again
     let mut buf = [0u8; 256];
+    let _ = debug_print("shell: entering read(0) loop");
     loop {
         let n = unsafe { _read(0, buf.as_mut_ptr() as *mut core::ffi::c_void, buf.len()) };
         if n > 0 {
+            let _ = debug_print(&format!("shell: read(0) got {} bytes", n));
             handle_line_payload(stdout, stdlog, &mut command_context, &buf[..n as usize])?;
             #[cfg(feature = "lang-parser")]
             {
@@ -529,6 +544,7 @@ fn handle_line_payload(
     context: &mut CommandContext,
     payload: &[u8],
 ) -> Result<()> {
+    let _ = debug_print(&format!("shell: read {} bytes from fd 0", payload.len()));
     #[cfg(not(feature = "lang-parser"))]
     let _ = (stdlog, context);
     // Ctrl-C in canonical mode is delivered as a single 0x03 marker byte.
