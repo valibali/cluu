@@ -13,7 +13,7 @@ mod status;
 mod window_mgr;
 mod render;
 
-use libcluu::boot::{process_info, TOKEN_IPC};
+use libcluu::boot::{process_info, PARAM_SESSION_MODE, TOKEN_IPC};
 use libcluu::ipc::{
     extract_reply_id, reply, send_msg_with_payload,
     COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL, VTMGR_PIN_VT_LABEL,
@@ -86,6 +86,13 @@ pub extern "C" fn main() -> i32 {
     let info = process_info();
     let ipc_cap = info.tokens[TOKEN_IPC];
     comp.instance_id = 0;
+    let session_mode = info.params[PARAM_SESSION_MODE] as u8;
+    comp.session_mode = session_mode;
+    let _ = libcluu::debug_print(&alloc::format!(
+        "compositor: session_mode={} ({})",
+        session_mode,
+        if session_mode == 1 { "user" } else { "system" },
+    ));
     // Register as "compositor" (not "compositor:0") so lookup_service("compositor:client")
     // resolves correctly: it splits on ':' to get service="compositor", output="client".
     if registry::init("compositor").is_err() {

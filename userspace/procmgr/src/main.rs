@@ -4082,7 +4082,7 @@ impl ProcessManager {
             .unwrap_or(payload.len())
             + 1;
         let param_data = &payload[path_nul_end..];
-        let mut params = [0u64; 16];
+        let mut params = [0u64; 32];
         for i in 0..param_count {
             let offset = i * 10; // 2 bytes index + 8 bytes value
             if offset + 10 > param_data.len() {
@@ -4092,7 +4092,7 @@ impl ProcessManager {
             let idx = u16::from_le_bytes([param_data[offset], param_data[offset + 1]]) as usize;
 
             // ── Policy: validate param index bounds ──
-            if idx >= 16 {
+            if idx >= 32 {
                 let _ = debug_print(&format!(
                     "procmgr: service spawn rejected: param index {} out of range",
                     idx
@@ -6399,7 +6399,7 @@ fn map_process_info_page(
         tokens[TOKEN_EXTRA_1] = extra_token_1;
     }
 
-    let mut params = [0u64; 16];
+    let mut params = [0u64; 32];
     // params[0] = pipe_mask for all processes
     params[0] = pipe_mask as u64;
     // NOTE: PARAM_CAP_PROFILE (slot 5) is NOT written here. The cap profile is

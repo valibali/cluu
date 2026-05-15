@@ -65,7 +65,9 @@ pub struct ProcessInfo {
     /// Slots 10-11: cwd offset / length (Shell-A).
     /// Slots 12-13: redir offset / length (file redirection).
     /// Slots 14-15: VFS fd trailer offset / length (FDAC VFS-backed fd handoff).
-    pub params: [u64; 16],
+    /// Slot  16:    compositor session-mode discriminator (PARAM_SESSION_MODE).
+    /// Slots 17-31: reserved for future use.
+    pub params: [u64; 32],
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -235,6 +237,12 @@ pub const PARAM_FD_VFS_OFFSET: usize = 14;
 /// VFS fd trailer length.  64 when present (4 fds × 16 bytes), 0 when absent.
 pub const PARAM_FD_VFS_LEN: usize = 15;
 
+/// Compositor session-mode discriminator.
+///   0 = system (autostarted at boot, hosts login modal only)
+///   1 = user   (spawned at SESSION_LOGIN under user envelope, full desktop)
+/// Default 0 when absent (procmgr leaves the slot zero-initialised).
+pub const PARAM_SESSION_MODE: usize = 16;
+
 /// Read the process info structure.
 pub fn process_info() -> &'static ProcessInfo {
     unsafe { &*(PROCESS_INFO_ADDR as *const ProcessInfo) }
@@ -313,7 +321,7 @@ pub fn pid() -> usize {
 
 const _: () = {
     let size = core::mem::size_of::<ProcessInfo>();
-    // 3 * usize + 16 * usize + 16 * u64 on x86_64 = 24 + 128 + 128 = 280 bytes.
+    // 3 * usize + 16 * usize + 32 * u64 on x86_64 = 24 + 128 + 256 = 408 bytes.
     // Page is 4096; plenty of room for argv/env/cwd/redir/fd-vfs payloads after the header.
     assert!(size <= 512, "ProcessInfo grew unexpectedly large");
 };

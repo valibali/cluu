@@ -258,6 +258,11 @@ pub struct Compositor {
     pub control_endpoint: usize,
     /// Registry endpoint for forwarding grant-request control messages.
     pub registry_endpoint: usize,
+
+    /// Session-mode discriminator read from PARAM_SESSION_MODE at startup.
+    ///   0 = system (autostarted at boot, hosts login modal only)
+    ///   1 = user   (spawned under user envelope, full desktop)
+    pub session_mode: u8,
 }
 
 use libcluu::posix::{
@@ -363,6 +368,7 @@ impl Compositor {
             input_endpoint_global: 0,
             control_endpoint: 0,
             registry_endpoint: 0,
+            session_mode: 0,
         })
     }
 }
