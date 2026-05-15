@@ -2460,11 +2460,17 @@ impl ProcessManager {
             let resolved_env = envelopes::resolve_env(&envelope, &username);
             let (user_env, user_envc) = build_envelope_env_payload(&resolved_env);
 
-            // Build a minimal argv for cluuterm: just the binary name.
+            // Build a minimal argv for the user compositor.
+            let mut comp_argv: Vec<u8> = Vec::new();
+            comp_argv.extend_from_slice(b"compositor\0");
+            let comp_argc = 1usize;
+
+            // Build a minimal argv for cluuterm.
             let mut cluuterm_argv: Vec<u8> = Vec::new();
             cluuterm_argv.extend_from_slice(b"cluuterm\0");
             let cluuterm_argc = 1usize;
 
+            const COMPOSITOR_BIN: &str = "/var/images/compositor/bin/compositor";
             const CLUUTERM_BIN: &str = "/var/images/cluuterm/bin/cluuterm";
 
             // Kill the system-mode compositor before spawning cluuterm so there
@@ -2478,6 +2484,82 @@ impl ProcessManager {
                 return Ok(());
             }
 
+            // Allocate the session container id now so both compositor and
+            // cluuterm can reference it as their session root.
+            let session_cid = self.next_container_id();
+
+            // ── Spawn user-mode compositor (session_mode=1) ──────────────────
+            let comp_param_overrides: [(usize, u64); 1] = [(PARAM_SESSION_MODE, 1)];
+
+            let comp_spawn_seq = self.next_spawn_seq();
+            let comp_spawn_start = self.clock_sample();
+
+            match self.spawn_service_with_env(
+                COMPOSITOR_BIN,
+                DEFAULT_PRIORITY,
+                &comp_argv,
+                comp_argc,
+                &user_env,
+                user_envc,
+                1, // non-zero owner_tid to use caller_env_data
+                comp_spawn_seq,
+                comp_spawn_start,
+                &[],   // no FDAC — compositor has no stdin
+                profile,
+                0,
+                0,
+                &comp_param_overrides,
+                None, // procmgr spawns internally; no caller view needed for ELF resolution
+                &[],
+                &[], // no redir
+                THREAD_CREATE_START_SUSPENDED,
+            ) {
+                Ok((comp_thread_token, _comp_cookie, comp_pid, _comp_stdin)) => {
+                    let comp_cid = self.next_container_id();
+                    self.pid_to_container_id.insert(comp_pid, comp_cid);
+                    self.container_owner_pids.insert(comp_pid);
+
+                    // Compositor is the session root — parent_container_id=0.
+                    self.install_view_and_run(comp_thread_token, &view_mounts, profile, comp_cid, 0, false);
+                    self.pid_to_view.insert(comp_pid, view_mounts.clone());
+
+                    let comp_inst_name = self.next_instance_name(session_cid, "compositor");
+                    self.container_instances.insert(comp_cid, ContainerInstance {
+                        name: String::from("compositor"),
+                        instance_name: comp_inst_name,
+                        session_id: session_cid,
+                        container_id: comp_cid,
+                        parent_container_id: 0, // session root
+                        pid: comp_pid,
+                        image_path: String::from("/var/images/compositor"),
+                        mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                        restart_policy: RestartPolicy::Never,
+                        restart_count: 0,
+                        last_exit_code: 0,
+                        restart_attempt_start: 0,
+                        quota: QuotaSpec::default(),
+                        live_processes: 0,
+                    });
+
+                    self.container_children.entry(session_cid)
+                        .or_insert_with(Vec::new).push(comp_cid);
+
+                    let _ = debug_print(&format!(
+                        "procmgr: user compositor spawned pid={} session_cid={} comp_cid={}",
+                        comp_pid, session_cid, comp_cid
+                    ));
+                }
+                Err(e) => {
+                    let _ = debug_print(&format!(
+                        "procmgr: SESSION_LOGIN kind=1 user compositor spawn failed: {:?}", e
+                    ));
+                    reply_msg.words[0] = e.to_errno() as usize;
+                    if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                    return Ok(());
+                }
+            }
+
+            // ── Spawn cluuterm as sibling under the same session container ───
             let spawn_seq = self.next_spawn_seq();
             let spawn_start = self.clock_sample();
 
@@ -2502,15 +2584,13 @@ impl ProcessManager {
                 THREAD_CREATE_START_SUSPENDED,
             ) {
                 Ok((thread_token, _cookie, pid, _stdin_send)) => {
-                    let session_cid = self.next_container_id();
                     let cluuterm_cid = self.next_container_id();
                     self.pid_to_container_id.insert(pid, cluuterm_cid);
                     self.container_owner_pids.insert(pid);
 
-                    // parent_container_id=0, is_identity_switch=false: procmgr is the
-                    // authoritative spawner for graphical session cluuterm; session_cid is
-                    // newly allocated, no view yet.
-                    self.install_view_and_run(thread_token, &view_mounts, profile, cluuterm_cid, 0, false);
+                    // cluuterm is a sibling of compositor under session_cid.
+                    // parent_container_id=session_cid, is_identity_switch=false.
+                    self.install_view_and_run(thread_token, &view_mounts, profile, cluuterm_cid, session_cid, false);
                     self.pid_to_view.insert(pid, view_mounts);
 
                     let inst_name = self.next_instance_name(session_cid, "cluuterm");
