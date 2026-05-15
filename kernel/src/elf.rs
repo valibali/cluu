@@ -332,7 +332,11 @@ pub(crate) unsafe fn map_user_page(
     // Map the page (overwrite any existing mapping)
     // Note: For ELF loading, segments may share pages so we allow remapping.
     // For space_grant, we need to replace the old mapping with the new one.
-    pt[pt_idx] = phys | page_flags;
+    // Mask phys to bits 12-51 so corrupted/garbage high bits never reach the
+    // PTE's reserved range (52-62). A reserved bit set in a PTE produces a
+    // RSV=1 page fault on the next walk, which we observed during the
+    // compositor-swap session-handoff stress.
+    pt[pt_idx] = (phys & pte_flags::ADDR_MASK) | page_flags;
 
     // Flush TLB for this page to ensure CPU sees the new mapping
     core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
@@ -406,7 +410,8 @@ pub(crate) unsafe fn map_shared_page(
     };
 
     let pt = &mut *(crate::mm::physmap::phys_to_virt_u64(pt_phys) as *mut [u64; 512]);
-    pt[pt_idx] = phys | page_flags;
+    // Mask phys to bits 12-51 — see comment in map_user_page (elf.rs:~335).
+    pt[pt_idx] = (phys & pte_flags::ADDR_MASK) | page_flags;
 
     core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
 
@@ -483,7 +488,8 @@ pub(crate) unsafe fn map_device_page(
 
     let pt = &mut *(crate::mm::physmap::phys_to_virt_u64(pt_phys) as *mut [u64; 512]);
 
-    pt[pt_idx] = phys | page_flags;
+    // Mask phys to bits 12-51 — see comment in map_user_page (elf.rs:~335).
+    pt[pt_idx] = (phys & pte_flags::ADDR_MASK) | page_flags;
 
     core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
 
@@ -567,7 +573,8 @@ pub(crate) unsafe fn map_device_page_wc(
     };
 
     let pt = &mut *(crate::mm::physmap::phys_to_virt_u64(pt_phys) as *mut [u64; 512]);
-    pt[pt_idx] = phys | page_flags;
+    // Mask phys to bits 12-51 — see comment in map_user_page (elf.rs:~335).
+    pt[pt_idx] = (phys & pte_flags::ADDR_MASK) | page_flags;
 
     core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
 
@@ -653,8 +660,10 @@ pub(crate) unsafe fn map_user_large_page(
         return Err(ElfLoadError::AddressConflict);
     }
 
-    // Map the 2MB large page directly in PD (no PT needed)
-    pd[pd_idx] = phys | page_flags;
+    // Map the 2MB large page directly in PD (no PT needed).
+    // Mask phys to bits 21-51 — bits 13-20 are reserved MBZ for 2 MiB
+    // huge-page PDEs. A reserved bit set yields a RSV=1 fault on access.
+    pd[pd_idx] = (phys & pte_flags::HUGE_ADDR_MASK) | page_flags;
 
     klibcluu::trace("Mapped 2MB large page: virt=0x");
     klibcluu::log_hex(klibcluu::LogLevel::Trace, " phys=0x", virt);

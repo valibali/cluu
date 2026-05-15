@@ -86,9 +86,14 @@ pub mod pte_flags {
     /// responsible for the frame lifetime.
     pub const SHARED_PHYS: u64 = 1 << 9;
 
-    /// Mask to extract the physical address from a page table entry (bits 12-51).
-    /// Strips flag bits (0-11) and reserved/NX bits (52-63).
+    /// Mask to extract the physical address from a 4-KiB page table entry
+    /// (bits 12-51). Strips flag bits (0-11) and reserved/NX bits (52-63).
     pub const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    /// Mask to extract the physical address from a 2-MiB huge-page PDE
+    /// (bits 21-51). Strips flag bits (0-12) — bits 13-20 are reserved MBZ
+    /// for huge pages — and reserved/NX bits (52-63).
+    pub const HUGE_ADDR_MASK: u64 = 0x000F_FFFF_FFE0_0000;
 
     /// Convenience combo: write-combining on a 4-KiB page.
     /// Index into PAT MSR is (PAT<<2)|(PCD<<1)|PWT = 0b001 = 1.
@@ -1038,7 +1043,9 @@ unsafe fn map_single_4k_page(
     if pt[pt_idx] & 0x1 != 0 {
         return Err("Page already mapped");
     }
-    pt[pt_idx] = phys | page_flags;
+    // Mask phys to bits 12-51 so any corrupted high bits don't end up in
+    // PTE reserved positions (52-62), which would produce a RSV=1 fault.
+    pt[pt_idx] = (phys & pte_flags::ADDR_MASK) | page_flags;
 
     // Flush TLB for this page
     unsafe {
