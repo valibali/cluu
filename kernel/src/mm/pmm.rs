@@ -144,14 +144,22 @@ impl BuddyAllocator {
             let block_size = 1 << order;
             for f in frame..frame + block_size {
                 if self.bitmap_is_free(f) {
-                    klibcluu::error("PMM AUDIT: list_push of already-free frame");
+                    // Soft-fail: log and refuse the push. Panicking on a
+                    // userspace-driven double-free would halt the kernel,
+                    // which violates the microkernel invariant that user
+                    // activity never crashes the kernel. The real root
+                    // cause (often shared PTE rows that point at the same
+                    // frame and are walked twice in teardown_user_pages)
+                    // must be fixed at the caller — but until then this
+                    // keeps the kernel alive.
+                    klibcluu::error("PMM AUDIT: list_push of already-free frame (soft-fail)");
                     klibcluu::log_hex(
                         klibcluu::LogLevel::Error,
                         "  phys=",
                         (f as u64) * (PAGE_SIZE as u64),
                     );
                     klibcluu::log_dec(klibcluu::LogLevel::Error, "  order=", order as u64);
-                    panic!("PMM audit: double-free / list_push of free frame");
+                    return;
                 }
             }
         }
@@ -361,6 +369,26 @@ impl BuddyAllocator {
             return;
         }
         if self.buddy_ready {
+            // Pre-check: if every frame in the block is already marked free
+            // (bitmap bit set), this is a double-free attempt. Skip the
+            // free path entirely so free_frames accounting stays consistent
+            // and the kernel does not panic on userspace-triggered cleanup.
+            // The real fix belongs in the caller (typically teardown_user_pages
+            // walking shared PTE rows twice).
+            let block_size = 1usize << order;
+            let mut already_free = true;
+            for f in frame..frame + block_size {
+                if !self.bitmap_is_free(f) {
+                    already_free = false;
+                    break;
+                }
+            }
+            if already_free {
+                klibcluu::error("PMM: free_order skipped — frame already free (double-free)");
+                klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=", phys_addr);
+                klibcluu::log_dec(klibcluu::LogLevel::Error, "  order=", order as u64);
+                return;
+            }
             self.buddy_free(phys_addr, order);
         } else {
             // Fallback: just mark bitmap bits
