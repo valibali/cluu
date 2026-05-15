@@ -26,6 +26,7 @@ use libcluu::boot::{
     PARAM_FD_VFS_OFFSET,
     PARAM_FD_VFS_LEN,
     PARAM_INITRD_SIZE,
+    PARAM_NOTIFY_READY_EP,
     PARAM_SESSION_MODE,
     PARAM_TTY_INSTANCE,
     PROCESS_INFO_ADDR,
@@ -66,6 +67,7 @@ use libcluu::ipc::PROCMGR_PID_PGID_QUERY_LABEL;
 use libcluu::ipc::PROCMGR_PROC_QUERY_LABEL;
 use libcluu::ipc::PROCMGR_QUERY_CTTY_LABEL;
 use libcluu::ipc::PROCMGR_SPAWN_SERVICE_LABEL;
+use libcluu::ipc::COMPOSITOR_READY_LABEL;
 use crate::pg_table::PgTable;
 use libcluu::registry;
 use libcluu::syscall::{
@@ -2302,6 +2304,15 @@ impl ProcessManager {
             "procmgr: killing system compositor pid={} cid={}", pid, container_id
         ));
 
+        // Clear the system compositor's registry entries BEFORE destroying the thread.
+        // This ensures that any pending subscribe_output("compositor", ...) calls from
+        // procmgr (which arrive while the old entries are still live) go into registry
+        // pending[], not to the old (dead) compositor's grant endpoint.
+        for ep_name in &["client", "input", "control", "stdin", "stdout", "stderr", "stdlog"] {
+            let _ = registry::force_unregister_service_output("compositor", ep_name);
+        }
+        let _ = debug_print("procmgr: cleared system compositor registry entries");
+
         // Reuse kill_container_process which handles thread_destroy + all map cleanup.
         self.kill_container_process(pid, container_id);
 
@@ -2489,7 +2500,13 @@ impl ProcessManager {
             let session_cid = self.next_container_id();
 
             // ── Spawn user-mode compositor (session_mode=1) ──────────────────
-            let comp_param_overrides: [(usize, u64); 1] = [(PARAM_SESSION_MODE, 1)];
+            // Create a one-shot notify endpoint so the compositor can signal
+            // readiness without procmgr polling the registry.
+            let comp_notify_ep = endpoint_create(self.token).unwrap_or(0);
+            let comp_param_overrides: [(usize, u64); 2] = [
+                (PARAM_SESSION_MODE, 1),
+                (PARAM_NOTIFY_READY_EP, comp_notify_ep as u64),
+            ];
 
             let comp_spawn_seq = self.next_spawn_seq();
             let comp_spawn_start = self.clock_sample();
@@ -2557,6 +2574,38 @@ impl ProcessManager {
                     if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
                     return Ok(());
                 }
+            }
+
+            // ── Wait for user compositor to signal READY ─────────────────────
+            // Compositor sends COMPOSITOR_READY_LABEL on comp_notify_ep once all
+            // endpoints are registered. 2 s timeout; fall through on timeout or
+            // if notify endpoint creation failed (comp_notify_ep == 0).
+            if comp_notify_ep != 0 {
+                let mut ready_buf = [0u8; core::mem::size_of::<Message>()];
+                match ipc_recv_timeout(comp_notify_ep, &mut ready_buf, 2_000) {
+                    Ok(_) => {
+                        // Parse label from received message.
+                        let label = if ready_buf.len() >= 4 {
+                            u32::from_le_bytes([ready_buf[0], ready_buf[1], ready_buf[2], ready_buf[3]])
+                        } else {
+                            0
+                        };
+                        if label == COMPOSITOR_READY_LABEL {
+                            let _ = debug_print("procmgr: user compositor READY received");
+                        } else {
+                            let _ = debug_print(&format!(
+                                "procmgr: unexpected msg on notify_ep label={:#x}; proceeding", label
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = debug_print(&format!(
+                            "procmgr: user compositor READY timeout ({:?}); proceeding anyway", e
+                        ));
+                    }
+                }
+                // Reclaim the one-shot endpoint.
+                let _ = token_revoke(comp_notify_ep);
             }
 
             // ── Spawn cluuterm as sibling under the same session container ───

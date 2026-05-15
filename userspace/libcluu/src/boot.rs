@@ -243,6 +243,12 @@ pub const PARAM_FD_VFS_LEN: usize = 15;
 /// Default 0 when absent (procmgr leaves the slot zero-initialised).
 pub const PARAM_SESSION_MODE: usize = 16;
 
+/// Endpoint to which a spawned process should send a "ready" notification
+/// once it has finished startup (registered its public endpoints, etc.).
+/// 0 = no notification expected. Used by procmgr at SESSION_LOGIN kind=1
+/// to gate cluuterm-spawn on user-compositor readiness.
+pub const PARAM_NOTIFY_READY_EP: usize = 17;
+
 /// Read the process info structure.
 pub fn process_info() -> &'static ProcessInfo {
     unsafe { &*(PROCESS_INFO_ADDR as *const ProcessInfo) }

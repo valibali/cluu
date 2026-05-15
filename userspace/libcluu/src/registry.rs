@@ -162,6 +162,27 @@ pub fn unregister_output(endpoint_name: &str) -> Result<()> {
     send_with_payload(registry_endpoint, &msg, &payload)
 }
 
+/// Unregister an output published by another service (admin/force path).
+///
+/// Used by procmgr to clear a killed service's registry entries before spawning
+/// a replacement, so that the new service can register under the same names.
+/// The registry allows this since 2026-05-15 (force-unregister).
+pub fn force_unregister_service_output(
+    service_name: &str,
+    endpoint_name: &str,
+) -> Result<()> {
+    let (registry_endpoint, control_endpoint) = {
+        let state = REGISTRY_STATE.lock();
+        (state.registry_endpoint, state.control_endpoint)
+    };
+    if registry_endpoint == 0 || control_endpoint == 0 {
+        return Err(Error::InvalidArgument);
+    }
+    let payload = encode_names(service_name, endpoint_name);
+    let msg = make_payload_message(REGISTRY_UNREGISTER_LABEL, payload.len(), &[control_endpoint]);
+    send_with_payload(registry_endpoint, &msg, &payload)
+}
+
 /// Register standard outputs (stdin/stdout/stderr/stdlog) when present.
 pub fn register_default_outputs() -> Result<()> {
     let info = process_info();
@@ -345,6 +366,10 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
     }
     // Mint a least-privilege token that only allows IPC_SEND.
     let send_rights = (Rights::IPC_SEND | Rights::IPC_CALL).bits() as usize;
+    let _ = crate::debug_print(&alloc::format!(
+        "registry-client: handle_grant_request endpoint={} requester={}",
+        endpoint_name, requester_endpoint
+    ));
     let derived = token_derive(endpoint_token, send_rights, u64::MAX)?;
     let payload = encode_names(&service_name, &endpoint_name);
     // Reply directly to the requester with the derived token.

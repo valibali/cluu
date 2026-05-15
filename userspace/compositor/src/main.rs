@@ -13,10 +13,10 @@ mod status;
 mod window_mgr;
 mod render;
 
-use libcluu::boot::{process_info, PARAM_SESSION_MODE, TOKEN_IPC};
+use libcluu::boot::{process_info, PARAM_NOTIFY_READY_EP, PARAM_SESSION_MODE, TOKEN_IPC};
 use libcluu::ipc::{
     extract_reply_id, reply, send_msg_with_payload,
-    COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL, VTMGR_PIN_VT_LABEL,
+    COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL, COMPOSITOR_READY_LABEL, VTMGR_PIN_VT_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
@@ -122,6 +122,15 @@ pub extern "C" fn main() -> i32 {
 
     let _ = debug_print("compositor: endpoints registered");
 
+    // Notify parent (procmgr) that we are fully ready: all endpoints registered.
+    // PARAM_NOTIFY_READY_EP == 0 means no notification expected (system compositor).
+    let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
+    if notify_ep != 0 {
+        let ready_msg = libcluu::types::Message::new(COMPOSITOR_READY_LABEL, [0; 6], 1);
+        let _ = libcluu::ipc::send(notify_ep, &ready_msg, libcluu::types::IpcFlags::empty());
+        let _ = debug_print("compositor: READY sent to parent");
+    }
+
     // Pin ourselves to VT4 in vtmgr so the slot is explicit and stable
     // regardless of service-launch order.  This is a best-effort fire-and-forget:
     // if vtmgr isn't up yet the message is dropped and vtmgr falls back to the
@@ -195,7 +204,16 @@ pub extern "C" fn main() -> i32 {
                     // Registry control messages (grant requests from subscribers) must
                     // be forwarded to the registry client so it can mint tokens.
                     if idx == REGISTRY_TOKEN_IDX {
-                        if let Ok(Some(event)) = registry::handle_incoming_message(&msg, payload) {
+                        let _ = debug_print(&alloc::format!(
+                            "compositor: registry msg label=0x{:x}", msg.tag.label
+                        ));
+                        let result = registry::handle_incoming_message(&msg, payload);
+                        if let Err(ref e) = result {
+                            let _ = debug_print(&alloc::format!(
+                                "compositor: handle_incoming_message err={:?}", e
+                            ));
+                        }
+                        if let Ok(Some(event)) = result {
                             match event {
                                 RegistryEvent::Grant { service_name, name, token } => {
                                     if service_name == "timeserver" && name == "main" {
