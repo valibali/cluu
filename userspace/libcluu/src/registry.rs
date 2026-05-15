@@ -120,46 +120,70 @@ pub fn lookup_service(full_name: &str) -> Option<usize> {
 }
 
 /// Register an output endpoint with the registry.
+///
+/// This is a synchronous call: it blocks until the registry has processed the
+/// registration and replied. Callers can rely on the entry being committed to
+/// the registry before this function returns.
 pub fn register_output(endpoint_name: &str, endpoint_token: usize) -> Result<()> {
-    let mut state = REGISTRY_STATE.lock();
-    let service_name = state.service_name.clone().ok_or(Error::InvalidArgument)?;
-    let registry_endpoint = state.registry_endpoint;
-    let control_endpoint = state.control_endpoint;
-    if registry_endpoint == 0 || control_endpoint == 0 {
-        return Err(Error::InvalidArgument);
-    }
-
-    // Keep a local map so we can grant later.
-    state
-        .outputs
-        .insert(endpoint_name.to_string(), endpoint_token);
+    let (service_name, registry_endpoint, control_endpoint) = {
+        let mut state = REGISTRY_STATE.lock();
+        let service_name = state.service_name.clone().ok_or(Error::InvalidArgument)?;
+        let registry_endpoint = state.registry_endpoint;
+        let control_endpoint = state.control_endpoint;
+        if registry_endpoint == 0 || control_endpoint == 0 {
+            let _ = crate::debug_print(&alloc::format!(
+                "registry-client: register_output '{}:{}' SKIPPED: registry_endpoint={} control_endpoint={}",
+                state.service_name.as_deref().unwrap_or("?"),
+                endpoint_name,
+                registry_endpoint,
+                control_endpoint,
+            ));
+            return Err(Error::InvalidArgument);
+        }
+        // Keep a local map so we can grant later.
+        state
+            .outputs
+            .insert(endpoint_name.to_string(), endpoint_token);
+        (service_name, registry_endpoint, control_endpoint)
+    };
+    // Lock is released before the blocking IPC call.
     let payload = encode_names(&service_name, endpoint_name);
     let msg = make_payload_message(
         REGISTRY_REGISTER_LABEL,
         payload.len(),
         &[control_endpoint, control_endpoint],
     );
-    send_with_payload(registry_endpoint, &msg, &payload)
+    let result = call_and_check(registry_endpoint, &msg, &payload);
+    if let Err(ref e) = result {
+        let _ = crate::debug_print(&alloc::format!(
+            "registry-client: register_output '{}:{}' FAILED: {:?}",
+            service_name, endpoint_name, e,
+        ));
+    }
+    result
 }
 
 pub fn unregister_output(endpoint_name: &str) -> Result<()> {
-    let mut state = REGISTRY_STATE.lock();
-    let service_name = state.service_name.clone().ok_or(Error::InvalidArgument)?;
-    let registry_endpoint = state.registry_endpoint;
-    let control_endpoint = state.control_endpoint;
-    if registry_endpoint == 0 || control_endpoint == 0 {
-        return Err(Error::InvalidArgument);
-    }
-
-    // Stop granting this output.
-    state.outputs.remove(endpoint_name);
+    let (service_name, registry_endpoint, control_endpoint) = {
+        let mut state = REGISTRY_STATE.lock();
+        let service_name = state.service_name.clone().ok_or(Error::InvalidArgument)?;
+        let registry_endpoint = state.registry_endpoint;
+        let control_endpoint = state.control_endpoint;
+        if registry_endpoint == 0 || control_endpoint == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        // Stop granting this output.
+        state.outputs.remove(endpoint_name);
+        (service_name, registry_endpoint, control_endpoint)
+    };
+    // Lock is released before the blocking IPC call.
     let payload = encode_names(&service_name, endpoint_name);
     let msg = make_payload_message(
         REGISTRY_UNREGISTER_LABEL,
         payload.len(),
         &[control_endpoint],
     );
-    send_with_payload(registry_endpoint, &msg, &payload)
+    call_and_check(registry_endpoint, &msg, &payload)
 }
 
 /// Unregister an output published by another service (admin/force path).
@@ -180,10 +204,15 @@ pub fn force_unregister_service_output(
     }
     let payload = encode_names(service_name, endpoint_name);
     let msg = make_payload_message(REGISTRY_UNREGISTER_LABEL, payload.len(), &[control_endpoint]);
-    send_with_payload(registry_endpoint, &msg, &payload)
+    call_and_check(registry_endpoint, &msg, &payload)
 }
 
 /// Register standard outputs (stdin/stdout/stderr/stdlog) when present.
+///
+/// Uses a fire-and-forget send (not a blocking call) so that it is safe to
+/// call from the registry process itself before it enters its receive loop.
+/// For all other callers the difference is invisible — the registry processes
+/// the message quickly and no ACK is needed for default-output registration.
 pub fn register_default_outputs() -> Result<()> {
     let info = process_info();
     let stdin = info.tokens[crate::boot::TOKEN_STDIN];
@@ -192,18 +221,45 @@ pub fn register_default_outputs() -> Result<()> {
     let stdlog = info.tokens[crate::boot::TOKEN_STDLOG];
 
     if stdin != 0 {
-        let _ = register_output("stdin", stdin);
+        let _ = register_output_async("stdin", stdin);
     }
     if stdout != 0 {
-        let _ = register_output("stdout", stdout);
+        let _ = register_output_async("stdout", stdout);
     }
     if stderr != 0 {
-        let _ = register_output("stderr", stderr);
+        let _ = register_output_async("stderr", stderr);
     }
     if stdlog != 0 {
-        let _ = register_output("stdlog", stdlog);
+        let _ = register_output_async("stdlog", stdlog);
     }
     Ok(())
+}
+
+/// Fire-and-forget register: sends REGISTRY_REGISTER_LABEL without waiting for ACK.
+///
+/// Only used internally by `register_default_outputs` where blocking is not safe
+/// (e.g., when called from the registry process before its receive loop starts).
+fn register_output_async(endpoint_name: &str, endpoint_token: usize) -> Result<()> {
+    let (service_name, registry_endpoint, control_endpoint) = {
+        let mut state = REGISTRY_STATE.lock();
+        let service_name = state.service_name.clone().ok_or(Error::InvalidArgument)?;
+        let registry_endpoint = state.registry_endpoint;
+        let control_endpoint = state.control_endpoint;
+        if registry_endpoint == 0 || control_endpoint == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        state
+            .outputs
+            .insert(endpoint_name.to_string(), endpoint_token);
+        (service_name, registry_endpoint, control_endpoint)
+    };
+    let payload = encode_names(&service_name, endpoint_name);
+    let msg = make_payload_message(
+        REGISTRY_REGISTER_LABEL,
+        payload.len(),
+        &[control_endpoint, control_endpoint],
+    );
+    send_with_payload(registry_endpoint, &msg, &payload)
 }
 
 pub fn subscribe_output(service_name: &str, endpoint_name: &str) -> Result<usize> {
@@ -386,7 +442,7 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
     }
 }
 
-use crate::ipc::{make_payload_message, parse_message};
+use crate::ipc::{call_with_payload, make_payload_message, parse_message};
 
 fn send_with_payload(endpoint: usize, msg: &Message, payload: &[u8]) -> Result<()> {
     // Serialize the message header + payload into a single IPC buffer.
@@ -395,6 +451,19 @@ fn send_with_payload(endpoint: usize, msg: &Message, payload: &[u8]) -> Result<(
     buffer.extend_from_slice(header);
     buffer.extend_from_slice(payload);
     crate::syscall::ipc_send(endpoint, &buffer)
+}
+
+/// Synchronous (call-style) send with payload: blocks until the registry replies.
+/// Returns Ok(()) if the registry accepted, or the error it reported.
+fn call_and_check(endpoint: usize, msg: &Message, payload: &[u8]) -> Result<()> {
+    let mut reply = Message::new(0, [0; 6], 0);
+    call_with_payload(endpoint, msg, payload, &mut reply)?;
+    let code = reply.words[1] as i32;
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(error_from_code(code))
+    }
 }
 
 fn encode_names(service_name: &str, endpoint_name: &str) -> Vec<u8> {

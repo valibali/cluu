@@ -117,6 +117,10 @@ fn run() -> Result<()> {
                                     }
                                     entries.insert(key.clone(), grant_endpoint);
                                     entry_owner.insert(key.clone(), sender_tid);
+                                    let _ = debug_print(&format!(
+                                        "registry: registered {}:{} sender_tid={}",
+                                        service, endpoint, sender_tid
+                                    ));
                                     // O(1) lookup + O(k) drain where k = pending for THIS output
                                     if let Some(requesters) = pending.remove(&key) {
                                         let grant_payload = encode_single_name(&endpoint);
