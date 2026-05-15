@@ -294,7 +294,7 @@ pub(crate) unsafe fn map_user_page(
             crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
         write_bytes(pdpt_virt as *mut u8, 0, 4096);
-        pml4[pml4_idx] = pdpt_phys | table_flags;
+        pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
         pdpt_phys
     };
 
@@ -308,7 +308,7 @@ pub(crate) unsafe fn map_user_page(
         let pd_phys = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
         write_bytes(pd_virt as *mut u8, 0, 4096);
-        pdpt[pdpt_idx] = pd_phys | table_flags;
+        pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
         pd_phys
     };
 
@@ -322,7 +322,7 @@ pub(crate) unsafe fn map_user_page(
         let pt_phys = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pt_virt = crate::mm::physmap::phys_to_virt_u64(pt_phys);
         write_bytes(pt_virt as *mut u8, 0, 4096);
-        pd[pd_idx] = pt_phys | table_flags;
+        pd[pd_idx] = (pt_phys & pte_flags::ADDR_MASK) | table_flags;
         pt_phys
     };
 
@@ -381,7 +381,7 @@ pub(crate) unsafe fn map_shared_page(
         let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
-        pml4[pml4_idx] = p | table_flags;
+        pml4[pml4_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
         p
     };
 
@@ -393,7 +393,7 @@ pub(crate) unsafe fn map_shared_page(
         let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
-        pdpt[pdpt_idx] = p | table_flags;
+        pdpt[pdpt_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
         p
     };
 
@@ -405,7 +405,7 @@ pub(crate) unsafe fn map_shared_page(
         let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
-        pd[pd_idx] = p | table_flags;
+        pd[pd_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
         p
     };
 
@@ -458,7 +458,7 @@ pub(crate) unsafe fn map_device_page(
         let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
-        pml4[pml4_idx] = p | table_flags;
+        pml4[pml4_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
         p
     };
 
@@ -470,7 +470,7 @@ pub(crate) unsafe fn map_device_page(
         let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
-        pdpt[pdpt_idx] = p | table_flags;
+        pdpt[pdpt_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
         p
     };
 
@@ -482,7 +482,7 @@ pub(crate) unsafe fn map_device_page(
         let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
-        pd[pd_idx] = p | table_flags;
+        pd[pd_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
         p
     };
 
@@ -544,7 +544,7 @@ pub(crate) unsafe fn map_device_page_wc(
         let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
-        pml4[pml4_idx] = p | table_flags;
+        pml4[pml4_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
         p
     };
 
@@ -556,7 +556,7 @@ pub(crate) unsafe fn map_device_page_wc(
         let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
-        pdpt[pdpt_idx] = p | table_flags;
+        pdpt[pdpt_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
         p
     };
 
@@ -568,7 +568,7 @@ pub(crate) unsafe fn map_device_page_wc(
         let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
-        pd[pd_idx] = p | table_flags;
+        pd[pd_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
         p
     };
 
@@ -633,7 +633,7 @@ pub(crate) unsafe fn map_user_large_page(
             crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
         write_bytes(pdpt_virt as *mut u8, 0, 4096);
-        pml4[pml4_idx] = pdpt_phys | table_flags;
+        pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
         pdpt_phys
     };
 
@@ -647,7 +647,7 @@ pub(crate) unsafe fn map_user_large_page(
         let pd_phys = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
         write_bytes(pd_virt as *mut u8, 0, 4096);
-        pdpt[pdpt_idx] = pd_phys | table_flags;
+        pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
         pd_phys
     };
 
