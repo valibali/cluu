@@ -1075,6 +1075,14 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
     let mut freed_frames: u64 = 0;
     let mut freed_tables: u64 = 0;
 
+    // Track physical frames already freed in this teardown walk. A given
+    // address space can map the same physical frame through multiple PTEs
+    // (CoW relics, mapping bugs, etc.); without dedup we hand the same
+    // phys to free_frame twice and the buddy allocator panics. Cost:
+    // O(#frames in space) BTreeSet, typically a few MB worth of u64s.
+    let mut freed: alloc::collections::BTreeSet<u64> =
+        alloc::collections::BTreeSet::new();
+
     // Only walk user half (entries 0-255)
     for &pml4e in pml4.iter().take(256) {
         if pml4e & pte_flags::PRESENT == 0 {
@@ -1111,8 +1119,10 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                         continue; // Device-mapped huge page — skip PMM free
                     }
                     let frame_phys = pde & 0x000F_FFFF_FFE0_0000; // 2MB aligned, strip flags
-                    crate::mm::pmm::free_large_frame(frame_phys);
-                    freed_frames += 512; // 512 x 4KB equivalent
+                    if freed.insert(frame_phys) {
+                        crate::mm::pmm::free_large_frame(frame_phys);
+                        freed_frames += 512; // 512 x 4KB equivalent
+                    }
                     continue;
                 }
 
@@ -1139,6 +1149,14 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                     }
 
                     let frame_phys = pte & pte_flags::ADDR_MASK;
+                    // Dedup: only release a given physical frame once per
+                    // teardown. Same phys mapped via multiple PTEs is the
+                    // root cause of the double-free panic the PMM audit
+                    // catches; skipping the duplicate here lets the kernel
+                    // stay correct without relying on the PMM soft-fail.
+                    if !freed.insert(frame_phys) {
+                        continue;
+                    }
                     // Grant-shared frames are tracked in the registry;
                     // freeing unconditionally here would yank the frame
                     // out from under other spaces that still have it
@@ -1153,24 +1171,34 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                     freed_frames += 1;
                 }
 
-                // Free the PT frame
-                crate::mm::pmm::free_frame(pt_phys);
-                freed_tables += 1;
+                // Free the PT frame (page table itself, not user data).
+                // Page tables are kernel-allocated and should never be shared
+                // between PD entries, but dedup anyway for defense in depth.
+                if freed.insert(pt_phys) {
+                    crate::mm::pmm::free_frame(pt_phys);
+                    freed_tables += 1;
+                }
             }
 
             // Free the PD frame
-            crate::mm::pmm::free_frame(pd_phys);
-            freed_tables += 1;
+            if freed.insert(pd_phys) {
+                crate::mm::pmm::free_frame(pd_phys);
+                freed_tables += 1;
+            }
         }
 
         // Free the PDPT frame
-        crate::mm::pmm::free_frame(pdpt_phys);
-        freed_tables += 1;
+        if freed.insert(pdpt_phys) {
+            crate::mm::pmm::free_frame(pdpt_phys);
+            freed_tables += 1;
+        }
     }
 
     // Free the PML4 frame itself
-    crate::mm::pmm::free_frame(pml4_phys.as_u64());
-    freed_tables += 1;
+    if freed.insert(pml4_phys.as_u64()) {
+        crate::mm::pmm::free_frame(pml4_phys.as_u64());
+        freed_tables += 1;
+    }
 
     klibcluu::log_dec(
         klibcluu::LogLevel::Trace,
