@@ -44,6 +44,11 @@ fn run() -> Result<()> {
     let mut entry_owner: BTreeMap<(String, String), usize> = BTreeMap::new();
     // Bind sender thread id -> latest control endpoint for async notifications.
     let mut sender_control_endpoint: BTreeMap<usize, usize> = BTreeMap::new();
+    // Admin tid: recorded from the first REGISTER sender (procmgr).  Only this
+    // tid may force-unregister or overwrite entries it did not originally own.
+    // This lets procmgr clear a killed service's stale entries before spawning
+    // its replacement, while keeping the strict owner check for all others.
+    let mut admin_tid: usize = 0;
     let registry_control = registry::control_endpoint();
     let mut buf = [0u8; 256];
     // Main dispatch loop: handle register/unregister/list/subscribe requests.
@@ -78,18 +83,36 @@ fn run() -> Result<()> {
                                         )?;
                                         continue;
                                     }
+                                    // Bootstrap admin tid from the first REGISTER sender
+                                    // (that is procmgr, which registers before anyone else).
+                                    if admin_tid == 0 {
+                                        admin_tid = sender_tid;
+                                        let _ = debug_print(&format!(
+                                            "registry: admin_tid={}", admin_tid
+                                        ));
+                                    }
                                     if let Some(owner_tid) = entry_owner.get(&key).copied() {
                                         if owner_tid != sender_tid {
-                                            let _ = debug_print(&format!(
-                                                "registry: deny register {}:{} sender_tid={} owner_tid={}",
-                                                service, endpoint, sender_tid, owner_tid
-                                            ));
-                                            send_status(
-                                                reply_token,
-                                                msg.words[1],
-                                                Error::PermissionDenied as i32,
-                                            )?;
-                                            continue;
+                                            // Admin may force-overwrite stale entries from
+                                            // killed services (e.g. procmgr replacing the
+                                            // system compositor with a user-mode one).
+                                            if sender_tid == admin_tid {
+                                                let _ = debug_print(&format!(
+                                                    "registry: admin overwrite {}:{} old_owner={}",
+                                                    service, endpoint, owner_tid
+                                                ));
+                                            } else {
+                                                let _ = debug_print(&format!(
+                                                    "registry: deny register {}:{} sender_tid={} owner_tid={}",
+                                                    service, endpoint, sender_tid, owner_tid
+                                                ));
+                                                send_status(
+                                                    reply_token,
+                                                    msg.words[1],
+                                                    Error::PermissionDenied as i32,
+                                                )?;
+                                                continue;
+                                            }
                                         }
                                     }
                                     entries.insert(key.clone(), grant_endpoint);
@@ -138,16 +161,25 @@ fn run() -> Result<()> {
                                 }
                                 if let Some(owner_tid) = entry_owner.get(&key).copied() {
                                     if owner_tid != sender_tid {
-                                        let _ = debug_print(&format!(
-                                            "registry: deny unregister {}:{} sender_tid={} owner_tid={}",
-                                            service, endpoint, sender_tid, owner_tid
-                                        ));
-                                        send_status(
-                                            reply_token,
-                                            msg.words[1],
-                                            Error::PermissionDenied as i32,
-                                        )?;
-                                        continue;
+                                        // Admin (procmgr) may force-unregister entries owned
+                                        // by killed services so their successor can re-register.
+                                        if sender_tid == admin_tid && admin_tid != 0 {
+                                            let _ = debug_print(&format!(
+                                                "registry: admin force-unregister {}:{} (was owner={})",
+                                                service, endpoint, owner_tid
+                                            ));
+                                        } else {
+                                            let _ = debug_print(&format!(
+                                                "registry: deny unregister {}:{} sender_tid={} owner_tid={}",
+                                                service, endpoint, sender_tid, owner_tid
+                                            ));
+                                            send_status(
+                                                reply_token,
+                                                msg.words[1],
+                                                Error::PermissionDenied as i32,
+                                            )?;
+                                            continue;
+                                        }
                                     }
                                     entry_owner.remove(&key);
                                     entries.remove(&key);
