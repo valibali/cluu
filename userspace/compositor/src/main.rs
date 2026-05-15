@@ -122,14 +122,17 @@ pub extern "C" fn main() -> i32 {
 
     let _ = debug_print("compositor: endpoints registered");
 
-    // Notify parent (procmgr) that we are fully ready: all endpoints registered.
-    // PARAM_NOTIFY_READY_EP == 0 means no notification expected (system compositor).
+    // READY notify is *deferred* until the main dispatch loop has actually
+    // started running (see one-shot send at the top of `loop` below).
+    // Sending it here, before vtmgr lookup + `recv_any` loop entry, races
+    // against any grant request the parent's downstream consumer (cluuterm)
+    // may send the instant it receives our READY — the request would land
+    // on `control_endpoint` while we are blocked inside
+    // `lookup_service("vtmgr:control")` (which only polls one endpoint and
+    // can exit on its own grant before our queued REGISTRY_GRANT_REQUEST is
+    // drained). Holding the READY until the polyendpoint recv is actually
+    // armed closes that window.
     let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
-    if notify_ep != 0 {
-        let ready_msg = libcluu::types::Message::new(COMPOSITOR_READY_LABEL, [0; 6], 1);
-        let _ = libcluu::ipc::send(notify_ep, &ready_msg, libcluu::types::IpcFlags::empty());
-        let _ = debug_print("compositor: READY sent to parent");
-    }
 
     // Pin ourselves to VT4 in vtmgr so the slot is explicit and stable
     // regardless of service-launch order.  This is a best-effort fire-and-forget:
@@ -177,7 +180,25 @@ pub extern "C" fn main() -> i32 {
     // Index of the registry endpoint in the tokens array.
     const REGISTRY_TOKEN_IDX: usize = 3;
 
+    // One-shot READY notify: fired on the first dispatch iteration so the
+    // very next syscall is the recv that will service any grant request
+    // procmgr's downstream consumer (cluuterm) issues in response to READY.
+    // notify_ep == 0 means no parent expects a READY (e.g. system compositor
+    // at boot autostart).
+    let mut pending_ready_ep: usize = notify_ep;
+
     loop {
+        if pending_ready_ep != 0 {
+            let ready_msg = libcluu::types::Message::new(COMPOSITOR_READY_LABEL, [0; 6], 1);
+            let _ = libcluu::ipc::send(
+                pending_ready_ep,
+                &ready_msg,
+                libcluu::types::IpcFlags::empty(),
+            );
+            let _ = debug_print("compositor: READY sent to parent (post-loop-entry)");
+            pending_ready_ep = 0;
+        }
+
         let now_ms = comp.last_clock_now_ms;
         let now_secs = now_ms / 1000;
 
