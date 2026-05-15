@@ -859,37 +859,23 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
         uart_hex("  r14=", f.r14);
         uart_hex("  r15=", f.r15);
 
-        // Probe the from_errno jump table at 0x43c968 in console's .rodata.
-        // table[3] (errno=-12 WouldBlock) should be ~0x4198c1; if it reads as
-        // 0x437720, that's a smoking gun for .rodata corruption (the wild jmp
-        // source).
-        unsafe { core::arch::asm!("stac", options(nomem, nostack)) };
-        let table_base: u64 = 0x43c968;
-        for idx in 0..6u64 {
-            let addr = table_base + idx * 8;
-            let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
-            uart_hex("PF: from_errno entry = ", val);
-        }
-
-        // Aliasing diagnostic: get the physical frame backing console's
-        // 0x43c000 page (the corrupted .rodata page), then scan every other
-        // address space for any virtual page mapping that same phys. If
-        // anything else maps it, we have proof that two spaces alias the
-        // same frame and one of them is overwriting the contents. CR3 is
-        // still the faulting process's at this point.
+        // Aliasing diagnostic: walk page tables to find any other space that
+        // maps the same physical frame as the faulting RIP page. `translate_vaddr`
+        // returns Option, so this is memory-safe even when the address isn't
+        // mapped in the faulting process.
         use x86_64::registers::control::Cr3;
         let faulting_root = Cr3::read_raw().0.start_address();
-        let corrupted_phys = crate::elf::translate_vaddr(
+        let fault_page = f.rip & !0xFFF;
+        let fault_phys = crate::elf::translate_vaddr(
             faulting_root,
-            x86_64::VirtAddr::new(0x43c000),
+            x86_64::VirtAddr::new(fault_page),
         );
-        if let Some(p) = corrupted_phys {
+        if let Some(p) = fault_phys {
             let phys_aligned = p.as_u64() & !0xFFF;
-            uart_hex("PF: console .rodata 0x43c000 -> phys ", phys_aligned);
-            // Walk every registered space and find aliases.
+            uart_hex("PF: faulting page -> phys ", phys_aligned);
             crate::mm::space_repository::for_each(|space_id, root| {
                 if root == faulting_root {
-                    return; // skip self
+                    return;
                 }
                 if let Some(va) = crate::elf::find_first_va_for_phys(root, phys_aligned) {
                     COM2.write_str("PF: ALIAS in space_id=");
@@ -898,41 +884,15 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
                 }
             });
         } else {
-            COM2.write_str("PF: console 0x43c000 not mapped (?!)\n");
+            COM2.write_str("PF: faulting page not mapped in this CR3\n");
         }
 
-        // Dump 8 qwords BELOW RSP first (the just-popped slots — if this was
-        // a `ret` with a corrupted return-PC slot, [RSP-8] still holds the
-        // popped value because `ret` only increments RSP, doesn't zero the slot).
-        // Then dump 64 qwords from user RSP (caller frames). Mark entries that
-        // look like .text return addresses.
-        // SMAP is enabled; set AC=1 so the kernel can read the user page.
-        // We're on the IST stack, so a nested PF here is bounded.
-        COM2.write_str("PF: stack near RSP (TEXT marks 0x400000..0x500000):\n");
-        // 8 qwords below RSP (descending in offset, ascending in physical address)
-        for i in 0..8u64 {
-            let off = 8 - i; // 8, 7, ..., 1 (qwords below)
-            let addr = f.rsp.wrapping_sub(off * 8);
-            let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
-            let prefix = if (0x400000..0x500000).contains(&val) {
-                "  TEXT BELOW q="
-            } else {
-                "  BELOW q="
-            };
-            uart_hex(prefix, val);
-        }
-        // 64 qwords at and above RSP
-        for off in 0..64u64 {
-            let addr = f.rsp.wrapping_add(off * 8);
-            let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
-            let prefix = if (0x400000..0x500000).contains(&val) {
-                "  TEXT q="
-            } else {
-                "  q="
-            };
-            uart_hex(prefix, val);
-        }
-        unsafe { core::arch::asm!("clac", options(nomem, nostack)) };
+        // NOTE: A previous diagnostic block read 6 qwords from a hardcoded
+        // table at 0x43c968 (console-specific) and 72 qwords around f.rsp.
+        // Both could fault on unmapped pages while CR3 is the faulting
+        // process's, producing a nested kernel PF that clobbered the IST
+        // stack and halted the kernel. Removed 2026-05-15. If you need a
+        // stack walk, gate every read on a translate_vaddr Some() check.
     }
 
     // Userspace fault that can't be handled by lazy alloc
