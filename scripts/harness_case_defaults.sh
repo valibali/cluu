@@ -655,6 +655,15 @@ harness_derive_marker_defaults() {
                 RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
                 ;;
+            l2_compositor_swap_login)
+                TEST_COMMAND=""
+                # Same credentials as l2_cluuterm_login. Boot, log in
+                # via the compositor login modal, observe both
+                # session_mode traces.
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
+                ;;
             l2_envelope_home_propagated)
                 TEST_COMMAND=""
                 # After graphical login (VT4 cluuterm session), shell prints

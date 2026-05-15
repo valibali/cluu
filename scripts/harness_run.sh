@@ -1756,6 +1756,22 @@ case "$MARKER_MODE" in
             "login: user authenticated"
         )
         ;;
+    l2_compositor_swap_login)
+        # Verify the VT4 compositor handoff: system compositor boots, is killed
+        # at SESSION_LOGIN, and a user-mode compositor is spawned under the user
+        # envelope.  All markers up to "compositor: session_mode=1 (user)" fire
+        # at boot/login time; "cluuterm: start" requires the login modal to
+        # accept the injected credentials.
+        required_markers=(
+            "TSC calibrated"
+            "compositor: session_mode=0 (system)"
+            "killing system compositor"
+            "system compositor reaped"
+            "compositor: session_mode=1 (user)"
+            "user compositor spawned"
+            "cluuterm: start"
+        )
+        ;;
     l2_text_shell_input)
         # Three serial-visible proof points that the legacy VT0 stdin
         # round-trip works via POSIX read(0) -> /dev/tty0 -> tty service:
