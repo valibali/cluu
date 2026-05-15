@@ -120,14 +120,26 @@ impl BuddyAllocator {
     // ─── Intrusive list helpers (require physmap) ──────────────────────────
 
     fn read_header(&self, frame: usize) -> FreePageHeader {
-        debug_assert!(frame > 0 && frame < MAX_FRAMES, "read_header: invalid frame {}", frame);
+        if frame == 0 || frame >= MAX_FRAMES {
+            // Corrupted free-list pointer or out-of-range frame. Return a zero
+            // header instead of panicking so a userspace-driven path can't
+            // crash the kernel. Caller treats next=0/prev=0 as end-of-list.
+            klibcluu::error("PMM: read_header out-of-range — list corruption (soft-fail)");
+            klibcluu::log_dec(klibcluu::LogLevel::Error, "  frame=", frame as u64);
+            return FreePageHeader { next: 0, prev: 0 };
+        }
         let phys = (frame as u64) * (PAGE_SIZE as u64);
         let virt = unsafe { crate::mm::physmap::phys_to_virt_u64(phys) } as *const FreePageHeader;
         unsafe { core::ptr::read_volatile(virt) }
     }
 
     fn write_header(&self, frame: usize, header: &FreePageHeader) {
-        debug_assert!(frame > 0 && frame < MAX_FRAMES, "write_header: invalid frame {}", frame);
+        if frame == 0 || frame >= MAX_FRAMES {
+            // See read_header. Skip the write rather than deref a bad pointer.
+            klibcluu::error("PMM: write_header out-of-range — list corruption (soft-fail)");
+            klibcluu::log_dec(klibcluu::LogLevel::Error, "  frame=", frame as u64);
+            return;
+        }
         let phys = (frame as u64) * (PAGE_SIZE as u64);
         let virt = unsafe { crate::mm::physmap::phys_to_virt_u64(phys) } as *mut FreePageHeader;
         unsafe { core::ptr::write_volatile(virt, FreePageHeader { ..*header }) }
