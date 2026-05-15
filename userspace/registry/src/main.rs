@@ -80,17 +80,16 @@ fn run() -> Result<()> {
                                     }
                                     if let Some(owner_tid) = entry_owner.get(&key).copied() {
                                         if owner_tid != sender_tid {
-                                            // Allow re-registration from a different sender;
-                                            // this happens when a service restarts (e.g. the
-                                            // system compositor is killed and a new user-mode
-                                            // compositor re-registers the same outputs).
-                                            // The old grant endpoint (owned by the dead thread)
-                                            // was revoked by procmgr's kill_container_process,
-                                            // so overwriting is safe.
                                             let _ = debug_print(&format!(
-                                                "registry: overwrite {}:{} old_owner={} new_owner={}",
-                                                service, endpoint, owner_tid, sender_tid
+                                                "registry: deny register {}:{} sender_tid={} owner_tid={}",
+                                                service, endpoint, sender_tid, owner_tid
                                             ));
+                                            send_status(
+                                                reply_token,
+                                                msg.words[1],
+                                                Error::PermissionDenied as i32,
+                                            )?;
+                                            continue;
                                         }
                                     }
                                     entries.insert(key.clone(), grant_endpoint);
@@ -139,13 +138,16 @@ fn run() -> Result<()> {
                                 }
                                 if let Some(owner_tid) = entry_owner.get(&key).copied() {
                                     if owner_tid != sender_tid {
-                                        // Allow unregister from a different sender; this
-                                        // happens when procmgr kills a service and clears
-                                        // its registry entries before spawning a successor.
                                         let _ = debug_print(&format!(
-                                            "registry: force-unregister {}:{} sender={} (was {})",
+                                            "registry: deny unregister {}:{} sender_tid={} owner_tid={}",
                                             service, endpoint, sender_tid, owner_tid
                                         ));
+                                        send_status(
+                                            reply_token,
+                                            msg.words[1],
+                                            Error::PermissionDenied as i32,
+                                        )?;
+                                        continue;
                                     }
                                     entry_owner.remove(&key);
                                     entries.remove(&key);
