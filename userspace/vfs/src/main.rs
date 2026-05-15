@@ -1142,6 +1142,12 @@ impl VfsServer {
         let container_id = msg.words[1] as u64;
         let mode = msg.words[2];
 
+        // DIAG(unmap-bug): log cleanup with cache stats so ordering vs map_elf is visible
+        let _ = debug_print(&format!(
+            "vfs: container_cleanup START c-{} mode={} cache_entries={}",
+            container_id, mode, self.cache.entries.len()
+        ));
+
         if container_id == 0 {
             return Ok(());
         }
@@ -3114,6 +3120,11 @@ impl VfsServer {
             return None;
         }
         self.cache.insert(entry.inode, entry.size, base, entry.size);
+        // DIAG(unmap-bug): log every cache fill so we can see inode→VA mapping
+        let _ = debug_print(&format!(
+            "vfs: cache_fill inode={} size={} base={:#x}",
+            entry.inode, entry.size, base
+        ));
         self.cache.get(entry.inode, entry.size)
     }
 
@@ -3900,6 +3911,11 @@ impl VfsServer {
         let target_space = msg.words[3];
         let map_start = self.clock_sample();
         let mut reply_msg = Message::new(VFS_MAP_ELF, [0; 6], 3);
+        // DIAG(unmap-bug): log map_elf entry so ordering vs container_cleanup is visible
+        let _ = debug_print(&format!(
+            "vfs: handle_map_elf START fd={} target_space={} cache_entries={}",
+            fd, target_space, self.cache.entries.len()
+        ));
         self.log_map_elf_stage(fd, "request", map_start);
         let client_id = match self.resolve_client_id("map_elf", caller_client, msg.words[1]) {
             Ok(id) => id,
@@ -3929,6 +3945,12 @@ impl VfsServer {
                     return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                 };
 
+                // DIAG(unmap-bug): log every map_elf with the cache entry VA and size
+                let _ = debug_print(&format!(
+                    "vfs: map_elf inode={} cache_base={:#x} cache_len={} target_space={}",
+                    entry.inode, cache_entry.base, cache_entry.len, target_space
+                ));
+
                 let data = unsafe {
                     core::slice::from_raw_parts(cache_entry.base as *const u8, cache_entry.len)
                 };
@@ -3944,10 +3966,18 @@ impl VfsServer {
                     }
                 };
                 if let Err(err) = self.map_cached_elf_segments(target_space, &elf_meta, data) {
+                    let _ = debug_print(&format!(
+                        "vfs: map_elf FAILED inode={} err={:?}", entry.inode, err
+                    ));
                     reply_msg.words[0] = err.to_errno() as usize;
                     return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                 }
                 self.log_map_elf_stage(fd, "segments_mapped", map_start);
+                // DIAG(unmap-bug): confirm success
+                let _ = debug_print(&format!(
+                    "vfs: map_elf OK inode={} entry={:#x} target_space={}",
+                    entry.inode, elf_meta.entry_point, target_space
+                ));
                 reply_msg.words[0] = 0;
                 reply_msg.words[1] = elf_meta.entry_point;
                 reply_msg.words[2] = cache_entry.len;
@@ -4080,6 +4110,10 @@ impl VfsServer {
         let file_offset = segment.file_offset;
         let file_size = segment.file_size;
         if file_offset + file_size > data.len() {
+            let _ = debug_print(&format!(
+                "vfs: map_cached_seg BOUNDS_ERR vaddr={:#x} file_off={} file_sz={} data_len={}",
+                vaddr, file_offset, file_size, data.len()
+            ));
             return Err(Error::InvalidArgument);
         }
 
@@ -4099,6 +4133,11 @@ impl VfsServer {
             let next_page = (vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let end = vaddr + mem_size;
             if end <= next_page {
+                // DIAG(unmap-bug): segment entirely within already-mapped page — skipped
+                let _ = debug_print(&format!(
+                    "vfs: map_cached_seg SKIP_INPAGE vaddr={:#x} mem_sz={:#x} flags={:#x}",
+                    vaddr, mem_size, final_flags
+                ));
                 return Ok(());
             }
             let remaining = end - next_page;
@@ -4107,28 +4146,50 @@ impl VfsServer {
             let adj_file_size = file_size.saturating_sub(skip);
             let adj_file_offset = file_offset + file_size - adj_file_size;
             let data_ptr = data.as_ptr() as usize + adj_file_offset;
-            return syscall::space_map_range(
+            // DIAG(unmap-bug): non-aligned segment tail mapping
+            let _ = debug_print(&format!(
+                "vfs: map_cached_seg UNALIGNED vaddr={:#x} next_page={:#x} pages={} data_ptr={:#x} flags={:#x} adj_file_sz={}",
+                vaddr, next_page, num_pages, data_ptr, final_flags, adj_file_size
+            ));
+            let r = syscall::space_map_range(
                 target_space,
                 next_page,
                 data_ptr,
                 final_flags,
                 num_pages,
                 adj_file_size,
-            )
-            .map(|_| ());
+            );
+            if let Err(ref e) = r {
+                let _ = debug_print(&format!(
+                    "vfs: map_cached_seg UNALIGNED FAIL vaddr={:#x} pages={} err={:?}",
+                    next_page, num_pages, e
+                ));
+            }
+            return r.map(|_| ());
         }
 
         let num_pages = mem_size.div_ceil(PAGE_SIZE);
         let data_ptr = data.as_ptr() as usize + file_offset;
-        syscall::space_map_range(
+        // DIAG(unmap-bug): log every aligned segment mapping
+        let _ = debug_print(&format!(
+            "vfs: map_cached_seg vaddr={:#x} pages={} data_ptr={:#x} flags={:#x} file_sz={} share_phys={}",
+            vaddr, num_pages, data_ptr, final_flags, file_size, !writable
+        ));
+        let r = syscall::space_map_range(
             target_space,
             vaddr,
             data_ptr,
             final_flags,
             num_pages,
             file_size,
-        )?;
-        Ok(())
+        );
+        if let Err(ref e) = r {
+            let _ = debug_print(&format!(
+                "vfs: map_cached_seg FAIL vaddr={:#x} pages={} err={:?}",
+                vaddr, num_pages, e
+            ));
+        }
+        r.map(|_| ())
     }
 }
 
