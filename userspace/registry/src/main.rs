@@ -251,27 +251,43 @@ fn run() -> Result<()> {
                                 let key = (service.clone(), endpoint.clone());
                                 match entries.get(&key) {
                                     Some(grant_endpoint) => {
+                                        let _ = debug_print(&format!(
+                                            "registry: SUBSCRIBE {}:{} sender_tid={} reply_ep={} → forward grant_ep={}",
+                                            service, endpoint, sender_tid, reply_endpoint, *grant_endpoint
+                                        ));
                                         let grant_payload = encode_single_name(&endpoint);
                                         let grant_msg = make_payload_message(
                                             REGISTRY_GRANT_REQUEST_LABEL,
                                             grant_payload.len(),
                                             &[reply_endpoint],
                                         );
-                                        if let Err(_err) = send_with_payload(
+                                        if let Err(err) = send_with_payload(
                                             *grant_endpoint,
                                             &grant_msg,
                                             &grant_payload,
                                         ) {
+                                            let _ = debug_print(&format!(
+                                                "registry: SUBSCRIBE forward FAILED {}:{} grant_ep={} err={:?}",
+                                                service, endpoint, *grant_endpoint, err
+                                            ));
                                             send_status(
                                                 reply_token,
                                                 reply_endpoint,
                                                 Error::InvalidArgument as i32,
                                             )?;
                                         } else {
+                                            let _ = debug_print(&format!(
+                                                "registry: SUBSCRIBE forward OK {}:{} grant_ep={}",
+                                                service, endpoint, *grant_endpoint
+                                            ));
                                             send_status(reply_token, reply_endpoint, 0)?;
                                         }
                                     }
                                     None => {
+                                        let _ = debug_print(&format!(
+                                            "registry: SUBSCRIBE {}:{} sender_tid={} reply_ep={} → no entry, pending",
+                                            service, endpoint, sender_tid, reply_endpoint
+                                        ));
                                         // O(1) insert with dedup via contains check on small vec
                                         let requesters = pending.entry(key).or_default();
                                         if !requesters.contains(&reply_endpoint) {
