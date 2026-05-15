@@ -26,6 +26,7 @@ use libcluu::boot::{
     PARAM_FD_VFS_OFFSET,
     PARAM_FD_VFS_LEN,
     PARAM_INITRD_SIZE,
+    PARAM_SESSION_MODE,
     PARAM_TTY_INSTANCE,
     PROCESS_INFO_ADDR,
     // New token slot constants
@@ -1295,7 +1296,7 @@ impl ProcessManager {
         }
     }
 
-    fn autostart_container(&mut self, image_name: &str, _svc: &libcluu::toml::TomlTable) -> Result<()> {
+    fn autostart_container(&mut self, image_name: &str, svc: &libcluu::toml::TomlTable) -> Result<()> {
         // Read manifest
         let manifest_path = format!("/var/images/{}/manifest.toml", image_name);
         let manifest_contents = self.read_file_from_vfs(&manifest_path)
@@ -1385,12 +1386,19 @@ impl ProcessManager {
         // Instance params: console and vt share PARAM_CAP_PROFILE slot with their
         // instance ID, so we override after the profile is written.
         // Console opens /dev/fb0 directly; procmgr no longer injects FB params.
-        let mut overrides_buf: [(usize, u64); 8] = [(0, 0); 8];
+        let mut overrides_buf: [(usize, u64); 12] = [(0, 0); 12];
         let mut n_overrides = 0;
         if image_name == "console" {
             overrides_buf[n_overrides] = (PARAM_CONSOLE_INSTANCE, 0);
             n_overrides += 1;
             overrides_buf[n_overrides] = (PARAM_CONSOLE_ACTIVE, 1);
+            n_overrides += 1;
+        }
+        // session_mode: read from [[service]] entry in autostart.toml (bare integer string).
+        // Defaults to 0 (system compositor) if absent or unparseable.
+        if let Some(sm_str) = svc.get_str("session_mode") {
+            let sm_val: u64 = sm_str.trim().parse().unwrap_or(0);
+            overrides_buf[n_overrides] = (PARAM_SESSION_MODE, sm_val);
             n_overrides += 1;
         }
         let param_overrides = &overrides_buf[..n_overrides];

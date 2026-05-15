@@ -9,6 +9,7 @@ image = "kbd"
 
 [[service]]
 image = "compositor"
+session_mode = 0
 
 [[service]]
 image = "login"
