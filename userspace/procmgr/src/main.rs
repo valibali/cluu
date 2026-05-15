@@ -2272,6 +2272,46 @@ impl ProcessManager {
         let _ = send(self.vfs_endpoint, &msg, IpcFlags::empty());
     }
 
+    /// Find the autostarted (system-mode) compositor's container and kill it
+    /// synchronously using thread_destroy + state cleanup.  thread_destroy is a
+    /// kernel operation and returns immediately; the killed thread will not send
+    /// an exit notification because it has been abruptly destroyed.  All tracking
+    /// maps are cleaned up inline, following the same pattern as the cascading-kill
+    /// and kill_container_process paths.
+    ///
+    /// Returns Ok(()) when the system compositor is gone or wasn't running;
+    /// Err(Error::NotFound) when the compositor exists but has no pid_to_cookie entry.
+    fn kill_system_compositor(&mut self) -> Result<()> {
+        // Find the system-mode (session_id == 0) compositor container.
+        let found = self.container_instances
+            .iter()
+            .find(|(_, c)| {
+                c.image_path == "/var/images/compositor" && c.session_id == 0
+            })
+            .map(|(cid, c)| (*cid, c.pid));
+
+        let (container_id, pid) = match found {
+            Some(v) => v,
+            None => {
+                let _ = debug_print("procmgr: kill_system_compositor: not running");
+                return Ok(());
+            }
+        };
+
+        let _ = debug_print(&format!(
+            "procmgr: killing system compositor pid={} cid={}", pid, container_id
+        ));
+
+        // Reuse kill_container_process which handles thread_destroy + all map cleanup.
+        self.kill_container_process(pid, container_id);
+
+        // Remove the container instance itself so it no longer appears in listings.
+        self.container_instances.remove(&container_id);
+
+        let _ = debug_print("procmgr: system compositor reaped");
+        Ok(())
+    }
+
     fn kill_container_process(&mut self, pid: usize, container_id: u64) {
         if let Some(&cookie) = self.pid_to_cookie.get(&pid) {
             if let Some(thread_token) = self.exit_table.remove(&cookie) {
@@ -2426,6 +2466,17 @@ impl ProcessManager {
             let cluuterm_argc = 1usize;
 
             const CLUUTERM_BIN: &str = "/var/images/cluuterm/bin/cluuterm";
+
+            // Kill the system-mode compositor before spawning cluuterm so there
+            // is no VT4 contention between the two compositor instances.
+            if let Err(e) = self.kill_system_compositor() {
+                let _ = debug_print(&format!(
+                    "procmgr: SESSION_LOGIN kind=1 abort: kill_system_compositor {:?}", e
+                ));
+                reply_msg.words[0] = e.to_errno() as usize;
+                if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
+                return Ok(());
+            }
 
             let spawn_seq = self.next_spawn_seq();
             let spawn_start = self.clock_sample();
