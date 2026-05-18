@@ -106,6 +106,123 @@ pub mod pte_flags {
 // Common flag combinations for convenience
 const PTE_PRESENT_WRITABLE: u64 = pte_flags::PRESENT | pte_flags::WRITABLE;
 
+/// Diagnostic toggle for the cross-space alias detector in
+/// `teardown_user_pages`. When true, every intermediate-table free during
+/// teardown first scans all other live address spaces; if the frame is still
+/// reachable as PT/PD/PDPT/PML4 in another space, the free is SKIPPED and a
+/// `[DIAG(alias)]` line is logged. Leaks frames intentionally — diagnostic.
+const ALIAS_DETECT: bool = true;
+
+/// Walk every OTHER live address space (excluding `exclude_pml4_phys`) and
+/// return `Some((space_id, level))` if `target_phys` is reachable as an
+/// intermediate-table frame anywhere in user-half (entries 0..256).
+///
+/// `level` is "PML4" | "PDPT" | "PD" | "PT". Returns on first hit.
+///
+/// # Safety
+///
+/// Physmap must be active. Holds the space_repository lock for the entire
+/// walk. Must not be called recursively into space_repository APIs.
+unsafe fn find_table_alias(
+    target_phys: u64,
+    exclude_pml4_phys: u64,
+) -> Option<(u64, &'static str)> {
+    let mut hit: Option<(u64, &'static str)> = None;
+    crate::mm::space_repository::for_each(|space_id, pml4_pa| {
+        if hit.is_some() {
+            return;
+        }
+        let pml4_phys = pml4_pa.as_u64();
+        if pml4_phys == exclude_pml4_phys {
+            return;
+        }
+        if pml4_phys == target_phys {
+            hit = Some((space_id.as_u64(), "PML4"));
+            return;
+        }
+        let pml4_virt = super::physmap::phys_to_virt_u64(pml4_phys);
+        let pml4 = &*(pml4_virt as *const [u64; 512]);
+        for &pml4e in pml4.iter().take(256) {
+            if pml4e & pte_flags::PRESENT == 0 {
+                continue;
+            }
+            let pdpt_phys = pml4e & pte_flags::ADDR_MASK;
+            if pdpt_phys == target_phys {
+                hit = Some((space_id.as_u64(), "PDPT"));
+                return;
+            }
+            let pdpt_virt = super::physmap::phys_to_virt_u64(pdpt_phys);
+            let pdpt = &*(pdpt_virt as *const [u64; 512]);
+            for &pdpte in pdpt.iter().take(512) {
+                if pdpte & pte_flags::PRESENT == 0 {
+                    continue;
+                }
+                if pdpte & pte_flags::HUGE != 0 {
+                    continue;
+                }
+                let pd_phys = pdpte & pte_flags::ADDR_MASK;
+                if pd_phys == target_phys {
+                    hit = Some((space_id.as_u64(), "PD"));
+                    return;
+                }
+                let pd_virt = super::physmap::phys_to_virt_u64(pd_phys);
+                let pd = &*(pd_virt as *const [u64; 512]);
+                for &pde in pd.iter().take(512) {
+                    if pde & pte_flags::PRESENT == 0 {
+                        continue;
+                    }
+                    if pde & pte_flags::HUGE != 0 {
+                        continue;
+                    }
+                    let pt_phys = pde & pte_flags::ADDR_MASK;
+                    if pt_phys == target_phys {
+                        hit = Some((space_id.as_u64(), "PT"));
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    hit
+}
+
+/// Helper: log + decide whether to free a table frame during teardown.
+/// Returns true if caller should call `pmm::free_frame`, false to leak.
+///
+/// # Safety
+/// Same as `find_table_alias`.
+unsafe fn check_table_free(
+    target_phys: u64,
+    level: &'static str,
+    teardown_pml4_phys: u64,
+) -> bool {
+    if !ALIAS_DETECT {
+        return true;
+    }
+    if let Some((other_space_id, other_level)) =
+        find_table_alias(target_phys, teardown_pml4_phys)
+    {
+        klibcluu::warn("[DIAG(alias)] table frame aliased — SKIP free");
+        klibcluu::log_hex(klibcluu::LogLevel::Warn, "  phys=0x", target_phys);
+        klibcluu::trace("  freeing_as=");
+        klibcluu::trace(level);
+        klibcluu::log_hex(
+            klibcluu::LogLevel::Warn,
+            "  teardown_pml4=0x",
+            teardown_pml4_phys,
+        );
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Warn,
+            "  aliased_in_space=",
+            other_space_id,
+        );
+        klibcluu::trace("  found_as=");
+        klibcluu::trace(other_level);
+        return false;
+    }
+    true
+}
+
 /// Page Table Manager
 ///
 /// Wraps x86_64's `OffsetPageTable` and integrates with our memory allocator.
@@ -1181,28 +1298,36 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                 // Free the PT frame (page table itself, not user data).
                 // Page tables are kernel-allocated and should never be shared
                 // between PD entries, but dedup anyway for defense in depth.
-                if freed.insert(pt_phys) {
+                if freed.insert(pt_phys)
+                    && check_table_free(pt_phys, "PT", pml4_phys.as_u64())
+                {
                     crate::mm::pmm::free_frame(pt_phys);
                     freed_tables += 1;
                 }
             }
 
             // Free the PD frame
-            if freed.insert(pd_phys) {
+            if freed.insert(pd_phys)
+                && check_table_free(pd_phys, "PD", pml4_phys.as_u64())
+            {
                 crate::mm::pmm::free_frame(pd_phys);
                 freed_tables += 1;
             }
         }
 
         // Free the PDPT frame
-        if freed.insert(pdpt_phys) {
+        if freed.insert(pdpt_phys)
+            && check_table_free(pdpt_phys, "PDPT", pml4_phys.as_u64())
+        {
             crate::mm::pmm::free_frame(pdpt_phys);
             freed_tables += 1;
         }
     }
 
     // Free the PML4 frame itself
-    if freed.insert(pml4_phys.as_u64()) {
+    if freed.insert(pml4_phys.as_u64())
+        && check_table_free(pml4_phys.as_u64(), "PML4", pml4_phys.as_u64())
+    {
         crate::mm::pmm::free_frame(pml4_phys.as_u64());
         freed_tables += 1;
     }
