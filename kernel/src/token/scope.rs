@@ -218,6 +218,22 @@ impl AddressSpaceId {
     }
 }
 
+/// Sentinel `AddressSpaceId` for tables owned by the kernel itself.
+///
+/// Used for:
+/// - Boot-time page tables built before the physmap is active (PML4, PDPT, PD,
+///   PT allocated inside `create_initial_page_tables`).
+/// - Kernel demand-pager (heap/stack lazy alloc) when no user space id is
+///   available.
+/// - `map_phys_to_userspace` bootstrap path (initrd mapping via user_map.rs).
+/// - `allocate_user_stack` / `map_single_4k_page` for kernel-originated mappings.
+///
+/// All live user-space tables MUST use a real (non-zero, non-MAX) id.
+/// `KERNEL_OWNER` must NEVER be stored on a frame that transitions to a user
+/// address space — only frames permanently owned by the kernel microkernel
+/// itself may carry this tag.
+pub const KERNEL_OWNER: AddressSpaceId = AddressSpaceId(u64::MAX);
+
 /// IPC endpoint identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EndpointId(pub u64);

@@ -1122,12 +1122,15 @@ unsafe fn map_single_4k_page(
         let pdpt_virt = unsafe { super::physmap::phys_to_virt_u64(pdpt_phys) };
         unsafe { write_bytes(pdpt_virt as *mut u8, 0, 4096) };
         pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
-        // Phase 1: retype new PDPT (level 3, kernel owner = 0)
-        let _ = crate::mm::frame_table::retype_to_pt(
-            pdpt_phys,
-            3,
-            crate::token::scope::AddressSpaceId::new(0),
-        );
+        // Phase 2.5: kernel-owned table — use KERNEL_OWNER (u64::MAX).
+        if crate::mm::frame_table::retype_to_pt(
+            pdpt_phys, 3, crate::token::scope::KERNEL_OWNER,
+        ).is_err() {
+            #[cfg(debug_assertions)]
+            panic!("map_single_4k_page: retype PDPT 0x{:x} failed", pdpt_phys);
+            #[cfg(not(debug_assertions))]
+            klibcluu::error("map_single_4k_page: retype PDPT failed — alias or double-alloc");
+        }
         pdpt_phys
     };
 
@@ -1142,12 +1145,15 @@ unsafe fn map_single_4k_page(
         let pd_virt = unsafe { super::physmap::phys_to_virt_u64(pd_phys) };
         unsafe { write_bytes(pd_virt as *mut u8, 0, 4096) };
         pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
-        // Phase 1: retype new PD (level 2, kernel owner = 0)
-        let _ = crate::mm::frame_table::retype_to_pt(
-            pd_phys,
-            2,
-            crate::token::scope::AddressSpaceId::new(0),
-        );
+        // Phase 2.5: kernel-owned table — use KERNEL_OWNER.
+        if crate::mm::frame_table::retype_to_pt(
+            pd_phys, 2, crate::token::scope::KERNEL_OWNER,
+        ).is_err() {
+            #[cfg(debug_assertions)]
+            panic!("map_single_4k_page: retype PD 0x{:x} failed", pd_phys);
+            #[cfg(not(debug_assertions))]
+            klibcluu::error("map_single_4k_page: retype PD failed — alias or double-alloc");
+        }
         pd_phys
     };
 
@@ -1166,12 +1172,15 @@ unsafe fn map_single_4k_page(
         let pt_virt = unsafe { super::physmap::phys_to_virt_u64(pt_phys) };
         unsafe { write_bytes(pt_virt as *mut u8, 0, 4096) };
         pd[pd_idx] = (pt_phys & pte_flags::ADDR_MASK) | table_flags;
-        // Phase 1: retype new PT (level 1, kernel owner = 0)
-        let _ = crate::mm::frame_table::retype_to_pt(
-            pt_phys,
-            1,
-            crate::token::scope::AddressSpaceId::new(0),
-        );
+        // Phase 2.5: kernel-owned table — use KERNEL_OWNER.
+        if crate::mm::frame_table::retype_to_pt(
+            pt_phys, 1, crate::token::scope::KERNEL_OWNER,
+        ).is_err() {
+            #[cfg(debug_assertions)]
+            panic!("map_single_4k_page: retype PT 0x{:x} failed", pt_phys);
+            #[cfg(not(debug_assertions))]
+            klibcluu::error("map_single_4k_page: retype PT failed — alias or double-alloc");
+        }
         pt_phys
     };
 
@@ -1513,16 +1522,24 @@ pub unsafe fn alloc_pml4() -> Result<PhysAddr, &'static str> {
         write_bytes(pml4_virt as *mut u8, 0, 4096);
     }
 
-    // Phase 1: retype as PML4 (level 4). Owner is unknown at this point
-    // (AddressSpace::new_user allocates the PML4 before the AddressSpaceId is
-    // assigned). We use AddressSpaceId(0) as a sentinel; the caller may call
-    // retype_to_pt again once the real ID is known. In advisory mode this is
-    // harmless.
-    let _ = crate::mm::frame_table::retype_to_pt(
+    // Phase 2.5: retype as PML4 (level 4).
+    // Owner is unknown at this point — `AddressSpace::new_user` allocates the
+    // PML4 before `space_repository::insert` assigns a real id.  We tag with
+    // `KERNEL_OWNER` (u64::MAX) as a distinct sentinel.  The caller MUST call
+    // `frame_table::retag_pt_owner(pml4_phys, real_id)` once the id is known.
+    if crate::mm::frame_table::retype_to_pt(
         pml4_phys,
         4,
-        crate::token::scope::AddressSpaceId::new(0),
-    );
+        crate::token::scope::KERNEL_OWNER,
+    ).is_err() {
+        #[cfg(debug_assertions)]
+        panic!("alloc_pml4: retype_to_pt(phys=0x{:x}) failed", pml4_phys);
+        #[cfg(not(debug_assertions))]
+        {
+            klibcluu::error("alloc_pml4: retype_to_pt failed — cross-space alias or double-alloc");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", pml4_phys);
+        }
+    }
 
     Ok(PhysAddr::new(pml4_phys))
 }

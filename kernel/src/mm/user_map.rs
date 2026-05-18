@@ -71,7 +71,10 @@ pub fn map_phys_to_userspace(
 
         // Map page (user-accessible, non-executable, read-only or writable)
         unsafe {
-            crate::elf::map_user_page(virt_addr, phys_addr, writable, false, page_table_root, crate::token::scope::AddressSpaceId::new(0))
+            // Bootstrap-only path: no user AddressSpaceId is available here;
+            // use KERNEL_OWNER so tables are not confused with any user space.
+            crate::elf::map_user_page(virt_addr, phys_addr, writable, false, page_table_root,
+                crate::token::scope::KERNEL_OWNER)
                 .map_err(|_| Error::OutOfMemory)?;
         }
     }

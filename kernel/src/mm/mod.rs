@@ -293,9 +293,13 @@ pub fn allocate_user_stack(
         // Allocate physical frame
         let phys_frame = pmm::alloc_frame().ok_or(crate::error::Error::OutOfMemory)?;
 
-        // Map page (writable, non-executable, user-accessible)
+        // Map page (writable, non-executable, user-accessible).
+        // allocate_user_stack is a bootstrap helper — by the time it's called
+        // for init the address space has no real id yet. Use KERNEL_OWNER so
+        // table frames aren't confused with any user space.
         unsafe {
-            crate::elf::map_user_page(virt_addr, phys_frame, true, false, page_table_root, crate::token::scope::AddressSpaceId::new(0))
+            crate::elf::map_user_page(virt_addr, phys_frame, true, false, page_table_root,
+                crate::token::scope::KERNEL_OWNER)
                 .map_err(|_| crate::error::Error::OutOfMemory)?;
         }
 

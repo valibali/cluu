@@ -1280,6 +1280,15 @@ fn invoke_space_create(token: &Token, _obj_ref: ObjectRef, _args: SyscallArgs) -
 
     let space_id = space_repository::insert(new_space);
 
+    // Phase 2.5: fix up the PML4 frame-table owner from KERNEL_OWNER sentinel
+    // to the real AddressSpaceId now that the repository has assigned one.
+    {
+        let pml4_phys = space_repository::with_space(space_id, |s| s.page_table_root.as_u64());
+        if let Some(pml4_pa) = pml4_phys {
+            crate::mm::frame_table::retag_pt_owner(pml4_pa, space_id);
+        }
+    }
+
     klibcluu::trace("Created address space: id=");
     klibcluu::log_dec(klibcluu::LogLevel::Trace, "", space_id.as_u64());
 

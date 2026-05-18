@@ -101,6 +101,10 @@ pub enum FrameTableError {
     StillReferenced,
     /// Frame is already typed (non-Untyped) when a fresh retype was requested.
     AlreadyTyped,
+    /// Frame is already typed as PageTable but owned by a different address space.
+    /// This is the cross-space alias error: two distinct spaces share one table
+    /// frame — a direct sign of PMM duplicate-alloc or retype bypass.
+    OwnerMismatch,
 }
 
 // ─── Storage ─────────────────────────────────────────────────────────────────
@@ -166,8 +170,14 @@ fn warn_mismatch(msg: &'static str, phys: u64) {
 /// Retype a frame to `PageTable` at the given `level` (1=PT 2=PD 3=PDPT 4=PML4)
 /// owned by `owner`.
 ///
-/// Phase 1: if the frame is already non-Untyped (e.g. early-boot allocation
-/// before the table was live) we log a warning and set the new type anyway.
+/// Phase 2.5 owner-uniqueness enforcement:
+/// - Untyped → PageTable(owner, level): always succeeds (normal path).
+/// - PageTable(same_owner, same_level) → idempotent success (re-entry for
+///   same space is safe; can happen when an existing intermediate table is
+///   encountered while mapping a second page in the same space).
+/// - PageTable(different_owner, *) → `OwnerMismatch` error.  This is the
+///   load-bearing check: a PMM duplicate-alloc or sentinel-0 bypass trips here.
+/// - Any other tag → `AlreadyTyped`.
 pub fn retype_to_pt(
     phys: u64,
     level: u8,
@@ -178,6 +188,27 @@ pub fn retype_to_pt(
     let idx = checked_frame(table, phys)?;
 
     let entry = &mut table[idx];
+    if entry.tag == FrameTag::PageTable {
+        // Already a PageTable: check for cross-space alias.
+        let existing_owner = entry.owner as u64;
+        let caller_owner = owner.as_u64() as u16 as u64; // truncated the same way
+        if existing_owner == caller_owner {
+            // Same owner — idempotent, no refcount change.
+            // Refcounting for intermediate tables is managed separately:
+            // initial alloc sets refcount=1; teardown calls dec_ref once per
+            // table frame found in the walk. The mapping reuse path just needs
+            // to verify ownership, not bump refcount.
+            return Ok(());
+        }
+        // Different owner → cross-space alias detected.
+        klibcluu::error("FRAME_TABLE CRITICAL: retype_to_pt OwnerMismatch — cross-space PT alias");
+        klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", phys);
+        klibcluu::log_dec(klibcluu::LogLevel::Error, "  existing_owner=", existing_owner);
+        klibcluu::log_dec(klibcluu::LogLevel::Error, "  caller_owner=", owner.as_u64());
+        klibcluu::log_dec(klibcluu::LogLevel::Error, "  existing_level=", entry.extra as u64);
+        klibcluu::log_dec(klibcluu::LogLevel::Error, "  caller_level=", level as u64);
+        return Err(FrameTableError::OwnerMismatch);
+    }
     if entry.tag != FrameTag::Untyped {
         let err = FrameTableError::AlreadyTyped;
         warn_mismatch("FRAME_TABLE WARN: retype_to_pt on non-Untyped frame", phys);
@@ -387,6 +418,28 @@ pub fn dec_ref(phys: u64) -> Result<u16, FrameTableError> {
 }
 
 // ─── Query API ───────────────────────────────────────────────────────────────
+
+/// Update the owner field of an existing `PageTable` frame.
+///
+/// Used to fix up the sentinel `KERNEL_OWNER` / `AddressSpaceId(0)` written
+/// by `alloc_pml4()` once the real `AddressSpaceId` is known (i.e. after
+/// `space_repository::insert` returns). If the frame is not currently a
+/// `PageTable`, the call is a no-op (logged at warn level).
+pub fn retag_pt_owner(phys: u64, new_owner: AddressSpaceId) {
+    let mut guard = FRAME_TABLE.lock();
+    let Some(table) = guard.as_mut() else { return; };
+    let idx = match checked_frame(table, phys) {
+        Ok(i) => i,
+        Err(_) => return,
+    };
+    let entry = &mut table[idx];
+    if entry.tag != FrameTag::PageTable {
+        klibcluu::warn("FRAME_TABLE WARN: retag_pt_owner called on non-PageTable frame");
+        klibcluu::log_hex(klibcluu::LogLevel::Warn, "  phys=0x", phys);
+        return;
+    }
+    entry.owner = new_owner.as_u64() as u16;
+}
 
 /// Return the `FrameTag` of the frame at `phys`.
 ///

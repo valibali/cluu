@@ -118,8 +118,11 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
 
     // Load init ELF into address space
     klibcluu::trace("Loading init ELF...");
-    // Phase 2: pass sentinel owner (space_id not yet assigned at bootstrap).
-    crate::elf::load_elf(init_elf, &mut init_space, crate::token::scope::AddressSpaceId::new(0)).map_err(|_e| {
+    // Phase 2.5: use KERNEL_OWNER — bootstrap loads init before space_repository
+    // assigns a real AddressSpaceId. Leaf frames are tagged UserData(KERNEL_OWNER)
+    // and intermediate tables PageTable(KERNEL_OWNER). This is acceptable for the
+    // primordial init space (only one exists, no cross-space alias is possible).
+    crate::elf::load_elf(init_elf, &mut init_space, crate::token::scope::KERNEL_OWNER).map_err(|_e| {
         klibcluu::error("Failed to load init ELF");
         Error::InvalidOperation
     })?;
@@ -170,13 +173,15 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
     })?;
 
     unsafe {
+        // Phase 2.5: bootstrap boot-info frame — use KERNEL_OWNER for same
+        // reason as the ELF load above.
         crate::elf::map_user_page(
             BOOT_INFO_ADDR,
             boot_frame,
             true,
             false,
             init_space.page_table_root,
-            crate::token::scope::AddressSpaceId::new(0),
+            crate::token::scope::KERNEL_OWNER,
         )?;
 
         let boot_phys = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(boot_frame));

@@ -49,8 +49,13 @@ pub enum FrameRegistryError {
 /// Calls `pmm::alloc_frame()` internally. Returns `(FrameId, phys_addr)`.
 pub fn alloc_frame(owner: AddressSpaceId) -> Option<(FrameId, u64)> {
     let phys = crate::mm::pmm::alloc_frame_tagged("registry_alloc")?;
-    // Phase 1: retype as UserData for the registry's owner.
-    let _ = crate::mm::frame_table::retype_to_user(phys, owner);
+    // Phase 2.5: retype as UserData for the registry's owner. LOUD on error.
+    if let Err(e) = crate::mm::frame_table::retype_to_user(phys, owner) {
+        klibcluu::error("frame_registry::alloc_frame: retype_to_user failed");
+        klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", phys);
+        klibcluu::log_dec(klibcluu::LogLevel::Error, "  owner=", owner.as_u64());
+        let _ = e; // retype failure is non-fatal for registry alloc
+    }
     let id = FrameId::new(NEXT_FRAME_ID.fetch_add(1, Ordering::SeqCst));
 
     let entry = FrameEntry {
@@ -214,11 +219,16 @@ pub fn alloc_frame_n(owner: AddressSpaceId, n_pages: usize) -> Option<(FrameId, 
         return None; // buddy max = order 9 (2 MiB)
     }
     let phys = crate::mm::pmm::alloc_order(order as usize)?;
-    // Phase 2: retype EVERY constituent page in the contiguous block as UserData.
+    // Phase 2.5: retype EVERY constituent page as UserData. LOUD on error.
     let allocated_count = 1usize << order;
     for i in 0..allocated_count {
         let page_phys = phys + (i as u64) * 4096;
-        let _ = crate::mm::frame_table::retype_to_user(page_phys, owner);
+        if let Err(e) = crate::mm::frame_table::retype_to_user(page_phys, owner) {
+            klibcluu::error("frame_registry::alloc_frame_n: retype_to_user failed");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", page_phys);
+            klibcluu::log_dec(klibcluu::LogLevel::Error, "  owner=", owner.as_u64());
+            let _ = e;
+        }
     }
     let id = FrameId::new(NEXT_FRAME_ID.fetch_add(1, Ordering::SeqCst));
     let allocated_pages: u32 = 1u32 << order;

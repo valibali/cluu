@@ -92,8 +92,10 @@ pub struct ElfBinary {
 /// * `data` - Raw ELF file bytes
 /// * `address_space` - Target address space to load into
 /// * `owner` - `AddressSpaceId` of the target space; used to tag intermediate
-///   page table frames with the correct owner. Pass `AddressSpaceId::new(0)` if
-///   the ID is not yet known (bootstrap / legacy spawn path).
+///   page table frames with the correct owner. Pass `KERNEL_OWNER` for the
+///   bootstrap / legacy spawn path where no real id has been assigned yet.
+///   Never pass `AddressSpaceId::new(0)` — that is the old sentinel and is
+///   indistinguishable from other zero-owner callers (Phase 2.5 fix).
 ///
 /// # Returns
 ///
@@ -190,8 +192,21 @@ fn load_segment_batch(
         // Allocate physical frame
         let frame_phys = crate::mm::pmm::alloc_frame_tagged("elf_alloc_leaf")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
-        // Phase 2: retype leaf frame as UserData with real owner.
-        let _ = crate::mm::frame_table::retype_to_user(frame_phys, owner);
+        // Phase 2.5: retype leaf frame as UserData with real owner. LOUD on error.
+        if let Err(e) = crate::mm::frame_table::retype_to_user(frame_phys, owner) {
+            #[cfg(debug_assertions)]
+            panic!("load_segment_batch: retype_to_user phys=0x{:x} owner={} failed: {:?}",
+                   frame_phys, owner.as_u64(), e);
+            #[cfg(not(debug_assertions))]
+            {
+                klibcluu::error("load_segment_batch: retype_to_user failed — alias or double-alloc");
+                klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", frame_phys);
+                klibcluu::log_dec(klibcluu::LogLevel::Error, "  owner=", owner.as_u64());
+                // Continue: the leaf frame is already zeroed; the PTE will be written.
+                // The failure means the alias detector will fire later during teardown.
+                let _ = e;
+            }
+        }
         let frame_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
 
         // Zero the entire page first
@@ -306,8 +321,19 @@ pub(crate) unsafe fn map_user_page(
         let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
         write_bytes(pdpt_virt as *mut u8, 0, 4096);
         pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
-        // Phase 2: retype new PDPT with real owner.
-        let _ = crate::mm::frame_table::retype_to_pt(pdpt_phys, 3, owner);
+        // Phase 2.5: retype new PDPT with real owner. Errors are LOUD.
+        if let Err(e) = crate::mm::frame_table::retype_to_pt(pdpt_phys, 3, owner) {
+            #[cfg(debug_assertions)]
+            panic!("map_user_page: retype PDPT 0x{:x} owner={} failed: {:?}",
+                   pdpt_phys, owner.as_u64(), e);
+            #[cfg(not(debug_assertions))]
+            {
+                klibcluu::error("map_user_page: retype PDPT failed — alias or double-alloc");
+                klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", pdpt_phys);
+                klibcluu::log_dec(klibcluu::LogLevel::Error, "  owner=", owner.as_u64());
+                return Err(ElfLoadError::MappingFailed("retype_to_pt PDPT failed"));
+            }
+        }
         pdpt_phys
     };
 
@@ -316,15 +342,38 @@ pub(crate) unsafe fn map_user_page(
 
     // Get or create PD
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
-        pdpt[pdpt_idx] & PHYS_MASK
+        // Reuse: verify no cross-space alias — the existing frame must belong
+        // to the same owner (idempotent retype will succeed for same owner).
+        let existing_pd_phys = pdpt[pdpt_idx] & PHYS_MASK;
+        if let Err(e) = crate::mm::frame_table::retype_to_pt(existing_pd_phys, 2, owner) {
+            klibcluu::error("map_user_page: reuse-PD retype failed — cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pd_phys=0x", existing_pd_phys);
+            klibcluu::log_dec(klibcluu::LogLevel::Error, "  owner=", owner.as_u64());
+            #[cfg(debug_assertions)]
+            panic!("map_user_page: reuse PD cross-space alias: {:?}", e);
+            #[cfg(not(debug_assertions))]
+            { let _ = e; }
+        }
+        existing_pd_phys
     } else {
         let pd_phys = crate::mm::pmm::alloc_frame_tagged("elf_alloc_pd")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
         write_bytes(pd_virt as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
-        // Phase 2: retype new PD with real owner.
-        let _ = crate::mm::frame_table::retype_to_pt(pd_phys, 2, owner);
+        // Phase 2.5: retype new PD with real owner. Errors are LOUD.
+        if let Err(e) = crate::mm::frame_table::retype_to_pt(pd_phys, 2, owner) {
+            #[cfg(debug_assertions)]
+            panic!("map_user_page: retype PD 0x{:x} owner={} failed: {:?}",
+                   pd_phys, owner.as_u64(), e);
+            #[cfg(not(debug_assertions))]
+            {
+                klibcluu::error("map_user_page: retype PD failed — alias or double-alloc");
+                klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", pd_phys);
+                klibcluu::log_dec(klibcluu::LogLevel::Error, "  owner=", owner.as_u64());
+                return Err(ElfLoadError::MappingFailed("retype_to_pt PD failed"));
+            }
+        }
         pd_phys
     };
 
@@ -333,15 +382,37 @@ pub(crate) unsafe fn map_user_page(
 
     // Get or create PT
     let pt_phys = if pd[pd_idx] & 0x1 != 0 {
-        pd[pd_idx] & PHYS_MASK
+        // Reuse: verify no cross-space alias.
+        let existing_pt_phys = pd[pd_idx] & PHYS_MASK;
+        if let Err(e) = crate::mm::frame_table::retype_to_pt(existing_pt_phys, 1, owner) {
+            klibcluu::error("map_user_page: reuse-PT retype failed — cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pt_phys=0x", existing_pt_phys);
+            klibcluu::log_dec(klibcluu::LogLevel::Error, "  owner=", owner.as_u64());
+            #[cfg(debug_assertions)]
+            panic!("map_user_page: reuse PT cross-space alias: {:?}", e);
+            #[cfg(not(debug_assertions))]
+            { let _ = e; }
+        }
+        existing_pt_phys
     } else {
         let pt_phys = crate::mm::pmm::alloc_frame_tagged("elf_alloc_pt")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pt_virt = crate::mm::physmap::phys_to_virt_u64(pt_phys);
         write_bytes(pt_virt as *mut u8, 0, 4096);
         pd[pd_idx] = (pt_phys & pte_flags::ADDR_MASK) | table_flags;
-        // Phase 2: retype new PT with real owner.
-        let _ = crate::mm::frame_table::retype_to_pt(pt_phys, 1, owner);
+        // Phase 2.5: retype new PT with real owner. Errors are LOUD.
+        if let Err(e) = crate::mm::frame_table::retype_to_pt(pt_phys, 1, owner) {
+            #[cfg(debug_assertions)]
+            panic!("map_user_page: retype PT 0x{:x} owner={} failed: {:?}",
+                   pt_phys, owner.as_u64(), e);
+            #[cfg(not(debug_assertions))]
+            {
+                klibcluu::error("map_user_page: retype PT failed — alias or double-alloc");
+                klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", pt_phys);
+                klibcluu::log_dec(klibcluu::LogLevel::Error, "  owner=", owner.as_u64());
+                return Err(ElfLoadError::MappingFailed("retype_to_pt PT failed"));
+            }
+        }
         pt_phys
     };
 
@@ -400,44 +471,71 @@ pub(crate) unsafe fn map_shared_page(
     let pml4_virt = crate::mm::physmap::phys_to_virt_u64(page_table_root.as_u64());
     let pml4 = &mut *(pml4_virt as *mut [u64; 512]);
 
+    // map_shared_page: get or create PDPT with owner-check on reuse.
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
-        pml4[pml4_idx] & PHYS_MASK
+        let ep = pml4[pml4_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 3, owner).is_err() {
+            klibcluu::error("map_shared_page: reuse-PDPT cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pdpt_phys=0x", ep);
+        }
+        ep
     } else {
         let p = crate::mm::pmm::alloc_frame_tagged("shared_alloc_pdpt")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pml4[pml4_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
-        // Phase 2: retype with real owner.
-        let _ = crate::mm::frame_table::retype_to_pt(p, 3, owner);
+        if crate::mm::frame_table::retype_to_pt(p, 3, owner).is_err() {
+            klibcluu::error("map_shared_page: retype PDPT failed");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", p);
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PDPT failed"));
+        }
         p
     };
 
     let pdpt = &mut *(crate::mm::physmap::phys_to_virt_u64(pdpt_phys) as *mut [u64; 512]);
 
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
-        pdpt[pdpt_idx] & PHYS_MASK
+        let ep = pdpt[pdpt_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 2, owner).is_err() {
+            klibcluu::error("map_shared_page: reuse-PD cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pd_phys=0x", ep);
+        }
+        ep
     } else {
         let p = crate::mm::pmm::alloc_frame_tagged("shared_alloc_pd")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
-        let _ = crate::mm::frame_table::retype_to_pt(p, 2, owner);
+        if crate::mm::frame_table::retype_to_pt(p, 2, owner).is_err() {
+            klibcluu::error("map_shared_page: retype PD failed");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", p);
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PD failed"));
+        }
         p
     };
 
     let pd = &mut *(crate::mm::physmap::phys_to_virt_u64(pd_phys) as *mut [u64; 512]);
 
     let pt_phys = if pd[pd_idx] & 0x1 != 0 {
-        pd[pd_idx] & PHYS_MASK
+        let ep = pd[pd_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 1, owner).is_err() {
+            klibcluu::error("map_shared_page: reuse-PT cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pt_phys=0x", ep);
+        }
+        ep
     } else {
         let p = crate::mm::pmm::alloc_frame_tagged("shared_alloc_pt")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pd[pd_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
-        let _ = crate::mm::frame_table::retype_to_pt(p, 1, owner);
+        if crate::mm::frame_table::retype_to_pt(p, 1, owner).is_err() {
+            klibcluu::error("map_shared_page: retype PT failed");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", p);
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PT failed"));
+        }
         p
     };
 
@@ -493,43 +591,71 @@ pub(crate) unsafe fn map_device_page(
     let pml4_virt = crate::mm::physmap::phys_to_virt_u64(page_table_root.as_u64());
     let pml4 = &mut *(pml4_virt as *mut [u64; 512]);
 
+    // map_device_page: get or create PDPT with owner-check on reuse.
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
-        pml4[pml4_idx] & PHYS_MASK
+        let ep = pml4[pml4_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 3, owner).is_err() {
+            klibcluu::error("map_device_page: reuse-PDPT cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pdpt_phys=0x", ep);
+        }
+        ep
     } else {
         let p = crate::mm::pmm::alloc_frame_tagged("device_alloc_pdpt")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pml4[pml4_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
-        let _ = crate::mm::frame_table::retype_to_pt(p, 3, owner);
+        if crate::mm::frame_table::retype_to_pt(p, 3, owner).is_err() {
+            klibcluu::error("map_device_page: retype PDPT failed");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", p);
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PDPT failed"));
+        }
         p
     };
 
     let pdpt = &mut *(crate::mm::physmap::phys_to_virt_u64(pdpt_phys) as *mut [u64; 512]);
 
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
-        pdpt[pdpt_idx] & PHYS_MASK
+        let ep = pdpt[pdpt_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 2, owner).is_err() {
+            klibcluu::error("map_device_page: reuse-PD cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pd_phys=0x", ep);
+        }
+        ep
     } else {
         let p = crate::mm::pmm::alloc_frame_tagged("device_alloc_pd")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
-        let _ = crate::mm::frame_table::retype_to_pt(p, 2, owner);
+        if crate::mm::frame_table::retype_to_pt(p, 2, owner).is_err() {
+            klibcluu::error("map_device_page: retype PD failed");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", p);
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PD failed"));
+        }
         p
     };
 
     let pd = &mut *(crate::mm::physmap::phys_to_virt_u64(pd_phys) as *mut [u64; 512]);
 
     let pt_phys = if pd[pd_idx] & 0x1 != 0 {
-        pd[pd_idx] & PHYS_MASK
+        let ep = pd[pd_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 1, owner).is_err() {
+            klibcluu::error("map_device_page: reuse-PT cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pt_phys=0x", ep);
+        }
+        ep
     } else {
         let p = crate::mm::pmm::alloc_frame_tagged("device_alloc_pt")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pd[pd_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
-        let _ = crate::mm::frame_table::retype_to_pt(p, 1, owner);
+        if crate::mm::frame_table::retype_to_pt(p, 1, owner).is_err() {
+            klibcluu::error("map_device_page: retype PT failed");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", p);
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PT failed"));
+        }
         p
     };
 
@@ -588,43 +714,68 @@ pub(crate) unsafe fn map_device_page_wc(
     let pml4_virt = crate::mm::physmap::phys_to_virt_u64(page_table_root.as_u64());
     let pml4 = &mut *(pml4_virt as *mut [u64; 512]);
 
+    // map_device_page_wc: get or create PDPT with owner-check on reuse.
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
-        pml4[pml4_idx] & PHYS_MASK
+        let ep = pml4[pml4_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 3, owner).is_err() {
+            klibcluu::error("map_device_page_wc: reuse-PDPT cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pdpt_phys=0x", ep);
+        }
+        ep
     } else {
         let p = crate::mm::pmm::alloc_frame_tagged("wc_alloc_pdpt")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pml4[pml4_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
-        let _ = crate::mm::frame_table::retype_to_pt(p, 3, owner);
+        if crate::mm::frame_table::retype_to_pt(p, 3, owner).is_err() {
+            klibcluu::error("map_device_page_wc: retype PDPT failed");
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PDPT failed"));
+        }
         p
     };
 
     let pdpt = &mut *(crate::mm::physmap::phys_to_virt_u64(pdpt_phys) as *mut [u64; 512]);
 
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
-        pdpt[pdpt_idx] & PHYS_MASK
+        let ep = pdpt[pdpt_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 2, owner).is_err() {
+            klibcluu::error("map_device_page_wc: reuse-PD cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pd_phys=0x", ep);
+        }
+        ep
     } else {
         let p = crate::mm::pmm::alloc_frame_tagged("wc_alloc_pd")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
-        let _ = crate::mm::frame_table::retype_to_pt(p, 2, owner);
+        if crate::mm::frame_table::retype_to_pt(p, 2, owner).is_err() {
+            klibcluu::error("map_device_page_wc: retype PD failed");
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PD failed"));
+        }
         p
     };
 
     let pd = &mut *(crate::mm::physmap::phys_to_virt_u64(pd_phys) as *mut [u64; 512]);
 
     let pt_phys = if pd[pd_idx] & 0x1 != 0 {
-        pd[pd_idx] & PHYS_MASK
+        let ep = pd[pd_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 1, owner).is_err() {
+            klibcluu::error("map_device_page_wc: reuse-PT cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pt_phys=0x", ep);
+        }
+        ep
     } else {
         let p = crate::mm::pmm::alloc_frame_tagged("wc_alloc_pt")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pd[pd_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
-        let _ = crate::mm::frame_table::retype_to_pt(p, 1, owner);
+        if crate::mm::frame_table::retype_to_pt(p, 1, owner).is_err() {
+            klibcluu::error("map_device_page_wc: retype PT failed");
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PT failed"));
+        }
         p
     };
 
@@ -686,16 +837,24 @@ pub(crate) unsafe fn map_user_large_page(
 
     const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-    // Get or create PDPT
+    // map_user_large_page: get or create PDPT with owner-check on reuse.
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
-        pml4[pml4_idx] & PHYS_MASK
+        let ep = pml4[pml4_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 3, owner).is_err() {
+            klibcluu::error("map_user_large_page: reuse-PDPT cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pdpt_phys=0x", ep);
+        }
+        ep
     } else {
         let pdpt_phys = crate::mm::pmm::alloc_frame_tagged("large_alloc_pdpt")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
         write_bytes(pdpt_virt as *mut u8, 0, 4096);
         pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
-        let _ = crate::mm::frame_table::retype_to_pt(pdpt_phys, 3, owner);
+        if crate::mm::frame_table::retype_to_pt(pdpt_phys, 3, owner).is_err() {
+            klibcluu::error("map_user_large_page: retype PDPT failed");
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PDPT failed"));
+        }
         pdpt_phys
     };
 
@@ -704,14 +863,22 @@ pub(crate) unsafe fn map_user_large_page(
 
     // Get or create PD
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
-        pdpt[pdpt_idx] & PHYS_MASK
+        let ep = pdpt[pdpt_idx] & PHYS_MASK;
+        if crate::mm::frame_table::retype_to_pt(ep, 2, owner).is_err() {
+            klibcluu::error("map_user_large_page: reuse-PD cross-space alias");
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  pd_phys=0x", ep);
+        }
+        ep
     } else {
         let pd_phys = crate::mm::pmm::alloc_frame_tagged("large_alloc_pd")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
         write_bytes(pd_virt as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
-        let _ = crate::mm::frame_table::retype_to_pt(pd_phys, 2, owner);
+        if crate::mm::frame_table::retype_to_pt(pd_phys, 2, owner).is_err() {
+            klibcluu::error("map_user_large_page: retype PD failed");
+            return Err(ElfLoadError::MappingFailed("retype_to_pt PD failed"));
+        }
         pd_phys
     };
 

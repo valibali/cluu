@@ -985,7 +985,22 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
         core::ptr::write_bytes(frame_virt as *mut u8, 0, 4096);
     }
 
-    // Map the page with user read+write permissions (no execute for stack/heap)
+    // Map the page with user read+write permissions (no execute for stack/heap).
+    // Phase 2.5: look up the real AddressSpaceId for this CR3 so that newly
+    // allocated intermediate PT frames are tagged with the correct owner.
+    // If the space isn't in the repository (e.g. very-early boot), fall back to
+    // KERNEL_OWNER — wrong owner is still better than sentinel 0 which causes
+    // false OwnerMismatch matches against each other.
+    let page_table_root_phys = page_table_root.as_u64();
+    let demand_owner = {
+        let mut found = crate::token::scope::KERNEL_OWNER;
+        crate::mm::space_repository::for_each(|sid, pml4_pa| {
+            if pml4_pa.as_u64() == page_table_root_phys {
+                found = sid;
+            }
+        });
+        found
+    };
     let virt_page = addr & !0xFFF; // Align to page boundary
     let result = unsafe {
         crate::elf::map_user_page(
@@ -994,7 +1009,7 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
             true,  // writable
             false, // not executable
             page_table_root,
-            crate::token::scope::AddressSpaceId::new(0),
+            demand_owner,
         )
     };
 
