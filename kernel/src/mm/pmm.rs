@@ -113,11 +113,11 @@ fn report_double_free(phys: u64, curr_rip: u64, curr_source: &'static str) {
         return;
     }
     klibcluu::log_hex(klibcluu::LogLevel::Error, "  curr_free_rip=0x", curr_rip);
-    klibcluu::error(curr_source); // e.g. "  curr_source=teardown_leaf"
+    klibcluu::log_str_pair(klibcluu::LogLevel::Error, "  curr_source=", curr_source);
     if let Some(ring) = FREE_RING.try_lock() {
         if let Some(prior) = ring.find_last(phys) {
             klibcluu::log_hex(klibcluu::LogLevel::Error, "  prior_free_rip=0x", prior.caller_rip);
-            klibcluu::error(prior.source); // e.g. "  prior_source=teardown_leaf"
+            klibcluu::log_str_pair(klibcluu::LogLevel::Error, "  prior_source=", prior.source);
         } else {
             klibcluu::error("  prior_source=<not in ring>");
         }
@@ -738,7 +738,7 @@ pub fn try_alloc_frame() -> Option<u64> {
 #[inline(never)] // keep frame pointer stable so caller_rip() is meaningful
 pub fn free_frame(phys_addr: u64) {
     let rip = caller_rip();
-    PMM.lock().free_order_tagged(phys_addr, 0, "  curr_source=<unknown>", rip);
+    PMM.lock().free_order_tagged(phys_addr, 0, "<unknown>", rip);
 }
 
 /// Free a single 4KB frame with an explicit caller-site tag.
@@ -761,7 +761,7 @@ pub fn alloc_large_frame() -> Option<u64> {
 #[inline(never)]
 pub fn free_large_frame(phys_addr: u64) {
     let rip = caller_rip();
-    PMM.lock().free_order_tagged(phys_addr, 9, "  curr_source=<unknown>", rip);
+    PMM.lock().free_order_tagged(phys_addr, 9, "<unknown>", rip);
 }
 
 /// Free a 2MB large frame with an explicit caller-site tag.
@@ -780,7 +780,7 @@ pub fn alloc_order(order: usize) -> Option<u64> {
 #[inline(never)]
 pub fn free_order(phys_addr: u64, order: usize) {
     let rip = caller_rip();
-    PMM.lock().free_order_tagged(phys_addr, order, "  curr_source=<unknown>", rip);
+    PMM.lock().free_order_tagged(phys_addr, order, "<unknown>", rip);
 }
 
 /// Free 2^order contiguous pages with an explicit caller-site tag.

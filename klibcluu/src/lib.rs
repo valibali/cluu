@@ -28,5 +28,5 @@ pub use uart::{Uart, COM2};
 // IRQ-safe logger (zero-cost in release builds)
 pub use logger::{
     debug, error, info, init as logger_init, log, log_dec, log_hex, log_kv_dec, log_kv_i64,
-    set_tsc_hz, should_log, trace, warn, LogLevel,
+    log_str_pair, set_tsc_hz, should_log, trace, warn, LogLevel,
 };

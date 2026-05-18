@@ -207,6 +207,12 @@ pub extern "C" fn main() -> i32 {
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout_ms) {
             Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) {
+                    // DIAG(grant-stall): log every recv to ground-truth where
+                    // cluuterm's GRANT_REQUEST (0x105) lands (or doesn't).
+                    let _ = debug_print(&alloc::format!(
+                        "compositor: recv idx={} label=0x{:x} sender_tid={}",
+                        idx, msg.tag.label, sender_tid
+                    ));
                     // TIME_TICK from timeserver push-mode subscription.
                     // Arrives on input_endpoint_global (idx=1). Update the
                     // cached clock and fire tick_clock (which marks row 0

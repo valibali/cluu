@@ -195,6 +195,25 @@ pub fn trace(msg: &str) {
     log(LogLevel::Trace, msg);
 }
 
+/// Log two strings concatenated on a single line. IRQ-safe, no allocation.
+pub fn log_str_pair(level: LogLevel, prefix: &str, suffix: &str) {
+    if !should_log(level) {
+        return;
+    }
+    write_timestamp();
+    let level_str = match level {
+        LogLevel::Error => "[ERROR] ",
+        LogLevel::Warn => "[WARN]  ",
+        LogLevel::Info => "[INFO]  ",
+        LogLevel::Debug => "[DEBUG] ",
+        LogLevel::Trace => "[TRACE] ",
+    };
+    COM2.write_str(level_str);
+    COM2.write_str(prefix);
+    COM2.write_str(suffix);
+    COM2.write_str("\n");
+}
+
 /// Log a hexadecimal value
 ///
 /// This is IRQ-safe and does not allocate.
