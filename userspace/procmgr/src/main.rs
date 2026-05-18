@@ -5029,8 +5029,18 @@ impl ProcessManager {
 
         // TTY needs CALL (in addition to SEND) so it can do synchronous
         // tab-completion queries to the shell over the same endpoint.
+        //
+        // Derive from the *original* stdin_endpoint (full-rights endpoint
+        // procmgr minted above), not the post-FdInherit `stdin_ep`. When
+        // FdInherit narrows stdin to a VFS-derived RECV-only token (e.g.
+        // a pts handle inherited from the parent), deriving SEND/CALL from
+        // it fails — and shell.wait_for_exit_or_sigint then bails with
+        // InvalidState because child_stdin_endpoint == 0. The parent_stdin
+        // route is used by the foreground/SIGINT machinery; it is a
+        // separate concern from where the child actually reads its stdin
+        // bytes from, so the legacy endpoint is the correct source here.
         let parent_stdin_send = match token_derive(
-            stdin_ep,
+            stdin_endpoint,
             (Rights::IPC_SEND.bits() | Rights::IPC_CALL.bits()) as usize,
             u64::MAX,
         ) {
