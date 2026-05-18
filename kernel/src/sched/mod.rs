@@ -50,21 +50,19 @@
 // Core types
 pub mod context;
 pub mod fpu;
-pub mod process;
-pub mod process_manager;
+// process, process_manager, and spawn retired in Phase 3 of the
+// frame-typing + unified-process-model spec (2026-05-18).
+// The files are kept as empty stubs for clarity; the mod declarations
+// are removed so the compiler will flag any stray import attempt.
 pub mod repository;
 pub mod scheduler;
-pub mod spawn;
 pub mod thread;
 pub mod thread_manager;
 
 // Re-export key types
 pub use context::Context;
-pub use process::{Process, ProcessId, ProcessInitState, ProcessState, ProcessType};
-pub use process_manager::ProcessManager;
 pub use repository::ThreadRepository;
 pub use scheduler::{PriorityBitmapScheduler, SchedulingPolicy};
-pub use spawn::{spawn_elf_process, spawn_kernel_process};
 pub use thread::{
     CallReplyInfo, FaultState, FaultType, Priority, Thread, ThreadFlags, ThreadId, ThreadState,
 };

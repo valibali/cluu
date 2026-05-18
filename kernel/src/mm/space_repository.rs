@@ -111,10 +111,10 @@ where
 
 /// Remove the address space whose PML4 phys matches `pml4_phys`.
 ///
-/// Used by `Process::drop` to claim teardown atomically: the first caller
-/// (either `invoke_space_destroy` or `Process::drop`) gets `Some(_)` and
-/// owns the teardown; the second caller gets `None` and must skip the
-/// `teardown_user_pages` call to avoid double-freeing user frames.
+/// The canonical teardown path is `invoke_space_destroy`: the caller gets
+/// `Some(_)` and owns the teardown; a racing second caller gets `None` and
+/// must skip `teardown_user_pages` to avoid double-freeing user frames.
+/// (Phase 3: `Process::drop` is retired; this is now the only teardown gate.)
 ///
 /// Linear scan — N is bounded by `MAX_ADDRESS_SPACES`.
 pub fn remove_by_pml4(pml4_phys: x86_64::PhysAddr) -> Option<AddressSpace> {
