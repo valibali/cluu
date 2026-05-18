@@ -48,7 +48,7 @@ pub enum FrameRegistryError {
 ///
 /// Calls `pmm::alloc_frame()` internally. Returns `(FrameId, phys_addr)`.
 pub fn alloc_frame(owner: AddressSpaceId) -> Option<(FrameId, u64)> {
-    let phys = crate::mm::pmm::alloc_frame()?;
+    let phys = crate::mm::pmm::alloc_frame_tagged("registry_alloc")?;
     let id = FrameId::new(NEXT_FRAME_ID.fetch_add(1, Ordering::SeqCst));
 
     let entry = FrameEntry {

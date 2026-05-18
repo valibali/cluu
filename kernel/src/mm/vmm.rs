@@ -1117,7 +1117,8 @@ unsafe fn map_single_4k_page(
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
         pml4[pml4_idx] & !0xFFF
     } else {
-        let pdpt_phys = crate::mm::pmm::alloc_frame().ok_or("Out of memory allocating PDPT")?;
+        let pdpt_phys = crate::mm::pmm::alloc_frame_tagged("alloc_pdpt")
+            .ok_or("Out of memory allocating PDPT")?;
         let pdpt_virt = unsafe { super::physmap::phys_to_virt_u64(pdpt_phys) };
         unsafe { write_bytes(pdpt_virt as *mut u8, 0, 4096) };
         pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
@@ -1130,7 +1131,8 @@ unsafe fn map_single_4k_page(
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
         pdpt[pdpt_idx] & !0xFFF
     } else {
-        let pd_phys = crate::mm::pmm::alloc_frame().ok_or("Out of memory allocating PD")?;
+        let pd_phys = crate::mm::pmm::alloc_frame_tagged("alloc_pd")
+            .ok_or("Out of memory allocating PD")?;
         let pd_virt = unsafe { super::physmap::phys_to_virt_u64(pd_phys) };
         unsafe { write_bytes(pd_virt as *mut u8, 0, 4096) };
         pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
@@ -1147,7 +1149,8 @@ unsafe fn map_single_4k_page(
         }
         pd[pd_idx] & !0xFFF
     } else {
-        let pt_phys = crate::mm::pmm::alloc_frame().ok_or("Out of memory allocating PT")?;
+        let pt_phys = crate::mm::pmm::alloc_frame_tagged("alloc_pt")
+            .ok_or("Out of memory allocating PT")?;
         let pt_virt = unsafe { super::physmap::phys_to_virt_u64(pt_phys) };
         unsafe { write_bytes(pt_virt as *mut u8, 0, 4096) };
         pd[pd_idx] = (pt_phys & pte_flags::ADDR_MASK) | table_flags;
@@ -1454,7 +1457,8 @@ pub unsafe fn alloc_pml4() -> Result<PhysAddr, &'static str> {
     use core::ptr::write_bytes;
 
     // Allocate one frame for PML4
-    let pml4_phys = crate::mm::pmm::alloc_frame().ok_or("Out of memory allocating PML4")?;
+    let pml4_phys =
+        crate::mm::pmm::alloc_frame_tagged("alloc_pml4").ok_or("Out of memory allocating PML4")?;
 
     // Zero out the PML4
     let pml4_virt = unsafe { super::physmap::phys_to_virt_u64(pml4_phys) };

@@ -183,8 +183,8 @@ fn load_segment_batch(
         let page_vaddr = start_page + (page_idx * PAGE_SIZE) as u64;
 
         // Allocate physical frame
-        let frame_phys =
-            crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let frame_phys = crate::mm::pmm::alloc_frame_tagged("elf_alloc_leaf")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let frame_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
 
         // Zero the entire page first
@@ -290,8 +290,8 @@ pub(crate) unsafe fn map_user_page(
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
         pml4[pml4_idx] & PHYS_MASK
     } else {
-        let pdpt_phys =
-            crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pdpt_phys = crate::mm::pmm::alloc_frame_tagged("elf_alloc_pdpt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
         write_bytes(pdpt_virt as *mut u8, 0, 4096);
         pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
@@ -305,7 +305,8 @@ pub(crate) unsafe fn map_user_page(
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
         pdpt[pdpt_idx] & PHYS_MASK
     } else {
-        let pd_phys = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pd_phys = crate::mm::pmm::alloc_frame_tagged("elf_alloc_pd")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
         write_bytes(pd_virt as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
@@ -319,7 +320,8 @@ pub(crate) unsafe fn map_user_page(
     let pt_phys = if pd[pd_idx] & 0x1 != 0 {
         pd[pd_idx] & PHYS_MASK
     } else {
-        let pt_phys = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pt_phys = crate::mm::pmm::alloc_frame_tagged("elf_alloc_pt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pt_virt = crate::mm::physmap::phys_to_virt_u64(pt_phys);
         write_bytes(pt_virt as *mut u8, 0, 4096);
         pd[pd_idx] = (pt_phys & pte_flags::ADDR_MASK) | table_flags;

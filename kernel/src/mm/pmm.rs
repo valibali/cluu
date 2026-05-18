@@ -14,57 +14,107 @@ use crate::bootboot::{MMapEnt, BOOTBOOT};
 use crate::mm::boot::info::BootInfoProvider;
 use spin::Mutex;
 
-// ─── Caller-site tracking for double-free diagnosis ───────────────────────────
+// ─── Caller-site tracking for alloc/free diagnosis ────────────────────────────
 //
 // Set to `false` to compile out all ring-buffer overhead (zero cost when off).
-const TRACK_FREE_CALLERS: bool = true;
+// Formerly TRACK_FREE_CALLERS; now covers both alloc and free events.
+const TRACK_ALLOC_FREE: bool = true;
 
 /// Capacity of the ring buffer (power of 2 for cheap modular wrap).
-const FREE_RING_LEN: usize = 1024;
+///
+/// Bumped from 1024 → 4096: at 60 Hz compositor + ELF loads each boot spawns
+/// O(100) PT/PD/PDPT/PML4 allocs plus the leaf pages, so 1024 slots fill up in
+/// under a second of boot activity and the prior-free entry for a double-free
+/// can be evicted before the second free fires. 4096 slots costs 4096×24 = 96 KB
+/// of static BSS — acceptable for a diagnostic build.
+const EVENT_RING_LEN: usize = 4096;
 
-/// One slot in the per-free ring buffer.
+/// Discriminator stored in each ring slot.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum EventKind {
+    Alloc,
+    Free,
+}
+
+/// One slot in the alloc/free event ring buffer.
 #[derive(Copy, Clone)]
-struct FreeSite {
+struct EventSite {
+    kind: EventKind,
     phys: u64,
     caller_rip: u64,
     source: &'static str,
 }
 
-impl FreeSite {
-    const EMPTY: FreeSite = FreeSite { phys: 0, caller_rip: 0, source: "" };
+impl EventSite {
+    const EMPTY: EventSite =
+        EventSite { kind: EventKind::Free, phys: 0, caller_rip: 0, source: "" };
 }
 
-struct FreeRing {
-    buf: [FreeSite; FREE_RING_LEN],
-    /// Write cursor (always incremented; index = head % FREE_RING_LEN).
+struct EventRing {
+    buf: [EventSite; EVENT_RING_LEN],
+    /// Write cursor (always incremented; index = head % EVENT_RING_LEN).
     head: usize,
 }
 
-impl FreeRing {
+impl EventRing {
     const fn new() -> Self {
-        Self { buf: [FreeSite::EMPTY; FREE_RING_LEN], head: 0 }
+        Self { buf: [EventSite::EMPTY; EVENT_RING_LEN], head: 0 }
     }
 
-    fn push(&mut self, site: FreeSite) {
-        let idx = self.head & (FREE_RING_LEN - 1);
+    fn push(&mut self, site: EventSite) {
+        let idx = self.head & (EVENT_RING_LEN - 1);
         self.buf[idx] = site;
         self.head = self.head.wrapping_add(1);
     }
 
-    /// Return the most-recent FreeSite whose `phys` matches. O(N).
-    fn find_last(&self, phys: u64) -> Option<FreeSite> {
+    /// Return the most-recent Free EventSite whose `phys` matches. O(N).
+    fn find_last_free(&self, phys: u64) -> Option<(EventSite, usize)> {
         // Walk backwards from head-1 (most recent) to head (oldest).
-        for i in 0..FREE_RING_LEN {
-            let idx = self.head.wrapping_sub(1).wrapping_sub(i) & (FREE_RING_LEN - 1);
-            if self.buf[idx].phys == phys && self.buf[idx].caller_rip != 0 {
-                return Some(self.buf[idx]);
+        // Returns the event and its logical sequence number (= ring.head - 1 - i).
+        for i in 0..EVENT_RING_LEN {
+            let idx = self.head.wrapping_sub(1).wrapping_sub(i) & (EVENT_RING_LEN - 1);
+            let e = &self.buf[idx];
+            if e.phys == phys && e.caller_rip != 0 && e.kind == EventKind::Free {
+                let seq = self.head.wrapping_sub(1).wrapping_sub(i);
+                return Some((*e, seq));
             }
         }
         None
     }
+
+    /// Collect all Alloc events for `phys` whose logical sequence number is
+    /// strictly greater than `after_seq`. Used by report_double_free to find
+    /// intervening allocs between two frees of the same frame.
+    ///
+    /// Returns events in chronological order (oldest first), up to `out` len.
+    fn collect_allocs_after(&self, phys: u64, after_seq: usize, out: &mut [EventSite]) -> usize {
+        let mut count = 0;
+        // We need chronological order, so scan oldest→newest.
+        // Ring covers [head - EVENT_RING_LEN, head). Walk forward from oldest.
+        let oldest_seq = self.head.wrapping_sub(EVENT_RING_LEN);
+        for i in 0..EVENT_RING_LEN {
+            let seq = oldest_seq.wrapping_add(i);
+            if seq == self.head {
+                break;
+            }
+            // Only look at events after `after_seq`.
+            if seq <= after_seq {
+                continue;
+            }
+            let idx = seq & (EVENT_RING_LEN - 1);
+            let e = &self.buf[idx];
+            if e.phys == phys && e.caller_rip != 0 && e.kind == EventKind::Alloc {
+                if count < out.len() {
+                    out[count] = *e;
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
 }
 
-static FREE_RING: Mutex<FreeRing> = Mutex::new(FreeRing::new());
+static EVENT_RING: Mutex<EventRing> = Mutex::new(EventRing::new());
 
 /// Capture the return address of our caller's caller using the frame pointer.
 ///
@@ -87,37 +137,68 @@ fn caller_rip() -> u64 {
     rip
 }
 
-/// Record a successful free into the ring buffer (no-op when TRACK_FREE_CALLERS=false).
+/// Record a successful free into the ring buffer (no-op when TRACK_ALLOC_FREE=false).
 #[inline(always)]
 fn record_free(phys: u64, rip: u64, source: &'static str) {
-    if !TRACK_FREE_CALLERS {
+    if !TRACK_ALLOC_FREE {
         return;
     }
-    if let Some(mut ring) = FREE_RING.try_lock() {
-        ring.push(FreeSite { phys, caller_rip: rip, source });
+    if let Some(mut ring) = EVENT_RING.try_lock() {
+        ring.push(EventSite { kind: EventKind::Free, phys, caller_rip: rip, source });
     }
     // If the lock is contended (very rare — called inside PMM.lock() holder)
     // we silently drop the record rather than deadlock.
 }
 
-/// Log a double-free event: scan the ring for the prior free site and emit
-/// both the prior RIP and the current RIP with their source tags.
+/// Record a successful alloc into the ring buffer (no-op when TRACK_ALLOC_FREE=false).
+#[inline(always)]
+fn record_alloc(phys: u64, rip: u64, source: &'static str) {
+    if !TRACK_ALLOC_FREE {
+        return;
+    }
+    if let Some(mut ring) = EVENT_RING.try_lock() {
+        ring.push(EventSite { kind: EventKind::Alloc, phys, caller_rip: rip, source });
+    }
+    // Lock-contention: silently drop (same policy as record_free).
+}
+
+/// Log a double-free event: scan the ring for the prior free site, any
+/// intervening alloc events for the same phys, and the current free RIP.
 ///
-/// Note: the source tag is emitted on a *separate* log line after its RIP
+/// Note: source tags are emitted on separate log lines after their RIP
 /// so we can stay allocation-free (no `format!` / String needed).
 #[inline(never)]
 fn report_double_free(phys: u64, curr_rip: u64, curr_source: &'static str) {
     klibcluu::error("PMM: free_order skipped — frame already free (double-free)");
     klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=", phys);
-    if !TRACK_FREE_CALLERS {
+    if !TRACK_ALLOC_FREE {
         return;
     }
     klibcluu::log_hex(klibcluu::LogLevel::Error, "  curr_free_rip=", curr_rip);
     klibcluu::log_str_pair(klibcluu::LogLevel::Error, "  curr_source=", curr_source);
-    if let Some(ring) = FREE_RING.try_lock() {
-        if let Some(prior) = ring.find_last(phys) {
+    if let Some(ring) = EVENT_RING.try_lock() {
+        if let Some((prior, prior_seq)) = ring.find_last_free(phys) {
             klibcluu::log_hex(klibcluu::LogLevel::Error, "  prior_free_rip=", prior.caller_rip);
             klibcluu::log_str_pair(klibcluu::LogLevel::Error, "  prior_source=", prior.source);
+            // Scan for any alloc events for this phys that happened AFTER the prior free.
+            let mut allocs: [EventSite; 8] = [EventSite::EMPTY; 8];
+            let n = ring.collect_allocs_after(phys, prior_seq, &mut allocs);
+            if n == 0 {
+                klibcluu::error("  intermediate_allocs=<none>");
+            } else {
+                for i in 0..n {
+                    klibcluu::log_hex(
+                        klibcluu::LogLevel::Error,
+                        "  intermediate_alloc_rip=",
+                        allocs[i].caller_rip,
+                    );
+                    klibcluu::log_str_pair(
+                        klibcluu::LogLevel::Error,
+                        "  intermediate_alloc_source=",
+                        allocs[i].source,
+                    );
+                }
+            }
         } else {
             klibcluu::error("  prior_source=<not in ring>");
         }
@@ -485,6 +566,14 @@ impl BuddyAllocator {
         }
     }
 
+    /// Like `alloc_order` but records an alloc event with `tag` and `rip`.
+    fn alloc_order_tagged(&mut self, order: usize, tag: &'static str, rip: u64) -> Option<u64> {
+        let phys = self.alloc_order(order)?;
+        // Record after the alloc so the ring only ever contains successful events.
+        record_alloc(phys, rip, tag);
+        Some(phys)
+    }
+
     fn free_order_tagged(&mut self, phys_addr: u64, order: usize, tag: &'static str, rip: u64) {
         let frame = (phys_addr / PAGE_SIZE as u64) as usize;
         // Skip addresses outside the managed physical memory range.
@@ -715,9 +804,24 @@ pub fn init_buddy() {
     PMM.lock().build_free_lists();
 }
 
-/// Allocate a single 4KB frame
+/// Allocate a single 4KB frame.
+///
+/// Tag defaults to `"<unknown>"`. For a diagnostic tagged alloc use
+/// `alloc_frame_tagged` instead.
+#[inline(never)] // keep frame pointer stable so caller_rip() is meaningful
 pub fn alloc_frame() -> Option<u64> {
-    PMM.lock().alloc_order(0)
+    let rip = caller_rip();
+    PMM.lock().alloc_order_tagged(0, "<unknown>", rip)
+}
+
+/// Allocate a single 4KB frame with an explicit caller-site tag.
+///
+/// `tag` should be a short `&'static str` such as `"alloc_pml4"` that
+/// identifies the call site. The tag is stored in the event ring.
+#[inline(never)]
+pub fn alloc_frame_tagged(tag: &'static str) -> Option<u64> {
+    let rip = caller_rip();
+    PMM.lock().alloc_order_tagged(0, tag, rip)
 }
 
 /// Non-blocking variant of `alloc_frame` for use from interrupt/exception
@@ -727,6 +831,10 @@ pub fn alloc_frame() -> Option<u64> {
 ///
 /// CRITICAL: blocking on PMM.lock() inside an ISR with interrupts disabled
 /// causes the same kernel halt as the timer-tick bug fixed in 393cd6b.
+///
+/// Note: alloc event is NOT recorded here (ISR context; ring lock may itself
+/// be contended or held by the interrupted PMM path). The no-tag, no-record
+/// fast path is acceptable for ISR demand-paging diagnosis.
 pub fn try_alloc_frame() -> Option<u64> {
     PMM.try_lock()?.alloc_order(0)
 }
@@ -752,9 +860,21 @@ pub fn free_frame_tagged(phys_addr: u64, tag: &'static str) {
     PMM.lock().free_order_tagged(phys_addr, 0, tag, rip);
 }
 
-/// Allocate a 2MB-aligned contiguous block (order 9 = 512 pages)
+/// Allocate a 2MB-aligned contiguous block (order 9 = 512 pages).
+///
+/// Tag defaults to `"<unknown>"`. For a diagnostic tagged alloc use
+/// `alloc_large_frame_tagged` instead.
+#[inline(never)]
 pub fn alloc_large_frame() -> Option<u64> {
-    PMM.lock().alloc_order(9)
+    let rip = caller_rip();
+    PMM.lock().alloc_order_tagged(9, "<unknown>", rip)
+}
+
+/// Allocate a 2MB-aligned contiguous block with an explicit caller-site tag.
+#[inline(never)]
+pub fn alloc_large_frame_tagged(tag: &'static str) -> Option<u64> {
+    let rip = caller_rip();
+    PMM.lock().alloc_order_tagged(9, tag, rip)
 }
 
 /// Free a 2MB large frame
@@ -771,9 +891,21 @@ pub fn free_large_frame_tagged(phys_addr: u64, tag: &'static str) {
     PMM.lock().free_order_tagged(phys_addr, 9, tag, rip);
 }
 
-/// Allocate 2^order contiguous pages
+/// Allocate 2^order contiguous pages.
+///
+/// Tag defaults to `"<unknown>"`. For a diagnostic tagged alloc use
+/// `alloc_order_tagged` instead.
+#[inline(never)]
 pub fn alloc_order(order: usize) -> Option<u64> {
-    PMM.lock().alloc_order(order)
+    let rip = caller_rip();
+    PMM.lock().alloc_order_tagged(order, "<unknown>", rip)
+}
+
+/// Allocate 2^order contiguous pages with an explicit caller-site tag.
+#[inline(never)]
+pub fn alloc_order_tagged(order: usize, tag: &'static str) -> Option<u64> {
+    let rip = caller_rip();
+    PMM.lock().alloc_order_tagged(order, tag, rip)
 }
 
 /// Free 2^order contiguous pages
