@@ -127,7 +127,7 @@ pub fn dec_and_maybe_free(frame_id: FrameId) {
 
     PHYS_TO_FRAME.lock().remove(&phys);
     let order = ceil_log2_pages(page_count as usize);
-    crate::mm::pmm::free_order(phys, order as usize);
+    crate::mm::pmm::free_order_tagged(phys, order as usize, "  curr_source=registry_dec");
 }
 
 /// Free a tracked frame. Fails if `map_count > 0`.

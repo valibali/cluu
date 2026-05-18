@@ -1244,7 +1244,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                     }
                     let frame_phys = pde & 0x000F_FFFF_FFE0_0000; // 2MB aligned, strip flags
                     if freed.insert(frame_phys) {
-                        crate::mm::pmm::free_large_frame(frame_phys);
+                        crate::mm::pmm::free_large_frame_tagged(frame_phys, "  curr_source=teardown_huge");
                         freed_frames += 512; // 512 x 4KB equivalent
                     }
                     continue;
@@ -1290,7 +1290,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                     {
                         crate::mm::frame_registry::dec_and_maybe_free(frame_id);
                     } else {
-                        crate::mm::pmm::free_frame(frame_phys);
+                        crate::mm::pmm::free_frame_tagged(frame_phys, "  curr_source=teardown_leaf");
                     }
                     freed_frames += 1;
                 }
@@ -1301,7 +1301,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                 if freed.insert(pt_phys)
                     && check_table_free(pt_phys, "PT", pml4_phys.as_u64())
                 {
-                    crate::mm::pmm::free_frame(pt_phys);
+                    crate::mm::pmm::free_frame_tagged(pt_phys, "  curr_source=teardown_pt");
                     freed_tables += 1;
                 }
             }
@@ -1310,7 +1310,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
             if freed.insert(pd_phys)
                 && check_table_free(pd_phys, "PD", pml4_phys.as_u64())
             {
-                crate::mm::pmm::free_frame(pd_phys);
+                crate::mm::pmm::free_frame_tagged(pd_phys, "  curr_source=teardown_pd");
                 freed_tables += 1;
             }
         }
@@ -1319,7 +1319,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
         if freed.insert(pdpt_phys)
             && check_table_free(pdpt_phys, "PDPT", pml4_phys.as_u64())
         {
-            crate::mm::pmm::free_frame(pdpt_phys);
+            crate::mm::pmm::free_frame_tagged(pdpt_phys, "  curr_source=teardown_pdpt");
             freed_tables += 1;
         }
     }
@@ -1328,7 +1328,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
     if freed.insert(pml4_phys.as_u64())
         && check_table_free(pml4_phys.as_u64(), "PML4", pml4_phys.as_u64())
     {
-        crate::mm::pmm::free_frame(pml4_phys.as_u64());
+        crate::mm::pmm::free_frame_tagged(pml4_phys.as_u64(), "  curr_source=teardown_pml4");
         freed_tables += 1;
     }
 

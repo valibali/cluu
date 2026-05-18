@@ -14,6 +14,118 @@ use crate::bootboot::{MMapEnt, BOOTBOOT};
 use crate::mm::boot::info::BootInfoProvider;
 use spin::Mutex;
 
+// ─── Caller-site tracking for double-free diagnosis ───────────────────────────
+//
+// Set to `false` to compile out all ring-buffer overhead (zero cost when off).
+const TRACK_FREE_CALLERS: bool = true;
+
+/// Capacity of the ring buffer (power of 2 for cheap modular wrap).
+const FREE_RING_LEN: usize = 1024;
+
+/// One slot in the per-free ring buffer.
+#[derive(Copy, Clone)]
+struct FreeSite {
+    phys: u64,
+    caller_rip: u64,
+    source: &'static str,
+}
+
+impl FreeSite {
+    const EMPTY: FreeSite = FreeSite { phys: 0, caller_rip: 0, source: "" };
+}
+
+struct FreeRing {
+    buf: [FreeSite; FREE_RING_LEN],
+    /// Write cursor (always incremented; index = head % FREE_RING_LEN).
+    head: usize,
+}
+
+impl FreeRing {
+    const fn new() -> Self {
+        Self { buf: [FreeSite::EMPTY; FREE_RING_LEN], head: 0 }
+    }
+
+    fn push(&mut self, site: FreeSite) {
+        let idx = self.head & (FREE_RING_LEN - 1);
+        self.buf[idx] = site;
+        self.head = self.head.wrapping_add(1);
+    }
+
+    /// Return the most-recent FreeSite whose `phys` matches. O(N).
+    fn find_last(&self, phys: u64) -> Option<FreeSite> {
+        // Walk backwards from head-1 (most recent) to head (oldest).
+        for i in 0..FREE_RING_LEN {
+            let idx = self.head.wrapping_sub(1).wrapping_sub(i) & (FREE_RING_LEN - 1);
+            if self.buf[idx].phys == phys && self.buf[idx].caller_rip != 0 {
+                return Some(self.buf[idx]);
+            }
+        }
+        None
+    }
+}
+
+static FREE_RING: Mutex<FreeRing> = Mutex::new(FreeRing::new());
+
+/// Capture the return address of our caller's caller using the frame pointer.
+///
+/// Reads `[rbp + 8]` which is the return address saved when our *direct*
+/// caller entered its stack frame. Frame pointers are guaranteed present
+/// because `.cargo/config.toml` injects `-C force-frame-pointers=yes`.
+///
+/// Safety: only valid when called from a function that established its own
+/// frame-pointer prologue (true for all non-inlined Rust fn in this build).
+#[inline(always)]
+fn caller_rip() -> u64 {
+    let rip: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, [rbp + 8]",
+            out(reg) rip,
+            options(nostack, preserves_flags)
+        );
+    }
+    rip
+}
+
+/// Record a successful free into the ring buffer (no-op when TRACK_FREE_CALLERS=false).
+#[inline(always)]
+fn record_free(phys: u64, rip: u64, source: &'static str) {
+    if !TRACK_FREE_CALLERS {
+        return;
+    }
+    if let Some(mut ring) = FREE_RING.try_lock() {
+        ring.push(FreeSite { phys, caller_rip: rip, source });
+    }
+    // If the lock is contended (very rare — called inside PMM.lock() holder)
+    // we silently drop the record rather than deadlock.
+}
+
+/// Log a double-free event: scan the ring for the prior free site and emit
+/// both the prior RIP and the current RIP with their source tags.
+///
+/// Note: the source tag is emitted on a *separate* log line after its RIP
+/// so we can stay allocation-free (no `format!` / String needed).
+#[inline(never)]
+fn report_double_free(phys: u64, curr_rip: u64, curr_source: &'static str) {
+    klibcluu::error("PMM: free_order skipped — frame already free (double-free)");
+    klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=", phys);
+    if !TRACK_FREE_CALLERS {
+        return;
+    }
+    klibcluu::log_hex(klibcluu::LogLevel::Error, "  curr_free_rip=0x", curr_rip);
+    klibcluu::error(curr_source); // e.g. "  curr_source=teardown_leaf"
+    if let Some(ring) = FREE_RING.try_lock() {
+        if let Some(prior) = ring.find_last(phys) {
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  prior_free_rip=0x", prior.caller_rip);
+            klibcluu::error(prior.source); // e.g. "  prior_source=teardown_leaf"
+        } else {
+            klibcluu::error("  prior_source=<not in ring>");
+        }
+    } else {
+        klibcluu::error("  prior_source=<ring locked>");
+    }
+}
+
 const PAGE_SIZE: usize = 4096;
 
 /// Maximum number of physical frames we can track (4GB / 4KB = 1M frames)
@@ -373,7 +485,7 @@ impl BuddyAllocator {
         }
     }
 
-    fn free_order(&mut self, phys_addr: u64, order: usize) {
+    fn free_order_tagged(&mut self, phys_addr: u64, order: usize, tag: &'static str, rip: u64) {
         let frame = (phys_addr / PAGE_SIZE as u64) as usize;
         // Skip addresses outside the managed physical memory range.
         // Device MMIO pages (e.g. framebuffer) are not PMM-owned.
@@ -396,14 +508,15 @@ impl BuddyAllocator {
                 }
             }
             if already_free {
-                klibcluu::error("PMM: free_order skipped — frame already free (double-free)");
-                klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=", phys_addr);
                 klibcluu::log_dec(klibcluu::LogLevel::Error, "  order=", order as u64);
+                report_double_free(phys_addr, rip, tag);
                 return;
             }
+            // Record the successful free before releasing the PMM lock.
+            record_free(phys_addr, rip, tag);
             self.buddy_free(phys_addr, order);
         } else {
-            // Fallback: just mark bitmap bits
+            // Fallback: just mark bitmap bits (pre-buddy phase, no tracking needed)
             let count = 1usize << order;
             for f in frame..frame + count {
                 self.bitmap_set_free(f);
@@ -618,9 +731,25 @@ pub fn try_alloc_frame() -> Option<u64> {
     PMM.try_lock()?.alloc_order(0)
 }
 
-/// Free a single 4KB frame
+/// Free a single 4KB frame.
+///
+/// Source is tagged as `"<unknown>"`. For diagnostic tagged release use
+/// `free_frame_tagged` instead.
+#[inline(never)] // keep frame pointer stable so caller_rip() is meaningful
 pub fn free_frame(phys_addr: u64) {
-    PMM.lock().free_order(phys_addr, 0);
+    let rip = caller_rip();
+    PMM.lock().free_order_tagged(phys_addr, 0, "  curr_source=<unknown>", rip);
+}
+
+/// Free a single 4KB frame with an explicit caller-site tag.
+///
+/// `tag` should be a short `&'static str` such as `"teardown_leaf"` that
+/// identifies the call site. The tag is stored in the ring buffer and
+/// printed on double-free detection.
+#[inline(never)]
+pub fn free_frame_tagged(phys_addr: u64, tag: &'static str) {
+    let rip = caller_rip();
+    PMM.lock().free_order_tagged(phys_addr, 0, tag, rip);
 }
 
 /// Allocate a 2MB-aligned contiguous block (order 9 = 512 pages)
@@ -629,8 +758,17 @@ pub fn alloc_large_frame() -> Option<u64> {
 }
 
 /// Free a 2MB large frame
+#[inline(never)]
 pub fn free_large_frame(phys_addr: u64) {
-    PMM.lock().free_order(phys_addr, 9);
+    let rip = caller_rip();
+    PMM.lock().free_order_tagged(phys_addr, 9, "  curr_source=<unknown>", rip);
+}
+
+/// Free a 2MB large frame with an explicit caller-site tag.
+#[inline(never)]
+pub fn free_large_frame_tagged(phys_addr: u64, tag: &'static str) {
+    let rip = caller_rip();
+    PMM.lock().free_order_tagged(phys_addr, 9, tag, rip);
 }
 
 /// Allocate 2^order contiguous pages
@@ -639,8 +777,17 @@ pub fn alloc_order(order: usize) -> Option<u64> {
 }
 
 /// Free 2^order contiguous pages
+#[inline(never)]
 pub fn free_order(phys_addr: u64, order: usize) {
-    PMM.lock().free_order(phys_addr, order);
+    let rip = caller_rip();
+    PMM.lock().free_order_tagged(phys_addr, order, "  curr_source=<unknown>", rip);
+}
+
+/// Free 2^order contiguous pages with an explicit caller-site tag.
+#[inline(never)]
+pub fn free_order_tagged(phys_addr: u64, order: usize, tag: &'static str) {
+    let rip = caller_rip();
+    PMM.lock().free_order_tagged(phys_addr, order, tag, rip);
 }
 
 /// Get memory statistics (used, total)
