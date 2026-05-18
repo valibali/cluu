@@ -108,3 +108,21 @@ where
         f(id, space.page_table_root);
     }
 }
+
+/// Remove the address space whose PML4 phys matches `pml4_phys`.
+///
+/// Used by `Process::drop` to claim teardown atomically: the first caller
+/// (either `invoke_space_destroy` or `Process::drop`) gets `Some(_)` and
+/// owns the teardown; the second caller gets `None` and must skip the
+/// `teardown_user_pages` call to avoid double-freeing user frames.
+///
+/// Linear scan — N is bounded by `MAX_ADDRESS_SPACES`.
+pub fn remove_by_pml4(pml4_phys: x86_64::PhysAddr) -> Option<AddressSpace> {
+    let mut repo = REPOSITORY.lock();
+    let id = repo
+        .spaces
+        .iter()
+        .find(|(_, s)| s.page_table_root == pml4_phys)
+        .map(|(&id, _)| id)?;
+    repo.spaces.remove(&id)
+}

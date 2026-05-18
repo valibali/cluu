@@ -204,6 +204,7 @@ pub extern "C" fn main() -> i32 {
 
         let timeout_ms = comp.deadlines.next_timeout_ms(now_ms);
 
+        let _ = debug_print(&alloc::format!("compositor: recv_any timeout_ms={}", timeout_ms));
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout_ms) {
             Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) {
@@ -397,9 +398,11 @@ pub extern "C" fn main() -> i32 {
                 }
             }
             Err(Error::Timeout) | Err(Error::WouldBlock) => {
+                let _ = debug_print("compositor: recv_any -> WouldBlock/Timeout");
                 // Fall through to deadline handling below.
             }
             Err(_) => {
+                let _ = debug_print(&alloc::format!("compositor: recv_any -> Err other -> yield+continue"));
                 let _ = syscall::yield_cpu();
                 continue;
             }

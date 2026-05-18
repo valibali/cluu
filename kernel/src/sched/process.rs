@@ -347,6 +347,22 @@ impl Drop for Process {
             return;
         }
 
+        // Claim teardown via space_repository. If the entry is still there,
+        // we own it and must tear down. If `invoke_space_destroy` already
+        // removed it (the userspace-driven path), skip — otherwise we
+        // double-free every leaf the previous teardown already returned to
+        // the PMM. The repository is the single source of truth for "is
+        // this AddressSpace still alive?"; piggybacking on it avoids any
+        // new kernel-side flag.
+        if crate::mm::space_repository::remove_by_pml4(pml4_phys).is_none() {
+            klibcluu::log_dec(
+                klibcluu::LogLevel::Trace,
+                "Process::drop: skip — already torn down PID ",
+                self.id.as_usize() as u64,
+            );
+            return;
+        }
+
         klibcluu::log_dec(
             klibcluu::LogLevel::Trace,
             "Process::drop: tearing down PID ",

@@ -112,11 +112,11 @@ fn report_double_free(phys: u64, curr_rip: u64, curr_source: &'static str) {
     if !TRACK_FREE_CALLERS {
         return;
     }
-    klibcluu::log_hex(klibcluu::LogLevel::Error, "  curr_free_rip=0x", curr_rip);
+    klibcluu::log_hex(klibcluu::LogLevel::Error, "  curr_free_rip=", curr_rip);
     klibcluu::log_str_pair(klibcluu::LogLevel::Error, "  curr_source=", curr_source);
     if let Some(ring) = FREE_RING.try_lock() {
         if let Some(prior) = ring.find_last(phys) {
-            klibcluu::log_hex(klibcluu::LogLevel::Error, "  prior_free_rip=0x", prior.caller_rip);
+            klibcluu::log_hex(klibcluu::LogLevel::Error, "  prior_free_rip=", prior.caller_rip);
             klibcluu::log_str_pair(klibcluu::LogLevel::Error, "  prior_source=", prior.source);
         } else {
             klibcluu::error("  prior_source=<not in ring>");
