@@ -22,6 +22,33 @@ use crate::token::scope::AddressSpaceId;
 /// Phase 2: true → mismatches are hard errors.
 const ENFORCE_INVARIANTS: bool = true;
 
+// ─── Phase 4 policy constants ─────────────────────────────────────────────────
+
+/// We deliberately do NOT reverse-retype Grant → UserData when refcount drops
+/// from 2 → 1.  The Grant state is "absorbed" until refcount hits 0
+/// (auto-untype in `dec_ref`).
+///
+/// Reasons:
+///   - Simpler state machine: only one direction of automatic tag change
+///     (UserData→Grant on first share) instead of two.
+///   - Avoids re-entering retype paths with the FRAME_TABLE lock held
+///     mid-`dec_ref`, which would require a try-lock or lock-upgrade.
+///   - Cost: a frame with exactly one remaining PTE mapping stays tagged Grant
+///     instead of reverting to UserData.  Negligible — only affects diagnostic
+///     output, not correctness.
+///
+/// This is option (a) from the Phase 4 spec.  Option (b) (per-frame lock +
+/// reverse retype) is deferred unless memory-pressure complaints arise.
+#[allow(dead_code)]
+const GRANT_KEEPS_TAG_UNTIL_UNTYPE: bool = true;
+
+/// If `inc_ref` on any frame returns a refcount above this threshold, a
+/// FRAME_TABLE warning is logged with the phys and tag.  A count this large
+/// most likely indicates a bug (e.g. a runaway mmap loop) rather than
+/// intentional sharing.  The increment still succeeds; the warning is
+/// advisory only.
+const REFCOUNT_WARN_THRESHOLD: u16 = 1024;
+
 // ─── Frame tag ───────────────────────────────────────────────────────────────
 
 /// Type tag stored per physical frame.
@@ -302,6 +329,13 @@ pub fn inc_ref(phys: u64) -> Result<u16, FrameTableError> {
     if entry.tag == FrameTag::UserData && old_rc == 1 && new_rc == 2 {
         entry.tag = FrameTag::Grant;
         klibcluu::log_hex(klibcluu::LogLevel::Trace, "FRAME_TABLE: UserData→Grant phys=0x", phys);
+    }
+    // Phase 4: warn on pathologically high refcounts (potential runaway mmap).
+    if new_rc >= REFCOUNT_WARN_THRESHOLD {
+        klibcluu::warn("FRAME_TABLE WARN: refcount past REFCOUNT_WARN_THRESHOLD — possible runaway sharing");
+        klibcluu::log_hex(klibcluu::LogLevel::Warn, "  phys=", phys);
+        klibcluu::log_dec(klibcluu::LogLevel::Warn, "  tag=", entry.tag as u64);
+        klibcluu::log_dec(klibcluu::LogLevel::Warn, "  refcount=", new_rc as u64);
     }
     Ok(new_rc)
 }
@@ -824,5 +858,131 @@ mod tests {
             err, FrameTableError::AlreadyTyped,
             "retype_to_pt on UserData frame must fail with AlreadyTyped"
         );
+    }
+
+    // ── Phase 4 Tests ──────────────────────────────────────────────────────
+
+    /// P4-T1: inc_ref past REFCOUNT_WARN_THRESHOLD — refcount still increments
+    /// normally.  The warning path (klibcluu::warn) is a no-op in host test
+    /// builds; we verify the returned count is correct.
+    ///
+    /// Note: actual warning emission is tested by grepping serial.log during
+    /// harness runs.  This test verifies the counter arithmetic is correct and
+    /// no assertion fires below the threshold.
+    #[test]
+    fn test_p4_inc_ref_past_warn_threshold() {
+        let mut table = fresh_table(16);
+        let phys = 2 * PAGE;
+
+        // Start with a UserData frame at rc=1.
+        do_retype_user(&mut table, phys, 77).unwrap();
+
+        // Increment to just below the threshold — tag becomes Grant at rc=2.
+        for expected_rc in 2..=REFCOUNT_WARN_THRESHOLD {
+            let rc = do_inc_ref_p2(&mut table, phys).unwrap();
+            assert_eq!(
+                rc, expected_rc,
+                "refcount should be {} after {} inc_ref calls",
+                expected_rc, expected_rc - 1
+            );
+            if expected_rc == 2 {
+                assert_eq!(
+                    meta(&table, phys).tag,
+                    FrameTag::Grant,
+                    "UserData must become Grant at rc=2"
+                );
+            } else {
+                assert_eq!(
+                    meta(&table, phys).tag,
+                    FrameTag::Grant,
+                    "Grant stays Grant above rc=2"
+                );
+            }
+        }
+
+        // At this point rc == REFCOUNT_WARN_THRESHOLD; one more inc crosses it.
+        let rc_above = do_inc_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(
+            rc_above,
+            REFCOUNT_WARN_THRESHOLD + 1,
+            "refcount must reach REFCOUNT_WARN_THRESHOLD+1"
+        );
+        // Tag must still be Grant.
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant);
+    }
+
+    /// P4-T2: Regression for "Keep Grant alive until untype".
+    /// Sequence: rc 1→2→3→2→1→0.  Tag must stay Grant at rc=3, rc=2, rc=1,
+    /// and transition to Untyped only at rc=0.
+    #[test]
+    fn test_p4_grant_keeps_tag_until_untype() {
+        let mut table = fresh_table(16);
+        let phys = 3 * PAGE;
+
+        // Allocate as UserData (rc=1).
+        do_retype_user(&mut table, phys, 50).unwrap();
+        assert_eq!(meta(&table, phys).tag, FrameTag::UserData);
+        assert_eq!(meta(&table, phys).refcount, 1);
+
+        // rc 1→2: transitions to Grant.
+        do_inc_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant, "rc=2 → Grant");
+        assert_eq!(meta(&table, phys).refcount, 2);
+
+        // rc 2→3: stays Grant.
+        do_inc_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant, "rc=3 → still Grant");
+        assert_eq!(meta(&table, phys).refcount, 3);
+
+        // rc 3→2: tag stays Grant (GRANT_KEEPS_TAG_UNTIL_UNTYPE = true).
+        do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant, "rc=2 after dec_ref → still Grant");
+        assert_eq!(meta(&table, phys).refcount, 2);
+
+        // rc 2→1: tag stays Grant (NOT reverse-retyped to UserData).
+        do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(
+            meta(&table, phys).tag,
+            FrameTag::Grant,
+            "rc=1 after dec_ref → Grant (no reverse-retype to UserData)"
+        );
+        assert_eq!(meta(&table, phys).refcount, 1);
+
+        // rc 1→0: auto-Untyped.
+        do_dec_ref_p2(&mut table, phys).unwrap();
+        let e = meta(&table, phys);
+        assert_eq!(e.tag, FrameTag::Untyped, "rc=0 → auto-Untyped");
+        assert_eq!(e.refcount, 0);
+        assert_eq!(e.owner, 0);
+    }
+
+    /// P4-T3: Simulate a double-free attempt at the frame_table level.
+    ///
+    /// Alloc a frame, free it (rc→0 → Untyped), then attempt a second
+    /// dec_ref on the now-Untyped frame.  The second dec_ref must NOT
+    /// transition the tag again (it is already Untyped with refcount=0;
+    /// saturating_sub keeps it at 0).
+    ///
+    /// Note: the PMM-level double-free soft-fail (in pmm.rs) is also tested
+    /// conceptually here — in host test builds we cannot call PMM directly
+    /// (no physmap), so we verify the frame_table layer does the right thing:
+    /// a second dec_ref on an Untyped(rc=0) frame is a no-op.
+    #[test]
+    fn test_p4_double_dec_ref_is_noop_after_untype() {
+        let mut table = fresh_table(16);
+        let phys = 4 * PAGE;
+
+        // Allocate and free (rc 1→0 → Untyped).
+        do_retype_user(&mut table, phys, 88).unwrap();
+        do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(meta(&table, phys).tag, FrameTag::Untyped);
+        assert_eq!(meta(&table, phys).refcount, 0);
+
+        // Second dec_ref on Untyped(rc=0): saturating_sub keeps refcount at 0,
+        // tag stays Untyped.  Should not panic or corrupt state.
+        let rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 0, "second dec_ref on Untyped must return 0");
+        assert_eq!(meta(&table, phys).tag, FrameTag::Untyped, "tag must remain Untyped");
+        assert_eq!(meta(&table, phys).refcount, 0);
     }
 }
