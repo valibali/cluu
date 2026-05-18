@@ -203,6 +203,16 @@ pub extern "C" fn kstart() -> ! {
         mm::heap::init().expect("Failed to initialize heap");
     }
 
+    // Phase 1 frame-typing: initialise the FrameMeta table now that the
+    // kernel heap is live, then seed it with boot-reserved frames from the PMM
+    // bitmap. This is advisory-only (ENFORCE_INVARIANTS=false).
+    {
+        let max_frame = mm::pmm::max_managed_frame();
+        mm::frame_table::init(max_frame);
+        mm::pmm::mark_boot_reserved_frames();
+        klibcluu::info("[FRAME_TABLE] phase-1 init done");
+    }
+
     // Initialize crypto/token systems (needed before creating tokens)
     crypto::init();
     token::init();

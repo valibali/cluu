@@ -49,6 +49,8 @@ pub enum FrameRegistryError {
 /// Calls `pmm::alloc_frame()` internally. Returns `(FrameId, phys_addr)`.
 pub fn alloc_frame(owner: AddressSpaceId) -> Option<(FrameId, u64)> {
     let phys = crate::mm::pmm::alloc_frame_tagged("registry_alloc")?;
+    // Phase 1: retype as UserData for the registry's owner.
+    let _ = crate::mm::frame_table::retype_to_user(phys, owner);
     let id = FrameId::new(NEXT_FRAME_ID.fetch_add(1, Ordering::SeqCst));
 
     let entry = FrameEntry {
@@ -127,6 +129,8 @@ pub fn dec_and_maybe_free(frame_id: FrameId) {
 
     PHYS_TO_FRAME.lock().remove(&phys);
     let order = ceil_log2_pages(page_count as usize);
+    // Phase 1: advisory retype before PMM free.
+    let _ = crate::mm::frame_table::retype_to_untyped(phys);
     crate::mm::pmm::free_order_tagged(phys, order as usize, "registry_dec");
 }
 
@@ -148,6 +152,8 @@ pub fn free_frame(frame_id: FrameId) -> Result<(), FrameRegistryError> {
 
     PHYS_TO_FRAME.lock().remove(&phys);
     let order = ceil_log2_pages(page_count as usize);
+    // Phase 1: advisory retype before PMM free.
+    let _ = crate::mm::frame_table::retype_to_untyped(phys);
     crate::mm::pmm::free_order(phys, order as usize);
     Ok(())
 }
@@ -208,6 +214,9 @@ pub fn alloc_frame_n(owner: AddressSpaceId, n_pages: usize) -> Option<(FrameId, 
         return None; // buddy max = order 9 (2 MiB)
     }
     let phys = crate::mm::pmm::alloc_order(order as usize)?;
+    // Phase 1: retype each page in the multi-page block as UserData.
+    // The block is contiguous; mark the base frame (representative).
+    let _ = crate::mm::frame_table::retype_to_user(phys, owner);
     let id = FrameId::new(NEXT_FRAME_ID.fetch_add(1, Ordering::SeqCst));
     let allocated_pages: u32 = 1u32 << order;
     let entry = FrameEntry {

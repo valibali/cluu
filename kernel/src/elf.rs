@@ -185,6 +185,13 @@ fn load_segment_batch(
         // Allocate physical frame
         let frame_phys = crate::mm::pmm::alloc_frame_tagged("elf_alloc_leaf")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        // Phase 1: retype leaf frame as UserData (owner unknown at this level;
+        // address_space.page_table_root is a PhysAddr, not an AddressSpaceId —
+        // use sentinel 0 until Phase 2 threads the real ID through).
+        let _ = crate::mm::frame_table::retype_to_user(
+            frame_phys,
+            crate::token::scope::AddressSpaceId::new(0),
+        );
         let frame_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
 
         // Zero the entire page first
@@ -295,6 +302,12 @@ pub(crate) unsafe fn map_user_page(
         let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
         write_bytes(pdpt_virt as *mut u8, 0, 4096);
         pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
+        // Phase 1: retype new PDPT (level 3, user owner sentinel = 0)
+        let _ = crate::mm::frame_table::retype_to_pt(
+            pdpt_phys,
+            3,
+            crate::token::scope::AddressSpaceId::new(0),
+        );
         pdpt_phys
     };
 
@@ -310,6 +323,12 @@ pub(crate) unsafe fn map_user_page(
         let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
         write_bytes(pd_virt as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
+        // Phase 1: retype new PD (level 2, user owner sentinel = 0)
+        let _ = crate::mm::frame_table::retype_to_pt(
+            pd_phys,
+            2,
+            crate::token::scope::AddressSpaceId::new(0),
+        );
         pd_phys
     };
 
@@ -325,6 +344,12 @@ pub(crate) unsafe fn map_user_page(
         let pt_virt = crate::mm::physmap::phys_to_virt_u64(pt_phys);
         write_bytes(pt_virt as *mut u8, 0, 4096);
         pd[pd_idx] = (pt_phys & pte_flags::ADDR_MASK) | table_flags;
+        // Phase 1: retype new PT (level 1, user owner sentinel = 0)
+        let _ = crate::mm::frame_table::retype_to_pt(
+            pt_phys,
+            1,
+            crate::token::scope::AddressSpaceId::new(0),
+        );
         pt_phys
     };
 

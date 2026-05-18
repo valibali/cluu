@@ -1122,6 +1122,12 @@ unsafe fn map_single_4k_page(
         let pdpt_virt = unsafe { super::physmap::phys_to_virt_u64(pdpt_phys) };
         unsafe { write_bytes(pdpt_virt as *mut u8, 0, 4096) };
         pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
+        // Phase 1: retype new PDPT (level 3, kernel owner = 0)
+        let _ = crate::mm::frame_table::retype_to_pt(
+            pdpt_phys,
+            3,
+            crate::token::scope::AddressSpaceId::new(0),
+        );
         pdpt_phys
     };
 
@@ -1136,6 +1142,12 @@ unsafe fn map_single_4k_page(
         let pd_virt = unsafe { super::physmap::phys_to_virt_u64(pd_phys) };
         unsafe { write_bytes(pd_virt as *mut u8, 0, 4096) };
         pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
+        // Phase 1: retype new PD (level 2, kernel owner = 0)
+        let _ = crate::mm::frame_table::retype_to_pt(
+            pd_phys,
+            2,
+            crate::token::scope::AddressSpaceId::new(0),
+        );
         pd_phys
     };
 
@@ -1154,6 +1166,12 @@ unsafe fn map_single_4k_page(
         let pt_virt = unsafe { super::physmap::phys_to_virt_u64(pt_phys) };
         unsafe { write_bytes(pt_virt as *mut u8, 0, 4096) };
         pd[pd_idx] = (pt_phys & pte_flags::ADDR_MASK) | table_flags;
+        // Phase 1: retype new PT (level 1, kernel owner = 0)
+        let _ = crate::mm::frame_table::retype_to_pt(
+            pt_phys,
+            1,
+            crate::token::scope::AddressSpaceId::new(0),
+        );
         pt_phys
     };
 
@@ -1247,6 +1265,8 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                     }
                     let frame_phys = pde & 0x000F_FFFF_FFE0_0000; // 2MB aligned, strip flags
                     if freed.insert(frame_phys) {
+                        // Phase 1: advisory retype before huge-page free
+                        let _ = crate::mm::frame_table::retype_to_untyped(frame_phys);
                         crate::mm::pmm::free_large_frame_tagged(frame_phys, "teardown_huge");
                         freed_frames += 512; // 512 x 4KB equivalent
                     }
@@ -1291,8 +1311,12 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                     if let Some(frame_id) =
                         crate::mm::frame_registry::lookup_by_phys(frame_phys)
                     {
+                        // Phase 1: advisory retype-to-untyped before registry dec
+                        let _ = crate::mm::frame_table::retype_to_untyped(frame_phys);
                         crate::mm::frame_registry::dec_and_maybe_free(frame_id);
                     } else {
+                        // Phase 1: advisory retype-to-untyped before PMM free
+                        let _ = crate::mm::frame_table::retype_to_untyped(frame_phys);
                         crate::mm::pmm::free_frame_tagged(frame_phys, "teardown_leaf");
                     }
                     freed_frames += 1;
@@ -1304,6 +1328,8 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                 if freed.insert(pt_phys)
                     && check_table_free(pt_phys, "PT", pml4_phys.as_u64())
                 {
+                    // Phase 1: advisory retype before free
+                    let _ = crate::mm::frame_table::retype_to_untyped(pt_phys);
                     crate::mm::pmm::free_frame_tagged(pt_phys, "teardown_pt");
                     freed_tables += 1;
                 }
@@ -1313,6 +1339,8 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
             if freed.insert(pd_phys)
                 && check_table_free(pd_phys, "PD", pml4_phys.as_u64())
             {
+                // Phase 1: advisory retype before free
+                let _ = crate::mm::frame_table::retype_to_untyped(pd_phys);
                 crate::mm::pmm::free_frame_tagged(pd_phys, "teardown_pd");
                 freed_tables += 1;
             }
@@ -1322,6 +1350,8 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
         if freed.insert(pdpt_phys)
             && check_table_free(pdpt_phys, "PDPT", pml4_phys.as_u64())
         {
+            // Phase 1: advisory retype before free
+            let _ = crate::mm::frame_table::retype_to_untyped(pdpt_phys);
             crate::mm::pmm::free_frame_tagged(pdpt_phys, "teardown_pdpt");
             freed_tables += 1;
         }
@@ -1331,6 +1361,8 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
     if freed.insert(pml4_phys.as_u64())
         && check_table_free(pml4_phys.as_u64(), "PML4", pml4_phys.as_u64())
     {
+        // Phase 1: advisory retype before free
+        let _ = crate::mm::frame_table::retype_to_untyped(pml4_phys.as_u64());
         crate::mm::pmm::free_frame_tagged(pml4_phys.as_u64(), "teardown_pml4");
         freed_tables += 1;
     }
@@ -1465,6 +1497,17 @@ pub unsafe fn alloc_pml4() -> Result<PhysAddr, &'static str> {
     unsafe {
         write_bytes(pml4_virt as *mut u8, 0, 4096);
     }
+
+    // Phase 1: retype as PML4 (level 4). Owner is unknown at this point
+    // (AddressSpace::new_user allocates the PML4 before the AddressSpaceId is
+    // assigned). We use AddressSpaceId(0) as a sentinel; the caller may call
+    // retype_to_pt again once the real ID is known. In advisory mode this is
+    // harmless.
+    let _ = crate::mm::frame_table::retype_to_pt(
+        pml4_phys,
+        4,
+        crate::token::scope::AddressSpaceId::new(0),
+    );
 
     Ok(PhysAddr::new(pml4_phys))
 }

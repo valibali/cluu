@@ -13,6 +13,7 @@
 use crate::bootboot::{MMapEnt, BOOTBOOT};
 use crate::mm::boot::info::BootInfoProvider;
 use spin::Mutex;
+extern crate alloc;
 
 // ─── Caller-site tracking for alloc/free diagnosis ────────────────────────────
 //
@@ -926,4 +927,39 @@ pub fn free_order_tagged(phys_addr: u64, order: usize, tag: &'static str) {
 pub fn get_stats() -> (usize, usize) {
     let pmm = PMM.lock();
     (pmm.total_frames - pmm.free_frames, pmm.total_frames)
+}
+
+/// Return `max_managed_frame` — the exclusive upper bound on PMM-owned frame indices.
+///
+/// Frames at or above this index are device MMIO / non-RAM. Used by the frame
+/// table to size its backing array and by `mark_boot_reserved_frames`.
+pub fn max_managed_frame() -> usize {
+    PMM.lock().max_managed_frame
+}
+
+/// Walk the PMM bitmap and call `retype_to_boot_reserved` (via `frame_table`)
+/// for every frame that is currently NOT free (i.e. used/reserved at boot time).
+///
+/// This runs once after `init_buddy()` and after `frame_table::init()` to seed
+/// the table with the static set of reserved frames (kernel image, initrd,
+/// framebuffer, BOOTBOOT struct, low-1MB). Free frames remain `Untyped`.
+///
+/// Only frames in `[0, max_managed_frame)` are scanned.
+pub fn mark_boot_reserved_frames() {
+    let pmm = PMM.lock();
+    let max = pmm.max_managed_frame.min(MAX_FRAMES);
+    // Avoid calling frame_table while holding the PMM lock (potential deadlock
+    // if frame_table's lock is held). Collect the used frames first, then mark.
+    // We own the PMM lock here and the scan is O(max/64), so build a tiny temp
+    // buffer per 64-frame word to minimise lock time.
+    let mut used_frames: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    for frame in 1..max {
+        if !pmm.bitmap_is_free(frame) {
+            used_frames.push((frame as u64) * (PAGE_SIZE as u64));
+        }
+    }
+    drop(pmm);
+    for phys in used_frames {
+        let _ = crate::mm::frame_table::retype_to_boot_reserved(phys);
+    }
 }

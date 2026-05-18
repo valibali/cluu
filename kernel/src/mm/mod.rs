@@ -92,6 +92,9 @@ pub mod space_repository;
 // Capability-based frame accounting
 pub mod frame_registry;
 
+// Per-frame typed ownership table (Phase 1 — advisory)
+pub mod frame_table;
+
 // Userspace physical memory mapping
 pub mod user_map;
 
