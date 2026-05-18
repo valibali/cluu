@@ -11,10 +11,12 @@ use libcluu::ipc::{
     PTS_CLOSED_LABEL, PTS_READ_LABEL, PTS_UNREGISTER_LABEL, PTS_WRITE_LABEL,
 };
 use libcluu::ipc::COMP_CLOSE_REQUEST_LABEL;
+use libcluu::registry::RegistryEvent;
+use libcluu::time::{TIME_SUBSCRIBE_PERIODIC_LABEL, TIME_TICK_LABEL};
 use libcluu::tty_core::{HistoryRow, LineDiscipline, Scrollback};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::window_shm::WindowShm;
-use libcluu::{debug_print, syscall};
+use libcluu::{debug_print, registry, syscall};
 
 /// Scrollback capacity in rows (matches legacy console `SCROLLBACK_LINES`).
 const SCROLLBACK_LINES: usize = 200;
@@ -55,6 +57,14 @@ pub struct Cluuterm {
     /// Held until input arrives so shell `read(0, ...)` blocks like a TTY
     /// instead of getting an immediate 0-byte (EOF-looking) reply.
     pending_pts_read: Option<(usize, usize)>,
+
+    // ── Cursor-blink state ──────────────────────────────────────────────
+    /// Cached timeserver endpoint; 0 = not yet resolved.
+    time_ep: usize,
+    /// Whether the 500 ms periodic subscription has been armed.
+    blink_armed: bool,
+    /// Current blink phase: true → cursor visible, false → cursor hidden.
+    blink_phase: bool,
 }
 
 // SAFETY: Cluuterm is single-threaded (cluuterm never spawns threads).
@@ -91,6 +101,9 @@ impl Cluuterm {
             current_attr: default_attr,
             stdin_buf: VecDeque::new(),
             pending_pts_read: None,
+            time_ep: 0,
+            blink_armed: false,
+            blink_phase: true,
         }
     }
 
@@ -356,22 +369,128 @@ impl Cluuterm {
 
     // ── Main recv loop ──────────────────────────────────────────────────
 
+    /// Toggle cursor visibility in the SHM header and notify the compositor.
+    ///
+    /// Called on every 500 ms TIME_TICK. Does not re-run the full render
+    /// path — only the `cursor_visible` flag and the damage notify change.
+    fn tick_blink(&mut self) {
+        self.blink_phase = !self.blink_phase;
+        let visible: u32 = if self.blink_phase { 1 } else { 0 };
+        unsafe {
+            core::ptr::write_volatile(
+                &mut (*self.shm).cursor_visible as *mut u32,
+                visible,
+            );
+        }
+        // Kick compositor so it repaints promptly rather than waiting for
+        // its own next tick.  The damage rect covers only the cursor cell;
+        // the compositor will union it with any pending dirty region.
+        let cx = self.cursor_x;
+        let cy = self.cursor_y;
+        let dmg = Message::new(
+            COMP_WIN_DAMAGE_LABEL,
+            [
+                self.window_id as usize,
+                cx,      // x (compositor coords — chrome-relative)
+                cy,      // y
+                1,       // w = 1 cell
+                1,       // h = 1 cell
+                0,
+            ],
+            5,
+        );
+        let _ = ipc::send(self.comp_ep, &dmg, IpcFlags::empty());
+    }
+
+    /// Arm the 500 ms periodic tick subscription against a freshly-granted
+    /// timeserver endpoint.  Silently degrades (no blink) on any failure.
+    fn arm_blink_timer(&mut self) {
+        if self.blink_armed || self.time_ep == 0 {
+            return;
+        }
+        let notify_ep = self.my_ep;
+        let mut sub = Message::new(
+            TIME_SUBSCRIBE_PERIODIC_LABEL,
+            [500, notify_ep, 0, 0, 0, 0],
+            3,
+        );
+        if libcluu::ipc::call(self.time_ep, &mut sub, IpcFlags::empty()).is_ok()
+            && sub.words[0] == 0
+        {
+            self.blink_armed = true;
+            let _ = debug_print("cluuterm: subscribed to timeserver 500ms blink");
+        } else {
+            let _ = debug_print("cluuterm: timeserver subscribe failed — no cursor blink");
+        }
+    }
+
     /// Block-receive from `my_ep` and dispatch messages until shutdown.
     pub fn run(&mut self) {
         let mut buf = [0u8; 1024];
-        let tokens = [self.my_ep];
+
+        // Request a timeserver grant up-front so the tick arrives once
+        // timeserver registers.  Failure is non-fatal: blink is cosmetic.
+        if registry::request_subscription("timeserver", "main").is_ok() {
+            let _ = debug_print("cluuterm: timeserver subscription requested");
+        } else {
+            let _ = debug_print("cluuterm: timeserver subscription request failed — no blink");
+        }
+
+        // The registry control endpoint carries Grant / SubscribeStatus events.
+        // Include it alongside my_ep so we receive the timeserver grant.
+        let ctrl_ep = registry::control_endpoint();
+        // Index of the registry endpoint in the `tokens` array below.
+        const REGISTRY_IDX: usize = 1;
 
         loop {
-            let (_, len) = match syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
-                Ok(v) => v,
-                Err(_) => continue,
+            // Rebuild the tokens slice each iteration so a zero ctrl_ep is
+            // simply excluded (the kernel rejects 0-valued endpoint tokens).
+            let (_, len) = if ctrl_ep != 0 {
+                let tokens = [self.my_ep, ctrl_ep];
+                match syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                }
+            } else {
+                let tokens = [self.my_ep];
+                match syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                }
             };
 
             let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) else {
                 continue;
             };
 
+            // ── Registry control: Grant / SubscribeStatus ──────────────
+            // We do a label-based check first because the registry control
+            // endpoint is only in the tokens array when ctrl_ep != 0, but
+            // the labels are unambiguous across all senders.
+            if let Ok(Some(event)) = registry::handle_incoming_message(&msg, payload) {
+                match event {
+                    RegistryEvent::Grant { service_name, name, token } => {
+                        if service_name == "timeserver" && name == "main" {
+                            self.time_ep = token;
+                            self.arm_blink_timer();
+                        }
+                    }
+                    RegistryEvent::SubscribeStatus { code } => {
+                        if code != 0 {
+                            // Registry refused or failed — blink stays off.
+                            let _ = debug_print("cluuterm: timeserver subscribe status non-zero");
+                        }
+                    }
+                }
+                continue;
+            }
+
             match msg.tag.label {
+                // ── Timeserver: 500 ms periodic tick ─────────────────────
+                TIME_TICK_LABEL => {
+                    self.tick_blink();
+                }
+
                 // ── Shell → VFS → cluuterm: write output bytes ──────────
                 PTS_WRITE_LABEL => {
                     // payload = the bytes the shell wrote to its stdout/stderr.
