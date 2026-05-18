@@ -9,9 +9,10 @@ use alloc::vec::Vec;
 
 use libcluu::boot::process_info;
 use libcluu::fs::client::VfsClient;
+use libcluu::fd_table::FD_TABLE;
 use libcluu::ipc::{
     build_container_run_payload_full, call, call_with_payload,
-    RedirAction, PROCMGR_CONTAINER_RUN_LABEL,
+    FdAction, RedirAction, PROCMGR_CONTAINER_RUN_LABEL,
     TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
     TTY_REGISTER_LABEL,
 };
@@ -231,8 +232,26 @@ pub fn spawn_process_with_argv_and_redirs(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
+    // Build FDAC so the child inherits the shell's stdin/stdout/stderr.
+    // Without this, procmgr falls back to freshly-created dead endpoints
+    // and external commands produce no output.
+    let fdac: Vec<FdAction> = {
+        let table = FD_TABLE.lock();
+        [0u32, 1u32, 2u32]
+            .iter()
+            .filter_map(|&fd| {
+                table.get(fd as i32).map(|e| FdAction {
+                    target_fd:     fd,
+                    is_pipe:       e.is_pipe(),
+                    endpoint:      e.endpoint,
+                    vfs_client_id: e.client_id,
+                    vfs_remote_fd: e.remote_fd.unwrap_or(0),
+                })
+            })
+            .collect()
+    };
     let (payload, _argc, fdac_offset) =
-        build_container_run_payload_full(name, args, &[], redirs, &env_refs);
+        build_container_run_payload_full(name, args, &fdac, redirs, &env_refs);
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
     let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();
