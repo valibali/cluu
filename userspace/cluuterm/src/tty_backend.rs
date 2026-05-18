@@ -383,10 +383,12 @@ impl Cluuterm {
             );
         }
         // Kick compositor so it repaints promptly rather than waiting for
-        // its own next tick.  The damage rect covers only the cursor cell;
-        // the compositor will union it with any pending dirty region.
-        let cx = self.cursor_x;
-        let cy = self.cursor_y;
+        // its own next tick.  The damage rect covers only the cursor cell.
+        // self.cursor_x/y are terminal-grid coords; the SHM cell space adds
+        // a (+1, +1) chrome offset, so the compositor-visible cell sits at
+        // (cursor_x + 1, cursor_y + 1).
+        let cx = self.cursor_x + 1;
+        let cy = self.cursor_y + 1;
         let dmg = Message::new(
             COMP_WIN_DAMAGE_LABEL,
             [

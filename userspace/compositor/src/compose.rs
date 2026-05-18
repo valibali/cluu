@@ -228,7 +228,11 @@ fn read_shm_cell(win: &Window, ix: u16, iy: u16) -> u64 {
     if cursor_visible == 0 {
         let cx = hdr.cursor_x as u16;
         let cy = hdr.cursor_y as u16;
-        if ix == cx && iy == cy {
+        // (0, 0) sentinel — clients that don't have a cursor (e.g. the
+        // login modal) never publish coords, so SHM stays zero-init.
+        // The real cluuterm cursor sits at (cursor_x + 1, cursor_y + 1)
+        // for the chrome offset, so it can never land on (0, 0).
+        if (cx != 0 || cy != 0) && ix == cx && iy == cy {
             // The cursor was rendered as an inverted cell (fg/bg swapped) by
             // cluuterm. Re-invert to restore the normal appearance.
             let cp    = cell & 0x1F_FFFF;
