@@ -213,12 +213,6 @@ pub extern "C" fn main() -> i32 {
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout_ms) {
             Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) {
-                    // DIAG(grant-stall): log every recv to ground-truth where
-                    // cluuterm's GRANT_REQUEST (0x105) lands (or doesn't).
-                    let _ = debug_print(&alloc::format!(
-                        "compositor: recv idx={} label=0x{:x} sender_tid={}",
-                        idx, msg.tag.label, sender_tid
-                    ));
                     // TIME_TICK from timeserver push-mode subscription.
                     // Arrives on input_endpoint_global (idx=1). Update the
                     // cached clock and fire tick_clock (which marks row 0
@@ -231,11 +225,6 @@ pub extern "C" fn main() -> i32 {
                         let now_ms_from_tick = msg.words[1] as u64;
                         comp.last_clock_now_ms = now_ms_from_tick;
                         comp.tick_clock(now_ms_from_tick, now_ms_from_tick / 1000);
-                        // Toggle cursor-blink phase and dirty the cursor cell
-                        // of every window so the compose pass re-reads the
-                        // SHM `cursor_visible` flag we are about to update.
-                        comp.blink_phase = !comp.blink_phase;
-                        comp.tick_blink();
                         // Do NOT continue — fall through to post-recv block.
                     }
 
@@ -257,23 +246,21 @@ pub extern "C" fn main() -> i32 {
                                     if service_name == "timeserver" && name == "main" {
                                         time_ep = token;
                                         let _ = debug_print("compositor: timeserver subscribed");
-                                        // Arm push-mode: subscribe for 2 Hz ticks on the input
-                                        // endpoint. 500 ms drives both the cursor blink phase
-                                        // (xterm-like cadence) and the status-bar clock; the
-                                        // clock value only refreshes its visible HH:MM:SS once
-                                        // per real second so the extra tick is cheap.
+                                        // Arm push-mode: subscribe for 1 Hz ticks on the input
+                                        // endpoint. The status-bar clock has 1 s granularity
+                                        // so 1000 ms suffices.
                                         if !pushmode_armed && time_ep != 0 {
                                             let notify_ep = comp.input_endpoint_global;
                                             let mut sub = libcluu::types::Message::new(
                                                 libcluu::time::TIME_SUBSCRIBE_PERIODIC_LABEL,
-                                                [500, notify_ep, 0, 0, 0, 0],
+                                                [1000, notify_ep, 0, 0, 0, 0],
                                                 3,
                                             );
                                             if libcluu::ipc::call(time_ep, &mut sub, IpcFlags::empty()).is_ok()
                                                 && sub.words[0] == 0
                                             {
                                                 pushmode_armed = true;
-                                                let _ = debug_print("compositor: subscribed to timeserver pushmode 500ms");
+                                                let _ = debug_print("compositor: subscribed to timeserver pushmode 1000ms");
                                             }
                                         }
                                     }

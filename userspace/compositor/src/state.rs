@@ -260,11 +260,6 @@ pub struct Compositor {
     ///   1 = user   (spawned under user envelope, full desktop)
     pub session_mode: u8,
 
-    /// Cursor-blink phase, toggled on each TIME_TICK. `true` = cursor visible.
-    /// The compositor writes this into the SHM `cursor_visible` field of every
-    /// window on each tick so the compose path can hide the cursor on the
-    /// "off" half of the blink cycle.
-    pub blink_phase: bool,
 }
 
 use libcluu::posix::{
@@ -371,7 +366,6 @@ impl Compositor {
             control_endpoint: 0,
             registry_endpoint: 0,
             session_mode: 0,
-            blink_phase: true,
         })
     }
 }

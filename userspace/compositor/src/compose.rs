@@ -219,8 +219,8 @@ pub fn render_status_row(comp: &mut Compositor) {
 fn read_shm_cell(win: &Window, ix: u16, iy: u16) -> u64 {
     let cell = win.mapping.read_cell(ix, iy).unwrap_or(BG_CELL);
     // Gate cursor visibility: if the SHM header marks the cursor hidden
-    // (blink "off" phase set by the compositor's tick_blink) and this cell
-    // is the cursor cell, un-invert it so the cursor disappears.
+    // (cursor_visible == 0, toggled by the client — e.g. cluuterm) and this
+    // cell is the cursor cell, un-invert it so the cursor disappears.
     let hdr = win.mapping.header();
     let cursor_visible = unsafe {
         core::ptr::read_volatile(&hdr.cursor_visible as *const u32)
