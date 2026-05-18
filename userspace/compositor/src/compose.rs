@@ -84,48 +84,63 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
 }
 
 fn chrome_glyph(win: &Window, lx: u16, ly: u16, focused: bool) -> u64 {
-    const TL: u32 = 0x250C;
-    const TR: u32 = 0x2510;
-    const BL: u32 = 0x2514;
-    const BR: u32 = 0x2518;
-    const H_BAR: u32 = 0x2500;
-    const V_BAR: u32 = 0x2502;
+    // Single-line box drawing — unfocused windows.
+    const TL_S: u32 = 0x250C;
+    const TR_S: u32 = 0x2510;
+    const BL_S: u32 = 0x2514;
+    const BR_S: u32 = 0x2518;
+    const H_S:  u32 = 0x2500;
+    const V_S:  u32 = 0x2502;
+
+    // Double-line box drawing — focused window.
+    const TL_D: u32 = 0x2554;
+    const TR_D: u32 = 0x2557;
+    const BL_D: u32 = 0x255A;
+    const BR_D: u32 = 0x255D;
+    const H_D:  u32 = 0x2550;
+    const V_D:  u32 = 0x2551;
+
+    let (tl, tr, bl, br, h_bar, v_bar) = if focused {
+        (TL_D, TR_D, BL_D, BR_D, H_D, V_D)
+    } else {
+        (TL_S, TR_S, BL_S, BR_S, H_S, V_S)
+    };
 
     let w = win.w;
     let h = win.h;
 
     // Corners.
     let corner = match (lx, ly) {
-        (0, 0) => Some(TL),
-        (x, 0) if x == w - 1 => Some(TR),
-        (0, y) if y == h - 1 => Some(BL),
-        (x, y) if x == w - 1 && y == h - 1 => Some(BR),
+        (0, 0) => Some(tl),
+        (x, 0) if x == w - 1 => Some(tr),
+        (0, y) if y == h - 1 => Some(bl),
+        (x, y) if x == w - 1 && y == h - 1 => Some(br),
         _ => None,
     };
     if let Some(cp) = corner {
         return pack_chrome_cell(cp, focused);
     }
 
-    // Top horizontal edge: centered title overlay, otherwise H_BAR.
+    // Top horizontal edge: centered title overlay, otherwise h_bar.
     if ly == 0 {
         if let Some(cp) = title_overlay_at(win, lx, focused) {
             return cp;
         }
-        return pack_chrome_cell(H_BAR, focused);
+        return pack_chrome_cell(h_bar, focused);
     }
 
     // Bottom horizontal edge.
     if ly == h - 1 {
-        return pack_chrome_cell(H_BAR, focused);
+        return pack_chrome_cell(h_bar, focused);
     }
 
     // Left + right vertical edges.
     if lx == 0 || lx == w - 1 {
-        return pack_chrome_cell(V_BAR, focused);
+        return pack_chrome_cell(v_bar, focused);
     }
 
     // Unreachable: caller checks in_chrome.
-    pack_chrome_cell(H_BAR, focused)
+    pack_chrome_cell(h_bar, focused)
 }
 
 /// If `lx` (in row 0, exclusive of corners) maps to a title slot, return the

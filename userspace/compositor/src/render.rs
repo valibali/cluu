@@ -242,6 +242,11 @@ fn unicode_to_cp437(cp: u32) -> u8 {
         0x2510 => 0xBF,                 // ┐
         0x2514 => 0xC0,                 // └
         0x2518 => 0xD9,                 // ┘
+        // Double-line corners (focused-window chrome).
+        0x2554 => 0xC9,                 // ╔
+        0x2557 => 0xBB,                 // ╗
+        0x255A => 0xC8,                 // ╚
+        0x255D => 0xBC,                 // ╝
         _ => b'?',
     }
 }
