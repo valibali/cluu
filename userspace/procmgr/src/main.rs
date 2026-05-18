@@ -4630,9 +4630,27 @@ impl ProcessManager {
             return Ok(0);
         }
         if requested_notify_endpoint != 0 {
+            // The caller passes the raw token handle from its own table. That
+            // handle is not valid in procmgr's token table — sending on it
+            // silently fails (no SEND rights here) and the caller hangs on its
+            // recv side. Mint a SEND-rights token in procmgr's table.
+            let derived = match token_derive(
+                requested_notify_endpoint,
+                Rights::IPC_SEND.bits() as usize,
+                u64::MAX,
+            ) {
+                Ok(tok) => tok,
+                Err(err) => {
+                    let _ = debug_print(&format!(
+                        "procmgr: notify_endpoint derive failed tid={} raw={} err={:?}",
+                        sender_tid, requested_notify_endpoint, err
+                    ));
+                    return Err(err);
+                }
+            };
             self.sender_notify_endpoint
-                .insert(sender_tid, requested_notify_endpoint);
-            return Ok(requested_notify_endpoint);
+                .insert(sender_tid, derived);
+            return Ok(derived);
         }
 
         Ok(self
