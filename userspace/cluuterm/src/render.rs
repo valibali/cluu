@@ -174,6 +174,10 @@ pub fn render(term: &mut Cluuterm) {
         let shm_off = (cy + 1) * shm_w + (cx + 1);
         unsafe {
             core::ptr::write_volatile(cells_base.add(shm_off), cell);
+            // Publish cursor position in compositor coords (chrome-offset +1).
+            // Compositor's blink path reads these to dirty/un-invert the cell.
+            core::ptr::write_volatile(&mut (*shm_ptr).cursor_x as *mut u32, (cx + 1) as u32);
+            core::ptr::write_volatile(&mut (*shm_ptr).cursor_y as *mut u32, (cy + 1) as u32);
         }
     }
 
