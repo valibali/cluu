@@ -160,7 +160,15 @@ fn run() -> Result<()> {
     #[cfg(feature = "lang-parser")]
     {
         let session_id = info.params[PARAM_TTY_INSTANCE] as usize;
-        command_context.tty_stdout = stdout;
+        // tty_stdout addresses a real TTY-service endpoint (one that speaks
+        // TTY_CTL_LABEL / TTY_REGISTER_LABEL). In the cluuterm/pts flow the
+        // shell's stdout token points at a VFS-routed pts endpoint that
+        // does NOT speak the legacy TTY protocol — sending TTY_CTL there
+        // hangs in `call()` waiting for a reply that never comes. The
+        // fd0_is_vfs_backed assertion above guarantees we're in that flow,
+        // so leave tty_stdout = 0 and let downstream guards skip TTY work.
+        command_context.tty_stdout = 0;
+        let _ = stdout; // not used as a TTY-service endpoint
         command_context.session_id = session_id;
 
         if let Ok(ep) = command_context.procmgr_spawn_endpoint() {

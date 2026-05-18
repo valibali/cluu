@@ -168,9 +168,15 @@ pub(crate) fn spawn_and_wait(
 
     let result = match parsed {
         Ok(()) => {
+            // tty_endpoint is the TTY-service control endpoint (TTY_CTL /
+            // TTY_REGISTER). In cluuterm/pts mode `stdout` is a VFS-routed
+            // pts endpoint that doesn't speak that protocol — passing it
+            // here would hang the cleanup `set_tty_foreground` call. Use
+            // `context.tty_stdout` which is 0 in cluuterm mode and a real
+            // TTY endpoint in legacy mode.
             wait_for_exit_or_sigint(
                 procmgr_ep,
-                stdout,
+                context.tty_stdout,
                 spawn.notify_endpoint,
                 spawn.stdin_endpoint,
                 spawn.pid,
@@ -297,22 +303,33 @@ pub(crate) fn wait_for_exit_or_sigint(
         ctrl_c_flags = TTY_FG_FLAG_NOTIFY_CTRL_C | TTY_FG_FLAG_FORWARD_CTRL_C;
     }
 
-    // Transfer tty foreground routing to the child while it runs.
-    set_tty_foreground(
-        tty_endpoint,
-        child_stdin_endpoint,
-        ctrl_c_notify_endpoint,
-        ctrl_c_flags,
-    )?;
-    let saved_lflag = match tty_get_lflag(tty_endpoint) {
-        Ok(lflag) => lflag,
-        Err(err) => {
-            let _ = debug_print(&format!("shell: tty_get_lflag failed {:?}", err));
-            TTY_LFLAG_DEFAULT
+    // Transfer tty foreground routing to the child while it runs. Skip in
+    // cluuterm/pts mode (tty_endpoint == 0) — there is no TTY service to
+    // forward Ctrl-C through; cluuterm handles foreground routing itself.
+    if tty_endpoint != 0 {
+        set_tty_foreground(
+            tty_endpoint,
+            child_stdin_endpoint,
+            ctrl_c_notify_endpoint,
+            ctrl_c_flags,
+        )?;
+    }
+    // Skip TTY_CTL when tty_endpoint is 0 (cluuterm/pts mode — no TTY service
+    // to talk to). `tty_get_lflag` would otherwise issue a synchronous call
+    // against a non-TTY endpoint and never get a reply.
+    let saved_lflag = if tty_endpoint != 0 {
+        match tty_get_lflag(tty_endpoint) {
+            Ok(lflag) => lflag,
+            Err(err) => {
+                let _ = debug_print(&format!("shell: tty_get_lflag failed {:?}", err));
+                TTY_LFLAG_DEFAULT
+            }
         }
+    } else {
+        TTY_LFLAG_DEFAULT
     };
     let mut lflag_switched = false;
-    if mode == ForegroundMode::PassCtrlCToChild {
+    if mode == ForegroundMode::PassCtrlCToChild && tty_endpoint != 0 {
         let target_lflag = saved_lflag & !(TTY_LFLAG_ECHO | TTY_LFLAG_ICANON);
         match tty_set_lflag(tty_endpoint, target_lflag) {
             Ok(()) => lflag_switched = true,
