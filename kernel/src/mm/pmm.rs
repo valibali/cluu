@@ -600,6 +600,11 @@ impl BuddyAllocator {
             if already_free {
                 klibcluu::log_dec(klibcluu::LogLevel::Error, "  order=", order as u64);
                 report_double_free(phys_addr, rip, tag);
+                // Phase 2: under Phase 2 refcount invariants this path should
+                // NEVER fire because dec_ref only calls free when the last ref
+                // drops. Panic in debug builds to catch regressions fast.
+                #[cfg(debug_assertions)]
+                panic!("PMM double-free detected — Phase 2 invariant violated");
                 return;
             }
             // Record the successful free before releasing the PMM lock.

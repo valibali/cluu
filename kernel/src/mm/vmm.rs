@@ -1199,11 +1199,25 @@ unsafe fn map_single_4k_page(
 
 /// Tear down user-half page tables and free all associated physical memory.
 ///
-/// Walks PML4 entries 0-255 (the user half), recursively frees:
-/// - All mapped 4KB frames (leaf PTEs)
+/// Walks PML4 entries 0-255 (the user half), recursively calls `dec_ref` on:
+/// - All mapped 4KB leaf frames (user data / grant)
 /// - All mapped 2MB huge page frames
 /// - All intermediate page table frames (PTs, PDs, PDPTs)
 /// - The PML4 frame itself
+///
+/// Phase 2: `dec_ref` is the single free path. When a frame's refcount drops
+/// to 0, dec_ref retypes it to Untyped and returns it to the PMM buddy
+/// allocator automatically. Shared frames (refcount ≥ 2) have their count
+/// decremented but are NOT freed until all owners release them — this is what
+/// prevents the 2026-05-18 frame-alias UAF.
+///
+/// The SHARED_PHYS PTE flag skip is intentionally removed. The frame_registry
+/// dec path is removed; dec_ref handles all variants uniformly.
+///
+/// The `freed: BTreeSet` dedup remains as defense-in-depth: calling dec_ref
+/// twice for the same phys within one teardown walk would double-decrement the
+/// refcount. The BTreeSet prevents that by skipping any phys seen more than
+/// once during this walk.
 ///
 /// The kernel half (entries 256-511) is NOT touched — those are shared
 /// references to the kernel's page tables.
@@ -1220,13 +1234,24 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
     let mut freed_frames: u64 = 0;
     let mut freed_tables: u64 = 0;
 
-    // Track physical frames already freed in this teardown walk. A given
-    // address space can map the same physical frame through multiple PTEs
-    // (CoW relics, mapping bugs, etc.); without dedup we hand the same
-    // phys to free_frame twice and the buddy allocator panics. Cost:
-    // O(#frames in space) BTreeSet, typically a few MB worth of u64s.
-    let mut freed: alloc::collections::BTreeSet<u64> =
+    // Dedup set: prevents calling dec_ref on the same phys twice within
+    // one teardown walk. With correct Phase 2 refcounting this set should
+    // never see a repeat; if it does, a warn is logged.
+    let mut seen: alloc::collections::BTreeSet<u64> =
         alloc::collections::BTreeSet::new();
+
+    // Helper: call dec_ref once per phys. Skip (with warn) if already seen.
+    macro_rules! dec_once {
+        ($phys:expr) => {{
+            let p: u64 = $phys;
+            if seen.insert(p) {
+                let _ = crate::mm::frame_table::dec_ref(p);
+            } else {
+                klibcluu::warn("teardown: dup phys — skipped dec_ref (Phase 2 dedup)");
+                klibcluu::log_hex(klibcluu::LogLevel::Warn, "  phys=0x", p);
+            }
+        }};
+    }
 
     // Only walk user half (entries 0-255)
     for &pml4e in pml4.iter().take(256) {
@@ -1245,7 +1270,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
 
             // 1GB huge page (unlikely but handle it)
             if pdpte & pte_flags::HUGE != 0 {
-                // Can't free 1GB frames with current PMM, just skip
+                // Can't free 1GB frames with current PMM, just skip.
                 continue;
             }
 
@@ -1261,11 +1286,13 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                 // 2MB huge page
                 if pde & pte_flags::HUGE != 0 {
                     if pde & pte_flags::NO_CACHE != 0 {
-                        continue; // Device-mapped huge page — skip PMM free
+                        continue; // Device-mapped huge page — never PMM-owned
                     }
-                    let frame_phys = pde & 0x000F_FFFF_FFE0_0000; // 2MB aligned, strip flags
-                    if freed.insert(frame_phys) {
-                        // Phase 1: advisory retype before huge-page free
+                    let frame_phys = pde & pte_flags::HUGE_ADDR_MASK;
+                    // Phase 2: dec_ref drives the huge-frame free.
+                    // (Huge frames currently don't go through the typed-frame
+                    // table so fall back to direct PMM free.)
+                    if seen.insert(frame_phys) {
                         let _ = crate::mm::frame_table::retype_to_untyped(frame_phys);
                         crate::mm::pmm::free_large_frame_tagged(frame_phys, "teardown_huge");
                         freed_frames += 512; // 512 x 4KB equivalent
@@ -1283,87 +1310,75 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
                         continue;
                     }
 
-                    // Skip device-mapped pages (MMIO) — they are not PMM-owned
+                    // Skip device-mapped pages (MMIO) — tag=Device, dec_ref
+                    // will silently no-op, but skip entirely for clarity.
                     if pte & pte_flags::NO_CACHE != 0 {
                         continue;
                     }
 
-                    // Skip MAP_SHARE_PHYS pages — the physical frame is owned
-                    // by the caller's (VFS) address space, not this one.
-                    // Freeing it here would corrupt the caller's mapping.
-                    if pte & pte_flags::SHARED_PHYS != 0 {
-                        continue;
-                    }
+                    // Phase 2: SHARED_PHYS skip removed. dec_ref handles all
+                    // variants: shared frames have refcount ≥ 2 and are NOT
+                    // freed until their last reference drops.
+                    // WC device frames: SHARED_PHYS set, NO_CACHE clear.
+                    // Detect via tag=Device in frame_table (dec_ref no-ops).
 
                     let frame_phys = pte & pte_flags::ADDR_MASK;
-                    // Dedup: only release a given physical frame once per
-                    // teardown. Same phys mapped via multiple PTEs is the
-                    // root cause of the double-free panic the PMM audit
-                    // catches; skipping the duplicate here lets the kernel
-                    // stay correct without relying on the PMM soft-fail.
-                    if !freed.insert(frame_phys) {
-                        continue;
-                    }
-                    // Grant-shared frames are tracked in the registry;
-                    // freeing unconditionally here would yank the frame
-                    // out from under other spaces that still have it
-                    // mapped. Let the registry decide.
-                    if let Some(frame_id) =
-                        crate::mm::frame_registry::lookup_by_phys(frame_phys)
-                    {
-                        // Phase 1: advisory retype-to-untyped before registry dec
-                        let _ = crate::mm::frame_table::retype_to_untyped(frame_phys);
-                        crate::mm::frame_registry::dec_and_maybe_free(frame_id);
-                    } else {
-                        // Phase 1: advisory retype-to-untyped before PMM free
-                        let _ = crate::mm::frame_table::retype_to_untyped(frame_phys);
-                        crate::mm::pmm::free_frame_tagged(frame_phys, "teardown_leaf");
-                    }
+                    // Phase 2: dec_ref is the single free path.
+                    dec_once!(frame_phys);
                     freed_frames += 1;
                 }
 
-                // Free the PT frame (page table itself, not user data).
-                // Page tables are kernel-allocated and should never be shared
-                // between PD entries, but dedup anyway for defense in depth.
-                if freed.insert(pt_phys)
-                    && check_table_free(pt_phys, "PT", pml4_phys.as_u64())
-                {
-                    // Phase 1: advisory retype before free
-                    let _ = crate::mm::frame_table::retype_to_untyped(pt_phys);
-                    crate::mm::pmm::free_frame_tagged(pt_phys, "teardown_pt");
+                // Phase 2: dec_ref for the PT frame.
+                // check_table_free is retained as a diagnostic; it no longer
+                // gates the free (dec_ref handles shared tables via refcount).
+                if seen.insert(pt_phys) {
+                    let should_log = unsafe {
+                        check_table_free(pt_phys, "PT", pml4_phys.as_u64())
+                    };
+                    if !should_log {
+                        // Alias detected — dec_ref will safely handle it.
+                        klibcluu::warn("teardown_pt: alias detected; dec_ref manages lifetime");
+                    }
+                    let _ = crate::mm::frame_table::dec_ref(pt_phys);
                     freed_tables += 1;
                 }
             }
 
-            // Free the PD frame
-            if freed.insert(pd_phys)
-                && check_table_free(pd_phys, "PD", pml4_phys.as_u64())
-            {
-                // Phase 1: advisory retype before free
-                let _ = crate::mm::frame_table::retype_to_untyped(pd_phys);
-                crate::mm::pmm::free_frame_tagged(pd_phys, "teardown_pd");
+            // Phase 2: dec_ref for the PD frame.
+            if seen.insert(pd_phys) {
+                let should_log = unsafe {
+                    check_table_free(pd_phys, "PD", pml4_phys.as_u64())
+                };
+                if !should_log {
+                    klibcluu::warn("teardown_pd: alias detected; dec_ref manages lifetime");
+                }
+                let _ = crate::mm::frame_table::dec_ref(pd_phys);
                 freed_tables += 1;
             }
         }
 
-        // Free the PDPT frame
-        if freed.insert(pdpt_phys)
-            && check_table_free(pdpt_phys, "PDPT", pml4_phys.as_u64())
-        {
-            // Phase 1: advisory retype before free
-            let _ = crate::mm::frame_table::retype_to_untyped(pdpt_phys);
-            crate::mm::pmm::free_frame_tagged(pdpt_phys, "teardown_pdpt");
+        // Phase 2: dec_ref for the PDPT frame.
+        if seen.insert(pdpt_phys) {
+            let should_log = unsafe {
+                check_table_free(pdpt_phys, "PDPT", pml4_phys.as_u64())
+            };
+            if !should_log {
+                klibcluu::warn("teardown_pdpt: alias detected; dec_ref manages lifetime");
+            }
+            let _ = crate::mm::frame_table::dec_ref(pdpt_phys);
             freed_tables += 1;
         }
     }
 
-    // Free the PML4 frame itself
-    if freed.insert(pml4_phys.as_u64())
-        && check_table_free(pml4_phys.as_u64(), "PML4", pml4_phys.as_u64())
+    // Phase 2: dec_ref for the PML4 frame itself.
     {
-        // Phase 1: advisory retype before free
-        let _ = crate::mm::frame_table::retype_to_untyped(pml4_phys.as_u64());
-        crate::mm::pmm::free_frame_tagged(pml4_phys.as_u64(), "teardown_pml4");
+        let should_log = unsafe {
+            check_table_free(pml4_phys.as_u64(), "PML4", pml4_phys.as_u64())
+        };
+        if !should_log {
+            klibcluu::warn("teardown_pml4: alias detected; dec_ref manages lifetime");
+        }
+        let _ = crate::mm::frame_table::dec_ref(pml4_phys.as_u64());
         freed_tables += 1;
     }
 

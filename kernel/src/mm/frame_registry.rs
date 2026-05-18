@@ -214,9 +214,12 @@ pub fn alloc_frame_n(owner: AddressSpaceId, n_pages: usize) -> Option<(FrameId, 
         return None; // buddy max = order 9 (2 MiB)
     }
     let phys = crate::mm::pmm::alloc_order(order as usize)?;
-    // Phase 1: retype each page in the multi-page block as UserData.
-    // The block is contiguous; mark the base frame (representative).
-    let _ = crate::mm::frame_table::retype_to_user(phys, owner);
+    // Phase 2: retype EVERY constituent page in the contiguous block as UserData.
+    let allocated_count = 1usize << order;
+    for i in 0..allocated_count {
+        let page_phys = phys + (i as u64) * 4096;
+        let _ = crate::mm::frame_table::retype_to_user(page_phys, owner);
+    }
     let id = FrameId::new(NEXT_FRAME_ID.fetch_add(1, Ordering::SeqCst));
     let allocated_pages: u32 = 1u32 << order;
     let entry = FrameEntry {

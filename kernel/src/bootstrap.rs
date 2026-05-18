@@ -118,7 +118,8 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
 
     // Load init ELF into address space
     klibcluu::trace("Loading init ELF...");
-    crate::elf::load_elf(init_elf, &mut init_space).map_err(|_e| {
+    // Phase 2: pass sentinel owner (space_id not yet assigned at bootstrap).
+    crate::elf::load_elf(init_elf, &mut init_space, crate::token::scope::AddressSpaceId::new(0)).map_err(|_e| {
         klibcluu::error("Failed to load init ELF");
         Error::InvalidOperation
     })?;
@@ -175,6 +176,7 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
             true,
             false,
             init_space.page_table_root,
+            crate::token::scope::AddressSpaceId::new(0),
         )?;
 
         let boot_phys = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(boot_frame));

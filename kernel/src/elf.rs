@@ -91,6 +91,9 @@ pub struct ElfBinary {
 ///
 /// * `data` - Raw ELF file bytes
 /// * `address_space` - Target address space to load into
+/// * `owner` - `AddressSpaceId` of the target space; used to tag intermediate
+///   page table frames with the correct owner. Pass `AddressSpaceId::new(0)` if
+///   the ID is not yet known (bootstrap / legacy spawn path).
 ///
 /// # Returns
 ///
@@ -98,6 +101,7 @@ pub struct ElfBinary {
 pub fn load_elf(
     data: &[u8],
     address_space: &mut crate::mm::AddressSpace,
+    owner: crate::token::scope::AddressSpaceId,
 ) -> Result<ElfBinary, ElfLoadError> {
     klibcluu::trace("ELF: Loading binary (");
     klibcluu::log_dec(klibcluu::LogLevel::Trace, " bytes)", data.len() as u64);
@@ -116,7 +120,7 @@ pub fn load_elf(
 
     // Load each segment using batch mapping
     for segment in parsed.segments_iter() {
-        load_segment_batch(address_space, segment, data)?;
+        load_segment_batch(address_space, segment, data, owner)?;
     }
 
     klibcluu::info("ELF: Successfully loaded");
@@ -137,6 +141,7 @@ fn load_segment_batch(
     address_space: &mut crate::mm::AddressSpace,
     segment: &LoadableSegment,
     elf_data: &[u8],
+    owner: crate::token::scope::AddressSpaceId,
 ) -> Result<(), ElfLoadError> {
     use core::ptr::{copy_nonoverlapping, write_bytes};
 
@@ -185,13 +190,8 @@ fn load_segment_batch(
         // Allocate physical frame
         let frame_phys = crate::mm::pmm::alloc_frame_tagged("elf_alloc_leaf")
             .ok_or(ElfLoadError::MemoryAllocationFailed)?;
-        // Phase 1: retype leaf frame as UserData (owner unknown at this level;
-        // address_space.page_table_root is a PhysAddr, not an AddressSpaceId —
-        // use sentinel 0 until Phase 2 threads the real ID through).
-        let _ = crate::mm::frame_table::retype_to_user(
-            frame_phys,
-            crate::token::scope::AddressSpaceId::new(0),
-        );
+        // Phase 2: retype leaf frame as UserData with real owner.
+        let _ = crate::mm::frame_table::retype_to_user(frame_phys, owner);
         let frame_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
 
         // Zero the entire page first
@@ -242,6 +242,7 @@ fn load_segment_batch(
                 writable,
                 executable,
                 page_table_root,
+                owner,
             )?;
         }
     }
@@ -259,12 +260,15 @@ fn load_segment_batch(
 /// Map a single 4KB user page
 ///
 /// Helper function to map a page into user address space with appropriate flags.
+/// `owner` is the `AddressSpaceId` of the target space; used to tag newly
+/// allocated intermediate page tables with the correct owner.
 pub(crate) unsafe fn map_user_page(
     virt: u64,
     phys: u64,
     writable: bool,
     executable: bool,
     page_table_root: PhysAddr,
+    owner: crate::token::scope::AddressSpaceId,
 ) -> Result<(), ElfLoadError> {
     use core::ptr::write_bytes;
 
@@ -302,12 +306,8 @@ pub(crate) unsafe fn map_user_page(
         let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
         write_bytes(pdpt_virt as *mut u8, 0, 4096);
         pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
-        // Phase 1: retype new PDPT (level 3, user owner sentinel = 0)
-        let _ = crate::mm::frame_table::retype_to_pt(
-            pdpt_phys,
-            3,
-            crate::token::scope::AddressSpaceId::new(0),
-        );
+        // Phase 2: retype new PDPT with real owner.
+        let _ = crate::mm::frame_table::retype_to_pt(pdpt_phys, 3, owner);
         pdpt_phys
     };
 
@@ -323,12 +323,8 @@ pub(crate) unsafe fn map_user_page(
         let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
         write_bytes(pd_virt as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
-        // Phase 1: retype new PD (level 2, user owner sentinel = 0)
-        let _ = crate::mm::frame_table::retype_to_pt(
-            pd_phys,
-            2,
-            crate::token::scope::AddressSpaceId::new(0),
-        );
+        // Phase 2: retype new PD with real owner.
+        let _ = crate::mm::frame_table::retype_to_pt(pd_phys, 2, owner);
         pd_phys
     };
 
@@ -344,12 +340,8 @@ pub(crate) unsafe fn map_user_page(
         let pt_virt = crate::mm::physmap::phys_to_virt_u64(pt_phys);
         write_bytes(pt_virt as *mut u8, 0, 4096);
         pd[pd_idx] = (pt_phys & pte_flags::ADDR_MASK) | table_flags;
-        // Phase 1: retype new PT (level 1, user owner sentinel = 0)
-        let _ = crate::mm::frame_table::retype_to_pt(
-            pt_phys,
-            1,
-            crate::token::scope::AddressSpaceId::new(0),
-        );
+        // Phase 2: retype new PT with real owner.
+        let _ = crate::mm::frame_table::retype_to_pt(pt_phys, 1, owner);
         pt_phys
     };
 
@@ -373,14 +365,19 @@ pub(crate) unsafe fn map_user_page(
 
 /// Map a single 4KB shared physical frame into user address space.
 ///
-/// Identical to `map_user_page` but sets SHARED_PHYS (bit 9) on the PTE.
-/// `teardown_user_pages` checks this bit and skips the PMM free — the frame
-/// is owned by the caller (VFS), not the target space.
+/// Phase 2: installs a READ-ONLY PTE for `phys` and calls `inc_ref(phys)` to
+/// record the new mapping in the typed-frame table. The SHARED_PHYS PTE bit is
+/// retained for diagnostic tooling but `teardown_user_pages` no longer uses it
+/// to skip PMM free — `dec_ref` handles that uniformly.
+///
+/// `owner` is the `AddressSpaceId` of the target space; used to tag any newly
+/// allocated intermediate page tables.
 pub(crate) unsafe fn map_shared_page(
     virt: u64,
     phys: u64,
     executable: bool,
     page_table_root: PhysAddr,
+    owner: crate::token::scope::AddressSpaceId,
 ) -> Result<(), ElfLoadError> {
     use core::ptr::write_bytes;
 
@@ -391,7 +388,8 @@ pub(crate) unsafe fn map_shared_page(
 
     let table_flags = pte_flags::PRESENT | pte_flags::WRITABLE | pte_flags::USER;
 
-    // Shared pages: PRESENT | USER | SHARED_PHYS (read-only, no WRITABLE)
+    // Shared pages: PRESENT | USER | SHARED_PHYS (read-only, no WRITABLE).
+    // SHARED_PHYS bit is kept as a diagnostic marker; teardown no longer gates on it.
     let mut page_flags = pte_flags::PRESENT | pte_flags::USER | pte_flags::SHARED_PHYS;
     if !executable {
         page_flags |= pte_flags::NO_EXECUTE;
@@ -405,10 +403,13 @@ pub(crate) unsafe fn map_shared_page(
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
         pml4[pml4_idx] & PHYS_MASK
     } else {
-        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let p = crate::mm::pmm::alloc_frame_tagged("shared_alloc_pdpt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pml4[pml4_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
+        // Phase 2: retype with real owner.
+        let _ = crate::mm::frame_table::retype_to_pt(p, 3, owner);
         p
     };
 
@@ -417,10 +418,12 @@ pub(crate) unsafe fn map_shared_page(
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
         pdpt[pdpt_idx] & PHYS_MASK
     } else {
-        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let p = crate::mm::pmm::alloc_frame_tagged("shared_alloc_pd")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
+        let _ = crate::mm::frame_table::retype_to_pt(p, 2, owner);
         p
     };
 
@@ -429,16 +432,21 @@ pub(crate) unsafe fn map_shared_page(
     let pt_phys = if pd[pd_idx] & 0x1 != 0 {
         pd[pd_idx] & PHYS_MASK
     } else {
-        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let p = crate::mm::pmm::alloc_frame_tagged("shared_alloc_pt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pd[pd_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
+        let _ = crate::mm::frame_table::retype_to_pt(p, 1, owner);
         p
     };
 
     let pt = &mut *(crate::mm::physmap::phys_to_virt_u64(pt_phys) as *mut [u64; 512]);
     // Mask phys to bits 12-51 — see comment in map_user_page (elf.rs:~335).
     pt[pt_idx] = (phys & pte_flags::ADDR_MASK) | page_flags;
+    // Phase 2: inc_ref records this mapping in the typed-frame table.
+    // inc_ref auto-transitions UserData → Grant when this is a second mapping.
+    let _ = crate::mm::frame_table::inc_ref(phys);
 
     core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
 
@@ -447,15 +455,21 @@ pub(crate) unsafe fn map_shared_page(
 
 /// Map a single device/MMIO page into user address space with cache disabled.
 ///
-/// Identical to `map_user_page` but sets PCD (bit 4) on the PTE,
-/// marking the page as uncacheable. This is required for MMIO device
-/// registers and enables `teardown_user_pages()` to identify and skip
-/// these frames during cleanup.
+/// Sets PCD (bit 4) on the PTE, marking the page as uncacheable. This is
+/// required for MMIO device registers and enables `teardown_user_pages()` to
+/// identify and skip these frames during cleanup (NO_CACHE detection).
+///
+/// Device frames (tag=Device) are never managed by the refcount system —
+/// no `inc_ref` is called here.
+///
+/// `owner` is the `AddressSpaceId` of the target space; used to tag any
+/// newly allocated intermediate page tables.
 pub(crate) unsafe fn map_device_page(
     virt: u64,
     phys: u64,
     writable: bool,
     page_table_root: PhysAddr,
+    owner: crate::token::scope::AddressSpaceId,
 ) -> Result<(), ElfLoadError> {
     use crate::mm::vmm::pte_flags;
     use core::ptr::write_bytes;
@@ -482,10 +496,12 @@ pub(crate) unsafe fn map_device_page(
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
         pml4[pml4_idx] & PHYS_MASK
     } else {
-        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let p = crate::mm::pmm::alloc_frame_tagged("device_alloc_pdpt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pml4[pml4_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
+        let _ = crate::mm::frame_table::retype_to_pt(p, 3, owner);
         p
     };
 
@@ -494,10 +510,12 @@ pub(crate) unsafe fn map_device_page(
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
         pdpt[pdpt_idx] & PHYS_MASK
     } else {
-        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let p = crate::mm::pmm::alloc_frame_tagged("device_alloc_pd")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
+        let _ = crate::mm::frame_table::retype_to_pt(p, 2, owner);
         p
     };
 
@@ -506,10 +524,12 @@ pub(crate) unsafe fn map_device_page(
     let pt_phys = if pd[pd_idx] & 0x1 != 0 {
         pd[pd_idx] & PHYS_MASK
     } else {
-        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let p = crate::mm::pmm::alloc_frame_tagged("device_alloc_pt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pd[pd_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
+        let _ = crate::mm::frame_table::retype_to_pt(p, 1, owner);
         p
     };
 
@@ -517,6 +537,8 @@ pub(crate) unsafe fn map_device_page(
 
     // Mask phys to bits 12-51 — see comment in map_user_page (elf.rs:~335).
     pt[pt_idx] = (phys & pte_flags::ADDR_MASK) | page_flags;
+    // NOTE: Device frames are tagged Device in the frame_table; inc_ref is NOT
+    // called here because device MMIO pages are never managed by the buddy PMM.
 
     core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
 
@@ -529,15 +551,16 @@ pub(crate) unsafe fn map_device_page(
 /// PWT alone (PCD=0, PWT=1, PAT=0) selects PAT[1] = WC, configured by
 /// `mm::pat::init()` at boot.
 ///
-/// Like `map_device_page`, the leaf PTE marks the frame so
-/// `teardown_user_pages` skips PMM free for it. We use SHARED_PHYS as
-/// the marker (the existing `map_device_page` relies on NO_CACHE; here
-/// we omit NO_CACHE so add SHARED_PHYS to retain the skip behavior).
+/// SHARED_PHYS is retained as a diagnostic marker. Like `map_device_page`,
+/// no `inc_ref` is called — WC device frames are never managed by the buddy PMM.
+///
+/// `owner` is the `AddressSpaceId` of the target space.
 pub(crate) unsafe fn map_device_page_wc(
     virt: u64,
     phys: u64,
     writable: bool,
     page_table_root: PhysAddr,
+    owner: crate::token::scope::AddressSpaceId,
 ) -> Result<(), ElfLoadError> {
     use crate::mm::vmm::pte_flags;
     use core::ptr::write_bytes;
@@ -568,10 +591,12 @@ pub(crate) unsafe fn map_device_page_wc(
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
         pml4[pml4_idx] & PHYS_MASK
     } else {
-        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let p = crate::mm::pmm::alloc_frame_tagged("wc_alloc_pdpt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pml4[pml4_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
+        let _ = crate::mm::frame_table::retype_to_pt(p, 3, owner);
         p
     };
 
@@ -580,10 +605,12 @@ pub(crate) unsafe fn map_device_page_wc(
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
         pdpt[pdpt_idx] & PHYS_MASK
     } else {
-        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let p = crate::mm::pmm::alloc_frame_tagged("wc_alloc_pd")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
+        let _ = crate::mm::frame_table::retype_to_pt(p, 2, owner);
         p
     };
 
@@ -592,16 +619,19 @@ pub(crate) unsafe fn map_device_page_wc(
     let pt_phys = if pd[pd_idx] & 0x1 != 0 {
         pd[pd_idx] & PHYS_MASK
     } else {
-        let p = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let p = crate::mm::pmm::alloc_frame_tagged("wc_alloc_pt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let v = crate::mm::physmap::phys_to_virt_u64(p);
         write_bytes(v as *mut u8, 0, 4096);
         pd[pd_idx] = (p & pte_flags::ADDR_MASK) | table_flags;
+        let _ = crate::mm::frame_table::retype_to_pt(p, 1, owner);
         p
     };
 
     let pt = &mut *(crate::mm::physmap::phys_to_virt_u64(pt_phys) as *mut [u64; 512]);
     // Mask phys to bits 12-51 — see comment in map_user_page (elf.rs:~335).
     pt[pt_idx] = (phys & pte_flags::ADDR_MASK) | page_flags;
+    // NOTE: WC device frames are not PMM-managed; inc_ref is NOT called.
 
     core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
 
@@ -612,12 +642,16 @@ pub(crate) unsafe fn map_device_page_wc(
 ///
 /// Both virtual and physical addresses must be 2MB-aligned.
 /// Uses the PS (Page Size) bit in the Page Directory entry.
+///
+/// `owner` is the `AddressSpaceId` of the target space; used to tag any
+/// newly allocated intermediate page tables.
 pub(crate) unsafe fn map_user_large_page(
     virt: u64,
     phys: u64,
     writable: bool,
     executable: bool,
     page_table_root: PhysAddr,
+    owner: crate::token::scope::AddressSpaceId,
 ) -> Result<(), ElfLoadError> {
     use core::ptr::write_bytes;
 
@@ -656,11 +690,12 @@ pub(crate) unsafe fn map_user_large_page(
     let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
         pml4[pml4_idx] & PHYS_MASK
     } else {
-        let pdpt_phys =
-            crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pdpt_phys = crate::mm::pmm::alloc_frame_tagged("large_alloc_pdpt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
         write_bytes(pdpt_virt as *mut u8, 0, 4096);
         pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
+        let _ = crate::mm::frame_table::retype_to_pt(pdpt_phys, 3, owner);
         pdpt_phys
     };
 
@@ -671,10 +706,12 @@ pub(crate) unsafe fn map_user_large_page(
     let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
         pdpt[pdpt_idx] & PHYS_MASK
     } else {
-        let pd_phys = crate::mm::pmm::alloc_frame().ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pd_phys = crate::mm::pmm::alloc_frame_tagged("large_alloc_pd")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
         let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
         write_bytes(pd_virt as *mut u8, 0, 4096);
         pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
+        let _ = crate::mm::frame_table::retype_to_pt(pd_phys, 2, owner);
         pd_phys
     };
 

@@ -1,15 +1,16 @@
 //! Per-frame typed ownership table. seL4-style Untyped / Retype.
 //!
-//! # Phase 1 — behaviorally identical (advisory only)
+//! # Phase 2 — refcount enforcement + Grant unified
 //!
-//! The `FrameMeta` array is the ground truth for *what a physical frame is
-//! being used for*. Every PMM alloc wires a `retype_to_*` call right after
-//! the frame is obtained; every PMM free wires `retype_to_untyped` right
-//! before the frame is returned. `ENFORCE_INVARIANTS = false` means the
-//! retype functions log mismatches as `FRAME_TABLE WARN` but always
-//! succeed — behaviour is identical to the pre-table kernel.
+//! `ENFORCE_INVARIANTS = true` means retype mismatches are hard errors.
 //!
-//! Phase 2 will flip the flag.
+//! Every map of a user leaf calls `inc_ref`; every unmap calls `dec_ref`.
+//! `dec_ref` at refcount 0 auto-retypes to Untyped and calls
+//! `pmm::free_frame_untyped` to return the frame to the buddy allocator.
+//!
+//! `inc_ref` on a UserData frame whose refcount transitions 1→2 automatically
+//! retypes the frame to Grant (shared / multi-owner). Grant frames stay
+//! Grant until refcount hits 0 (reverse retype to UserData deferred to Phase 4).
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -18,9 +19,8 @@ use crate::token::scope::AddressSpaceId;
 
 // ─── Enforcement toggle ───────────────────────────────────────────────────────
 
-/// Phase 1: false → log-and-proceed on mismatches.
-/// Phase 2: flip to true → mismatches become hard errors.
-const ENFORCE_INVARIANTS: bool = false;
+/// Phase 2: true → mismatches are hard errors.
+const ENFORCE_INVARIANTS: bool = true;
 
 // ─── Frame tag ───────────────────────────────────────────────────────────────
 
@@ -276,35 +276,80 @@ pub fn retype_to_untyped(phys: u64) -> Result<(), FrameTableError> {
 
 /// Increment the refcount on a frame. Returns the new refcount.
 ///
-/// Phase 1: advisory. Does NOT guard against overflow (u16::MAX).
+/// When a UserData frame's refcount transitions from 1 → 2, the frame is
+/// automatically retyped UserData → Grant (sealing the "shared" semantics).
+/// Grant frames keep their tag until refcount drops to 0.
+///
+/// Device / KernelHeap / BootReserved frames are silently skipped (they
+/// never participate in the user refcount lifecycle).
 pub fn inc_ref(phys: u64) -> Result<u16, FrameTableError> {
     let mut guard = FRAME_TABLE.lock();
     let Some(table) = guard.as_mut() else { return Ok(0); };
     let idx = checked_frame(table, phys)?;
 
     let entry = &mut table[idx];
+    // Device/KernelHeap/BootReserved: not managed by refcount, silently ignore.
+    match entry.tag {
+        FrameTag::Device | FrameTag::KernelHeap | FrameTag::BootReserved => {
+            return Ok(entry.refcount);
+        }
+        _ => {}
+    }
+    let old_rc = entry.refcount;
     entry.refcount = entry.refcount.saturating_add(1);
-    Ok(entry.refcount)
+    let new_rc = entry.refcount;
+    // UserData 1→2 automatically transitions to Grant.
+    if entry.tag == FrameTag::UserData && old_rc == 1 && new_rc == 2 {
+        entry.tag = FrameTag::Grant;
+        klibcluu::log_hex(klibcluu::LogLevel::Trace, "FRAME_TABLE: UserData→Grant phys=0x", phys);
+    }
+    Ok(new_rc)
 }
 
 /// Decrement the refcount on a frame. Returns the new refcount.
 ///
-/// When the refcount reaches 0 the tag is automatically set to `Untyped`
-/// (owner and extra cleared), mirroring the seL4 "free when last ref drops"
-/// semantic. This auto-untype is advisory in Phase 1.
+/// When the refcount reaches 0:
+/// - The tag is automatically set to `Untyped` (owner and extra cleared).
+/// - For UserData and Grant frames, the physical frame is returned to the PMM
+///   buddy allocator (`pmm::free_frame`) automatically. Callers must NOT call
+///   `pmm::free_*` directly after `dec_ref` — dec_ref owns that path.
+///
+/// Device / KernelHeap / BootReserved frames are silently skipped.
+///
+/// The FRAME_TABLE lock is dropped before calling into PMM to avoid
+/// holding both locks simultaneously.
 pub fn dec_ref(phys: u64) -> Result<u16, FrameTableError> {
-    let mut guard = FRAME_TABLE.lock();
-    let Some(table) = guard.as_mut() else { return Ok(0); };
-    let idx = checked_frame(table, phys)?;
+    // Phase 1: determine whether we need to auto-free under the lock, then
+    // drop the lock before calling PMM.
+    let (new_rc, should_free) = {
+        let mut guard = FRAME_TABLE.lock();
+        let Some(table) = guard.as_mut() else { return Ok(0); };
+        let idx = checked_frame(table, phys)?;
 
-    let entry = &mut table[idx];
-    entry.refcount = entry.refcount.saturating_sub(1);
-    if entry.refcount == 0 {
-        entry.tag = FrameTag::Untyped;
-        entry.owner = 0;
-        entry.extra = 0;
+        let entry = &mut table[idx];
+        // Device/KernelHeap/BootReserved: not managed, silently ignore.
+        match entry.tag {
+            FrameTag::Device | FrameTag::KernelHeap | FrameTag::BootReserved => {
+                return Ok(entry.refcount);
+            }
+            _ => {}
+        }
+        entry.refcount = entry.refcount.saturating_sub(1);
+        let new_rc = entry.refcount;
+        let should_free = new_rc == 0 && matches!(entry.tag, FrameTag::UserData | FrameTag::Grant | FrameTag::PageTable);
+        if new_rc == 0 {
+            entry.tag = FrameTag::Untyped;
+            entry.owner = 0;
+            entry.extra = 0;
+        }
+        (new_rc, should_free)
+    };
+    // Auto-free to PMM when the last reference drops.  Lock is released here.
+    if should_free {
+        // Use free_frame_tagged so the ring gets an event.
+        crate::mm::pmm::free_frame_tagged(phys, "dec_ref_auto");
     }
-    Ok(entry.refcount)
+    Ok(new_rc)
 }
 
 // ─── Query API ───────────────────────────────────────────────────────────────
@@ -448,10 +493,49 @@ mod tests {
         Ok(())
     }
 
+    /// Phase 1-era inc_ref (no UserData→Grant auto-transition).
     fn do_inc_ref(table: &mut Vec<FrameMeta>, phys: u64) -> Result<u16, FrameTableError> {
         let idx = checked_frame(table, phys)?;
         table[idx].refcount = table[idx].refcount.saturating_add(1);
         Ok(table[idx].refcount)
+    }
+
+    /// Phase 2-era inc_ref: UserData 1→2 auto-transitions to Grant.
+    fn do_inc_ref_p2(table: &mut Vec<FrameMeta>, phys: u64) -> Result<u16, FrameTableError> {
+        let idx = checked_frame(table, phys)?;
+        let entry = &mut table[idx];
+        match entry.tag {
+            FrameTag::Device | FrameTag::KernelHeap | FrameTag::BootReserved => {
+                return Ok(entry.refcount);
+            }
+            _ => {}
+        }
+        let old_rc = entry.refcount;
+        entry.refcount = entry.refcount.saturating_add(1);
+        let new_rc = entry.refcount;
+        if entry.tag == FrameTag::UserData && old_rc == 1 && new_rc == 2 {
+            entry.tag = FrameTag::Grant;
+        }
+        Ok(new_rc)
+    }
+
+    /// Phase 2-era dec_ref: auto-Untyped at 0 (does NOT call PMM in test context).
+    fn do_dec_ref_p2(table: &mut Vec<FrameMeta>, phys: u64) -> Result<u16, FrameTableError> {
+        let idx = checked_frame(table, phys)?;
+        let entry = &mut table[idx];
+        match entry.tag {
+            FrameTag::Device | FrameTag::KernelHeap | FrameTag::BootReserved => {
+                return Ok(entry.refcount);
+            }
+            _ => {}
+        }
+        entry.refcount = entry.refcount.saturating_sub(1);
+        if entry.refcount == 0 {
+            entry.tag = FrameTag::Untyped;
+            entry.owner = 0;
+            entry.extra = 0;
+        }
+        Ok(entry.refcount)
     }
 
     fn do_dec_ref(table: &mut Vec<FrameMeta>, phys: u64) -> Result<u16, FrameTableError> {
@@ -593,5 +677,152 @@ mod tests {
         let phys = 5 * PAGE;
         let err = checked_frame(&table, phys).unwrap_err();
         assert_eq!(err, FrameTableError::OutOfRange);
+    }
+
+    // ── Phase 2 Tests ──────────────────────────────────────────────────────
+
+    /// P2-T1: inc_ref on UserData(rc=1) → returns 2, tag transitions to Grant.
+    #[test]
+    fn test_p2_inc_ref_userdata_to_grant() {
+        let mut table = fresh_table(16);
+        let phys = 8 * PAGE;
+        do_retype_user(&mut table, phys, 10).unwrap();
+        assert_eq!(meta(&table, phys).tag, FrameTag::UserData);
+        assert_eq!(meta(&table, phys).refcount, 1);
+
+        let new_rc = do_inc_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(new_rc, 2, "refcount should be 2 after inc_ref");
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant, "UserData 1→2 must become Grant");
+    }
+
+    /// P2-T2: dec_ref on Grant(rc=2) → returns 1, tag stays Grant.
+    #[test]
+    fn test_p2_dec_ref_grant_stays_grant() {
+        let mut table = fresh_table(16);
+        let phys = 9 * PAGE;
+        do_retype_user(&mut table, phys, 11).unwrap();
+        do_inc_ref_p2(&mut table, phys).unwrap(); // rc=2, tag=Grant
+
+        let new_rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(new_rc, 1, "refcount should be 1 after dec_ref");
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant, "Grant stays Grant at rc=1");
+    }
+
+    /// P2-T3: dec_ref on Grant(rc=1) → returns 0, tag transitions to Untyped.
+    #[test]
+    fn test_p2_dec_ref_grant_to_untyped() {
+        let mut table = fresh_table(16);
+        let phys = 10 * PAGE;
+        do_retype_user(&mut table, phys, 12).unwrap();
+        do_inc_ref_p2(&mut table, phys).unwrap(); // rc=2, tag=Grant
+        do_dec_ref_p2(&mut table, phys).unwrap(); // rc=1, tag=Grant
+
+        let new_rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(new_rc, 0, "refcount should be 0");
+        let e = meta(&table, phys);
+        assert_eq!(e.tag, FrameTag::Untyped, "Grant rc=0 → Untyped");
+        assert_eq!(e.owner, 0);
+    }
+
+    /// P2-T4: retype_to_untyped on Grant(rc=0) succeeds.
+    #[test]
+    fn test_p2_retype_untyped_on_grant_rc0() {
+        let mut table = fresh_table(16);
+        let phys = 11 * PAGE;
+        do_retype_user(&mut table, phys, 13).unwrap();
+        do_inc_ref_p2(&mut table, phys).unwrap();  // rc=2, Grant
+        do_dec_ref_p2(&mut table, phys).unwrap();  // rc=1, Grant
+        do_dec_ref_p2(&mut table, phys).unwrap();  // rc=0, Untyped (auto)
+        // Frame is now Untyped via auto-untype; retype_to_untyped on already-
+        // Untyped (rc=0) succeeds.
+        let result = do_retype_untyped(&mut table, phys);
+        assert!(result.is_ok(), "retype_to_untyped on Untyped(rc=0) should succeed");
+    }
+
+    /// P2-T5: retype_to_untyped on Grant(rc>0) → StillReferenced error.
+    #[test]
+    fn test_p2_retype_untyped_on_grant_still_referenced() {
+        let mut table = fresh_table(16);
+        let phys = 12 * PAGE;
+        do_retype_user(&mut table, phys, 14).unwrap();
+        do_inc_ref_p2(&mut table, phys).unwrap();  // rc=2, Grant
+        // Frame has rc=2; retype_to_untyped must fail.
+        let err = do_retype_untyped(&mut table, phys).unwrap_err();
+        assert_eq!(err, FrameTableError::StillReferenced);
+    }
+
+    /// P2-T6: Full sequence retype_to_user → inc_ref → Grant → dec_ref → Grant(rc=1)
+    /// → dec_ref → Untyped(rc=0). Net: ownership cleared, ready for reallocation.
+    #[test]
+    fn test_p2_full_ownership_lifecycle() {
+        let mut table = fresh_table(16);
+        let phys = 13 * PAGE;
+
+        // Allocate
+        do_retype_user(&mut table, phys, 100).unwrap();
+        assert_eq!(meta(&table, phys).tag, FrameTag::UserData);
+        assert_eq!(meta(&table, phys).refcount, 1);
+
+        // Grant (second mapping)
+        let rc = do_inc_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 2);
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant);
+
+        // First unmap
+        let rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 1);
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant);
+
+        // Last unmap → auto-Untyped
+        let rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 0);
+        let e = meta(&table, phys);
+        assert_eq!(e.tag, FrameTag::Untyped);
+        assert_eq!(e.owner, 0);
+        assert_eq!(e.refcount, 0);
+    }
+
+    /// P2-T7: Sequential inc_ref calls: rc 1→2→3 yields tag=Grant rc=3.
+    #[test]
+    fn test_p2_multi_inc_ref_stays_grant() {
+        let mut table = fresh_table(16);
+        let phys = 14 * PAGE;
+        do_retype_user(&mut table, phys, 200).unwrap(); // rc=1, UserData
+
+        let rc = do_inc_ref_p2(&mut table, phys).unwrap(); // rc=2
+        assert_eq!(rc, 2);
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant);
+
+        let rc = do_inc_ref_p2(&mut table, phys).unwrap(); // rc=3
+        assert_eq!(rc, 3);
+        // Grant 2→3: tag stays Grant
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant);
+    }
+
+    /// P2-T8: Integration — frame aliased as both UserData and PageTable must fail.
+    /// Simulates the 2026-05-18 alias scenario:
+    ///   retype_to_user(0x2a04e000, spA) → login's BSS alloc
+    ///   retype_to_pt(0x2a04e000, level=3, spB) → MUST FAIL AlreadyTyped
+    #[test]
+    fn test_p2_alias_scenario_2026_05_18() {
+        let mut table = fresh_table(0x2b000); // enough frames to cover 0x2a04e000
+        // 0x2a04e000 / 4096 = 0x2a04e frame index
+        // We use a scaled-down address to stay within our small table.
+        // Frame 5 = phys 5*4096 = 0x5000
+        let phys_a = 5 * PAGE; // simulates login's BSS frame
+
+        // spA marks the frame as UserData (login allocates it)
+        let owner_a = 42u64;
+        do_retype_user(&mut table, phys_a, owner_a).unwrap();
+        assert_eq!(meta(&table, phys_a).tag, FrameTag::UserData);
+
+        // spB tries to retype the SAME frame as a PDPT (level 3)
+        // → MUST return AlreadyTyped (the bug class this commit closes)
+        let owner_b = 43u64;
+        let err = do_retype_pt(&mut table, phys_a, 3, owner_b).unwrap_err();
+        assert_eq!(
+            err, FrameTableError::AlreadyTyped,
+            "retype_to_pt on UserData frame must fail with AlreadyTyped"
+        );
     }
 }

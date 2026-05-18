@@ -295,7 +295,7 @@ pub fn allocate_user_stack(
 
         // Map page (writable, non-executable, user-accessible)
         unsafe {
-            crate::elf::map_user_page(virt_addr, phys_frame, true, false, page_table_root)
+            crate::elf::map_user_page(virt_addr, phys_frame, true, false, page_table_root, crate::token::scope::AddressSpaceId::new(0))
                 .map_err(|_| crate::error::Error::OutOfMemory)?;
         }
 

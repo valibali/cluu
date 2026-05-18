@@ -60,7 +60,8 @@ pub fn spawn_elf_process(
     // Step 2: Load ELF binary into process address space
     let result = ProcessManager::with_process_mut(pid, |process| {
         // Load ELF segments into address space
-        let binary = elf::load_elf(elf_data, &mut process.address_space)
+        // Phase 2: legacy spawn path uses sentinel owner (process model pre-dates space_repository).
+        let binary = elf::load_elf(elf_data, &mut process.address_space, crate::token::scope::AddressSpaceId::new(0))
             .map_err(|_| "ELF loading failed")?;
 
         Ok::<_, &'static str>(binary)

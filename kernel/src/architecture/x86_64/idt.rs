@@ -994,6 +994,7 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
             true,  // writable
             false, // not executable
             page_table_root,
+            crate::token::scope::AddressSpaceId::new(0),
         )
     };
 

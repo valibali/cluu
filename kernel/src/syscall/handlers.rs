@@ -1379,10 +1379,10 @@ fn rollback_mapped_4kb(
             let addr = VirtAddr::new(virt_start + (i as u64) * 0x1000);
             if let Ok(phys) = vmm.unmap(addr) {
                 let phys_addr = phys.as_u64();
+                // Phase 2: dec_ref is the single free path.
+                let _ = crate::mm::frame_table::dec_ref(phys_addr);
                 if let Some(frame_id) = frame_registry::lookup_by_phys(phys_addr) {
-                    frame_registry::dec_and_maybe_free(frame_id);
-                } else {
-                    pmm::free_frame(phys_addr);
+                    frame_registry::dec_map_count(frame_id);
                 }
             }
         }
@@ -1506,6 +1506,7 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
             writable,
             executable,
             space.page_table_root,
+            space_id,
         )
     });
 
@@ -1570,12 +1571,18 @@ fn invoke_space_unmap(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
             let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
             if let Ok(phys) = vmm.unmap(addr) {
                 let phys_addr = phys.as_u64();
-                // Check if this is a tracked frame (allocated via frame
-                // capabilities or shared through a grant).
+                // Phase 2: dec_ref is the single path. It handles auto-free via
+                // the typed-frame table. For device/MMIO frames (tag=Device),
+                // dec_ref silently no-ops (correct). The frame_registry path
+                // for capability-tracked frames still needs to be decremented so
+                // map_count stays consistent — but the actual PMM free is now
+                // driven by dec_ref, not frame_registry.
+                let _ = crate::mm::frame_table::dec_ref(phys_addr);
+                // Also maintain the frame_registry map_count for tracked frames.
                 if let Some(frame_id) = frame_registry::lookup_by_phys(phys_addr) {
-                    frame_registry::dec_and_maybe_free(frame_id);
-                } else {
-                    pmm::free_frame(phys_addr);
+                    // dec_and_maybe_free would double-free if dec_ref already freed;
+                    // just decrement the map count instead.
+                    frame_registry::dec_map_count(frame_id);
                 }
                 unmapped += 1;
             }
@@ -1956,6 +1963,7 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
             writable,
             executable,
             target_space.page_table_root,
+            target_space_id,
         )
     });
 
@@ -1966,6 +1974,10 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
             // stale mapping above, which in this case was this same
             // frame — compensate by not incrementing).
             if prior_phys != Some(phys_addr) {
+                // Phase 2: inc_ref drives the UserData→Grant transition.
+                // register_grant_mapping maintains the frame_registry for
+                // legacy map_count / lookup_by_phys callers.
+                let _ = crate::mm::frame_table::inc_ref(phys_addr);
                 frame_registry::register_grant_mapping(phys_addr, target_space_id);
             }
             Ok(0)
@@ -2198,6 +2210,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
                     writable,
                     executable,
                     space.page_table_root,
+                    space_id,
                 )
             });
             match map_result {
@@ -2275,6 +2288,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
                     writable,
                     executable,
                     space.page_table_root,
+                    space_id,
                 )
             });
 
@@ -2412,6 +2426,7 @@ fn map_range_4kb(req: MapRange4kbRequest) -> SyscallResult {
                 writable,
                 executable,
                 space.page_table_root,
+                space_id,
             )
         });
 
@@ -2489,11 +2504,11 @@ fn map_range_4kb_shared(req: MapRangeSharedRequest) -> SyscallResult {
 
         let target_virt = virt_start.wrapping_add((page_idx * PAGE_SIZE) as u64);
 
-        // Map src_phys into the target space, READ-ONLY with SHARED_PHYS marker.
-        // map_shared_page sets pte_flags::SHARED_PHYS so teardown_user_pages
-        // skips PMM free for these PTEs — the frame is owned by the caller.
+        // Map src_phys into the target space READ-ONLY. map_shared_page calls
+        // inc_ref(src_phys) to record the new mapping in the frame_table so
+        // dec_ref in teardown handles the lifetime correctly.
         let result = space_repository::with_space_mut(space_id, |space| unsafe {
-            elf::map_shared_page(target_virt, src_phys, executable, space.page_table_root)
+            elf::map_shared_page(target_virt, src_phys, executable, space.page_table_root, space_id)
         });
 
         match result {
@@ -2548,6 +2563,7 @@ fn map_remaining_4kb(
                 writable,
                 executable,
                 space.page_table_root,
+                space_id,
             )
         });
 
@@ -2588,7 +2604,7 @@ fn map_device_range(
         let phys_addr = phys_start + (page_idx * PAGE_SIZE) as u64;
 
         let result = space_repository::with_space_mut(space_id, |space| unsafe {
-            elf::map_device_page(virt_addr, phys_addr, writable, space.page_table_root)
+            elf::map_device_page(virt_addr, phys_addr, writable, space.page_table_root, space_id)
         });
 
         match result {
@@ -2624,7 +2640,7 @@ fn map_device_range_wc(
         let phys_addr = phys_start + (page_idx * PAGE_SIZE) as u64;
 
         let result = space_repository::with_space_mut(space_id, |space| unsafe {
-            elf::map_device_page_wc(virt_addr, phys_addr, writable, space.page_table_root)
+            elf::map_device_page_wc(virt_addr, phys_addr, writable, space.page_table_root, space_id)
         });
 
         match result {
