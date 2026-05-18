@@ -11,6 +11,27 @@
 //! `inc_ref` on a UserData frame whose refcount transitions 1→2 automatically
 //! retypes the frame to Grant (shared / multi-owner). Grant frames stay
 //! Grant until refcount hits 0 (reverse retype to UserData deferred to Phase 4).
+//!
+//! # Phase 2.6 — refcount convention (chosen invariant)
+//!
+//! The refcount convention is: **`retype_to_user` sets refcount=1 representing
+//! the FIRST PTE install; no additional `inc_ref` is called at that first
+//! install site. Every SUBSEQUENT install of the same physical frame into any
+//! address space calls `inc_ref` before writing the PTE. Every PTE clear
+//! (teardown, unmap, overwrite) calls `dec_ref` on the displaced phys.**
+//!
+//! Rationale: this is "easiest correct" per the Phase 2.6 spec. The alternative
+//! (retype sets rc=0, every install calls inc_ref) is more uniform but requires
+//! touching all ELF load paths, which is more invasive.
+//!
+//! Specific sites:
+//! - `elf::load_segment_batch` → `retype_to_user` (rc=1) + `map_user_page` (no inc_ref).
+//! - `elf::map_shared_page` → `inc_ref` (subsequent install of VFS-cache phys).
+//! - `invoke_space_map` MAP_FRAME_TOKEN → `inc_ref` before `map_user_page`.
+//! - `invoke_space_map_range` MAP_FRAME_TOKEN → `inc_ref` per page before `map_user_page`.
+//! - `map_user_page` overwrite of existing present PTE → `dec_ref(old_phys)` first.
+//! - `teardown_user_pages` → `dec_ref` every leaf and intermediate frame.
+//! - `invoke_space_unmap` → `dec_ref` every unmapped leaf.
 
 use alloc::vec::Vec;
 use spin::Mutex;

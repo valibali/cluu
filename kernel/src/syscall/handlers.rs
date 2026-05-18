@@ -1464,6 +1464,12 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
         };
         let phys = frame_registry::get_phys(frame_id).ok_or(Error::NotFound)?;
         frame_registry::inc_map_count(frame_id);
+        // Phase 2.6: frame was retype_to_user'd when allocated (rc=1, UserData).
+        // This is a SECOND mapping into a different address space — call inc_ref
+        // so teardown of either space only decrements without prematurely freeing
+        // the frame. Without this, the owner's teardown dec_ref drives rc→0 while
+        // the borrower's PTE still points to the now-freed phys (UAF).
+        let _ = crate::mm::frame_table::inc_ref(phys);
         mapped_frame_id = Some(frame_id);
         phys
     } else if map_device {
@@ -1523,6 +1529,8 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
         Some(Ok(())) => Ok(0),
         Some(Err(_)) => {
             if let Some(fid) = mapped_frame_id {
+                // Phase 2.6: undo the inc_ref added above for MAP_FRAME_TOKEN.
+                let _ = crate::mm::frame_table::dec_ref(frame_phys);
                 frame_registry::dec_map_count(fid);
             } else if !map_device {
                 pmm::free_frame(frame_phys);
@@ -1531,6 +1539,8 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
         }
         None => {
             if let Some(fid) = mapped_frame_id {
+                // Phase 2.6: undo the inc_ref added above for MAP_FRAME_TOKEN.
+                let _ = crate::mm::frame_table::dec_ref(frame_phys);
                 frame_registry::dec_map_count(fid);
             } else if !map_device {
                 pmm::free_frame(frame_phys);
@@ -2212,6 +2222,11 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
         for page_idx in 0..num_pages {
             let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
             let phys_addr = phys_base + (page_idx * PAGE_SIZE) as u64;
+            // Phase 2.6: inc_ref each page individually — the frame was
+            // retype_to_user'd at FrameAllocate time (rc≥1). This is a
+            // SECOND (or later) mapping; teardown of either space must
+            // only decrement, not prematurely free. One inc_ref per PTE.
+            let _ = crate::mm::frame_table::inc_ref(phys_addr);
             let map_result = space_repository::with_space_mut(space_id, |space| unsafe {
                 crate::elf::map_user_page(
                     virt_addr,
@@ -2225,11 +2240,15 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
             match map_result {
                 Some(Ok(())) => {}
                 Some(Err(_)) => {
+                    // map_user_page failed: undo the inc_ref we just added, then
+                    // also undo the frame_registry map_count.
+                    let _ = crate::mm::frame_table::dec_ref(phys_addr);
                     frame_registry::dec_map_count(frame_id);
                     klibcluu::warn("invoke_space_map_range MAP_FRAME_TOKEN: map_user_page failed");
                     return Err(Error::OutOfMemory);
                 }
                 None => {
+                    let _ = crate::mm::frame_table::dec_ref(phys_addr);
                     frame_registry::dec_map_count(frame_id);
                     klibcluu::warn("invoke_space_map_range MAP_FRAME_TOKEN: space not found");
                     return Err(Error::NotFound);

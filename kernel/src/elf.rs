@@ -419,9 +419,20 @@ pub(crate) unsafe fn map_user_page(
     let pt_virt = crate::mm::physmap::phys_to_virt_u64(pt_phys);
     let pt = &mut *(pt_virt as *mut [u64; 512]);
 
-    // Map the page (overwrite any existing mapping)
-    // Note: For ELF loading, segments may share pages so we allow remapping.
-    // For space_grant, we need to replace the old mapping with the new one.
+    // Phase 2.6: if a present PTE already occupies this slot, dec_ref the old
+    // physical frame before overwriting. This keeps the refcount in sync when
+    // ELF segments share a page boundary or a remapping replaces an earlier
+    // install. Skipping this would strand the old frame at refcount ≥ 1 with
+    // no PTE, causing a permanent memory leak (UserData/Grant frames) or a
+    // spurious PMM "still referenced" warning on the next retype attempt.
+    // Device-mapped (NO_CACHE) and WC frames are tag=Device in the frame_table;
+    // dec_ref no-ops silently for those.
+    if pt[pt_idx] & pte_flags::PRESENT != 0 {
+        let old_phys = pt[pt_idx] & PHYS_MASK;
+        let _ = crate::mm::frame_table::dec_ref(old_phys);
+    }
+
+    // Map the page.
     // Mask phys to bits 12-51 so corrupted/garbage high bits never reach the
     // PTE's reserved range (52-62). A reserved bit set in a PTE produces a
     // RSV=1 page fault on the next walk, which we observed during the
