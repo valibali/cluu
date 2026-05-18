@@ -257,19 +257,23 @@ pub extern "C" fn main() -> i32 {
                                     if service_name == "timeserver" && name == "main" {
                                         time_ep = token;
                                         let _ = debug_print("compositor: timeserver subscribed");
-                                        // Arm push-mode: subscribe for 1Hz ticks on the input endpoint.
+                                        // Arm push-mode: subscribe for 2 Hz ticks on the input
+                                        // endpoint. 500 ms drives both the cursor blink phase
+                                        // (xterm-like cadence) and the status-bar clock; the
+                                        // clock value only refreshes its visible HH:MM:SS once
+                                        // per real second so the extra tick is cheap.
                                         if !pushmode_armed && time_ep != 0 {
                                             let notify_ep = comp.input_endpoint_global;
                                             let mut sub = libcluu::types::Message::new(
                                                 libcluu::time::TIME_SUBSCRIBE_PERIODIC_LABEL,
-                                                [1000, notify_ep, 0, 0, 0, 0],
+                                                [500, notify_ep, 0, 0, 0, 0],
                                                 3,
                                             );
                                             if libcluu::ipc::call(time_ep, &mut sub, IpcFlags::empty()).is_ok()
                                                 && sub.words[0] == 0
                                             {
                                                 pushmode_armed = true;
-                                                let _ = debug_print("compositor: subscribed to timeserver pushmode 1000ms");
+                                                let _ = debug_print("compositor: subscribed to timeserver pushmode 500ms");
                                             }
                                         }
                                     }
