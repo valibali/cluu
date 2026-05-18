@@ -224,6 +224,15 @@ impl VtmgrContext {
     ///
     /// Updates `compositor_vt` and switches immediately if `active_vt` differs.
     /// Unknown service names are silently ignored.
+    ///
+    /// PIN_VT also acts as the signal that the bound compositor identity may
+    /// have changed (e.g. system→user compositor swap at SESSION_LOGIN). The
+    /// registry does not re-Grant existing subscribers when an entry is
+    /// replaced, so vtmgr's cached `compositor_control` / `compositor_input_ep`
+    /// can outlive the process that minted them. Invalidate both caches and
+    /// re-request the subscriptions; the Grant handler then re-emits
+    /// COMP_VT_ACTIVATE when `active_vt == compositor_vt`, which is exactly
+    /// the scenario the no-op `switch_vt` branch below would otherwise miss.
     pub fn handle_pin_vt(&mut self, vt_index: usize, service_name: &str) {
         if service_name == "compositor" && vt_index < VT_COUNT {
             self.compositor_vt = vt_index;
@@ -231,6 +240,10 @@ impl VtmgrContext {
                 "vtmgr: compositor pinned to VT{}",
                 vt_index
             ));
+            self.compositor_control = 0;
+            self.requested_compositor = false;
+            self.compositor_input_ep = 0;
+            self.requested_compositor_input = false;
             if self.active_vt != vt_index {
                 self.switch_vt(vt_index);
             }

@@ -86,9 +86,10 @@ fn handle_vtmgr_message(ctx: &mut VtmgrContext, msg: &Message, payload: &[u8]) {
                 let _ = libcluu::ipc::reply(reply_id, &reply, IpcFlags::empty());
             }
         }
-        VTMGR_PIN_VT_LABEL if msg.tag.words >= 1 => {
-            let vt_index = msg.words[0];
-            // Payload is the service name as raw UTF-8 bytes (no NUL terminator).
+        VTMGR_PIN_VT_LABEL if msg.tag.words >= 2 => {
+            // words[0] = payload_len (overwritten by send_msg_with_payload),
+            // words[1] = vt_index. Payload = service name as raw UTF-8.
+            let vt_index = msg.words[1];
             if let Ok(name) = core::str::from_utf8(payload) {
                 ctx.handle_pin_vt(vt_index, name);
             }

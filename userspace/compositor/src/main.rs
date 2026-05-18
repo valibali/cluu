@@ -141,10 +141,12 @@ pub extern "C" fn main() -> i32 {
     const COMPOSITOR_VT: usize = 4;
     const SERVICE_NAME: &[u8] = b"compositor";
     if let Some(vtmgr_ep) = registry::lookup_service("vtmgr:control") {
+        // words[0] is overwritten with payload_len by send_msg_with_payload, so
+        // vt_index lives in words[1] to survive the transport.
         let pin_msg = Message::new(
             VTMGR_PIN_VT_LABEL,
-            [COMPOSITOR_VT, 0, 0, 0, 0, 0],
-            1,
+            [SERVICE_NAME.len(), COMPOSITOR_VT, 0, 0, 0, 0],
+            2,
         );
         let _ = send_msg_with_payload(vtmgr_ep, &pin_msg, SERVICE_NAME);
         let _ = debug_print("compositor: pinned to VT4");
