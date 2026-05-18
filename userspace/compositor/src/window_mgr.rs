@@ -74,15 +74,21 @@ impl Compositor {
         }
 
         // Fullscreen windows are pinned at (0, 0). Normal windows cascade,
-        // respecting row 0 as the status bar (y >= 1).
+        // respecting row 0 as the status bar (y >= 1). The cascade step is
+        // chosen to be obviously visible — id*2 made the second window
+        // overlap the first by ≥ 95 % of its area, making Alt+Tab focus
+        // changes look like nothing happened. id*8 cells / id*3 rows leaves
+        // enough title bar and side chrome of every prior window peeking
+        // out so users can see all windows at once.
         let (x, y) = if fullscreen {
             (0u16, 0u16)
         } else {
-            let offset = (id as u16) * 2;
+            let step_x = (id as u16).saturating_mul(8);
+            let step_y = (id as u16).saturating_mul(3);
             let max_x = self.cols.saturating_sub(granted_w);
             let max_y = self.rows.saturating_sub(granted_h);
-            let x = offset.min(max_x);
-            let y = (1 + offset).min(max_y.max(1));
+            let x = step_x.min(max_x);
+            let y = (1 + step_y).min(max_y.max(1));
             (x, y)
         };
 
