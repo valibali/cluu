@@ -32,7 +32,7 @@ fn run() -> libcluu::Result<()> {
     let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();
     msg.words[1] = 0; // no notify
-    msg.words[2] = 0; // no fdac
+    msg.words[2] = 0; // no FdInherit
     let mut reply = Message::new(0, [0; 6], 0);
     call_with_payload(procmgr_ep, &msg, payload, &mut reply)?;
 

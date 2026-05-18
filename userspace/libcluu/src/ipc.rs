@@ -108,9 +108,9 @@ pub const VFS_SET_VIEW_LABEL: u32 = 21;
 pub const VFS_CONTAINER_CLEANUP_LABEL: u32 = 22;
 
 /// Container run: payload = image name (UTF-8), optionally followed by an
-/// FDAC blob, ARGV trailer, REDIR trailer, ENV trailer, and/or CWD trailer.
+/// FdInherit blob, ARGV trailer, REDIR trailer, ENV trailer, and/or CWD trailer.
 /// Wire order (when all trailers present):
-///   `[name][FDAC][ARGV trailer][REDIR trailer][ENV trailer][CWD trailer]`
+///   `[name][FdInherit][ARGV trailer][REDIR trailer][ENV trailer][CWD trailer]`
 /// Procmgr strips trailers in reverse order: CWD → ENV → REDIR → ARGV.
 /// Reply: words[0] = errno, words[1] = pid, words[2] = container_id.
 pub const PROCMGR_CONTAINER_RUN_LABEL: u32 = 24;
@@ -118,13 +118,13 @@ pub const PROCMGR_CONTAINER_RUN_LABEL: u32 = 24;
 /// Magic marker for the CWD trailer at the end of a spawn payload.
 /// Bytes in little-endian order: 'C','W','D',' ' = 0x43, 0x57, 0x44, 0x20.
 ///
-/// Trailer layout (always at the very end of the payload, after any FDAC blob):
+/// Trailer layout (always at the very end of the payload, after any FdInherit blob):
 ///   `[cwd_bytes][u32 cwd_len LE][u32 CWD_MAGIC LE]`
 ///
 /// The trailer is optional; payloads without it are treated as "no parent cwd"
 /// and the child's cwd defaults to `/`. Procmgr strips the trailer before
-/// computing FDAC offsets, so callers must append the trailer **after** the
-/// FDAC blob.
+/// computing fd_inherit_offset, so callers must append the trailer **after** the
+/// FdInherit blob.
 pub const CWD_MAGIC: u32 = 0x2044_5743;
 
 /// Magic sentinel for the ARGV trailer (ASCII "ARGV" little-endian).
@@ -292,7 +292,7 @@ pub const PTS_CLOSED_LABEL: u32     = 0x76;
 // VFS_DERIVE_CHILD_FD_LABEL — procmgr → VFS: clone an open file to a
 // new client_id and mint a narrowed VFS token for the child.
 //
-// Sent by procmgr's FDAC handler when spawning a child that inherits a
+// Sent by procmgr's FdInherit handler when spawning a child that inherits a
 // VFS-backed fd (pts, ext2, memfs).  VFS mints the derived token from
 // its own full-rights endpoint (`self.endpoint`), which it holds
 // legitimately via `endpoint_create` at boot.
@@ -1012,11 +1012,12 @@ pub const REDIR_MAGIC: u32 = 0x52454449;
 /// where `env_bytes` is "KEY=VALUE\0KEY=VALUE\0..." packed.
 pub const ENV_MAGIC: u32 = 0x2056_4E45;
 
-/// One entry in the FDAC blob passed in a `CONTAINER_RUN` payload.
+/// One entry in the FdInherit blob passed in a `CONTAINER_RUN` payload.
 ///
-/// FDAC = "File Descriptor Action" — each entry overrides one of the child's
-/// standard file descriptors (0=stdin, 1=stdout, 2=stderr, 3=stdlog) with a
-/// caller-supplied endpoint token.
+/// FdInherit = per-child-fd inheritance manifest passed at spawn time.
+/// NOT access-control. Each entry tells procmgr which parent cap or VFS handle
+/// to install at the named child fd. Monotone-decreasing: parent must already
+/// hold what it lists.
 ///
 /// Wire format per entry (32 bytes):
 ///   bytes  0– 3: target_fd (u32 LE)
@@ -1024,7 +1025,7 @@ pub const ENV_MAGIC: u32 = 0x2056_4E45;
 ///   bytes  8–15: endpoint  (usize LE; legacy path: pipes, tty)
 ///   bytes 16–23: vfs_client_id (usize LE; 0 = not VFS-backed)
 ///   bytes 24–31: vfs_remote_fd (usize LE; 0 = not VFS-backed)
-pub struct FdAction {
+pub struct FdInherit {
     pub target_fd:     u32,
     pub is_pipe:       bool,
     pub endpoint:      usize,
@@ -1044,48 +1045,50 @@ pub struct RedirAction {
     pub path: alloc::string::String,
 }
 
-/// Build a `CONTAINER_RUN` payload that includes argv AND FDAC entries.
+/// Build a `CONTAINER_RUN` payload that includes argv AND FdInherit entries.
 ///
 /// Wire format (in order):
 ///   `[name_bytes]`
-///   `[u32 FDAC_MAGIC LE][u32 count LE][(u32 fd, u32 flags, u64 ep, u64 vfs_client_id, u64 vfs_remote_fd) * count]`
+///   `[u32 FD_INHERIT_MAGIC LE][u32 count LE][(u32 fd, u32 flags, u64 ep, u64 vfs_client_id, u64 vfs_remote_fd) * count]`
 ///   `[argv[0]\0][argv[1]\0]...[u32 argv_bytes_len LE][u32 ARGV_MAGIC LE]`
 ///   `[cwd_bytes][u32 cwd_len LE][u32 CWD_MAGIC LE]`
 ///
-/// FDAC comes before the ARGV trailer so that procmgr's `split_argv_trailer`
+/// FdInherit comes before the ARGV trailer so that procmgr's `split_argv_trailer`
 /// (which looks at the last 4 bytes before the CWD) can cleanly strip the ARGV
-/// block, leaving `[name][FDAC]` in `effective_payload`.
+/// block, leaving `[name][FdInherit]` in `effective_payload`.
 ///
-/// Returns `(payload_bytes, argc, fdac_offset)` where `fdac_offset` is the
-/// byte offset of the FDAC blob measured from the start of the pre-CWD
-/// payload view (i.e. from index 0).  Caller sets `msg.words[2] = fdac_offset`.
+/// Returns `(payload_bytes, argc, fd_inherit_offset)` where `fd_inherit_offset` is the
+/// byte offset of the FdInherit blob measured from the start of the pre-CWD
+/// payload view (i.e. from index 0).  Caller sets `msg.words[2] = fd_inherit_offset`.
 ///
-/// If `fdac` is empty, `fdac_offset` is returned as `0` and no FDAC blob is
-/// written, matching the existing no-FDAC wire format.
+/// If `fd_inherit` is empty, `fd_inherit_offset` is returned as `0` and no FdInherit blob is
+/// written, matching the existing no-FdInherit wire format.
 #[cfg(feature = "posix")]
-pub fn build_container_run_payload_with_argv_and_fdac(
+pub fn build_container_run_payload_with_argv_and_fd_inherit(
     name: &str,
     args: &[&str],
-    fdac: &[FdAction],
+    fd_inherit: &[FdInherit],
 ) -> (Vec<u8>, usize, usize) {
     use crate::boot::CWD_MAX;
 
     let argc = args.len();
     let argv_bytes_est: usize = args.iter().map(|a| a.len() + 1).sum();
     let mut payload =
-        Vec::with_capacity(name.len() + argv_bytes_est + 32 * fdac.len() + 16 + CWD_MAX + 24);
+        Vec::with_capacity(name.len() + argv_bytes_est + 32 * fd_inherit.len() + 16 + CWD_MAX + 24);
     payload.extend_from_slice(name.as_bytes());
 
-    // FDAC blob immediately after the image name — before ARGV trailer.
+    // FdInherit blob immediately after the image name — before ARGV trailer.
     // This ordering is required because procmgr's split_argv_trailer checks
     // the last 4 bytes of the effective_payload (post-CWD-strip) for
     // ARGV_MAGIC, so ARGV must be the last block before CWD.
-    let fdac_offset = if fdac.is_empty() { 0 } else { payload.len() };
-    if !fdac.is_empty() {
-        const FDAC_MAGIC: u32 = 0x46444143;
-        payload.extend_from_slice(&FDAC_MAGIC.to_le_bytes());
-        payload.extend_from_slice(&(fdac.len() as u32).to_le_bytes());
-        for entry in fdac {
+    let fd_inherit_offset = if fd_inherit.is_empty() { 0 } else { payload.len() };
+    if !fd_inherit.is_empty() {
+        // Magic value 0x46444143 spells "FDAC" in ASCII — kept for historical
+        // wire-format compatibility; the concept has since been renamed FdInherit.
+        const FD_INHERIT_MAGIC: u32 = 0x46444143;
+        payload.extend_from_slice(&FD_INHERIT_MAGIC.to_le_bytes());
+        payload.extend_from_slice(&(fd_inherit.len() as u32).to_le_bytes());
+        for entry in fd_inherit {
             // bytes 0–3: target_fd
             payload.extend_from_slice(&entry.target_fd.to_le_bytes());
             // bytes 4–7: flags
@@ -1100,7 +1103,7 @@ pub fn build_container_run_payload_with_argv_and_fdac(
         }
     }
 
-    // ARGV trailer comes after FDAC, directly before CWD.
+    // ARGV trailer comes after FdInherit, directly before CWD.
     if argc > 0 {
         let argv_start = payload.len();
         for arg in args {
@@ -1120,35 +1123,35 @@ pub fn build_container_run_payload_with_argv_and_fdac(
     payload.extend_from_slice(&(cwd_len as u32).to_le_bytes());
     payload.extend_from_slice(&CWD_MAGIC.to_le_bytes());
 
-    (payload, argc, fdac_offset)
+    (payload, argc, fd_inherit_offset)
 }
 
-/// Build a `CONTAINER_RUN` payload with argv, FDAC entries, REDIR entries,
+/// Build a `CONTAINER_RUN` payload with argv, FdInherit entries, REDIR entries,
 /// AND an ENV block.
 ///
 /// Wire format (in order):
 ///   `[name_bytes]`
-///   `[u32 FDAC_MAGIC LE][u32 count LE][(u32 fd, u32 flags, u64 ep, u64 vfs_client_id, u64 vfs_remote_fd) * count]`
+///   `[u32 FD_INHERIT_MAGIC LE][u32 count LE][(u32 fd, u32 flags, u64 ep, u64 vfs_client_id, u64 vfs_remote_fd) * count]`
 ///   `[argv[0]\0][argv[1]\0]...[u32 argv_bytes_len LE][u32 ARGV_MAGIC LE]`
 ///   `[redir entries...][u32 entries_len LE][u32 REDIR_MAGIC LE]`
 ///   `[env_bytes][u32 env_bytes_len LE][u32 ENV_MAGIC LE]`
 ///   `[cwd_bytes][u32 cwd_len LE][u32 CWD_MAGIC LE]`
 ///
 /// Stripping order in procmgr (outermost first): CWD → ENV → REDIR → ARGV,
-/// leaving `[name][FDAC]` in `effective_payload`.
+/// leaving `[name][FdInherit]` in `effective_payload`.
 ///
 /// `env` carries the parent's exported env layered with the shell's exported
 /// vars; entries are packed as "KEY=VALUE\0" — same wire format as procmgr's
 /// `build_default_env_payload`. An empty `env` slice omits the ENV trailer
 /// (procmgr falls back to `DEFAULT_ENV`).
 ///
-/// Returns `(payload_bytes, argc, fdac_offset)`.
+/// Returns `(payload_bytes, argc, fd_inherit_offset)`.
 /// Maximum 4 redirs; paths capped at 255 bytes each.
 #[cfg(feature = "posix")]
 pub fn build_container_run_payload_full(
     name: &str,
     args: &[&str],
-    fdac: &[FdAction],
+    fd_inherit: &[FdInherit],
     redirs: &[RedirAction],
     env: &[(&str, &str)],
 ) -> (Vec<u8>, usize, usize) {
@@ -1159,16 +1162,18 @@ pub fn build_container_run_payload_full(
     let redir_bytes_est: usize = redirs.iter().map(|r| 4 + r.path.len().min(255)).sum();
     let env_bytes_est: usize = env.iter().map(|(k, v)| k.len() + v.len() + 2).sum();
     let mut payload =
-        Vec::with_capacity(name.len() + argv_bytes_est + 32 * fdac.len() + redir_bytes_est + env_bytes_est + 24 + CWD_MAX + 24);
+        Vec::with_capacity(name.len() + argv_bytes_est + 32 * fd_inherit.len() + redir_bytes_est + env_bytes_est + 24 + CWD_MAX + 24);
     payload.extend_from_slice(name.as_bytes());
 
-    // FDAC blob immediately after the image name.
-    let fdac_offset = if fdac.is_empty() { 0 } else { payload.len() };
-    if !fdac.is_empty() {
-        const FDAC_MAGIC: u32 = 0x46444143;
-        payload.extend_from_slice(&FDAC_MAGIC.to_le_bytes());
-        payload.extend_from_slice(&(fdac.len() as u32).to_le_bytes());
-        for entry in fdac {
+    // FdInherit blob immediately after the image name.
+    let fd_inherit_offset = if fd_inherit.is_empty() { 0 } else { payload.len() };
+    if !fd_inherit.is_empty() {
+        // Magic value 0x46444143 spells "FDAC" in ASCII — kept for historical
+        // wire-format compatibility; the concept has since been renamed FdInherit.
+        const FD_INHERIT_MAGIC: u32 = 0x46444143;
+        payload.extend_from_slice(&FD_INHERIT_MAGIC.to_le_bytes());
+        payload.extend_from_slice(&(fd_inherit.len() as u32).to_le_bytes());
+        for entry in fd_inherit {
             // bytes 0–3: target_fd
             payload.extend_from_slice(&entry.target_fd.to_le_bytes());
             // bytes 4–7: flags
@@ -1183,7 +1188,7 @@ pub fn build_container_run_payload_full(
         }
     }
 
-    // ARGV trailer comes after FDAC.
+    // ARGV trailer comes after FdInherit.
     if argc > 0 {
         let argv_start = payload.len();
         for arg in args {
@@ -1233,7 +1238,7 @@ pub fn build_container_run_payload_full(
     payload.extend_from_slice(&(cwd_len as u32).to_le_bytes());
     payload.extend_from_slice(&CWD_MAGIC.to_le_bytes());
 
-    (payload, argc, fdac_offset)
+    (payload, argc, fd_inherit_offset)
 }
 
 #[cfg(test)]

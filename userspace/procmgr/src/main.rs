@@ -261,7 +261,7 @@ struct ProcessManager {
     requested_tty_mask: u8,
     vfs_endpoint: usize,    // VFS service endpoint
     /// Cached value of procmgr's main-thread tid; 0 means not yet looked up.
-    /// Used by VFS-backed FDAC injection (see `procmgr_main_tid`).
+    /// Used by VFS-backed FdInherit injection (see `procmgr_main_tid`).
     cached_main_tid: usize,
     /// virtio-blk listen endpoint for BLK_TID_CLEANUP broadcasts. Resolved
     /// lazily on first cleanup so we don't depend on blkdev boot order.
@@ -792,10 +792,10 @@ impl ProcessManager {
     }
 
     /// Open `/dev/tty<vt>` via procmgr's own VFS client. Used at session-login
-    /// to seed FDAC entries for the legacy text shell.
+    /// to seed FdInherit entries for the legacy text shell.
     ///
-    /// Returns `(client_id, remote_fd)` — the pair that the FDAC parser
-    /// expects on a VFS-backed FdAction. `client_id` is procmgr's main-thread
+    /// Returns `(client_id, remote_fd)` — the pair that the FdInherit parser
+    /// expects on a VFS-backed FdInherit entry. `client_id` is procmgr's main-thread
     /// tid (what VFS authenticated the open under); `remote_fd` is VFS's
     /// table fd for the open. Both nonzero on success.
     fn open_dev_tty_for_session(&mut self, vt: usize) -> Result<(usize, usize)> {
@@ -842,20 +842,22 @@ impl ProcessManager {
         Ok(tid)
     }
 
-    /// Build an FDAC payload that targets fd 0/1/2 at the same VFS-backed
+    /// Build an FdInherit payload that targets fd 0/1/2 at the same VFS-backed
     /// file. Used by the legacy text-VT session spawn.
     ///
     /// Layout (matches libcluu/src/posix/process.rs):
-    ///   u32 magic = 0x46444143
+    ///   u32 magic = 0x46444143  (spells "FDAC" in ASCII — historical wire value)
     ///   u32 count = 3
-    ///   3 × FdAction { u32 target_fd, u32 flags, usize endpoint,
-    ///                  usize vfs_client_id, usize vfs_remote_fd }
-    fn build_devtty_fdac(&self, vfs_client_id: usize, vfs_remote_fd: usize)
+    ///   3 × FdInherit { u32 target_fd, u32 flags, usize endpoint,
+    ///                   usize vfs_client_id, usize vfs_remote_fd }
+    fn build_devtty_fd_inherit(&self, vfs_client_id: usize, vfs_remote_fd: usize)
         -> Vec<u8>
     {
-        const FDAC_MAGIC: u32 = 0x46444143;
+        // Magic value 0x46444143 spells "FDAC" in ASCII — kept for historical
+        // wire-format compatibility; the concept has since been renamed FdInherit.
+        const FD_INHERIT_MAGIC: u32 = 0x46444143;
         let mut out = Vec::with_capacity(8 + 3 * 32);
-        out.extend_from_slice(&FDAC_MAGIC.to_le_bytes());
+        out.extend_from_slice(&FD_INHERIT_MAGIC.to_le_bytes());
         out.extend_from_slice(&3u32.to_le_bytes());
         for target_fd in 0u32..=2u32 {
             out.extend_from_slice(&target_fd.to_le_bytes());
@@ -1415,7 +1417,7 @@ impl ProcessManager {
             0, // sender_tid=0 (internal autostart)
             spawn_seq,
             spawn_start,
-            &[], // no FDAC
+            &[], // no FdInherit
             requested_profile,
             extra_token,
             extra_token_1,
@@ -1823,7 +1825,7 @@ impl ProcessManager {
             self.fault_endpoint,
         ];
         // Buffer must fit the largest message procmgr can receive on any of
-        // its four endpoints. PROCMGR_SPAWN_LABEL with FDAC + envp + cwd
+        // its four endpoints. PROCMGR_SPAWN_LABEL with FdInherit + envp + cwd
         // trailer can exceed 256 bytes; kernel `recv_to_user_nonblocking`
         // pops the message and returns BufferTooSmall if it overflows,
         // dropping the message permanently. 4 KiB matches the inline IPC
@@ -2521,7 +2523,7 @@ impl ProcessManager {
                 1, // non-zero owner_tid to use caller_env_data
                 comp_spawn_seq,
                 comp_spawn_start,
-                &[],   // no FDAC — compositor has no stdin
+                &[],   // no FdInherit — compositor has no stdin
                 profile,
                 0,
                 0,
@@ -2823,7 +2825,7 @@ impl ProcessManager {
                 return Ok(());
             }
         };
-        let fdac_data = self.build_devtty_fdac(tty_client_id, tty_remote_fd);
+        let fd_inherit_data = self.build_devtty_fd_inherit(tty_client_id, tty_remote_fd);
         let procmgr_main_tid = match self.procmgr_main_tid() {
             Ok(t) => t,
             Err(e) => {
@@ -2839,9 +2841,9 @@ impl ProcessManager {
         };
 
         // Note: we no longer need to temporarily swap self.tty_endpoints[0]
-        // because FDAC fully describes fd 0/1/2. Keep the swap commented in
-        // case future stdout/log routing wants a fallback when FDAC parse
-        // fails — for now, FDAC is the only source of truth.
+        // because FdInherit fully describes fd 0/1/2. Keep the swap commented in
+        // case future stdout/log routing wants a fallback when FdInherit parse
+        // fails — for now, FdInherit is the only source of truth.
         let _ = tty_ep; // suppress unused-warning until removed in Task 9
 
         match self.spawn_service_with_env(
@@ -2854,7 +2856,7 @@ impl ProcessManager {
             procmgr_main_tid, // VFS will see opens under this tid
             spawn_seq,
             spawn_start,
-            &fdac_data,
+            &fd_inherit_data,
             profile,
             0,
             0,
@@ -3558,7 +3560,7 @@ impl ProcessManager {
         };
 
         // Step 2: derive the write-only (IPC_SEND | GRANT) token.
-        // GRANT is required so that the FDAC handler (which calls token_derive
+        // GRANT is required so that the FdInherit handler (which calls token_derive
         // on the shell-supplied token) can narrow it further for the child.
         // u64::MAX expiry so the derived child token passes the expiry check.
         let write_token = match token_derive(
@@ -4528,9 +4530,9 @@ impl ProcessManager {
 
         // Extract argv data: payload is [path\0, argv[0]\0, argv[1]\0, ...]
         let argc = if msg.tag.words >= 2 { msg.words[1] } else { 0 };
-        let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
+        let fd_inherit_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
 
-        // Strip the CWD trailer first, then ENV trailer, so argv/fdac slices
+        // Strip the CWD trailer first, then ENV trailer, so argv/fd_inherit slices
         // don't extend into them.  Own all slices before any outbound IPC
         // (all slices point into the kernel recv buffer which VFS calls will
         // overwrite).
@@ -4547,8 +4549,8 @@ impl ProcessManager {
         } else {
             alloc::vec::Vec::new()
         };
-        let fdac_data: alloc::vec::Vec<u8> = if fdac_offset > 0 && fdac_offset < effective_payload.len() {
-            effective_payload[fdac_offset..].to_vec()
+        let fd_inherit_data: alloc::vec::Vec<u8> = if fd_inherit_offset > 0 && fd_inherit_offset < effective_payload.len() {
+            effective_payload[fd_inherit_offset..].to_vec()
         } else {
             alloc::vec::Vec::new()
         };
@@ -4568,7 +4570,7 @@ impl ProcessManager {
             sender_tid,
             spawn_seq,
             spawn_start,
-            &fdac_data,
+            &fd_inherit_data,
             child_profile,
             0,
             0,
@@ -4758,7 +4760,7 @@ impl ProcessManager {
         owner_tid: usize,
         spawn_seq: usize,
         spawn_start: u64,
-        fdac_data: &[u8],
+        fd_inherit_data: &[u8],
         profile: CapProfile,
         extra_token: usize,
         extra_token_1: usize,
@@ -4849,7 +4851,7 @@ impl ProcessManager {
         let self_cap = derive_slot(self.token, slot_rights[TOKEN_SELF])?;
         let child_space_token = derive_slot(space_token, slot_rights[TOKEN_SPACE])?;
 
-        // Create the child thread SUSPENDED before FDAC parsing so that the child's TID
+        // Create the child thread SUSPENDED before FdInherit parsing so that the child's TID
         // is available for VFS derive_child_fd (which registers the fd slot under child_tid).
         // The thread stays suspended until install_view_and_run → thread_resume.
         let thread_token = thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority, thread_flags)?;
@@ -4865,7 +4867,7 @@ impl ProcessManager {
         let thread_tid = thread_get_id(thread_token)?;
         self.log_spawn_stage(spawn_seq, "thread_start_done", spawn_start);
 
-        // Parse FDAC (fd actions) to override child stdio endpoints.
+        // Parse FdInherit blob to override child stdio endpoints.
         // fd_vfs_meta[i] = (child_vfs_client_id, child_vfs_remote_fd) for fd i.
         // Set to (0, 0) for legacy (tty/pipe) fds; non-zero means VFS-backed.
         let mut pipe_mask: u8 = 0;
@@ -4875,13 +4877,14 @@ impl ProcessManager {
         let mut stdlog_ep = stdlog_endpoint;
         let mut fd_vfs_meta: [(usize, usize); 4] = [(0, 0); 4];
 
-        if fdac_data.len() >= 8 {
+        if fd_inherit_data.len() >= 8 {
             let magic =
-                u32::from_le_bytes([fdac_data[0], fdac_data[1], fdac_data[2], fdac_data[3]]);
-            let count = u32::from_le_bytes([fdac_data[4], fdac_data[5], fdac_data[6], fdac_data[7]])
+                u32::from_le_bytes([fd_inherit_data[0], fd_inherit_data[1], fd_inherit_data[2], fd_inherit_data[3]]);
+            let count = u32::from_le_bytes([fd_inherit_data[4], fd_inherit_data[5], fd_inherit_data[6], fd_inherit_data[7]])
                 as usize;
+            // Magic 0x46444143 spells "FDAC" in ASCII — historical wire value kept for ABI compatibility.
             if magic == 0x46444143 && count <= 4 {
-                // Each FdAction is 32 bytes:
+                // Each FdInherit entry is 32 bytes:
                 //   bytes  0– 3: u32 target_fd
                 //   bytes  4– 7: u32 flags
                 //   bytes  8–15: usize endpoint  (legacy: pipes/tty)
@@ -4889,50 +4892,50 @@ impl ProcessManager {
                 //   bytes 24–31: usize vfs_remote_fd  (0 = not VFS-backed)
                 for i in 0..count {
                     let base = 8 + i * 32;
-                    if base + 32 > fdac_data.len() {
+                    if base + 32 > fd_inherit_data.len() {
                         break;
                     }
                     let target_fd = u32::from_le_bytes([
-                        fdac_data[base],
-                        fdac_data[base + 1],
-                        fdac_data[base + 2],
-                        fdac_data[base + 3],
+                        fd_inherit_data[base],
+                        fd_inherit_data[base + 1],
+                        fd_inherit_data[base + 2],
+                        fd_inherit_data[base + 3],
                     ]);
                     let flags = u32::from_le_bytes([
-                        fdac_data[base + 4],
-                        fdac_data[base + 5],
-                        fdac_data[base + 6],
-                        fdac_data[base + 7],
+                        fd_inherit_data[base + 4],
+                        fd_inherit_data[base + 5],
+                        fd_inherit_data[base + 6],
+                        fd_inherit_data[base + 7],
                     ]);
                     let endpoint = usize::from_le_bytes([
-                        fdac_data[base + 8],
-                        fdac_data[base + 9],
-                        fdac_data[base + 10],
-                        fdac_data[base + 11],
-                        fdac_data[base + 12],
-                        fdac_data[base + 13],
-                        fdac_data[base + 14],
-                        fdac_data[base + 15],
+                        fd_inherit_data[base + 8],
+                        fd_inherit_data[base + 9],
+                        fd_inherit_data[base + 10],
+                        fd_inherit_data[base + 11],
+                        fd_inherit_data[base + 12],
+                        fd_inherit_data[base + 13],
+                        fd_inherit_data[base + 14],
+                        fd_inherit_data[base + 15],
                     ]);
                     let vfs_client_id = usize::from_le_bytes([
-                        fdac_data[base + 16],
-                        fdac_data[base + 17],
-                        fdac_data[base + 18],
-                        fdac_data[base + 19],
-                        fdac_data[base + 20],
-                        fdac_data[base + 21],
-                        fdac_data[base + 22],
-                        fdac_data[base + 23],
+                        fd_inherit_data[base + 16],
+                        fd_inherit_data[base + 17],
+                        fd_inherit_data[base + 18],
+                        fd_inherit_data[base + 19],
+                        fd_inherit_data[base + 20],
+                        fd_inherit_data[base + 21],
+                        fd_inherit_data[base + 22],
+                        fd_inherit_data[base + 23],
                     ]);
                     let vfs_remote_fd = usize::from_le_bytes([
-                        fdac_data[base + 24],
-                        fdac_data[base + 25],
-                        fdac_data[base + 26],
-                        fdac_data[base + 27],
-                        fdac_data[base + 28],
-                        fdac_data[base + 29],
-                        fdac_data[base + 30],
-                        fdac_data[base + 31],
+                        fd_inherit_data[base + 24],
+                        fd_inherit_data[base + 25],
+                        fd_inherit_data[base + 26],
+                        fd_inherit_data[base + 27],
+                        fd_inherit_data[base + 28],
+                        fd_inherit_data[base + 29],
+                        fd_inherit_data[base + 30],
+                        fd_inherit_data[base + 31],
                     ]);
 
                     let is_pipe = (flags & 0x01) != 0;
@@ -4941,7 +4944,7 @@ impl ProcessManager {
                     // (which sends TTY_READ_REQUEST_LABEL as a synchronous call
                     // via fd 1's endpoint) can complete successfully.
                     // GRANT is included so that descendants (login → shell) can
-                    // re-derive via FDAC.  Mirrors the pre-existing pipe-endpoint
+                    // re-derive via FdInherit.  Mirrors the pre-existing pipe-endpoint
                     // pattern at main.rs:2901-2924.
                     let probe_rights = match target_fd {
                         0 => (Rights::IPC_RECV | Rights::GRANT).bits() as usize,
@@ -4972,7 +4975,7 @@ impl ProcessManager {
                             Ok((tok, cid, rfd)) => (tok, cid, rfd),
                             Err(e) => {
                                 let _ = debug_print(&format!(
-                                    "procmgr: FDAC vfs_derive_child_fd failed fd={} parent_cid={} rfd={} err={:?}",
+                                    "procmgr: FdInherit vfs_derive_child_fd failed fd={} parent_cid={} rfd={} err={:?}",
                                     target_fd, parent_cid_for_vfs, vfs_remote_fd, e
                                 ));
                                 return Err(Error::PermissionDenied);
@@ -4984,7 +4987,7 @@ impl ProcessManager {
                             Ok(derived) => (derived, 0usize, 0usize),
                             Err(_) => {
                                 let _ = debug_print(&format!(
-                                    "procmgr: FDAC rejected: endpoint {} for fd {} failed derive",
+                                    "procmgr: FdInherit rejected: endpoint {} for fd {} failed derive",
                                     endpoint, target_fd
                                 ));
                                 return Err(Error::PermissionDenied);
@@ -5018,7 +5021,7 @@ impl ProcessManager {
                     }
                 }
                 let _ = debug_print(&format!(
-                    "procmgr: FDAC parsed {} actions, pipe_mask=0x{:02x}",
+                    "procmgr: FdInherit parsed {} entries, pipe_mask=0x{:02x}",
                     count, pipe_mask
                 ));
             }
@@ -5072,7 +5075,7 @@ impl ProcessManager {
             &fd_vfs_meta,
         )?;
 
-        // thread_token and thread_tid were obtained above (before FDAC) so the
+        // thread_token and thread_tid were obtained above (before FdInherit parsing) so the
         // child TID could be used as the VFS client_id during derive_child_fd.
         self.exit_table.insert(cookie, thread_token);
         self.pid_to_cookie.insert(pid, cookie);
@@ -5474,14 +5477,14 @@ impl ProcessManager {
         // Count env entries (one NUL per "KEY=VALUE\0" record).
         let envc = env_bytes.iter().filter(|&&b| b == 0).count();
 
-        // Extract FDAC offset and param override info from message words
-        let fdac_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
+        // Extract fd_inherit_offset and param override info from message words
+        let fd_inherit_offset = if msg.tag.words >= 3 { msg.words[2] } else { 0 };
         let param_offset = if msg.tag.words >= 4 { msg.words[3] } else { 0 };
         let param_count = if msg.tag.words >= 5 { msg.words[4] } else { 0 };
 
-        // Extract image name from payload (NUL-terminated, bounded by FDAC or param offset)
-        let name_end = if fdac_offset > 0 && fdac_offset <= effective_payload.len() {
-            fdac_offset
+        // Extract image name from payload (NUL-terminated, bounded by fd_inherit_offset or param offset)
+        let name_end = if fd_inherit_offset > 0 && fd_inherit_offset <= effective_payload.len() {
+            fd_inherit_offset
         } else if param_offset > 0 && param_offset <= effective_payload.len() {
             param_offset
         } else {
@@ -5503,10 +5506,10 @@ impl ProcessManager {
             }
         };
 
-        // Extract FDAC data from payload (after image name, before trailer).
+        // Extract FdInherit data from payload (after image name, before trailer).
         // Own the slice so the IPC buffer reuse does not corrupt it.
-        let fdac_data: alloc::vec::Vec<u8> = if fdac_offset > 0 && fdac_offset < effective_payload.len() {
-            effective_payload[fdac_offset..].to_vec()
+        let fd_inherit_data: alloc::vec::Vec<u8> = if fd_inherit_offset > 0 && fd_inherit_offset < effective_payload.len() {
+            effective_payload[fd_inherit_offset..].to_vec()
         } else {
             alloc::vec::Vec::new()
         };
@@ -5857,7 +5860,7 @@ impl ProcessManager {
             sender_tid,
             spawn_seq,
             spawn_start,
-            &fdac_data,
+            &fd_inherit_data,
             requested_profile,
             extra_token,
             extra_token_1,

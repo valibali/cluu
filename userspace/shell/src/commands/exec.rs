@@ -12,7 +12,7 @@ use libcluu::fs::client::VfsClient;
 use libcluu::fd_table::FD_TABLE;
 use libcluu::ipc::{
     build_container_run_payload_full, call, call_with_payload,
-    FdAction, RedirAction, PROCMGR_CONTAINER_RUN_LABEL,
+    FdInherit, RedirAction, PROCMGR_CONTAINER_RUN_LABEL,
     TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
     TTY_REGISTER_LABEL,
 };
@@ -232,15 +232,15 @@ pub fn spawn_process_with_argv_and_redirs(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    // Build FDAC so the child inherits the shell's stdin/stdout/stderr.
+    // Build FdInherit so the child inherits the shell's stdin/stdout/stderr.
     // Without this, procmgr falls back to freshly-created dead endpoints
     // and external commands produce no output.
-    let fdac: Vec<FdAction> = {
+    let fd_inherit: Vec<FdInherit> = {
         let table = FD_TABLE.lock();
         [0u32, 1u32, 2u32]
             .iter()
             .filter_map(|&fd| {
-                table.get(fd as i32).map(|e| FdAction {
+                table.get(fd as i32).map(|e| FdInherit {
                     target_fd:     fd,
                     is_pipe:       e.is_pipe(),
                     endpoint:      e.endpoint,
@@ -250,13 +250,13 @@ pub fn spawn_process_with_argv_and_redirs(
             })
             .collect()
     };
-    let (payload, _argc, fdac_offset) =
-        build_container_run_payload_full(name, args, &fdac, redirs, &env_refs);
+    let (payload, _argc, fd_inherit_offset) =
+        build_container_run_payload_full(name, args, &fd_inherit, redirs, &env_refs);
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
     let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
     msg.words[0] = payload.len();
     msg.words[1] = notify_endpoint;
-    msg.words[2] = fdac_offset;
+    msg.words[2] = fd_inherit_offset;
     let mut reply = Message::new(0, [0; 6], 0);
     let _ = debug_print(&format!(
         "shell: container run begin name={} ep={} notify={}",

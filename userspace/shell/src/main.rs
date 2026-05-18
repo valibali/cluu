@@ -60,16 +60,16 @@ fn run() -> Result<()> {
         libcluu::fd_table::patch_vfs_stdio_endpoints(vfs_ep);
     }
 
-    // Procmgr seeds fd 0/1/2 via FDAC at every spawn. Shell unconditionally
+    // Procmgr seeds fd 0/1/2 via FdInherit at every spawn. Shell unconditionally
     // reads stdin via POSIX read(0). If the assertion ever trips, procmgr
-    // failed to wire FDAC and the child should exit rather than spin.
+    // failed to wire FdInherit and the child should exit rather than spin.
     let fd0_is_vfs_backed = libcluu::fd_table::FD_TABLE
         .lock()
         .get(0)
         .map(|e| e.remote_fd.is_some())
         .unwrap_or(false);
     if !fd0_is_vfs_backed {
-        let _ = debug_print("shell: FATAL fd 0 not VFS-backed; parent FDAC missing");
+        let _ = debug_print("shell: FATAL fd 0 not VFS-backed; parent FdInherit missing");
         return Err(libcluu::Error::InvalidState);
     }
     let _ = debug_print("shell: stdin path = vfs-backed");

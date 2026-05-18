@@ -347,7 +347,7 @@ pub extern "C" fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid
 pub struct FileActionsInner {
     count: u8,
     _pad: [u8; 7],
-    actions: [FdAction; MAX_FD_ACTIONS],
+    actions: [FdInherit; MAX_FD_ACTIONS],
 }
 
 /// Spawn a new process.
@@ -429,10 +429,10 @@ pub extern "C" fn posix_spawn(
         }
     }
 
-    // Serialize fd actions (FDAC) immediately after argv data.
-    let fdac_offset = serialize_fd_actions(_file_actions, &mut payload);
+    // Serialize fd actions (FdInherit) immediately after argv data.
+    let fd_inherit_offset = serialize_fd_actions(_file_actions, &mut payload);
 
-    // Append the ENV magic trailer after FDAC, before CWD.
+    // Append the ENV magic trailer after FdInherit, before CWD.
     // Wire format: [env_bytes][u32 env_bytes_len LE][u32 ENV_MAGIC LE]
     // where env_bytes is "KEY=VALUE\0KEY=VALUE\0..." packed.
     // procmgr strips this with split_env_trailer (after split_cwd_trailer).
@@ -478,7 +478,7 @@ pub extern "C" fn posix_spawn(
     let mut msg = crate::types::Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
     msg.words[0] = payload.len();
     msg.words[1] = argc;
-    msg.words[2] = fdac_offset; // FDAC payload offset (0 = no fd actions)
+    msg.words[2] = fd_inherit_offset; // FdInherit payload offset (0 = no fd actions)
     msg.words[3] = notify_endpoint;
 
     let mut reply = crate::types::Message::new(0, [0; 6], 0);
@@ -525,17 +525,19 @@ pub extern "C" fn posix_spawn(
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_FD_ACTIONS: usize = 4;
-/// Magic marker for fd actions in spawn payload.
-const FDAC_MAGIC: u32 = 0x46444143; // "FDAC"
+/// Magic marker for fd inheritance blob in spawn payload.
+/// The numerical value 0x46444143 spells "FDAC" in ASCII — kept unchanged
+/// for wire-format compatibility; the concept is now called FdInherit.
+const FD_INHERIT_MAGIC: u32 = 0x46444143;
 /// Re-exported for clarity at the call site; canonical definition lives in
 /// `libcluu::ipc::CWD_MAGIC` since it is part of the spawn IPC contract.
 use crate::ipc::{CWD_MAGIC, ENV_MAGIC};
-const FDAC_FLAG_PIPE: u32 = 0x01;
+const FD_INHERIT_FLAG_PIPE: u32 = 0x01;
 
-/// A single fd redirection action.
+/// A single fd inheritance entry.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct FdAction {
+struct FdInherit {
     target_fd:     u32,    // bytes 0–3
     flags:         u32,    // bytes 4–7
     endpoint:      usize,  // bytes 8–15  (legacy path: pipes, tty)
@@ -554,7 +556,7 @@ pub extern "C" fn posix_spawn_file_actions_init(actions: *mut *mut FileActionsIn
     let inner = alloc::boxed::Box::new(FileActionsInner {
         count: 0,
         _pad: [0; 7],
-        actions: [FdAction {
+        actions: [FdInherit {
             target_fd:     0,
             flags:         0,
             endpoint:      0,
@@ -619,14 +621,14 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
 
     let mut flags: u32 = 0;
     if entry.is_pipe() {
-        flags |= FDAC_FLAG_PIPE;
+        flags |= FD_INHERIT_FLAG_PIPE;
     }
     let endpoint = entry.endpoint;
     let vfs_client_id = entry.client_id;
     let vfs_remote_fd = entry.remote_fd.unwrap_or(0);
     drop(table);
 
-    inner.actions[count] = FdAction {
+    inner.actions[count] = FdInherit {
         target_fd: newfd as u32,
         flags,
         endpoint,
@@ -637,7 +639,7 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
     0
 }
 
-/// Serialize fd actions into the spawn payload. Returns the offset where FDAC starts.
+/// Serialize fd inheritance entries into the spawn payload. Returns the offset where the FdInherit blob starts.
 fn serialize_fd_actions(
     file_actions: *const *const FileActionsInner,
     payload: &mut Vec<u8>,
@@ -655,24 +657,24 @@ fn serialize_fd_actions(
         return 0;
     }
 
-    let fdac_offset = payload.len();
+    let fd_inherit_offset = payload.len();
 
-    // Write FDAC magic + count
-    payload.extend_from_slice(&FDAC_MAGIC.to_le_bytes());
+    // Write FD_INHERIT_MAGIC + count
+    payload.extend_from_slice(&FD_INHERIT_MAGIC.to_le_bytes());
     payload.extend_from_slice(&(count as u32).to_le_bytes());
 
-    // Write FdAction array
+    // Write FdInherit array
     for i in 0..count {
         let action_bytes = unsafe {
             core::slice::from_raw_parts(
-                &inner.actions[i] as *const FdAction as *const u8,
-                core::mem::size_of::<FdAction>(),
+                &inner.actions[i] as *const FdInherit as *const u8,
+                core::mem::size_of::<FdInherit>(),
             )
         };
         payload.extend_from_slice(action_bytes);
     }
 
-    fdac_offset
+    fd_inherit_offset
 }
 
 fn push_cstr(ptr: *const c_char, out: &mut Vec<u8>) {

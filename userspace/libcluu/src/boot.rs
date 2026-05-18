@@ -64,7 +64,7 @@ pub struct ProcessInfo {
     /// Slots 0-9: existing (see PARAM_* constants below).
     /// Slots 10-11: cwd offset / length (Shell-A).
     /// Slots 12-13: redir offset / length (file redirection).
-    /// Slots 14-15: VFS fd trailer offset / length (FDAC VFS-backed fd handoff).
+    /// Slots 14-15: VFS fd trailer offset / length (FdInherit VFS-backed fd handoff).
     /// Slot  16:    compositor session-mode discriminator (PARAM_SESSION_MODE).
     /// Slots 17-31: reserved for future use.
     pub params: [u64; 32],
@@ -230,7 +230,7 @@ pub const PARAM_REDIR_LEN: usize = 13;
 /// for fds 0..3.  Each entry is `(u64 vfs_client_id, u64 vfs_remote_fd)`.
 /// `vfs_client_id == 0` means the fd is NOT VFS-backed (legacy tty/pipe path).
 ///
-/// Written by procmgr's FDAC handler when the parent used
+/// Written by procmgr's FdInherit handler when the parent used
 /// `posix_spawn_file_actions_adddup2` on a VFS-backed fd (e.g. `/dev/pts/*`).
 /// Read by `libcluu::fd_table::init_stdio` to build `FdEntry::file(...)`.
 pub const PARAM_FD_VFS_OFFSET: usize = 14;

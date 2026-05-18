@@ -233,7 +233,7 @@ fn register_pts(my_ep: usize) -> Result<u32, i32> {
 /// fd 0/1/2 to those open file descriptors.
 ///
 /// The pts fds opened here are closed after spawn; the child inherits them
-/// through the FDAC mechanism baked into libcluu's posix_spawn.
+/// through the FdInherit mechanism baked into libcluu's posix_spawn.
 ///
 /// NOTE: The file_actions adddup2 only accepts newfd in 0-3 (libcluu
 /// constraint: `!(0..=3).contains(&newfd)` → EINVAL).  We open the pts fd

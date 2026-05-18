@@ -1035,7 +1035,7 @@ impl VfsServer {
     /// child client_id and mint a narrowed VFS token from VFS's own full-rights
     /// endpoint.
     ///
-    /// Called by procmgr's FDAC handler during `posix_spawn` when the parent
+    /// Called by procmgr's FdInherit handler during `posix_spawn` when the parent
     /// has a VFS-backed fd (pts, ext2, memfs) in its file-action list.
     ///
     /// Wire format (see `libcluu::ipc::VFS_DERIVE_CHILD_FD_LABEL`):

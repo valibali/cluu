@@ -14,7 +14,7 @@ use cluu_lang::ast::{CmdElem, Pipeline};
 use crate::commands::{build_redir_actions, render_word_public, spawn_process_with_argv_and_redirs, BuiltinRegistry, CommandContext, WriteSink};
 use libcluu::ipc::{
     build_container_run_payload_full, call_with_payload,
-    FdAction, PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL,
+    FdInherit, PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL,
 };
 use libcluu::posix::jobs::{pg_attach, pg_create, tty_set_fg};
 use libcluu::syscall::endpoint_create;
@@ -411,10 +411,10 @@ impl PipelineExecutor {
                 }
             }
 
-            let mut fdac: Vec<FdAction> = Vec::with_capacity(2);
+            let mut fd_inherit: Vec<FdInherit> = Vec::with_capacity(2);
             // Wire read end of upstream pipe as stdin (not for first stage).
             if i > 0 {
-                fdac.push(FdAction {
+                fd_inherit.push(FdInherit {
                     target_fd:     0,
                     is_pipe:       true,
                     endpoint:      pipes[i - 1].read_token,
@@ -424,7 +424,7 @@ impl PipelineExecutor {
             }
             // Wire write end of downstream pipe as stdout (not for last stage).
             if i < n - 1 {
-                fdac.push(FdAction {
+                fd_inherit.push(FdInherit {
                     target_fd:     1,
                     is_pipe:       true,
                     endpoint:      pipes[i].write_token,
@@ -433,8 +433,8 @@ impl PipelineExecutor {
                 });
             }
 
-            let (payload, _argc, fdac_offset) =
-                build_container_run_payload_full(image_name, &arg_refs, &fdac, stage_redirs, &env_refs);
+            let (payload, _argc, fd_inherit_offset) =
+                build_container_run_payload_full(image_name, &arg_refs, &fd_inherit, stage_redirs, &env_refs);
 
             let notify_endpoint = match endpoint_create(process_info().tokens[TOKEN_IPC]) {
                 Ok(ep) => ep,
@@ -449,7 +449,7 @@ impl PipelineExecutor {
             let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
             msg.words[0] = payload.len();
             msg.words[1] = notify_endpoint;
-            msg.words[2] = fdac_offset;
+            msg.words[2] = fd_inherit_offset;
 
             let mut reply = Message::new(0, [0; 6], 0);
             if let Err(e) = call_with_payload(procmgr_ep, &msg, &payload, &mut reply) {
@@ -562,7 +562,7 @@ impl PipelineExecutor {
         let _ = waited_any;
 
         // Close the shell's own pipe tokens. Children received fresh derived
-        // tokens from procmgr via the FDAC path, so revoking the shell's tokens
+        // tokens from procmgr via the FdInherit path, so revoking the shell's tokens
         // here does not disturb children that are already running. Closing is
         // done after the wait so pipe endpoints remain live while children run.
         for p in &pipes {
