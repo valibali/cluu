@@ -202,11 +202,14 @@ pub extern "C" fn main() -> i32 {
         }
 
         let now_ms = comp.last_clock_now_ms;
-        let now_secs = now_ms / 1000;
 
-        let timeout_ms = comp.deadlines.next_timeout_ms(now_ms);
+        // Pure event-driven: block for at most 30 s then loop on Timeout.
+        // This avoids passing near-u64::MAX to the kernel recv syscall
+        // (violates the "no timeouts as deadlock guards" rule). When a frame
+        // deadline is pending, the cap is tightened to that deadline.
+        const RECV_MAX_MS: u64 = 30_000;
+        let timeout_ms = comp.deadlines.next_timeout_ms(now_ms, RECV_MAX_MS);
 
-        let _ = debug_print(&alloc::format!("compositor: recv_any timeout_ms={}", timeout_ms));
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout_ms) {
             Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) {
@@ -228,6 +231,11 @@ pub extern "C" fn main() -> i32 {
                         let now_ms_from_tick = msg.words[1] as u64;
                         comp.last_clock_now_ms = now_ms_from_tick;
                         comp.tick_clock(now_ms_from_tick, now_ms_from_tick / 1000);
+                        // Toggle cursor-blink phase and dirty the cursor cell
+                        // of every window so the compose pass re-reads the
+                        // SHM `cursor_visible` flag we are about to update.
+                        comp.blink_phase = !comp.blink_phase;
+                        comp.tick_blink();
                         // Do NOT continue — fall through to post-recv block.
                     }
 

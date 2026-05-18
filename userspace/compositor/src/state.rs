@@ -53,33 +53,29 @@ pub struct Deadlines {
     /// Next frame-flush deadline. Set to `now + MIN_FRAME_MS` after a flush.
     /// Set to `u64::MAX` when no dirty cells pending OR compositor inactive.
     pub next_frame_ms: u64,
-
-    /// Next status-bar clock update deadline. Set to `now + 1000` after each
-    /// clock tick.
-    pub next_clock_ms: u64,
 }
 
 impl Deadlines {
-    /// Create a `Deadlines` with both tasks parked at `u64::MAX`. The clock
-    /// task is push-mode (timeserver TIME_TICK arrival), so its deadline is
-    /// not used to drive the recv timeout — it's kept for legacy tick_clock
-    /// guard arithmetic only.
+    /// Create a `Deadlines` with the frame task parked at `u64::MAX`.
+    /// All clock/blink wakeups are push-mode (timeserver TIME_TICK arrival)
+    /// and do not use deadline-driven recv timeouts.
     pub const fn new() -> Self {
         Self {
             next_frame_ms: u64::MAX,
-            next_clock_ms: u64::MAX,
         }
     }
 
-    /// Time in ms until the earliest deadline. Saturates to 0 if any deadline
-    /// is already due.
+    /// Milliseconds until the next frame deadline, capped at `max_ms` to
+    /// avoid passing near-`u64::MAX` values to the kernel recv syscall.
     ///
-    /// Push-mode: `next_clock_ms` is NOT included — timeserver pushes
-    /// TIME_TICK directly, so the recv loop wakes on the IPC, not a timeout.
-    /// Including next_clock_ms here causes a busy-spin when its initial value
-    /// is 0 (timeout = 0 → poll-mode recv).
-    pub fn next_timeout_ms(&self, now_ms: u64) -> u64 {
-        self.next_frame_ms.saturating_sub(now_ms)
+    /// When no frame is pending (`next_frame_ms == u64::MAX`) the loop
+    /// blocks for up to `max_ms` before re-checking — equivalent to a
+    /// bounded "block forever" that is safe to loop on Timeout.
+    pub fn next_timeout_ms(&self, now_ms: u64, max_ms: u64) -> u64 {
+        if self.next_frame_ms == u64::MAX {
+            return max_ms;
+        }
+        self.next_frame_ms.saturating_sub(now_ms).min(max_ms)
     }
 }
 
@@ -263,6 +259,12 @@ pub struct Compositor {
     ///   0 = system (autostarted at boot, hosts login modal only)
     ///   1 = user   (spawned under user envelope, full desktop)
     pub session_mode: u8,
+
+    /// Cursor-blink phase, toggled on each TIME_TICK. `true` = cursor visible.
+    /// The compositor writes this into the SHM `cursor_visible` field of every
+    /// window on each tick so the compose path can hide the cursor on the
+    /// "off" half of the blink cycle.
+    pub blink_phase: bool,
 }
 
 use libcluu::posix::{
@@ -369,6 +371,7 @@ impl Compositor {
             control_endpoint: 0,
             registry_endpoint: 0,
             session_mode: 0,
+            blink_phase: true,
         })
     }
 }

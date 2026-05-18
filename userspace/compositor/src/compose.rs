@@ -202,5 +202,26 @@ pub fn render_status_row(comp: &mut Compositor) {
 }
 
 fn read_shm_cell(win: &Window, ix: u16, iy: u16) -> u64 {
-    win.mapping.read_cell(ix, iy).unwrap_or(BG_CELL)
+    let cell = win.mapping.read_cell(ix, iy).unwrap_or(BG_CELL);
+    // Gate cursor visibility: if the SHM header marks the cursor hidden
+    // (blink "off" phase set by the compositor's tick_blink) and this cell
+    // is the cursor cell, un-invert it so the cursor disappears.
+    let hdr = win.mapping.header();
+    let cursor_visible = unsafe {
+        core::ptr::read_volatile(&hdr.cursor_visible as *const u32)
+    };
+    if cursor_visible == 0 {
+        let cx = hdr.cursor_x as u16;
+        let cy = hdr.cursor_y as u16;
+        if ix == cx && iy == cy {
+            // The cursor was rendered as an inverted cell (fg/bg swapped) by
+            // cluuterm. Re-invert to restore the normal appearance.
+            let cp    = cell & 0x1F_FFFF;
+            let fg    = (cell >> 21) & 0xFF;
+            let bg    = (cell >> 29) & 0xFF;
+            let attrs = (cell >> 37) & 0x07;
+            return cp | (bg << 21) | (fg << 29) | (attrs << 37);
+        }
+    }
+    cell
 }

@@ -2,7 +2,7 @@
 //!
 //! All methods are `impl Compositor` blocks; the type itself lives in `state`.
 
-use crate::config::{CLOCK_PERIOD_MS, MIN_FRAME_MS};
+use crate::config::MIN_FRAME_MS;
 use crate::state::{Compositor, PixelRect};
 
 impl Compositor {
@@ -65,6 +65,47 @@ impl Compositor {
         self.clock_seconds = now_secs;
         for cx in 0..self.cols {
             self.cell_dirty.push((cx, 0));
+        }
+    }
+
+    /// Write the current `blink_phase` into every window's SHM `cursor_visible`
+    /// field, then dirty the cursor cell so the compose pass re-reads the
+    /// updated visibility flag.
+    ///
+    /// Called from the TIME_TICK arm in `main` immediately after toggling
+    /// `blink_phase`. Each TIME_TICK is 1 Hz, giving a 1 s on / 1 s off blink.
+    /// (Upgrade to 500 ms by changing the timeserver subscription period from
+    /// 1000 ms to 500 ms in the Grant handler in `main.rs`.)
+    pub fn tick_blink(&mut self) {
+        let visible: u32 = if self.blink_phase { 1 } else { 0 };
+        for win in self.windows.iter() {
+            // Write cursor_visible into the SHM header so compose_cell can
+            // gate cursor rendering on the blink phase.
+            let hdr = win.mapping.as_ptr() as *mut crate::state::WindowShm;
+            unsafe {
+                core::ptr::write_volatile(&mut (*hdr).cursor_visible as *mut u32, visible);
+                // Also expose cursor position via the header so the compose
+                // path can find the cursor cell without re-scanning the grid.
+                // cursor_x / cursor_y in the SHM header are set here to 0
+                // as a placeholder; cluuterm will update them once it writes
+                // cursor position to the SHM header (follow-up task).
+                // No write needed: they are already 0 from window init.
+            }
+            // Dirty the cursor cell (SHM interior origin + cursor offset).
+            // SHM cursor_x/cursor_y are compositor-internal: convert to the
+            // global cell grid position. Chrome is 1 cell, so interior
+            // cell (cx, cy) maps to global (win.x + 1 + cx, win.y + 1 + cy).
+            let shm_cx = unsafe { (*hdr).cursor_x } as u16;
+            let shm_cy = unsafe { (*hdr).cursor_y } as u16;
+            let gx = win.x.saturating_add(1).saturating_add(shm_cx);
+            let gy = win.y.saturating_add(1).saturating_add(shm_cy);
+            if gx < self.cols && gy < self.rows {
+                self.cell_dirty.push((gx, gy));
+            }
+        }
+        if !self.windows.is_empty() && !self.cell_dirty.is_empty() {
+            let now_ms = self.last_clock_now_ms;
+            self.schedule_frame(now_ms);
         }
     }
 
