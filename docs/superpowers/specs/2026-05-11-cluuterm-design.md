@@ -1,6 +1,6 @@
 # cluuterm — terminal emulator design (2026-05-11)
 
-**Status:** Draft for implementation.
+**Status:** v1 partially shipped; v2 uplift required — see §11.
 **Sub-project:** B of the TUI compositor workstream
 (A = compositor, already shipped — see `2026-05-10-tui-compositor-design.md`;
 C = PS/2 mouse; D = `libtui` primitives extraction).
@@ -348,3 +348,142 @@ cluuterm (VT4). It does not know which hosted it.
 
 - `docs/superpowers/specs/2026-05-10-tui-compositor-design.md` — sub-project A.
 - `docs/CURRENT_PHASE.md` / `docs/ROADMAP.md` — phase context.
+
+## 11. v2 uplift (added 2026-05-18 after live-fire htop/top run)
+
+After v1 landed we ran the user-compositor + cluuterm + shell + `ps` /
+`top` / `htop` flow end-to-end. `ps` renders correctly; `top` and `htop`
+print only partial letters, scrolling does not work, and Ctrl-C cannot
+interrupt a stuck TUI app (`cluuterm: Ctrl-C (signal dropped in v1)`).
+The root causes are concrete gaps below. v2 brings cluuterm to the
+minimum viable terminal for ncurses-style TUI apps.
+
+### 11.1 Signals — Ctrl-C → SIGINT propagation
+
+v1 explicitly drops Ctrl-C (`cluuterm/src/input.rs` `// signal dropped in
+v1`). v2 wires it through:
+
+- LineDiscipline cooked-mode: detect ^C / ^Z / ^\ at input → translate
+  to SIGINT / SIGTSTP / SIGQUIT delivery via procmgr to the **foreground
+  process group** in the pts.
+- LineDiscipline raw-mode: pass the byte through (terminal apps that
+  want raw ISIG-off behaviour set termios `ISIG=0`; default keeps ISIG
+  on).
+- procmgr already supports signal delivery — needs a `PTS_KILL_FG`
+  IPC verb from cluuterm carrying (pts_id, signal). VFS forwards.
+
+### 11.2 TERM env var
+
+procmgr currently spawns shell/login with no `TERM`. ncurses-based
+apps fall back to "dumb" output (partial letters, no escape sequences).
+
+- cluuterm publishes `TERM=cluu-256color` (registered with `ncurses`
+  via a vendored terminfo entry, or aliased to `xterm-256color` until
+  custom terminfo lands).
+- procmgr inherits `TERM` from the spawning context's environment.
+- `/etc/envelopes.toml` adds `TERM=cluu-256color` to the user envelope.
+
+### 11.3 Window size — TIOCGWINSZ + SIGWINCH
+
+ncurses queries `winsize` (rows, cols, xpixels, ypixels) via ioctl.
+Without it, htop draws to a 0×0 grid → nothing visible.
+
+- libcluu/posix adds `TIOCGWINSZ` (0x5413) ioctl on pts fds. cluuterm's
+  pts backend returns the current SHM cell grid dimensions
+  (80×24 in v1, dynamic in v2).
+- v2 also delivers SIGWINCH to the foreground pgrp on resize
+  (deferred: requires resize support, see §11.7).
+
+### 11.4 ANSI parser extensions (`libcluu::ansi`)
+
+Current parser handles `Print / NL / CR / BS / Tab / Bell / MoveCursor[Up
+| Down | Left | Right | Abs] / EraseLine / EraseDisplay / SetAttr /
+ResetAttr / Scroll`. Add the following events and CSI sequences:
+
+| Sequence              | Event                     | Used by         |
+|-----------------------|---------------------------|-----------------|
+| `CSI ? 25 l/h`        | `CursorVisible(bool)`     | htop, less      |
+| `CSI ? 1049 l/h`      | `AltScreen(bool)`         | htop, vim       |
+| `CSI ? 1000/1002/1006 l/h` | `MouseMode(...)`     | htop (defer to sub-project C) |
+| `CSI r` (DECSTBM)     | `SetScrollRegion(t, b)`   | htop, less      |
+| `CSI s / CSI u` or `ESC 7 / ESC 8` | `CursorSave / CursorRestore` | many |
+| `CSI 38;5;N m`        | `SetAttr` w/ 256-color fg | most TUI        |
+| `CSI 48;5;N m`        | `SetAttr` w/ 256-color bg | most TUI        |
+| `CSI 38;2;r;g;b m`    | `SetAttr` w/ truecolor fg | modern TUIs     |
+| `CSI 48;2;r;g;b m`    | `SetAttr` w/ truecolor bg | modern TUIs     |
+| `OSC 0 ; <title> BEL` | `SetTitle(...)`           | shells          |
+| `CSI ? 1 h/l`         | `AppCursorKeys(bool)` (DECCKM) | vim, less |
+| `CSI ? 7 h/l`         | `AutoWrap(bool)` (DECAWM) | many            |
+| `ESC c`               | `Reset` (RIS)             | reset(1)        |
+| `CSI 6 n`             | `RequestCursorPosition`   | many — needs reply path |
+| `CSI L / M`           | `InsertLine / DeleteLine` | scroll-region apps |
+| `CSI P / @`           | `DeleteChar / InsertChar` | line editors    |
+| `ESC ( B / ESC ) 0`   | `SetCharset(...)`         | many — accept and ignore in v2 |
+
+`SetAttr` payload widens to support `fg/bg ∈ {Default, Indexed(u8),
+Rgb(u8,u8,u8)}` plus the existing `bold` flag, joined later by
+`italic`, `underline`, `reverse`, `dim`, `hidden`, `strikethrough`.
+
+### 11.5 Alt-screen buffer
+
+`CSI ? 1049 h` saves cursor + switches to a secondary screen buffer,
+clears it, and disables scrollback. `CSI ? 1049 l` restores. cluuterm
+needs two independent cell grids and pointer-switch between them on
+the AltScreen event. Scrollback is wired only to the main grid;
+alt-screen scrollback is unused (matches xterm).
+
+### 11.6 Scrollback (currently broken)
+
+Spec §4.2 says scrollback is reused from legacy VT but it's not
+plumbed in cluuterm. v2 wires it:
+
+- `libcluu::tty_core::Scrollback` ring buffer attached to the main grid.
+- Scrollback hotkey (Shift+PgUp / Shift+PgDn) handled in
+  cluuterm/input.rs **before** keymap encoding — never reaches the
+  child process.
+- Scrolling shifts the rendered viewport offset, not the cell grid
+  itself.
+- Default ring depth: 1024 lines × 80 cols.
+
+### 11.7 Resize (preview, full v2 stretch goal)
+
+Out of v1, intended for v2.5. Resize requires:
+
+- compositor → cluuterm: `WIN_RESIZE(rows, cols)` event;
+- cluuterm reflows main grid, resizes alt-screen, emits SIGWINCH;
+- TIOCGWINSZ now returns new dims;
+- SHM re-allocation if pixel area grows.
+
+Scoped after §11.1–§11.6 land.
+
+### 11.8 Concrete component changes for v2
+
+| Crate | Change |
+|-------|--------|
+| `userspace/libcluu/src/ansi/` | Event enum widened (§11.4); state machine adds OSC, DCS, alt-screen, scroll-region branches |
+| `userspace/libcluu/src/tty_core/` | LineDiscipline learns ISIG → signal; Scrollback wired (§11.6); termios bits for ISIG/IUTF8/IEXTEN |
+| `userspace/cluuterm/` | Two cell grids (main + alt); SIGWINCH delivery; PTS_IOCTL for TIOCGWINSZ; Ctrl-C → procmgr PTS_KILL_FG; scrollback viewport |
+| `userspace/vfs/` | PTS_KILL_FG forwarder (pts_id, signal); pts foreground-pgrp tracking |
+| `userspace/procmgr/` | Receive PTS_KILL_FG → signal foreground pgrp |
+| `/etc/envelopes.toml` | Add `TERM=cluu-256color` to user env |
+| `etc/terminfo/cluu-256color.ti` | New vendored terminfo entry (alias to xterm-256color initially) |
+
+### 11.9 Acceptance markers (v2)
+
+| Marker | Asserts |
+|--------|---------|
+| `l2_cluuterm_top` | `top` opens, renders bordered grid, Ctrl-C exits cleanly |
+| `l2_cluuterm_htop` | `htop` renders header + process list with colors |
+| `l2_cluuterm_scrollback` | Shift+PgUp scrolls main grid; child is unaware |
+| `l2_cluuterm_alt_screen` | After `tput smcup`, main grid restored on `tput rmcup` |
+| `l2_cluuterm_sigint` | Ctrl-C interrupts a `sleep 60` running inside cluuterm |
+| `l2_cluuterm_winsize` | `stty size` inside cluuterm prints `24 80` (not `0 0`) |
+
+### 11.10 Non-goals (still deferred to v3)
+
+- True graphical compositing (overlays, transparency).
+- Mouse selection / clipboard (waits for sub-project C — PS/2 mouse).
+- Bracketed paste mode (`CSI ? 2004 h`).
+- BiDi / complex script shaping.
+- Font fallback / variable-width glyphs.
+
