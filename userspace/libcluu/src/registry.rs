@@ -356,23 +356,14 @@ pub fn poll_or_recv_any(
 fn wait_for_grant(endpoint_name: &str) -> Result<usize> {
     let control_endpoint = control_endpoint();
     let mut buf = [0u8; 256];
-    // Bound the wait so a missing/un-granted service doesn't deadlock the
-    // caller forever. 2 s is generous for a healthy boot; if it expires we
-    // surface NotFound and the caller (e.g. clock_gettime) can fall back.
-    const SUBSCRIBE_TIMEOUT_MS: u64 = 2_000;
-    let deadline = SUBSCRIBE_TIMEOUT_MS;
+    // Block forever. If the producer dies before granting, the kernel
+    // revokes its tokens and our recv returns a concrete error
+    // (BadToken / Closed). A time-bounded recv would convert "hung" into
+    // "spurious NotFound" and trigger cascade kills — banned by the no-
+    // timeouts rule (memory/feedback_no_timeouts.md). A hang is data.
+    let _ = endpoint_name;
     loop {
-        let (index, len) = match ipc_recv_any(&[control_endpoint], &mut buf, deadline) {
-            Ok(v) => v,
-            Err(Error::Timeout) => {
-                let _ = crate::debug_print(&alloc::format!(
-                    "registry-client: subscribe TIMEOUT waiting for grant of {}",
-                    endpoint_name
-                ));
-                return Err(Error::NotFound);
-            }
-            Err(err) => return Err(err),
-        };
+        let (index, len) = ipc_recv_any(&[control_endpoint], &mut buf, u64::MAX)?;
         let _ = index;
         if let Some((msg, payload)) = parse_message(&buf[..len]) {
             if let Some(event) = handle_incoming_message(&msg, payload)? {
