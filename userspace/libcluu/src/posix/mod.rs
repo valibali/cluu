@@ -337,7 +337,7 @@ pub extern "C" fn _ioctl_r(
     request: c_ulong,
     argp: *mut c_void,
 ) -> c_int {
-    termios::_ioctl(fd, request, argp)
+    unsafe { termios::_ioctl(fd, request, argp) }
 }
 
 #[no_mangle]

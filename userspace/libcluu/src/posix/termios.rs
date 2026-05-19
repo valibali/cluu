@@ -155,17 +155,19 @@ fn pts_call_raw(label: u32, endpoint: usize, request_payload: &[u8]) -> Result<V
 /// Returns `Ok(decoded_reply)` on success, or sets errno and returns `Err(errno)`.
 macro_rules! pts_call {
     ($fd:expr, $label:expr, $req:expr, $rep_ty:ty) => {{
-        let ep = endpoint_for_fd($fd)?;
-        let payload = postcard::to_allocvec(&$req).map_err(|_| {
-            set_errno(EINVAL);
-            EINVAL
-        })?;
-        let reply_bytes = pts_call_raw($label, ep, &payload)?;
-        let reply: $rep_ty = postcard::from_bytes(&reply_bytes).map_err(|_| {
-            set_errno(EIO);
-            EIO
-        })?;
-        Ok(reply)
+        (|| -> Result<$rep_ty, i32> {
+            let ep = endpoint_for_fd($fd)?;
+            let payload = postcard::to_allocvec(&$req).map_err(|_| {
+                set_errno(EINVAL);
+                EINVAL
+            })?;
+            let reply_bytes = pts_call_raw($label, ep, &payload)?;
+            let reply: $rep_ty = postcard::from_bytes(&reply_bytes).map_err(|_| {
+                set_errno(EIO);
+                EIO
+            })?;
+            Ok(reply)
+        })()
     }};
 }
 
@@ -345,5 +347,5 @@ pub unsafe extern "C" fn _ioctl(fd: c_int, request: c_ulong, argp: *mut c_void) 
 /// C-callable ioctl entry point (matches newlib <sys/ioctl.h>).
 #[no_mangle]
 pub extern "C" fn ioctl(fd: c_int, request: c_ulong, argp: *mut c_void) -> c_int {
-    _ioctl(fd, request, argp)
+    unsafe { _ioctl(fd, request, argp) }
 }

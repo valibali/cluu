@@ -644,6 +644,7 @@ name = "cluu-vfs"
 version = "0.1.0"
 dependencies = [
  "libcluu",
+ "postcard",
 ]
 
 [[package]]
