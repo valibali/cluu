@@ -1045,6 +1045,7 @@ impl ProcessManager {
         registry::register_default_outputs()?;
         self.spawn_endpoint = endpoint_create(self.token)?;
         registry::register_output("spawn", self.spawn_endpoint)?;
+        registry::register_output("session", self.spawn_endpoint)?;
         self.fault_endpoint = endpoint_create(self.token)?;
 
         // Request tty:N main for all VTs (non-blocking); grants arrive via registry events.
