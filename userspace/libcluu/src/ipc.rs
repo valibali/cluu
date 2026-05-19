@@ -238,6 +238,9 @@ pub const COMP_CLOSE_REQUEST_LABEL: u32 = 101;
 /// Sent by a process to its parent's notify-ready endpoint once it has
 /// finished startup. words: all zero (presence is the signal).
 pub const COMPOSITOR_READY_LABEL: u32 = 102;
+/// compositor → app input endpoint. Window was resized to new pixel dimensions.
+/// words[0] = pixel_width (u32), words[1] = pixel_height (u32).
+pub const COMP_WIN_CONFIGURE_LABEL: u32 = 103;
 
 // --- Input routing (vtmgr today; inputd post-extraction). ---
 // client → vtmgr: request a VT switch. vtmgr decides per policy.

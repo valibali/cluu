@@ -121,6 +121,25 @@ impl Compositor {
                 self.cell_dirty.push((cx, cy));
             }
         }
+
+        // Notify app of initial interior dimensions via WIN_CONFIGURE.
+        // Interior = total cells minus 2 for chrome (1-cell border each side).
+        if input_endpoint != 0 && granted_w > 2 && granted_h > 2 {
+            let interior_w = (granted_w - 2) as u32;
+            let interior_h = (granted_h - 2) as u32;
+            let msg = libcluu::types::Message::new(
+                libcluu::ipc::COMP_WIN_CONFIGURE_LABEL,
+                [
+                    id as usize,
+                    interior_w as usize,
+                    interior_h as usize,
+                    0, 0, 0,
+                ],
+                3,
+            );
+            let _ = libcluu::ipc::send(input_endpoint, &msg, libcluu::types::IpcFlags::empty());
+        }
+
         Ok((id, token, granted_w as u32, granted_h as u32))
     }
 }
@@ -269,6 +288,25 @@ impl Compositor {
             for cx in x..x.saturating_add(max_w) {
                 self.cell_dirty.push((cx, cy));
             }
+        }
+
+        // Notify the app about the new interior dimensions via WIN_CONFIGURE.
+        // Interior = total cells minus 2 for chrome (1-cell border each side).
+        let input_ep = self.windows[pos].input_endpoint;
+        if input_ep != 0 && new_w > 2 && new_h > 2 {
+            let interior_w = (new_w - 2) as u32;
+            let interior_h = (new_h - 2) as u32;
+            let msg = libcluu::types::Message::new(
+                libcluu::ipc::COMP_WIN_CONFIGURE_LABEL,
+                [
+                    id as usize,
+                    interior_w as usize,
+                    interior_h as usize,
+                    0, 0, 0,
+                ],
+                3,
+            );
+            let _ = libcluu::ipc::send(input_ep, &msg, libcluu::types::IpcFlags::empty());
         }
     }
 

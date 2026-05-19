@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 
 use libcluu::ansi::{Attr, EraseMode, Event, Parser};
 use libcluu::ipc::{
-    self, COMP_INPUT_FORWARD_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL,
+    self, COMP_INPUT_FORWARD_LABEL, COMP_WIN_CONFIGURE_LABEL,
+    COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL,
 };
 use libcluu::ipc::{COMP_CLOSE_REQUEST_LABEL, PROCMGR_PG_SIGNAL_LABEL};
 use libcluu::registry::RegistryEvent;
@@ -627,6 +628,69 @@ impl Cluuterm {
         }
     }
 
+    /// Handle a COMP_WIN_CONFIGURE resize event.
+    ///
+    /// Reallocates the cell grid to `new_cols` × `new_rows`, updates the
+    /// pts winsize, emits SIGWINCH to the foreground process group, and
+    /// triggers a full redraw.
+    pub fn resize_grid(&mut self, new_cols: usize, new_rows: usize) {
+        if new_cols == 0 || new_rows == 0 {
+            return;
+        }
+
+        let total = new_cols * new_rows;
+        let default_attr = Attr::default_attr();
+
+        let mut new_cells = alloc::vec![b' '; total];
+        let mut new_fg = alloc::vec![default_attr.fg; total];
+        let mut new_bg = alloc::vec![default_attr.bg; total];
+
+        // Copy-over existing content that fits in the new grid.
+        let copy_cols = new_cols.min(self.cols);
+        let copy_rows = new_rows.min(self.rows);
+        for r in 0..copy_rows {
+            let old_start = r * self.cols;
+            let new_start = r * new_cols;
+            new_cells[new_start..new_start + copy_cols]
+                .copy_from_slice(&self.cells[old_start..old_start + copy_cols]);
+            new_fg[new_start..new_start + copy_cols]
+                .copy_from_slice(&self.fg_cells[old_start..old_start + copy_cols]);
+            new_bg[new_start..new_start + copy_cols]
+                .copy_from_slice(&self.bg_cells[old_start..old_start + copy_cols]);
+        }
+
+        self.cells = new_cells;
+        self.fg_cells = new_fg;
+        self.bg_cells = new_bg;
+        self.cols = new_cols;
+        self.rows = new_rows;
+
+        // Clamp cursor.
+        if self.cursor_x >= new_cols {
+            self.cursor_x = new_cols.saturating_sub(1);
+        }
+        if self.cursor_y >= new_rows {
+            self.cursor_y = new_rows.saturating_sub(1);
+        }
+
+        // Update pts winsize and emit SIGWINCH.
+        let new_ws = Winsize {
+            rows: new_rows as u16,
+            cols: new_cols as u16,
+            xpixel: (new_cols * 8) as u16,
+            ypixel: (new_rows * 16) as u16,
+        };
+        if new_ws != self.pts.winsize {
+            self.pts.winsize = new_ws;
+            if let Some(pgid) = self.pts.fg_pgid {
+                self.pts.send_pg_signal(pgid, SIGWINCH);
+            }
+        }
+
+        // Full redraw with new dimensions.
+        self.render_and_publish();
+    }
+
     fn render_and_publish(&mut self) {
         // Blit the terminal cell grid into the compositor SHM.
         crate::render::render(self);
@@ -894,6 +958,17 @@ impl Cluuterm {
                 // ── Compositor: forwarded keystroke (Task 16) ───────────
                 COMP_INPUT_FORWARD_LABEL => {
                     crate::input::handle(self, &msg, payload);
+                }
+
+                // ── Compositor: window configure (resize) ───────────────
+                COMP_WIN_CONFIGURE_LABEL => {
+                    let interior_w = msg.words[1] as usize;
+                    let interior_h = msg.words[2] as usize;
+                    if interior_w > 0 && interior_h > 0
+                        && (interior_w != self.cols || interior_h != self.rows)
+                    {
+                        self.resize_grid(interior_w, interior_h);
+                    }
                 }
 
                 // ── Compositor: window close request ────────────────────
