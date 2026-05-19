@@ -16,6 +16,7 @@ extern crate alloc;
 
 pub mod spawn;
 pub mod primordial;
+pub mod pts;
 
 // Re-exports populated as modules gain content:
 pub use spawn::*;

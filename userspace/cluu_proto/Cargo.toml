@@ -9,7 +9,7 @@ license = "MIT"
 [dependencies]
 serde = { workspace = true }
 postcard = { workspace = true }
-bitflags = { workspace = true }
+bitflags = { workspace = true, features = ["serde"] }
 
 [lib]
 name = "cluu_proto"
