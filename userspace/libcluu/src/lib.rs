@@ -56,6 +56,7 @@ pub mod vfs_view;
 pub mod vspace;
 pub mod window_shm;
 
+pub mod session;
 pub mod spawn;
 
 // POSIX syscall stubs (feature-gated for newlib compatibility)
