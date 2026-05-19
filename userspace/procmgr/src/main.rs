@@ -5770,7 +5770,7 @@ impl ProcessManager {
             let label = cluu_wire::spawn::PROCMGR_SPAWN_UNIFIED_LABEL;
             let words = [reply_bytes.len(), 0, 0, 0, 0, 0];
             let reply_msg = Message::new(label, words, 0);
-            let _ = libcluu::ipc::send_msg_with_payload(token, &reply_msg, &reply_bytes);
+            let _ = libcluu::ipc::reply_with_payload(token, &reply_msg, &reply_bytes);
         }
     }
 
