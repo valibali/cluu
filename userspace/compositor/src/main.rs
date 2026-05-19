@@ -2,6 +2,7 @@
 #![no_main]
 
 extern crate alloc;
+extern crate cluu_proto;
 
 mod config;
 mod state;
@@ -15,12 +16,20 @@ mod render;
 
 use libcluu::boot::{process_info, PARAM_NOTIFY_READY_EP, PARAM_SESSION_MODE, TOKEN_IPC};
 use libcluu::ipc::{
-    extract_reply_id, reply, send_msg_with_payload,
+    extract_reply_id, reply, reply_with_payload, send_msg_with_payload,
     COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL, COMPOSITOR_READY_LABEL, VTMGR_PIN_VT_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
 use registry::RegistryEvent;
+
+use cluu_proto::session::{
+    SESSION_ENDED_LABEL, COMPOSITOR_SESSION_HANDOFF_LABEL,
+    CompositorSessionHandoffRequest, CompositorSessionHandoffReply,
+    SessionEndedEvent, SessionErr,
+};
+use cluu_proto::spawn::{SpawnEnvelope, ViewSource};
+use cluu_proto::ABI_VERSION;
 
 /// Send COMP_FRAME_READY_LABEL to windows that have pending damage since the
 /// last broadcast.  A window is eligible if:
@@ -228,6 +237,17 @@ pub extern "C" fn main() -> i32 {
                         // Do NOT continue — fall through to post-recv block.
                     }
 
+                    // Session handoff from login service. Handled with raw label match
+                    // because the payload is postcard-encoded (not word-based).
+                    if msg.tag.label == COMPOSITOR_SESSION_HANDOFF_LABEL {
+                        handle_session_handoff(&mut comp, &msg, payload, sender_tid);
+                        continue;
+                    }
+                    if msg.tag.label == SESSION_ENDED_LABEL {
+                        handle_session_ended(&mut comp, &msg, payload);
+                        continue;
+                    }
+
                     // Registry control messages (grant requests from subscribers) must
                     // be forwarded to the registry client so it can mint tokens.
                     if idx == REGISTRY_TOKEN_IDX {
@@ -430,5 +450,109 @@ pub extern "C" fn main() -> i32 {
         if comp.tick_frame(now_ms) {
             broadcast_frame_ready(&mut comp);
         }
+    }
+}
+
+// ── Session lifecycle handlers ─────────────────────────────────────
+
+fn handle_session_handoff(
+    comp: &mut state::Compositor,
+    msg: &Message,
+    payload: &[u8],
+    _sender_tid: usize,
+) {
+    let req: CompositorSessionHandoffRequest = match postcard::from_bytes(payload) {
+        Ok(r) => r,
+        Err(_) => {
+            reply_handoff_err(comp, msg, SessionErr::Internal(0xE4u32));
+            return;
+        }
+    };
+
+    let our_event_send = event_endpoint_send_cap(comp);
+
+    match libcluu::session::subscribe(req.token_sub, our_event_send) {
+        Ok(()) => {
+            comp.tracked_sessions.insert(req.session_id);
+            let reply: CompositorSessionHandoffReply = Ok(());
+            reply_postcard(comp, msg, COMPOSITOR_SESSION_HANDOFF_LABEL, &reply);
+        }
+        Err(e) => {
+            reply_handoff_err(comp, msg, e);
+        }
+    }
+}
+
+fn handle_session_ended(comp: &mut state::Compositor, _msg: &Message, payload: &[u8]) {
+    let event: SessionEndedEvent = match postcard::from_bytes(payload) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let to_close: alloc::vec::Vec<u64> = comp
+        .windows
+        .iter()
+        .filter(|w| w.session_id == Some(event.session_id))
+        .map(|w| w.id)
+        .collect();
+    for window_id in to_close {
+        close_window(comp, window_id);
+    }
+    comp.tracked_sessions.remove(&event.session_id);
+    spawn_login_window(comp);
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+fn reply_postcard<R: serde::Serialize>(
+    comp: &state::Compositor,
+    msg: &Message,
+    label: u32,
+    value: &R,
+) {
+    let bytes = postcard::to_allocvec(value).expect("ser");
+    let reply_msg = Message::new(label, [bytes.len(), ABI_VERSION as usize, 0, 0, 0, 0], 2);
+    let reply_token = extract_reply_id(msg).unwrap_or(0);
+    let _ = reply_with_payload(reply_token, &reply_msg, &bytes);
+}
+
+fn reply_handoff_err(comp: &state::Compositor, msg: &Message, err: SessionErr) {
+    let reply: CompositorSessionHandoffReply = Err(err);
+    reply_postcard(comp, msg, COMPOSITOR_SESSION_HANDOFF_LABEL, &reply);
+}
+
+/// Return the token handle the compositor uses to send SESSION_ENDED
+/// subscription events to procmgr. Stub — returns 0 until the event
+/// endpoint is properly created and wired.
+fn event_endpoint_send_cap(_comp: &state::Compositor) -> cluu_proto::TokenHandle {
+    0
+}
+
+/// Return the view token that login and session windows derive their
+/// VFS view from. Stub — returns 0 until the real view token plumbing
+/// is in place.
+fn compositor_view_token(_comp: &state::Compositor) -> cluu_proto::TokenHandle {
+    0
+}
+
+fn close_window(_comp: &mut state::Compositor, _window_id: u64) {
+    // Stub — real close_window will call handle_win_destroy + SHM free.
+}
+
+fn spawn_login_window(comp: &mut state::Compositor) {
+    let envelope = SpawnEnvelope {
+        image: alloc::string::String::from("login"),
+        args: alloc::vec::Vec::new(),
+        env: alloc::vec::Vec::new(),
+        view: ViewSource::Derive(compositor_view_token(comp)),
+        fd_inherit: alloc::vec::Vec::new(),
+        session: None,
+        notify: None,
+    };
+    if let Err(e) = libcluu::spawn::spawn(envelope) {
+        let _ = libcluu::debug_print(&alloc::format!(
+            "compositor: login spawn failed {:?}\n",
+            e
+        ));
     }
 }

@@ -11,6 +11,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -173,6 +174,9 @@ pub struct Window {
     /// When true: window covers the full cell grid (x=0, y=0, w=cols, h=rows).
     /// Compositor skips chrome rendering and status bar for this window while focused.
     pub fullscreen: bool,
+    /// Session that owns this window, if any. Set on session handoff;
+    /// `None` for sessionless windows (e.g. login modal, demo shells).
+    pub session_id: Option<u32>,
 }
 
 /// Long-lived compositor state.  Single instance per process, owned by `main`.
@@ -259,6 +263,11 @@ pub struct Compositor {
     ///   0 = system (autostarted at boot, hosts login modal only)
     ///   1 = user   (spawned under user envelope, full desktop)
     pub session_mode: u8,
+
+    /// Set of session IDs for which the compositor has an active
+    /// SESSION_ENDED subscription. Used to deduplicate subscriptions
+    /// and verify incoming SESSION_ENDED events.
+    pub tracked_sessions: BTreeSet<u32>,
 
 }
 
@@ -366,6 +375,7 @@ impl Compositor {
             control_endpoint: 0,
             registry_endpoint: 0,
             session_mode: 0,
+            tracked_sessions: BTreeSet::new(),
         })
     }
 }

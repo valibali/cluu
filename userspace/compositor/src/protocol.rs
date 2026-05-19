@@ -21,6 +21,8 @@ use libcluu::ipc::{
 };
 use libcluu::types::Message;
 
+pub use cluu_proto::session::COMPOSITOR_SESSION_HANDOFF_LABEL;
+
 #[derive(Debug)]
 pub enum Incoming {
     WinRegister { req_w: u32, req_h: u32, title_len: u32, input_endpoint: usize, flags: u32 },

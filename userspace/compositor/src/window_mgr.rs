@@ -112,6 +112,7 @@ impl Compositor {
             input_endpoint,
             pending_frame_ready: false,
             fullscreen,
+            session_id: None,
         });
         self.focused = Some(id);
         // Mark all the window's cells dirty so the (eventual) compose pass
