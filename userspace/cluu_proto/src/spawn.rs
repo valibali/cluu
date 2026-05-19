@@ -1,0 +1,1 @@
+//! Spawn protocol types — see spec 1.

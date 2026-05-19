@@ -1,0 +1,1 @@
+//! Primordial seed types — see spec 1 §13.

@@ -28,6 +28,7 @@ members = [
     "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
+    "userspace/cluu_proto",
     "userspace/grep",
     "userspace/head",
     "userspace/tail",
@@ -162,6 +163,8 @@ bitflags = "2.4"
 spin = "0.9"
 log = "0.4"
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
+postcard = { version = "1.0", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 
 # x86_64 architecture support
 x86_64 = "0.15"

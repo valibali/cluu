@@ -1,0 +1,20 @@
+[package]
+name = "cluu_proto"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU wire protocol types — single source of truth for spawn, session, pts, window."
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+serde = { workspace = true }
+postcard = { workspace = true }
+bitflags = { workspace = true }
+
+[lib]
+name = "cluu_proto"
+crate-type = ["rlib"]
+
+[features]
+default = []
+host-test = ["serde/std", "postcard/use-std"]
