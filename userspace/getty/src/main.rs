@@ -106,15 +106,6 @@ fn getty_view_token() -> u64 {
     libcluu::boot::process_info().tokens[libcluu::boot::TOKEN_EXTRA_0] as u64
 }
 
-// ─── Panic handler ────────────────────────────────────────────────────────────
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {
-        unsafe { core::arch::asm!("hlt") }
-    }
-}
-
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 #[no_mangle]
