@@ -1,0 +1,36 @@
+{
+  "id": "plan2-pty-unification-01",
+  "seq": "01",
+  "title": "cluu_proto::pts module — verb labels 100-110 + types",
+  "status": "in_progress",
+  "agent_id": "CoderAgent",
+  "started_at": "2026-05-19T12:00:00Z",
+  "depends_on": [],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/cluu_proto/src/lib.rs",
+    "userspace/cluu_proto/src/spawn.rs"
+  ],
+  "acceptance_criteria": [
+    "All PTS_* label constants defined (100-110)",
+    "Termios struct with complete bitmask constants + default_pts()",
+    "Winsize struct with Serialize/Deserialize",
+    "PollEvents bitflags",
+    "All request/reply/event types: ReadRequest/Reply, WriteRequest/Reply, PollRequest/Reply, GetTermiosReply, SetTermiosRequest/Reply, When enum, GetWinsizeReply/SetWinsizeReply, GetPgrpReply/SetPgrpRequest/Reply, FlushRequest/Reply, FlushQueue enum, PtsErr enum",
+    "5 postcard round-trip tests pass (termios_default, termios_roundtrip, pts_err_roundtrip, winsize_roundtrip, read_request_roundtrip)",
+    "cargo build -p cluu_proto clean",
+    "cargo test -p cluu_proto --features host-test passes"
+  ],
+  "deliverables": [
+    "userspace/cluu_proto/src/pts.rs (create)",
+    "userspace/cluu_proto/src/lib.rs (modify: add pub mod pts;)"
+  ],
+  "agent_id": null,
+  "started_at": null,
+  "completed_at": null,
+  "completion_summary": null
+}

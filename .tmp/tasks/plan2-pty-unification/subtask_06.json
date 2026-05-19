@@ -1,0 +1,35 @@
+{
+  "id": "plan2-pty-unification-06",
+  "seq": "06",
+  "title": "POSIX termios/ioctl shims (tcgetattr/tcsetattr/tcflush/ioctl)",
+  "status": "completed",
+  "depends_on": ["01"],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/libcluu/src/posix/",
+    "userspace/libcluu/src/posix/mod.rs",
+    "userspace/cluu_proto/src/pts.rs"
+  ],
+  "acceptance_criteria": [
+    "tcgetattr(fd, *mut Termios) → issues PTS_GET_TERMIOS_LABEL IPC",
+    "tcsetattr(fd, when, *const Termios) → issues PTS_SET_TERMIOS_LABEL with When enum",
+    "tcflush(fd, queue) → issues PTS_FLUSH_LABEL with FlushQueue",
+    "ioctl(fd, TIOCGWINSZ/SWINSZ/GPGRP/SPGRP, arg) → issues corresponding PTS_* verbs",
+    "PtsErr translated to errno (EIO/EINTR/EAGAIN/EPERM/EINVAL)",
+    "pts_call() generic helper for IPC call + postcard encode/decode",
+    "All #[no_mangle] pub extern \"C\" signatures match newlib <termios.h>",
+    "cargo build -p libcluu --features posix clean"
+  ],
+  "deliverables": [
+    "userspace/libcluu/src/posix/termios.rs (create)",
+    "userspace/libcluu/src/posix/mod.rs (modify: add pub mod termios;)"
+  ],
+  "agent_id": null,
+  "started_at": "2026-05-19T00:00:00Z",
+  "completed_at": "2026-05-19T00:00:00Z",
+  "completion_summary": "Impl POSIX termios/ioctl: tcgetattr (PTS_GET_TERMIOS), tcsetattr (PTS_SET_TERMIOS w/ When), tcflush (PTS_FLUSH w/ FlushQueue), _ioctl (TIOCGWINSZ/SWINSZ/GPGRP/SPGRP). pts_call! macro for postcard IPC. PtsErr→EIO/EINTR/EAGAIN/EPERM/EINVAL. 7 #[no_mangle] shims. Build unverified (no bash access)."
+}

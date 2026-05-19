@@ -1,0 +1,40 @@
+{
+  "id": "plan2-pty-unification-02",
+  "seq": "02",
+  "title": "Expand libcluu::tty_core::line_discipline — LineDiscOutput API + 8 tests",
+  "status": "in_progress",
+  "agent_id": "coder-agent",
+  "started_at": "2026-05-19T00:00:00Z",
+  "depends_on": ["01"],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/libcluu/src/tty_core/line_discipline.rs",
+    "userspace/libcluu/src/tty_core/mod.rs"
+  ],
+  "acceptance_criteria": [
+    "LineDiscOutput enum defined (Bytes, Signal, Echo, Eof, Drop)",
+    "SignalNum enum with SIGINT/SIGQUIT/SIGTSTP",
+    "LineDiscipline struct with termios, pending_line, output_pending, eof_seen, last_was_cr",
+    "feed_byte() implements ISIG (VINTR→SIGINT, VQUIT→SIGQUIT, VSUSP→SIGTSTP)",
+    "feed_byte() handles ICRNL, INLCR input translation",
+    "feed_byte() canonical mode: VEOF, VERASE, VKILL, VWERASE, NL line-end",
+    "feed_byte() raw mode passthrough when ICANON cleared",
+    "process_output() OPOST/ONLCR for CR-NL translation on output",
+    "flush_input() clears pending_line buffer",
+    "8 unit tests pass (canonical_line_assembly, vintr_signal_under_isig, no_signal_when_isig_clear, veof_canonical, verase_with_echoe, opost_nl_to_crnl, icrnl_translates_cr_to_nl, raw_mode_passthrough)",
+    "cargo build -p libcluu clean",
+    "cargo test -p libcluu --features host-test line_discipline passes"
+  ],
+  "deliverables": [
+    "userspace/libcluu/src/tty_core/line_discipline.rs (modify: expand)",
+    "userspace/libcluu/src/tty_core/mod.rs (modify: re-exports)"
+  ],
+  "agent_id": null,
+  "started_at": null,
+  "completed_at": null,
+  "completion_summary": null
+}

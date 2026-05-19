@@ -1,0 +1,41 @@
+{
+  "id": "plan2-pty-unification",
+  "name": "Terminal + PTY Unification",
+  "status": "active",
+  "objective": "Unify legacy TTY service and cluuterm onto one PTS_* verb set (labels 100-110). Shared line-discipline library, POSIX terminal signal coverage, per-session /dev/pts overlay, POSIX termios shims, TERM env propagation.",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "docs/superpowers/plans/2026-05-19-implementer-brief.md",
+    "docs/superpowers/plans/2026-05-18-plan2-terminal-pty-unification.md",
+    ".tmp/handoff-plan2.md",
+    "userspace/cluu_proto/src/lib.rs",
+    "userspace/cluu_proto/src/spawn.rs",
+    "userspace/libcluu/src/tty_core/line_discipline.rs",
+    "userspace/libcluu/src/tty_core/mod.rs",
+    "userspace/cluuterm/src/tty_backend.rs",
+    "userspace/cluuterm/src/main.rs",
+    "userspace/tty/src/main.rs",
+    "userspace/tty/src/protocol.rs",
+    "userspace/shell/src/",
+    "userspace/vfs/src/pts.rs",
+    "userspace/vfs/src/view.rs",
+    "userspace/vfs/src/main.rs",
+    "userspace/probes/argvprobe/",
+    "userspace/libcluu/src/posix/"
+  ],
+  "exit_criteria": [
+    "All 13 tasks complete with verified acceptance criteria",
+    "cargo xtask build clean",
+    "harness_run.sh reaches compositor: ready",
+    "Zero-hit grep proofs for legacy TTY_* labels",
+    "Zero-hit grep for tty_endpoint != 0 in shell",
+    "8 acceptance markers pass",
+    "No new timeouts in cluuterm or tty service"
+  ],
+  "subtask_count": 13,
+  "completed_count": 0,
+  "created_at": "2026-05-19T12:00:00Z",
+  "completed_at": null
+}

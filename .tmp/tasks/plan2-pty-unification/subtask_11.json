@@ -1,0 +1,33 @@
+{
+  "id": "plan2-pty-unification-11",
+  "seq": "11",
+  "title": "SIGWINCH on WIN_CONFIGURE resize",
+  "status": "completed",
+  "depends_on": ["04", "09"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/cluuterm/src/main.rs"
+  ],
+  "acceptance_criteria": [
+    "WIN_CONFIGURE handler computes new (cols, rows) from pixel dims and cell metrics",
+    "Updates pts.winsize when size changes",
+    "Emits SIGWINCH (signal 28) to fg_pgid via procmgr_pg_signal",
+    "Triggers redraw_grid() after resize",
+    "stty size reports new dimensions after resize",
+    "cargo build -p cluuterm clean",
+    "l2_sigwinch_delivered marker passes (Task 13)"
+  ],
+  "deliverables": [
+    "userspace/cluuterm/src/tty_backend.rs (modify: add WIN_CONFIGURE handler)",
+    "userspace/compositor/src/window_mgr.rs (modify: send WIN_CONFIGURE on resize/register)",
+    "userspace/libcluu/src/ipc.rs (modify: add COMP_WIN_CONFIGURE_LABEL=103)"
+  ],
+  "agent_id": "coder-agent",
+  "started_at": "2026-05-19T00:00:00Z",
+  "completed_at": "2026-05-19T00:00:00Z",
+  "completion_summary": "COMP_WIN_CONFIGURE label (103) in libcluu. Compositor notifies cluuterm on win_register + resize_focused. Cluuterm resize_grid reallocates cell grid, updates pts.winsize, sends SIGWINCH via procmgr_pg_signal, triggers redraw."
+}

@@ -215,7 +215,10 @@ dependencies = [
 name = "cluu-compositor"
 version = "0.1.0"
 dependencies = [
+ "cluu_proto",
  "libcluu",
+ "postcard",
+ "serde",
 ]
 
 [[package]]
@@ -458,7 +461,9 @@ dependencies = [
 name = "cluu-login"
 version = "0.1.0"
 dependencies = [
+ "cluu_proto",
  "libcluu",
+ "postcard",
 ]
 
 [[package]]

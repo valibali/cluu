@@ -1,0 +1,34 @@
+{
+  "id": "plan2-pty-unification-09",
+  "seq": "09",
+  "title": "Cluuterm registers pts in its session",
+  "status": "completed",
+  "agent_id": "coder-agent",
+  "started_at": "2026-05-19T00:00:00Z",
+  "completed_at": "2026-05-19T00:00:00Z",
+  "completion_summary": "Added read_own_session_id() returning None; switched register_pts to VFS_REGISTER_PTS_LABEL with VfsRegisterPtsRequest postcard payload",
+  "depends_on": ["04", "08"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/cluuterm/src/main.rs",
+    "userspace/cluuterm/src/tty_backend.rs",
+    "userspace/vfs/src/main.rs",
+    "userspace/cluu_proto/src/pts.rs"
+  ],
+  "acceptance_criteria": [
+    "read_own_session_id() helper queries procmgr for session_id",
+    "VFS_REGISTER_PTS call passes session_id in request payload",
+    "For spec 2: session_id remains None until spec 3 wires sessions",
+    "Per-session overlay infra accepts the session_id field",
+    "cargo build -p cluuterm clean",
+    "bash scripts/harness_run.sh boots, cluuterm renders shell prompt"
+  ],
+  "deliverables": [
+    "userspace/cluuterm/src/main.rs (modify: add session_id query + pass to register)",
+    "userspace/cluuterm/src/tty_backend.rs (modify if needed)"
+  ]
+}

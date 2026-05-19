@@ -1,0 +1,37 @@
+{
+  "id": "plan2-pty-unification-12",
+  "seq": "12",
+  "title": "Delete dead code (legacy TTY_* labels, dual-protocol guards)",
+  "status": "pending",
+  "depends_on": ["04", "05", "07"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/libcluu/src/ipc.rs",
+    "userspace/tty/src/protocol.rs",
+    "userspace/shell/src/"
+  ],
+  "acceptance_criteria": [
+    "Zero hits for TTY_REGISTER_LABEL anywhere in tree (git grep -c returns nothing or 0)",
+    "Zero hits for TTY_CTL_LABEL",
+    "Zero hits for TTY_SET_FG_LABEL",
+    "Zero hits for TTY_READ_REQUEST_LABEL",
+    "Zero hits for TTY_POLL_QUERY_LABEL",
+    "Zero hits for tty_endpoint != 0 in userspace/shell/",
+    "Legacy PTS_* consts in libcluu/src/ipc.rs deleted (superseded by cluu_proto::pts)",
+    "cargo xtask build clean",
+    "cargo clippy --workspace --all-targets -- -D warnings clean"
+  ],
+  "deliverables": [
+    "userspace/libcluu/src/ipc.rs (modify: delete TTY_* and legacy PTS_* consts)",
+    "userspace/tty/src/protocol.rs (modify: delete remaining TTY_* if any)",
+    "userspace/shell/src/ (modify: final cleanup if any guards remain)"
+  ],
+  "agent_id": null,
+  "started_at": null,
+  "completed_at": null,
+  "completion_summary": null
+}

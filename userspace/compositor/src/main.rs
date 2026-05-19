@@ -14,10 +14,10 @@ mod status;
 mod window_mgr;
 mod render;
 
-use libcluu::boot::{process_info, PARAM_NOTIFY_READY_EP, PARAM_SESSION_MODE, TOKEN_IPC};
+use libcluu::boot::{process_info, PARAM_NOTIFY_READY_EP, TOKEN_IPC};
 use libcluu::ipc::{
     extract_reply_id, reply, reply_with_payload, send_msg_with_payload,
-    COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL, COMPOSITOR_READY_LABEL, VTMGR_PIN_VT_LABEL,
+    COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL, VTMGR_PIN_VT_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
@@ -95,13 +95,8 @@ pub extern "C" fn main() -> i32 {
     let info = process_info();
     let ipc_cap = info.tokens[TOKEN_IPC];
     comp.instance_id = 0;
-    let session_mode = info.params[PARAM_SESSION_MODE] as u8;
-    comp.session_mode = session_mode;
-    let _ = libcluu::debug_print(&alloc::format!(
-        "compositor: session_mode={} ({})",
-        session_mode,
-        if session_mode == 1 { "user" } else { "system" },
-    ));
+    // session_mode removed — compositor runs in single persistent mode
+    // (Task 9, Plan 3: session lifecycle refactor)
     // Register as "compositor" (not "compositor:0") so lookup_service("compositor:client")
     // resolves correctly: it splits on ':' to get service="compositor", output="client".
     if registry::init("compositor").is_err() {
@@ -141,7 +136,7 @@ pub extern "C" fn main() -> i32 {
     // can exit on its own grant before our queued REGISTRY_GRANT_REQUEST is
     // drained). Holding the READY until the polyendpoint recv is actually
     // armed closes that window.
-    let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
+let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
 
     // Pin ourselves to VT4 in vtmgr so the slot is explicit and stable
     // regardless of service-launch order.  This is a best-effort fire-and-forget:
@@ -193,25 +188,9 @@ pub extern "C" fn main() -> i32 {
     // Index of the registry endpoint in the tokens array.
     const REGISTRY_TOKEN_IDX: usize = 3;
 
-    // One-shot READY notify: fired on the first dispatch iteration so the
-    // very next syscall is the recv that will service any grant request
-    // procmgr's downstream consumer (cluuterm) issues in response to READY.
-    // notify_ep == 0 means no parent expects a READY (e.g. system compositor
-    // at boot autostart).
-    let mut pending_ready_ep: usize = notify_ep;
+    let _ = notify_ep;
 
     loop {
-        if pending_ready_ep != 0 {
-            let ready_msg = libcluu::types::Message::new(COMPOSITOR_READY_LABEL, [0; 6], 1);
-            let _ = libcluu::ipc::send(
-                pending_ready_ep,
-                &ready_msg,
-                libcluu::types::IpcFlags::empty(),
-            );
-            let _ = debug_print("compositor: READY sent to parent (post-loop-entry)");
-            pending_ready_ep = 0;
-        }
-
         let now_ms = comp.last_clock_now_ms;
 
         // Pure event-driven: block for at most 30 s then loop on Timeout.

@@ -258,11 +258,8 @@ pub struct Compositor {
     pub control_endpoint: usize,
     /// Registry endpoint for forwarding grant-request control messages.
     pub registry_endpoint: usize,
-
-    /// Session-mode discriminator read from PARAM_SESSION_MODE at startup.
-    ///   0 = system (autostarted at boot, hosts login modal only)
-    ///   1 = user   (spawned under user envelope, full desktop)
-    pub session_mode: u8,
+    /// compositor no longer distinguishes system/user mode.
+    /// Task 9, Plan 3: session lifecycle refactor.
 
     /// Set of session IDs for which the compositor has an active
     /// SESSION_ENDED subscription. Used to deduplicate subscriptions
@@ -374,7 +371,6 @@ impl Compositor {
             input_endpoint_global: 0,
             control_endpoint: 0,
             registry_endpoint: 0,
-            session_mode: 0,
             tracked_sessions: BTreeSet::new(),
         })
     }

@@ -1,0 +1,31 @@
+{
+  "id": "plan2-pty-unification-07",
+  "seq": "07",
+  "title": "Shell drops tty_endpoint dual-protocol branch",
+  "status": "in_progress",
+  "agent_id": "coder-agent",
+  "started_at": "2026-05-19T00:00:00Z",
+  "depends_on": ["01"],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/shell/src/"
+  ],
+  "acceptance_criteria": [
+    "All tty_endpoint != 0 / tty_endpoint == 0 guards removed from shell",
+    "Shell unconditionally uses PTS_* verbs (unified path works for both tty and cluuterm)",
+    "TtyMode enum (if present) simplified to single mode",
+    "cargo build -p shell clean",
+    "bash scripts/harness_run.sh boots, shell prompt visible, typing works"
+  ],
+  "deliverables": [
+    "userspace/shell/src/ (modify: delete dual-protocol branches)"
+  ],
+  "agent_id": null,
+  "started_at": null,
+  "completed_at": null,
+  "completion_summary": null
+}

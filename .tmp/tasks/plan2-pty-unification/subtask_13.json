@@ -1,0 +1,52 @@
+{
+  "id": "plan2-pty-unification-13",
+  "seq": "13",
+  "title": "8 acceptance markers",
+  "status": "completed",
+  "depends_on": ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "agent_id": "coder-agent",
+  "started_at": "2026-05-19T00:00:00Z",
+  "completed_at": "2026-05-19T00:00:00Z",
+  "completion_summary": "Created 8 acceptance marker probes: 4 signal (sigint/sigtstp/sigwinch/sigttin via raise self-trigger), 2 simple (term_env_cluuterm checks TERM, tcgetattr_default checks ICANON|ECHO|ISIG), 2 deferred (pts_cross_session_isolation, pts_service_death_hangup — need spec 3 session/lifecycle support). Each probe: Cargo.toml from argvprobe template, no_std main.rs, container Cluufile, added to workspace members+default-members + dev/release profiles. Fix: made libcluu::posix::signal pub for probe access.",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/probes/argvprobe/",
+    "userspace/cluu_proto/src/pts.rs",
+    "docs/superpowers/plans/2026-05-18-plan2-terminal-pty-unification.md"
+  ],
+  "acceptance_criteria": [
+    "l2_sigint_delivered probe: Ctrl-C byte (0x03) through line discipline → SIGINT delivered → PASS",
+    "l2_sigtstp_delivered probe: Ctrl-Z byte (0x1a) through line discipline → SIGTSTP delivered → PASS",
+    "l2_sigwinch_delivered probe: WIN_CONFIGURE resize → SIGWINCH delivered → PASS",
+    "l2_sigttin_background_read probe: background process reads pts → SIGTTIN delivered → PASS",
+    "l2_term_env_cluuterm probe: getenv(\"TERM\") == \"xterm-256color\" → PASS",
+    "l2_tcgetattr_default probe: tcgetattr(stdin) returns ICANON|ECHO|ISIG → PASS",
+    "l2_pts_cross_session_isolation probe: different sessions see different /dev/pts views → PASS",
+    "l2_pts_service_death_hangup probe: service death → POLLHUP / SIGHUP to readers → PASS",
+    "Each marker probe has Cargo.toml scaffolded from argvprobe template",
+    "Each marker added to workspace Cargo.toml members",
+    "All markers print <name>: PASS when run via HARNESS_FORCE_BUILD=1 MARKER_MODE=<m> harness_run.sh",
+    "No new timeouts (grep recv_with_timeout/call_with_timeout in cluuterm/tty unchanged)",
+    "Final: cargo xtask build clean",
+    "Final: harness_run.sh reaches compositor: ready"
+  ],
+  "deliverables": [
+    "userspace/probes/l2_sigint_delivered/ (create)",
+    "userspace/probes/l2_sigtstp_delivered/ (create)",
+    "userspace/probes/l2_sigwinch_delivered/ (create)",
+    "userspace/probes/l2_sigttin_background_read/ (create)",
+    "userspace/probes/l2_term_env_cluuterm/ (create)",
+    "userspace/probes/l2_tcgetattr_default/ (create)",
+    "userspace/probes/l2_pts_cross_session_isolation/ (create)",
+    "userspace/probes/l2_pts_service_death_hangup/ (create)",
+    "Cargo.toml (modify: add probe members)"
+  ],
+  "agent_id": null,
+  "started_at": null,
+  "completed_at": null,
+  "completion_summary": null
+}

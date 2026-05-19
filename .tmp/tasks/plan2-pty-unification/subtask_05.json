@@ -1,0 +1,37 @@
+{
+  "id": "plan2-pty-unification-05",
+  "seq": "05",
+  "title": "TTY service speaks PTS_* verbs, retire TTY_* labels",
+  "status": "completed",
+  "agent_id": "coder-agent",
+  "started_at": "2026-05-19T00:00:00Z",
+  "completed_at": "2026-05-19T00:00:00Z",
+  "completion_summary": "feat(tty): speak unified PTS_* verbs; retire TTY_* labels. Replaced TTY_CTL, TTY_SET_FG, TTY_GET_FG, TTY_READ_REQUEST, TTY_POLL_QUERY dispatch with postcard-serialized PTS_GET_TERMIOS, PTS_SET_TERMIOS, PTS_SET_PGRP, PTS_GET_PGRP, PTS_READ, PTS_POLL, PTS_WRITE. Added cluu_proto + postcard deps. TTY_REGISTER kept as local registration. TTY_WRITE_SYNC kept for compatibility. context.rs uses PTS_READ_LABEL in reply.",
+  "depends_on": ["01", "03"],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/tty/src/main.rs",
+    "userspace/tty/src/context.rs",
+    "userspace/tty/src/protocol.rs",
+    "userspace/cluu_proto/src/pts.rs"
+  ],
+  "acceptance_criteria": [
+    "TTY_* label dispatch replaced with PTS_* label dispatch from cluu_proto::pts",
+    "Handler bodies mirror cluuterm's PTS_* implementations (same line discipline, same routing helpers)",
+    "TTY service holds per-/dev/tty<n> LineDiscipline instances",
+    "Legacy TTY_* handler arms deleted from main.rs",
+    "TTY_* const definitions deleted from protocol.rs",
+    "/dev/tty1..3 registrations unchanged (still register at startup)",
+    "cargo build -p tty clean",
+    "bash scripts/harness_run.sh boots, Ctrl+Alt+F2 shows text-VT with shell prompt"
+  ],
+  "deliverables": [
+    "userspace/tty/src/main.rs (modify: replace dispatch)",
+    "userspace/tty/src/context.rs (modify: add LineDiscipline per VT)",
+    "userspace/tty/src/protocol.rs (modify: delete TTY_* consts)"
+  ]
+}

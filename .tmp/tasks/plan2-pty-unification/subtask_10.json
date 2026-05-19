@@ -1,0 +1,28 @@
+{
+  "id": "plan2-pty-unification-10",
+  "seq": "10",
+  "title": "TERM=xterm-256color env propagation",
+  "status": "pending",
+  "depends_on": ["09"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/cluuterm/src/main.rs"
+  ],
+  "acceptance_criteria": [
+    "Cluuterm spawn_shell_with_pts includes TERM=xterm-256color in env vec (or verify already present from plan 1 task 17)",
+    "TTY service getty path deferred to spec 3 (note only, no code change)",
+    "cargo build -p cluuterm clean",
+    "l2_term_env_cluuterm marker passes (Task 13)"
+  ],
+  "deliverables": [
+    "userspace/cluuterm/src/main.rs (modify if TERM not already set)"
+  ],
+  "agent_id": null,
+  "started_at": null,
+  "completed_at": null,
+  "completion_summary": null
+}

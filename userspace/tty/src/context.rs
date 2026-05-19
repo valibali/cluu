@@ -17,6 +17,8 @@ use libcluu::ipc::{
 use libcluu::registry;
 use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Result};
+use cluu_proto::session::{ProfileSpec, SessionCreateRequest};
+use cluu_proto::ViewSource;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum LoginState {
@@ -326,57 +328,58 @@ impl TtyContext {
         self.forward_to_console(data);
     }
 
+    /// Transitional: send a SESSION_CREATE request to procmgr using the new
+    /// cluu_proto session protocol.  Full credential verification and shell
+    /// spawning will move into the getty binary (Task 10).  For now we create
+    /// a minimal session with a placeholder profile; the VFS-backed session
+    /// path continues to work.
     pub fn send_login_request(&mut self) {
-        if self.procmgr_spawn == 0 {
-            // procmgr grant hasn't arrived yet — retry after a brief yield.
-            self.mode = TtyMode::Login(LoginState::Username);
-            self.login_username.clear();
-            for b in self.login_password.iter_mut() { *b = 0; }
-            self.login_password.clear();
-            self.write_to_console(b"Service unavailable, try again\r\nlogin: ");
-            return;
-        }
-        let mut payload = Vec::new();
-        payload.push(0); // session_kind = 0 (tty)
-        payload.extend_from_slice(&self.login_username);
-        payload.push(0);
-        payload.extend_from_slice(&self.login_password);
-        payload.push(0);
-        // Zero password buffer
+        // Clear password buffer immediately so it doesn't outlive this call.
         for b in self.login_password.iter_mut() { *b = 0; }
         self.login_password.clear();
 
-        let msg = libcluu::types::Message::new(
-            libcluu::ipc::PROCMGR_SESSION_LOGIN_LABEL,
-            [payload.len(), self.instance_id as usize, 0, 0, 0, 0],
-            2,
-        );
-        self.mode = TtyMode::Login(LoginState::Authenticating);
-        let _ = debug_print(&format!("tty:{}: login request sent", self.instance_id));
+        let user_name: alloc::string::String = core::str::from_utf8(&self.login_username).unwrap_or("").into();
+        let _instance = self.instance_id; // tty instance (kept local for future use)
 
-        // Use call semantics so procmgr can reply with success/failure + shell stdin.
-        let mut reply_msg = Message::new(0, [0; 6], 0);
-        match libcluu::ipc::call_with_payload(self.procmgr_spawn, &msg, &payload, &mut reply_msg) {
-            Ok(()) => {
-                if reply_msg.words[0] != 0 {
-                    let _ = debug_print(&format!(
-                        "tty:{}: login failed (err={})", self.instance_id, reply_msg.words[0]
-                    ));
-                    self.mode = TtyMode::Login(LoginState::Username);
-                    self.login_username.clear();
-                    self.write_to_console(b"Login incorrect\r\nlogin: ");
-                } else {
-                    // Login succeeded — enter Terminal mode (Path A: stdin via fd 0, not push).
-                    self.mode = TtyMode::Terminal;
-                    let _ = debug_print(&format!(
-                        "tty:{}: login success, terminal mode", self.instance_id
-                    ));
-                }
+        // Build a minimal ProfileSpec with BootstrapRoot — the full envelope
+        // (home, env, umask) will be applied by getty (Task 10).
+        let profile = ProfileSpec {
+            home: alloc::format!("/home/{}", user_name),
+            initial_view: ViewSource::BootstrapRoot,
+            env: alloc::vec![
+                (alloc::string::String::from("HOME"),
+                 alloc::format!("/home/{}", user_name)),
+                (alloc::string::String::from("USER"), user_name.clone()),
+                (alloc::string::String::from("TERM"),
+                 alloc::string::String::from("xterm-256color")),
+            ],
+            umask: 0o022,
+        };
+        let req = SessionCreateRequest {
+            user_name: user_name.clone(),
+            profile,
+        };
+
+        self.mode = TtyMode::Login(LoginState::Authenticating);
+        self.login_username.clear();
+
+        match libcluu::session::create(req) {
+            Ok(_ok) => {
+                let _ = debug_print(&format!(
+                    "tty:{}: SESSION_CREATE ok session_id={}", self.instance_id, _ok.session_id
+                ));
+                // Login succeeded — enter Terminal mode (Path A: stdin via fd 0).
+                self.mode = TtyMode::Terminal;
+                let _ = debug_print(&format!(
+                    "tty:{}: login success, terminal mode", self.instance_id
+                ));
             }
-            Err(_) => {
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "tty:{}: SESSION_CREATE failed {:?}", self.instance_id, e
+                ));
                 self.mode = TtyMode::Login(LoginState::Username);
-                self.login_username.clear();
-                self.write_to_console(b"\r\nlogin: ");
+                self.write_to_console(b"Login incorrect\r\nlogin: ");
             }
         }
     }

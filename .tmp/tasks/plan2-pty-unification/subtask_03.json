@@ -1,0 +1,31 @@
+{
+  "id": "plan2-pty-unification-03",
+  "seq": "03",
+  "title": "Service-shared routing helper in libcluu::tty_core",
+  "status": "pending",
+  "depends_on": ["02"],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/libcluu/src/tty_core/mod.rs",
+    "userspace/libcluu/src/tty_core/line_discipline.rs"
+  ],
+  "acceptance_criteria": [
+    "ServiceAction enum defined (DeliverBytes, SignalFgPgrp, Echo, DeliverEof)",
+    "translate_output() maps LineDiscOutput → Option<ServiceAction>",
+    "route_input_byte() convenience wrapper: feed byte, return action list",
+    "Module exports accessible from libcluu::tty_core::routing",
+    "cargo build -p libcluu clean"
+  ],
+  "deliverables": [
+    "userspace/libcluu/src/tty_core/mod.rs (modify: add pub mod routing; or inline)",
+    "userspace/libcluu/src/tty_core/routing.rs (create if extracted as submodule)"
+  ],
+  "agent_id": null,
+  "started_at": null,
+  "completed_at": null,
+  "completion_summary": null
+}

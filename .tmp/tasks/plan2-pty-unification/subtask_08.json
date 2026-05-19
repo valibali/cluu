@@ -1,0 +1,43 @@
+{
+  "id": "plan2-pty-unification-08",
+  "seq": "08",
+  "title": "VFS per-session /dev/pts overlay",
+  "status": "completed",
+  "agent_id": "coder-agent",
+  "started_at": "2026-05-19T00:00:00Z",
+  "completed_at": "2026-05-19T00:00:00Z",
+  "completion_summary": "feat(vfs): per-session /dev/pts overlay; VFS_REGISTER_PTS accepts session_id",
+  "depends_on": ["01"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/vfs/src/pts.rs",
+    "userspace/vfs/src/view.rs",
+    "userspace/vfs/src/main.rs",
+    "userspace/cluu_proto/src/pts.rs"
+  ],
+  "acceptance_criteria": [
+    "PtsOverlay struct with by_session (BTreeMap) and global maps",
+    "PtsEntry gains session_id: Option<u32> field",
+    "narrow_pts_mount() in view.rs substitutes per-session overlay for /dev/pts",
+    "Sessionless callers see no /dev/pts (return None)",
+    "VFS_REGISTER_PTS_LABEL wire format extended with VfsRegisterPtsRequest { session_id, pts_endpoint, suggested_id }",
+    "VfsRegisterPtsRequest/VfsRegisterPtsReply types added to cluu_proto::pts",
+    "Existing registration path works with session_id: None (backward compat)",
+    "cargo build -p vfs -p cluu_proto clean",
+    "bash scripts/harness_run.sh boots"
+  ],
+  "deliverables": [
+    "userspace/vfs/src/pts.rs (modify: per-session storage)",
+    "userspace/vfs/src/view.rs (modify: derive per-session overlay)",
+    "userspace/vfs/src/main.rs (modify: accept session_id in registration)",
+    "userspace/cluu_proto/src/pts.rs (modify: add VfsRegisterPtsRequest/Reply)"
+  ],
+  "agent_id": null,
+  "started_at": null,
+  "completed_at": null,
+  "completion_summary": null
+}

@@ -136,12 +136,8 @@ pub const ARGV_MAGIC: u32 = 0x5647_5241;
 /// Reply: payload = "name pid container_id\n" lines.
 pub const PROCMGR_CONTAINER_LIST_LABEL: u32 = 25;
 
-/// Session login: caller → procmgr (call). words[0]=payload_len, words[1]=vt_instance.
-/// Payload wire format: `session_kind(u8) + username\0 + password\0`
-///   session_kind 0 = tty  (sent by tty/context.rs; procmgr spawns a shell on the VT)
-///   session_kind 1 = compositor (sent by /bin/login; procmgr stubs OK — T6 fills spawn)
-/// Reply: words[0]=errno (0=ok), words[1]=container_id (tty path) or 0 (compositor stub).
-pub const PROCMGR_SESSION_LOGIN_LABEL: u32 = 30;
+// PROCMGR_SESSION_LOGIN_LABEL removed — replaced by cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL
+// (Task 9, Plan 3: session lifecycle refactor)
 /// Session death: procmgr → tty (send). words[0]=vt_instance.
 pub const PROCMGR_SESSION_DEATH_LABEL: u32 = 31;
 /// Privilege escalation (sudo): shell → procmgr (call).
@@ -235,9 +231,8 @@ pub const COMP_FRAME_READY_LABEL: u32 = 100;
 /// compositor → app input endpoint. User or compositor requested window close.
 /// App should unregister its PTS, destroy the window, and exit cleanly.
 pub const COMP_CLOSE_REQUEST_LABEL: u32 = 101;
-/// Sent by a process to its parent's notify-ready endpoint once it has
-/// finished startup. words: all zero (presence is the signal).
-pub const COMPOSITOR_READY_LABEL: u32 = 102;
+// COMPOSITOR_READY_LABEL removed — compositor no longer swaps system/user mode
+// (Task 9, Plan 3: session lifecycle refactor)
 /// compositor → app input endpoint. Window was resized to new pixel dimensions.
 /// words[0] = pixel_width (u32), words[1] = pixel_height (u32).
 pub const COMP_WIN_CONFIGURE_LABEL: u32 = 103;

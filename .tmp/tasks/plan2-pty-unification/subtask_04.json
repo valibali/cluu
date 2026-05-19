@@ -1,0 +1,42 @@
+{
+  "id": "plan2-pty-unification-04",
+  "seq": "04",
+  "title": "Cluuterm speaks PTS_* verbs (11 handlers)",
+  "status": "completed",
+  "agent_id": "coder-agent",
+  "started_at": "2026-05-19T00:00:00Z",
+  "depends_on": ["01", "03"],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md"
+  ],
+  "reference_files": [
+    "userspace/cluuterm/src/tty_backend.rs",
+    "userspace/cluuterm/src/main.rs",
+    "userspace/cluu_proto/src/pts.rs"
+  ],
+  "acceptance_criteria": [
+    "All 11 PTS_* verb handlers implemented (READ, WRITE, POLL, GET_TERMIOS, SET_TERMIOS, GET_WINSIZE, SET_WINSIZE, GET_PGRP, SET_PGRP, FLUSH, CLOSED)",
+    "Import from cluu_proto::pts replaces legacy local PTS_* consts",
+    "Per-pts state struct includes LineDiscipline, fg_pgid, winsize, pending_readers, blocked_writers, closed",
+    "handle_pts_read: SIGTTIN check when caller not fg_pgrp, return Eintr",
+    "handle_pts_write: TOSTOP/SIGTTOU check, process_output(), write_to_render()",
+    "handle_pts_set_winsize emits SIGWINCH to fg_pgid",
+    "handle_pts_flush handles Input/Output/Both queues",
+    "handle_pts_poll returns POLLIN/POLLOUT/POLLHUP readiness",
+    "reply_ok/reply_err helpers for postcard-serialized IPC replies",
+    "WIN_INPUT handler wired through route_input_byte → ServiceAction dispatch",
+    "ServiceAction::DeliverBytes wakes pending readers",
+    "ServiceAction::SignalFgPgrp calls procmgr_pg_signal",
+    "ServiceAction::Echo writes to rendering layer",
+    "cargo build -p cluuterm clean",
+    "bash scripts/harness_run.sh boots to compositor: ready"
+  ],
+  "deliverables": [
+    "userspace/cluuterm/src/tty_backend.rs (modify: replace dispatch + add handlers)",
+    "userspace/cluuterm/src/main.rs (modify: wire input routing)"
+  ],
+  "completed_at": "2026-05-19T00:00:00Z",
+  "completion_summary": "Implemented 11 PTS_* handlers (100-110), Pts struct, reply_ok/reply_err, input routing"
+}
