@@ -14,14 +14,3 @@ session_mode = 0
 [[service]]
 image = "login"
 
-[[service]]
-image = "getty"
-args = ["/dev/tty1"]
-
-[[service]]
-image = "getty"
-args = ["/dev/tty2"]
-
-[[service]]
-image = "getty"
-args = ["/dev/tty3"]
