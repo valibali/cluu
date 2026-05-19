@@ -1,9 +1,8 @@
 //! `cluuterm` — CLUU terminal emulator binary.
 //!
-//! Task 14: scaffold quality — performs WIN_REGISTER with the compositor,
-//! PTS_REGISTER with VFS, then posix_spawns /bin/login with fd 0/1/2 bound
-//! to the pts node.  The real recv loop (PTS_READ/WRITE/CLOSED, FRAME_READY,
-//! INPUT_FORWARD) is filled in by Tasks 15-17.
+//! Registers with compositor (WIN_REGISTER), registers PTS with VFS,
+//! then spawns /bin/shell with fd 0/1/2 bound to the pts node via
+//! the unified spawn protocol (plan 1, `libcluu::spawn::spawn`).
 
 #![no_std]
 #![no_main]
@@ -24,6 +23,13 @@ use libcluu::syscall::MAP_FRAME_TOKEN;
 use libcluu::types::Message;
 use libcluu::window_shm::WindowShm;
 use libcluu::{debug_print, registry, syscall};
+
+use cluu_proto::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, ViewSource};
+
+extern "C" {
+    fn _open(path: *const u8, flags: i32, mode: u32) -> i32;
+    fn _close(fd: i32) -> i32;
+}
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
@@ -228,116 +234,100 @@ fn register_pts(my_ep: usize) -> Result<u32, i32> {
 
 /// Spawn `/bin/shell` with fd 0, 1, 2 bound to `/dev/pts/<pts_id>`.
 ///
-/// Strategy: open /dev/pts/<id> three times (for stdin, stdout, stderr),
-/// then use posix_spawn_file_actions_adddup2 to redirect the child's
-/// fd 0/1/2 to those open file descriptors.
-///
-/// The pts fds opened here are closed after spawn; the child inherits them
-/// through the FdInherit mechanism baked into libcluu's posix_spawn.
-///
-/// NOTE: The file_actions adddup2 only accepts newfd in 0-3 (libcluu
-/// constraint: `!(0..=3).contains(&newfd)` → EINVAL).  We open the pts fd
-/// once and dup2 it to 0, 1, and 2 separately.
+/// Opens the pts node, builds FdInherit entries referencing it, and calls
+/// the unified spawn protocol (`libcluu::spawn::spawn`). The parent-side
+/// pts fd is closed after spawn.
 fn spawn_shell_with_pts(pts_id: u32) -> Result<(), i32> {
-    extern "C" {
-        fn posix_spawn(
-            pid: *mut i32,
-            path: *const u8,
-            file_actions: *const core::ffi::c_void,
-            attrp: *const core::ffi::c_void,
-            argv: *const *const u8,
-            envp: *const *const u8,
-        ) -> i32;
-
-        fn posix_spawn_file_actions_init(
-            actions: *mut *mut core::ffi::c_void,
-        ) -> i32;
-
-        fn posix_spawn_file_actions_destroy(
-            actions: *mut *mut core::ffi::c_void,
-        ) -> i32;
-
-        fn posix_spawn_file_actions_adddup2(
-            actions: *mut *mut core::ffi::c_void,
-            fd: i32,
-            newfd: i32,
-        ) -> i32;
-
-        fn _open(path: *const u8, flags: i32, mode: u32) -> i32;
-        fn _close(fd: i32) -> i32;
-    }
-
-    // Build the /dev/pts/<id> path.
     let path_bytes = render::pts_path(pts_id);
 
-    // O_RDWR = 2 on this target.
-    const O_RDWR: i32 = 2;
+    // O_RDONLY = 0; O_WRONLY = 1; we open once RW and build FdInherit entries.
+    const O_RDONLY: i32 = 0;
+    const O_WRONLY: i32 = 1;
 
-    // Open the pts node.
-    let pts_fd = unsafe { _open(path_bytes.as_ptr(), O_RDWR, 0) };
-    if pts_fd < 0 {
-        let _ = debug_print("cluuterm: open /dev/pts failed");
+    // Open the pts node for input (fd 0) and output (fd 1, 2).
+    let pts_in: i32 = unsafe { _open(path_bytes.as_ptr(), O_RDONLY, 0) };
+    if pts_in < 0 {
+        let _ = debug_print("cluuterm: open /dev/pts for read failed");
         return Err(10);
     }
-
-    // Set up file_actions: dup2 pts_fd → 0, 1, 2.
-    let mut fa_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
-    let fa_init_rc = unsafe { posix_spawn_file_actions_init(&mut fa_ptr) };
-    if fa_init_rc != 0 {
-        unsafe { _close(pts_fd); }
+    let pts_out: i32 = unsafe { _open(path_bytes.as_ptr(), O_WRONLY, 0) };
+    if pts_out < 0 {
+        unsafe { _close(pts_in); }
+        let _ = debug_print("cluuterm: open /dev/pts for write failed");
         return Err(11);
     }
 
-    let mut ok = true;
-    for newfd in [0i32, 1, 2] {
-        let rc = unsafe {
-            posix_spawn_file_actions_adddup2(
-                &mut fa_ptr,
-                pts_fd,
-                newfd,
+    // Resolve VFS addresses for fd inheritance.
+let (stdin_cid, stdin_rfd, stdout_cid, stdout_rfd) = {
+            let fd_table = libcluu::fd_table::FD_TABLE.lock();
+            let stdin_entry = fd_table.get(pts_in).ok_or(12)?;
+            let stdout_entry = fd_table.get(pts_out).ok_or(13)?;
+            (
+                stdin_entry.client_id as u64, stdin_entry.remote_fd.unwrap_or(0) as u32,
+                stdout_entry.client_id as u64, stdout_entry.remote_fd.unwrap_or(0) as u32,
             )
         };
-        if rc != 0 {
-            ok = false;
-            break;
-        }
-    }
 
-    if !ok {
-        unsafe {
-            posix_spawn_file_actions_destroy(&mut fa_ptr);
-            _close(pts_fd);
-        }
-        return Err(12);
-    }
+    let fd_inherit = alloc::vec![
+        FdInherit {
+            child_fd: 0,
+            source: FdSource::VfsFd {
+                vfs_client_id: stdin_cid,
+                vfs_remote_fd: stdin_rfd,
+            },
+            rights: FdRights::READ_ONLY,
+        },
+        FdInherit {
+            child_fd: 1,
+            source: FdSource::VfsFd {
+                vfs_client_id: stdout_cid,
+                vfs_remote_fd: stdout_rfd,
+            },
+            rights: FdRights::WRITE_ONLY,
+        },
+        FdInherit {
+            child_fd: 2,
+            source: FdSource::VfsFd {
+                vfs_client_id: stdout_cid,
+                vfs_remote_fd: stdout_rfd,
+            },
+            rights: FdRights::WRITE_ONLY,
+        },
+    ];
 
-    let login_path = b"/bin/shell\0";
-    let arg0 = b"shell\0";
-    let argv: [*const u8; 2] = [arg0.as_ptr(), core::ptr::null()];
-    // envp = NULL tells libcluu's posix_spawn to fall back to our `environ`,
-    // which procmgr seeded from the user envelope at SESSION_LOGIN spawn.
-    // That carries HOME/USER/PATH down to the shell so .shellrc resolves
-    // and the prompt renders the right user/cwd.
-    let mut child_pid: i32 = 0;
-
-    let rc = unsafe {
-        posix_spawn(
-            &mut child_pid,
-            login_path.as_ptr(),
-            &fa_ptr as *const _ as *const core::ffi::c_void,
-            core::ptr::null(),
-            argv.as_ptr(),
-            core::ptr::null(),
-        )
+    let envelope = SpawnEnvelope {
+        image: alloc::string::String::from("shell"),
+        args: alloc::vec::Vec::new(),
+        env: alloc::vec![
+            (alloc::string::String::from("TERM"),
+             alloc::string::String::from("xterm-256color")),
+        ],
+        view: ViewSource::Derive(libcluu::token(libcluu::boot::TOKEN_EXTRA_0) as u64),
+        fd_inherit,
+        session: None,
+        notify: None,
     };
 
-    unsafe {
-        posix_spawn_file_actions_destroy(&mut fa_ptr);
-        _close(pts_fd);
+    match libcluu::spawn::spawn(envelope) {
+        Ok(reply) => {
+            let _ = debug_print(&alloc::format!(
+                "cluuterm: spawned shell pid={}\n", reply.pid));
+        }
+        Err(e) => {
+            let _ = debug_print(&alloc::format!(
+                "cluuterm: spawn shell failed: {:?}\n", e));
+            unsafe {
+                _close(pts_in);
+                _close(pts_out);
+            }
+            return Err(15);
+        }
     }
 
-    if rc != 0 {
-        return Err(13);
+    // Close parent-side pts fds.
+    unsafe {
+        _close(pts_in);
+        _close(pts_out);
     }
     Ok(())
 }
