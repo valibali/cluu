@@ -88,6 +88,14 @@ members = [
     "userspace/login",
     "userspace/stat",
     "userspace/cluuterm",
+    "userspace/probes/l2_sigint_delivered",
+    "userspace/probes/l2_sigtstp_delivered",
+    "userspace/probes/l2_sigwinch_delivered",
+    "userspace/probes/l2_sigttin_background_read",
+    "userspace/probes/l2_term_env_cluuterm",
+    "userspace/probes/l2_tcgetattr_default",
+    "userspace/probes/l2_pts_cross_session_isolation",
+    "userspace/probes/l2_pts_service_death_hangup",
 
     # Language tooling
     "crates/cluu_lang",
@@ -149,6 +157,14 @@ default-members = [
     "userspace/login",
     "userspace/stat",
     "userspace/cluuterm",
+    "userspace/probes/l2_sigint_delivered",
+    "userspace/probes/l2_sigtstp_delivered",
+    "userspace/probes/l2_sigwinch_delivered",
+    "userspace/probes/l2_sigttin_background_read",
+    "userspace/probes/l2_term_env_cluuterm",
+    "userspace/probes/l2_tcgetattr_default",
+    "userspace/probes/l2_pts_cross_session_isolation",
+    "userspace/probes/l2_pts_service_death_hangup",
 ]
 
 [workspace.package]
@@ -261,6 +277,30 @@ debug = 0
 debug = 0
 
 [profile.dev.package."cluu-cluuterm"]
+debug = 0
+
+[profile.dev.package."cluu-l2-sigint-delivered"]
+debug = 0
+
+[profile.dev.package."cluu-l2-sigtstp-delivered"]
+debug = 0
+
+[profile.dev.package."cluu-l2-sigwinch-delivered"]
+debug = 0
+
+[profile.dev.package."cluu-l2-sigttin-background-read"]
+debug = 0
+
+[profile.dev.package."cluu-l2-term-env-cluuterm"]
+debug = 0
+
+[profile.dev.package."cluu-l2-tcgetattr-default"]
+debug = 0
+
+[profile.dev.package."cluu-l2-pts-cross-session-isolation"]
+debug = 0
+
+[profile.dev.package."cluu-l2-pts-service-death-hangup"]
 debug = 0
 
 [profile.dev.package."cluu-mkdir"]
@@ -465,6 +505,30 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-cluuterm"]
+debug = 0
+
+[profile.release.package."cluu-l2-sigint-delivered"]
+debug = 0
+
+[profile.release.package."cluu-l2-sigtstp-delivered"]
+debug = 0
+
+[profile.release.package."cluu-l2-sigwinch-delivered"]
+debug = 0
+
+[profile.release.package."cluu-l2-sigttin-background-read"]
+debug = 0
+
+[profile.release.package."cluu-l2-term-env-cluuterm"]
+debug = 0
+
+[profile.release.package."cluu-l2-tcgetattr-default"]
+debug = 0
+
+[profile.release.package."cluu-l2-pts-cross-session-isolation"]
+debug = 0
+
+[profile.release.package."cluu-l2-pts-service-death-hangup"]
 debug = 0
 
 [profile.release.package."cluu-mkdir"]

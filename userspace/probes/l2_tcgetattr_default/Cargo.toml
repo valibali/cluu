@@ -1,0 +1,14 @@
+[package]
+name = "cluu-l2-tcgetattr-default"
+version = "0.1.0"
+edition = "2021"
+description = "Spec 2 marker: verify tcgetattr returns ICANON|ECHO|ISIG"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "l2_tcgetattr_default"
+path = "src/main.rs"

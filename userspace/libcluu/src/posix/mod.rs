@@ -24,7 +24,7 @@
 #![allow(non_camel_case_types)]
 
 mod dir;
-mod env;
+pub mod env;
 mod fcntl;
 pub(crate) mod file;
 mod framebuffer;
@@ -34,7 +34,7 @@ pub mod pipe;
 mod poll;
 mod process;
 pub mod pthread;
-mod signal;
+pub mod signal;
 mod stat;
 mod stubs;
 pub mod termios;

@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs registry
+BUILD "cargo build --manifest-path userspace/probes/l2_sigtstp_delivered/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/l2_sigtstp_delivered.elf /bin/l2_sigtstp_delivered
+ENTRYPOINT /bin/l2_sigtstp_delivered
