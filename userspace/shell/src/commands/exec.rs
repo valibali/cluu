@@ -330,41 +330,13 @@ pub(crate) fn wait_for_exit_or_sigint(
         ctrl_c_flags = TTY_FG_FLAG_NOTIFY_CTRL_C | TTY_FG_FLAG_FORWARD_CTRL_C;
     }
 
-    // Transfer tty foreground routing to the child while it runs. Skip in
-    // cluuterm/pts mode (tty_endpoint == 0) — there is no TTY service to
-    // forward Ctrl-C through; cluuterm handles foreground routing itself.
-    if tty_endpoint != 0 {
-        set_tty_foreground(
-            tty_endpoint,
-            child_stdin_endpoint,
-            ctrl_c_notify_endpoint,
-            ctrl_c_flags,
-        )?;
-    }
-    // Skip TTY_CTL when tty_endpoint is 0 (cluuterm/pts mode — no TTY service
-    // to talk to). `tty_get_lflag` would otherwise issue a synchronous call
-    // against a non-TTY endpoint and never get a reply.
-    let saved_lflag = if tty_endpoint != 0 {
-        match tty_get_lflag(tty_endpoint) {
-            Ok(lflag) => lflag,
-            Err(err) => {
-                let _ = debug_print(&format!("shell: tty_get_lflag failed {:?}", err));
-                TTY_LFLAG_DEFAULT
-            }
-        }
-    } else {
-        TTY_LFLAG_DEFAULT
-    };
-    let mut lflag_switched = false;
-    if mode == ForegroundMode::PassCtrlCToChild && tty_endpoint != 0 {
-        let target_lflag = saved_lflag & !(TTY_LFLAG_ECHO | TTY_LFLAG_ICANON);
-        match tty_set_lflag(tty_endpoint, target_lflag) {
-            Ok(()) => lflag_switched = true,
-            Err(err) => {
-                let _ = debug_print(&format!("shell: tty_set_lflag(raw) failed {:?}", err));
-            }
-        }
-    }
+    // Unified PTS_* path: foreground routing is handled service-side via
+    // PTS_SET_PGRP_LABEL (already set by tty_set_fg in spawn_and_wait).
+    // No legacy TTY_REGISTER_LABEL forward needed.
+    // Unified PTS_* path: termios (ECHO, ICANON) is managed service-side via
+    // PTS_GET_TERMIOS_LABEL / PTS_SET_TERMIOS_LABEL. Shell no longer toggles
+    // lflag directly — the legacy TTY_CTL_LABEL path is dead code.
+    let _lflag_switched = false;
 
     let mut buf = [0u8; 256];
     let tokens = [notify_endpoint, ctrl_c_notify_endpoint];
@@ -420,25 +392,9 @@ pub(crate) fn wait_for_exit_or_sigint(
         }
     };
 
-    // Restore normal shell stdin routing once the foreground child finishes.
-    if lflag_switched {
-        if let Err(err) = tty_set_lflag(tty_endpoint, saved_lflag) {
-            let _ = debug_print(&format!("shell: tty_set_lflag(restore) failed {:?}", err));
-            if result.is_ok() {
-                result = Err(err);
-            }
-        }
-    }
-    // Guard the fg-restore call: if tty_endpoint is 0/bogus we silently skip
-    // rather than calling into a NULL receiver path.
-    if tty_endpoint != 0 {
-        if let Err(err) = set_tty_foreground(tty_endpoint, 0, 0, TTY_FG_FLAG_FORWARD_CTRL_C) {
-            let _ = debug_print(&format!("shell: tty foreground restore failed {:?}", err));
-            if result.is_ok() {
-                result = Err(err);
-            }
-        }
-    }
+    // Unified PTS_* path: foreground routing restored service-side via
+    // PTS_SET_PGRP_LABEL (already handled by tty_set_fg restore in spawn_and_wait).
+    // No legacy TTY_CTL_LABEL lflag restore or TTY_REGISTER_LABEL fg-restore needed.
     let _ = debug_print("shell: wait_for_exit_or_sigint return");
     result
 }
