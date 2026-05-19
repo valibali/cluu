@@ -165,6 +165,8 @@ pub extern "C" fn main() -> i32 {
 
     let _ = debug_print("compositor: ready");
 
+    spawn_login_window(&mut comp);
+
     // vtmgr owns fb arbitration: compositor starts inactive and waits
     // for COMP_VT_ACTIVATE_LABEL from vtmgr (Ctrl+Alt+F5).
 
