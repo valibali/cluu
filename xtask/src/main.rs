@@ -7,14 +7,14 @@
 //!   cargo xtask test           # Run all tests
 //!   cargo xtask clean          # Clean all build artifacts
 
+mod tui;
+
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
@@ -418,103 +418,6 @@ fn logs_root_dir() -> PathBuf {
     project_root().join("target").join("logs")
 }
 
-fn work_units_from_line(line: &str) -> u32 {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed == "(output)" {
-        return 0;
-    }
-    if trimmed.contains("Blocking waiting for file lock") {
-        return 0;
-    }
-
-    let lower = trimmed.to_ascii_lowercase();
-
-    // Strong build-step indicators.
-    if lower.starts_with("compiling ")
-        || lower.starts_with("linking ")
-        || lower.starts_with("finished ")
-        || lower.contains("building c object")
-        || lower.contains("building cxx object")
-        || lower.contains("generating ")
-        || lower.contains("assembling ")
-    {
-        return 1;
-    }
-
-    // File-oriented heuristic for tool outputs that don't use the cargo-style prefixes.
-    let file_markers = [".rs", ".c", ".h", ".s", ".asm", ".o", ".a", ".ld"];
-    if file_markers.iter().any(|marker| lower.contains(marker)) {
-        return 1;
-    }
-
-    0
-}
-
-fn is_work_unit_line(line: &str) -> bool {
-    work_units_from_line(line) > 0
-}
-
-fn count_work_units_in_log(log_path: &Path) -> u32 {
-    let Ok(content) = fs::read_to_string(log_path) else {
-        return 0;
-    };
-    content.lines().fold(0u32, |acc, line| {
-        acc.saturating_add(work_units_from_line(line))
-    })
-}
-
-fn default_expected_work_units(task_id: &str) -> u32 {
-    match task_id {
-        "dep-klibcluu" => 60,
-        "dep-libcluu" => 80,
-        "dep-newlib" => 320,
-        "dep-syscalls" => 40,
-        "dep-crt0" => 8,
-        id if id.starts_with("init-") => 40,
-        "kernel" => 120,
-        "initrd" => 24,
-        "userdisk" => 48,
-        "disk-image" => 8,
-        id if id.starts_with("container-") => 20,
-        _ => 80,
-    }
-}
-
-fn historical_expected_work_units(task_id: &str, logs_root: &Path) -> u32 {
-    if !logs_root.exists() {
-        return default_expected_work_units(task_id);
-    }
-
-    let mut runs: Vec<PathBuf> = match fs::read_dir(logs_root) {
-        Ok(read_dir) => read_dir
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    runs.sort_by_key(|path| path.file_name().map(|n| n.to_os_string()));
-    runs.reverse();
-
-    let mut samples: Vec<u32> = Vec::new();
-    for run_dir in runs.into_iter().take(10) {
-        let path = run_dir.join(format!("{task_id}.log"));
-        if !path.exists() {
-            continue;
-        }
-        let count = count_work_units_in_log(&path);
-        if count > 0 {
-            samples.push(count);
-        }
-    }
-
-    if samples.is_empty() {
-        return default_expected_work_units(task_id);
-    }
-    samples.sort_unstable();
-    samples[samples.len() / 2]
-}
-
 fn select_log_run_dir(run: Option<&str>) -> Result<PathBuf> {
     let root = logs_root_dir();
     let legacy_root = project_root().join("target").join("xtask-logs");
@@ -762,798 +665,8 @@ fn sanitize_live_line(raw: &str) -> String {
     }
 }
 
-fn truncate_live_line(line: &str, max_chars: usize) -> String {
-    if line.chars().count() <= max_chars {
-        return line.to_string();
-    }
-    let keep = max_chars.saturating_sub(3);
-    let mut out: String = line.chars().take(keep).collect();
-    out.push_str("...");
-    out
-}
-
-fn ansi_escape_len(bytes: &[u8], start: usize) -> usize {
-    if start >= bytes.len() || bytes[start] != 0x1b {
-        return 0;
-    }
-    if start + 1 >= bytes.len() {
-        return 1;
-    }
-    match bytes[start + 1] {
-        b'[' => {
-            // CSI: ESC [ ... <final-byte 0x40..0x7E>
-            let mut i = start + 2;
-            while i < bytes.len() {
-                if (0x40..=0x7e).contains(&bytes[i]) {
-                    return i - start + 1;
-                }
-                i += 1;
-            }
-            bytes.len() - start
-        }
-        b']' => {
-            // OSC: ESC ] ... BEL or ST(ESC \)
-            let mut i = start + 2;
-            while i < bytes.len() {
-                if bytes[i] == 0x07 {
-                    return i - start + 1;
-                }
-                if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                    return i - start + 2;
-                }
-                i += 1;
-            }
-            bytes.len() - start
-        }
-        _ => {
-            // Other ESC sequence, assume 2-byte sequence.
-            (start + 2).min(bytes.len()) - start
-        }
-    }
-}
-
-fn visible_width_ansi(line: &str) -> usize {
-    let mut width = 0usize;
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b {
-            let esc_len = ansi_escape_len(bytes, i).max(1);
-            i = i.saturating_add(esc_len);
-            continue;
-        }
-        if let Some(ch) = line[i..].chars().next() {
-            i += ch.len_utf8();
-            width = width.saturating_add(1);
-        } else {
-            break;
-        }
-    }
-    width
-}
-
-fn take_visible_ansi(line: &str, visible_limit: usize) -> String {
-    let mut out = String::new();
-    let mut visible = 0usize;
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b {
-            let esc_len = ansi_escape_len(bytes, i).max(1);
-            let end = (i + esc_len).min(bytes.len());
-            out.push_str(&line[i..end]);
-            i = end;
-            continue;
-        }
-        if visible >= visible_limit {
-            break;
-        }
-        if let Some(ch) = line[i..].chars().next() {
-            out.push(ch);
-            i += ch.len_utf8();
-            visible = visible.saturating_add(1);
-        } else {
-            break;
-        }
-    }
-
-    out
-}
-
-fn clamp_render_line(line: &str, width: usize, use_color: bool) -> String {
-    let width = width.max(1);
-    if !use_color {
-        return truncate_live_line(line, width);
-    }
-    if visible_width_ansi(line) <= width {
-        return line.to_string();
-    }
-
-    let mut out = take_visible_ansi(line, width.saturating_sub(1));
-    out.push('…');
-    out.push_str("\x1b[0m");
-    out
-}
-
-fn fit_render_line(line: &str, width: usize, use_color: bool) -> String {
-    let width = width.max(1);
-    let clamped = clamp_render_line(line, width, use_color);
-    let visible = if use_color {
-        visible_width_ansi(&clamped)
-    } else {
-        clamped.chars().count()
-    };
-    if visible >= width {
-        return clamped;
-    }
-    let mut out = clamped;
-    out.push_str(&" ".repeat(width - visible));
-    out
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NodeStatus {
-    Pending,
-    Running,
-    Done,
-    Failed,
-}
-
-#[derive(Clone, Debug)]
-struct RichTreeNode {
-    id: String,
-    label: String,
-    parent: Option<String>,
-    children: Vec<String>,
-    is_leaf: bool,
-    status: NodeStatus,
-    last_line: String,
-    fail_log: Option<String>,
-    progress: f32,
-    work_units_seen: u32,
-    work_units_expected: u32,
-    start_tick: u64,
-}
-
-#[derive(Clone, Debug)]
-struct RichTreeNodeDef {
-    id: String,
-    label: String,
-    parent: Option<String>,
-    is_leaf: bool,
-}
-
-#[derive(Clone, Debug)]
-struct RichTreeSnapshot {
-    title: String,
-    logs_dir: String,
-    order: Vec<String>,
-    nodes: HashMap<String, RichTreeNode>,
-    stop: bool,
-}
-
-#[derive(Debug)]
-struct RichTreeState {
-    title: String,
-    logs_dir: PathBuf,
-    order: Vec<String>,
-    nodes: HashMap<String, RichTreeNode>,
-    tick: u64,
-    stop: bool,
-}
-
-#[derive(Clone)]
-struct RichTreeUi {
-    state: Arc<Mutex<RichTreeState>>,
-}
-
-impl RichTreeUi {
-    fn new(title: String, logs_dir: PathBuf, defs: &[RichTreeNodeDef]) -> Self {
-        let logs_root = logs_dir
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(logs_root_dir);
-        let mut nodes: HashMap<String, RichTreeNode> = HashMap::new();
-        for def in defs {
-            let expected = if def.is_leaf {
-                historical_expected_work_units(&def.id, &logs_root)
-            } else {
-                0
-            };
-            nodes.insert(
-                def.id.clone(),
-                RichTreeNode {
-                    id: def.id.clone(),
-                    label: def.label.clone(),
-                    parent: def.parent.clone(),
-                    children: Vec::new(),
-                    is_leaf: def.is_leaf,
-                    status: NodeStatus::Pending,
-                    last_line: String::new(),
-                    fail_log: None,
-                    progress: 0.0,
-                    work_units_seen: 0,
-                    work_units_expected: expected,
-                    start_tick: 0,
-                },
-            );
-        }
-        for def in defs {
-            if let Some(parent_id) = def.parent.as_deref() {
-                if let Some(parent) = nodes.get_mut(parent_id) {
-                    parent.children.push(def.id.clone());
-                }
-            }
-        }
-
-        let order = compute_tree_order(defs, &nodes);
-        Self {
-            state: Arc::new(Mutex::new(RichTreeState {
-                title,
-                logs_dir,
-                order,
-                nodes,
-                tick: 0,
-                stop: false,
-            })),
-        }
-    }
-
-    fn snapshot(&self) -> RichTreeSnapshot {
-        let state = self.state.lock().expect("tree state lock poisoned");
-        RichTreeSnapshot {
-            title: state.title.clone(),
-            logs_dir: state.logs_dir.display().to_string(),
-            order: state.order.clone(),
-            nodes: state.nodes.clone(),
-            stop: state.stop,
-        }
-    }
-
-    fn start_renderer(&self) -> thread::JoinHandle<()> {
-        let ui = self.clone();
-        thread::spawn(move || {
-            let use_ansi = should_use_ansi_controls();
-            if use_ansi {
-                // Hidden cursor + no line-wrap to prevent redraw artifacts.
-                // We intentionally do NOT use the alternate screen buffer
-                // (\x1b[?1049h) so the final tree state remains visible
-                // after the build completes.
-                print!("\x1b[?25l\x1b[?7l");
-            }
-            let _ = io::stdout().flush();
-            let mut progress_floor: HashMap<String, f32> = HashMap::new();
-            let mut last_frame = String::new();
-            let mut prev_line_count: usize = 0;
-
-            loop {
-                let snapshot = ui.snapshot();
-                let frame = render_tree_frame(&snapshot, &mut progress_floor);
-                if frame != last_frame {
-                    if use_ansi && prev_line_count > 0 {
-                        // Move cursor up to overwrite the previous frame.
-                        print!("\x1b[{}A\r\x1b[J", prev_line_count);
-                    }
-                    print!("{frame}");
-                    let _ = io::stdout().flush();
-                    prev_line_count = frame.lines().count();
-                    last_frame = frame;
-                }
-
-                if snapshot.stop {
-                    break;
-                }
-                {
-                    let mut state = ui.state.lock().expect("tree state lock poisoned");
-                    state.tick = state.tick.wrapping_add(1);
-                }
-                thread::sleep(Duration::from_millis(90));
-            }
-
-            if use_ansi {
-                // Restore line wrap + show cursor. The final frame stays on screen.
-                print!("\x1b[?7h\x1b[?25h");
-                println!();
-            }
-            let _ = io::stdout().flush();
-        })
-    }
-
-    fn start_task(&self, id: &str) {
-        let mut state = self.state.lock().expect("tree state lock poisoned");
-        let tick = state.tick;
-        if let Some(node) = state.nodes.get_mut(id) {
-            node.status = NodeStatus::Running;
-            node.last_line.clear();
-            node.fail_log = None;
-            node.progress = node.progress.max(0.01);
-            node.work_units_seen = 0;
-            node.start_tick = tick;
-        }
-    }
-
-    fn push_line(&self, id: &str, line: String) {
-        let mut state = self.state.lock().expect("tree state lock poisoned");
-        let tick = state.tick;
-        if let Some(node) = state.nodes.get_mut(id) {
-            node.last_line = line;
-            if node.status == NodeStatus::Running {
-                if is_work_unit_line(&node.last_line) {
-                    node.work_units_seen = node
-                        .work_units_seen
-                        .saturating_add(work_units_from_line(&node.last_line));
-                }
-                let expected = node.work_units_expected.max(1) as f32;
-                let by_units = (node.work_units_seen as f32 / expected).clamp(0.0, 0.97);
-                let elapsed = tick.saturating_sub(node.start_tick) as f32;
-                let by_time = (0.02 + elapsed * 0.0025).min(0.90);
-                let candidate = by_units.max(by_time);
-                node.progress = node.progress.max(candidate);
-            }
-        }
-    }
-
-    fn finish_task(&self, id: &str, failed: bool, log_path: &Path) {
-        let mut state = self.state.lock().expect("tree state lock poisoned");
-        if let Some(node) = state.nodes.get_mut(id) {
-            if failed {
-                node.status = NodeStatus::Failed;
-                node.fail_log = Some(relative_to_root_display(log_path));
-                node.progress = 1.0;
-            } else {
-                node.status = NodeStatus::Done;
-                node.last_line = "done".to_string();
-                node.fail_log = None;
-                node.progress = 1.0;
-            }
-        }
-    }
-
-    fn stop(&self) {
-        let mut state = self.state.lock().expect("tree state lock poisoned");
-        state.stop = true;
-    }
-}
-
-fn compute_tree_order(
-    defs: &[RichTreeNodeDef],
-    nodes: &HashMap<String, RichTreeNode>,
-) -> Vec<String> {
-    let roots: Vec<String> = defs
-        .iter()
-        .filter(|def| def.parent.is_none())
-        .map(|def| def.id.clone())
-        .collect();
-
-    let mut order = Vec::new();
-    fn walk(id: &str, nodes: &HashMap<String, RichTreeNode>, order: &mut Vec<String>) {
-        order.push(id.to_string());
-        if let Some(node) = nodes.get(id) {
-            for child in &node.children {
-                walk(child, nodes, order);
-            }
-        }
-    }
-    for root in &roots {
-        walk(root, nodes, &mut order);
-    }
-    order
-}
-
-#[cfg(unix)]
-fn winsize_from_fd(fd: libc::c_int) -> Option<(usize, usize)> {
-    let mut ws = libc::winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: ioctl(TIOCGWINSZ) writes into `ws` for a valid tty fd.
-    let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
-    if rc == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-        Some((ws.ws_col as usize, ws.ws_row as usize))
-    } else {
-        None
-    }
-}
-
-fn terminal_dimensions() -> (usize, usize) {
-    if let (Some(w), Some(h)) = (
-        std::env::var("CLUU_UI_WIDTH")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok()),
-        std::env::var("CLUU_UI_HEIGHT")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok()),
-    ) {
-        if w > 0 && h > 0 {
-            return (w, h);
-        }
-    }
-
-    #[cfg(unix)]
-    {
-        let fds = [
-            io::stdout().as_raw_fd(),
-            io::stderr().as_raw_fd(),
-            io::stdin().as_raw_fd(),
-        ];
-        for fd in fds {
-            if let Some((w, h)) = winsize_from_fd(fd) {
-                return (w, h);
-            }
-        }
-
-        if let Ok(tty) = File::open("/dev/tty") {
-            if let Some((w, h)) = winsize_from_fd(tty.as_raw_fd()) {
-                return (w, h);
-            }
-        }
-    }
-
-    if let Some((terminal_size::Width(w), terminal_size::Height(h))) =
-        terminal_size::terminal_size()
-    {
-        return (w as usize, h as usize);
-    }
-
-    let width = std::env::var("COLUMNS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(120);
-    let height = std::env::var("LINES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(40);
-    (width, height)
-}
-
-fn leaf_progress(node: &RichTreeNode) -> f32 {
-    match node.status {
-        NodeStatus::Pending => node.progress,
-        NodeStatus::Running => node.progress,
-        NodeStatus::Done | NodeStatus::Failed => 1.0,
-    }
-}
-
-fn aggregate_node(
-    id: &str,
-    nodes: &HashMap<String, RichTreeNode>,
-) -> (f32, NodeStatus, Option<String>) {
-    let Some(node) = nodes.get(id) else {
-        return (0.0, NodeStatus::Pending, None);
-    };
-    if node.children.is_empty() || node.is_leaf {
-        return (leaf_progress(node), node.status, node.fail_log.clone());
-    }
-
-    let mut progress_sum = 0.0f32;
-    let mut count = 0usize;
-    let mut any_running = false;
-    let mut any_done = false;
-    let mut any_failed = false;
-    let mut all_done = true;
-    let mut first_fail_log: Option<String> = None;
-
-    for child in &node.children {
-        let (progress, status, fail_log) = aggregate_node(child, nodes);
-        progress_sum += progress;
-        count += 1;
-        match status {
-            NodeStatus::Failed => {
-                any_failed = true;
-                if first_fail_log.is_none() {
-                    first_fail_log = fail_log;
-                }
-            }
-            NodeStatus::Running => any_running = true,
-            NodeStatus::Done => any_done = true,
-            NodeStatus::Pending => {}
-        }
-        if status != NodeStatus::Done {
-            all_done = false;
-        }
-    }
-
-    let progress = if count == 0 {
-        0.0
-    } else {
-        progress_sum / (count as f32)
-    };
-    let status = if any_failed {
-        NodeStatus::Failed
-    } else if count > 0 && all_done {
-        NodeStatus::Done
-    } else if any_running || any_done {
-        NodeStatus::Running
-    } else {
-        NodeStatus::Pending
-    };
-
-    (progress, status, first_fail_log)
-}
-
-fn tree_prefix(id: &str, nodes: &HashMap<String, RichTreeNode>) -> (String, bool) {
-    let mut parent_chain: Vec<(&str, &str)> = Vec::new();
-    let mut current = id;
-    while let Some(node) = nodes.get(current) {
-        if let Some(parent) = node.parent.as_deref() {
-            parent_chain.push((current, parent));
-            current = parent;
-        } else {
-            break;
-        }
-    }
-
-    let mut prefix = String::new();
-    for (idx, (child, parent)) in parent_chain.iter().rev().enumerate() {
-        let parent_node = match nodes.get(*parent) {
-            Some(node) => node,
-            None => continue,
-        };
-        let is_last = parent_node
-            .children
-            .last()
-            .map(|last| last.as_str() == *child)
-            .unwrap_or(true);
-        let is_direct_parent = idx + 1 == parent_chain.len();
-        if is_direct_parent {
-            prefix.push_str(if is_last { "└─ " } else { "├─ " });
-        } else {
-            prefix.push_str(if is_last { "   " } else { "│  " });
-        }
-    }
-
-    let is_root = parent_chain.is_empty();
-    (prefix, is_root)
-}
-
-fn should_use_color() -> bool {
-    io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
-}
-
-fn should_use_ansi_controls() -> bool {
-    if !io::stdout().is_terminal() {
-        return false;
-    }
-    match std::env::var("TERM") {
-        Ok(term) => !term.trim().is_empty() && term != "dumb",
-        Err(_) => true,
-    }
-}
-
-fn paint(text: &str, ansi_code: &str, use_color: bool) -> String {
-    if use_color {
-        format!("\x1b[{}m{}\x1b[0m", ansi_code, text)
-    } else {
-        text.to_string()
-    }
-}
-
-fn colorize_tree_prefix(prefix: &str, use_color: bool) -> String {
-    if !use_color {
-        return prefix.to_string();
-    }
-    let mut out = String::with_capacity(prefix.len() * 2);
-    for ch in prefix.chars() {
-        match ch {
-            '├' | '└' | '│' | '─' => out.push_str(&paint(&ch.to_string(), "38;5;45", true)),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-fn progress_bar(progress: f32, width: usize, status: NodeStatus, use_color: bool) -> String {
-    let width = width.max(4);
-    let filled = ((progress.clamp(0.0, 1.0)) * (width as f32)).round() as usize;
-    let (fill_color, empty_color) = match status {
-        NodeStatus::Pending => ("90", "90"),
-        NodeStatus::Running => ("38;5;45", "90"),
-        NodeStatus::Done => ("32", "90"),
-        NodeStatus::Failed => ("31", "90"),
-    };
-    let mut out = String::with_capacity(width * 8);
-    for i in 0..width {
-        if i < filled {
-            out.push_str(&paint("#", fill_color, use_color));
-        } else {
-            out.push_str(&paint("-", empty_color, use_color));
-        }
-    }
-    out
-}
-
-fn colorize_status(status: NodeStatus, use_color: bool) -> String {
-    match status {
-        NodeStatus::Pending => paint("PENDING", "90", use_color),
-        NodeStatus::Running => paint("RUNNING", "33", use_color),
-        NodeStatus::Done => paint("DONE", "32", use_color),
-        NodeStatus::Failed => paint("FAILED", "31", use_color),
-    }
-}
-
-fn status_counts(snapshot: &RichTreeSnapshot) -> (usize, usize, usize, usize, usize) {
-    let mut leaves = 0usize;
-    let mut pending = 0usize;
-    let mut running = 0usize;
-    let mut done = 0usize;
-    let mut failed = 0usize;
-
-    for node in snapshot.nodes.values() {
-        if !node.is_leaf {
-            continue;
-        }
-        leaves += 1;
-        match node.status {
-            NodeStatus::Pending => pending += 1,
-            NodeStatus::Running => running += 1,
-            NodeStatus::Done => done += 1,
-            NodeStatus::Failed => failed += 1,
-        }
-    }
-
-    (leaves, pending, running, done, failed)
-}
-
-fn render_tree_frame(
-    snapshot: &RichTreeSnapshot,
-    progress_floor: &mut HashMap<String, f32>,
-) -> String {
-    let (term_width, term_height) = terminal_dimensions();
-    let width = term_width.max(24);
-    let visible_lines = term_height.max(1);
-    let use_color = should_use_color();
-    let mut out = String::new();
-    let (overall_progress, _, _) = aggregate_node("build", &snapshot.nodes);
-    let overall_percent = ((overall_progress.clamp(0.0, 1.0)) * 100.0).round() as u32;
-    let overall_bar = progress_bar(overall_progress, 28, NodeStatus::Running, use_color);
-    let (total, pending, running, done, failed) = status_counts(snapshot);
-    let run_id = Path::new(&snapshot.logs_dir)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown");
-    let header_line_1 = format!(
-        "{}  [{}]  {}",
-        paint(&snapshot.title, "1;97", use_color),
-        overall_bar,
-        paint(&format!("{:>3}%", overall_percent), "1;33", use_color)
-    );
-    let header_line_2 = format!(
-        "{} {}  {} {}  {} {}  {} {}  {} {}",
-        paint("run:", "90", use_color),
-        paint(run_id, "96", use_color),
-        paint("done:", "90", use_color),
-        paint(&done.to_string(), "32", use_color),
-        paint("running:", "90", use_color),
-        paint(&running.to_string(), "33", use_color),
-        paint("pending:", "90", use_color),
-        paint(&pending.to_string(), "90", use_color),
-        paint("failed:", "90", use_color),
-        paint(
-            &failed.to_string(),
-            if failed > 0 { "31;1" } else { "32" },
-            use_color
-        )
-    );
-    let header_line_3 = format!(
-        "{} {}",
-        paint("tasks:", "90", use_color),
-        paint(&total.to_string(), "94", use_color)
-    );
-    let header_line_4 = paint(
-        "hint: use 'cargo xtask logs --task <name> --follow' for live per-task logs",
-        "2",
-        use_color,
-    );
-    let separator = paint(&"─".repeat(width), "38;5;45", use_color);
-    let mut header_lines = vec![
-        header_line_1,
-        header_line_2,
-        header_line_3,
-        header_line_4,
-        separator,
-    ];
-
-    let mut lines: Vec<String> = Vec::new();
-    for id in &snapshot.order {
-        let Some(node) = snapshot.nodes.get(id.as_str()) else {
-            continue;
-        };
-        let (raw_progress, status, fail_log) = aggregate_node(&node.id, &snapshot.nodes);
-        let previous = progress_floor.get(id).copied().unwrap_or(0.0);
-        let progress = match status {
-            NodeStatus::Done | NodeStatus::Failed => 1.0,
-            NodeStatus::Pending | NodeStatus::Running => raw_progress.max(previous),
-        }
-        .clamp(0.0, 1.0);
-        progress_floor.insert(id.clone(), progress);
-        let (prefix, is_root) = tree_prefix(&node.id, &snapshot.nodes);
-        let prefix = colorize_tree_prefix(&prefix, use_color);
-        let label = if is_root {
-            paint(&node.label, "1;97", use_color)
-        } else {
-            format!("{}{}", prefix, paint(&node.label, "36", use_color))
-        };
-
-        let percent = ((progress.clamp(0.0, 1.0)) * 100.0).round() as u32;
-        let percent_s = match status {
-            NodeStatus::Pending => paint(&format!("{:>3}%", percent), "90", use_color),
-            NodeStatus::Running => paint(&format!("{:>3}%", percent), "33", use_color),
-            NodeStatus::Done => paint(&format!("{:>3}%", percent), "32", use_color),
-            NodeStatus::Failed => paint(&format!("{:>3}%", percent), "31", use_color),
-        };
-        let status_s = colorize_status(status, use_color);
-
-        let make_base_line = |bar_width: usize| {
-            let bar = progress_bar(progress, bar_width, status, use_color);
-            format!("{} [{}] {} {}", label, bar, percent_s, status_s)
-        };
-
-        // Fit the base line first so tree/progress/status stay intact on narrow terminals.
-        let mut bar_width = 18usize;
-        let mut line = loop {
-            let candidate = make_base_line(bar_width);
-            if visible_width_ansi(&candidate) <= width || bar_width <= 4 {
-                break candidate;
-            }
-            bar_width -= 1;
-        };
-
-        if status == NodeStatus::Running && !node.last_line.is_empty() {
-            // Reserve visible room for a live log snippet by shrinking the bar if needed.
-            let desired_live_width = 24usize;
-            loop {
-                let remaining = width.saturating_sub(visible_width_ansi(&line) + 2);
-                if remaining >= desired_live_width || bar_width <= 4 {
-                    break;
-                }
-                bar_width -= 1;
-                line = make_base_line(bar_width);
-            }
-            let remaining = width.saturating_sub(visible_width_ansi(&line) + 2);
-            if remaining > 0 {
-                line.push_str("  ");
-                line.push_str(&paint(
-                    &truncate_live_line(&node.last_line, remaining.max(1)),
-                    "2",
-                    use_color,
-                ));
-            }
-        }
-        if status == NodeStatus::Failed {
-            let note = fail_log.unwrap_or_else(|| "log unavailable".to_string());
-            let remaining = width.saturating_sub(visible_width_ansi(&line) + 2);
-            if remaining > 6 {
-                line.push_str("  ");
-                line.push_str(&paint(
-                    &truncate_live_line(&format!("log: {}", note), remaining),
-                    "31;1",
-                    use_color,
-                ));
-            }
-        }
-        lines.push(line);
-    }
-
-    let header_count = header_lines.len();
-    let tree_visible = visible_lines.saturating_sub(header_count);
-    let mut rendered_lines: Vec<String> = Vec::new();
-    rendered_lines.extend(
-        header_lines
-            .drain(..)
-            .take(visible_lines)
-            .map(|line| fit_render_line(&line, width, use_color)),
-    );
-    rendered_lines.extend(
-        lines
-            .into_iter()
-            .take(tree_visible)
-            .map(|line| fit_render_line(&line, width, use_color)),
-    );
-    out.push_str(&rendered_lines.join("\n"));
-    out
-}
+// RichTreeNodeDef re-exported from tui module for build_pipeline_rich.
+// The old RichTreeUi/render_tree_frame has been replaced by ratatui TUI in tui.rs.
 
 type TaskSink = Arc<dyn Fn(String) + Send + Sync + 'static>;
 
@@ -1640,17 +753,22 @@ fn read_log_tail(log_path: &Path, lines: usize) -> String {
     collected.join("\n")
 }
 
-fn run_rich_task(task: &RichTask, logs_dir: &Path, ui: Option<RichTreeUi>) -> Result<()> {
+fn run_rich_task(
+    task: &RichTask,
+    logs_dir: &Path,
+    tui_state: Option<Arc<Mutex<tui::TuiState>>>,
+) -> Result<()> {
     let task_name = task.name.clone();
     let log_path = logs_dir.join(format!("{}.log", task_name));
-    if let Some(ui_ref) = ui.as_ref() {
-        ui_ref.start_task(&task_name);
+    if let Some(ref state) = tui_state {
+        state.lock().expect("tui state lock poisoned").start_task(&task_name);
     }
 
-    let sink: TaskSink = if let Some(ui_ref) = ui.clone() {
+    let sink: TaskSink = if let Some(ref state) = tui_state {
         let name_for_sink = task_name.clone();
+        let state = Arc::clone(state);
         Arc::new(move |line: String| {
-            ui_ref.push_line(&name_for_sink, line);
+            state.lock().expect("tui state lock poisoned").push_line(&name_for_sink, line);
         })
     } else {
         let name_for_sink = task_name.clone();
@@ -1662,14 +780,15 @@ fn run_rich_task(task: &RichTask, logs_dir: &Path, ui: Option<RichTreeUi>) -> Re
     let result = run_internal_xtask_task(&task.args, &log_path, sink);
     match result {
         Ok(()) => {
-            if let Some(ui_ref) = ui.as_ref() {
-                ui_ref.finish_task(&task_name, false, &log_path);
+            if let Some(ref state) = tui_state {
+                state.lock().expect("tui state lock poisoned").finish_task(&task_name, false, None);
             }
             Ok(())
         }
         Err(err) => {
-            if let Some(ui_ref) = ui.as_ref() {
-                ui_ref.finish_task(&task_name, true, &log_path);
+            if let Some(ref state) = tui_state {
+                let fail_log = Some(relative_to_root_display(&log_path));
+                state.lock().expect("tui state lock poisoned").finish_task(&task_name, true, fail_log);
             }
             Err(err.context(format!(
                 "Task '{}' failed. Log: {}",
@@ -1682,7 +801,7 @@ fn run_rich_task(task: &RichTask, logs_dir: &Path, ui: Option<RichTreeUi>) -> Re
 
 fn run_rich_dag(
     tasks: Vec<RichTask>,
-    tree_defs: Vec<RichTreeNodeDef>,
+    tree_defs: Vec<tui::TreeNodeDef>,
     logs_dir: &Path,
     interactive_tree: bool,
 ) -> Result<()> {
@@ -1695,16 +814,24 @@ fn run_rich_dag(
     let (tx, rx) = mpsc::channel::<(String, Result<()>)>();
     let mut first_error: Option<anyhow::Error> = None;
 
-    let tree_ui = if interactive_tree {
-        Some(RichTreeUi::new(
+    let tui_state = if interactive_tree {
+        Some(Arc::new(Mutex::new(tui::TuiState::new(
             "CLUU rich build".to_string(),
             logs_dir.to_path_buf(),
             &tree_defs,
-        ))
+        ))))
     } else {
         None
     };
-    let renderer = tree_ui.as_ref().map(|ui| ui.start_renderer());
+
+    let renderer = if let Some(ref state) = tui_state {
+        let state = Arc::clone(state);
+        Some(thread::spawn(move || {
+            let _ = tui::run_tui(state);
+        }))
+    } else {
+        None
+    };
 
     loop {
         if first_error.is_none() {
@@ -1720,19 +847,19 @@ fn run_rich_dag(
 
                 let logs_dir = logs_dir.to_path_buf();
                 let tx = tx.clone();
-                let tree_ui = tree_ui.clone();
+                let tui_state = tui_state.clone();
 
                 thread::spawn(move || {
                     let name = task.name.clone();
-                    let result = run_rich_task(&task, &logs_dir, tree_ui);
+                    let result = run_rich_task(&task, &logs_dir, tui_state);
                     let _ = tx.send((name, result));
                 });
             }
         }
 
         if running.is_empty() {
-            if let Some(ui) = tree_ui.as_ref() {
-                ui.stop();
+            if let Some(ref state) = tui_state {
+                state.lock().expect("tui state lock poisoned").stop = true;
             }
             if let Some(handle) = renderer {
                 let _ = handle.join();
@@ -1778,89 +905,89 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
 
     // -- Tree node definitions --------------------------------------------------
     let mut tree_defs = vec![
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "build".into(),
             label: "build".into(),
             parent: None,
             is_leaf: false,
         },
         // Dependencies
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "dependencies".into(),
             label: "dependencies".into(),
             parent: Some("build".into()),
             is_leaf: false,
         },
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "dep-klibcluu".into(),
             label: "klibcluu".into(),
             parent: Some("dependencies".into()),
             is_leaf: true,
         },
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "dep-libcluu".into(),
             label: "libcluu".into(),
             parent: Some("dependencies".into()),
             is_leaf: true,
         },
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "dep-newlib".into(),
             label: "newlib".into(),
             parent: Some("dependencies".into()),
             is_leaf: true,
         },
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "dep-syscalls".into(),
             label: "syscalls".into(),
             parent: Some("dependencies".into()),
             is_leaf: true,
         },
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "dep-crt0".into(),
             label: "crt0".into(),
             parent: Some("dependencies".into()),
             is_leaf: true,
         },
         // Kernel
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "kernel".into(),
             label: "kernel".into(),
             parent: Some("build".into()),
             is_leaf: true,
         },
         // Userspace
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "userspace".into(),
             label: "userspace".into(),
             parent: Some("build".into()),
             is_leaf: false,
         },
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "init".into(),
             label: "init".into(),
             parent: Some("userspace".into()),
             is_leaf: false,
         },
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "containers".into(),
             label: "containers".into(),
             parent: Some("userspace".into()),
             is_leaf: false,
         },
         // Packaging
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "initrd".into(),
             label: "initrd".into(),
             parent: Some("build".into()),
             is_leaf: true,
         },
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "userdisk".into(),
             label: "userdisk".into(),
             parent: Some("build".into()),
             is_leaf: true,
         },
-        RichTreeNodeDef {
+        tui::TreeNodeDef {
             id: "disk-image".into(),
             label: "disk-image".into(),
             parent: Some("build".into()),
@@ -1870,7 +997,7 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
 
     // Init primordial subtasks (one per crate)
     for crate_name in INIT_CRATES {
-        tree_defs.push(RichTreeNodeDef {
+        tree_defs.push(tui::TreeNodeDef {
             id: format!("init-{}", crate_name),
             label: crate_name.to_string(),
             parent: Some("init".into()),
@@ -1880,7 +1007,7 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
 
     // Dynamic container nodes (auto-discovered from containers/*/)
     for name in &container_names {
-        tree_defs.push(RichTreeNodeDef {
+        tree_defs.push(tui::TreeNodeDef {
             id: format!("container-{}", name),
             label: name.clone(),
             parent: Some("containers".into()),
@@ -2001,8 +1128,8 @@ fn build_pipeline_rich(profile: &str) -> Result<()> {
         deps: vec!["initrd".into(), "userdisk".into()],
     });
 
-    let interactive_tree = io::stdout().is_terminal();
-    run_rich_dag(tasks, tree_defs, &logs_dir, interactive_tree)?;
+    let tui_capable = tui::is_tui_capable();
+    run_rich_dag(tasks, tree_defs, &logs_dir, tui_capable)?;
 
     println!("✓ Rich build complete");
     println!("  Per-task logs are in {}", logs_dir.display());

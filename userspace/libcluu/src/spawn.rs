@@ -32,12 +32,12 @@ pub fn spawn(envelope: SpawnEnvelope) -> Result<SpawnReply, SpawnError> {
     let msg = Message::new(PROCMGR_SPAWN_UNIFIED_LABEL, words, 0);
 
     let mut reply_buf = [0u8; SPAWN_REPLY_BUF_SIZE];
-    let (_reply_msg, bytes_received) = ipc::call_with_reply_buf(procmgr_ep, &msg, &payload, &mut reply_buf)
+    let (_reply_msg, payload_len) = ipc::call_with_reply_buf(procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SpawnError::Internal(0xEBADAB5u32))?;
 
-    let reply_payload_start = IPC_MSG_HEADER_SIZE;
-    let reply_payload = if bytes_received > reply_payload_start {
-        &reply_buf[reply_payload_start..bytes_received]
+    let hdr = IPC_MSG_HEADER_SIZE;
+    let reply_payload = if payload_len > 0 {
+        &reply_buf[hdr..hdr + payload_len]
     } else {
         &[]
     };
