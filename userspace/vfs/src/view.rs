@@ -10,6 +10,8 @@ use libcluu::cap::CapProfile;
 use libcluu::vfs_view;
 use libcluu::{Error, Result};
 
+use crate::pts::{PtsBackend, PtsRegistry};
+
 /// Where a view mount routes I/O requests.
 #[derive(Clone, Copy, PartialEq)]
 pub enum MountTarget {
@@ -243,3 +245,33 @@ fn rewrite_path(path: &str, dst_prefix: &str, src_prefix: &str) -> Option<String
     }
     None
 }
+
+// ─── Per-session PTS overlay ──────────────────────────────────────────────────
+
+/// Narrow a `/dev/pts` mount entry for a child view.
+///
+/// If `session_id` is `Some`, the mount is replaced with a session-private
+/// `PtsBackend` that only shows the global pts entries plus those registered
+/// under `session_id`.  This is called during view derivation when a child
+/// process inherits the `/dev/pts` mount.
+///
+/// If `session_id` is `None` (sessionless caller), returns `None` — the
+/// caller should not see `/dev/pts` at all, because there is no session
+/// context to filter by.
+///
+/// The `registry_ptr` must point to the live `PtsRegistry` owned by the
+/// VFS server.  SAFETY: same lifetime contract as other `PtsBackend` uses.
+pub fn narrow_pts_mount(
+    registry_ptr: *const PtsRegistry,
+    session_id: Option<u32>,
+) -> Option<alloc::boxed::Box<PtsBackend>> {
+    match session_id {
+        Some(sid) => Some(alloc::boxed::Box::new(PtsBackend::for_session(
+            registry_ptr,
+            sid,
+        ))),
+        None => None,
+    }
+}
+
+// ─── Path helpers ─────────────────────────────────────────────────────────────

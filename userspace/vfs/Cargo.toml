@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 libcluu = { path = "../libcluu" }
+postcard = { workspace = true }
 
 [[bin]]
 name = "vfs"

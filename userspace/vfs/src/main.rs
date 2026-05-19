@@ -8,6 +8,9 @@
 
 extern crate alloc;
 
+#[allow(unused_imports)]
+use libcluu::runtime as _;
+
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::vec::Vec;
@@ -734,6 +737,9 @@ impl VfsServer {
         if msg.tag.label == PTS_REGISTER_LABEL {
             return self.handle_pts_register(msg, sender_tid);
         }
+        if msg.tag.label == libcluu::proto::pts::VFS_REGISTER_PTS_LABEL {
+            return self.handle_vfs_register_pts(msg, payload, sender_tid);
+        }
         if msg.tag.label == PTS_UNREGISTER_LABEL {
             return self.handle_pts_unregister(msg, sender_tid);
         }
@@ -990,6 +996,91 @@ impl VfsServer {
         }
 
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    /// Handle VFS_REGISTER_PTS_LABEL (111): allocate a new `/dev/pts/<id>` slot
+    /// with optional `session_id` for per-session overlay.
+    ///
+    /// Wire format (payload = postcard-serialized VfsRegisterPtsRequest):
+    ///   session_id:   Option<u32>
+    ///   pts_endpoint: u64
+    ///   suggested_id: Option<u32>
+    ///
+    /// Reply (payload = postcard-serialized VfsRegisterPtsReply):
+    ///   assigned_id: u32
+    ///
+    /// When `session_id` is `None`, the entry lands in the global namespace
+    /// (identical to the legacy PTS_REGISTER_LABEL path).  When `Some`, the
+    /// entry lands in `by_session[sid]` and is only visible in that session's
+    /// derived `/dev/pts/` overlay.
+    fn handle_vfs_register_pts(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
+        let reply_token = extract_reply_id(msg).unwrap_or(self.endpoint);
+
+        if sender_tid == 0 {
+            let reply_bytes = postcard::to_allocvec(&Error::PermissionDenied.to_errno())
+                .unwrap_or_default();
+            let reply_msg = Message::new(
+                libcluu::proto::pts::VFS_REGISTER_PTS_LABEL,
+                [Error::PermissionDenied.to_errno() as usize, 0, 0, 0, 0, 0],
+                1,
+            );
+            return ipc::reply_with_payload(reply_token, &reply_msg, &reply_bytes);
+        }
+
+        let req: libcluu::proto::pts::VfsRegisterPtsRequest =
+            match postcard::from_bytes(payload) {
+                Ok(r) => r,
+                Err(_) => {
+                    let reply_bytes = postcard::to_allocvec(&Error::InvalidArgument.to_errno())
+                        .unwrap_or_default();
+                    let reply_msg = Message::new(
+                        libcluu::proto::pts::VFS_REGISTER_PTS_LABEL,
+                        [Error::InvalidArgument.to_errno() as usize, 0, 0, 0, 0, 0],
+                        1,
+                    );
+                    return ipc::reply_with_payload(reply_token, &reply_msg, &reply_bytes);
+                }
+            };
+
+        let notify_endpoint = req.pts_endpoint as usize;
+
+        match self.pts_registry.register_in_session(
+            req.session_id,
+            sender_tid,
+            notify_endpoint,
+        ) {
+            Some(assigned_id) => {
+                let _ = debug_print(&format!(
+                    "vfs: vfs_register_pts session={:?} owner_tid={} id={}",
+                    req.session_id, sender_tid, assigned_id
+                ));
+                let reply = libcluu::proto::pts::VfsRegisterPtsReply { assigned_id };
+                let reply_bytes =
+                    postcard::to_allocvec(&reply).unwrap_or_default();
+                let reply_msg = Message::new(
+                    libcluu::proto::pts::VFS_REGISTER_PTS_LABEL,
+                    [0, assigned_id as usize, 0, 0, 0, 0],
+                    2,
+                );
+                ipc::reply_with_payload(reply_token, &reply_msg, &reply_bytes)
+            }
+            None => {
+                let _ = debug_print("vfs: vfs_register_pts pool exhausted");
+                let reply_bytes = postcard::to_allocvec(&Error::OutOfMemory.to_errno())
+                    .unwrap_or_default();
+                let reply_msg = Message::new(
+                    libcluu::proto::pts::VFS_REGISTER_PTS_LABEL,
+                    [Error::OutOfMemory.to_errno() as usize, 0, 0, 0, 0, 0],
+                    1,
+                );
+                ipc::reply_with_payload(reply_token, &reply_msg, &reply_bytes)
+            }
+        }
     }
 
     /// Handle PTS_UNREGISTER_LABEL: release a `/dev/pts/<id>` slot.

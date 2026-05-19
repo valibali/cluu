@@ -210,6 +210,33 @@ pub enum PtsErr {
     Internal(u32),
 }
 
+// ----- VFS PTS registration -----
+
+/// Verb label for registering a pseudo-terminal slave in a session-aware manner.
+/// Separate from the legacy `PTS_REGISTER_LABEL` (0x70); this label carries a
+/// `session_id` field for per-session /dev/pts/ overlay.
+pub const VFS_REGISTER_PTS_LABEL: u32 = 111;
+
+/// Request: register a new `/dev/pts/<id>` under the given session.
+///
+/// `session_id` = `None` for sessionless callers (text-VT tty service).
+/// These entries land in the global namespace and are visible to all sessions.
+///
+/// `session_id` = `Some(sid)` for graphical (cluuterm) sessions; the pts is
+/// only visible within that session's derived /dev/pts/ overlay.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VfsRegisterPtsRequest {
+    pub session_id: Option<u32>,
+    pub pts_endpoint: u64,
+    pub suggested_id: Option<u32>,
+}
+
+/// Reply for a successful PTS registration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VfsRegisterPtsReply {
+    pub assigned_id: u32,
+}
+
 // ----- Tests -----
 
 #[cfg(test)]
