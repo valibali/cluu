@@ -8,7 +8,6 @@
 //!
 //! 10-step body per spec 1 §12.
 
-extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -203,9 +202,8 @@ fn rollback_all(_rb: RollbackList) {
 }
 
 /// Hook stubs that the engineer wires to existing procmgr helpers in main.rs.
-/// Once all hooks are wired, no `unimplemented!()` remains.
+/// Once all hooks are wired to existing procmgr helpers, no `unimplemented!()` will remain.
 mod hooks {
-    extern crate alloc;
     use cluu_proto::TokenHandle;
     use crate::view_table::ViewObjectId;
     use crate::manifest_cache::CachedManifest;

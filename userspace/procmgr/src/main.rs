@@ -197,6 +197,8 @@ const SERVICE_PATH: &str = "/var/images/vt/bin/shell";
 use libcluu::build_env::SHELL_AUTOSTART_CMD;
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
+/// Unified spawn verb (spec 1). Defined in cluu_proto::spawn — re-exported here.
+const PROCMGR_SPAWN_UNIFIED_LABEL: u32 = cluu_proto::spawn::PROCMGR_SPAWN_UNIFIED_LABEL;
 const PROCMGR_KILL_LABEL: u32 = 3;
 const PROCMGR_FAULT_LABEL: u32 = 0xFA017;
 const DEFAULT_PRIORITY: usize = 200;
@@ -2182,6 +2184,10 @@ impl ProcessManager {
         }
         if msg.tag.label == PROCMGR_PID_PGID_QUERY_LABEL {
             return self.handle_pid_pgid_query(msg);
+        }
+        if msg.tag.label == cluu_proto::spawn::PROCMGR_SPAWN_UNIFIED_LABEL {
+            self.handle_spawn_unified(msg, payload, sender_tid);
+            return Ok(());
         }
         self.handle_spawn_message(msg, payload, sender_tid)
     }
@@ -6250,6 +6256,73 @@ impl ProcessManager {
             let _ = reply(token, &reply_msg, IpcFlags::empty());
         }
         Ok(())
+    }
+
+    /// Handle the unified spawn IPC verb (`PROCMGR_SPAWN_UNIFIED_LABEL = 80`).
+    /// Deserializes a postcard-encoded `SpawnEnvelope` from the payload,
+    /// delegates to `crate::spawn::spawn()`, and replies with the result.
+    fn handle_spawn_unified(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) {
+        use cluu_proto::spawn::{SpawnEnvelope, SpawnError, SpawnReply};
+
+        let reply_token = extract_reply_id(msg);
+
+        // Deserialize the envelope from the payload.
+        let envelope: SpawnEnvelope = match postcard::from_bytes(payload) {
+            Ok(e) => e,
+            Err(_) => {
+                let _ = debug_print("procmgr: spawn_unified deserialize failed");
+                return self.send_spawn_unified_err(reply_token, SpawnError::Internal(0xEBADAB2u32));
+            }
+        };
+
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
+
+        // Call the core spawn function.
+        let result = ::procmgr::spawn::spawn(envelope, caller_pid);
+
+        // Serialize and send the reply.
+        self.send_spawn_unified_reply(reply_token, &result)
+    }
+
+    fn send_spawn_unified_err(
+        &self,
+        reply_token: Option<usize>,
+        err: cluu_proto::spawn::SpawnError,
+    ) {
+        let result: core::result::Result<
+            cluu_proto::spawn::SpawnReply,
+            cluu_proto::spawn::SpawnError,
+        > = Err(err);
+        self.send_spawn_unified_reply(reply_token, &result)
+    }
+
+    fn send_spawn_unified_reply(
+        &self,
+        reply_token: Option<usize>,
+        result: &core::result::Result<
+            cluu_proto::spawn::SpawnReply,
+            cluu_proto::spawn::SpawnError,
+        >,
+    ) {
+        let reply_bytes = match postcard::to_allocvec(result) {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = debug_print("procmgr: spawn_unified reply serialization failed");
+                return;
+            }
+        };
+
+        if let Some(token) = reply_token {
+            let label = cluu_proto::spawn::PROCMGR_SPAWN_UNIFIED_LABEL;
+            let words = [reply_bytes.len(), 0, 0, 0, 0, 0];
+            let reply_msg = Message::new(label, words, 0);
+            let _ = libcluu::ipc::send_msg_with_payload(token, &reply_msg, &reply_bytes);
+        }
     }
 
     fn send_spawn_reply(&self, reply_token: Option<usize>, msg: &Message) -> Result<()> {

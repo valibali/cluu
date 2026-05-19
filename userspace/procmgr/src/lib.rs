@@ -5,6 +5,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 pub use elf::{ElfFile, LoadableSegment};
 pub use libcluu::elf;
 
