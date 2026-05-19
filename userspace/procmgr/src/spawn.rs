@@ -11,10 +11,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use cluu_proto::spawn::{
+use cluu_wire::spawn::{
     FdInherit, FdSource, RestartPolicy, SpawnEnvelope, SpawnError, SpawnReply, ViewSource,
 };
-use cluu_proto::TokenHandle;
+use cluu_wire::TokenHandle;
 
 use crate::manifest_cache::{CachedManifest, MANIFEST_CACHE};
 use crate::view_table::{verify_monotone, ViewObjectId, VIEW_TABLE};
@@ -84,7 +84,7 @@ pub fn spawn(envelope: SpawnEnvelope, caller_pid: u32) -> Result<SpawnReply, Spa
             let resolved = crate::session_table::SESSION_TABLE.resolve(
                 t,
                 caller_pid,
-                cluu_proto::session::RIGHT_SESSION_JOIN,
+                cluu_wire::session::RIGHT_SESSION_JOIN,
             );
             match resolved {
                 Err(_) => {
@@ -230,7 +230,7 @@ fn rollback_all(_rb: RollbackList) {
 /// Hook stubs that the engineer wires to existing procmgr helpers in main.rs.
 /// Once all hooks are wired to existing procmgr helpers, no `unimplemented!()` will remain.
 mod hooks {
-    use cluu_proto::TokenHandle;
+    use cluu_wire::TokenHandle;
     use crate::view_table::ViewObjectId;
     use crate::manifest_cache::CachedManifest;
 
@@ -285,8 +285,8 @@ mod hooks {
         _session_id: Option<u32>,
         _view_id: u32,
         _notify: Option<TokenHandle>,
-        _restart_policy: cluu_proto::spawn::RestartPolicy,
-        _restart_envelope: cluu_proto::spawn::SpawnEnvelope,
+        _restart_policy: cluu_wire::spawn::RestartPolicy,
+        _restart_envelope: cluu_wire::spawn::SpawnEnvelope,
     ) -> Result<u32, ()> {
         Err(())
     }

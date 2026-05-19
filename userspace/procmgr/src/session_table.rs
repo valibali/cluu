@@ -8,8 +8,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use cluu_proto::session::{ProfileSpec, RIGHT_SESSION_ALL, SessionErr, SessionState};
-use cluu_proto::TokenHandle;
+use cluu_wire::session::{ProfileSpec, RIGHT_SESSION_ALL, SessionErr, SessionState};
+use cluu_wire::TokenHandle;
 
 pub type SessionId = u32;
 
@@ -136,7 +136,7 @@ impl SessionTable {
             if entry.owner_pid != caller_pid {
                 return Err(SessionErr::InvalidToken);
             }
-            if (entry.rights & cluu_proto::session::RIGHT_SESSION_CONTROL) == 0 {
+            if (entry.rights & cluu_wire::session::RIGHT_SESSION_CONTROL) == 0 {
                 return Err(SessionErr::InsufficientRights);
             }
             entry.session_id
@@ -162,7 +162,7 @@ impl SessionTable {
             if entry.owner_pid != caller_pid {
                 return Err(SessionErr::InvalidToken);
             }
-            if (entry.rights & cluu_proto::session::RIGHT_SESSION_SUBSCRIBE) == 0 {
+            if (entry.rights & cluu_wire::session::RIGHT_SESSION_SUBSCRIBE) == 0 {
                 return Err(SessionErr::InsufficientRights);
             }
             entry.session_id

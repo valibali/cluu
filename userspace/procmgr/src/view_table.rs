@@ -10,7 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use cluu_proto::spawn::SpawnError;
+use cluu_wire::spawn::SpawnError;
 
 pub type ViewObjectId = u32;
 

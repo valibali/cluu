@@ -10,8 +10,8 @@ extern crate alloc;
 pub use elf::{ElfFile, LoadableSegment};
 pub use libcluu::elf;
 
-/// Re-export of `cluu_proto` — the wire-protocol types crate.
-pub use cluu_proto as proto;
+/// Re-export of `cluu_wire` — the wire-protocol types crate.
+pub use cluu_wire as proto;
 
 pub mod manifest_cache;
 pub mod view_table;

@@ -12,7 +12,7 @@ mod context;
 mod protocol;
 
 use context::{TtyContext, TtyMode, LoginState};
-use cluu_proto::pts::{
+use cluu_wire::pts::{
     PTS_GET_PGRP_LABEL, PTS_GET_TERMIOS_LABEL, PTS_POLL_LABEL, PTS_READ_LABEL,
     PTS_SET_PGRP_LABEL, PTS_SET_TERMIOS_LABEL, PTS_WRITE_LABEL,
     GetPgrpReply, GetTermiosReply, PollReply, PtsErr,
@@ -116,7 +116,7 @@ fn handle_one_message(
             // Request is postcard-serialized ReadRequest; words[0] = payload len.
             if let Some(reply_token) = extract_reply_id(&msg) {
                 let max_bytes: usize = if payload.len() >= 4 {
-                    postcard::from_bytes::<cluu_proto::pts::ReadRequest>(payload)
+                    postcard::from_bytes::<cluu_wire::pts::ReadRequest>(payload)
                         .map(|r| r.max_bytes as usize)
                         .unwrap_or(0)
                 } else {
@@ -159,7 +159,7 @@ fn handle_one_message(
             // Deserialize SetTermiosRequest, apply to discipline.
             if let Some(reply_token) = extract_reply_id(&msg) {
                 let result: core::result::Result<(), PtsErr> = if let Ok(req) =
-                    postcard::from_bytes::<cluu_proto::pts::SetTermiosRequest>(payload)
+                    postcard::from_bytes::<cluu_wire::pts::SetTermiosRequest>(payload)
                 {
                     match discipline.set_termios(req.termios) {
                         Ok(()) => core::result::Result::Ok(()),
@@ -205,9 +205,9 @@ fn handle_one_message(
             if let Some(reply_token) = extract_reply_id(&msg) {
                 let has_data = !ctx.input_queue.is_empty();
                 let ready = if has_data {
-                    cluu_proto::pts::PollEvents::POLLIN
+                    cluu_wire::pts::PollEvents::POLLIN
                 } else {
-                    cluu_proto::pts::PollEvents::empty()
+                    cluu_wire::pts::PollEvents::empty()
                 };
                 let reply_val = PollReply { ready };
                 let bytes = postcard::to_allocvec(&reply_val).unwrap_or_default();
@@ -223,7 +223,7 @@ fn handle_one_message(
             // Set the foreground pgid for a session via postcard SetPgrpRequest (i32).
             if let Some(reply_token) = extract_reply_id(&msg) {
                 let pgid: i32 = if !payload.is_empty() {
-                    postcard::from_bytes::<cluu_proto::pts::SetPgrpRequest>(payload)
+                    postcard::from_bytes::<cluu_wire::pts::SetPgrpRequest>(payload)
                         .unwrap_or(0)
                 } else {
                     msg.words[1] as i32 // legacy fallback: words[1]=pgid

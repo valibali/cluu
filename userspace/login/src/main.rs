@@ -20,11 +20,11 @@ extern crate alloc;
 #[allow(unused_imports)]
 use libcluu::runtime as _;
 
-use cluu_proto::session::{
+use cluu_wire::session::{
     CompositorSessionHandoffRequest, ProfileSpec, SessionCreateRequest,
     COMPOSITOR_SESSION_HANDOFF_LABEL, RIGHT_SESSION_QUERY, RIGHT_SESSION_SUBSCRIBE,
 };
-use cluu_proto::spawn::{SpawnEnvelope, ViewSource};
+use cluu_wire::spawn::{SpawnEnvelope, ViewSource};
 
 use libcluu::boot::{process_info, space_token, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::ipc::{
@@ -659,7 +659,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                             };
                             let words = [
                                 payload.len(),
-                                cluu_proto::ABI_VERSION as usize,
+                                cluu_wire::ABI_VERSION as usize,
                                 0, 0, 0, 0,
                             ];
                             let msg = Message::new(

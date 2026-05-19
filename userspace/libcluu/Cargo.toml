@@ -11,7 +11,7 @@ bitflags = { workspace = true }
 klibcluu = { path = "../../klibcluu" }
 spin = { workspace = true }
 lazy_static = { workspace = true }
-cluu_proto = { path = "../cluu_proto" }
+cluu_wire = { path = "../cluu_wire" }
 postcard = { workspace = true }
 
 [dev-dependencies]

@@ -198,7 +198,7 @@ dependencies = [
 name = "cluu-cluuterm"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
  "serde",
@@ -215,7 +215,7 @@ dependencies = [
 name = "cluu-compositor"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
  "serde",
@@ -461,7 +461,7 @@ dependencies = [
 name = "cluu-l3-compositor-receives-session-ended"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
 ]
@@ -470,7 +470,7 @@ dependencies = [
 name = "cluu-l3-getty-auth-spawns-shell"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
 ]
@@ -479,7 +479,7 @@ dependencies = [
 name = "cluu-l3-session-create-destroy"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
 ]
@@ -488,7 +488,7 @@ dependencies = [
 name = "cluu-l3-session-derive-narrow"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
 ]
@@ -497,7 +497,7 @@ dependencies = [
 name = "cluu-l3-session-end-removes-pts"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
 ]
@@ -506,7 +506,7 @@ dependencies = [
 name = "cluu-l3-session-leader-exit-cascades"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
 ]
@@ -515,7 +515,7 @@ dependencies = [
 name = "cluu-l3-session-query"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
 ]
@@ -524,7 +524,7 @@ dependencies = [
 name = "cluu-l3-session-set-leader-monotone"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
 ]
@@ -533,7 +533,7 @@ dependencies = [
 name = "cluu-login"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
 ]
@@ -612,7 +612,7 @@ dependencies = [
 name = "cluu-procmgr"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
  "spin",
@@ -665,7 +665,7 @@ name = "cluu-shell"
 version = "0.1.0"
 dependencies = [
  "cluu_lang",
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
 ]
 
@@ -764,7 +764,7 @@ dependencies = [
 name = "cluu-tty"
 version = "0.1.0"
 dependencies = [
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
 ]
@@ -862,7 +862,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cluu_proto"
+name = "cluu_wire"
 version = "0.1.0"
 dependencies = [
  "bitflags",
@@ -996,7 +996,7 @@ name = "getty"
 version = "0.1.0"
 dependencies = [
  "bitflags",
- "cluu_proto",
+ "cluu_wire",
  "libcluu",
  "postcard",
  "serde",
@@ -1044,7 +1044,7 @@ name = "libcluu"
 version = "0.1.0"
 dependencies = [
  "bitflags",
- "cluu_proto",
+ "cluu_wire",
  "klibcluu",
  "lazy_static",
  "postcard",

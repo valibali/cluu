@@ -6,7 +6,7 @@
 //! errno.
 //!
 //! Protocol notes:
-//!   - Verb labels come from `cluu_proto::pts` (100-110), NOT the legacy
+//!   - Verb labels come from `cluu_wire::pts` (100-110), NOT the legacy
 //!     `PTS_IOCTL_LABEL` (0x74) in `crate::ipc`.
 //!   - Requests/replies are serialized via postcard, wrapped in a `Message`
 //!     header, and sent via raw `syscall::ipc_call`.
@@ -16,7 +16,7 @@ use crate::errno::{set_errno, EAGAIN, EINTR, EINVAL, EIO, EPERM};
 use crate::types::Message;
 use alloc::vec::Vec;
 
-// ── C-compatible structs (mirror cluu_proto::pts but repr(C) for C ABI) ───
+// ── C-compatible structs (mirror cluu_wire::pts but repr(C) for C ABI) ───
 
 type tcflag_t = u32;
 type cc_t = u8;
@@ -53,7 +53,7 @@ const TIOCSWINSZ: c_ulong = 0x5414;
 const TIOCGPGRP: c_ulong = 0x540F;
 const TIOCSPGRP: c_ulong = 0x5410;
 
-// ── Termios ↔ cluu_proto::pts::Termios conversion ─────────────────────────
+// ── Termios ↔ cluu_wire::pts::Termios conversion ─────────────────────────
 
 fn to_proto_termios(t: &Termios) -> crate::proto::pts::Termios {
     crate::proto::pts::Termios {
@@ -194,7 +194,7 @@ pub extern "C" fn tcgetattr(fd: c_int, out: *mut Termios) -> c_int {
 /// Set terminal attributes via PTS_SET_TERMIOS_LABEL.
 ///
 /// `when`: 0 = TCSANOW, 1 = TCSADRAIN, 2 = TCSAFLUSH (matches `When` enum
-/// discriminants in `cluu_proto::pts`).
+/// discriminants in `cluu_wire::pts`).
 #[no_mangle]
 pub extern "C" fn tcsetattr(fd: c_int, when: c_int, t_in: *const Termios) -> c_int {
     if t_in.is_null() {

@@ -4,8 +4,8 @@ extern crate alloc;
 
 use core::mem::size_of;
 
-use cluu_proto::spawn::{SpawnEnvelope, SpawnError, SpawnReply, PROCMGR_SPAWN_UNIFIED_LABEL};
-use cluu_proto::ABI_VERSION;
+use cluu_wire::spawn::{SpawnEnvelope, SpawnError, SpawnReply, PROCMGR_SPAWN_UNIFIED_LABEL};
+use cluu_wire::ABI_VERSION;
 
 use crate::ipc;
 use crate::types::Message;

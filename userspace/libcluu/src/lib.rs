@@ -67,11 +67,11 @@ pub mod fd_table;
 #[cfg(feature = "posix")]
 pub mod posix;
 
-// Re-export of `cluu_proto` — the wire-protocol types crate.
+// Re-export of `cluu_wire` — the wire-protocol types crate.
 ///
 /// Callers may use `libcluu::proto::SpawnEnvelope` or import directly from
-/// `cluu_proto`; both paths reach the same types.
-pub use cluu_proto as proto;
+/// `cluu_wire`; both paths reach the same types.
+pub use cluu_wire as proto;
 
 // Re-exports
 pub use boot::{

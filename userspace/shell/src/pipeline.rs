@@ -15,7 +15,7 @@ use crate::commands::{build_redir_actions, render_word_public, spawn_process_wit
 use libcluu::ipc::{
     PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL,
 };
-use cluu_proto::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, ViewSource};
+use cluu_wire::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, ViewSource};
 use libcluu::posix::jobs::{pg_attach, pg_create, tty_set_fg};
 use libcluu::syscall::endpoint_create;
 use libcluu::types::Message;

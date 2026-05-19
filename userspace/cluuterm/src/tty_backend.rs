@@ -19,7 +19,7 @@ use libcluu::types::{IpcFlags, Message};
 use libcluu::window_shm::WindowShm;
 use libcluu::{debug_print, registry, syscall};
 
-use cluu_proto::pts::{
+use cluu_wire::pts::{
     PTS_READ_LABEL, PTS_WRITE_LABEL, PTS_POLL_LABEL,
     PTS_GET_TERMIOS_LABEL, PTS_SET_TERMIOS_LABEL,
     PTS_GET_WINSIZE_LABEL, PTS_SET_WINSIZE_LABEL,
@@ -318,7 +318,7 @@ fn reply_ok<R: serde::Serialize>(reply_token: usize, label: u32, value: R) {
     let bytes = postcard::to_allocvec(&value).expect("postcard ser");
     let mut msg = Message::new(label, [0, 0, 0, 0, 0, 0], 0);
     msg.words[0] = bytes.len();
-    msg.words[1] = cluu_proto::ABI_VERSION as usize;
+    msg.words[1] = cluu_wire::ABI_VERSION as usize;
     let _ = libcluu::ipc::reply_with_payload(reply_token, &msg, &bytes);
 }
 
@@ -329,7 +329,7 @@ fn reply_err(reply_token: usize, label: u32, err: PtsErr) {
     let bytes = postcard::to_allocvec(&value).expect("postcard ser");
     let mut msg = Message::new(label, [0, 0, 0, 0, 0, 0], 0);
     msg.words[0] = bytes.len();
-    msg.words[1] = cluu_proto::ABI_VERSION as usize;
+    msg.words[1] = cluu_wire::ABI_VERSION as usize;
     let _ = libcluu::ipc::reply_with_payload(reply_token, &msg, &bytes);
 }
 

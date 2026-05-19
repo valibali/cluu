@@ -195,8 +195,8 @@ const SERVICE_PATH: &str = "/var/images/vt/bin/shell";
 use libcluu::build_env::SHELL_AUTOSTART_CMD;
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
-/// Unified spawn verb (spec 1). Defined in cluu_proto::spawn — re-exported here.
-const PROCMGR_SPAWN_UNIFIED_LABEL: u32 = cluu_proto::spawn::PROCMGR_SPAWN_UNIFIED_LABEL;
+/// Unified spawn verb (spec 1). Defined in cluu_wire::spawn — re-exported here.
+const PROCMGR_SPAWN_UNIFIED_LABEL: u32 = cluu_wire::spawn::PROCMGR_SPAWN_UNIFIED_LABEL;
 const PROCMGR_KILL_LABEL: u32 = 3;
 const PROCMGR_FAULT_LABEL: u32 = 0xFA017;
 const DEFAULT_PRIORITY: usize = 200;
@@ -1408,7 +1408,7 @@ impl ProcessManager {
             overrides_buf[n_overrides] = (PARAM_CONSOLE_ACTIVE, 1);
             n_overrides += 1;
         }
-        // session_mode parsing removed — replaced by cluu_proto::session (Task 9, Plan 3)
+        // session_mode parsing removed — replaced by cluu_wire::session (Task 9, Plan 3)
         let param_overrides = &overrides_buf[..n_overrides];
 
         match self.spawn_service_with_env(
@@ -2224,29 +2224,29 @@ impl ProcessManager {
         if msg.tag.label == PROCMGR_PID_PGID_QUERY_LABEL {
             return self.handle_pid_pgid_query(msg);
         }
-        if msg.tag.label == cluu_proto::spawn::PROCMGR_SPAWN_UNIFIED_LABEL {
+        if msg.tag.label == cluu_wire::spawn::PROCMGR_SPAWN_UNIFIED_LABEL {
             self.handle_spawn_unified(msg, payload, sender_tid);
             return Ok(());
         }
-        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL {
+        if msg.tag.label == cluu_wire::session::PROCMGR_SESSION_CREATE_LABEL {
             return self.handle_session_create(msg, payload, sender_tid);
         }
-        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_SET_LEADER_LABEL {
+        if msg.tag.label == cluu_wire::session::PROCMGR_SESSION_SET_LEADER_LABEL {
             return self.handle_session_set_leader(msg, payload, sender_tid);
         }
         if msg.tag.label == libcluu::ipc::PROCMGR_ESCALATE_LABEL {
             return self.handle_escalate(msg, payload, sender_tid);
         }
-        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_QUERY_LABEL {
+        if msg.tag.label == cluu_wire::session::PROCMGR_SESSION_QUERY_LABEL {
             return self.handle_session_query(msg, payload, sender_tid);
         }
-        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_SUBSCRIBE_LABEL {
+        if msg.tag.label == cluu_wire::session::PROCMGR_SESSION_SUBSCRIBE_LABEL {
             return self.handle_session_subscribe(msg, payload, sender_tid);
         }
-        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_DERIVE_TOKEN_LABEL {
+        if msg.tag.label == cluu_wire::session::PROCMGR_SESSION_DERIVE_TOKEN_LABEL {
             return self.handle_session_derive(msg, payload, sender_tid);
         }
-        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_DESTROY_LABEL {
+        if msg.tag.label == cluu_wire::session::PROCMGR_SESSION_DESTROY_LABEL {
             return self.handle_session_destroy(msg, payload, sender_tid);
         }
         self.handle_spawn_message(msg, payload, sender_tid)
@@ -5700,7 +5700,7 @@ impl ProcessManager {
         payload: &[u8],
         sender_tid: usize,
     ) {
-        use cluu_proto::spawn::{SpawnEnvelope, SpawnError, SpawnReply};
+        use cluu_wire::spawn::{SpawnEnvelope, SpawnError, SpawnReply};
 
         let reply_token = extract_reply_id(msg);
 
@@ -5716,7 +5716,7 @@ impl ProcessManager {
         let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
 
         // Snapshot session info before spawn consumes the envelope.
-        let spawn_session: Option<cluu_proto::TokenHandle> = envelope.session;
+        let spawn_session: Option<cluu_wire::TokenHandle> = envelope.session;
 
         // Call the core spawn function.
         let result = ::procmgr::spawn::spawn(envelope, caller_pid);
@@ -5741,11 +5741,11 @@ impl ProcessManager {
     fn send_spawn_unified_err(
         &self,
         reply_token: Option<usize>,
-        err: cluu_proto::spawn::SpawnError,
+        err: cluu_wire::spawn::SpawnError,
     ) {
         let result: core::result::Result<
-            cluu_proto::spawn::SpawnReply,
-            cluu_proto::spawn::SpawnError,
+            cluu_wire::spawn::SpawnReply,
+            cluu_wire::spawn::SpawnError,
         > = Err(err);
         self.send_spawn_unified_reply(reply_token, &result)
     }
@@ -5754,8 +5754,8 @@ impl ProcessManager {
         &self,
         reply_token: Option<usize>,
         result: &core::result::Result<
-            cluu_proto::spawn::SpawnReply,
-            cluu_proto::spawn::SpawnError,
+            cluu_wire::spawn::SpawnReply,
+            cluu_wire::spawn::SpawnError,
         >,
     ) {
         let reply_bytes = match postcard::to_allocvec(result) {
@@ -5767,7 +5767,7 @@ impl ProcessManager {
         };
 
         if let Some(token) = reply_token {
-            let label = cluu_proto::spawn::PROCMGR_SPAWN_UNIFIED_LABEL;
+            let label = cluu_wire::spawn::PROCMGR_SPAWN_UNIFIED_LABEL;
             let words = [reply_bytes.len(), 0, 0, 0, 0, 0];
             let reply_msg = Message::new(label, words, 0);
             let _ = libcluu::ipc::send_msg_with_payload(token, &reply_msg, &reply_bytes);
@@ -5787,7 +5787,7 @@ impl ProcessManager {
 
     fn send_session_reply(&mut self, reply_id: Option<usize>, label: u32, bytes: &[u8]) {
         if let Some(tok) = reply_id {
-            let words = [bytes.len(), cluu_proto::ABI_VERSION as usize, 0, 0, 0, 0];
+            let words = [bytes.len(), cluu_wire::ABI_VERSION as usize, 0, 0, 0, 0];
             let reply_msg = Message::new(label, words, 0);
             let _ = ipc::reply_with_payload(tok, &reply_msg, bytes);
         }
@@ -5800,29 +5800,29 @@ impl ProcessManager {
         sender_tid: usize,
     ) -> Result<()> {
         let reply_id = extract_reply_id(msg);
-        if msg.words[1] as u32 != cluu_proto::ABI_VERSION {
-            let reply = cluu_proto::session::SessionCreateReply::Err(
-                cluu_proto::session::SessionCreateErr::Internal(0xE0u32),
+        if msg.words[1] as u32 != cluu_wire::ABI_VERSION {
+            let reply = cluu_wire::session::SessionCreateReply::Err(
+                cluu_wire::session::SessionCreateErr::Internal(0xE0u32),
             );
             let bytes = postcard::to_allocvec(&reply).expect("ser");
             self.send_session_reply(
                 reply_id,
-                cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL,
+                cluu_wire::session::PROCMGR_SESSION_CREATE_LABEL,
                 &bytes,
             );
             return Ok(());
         }
-        let req: cluu_proto::session::SessionCreateRequest =
+        let req: cluu_wire::session::SessionCreateRequest =
             match postcard::from_bytes(payload) {
                 Ok(r) => r,
                 Err(_) => {
-                    let reply = cluu_proto::session::SessionCreateReply::Err(
-                        cluu_proto::session::SessionCreateErr::Internal(0xE1u32),
+                    let reply = cluu_wire::session::SessionCreateReply::Err(
+                        cluu_wire::session::SessionCreateErr::Internal(0xE1u32),
                     );
                     let bytes = postcard::to_allocvec(&reply).expect("ser");
                     self.send_session_reply(
                         reply_id,
-                        cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL,
+                        cluu_wire::session::PROCMGR_SESSION_CREATE_LABEL,
                         &bytes,
                     );
                     return Ok(());
@@ -5836,18 +5836,18 @@ impl ProcessManager {
         ));
 
         if !self.caller_has_right(caller_pid, 0x8000_0001) {
-        // 0x8000_0001 = RIGHT_SESSION_CREATE (to be added to cluu_proto)
+        // 0x8000_0001 = RIGHT_SESSION_CREATE (to be added to cluu_wire)
             let _ = debug_print(&format!(
                 "procmgr: SESSION_CREATE PermissionDenied pid={} right=0x{:08X}",
                 caller_pid, 0x8000_0001u32
             ));
-            let reply = cluu_proto::session::SessionCreateReply::Err(
-                cluu_proto::session::SessionCreateErr::PermissionDenied,
+            let reply = cluu_wire::session::SessionCreateReply::Err(
+                cluu_wire::session::SessionCreateErr::PermissionDenied,
             );
             let bytes = postcard::to_allocvec(&reply).expect("ser");
             self.send_session_reply(
                 reply_id,
-                cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL,
+                cluu_wire::session::PROCMGR_SESSION_CREATE_LABEL,
                 &bytes,
             );
             return Ok(());
@@ -5869,7 +5869,7 @@ impl ProcessManager {
         self.session_creators.insert(caller_pid, session_id);
 
         let reply =
-            cluu_proto::session::SessionCreateReply::Ok(cluu_proto::session::SessionCreateOk {
+            cluu_wire::session::SessionCreateReply::Ok(cluu_wire::session::SessionCreateOk {
                 token,
                 session_id,
             });
@@ -5877,7 +5877,7 @@ impl ProcessManager {
         let _ = debug_print(&format!("procmgr: SESSION_CREATE reply bytes.len()={}", bytes.len()));
         self.send_session_reply(
             reply_id,
-            cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL,
+            cluu_wire::session::PROCMGR_SESSION_CREATE_LABEL,
             &bytes,
         );
         Ok(())
@@ -5890,29 +5890,29 @@ impl ProcessManager {
         sender_tid: usize,
     ) -> Result<()> {
         let reply_id = extract_reply_id(msg);
-        if msg.words[1] as u32 != cluu_proto::ABI_VERSION {
-            let reply = cluu_proto::session::SessionSetLeaderReply::Err(
-                cluu_proto::session::SessionErr::Internal(0xE0u32),
+        if msg.words[1] as u32 != cluu_wire::ABI_VERSION {
+            let reply = cluu_wire::session::SessionSetLeaderReply::Err(
+                cluu_wire::session::SessionErr::Internal(0xE0u32),
             );
             let bytes = postcard::to_allocvec(&reply).expect("ser");
             self.send_session_reply(
                 reply_id,
-                cluu_proto::session::PROCMGR_SESSION_SET_LEADER_LABEL,
+                cluu_wire::session::PROCMGR_SESSION_SET_LEADER_LABEL,
                 &bytes,
             );
             return Ok(());
         }
-        let req: cluu_proto::session::SessionSetLeaderRequest =
+        let req: cluu_wire::session::SessionSetLeaderRequest =
             match postcard::from_bytes(payload) {
                 Ok(r) => r,
                 Err(_) => {
-                    let reply = cluu_proto::session::SessionSetLeaderReply::Err(
-                        cluu_proto::session::SessionErr::Internal(0xE1u32),
+                    let reply = cluu_wire::session::SessionSetLeaderReply::Err(
+                        cluu_wire::session::SessionErr::Internal(0xE1u32),
                     );
                     let bytes = postcard::to_allocvec(&reply).expect("ser");
                     self.send_session_reply(
                         reply_id,
-                        cluu_proto::session::PROCMGR_SESSION_SET_LEADER_LABEL,
+                        cluu_wire::session::PROCMGR_SESSION_SET_LEADER_LABEL,
                         &bytes,
                     );
                     return Ok(());
@@ -5927,11 +5927,11 @@ impl ProcessManager {
             |pid, sid| self.process_session_id(pid) == Some(sid),
         );
 
-        let reply: cluu_proto::session::SessionSetLeaderReply = result.map(|()| ());
+        let reply: cluu_wire::session::SessionSetLeaderReply = result.map(|()| ());
         let bytes = postcard::to_allocvec(&reply).expect("ser");
         self.send_session_reply(
             reply_id,
-            cluu_proto::session::PROCMGR_SESSION_SET_LEADER_LABEL,
+            cluu_wire::session::PROCMGR_SESSION_SET_LEADER_LABEL,
             &bytes,
         );
         Ok(())
@@ -5944,18 +5944,18 @@ impl ProcessManager {
         sender_tid: usize,
     ) -> Result<()> {
         let reply_id = extract_reply_id(msg);
-        let req: cluu_proto::session::SessionQueryRequest =
+        let req: cluu_wire::session::SessionQueryRequest =
             match postcard::from_bytes(payload) {
                 Ok(r) => r,
                 Err(_) => {
                     let result: core::result::Result<
-                        cluu_proto::session::SessionQueryReply,
-                        cluu_proto::session::SessionErr,
-                    > = Err(cluu_proto::session::SessionErr::Internal(0xE1u32));
+                        cluu_wire::session::SessionQueryReply,
+                        cluu_wire::session::SessionErr,
+                    > = Err(cluu_wire::session::SessionErr::Internal(0xE1u32));
                     let bytes = postcard::to_allocvec(&result).expect("ser");
                     self.send_session_reply(
                         reply_id,
-                        cluu_proto::session::PROCMGR_SESSION_QUERY_LABEL,
+                        cluu_wire::session::PROCMGR_SESSION_QUERY_LABEL,
                         &bytes,
                     );
                     return Ok(());
@@ -5966,15 +5966,15 @@ impl ProcessManager {
         let resolved = procmgr::session_table::SESSION_TABLE.resolve(
             req.token,
             caller_pid,
-            cluu_proto::session::RIGHT_SESSION_QUERY,
+            cluu_wire::session::RIGHT_SESSION_QUERY,
         );
 
-        let result: core::result::Result<cluu_proto::session::SessionQueryReply, cluu_proto::session::SessionErr> =
+        let result: core::result::Result<cluu_wire::session::SessionQueryReply, cluu_wire::session::SessionErr> =
             match resolved {
                 Err(e) => Err(e),
                 Ok((sid, _)) => match procmgr::session_table::SESSION_TABLE.snapshot(sid) {
-                    None => Err(cluu_proto::session::SessionErr::NotFound),
-                    Some(s) => Ok(cluu_proto::session::SessionQueryReply {
+                    None => Err(cluu_wire::session::SessionErr::NotFound),
+                    Some(s) => Ok(cluu_wire::session::SessionQueryReply {
                         session_id: s.id,
                         user_name: s.user_name.clone(),
                         leader_pid: s.leader_pid,
@@ -5986,7 +5986,7 @@ impl ProcessManager {
         let bytes = postcard::to_allocvec(&result).expect("ser");
         self.send_session_reply(
             reply_id,
-            cluu_proto::session::PROCMGR_SESSION_QUERY_LABEL,
+            cluu_wire::session::PROCMGR_SESSION_QUERY_LABEL,
             &bytes,
         );
         Ok(())
@@ -5999,17 +5999,17 @@ impl ProcessManager {
         sender_tid: usize,
     ) -> Result<()> {
         let reply_id = extract_reply_id(msg);
-        let req: cluu_proto::session::SessionSubscribeRequest =
+        let req: cluu_wire::session::SessionSubscribeRequest =
             match postcard::from_bytes(payload) {
                 Ok(r) => r,
                 Err(_) => {
-                    let reply = cluu_proto::session::SessionSubscribeReply::Err(
-                        cluu_proto::session::SessionErr::Internal(0xE1u32),
+                    let reply = cluu_wire::session::SessionSubscribeReply::Err(
+                        cluu_wire::session::SessionErr::Internal(0xE1u32),
                     );
                     let bytes = postcard::to_allocvec(&reply).expect("ser");
                     self.send_session_reply(
                         reply_id,
-                        cluu_proto::session::PROCMGR_SESSION_SUBSCRIBE_LABEL,
+                        cluu_wire::session::PROCMGR_SESSION_SUBSCRIBE_LABEL,
                         &bytes,
                     );
                     return Ok(());
@@ -6020,13 +6020,13 @@ impl ProcessManager {
         let derived = match self.derive_send_cap_for_event(req.event_send, caller_pid) {
             Some(d) => d,
             None => {
-                let reply = cluu_proto::session::SessionSubscribeReply::Err(
-                    cluu_proto::session::SessionErr::InvalidToken,
+                let reply = cluu_wire::session::SessionSubscribeReply::Err(
+                    cluu_wire::session::SessionErr::InvalidToken,
                 );
                 let bytes = postcard::to_allocvec(&reply).expect("ser");
                 self.send_session_reply(
                     reply_id,
-                    cluu_proto::session::PROCMGR_SESSION_SUBSCRIBE_LABEL,
+                    cluu_wire::session::PROCMGR_SESSION_SUBSCRIBE_LABEL,
                     &bytes,
                 );
                 return Ok(());
@@ -6038,11 +6038,11 @@ impl ProcessManager {
             caller_pid,
             derived,
         );
-        let reply: cluu_proto::session::SessionSubscribeReply = result.map(|()| ());
+        let reply: cluu_wire::session::SessionSubscribeReply = result.map(|()| ());
         let bytes = postcard::to_allocvec(&reply).expect("ser");
         self.send_session_reply(
             reply_id,
-            cluu_proto::session::PROCMGR_SESSION_SUBSCRIBE_LABEL,
+            cluu_wire::session::PROCMGR_SESSION_SUBSCRIBE_LABEL,
             &bytes,
         );
         Ok(())
@@ -6055,17 +6055,17 @@ impl ProcessManager {
         sender_tid: usize,
     ) -> Result<()> {
         let reply_id = extract_reply_id(msg);
-        let req: cluu_proto::session::SessionDeriveRequest =
+        let req: cluu_wire::session::SessionDeriveRequest =
             match postcard::from_bytes(payload) {
                 Ok(r) => r,
                 Err(_) => {
-                    let reply = cluu_proto::session::SessionDeriveReply::Err(
-                        cluu_proto::session::SessionErr::Internal(0xE1u32),
+                    let reply = cluu_wire::session::SessionDeriveReply::Err(
+                        cluu_wire::session::SessionErr::Internal(0xE1u32),
                     );
                     let bytes = postcard::to_allocvec(&reply).expect("ser");
                     self.send_session_reply(
                         reply_id,
-                        cluu_proto::session::PROCMGR_SESSION_DERIVE_TOKEN_LABEL,
+                        cluu_wire::session::PROCMGR_SESSION_DERIVE_TOKEN_LABEL,
                         &bytes,
                     );
                     return Ok(());
@@ -6079,11 +6079,11 @@ impl ProcessManager {
             req.rights,
             caller_pid,
         );
-        let reply: cluu_proto::session::SessionDeriveReply = result;
+        let reply: cluu_wire::session::SessionDeriveReply = result;
         let bytes = postcard::to_allocvec(&reply).expect("ser");
         self.send_session_reply(
             reply_id,
-            cluu_proto::session::PROCMGR_SESSION_DERIVE_TOKEN_LABEL,
+            cluu_wire::session::PROCMGR_SESSION_DERIVE_TOKEN_LABEL,
             &bytes,
         );
         Ok(())
@@ -6096,17 +6096,17 @@ impl ProcessManager {
         sender_tid: usize,
     ) -> Result<()> {
         let reply_id = extract_reply_id(msg);
-        let req: cluu_proto::session::SessionDestroyRequest =
+        let req: cluu_wire::session::SessionDestroyRequest =
             match postcard::from_bytes(payload) {
                 Ok(r) => r,
                 Err(_) => {
-                    let reply = cluu_proto::session::SessionDestroyReply::Err(
-                        cluu_proto::session::SessionErr::Internal(0xE1u32),
+                    let reply = cluu_wire::session::SessionDestroyReply::Err(
+                        cluu_wire::session::SessionErr::Internal(0xE1u32),
                     );
                     let bytes = postcard::to_allocvec(&reply).expect("ser");
                     self.send_session_reply(
                         reply_id,
-                        cluu_proto::session::PROCMGR_SESSION_DESTROY_LABEL,
+                        cluu_wire::session::PROCMGR_SESSION_DESTROY_LABEL,
                         &bytes,
                     );
                     return Ok(());
@@ -6117,25 +6117,25 @@ impl ProcessManager {
         let resolved = procmgr::session_table::SESSION_TABLE.resolve(
             req.token,
             caller_pid,
-            cluu_proto::session::RIGHT_SESSION_CONTROL,
+            cluu_wire::session::RIGHT_SESSION_CONTROL,
         );
         match resolved {
             Err(e) => {
-                let reply = cluu_proto::session::SessionDestroyReply::Err(e);
+                let reply = cluu_wire::session::SessionDestroyReply::Err(e);
                 let bytes = postcard::to_allocvec(&reply).expect("ser");
                 self.send_session_reply(
                     reply_id,
-                    cluu_proto::session::PROCMGR_SESSION_DESTROY_LABEL,
+                    cluu_wire::session::PROCMGR_SESSION_DESTROY_LABEL,
                     &bytes,
                 );
             }
             Ok((sid, _)) => {
                 self.destroy_session(sid);
-                let reply = cluu_proto::session::SessionDestroyReply::Ok(());
+                let reply = cluu_wire::session::SessionDestroyReply::Ok(());
                 let bytes = postcard::to_allocvec(&reply).expect("ser");
                 self.send_session_reply(
                     reply_id,
-                    cluu_proto::session::PROCMGR_SESSION_DESTROY_LABEL,
+                    cluu_wire::session::PROCMGR_SESSION_DESTROY_LABEL,
                     &bytes,
                 );
             }
@@ -6152,19 +6152,19 @@ impl ProcessManager {
             const SIGHUP: u32 = 1;
             self.send_signal(pid, SIGHUP);
         }
-        let event = cluu_proto::session::SessionEndedEvent { session_id: sid };
+        let event = cluu_wire::session::SessionEndedEvent { session_id: sid };
         let bytes = postcard::to_allocvec(&event).expect("ser");
         for sub in subscribers {
             let words = [
                 bytes.len(),
-                cluu_proto::ABI_VERSION as usize,
+                cluu_wire::ABI_VERSION as usize,
                 0,
                 0,
                 0,
                 0,
             ];
             let event_msg = Message::new(
-                cluu_proto::session::SESSION_ENDED_LABEL,
+                cluu_wire::session::SESSION_ENDED_LABEL,
                 words,
                 0,
             );
@@ -6201,15 +6201,15 @@ impl ProcessManager {
 
     fn derive_send_cap_for_event(
         &self,
-        event_send: cluu_proto::TokenHandle,
+        event_send: cluu_wire::TokenHandle,
         _caller_pid: u32,
-    ) -> Option<cluu_proto::TokenHandle> {
+    ) -> Option<cluu_wire::TokenHandle> {
         match token_derive(
             event_send as usize,
             Rights::IPC_SEND.bits() as usize,
             u64::MAX,
         ) {
-            Ok(tok) => Some(tok as cluu_proto::TokenHandle),
+            Ok(tok) => Some(tok as cluu_wire::TokenHandle),
             Err(_) => None,
         }
     }

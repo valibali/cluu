@@ -7,7 +7,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use cluu_proto::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, SpawnError, ViewSource};
+use cluu_wire::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, SpawnError, ViewSource};
 use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::fs::client::VfsClient;
 use libcluu::fd_table::FD_TABLE;

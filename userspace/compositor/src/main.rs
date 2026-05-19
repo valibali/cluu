@@ -2,7 +2,7 @@
 #![no_main]
 
 extern crate alloc;
-extern crate cluu_proto;
+extern crate cluu_wire;
 
 mod config;
 mod state;
@@ -23,13 +23,13 @@ use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
 use registry::RegistryEvent;
 
-use cluu_proto::session::{
+use cluu_wire::session::{
     SESSION_ENDED_LABEL, COMPOSITOR_SESSION_HANDOFF_LABEL,
     CompositorSessionHandoffRequest, CompositorSessionHandoffReply,
     SessionEndedEvent, SessionErr,
 };
-use cluu_proto::spawn::{SpawnEnvelope, ViewSource};
-use cluu_proto::ABI_VERSION;
+use cluu_wire::spawn::{SpawnEnvelope, ViewSource};
+use cluu_wire::ABI_VERSION;
 
 /// Send COMP_FRAME_READY_LABEL to windows that have pending damage since the
 /// last broadcast.  A window is eligible if:
@@ -505,14 +505,14 @@ fn reply_handoff_err(comp: &state::Compositor, msg: &Message, err: SessionErr) {
 /// Return the token handle the compositor uses to send SESSION_ENDED
 /// subscription events to procmgr. Stub — returns 0 until the event
 /// endpoint is properly created and wired.
-fn event_endpoint_send_cap(_comp: &state::Compositor) -> cluu_proto::TokenHandle {
+fn event_endpoint_send_cap(_comp: &state::Compositor) -> cluu_wire::TokenHandle {
     0
 }
 
 /// Return the view token that login and session windows derive their
 /// VFS view from. Stub — returns 0 until the real view token plumbing
 /// is in place.
-fn compositor_view_token(_comp: &state::Compositor) -> cluu_proto::TokenHandle {
+fn compositor_view_token(_comp: &state::Compositor) -> cluu_wire::TokenHandle {
     0
 }
 

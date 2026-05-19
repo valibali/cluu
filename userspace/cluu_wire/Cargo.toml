@@ -1,5 +1,5 @@
 [package]
-name = "cluu_proto"
+name = "cluu_wire"
 version = "0.1.0"
 edition = "2021"
 description = "CLUU wire protocol types — single source of truth for spawn, session, pts, window."
@@ -12,7 +12,7 @@ postcard = { workspace = true }
 bitflags = { workspace = true, features = ["serde"] }
 
 [lib]
-name = "cluu_proto"
+name = "cluu_wire"
 crate-type = ["rlib"]
 
 [features]

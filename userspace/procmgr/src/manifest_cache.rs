@@ -8,7 +8,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use spin::Mutex;
 
-use cluu_proto::spawn::RestartPolicy;
+use cluu_wire::spawn::RestartPolicy;
 
 /// Cached projection of a Cluufile manifest.
 #[derive(Clone, Debug)]

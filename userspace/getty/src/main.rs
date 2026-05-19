@@ -75,26 +75,26 @@ fn parse_tty_path(args: &[String]) -> String {
 
 // ─── Termios helpers ──────────────────────────────────────────────────────────
 
-fn termios_disable_echo(fd: i32) -> Option<cluu_proto::pts::Termios> {
-    let mut termios: cluu_proto::pts::Termios = unsafe { core::mem::zeroed() };
+fn termios_disable_echo(fd: i32) -> Option<cluu_wire::pts::Termios> {
+    let mut termios: cluu_wire::pts::Termios = unsafe { core::mem::zeroed() };
     let r = libcluu::posix::termios::tcgetattr(
-        fd, &mut termios as *mut cluu_proto::pts::Termios as *mut libcluu::posix::termios::Termios);
+        fd, &mut termios as *mut cluu_wire::pts::Termios as *mut libcluu::posix::termios::Termios);
     if r != 0 {
         return None;
     }
     let saved = termios;
-    termios.c_lflag &= !cluu_proto::pts::Termios::ECHO;
+    termios.c_lflag &= !cluu_wire::pts::Termios::ECHO;
     let r2 = libcluu::posix::termios::tcsetattr(
-        fd, 0, &termios as *const cluu_proto::pts::Termios as *const libcluu::posix::termios::Termios);
+        fd, 0, &termios as *const cluu_wire::pts::Termios as *const libcluu::posix::termios::Termios);
     if r2 != 0 {
         return None;
     }
     Some(saved)
 }
 
-fn termios_restore(fd: i32, saved: &cluu_proto::pts::Termios) {
+fn termios_restore(fd: i32, saved: &cluu_wire::pts::Termios) {
     let _ = libcluu::posix::termios::tcsetattr(
-        fd, 0, saved as *const cluu_proto::pts::Termios as *const libcluu::posix::termios::Termios);
+        fd, 0, saved as *const cluu_wire::pts::Termios as *const libcluu::posix::termios::Termios);
 }
 
 fn validate_creds(_user_name: &str, _password: &str) -> bool {
@@ -159,8 +159,8 @@ pub extern "C" fn main() -> i32 {
 
     // ── SESSION_CREATE ─────────────────────────────────────────────────────
 
-    use cluu_proto::session::{ProfileSpec, SessionCreateRequest};
-    use cluu_proto::spawn::ViewSource;
+    use cluu_wire::session::{ProfileSpec, SessionCreateRequest};
+    use cluu_wire::spawn::ViewSource;
 
     let create_reply = libcluu::session::create(SessionCreateRequest {
         user_name: user_name.clone(),
@@ -190,7 +190,7 @@ pub extern "C" fn main() -> i32 {
     let _ = libcluu::debug_print("getty: session_create OK, spawning shell");
 
     // ── Spawn the user's shell on this TTY ─────────────────────────────────
-    use cluu_proto::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope};
+    use cluu_wire::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope};
 
     let stdin_entry = libcluu::fd_table::FD_TABLE.lock().get(fd_in).cloned();
     let stdout_entry = libcluu::fd_table::FD_TABLE.lock().get(fd_out).cloned();

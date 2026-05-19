@@ -21,7 +21,7 @@ use libcluu::ipc::{
 };
 use libcluu::types::Message;
 
-pub use cluu_proto::session::COMPOSITOR_SESSION_HANDOFF_LABEL;
+pub use cluu_wire::session::COMPOSITOR_SESSION_HANDOFF_LABEL;
 
 #[derive(Debug)]
 pub enum Incoming {

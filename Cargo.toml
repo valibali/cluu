@@ -28,7 +28,7 @@ members = [
     "userspace/registry",
     "userspace/timeserver",
     "userspace/cat",
-    "userspace/cluu_proto",
+    "userspace/cluu_wire",
     "userspace/grep",
     "userspace/head",
     "userspace/tail",

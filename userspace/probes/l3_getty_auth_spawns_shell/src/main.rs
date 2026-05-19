@@ -12,10 +12,10 @@ use alloc::string::String;
 use alloc::vec;
 use libcluu::runtime as _;
 
-use cluu_proto::session::{
+use cluu_wire::session::{
     ProfileSpec, SessionCreateRequest,
 };
-use cluu_proto::spawn::{SpawnEnvelope, ViewSource};
+use cluu_wire::spawn::{SpawnEnvelope, ViewSource};
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {

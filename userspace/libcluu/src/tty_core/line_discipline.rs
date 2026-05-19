@@ -11,7 +11,7 @@ extern crate alloc;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use cluu_proto::pts::Termios;
+use cluu_wire::pts::Termios;
 use crate::syscall::debug_print as dp;
 
 const BACKSPACE_SEQ: &[u8] = b"\x08 \x08";

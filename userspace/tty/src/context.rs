@@ -17,8 +17,8 @@ use libcluu::ipc::{
 use libcluu::registry;
 use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Result};
-use cluu_proto::session::{ProfileSpec, SessionCreateRequest};
-use cluu_proto::ViewSource;
+use cluu_wire::session::{ProfileSpec, SessionCreateRequest};
+use cluu_wire::ViewSource;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum LoginState {
@@ -279,7 +279,7 @@ impl TtyContext {
             // must not consume fresh keyboard input.
             let data: Vec<u8> = self.input_queue.iter().take(n).copied().collect();
             let reply_token = pending.reply_token;
-            let reply_msg = Message::new(cluu_proto::pts::PTS_READ_LABEL, [0; 6], 0);
+            let reply_msg = Message::new(cluu_wire::pts::PTS_READ_LABEL, [0; 6], 0);
 
             match libcluu::ipc::reply_with_payload(reply_token, &reply_msg, &data) {
                 Ok(()) => {
@@ -329,7 +329,7 @@ impl TtyContext {
     }
 
     /// Transitional: send a SESSION_CREATE request to procmgr using the new
-    /// cluu_proto session protocol.  Full credential verification and shell
+    /// cluu_wire session protocol.  Full credential verification and shell
     /// spawning will move into the getty binary (Task 10).  For now we create
     /// a minimal session with a placeholder profile; the VFS-backed session
     /// path continues to work.

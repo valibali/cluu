@@ -136,7 +136,7 @@ pub const ARGV_MAGIC: u32 = 0x5647_5241;
 /// Reply: payload = "name pid container_id\n" lines.
 pub const PROCMGR_CONTAINER_LIST_LABEL: u32 = 25;
 
-// PROCMGR_SESSION_LOGIN_LABEL removed — replaced by cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL
+// PROCMGR_SESSION_LOGIN_LABEL removed — replaced by cluu_wire::session::PROCMGR_SESSION_CREATE_LABEL
 // (Task 9, Plan 3: session lifecycle refactor)
 /// Session death: procmgr → tty (send). words[0]=vt_instance.
 pub const PROCMGR_SESSION_DEATH_LABEL: u32 = 31;

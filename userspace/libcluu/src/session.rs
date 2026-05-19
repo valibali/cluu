@@ -2,9 +2,9 @@
 
 extern crate alloc;
 
-use cluu_proto::ABI_VERSION;
-use cluu_proto::TokenHandle;
-use cluu_proto::session::*;
+use cluu_wire::ABI_VERSION;
+use cluu_wire::TokenHandle;
+use cluu_wire::session::*;
 
 use crate::ipc;
 use crate::types::Message;

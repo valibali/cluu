@@ -757,7 +757,7 @@ pub extern "C" fn system(command: *const c_char) -> c_int {
 // (spec 1, plan 1 task 11)
 // ═══════════════════════════════════════════════════════════════════════════
 
-use cluu_proto::spawn::{
+use cluu_wire::spawn::{
     FdInherit as ProtoFdInherit, FdRights, FdSource, SpawnEnvelope, SpawnError, ViewSource,
 };
 

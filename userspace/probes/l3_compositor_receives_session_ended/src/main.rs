@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec;
 use libcluu::runtime as _;
 
-use cluu_proto::session::{
+use cluu_wire::session::{
     ProfileSpec, SessionCreateRequest,
 };
 
@@ -34,7 +34,7 @@ pub extern "C" fn main() -> i32 {
         user_name: String::from("testuser"),
         profile: ProfileSpec {
             home: String::from("/home/testuser"),
-            initial_view: cluu_proto::spawn::ViewSource::Derive(0xC0FFEE),
+            initial_view: cluu_wire::spawn::ViewSource::Derive(0xC0FFEE),
             env: vec![(String::from("USER"), String::from("testuser"))],
             umask: 0o022,
         },

@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 libcluu = { path = "../libcluu", features = ["posix"] }
-cluu_proto = { path = "../cluu_proto" }
+cluu_wire = { path = "../cluu_wire" }
 postcard = { workspace = true }
 serde = { workspace = true }
 

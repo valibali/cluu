@@ -23,8 +23,8 @@ use libcluu::types::Message;
 use libcluu::window_shm::WindowShm;
 use libcluu::{debug_print, registry, syscall};
 
-use cluu_proto::pts::{VFS_REGISTER_PTS_LABEL, VfsRegisterPtsRequest, VfsRegisterPtsReply};
-use cluu_proto::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, ViewSource};
+use cluu_wire::pts::{VFS_REGISTER_PTS_LABEL, VfsRegisterPtsRequest, VfsRegisterPtsReply};
+use cluu_wire::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, ViewSource};
 
 extern "C" {
     fn _open(path: *const u8, flags: i32, mode: u32) -> i32;
