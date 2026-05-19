@@ -17,13 +17,13 @@ mod render;
 mod tty_backend;
 
 use libcluu::boot::{process_info, space_token, TOKEN_IPC};
-use libcluu::ipc::{COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY, PTS_REGISTER_LABEL};
-use libcluu::types::IpcFlags;
+use libcluu::ipc::{COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY};
 use libcluu::syscall::MAP_FRAME_TOKEN;
 use libcluu::types::Message;
 use libcluu::window_shm::WindowShm;
 use libcluu::{debug_print, registry, syscall};
 
+use cluu_proto::pts::{VFS_REGISTER_PTS_LABEL, VfsRegisterPtsRequest, VfsRegisterPtsReply};
 use cluu_proto::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, ViewSource};
 
 extern "C" {
@@ -184,17 +184,21 @@ fn register_window(my_ep: usize) -> Result<(u32, usize), i32> {
 
 // ─── PTS_REGISTER ─────────────────────────────────────────────────────────────
 
+/// Query procmgr for the caller's session_id.
+///
+/// Until spec 3 wires sessions through spawn, this returns `None`
+/// unconditionally. The per-session `/dev/pts/` overlay only activates
+/// once spec 3 populates real session ids.
+fn read_own_session_id() -> Option<u32> {
+    None
+}
+
 /// Register a new `/dev/pts/<id>` slot with the VFS.
 ///
-/// Wire format (sent to "vfs:main"):
-///   label   = PTS_REGISTER_LABEL
-///   words[0] = notify_endpoint — VFS fires PTS_CLOSED_LABEL here when the
-///              last fd on the pts is closed.
-///   nwords  = 1
+/// Wire format (sent to "vfs:main"): uses VFS_REGISTER_PTS_LABEL (111)
+/// with a postcard-serialized VfsRegisterPtsRequest payload.
 ///
-/// Reply:
-///   words[0] = errno (0 = ok)
-///   words[1] = id (u32)
+/// Reply is postcard-serialized VfsRegisterPtsReply with assigned_id.
 fn register_pts(my_ep: usize) -> Result<u32, i32> {
     let vfs_ep = match registry::lookup_service("vfs:main") {
         Some(ep) => ep,
@@ -204,30 +208,34 @@ fn register_pts(my_ep: usize) -> Result<u32, i32> {
         }
     };
 
-    let mut msg = Message::new(
-        PTS_REGISTER_LABEL,
-        [
-            my_ep, // words[0] = notify_endpoint for PTS_CLOSED_LABEL
-            0,
-            0,
-            0,
-            0,
-            0,
-        ],
-        1,
+    let req = VfsRegisterPtsRequest {
+        session_id: read_own_session_id(),
+        pts_endpoint: my_ep as u64,
+        suggested_id: None,
+    };
+
+    let payload = postcard::to_allocvec(&req).map_err(|_| 10)?;
+
+    let msg = libcluu::ipc::make_payload_message(
+        VFS_REGISTER_PTS_LABEL,
+        payload.len(),
+        &[],
     );
 
-    if libcluu::ipc::call(vfs_ep, &mut msg, IpcFlags::empty()).is_err() {
-        return Err(8);
-    }
+    // Allocate reply buffer: Message header + up to 128 bytes for postcard reply.
+    let mut reply_buf = [0u8; core::mem::size_of::<Message>() + 128];
 
-    // reply is in-place in msg after call().
-    let errno = msg.words[0];
-    if errno != 0 {
-        return Err(9);
-    }
-    let id = msg.words[1] as u32;
-    Ok(id)
+    let (_reply_msg, reply_payload_len) =
+        libcluu::ipc::call_with_reply_buf(vfs_ep, &msg, &payload, &mut reply_buf)
+            .map_err(|_| 8)?;
+
+    let reply_start = core::mem::size_of::<Message>();
+    let reply_payload = &reply_buf[reply_start..reply_start + reply_payload_len];
+
+    let reply: VfsRegisterPtsReply =
+        postcard::from_bytes(reply_payload).map_err(|_| 9)?;
+
+    Ok(reply.assigned_id)
 }
 
 // ─── spawn /bin/shell ─────────────────────────────────────────────────────────
