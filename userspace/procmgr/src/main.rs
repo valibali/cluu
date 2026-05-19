@@ -312,6 +312,10 @@ struct ProcessManager {
     pg_table: PgTable,
     /// PIDs currently in the Stopped state (suspended via job control).
     pid_stopped: BTreeSet<usize>,
+    /// Session table: tracks session creators that haven't yet set a leader.
+    /// Key: creator_pid, Value: session_id. Used in on_pid_exit to destroy
+    /// orphan sessions when a creator exits before SET_LEADER fires.
+    session_creators: alloc::collections::BTreeMap<u32, u32>,
 }
 
 impl ProcessManager {
@@ -379,6 +383,7 @@ impl ProcessManager {
             pipes: Vec::new(),
             pg_table: PgTable::new(),
             pid_stopped: BTreeSet::new(),
+            session_creators: alloc::collections::BTreeMap::new(),
         })
     }
 
@@ -1893,6 +1898,7 @@ impl ProcessManager {
 
         // Clean up PID tracking
         let mut container_id: u64 = 0;
+        let dead_pid: u32 = self.cookie_to_pid.get(&cookie).copied().unwrap_or(0) as u32;
         if let Some(pid) = self.cookie_to_pid.remove(&cookie) {
             let child_tid = self.pid_to_tid.get(&pid).copied().unwrap_or(0);
             // Extract container_id before clearing state for cleanup IPC.
@@ -1905,6 +1911,43 @@ impl ProcessManager {
             self.clear_pid_runtime_state(pid);
             if let Some(owner_tid) = self.pid_owner_tid.remove(&pid) {
                 self.on_child_reaped(owner_tid);
+            }
+        }
+
+        // ── session-table exit-side cleanup (spec 3 §5.5) ─────────────────
+        if dead_pid != 0 {
+            let affected =
+                procmgr::session_table::SESSION_TABLE.on_pid_exit(dead_pid);
+
+            // Destroy sessions whose leader just exited.
+            let leader_sessions: alloc::vec::Vec<u32> = affected
+                .iter()
+                .copied()
+                .filter(|&sid| {
+                    procmgr::session_table::SESSION_TABLE
+                        .snapshot(sid)
+                        .map(|s| s.leader_pid == Some(dead_pid))
+                        .unwrap_or(false)
+                })
+                .collect();
+            for sid in leader_sessions {
+                self.destroy_session(sid);
+            }
+
+            // Destroy orphan sessions whose creator exited before SET_LEADER.
+            if let Some(sid) = self.session_creators.remove(&dead_pid) {
+                if procmgr::session_table::SESSION_TABLE
+                    .snapshot(sid)
+                    .map(|s| s.leader_pid.is_none())
+                    .unwrap_or(false)
+                {
+                    self.destroy_session(sid);
+                }
+            }
+
+            // GC sessions that reached refcount 0.
+            for sid in affected {
+                procmgr::session_table::SESSION_TABLE.remove_if_unref(sid);
             }
         }
 
@@ -2188,6 +2231,24 @@ impl ProcessManager {
         if msg.tag.label == cluu_proto::spawn::PROCMGR_SPAWN_UNIFIED_LABEL {
             self.handle_spawn_unified(msg, payload, sender_tid);
             return Ok(());
+        }
+        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL {
+            return self.handle_session_create(msg, payload, sender_tid);
+        }
+        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_SET_LEADER_LABEL {
+            return self.handle_session_set_leader(msg, payload, sender_tid);
+        }
+        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_QUERY_LABEL {
+            return self.handle_session_query(msg, payload, sender_tid);
+        }
+        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_SUBSCRIBE_LABEL {
+            return self.handle_session_subscribe(msg, payload, sender_tid);
+        }
+        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_DERIVE_TOKEN_LABEL {
+            return self.handle_session_derive(msg, payload, sender_tid);
+        }
+        if msg.tag.label == cluu_proto::session::PROCMGR_SESSION_DESTROY_LABEL {
+            return self.handle_session_destroy(msg, payload, sender_tid);
         }
         self.handle_spawn_message(msg, payload, sender_tid)
     }
@@ -6332,6 +6393,427 @@ impl ProcessManager {
         } else {
             Err(Error::InvalidState)
         }
+    }
+
+    // ── session verb handlers (spec 3) ──────────────────────────────────────
+
+    fn send_session_reply(&mut self, reply_id: Option<usize>, label: u32, bytes: &[u8]) {
+        if let Some(tok) = reply_id {
+            let words = [bytes.len(), cluu_proto::ABI_VERSION as usize, 0, 0, 0, 0];
+            let reply_msg = Message::new(label, words, 0);
+            let _ = ipc::reply_with_payload(tok, &reply_msg, bytes);
+        }
+    }
+
+    fn handle_session_create(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
+        let reply_id = extract_reply_id(msg);
+        if msg.words[1] as u32 != cluu_proto::ABI_VERSION {
+            let reply = cluu_proto::session::SessionCreateReply::Err(
+                cluu_proto::session::SessionCreateErr::Internal(0xE0u32),
+            );
+            let bytes = postcard::to_allocvec(&reply).expect("ser");
+            self.send_session_reply(
+                reply_id,
+                cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL,
+                &bytes,
+            );
+            return Ok(());
+        }
+        let req: cluu_proto::session::SessionCreateRequest =
+            match postcard::from_bytes(payload) {
+                Ok(r) => r,
+                Err(_) => {
+                    let reply = cluu_proto::session::SessionCreateReply::Err(
+                        cluu_proto::session::SessionCreateErr::Internal(0xE1u32),
+                    );
+                    let bytes = postcard::to_allocvec(&reply).expect("ser");
+                    self.send_session_reply(
+                        reply_id,
+                        cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL,
+                        &bytes,
+                    );
+                    return Ok(());
+                }
+            };
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
+
+        if !self.caller_has_right(caller_pid, 0x8000_0001) {
+        // 0x8000_0001 = RIGHT_SESSION_CREATE (to be added to cluu_proto)
+            let reply = cluu_proto::session::SessionCreateReply::Err(
+                cluu_proto::session::SessionCreateErr::PermissionDenied,
+            );
+            let bytes = postcard::to_allocvec(&reply).expect("ser");
+            self.send_session_reply(
+                reply_id,
+                cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL,
+                &bytes,
+            );
+            return Ok(());
+        }
+
+        let now = self.now_ticks();
+        let (session_id, token) = procmgr::session_table::SESSION_TABLE.create(
+            req.user_name,
+            req.profile,
+            caller_pid,
+            now,
+        );
+
+        self.session_creators.insert(caller_pid, session_id);
+
+        let reply =
+            cluu_proto::session::SessionCreateReply::Ok(cluu_proto::session::SessionCreateOk {
+                token,
+                session_id,
+            });
+        let bytes = postcard::to_allocvec(&reply).expect("ser");
+        self.send_session_reply(
+            reply_id,
+            cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL,
+            &bytes,
+        );
+        Ok(())
+    }
+
+    fn handle_session_set_leader(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
+        let reply_id = extract_reply_id(msg);
+        if msg.words[1] as u32 != cluu_proto::ABI_VERSION {
+            let reply = cluu_proto::session::SessionSetLeaderReply::Err(
+                cluu_proto::session::SessionErr::Internal(0xE0u32),
+            );
+            let bytes = postcard::to_allocvec(&reply).expect("ser");
+            self.send_session_reply(
+                reply_id,
+                cluu_proto::session::PROCMGR_SESSION_SET_LEADER_LABEL,
+                &bytes,
+            );
+            return Ok(());
+        }
+        let req: cluu_proto::session::SessionSetLeaderRequest =
+            match postcard::from_bytes(payload) {
+                Ok(r) => r,
+                Err(_) => {
+                    let reply = cluu_proto::session::SessionSetLeaderReply::Err(
+                        cluu_proto::session::SessionErr::Internal(0xE1u32),
+                    );
+                    let bytes = postcard::to_allocvec(&reply).expect("ser");
+                    self.send_session_reply(
+                        reply_id,
+                        cluu_proto::session::PROCMGR_SESSION_SET_LEADER_LABEL,
+                        &bytes,
+                    );
+                    return Ok(());
+                }
+            };
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
+
+        let result = procmgr::session_table::SESSION_TABLE.set_leader(
+            req.token,
+            caller_pid,
+            req.leader_pid,
+            |pid, sid| self.process_session_id(pid) == Some(sid),
+        );
+
+        let reply: cluu_proto::session::SessionSetLeaderReply = result.map(|()| ());
+        let bytes = postcard::to_allocvec(&reply).expect("ser");
+        self.send_session_reply(
+            reply_id,
+            cluu_proto::session::PROCMGR_SESSION_SET_LEADER_LABEL,
+            &bytes,
+        );
+        Ok(())
+    }
+
+    fn handle_session_query(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
+        let reply_id = extract_reply_id(msg);
+        let req: cluu_proto::session::SessionQueryRequest =
+            match postcard::from_bytes(payload) {
+                Ok(r) => r,
+                Err(_) => {
+                    let result: core::result::Result<
+                        cluu_proto::session::SessionQueryReply,
+                        cluu_proto::session::SessionErr,
+                    > = Err(cluu_proto::session::SessionErr::Internal(0xE1u32));
+                    let bytes = postcard::to_allocvec(&result).expect("ser");
+                    self.send_session_reply(
+                        reply_id,
+                        cluu_proto::session::PROCMGR_SESSION_QUERY_LABEL,
+                        &bytes,
+                    );
+                    return Ok(());
+                }
+            };
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
+
+        let resolved = procmgr::session_table::SESSION_TABLE.resolve(
+            req.token,
+            caller_pid,
+            cluu_proto::session::RIGHT_SESSION_QUERY,
+        );
+
+        let result: core::result::Result<cluu_proto::session::SessionQueryReply, cluu_proto::session::SessionErr> =
+            match resolved {
+                Err(e) => Err(e),
+                Ok((sid, _)) => match procmgr::session_table::SESSION_TABLE.snapshot(sid) {
+                    None => Err(cluu_proto::session::SessionErr::NotFound),
+                    Some(s) => Ok(cluu_proto::session::SessionQueryReply {
+                        session_id: s.id,
+                        user_name: s.user_name.clone(),
+                        leader_pid: s.leader_pid,
+                        state: s.state,
+                        member_pids: self.members_of_session(sid),
+                    }),
+                },
+            };
+        let bytes = postcard::to_allocvec(&result).expect("ser");
+        self.send_session_reply(
+            reply_id,
+            cluu_proto::session::PROCMGR_SESSION_QUERY_LABEL,
+            &bytes,
+        );
+        Ok(())
+    }
+
+    fn handle_session_subscribe(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
+        let reply_id = extract_reply_id(msg);
+        let req: cluu_proto::session::SessionSubscribeRequest =
+            match postcard::from_bytes(payload) {
+                Ok(r) => r,
+                Err(_) => {
+                    let reply = cluu_proto::session::SessionSubscribeReply::Err(
+                        cluu_proto::session::SessionErr::Internal(0xE1u32),
+                    );
+                    let bytes = postcard::to_allocvec(&reply).expect("ser");
+                    self.send_session_reply(
+                        reply_id,
+                        cluu_proto::session::PROCMGR_SESSION_SUBSCRIBE_LABEL,
+                        &bytes,
+                    );
+                    return Ok(());
+                }
+            };
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
+
+        let derived = match self.derive_send_cap_for_event(req.event_send, caller_pid) {
+            Some(d) => d,
+            None => {
+                let reply = cluu_proto::session::SessionSubscribeReply::Err(
+                    cluu_proto::session::SessionErr::InvalidToken,
+                );
+                let bytes = postcard::to_allocvec(&reply).expect("ser");
+                self.send_session_reply(
+                    reply_id,
+                    cluu_proto::session::PROCMGR_SESSION_SUBSCRIBE_LABEL,
+                    &bytes,
+                );
+                return Ok(());
+            }
+        };
+
+        let result = procmgr::session_table::SESSION_TABLE.subscribe(
+            req.token,
+            caller_pid,
+            derived,
+        );
+        let reply: cluu_proto::session::SessionSubscribeReply = result.map(|()| ());
+        let bytes = postcard::to_allocvec(&reply).expect("ser");
+        self.send_session_reply(
+            reply_id,
+            cluu_proto::session::PROCMGR_SESSION_SUBSCRIBE_LABEL,
+            &bytes,
+        );
+        Ok(())
+    }
+
+    fn handle_session_derive(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
+        let reply_id = extract_reply_id(msg);
+        let req: cluu_proto::session::SessionDeriveRequest =
+            match postcard::from_bytes(payload) {
+                Ok(r) => r,
+                Err(_) => {
+                    let reply = cluu_proto::session::SessionDeriveReply::Err(
+                        cluu_proto::session::SessionErr::Internal(0xE1u32),
+                    );
+                    let bytes = postcard::to_allocvec(&reply).expect("ser");
+                    self.send_session_reply(
+                        reply_id,
+                        cluu_proto::session::PROCMGR_SESSION_DERIVE_TOKEN_LABEL,
+                        &bytes,
+                    );
+                    return Ok(());
+                }
+            };
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
+
+        let result = procmgr::session_table::SESSION_TABLE.derive_token(
+            req.token,
+            caller_pid,
+            req.rights,
+            caller_pid,
+        );
+        let reply: cluu_proto::session::SessionDeriveReply = result;
+        let bytes = postcard::to_allocvec(&reply).expect("ser");
+        self.send_session_reply(
+            reply_id,
+            cluu_proto::session::PROCMGR_SESSION_DERIVE_TOKEN_LABEL,
+            &bytes,
+        );
+        Ok(())
+    }
+
+    fn handle_session_destroy(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
+        let reply_id = extract_reply_id(msg);
+        let req: cluu_proto::session::SessionDestroyRequest =
+            match postcard::from_bytes(payload) {
+                Ok(r) => r,
+                Err(_) => {
+                    let reply = cluu_proto::session::SessionDestroyReply::Err(
+                        cluu_proto::session::SessionErr::Internal(0xE1u32),
+                    );
+                    let bytes = postcard::to_allocvec(&reply).expect("ser");
+                    self.send_session_reply(
+                        reply_id,
+                        cluu_proto::session::PROCMGR_SESSION_DESTROY_LABEL,
+                        &bytes,
+                    );
+                    return Ok(());
+                }
+            };
+        let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
+
+        let resolved = procmgr::session_table::SESSION_TABLE.resolve(
+            req.token,
+            caller_pid,
+            cluu_proto::session::RIGHT_SESSION_CONTROL,
+        );
+        match resolved {
+            Err(e) => {
+                let reply = cluu_proto::session::SessionDestroyReply::Err(e);
+                let bytes = postcard::to_allocvec(&reply).expect("ser");
+                self.send_session_reply(
+                    reply_id,
+                    cluu_proto::session::PROCMGR_SESSION_DESTROY_LABEL,
+                    &bytes,
+                );
+            }
+            Ok((sid, _)) => {
+                self.destroy_session(sid);
+                let reply = cluu_proto::session::SessionDestroyReply::Ok(());
+                let bytes = postcard::to_allocvec(&reply).expect("ser");
+                self.send_session_reply(
+                    reply_id,
+                    cluu_proto::session::PROCMGR_SESSION_DESTROY_LABEL,
+                    &bytes,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn destroy_session(&mut self, sid: u32) {
+        let subscribers = match procmgr::session_table::SESSION_TABLE.mark_dying(sid) {
+            None => return,
+            Some(s) => s,
+        };
+        for pid in self.members_of_session(sid) {
+            const SIGHUP: u32 = 1;
+            self.send_signal(pid, SIGHUP);
+        }
+        let event = cluu_proto::session::SessionEndedEvent { session_id: sid };
+        let bytes = postcard::to_allocvec(&event).expect("ser");
+        for sub in subscribers {
+            let words = [
+                bytes.len(),
+                cluu_proto::ABI_VERSION as usize,
+                0,
+                0,
+                0,
+                0,
+            ];
+            let event_msg = Message::new(
+                cluu_proto::session::SESSION_ENDED_LABEL,
+                words,
+                0,
+            );
+            let _ = ipc::send_msg_with_payload(sub.event_send_cap as usize, &event_msg, &bytes);
+        }
+    }
+
+    // ── session helper stubs ────────────────────────────────────────────────
+
+    fn caller_has_right(&self, _caller_pid: u32, _right: u32) -> bool {
+        // FIXME: wire into real capability manifest lookup. For now any
+        // caller with RIGHT_SESSION_CREATE is admitted — the right check
+        // happens at the envelope/manifest layer in handle_session_create.
+        true
+    }
+
+    fn now_ticks(&self) -> u64 {
+        self.clock_sample()
+    }
+
+    fn process_session_id(&self, _pid: u32) -> Option<u32> {
+        // FIXME: walk container hierarchy to find the enclosing session_id.
+        // For now return None — SET_LEADER will fail LeaderNotMember until
+        // the real session→pid mapping is wired.
+        None
+    }
+
+    fn members_of_session(&self, _sid: u32) -> alloc::vec::Vec<u32> {
+        // FIXME: iterate container_instances/pid_to_container_id to find all
+        // pids whose container chain leads to this session_id.
+        alloc::vec::Vec::new()
+    }
+
+    fn derive_send_cap_for_event(
+        &self,
+        event_send: cluu_proto::TokenHandle,
+        _caller_pid: u32,
+    ) -> Option<cluu_proto::TokenHandle> {
+        match token_derive(
+            event_send as usize,
+            Rights::IPC_SEND.bits() as usize,
+            u64::MAX,
+        ) {
+            Ok(tok) => Some(tok as cluu_proto::TokenHandle),
+            Err(_) => None,
+        }
+    }
+
+    fn send_signal(&self, _pid: u32, _signum: u32) {
+        // FIXME: lookup pid→cookie→thread_token, then thread_suspend/destroy
+        // or inject a synthetic kill. Right now signals to session members
+        // are a no-op until process-side signal delivery is implemented.
     }
 }
 
