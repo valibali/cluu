@@ -22,12 +22,13 @@ pub fn create(req: SessionCreateRequest) -> Result<SessionCreateOk, SessionCreat
     let msg = Message::new(PROCMGR_SESSION_CREATE_LABEL, words, 0);
 
     let mut reply_buf = [0u8; REPLY_BUF_SIZE];
-    let (_reply_msg, bytes_received) = ipc::call_with_reply_buf(
+    let (_reply_msg, payload_len) = ipc::call_with_reply_buf(
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionCreateErr::Internal(0xE2u32))?;
 
-    let reply_payload = if bytes_received > 0 {
-        &reply_buf[..bytes_received]
+    let hdr = core::mem::size_of::<Message>();
+    let reply_payload = if payload_len > 0 {
+        &reply_buf[hdr..hdr + payload_len]
     } else {
         &[]
     };
@@ -48,12 +49,13 @@ pub fn destroy(token: TokenHandle) -> Result<(), SessionErr> {
     let msg = Message::new(PROCMGR_SESSION_DESTROY_LABEL, words, 0);
 
     let mut reply_buf = [0u8; REPLY_BUF_SIZE];
-    let (_reply_msg, bytes_received) = ipc::call_with_reply_buf(
+    let (_reply_msg, payload_len) = ipc::call_with_reply_buf(
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionErr::Internal(0xE6u32))?;
 
-    let reply_payload = if bytes_received > 0 {
-        &reply_buf[..bytes_received]
+    let hdr = core::mem::size_of::<Message>();
+    let reply_payload = if payload_len > 0 {
+        &reply_buf[hdr..hdr + payload_len]
     } else {
         &[]
     };
@@ -74,12 +76,13 @@ pub fn query(token: TokenHandle) -> Result<SessionQueryReply, SessionErr> {
     let msg = Message::new(PROCMGR_SESSION_QUERY_LABEL, words, 0);
 
     let mut reply_buf = [0u8; REPLY_BUF_SIZE];
-    let (_reply_msg, bytes_received) = ipc::call_with_reply_buf(
+    let (_reply_msg, payload_len) = ipc::call_with_reply_buf(
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionErr::Internal(0xEAu32))?;
 
-    let reply_payload = if bytes_received > 0 {
-        &reply_buf[..bytes_received]
+    let hdr = core::mem::size_of::<Message>();
+    let reply_payload = if payload_len > 0 {
+        &reply_buf[hdr..hdr + payload_len]
     } else {
         &[]
     };
@@ -100,12 +103,13 @@ pub fn subscribe(token: TokenHandle, event_send: TokenHandle) -> Result<(), Sess
     let msg = Message::new(PROCMGR_SESSION_SUBSCRIBE_LABEL, words, 0);
 
     let mut reply_buf = [0u8; REPLY_BUF_SIZE];
-    let (_reply_msg, bytes_received) = ipc::call_with_reply_buf(
+    let (_reply_msg, payload_len) = ipc::call_with_reply_buf(
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionErr::Internal(0xEEu32))?;
 
-    let reply_payload = if bytes_received > 0 {
-        &reply_buf[..bytes_received]
+    let hdr = core::mem::size_of::<Message>();
+    let reply_payload = if payload_len > 0 {
+        &reply_buf[hdr..hdr + payload_len]
     } else {
         &[]
     };
@@ -126,12 +130,13 @@ pub fn derive_token(token: TokenHandle, rights: u32) -> Result<TokenHandle, Sess
     let msg = Message::new(PROCMGR_SESSION_DERIVE_TOKEN_LABEL, words, 0);
 
     let mut reply_buf = [0u8; REPLY_BUF_SIZE];
-    let (_reply_msg, bytes_received) = ipc::call_with_reply_buf(
+    let (_reply_msg, payload_len) = ipc::call_with_reply_buf(
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionErr::Internal(0xF2u32))?;
 
-    let reply_payload = if bytes_received > 0 {
-        &reply_buf[..bytes_received]
+    let hdr = core::mem::size_of::<Message>();
+    let reply_payload = if payload_len > 0 {
+        &reply_buf[hdr..hdr + payload_len]
     } else {
         &[]
     };
@@ -152,12 +157,13 @@ pub fn set_leader(token: TokenHandle, leader_pid: u32) -> Result<(), SessionErr>
     let msg = Message::new(PROCMGR_SESSION_SET_LEADER_LABEL, words, 0);
 
     let mut reply_buf = [0u8; REPLY_BUF_SIZE];
-    let (_reply_msg, bytes_received) = ipc::call_with_reply_buf(
+    let (_reply_msg, payload_len) = ipc::call_with_reply_buf(
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionErr::Internal(0xF6u32))?;
 
-    let reply_payload = if bytes_received > 0 {
-        &reply_buf[..bytes_received]
+    let hdr = core::mem::size_of::<Message>();
+    let reply_payload = if payload_len > 0 {
+        &reply_buf[hdr..hdr + payload_len]
     } else {
         &[]
     };
