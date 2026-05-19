@@ -127,6 +127,15 @@ pub fn spawn(envelope: SpawnEnvelope, caller_pid: u32) -> Result<SpawnReply, Spa
                 rollback.installed_fds.push(entry.child_fd);
                 inherited_for_pi.push((entry.child_fd, *vfs_client_id, *vfs_remote_fd));
             }
+            FdSource::EndpointCap { endpoint_token } => {
+                hooks::inherit_endpoint_cap(*endpoint_token, child_tid, entry.child_fd)
+                    .map_err(|_| {
+                        rollback_all(rollback.clone());
+                        SpawnError::FdInheritDeniedAt(entry.child_fd)
+                    })?;
+                rollback.installed_fds.push(entry.child_fd);
+                inherited_for_pi.push((entry.child_fd, 0, 0));
+            }
         }
     }
 
@@ -219,6 +228,14 @@ mod hooks {
     pub fn vfs_derive_child_fd(
         _vfs_client_id: u64,
         _vfs_remote_fd: u32,
+        _child_tid: u64,
+        _child_fd: u32,
+    ) -> Result<TokenHandle, ()> {
+        Err(())
+    }
+
+    pub fn inherit_endpoint_cap(
+        _endpoint_token: u64,
         _child_tid: u64,
         _child_fd: u32,
     ) -> Result<TokenHandle, ()> {

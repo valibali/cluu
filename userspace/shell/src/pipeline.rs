@@ -13,9 +13,9 @@ use cluu_lang::ast::{CmdElem, Pipeline};
 
 use crate::commands::{build_redir_actions, render_word_public, spawn_process_with_argv_and_redirs, BuiltinRegistry, CommandContext, WriteSink};
 use libcluu::ipc::{
-    build_container_run_payload_full, call_with_payload,
-    FdInherit, PROCMGR_CONTAINER_RUN_LABEL, PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL,
+    PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL,
 };
+use cluu_proto::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, ViewSource};
 use libcluu::posix::jobs::{pg_attach, pg_create, tty_set_fg};
 use libcluu::syscall::endpoint_create;
 use libcluu::types::Message;
@@ -415,26 +415,28 @@ impl PipelineExecutor {
             // Wire read end of upstream pipe as stdin (not for first stage).
             if i > 0 {
                 fd_inherit.push(FdInherit {
-                    target_fd:     0,
-                    is_pipe:       true,
-                    endpoint:      pipes[i - 1].read_token,
-                    vfs_client_id: 0,
-                    vfs_remote_fd: 0,
+                    child_fd: 0,
+                    source: FdSource::EndpointCap {
+                        endpoint_token: pipes[i - 1].read_token as u64,
+                    },
+                    rights: FdRights::READ_ONLY,
                 });
             }
             // Wire write end of downstream pipe as stdout (not for last stage).
             if i < n - 1 {
                 fd_inherit.push(FdInherit {
-                    target_fd:     1,
-                    is_pipe:       true,
-                    endpoint:      pipes[i].write_token,
-                    vfs_client_id: 0,
-                    vfs_remote_fd: 0,
+                    child_fd: 1,
+                    source: FdSource::EndpointCap {
+                        endpoint_token: pipes[i].write_token as u64,
+                    },
+                    rights: FdRights::WRITE_ONLY,
                 });
             }
 
-            let (payload, _argc, fd_inherit_offset) =
-                build_container_run_payload_full(image_name, &arg_refs, &fd_inherit, stage_redirs, &env_refs);
+            // Build env pairs from refs
+            let env: Vec<(String, String)> = env_refs.iter()
+                .map(|(k, v)| (String::from(*k), String::from(*v)))
+                .collect();
 
             let notify_endpoint = match endpoint_create(process_info().tokens[TOKEN_IPC]) {
                 Ok(ep) => ep,
@@ -446,32 +448,32 @@ impl PipelineExecutor {
                 }
             };
 
-            let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
-            msg.words[0] = payload.len();
-            msg.words[1] = notify_endpoint;
-            msg.words[2] = fd_inherit_offset;
+            let image: String = image_name.into();
+            let args: Vec<String> = arg_refs.iter().map(|s| String::from(*s)).collect();
 
-            let mut reply = Message::new(0, [0; 6], 0);
-            if let Err(e) = call_with_payload(procmgr_ep, &msg, &payload, &mut reply) {
-                for p in &pipes {
-                    let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+            let envelope = SpawnEnvelope {
+                image,
+                args,
+                env: env,
+                view: ViewSource::Derive(libcluu::token(libcluu::boot::TOKEN_EXTRA_0) as u64),
+                fd_inherit,
+                session: None,
+                notify: Some(notify_endpoint as u64),
+            };
+
+            let reply = match libcluu::spawn::spawn(envelope) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = debug_print(&format!(
+                        "shell: pipeline stage '{}' spawn failed: {:?}\n",
+                        image_name, e));
+                    for p in &pipes {
+                        let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+                    }
+                    return Ok(127);
                 }
-                return Err(e);
-            }
-            let status = reply.words[0];
-            if status != 0 {
-                let line = format!(
-                    "shell: pipeline stage {} ('{}') failed to start (status={})\n",
-                    i, image_name, status
-                );
-                crate::write_stdout(line.as_bytes());
-                for p in &pipes {
-                    let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
-                }
-                return Ok(127);
-            }
-            // Attach child to pipeline's pgid.
-            let child_pid = reply.words[1];
+            };
+            let child_pid = reply.pid as usize;
             if pipeline_pgid != 0 {
                 let _ = pg_attach(procmgr_ep, pipeline_pgid, child_pid);
             }

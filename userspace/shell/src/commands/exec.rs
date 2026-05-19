@@ -7,12 +7,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use libcluu::boot::process_info;
+use cluu_proto::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, SpawnError, ViewSource};
+use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::fs::client::VfsClient;
 use libcluu::fd_table::FD_TABLE;
 use libcluu::ipc::{
-    build_container_run_payload_full, call, call_with_payload,
-    FdInherit, RedirAction, PROCMGR_CONTAINER_RUN_LABEL,
+    call, RedirAction,
     TTY_FG_FLAG_FORWARD_CTRL_C, TTY_FG_FLAG_NOTIFY_CTRL_C, TTY_READ_LABEL,
     TTY_REGISTER_LABEL,
 };
@@ -22,7 +22,7 @@ use libcluu::posix::tty::{
 };
 use libcluu::syscall;
 use libcluu::types::Message;
-use libcluu::{debug_print, Error, IpcFlags, Result, TOKEN_IPC};
+use libcluu::{debug_print, Error, IpcFlags, Result};
 use core::mem::size_of;
 
 use crate::commands::builtins::registry::{CommandContext, ExecResult, ForegroundMode};
@@ -246,39 +246,66 @@ pub fn spawn_process_with_argv_and_redirs(
         [0u32, 1u32, 2u32]
             .iter()
             .filter_map(|&fd| {
+                let rights = match fd {
+                    0 => FdRights::READ_ONLY,
+                    _ => FdRights::WRITE_ONLY,
+                };
                 table.get(fd as i32).map(|e| FdInherit {
-                    target_fd:     fd,
-                    is_pipe:       e.is_pipe(),
-                    endpoint:      e.endpoint,
-                    vfs_client_id: e.client_id,
-                    vfs_remote_fd: e.remote_fd.unwrap_or(0),
+                    child_fd: fd,
+                    source: FdSource::VfsFd {
+                        vfs_client_id: e.client_id as u64,
+                        vfs_remote_fd: e.remote_fd.unwrap_or(0) as u32,
+                    },
+                    rights,
                 })
             })
             .collect()
     };
-    let (payload, _argc, fd_inherit_offset) =
-        build_container_run_payload_full(name, args, &fd_inherit, redirs, &env_refs);
+    let argv: Vec<String> = args.iter().map(|s| String::from(*s)).collect();
+    let env: Vec<(String, String)> = env_refs
+        .iter()
+        .map(|(k, v)| (String::from(*k), String::from(*v)))
+        .collect();
+    let image = if argv.is_empty() {
+        String::from(name)
+    } else {
+        argv[0].clone()
+    };
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
-    let mut msg = Message::new(PROCMGR_CONTAINER_RUN_LABEL, [0; 6], 3);
-    msg.words[0] = payload.len();
-    msg.words[1] = notify_endpoint;
-    msg.words[2] = fd_inherit_offset;
-    let mut reply = Message::new(0, [0; 6], 0);
+    let envelope = SpawnEnvelope {
+        image,
+        args: argv,
+        env,
+        view: ViewSource::Derive(libcluu::token(TOKEN_EXTRA_0) as u64),
+        fd_inherit,
+        session: None,
+        notify: Some(notify_endpoint as u64),
+    };
     let _ = debug_print(&format!(
-        "shell: container run begin name={} ep={} notify={}",
+        "shell: spawn begin name={} ep={} notify={}",
         name, procmgr_endpoint, notify_endpoint
     ));
-    call_with_payload(procmgr_endpoint, &msg, &payload, &mut reply)?;
+    let reply = libcluu::spawn::spawn(envelope).map_err(|e| match e {
+        SpawnError::ImageNotFound => Error::NotFound,
+        SpawnError::PermissionDenied => Error::PermissionDenied,
+        SpawnError::OutOfMemory => Error::OutOfMemory,
+        SpawnError::ViewDeriveDenied => Error::PermissionDenied,
+        SpawnError::SessionRevoked => Error::PermissionDenied,
+        SpawnError::NotifyTokenInvalid => Error::InvalidParameter,
+        SpawnError::FdInheritDeniedAt(_) => Error::PermissionDenied,
+        SpawnError::ManifestInvalid(_) => Error::InvalidState,
+        SpawnError::Internal(_) => Error::InvalidState,
+    })?;
     let _ = debug_print(&format!(
-        "shell: container run done status={} pid={} stdin={}",
-        reply.words[0], reply.words[1], reply.words[4]
+        "shell: spawn done pid={} child_thread_token=0x{:x}",
+        reply.pid, reply.child_thread_token
     ));
     Ok(SpawnResult {
         procmgr_endpoint,
         notify_endpoint,
-        status_word: reply.words[0],
-        pid: reply.words[1],
-        stdin_endpoint: reply.words[4],
+        status_word: 0,
+        pid: reply.pid as usize,
+        stdin_endpoint: 0,
     })
 }
 

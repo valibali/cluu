@@ -70,6 +70,9 @@ pub enum FdSource {
         vfs_client_id: u64,
         vfs_remote_fd: u32,
     },
+    EndpointCap {
+        endpoint_token: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
