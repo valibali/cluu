@@ -10,11 +10,13 @@
 extern crate alloc;
 extern crate libcluu;
 
+#[allow(unused_imports)]
+use libcluu::runtime as _;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use libcluu::debug_print;
 
 // ─── POSIX shim wrappers ──────────────────────────────────────────────────────
 
@@ -63,9 +65,9 @@ fn read_line(fd: i32) -> Option<String> {
 
 // ─── TTY path parsing ─────────────────────────────────────────────────────────
 
-fn parse_tty_path(argv: &[&str]) -> String {
-    if argv.len() >= 2 {
-        String::from(argv[1])
+fn parse_tty_path(args: &[String]) -> String {
+    if args.len() >= 2 {
+        args[1].clone()
     } else {
         String::from("/dev/tty1")
     }
@@ -91,7 +93,7 @@ fn termios_disable_echo(fd: i32) -> Option<cluu_proto::pts::Termios> {
 }
 
 fn termios_restore(fd: i32, saved: &cluu_proto::pts::Termios) {
-    libcluu::posix::termios::tcsetattr(
+    let _ = libcluu::posix::termios::tcsetattr(
         fd, 0, saved as *const cluu_proto::pts::Termios as *const libcluu::posix::termios::Termios);
 }
 
@@ -109,28 +111,9 @@ fn getty_view_token() -> u64 {
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
-    // ── Build argv slice ──────────────────────────────────────────────────
-    let mut args: Vec<&str> = Vec::new();
-    unsafe {
-        for i in 0..argc {
-            let p = *argv.offset(i as isize);
-            if p.is_null() {
-                continue;
-            }
-            let mut end = 0usize;
-            while *p.add(end) != 0 {
-                end += 1;
-            }
-            let slice = core::slice::from_raw_parts(p, end);
-            if let Ok(s) = core::str::from_utf8(slice) {
-                args.push(s);
-            }
-        }
-    }
-
+pub extern "C" fn main() -> i32 {
+    let args = libcluu::args::args();
     let tty_path = parse_tty_path(&args);
-    let _ = debug_print(&format!("getty: starting on {}\n", tty_path));
 
     // ── Open TTY as stdin/stdout/stderr ───────────────────────────────────
     let fd_in  = open_tty(&tty_path, libcluu::posix::O_RDONLY);
@@ -138,7 +121,6 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     let fd_err = open_tty(&tty_path, libcluu::posix::O_WRONLY);
 
     if fd_in < 0 || fd_out < 0 || fd_err < 0 {
-        let _ = debug_print("getty: failed to open tty\n");
         return 1;
     }
 
@@ -167,9 +149,9 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     }
 
     // ── SESSION_CREATE ─────────────────────────────────────────────────────
-    
+
     use cluu_proto::session::{ProfileSpec, SessionCreateRequest};
-    use cluu_proto::spawn::{ViewSource};
+    use cluu_proto::spawn::ViewSource;
 
     let create_reply = libcluu::session::create(SessionCreateRequest {
         user_name: user_name.clone(),
@@ -187,8 +169,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 
     let ok = match create_reply {
         Ok(o) => o,
-        Err(e) => {
-            let _ = debug_print(&format!("getty: SESSION_CREATE failed {:?}\n", e));
+        Err(_e) => {
             close_fd(fd_in);
             close_fd(fd_out);
             close_fd(fd_err);
@@ -245,8 +226,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     let shell_reply = libcluu::spawn::spawn(envelope);
     let shell_pid = match shell_reply {
         Ok(r) => r.pid,
-        Err(e) => {
-            let _ = debug_print(&format!("getty: shell spawn failed {:?}\n", e));
+        Err(_e) => {
             close_fd(fd_in);
             close_fd(fd_out);
             close_fd(fd_err);
@@ -255,8 +235,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     };
 
     // ── SET_LEADER ─────────────────────────────────────────────────────────
-    if let Err(e) = libcluu::session::set_leader(ok.token, shell_pid) {
-        let _ = debug_print(&format!("getty: set_leader failed {:?}\n", e));
+    if let Err(_e) = libcluu::session::set_leader(ok.token, shell_pid) {
         close_fd(fd_in);
         close_fd(fd_out);
         close_fd(fd_err);
