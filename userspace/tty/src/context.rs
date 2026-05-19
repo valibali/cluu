@@ -277,7 +277,7 @@ impl TtyContext {
             // must not consume fresh keyboard input.
             let data: Vec<u8> = self.input_queue.iter().take(n).copied().collect();
             let reply_token = pending.reply_token;
-            let reply_msg = Message::new(libcluu::ipc::TTY_READ_REQUEST_LABEL, [0; 6], 0);
+            let reply_msg = Message::new(cluu_proto::pts::PTS_READ_LABEL, [0; 6], 0);
 
             match libcluu::ipc::reply_with_payload(reply_token, &reply_msg, &data) {
                 Ok(()) => {

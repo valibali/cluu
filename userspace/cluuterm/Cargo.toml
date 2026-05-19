@@ -13,3 +13,5 @@ path = "src/main.rs"
 [dependencies]
 libcluu = { path = "../libcluu", features = ["posix"] }
 cluu_proto = { path = "../cluu_proto" }
+postcard = { workspace = true }
+serde = { workspace = true }

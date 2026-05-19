@@ -1,4 +1,4 @@
-//! Cluuterm core state machine and recv loop.
+//! Cluuterm core state machine — PTS_* verb dispatch, rendering, recv loop.
 
 extern crate alloc;
 
@@ -8,22 +8,331 @@ use alloc::vec::Vec;
 use libcluu::ansi::{Attr, EraseMode, Event, Parser};
 use libcluu::ipc::{
     self, COMP_INPUT_FORWARD_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL,
-    PTS_CLOSED_LABEL, PTS_READ_LABEL, PTS_UNREGISTER_LABEL, PTS_WRITE_LABEL,
 };
-use libcluu::ipc::COMP_CLOSE_REQUEST_LABEL;
+use libcluu::ipc::{COMP_CLOSE_REQUEST_LABEL, PROCMGR_PG_SIGNAL_LABEL};
 use libcluu::registry::RegistryEvent;
 use libcluu::time::{TIME_SUBSCRIBE_PERIODIC_LABEL, TIME_TICK_LABEL};
-use libcluu::tty_core::{HistoryRow, LineDiscipline, Scrollback};
+use libcluu::tty_core::{HistoryRow, Scrollback};
+use libcluu::tty_core::routing::{route_input_byte, ServiceAction};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::window_shm::WindowShm;
 use libcluu::{debug_print, registry, syscall};
 
+use cluu_proto::pts::{
+    PTS_READ_LABEL, PTS_WRITE_LABEL, PTS_POLL_LABEL,
+    PTS_GET_TERMIOS_LABEL, PTS_SET_TERMIOS_LABEL,
+    PTS_GET_WINSIZE_LABEL, PTS_SET_WINSIZE_LABEL,
+    PTS_GET_PGRP_LABEL, PTS_SET_PGRP_LABEL,
+    PTS_FLUSH_LABEL, PTS_CLOSED_LABEL,
+    ReadRequest, ReadReply, WriteRequest, WriteReply,
+    PollRequest, PollReply, PollEvents,
+    GetTermiosReply, SetTermiosRequest, SetTermiosReply,
+    GetWinsizeReply, Winsize, SetWinsizeReply,
+    GetPgrpReply, SetPgrpRequest, SetPgrpReply,
+    FlushRequest, FlushReply, FlushQueue,
+    Termios, PtsErr,
+};
+
 /// Scrollback capacity in rows (matches legacy console `SCROLLBACK_LINES`).
 const SCROLLBACK_LINES: usize = 200;
 
-/// Maximum bytes VFS can send in a single PTS_WRITE payload.
-/// IPC_MESSAGE_MAX in VFS = 1024; actual payload headroom ≈ 1024 - header.
-const PTS_WRITE_MAX: usize = 800;
+/// Signal number for SIGWINCH (POSIX).
+const SIGWINCH: u32 = 28;
+/// Signal number for SIGTTOU (POSIX) — used for TOSTOP check.
+const SIGTTOU: u32 = 22;
+/// Signal number for SIGTTIN (POSIX) — used for bg-read check.
+const SIGTTIN: u32 = 21;
+
+// ── Per-PTS state ────────────────────────────────────────────────────────────
+
+/// A pending PTS_READ that is blocked waiting for cooked bytes.
+#[derive(Clone, Debug)]
+pub struct PendingRead {
+    pub reply_token: usize,
+    pub caller_pid: u32,
+    pub caller_pgid: i32,
+    pub max_bytes: u32,
+}
+
+/// PTS state: line discipline + job-control fields. Owned by Cluuterm.pts.
+pub struct Pts {
+    pub id: u32,
+    pub line_discipline: libcluu::tty_core::line_discipline::LineDiscipline,
+    pub fg_pgid: Option<i32>,
+    pub winsize: Winsize,
+    pub pending_readers: VecDeque<PendingRead>,
+    /// Cooked bytes queued for delivery to PTS_READ callers.
+    pub ready_bytes: VecDeque<u8>,
+    pub closed: bool,
+    procmgr_main: usize,
+}
+
+impl Pts {
+    fn new(id: u32) -> Self {
+        Self {
+            id,
+            line_discipline: libcluu::tty_core::line_discipline::LineDiscipline::new(),
+            fg_pgid: None,
+            winsize: Winsize { rows: 24, cols: 80, xpixel: 640, ypixel: 480 },
+            pending_readers: VecDeque::new(),
+            ready_bytes: VecDeque::new(),
+            closed: false,
+            procmgr_main: 0,
+        }
+    }
+
+    fn set_procmgr_ep(&mut self, ep: usize) {
+        self.procmgr_main = ep;
+    }
+
+    /// Check if any cooked bytes are available for immediate delivery.
+    fn has_cooked_bytes(&self) -> bool {
+        !self.ready_bytes.is_empty()
+    }
+
+    /// Try to take up to `max` cooked bytes. Returns `None` if none available.
+    fn try_take_cooked_bytes(&mut self, max: u32) -> Option<Vec<u8>> {
+        let n = (max as usize).min(self.ready_bytes.len());
+        if n == 0 {
+            return None;
+        }
+        let out: Vec<u8> = self.ready_bytes.drain(..n).collect();
+        Some(out)
+    }
+
+    /// Wake all pending readers that can be satisfied by current cooked bytes.
+    fn try_wake_pending_readers(&mut self) {
+        while let Some(mut pending) = self.pending_readers.pop_front() {
+            if let Some(bytes) = self.try_take_cooked_bytes(pending.max_bytes) {
+                reply_ok::<ReadReply>(pending.reply_token, PTS_READ_LABEL, Ok(bytes));
+            } else {
+                // Not enough bytes yet; re-queue and stop.
+                self.pending_readers.push_front(pending);
+                break;
+            }
+        }
+    }
+
+    /// Send a signal to a process group via procmgr (fire-and-forget).
+    fn send_pg_signal(&self, pgid: i32, signum: u32) {
+        if self.procmgr_main == 0 {
+            return;
+        }
+        let msg = Message::new(
+            PROCMGR_PG_SIGNAL_LABEL,
+            [pgid as usize, signum as usize, 0, 0, 0, 0],
+            2,
+        );
+        let _ = ipc::send(self.procmgr_main, &msg, IpcFlags::empty());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 11 PTS_* verb handlers
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// PTS_READ_LABEL (100)
+    fn handle_pts_read(
+        &mut self,
+        req: ReadRequest,
+        msg: &Message,
+        caller_pid: u32,
+        caller_pgid: i32,
+    ) {
+        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => return,
+        };
+
+        // SIGTTIN: if caller is not in fg pgrp, signal them, return Eintr.
+        if self.fg_pgid.is_some() && self.fg_pgid != Some(caller_pgid) {
+            self.send_pg_signal(caller_pgid, SIGTTIN);
+            reply_err(reply_token, PTS_READ_LABEL, PtsErr::Eintr);
+            return;
+        }
+        if self.closed {
+            reply_ok::<ReadReply>(reply_token, PTS_READ_LABEL, Err(PtsErr::Eio));
+            return;
+        }
+        if let Some(bytes) = self.try_take_cooked_bytes(req.max_bytes) {
+            reply_ok::<ReadReply>(reply_token, PTS_READ_LABEL, Ok(bytes));
+            return;
+        }
+        // No cooked bytes — defer reply.
+        self.pending_readers.push_back(PendingRead {
+            reply_token,
+            caller_pid,
+            caller_pgid,
+            max_bytes: req.max_bytes,
+        });
+    }
+
+    /// PTS_WRITE_LABEL (101)
+    fn handle_pts_write(
+        &mut self,
+        req: &WriteRequest,
+        msg: &Message,
+        caller_pid: u32,
+        caller_pgid: i32,
+    ) -> Option<Vec<u8>> {
+        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => return None,
+        };
+
+        // TOSTOP check: background process writing to terminal gets SIGTTOU.
+        let lflag = self.line_discipline.termios().c_lflag;
+        if lflag & Termios::TOSTOP != 0
+            && self.fg_pgid.is_some()
+            && self.fg_pgid != Some(caller_pgid)
+        {
+            self.send_pg_signal(caller_pgid, SIGTTOU);
+            reply_err(reply_token, PTS_WRITE_LABEL, PtsErr::Eintr);
+            return None;
+        }
+
+        let cooked = self.line_discipline.process_output(req);
+        reply_ok::<WriteReply>(reply_token, PTS_WRITE_LABEL, Ok(req.len() as u32));
+        Some(cooked)
+    }
+
+    /// PTS_POLL_LABEL (102)
+    fn handle_pts_poll(&mut self, req: PollRequest, msg: &Message) {
+        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => return,
+        };
+        let mut ready = PollEvents::empty();
+        if self.has_cooked_bytes() { ready |= PollEvents::POLLIN; }
+        if !self.closed             { ready |= PollEvents::POLLOUT; }
+        if self.closed              { ready |= PollEvents::POLLHUP; }
+        reply_ok::<PollReply>(reply_token, PTS_POLL_LABEL, PollReply { ready });
+    }
+
+    /// PTS_GET_TERMIOS_LABEL (103)
+    fn handle_pts_get_termios(&mut self, msg: &Message) {
+        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => return,
+        };
+        let t = *self.line_discipline.termios();
+        reply_ok::<GetTermiosReply>(reply_token, PTS_GET_TERMIOS_LABEL, t);
+    }
+
+    /// PTS_SET_TERMIOS_LABEL (104)
+    fn handle_pts_set_termios(&mut self, req: SetTermiosRequest, msg: &Message) {
+        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => return,
+        };
+        match self.line_discipline.set_termios(req.termios) {
+            Ok(()) => reply_ok::<SetTermiosReply>(reply_token, PTS_SET_TERMIOS_LABEL, Ok(())),
+            Err(_) => reply_ok::<SetTermiosReply>(reply_token, PTS_SET_TERMIOS_LABEL, Err(PtsErr::EinvalTermios)),
+        }
+    }
+
+    /// PTS_GET_WINSIZE_LABEL (105)
+    fn handle_pts_get_winsize(&mut self, msg: &Message) {
+        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => return,
+        };
+        reply_ok::<GetWinsizeReply>(reply_token, PTS_GET_WINSIZE_LABEL, self.winsize);
+    }
+
+    /// PTS_SET_WINSIZE_LABEL (106)
+    fn handle_pts_set_winsize(&mut self, req: Winsize, msg: &Message) {
+        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => return,
+        };
+        self.winsize = req;
+        if let Some(pgid) = self.fg_pgid {
+            self.send_pg_signal(pgid, SIGWINCH);
+        }
+        reply_ok::<SetWinsizeReply>(reply_token, PTS_SET_WINSIZE_LABEL, Ok(()));
+    }
+
+    /// PTS_GET_PGRP_LABEL (107)
+    fn handle_pts_get_pgrp(&mut self, msg: &Message) {
+        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => return,
+        };
+        reply_ok::<GetPgrpReply>(reply_token, PTS_GET_PGRP_LABEL, self.fg_pgid.unwrap_or(0));
+    }
+
+    /// PTS_SET_PGRP_LABEL (108)
+    fn handle_pts_set_pgrp(&mut self, req: SetPgrpRequest, msg: &Message) {
+        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => return,
+        };
+        self.fg_pgid = Some(req);
+        reply_ok::<SetPgrpReply>(reply_token, PTS_SET_PGRP_LABEL, Ok(()));
+    }
+
+    /// PTS_FLUSH_LABEL (109)
+    fn handle_pts_flush(&mut self, req: FlushRequest, msg: &Message) {
+        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => return,
+        };
+        match req.queue {
+            FlushQueue::Input | FlushQueue::Both => {
+                self.line_discipline.flush_input();
+                self.ready_bytes.clear();
+            }
+            _ => {}
+        }
+        match req.queue {
+            FlushQueue::Output | FlushQueue::Both => {
+                // Output queue: nothing persistent for PTS — handled at TTY side.
+            }
+            _ => {}
+        }
+        reply_ok::<FlushReply>(reply_token, PTS_FLUSH_LABEL, Ok(()));
+    }
+
+    /// PTS_CLOSED_LABEL (110)
+    fn handle_pts_closed(&mut self) {
+        self.closed = true;
+        // Wake all pending readers with EIO.
+        while let Some(pr) = self.pending_readers.pop_front() {
+            reply_err(pr.reply_token, PTS_READ_LABEL, PtsErr::Eio);
+        }
+    }
+
+    // ── Input routing ───────────────────────────────────────────────────────
+
+    /// Feed one input byte through line discipline → service actions.
+    /// Returns a list of `ServiceAction` for the caller to dispatch.
+    pub fn on_input_byte(&mut self, byte: u8) -> Vec<ServiceAction> {
+        route_input_byte(&mut self.line_discipline, byte)
+    }
+}
+
+// ── Reply helpers (postcard-serialized IPC replies) ──────────────────────────
+
+fn reply_ok<R: serde::Serialize>(reply_token: usize, label: u32, value: R) {
+    let bytes = postcard::to_allocvec(&value).expect("postcard ser");
+    let mut msg = Message::new(label, [0, 0, 0, 0, 0, 0], 0);
+    msg.words[0] = bytes.len();
+    msg.words[1] = cluu_proto::ABI_VERSION as usize;
+    let _ = libcluu::ipc::reply_with_payload(reply_token, &msg, &bytes);
+}
+
+fn reply_err(reply_token: usize, label: u32, err: PtsErr) {
+    // Serialize Err(err) directly — postcard doesn't need a type parameter.
+    // We encode a Result<(), PtsErr>::Err(err) as the reply payload.
+    let value: core::result::Result<(), PtsErr> = core::result::Result::Err(err);
+    let bytes = postcard::to_allocvec(&value).expect("postcard ser");
+    let mut msg = Message::new(label, [0, 0, 0, 0, 0, 0], 0);
+    msg.words[0] = bytes.len();
+    msg.words[1] = cluu_proto::ABI_VERSION as usize;
+    let _ = libcluu::ipc::reply_with_payload(reply_token, &msg, &bytes);
+}
+
+// ── Terminal cell-grid + rendering (preserved from original) ─────────────────
 
 pub struct Cluuterm {
     pub cols: usize,
@@ -33,14 +342,17 @@ pub struct Cluuterm {
     pub pts_id: u32,
     pub window_id: u32,
     /// My endpoint (receives FRAME_READY + INPUT_FORWARD from compositor,
-    /// PTS_READ/WRITE from VFS, PTS_CLOSED from VFS).
+    /// PTS_* from VFS, PTS_CLOSED from VFS).
     pub my_ep: usize,
     /// Compositor client endpoint (for DAMAGE + DESTROY messages).
     pub comp_ep: usize,
 
+    // ── PTS state (unified verb set) ────────────────────────────────────────
+    pub pts: Pts,
+
     // ── Terminal state ──────────────────────────────────────────────────
     pub parser: Parser,
-    pub discipline: LineDiscipline,
+    pub discipline: libcluu::tty_core::line_discipline::LineDiscipline,
     pub scrollback: Scrollback,
     /// Cell character grid: `cols * rows` bytes, row-major.
     pub cells: Vec<u8>,
@@ -90,8 +402,9 @@ impl Cluuterm {
             window_id,
             my_ep,
             comp_ep,
+            pts: Pts::new(pts_id),
             parser: Parser::new(),
-            discipline: LineDiscipline::new(),
+            discipline: libcluu::tty_core::line_discipline::LineDiscipline::new(),
             scrollback: Scrollback::new(SCROLLBACK_LINES),
             cells: alloc::vec![b' '; total],
             fg_cells: alloc::vec![default_attr.fg; total],
@@ -344,20 +657,40 @@ impl Cluuterm {
         self.stdin_buf.drain(..n).collect()
     }
 
+    // ── Input dispatch from routing layer ──────────────────────────────
+
+    /// Apply service actions from `route_input_byte` to this terminal.
+    pub fn apply_service_actions(&mut self, actions: Vec<ServiceAction>) {
+        for action in actions {
+            match action {
+                ServiceAction::DeliverBytes(bytes) => {
+                    self.pts.ready_bytes.extend(bytes.iter().cloned());
+                    self.pts.try_wake_pending_readers();
+                }
+                ServiceAction::SignalFgPgrp(sig) => {
+                    if let Some(pgid) = self.pts.fg_pgid {
+                        self.pts.send_pg_signal(pgid, sig as u32);
+                    }
+                }
+                ServiceAction::Echo(bytes) => {
+                    // Echo bytes go through process_output (OPOST) then render.
+                    let cooked = self.pts.line_discipline.process_output(&bytes);
+                    self.handle_pts_write(&cooked);
+                }
+                ServiceAction::DeliverEof => {
+                    // EOF: wake pending readers (they get empty/close behavior).
+                    self.pts.try_wake_pending_readers();
+                }
+            }
+        }
+    }
+
     // ── Shutdown ────────────────────────────────────────────────────────
 
     fn shutdown(&mut self) {
         let _ = debug_print("cluuterm: shutdown");
-        // Unregister PTS slot (idempotent).
-        let vfs_ep = libcluu::registry::lookup_service("vfs:main");
-        if let Some(ep) = vfs_ep {
-            let mut msg = Message::new(
-                PTS_UNREGISTER_LABEL,
-                [self.pts_id as usize, 0, 0, 0, 0, 0],
-                1,
-            );
-            let _ = ipc::call(ep, &mut msg, IpcFlags::empty());
-        }
+        // Mark pts closed; wake pending readers.
+        self.pts.handle_pts_closed();
         // Destroy compositor window.
         let destroy = Message::new(
             COMP_WIN_DESTROY_LABEL,
@@ -438,6 +771,11 @@ impl Cluuterm {
             let _ = debug_print("cluuterm: timeserver subscription request failed — no blink");
         }
 
+        // Request procmgr:main subscription for pg_signal (job control).
+        if registry::request_subscription("procmgr", "main").is_ok() {
+            let _ = debug_print("cluuterm: procmgr main subscription requested");
+        }
+
         // The registry control endpoint carries Grant / SubscribeStatus events.
         // Include it alongside my_ep so we receive the timeserver grant.
         let ctrl_ep = registry::control_endpoint();
@@ -476,11 +814,14 @@ impl Cluuterm {
                             self.time_ep = token;
                             self.arm_blink_timer();
                         }
+                        if service_name == "procmgr" && name == "main" {
+                            self.pts.set_procmgr_ep(token);
+                        }
                     }
                     RegistryEvent::SubscribeStatus { code } => {
                         if code != 0 {
-                            // Registry refused or failed — blink stays off.
-                            let _ = debug_print("cluuterm: timeserver subscribe status non-zero");
+                            // Registry refused or failed — service stays offline.
+                            let _ = debug_print("cluuterm: subscription status non-zero");
                         }
                     }
                 }
@@ -493,26 +834,37 @@ impl Cluuterm {
                     self.tick_blink();
                 }
 
-                // ── Shell → VFS → cluuterm: write output bytes ──────────
+                // ═══════════════════════════════════════════════════════
+                // PTS_* unified verb set (labels 100-110)
+                // ═══════════════════════════════════════════════════════
+
+                // ── PTS_WRITE (101): Shell → VFS → cluuterm output ─────
                 PTS_WRITE_LABEL => {
-                    // payload = the bytes the shell wrote to its stdout/stderr.
-                    self.handle_pts_write(payload);
-                    // Ack: errno=0, bytes_written=payload.len().
-                    let n = payload.len();
-                    let reply_token = libcluu::ipc::extract_reply_id(&msg).unwrap_or(0);
-                    if reply_token != 0 {
-                        let reply = Message::new(
-                            PTS_WRITE_LABEL,
-                            [0, n, 0, 0, 0, 0],
-                            2,
-                        );
-                        let _ = ipc::reply(reply_token, &reply, IpcFlags::empty());
+                    // Decode WriteRequest from postcard payload.
+                    let req: WriteRequest = match postcard::from_bytes(payload) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            // Legacy compatibility: raw bytes if postcard decode fails.
+                            payload.to_vec()
+                        }
+                    };
+                    if let Some(cooked) = self.pts.handle_pts_write(
+                        &req,
+                        &msg,
+                        0, // caller_pid (not used in current VFS path)
+                        0, // caller_pgid
+                    ) {
+                        self.handle_pts_write(&cooked);
                     }
                 }
 
-                // ── Shell → VFS → cluuterm: read stdin bytes ─────────────
+                // ── PTS_READ (100): Shell reads stdin ───────────────────
                 PTS_READ_LABEL => {
-                    let max = msg.words[1].max(1);
+                    // Decode ReadRequest from postcard payload, or use legacy words[1].
+                    let max = match postcard::from_bytes::<ReadRequest>(payload) {
+                        Ok(req) => req.max_bytes as usize,
+                        Err(_) => msg.words[1].max(1),
+                    };
                     let reply_token = libcluu::ipc::extract_reply_id(&msg).unwrap_or(0);
                     if reply_token == 0 {
                         // No reply slot — drop silently.
@@ -533,18 +885,18 @@ impl Cluuterm {
                     }
                 }
 
-                // ── VFS: all fds on pts closed ────────────────────────────
+                // ── PTS_CLOSED (110): VFS notifies that all fds closed ──
                 PTS_CLOSED_LABEL => {
                     self.shutdown();
                     return;
                 }
 
-                // ── Compositor: forwarded keystroke (Task 16) ─────────────
+                // ── Compositor: forwarded keystroke (Task 16) ───────────
                 COMP_INPUT_FORWARD_LABEL => {
                     crate::input::handle(self, &msg, payload);
                 }
 
-                // ── Compositor: window close request ──────────────────────
+                // ── Compositor: window close request ────────────────────
                 COMP_CLOSE_REQUEST_LABEL => {
                     self.shutdown();
                     return;

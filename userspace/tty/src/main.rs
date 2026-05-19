@@ -12,11 +12,15 @@ mod context;
 mod protocol;
 
 use context::{TtyContext, TtyMode, LoginState};
+use cluu_proto::pts::{
+    PTS_GET_PGRP_LABEL, PTS_GET_TERMIOS_LABEL, PTS_POLL_LABEL, PTS_READ_LABEL,
+    PTS_SET_PGRP_LABEL, PTS_SET_TERMIOS_LABEL, PTS_WRITE_LABEL,
+    GetPgrpReply, GetTermiosReply, PollReply, PtsErr,
+    SetPgrpReply, SetTermiosReply,
+};
 use libcluu::ipc::{
-    extract_reply_id, reply, CONSOLE_CREDIT_REFILL_LABEL, KBD_EVENT_LABEL, TTY_CTL_LABEL,
-    TTY_GET_FG_LABEL, TTY_POLL_QUERY_LABEL,
-    TTY_READ_REQUEST_LABEL, TTY_REGISTER_LABEL, TTY_SET_FG_LABEL,
-    TTY_WRITE_LABEL, TTY_WRITE_SYNC_LABEL,
+    extract_reply_id, reply, CONSOLE_CREDIT_REFILL_LABEL, KBD_EVENT_LABEL,
+    TTY_REGISTER_LABEL, TTY_WRITE_SYNC_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{yield_cpu, Error, Result};
@@ -107,10 +111,17 @@ fn handle_one_message(
                 handle_key(ctx, discipline, event.ascii, event.extended);
             }
         }
-        TTY_READ_REQUEST_LABEL => {
-            // A process called read(0, buf, n) — enqueue the request
+        PTS_READ_LABEL => {
+            // PTS_READ_LABEL: process called read(0, buf, n) — enqueue the request.
+            // Request is postcard-serialized ReadRequest; words[0] = payload len.
             if let Some(reply_token) = extract_reply_id(&msg) {
-                let max_bytes = msg.words[0];
+                let max_bytes: usize = if payload.len() >= 4 {
+                    postcard::from_bytes::<cluu_proto::pts::ReadRequest>(payload)
+                        .map(|r| r.max_bytes as usize)
+                        .unwrap_or(0)
+                } else {
+                    msg.words[0] // legacy fallback for pre-spec2 callers
+                };
                 ctx.pending_reads.push_back(context::PendingRead {
                     reply_token,
                     max_bytes,
@@ -118,7 +129,8 @@ fn handle_one_message(
                 ctx.try_satisfy_reads();
             }
         }
-        TTY_WRITE_LABEL => {
+        PTS_WRITE_LABEL => {
+            // Shell wrote output via PTS_WRITE — forward to console framebuffer.
             ctx.forward_to_console(payload);
         }
         TTY_WRITE_SYNC_LABEL => {
@@ -133,36 +145,33 @@ fn handle_one_message(
             let refill_amount = msg.words[0];
             ctx.handle_credit_refill(refill_amount);
         }
-        TTY_CTL_LABEL => {
-            // Terminal control: get/set mode
+        PTS_GET_TERMIOS_LABEL => {
+            // Reply with current termios via postcard.
             if let Some(reply_token) = extract_reply_id(&msg) {
-                let subcmd = msg.words[0];
-                match subcmd {
-                    0 => {
-                        // getattr: reply with current mode flags
-                        let mode = &discipline.mode;
-                        let lflag: usize = (if mode.canonical { 0x02 } else { 0 })
-                            | (if mode.echo { 0x08 } else { 0 });
-                        let reply_msg =
-                            Message::new(TTY_CTL_LABEL, [0, 0, 0, 0, lflag, 0], 5);
-                        let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                let t = discipline.termios;
+                let value: GetTermiosReply = t;
+                let bytes = postcard::to_allocvec(&value).unwrap_or_default();
+                let reply_msg = Message::new(PTS_GET_TERMIOS_LABEL, [0; 6], 0);
+                let _ = libcluu::ipc::reply_with_payload(reply_token, &reply_msg, &bytes);
+            }
+        }
+        PTS_SET_TERMIOS_LABEL => {
+            // Deserialize SetTermiosRequest, apply to discipline.
+            if let Some(reply_token) = extract_reply_id(&msg) {
+                let result: core::result::Result<(), PtsErr> = if let Ok(req) =
+                    postcard::from_bytes::<cluu_proto::pts::SetTermiosRequest>(payload)
+                {
+                    match discipline.set_termios(req.termios) {
+                        Ok(()) => core::result::Result::Ok(()),
+                        Err(_) => core::result::Result::Err(PtsErr::EinvalTermios),
                     }
-                    1 => {
-                        // setattr: update discipline mode
-                        let lflag = msg.words[4];
-                        let new_mode = TermMode {
-                            canonical: (lflag & 0x02) != 0,
-                            echo: (lflag & 0x08) != 0,
-                        };
-                        discipline.set_mode(new_mode);
-                        let reply_msg = Message::new(TTY_CTL_LABEL, [0; 6], 0);
-                        let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                    }
-                    _ => {
-                        let reply_msg = Message::new(TTY_CTL_LABEL, [0; 6], 0);
-                        let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
-                    }
-                }
+                } else {
+                    core::result::Result::Err(PtsErr::EinvalTermios)
+                };
+                let value: SetTermiosReply = result;
+                let bytes = postcard::to_allocvec(&value).unwrap_or_default();
+                let reply_msg = Message::new(PTS_SET_TERMIOS_LABEL, [0; 6], 0);
+                let _ = libcluu::ipc::reply_with_payload(reply_token, &reply_msg, &bytes);
             }
         }
         TTY_REGISTER_LABEL => {
@@ -191,50 +200,56 @@ fn handle_one_message(
                 let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         }
-        TTY_POLL_QUERY_LABEL => {
-            // Readiness query from poll(): reply with 1 if input available, 0 otherwise.
+        PTS_POLL_LABEL => {
+            // Readiness query from poll(): deserialize PollRequest, reply with PollReply.
             if let Some(reply_token) = extract_reply_id(&msg) {
-                let has_data = if ctx.input_queue.is_empty() {
-                    0usize
+                let has_data = !ctx.input_queue.is_empty();
+                let ready = if has_data {
+                    cluu_proto::pts::PollEvents::POLLIN
                 } else {
-                    1usize
+                    cluu_proto::pts::PollEvents::empty()
                 };
-                let reply_msg = Message::new(
-                    TTY_POLL_QUERY_LABEL,
-                    [has_data, 0, 0, 0, 0, 0],
-                    1,
-                );
-                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                let reply_val = PollReply { ready };
+                let bytes = postcard::to_allocvec(&reply_val).unwrap_or_default();
+                let reply_msg = Message::new(PTS_POLL_LABEL, [0; 6], 0);
+                let _ = libcluu::ipc::reply_with_payload(reply_token, &reply_msg, &bytes);
             }
         }
         libcluu::ipc::PROCMGR_SESSION_DEATH_LABEL => {
             ctx.handle_session_death();
             discipline.set_mode(TermMode::default());
         }
-        TTY_SET_FG_LABEL => {
-            // Set the foreground pgid for a session.
-            // words[0] = session_id, words[1] = pgid.
-            let session = msg.words[0];
-            let pgid = msg.words[1];
-            if pgid == 0 {
-                ctx.fg_pgid_per_session.remove(&session);
-            } else {
-                ctx.fg_pgid_per_session.insert(session, pgid);
-            }
-            // Reply if caller used call semantics; ignore if fire-and-forget.
+        PTS_SET_PGRP_LABEL => {
+            // Set the foreground pgid for a session via postcard SetPgrpRequest (i32).
             if let Some(reply_token) = extract_reply_id(&msg) {
-                let reply_msg = Message::new(TTY_SET_FG_LABEL, [0; 6], 0);
-                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                let pgid: i32 = if !payload.is_empty() {
+                    postcard::from_bytes::<cluu_proto::pts::SetPgrpRequest>(payload)
+                        .unwrap_or(0)
+                } else {
+                    msg.words[1] as i32 // legacy fallback: words[1]=pgid
+                };
+                let session = ctx.session_id();
+                let pgid_usize = pgid as usize;
+                if pgid == 0 {
+                    ctx.fg_pgid_per_session.remove(&session);
+                } else {
+                    ctx.fg_pgid_per_session.insert(session, pgid_usize);
+                }
+                let value: SetPgrpReply = Ok(());
+                let bytes = postcard::to_allocvec(&value).unwrap_or_default();
+                let reply_msg = Message::new(PTS_SET_PGRP_LABEL, [0; 6], 0);
+                let _ = libcluu::ipc::reply_with_payload(reply_token, &reply_msg, &bytes);
             }
         }
-        TTY_GET_FG_LABEL => {
-            // Query the foreground pgid for a session.
-            // words[0] = session_id. Reply: words[0]=0, words[1]=pgid.
+        PTS_GET_PGRP_LABEL => {
+            // Query foreground pgid for a session, reply via postcard GetPgrpReply.
             if let Some(reply_token) = extract_reply_id(&msg) {
-                let session = msg.words[0];
-                let pgid = ctx.fg_pgid_per_session.get(&session).copied().unwrap_or(0);
-                let reply_msg = Message::new(TTY_GET_FG_LABEL, [0, pgid, 0, 0, 0, 0], 2);
-                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                let session = ctx.session_id();
+                let pgid: GetPgrpReply =
+                    ctx.fg_pgid_per_session.get(&session).copied().unwrap_or(0) as i32;
+                let bytes = postcard::to_allocvec(&pgid).unwrap_or_default();
+                let reply_msg = Message::new(PTS_GET_PGRP_LABEL, [0; 6], 0);
+                let _ = libcluu::ipc::reply_with_payload(reply_token, &reply_msg, &bytes);
             }
         }
         _ => {}
@@ -307,7 +322,7 @@ fn handle_login_key(ctx: &mut TtyContext, ch: u8, extended: u8) {
 }
 
 /// Apply a line discipline effect: echo and deliver line/raw data.
-fn apply_effect(ctx: &mut TtyContext, discipline: &mut LineDiscipline, effect: LineEffect) {
+fn apply_effect(ctx: &mut TtyContext, _discipline: &mut LineDiscipline, effect: LineEffect) {
     match effect.echo {
         EchoAction::None => {}
         EchoAction::Bytes(bytes) => ctx.forward_to_console(bytes),
@@ -373,11 +388,11 @@ fn send_pg_signal(procmgr_ep: usize, pgid: usize, signum: i32) -> Result<()> {
     libcluu::ipc::send(procmgr_ep, &msg, IpcFlags::empty())
 }
 
-/// Deliver a completed line by queueing it for the next TTY_READ_REQUEST.
+/// Deliver a completed line by queueing it for the next PTS_READ.
 ///
 /// Path A unification: the shell (and any other reader) opens /dev/ttyN
 /// and calls POSIX read(0); VFS forwards the request here as
-/// TTY_READ_REQUEST_LABEL. There is no longer a TTY_READ_LABEL push path —
+/// PTS_READ_LABEL. There is no longer a TTY_READ_LABEL push path —
 /// bytes always sit in input_queue until a pending read drains them.
 fn deliver_line(ctx: &mut TtyContext, line: &[u8]) {
     let _ = libcluu::debug_print(&alloc::format!(
