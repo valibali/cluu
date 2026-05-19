@@ -197,6 +197,28 @@ impl SessionTable {
         }
     }
 
+    /// Bump refcount when a child is spawned into this session.
+    pub fn inc_refcount(&self, session_id: SessionId) -> bool {
+        let mut g = self.inner.lock();
+        if let Some(s) = g.sessions.get_mut(&session_id) {
+            s.refcount = s.refcount.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Decrement refcount (typically on child exit).
+    pub fn dec_refcount(&self, session_id: SessionId) -> bool {
+        let mut g = self.inner.lock();
+        if let Some(s) = g.sessions.get_mut(&session_id) {
+            s.refcount = s.refcount.saturating_sub(1);
+            true
+        } else {
+            false
+        }
+    }
+
     /// On token-owner exit: drop all tokens owned by the dying pid and
     /// decrement the corresponding sessions' refcounts.
     pub fn on_pid_exit(&self, dead_pid: u32) -> Vec<SessionId> {

@@ -316,6 +316,9 @@ struct ProcessManager {
     /// Key: creator_pid, Value: session_id. Used in on_pid_exit to destroy
     /// orphan sessions when a creator exits before SET_LEADER fires.
     session_creators: alloc::collections::BTreeMap<u32, u32>,
+    /// pid → session_id mapping set at spawn time, consumed on child exit
+    /// to decrement the session refcount and enable leader-exit cascade.
+    pid_to_session: alloc::collections::BTreeMap<usize, u32>,
 }
 
 impl ProcessManager {
@@ -384,6 +387,7 @@ impl ProcessManager {
             pg_table: PgTable::new(),
             pid_stopped: BTreeSet::new(),
             session_creators: alloc::collections::BTreeMap::new(),
+            pid_to_session: alloc::collections::BTreeMap::new(),
         })
     }
 
@@ -1916,6 +1920,11 @@ impl ProcessManager {
 
         // ── session-table exit-side cleanup (spec 3 §5.5) ─────────────────
         if dead_pid != 0 {
+            // Decrement session refcount for pids spawned into a session.
+            if let Some(sid) = self.pid_to_session.remove(&(dead_pid as usize)) {
+                procmgr::session_table::SESSION_TABLE.dec_refcount(sid);
+            }
+
             let affected =
                 procmgr::session_table::SESSION_TABLE.on_pid_exit(dead_pid);
 
@@ -6343,8 +6352,24 @@ impl ProcessManager {
 
         let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
 
+        // Snapshot session info before spawn consumes the envelope.
+        let spawn_session: Option<cluu_proto::TokenHandle> = envelope.session;
+
         // Call the core spawn function.
         let result = ::procmgr::spawn::spawn(envelope, caller_pid);
+
+        // If spawn succeeded and was session-scoped, record pid-to-session.
+        if let Ok(ref reply) = result {
+            if let Some(tok) = spawn_session {
+                // Resolve the token to get the session_id (no rights check
+                // needed — spawn already validated via RIGHT_SESSION_JOIN).
+                if let Ok((sid, _)) = procmgr::session_table::SESSION_TABLE
+                    .resolve(tok, caller_pid, 0)
+                {
+                    self.pid_to_session.insert(reply.pid as usize, sid);
+                }
+            }
+        }
 
         // Serialize and send the reply.
         self.send_spawn_unified_reply(reply_token, &result)
@@ -6789,10 +6814,11 @@ impl ProcessManager {
         None
     }
 
-    fn members_of_session(&self, _sid: u32) -> alloc::vec::Vec<u32> {
-        // FIXME: iterate container_instances/pid_to_container_id to find all
-        // pids whose container chain leads to this session_id.
-        alloc::vec::Vec::new()
+    fn members_of_session(&self, sid: u32) -> alloc::vec::Vec<u32> {
+        self.pid_to_session
+            .iter()
+            .filter_map(|(&pid, &s)| if s == sid { Some(pid as u32) } else { None })
+            .collect()
     }
 
     fn derive_send_cap_for_event(

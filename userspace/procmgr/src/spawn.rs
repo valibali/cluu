@@ -81,13 +81,21 @@ pub fn spawn(envelope: SpawnEnvelope, caller_pid: u32) -> Result<SpawnReply, Spa
             None
         }
         Some(t) => {
-            let sid = hooks::resolve_session_token(t, caller_pid)
-                .map_err(|_| {
+            let resolved = crate::session_table::SESSION_TABLE.resolve(
+                t,
+                caller_pid,
+                cluu_proto::session::RIGHT_SESSION_JOIN,
+            );
+            match resolved {
+                Err(_) => {
                     rollback_all(rollback.clone());
-                    SpawnError::SessionRevoked
-                })?;
-            rollback.session_id = Some(sid);
-            Some(sid)
+                    return Err(SpawnError::SessionRevoked);
+                }
+                Ok((sid, _rights)) => {
+                    rollback.session_id = Some(sid);
+                    Some(sid)
+                }
+            }
         }
     };
 
@@ -169,6 +177,15 @@ pub fn spawn(envelope: SpawnEnvelope, caller_pid: u32) -> Result<SpawnReply, Spa
         SpawnError::Internal(0xE0000050u32)
     })?;
     rollback.process_entry_pid = Some(pid);
+
+    // Step 8b: if session-scoped, bump the session's refcount so the child
+    // counts as a member. The exit path decrements it via SESSION_TABLE.
+    if let Some(session_id) = session_id {
+        if !crate::session_table::SESSION_TABLE.inc_refcount(session_id) {
+            rollback_all(rollback.clone());
+            return Err(SpawnError::SessionRevoked);
+        }
+    }
 
     // Step 9: start the thread.
     hooks::resume_thread(child_tid).map_err(|_| {
