@@ -1,11 +1,16 @@
 //! /bin/login — compositor client: login modal window.
 //!
-//! Task T4: SESSION_LOGIN submit via PROCMGR_SESSION_LOGIN_LABEL.
+//! Post-authentication flow (Task 6 Plan 3):
+//!   1. SESSION_CREATE (libcluu::session::create)
+//!   2. DERIVE_TOKEN  (narrowed token for compositor)
+//!   3. COMPOSITOR_SESSION_HANDOFF (hand over session to compositor)
+//!   4. Spawn cluuterm (libcluu::spawn::spawn)
+//!   5. SESSION_SET_LEADER (set primary pid)
 //!
 //! Registers a window with the compositor, maps the SHM frame, renders a
 //! centered login modal (username + password fields), sends WIN_DAMAGE, then
 //! loops on ipc_recv_any handling COMP_INPUT_FORWARD_LABEL keystrokes.
-//! On Enter-in-password: sends SESSION_LOGIN to procmgr with session_kind=1.
+//! On Enter-in-password: executes the five-step session lifecycle.
 
 #![no_std]
 #![no_main]
@@ -15,10 +20,16 @@ extern crate alloc;
 #[allow(unused_imports)]
 use libcluu::runtime as _;
 
-use libcluu::boot::{process_info, space_token, TOKEN_IPC};
+use cluu_proto::session::{
+    CompositorSessionHandoffRequest, ProfileSpec, SessionCreateRequest,
+    COMPOSITOR_SESSION_HANDOFF_LABEL, RIGHT_SESSION_QUERY, RIGHT_SESSION_SUBSCRIBE,
+};
+use cluu_proto::spawn::{SpawnEnvelope, ViewSource};
+
+use libcluu::boot::{process_info, space_token, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::ipc::{
     COMP_INPUT_FORWARD_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_FLAG_FULLSCREEN,
-    COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY, PROCMGR_SESSION_LOGIN_LABEL,
+    COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY,
 };
 use libcluu::syscall::MAP_FRAME_TOKEN;
 use libcluu::types::{IpcFlags, Message};
@@ -381,39 +392,11 @@ unsafe fn render_fields(cells: *mut u64, w: u32, mx: u32, my: u32, state: &Login
     }
 }
 
-// ─── Session login IPC ────────────────────────────────────────────────────────
+// ─── View token ───────────────────────────────────────────────────────────────
 
-/// Send `PROCMGR_SESSION_LOGIN_LABEL` to `procmgr_spawn` and return `Ok(())`
-/// on authentication success or `Err(errno)` on failure.
-///
-/// Payload wire format:
-///   `session_kind (1 byte = 1) + username\0 + password\0`
-///
-/// Reply: `words[0] == 0` → success; `words[0] != 0` → errno.
-fn try_login(procmgr_spawn: usize, username: &[u8], password: &[u8]) -> Result<(), usize> {
-    let mut payload: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-    payload.push(1); // session_kind = compositor
-    payload.extend_from_slice(username);
-    payload.push(0);
-    payload.extend_from_slice(password);
-    payload.push(0);
-
-    let msg = libcluu::types::Message::new(
-        PROCMGR_SESSION_LOGIN_LABEL,
-        [payload.len(), 0 /* instance_id */, 0, 0, 0, 0],
-        2,
-    );
-    let mut reply = libcluu::types::Message::new(0, [0; 6], 0);
-    match libcluu::ipc::call_with_payload(procmgr_spawn, &msg, &payload, &mut reply) {
-        Err(_) => Err(usize::MAX),
-        Ok(()) => {
-            if reply.words[0] == 0 {
-                Ok(())
-            } else {
-                Err(reply.words[0])
-            }
-        }
-    }
+/// Returns the view token inherited from the parent spawn.
+fn login_view_token() -> u64 {
+    process_info().tokens[TOKEN_EXTRA_0] as u64
 }
 
 // ─── WIN_REGISTER ─────────────────────────────────────────────────────────────
@@ -492,15 +475,6 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         let _ = debug_print("login: registry init failed");
         return 1;
     }
-
-    // Look up procmgr:spawn endpoint once at startup (cached for the submit call).
-    let procmgr_spawn = match registry::lookup_service("procmgr:spawn") {
-        Some(ep) => ep,
-        None => {
-            let _ = debug_print("login: no procmgr:spawn in registry");
-            return 1;
-        }
-    };
 
     // Allocate a long-lived endpoint (compositor pacing + input events).
     let info = process_info();
@@ -622,33 +596,130 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                     0x0A | 0x0D => {
                         let submit = state.handle_enter();
                         if submit {
-                            let username = state.username.clone();
-                            let password = state.password.clone();
-                            match try_login(procmgr_spawn, &username, &password) {
-                                Ok(()) => {
-                                    let _ = debug_print("login: user authenticated");
-                                    // Tell the compositor to destroy our window
-                                    // before we exit so the user immediately
-                                    // sees just the cluuterm window. Without
-                                    // this the modal lingers until procmgr's
-                                    // PROC_EXIT path reaches the compositor.
-                                    let destroy = libcluu::types::Message::new(
-                                        libcluu::ipc::COMP_WIN_DESTROY_LABEL,
-                                        [win_id as usize, 0, 0, 0, 0, 0],
-                                        1,
+                            let user_name =
+                                alloc::string::String::from_utf8_lossy(&state.username)
+                                    .into_owned();
+                            // ── 1. SESSION_CREATE ──────────────────────────────────
+                            let create_reply = libcluu::session::create(SessionCreateRequest {
+                                user_name: user_name.clone(),
+                                profile: ProfileSpec {
+                                    home: alloc::format!("/home/{}", user_name),
+                                    initial_view: ViewSource::Derive(login_view_token()),
+                                    env: alloc::vec![
+                                        (alloc::string::String::from("HOME"),
+                                         alloc::format!("/home/{}", user_name)),
+                                        (alloc::string::String::from("USER"),
+                                         user_name.clone()),
+                                        (alloc::string::String::from("TERM"),
+                                         alloc::string::String::from("xterm-256color")),
+                                    ],
+                                    umask: 0o022,
+                                },
+                            });
+                            let ok = match create_reply {
+                                Ok(o) => o,
+                                Err(e) => {
+                                    let _ = debug_print("login: SESSION_CREATE failed");
+                                    let _ = e;
+                                    return -1;
+                                }
+                            };
+
+                            // ── 2. DERIVE_TOKEN ────────────────────────────────────
+                            let token_sub = match libcluu::session::derive_token(
+                                ok.token, RIGHT_SESSION_SUBSCRIBE | RIGHT_SESSION_QUERY,
+                            ) {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    let _ = debug_print("login: derive_token failed");
+                                    let _ = e;
+                                    return -1;
+                                }
+                            };
+
+                            // ── 3. COMPOSITOR_SESSION_HANDOFF ──────────────────────
+                            let handoff_req = CompositorSessionHandoffRequest {
+                                session_id: ok.session_id,
+                                token_sub,
+                            };
+                            let payload = postcard::to_allocvec(&handoff_req)
+                                .expect("ser");
+                            let compositor_control = match
+                                registry::lookup_service("compositor:control")
+                            {
+                                Some(ep) => ep,
+                                None => {
+                                    let _ = debug_print(
+                                        "login: compositor:control not found",
                                     );
-                                    let _ = libcluu::ipc::send(comp_ep, &destroy, IpcFlags::empty());
-                                    return 0;
+                                    return -1;
                                 }
-                                Err(_errno) => {
-                                    // Clear credentials, show error banner, refocus username.
-                                    state.username.clear();
-                                    state.password.clear();
-                                    state.focus = Focus::Username;
-                                    state.show_error = true;
-                                }
+                            };
+                            let words = [
+                                payload.len(),
+                                cluu_proto::ABI_VERSION as usize,
+                                0, 0, 0, 0,
+                            ];
+                            let msg = Message::new(
+                                COMPOSITOR_SESSION_HANDOFF_LABEL, words, 0,
+                            );
+                            let mut reply_buf = [0u8; 512];
+                            if libcluu::ipc::call_with_reply_buf(
+                                compositor_control, &msg, &payload, &mut reply_buf,
+                            )
+                            .is_err()
+                            {
+                                let _ = debug_print("login: handoff IPC failed");
+                                return -1;
                             }
-                            // Fall through to re-render (shows error banner or clears fields).
+
+                            // ── 4. Spawn cluuterm ─────────────────────────────────
+                            let primary_envelope = SpawnEnvelope {
+                                image: alloc::string::String::from("cluuterm"),
+                                args: alloc::vec::Vec::new(),
+                                env: alloc::vec![
+                                    (alloc::string::String::from("HOME"),
+                                     alloc::format!("/home/{}", user_name)),
+                                    (alloc::string::String::from("USER"),
+                                     user_name.clone()),
+                                ],
+                                view: ViewSource::Derive(login_view_token()),
+                                fd_inherit: alloc::vec::Vec::new(),
+                                session: Some(ok.token),
+                                notify: None,
+                            };
+                            let primary_pid =
+                                match libcluu::spawn::spawn(primary_envelope) {
+                                    Ok(r) => r.pid,
+                                    Err(e) => {
+                                        let _ = debug_print(
+                                            "login: primary spawn failed",
+                                        );
+                                        let _ = e;
+                                        return -1;
+                                    }
+                                };
+
+                            // ── 5. SESSION_SET_LEADER ─────────────────────────────
+                            if libcluu::session::set_leader(ok.token, primary_pid)
+                                .is_err()
+                            {
+                                let _ = debug_print("login: set_leader failed");
+                                return -1;
+                            }
+
+                            // Tell the compositor to destroy our window before we
+                            // exit so the user immediately sees just the cluuterm
+                            // window.
+                            let destroy = Message::new(
+                                libcluu::ipc::COMP_WIN_DESTROY_LABEL,
+                                [win_id as usize, 0, 0, 0, 0, 0],
+                                1,
+                            );
+                            let _ = libcluu::ipc::send(
+                                comp_ep, &destroy, IpcFlags::empty(),
+                            );
+                            return 0;
                         }
                         // Moved focus to password — fall through to re-render.
                     }
