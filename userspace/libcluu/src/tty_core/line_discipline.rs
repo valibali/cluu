@@ -11,10 +11,53 @@ extern crate alloc;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use cluu_proto::pts::Termios;
 use crate::syscall::debug_print as dp;
 
 const BACKSPACE_SEQ: &[u8] = b"\x08 \x08";
 const HISTORY_CAP: usize = 32;
+
+// ---------------------------------------------------------------------------
+// Spec-2 line-discipline output API (unified PTS verb set)
+// ---------------------------------------------------------------------------
+
+/// Output of feeding one input byte through POSIX line discipline.
+/// Service consumes these and dispatches accordingly.
+#[derive(Clone, Debug)]
+pub enum LineDiscOutput {
+    /// Cooked bytes to deliver to a PTS_READ caller.
+    Bytes(alloc::vec::Vec<u8>),
+    /// Service should call PROCMGR_PG_SIGNAL(fg_pgid, sig).
+    Signal(SignalNum),
+    /// Service should write these bytes back as echo.
+    Echo(alloc::vec::Vec<u8>),
+    /// Canonical EOF reached (VEOF / Ctrl-D). Flush pending line + signal EOF.
+    Eof,
+    /// Byte consumed; no externally-visible effect (e.g., mid-edit).
+    Drop,
+}
+
+/// Signal numbers used by the line discipline → service translation.
+/// Values match POSIX / newlib `<signal.h>`. Service routes via
+/// existing PROCMGR_PG_SIGNAL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SignalNum {
+    SIGINT  = 2,
+    SIGQUIT = 3,
+    SIGTSTP = 20,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TermiosErr {
+    InvalidVmin,
+    InvalidCcc,
+    Unsupported,
+}
+
+// ---------------------------------------------------------------------------
+// Legacy line-effect API (kept for existing shell UX)
+// ---------------------------------------------------------------------------
 
 /// Output of processing a single input byte.
 pub struct LineEffect {
@@ -68,6 +111,14 @@ impl Default for TermMode {
 /// In canonical mode it buffers input and only emits a line when Enter is pressed.
 /// In raw mode each byte is delivered immediately with optional echo.
 pub struct LineDiscipline {
+    // --- Spec-2 termios fields (POSIX line discipline) ---
+    pub termios: Termios,
+    pending_line: alloc::vec::Vec<u8>,
+    output_pending: alloc::vec::Vec<u8>,
+    eof_seen: bool,
+    last_was_cr: bool,
+
+    // --- Legacy shell-UX fields ---
     buffer: Vec<u8>,
     pub mode: TermMode,
     /// In-memory command history (most recent at the back).
@@ -92,6 +143,11 @@ impl LineDiscipline {
     /// Create a new line discipline in canonical+echo mode.
     pub fn new() -> Self {
         Self {
+            termios: Termios::default_pts(),
+            pending_line: alloc::vec::Vec::new(),
+            output_pending: alloc::vec::Vec::new(),
+            eof_seen: false,
+            last_was_cr: false,
             buffer: Vec::new(),
             mode: TermMode::default(),
             history: VecDeque::new(),
@@ -118,6 +174,149 @@ impl LineDiscipline {
         }
         self.csi_state = CsiState::Idle;
     }
+
+    // ---- Spec-2 POSIX line-discipline API (unified PTS verb set) ----
+
+    pub fn termios(&self) -> &Termios {
+        &self.termios
+    }
+
+    pub fn set_termios(&mut self, new: Termios) -> Result<(), TermiosErr> {
+        // Basic sanity: accept any termios for now
+        let _ = new.c_cc[Termios::VMIN];
+        self.termios = new;
+        Ok(())
+    }
+
+    /// Feed one input byte through POSIX line discipline.
+    /// Returns zero or more `LineDiscOutput` events the service must handle.
+    pub fn feed_byte(&mut self, byte: u8) -> alloc::vec::Vec<LineDiscOutput> {
+        let mut out: alloc::vec::Vec<LineDiscOutput> = alloc::vec::Vec::new();
+        let canonical = self.termios.c_lflag & Termios::ICANON != 0;
+        let isig      = self.termios.c_lflag & Termios::ISIG   != 0;
+        let echo      = self.termios.c_lflag & Termios::ECHO   != 0;
+        let echoe     = self.termios.c_lflag & Termios::ECHOE  != 0;
+        let echok     = self.termios.c_lflag & Termios::ECHOK  != 0;
+
+        // ISIG translations always come first regardless of canonical mode.
+        if isig {
+            if byte == self.termios.c_cc[Termios::VINTR] {
+                out.push(LineDiscOutput::Signal(SignalNum::SIGINT));
+                return out;
+            }
+            if byte == self.termios.c_cc[Termios::VQUIT] {
+                out.push(LineDiscOutput::Signal(SignalNum::SIGQUIT));
+                return out;
+            }
+            if byte == self.termios.c_cc[Termios::VSUSP] {
+                out.push(LineDiscOutput::Signal(SignalNum::SIGTSTP));
+                return out;
+            }
+        }
+
+        if !canonical {
+            // Raw mode: emit byte immediately.
+            out.push(LineDiscOutput::Bytes(alloc::vec![byte]));
+            if echo {
+                out.push(LineDiscOutput::Echo(alloc::vec![byte]));
+            }
+            return out;
+        }
+
+        // Canonical mode below.
+        if byte == self.termios.c_cc[Termios::VEOF] {
+            // EOF: flush pending_line, then signal Eof.
+            if !self.pending_line.is_empty() {
+                out.push(LineDiscOutput::Bytes(core::mem::take(&mut self.pending_line)));
+            }
+            out.push(LineDiscOutput::Eof);
+            return out;
+        }
+        if byte == self.termios.c_cc[Termios::VERASE] {
+            if self.pending_line.pop().is_some() && echoe {
+                out.push(LineDiscOutput::Echo(alloc::vec![b'\x08', b' ', b'\x08']));
+            }
+            return out;
+        }
+        if byte == self.termios.c_cc[Termios::VKILL] {
+            self.pending_line.clear();
+            if echok {
+                // Visual line clear: CR + clear-to-EOL.
+                out.push(LineDiscOutput::Echo(alloc::vec![b'\r', 0x1b, b'[', b'K']));
+            }
+            return out;
+        }
+        if byte == self.termios.c_cc[Termios::VWERASE] {
+            // Erase last word: pop trailing non-spaces then trailing spaces.
+            let mut popped = false;
+            while let Some(&b) = self.pending_line.last() {
+                if b == b' ' { break; }
+                self.pending_line.pop();
+                popped = true;
+            }
+            while let Some(&b) = self.pending_line.last() {
+                if b != b' ' { break; }
+                self.pending_line.pop();
+                popped = true;
+            }
+            if popped && echoe {
+                out.push(LineDiscOutput::Echo(alloc::vec![b'\r', 0x1b, b'[', b'K']));
+                out.push(LineDiscOutput::Echo(self.pending_line.clone()));
+            }
+            return out;
+        }
+        if byte == b'\n' {
+            self.pending_line.push(b'\n');
+            let line = core::mem::take(&mut self.pending_line);
+            out.push(LineDiscOutput::Bytes(line));
+            // Echo newline if ECHO or ECHONL is set.
+            if echo || self.termios.c_lflag & Termios::ECHONL != 0 {
+                out.push(LineDiscOutput::Echo(alloc::vec![b'\n']));
+            }
+            return out;
+        }
+        // ICRNL: translate \r to \n on input.
+        if byte == b'\r' && self.termios.c_iflag & Termios::ICRNL != 0 {
+            return self.feed_byte(b'\n');
+        }
+        // INLCR: translate \n to \r on input.
+        if byte == b'\n' && self.termios.c_iflag & Termios::INLCR != 0 {
+            return self.feed_byte(b'\r');
+        }
+        // Default: append, echo if requested.
+        self.pending_line.push(byte);
+        if echo {
+            out.push(LineDiscOutput::Echo(alloc::vec![byte]));
+        }
+        out
+    }
+
+    /// Apply OPOST processing to outgoing bytes.
+    /// Service calls this before rendering to the framebuffer / VT.
+    pub fn process_output(&mut self, bytes: &[u8]) -> alloc::vec::Vec<u8> {
+        let opost = self.termios.c_oflag & Termios::OPOST != 0;
+        let onlcr = self.termios.c_oflag & Termios::ONLCR != 0;
+        if !opost {
+            return bytes.to_vec();
+        }
+        let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            if b == b'\n' && onlcr {
+                out.push(b'\r');
+                out.push(b'\n');
+            } else {
+                out.push(b);
+            }
+        }
+        out
+    }
+
+    /// Flush the pending line buffer (used by tcflush(Input)).
+    pub fn flush_input(&mut self) {
+        self.pending_line.clear();
+    }
+
+    // ---- Legacy shell-UX API (kept for existing canonical mode) ----
 
     /// Process a byte and return echo/line delivery actions.
     pub fn handle_byte(&mut self, byte: u8) -> LineEffect {
@@ -787,5 +986,94 @@ mod tests {
         feed(&mut ld, b"\x1bX");
         // Both bytes silently dropped; buffer unchanged.
         assert_eq!(ld.buffer, b"abc");
+    }
+}
+
+impl Default for LineDiscipline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod spec2_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_line_assembly() {
+        let mut ld = LineDiscipline::new();
+        ld.feed_byte(b'h');
+        ld.feed_byte(b'i');
+        let out = ld.feed_byte(b'\n');
+        let bytes_emitted: alloc::vec::Vec<u8> = out.iter().filter_map(|e| match e {
+            LineDiscOutput::Bytes(b) => Some(b.clone()),
+            _ => None,
+        }).flatten().collect();
+        assert_eq!(bytes_emitted, b"hi\n".to_vec());
+    }
+
+    #[test]
+    fn vintr_signal_under_isig() {
+        let mut ld = LineDiscipline::new();
+        let out = ld.feed_byte(0x03); // Ctrl-C
+        assert!(out.iter().any(|e| matches!(e, LineDiscOutput::Signal(SignalNum::SIGINT))));
+    }
+
+    #[test]
+    fn no_signal_when_isig_clear() {
+        let mut ld = LineDiscipline::new();
+        ld.termios.c_lflag &= !Termios::ISIG;
+        let out = ld.feed_byte(0x03);
+        assert!(!out.iter().any(|e| matches!(e, LineDiscOutput::Signal(_))));
+    }
+
+    #[test]
+    fn veof_canonical() {
+        let mut ld = LineDiscipline::new();
+        let out = ld.feed_byte(0x04); // Ctrl-D
+        assert!(out.iter().any(|e| matches!(e, LineDiscOutput::Eof)));
+    }
+
+    #[test]
+    fn verase_with_echoe() {
+        let mut ld = LineDiscipline::new();
+        ld.feed_byte(b'a');
+        let out = ld.feed_byte(0x7f); // DEL
+        let echoed: alloc::vec::Vec<u8> = out.iter().filter_map(|e| match e {
+            LineDiscOutput::Echo(b) => Some(b.clone()),
+            _ => None,
+        }).flatten().collect();
+        assert_eq!(echoed, b"\x08 \x08".to_vec());
+    }
+
+    #[test]
+    fn opost_nl_to_crnl() {
+        let mut ld = LineDiscipline::new();
+        let out = ld.process_output(b"hi\n");
+        assert_eq!(out, b"hi\r\n".to_vec());
+    }
+
+    #[test]
+    fn icrnl_translates_cr_to_nl() {
+        let mut ld = LineDiscipline::new();
+        ld.feed_byte(b'a');
+        let out = ld.feed_byte(b'\r');
+        let bytes_emitted: alloc::vec::Vec<u8> = out.iter().filter_map(|e| match e {
+            LineDiscOutput::Bytes(b) => Some(b.clone()),
+            _ => None,
+        }).flatten().collect();
+        assert_eq!(bytes_emitted, b"a\n".to_vec());
+    }
+
+    #[test]
+    fn raw_mode_passthrough() {
+        let mut ld = LineDiscipline::new();
+        ld.termios.c_lflag &= !Termios::ICANON;
+        let out = ld.feed_byte(b'X');
+        let bytes: alloc::vec::Vec<u8> = out.iter().filter_map(|e| match e {
+            LineDiscOutput::Bytes(b) => Some(b.clone()),
+            _ => None,
+        }).flatten().collect();
+        assert_eq!(bytes, b"X".to_vec());
     }
 }
