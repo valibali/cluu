@@ -751,3 +751,127 @@ pub extern "C" fn system(command: *const c_char) -> c_int {
 
     status
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Unified spawn shim — translates C ABI → libcluu::spawn::spawn()
+// (spec 1, plan 1 task 11)
+// ═══════════════════════════════════════════════════════════════════════════
+
+use cluu_proto::spawn::{
+    FdInherit as ProtoFdInherit, FdRights, FdSource, SpawnEnvelope, SpawnError, ViewSource,
+};
+
+/// New spawn entry point using the unified protocol.
+/// Translates C ABI → `SpawnEnvelope` → `libcluu::spawn::spawn()`.
+#[no_mangle]
+pub extern "C" fn posix_spawn_v2(
+    pid: *mut pid_t,
+    image: *const c_char,
+    file_actions: *const *const FileActionsInner,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    let image_str = unsafe { cstr_to_str_raw(image) };
+    let image = match image_str {
+        Some(s) => s,
+        None => return EINVAL,
+    };
+    let image = alloc::string::String::from(image);
+
+    let fd_inherit = translate_fd_actions(file_actions);
+    let args = unsafe { collect_argv(argv) };
+    let env = unsafe { collect_envp(envp) };
+
+    let envelope = SpawnEnvelope {
+        image,
+        args,
+        env,
+        view: ViewSource::Derive(
+            crate::boot::process_info().tokens[crate::boot::TOKEN_EXTRA_0] as u64,
+        ),
+        fd_inherit,
+        session: None,
+        notify: None,
+    };
+    match crate::spawn::spawn(envelope) {
+        Ok(reply) => {
+            if !pid.is_null() { unsafe { *pid = reply.pid as pid_t; } }
+            0
+        }
+        Err(e) => match e {
+            SpawnError::ImageNotFound => 2,
+            SpawnError::PermissionDenied => 13,
+            SpawnError::FdInheritDeniedAt(_) => 9,
+            _ => 5, // EIO
+        },
+    }
+}
+
+unsafe fn cstr_to_str_raw(ptr: *const c_char) -> Option<&'static str> {
+    if ptr.is_null() { return None; }
+    let mut len = 0;
+    let mut p = ptr;
+    while *p != 0 { len += 1; p = p.add(1); }
+    core::str::from_utf8(core::slice::from_raw_parts(ptr as *const u8, len)).ok()
+}
+
+unsafe fn collect_argv(argv: *const *const c_char) -> alloc::vec::Vec<alloc::string::String> {
+    let mut out = alloc::vec::Vec::new();
+    if argv.is_null() { return out; }
+    let mut p = argv;
+    while !(*p).is_null() {
+        if let Some(s) = cstr_to_str_raw(*p) {
+            out.push(alloc::string::String::from(s));
+        }
+        p = p.add(1);
+    }
+    out
+}
+
+unsafe fn collect_envp(envp: *const *const c_char) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)> {
+    let mut out = alloc::vec::Vec::new();
+    if envp.is_null() { return out; }
+    let mut p = envp;
+    while !(*p).is_null() {
+        if let Some(s) = cstr_to_str_raw(*p) {
+            if let Some((k, v)) = s.split_once('=') {
+                out.push((alloc::string::String::from(k), alloc::string::String::from(v)));
+            }
+        }
+        p = p.add(1);
+    }
+    out
+}
+
+fn translate_fd_actions(
+    file_actions: *const *const FileActionsInner,
+) -> alloc::vec::Vec<ProtoFdInherit> {
+    if file_actions.is_null() || unsafe { (*file_actions).is_null() } {
+        return alloc::vec::Vec::new();
+    }
+    let inner = unsafe { &**file_actions };
+    if inner.count == 0 { return alloc::vec::Vec::new(); }
+    let table = crate::fd_table::FD_TABLE.lock();
+    let mut out = alloc::vec::Vec::new();
+    for i in 0..inner.count as usize {
+        let a = &inner.actions[i];
+        let rights = if a.target_fd == 0 { FdRights::READ_ONLY } else { FdRights::WRITE_ONLY };
+        if a.flags & FD_INHERIT_FLAG_PIPE != 0 {
+            out.push(ProtoFdInherit {
+                child_fd: a.target_fd,
+                source: FdSource::EndpointCap { endpoint_token: a.endpoint as u64 },
+                rights,
+            });
+        } else if a.vfs_client_id != 0 {
+            out.push(ProtoFdInherit {
+                child_fd: a.target_fd,
+                source: FdSource::VfsFd {
+                    vfs_client_id: a.vfs_client_id as u64,
+                    vfs_remote_fd: a.vfs_remote_fd as u32,
+                },
+                rights,
+            });
+        }
+    }
+    out
+}
