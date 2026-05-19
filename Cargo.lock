@@ -458,6 +458,78 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-l3-compositor-receives-session-ended"
+version = "0.1.0"
+dependencies = [
+ "cluu_proto",
+ "libcluu",
+ "postcard",
+]
+
+[[package]]
+name = "cluu-l3-getty-auth-spawns-shell"
+version = "0.1.0"
+dependencies = [
+ "cluu_proto",
+ "libcluu",
+ "postcard",
+]
+
+[[package]]
+name = "cluu-l3-session-create-destroy"
+version = "0.1.0"
+dependencies = [
+ "cluu_proto",
+ "libcluu",
+ "postcard",
+]
+
+[[package]]
+name = "cluu-l3-session-derive-narrow"
+version = "0.1.0"
+dependencies = [
+ "cluu_proto",
+ "libcluu",
+ "postcard",
+]
+
+[[package]]
+name = "cluu-l3-session-end-removes-pts"
+version = "0.1.0"
+dependencies = [
+ "cluu_proto",
+ "libcluu",
+ "postcard",
+]
+
+[[package]]
+name = "cluu-l3-session-leader-exit-cascades"
+version = "0.1.0"
+dependencies = [
+ "cluu_proto",
+ "libcluu",
+ "postcard",
+]
+
+[[package]]
+name = "cluu-l3-session-query"
+version = "0.1.0"
+dependencies = [
+ "cluu_proto",
+ "libcluu",
+ "postcard",
+]
+
+[[package]]
+name = "cluu-l3-session-set-leader-monotone"
+version = "0.1.0"
+dependencies = [
+ "cluu_proto",
+ "libcluu",
+ "postcard",
+]
+
+[[package]]
 name = "cluu-login"
 version = "0.1.0"
 dependencies = [

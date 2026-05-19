@@ -5830,8 +5830,17 @@ impl ProcessManager {
             };
         let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
 
+        let _ = debug_print(&format!(
+            "procmgr: SESSION_CREATE req sender_tid={} caller_pid={} user={}",
+            sender_tid, caller_pid, req.user_name
+        ));
+
         if !self.caller_has_right(caller_pid, 0x8000_0001) {
         // 0x8000_0001 = RIGHT_SESSION_CREATE (to be added to cluu_proto)
+            let _ = debug_print(&format!(
+                "procmgr: SESSION_CREATE PermissionDenied pid={} right=0x{:08X}",
+                caller_pid, 0x8000_0001u32
+            ));
             let reply = cluu_proto::session::SessionCreateReply::Err(
                 cluu_proto::session::SessionCreateErr::PermissionDenied,
             );
@@ -5852,6 +5861,11 @@ impl ProcessManager {
             now,
         );
 
+        let _ = debug_print(&format!(
+            "procmgr: SESSION_CREATE ok session_id={} token={}",
+            session_id, token
+        ));
+
         self.session_creators.insert(caller_pid, session_id);
 
         let reply =
@@ -5860,6 +5874,7 @@ impl ProcessManager {
                 session_id,
             });
         let bytes = postcard::to_allocvec(&reply).expect("ser");
+        let _ = debug_print(&format!("procmgr: SESSION_CREATE reply bytes.len()={}", bytes.len()));
         self.send_session_reply(
             reply_id,
             cluu_proto::session::PROCMGR_SESSION_CREATE_LABEL,

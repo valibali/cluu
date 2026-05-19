@@ -9,13 +9,13 @@ use crate::spawn::ViewSource;
 
 // ----- Verb labels -----
 
-pub const PROCMGR_SESSION_CREATE_LABEL:        u32 = 82;
-pub const PROCMGR_SESSION_DESTROY_LABEL:       u32 = 83;
-pub const PROCMGR_SESSION_QUERY_LABEL:         u32 = 84;
-pub const PROCMGR_SESSION_SUBSCRIBE_LABEL:     u32 = 85;
-pub const PROCMGR_SESSION_DERIVE_TOKEN_LABEL:  u32 = 86;
-pub const SESSION_ENDED_LABEL:                 u32 = 87;   // async event
-pub const PROCMGR_SESSION_SET_LEADER_LABEL:    u32 = 88;
+pub const PROCMGR_SESSION_CREATE_LABEL:        u32 = 89;
+pub const PROCMGR_SESSION_DESTROY_LABEL:       u32 = 90;
+pub const PROCMGR_SESSION_QUERY_LABEL:         u32 = 91;
+pub const PROCMGR_SESSION_SUBSCRIBE_LABEL:     u32 = 92;
+pub const PROCMGR_SESSION_DERIVE_TOKEN_LABEL:  u32 = 93;
+pub const SESSION_ENDED_LABEL:                 u32 = 94;   // async event
+pub const PROCMGR_SESSION_SET_LEADER_LABEL:    u32 = 95;
 
 // Compositor:control verb (for the login → compositor handoff).
 pub const COMPOSITOR_SESSION_HANDOFF_LABEL:    u32 = 200;

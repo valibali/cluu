@@ -618,9 +618,11 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                             });
                             let ok = match create_reply {
                                 Ok(o) => o,
-                                Err(e) => {
-                                    let _ = debug_print("login: SESSION_CREATE failed");
-                                    let _ = e;
+                                Err(ref e) => {
+                                    let msg = alloc::format!(
+                                        "login: SESSION_CREATE failed: {:?}", e
+                                    );
+                                    let _ = debug_print(&msg);
                                     return -1;
                                 }
                             };

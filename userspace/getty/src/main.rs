@@ -112,24 +112,32 @@ fn getty_view_token() -> u64 {
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
+    let _ = libcluu::debug_print("getty: main() entered");
     let args = libcluu::args::args();
     let tty_path = parse_tty_path(&args);
+    let _ = libcluu::debug_print(&format!("getty: tty_path={}", tty_path));
 
-    // ── Open TTY as stdin/stdout/stderr ───────────────────────────────────
     let fd_in  = open_tty(&tty_path, libcluu::posix::O_RDONLY);
     let fd_out = open_tty(&tty_path, libcluu::posix::O_WRONLY);
     let fd_err = open_tty(&tty_path, libcluu::posix::O_WRONLY);
 
+    let _ = libcluu::debug_print(&format!("getty: fds in={} out={} err={}", fd_in, fd_out, fd_err));
+
     if fd_in < 0 || fd_out < 0 || fd_err < 0 {
+        let _ = libcluu::debug_print("getty: open_tty FAILED — returning 1");
         return 1;
     }
+
+    let _ = libcluu::debug_print("getty: TTY open OK, prompting for login");
 
     // ── Prompt for username ───────────────────────────────────────────────
     write_fd(fd_out, b"cluu login: ");
     let user_name = read_line(fd_in).unwrap_or_else(|| String::from("root"));
+    let _ = libcluu::debug_print(&format!("getty: username={}", user_name));
 
     // ── Disable ECHO, read password, restore ECHO ──────────────────────────
     let saved_termios = termios_disable_echo(fd_in);
+    let _ = libcluu::debug_print(&format!("getty: termios_disable_echo OK={}", saved_termios.is_some()));
 
     write_fd(fd_out, b"password: ");
     let password = read_line(fd_in).unwrap_or_default();
@@ -141,6 +149,7 @@ pub extern "C" fn main() -> i32 {
 
     // ── Validate credentials ───────────────────────────────────────────────
     if !validate_creds(&user_name, &password) {
+        let _ = libcluu::debug_print("getty: validate_creds FAILED — returning 1");
         write_fd(fd_out, b"Login incorrect.\n");
         close_fd(fd_in);
         close_fd(fd_out);
@@ -167,15 +176,18 @@ pub extern "C" fn main() -> i32 {
         },
     });
 
+    let _ = libcluu::debug_print("getty: session_create...");
     let ok = match create_reply {
         Ok(o) => o,
         Err(_e) => {
+            let _ = libcluu::debug_print("getty: session_create FAILED — returning 1");
             close_fd(fd_in);
             close_fd(fd_out);
             close_fd(fd_err);
             return 1;
         }
     };
+    let _ = libcluu::debug_print("getty: session_create OK, spawning shell");
 
     // ── Spawn the user's shell on this TTY ─────────────────────────────────
     use cluu_proto::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope};
@@ -227,24 +239,30 @@ pub extern "C" fn main() -> i32 {
     let shell_pid = match shell_reply {
         Ok(r) => r.pid,
         Err(_e) => {
+            let _ = libcluu::debug_print("getty: spawn FAILED — returning 1");
             close_fd(fd_in);
             close_fd(fd_out);
             close_fd(fd_err);
             return 1;
         }
     };
+    let _ = libcluu::debug_print(&format!("getty: shell spawned, pid={}", shell_pid));
 
     // ── SET_LEADER ─────────────────────────────────────────────────────────
+    let _ = libcluu::debug_print("getty: set_leader...");
     if let Err(_e) = libcluu::session::set_leader(ok.token, shell_pid) {
+        let _ = libcluu::debug_print("getty: set_leader FAILED — returning 1");
         close_fd(fd_in);
         close_fd(fd_out);
         close_fd(fd_err);
         return 1;
     }
+    let _ = libcluu::debug_print("getty: set_leader OK");
 
     // ── Cleanup and exit ───────────────────────────────────────────────────
     close_fd(fd_in);
     close_fd(fd_out);
     close_fd(fd_err);
+    let _ = libcluu::debug_print("getty: exiting 0 — shell terminated normally");
     0
 }
