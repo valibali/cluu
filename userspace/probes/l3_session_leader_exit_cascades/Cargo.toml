@@ -1,0 +1,16 @@
+[package]
+name = "cluu-l3-session-leader-exit-cascades"
+version = "0.1.0"
+edition = "2021"
+description = "Spec 3 acceptance marker: leader exit cascades SESSION_ENDED"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+cluu_proto = { path = "../../cluu_proto" }
+postcard = { workspace = true }
+
+[[bin]]
+name = "l3_session_leader_exit_cascades"
+path = "src/main.rs"

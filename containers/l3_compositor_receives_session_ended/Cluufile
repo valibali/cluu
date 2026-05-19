@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs registry
+BUILD "cargo build --manifest-path userspace/probes/l3_compositor_receives_session_ended/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/l3_compositor_receives_session_ended.elf /bin/l3_compositor_receives_session_ended
+ENTRYPOINT /bin/l3_compositor_receives_session_ended

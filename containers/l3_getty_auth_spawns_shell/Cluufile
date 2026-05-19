@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs registry
+BUILD "cargo build --manifest-path userspace/probes/l3_getty_auth_spawns_shell/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/l3_getty_auth_spawns_shell.elf /bin/l3_getty_auth_spawns_shell
+ENTRYPOINT /bin/l3_getty_auth_spawns_shell

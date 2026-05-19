@@ -97,6 +97,14 @@ members = [
     "userspace/probes/l2_tcgetattr_default",
     "userspace/probes/l2_pts_cross_session_isolation",
     "userspace/probes/l2_pts_service_death_hangup",
+    "userspace/probes/l3_session_create_destroy",
+    "userspace/probes/l3_session_derive_narrow",
+    "userspace/probes/l3_session_query",
+    "userspace/probes/l3_session_set_leader_monotone",
+    "userspace/probes/l3_session_leader_exit_cascades",
+    "userspace/probes/l3_session_end_removes_pts",
+    "userspace/probes/l3_compositor_receives_session_ended",
+    "userspace/probes/l3_getty_auth_spawns_shell",
 
     # Language tooling
     "crates/cluu_lang",
@@ -167,6 +175,14 @@ default-members = [
     "userspace/probes/l2_tcgetattr_default",
     "userspace/probes/l2_pts_cross_session_isolation",
     "userspace/probes/l2_pts_service_death_hangup",
+    "userspace/probes/l3_session_create_destroy",
+    "userspace/probes/l3_session_derive_narrow",
+    "userspace/probes/l3_session_query",
+    "userspace/probes/l3_session_set_leader_monotone",
+    "userspace/probes/l3_session_leader_exit_cascades",
+    "userspace/probes/l3_session_end_removes_pts",
+    "userspace/probes/l3_compositor_receives_session_ended",
+    "userspace/probes/l3_getty_auth_spawns_shell",
 ]
 
 [workspace.package]
@@ -303,6 +319,30 @@ debug = 0
 debug = 0
 
 [profile.dev.package."cluu-l2-pts-service-death-hangup"]
+debug = 0
+
+[profile.dev.package."cluu-l3-session-create-destroy"]
+debug = 0
+
+[profile.dev.package."cluu-l3-session-derive-narrow"]
+debug = 0
+
+[profile.dev.package."cluu-l3-session-query"]
+debug = 0
+
+[profile.dev.package."cluu-l3-session-set-leader-monotone"]
+debug = 0
+
+[profile.dev.package."cluu-l3-session-leader-exit-cascades"]
+debug = 0
+
+[profile.dev.package."cluu-l3-session-end-removes-pts"]
+debug = 0
+
+[profile.dev.package."cluu-l3-compositor-receives-session-ended"]
+debug = 0
+
+[profile.dev.package."cluu-l3-getty-auth-spawns-shell"]
 debug = 0
 
 [profile.dev.package."cluu-mkdir"]
@@ -531,6 +571,30 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-l2-pts-service-death-hangup"]
+debug = 0
+
+[profile.release.package."cluu-l3-session-create-destroy"]
+debug = 0
+
+[profile.release.package."cluu-l3-session-derive-narrow"]
+debug = 0
+
+[profile.release.package."cluu-l3-session-query"]
+debug = 0
+
+[profile.release.package."cluu-l3-session-set-leader-monotone"]
+debug = 0
+
+[profile.release.package."cluu-l3-session-leader-exit-cascades"]
+debug = 0
+
+[profile.release.package."cluu-l3-session-end-removes-pts"]
+debug = 0
+
+[profile.release.package."cluu-l3-compositor-receives-session-ended"]
+debug = 0
+
+[profile.release.package."cluu-l3-getty-auth-spawns-shell"]
 debug = 0
 
 [profile.release.package."cluu-mkdir"]

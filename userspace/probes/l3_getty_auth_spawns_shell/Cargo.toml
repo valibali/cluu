@@ -1,0 +1,16 @@
+[package]
+name = "cluu-l3-getty-auth-spawns-shell"
+version = "0.1.0"
+edition = "2021"
+description = "Spec 3 acceptance marker: getty auth flow spawns shell"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+cluu_proto = { path = "../../cluu_proto" }
+postcard = { workspace = true }
+
+[[bin]]
+name = "l3_getty_auth_spawns_shell"
+path = "src/main.rs"
