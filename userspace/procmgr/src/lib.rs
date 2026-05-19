@@ -13,6 +13,7 @@ pub use cluu_proto as proto;
 
 pub mod manifest_cache;
 pub mod view_table;
+pub mod spawn;
 
 // Include sub-modules that have `#[cfg(test)]` unit tests so that
 // `cargo test -p cluu-procmgr --lib` can discover and run them on the host.
