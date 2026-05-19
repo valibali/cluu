@@ -15,6 +15,7 @@ pub use cluu_proto as proto;
 
 pub mod manifest_cache;
 pub mod view_table;
+pub mod session_table;
 pub mod spawn;
 
 // Include sub-modules that have `#[cfg(test)]` unit tests so that
