@@ -56,6 +56,8 @@ pub mod vfs_view;
 pub mod vspace;
 pub mod window_shm;
 
+pub mod spawn;
+
 // POSIX syscall stubs (feature-gated for newlib compatibility)
 #[cfg(feature = "posix")]
 pub mod errno;
