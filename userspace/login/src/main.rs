@@ -695,9 +695,11 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                     Ok(r) => r.pid,
                                     Err(e) => {
                                         let _ = debug_print(
-                                            "login: primary spawn failed",
+                                            &alloc::format!(
+                                                "login: primary spawn failed: {:?}",
+                                                e
+                                            )
                                         );
-                                        let _ = e;
                                         return -1;
                                     }
                                 };

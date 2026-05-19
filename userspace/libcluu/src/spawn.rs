@@ -33,7 +33,12 @@ pub fn spawn(envelope: SpawnEnvelope) -> Result<SpawnReply, SpawnError> {
 
     let mut reply_buf = [0u8; SPAWN_REPLY_BUF_SIZE];
     let (_reply_msg, payload_len) = ipc::call_with_reply_buf(procmgr_ep, &msg, &payload, &mut reply_buf)
-        .map_err(|_| SpawnError::Internal(0xEBADAB5u32))?;
+        .map_err(|e| {
+            let _ = crate::debug_print(&alloc::format!(
+                "libcluu::spawn IPC call failed: {:?}", e
+            ));
+            SpawnError::Internal(0xEBADAB5u32)
+        })?;
 
     let hdr = IPC_MSG_HEADER_SIZE;
     let reply_payload = if payload_len > 0 {
@@ -43,7 +48,16 @@ pub fn spawn(envelope: SpawnEnvelope) -> Result<SpawnReply, SpawnError> {
     };
 
     let result: Result<SpawnReply, SpawnError> = postcard::from_bytes(reply_payload)
-        .map_err(|_| SpawnError::Internal(0xEBADAB6u32))?;
+        .map_err(|_| {
+            let _ = crate::debug_print(&alloc::format!(
+                "libcluu::spawn deser fail payload_len={} hex={:02x?}",
+                payload_len, reply_payload
+            ));
+            SpawnError::Internal(0xEBADAB6u32)
+        })?;
 
+    let _ = crate::debug_print(&alloc::format!(
+        "libcluu::spawn result={:?}", result
+    ));
     result
 }

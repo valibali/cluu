@@ -252,6 +252,8 @@ pub struct TuiState {
     pub tick: u64,
     pub stop: bool,
     pub progress_floor: std::collections::HashMap<String, f32>,
+    /// IDs of non-leaf nodes whose children are hidden.
+    pub collapsed: std::collections::HashSet<String>,
 }
 
 impl TuiState {
@@ -316,6 +318,31 @@ impl TuiState {
             tick: 0,
             stop: false,
             progress_floor: std::collections::HashMap::new(),
+            collapsed: {
+                let mut c = std::collections::HashSet::new();
+                for def in defs {
+                    let child_count = defs.iter().filter(|d| d.parent.as_deref() == Some(def.id.as_str())).count();
+                    if child_count > 4 {
+                        c.insert(def.id.clone());
+                    }
+                }
+                c
+            },
+        }
+    }
+
+    pub fn toggle_collapse(&mut self, id: &str) {
+        // Only non-leaf nodes can be collapsed.
+        let has_children = self.nodes.iter().any(|(_, node)| {
+            node.parent.as_deref() == Some(id)
+        });
+        if !has_children {
+            return;
+        }
+        if self.collapsed.contains(id) {
+            self.collapsed.remove(id);
+        } else {
+            self.collapsed.insert(id.to_string());
         }
     }
 
@@ -374,8 +401,30 @@ impl TuiState {
             .map(|(id, node)| (id.as_str(), node))
             .collect();
 
+        // Collect which IDs should be hidden (descendants of collapsed nodes).
+        let hidden: std::collections::HashSet<&str> = {
+            let mut h = std::collections::HashSet::new();
+            for cid in &self.collapsed {
+                let mut stack: Vec<&str> = node_map
+                    .get(cid.as_str())
+                    .map(|n| n.children.iter().map(|s| s.as_str()).collect())
+                    .unwrap_or_default();
+                while let Some(c) = stack.pop() {
+                    if h.insert(c) {
+                        if let Some(n) = node_map.get(c) {
+                            stack.extend(n.children.iter().map(|s| s.as_str()));
+                        }
+                    }
+                }
+            }
+            h
+        };
+
         let mut tree_rows: Vec<TreeRow> = Vec::new();
         for id in &self.order {
+            if hidden.contains(id.as_str()) {
+                continue;
+            }
             let Some((_, node)) = self.nodes.iter().find(|(nid, _)| nid == id) else {
                 continue;
             };
@@ -387,10 +436,13 @@ impl TuiState {
             }
             .clamp(0.0, 1.0);
             let (prefix, is_root) = tree_prefix(&node.id, &self.nodes);
+            let has_children = !node.children.is_empty();
             tree_rows.push(TreeRow {
+                id: id.clone(),
                 label: node.label.clone(),
                 prefix,
                 is_root,
+                has_children,
                 progress,
                 status,
                 last_line: node.last_line.clone(),
@@ -418,9 +470,11 @@ impl TuiState {
 
 /// Immutable snapshot for rendering.
 pub struct TreeRow {
+    pub id: String,
     pub label: String,
     pub prefix: String,
     pub is_root: bool,
+    pub has_children: bool,
     pub progress: f32,
     pub status: NodeStatus,
     pub last_line: String,
@@ -525,10 +579,9 @@ fn render_header(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
     frame.render_widget(Paragraph::new(Line::from(sep)), layout[3]);
 }
 
-fn render_tree_row(frame: &mut Frame, area: Rect, row: &TreeRow) {
+fn render_tree_row(frame: &mut Frame, area: Rect, row: &TreeRow, collapsed: &std::collections::HashSet<String>) {
     let progress_percent = progress_percent(row.progress);
 
-    // Build the line: prefix + label + gauge + % + status + live-log
     let icon = status_icon(row.status);
     let style = status_style(row.status);
 
@@ -544,6 +597,11 @@ fn render_tree_row(frame: &mut Frame, area: Rect, row: &TreeRow) {
 
     if !row.is_root {
         spans.push(Span::styled(&row.prefix, prefix_style));
+    }
+    // Collapse indicator
+    if row.has_children {
+        let marker = if collapsed.contains(&row.id) { "▸ " } else { "▾ " };
+        spans.push(Span::styled(marker, Style::new().fg(Color::Yellow)));
     }
     spans.push(Span::styled(&row.label, label_style));
     spans.push(Span::raw(" "));
@@ -605,39 +663,51 @@ fn render_tree_row(frame: &mut Frame, area: Rect, row: &TreeRow) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_tree(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &mut ListState) {
-    let items: Vec<ListItem> = snapshot
-        .tree_rows
+fn render_tree(
+    frame: &mut Frame,
+    area: Rect,
+    snapshot: &Snapshot,
+    state: &mut ListState,
+    scroll_offset: usize,
+    collapsed: &std::collections::HashSet<String>,
+) {
+    let visible_count = area.height as usize;
+    let total_rows = snapshot.tree_rows.len();
+    let max_offset = total_rows.saturating_sub(visible_count);
+    let offset = scroll_offset.min(max_offset);
+
+    let visible_rows: Vec<&TreeRow> = snapshot.tree_rows.iter().skip(offset).take(visible_count).collect();
+
+    let items: Vec<ListItem> = visible_rows
         .iter()
-        .map(|_| {
-            ListItem::new("")
-        })
+        .map(|_| ListItem::new(""))
         .collect();
 
     let list = List::new(items)
         .block(Block::default())
         .highlight_style(Style::new());
-
     frame.render_stateful_widget(list, area, state);
 
-    // Render each row manually for full control over inline formatting
     let row_height = 1u16;
-    for (i, row) in snapshot.tree_rows.iter().enumerate() {
+    for (i, row) in visible_rows.iter().enumerate() {
         let y = area.y + i as u16 * row_height;
-        if y >= area.y + area.height {
-            break;
-        }
         let row_area = Rect {
             x: area.x,
             y,
             width: area.width,
             height: row_height,
         };
-        render_tree_row(frame, row_area, row);
+        render_tree_row(frame, row_area, row, collapsed);
     }
 }
 
-fn render_ui(frame: &mut Frame, snapshot: &Snapshot, list_state: &mut ListState) {
+fn render_ui(
+    frame: &mut Frame,
+    snapshot: &Snapshot,
+    list_state: &mut ListState,
+    scroll_offset: usize,
+    collapsed: &std::collections::HashSet<String>,
+) {
     let area = frame.area();
 
     // Layout: header (4 lines) + tree (rest)
@@ -648,7 +718,7 @@ fn render_ui(frame: &mut Frame, snapshot: &Snapshot, list_state: &mut ListState)
     .split(area);
 
     render_header(frame, layout[0], snapshot);
-    render_tree(frame, layout[1], snapshot, list_state);
+    render_tree(frame, layout[1], snapshot, list_state, scroll_offset, collapsed);
 }
 
 // ---------------------------------------------------------------------------
@@ -666,7 +736,6 @@ pub fn is_tui_capable() -> bool {
 /// update. This function blocks until `state.stop` is true or the
 /// user presses `q`.
 pub fn run_tui(state: Arc<Mutex<TuiState>>) -> Result<()> {
-    // Setup terminal
     enable_raw_mode()?;
     let mut stderr = io::stderr();
     execute!(stderr, EnterAlternateScreen)?;
@@ -674,11 +743,10 @@ pub fn run_tui(state: Arc<Mutex<TuiState>>) -> Result<()> {
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
     let mut list_state = ListState::default();
+    let mut scroll_offset: usize = 0;
 
-    // Main render loop
     let result = (|| -> Result<()> {
         loop {
-            // Check for exit
             {
                 let s = state.lock().expect("TUI state lock poisoned");
                 if s.stop {
@@ -686,17 +754,31 @@ pub fn run_tui(state: Arc<Mutex<TuiState>>) -> Result<()> {
                 }
             }
 
-            // Render
+            let snapshot;
+            let collapsed;
+            {
+                let mut s = state.lock().expect("TUI state lock poisoned");
+                s.tick();
+                snapshot = s.snapshot();
+                collapsed = s.collapsed.clone();
+            }
+
+            // Auto-scroll: find first running or failed task
+            if let Some(idx) = snapshot.tree_rows.iter().position(|r| {
+                matches!(r.status, NodeStatus::Running | NodeStatus::Failed)
+            }) {
+                let visible = terminal.get_frame().area().height.saturating_sub(4) as usize;
+                let view_end = scroll_offset.saturating_add(visible);
+                if idx < scroll_offset || idx >= view_end {
+                    scroll_offset = idx;
+                }
+            }
+
+            let local_collapsed = collapsed;
             terminal.draw(|frame| {
-                let snapshot = {
-                    let mut s = state.lock().expect("TUI state lock poisoned");
-                    s.tick();
-                    s.snapshot()
-                };
-                render_ui(frame, &snapshot, &mut list_state);
+                render_ui(frame, &snapshot, &mut list_state, scroll_offset, &local_collapsed);
             })?;
 
-            // Check for key input (non-blocking)
             if event::poll(Duration::from_millis(50))? {
                 if let CrosstermEvent::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
@@ -705,6 +787,37 @@ pub fn run_tui(state: Arc<Mutex<TuiState>>) -> Result<()> {
                                 let mut s = state.lock().expect("TUI state lock poisoned");
                                 s.stop = true;
                                 break;
+                            }
+                            KeyCode::Enter | KeyCode::Char(' ') => {
+                                // Toggle collapse on currently-highlighted row.
+                                // For simplicity: pick first non-leaf in view as target.
+                                let snap = snapshot.tree_rows.get(scroll_offset);
+                                if let Some(row) = snap {
+                                    if row.has_children {
+                                        let mut s = state.lock().expect("TUI state lock poisoned");
+                                        s.toggle_collapse(&row.id);
+                                    }
+                                }
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                scroll_offset = scroll_offset.saturating_sub(1);
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                let max = snapshot.tree_rows.len().saturating_sub(1);
+                                scroll_offset = (scroll_offset + 1).min(max);
+                            }
+                            KeyCode::PageUp => {
+                                let visible = terminal.get_frame().area().height.saturating_sub(4) as usize;
+                                scroll_offset = scroll_offset.saturating_sub(visible);
+                            }
+                            KeyCode::PageDown => {
+                                let visible = terminal.get_frame().area().height.saturating_sub(4) as usize;
+                                let max = snapshot.tree_rows.len().saturating_sub(1);
+                                scroll_offset = (scroll_offset + visible).min(max);
+                            }
+                            KeyCode::Home => scroll_offset = 0,
+                            KeyCode::End => {
+                                scroll_offset = snapshot.tree_rows.len().saturating_sub(1);
                             }
                             _ => {}
                         }
@@ -715,7 +828,6 @@ pub fn run_tui(state: Arc<Mutex<TuiState>>) -> Result<()> {
         Ok(())
     })();
 
-    // Cleanup terminal
     disable_raw_mode()?;
     execute!(io::stderr(), LeaveAlternateScreen)?;
 
