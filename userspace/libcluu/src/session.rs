@@ -9,7 +9,6 @@ use cluu_proto::session::*;
 use crate::ipc;
 use crate::types::Message;
 
-const IPC_MSG_HEADER_SIZE: usize = 8 + 6 * core::mem::size_of::<usize>();
 const REPLY_BUF_SIZE: usize = 512;
 
 pub fn create(req: SessionCreateRequest) -> Result<SessionCreateOk, SessionCreateErr> {
@@ -27,8 +26,8 @@ pub fn create(req: SessionCreateRequest) -> Result<SessionCreateOk, SessionCreat
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionCreateErr::Internal(0xE2u32))?;
 
-    let reply_payload = if bytes_received > IPC_MSG_HEADER_SIZE {
-        &reply_buf[IPC_MSG_HEADER_SIZE..bytes_received]
+    let reply_payload = if bytes_received > 0 {
+        &reply_buf[..bytes_received]
     } else {
         &[]
     };
@@ -53,8 +52,8 @@ pub fn destroy(token: TokenHandle) -> Result<(), SessionErr> {
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionErr::Internal(0xE6u32))?;
 
-    let reply_payload = if bytes_received > IPC_MSG_HEADER_SIZE {
-        &reply_buf[IPC_MSG_HEADER_SIZE..bytes_received]
+    let reply_payload = if bytes_received > 0 {
+        &reply_buf[..bytes_received]
     } else {
         &[]
     };
@@ -79,8 +78,8 @@ pub fn query(token: TokenHandle) -> Result<SessionQueryReply, SessionErr> {
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionErr::Internal(0xEAu32))?;
 
-    let reply_payload = if bytes_received > IPC_MSG_HEADER_SIZE {
-        &reply_buf[IPC_MSG_HEADER_SIZE..bytes_received]
+    let reply_payload = if bytes_received > 0 {
+        &reply_buf[..bytes_received]
     } else {
         &[]
     };
@@ -105,8 +104,8 @@ pub fn subscribe(token: TokenHandle, event_send: TokenHandle) -> Result<(), Sess
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionErr::Internal(0xEEu32))?;
 
-    let reply_payload = if bytes_received > IPC_MSG_HEADER_SIZE {
-        &reply_buf[IPC_MSG_HEADER_SIZE..bytes_received]
+    let reply_payload = if bytes_received > 0 {
+        &reply_buf[..bytes_received]
     } else {
         &[]
     };
@@ -131,8 +130,8 @@ pub fn derive_token(token: TokenHandle, rights: u32) -> Result<TokenHandle, Sess
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionErr::Internal(0xF2u32))?;
 
-    let reply_payload = if bytes_received > IPC_MSG_HEADER_SIZE {
-        &reply_buf[IPC_MSG_HEADER_SIZE..bytes_received]
+    let reply_payload = if bytes_received > 0 {
+        &reply_buf[..bytes_received]
     } else {
         &[]
     };
@@ -157,8 +156,8 @@ pub fn set_leader(token: TokenHandle, leader_pid: u32) -> Result<(), SessionErr>
         procmgr_ep, &msg, &payload, &mut reply_buf)
         .map_err(|_| SessionErr::Internal(0xF6u32))?;
 
-    let reply_payload = if bytes_received > IPC_MSG_HEADER_SIZE {
-        &reply_buf[IPC_MSG_HEADER_SIZE..bytes_received]
+    let reply_payload = if bytes_received > 0 {
+        &reply_buf[..bytes_received]
     } else {
         &[]
     };
