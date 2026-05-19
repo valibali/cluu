@@ -11,6 +11,8 @@ pub use libcluu::elf;
 /// Re-export of `cluu_proto` — the wire-protocol types crate.
 pub use cluu_proto as proto;
 
+pub mod manifest_cache;
+
 // Include sub-modules that have `#[cfg(test)]` unit tests so that
 // `cargo test -p cluu-procmgr --lib` can discover and run them on the host.
 #[cfg(test)]

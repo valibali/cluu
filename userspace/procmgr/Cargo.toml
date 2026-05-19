@@ -9,6 +9,7 @@ license = "MIT"
 [dependencies]
 libcluu = { path = "../libcluu" }
 cluu_proto = { path = "../cluu_proto" }
+spin = { workspace = true }
 postcard = { workspace = true }
 
 [dev-dependencies]
