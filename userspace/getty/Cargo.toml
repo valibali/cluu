@@ -1,0 +1,18 @@
+[package]
+name = "getty"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU text-VT login binary (getty)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }
+cluu_proto = { path = "../cluu_proto" }
+postcard = { workspace = true }
+bitflags = { workspace = true }
+serde = { workspace = true }
+
+[[bin]]
+name = "getty"
+path = "src/main.rs"

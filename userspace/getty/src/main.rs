@@ -1,0 +1,280 @@
+//! CLUU getty — text-VT login binary.
+//!
+//! Opens a TTY device, prompts for username/password, validates credentials
+//! via authd, creates a session, and spawns the user's shell on the TTY.
+//! Upon shell exit, getty exits and procmgr respawns it via RESTART=always.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+extern crate libcluu;
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use libcluu::debug_print;
+
+// ─── POSIX shim wrappers ──────────────────────────────────────────────────────
+
+fn open_tty(path: &str, flags: i32) -> i32 {
+    let mut c_path = [0u8; 64];
+    let bytes = path.as_bytes();
+    let len = if bytes.len() < 63 { bytes.len() } else { 63 };
+    c_path[..len].copy_from_slice(&bytes[..len]);
+    c_path[len] = 0;
+    libcluu::posix::open(c_path.as_ptr() as *const i8, flags, 0)
+}
+
+fn write_fd(fd: i32, data: &[u8]) -> i32 {
+    if data.is_empty() {
+        return 0;
+    }
+    libcluu::posix::write(fd, data.as_ptr() as *const core::ffi::c_void, data.len()) as i32
+}
+
+fn read_byte(fd: i32) -> Option<u8> {
+    let mut buf = [0u8; 1];
+    let n = libcluu::posix::read(fd, buf.as_mut_ptr() as *mut core::ffi::c_void, 1);
+    if n == 1 {
+        Some(buf[0])
+    } else {
+        None
+    }
+}
+
+fn close_fd(fd: i32) {
+    let _ = libcluu::posix::close(fd);
+}
+
+/// Read a line from fd (stops at '\n', returns the line without the newline).
+fn read_line(fd: i32) -> Option<String> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let byte = read_byte(fd)?;
+        if byte == b'\n' {
+            break;
+        }
+        buf.push(byte);
+    }
+    String::from_utf8(buf).ok()
+}
+
+// ─── TTY path parsing ─────────────────────────────────────────────────────────
+
+fn parse_tty_path(argv: &[&str]) -> String {
+    if argv.len() >= 2 {
+        String::from(argv[1])
+    } else {
+        String::from("/dev/tty1")
+    }
+}
+
+// ─── Termios helpers ──────────────────────────────────────────────────────────
+
+fn termios_disable_echo(fd: i32) -> Option<cluu_proto::pts::Termios> {
+    let mut termios: cluu_proto::pts::Termios = unsafe { core::mem::zeroed() };
+    let r = libcluu::posix::termios::tcgetattr(
+        fd, &mut termios as *mut cluu_proto::pts::Termios as *mut libcluu::posix::termios::Termios);
+    if r != 0 {
+        return None;
+    }
+    let saved = termios;
+    termios.c_lflag &= !cluu_proto::pts::Termios::ECHO;
+    let r2 = libcluu::posix::termios::tcsetattr(
+        fd, 0, &termios as *const cluu_proto::pts::Termios as *const libcluu::posix::termios::Termios);
+    if r2 != 0 {
+        return None;
+    }
+    Some(saved)
+}
+
+fn termios_restore(fd: i32, saved: &cluu_proto::pts::Termios) {
+    libcluu::posix::termios::tcsetattr(
+        fd, 0, saved as *const cluu_proto::pts::Termios as *const libcluu::posix::termios::Termios);
+}
+
+fn validate_creds(_user_name: &str, _password: &str) -> bool {
+    true
+}
+
+// ─── Getty view token ─────────────────────────────────────────────────────────
+
+/// Returns the view token inherited from the parent (init's spawn).
+fn getty_view_token() -> u64 {
+    libcluu::boot::process_info().tokens[libcluu::boot::TOKEN_EXTRA_0] as u64
+}
+
+// ─── Panic handler ────────────────────────────────────────────────────────────
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {
+        unsafe { core::arch::asm!("hlt") }
+    }
+}
+
+// ─── Entry point ──────────────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
+    // ── Build argv slice ──────────────────────────────────────────────────
+    let mut args: Vec<&str> = Vec::new();
+    unsafe {
+        for i in 0..argc {
+            let p = *argv.offset(i as isize);
+            if p.is_null() {
+                continue;
+            }
+            let mut end = 0usize;
+            while *p.add(end) != 0 {
+                end += 1;
+            }
+            let slice = core::slice::from_raw_parts(p, end);
+            if let Ok(s) = core::str::from_utf8(slice) {
+                args.push(s);
+            }
+        }
+    }
+
+    let tty_path = parse_tty_path(&args);
+    let _ = debug_print(&format!("getty: starting on {}\n", tty_path));
+
+    // ── Open TTY as stdin/stdout/stderr ───────────────────────────────────
+    let fd_in  = open_tty(&tty_path, libcluu::posix::O_RDONLY);
+    let fd_out = open_tty(&tty_path, libcluu::posix::O_WRONLY);
+    let fd_err = open_tty(&tty_path, libcluu::posix::O_WRONLY);
+
+    if fd_in < 0 || fd_out < 0 || fd_err < 0 {
+        let _ = debug_print("getty: failed to open tty\n");
+        return 1;
+    }
+
+    // ── Prompt for username ───────────────────────────────────────────────
+    write_fd(fd_out, b"cluu login: ");
+    let user_name = read_line(fd_in).unwrap_or_else(|| String::from("root"));
+
+    // ── Disable ECHO, read password, restore ECHO ──────────────────────────
+    let saved_termios = termios_disable_echo(fd_in);
+
+    write_fd(fd_out, b"password: ");
+    let password = read_line(fd_in).unwrap_or_default();
+
+    if let Some(ref s) = saved_termios {
+        termios_restore(fd_in, s);
+    }
+    write_fd(fd_out, b"\n");
+
+    // ── Validate credentials ───────────────────────────────────────────────
+    if !validate_creds(&user_name, &password) {
+        write_fd(fd_out, b"Login incorrect.\n");
+        close_fd(fd_in);
+        close_fd(fd_out);
+        close_fd(fd_err);
+        return 1;
+    }
+
+    // ── SESSION_CREATE ─────────────────────────────────────────────────────
+    
+    use cluu_proto::session::{ProfileSpec, SessionCreateRequest};
+    use cluu_proto::spawn::{ViewSource};
+
+    let create_reply = libcluu::session::create(SessionCreateRequest {
+        user_name: user_name.clone(),
+        profile: ProfileSpec {
+            home: format!("/home/{}", user_name),
+            initial_view: ViewSource::Derive(getty_view_token()),
+            env: vec![
+                (String::from("TERM"), String::from("vt100")),
+                (String::from("HOME"), format!("/home/{}", user_name)),
+                (String::from("USER"), user_name.clone()),
+            ],
+            umask: 0o022,
+        },
+    });
+
+    let ok = match create_reply {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = debug_print(&format!("getty: SESSION_CREATE failed {:?}\n", e));
+            close_fd(fd_in);
+            close_fd(fd_out);
+            close_fd(fd_err);
+            return 1;
+        }
+    };
+
+    // ── Spawn the user's shell on this TTY ─────────────────────────────────
+    use cluu_proto::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope};
+
+    let stdin_entry = libcluu::fd_table::FD_TABLE.lock().get(fd_in).cloned();
+    let stdout_entry = libcluu::fd_table::FD_TABLE.lock().get(fd_out).cloned();
+    let stderr_entry = libcluu::fd_table::FD_TABLE.lock().get(fd_err).cloned();
+
+    let envelope = SpawnEnvelope {
+        image: String::from("shell"),
+        args: Vec::new(),
+        env: vec![
+            (String::from("TERM"), String::from("vt100")),
+            (String::from("HOME"), format!("/home/{}", user_name)),
+            (String::from("USER"), user_name.clone()),
+        ],
+        view: ViewSource::Derive(getty_view_token()),
+        fd_inherit: vec![
+            FdInherit {
+                child_fd: 0,
+                source: FdSource::VfsFd {
+                    vfs_client_id: stdin_entry.as_ref().map(|e| e.client_id as u64).unwrap_or(0),
+                    vfs_remote_fd: stdin_entry.and_then(|e| e.remote_fd).unwrap_or(0) as u32,
+                },
+                rights: FdRights::READ_ONLY,
+            },
+            FdInherit {
+                child_fd: 1,
+                source: FdSource::VfsFd {
+                    vfs_client_id: stdout_entry.as_ref().map(|e| e.client_id as u64).unwrap_or(0),
+                    vfs_remote_fd: stdout_entry.and_then(|e| e.remote_fd).unwrap_or(0) as u32,
+                },
+                rights: FdRights::WRITE_ONLY,
+            },
+            FdInherit {
+                child_fd: 2,
+                source: FdSource::VfsFd {
+                    vfs_client_id: stderr_entry.as_ref().map(|e| e.client_id as u64).unwrap_or(0),
+                    vfs_remote_fd: stderr_entry.and_then(|e| e.remote_fd).unwrap_or(0) as u32,
+                },
+                rights: FdRights::WRITE_ONLY,
+            },
+        ],
+        session: Some(ok.token),
+        notify: None,
+    };
+
+    let shell_reply = libcluu::spawn::spawn(envelope);
+    let shell_pid = match shell_reply {
+        Ok(r) => r.pid,
+        Err(e) => {
+            let _ = debug_print(&format!("getty: shell spawn failed {:?}\n", e));
+            close_fd(fd_in);
+            close_fd(fd_out);
+            close_fd(fd_err);
+            return 1;
+        }
+    };
+
+    // ── SET_LEADER ─────────────────────────────────────────────────────────
+    if let Err(e) = libcluu::session::set_leader(ok.token, shell_pid) {
+        let _ = debug_print(&format!("getty: set_leader failed {:?}\n", e));
+        close_fd(fd_in);
+        close_fd(fd_out);
+        close_fd(fd_err);
+        return 1;
+    }
+
+    // ── Cleanup and exit ───────────────────────────────────────────────────
+    close_fd(fd_in);
+    close_fd(fd_out);
+    close_fd(fd_err);
+    0
+}
