@@ -320,11 +320,9 @@ impl TuiState {
             progress_floor: std::collections::HashMap::new(),
             collapsed: {
                 let mut c = std::collections::HashSet::new();
-                for def in defs {
-                    let child_count = defs.iter().filter(|d| d.parent.as_deref() == Some(def.id.as_str())).count();
-                    if child_count > 4 {
-                        c.insert(def.id.clone());
-                    }
+                // Only auto-collapse "containers" — it has the most children.
+                if defs.iter().any(|d| d.id == "containers") {
+                    c.insert("containers".to_string());
                 }
                 c
             },
@@ -579,11 +577,17 @@ fn render_header(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
     frame.render_widget(Paragraph::new(Line::from(sep)), layout[3]);
 }
 
-fn render_tree_row(frame: &mut Frame, area: Rect, row: &TreeRow, collapsed: &std::collections::HashSet<String>) {
+fn render_tree_row(frame: &mut Frame, area: Rect, row: &TreeRow, collapsed: &std::collections::HashSet<String>, selected: bool) {
     let progress_percent = progress_percent(row.progress);
 
     let icon = status_icon(row.status);
     let style = status_style(row.status);
+
+    let highlight_bg = if selected {
+        Style::new().bg(Color::DarkGray)
+    } else {
+        Style::new()
+    };
 
     let (label_style, prefix_style) = if row.is_root {
         (Style::new().fg(Color::White).bold(), Style::new())
@@ -591,7 +595,9 @@ fn render_tree_row(frame: &mut Frame, area: Rect, row: &TreeRow, collapsed: &std
         (Style::new().fg(Color::Cyan), Style::new().fg(Color::Cyan))
     };
 
+    let cursor = if selected { "▸ " } else { "  " };
     let mut spans = vec![
+        Span::styled(cursor, Style::new().fg(Color::Yellow).bold()),
         Span::styled(format!("{} ", icon), style),
     ];
 
@@ -660,7 +666,10 @@ fn render_tree_row(frame: &mut Frame, area: Rect, row: &TreeRow, collapsed: &std
         }
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(highlight_bg),
+        area,
+    );
 }
 
 fn render_tree(
@@ -669,6 +678,7 @@ fn render_tree(
     snapshot: &Snapshot,
     state: &mut ListState,
     scroll_offset: usize,
+    selected_index: usize,
     collapsed: &std::collections::HashSet<String>,
 ) {
     let visible_count = area.height as usize;
@@ -697,7 +707,8 @@ fn render_tree(
             width: area.width,
             height: row_height,
         };
-        render_tree_row(frame, row_area, row, collapsed);
+        let selected = (offset + i) == selected_index;
+        render_tree_row(frame, row_area, row, collapsed, selected);
     }
 }
 
@@ -706,6 +717,7 @@ fn render_ui(
     snapshot: &Snapshot,
     list_state: &mut ListState,
     scroll_offset: usize,
+    selected_index: usize,
     collapsed: &std::collections::HashSet<String>,
 ) {
     let area = frame.area();
@@ -718,7 +730,7 @@ fn render_ui(
     .split(area);
 
     render_header(frame, layout[0], snapshot);
-    render_tree(frame, layout[1], snapshot, list_state, scroll_offset, collapsed);
+    render_tree(frame, layout[1], snapshot, list_state, scroll_offset, selected_index, collapsed);
 }
 
 // ---------------------------------------------------------------------------
@@ -743,7 +755,7 @@ pub fn run_tui(state: Arc<Mutex<TuiState>>) -> Result<()> {
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
     let mut list_state = ListState::default();
-    let mut scroll_offset: usize = 0;
+    let mut selected_index: usize = 0;
 
     let result = (|| -> Result<()> {
         loop {
@@ -763,20 +775,19 @@ pub fn run_tui(state: Arc<Mutex<TuiState>>) -> Result<()> {
                 collapsed = s.collapsed.clone();
             }
 
-            // Auto-scroll: find first running or failed task
-            if let Some(idx) = snapshot.tree_rows.iter().position(|r| {
-                matches!(r.status, NodeStatus::Running | NodeStatus::Failed)
-            }) {
-                let visible = terminal.get_frame().area().height.saturating_sub(4) as usize;
-                let view_end = scroll_offset.saturating_add(visible);
-                if idx < scroll_offset || idx >= view_end {
-                    scroll_offset = idx;
-                }
-            }
+            let visible = (terminal.get_frame().area().height.saturating_sub(4) as usize).max(1);
+
+            // Clamp selected_index, then derive scroll_offset to keep it visible
+            let max_idx = snapshot.tree_rows.len().saturating_sub(1);
+            selected_index = selected_index.min(max_idx);
+
+            let mut scroll_offset = selected_index.saturating_sub(visible / 2);
+            let max_scroll = snapshot.tree_rows.len().saturating_sub(visible);
+            scroll_offset = scroll_offset.min(max_scroll);
 
             let local_collapsed = collapsed;
             terminal.draw(|frame| {
-                render_ui(frame, &snapshot, &mut list_state, scroll_offset, &local_collapsed);
+                render_ui(frame, &snapshot, &mut list_state, scroll_offset, selected_index, &local_collapsed);
             })?;
 
             if event::poll(Duration::from_millis(50))? {
@@ -789,10 +800,8 @@ pub fn run_tui(state: Arc<Mutex<TuiState>>) -> Result<()> {
                                 break;
                             }
                             KeyCode::Enter | KeyCode::Char(' ') => {
-                                // Toggle collapse on currently-highlighted row.
-                                // For simplicity: pick first non-leaf in view as target.
-                                let snap = snapshot.tree_rows.get(scroll_offset);
-                                if let Some(row) = snap {
+                                let row = snapshot.tree_rows.get(selected_index);
+                                if let Some(row) = row {
                                     if row.has_children {
                                         let mut s = state.lock().expect("TUI state lock poisoned");
                                         s.toggle_collapse(&row.id);
@@ -800,25 +809,19 @@ pub fn run_tui(state: Arc<Mutex<TuiState>>) -> Result<()> {
                                 }
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
-                                scroll_offset = scroll_offset.saturating_sub(1);
+                                selected_index = selected_index.saturating_sub(1);
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
-                                let max = snapshot.tree_rows.len().saturating_sub(1);
-                                scroll_offset = (scroll_offset + 1).min(max);
+                                selected_index = (selected_index + 1).min(max_idx);
                             }
                             KeyCode::PageUp => {
-                                let visible = terminal.get_frame().area().height.saturating_sub(4) as usize;
-                                scroll_offset = scroll_offset.saturating_sub(visible);
+                                selected_index = selected_index.saturating_sub(visible);
                             }
                             KeyCode::PageDown => {
-                                let visible = terminal.get_frame().area().height.saturating_sub(4) as usize;
-                                let max = snapshot.tree_rows.len().saturating_sub(1);
-                                scroll_offset = (scroll_offset + visible).min(max);
+                                selected_index = (selected_index + visible).min(max_idx);
                             }
-                            KeyCode::Home => scroll_offset = 0,
-                            KeyCode::End => {
-                                scroll_offset = snapshot.tree_rows.len().saturating_sub(1);
-                            }
+                            KeyCode::Home => selected_index = 0,
+                            KeyCode::End => selected_index = max_idx,
                             _ => {}
                         }
                     }
