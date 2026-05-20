@@ -1,6 +1,6 @@
 //! Spawn protocol types — see spec 1.
 //!
-//! Wire envelope for `PROCMGR_SPAWN_UNIFIED_LABEL = 80`.
+//! Wire envelope for `PROCMGR_SPAWN_UNIFIED_LABEL = 50`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::TokenHandle;
 
 /// Wire label for the unified spawn IPC verb.
-pub const PROCMGR_SPAWN_UNIFIED_LABEL: u32 = 80;
+pub const PROCMGR_SPAWN_UNIFIED_LABEL: u32 = 50;
 
 /// One spawn call's payload. Postcard-serialized into the IPC payload buffer.
 #[derive(Clone, Debug, Serialize, Deserialize)]

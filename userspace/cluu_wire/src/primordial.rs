@@ -1,6 +1,6 @@
 //! Primordial seed types — see spec 1 §13.
 //!
-//! Wire format for `PROCMGR_PRIMORDIAL_SEED_LABEL = 81`. Init sends this
+//! Wire format for `PROCMGR_PRIMORDIAL_SEED_LABEL = 51`. Init sends this
 //! one-shot message to procmgr immediately after procmgr's kernel-spawn.
 //! Procmgr rejects the call after first success and rejects any caller
 //! other than init's pid.
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::spawn::{SpawnEnvelope, SpawnError, SpawnReply};
 
-pub const PROCMGR_PRIMORDIAL_SEED_LABEL: u32 = 81;
+pub const PROCMGR_PRIMORDIAL_SEED_LABEL: u32 = 51;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PrimordialSeed {

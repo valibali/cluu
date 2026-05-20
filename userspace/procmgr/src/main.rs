@@ -5691,7 +5691,7 @@ impl ProcessManager {
         Ok(())
     }
 
-    /// Handle the unified spawn IPC verb (`PROCMGR_SPAWN_UNIFIED_LABEL = 80`).
+    /// Handle the unified spawn IPC verb (`PROCMGR_SPAWN_UNIFIED_LABEL = 50`).
     /// Deserializes a postcard-encoded `SpawnEnvelope` from the payload,
     /// delegates to `crate::spawn::spawn()`, and replies with the result.
     fn handle_spawn_unified(
