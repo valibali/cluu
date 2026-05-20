@@ -7,6 +7,13 @@
 //! - the PRIMORDIAL_SEED handler (Task 12)
 //!
 //! 10-step body per spec 1 §12.
+//!
+//! TODO(spec-1): `mod hooks` below is all stubs. Wiring them to existing
+//! procmgr helpers is plan-1 §12 work that was never completed. Until that
+//! lands, `handle_spawn_unified` in `main.rs` bypasses `spawn()` and calls
+//! the legacy `spawn_service_with_env` + `install_view_and_run` pipeline
+//! directly. See feedback memory `spawn_hooks_unwired` for the 6-batch
+//! wiring plan produced by the mapping subagent on 2026-05-20.
 
 use alloc::string::String;
 use alloc::vec::Vec;

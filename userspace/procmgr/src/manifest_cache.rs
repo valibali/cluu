@@ -13,12 +13,15 @@ use cluu_wire::spawn::RestartPolicy;
 /// Cached projection of a Cluufile manifest.
 #[derive(Clone, Debug)]
 pub struct CachedManifest {
-    /// Full path to the entrypoint binary, e.g., "/bin/shell".
+    /// Full path to the entrypoint binary, e.g., "/var/images/login/bin/login".
     pub entrypoint: String,
     /// Restart policy declared by the Cluufile (defaults to Never if absent).
     pub restart_policy: RestartPolicy,
     /// Whether the manifest grants `RIGHT_SESSIONLESS_SPAWN`.
     pub allow_sessionless: bool,
+    /// Capability profile bits (matches CapProfile::bits()). Stored so
+    /// handle_spawn_unified can reconstruct the CapProfile without re-reading TOML.
+    pub cap_profile_bits: u16,
 }
 
 pub struct ManifestCache {

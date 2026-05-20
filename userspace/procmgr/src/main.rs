@@ -5565,6 +5565,57 @@ impl ProcessManager {
         self.load_from_vfs(path)
     }
 
+    /// Ensure `image` is present in MANIFEST_CACHE, loading from VFS on miss.
+    /// Returns `false` if the manifest cannot be found or parsed.
+    fn ensure_manifest_cached(&mut self, image: &str) -> bool {
+        use procmgr::manifest_cache::{CachedManifest, MANIFEST_CACHE};
+        use cluu_wire::spawn::RestartPolicy as WirePolicy;
+
+        // Pre-load from VFS so the closure can be FnOnce() -> Option<CachedManifest>.
+        let preloaded: Option<CachedManifest> = (|| {
+            let manifest_path = alloc::format!("/var/images/{}/manifest.toml", image);
+            let data = self.read_file_from_vfs(&manifest_path)?;
+            let s_owned = alloc::string::String::from(core::str::from_utf8(&data).ok()?);
+            let doc = libcluu::toml::parse(&s_owned).ok()?;
+            let entrypoint = {
+                let rel = doc.table("exec").and_then(|t| t.get_str("binary"))?;
+                alloc::format!("/var/images/{}{}", image, rel)
+            };
+            let wire_policy = match parse_restart_policy(&doc) {
+                RestartPolicy::Never => WirePolicy::Never,
+                RestartPolicy::Always => WirePolicy::Always,
+                RestartPolicy::OnFailure { max_restarts, window_secs } => WirePolicy::OnFailure {
+                    max: max_restarts as u32,
+                    window_ms: window_secs * 1000,
+                },
+            };
+            let allow_sessionless = doc
+                .table("profile")
+                .and_then(|t| t.get_str("allow_sessionless"))
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            // Compute capability profile bits for handle_spawn_unified.
+            let mut cap_profile_bits: u16 = CapProfile::USER.bits();
+            if let Some(profile_table) = doc.table("profile") {
+                if let Some(caps) = profile_table.get_array("capabilities") {
+                    for cap_name in caps {
+                        if let Some(cap) = parse_capability(cap_name) {
+                            cap_profile_bits |= cap.bits();
+                        }
+                    }
+                }
+            }
+            Some(CachedManifest {
+                entrypoint,
+                restart_policy: wire_policy,
+                allow_sessionless,
+                cap_profile_bits,
+            })
+        })();
+
+        MANIFEST_CACHE.get_or_load(image, move || preloaded).is_some()
+    }
+
     fn handle_kill_message(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
         let reply_token = extract_reply_id(msg);
         let mut reply_msg = Message::new(PROCMGR_KILL_LABEL, [0; 6], 1);
@@ -5715,27 +5766,196 @@ impl ProcessManager {
 
         let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
 
-        // Snapshot session info before spawn consumes the envelope.
-        let spawn_session: Option<cluu_wire::TokenHandle> = envelope.session;
-
-        // Call the core spawn function.
-        let result = ::procmgr::spawn::spawn(envelope, caller_pid);
-
-        // If spawn succeeded and was session-scoped, record pid-to-session.
-        if let Ok(ref reply) = result {
-            if let Some(tok) = spawn_session {
-                // Resolve the token to get the session_id (no rights check
-                // needed — spawn already validated via RIGHT_SESSION_JOIN).
-                if let Ok((sid, _)) = procmgr::session_table::SESSION_TABLE
-                    .resolve(tok, caller_pid, 0)
-                {
-                    self.pid_to_session.insert(reply.pid as usize, sid);
-                }
-            }
+        // Ensure manifest is in cache.
+        if !self.ensure_manifest_cached(&envelope.image) {
+            let _ = debug_print(&format!(
+                "procmgr: spawn_unified manifest not found for image '{}'",
+                envelope.image
+            ));
+            return self.send_spawn_unified_err(reply_token, SpawnError::ImageNotFound);
         }
 
-        // Serialize and send the reply.
-        self.send_spawn_unified_reply(reply_token, &result)
+        // Retrieve cached manifest data.
+        let (binary_path, requested_profile) = {
+            let m = procmgr::manifest_cache::MANIFEST_CACHE
+                .get_or_load(&envelope.image, || None)
+                .unwrap(); // just ensured above
+            let profile = CapProfile::from_bits_truncate(m.cap_profile_bits);
+            (m.entrypoint, profile)
+        };
+
+        // Validate that caller can grant the profile.
+        let caller_profile = self
+            .pid_to_profile
+            .get(&(caller_pid as usize))
+            .copied()
+            .unwrap_or(CapProfile::USER);
+        if !caller_profile.can_grant(requested_profile) {
+            let _ = debug_print(&format!(
+                "procmgr: spawn_unified '{}' profile escalation denied",
+                envelope.image
+            ));
+            return self.send_spawn_unified_err(reply_token, SpawnError::PermissionDenied);
+        }
+
+        // Build argv payload: binary basename as argv[0], then envelope args.
+        let argv0 = binary_path.rsplit('/').next().unwrap_or(&binary_path);
+        let mut argv_payload: Vec<u8> = Vec::new();
+        argv_payload.extend_from_slice(argv0.as_bytes());
+        argv_payload.push(0);
+        let mut argc = 1usize;
+        for arg in &envelope.args {
+            argv_payload.extend_from_slice(arg.as_bytes());
+            argv_payload.push(0);
+            argc += 1;
+        }
+
+        // Build env payload: KEY=VALUE\0 records.
+        let mut env_payload: Vec<u8> = Vec::new();
+        let mut envc = 0usize;
+        for (k, v) in &envelope.env {
+            env_payload.extend_from_slice(k.as_bytes());
+            env_payload.push(b'=');
+            env_payload.extend_from_slice(v.as_bytes());
+            env_payload.push(0);
+            envc += 1;
+        }
+
+        // Container bookkeeping.
+        let container_id = self.next_container_id();
+        let caller_container_id = self
+            .pid_to_container_id
+            .get(&(caller_pid as usize))
+            .copied()
+            .unwrap_or(0);
+        let parent_cid = caller_container_id; // no detach for unified spawn
+
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
+
+        match self.spawn_service_with_env(
+            &binary_path,
+            DEFAULT_PRIORITY,
+            &argv_payload,
+            argc,
+            &env_payload,
+            envc,
+            sender_tid,
+            spawn_seq,
+            spawn_start,
+            &[], // fd_inherit_data: handled separately below if needed
+            requested_profile,
+            0,   // extra_token
+            0,   // extra_token_1
+            &[], // param_overrides
+            None, // caller_view: derive from profile default
+            &[], // cwd_bytes
+            &[], // redir_bytes
+            THREAD_CREATE_START_SUSPENDED,
+        ) {
+            Ok((thread_token, cookie, pid, child_stdin_send)) => {
+                // Build view for child: inherit from caller's view when available,
+                // falling back to the profile default for top-level callers.
+                let view_mounts = if caller_container_id != 0 {
+                    self.pid_to_view
+                        .get(&(caller_pid as usize))
+                        .cloned()
+                        .unwrap_or_else(|| default_view_for_profile(requested_profile))
+                } else {
+                    default_view_for_profile(requested_profile)
+                };
+                let image_dir = alloc::format!("/var/images/{}", envelope.image);
+
+                self.pid_to_container_id.insert(pid, container_id);
+                self.container_owner_pids.insert(pid);
+                self.install_view_and_run(
+                    thread_token,
+                    &view_mounts,
+                    requested_profile,
+                    container_id,
+                    parent_cid,
+                    false,
+                );
+                self.pid_to_view.insert(pid, view_mounts.clone());
+
+                // Register container instance.
+                let run_session_id = self.resolve_caller_session(sender_tid)
+                    .map(|s| s.container_id)
+                    .unwrap_or(0);
+                let inst_name =
+                    self.next_instance_name(run_session_id, &envelope.image);
+                let wire_policy =
+                    procmgr::manifest_cache::MANIFEST_CACHE
+                        .get_or_load(&envelope.image, || None)
+                        .map(|m| m.restart_policy)
+                        .unwrap_or(cluu_wire::spawn::RestartPolicy::Never);
+                // Convert wire RestartPolicy to local RestartPolicy for ContainerInstance.
+                let local_restart_policy = match wire_policy {
+                    cluu_wire::spawn::RestartPolicy::Never => RestartPolicy::Never,
+                    cluu_wire::spawn::RestartPolicy::Always => RestartPolicy::Always,
+                    cluu_wire::spawn::RestartPolicy::OnFailure { max, window_ms } =>
+                        RestartPolicy::OnFailure {
+                            max_restarts: max as usize,
+                            window_secs: window_ms / 1000,
+                        },
+                };
+                self.container_instances.insert(
+                    container_id,
+                    ContainerInstance {
+                        name: envelope.image.clone(),
+                        instance_name: inst_name,
+                        session_id: run_session_id,
+                        container_id,
+                        parent_container_id: parent_cid,
+                        pid,
+                        image_path: image_dir,
+                        mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+                        restart_policy: local_restart_policy,
+                        restart_count: 0,
+                        last_exit_code: 0,
+                        restart_attempt_start: 0,
+                        quota: QuotaSpec::default(),
+                        live_processes: 0,
+                    },
+                );
+                if parent_cid != 0 {
+                    self.container_children
+                        .entry(parent_cid)
+                        .or_insert_with(Vec::new)
+                        .push(container_id);
+                }
+                if sender_tid != 0 {
+                    let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
+                    *entry = entry.saturating_add(1);
+                }
+                let _ = debug_print(&alloc::format!(
+                    "procmgr: spawn_unified '{}' started pid={} cid={}",
+                    envelope.image, pid, container_id
+                ));
+
+                // Derive a child_thread_token for the reply.
+                let child_thread_token: u64 =
+                    match token_derive(thread_token, Rights::empty().bits() as usize, u64::MAX) {
+                        Ok(t) => t as u64,
+                        Err(_) => thread_token as u64,
+                    };
+
+                let result: core::result::Result<SpawnReply, SpawnError> = Ok(SpawnReply {
+                    pid: pid as u32,
+                    child_thread_token,
+                });
+                let _ = child_stdin_send; // unused for now
+                let _ = cookie;
+                self.send_spawn_unified_reply(reply_token, &result)
+            }
+            Err(err) => {
+                let _ = debug_print(&alloc::format!(
+                    "procmgr: spawn_unified '{}' failed: {:?}",
+                    envelope.image, err
+                ));
+                self.send_spawn_unified_err(reply_token, SpawnError::Internal(0xE5000001u32))
+            }
+        }
     }
 
     fn send_spawn_unified_err(
