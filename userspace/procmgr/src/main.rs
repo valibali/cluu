@@ -5833,6 +5833,40 @@ impl ProcessManager {
         let spawn_seq = self.next_spawn_seq();
         let spawn_start = self.clock_sample();
 
+        // Serialize envelope.fd_inherit into the legacy FDAC wire format
+        // consumed by spawn_service_with_env. Wire layout:
+        //   u32 magic = 0x46444143 ("FDAC")
+        //   u32 count (≤ 4)
+        //   N × 32 bytes:
+        //     u32 target_fd, u32 flags,
+        //     u64 endpoint, u64 vfs_client_id, u64 vfs_remote_fd
+        let fd_inherit_bytes: Vec<u8> = if envelope.fd_inherit.is_empty() {
+            Vec::new()
+        } else {
+            use cluu_wire::spawn::FdSource;
+            let n = core::cmp::min(envelope.fd_inherit.len(), 4) as u32;
+            let mut buf = Vec::with_capacity(8 + (n as usize) * 32);
+            buf.extend_from_slice(&0x46444143u32.to_le_bytes());
+            buf.extend_from_slice(&n.to_le_bytes());
+            for entry in envelope.fd_inherit.iter().take(n as usize) {
+                let (flags, endpoint, vfs_cid, vfs_rfd): (u32, u64, u64, u64) =
+                    match entry.source {
+                        FdSource::VfsFd { vfs_client_id, vfs_remote_fd } => {
+                            (0, 0, vfs_client_id, vfs_remote_fd as u64)
+                        }
+                        FdSource::EndpointCap { endpoint_token } => {
+                            (0x01, endpoint_token, 0, 0)
+                        }
+                    };
+                buf.extend_from_slice(&entry.child_fd.to_le_bytes());
+                buf.extend_from_slice(&flags.to_le_bytes());
+                buf.extend_from_slice(&endpoint.to_le_bytes());
+                buf.extend_from_slice(&vfs_cid.to_le_bytes());
+                buf.extend_from_slice(&vfs_rfd.to_le_bytes());
+            }
+            buf
+        };
+
         match self.spawn_service_with_env(
             &binary_path,
             DEFAULT_PRIORITY,
@@ -5843,7 +5877,7 @@ impl ProcessManager {
             sender_tid,
             spawn_seq,
             spawn_start,
-            &[], // fd_inherit_data: handled separately below if needed
+            &fd_inherit_bytes,
             requested_profile,
             0,   // extra_token
             0,   // extra_token_1
@@ -5877,6 +5911,21 @@ impl ProcessManager {
                     false,
                 );
                 self.pid_to_view.insert(pid, view_mounts.clone());
+
+                // Record session membership when envelope carries a session
+                // token. Required so SESSION_SET_LEADER's check_member predicate
+                // succeeds for the freshly-spawned child.
+                if let Some(tok) = envelope.session {
+                    match procmgr::session_table::SESSION_TABLE
+                        .resolve(tok, caller_pid, 0)
+                    {
+                        Ok((sid, _)) => {
+                            self.pid_to_session.insert(pid, sid);
+                            procmgr::session_table::SESSION_TABLE.inc_refcount(sid);
+                        }
+                        Err(_) => {}
+                    }
+                }
 
                 // Register container instance.
                 let run_session_id = self.resolve_caller_session(sender_tid)
@@ -6147,6 +6196,27 @@ impl ProcessManager {
             |pid, sid| self.process_session_id(pid) == Some(sid),
         );
 
+        // On success, reparent the leader's container to top-level so the
+        // session-creator's container teardown does not cascade-kill the
+        // newly-anointed leader (spec 3 §5.5: creator may exit after handoff).
+        if result.is_ok() {
+            if let Some(&leader_cid) =
+                self.pid_to_container_id.get(&(req.leader_pid as usize))
+            {
+                if let Some(inst) = self.container_instances.get_mut(&leader_cid) {
+                    let old_parent = inst.parent_container_id;
+                    inst.parent_container_id = 0;
+                    if old_parent != 0 {
+                        if let Some(siblings) =
+                            self.container_children.get_mut(&old_parent)
+                        {
+                            siblings.retain(|&c| c != leader_cid);
+                        }
+                    }
+                }
+            }
+        }
+
         let reply: cluu_wire::session::SessionSetLeaderReply = result.map(|()| ());
         let bytes = postcard::to_allocvec(&reply).expect("ser");
         self.send_session_reply(
@@ -6405,11 +6475,8 @@ impl ProcessManager {
         self.clock_sample()
     }
 
-    fn process_session_id(&self, _pid: u32) -> Option<u32> {
-        // FIXME: walk container hierarchy to find the enclosing session_id.
-        // For now return None — SET_LEADER will fail LeaderNotMember until
-        // the real session→pid mapping is wired.
-        None
+    fn process_session_id(&self, pid: u32) -> Option<u32> {
+        self.pid_to_session.get(&(pid as usize)).copied()
     }
 
     fn members_of_session(&self, sid: u32) -> alloc::vec::Vec<u32> {
