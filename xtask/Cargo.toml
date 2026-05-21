@@ -10,3 +10,4 @@ clap = { version = "4.4", features = ["derive"] }
 sha2 = "0.10"
 ratatui = "0.30"
 crossterm = "0.28"
+walkdir = "2"

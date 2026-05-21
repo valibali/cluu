@@ -11,6 +11,7 @@ mod tui;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use walkdir;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -261,6 +262,8 @@ enum Commands {
     /// Internal: build a single container by name
     #[command(hide = true)]
     BuildSingleContainer { name: String },
+    /// Check procmgr crates for forbidden ACL-style identifiers
+    CheckCapPurity,
 }
 
 fn main() -> Result<()> {
@@ -379,6 +382,9 @@ fn main() -> Result<()> {
         }
         Commands::BuildSingleContainer { name } => {
             build_single_container(&name)?;
+        }
+        Commands::CheckCapPurity => {
+            check_cap_purity()?;
         }
     }
 
@@ -3250,5 +3256,43 @@ fn copy_container_image(src_dir: &Path, dst_dir: &Path) -> Result<()> {
             fs::copy(&src_path, &dst_path)?;
         }
     }
+    Ok(())
+}
+
+fn check_cap_purity() -> Result<()> {
+    let forbidden = [
+        "pid_to_session", "tid_to_pid", "resolve_caller_session",
+        "caller_profile", "can_grant", "session_match",
+    ];
+    let crates = ["userspace/root-procmgr", "userspace/session-procmgr"];
+    let root = project_root();
+    let mut hits = Vec::new();
+    for c in &crates {
+        let crate_dir = root.join(c);
+        if !crate_dir.exists() {
+            // Crate not yet created; skip without error.
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(&crate_dir).into_iter().filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |x| x == "rs"))
+        {
+            let body = std::fs::read_to_string(entry.path())
+                .with_context(|| format!("Failed to read {}", entry.path().display()))?;
+            for kw in &forbidden {
+                for (line, text) in body.lines().enumerate() {
+                    if text.contains(kw) && !text.trim_start().starts_with("//") {
+                        hits.push(format!("{}:{}: {}", entry.path().display(), line + 1, kw));
+                    }
+                }
+            }
+        }
+    }
+    if !hits.is_empty() {
+        for h in &hits {
+            eprintln!("cap-purity violation: {}", h);
+        }
+        bail!("{} cap-purity violation(s)", hits.len());
+    }
+    println!("  ✓ cap-purity: no violations found");
     Ok(())
 }
