@@ -5,6 +5,8 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+pub use crate::kernel_iface::Kernel;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelCall {
     Mint   { parent: u64, rights: u32, new_handle: u64 },
@@ -12,12 +14,6 @@ pub enum KernelCall {
     SpawnThread { entry: u64, stack: u64, tid: u64 },
     SendMsg { dest: u64, label: u32, len: usize },
     Recv   { token: u64 },
-}
-
-pub trait Kernel {
-    fn mint(&mut self, parent: u64, rights: u32) -> u64;
-    fn revoke(&mut self, handle: u64);
-    fn spawn_thread(&mut self, entry: u64, stack: u64) -> u64;
 }
 
 #[derive(Default)]

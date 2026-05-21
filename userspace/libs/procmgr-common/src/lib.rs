@@ -12,6 +12,9 @@
 
 extern crate alloc;
 
+pub mod kernel_iface;
+pub mod mint_guard;
+
 pub mod labels;
 pub mod pid;
 pub mod handler;
