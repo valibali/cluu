@@ -32,6 +32,9 @@ pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply,
         procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL => {
             crate::spawn::Spawn::handle(state, msg)
         }
+        procmgr_common::labels::PROCMGR_EXIT_LABEL => {
+            crate::child_monitor::ChildExit::handle(state, msg)
+        }
         _ => Err(HandlerError::BadLabel),
     }
 }
