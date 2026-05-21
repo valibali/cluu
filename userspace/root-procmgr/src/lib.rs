@@ -23,3 +23,4 @@ pub mod session_table;
 pub mod spawn;
 pub mod session_directory;
 pub mod dispatch;
+pub mod cap_broker;
