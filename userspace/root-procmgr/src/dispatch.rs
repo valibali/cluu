@@ -26,6 +26,9 @@ pub struct ProcmgrState {
 
     // ── Service registry ─────────────────────────────────────────────────
     pub services: alloc::vec::Vec<crate::services::ServiceEntry>,
+
+    // ── Shutdown flag ─────────────────────────────────────────────────────
+    pub shutting_down: bool,
 }
 
 impl Default for ProcmgrState {
@@ -44,6 +47,7 @@ impl ProcmgrState {
             parent_timeserver_cap: 0,
             parent_timeserver_rights: 0,
             services: alloc::vec::Vec::new(),
+            shutting_down: false,
         }
     }
 
@@ -61,6 +65,7 @@ impl ProcmgrState {
             parent_timeserver_cap: 0xBEEF_0003,
             parent_timeserver_rights: 0x01,
             services: alloc::vec::Vec::new(),
+            shutting_down: false,
         }
     }
 }
@@ -70,11 +75,13 @@ pub fn dispatch(state: &mut ProcmgrState, msg: &InboundMsg<'_>) -> Result<Reply,
     use crate::session_directory::{SessionCreate, SessionDestroy};
     use crate::services::ServiceSpawn;
     use crate::escalate::Escalate;
+    use crate::shutdown::Shutdown;
     match msg.label {
         SessionCreate::LABEL  => SessionCreate::handle(state, msg),
         SessionDestroy::LABEL => SessionDestroy::handle(state, msg),
         ServiceSpawn::LABEL   => ServiceSpawn::handle(state, msg),
         Escalate::LABEL       => Escalate::handle(state, msg),
+        Shutdown::LABEL       => Shutdown::handle(state, msg),
         _ => Err(HandlerError::BadLabel),
     }
 }
