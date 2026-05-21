@@ -28,3 +28,4 @@ pub mod restart_root;
 pub mod services;
 pub mod escalate;
 pub mod shutdown;
+pub mod proc_query_all;

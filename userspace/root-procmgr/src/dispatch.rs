@@ -5,6 +5,10 @@ extern crate alloc;
 use procmgr_common::handler::{HandlerError, InboundMsg, MsgHandler, Reply};
 use crate::session_directory::SessionDirectory;
 
+fn empty_query_session_local(_sid: u8) -> procmgr_common::wire::ProcQueryLocalReply {
+    procmgr_common::wire::ProcQueryLocalReply { procs: alloc::vec::Vec::new() }
+}
+
 /// Root-procmgr runtime state passed to every handler.
 ///
 /// TODO(Phase 12): replace `MockKernel` field with `RealKernel` behind
@@ -29,6 +33,11 @@ pub struct ProcmgrState {
 
     // ── Shutdown flag ─────────────────────────────────────────────────────
     pub shutting_down: bool,
+
+    // ── Cross-session proc query ──────────────────────────────────────────
+    /// Injected fn that queries a session-procmgr for its local proc list.
+    /// Default stub returns empty; production wires the real IPC call.
+    pub query_session_local: fn(u8) -> procmgr_common::wire::ProcQueryLocalReply,
 }
 
 impl Default for ProcmgrState {
@@ -48,6 +57,7 @@ impl ProcmgrState {
             parent_timeserver_rights: 0,
             services: alloc::vec::Vec::new(),
             shutting_down: false,
+            query_session_local: empty_query_session_local,
         }
     }
 
@@ -66,6 +76,7 @@ impl ProcmgrState {
             parent_timeserver_rights: 0x01,
             services: alloc::vec::Vec::new(),
             shutting_down: false,
+            query_session_local: empty_query_session_local,
         }
     }
 }
@@ -76,12 +87,14 @@ pub fn dispatch(state: &mut ProcmgrState, msg: &InboundMsg<'_>) -> Result<Reply,
     use crate::services::ServiceSpawn;
     use crate::escalate::Escalate;
     use crate::shutdown::Shutdown;
+    use crate::proc_query_all::ProcQueryAll;
     match msg.label {
         SessionCreate::LABEL  => SessionCreate::handle(state, msg),
         SessionDestroy::LABEL => SessionDestroy::handle(state, msg),
         ServiceSpawn::LABEL   => ServiceSpawn::handle(state, msg),
         Escalate::LABEL       => Escalate::handle(state, msg),
         Shutdown::LABEL       => Shutdown::handle(state, msg),
+        ProcQueryAll::LABEL   => ProcQueryAll::handle(state, msg),
         _ => Err(HandlerError::BadLabel),
     }
 }

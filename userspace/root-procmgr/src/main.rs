@@ -13,6 +13,7 @@ mod restart_root;
 mod services;
 mod escalate;
 mod shutdown;
+mod proc_query_all;
 
 use procmgr_common::{envelopes, mount_policy};
 use mount_policy::{
