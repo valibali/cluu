@@ -36,7 +36,6 @@ pub struct Envelope {
 
 /// Apply `{user}` substitution to env_template, merging with static env.
 /// Static env wins on key conflict (matches spec §6 step 3).
-#[allow(dead_code)]
 pub fn resolve_env(envelope: &Envelope, user: &str) -> BTreeMap<String, String> {
     let mut out = envelope.env.clone();
     for (k, template) in &envelope.env_template {
@@ -158,7 +157,6 @@ pub fn resolve_session_mounts(env: &Envelope, session_kind: u8, vt: usize, user:
 }
 
 /// Look up an envelope by name in a parsed list.
-#[allow(dead_code)]
 pub fn lookup_envelope<'a>(envelopes: &'a [Envelope], name: &str) -> Option<&'a Envelope> {
     envelopes.iter().find(|e| e.name == name)
 }
