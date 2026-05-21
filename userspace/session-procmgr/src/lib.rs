@@ -13,3 +13,7 @@ pub mod pipe_registry;
 pub mod proc_query_local;
 pub mod restart;
 pub mod spawn;
+
+/// Production kernel adapter — excluded from host-test (uses real x86-64 syscalls).
+#[cfg(not(feature = "host-test"))]
+pub mod real_kernel;

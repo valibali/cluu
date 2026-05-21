@@ -29,3 +29,7 @@ pub mod services;
 pub mod escalate;
 pub mod shutdown;
 pub mod proc_query_all;
+
+/// Production kernel adapter — excluded from host-test (uses real x86-64 syscalls).
+#[cfg(not(feature = "host-test"))]
+pub mod real_kernel;

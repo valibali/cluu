@@ -14,6 +14,7 @@ mod services;
 mod escalate;
 mod shutdown;
 mod proc_query_all;
+mod real_kernel;
 
 use procmgr_common::{envelopes, mount_policy};
 use mount_policy::{
