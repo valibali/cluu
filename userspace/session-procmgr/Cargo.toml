@@ -1,0 +1,34 @@
+[package]
+name = "cluu-session-procmgr"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU per-session process manager"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu_wire = { path = "../cluu_wire" }
+procmgr-common = { path = "../libs/procmgr-common" }
+spin = { workspace = true }
+postcard = { workspace = true }
+
+[dev-dependencies]
+libcluu = { path = "../libcluu", features = ["host-test"] }
+procmgr-common = { path = "../libs/procmgr-common", features = ["host-test"] }
+proptest = { workspace = true }
+
+[features]
+default = []
+host-test = [
+    "libcluu/host-test",
+    "procmgr-common/host-test",
+]
+
+[lib]
+name = "session_procmgr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "session-procmgr"
+path = "src/main.rs"
