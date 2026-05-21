@@ -1376,7 +1376,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/virtio-blk", // Driver library
         "userspace/ext2",       // Filesystem library
         "userspace/init",       // System programs
-        "userspace/procmgr",
+        "userspace/root-procmgr",
         "userspace/registry",
         "userspace/vfs",
         "userspace/ramfs",
