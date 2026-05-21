@@ -1915,18 +1915,18 @@ impl ProcessManager {
         if dead_pid != 0 {
             // Decrement session refcount for pids spawned into a session.
             if let Some(sid) = self.pid_to_session.remove(&(dead_pid as usize)) {
-                procmgr::session_table::SESSION_TABLE.dec_refcount(sid);
+                root_procmgr::session_table::SESSION_TABLE.dec_refcount(sid);
             }
 
             let affected =
-                procmgr::session_table::SESSION_TABLE.on_pid_exit(dead_pid);
+                root_procmgr::session_table::SESSION_TABLE.on_pid_exit(dead_pid);
 
             // Destroy sessions whose leader just exited.
             let leader_sessions: alloc::vec::Vec<u32> = affected
                 .iter()
                 .copied()
                 .filter(|&sid| {
-                    procmgr::session_table::SESSION_TABLE
+                    root_procmgr::session_table::SESSION_TABLE
                         .snapshot(sid)
                         .map(|s| s.leader_pid == Some(dead_pid))
                         .unwrap_or(false)
@@ -1938,7 +1938,7 @@ impl ProcessManager {
 
             // Destroy orphan sessions whose creator exited before SET_LEADER.
             if let Some(sid) = self.session_creators.remove(&dead_pid) {
-                if procmgr::session_table::SESSION_TABLE
+                if root_procmgr::session_table::SESSION_TABLE
                     .snapshot(sid)
                     .map(|s| s.leader_pid.is_none())
                     .unwrap_or(false)
@@ -1949,7 +1949,7 @@ impl ProcessManager {
 
             // GC sessions that reached refcount 0.
             for sid in affected {
-                procmgr::session_table::SESSION_TABLE.remove_if_unref(sid);
+                root_procmgr::session_table::SESSION_TABLE.remove_if_unref(sid);
             }
         }
 
@@ -5568,7 +5568,7 @@ impl ProcessManager {
     /// Ensure `image` is present in MANIFEST_CACHE, loading from VFS on miss.
     /// Returns `false` if the manifest cannot be found or parsed.
     fn ensure_manifest_cached(&mut self, image: &str) -> bool {
-        use procmgr::manifest_cache::{CachedManifest, MANIFEST_CACHE};
+        use root_procmgr::manifest_cache::{CachedManifest, MANIFEST_CACHE};
         use cluu_wire::spawn::RestartPolicy as WirePolicy;
 
         // Pre-load from VFS so the closure can be FnOnce() -> Option<CachedManifest>.
@@ -5777,7 +5777,7 @@ impl ProcessManager {
 
         // Retrieve cached manifest data.
         let (binary_path, requested_profile) = {
-            let m = procmgr::manifest_cache::MANIFEST_CACHE
+            let m = root_procmgr::manifest_cache::MANIFEST_CACHE
                 .get_or_load(&envelope.image, || None)
                 .unwrap(); // just ensured above
             let profile = CapProfile::from_bits_truncate(m.cap_profile_bits);
@@ -5821,7 +5821,7 @@ impl ProcessManager {
                 .get(&(caller_pid as usize))
                 .copied()
                 .and_then(|sid| {
-                    procmgr::session_table::SESSION_TABLE
+                    root_procmgr::session_table::SESSION_TABLE
                         .snapshot(sid)
                         .map(|s| s.profile.env)
                 });
@@ -5934,12 +5934,12 @@ impl ProcessManager {
                 // token. Required so SESSION_SET_LEADER's check_member predicate
                 // succeeds for the freshly-spawned child.
                 if let Some(tok) = envelope.session {
-                    match procmgr::session_table::SESSION_TABLE
+                    match root_procmgr::session_table::SESSION_TABLE
                         .resolve(tok, caller_pid, 0)
                     {
                         Ok((sid, _)) => {
                             self.pid_to_session.insert(pid, sid);
-                            procmgr::session_table::SESSION_TABLE.inc_refcount(sid);
+                            root_procmgr::session_table::SESSION_TABLE.inc_refcount(sid);
                         }
                         Err(_) => {}
                     }
@@ -5950,7 +5950,7 @@ impl ProcessManager {
                     // (e.g. shell spawned by cluuterm spawning ls) carry
                     // session identity through to envelope-merge lookup.
                     self.pid_to_session.insert(pid, sid);
-                    procmgr::session_table::SESSION_TABLE.inc_refcount(sid);
+                    root_procmgr::session_table::SESSION_TABLE.inc_refcount(sid);
                 }
 
                 // Register container instance.
@@ -5960,7 +5960,7 @@ impl ProcessManager {
                 let inst_name =
                     self.next_instance_name(run_session_id, &envelope.image);
                 let wire_policy =
-                    procmgr::manifest_cache::MANIFEST_CACHE
+                    root_procmgr::manifest_cache::MANIFEST_CACHE
                         .get_or_load(&envelope.image, || None)
                         .map(|m| m.restart_policy)
                         .unwrap_or(cluu_wire::spawn::RestartPolicy::Never);
@@ -6178,7 +6178,7 @@ impl ProcessManager {
         }
 
         let now = self.now_ticks();
-        let (session_id, token) = procmgr::session_table::SESSION_TABLE.create(
+        let (session_id, token) = root_procmgr::session_table::SESSION_TABLE.create(
             req.user_name,
             req.profile,
             caller_pid,
@@ -6244,7 +6244,7 @@ impl ProcessManager {
             };
         let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
 
-        let result = procmgr::session_table::SESSION_TABLE.set_leader(
+        let result = root_procmgr::session_table::SESSION_TABLE.set_leader(
             req.token,
             caller_pid,
             req.leader_pid,
@@ -6308,7 +6308,7 @@ impl ProcessManager {
             };
         let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
 
-        let resolved = procmgr::session_table::SESSION_TABLE.resolve(
+        let resolved = root_procmgr::session_table::SESSION_TABLE.resolve(
             req.token,
             caller_pid,
             cluu_wire::session::RIGHT_SESSION_QUERY,
@@ -6317,7 +6317,7 @@ impl ProcessManager {
         let result: core::result::Result<cluu_wire::session::SessionQueryReply, cluu_wire::session::SessionErr> =
             match resolved {
                 Err(e) => Err(e),
-                Ok((sid, _)) => match procmgr::session_table::SESSION_TABLE.snapshot(sid) {
+                Ok((sid, _)) => match root_procmgr::session_table::SESSION_TABLE.snapshot(sid) {
                     None => Err(cluu_wire::session::SessionErr::NotFound),
                     Some(s) => Ok(cluu_wire::session::SessionQueryReply {
                         session_id: s.id,
@@ -6378,7 +6378,7 @@ impl ProcessManager {
             }
         };
 
-        let result = procmgr::session_table::SESSION_TABLE.subscribe(
+        let result = root_procmgr::session_table::SESSION_TABLE.subscribe(
             req.token,
             caller_pid,
             derived,
@@ -6418,7 +6418,7 @@ impl ProcessManager {
             };
         let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
 
-        let result = procmgr::session_table::SESSION_TABLE.derive_token(
+        let result = root_procmgr::session_table::SESSION_TABLE.derive_token(
             req.token,
             caller_pid,
             req.rights,
@@ -6459,7 +6459,7 @@ impl ProcessManager {
             };
         let caller_pid = self.tid_to_pid.get(&sender_tid).copied().unwrap_or(0) as u32;
 
-        let resolved = procmgr::session_table::SESSION_TABLE.resolve(
+        let resolved = root_procmgr::session_table::SESSION_TABLE.resolve(
             req.token,
             caller_pid,
             cluu_wire::session::RIGHT_SESSION_CONTROL,
@@ -6489,7 +6489,7 @@ impl ProcessManager {
     }
 
     fn destroy_session(&mut self, sid: u32) {
-        let subscribers = match procmgr::session_table::SESSION_TABLE.mark_dying(sid) {
+        let subscribers = match root_procmgr::session_table::SESSION_TABLE.mark_dying(sid) {
             None => return,
             Some(s) => s,
         };

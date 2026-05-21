@@ -1,5 +1,5 @@
 [package]
-name = "cluu-procmgr"
+name = "cluu-root-procmgr"
 version = "0.1.0"
 edition = "2021"
 description = "CLUU process manager server"
@@ -20,9 +20,9 @@ default = []
 host-test = ["libcluu/host-test"]  # enables std for unit tests on host
 
 [lib]
-name = "procmgr"
+name = "root_procmgr"
 path = "src/lib.rs"
 
 [[bin]]
-name = "procmgr"
+name = "root-procmgr"
 path = "src/main.rs"

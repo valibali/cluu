@@ -227,8 +227,8 @@ pub fn launch_service(
     };
     t.mark("token_derive");
 
-    if service.name == "procmgr" {
-        debug_print(&format!("init: procmgr token {}", child_token))?;
+    if service.name == "root-procmgr" {
+        debug_print(&format!("init: root-procmgr token {}", child_token))?;
     }
 
     debug_print(&format!("init: launching {}", service.name))?;
@@ -293,7 +293,7 @@ pub fn launch_service(
     // For procmgr we need a Thread-typed token for TOKEN_SELF_THREAD so that
     // procmgr can call thread_get_id on itself.  Create it suspended, patch the
     // ProcessInfo page with the thread token, then resume.
-    let is_procmgr = service.name == "procmgr";
+    let is_procmgr = service.name == "root-procmgr";
     let create_flags = if is_procmgr { THREAD_CREATE_START_SUSPENDED } else { 0 };
     let thread_token = thread_create(
         space_token,

@@ -19,6 +19,6 @@ pub mod session_table;
 pub mod spawn;
 
 // Include sub-modules that have `#[cfg(test)]` unit tests so that
-// `cargo test -p cluu-procmgr --lib` can discover and run them on the host.
+// `cargo test -p cluu-root-procmgr --lib` can discover and run them on the host.
 #[cfg(test)]
 pub mod envelopes;

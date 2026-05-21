@@ -16,7 +16,7 @@ members = [
     "userspace/libcluu",
     "userspace/libs/procmgr-common",
     "userspace/init",
-    "userspace/procmgr",
+    "userspace/root-procmgr",
     "userspace/vfs",
     "userspace/ramfs",
     "userspace/compositor",
@@ -123,7 +123,7 @@ default-members = [
     "userspace/libcluu",
     "userspace/libs/procmgr-common",
     "userspace/init",
-    "userspace/procmgr",
+    "userspace/root-procmgr",
     "userspace/vfs",
     "userspace/ramfs",
     "userspace/compositor",
@@ -223,7 +223,7 @@ debug = 0
 [profile.dev.package."cluu-init"]
 debug = 0
 
-[profile.dev.package."cluu-procmgr"]
+[profile.dev.package."cluu-root-procmgr"]
 debug = 0
 
 [profile.dev.package."cluu-console"]
@@ -475,7 +475,7 @@ debug = 0
 [profile.release.package."cluu-init"]
 debug = 0
 
-[profile.release.package."cluu-procmgr"]
+[profile.release.package."cluu-root-procmgr"]
 debug = 0
 
 [profile.release.package."cluu-console"]

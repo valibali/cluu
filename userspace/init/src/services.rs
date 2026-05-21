@@ -87,7 +87,7 @@ const TPMD_RIGHTS: Rights = Rights::from_bits_truncate(TPMD_RIGHTS_BITS);
 pub const PRIMORDIAL_SERVICES: &[&str] = &[
     "registry",
     "timeserver",
-    "procmgr",
+    "root-procmgr",
     "vfs",
     "virtio-blk",
 ];
@@ -118,8 +118,8 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         profile: CapProfile::SERVICE,
     },
     ServiceSpec {
-        name: "procmgr",
-        path: "sys/procmgr",
+        name: "root-procmgr",
+        path: "sys/root-procmgr",
         priority: 200,
         rights: Some(PROCMGR_RIGHTS),
         space_policy: SpacePolicy::Standard,
