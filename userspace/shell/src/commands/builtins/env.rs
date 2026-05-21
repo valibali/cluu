@@ -131,10 +131,23 @@ impl BuiltinCommand for EnvBuiltin {
         context: &mut CommandContext,
         _args: &[String],
     ) -> Result<()> {
-        for (name, value) in context.entries() {
-            let line = format!("{}={}\n", name, value);
+        // Process env (envelope-resolved at session-create, inherited via
+        // spawn). Shell-local vars override only when also exported.
+        let mut seen: alloc::collections::BTreeSet<String> =
+            alloc::collections::BTreeSet::new();
+        for (k, v) in context.exported_pairs() {
+            let line = format!("{}={}\n", k, v);
+            stdout.write_all(line.as_bytes())?;
+            seen.insert(k);
+        }
+        for (k, v) in libcluu::posix::snapshot_env() {
+            if seen.contains(&k) {
+                continue;
+            }
+            let line = format!("{}={}\n", k, v);
             stdout.write_all(line.as_bytes())?;
         }
+        let _ = context;
         Ok(())
     }
 
