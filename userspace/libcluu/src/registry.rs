@@ -493,15 +493,10 @@ fn decode_names(payload: &[u8]) -> Option<(String, String)> {
 }
 
 fn error_from_code(code: i32) -> Error {
-    match code {
-        -1 => Error::InvalidArgument,
-        -2 => Error::OutOfMemory,
-        -3 => Error::NotFound,
-        -4 => Error::PermissionDenied,
-        -5 => Error::AlreadyExists,
-        -6 => Error::Timeout,
-        _ => Error::InvalidOperation,
+    if code == 0 {
+        return Error::InvalidOperation;
     }
+    Error::from_errno(code as isize)
 }
 
 #[cfg(test)]

@@ -49,7 +49,9 @@ pub extern "C" fn main() -> i32 {
 fn run() -> Result<()> {
     let info = process_info();
     registry::init("shell")?;
-    registry::register_default_outputs()?;
+    // No register_default_outputs: shell:{stdin,stdout,stderr,stdlog} are
+    // never consumed, and registering them globally collides between
+    // concurrent shell sessions (second cluuterm's shell would fail to start).
 
     // Patch VFS-backed stdio fds: init_stdio() runs before the registry is
     // available so it stores stdin/stdout IPC tokens in FdEntry::endpoint.

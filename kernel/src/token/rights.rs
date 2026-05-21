@@ -176,7 +176,8 @@ impl Rights {
                 | Self::WRITE.0
                 | Self::THREAD_CONTROL.0
                 | Self::THREAD_SUSPEND.0
-                | Self::DESTROY.0,
+                | Self::DESTROY.0
+                | Self::GRANT.0,
         )
     }
 

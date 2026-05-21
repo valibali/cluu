@@ -33,7 +33,12 @@ bitflags! {
 
 impl Rights {
     pub fn thread_full() -> Self {
-        Self::READ | Self::WRITE | Self::THREAD_CONTROL | Self::THREAD_SUSPEND | Self::DESTROY
+        Self::READ
+            | Self::WRITE
+            | Self::THREAD_CONTROL
+            | Self::THREAD_SUSPEND
+            | Self::DESTROY
+            | Self::GRANT
     }
 
     pub fn space_full() -> Self {

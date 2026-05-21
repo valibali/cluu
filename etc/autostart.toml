@@ -11,6 +11,5 @@ image = "kbd"
 image = "compositor"
 session_mode = 0
 
-[[service]]
-image = "login"
-
+# login is spawned by compositor (spawn_login_window) — not via autostart,
+# to avoid double-spawning two login windows.
