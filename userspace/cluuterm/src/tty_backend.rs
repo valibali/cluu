@@ -25,7 +25,7 @@ use cluu_wire::pts::{
     PTS_GET_WINSIZE_LABEL, PTS_SET_WINSIZE_LABEL,
     PTS_GET_PGRP_LABEL, PTS_SET_PGRP_LABEL,
     PTS_FLUSH_LABEL, PTS_CLOSED_LABEL,
-    ReadRequest, ReadReply, WriteRequest, WriteReply,
+    WriteRequest, WriteReply,
     PollRequest, PollReply, PollEvents,
     GetTermiosReply, SetTermiosRequest, SetTermiosReply,
     GetWinsizeReply, Winsize, SetWinsizeReply,
@@ -46,24 +46,17 @@ const SIGTTIN: u32 = 21;
 
 // ── Per-PTS state ────────────────────────────────────────────────────────────
 
-/// A pending PTS_READ that is blocked waiting for cooked bytes.
-#[derive(Clone, Debug)]
-pub struct PendingRead {
-    pub reply_token: usize,
-    pub caller_pid: u32,
-    pub caller_pgid: i32,
-    pub max_bytes: u32,
-}
-
 /// PTS state: line discipline + job-control fields. Owned by Cluuterm.pts.
 pub struct Pts {
     pub id: u32,
     pub line_discipline: libcluu::tty_core::line_discipline::LineDiscipline,
     pub fg_pgid: Option<i32>,
     pub winsize: Winsize,
-    pub pending_readers: VecDeque<PendingRead>,
-    /// Cooked bytes queued for delivery to PTS_READ callers.
+    /// Cooked bytes queued for delivery to the next PTS_READ drain hint.
     pub ready_bytes: VecDeque<u8>,
+    /// Set when VFS has sent a PTS_READ drain-hint and bytes were not yet
+    /// available.  Cleared once bytes are drained and PTS_READ_DELIVER sent.
+    pub drain_requested: Option<u32>,
     pub closed: bool,
     procmgr_main: usize,
 }
@@ -75,8 +68,8 @@ impl Pts {
             line_discipline: libcluu::tty_core::line_discipline::LineDiscipline::new(),
             fg_pgid: None,
             winsize: Winsize { rows: 24, cols: 80, xpixel: 640, ypixel: 480 },
-            pending_readers: VecDeque::new(),
             ready_bytes: VecDeque::new(),
+            drain_requested: None,
             closed: false,
             procmgr_main: 0,
         }
@@ -86,12 +79,7 @@ impl Pts {
         self.procmgr_main = ep;
     }
 
-    /// Check if any cooked bytes are available for immediate delivery.
-    fn has_cooked_bytes(&self) -> bool {
-        !self.ready_bytes.is_empty()
-    }
-
-    /// Try to take up to `max` cooked bytes. Returns `None` if none available.
+    /// Drain up to `max` cooked bytes into a Vec.  Returns `None` if empty.
     fn try_take_cooked_bytes(&mut self, max: u32) -> Option<Vec<u8>> {
         let n = (max as usize).min(self.ready_bytes.len());
         if n == 0 {
@@ -101,17 +89,18 @@ impl Pts {
         Some(out)
     }
 
-    /// Wake all pending readers that can be satisfied by current cooked bytes.
-    fn try_wake_pending_readers(&mut self) {
-        while let Some(mut pending) = self.pending_readers.pop_front() {
-            if let Some(bytes) = self.try_take_cooked_bytes(pending.max_bytes) {
-                reply_ok::<ReadReply>(pending.reply_token, PTS_READ_LABEL, Ok(bytes));
-            } else {
-                // Not enough bytes yet; re-queue and stop.
-                self.pending_readers.push_front(pending);
-                break;
-            }
-        }
+    /// Send `PTS_READ_DELIVER_LABEL` (112) to VFS carrying `bytes`.
+    ///
+    /// `words[0]` is clobbered by `send_msg_with_payload` with payload_len.
+    /// `pts_id` lives in `words[1]`.
+    fn send_deliver(&self, vfs_ep: usize, bytes: &[u8]) {
+        use cluu_wire::pts::PTS_READ_DELIVER_LABEL;
+        let msg = Message::new(
+            PTS_READ_DELIVER_LABEL,
+            [0, self.id as usize, 0, 0, 0, 0],
+            2,
+        );
+        let _ = libcluu::ipc::send_msg_with_payload(vfs_ep, &msg, bytes);
     }
 
     /// Send a signal to a process group via procmgr (fire-and-forget).
@@ -128,43 +117,33 @@ impl Pts {
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // 11 PTS_* verb handlers
+    // PTS_* verb handlers
     // ══════════════════════════════════════════════════════════════════════
 
-    /// PTS_READ_LABEL (100)
-    fn handle_pts_read(
-        &mut self,
-        req: ReadRequest,
-        msg: &Message,
-        caller_pid: u32,
-        caller_pgid: i32,
-    ) {
-        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
-            Some(t) => t,
-            None => return,
-        };
-
-        // SIGTTIN: if caller is not in fg pgrp, signal them, return Eintr.
-        if self.fg_pgid.is_some() && self.fg_pgid != Some(caller_pgid) {
-            self.send_pg_signal(caller_pgid, SIGTTIN);
-            reply_err(reply_token, PTS_READ_LABEL, PtsErr::Eintr);
+    /// PTS_READ_LABEL (100) drain-hint from VFS (fire-and-forget, no reply).
+    ///
+    /// VFS parked the shell's reply_token and sends this to ask cluuterm to
+    /// push cooked bytes via `PTS_READ_DELIVER_LABEL`.
+    ///
+    /// Wire layout (VFS side uses `send_msg_with_payload`):
+    ///   `words[0]` = payload_len (0 — clobbered by send_msg_with_payload)
+    ///   `words[1]` = pts_id
+    ///   `words[2]` = requested bytes
+    ///
+    /// If cooked bytes are available, drain + send PTS_READ_DELIVER now.
+    /// Otherwise set `drain_requested` so `apply_service_actions` fires when
+    /// bytes arrive from keyboard input.
+    fn handle_pts_read_drain_hint(&mut self, msg: &Message, vfs_ep: usize) {
+        let requested = msg.words[2] as u32;
+        if requested == 0 {
             return;
         }
-        if self.closed {
-            reply_ok::<ReadReply>(reply_token, PTS_READ_LABEL, Err(PtsErr::Eio));
-            return;
+        if let Some(bytes) = self.try_take_cooked_bytes(requested) {
+            self.send_deliver(vfs_ep, &bytes);
+        } else {
+            // No bytes yet — remember the request; DeliverBytes arm will send.
+            self.drain_requested = Some(requested);
         }
-        if let Some(bytes) = self.try_take_cooked_bytes(req.max_bytes) {
-            reply_ok::<ReadReply>(reply_token, PTS_READ_LABEL, Ok(bytes));
-            return;
-        }
-        // No cooked bytes — defer reply.
-        self.pending_readers.push_back(PendingRead {
-            reply_token,
-            caller_pid,
-            caller_pgid,
-            max_bytes: req.max_bytes,
-        });
     }
 
     /// PTS_WRITE_LABEL (101)
@@ -208,9 +187,9 @@ impl Pts {
             None => return,
         };
         let mut ready = PollEvents::empty();
-        if self.has_cooked_bytes() { ready |= PollEvents::POLLIN; }
-        if !self.closed             { ready |= PollEvents::POLLOUT; }
-        if self.closed              { ready |= PollEvents::POLLHUP; }
+        if !self.ready_bytes.is_empty() { ready |= PollEvents::POLLIN; }
+        if !self.closed                  { ready |= PollEvents::POLLOUT; }
+        if self.closed                   { ready |= PollEvents::POLLHUP; }
         reply_ok::<PollReply>(reply_token, PTS_POLL_LABEL, PollReply { ready });
     }
 
@@ -302,10 +281,9 @@ impl Pts {
     /// PTS_CLOSED_LABEL (110)
     fn handle_pts_closed(&mut self) {
         self.closed = true;
-        // Wake all pending readers with EIO.
-        while let Some(pr) = self.pending_readers.pop_front() {
-            reply_err(pr.reply_token, PTS_READ_LABEL, PtsErr::Eio);
-        }
+        // In the async path, parked reads are tracked on the VFS side.
+        // Clear any pending drain request on our side.
+        self.drain_requested = None;
     }
 
     // ── Input routing ───────────────────────────────────────────────────────
@@ -352,6 +330,10 @@ pub struct Cluuterm {
     pub my_ep: usize,
     /// Compositor client endpoint (for DAMAGE + DESTROY messages).
     pub comp_ep: usize,
+    /// VFS main endpoint.  Used to send `PTS_READ_DELIVER_LABEL` replies.
+    /// Populated at construction from the same endpoint used for PTS
+    /// registration.  0 until explicitly set.
+    pub vfs_ep: usize,
 
     // ── PTS state (unified verb set) ────────────────────────────────────────
     pub pts: Pts,
@@ -391,6 +373,7 @@ impl Cluuterm {
         window_id: u32,
         my_ep: usize,
         comp_ep: usize,
+        vfs_ep: usize,
     ) -> Self {
         let total = cols * rows;
         let default_attr = Attr::default_attr();
@@ -402,6 +385,7 @@ impl Cluuterm {
             window_id,
             my_ep,
             comp_ep,
+            vfs_ep,
             pts: Pts::new(pts_id),
             parser: Parser::new(),
             discipline: libcluu::tty_core::line_discipline::LineDiscipline::new(),
@@ -696,7 +680,16 @@ impl Cluuterm {
             match action {
                 ServiceAction::DeliverBytes(bytes) => {
                     self.pts.ready_bytes.extend(bytes.iter().cloned());
-                    self.pts.try_wake_pending_readers();
+                    // If VFS is waiting for a drain, satisfy it now.
+                    if let Some(requested) = self.pts.drain_requested.take() {
+                        if let Some(cooked) = self.pts.try_take_cooked_bytes(requested) {
+                            let vfs_ep = self.vfs_ep;
+                            self.pts.send_deliver(vfs_ep, &cooked);
+                        } else {
+                            // Bytes were consumed by something else; re-arm.
+                            self.pts.drain_requested = Some(requested);
+                        }
+                    }
                 }
                 ServiceAction::SignalFgPgrp(sig) => {
                     if let Some(pgid) = self.pts.fg_pgid {
@@ -709,8 +702,10 @@ impl Cluuterm {
                     self.handle_pts_write(&cooked);
                 }
                 ServiceAction::DeliverEof => {
-                    // EOF: wake pending readers (they get empty/close behavior).
-                    self.pts.try_wake_pending_readers();
+                    // EOF: no cooked bytes to drain; VFS-side parked read will
+                    // be replied when cluuterm sends an empty PTS_READ_DELIVER
+                    // or closes. Currently the VFS parks the read until bytes
+                    // arrive; EOF is a rare case handled by pts.closed path.
                 }
             }
         }
@@ -878,13 +873,14 @@ impl Cluuterm {
                     }
                 }
 
-                // ── PTS_READ (100): Shell reads stdin ───────────────────
+                // ── PTS_READ (100): drain-hint from VFS ────────────────
+                //
+                // VFS sends this fire-and-forget after parking the shell's
+                // reply_token.  `words[1]` = pts_id, `words[2]` = requested.
+                // We drain cooked bytes and push PTS_READ_DELIVER back to VFS.
                 PTS_READ_LABEL => {
-                    let req: ReadRequest = match postcard::from_bytes(payload) {
-                        Ok(r) => r,
-                        Err(_) => ReadRequest { max_bytes: msg.words[1].max(1) as u32 },
-                    };
-                    self.pts.handle_pts_read(req, &msg, 0, 0);
+                    let vfs_ep = self.vfs_ep;
+                    self.pts.handle_pts_read_drain_hint(&msg, vfs_ep);
                 }
 
                 // ── PTS_CLOSED (110): VFS notifies that all fds closed ──

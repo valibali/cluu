@@ -12,6 +12,7 @@ extern crate alloc;
 use libcluu::runtime as _;
 
 use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::vec::Vec;
 use core::cmp;
@@ -388,6 +389,23 @@ struct FreeBlock {
     size: usize,
 }
 
+/// A shell read(2) parked by the async PTS read path.
+///
+/// Created in `handle_read_grant` (pts arm) instead of sync-calling cluuterm.
+/// The shell stays blocked on `reply_token`.  When cluuterm replies with
+/// `PTS_READ_DELIVER_LABEL`, VFS pops this, grants the bytes into `target_base`
+/// inside `caller_space`, then replies `reply_token` to unblock the shell.
+struct ParkedRead {
+    /// Reply slot that unblocks the shell when answered.
+    reply_token: usize,
+    /// Space token of the shell process (for `space_grant`).
+    caller_space: usize,
+    /// Grant target base address in the shell's address space.
+    target_base: usize,
+    /// Maximum bytes the shell requested.
+    requested: usize,
+}
+
 impl FileCache {
     fn new(base: usize, size: usize) -> Self {
         Self {
@@ -647,6 +665,15 @@ struct VfsServer {
     /// /dev/tty0 when the DeviceBackend was opened before the tty service
     /// registered (i.e. endpoint was 0 at open-time).
     tty_endpoints: [usize; 4],
+    /// Parked shell reads awaiting async delivery from cluuterm.
+    ///
+    /// Keyed by `pts_id`.  When `handle_read_grant` sees a Pts open-file it
+    /// parks a `ParkedRead` here and sends a fire-and-forget drain-hint
+    /// (`PTS_READ_LABEL`) to cluuterm instead of blocking.  Cluuterm replies
+    /// with `PTS_READ_DELIVER_LABEL`; the handler pops the front entry, grants
+    /// the payload bytes into the shell's address space, and replies the parked
+    /// `reply_token` to unblock the shell.
+    pending_pts_reads: BTreeMap<u32, VecDeque<ParkedRead>>,
 }
 
 impl VfsServer {
@@ -707,6 +734,7 @@ impl VfsServer {
             bounce_pool,
             pts_registry,
             tty_endpoints: [0usize; 4],
+            pending_pts_reads: BTreeMap::new(),
         }
     }
 
@@ -745,6 +773,9 @@ impl VfsServer {
         }
         if msg.tag.label == VFS_DERIVE_CHILD_FD_LABEL {
             return self.handle_derive_child_fd(msg);
+        }
+        if msg.tag.label == libcluu::proto::pts::PTS_READ_DELIVER_LABEL {
+            return self.handle_pts_read_deliver(msg, payload);
         }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
@@ -1120,6 +1151,66 @@ impl VfsServer {
         }
 
         ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    /// Handle `PTS_READ_DELIVER_LABEL` (112) — cluuterm pushes cooked bytes for a
+    /// parked shell read.
+    ///
+    /// Wire layout (fire-and-forget from cluuterm, no reply slot):
+    ///   `words[0]` = payload_len (written by `send_msg_with_payload`)
+    ///   `words[1]` = pts_id
+    ///   payload    = raw cooked bytes
+    ///
+    /// Pops the front `ParkedRead` for `pts_id`, grants the payload bytes into the
+    /// shell's address space (`caller_space`/`target_base`), then replies the
+    /// parked `reply_token` to unblock the shell's `read(2)`.
+    fn handle_pts_read_deliver(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+        let pts_id = msg.words[1] as u32;
+
+        let parked = match self
+            .pending_pts_reads
+            .get_mut(&pts_id)
+            .and_then(|q| q.pop_front())
+        {
+            Some(p) => p,
+            None => {
+                let _ = debug_print(&format!(
+                    "vfs: pts_read_deliver pts_id={} — no parked read (stale delivery?)",
+                    pts_id
+                ));
+                return Ok(());
+            }
+        };
+
+        let data: Vec<u8> = payload.iter().copied().take(parked.requested).collect();
+
+        let mut reply_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
+
+        if data.is_empty() {
+            // Cluuterm sent zero bytes — no cooked bytes available yet.
+            // Re-park and do nothing; cluuterm will send another
+            // PTS_READ_DELIVER when bytes arrive (via DeliverBytes path).
+            self.pending_pts_reads
+                .entry(pts_id)
+                .or_insert_with(VecDeque::new)
+                .push_front(parked);
+            return Ok(());
+        }
+
+        self.grant_data_to_caller(
+            &data,
+            parked.target_base,
+            parked.caller_space,
+            &mut reply_msg,
+        )?;
+
+        let _ = debug_print(&format!(
+            "vfs: pts_read_deliver pts_id={} granted {} bytes",
+            pts_id,
+            data.len()
+        ));
+
+        ipc::reply(parked.reply_token, &reply_msg, IpcFlags::empty())
     }
 
     /// Handle `VFS_DERIVE_CHILD_FD_LABEL` — clone a parent's open file to a
@@ -3011,9 +3102,17 @@ impl VfsServer {
                     }
                 }
             }
-            // PTS read_grant: forward to owning cluuterm via PTS_READ_LABEL,
-            // then copy the returned bytes into the caller's grant buffer.
-            // This unblocks shell read(0) on /dev/pts/<id>.
+            // PTS read_grant (async path):
+            //
+            // Instead of synchronously calling cluuterm (which could deadlock
+            // if cluuterm needs to call VFS while the reply is deferred), we:
+            //   1. Park the shell's reply_token + caller context.
+            //   2. Fire-and-forget PTS_READ_LABEL drain-hint to cluuterm.
+            //   3. Return Ok(()) WITHOUT replying — shell stays blocked.
+            //
+            // Cluuterm drains cooked bytes and sends PTS_READ_DELIVER_LABEL
+            // back; the handler below grants bytes into shell's space and
+            // replies the parked token to unblock the shell.
             OpenFile::Pts(pts) => {
                 let ep = match self.pts_registry.notify_endpoint(pts.pts_id) {
                     Some(ep) if ep != 0 => ep,
@@ -3022,33 +3121,30 @@ impl VfsServer {
                         return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                     }
                 };
-                let req = Message::new(
-                    libcluu::ipc::PTS_READ_LABEL,
-                    [pts.pts_id as usize, requested, 0, 0, 0, 0],
-                    2,
+
+                // Park the shell's blocked read.
+                let parked = ParkedRead {
+                    reply_token,
+                    caller_space: target_space,
+                    target_base,
+                    requested,
+                };
+                self.pending_pts_reads
+                    .entry(pts.pts_id)
+                    .or_insert_with(VecDeque::new)
+                    .push_back(parked);
+
+                // Drain-hint to cluuterm: words[0] clobbered by
+                // send_msg_with_payload, so pts_id lives in words[1] and
+                // requested lives in words[2].
+                let drain_hint = Message::new(
+                    libcluu::proto::pts::PTS_READ_LABEL,
+                    [0, pts.pts_id as usize, requested, 0, 0, 0],
+                    3,
                 );
-                const PTS_REPLY_BUF: usize = 1024;
-                let mut pts_buf = alloc::vec![0u8; PTS_REPLY_BUF];
-                match ipc::call_with_reply_buf(ep, &req, &[], &mut pts_buf) {
-                    Ok((_, payload_len)) => {
-                        let data_start = core::mem::size_of::<Message>();
-                        let data_len = payload_len.min(requested);
-                        if data_start + data_len <= pts_buf.len() {
-                            let data = pts_buf[data_start..data_start + data_len].to_vec();
-                            self.grant_data_to_caller(
-                                &data,
-                                target_base,
-                                target_space,
-                                &mut reply_msg,
-                            )?;
-                        } else {
-                            reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
-                        }
-                    }
-                    Err(err) => {
-                        reply_msg.words[0] = err.to_errno() as usize;
-                    }
-                }
+                let _ = ipc::send_msg_with_payload(ep, &drain_hint, &[]);
+                // Shell stays blocked; we do NOT call ipc::reply here.
+                return Ok(());
             }
         }
 

@@ -217,6 +217,19 @@ pub enum PtsErr {
 /// `session_id` field for per-session /dev/pts/ overlay.
 pub const VFS_REGISTER_PTS_LABEL: u32 = 111;
 
+/// Reverse delivery label: cluuterm → VFS.
+///
+/// Sent by cluuterm in response to a `PTS_READ_LABEL` drain-hint from VFS.
+/// Wire layout (fire-and-forget, no reply slot):
+///   `words[0]` = payload_len (overwritten by `send_msg_with_payload`)
+///   `words[1]` = pts_id
+///
+/// Payload = raw cooked bytes to deliver to the blocked shell read().
+/// VFS pops the `ParkedRead` for `pts_id` from `pending_pts_reads`, grants
+/// the payload into the shell's target buffer, and replies the parked
+/// `reply_token` to unblock the shell.
+pub const PTS_READ_DELIVER_LABEL: u32 = 112;
+
 /// Request: register a new `/dev/pts/<id>` under the given session.
 ///
 /// `session_id` = `None` for sessionless callers (text-VT tty service).

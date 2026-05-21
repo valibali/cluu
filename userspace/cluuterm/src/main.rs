@@ -82,8 +82,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let _ = debug_print("cluuterm: window registered");
 
     // Phase 2: register pts node with VFS.
-    let pts_id = match register_pts(my_ep) {
-        Ok(id) => id,
+    let (pts_id, vfs_ep) = match register_pts(my_ep) {
+        Ok(pair) => pair,
         Err(code) => {
             let _ = debug_print("cluuterm: PTS_REGISTER failed");
             return code;
@@ -100,7 +100,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     // Phase 4: run main loop (stub recv loop — Task 15 fills the real body).
     let shm_ptr = SHM_VA as *mut WindowShm;
-    let mut term = tty_backend::Cluuterm::new(COLS, ROWS, shm_ptr, pts_id, window_id, my_ep, comp_ep);
+    let mut term = tty_backend::Cluuterm::new(COLS, ROWS, shm_ptr, pts_id, window_id, my_ep, comp_ep, vfs_ep);
     term.run();
     0
 }
@@ -199,7 +199,10 @@ fn read_own_session_id() -> Option<u32> {
 /// with a postcard-serialized VfsRegisterPtsRequest payload.
 ///
 /// Reply is postcard-serialized VfsRegisterPtsReply with assigned_id.
-fn register_pts(my_ep: usize) -> Result<u32, i32> {
+///
+/// Returns `(pts_id, vfs_ep)` so the caller can pass `vfs_ep` to
+/// `Cluuterm::new` for `PTS_READ_DELIVER_LABEL` replies.
+fn register_pts(my_ep: usize) -> Result<(u32, usize), i32> {
     let vfs_ep = match registry::lookup_service("vfs:main") {
         Some(ep) => ep,
         None => {
@@ -235,7 +238,7 @@ fn register_pts(my_ep: usize) -> Result<u32, i32> {
     let reply: VfsRegisterPtsReply =
         postcard::from_bytes(reply_payload).map_err(|_| 9)?;
 
-    Ok(reply.assigned_id)
+    Ok((reply.assigned_id, vfs_ep))
 }
 
 // ─── spawn /bin/shell ─────────────────────────────────────────────────────────
