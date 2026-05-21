@@ -1645,7 +1645,8 @@ fn build_boot_manifest(initrd_dir: &Path, service_paths: &[String]) -> Result<St
 fn manifest_rights_mask(path: &str) -> u32 {
     match path {
         // Mirrors userspace/init/src/services.rs
-        "sys/procmgr" => {
+        // Note: binary was renamed procmgr → root-procmgr in 1674f98.
+        "sys/root-procmgr" => {
             RIGHT_READ
                 | RIGHT_WRITE
                 | RIGHT_CREATE
