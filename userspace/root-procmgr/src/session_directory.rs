@@ -89,7 +89,10 @@ impl SessionDirectory {
 
 use procmgr_common::handler::{HandlerError, InboundMsg, MsgHandler, Reply};
 use procmgr_common::labels::PROCMGR_SESSION_CREATE_LABEL;
+use procmgr_common::mint_guard::MintGuard;
 use procmgr_common::wire::SessionEnvelope;
+use crate::cap_broker::{sub_mint, CapRights,
+    VFS_SESSION_RIGHTS, REGISTRY_SESSION_RIGHTS, TIMESERVER_SESSION_RIGHTS};
 
 pub struct SessionCreate;
 
@@ -109,12 +112,30 @@ impl MsgHandler for SessionCreate {
             .map_err(|_| HandlerError::BadPayload)?;
         let (sid, gen) = state.session_directory.alloc_sid()
             .map_err(|_| HandlerError::Eagain)?;
+
+        // Mint session-scoped caps from root's primordial handles.
+        let mut g = MintGuard::new(&mut state.kernel);
+        let vfs_cap = sub_mint(&mut g, state.parent_vfs_cap,
+            CapRights(state.parent_vfs_rights), CapRights(VFS_SESSION_RIGHTS))
+            .map_err(|_| HandlerError::Internal("vfs sub_mint"))?;
+        let reg_cap = sub_mint(&mut g, state.parent_registry_cap,
+            CapRights(state.parent_registry_rights), CapRights(REGISTRY_SESSION_RIGHTS))
+            .map_err(|_| HandlerError::Internal("reg sub_mint"))?;
+        let ts_cap = sub_mint(&mut g, state.parent_timeserver_cap,
+            CapRights(state.parent_timeserver_rights), CapRights(TIMESERVER_SESSION_RIGHTS))
+            .map_err(|_| HandlerError::Internal("ts sub_mint"))?;
+        let minted_caps = g.forget();
+
         let envelope = SessionEnvelope {
             sid, generation: gen,
             user_name: req.user_name.clone(),
             profile: req.profile.clone(),
             pid_base: (sid as i32) << procmgr_common::pid::LOCAL_BITS,
-            caps: Vec::new(),  // cap_broker integration in Task 4.2
+            caps: alloc::vec![
+                ("vfs".into(), vfs_cap),
+                ("registry".into(), reg_cap),
+                ("timeserver".into(), ts_cap),
+            ],
             env_defaults: req.env_defaults.clone(),
             view_spec: req.view_spec.clone(),
         };
@@ -125,7 +146,7 @@ impl MsgHandler for SessionCreate {
             user_name: req.user_name,
             session_pmgr_thread_tok: pmgr_tid,
             session_pmgr_spawn_ep: pmgr_ep,
-            minted_caps: Vec::new(),
+            minted_caps,
             state: SessionState::Live,
         });
         let bytes = postcard::to_allocvec(&envelope)
@@ -234,11 +255,11 @@ mod tests {
 mod handler_tests {
     use super::*;
 
-    #[test]
-    fn create_returns_envelope_with_pid_base() {
-        let mut state = crate::dispatch::ProcmgrState::new_for_test();
+    /// Helper: build a SessionCreate payload for `user_name` and invoke the handler.
+    /// Returns the decoded `SessionEnvelope` on success, panics on error.
+    fn call_create(state: &mut crate::dispatch::ProcmgrState, user_name: &str) -> SessionEnvelope {
         let req = SessionCreateReq {
-            user_name: "alice".into(), profile: "user".into(),
+            user_name: user_name.into(), profile: "user".into(),
             env_defaults: alloc::vec![], view_spec: "default".into(),
         };
         let payload = postcard::to_allocvec(&req).unwrap();
@@ -246,8 +267,14 @@ mod handler_tests {
             label: SessionCreate::LABEL, words: [0; 6],
             payload: &payload, sender_tid: 1,
         };
-        let reply = SessionCreate::handle(&mut state, &msg).unwrap();
-        let env: SessionEnvelope = postcard::from_bytes(&reply.payload).unwrap();
+        let reply = SessionCreate::handle(state, &msg).unwrap();
+        postcard::from_bytes(&reply.payload).unwrap()
+    }
+
+    #[test]
+    fn create_returns_envelope_with_pid_base() {
+        let mut state = crate::dispatch::ProcmgrState::new_for_test();
+        let env = call_create(&mut state, "alice");
         assert_eq!(env.user_name, "alice");
         assert_eq!(env.generation, 0);
         assert_eq!(env.pid_base, (env.sid as i32) << 23);
@@ -277,6 +304,21 @@ mod handler_tests {
             payload: &payload, sender_tid: 1,
         };
         assert!(matches!(SessionCreate::handle(&mut state, &msg), Err(HandlerError::Eagain)));
+    }
+
+    #[test]
+    fn create_mints_vfs_registry_timeserver_caps() {
+        let mut state = crate::dispatch::ProcmgrState::new_for_test();
+        let env = call_create(&mut state, "alice");
+        assert!(env.caps.iter().any(|(n, _)| n == "vfs"),
+            "envelope must contain a vfs cap");
+        assert!(env.caps.iter().any(|(n, _)| n == "registry"),
+            "envelope must contain a registry cap");
+        assert!(env.caps.iter().any(|(n, _)| n == "timeserver"),
+            "envelope must contain a timeserver cap");
+        let entry = state.session_directory.lookup(env.sid).unwrap();
+        assert_eq!(entry.minted_caps.len(), 3,
+            "session entry must record exactly 3 minted caps");
     }
 }
 

@@ -8,6 +8,7 @@ mod session_directory;
 // allow until Phase N handlers register (dispatcher wired in Phase 3 when SessionCreate lands)
 #[allow(dead_code)]
 mod dispatch;
+mod cap_broker;
 
 use procmgr_common::{envelopes, mount_policy};
 use mount_policy::{
