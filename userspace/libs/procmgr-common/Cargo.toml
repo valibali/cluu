@@ -1,0 +1,25 @@
+[package]
+name = "procmgr-common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared library for root-procmgr and session-procmgr"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu" }
+cluu_wire = { path = "../../cluu_wire" }
+spin = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[features]
+default = []
+host-test = ["libcluu/host-test"]
+
+[lib]
+name = "procmgr_common"
+path = "src/lib.rs"

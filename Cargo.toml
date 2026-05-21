@@ -14,6 +14,7 @@ members = [
 
     # Userspace
     "userspace/libcluu",
+    "userspace/libs/procmgr-common",
     "userspace/init",
     "userspace/procmgr",
     "userspace/vfs",
@@ -119,6 +120,7 @@ default-members = [
     "kernel",
     "klibcluu",
     "userspace/libcluu",
+    "userspace/libs/procmgr-common",
     "userspace/init",
     "userspace/procmgr",
     "userspace/vfs",
