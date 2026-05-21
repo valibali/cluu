@@ -711,6 +711,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                 let _ = debug_print("login: set_leader failed");
                                 return -1;
                             }
+                            let _ = debug_print("login: user authenticated");
 
                             // Tell the compositor to destroy our window before we
                             // exit so the user immediately sees just the cluuterm

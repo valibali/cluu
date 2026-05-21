@@ -10,17 +10,17 @@ use serde::{Deserialize, Serialize};
 
 // ----- Verb labels -----
 
-pub const PTS_READ_LABEL: u32 = 100;
-pub const PTS_WRITE_LABEL: u32 = 101;
-pub const PTS_POLL_LABEL: u32 = 102;
-pub const PTS_GET_TERMIOS_LABEL: u32 = 103;
-pub const PTS_SET_TERMIOS_LABEL: u32 = 104;
-pub const PTS_GET_WINSIZE_LABEL: u32 = 105;
-pub const PTS_SET_WINSIZE_LABEL: u32 = 106;
-pub const PTS_GET_PGRP_LABEL: u32 = 107;
-pub const PTS_SET_PGRP_LABEL: u32 = 108;
-pub const PTS_FLUSH_LABEL: u32 = 109;
-pub const PTS_CLOSED_LABEL: u32 = 110;
+pub const PTS_READ_LABEL: u32 = 130;
+pub const PTS_WRITE_LABEL: u32 = 131;
+pub const PTS_POLL_LABEL: u32 = 132;
+pub const PTS_GET_TERMIOS_LABEL: u32 = 133;
+pub const PTS_SET_TERMIOS_LABEL: u32 = 134;
+pub const PTS_GET_WINSIZE_LABEL: u32 = 135;
+pub const PTS_SET_WINSIZE_LABEL: u32 = 136;
+pub const PTS_GET_PGRP_LABEL: u32 = 137;
+pub const PTS_SET_PGRP_LABEL: u32 = 138;
+pub const PTS_FLUSH_LABEL: u32 = 139;
+pub const PTS_CLOSED_LABEL: u32 = 140;
 
 // ----- Termios -----
 
@@ -215,7 +215,7 @@ pub enum PtsErr {
 /// Verb label for registering a pseudo-terminal slave in a session-aware manner.
 /// Separate from the legacy `PTS_REGISTER_LABEL` (0x70); this label carries a
 /// `session_id` field for per-session /dev/pts/ overlay.
-pub const VFS_REGISTER_PTS_LABEL: u32 = 111;
+pub const VFS_REGISTER_PTS_LABEL: u32 = 141;
 
 /// Reverse delivery label: cluuterm → VFS.
 ///
@@ -228,7 +228,7 @@ pub const VFS_REGISTER_PTS_LABEL: u32 = 111;
 /// VFS pops the `ParkedRead` for `pts_id` from `pending_pts_reads`, grants
 /// the payload into the shell's target buffer, and replies the parked
 /// `reply_token` to unblock the shell.
-pub const PTS_READ_DELIVER_LABEL: u32 = 112;
+pub const PTS_READ_DELIVER_LABEL: u32 = 142;
 
 /// Request: register a new `/dev/pts/<id>` under the given session.
 ///

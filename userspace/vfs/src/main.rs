@@ -25,7 +25,7 @@ use libcluu::fs::protocol::{
 };
 use libcluu::ipc::{
     self, extract_reply_id, parse_message, reply_with_payload, SharedRing, SharedRingHeader,
-    PTS_REGISTER_LABEL, PTS_UNREGISTER_LABEL, PTS_CLOSED_LABEL, VFS_DERIVE_CHILD_FD_LABEL,
+    PTS_REGISTER_LABEL, PTS_UNREGISTER_LABEL, VFS_DERIVE_CHILD_FD_LABEL,
 };
 use libcluu::types::Message;
 use libcluu::*;
@@ -1318,7 +1318,11 @@ impl VfsServer {
         if let Some((new_refcount, notify_endpoint)) = self.pts_registry.dec_ref(id) {
             if new_refcount == 0 && notify_endpoint != 0 {
                 // Fire-and-forget: owner is notified that all fds are closed.
-                let msg = Message::new(PTS_CLOSED_LABEL, [id as usize, 0, 0, 0, 0, 0], 1);
+                let msg = Message::new(
+                    libcluu::proto::pts::PTS_CLOSED_LABEL,
+                    [id as usize, 0, 0, 0, 0, 0],
+                    1,
+                );
                 let _ = ipc::send(notify_endpoint, &msg, IpcFlags::empty());
                 let _ = debug_print(&format!("vfs: pts_closed id={}", id));
             }
@@ -1902,7 +1906,7 @@ impl VfsServer {
                     }
                 };
                 let req = Message::new(
-                    libcluu::ipc::PTS_WRITE_LABEL,
+                    libcluu::proto::pts::PTS_WRITE_LABEL,
                     [id as usize, data.len(), 0, 0, 0, 0],
                     2,
                 );
@@ -2875,7 +2879,7 @@ impl VfsServer {
                     _ => return Err(Error::NotFound),
                 };
                 let req = Message::new(
-                    libcluu::ipc::PTS_READ_LABEL,
+                    libcluu::proto::pts::PTS_READ_LABEL,
                     [pts.pts_id as usize, requested, 0, 0, 0, 0],
                     2,
                 );
