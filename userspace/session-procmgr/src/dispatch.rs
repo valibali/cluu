@@ -45,6 +45,9 @@ pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply,
         procmgr_common::labels::SESSION_PROCMGR_PIPE_CLOSE_LABEL => {
             crate::pipe_handlers::PipeClose::handle(state, msg)
         }
+        procmgr_common::labels::SESSION_PROCMGR_KILL_LABEL => {
+            crate::kill::Kill::handle(state, msg)
+        }
         _ => Err(HandlerError::BadLabel),
     }
 }
