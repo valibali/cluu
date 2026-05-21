@@ -12,6 +12,7 @@ pub struct SessionState {
     pub registry_cap: u64,
     pub timeserver_cap: u64,
     pub restart: crate::restart::RestartTracker,
+    pub pipes: crate::pipe_registry::PipeRegistry,
 }
 
 impl SessionState {
@@ -25,6 +26,7 @@ impl SessionState {
             registry_cap: 0xF001,
             timeserver_cap: 0xF002,
             restart: crate::restart::RestartTracker::new(),
+            pipes: crate::pipe_registry::PipeRegistry::new(),
         }
     }
 }
@@ -36,6 +38,12 @@ pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply,
         }
         procmgr_common::labels::PROCMGR_EXIT_LABEL => {
             crate::child_monitor::ChildExit::handle(state, msg)
+        }
+        procmgr_common::labels::SESSION_PROCMGR_PIPE_CREATE_LABEL => {
+            crate::pipe_handlers::PipeCreate::handle(state, msg)
+        }
+        procmgr_common::labels::SESSION_PROCMGR_PIPE_CLOSE_LABEL => {
+            crate::pipe_handlers::PipeClose::handle(state, msg)
         }
         _ => Err(HandlerError::BadLabel),
     }
