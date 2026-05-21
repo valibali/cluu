@@ -5811,11 +5811,27 @@ impl ProcessManager {
         }
 
         // Resolve caller's session → username → user_records → envelope.
+        // Tries the local (container-id-keyed) session_table first, then
+        // falls back to the global SESSION_TABLE via pid_to_session for
+        // login-flow callers whose container isn't mirrored locally.
         // Logs warnings on session-yes-but-lookup-missed paths; stays
         // silent for the no-session boot/service path.
         let merged_env: alloc::collections::BTreeMap<String, String> = {
-            let resolved = if let Some(session) = self.resolve_caller_session(sender_tid) {
-                let username = session.username.clone();
+            let caller_username: Option<String> = self
+                .resolve_caller_session(sender_tid)
+                .map(|s| s.username.clone())
+                .or_else(|| {
+                    self.pid_to_session
+                        .get(&(caller_pid as usize))
+                        .copied()
+                        .and_then(|sid| {
+                            procmgr::session_table::SESSION_TABLE
+                                .snapshot(sid)
+                                .map(|s| s.user_name)
+                        })
+                });
+
+            let resolved = if let Some(username) = caller_username {
                 match self.user_records.get(&username) {
                     None => {
                         let _ = debug_print(&format!(
@@ -5956,6 +5972,14 @@ impl ProcessManager {
                         }
                         Err(_) => {}
                     }
+                } else if let Some(&sid) =
+                    self.pid_to_session.get(&(caller_pid as usize))
+                {
+                    // Inherit session from caller so transitive children
+                    // (e.g. shell spawned by cluuterm spawning ls) carry
+                    // session identity through to envelope-merge lookup.
+                    self.pid_to_session.insert(pid, sid);
+                    procmgr::session_table::SESSION_TABLE.inc_refcount(sid);
                 }
 
                 // Register container instance.
