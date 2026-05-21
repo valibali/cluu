@@ -12,9 +12,11 @@ cluu_wire = { path = "../cluu_wire" }
 procmgr-common = { path = "../libs/procmgr-common" }
 spin = { workspace = true }
 postcard = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 libcluu = { path = "../libcluu", features = ["host-test"] }
+proptest = { workspace = true }
 
 [features]
 default = []

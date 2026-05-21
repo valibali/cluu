@@ -736,6 +736,8 @@ dependencies = [
  "libcluu",
  "postcard",
  "procmgr-common",
+ "proptest",
+ "serde",
  "spin",
 ]
 

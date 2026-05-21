@@ -3,7 +3,7 @@
 //! This library provides the core functionality for process management,
 //! including ELF parsing and loading.
 
-#![no_std]
+#![cfg_attr(not(feature = "host-test"), no_std)]
 
 extern crate alloc;
 
@@ -21,3 +21,5 @@ pub use procmgr_common::view_table;
 
 pub mod session_table;
 pub mod spawn;
+pub mod session_directory;
+pub mod dispatch;

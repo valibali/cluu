@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod pg_table;
+mod session_directory;
 // allow until Phase N handlers register (dispatcher wired in Phase 3 when SessionCreate lands)
 #[allow(dead_code)]
 mod dispatch;

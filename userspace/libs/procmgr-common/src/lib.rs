@@ -20,7 +20,8 @@ pub mod pid;
 pub mod handler;
 pub mod wire;
 
-#[cfg(any(test, feature = "host-test"))]
+// test_kernel carries no std dependencies (alloc-only) so it's always included.
+// Phase 12 will gate this behind a RealKernel impl when the recv loop is wired.
 pub mod test_kernel;
 
 pub mod envelopes;
