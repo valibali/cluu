@@ -1,4 +1,4 @@
-//! Compositor INPUT_FORWARD → keymap → LineDiscipline → stdin_buf / echo.
+//! Compositor INPUT_FORWARD → keymap → LineDiscipline → pts.ready_bytes / echo.
 //!
 //! # Wire layout (COMP_INPUT_FORWARD_LABEL)
 //!

@@ -168,17 +168,18 @@ impl Pts {
     }
 
     /// PTS_WRITE_LABEL (101)
+    ///
+    /// Reply is optional: VFS forwards shell stdout via fire-and-forget
+    /// send (no reply slot). The cook/render side-effect must run
+    /// regardless so the terminal updates.
     fn handle_pts_write(
         &mut self,
         req: &WriteRequest,
         msg: &Message,
-        caller_pid: u32,
+        _caller_pid: u32,
         caller_pgid: i32,
     ) -> Option<Vec<u8>> {
-        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
-            Some(t) => t,
-            None => return None,
-        };
+        let reply_token = libcluu::ipc::extract_reply_id(msg);
 
         // TOSTOP check: background process writing to terminal gets SIGTTOU.
         let lflag = self.line_discipline.termios().c_lflag;
@@ -187,12 +188,16 @@ impl Pts {
             && self.fg_pgid != Some(caller_pgid)
         {
             self.send_pg_signal(caller_pgid, SIGTTOU);
-            reply_err(reply_token, PTS_WRITE_LABEL, PtsErr::Eintr);
+            if let Some(t) = reply_token {
+                reply_err(t, PTS_WRITE_LABEL, PtsErr::Eintr);
+            }
             return None;
         }
 
         let cooked = self.line_discipline.process_output(req);
-        reply_ok::<WriteReply>(reply_token, PTS_WRITE_LABEL, Ok(req.len() as u32));
+        if let Some(t) = reply_token {
+            reply_ok::<WriteReply>(t, PTS_WRITE_LABEL, Ok(req.len() as u32));
+        }
         Some(cooked)
     }
 
@@ -364,12 +369,6 @@ pub struct Cluuterm {
     pub cursor_x: usize,
     pub cursor_y: usize,
     pub current_attr: Attr,
-    /// Bytes queued for the next PTS_READ from VFS (shell stdin).
-    pub stdin_buf: VecDeque<u8>,
-    /// Deferred PTS_READ reply when `stdin_buf` was empty at request time.
-    /// Held until input arrives so shell `read(0, ...)` blocks like a TTY
-    /// instead of getting an immediate 0-byte (EOF-looking) reply.
-    pending_pts_read: Option<(usize, usize)>,
 
     // ── Cursor-blink state ──────────────────────────────────────────────
     /// Cached timeserver endpoint; 0 = not yet resolved.
@@ -413,34 +412,10 @@ impl Cluuterm {
             cursor_x: 0,
             cursor_y: 0,
             current_attr: default_attr,
-            stdin_buf: VecDeque::new(),
-            pending_pts_read: None,
             time_ep: 0,
             blink_armed: false,
             blink_phase: true,
         }
-    }
-
-    /// Fulfill a deferred PTS_READ if one is pending and stdin now has data.
-    /// Called whenever new bytes land in `stdin_buf` (line discipline output,
-    /// raw byte injection, etc.).
-    pub fn try_flush_pending_pts_read(&mut self) {
-        let (reply_token, max) = match self.pending_pts_read.take() {
-            Some(p) => p,
-            None => return,
-        };
-        if self.stdin_buf.is_empty() {
-            // Re-arm and wait for more input.
-            self.pending_pts_read = Some((reply_token, max));
-            return;
-        }
-        let data = self.handle_pts_read(max);
-        let reply = Message::new(
-            PTS_READ_LABEL,
-            [0, data.len(), 0, 0, 0, 0],
-            2,
-        );
-        let _ = libcluu::ipc::reply_with_payload(reply_token, &reply, &data);
     }
 
     // ── PTS_WRITE — shell/app output → cell grid ───────────────────────
@@ -713,14 +688,6 @@ impl Cluuterm {
         let _ = ipc::send(self.comp_ep, &dmg, libcluu::types::IpcFlags::empty());
     }
 
-    // ── PTS_READ — shell reads stdin ────────────────────────────────────
-
-    /// Drain up to `max` bytes from the stdin buffer.
-    pub fn handle_pts_read(&mut self, max: usize) -> Vec<u8> {
-        let n = max.min(self.stdin_buf.len());
-        self.stdin_buf.drain(..n).collect()
-    }
-
     // ── Input dispatch from routing layer ──────────────────────────────
 
     /// Apply service actions from `route_input_byte` to this terminal.
@@ -904,49 +871,20 @@ impl Cluuterm {
 
                 // ── PTS_WRITE (101): Shell → VFS → cluuterm output ─────
                 PTS_WRITE_LABEL => {
-                    // Decode WriteRequest from postcard payload.
-                    let req: WriteRequest = match postcard::from_bytes(payload) {
-                        Ok(r) => r,
-                        Err(_) => {
-                            // Legacy compatibility: raw bytes if postcard decode fails.
-                            payload.to_vec()
-                        }
-                    };
-                    if let Some(cooked) = self.pts.handle_pts_write(
-                        &req,
-                        &msg,
-                        0, // caller_pid (not used in current VFS path)
-                        0, // caller_pgid
-                    ) {
+                    // VFS sends raw bytes via send_msg_with_payload.
+                    let req: WriteRequest = payload.to_vec();
+                    if let Some(cooked) = self.pts.handle_pts_write(&req, &msg, 0, 0) {
                         self.handle_pts_write(&cooked);
                     }
                 }
 
                 // ── PTS_READ (100): Shell reads stdin ───────────────────
                 PTS_READ_LABEL => {
-                    // Decode ReadRequest from postcard payload, or use legacy words[1].
-                    let max = match postcard::from_bytes::<ReadRequest>(payload) {
-                        Ok(req) => req.max_bytes as usize,
-                        Err(_) => msg.words[1].max(1),
+                    let req: ReadRequest = match postcard::from_bytes(payload) {
+                        Ok(r) => r,
+                        Err(_) => ReadRequest { max_bytes: msg.words[1].max(1) as u32 },
                     };
-                    let reply_token = libcluu::ipc::extract_reply_id(&msg).unwrap_or(0);
-                    if reply_token == 0 {
-                        // No reply slot — drop silently.
-                    } else if self.stdin_buf.is_empty() {
-                        // POSIX terminal read: block until at least one byte
-                        // is available. Defer reply; input.rs flushes via
-                        // try_flush_pending_pts_read when bytes arrive.
-                        // Most-recent caller wins if multiple pile up.
-                        self.pending_pts_read = Some((reply_token, max));
-                    } else {
-                        let data = self.handle_pts_read(max);
-                        let reply = Message::new(
-                            PTS_READ_LABEL,
-                            [0, data.len(), 0, 0, 0, 0],
-                            2,
-                        );
-                        let _ = libcluu::ipc::reply_with_payload(reply_token, &reply, &data);
-                    }
+                    self.pts.handle_pts_read(req, &msg, 0, 0);
                 }
 
                 // ── PTS_CLOSED (110): VFS notifies that all fds closed ──
