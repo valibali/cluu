@@ -5811,22 +5811,36 @@ impl ProcessManager {
         }
 
         // Resolve caller's session → username → user_records → envelope.
-        // If any step fails (no enclosing session, unknown user, missing
-        // envelope), fall through to the caller-only env (preserves
-        // current behavior for service/boot paths).
+        // Logs warnings on session-yes-but-lookup-missed paths; stays
+        // silent for the no-session boot/service path.
         let merged_env: alloc::collections::BTreeMap<String, String> = {
-            let resolved = self
-                .resolve_caller_session(sender_tid)
-                .and_then(|session| {
-                    let username = session.username.clone();
-                    self.user_records
-                        .get(&username)
-                        .map(|rec| (username, rec.profile_name.clone()))
-                })
-                .and_then(|(username, profile_name)| {
-                    envelopes::lookup_envelope(&self.envelopes, &profile_name)
-                        .map(|env_def| envelopes::resolve_env(env_def, &username))
-                });
+            let resolved = if let Some(session) = self.resolve_caller_session(sender_tid) {
+                let username = session.username.clone();
+                match self.user_records.get(&username) {
+                    None => {
+                        let _ = debug_print(&format!(
+                            "procmgr: spawn_unified session user '{}' has no user_records entry; skipping envelope merge",
+                            username
+                        ));
+                        None
+                    }
+                    Some(rec) => {
+                        let profile_name = rec.profile_name.clone();
+                        match envelopes::lookup_envelope(&self.envelopes, &profile_name) {
+                            None => {
+                                let _ = debug_print(&format!(
+                                    "procmgr: spawn_unified user '{}' profile '{}' has no envelope; skipping envelope merge",
+                                    username, profile_name
+                                ));
+                                None
+                            }
+                            Some(env_def) => Some(envelopes::resolve_env(env_def, &username)),
+                        }
+                    }
+                }
+            } else {
+                None
+            };
 
             let mut merged = resolved.unwrap_or_default();
             for (k, v) in &envelope.env {
