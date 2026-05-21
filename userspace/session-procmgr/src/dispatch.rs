@@ -11,6 +11,7 @@ pub struct SessionState {
     pub vfs_cap: u64,
     pub registry_cap: u64,
     pub timeserver_cap: u64,
+    pub restart: crate::restart::RestartTracker,
 }
 
 impl SessionState {
@@ -23,6 +24,7 @@ impl SessionState {
             vfs_cap: 0xF000,
             registry_cap: 0xF001,
             timeserver_cap: 0xF002,
+            restart: crate::restart::RestartTracker::new(),
         }
     }
 }
