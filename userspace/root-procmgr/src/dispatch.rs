@@ -69,10 +69,12 @@ impl ProcmgrState {
 pub fn dispatch(state: &mut ProcmgrState, msg: &InboundMsg<'_>) -> Result<Reply, HandlerError> {
     use crate::session_directory::{SessionCreate, SessionDestroy};
     use crate::services::ServiceSpawn;
+    use crate::escalate::Escalate;
     match msg.label {
         SessionCreate::LABEL  => SessionCreate::handle(state, msg),
         SessionDestroy::LABEL => SessionDestroy::handle(state, msg),
         ServiceSpawn::LABEL   => ServiceSpawn::handle(state, msg),
+        Escalate::LABEL       => Escalate::handle(state, msg),
         _ => Err(HandlerError::BadLabel),
     }
 }

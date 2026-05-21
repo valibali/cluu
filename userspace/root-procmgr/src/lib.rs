@@ -26,3 +26,4 @@ pub mod dispatch;
 pub mod cap_broker;
 pub mod restart_root;
 pub mod services;
+pub mod escalate;

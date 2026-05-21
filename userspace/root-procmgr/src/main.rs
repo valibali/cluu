@@ -11,6 +11,7 @@ mod dispatch;
 mod cap_broker;
 mod restart_root;
 mod services;
+mod escalate;
 
 use procmgr_common::{envelopes, mount_policy};
 use mount_policy::{
