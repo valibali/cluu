@@ -4,6 +4,7 @@ extern crate alloc;
 pub mod cap_broker_session;
 pub mod child_monitor;
 pub mod child_table;
+pub mod ctty;
 pub mod dispatch;
 pub mod kill;
 pub mod pg_table;

@@ -1,4 +1,5 @@
 extern crate alloc;
+use alloc::string::String;
 use procmgr_common::handler::{HandlerError, InboundMsg, MsgHandler, Reply};
 use procmgr_common::pid::SessionId;
 use procmgr_common::test_kernel::MockKernel;
@@ -13,6 +14,7 @@ pub struct SessionState {
     pub timeserver_cap: u64,
     pub restart: crate::restart::RestartTracker,
     pub pipes: crate::pipe_registry::PipeRegistry,
+    pub ctty: Option<String>,
 }
 
 impl SessionState {
@@ -27,6 +29,7 @@ impl SessionState {
             timeserver_cap: 0xF002,
             restart: crate::restart::RestartTracker::new(),
             pipes: crate::pipe_registry::PipeRegistry::new(),
+            ctty: None,
         }
     }
 }
@@ -47,6 +50,9 @@ pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply,
         }
         procmgr_common::labels::SESSION_PROCMGR_KILL_LABEL => {
             crate::kill::Kill::handle(state, msg)
+        }
+        procmgr_common::labels::SESSION_PROCMGR_CTTY_QUERY_LABEL => {
+            crate::ctty::CttyQuery::handle(state, msg)
         }
         _ => Err(HandlerError::BadLabel),
     }
