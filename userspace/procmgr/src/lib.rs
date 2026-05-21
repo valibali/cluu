@@ -21,6 +21,4 @@ pub mod spawn;
 // Include sub-modules that have `#[cfg(test)]` unit tests so that
 // `cargo test -p cluu-procmgr --lib` can discover and run them on the host.
 #[cfg(test)]
-extern crate alloc;
-#[cfg(test)]
 pub mod envelopes;

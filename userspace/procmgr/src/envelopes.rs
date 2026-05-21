@@ -254,4 +254,30 @@ mounts = ["rw:/home/{user}", "rw:/tmp/{user}"]
             String::from("rw:/tmp/alice"),
         ]);
     }
+
+    #[test]
+    fn merge_caller_env_over_resolved_envelope() {
+        let envs = parse_envelopes(SAMPLE).expect("parse");
+        let resolved = resolve_env(&envs[0], "balazs");
+        // resolved has PATH=/bin:/usr/bin, HOME=/home/balazs
+
+        // Caller-supplied env (simulates SpawnEnvelope.env from cluuterm).
+        let caller: alloc::vec::Vec<(String, String)> = alloc::vec![
+            (String::from("TERM"), String::from("xterm-256color")),
+            (String::from("HOME"), String::from("/home/balazs/work")),
+        ];
+
+        // Merge: start from resolved, overlay caller.
+        let mut merged = resolved.clone();
+        for (k, v) in &caller {
+            merged.insert(k.clone(), v.clone());
+        }
+
+        // Envelope default PATH preserved (caller did not provide).
+        assert_eq!(merged.get("PATH").map(String::as_str), Some("/bin:/usr/bin"));
+        // Caller HOME wins over envelope template.
+        assert_eq!(merged.get("HOME").map(String::as_str), Some("/home/balazs/work"));
+        // Caller-only key surfaces.
+        assert_eq!(merged.get("TERM").map(String::as_str), Some("xterm-256color"));
+    }
 }
