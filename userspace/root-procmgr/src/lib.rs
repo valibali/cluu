@@ -24,3 +24,4 @@ pub mod spawn;
 pub mod session_directory;
 pub mod dispatch;
 pub mod cap_broker;
+pub mod restart_root;

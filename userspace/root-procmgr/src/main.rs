@@ -9,6 +9,7 @@ mod session_directory;
 #[allow(dead_code)]
 mod dispatch;
 mod cap_broker;
+mod restart_root;
 
 use procmgr_common::{envelopes, mount_policy};
 use mount_policy::{
