@@ -11,33 +11,42 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use libcluu::fs::client::VfsClient;
 
-/// Resolve a bare command name against $PATH. Returns `Some(name)` if
-/// `<name>` is a known container image and the user's $PATH has at
-/// least one non-empty directory entry (i.e. PATH is configured for
-/// the session). Returns `None` if the name contains a slash (caller
-/// should treat it as a literal path), if PATH is empty, or if no
-/// matching container manifest exists.
+/// Resolve a bare command name against $PATH. Walks PATH dirs in order,
+/// stat'ing `<dir>/<name>`. First hit is realpath'd; if the canonical
+/// path lives under `/var/images/<n>/...` the image name is returned.
+/// User-visible PATH dirs (e.g. `/bin`) carry symlinks into the
+/// container image tree, so this path-of-least-surprise resolution
+/// works inside the restricted envelope view (no `/var/images` mount
+/// required).
+///
+/// Returns `None` when the name contains a slash (caller dispatches as
+/// a literal path), when PATH has no non-empty entry, or when nothing
+/// in PATH resolves into a known image.
 pub fn resolve(bare_name: &str, path_env: &str, vfs: &VfsClient) -> Option<String> {
     if bare_name.is_empty() || bare_name.contains('/') {
         return None;
     }
-
-    // The container model: every binary lives at /var/images/<name>/manifest.toml,
-    // not at the directory listed in PATH. PATH controls reachability — if a user's
-    // envelope only has /bin in PATH, we still gate the lookup so that a binary
-    // not "in /bin" semantically isn't reachable. For now, accept any non-empty
-    // PATH; tighten later if we need per-PATH-dir filtering (TODO: scope by
-    // PATH-dir membership once binaries declare their canonical PATH bucket).
-    let path_has_at_least_one_dir = path_env.split(':').any(|d| !d.is_empty());
-    if !path_has_at_least_one_dir {
-        return None;
+    for dir in path_env.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = if dir.ends_with('/') {
+            format!("{}{}", dir, bare_name)
+        } else {
+            format!("{}/{}", dir, bare_name)
+        };
+        if vfs.stat(&candidate).is_err() {
+            continue;
+        }
+        let canonical = match vfs.realpath(&candidate) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Some(image) = image_name_from_canonical(&canonical) {
+            return Some(image);
+        }
     }
-
-    let manifest_path = format!("/var/images/{}/manifest.toml", bare_name);
-    match vfs.stat(&manifest_path) {
-        Ok(_) => Some(bare_name.to_string()),
-        Err(_) => None,
-    }
+    None
 }
 
 /// Pull the container image name out of a canonical absolute path, when the
