@@ -19,3 +19,8 @@ pub mod wire;
 
 #[cfg(any(test, feature = "host-test"))]
 pub mod test_kernel;
+
+pub mod envelopes;
+pub mod manifest_cache;
+pub mod mount_policy;
+pub mod view_table;

@@ -13,12 +13,11 @@ pub use libcluu::elf;
 /// Re-export of `cluu_wire` — the wire-protocol types crate.
 pub use cluu_wire as proto;
 
-pub mod manifest_cache;
-pub mod view_table;
+/// Re-exports of modules now living in procmgr-common.
+pub use procmgr_common::envelopes;
+pub use procmgr_common::manifest_cache;
+pub use procmgr_common::mount_policy;
+pub use procmgr_common::view_table;
+
 pub mod session_table;
 pub mod spawn;
-
-// Include sub-modules that have `#[cfg(test)]` unit tests so that
-// `cargo test -p cluu-root-procmgr --lib` can discover and run them on the host.
-#[cfg(test)]
-pub mod envelopes;

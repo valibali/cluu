@@ -9,6 +9,7 @@ license = "MIT"
 [dependencies]
 libcluu = { path = "../libcluu" }
 cluu_wire = { path = "../cluu_wire" }
+procmgr-common = { path = "../libs/procmgr-common" }
 spin = { workspace = true }
 postcard = { workspace = true }
 
@@ -17,7 +18,7 @@ libcluu = { path = "../libcluu", features = ["host-test"] }
 
 [features]
 default = []
-host-test = ["libcluu/host-test"]  # enables std for unit tests on host
+host-test = ["libcluu/host-test", "procmgr-common/host-test"]  # enables std for unit tests on host
 
 [lib]
 name = "root_procmgr"

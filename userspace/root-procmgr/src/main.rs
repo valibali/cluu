@@ -3,11 +3,10 @@
 
 extern crate alloc;
 
-mod envelopes;
-mod mount_policy;
 mod pg_table;
 
-use crate::mount_policy::{
+use procmgr_common::{envelopes, mount_policy};
+use mount_policy::{
     parse_mount_policies_raw, resolve_effective_policies, validate_cluufile_against_parent,
     MountPolicy, MountPolicyEntry,
 };
@@ -564,9 +563,9 @@ impl ProcessManager {
     /// derived from MountMode. memfs_cid=0 means "resolve against the global
     /// MountTable" — per-Cluufile MOUNT private uses non-zero memfs_cid and
     /// is layered on later (Phase 4).
-    fn build_view_from_envelope(envelope: &crate::envelopes::Envelope) -> ViewMountList {
+    fn build_view_from_envelope(envelope: &envelopes::Envelope) -> ViewMountList {
         envelope.mounts.iter().map(|m| {
-            let writable = matches!(m.mode, crate::envelopes::MountMode::Rw);
+            let writable = matches!(m.mode, envelopes::MountMode::Rw);
             (m.path.clone(), m.path.clone(), writable, 0u64)
         }).collect()
     }
