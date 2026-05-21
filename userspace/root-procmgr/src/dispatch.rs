@@ -1,5 +1,7 @@
 //! Static label → handler table.
 
+extern crate alloc;
+
 use procmgr_common::handler::{HandlerError, InboundMsg, MsgHandler, Reply};
 use crate::session_directory::SessionDirectory;
 
@@ -21,6 +23,9 @@ pub struct ProcmgrState {
     pub parent_registry_rights: u32,
     pub parent_timeserver_cap: u64,
     pub parent_timeserver_rights: u32,
+
+    // ── Service registry ─────────────────────────────────────────────────
+    pub services: alloc::vec::Vec<crate::services::ServiceEntry>,
 }
 
 impl Default for ProcmgrState {
@@ -38,6 +43,7 @@ impl ProcmgrState {
             parent_registry_rights: 0,
             parent_timeserver_cap: 0,
             parent_timeserver_rights: 0,
+            services: alloc::vec::Vec::new(),
         }
     }
 
@@ -54,6 +60,7 @@ impl ProcmgrState {
             parent_registry_rights: 0x03,
             parent_timeserver_cap: 0xBEEF_0003,
             parent_timeserver_rights: 0x01,
+            services: alloc::vec::Vec::new(),
         }
     }
 }
@@ -61,9 +68,11 @@ impl ProcmgrState {
 #[allow(dead_code)]
 pub fn dispatch(state: &mut ProcmgrState, msg: &InboundMsg<'_>) -> Result<Reply, HandlerError> {
     use crate::session_directory::{SessionCreate, SessionDestroy};
+    use crate::services::ServiceSpawn;
     match msg.label {
         SessionCreate::LABEL  => SessionCreate::handle(state, msg),
         SessionDestroy::LABEL => SessionDestroy::handle(state, msg),
+        ServiceSpawn::LABEL   => ServiceSpawn::handle(state, msg),
         _ => Err(HandlerError::BadLabel),
     }
 }

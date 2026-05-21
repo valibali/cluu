@@ -10,6 +10,7 @@ mod session_directory;
 mod dispatch;
 mod cap_broker;
 mod restart_root;
+mod services;
 
 use procmgr_common::{envelopes, mount_policy};
 use mount_policy::{
