@@ -5810,55 +5810,26 @@ impl ProcessManager {
             argc += 1;
         }
 
-        // Resolve caller's session → username → user_records → envelope.
-        // Tries the local (container-id-keyed) session_table first, then
-        // falls back to the global SESSION_TABLE via pid_to_session for
-        // login-flow callers whose container isn't mirrored locally.
-        // Logs warnings on session-yes-but-lookup-missed paths; stays
-        // silent for the no-session boot/service path.
+        // Session is the single source of truth for env. The global
+        // SESSION_TABLE.profile.env was envelope-merged once at SESSION_CREATE;
+        // here we just read it and overlay caller-supplied envelope.env.
+        // No-session path (boot/service, autologin pre-session): caller-only,
+        // silent — those spawns never enter a SESSION_CREATE flow.
         let merged_env: alloc::collections::BTreeMap<String, String> = {
-            let caller_username: Option<String> = self
-                .resolve_caller_session(sender_tid)
-                .map(|s| s.username.clone())
-                .or_else(|| {
-                    self.pid_to_session
-                        .get(&(caller_pid as usize))
-                        .copied()
-                        .and_then(|sid| {
-                            procmgr::session_table::SESSION_TABLE
-                                .snapshot(sid)
-                                .map(|s| s.user_name)
-                        })
+            let session_env: Option<Vec<(String, String)>> = self
+                .pid_to_session
+                .get(&(caller_pid as usize))
+                .copied()
+                .and_then(|sid| {
+                    procmgr::session_table::SESSION_TABLE
+                        .snapshot(sid)
+                        .map(|s| s.profile.env)
                 });
 
-            let resolved = if let Some(username) = caller_username {
-                match self.user_records.get(&username) {
-                    None => {
-                        let _ = debug_print(&format!(
-                            "procmgr: spawn_unified session user '{}' has no user_records entry; skipping envelope merge",
-                            username
-                        ));
-                        None
-                    }
-                    Some(rec) => {
-                        let profile_name = rec.profile_name.clone();
-                        match envelopes::lookup_envelope(&self.envelopes, &profile_name) {
-                            None => {
-                                let _ = debug_print(&format!(
-                                    "procmgr: spawn_unified user '{}' profile '{}' has no envelope; skipping envelope merge",
-                                    username, profile_name
-                                ));
-                                None
-                            }
-                            Some(env_def) => Some(envelopes::resolve_env(env_def, &username)),
-                        }
-                    }
-                }
-            } else {
-                None
-            };
-
-            let mut merged = resolved.unwrap_or_default();
+            let mut merged: alloc::collections::BTreeMap<String, String> =
+                session_env
+                    .map(|pairs| pairs.into_iter().collect())
+                    .unwrap_or_default();
             for (k, v) in &envelope.env {
                 merged.insert(k.clone(), v.clone());
             }
@@ -6158,6 +6129,35 @@ impl ProcessManager {
             "procmgr: SESSION_CREATE req sender_tid={} caller_pid={} user={}",
             sender_tid, caller_pid, req.user_name
         ));
+
+        // Resolve envelope defaults once at session-create and merge into
+        // ProfileSpec.env so the SessionObject becomes the single source of
+        // truth for the session's environment. Caller-supplied env wins on
+        // key conflict (matches login's intent to override TERM etc.).
+        // Spawn no longer re-walks /etc/envelopes.toml per child.
+        let mut req = req;
+        if let Some(rec) = self.user_records.get(&req.user_name) {
+            if let Some(env_def) =
+                envelopes::lookup_envelope(&self.envelopes, &rec.profile_name)
+            {
+                let resolved = envelopes::resolve_env(env_def, &req.user_name);
+                let mut merged: alloc::collections::BTreeMap<String, String> = resolved;
+                for (k, v) in req.profile.env.drain(..) {
+                    merged.insert(k, v);
+                }
+                req.profile.env = merged.into_iter().collect();
+            } else {
+                let _ = debug_print(&format!(
+                    "procmgr: SESSION_CREATE user '{}' profile '{}' has no envelope; session env = caller-only",
+                    req.user_name, rec.profile_name
+                ));
+            }
+        } else {
+            let _ = debug_print(&format!(
+                "procmgr: SESSION_CREATE user '{}' has no user_records entry; session env = caller-only",
+                req.user_name
+            ));
+        }
 
         if !self.caller_has_right(caller_pid, 0x8000_0001) {
         // 0x8000_0001 = RIGHT_SESSION_CREATE (to be added to cluu_wire)
