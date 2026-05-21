@@ -13,6 +13,9 @@ pub struct FileEntry {
     pub base: usize,
     pub offset: usize,
     pub size: usize,
+    /// Effective capability rights for this open file (IPC rights bitmask).
+    /// Set to `u64::MAX` on initial open; clamped on FdInherit derive.
+    pub rights: u64,
 }
 
 /// A file entry backed by a remote service (ext2 via virtio-blk).
@@ -25,6 +28,9 @@ pub struct Ext2Entry {
     /// Original path used to open this file (for caching).
     #[allow(dead_code)]
     pub path: String,
+    /// Effective capability rights for this open file (IPC rights bitmask).
+    /// Set to `u64::MAX` on initial open; clamped on FdInherit derive.
+    pub rights: u64,
 }
 
 /// A file entry backed by a virtual filesystem (procfs, etc.)
@@ -73,6 +79,9 @@ pub struct MemFsEntry {
     #[allow(dead_code)]
     pub memfs_path: String,
     pub size: usize,
+    /// Effective capability rights for this open file (IPC rights bitmask).
+    /// Set to `u64::MAX` on initial open; clamped on FdInherit derive.
+    pub rights: u64,
 }
 
 /// A device file handle.
@@ -81,6 +90,9 @@ pub struct DeviceFile {
     pub device_type: DeviceType,
     #[allow(dead_code)]
     pub path: String,
+    /// Effective capability rights for this open file (IPC rights bitmask).
+    /// Set to `u64::MAX` on initial open; clamped on FdInherit derive.
+    pub rights: u64,
 }
 
 /// A pseudo-terminal slave file handle.
@@ -91,6 +103,9 @@ pub struct PtsFile {
     /// Full path, e.g. `/dev/pts/5`.
     #[allow(dead_code)]
     pub path: String,
+    /// Effective capability rights for this open file (IPC rights bitmask).
+    /// Set to `u64::MAX` on initial open; clamped on FdInherit derive.
+    pub rights: u64,
 }
 
 /// Open file handle.
@@ -132,6 +147,35 @@ impl OpenFile {
             OpenFile::Device(d) => Some(d.path.as_str()),
             OpenFile::MemFs(_) => None,
             OpenFile::Pts(_) => Some("/dev/pts"),
+        }
+    }
+
+    /// Effective capability rights for this open file entry.
+    ///
+    /// Returns `u64::MAX` for variants whose rights are not narrowed (Virtual),
+    /// and the stored rights mask for variants that track narrowing
+    /// (Memory, Ext2, Device, MemFs, Pts).
+    pub fn rights(&self) -> u64 {
+        match self {
+            OpenFile::Memory(e) => e.rights,
+            OpenFile::Ext2(e) => e.rights,
+            OpenFile::Virtual(_) => u64::MAX,
+            OpenFile::Device(e) => e.rights,
+            OpenFile::MemFs(e) => e.rights,
+            OpenFile::Pts(e) => e.rights,
+        }
+    }
+
+    /// Set the effective capability rights on this open file entry.
+    /// Used by `handle_derive_child_fd` to record the clamped child rights.
+    pub fn set_rights(&mut self, rights: u64) {
+        match self {
+            OpenFile::Memory(e) => e.rights = rights,
+            OpenFile::Ext2(e) => e.rights = rights,
+            OpenFile::Virtual(_) => {}
+            OpenFile::Device(e) => e.rights = rights,
+            OpenFile::MemFs(e) => e.rights = rights,
+            OpenFile::Pts(e) => e.rights = rights,
         }
     }
 }
@@ -184,5 +228,11 @@ impl FdTable {
         if let Some(table) = self.clients.get_mut(&client_id) {
             table.entries.remove(&fd);
         }
+    }
+
+    /// Return the effective capability rights for `(client_id, fd)`, or
+    /// `None` if the entry does not exist.
+    pub fn rights(&self, client_id: usize, fd: usize) -> Option<u64> {
+        self.get(client_id, fd).map(|f| f.rights())
     }
 }

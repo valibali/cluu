@@ -473,6 +473,7 @@ impl MountBackend for PtsBackend {
         Ok(OpenFile::Pts(PtsFile {
             pts_id: id,
             path: String::from(full_path),
+            rights: u64::MAX,
         }))
     }
 

@@ -150,6 +150,7 @@ impl MountBackend for InitrdBackend {
             base,
             offset,
             size: slice.len(),
+            rights: u64::MAX,
         }))
     }
 
@@ -225,6 +226,7 @@ impl MountBackend for RemoteBackend {
             inode: inode as u32,
             size,
             path: String::from(full_path),
+            rights: u64::MAX,
         }))
     }
 
@@ -518,6 +520,7 @@ impl MountBackend for DeviceBackend {
         Ok(OpenFile::Device(DeviceFile {
             device_type,
             path: String::from(full_path),
+            rights: u64::MAX,
         }))
     }
 
@@ -597,6 +600,7 @@ impl MountBackend for VirtualBackend {
                 Ok(OpenFile::Virtual(VirtualFile {
                     data,
                     path: String::from(full_path),
+                    rights: u64::MAX,
                 }))
             }
             VirtualEntry::Dir(_) => Err(Error::InvalidArgument), // Can't open dir as file
@@ -645,6 +649,9 @@ impl MountBackend for VirtualBackend {
 pub struct VirtualFile {
     pub data: Vec<u8>,
     pub path: String,
+    /// Effective capability rights. Always `u64::MAX` — virtual files are
+    /// read-only generated content and not subject to FdInherit narrowing.
+    pub rights: u64,
 }
 
 /// A single mount point configuration.

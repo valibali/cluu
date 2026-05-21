@@ -361,6 +361,7 @@ impl MountBackend for ProcfsBackend {
             return Ok(OpenFile::Virtual(VirtualFile {
                 data,
                 path: String::from(full_path),
+                rights: u64::MAX,
             }));
         }
 
@@ -371,6 +372,7 @@ impl MountBackend for ProcfsBackend {
             return Ok(OpenFile::Virtual(VirtualFile {
                 data,
                 path: String::from(full_path),
+                rights: u64::MAX,
             }));
         }
 
