@@ -5810,16 +5810,33 @@ impl ProcessManager {
             argc += 1;
         }
 
+        // Resolve caller's session → username → user_records → envelope.
+        // If any step fails (no enclosing session, unknown user, missing
+        // envelope), fall through to the caller-only env (preserves
+        // current behavior for service/boot paths).
+        let merged_env: alloc::collections::BTreeMap<String, String> = {
+            let resolved = self
+                .resolve_caller_session(sender_tid)
+                .and_then(|session| {
+                    let username = session.username.clone();
+                    self.user_records
+                        .get(&username)
+                        .map(|rec| (username, rec.profile_name.clone()))
+                })
+                .and_then(|(username, profile_name)| {
+                    envelopes::lookup_envelope(&self.envelopes, &profile_name)
+                        .map(|env_def| envelopes::resolve_env(env_def, &username))
+                });
+
+            let mut merged = resolved.unwrap_or_default();
+            for (k, v) in &envelope.env {
+                merged.insert(k.clone(), v.clone());
+            }
+            merged
+        };
+
         // Build env payload: KEY=VALUE\0 records.
-        let mut env_payload: Vec<u8> = Vec::new();
-        let mut envc = 0usize;
-        for (k, v) in &envelope.env {
-            env_payload.extend_from_slice(k.as_bytes());
-            env_payload.push(b'=');
-            env_payload.extend_from_slice(v.as_bytes());
-            env_payload.push(0);
-            envc += 1;
-        }
+        let (env_payload, envc) = build_envelope_env_payload(&merged_env);
 
         // Container bookkeeping.
         let container_id = self.next_container_id();
