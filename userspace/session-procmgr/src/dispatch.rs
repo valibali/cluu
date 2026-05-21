@@ -54,6 +54,9 @@ pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply,
         procmgr_common::labels::SESSION_PROCMGR_CTTY_QUERY_LABEL => {
             crate::ctty::CttyQuery::handle(state, msg)
         }
+        procmgr_common::labels::SESSION_PROCMGR_PROC_QUERY_LOCAL_LABEL => {
+            crate::proc_query_local::ProcQueryLocal::handle(state, msg)
+        }
         _ => Err(HandlerError::BadLabel),
     }
 }
