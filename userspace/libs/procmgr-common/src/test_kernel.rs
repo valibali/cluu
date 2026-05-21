@@ -21,11 +21,17 @@ pub struct MockKernel {
     pub calls: Vec<KernelCall>,
     pub next_handle: u64,
     pub revoked: BTreeMap<u64, bool>,
+    pub fail_next_spawn: bool,
 }
 
 impl MockKernel {
     pub fn new() -> Self {
-        Self { calls: Vec::new(), next_handle: 0x1000, revoked: BTreeMap::new() }
+        Self {
+            calls: Vec::new(),
+            next_handle: 0x1000,
+            revoked: BTreeMap::new(),
+            fail_next_spawn: false,
+        }
     }
 }
 
@@ -41,6 +47,10 @@ impl Kernel for MockKernel {
         self.revoked.insert(handle, true);
     }
     fn spawn_thread(&mut self, entry: u64, stack: u64) -> u64 {
+        if self.fail_next_spawn {
+            self.fail_next_spawn = false;
+            return 0; // sentinel: spawn failed
+        }
         let tid = self.next_handle;
         self.next_handle += 1;
         self.calls.push(KernelCall::SpawnThread { entry, stack, tid });

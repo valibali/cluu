@@ -1,5 +1,5 @@
 extern crate alloc;
-use procmgr_common::handler::{HandlerError, InboundMsg, Reply};
+use procmgr_common::handler::{HandlerError, InboundMsg, MsgHandler, Reply};
 use procmgr_common::pid::SessionId;
 use procmgr_common::test_kernel::MockKernel;
 
@@ -27,8 +27,11 @@ impl SessionState {
     }
 }
 
-pub fn dispatch(_state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply, HandlerError> {
+pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply, HandlerError> {
     match msg.label {
+        procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL => {
+            crate::spawn::Spawn::handle(state, msg)
+        }
         _ => Err(HandlerError::BadLabel),
     }
 }
