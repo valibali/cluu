@@ -346,18 +346,19 @@ pub fn real_spawn_user_process(
         state.vfs_cap, thread_tok,
     ));
     if state.vfs_cap != 0 {
-        let mounts: &[(&str, &str, bool, u64)] = &[
-            ("/", "/", false, 0u64),
-            ("/dev", "/dev", false, 0u64),
-        ];
+        // Use the same default user-profile mount set as root-procmgr so that
+        // children spawned via session-procmgr have a writable /dev/pts (needed
+        // for cluuterm → shell pts wiring). Hardcoded "/dev" read-only would
+        // make /dev/pts/<id> O_WRONLY opens fail with PermissionDenied.
+        let default_mounts = libcluu::vfs_view::default_mounts_for_profile(CapProfile::USER);
         let mut payload = alloc::vec::Vec::new();
-        for (src, dst, writable, memfs_cid) in mounts {
+        for (src, dst, writable) in default_mounts {
             let src_bytes = src.as_bytes();
             let dst_bytes = dst.as_bytes();
             payload.extend_from_slice(&(src_bytes.len() as u16).to_le_bytes());
             payload.extend_from_slice(&(dst_bytes.len() as u16).to_le_bytes());
             payload.push(if *writable { 1u8 } else { 0u8 });
-            payload.extend_from_slice(&memfs_cid.to_le_bytes());
+            payload.extend_from_slice(&0u64.to_le_bytes()); // memfs_cid
             payload.extend_from_slice(src_bytes);
             payload.extend_from_slice(dst_bytes);
         }
@@ -365,7 +366,7 @@ pub fn real_spawn_user_process(
         let mut msg = Message::new(VFS_SET_VIEW_LABEL, [0; 6], 6);
         msg.words[0] = payload.len();
         msg.words[1] = thread_tid;
-        msg.words[2] = mounts.len();
+        msg.words[2] = default_mounts.len();
         msg.words[3] = CapProfile::USER.bits() as usize;
         msg.words[4] = 0usize; // container_id
         msg.words[5] = state.view_mgr_token as usize;
