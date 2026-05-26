@@ -58,7 +58,7 @@ pub struct SpawnResult {
 /// any builtin. For bare names, walks `$PATH` looking for an installed
 /// container manifest. For paths-with-slashes, asks VFS to canonicalise
 /// the path and recovers the bare image name from `/var/images/<name>/...`.
-/// On hit, dispatches through the same code SpawnBuiltin uses and waits
+/// On hit, dispatches through `spawn_and_wait` and waits
 /// for exit. On miss, returns NotHandled so the caller emits
 /// "unsupported command".
 pub(crate) fn try_path_dispatch(
@@ -123,8 +123,8 @@ fn read_path_env() -> String {
 }
 
 /// Spawn `name` with `args`, wait for exit, return the exit code (or
-/// `1` on internal error). Shared between `SpawnBuiltin::run` and
-/// UE17's PATH-dispatch fall-through.
+/// `1` on internal error). Shared between pipeline single-stage paths
+/// and UE17's PATH-dispatch fall-through.
 ///
 /// Job control: a fresh pgid is created and the child attached to it before
 /// `wait_for_exit_or_sigint` blocks. The TTY's fg-pgid for this session is

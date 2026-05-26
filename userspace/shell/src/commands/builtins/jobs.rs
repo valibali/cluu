@@ -1,7 +1,5 @@
 //! Job control builtins: jobs, fg, bg, wait, kill.
 //!
-//! Replaces the pre-Stage-3 primitives (SpawnBuiltin, SpawnBgBuiltin,
-//! StopBuiltin, ForegroundBuiltin, BackgroundBuiltin).  The real
 //! JobTable tracks each pipeline as a single job keyed by pgid.
 
 use alloc::boxed::Box;
