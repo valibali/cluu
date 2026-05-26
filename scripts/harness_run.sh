@@ -1907,6 +1907,17 @@ case "$MARKER_MODE" in
             "TIMETICK_PROBE: count=10"
         )
         ;;
+    l2_login)
+        # Verify session-procmgr spawns on login:
+        #   - TSC is calibrated (kernel is alive)
+        #   - login authenticates user and SESSION_CREATE fires
+        #   - session-procmgr starts and logs its sid
+        required_markers=(
+            "TSC calibrated"
+            "login: user authenticated"
+            "session-procmgr: started"
+        )
+        ;;
     none)
         required_markers=()
         ;;

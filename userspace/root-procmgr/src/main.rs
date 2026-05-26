@@ -4181,6 +4181,88 @@ impl ProcessManager {
         let _ = send(self.blkdev_endpoint, &msg, IpcFlags::empty());
     }
 
+    /// Spawn a `session-procmgr` instance for the given session.
+    ///
+    /// Serialises a `procmgr_common::wire::SessionEnvelope` and passes it to
+    /// the child binary via the ProcessInfo page argv slot (PARAM_ARGC holds
+    /// the byte length, PARAM_ARGV_OFFSET holds the page offset).  The child
+    /// reads those raw bytes on startup and deserialises the envelope.
+    ///
+    /// Errors are logged but NOT fatal — the session is created regardless.
+    fn spawn_session_procmgr_for(&mut self, session_id: u32, user_name: &str) {
+        use procmgr_common::wire::SessionEnvelope;
+
+        let envelope = SessionEnvelope {
+            sid: (session_id & 0xFF) as u8,
+            generation: 0,
+            user_name: user_name.into(),
+            profile: alloc::string::String::new(),
+            pid_base: ((session_id & 0xFF) as i32)
+                << procmgr_common::pid::LOCAL_BITS,
+            caps: alloc::vec::Vec::new(),
+            env_defaults: alloc::vec::Vec::new(),
+            view_spec: alloc::string::String::new(),
+        };
+
+        let env_bytes = match postcard::to_allocvec(&envelope) {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = debug_print(
+                    "procmgr: SESSION spawn_session_procmgr_for: envelope ser failed",
+                );
+                return;
+            }
+        };
+
+        // argv_payload = raw envelope bytes; argc = byte length.
+        // session-procmgr reads PARAM_ARGC as byte count and
+        // PARAM_ARGV_OFFSET as offset of the raw envelope bytes.
+        let byte_len = env_bytes.len();
+
+        let spawn_seq = self.spawn_seq_next;
+        self.spawn_seq_next += 1;
+        let spawn_start = self.clock_sample();
+
+        let _ = debug_print(&format!(
+            "procmgr: spawning session-procmgr sid={} env_bytes={}",
+            session_id & 0xFF, byte_len
+        ));
+
+        match self.spawn_service_with_env(
+            "/bin/session-procmgr",
+            0,                   // default priority
+            &env_bytes,          // argv_payload = raw envelope bytes
+            byte_len,            // argc = byte count (special convention)
+            &[],                 // no caller env
+            0,
+            0,                   // owner_tid = 0 (system spawn)
+            spawn_seq,
+            spawn_start,
+            &[],                 // no fd_inherit
+            CapProfile::SERVICE, // session-procmgr needs SERVICE profile
+            0,
+            0,
+            &[],
+            None,
+            &[],
+            &[],
+            0,
+        ) {
+            Ok((thread_tok, _cookie, _pid, _)) => {
+                let _ = debug_print(&format!(
+                    "procmgr: session-procmgr spawned sid={} thread_tok={}",
+                    session_id & 0xFF, thread_tok
+                ));
+            }
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: session-procmgr spawn FAILED sid={} {:?}",
+                    session_id & 0xFF, e
+                ));
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments, dead_code)]
     fn spawn_service(
         &mut self,
@@ -6189,8 +6271,8 @@ impl ProcessManager {
 
         let now = self.now_ticks();
         let (session_id, token) = root_procmgr::session_table::SESSION_TABLE.create(
-            req.user_name,
-            req.profile,
+            req.user_name.clone(),
+            req.profile.clone(),
             caller_pid,
             now,
         );
@@ -6201,6 +6283,12 @@ impl ProcessManager {
         ));
 
         self.session_creators.insert(caller_pid, session_id);
+
+        // Spawn session-procmgr for this session.  Serialise a minimal
+        // SessionEnvelope and pass it to the child via argv bytes.
+        // Caps are left empty for now; the session-procmgr initialises its
+        // kernel adapter with MockKernel until Phase 12.4 wires real caps.
+        self.spawn_session_procmgr_for(session_id, &req.user_name);
 
         let reply =
             cluu_wire::session::SessionCreateReply::Ok(cluu_wire::session::SessionCreateOk {

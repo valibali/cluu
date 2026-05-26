@@ -644,6 +644,14 @@ harness_derive_marker_defaults() {
                 # autostart.toml boots cluuterm at VT4; all markers fire at
                 # boot without any keyboard input.
                 ;;
+            l2_login)
+                TEST_COMMAND=""
+                # Inject credentials to trigger SESSION_CREATE + session-procmgr spawn.
+                # Same sendkey sequence as l2_cluuterm_login: root/root on VT4.
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
+                ;;
             l2_cluuterm_login)
                 TEST_COMMAND=""
                 # After boot, inject credentials into the login modal.

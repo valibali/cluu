@@ -9,6 +9,15 @@ fn empty_query_session_local(_sid: u8) -> procmgr_common::wire::ProcQueryLocalRe
     procmgr_common::wire::ProcQueryLocalReply { procs: alloc::vec::Vec::new() }
 }
 
+/// Stub for `spawn_session_procmgr` that does nothing (tests + pre-wiring).
+///
+/// Returns `None` to signal that no real session-procmgr was spawned.
+/// The `SessionCreate::handle` caller stores `(0, 0)` for `pmgr_tid` /
+/// `pmgr_ep` when this stub is active, preserving the pre-Task-12.3 behaviour.
+fn stub_spawn_session_procmgr(_envelope_bytes: &[u8]) -> Option<(u64, u64)> {
+    None
+}
+
 /// Root-procmgr runtime state passed to every handler.
 ///
 /// TODO(Phase 12): replace `MockKernel` field with `RealKernel` behind
@@ -38,6 +47,13 @@ pub struct ProcmgrState {
     /// Injected fn that queries a session-procmgr for its local proc list.
     /// Default stub returns empty; production wires the real IPC call.
     pub query_session_local: fn(u8) -> procmgr_common::wire::ProcQueryLocalReply,
+
+    // ── Session-procmgr spawn callback ────────────────────────────────────
+    /// Injected fn that spawns a `/bin/session-procmgr` instance and passes
+    /// it the serialised `SessionEnvelope`.  Returns `Some((thread_tok, ep))`
+    /// on success, `None` when the spawn is deferred (stub / pre-wiring).
+    /// Production installs a real implementation; tests keep the stub.
+    pub spawn_session_procmgr: fn(envelope_bytes: &[u8]) -> Option<(u64, u64)>,
 }
 
 impl Default for ProcmgrState {
@@ -58,6 +74,7 @@ impl ProcmgrState {
             services: alloc::vec::Vec::new(),
             shutting_down: false,
             query_session_local: empty_query_session_local,
+            spawn_session_procmgr: stub_spawn_session_procmgr,
         }
     }
 
@@ -77,6 +94,7 @@ impl ProcmgrState {
             services: alloc::vec::Vec::new(),
             shutting_down: false,
             query_session_local: empty_query_session_local,
+            spawn_session_procmgr: stub_spawn_session_procmgr,
         }
     }
 }

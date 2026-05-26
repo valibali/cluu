@@ -139,8 +139,15 @@ impl MsgHandler for SessionCreate {
             env_defaults: req.env_defaults.clone(),
             view_spec: req.view_spec.clone(),
         };
-        // session-procmgr spawn deferred to Task 5.1; use placeholder tok/ep.
-        let (pmgr_tid, pmgr_ep) = (0u64, 0u64);
+
+        // Serialise the envelope and hand it to session-procmgr via the
+        // injected spawn callback.  On stub/test the callback returns None
+        // and we fall back to (0, 0) placeholder handles.
+        let env_bytes = postcard::to_allocvec(&envelope)
+            .map_err(|_| HandlerError::Internal("envelope_ser"))?;
+        let (pmgr_tid, pmgr_ep) = (state.spawn_session_procmgr)(&env_bytes)
+            .unwrap_or((0u64, 0u64));
+
         state.session_directory.insert(SessionEntry {
             sid, generation: gen,
             user_name: req.user_name,
