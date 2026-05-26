@@ -31,7 +31,8 @@ use libcluu::{
     debug_print, registry,
     ipc::{extract_reply_id, parse_message},
     mem::PAGE_SIZE,
-    syscall::endpoint_create,
+    rights::Rights,
+    syscall::{endpoint_create, token_derive},
     types::Message,
     Result,
 };
@@ -118,10 +119,24 @@ fn run() -> Result<()> {
     let ipc_cap = info.tokens[libcluu::boot::TOKEN_IPC];
     let ep = endpoint_create(ipc_cap)?;
 
+    // Derive a grantable handle for register_output so that
+    // handle_grant_request can call token_derive on it when a subscriber
+    // arrives.  The registered token needs IPC_SEND|IPC_CALL|GRANT (no
+    // IPC_RECV — subscribers call/send, they do not recv on our endpoint).
+    // The recv loop below keeps using `ep` which has IPC_RECV.
+    let ep_grantable = token_derive(
+        ep,
+        (Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT).bits() as usize,
+        u64::MAX,
+    ).unwrap_or_else(|_| {
+        let _ = debug_print("session-procmgr: WARN token_derive grantable FAILED, using raw ep");
+        ep
+    });
+
     // Register as "session-procmgr:<sid>:spawn" so root-procmgr and
     // cluuterm can discover us by session id.
     let ep_name = alloc::format!("spawn:{}", sid);
-    registry::register_output(&ep_name, ep)?;
+    registry::register_output(&ep_name, ep_grantable)?;
 
     let _ = debug_print(&alloc::format!(
         "session-procmgr: registered sid={} ep={}",
