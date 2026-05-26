@@ -776,15 +776,40 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
                             // Tell the compositor to destroy our window before we
                             // exit so the user immediately sees just the cluuterm
-                            // window.
+                            // window. Retry on WouldBlock/Busy because we exit
+                            // right after — a dropped message leaves the modal
+                            // in the z-order forever.
                             let destroy = Message::new(
                                 libcluu::ipc::COMP_WIN_DESTROY_LABEL,
                                 [win_id as usize, 0, 0, 0, 0, 0],
                                 1,
                             );
-                            let _ = libcluu::ipc::send(
-                                comp_ep, &destroy, IpcFlags::empty(),
-                            );
+                            let mut attempts = 0u32;
+                            loop {
+                                match libcluu::ipc::send(
+                                    comp_ep, &destroy, IpcFlags::empty(),
+                                ) {
+                                    Ok(()) => {
+                                        let _ = debug_print("login: WIN_DESTROY sent");
+                                        break;
+                                    }
+                                    Err(libcluu::Error::WouldBlock)
+                                    | Err(libcluu::Error::Busy) => {
+                                        attempts += 1;
+                                        if attempts > 64 {
+                                            let _ = debug_print(
+                                                "login: WIN_DESTROY gave up after retries",
+                                            );
+                                            break;
+                                        }
+                                        let _ = syscall::yield_cpu();
+                                    }
+                                    Err(_) => {
+                                        let _ = debug_print("login: WIN_DESTROY send failed");
+                                        break;
+                                    }
+                                }
+                            }
                             return 0;
                         }
                         // Moved focus to password — fall through to re-render.
