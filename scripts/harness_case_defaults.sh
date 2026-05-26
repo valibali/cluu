@@ -28,89 +28,127 @@ harness_derive_marker_defaults() {
             m3_maperror) TEST_COMMAND="maperror 3" ;;
             m4_deny_paths)
                 TEST_COMMAND="killdeny 2 9"
-                SHELL_AUTOSTART_CMD_DEFAULT="killdeny 2 9"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             m4_registry_deny_paths)
                 TEST_COMMAND="regdeny"
-                SHELL_AUTOSTART_CMD_DEFAULT="regdeny"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             kernel_suspended_thread)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="suspendprobe"
+                TEST_COMMAND="suspendprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_argv)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="argvprobe hello world"
+                TEST_COMMAND="argvprobe hello world"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_vqprobe)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="vqprobe"
+                TEST_COMMAND="vqprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_blk_basic)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="blkprobe"
+                TEST_COMMAND="blkprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_blk_concurrent)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="blkprobe concurrent"
+                TEST_COMMAND="blkprobe concurrent"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_blk_perf)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="blkprobe perf"
+                TEST_COMMAND="blkprobe perf"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_blk_session_teardown)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="blkprobe leak"
+                TEST_COMMAND="blkprobe leak"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_bare_cmd)
-                TEST_COMMAND=""
                 # UE17: PATH-based bare-command resolution. No `spawn` prefix —
                 # the shell falls through from the builtin lookup to PATH-based
                 # dispatch and runs /var/images/cat. We anchor on the procmgr
                 # debug-print marker (`procmgr: container 'cat' started`)
                 # because /etc/motd's contents go to TTY/stdout, not to COM2.
-                SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd"
+                TEST_COMMAND="cat /etc/motd"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_path_symlink_resolve)
-                TEST_COMMAND=""
                 # Item #1 of open-work queue: /bin/ls is now a real ext2
                 # symlink that resolves through VFS realpath instead of the
                 # legacy strip_prefix("/bin/") hack. ls output goes to the
                 # framebuffer, so harness_run.sh anchors on procmgr's
                 # `container 'ls' started` debug print on COM2 instead.
-                SHELL_AUTOSTART_CMD_DEFAULT="/bin/ls /"
+                TEST_COMMAND="/bin/ls /"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_cd)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="cd /; cd etc; pwd"
+                TEST_COMMAND="cd /; cd etc; pwd"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_cd_inherit)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="cd /tmp; pwdprobe"
+                TEST_COMMAND="cd /tmp; pwdprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_ext2write)
                 TEST_COMMAND="ext2io write"
-                SHELL_AUTOSTART_CMD_DEFAULT="ext2io write"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_ext2append)
                 TEST_COMMAND="ext2io append"
-                SHELL_AUTOSTART_CMD_DEFAULT="ext2io append"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_ext2mutate)
                 TEST_COMMAND="ext2io mutate"
-                SHELL_AUTOSTART_CMD_DEFAULT="ext2io mutate"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_ext2unlink)
                 TEST_COMMAND="ext2io unlink"
-                SHELL_AUTOSTART_CMD_DEFAULT="ext2io unlink"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_owner_deny)
                 TEST_COMMAND="ownerdeny"
-                SHELL_AUTOSTART_CMD_DEFAULT="ownerdeny"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             d7_container_storage)
                 TEST_COMMAND="containerprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="containerprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             e13_container_run)
                 TEST_COMMAND="container run hello"
@@ -138,24 +176,34 @@ harness_derive_marker_defaults() {
                 ;;
             l2_sigint)
                 TEST_COMMAND="sleepy"
-                SHELL_AUTOSTART_CMD_DEFAULT="sleepy"
                 POST_SENDKEY_DEFAULT="ctrl-c"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_jobs)
                 TEST_COMMAND="spawnbg sleepy"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_jobs_basic)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="sleep 30 & ; jobs"
+                TEST_COMMAND="sleep 30 & ; jobs"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_jobs_pipeline)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="echo abc | tr a-z A-Z"
+                TEST_COMMAND="echo abc | tr a-z A-Z"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_jobs_kill)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="sleep 30 & ; kill %1"
+                TEST_COMMAND="sleep 30 & ; kill %1"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_alias_basic)
                 TEST_COMMAND="alias ll=ls ; alias ll"
@@ -191,12 +239,16 @@ harness_derive_marker_defaults() {
                 SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_fg)
-                TEST_COMMAND="fg"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
+                TEST_COMMAND="spawnbg sleepy ; fg"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_stop)
-                TEST_COMMAND="stop"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"
+                TEST_COMMAND="spawnbg sleepy ; stop"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_jobchurn)
                 TEST_COMMAND="jobchurn 3"
@@ -211,35 +263,42 @@ harness_derive_marker_defaults() {
                 SHELL_AUTOSTART_CMD_DEFAULT=""
                 ;;
             l2_mkdir)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="mkdir /tmp/a; mkdir -p /tmp/b/c/d"
+                TEST_COMMAND="mkdir /tmp/a; mkdir -p /tmp/b/c/d"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_cp)
-                TEST_COMMAND=""
                 # Smoke test: spawn cp with no args. Verifies the binary
                 # exists, the container view installs cleanly, and cp's
                 # arg-parser fires. End-to-end file-copy is exercised
                 # interactively (writing /tmp from shell-MemFs is a
                 # separate VFS investigation — see follow-up task).
-                SHELL_AUTOSTART_CMD_DEFAULT="cp"
+                TEST_COMMAND="cp"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_mv)
-                TEST_COMMAND=""
                 # Same smoke pattern as l2_cp until end-to-end /tmp file
                 # creation is unblocked.
-                SHELL_AUTOSTART_CMD_DEFAULT="mv"
+                TEST_COMMAND="mv"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_envelope_mounts)
-                TEST_COMMAND=""
                 # Root auto-logs in with supervisor envelope (/ rw), so we
                 # drop into alice's *user* envelope via `su alice -c …` to
                 # exercise the read-only /etc enforcement. The nested shell
                 # runs the command, prints `touch: /etc/probefile:
                 # PermissionDenied`, then exits.
-                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c touch /etc/probefile"
+                TEST_COMMAND="su alice -c touch /etc/probefile"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_cluufile_match)
-                TEST_COMMAND=""
                 # Happy path for UE13's strict Cluufile validation: the
                 # cat container has no MOUNT directives, so any caller view
                 # is acceptable. The supervisor shell spawns /bin/cat to
@@ -248,68 +307,86 @@ harness_derive_marker_defaults() {
                 # `spawn cat …` (not bare `cat …`) because the shell's
                 # parser dispatches plain command words only to builtins;
                 # `spawn` is the explicit binary-launch builtin.
-                SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd"
+                TEST_COMMAND="cat /etc/motd"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_cluufile_mismatch)
-                TEST_COMMAND=""
                 # Mismatch path for UE13: the cfmismatch probe's Cluufile
                 # demands MOUNT /etc readwrite, but alice's user envelope
                 # provides /etc only as ro. Spawning from alice's nested
                 # shell forces validation through pid_to_view and procmgr
                 # must emit `cluufile mismatch` and reject with
                 # PermissionDenied before main() runs.
-                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c cfmismatch"
+                TEST_COMMAND="su alice -c cfmismatch"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_edit_smoke)
-                TEST_COMMAND=""
                 # Smoke: spawn edit (no args). Verifies the binary boots
                 # into raw-mode input loop without crashing. Edit blocks
                 # on stdin recv after `edit: starting up` — clean exit
                 # via injected key is a follow-up case (post-T18 once
                 # rendering exists; see harness_run.sh marker comment).
-                SHELL_AUTOSTART_CMD_DEFAULT="edit"
+                TEST_COMMAND="edit"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_edit_insert)
-                TEST_COMMAND=""
                 # RED until an editprobe-style byte-injection helper exists. The
                 # harness's KEYSTROKE_COMMANDS mechanism types whole lines + Enter,
                 # so it can't drive INSERT mode (needs raw chars + Esc + :wq).
                 # Manual interactive verification is the v1 acceptance path.
-                SHELL_AUTOSTART_CMD_DEFAULT="edit /home/root/test.txt"
+                TEST_COMMAND="edit /home/root/test.txt"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_edit_undo)
-                TEST_COMMAND=""
                 # Same RED status as l2_edit_insert.
-                SHELL_AUTOSTART_CMD_DEFAULT="edit /home/root/undo.txt"
+                TEST_COMMAND="edit /home/root/undo.txt"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_edit_eacces)
-                TEST_COMMAND=""
                 # RED until byte-injection lands. Drops into alice (user envelope =
                 # ro:/etc) and runs edit on /etc/motd. Without keystroke injection
                 # for `iX:w`, the failing-write code path can't be exercised by the
                 # harness; manual verification only.
-                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c edit /etc/motd"
+                TEST_COMMAND="su alice -c edit /etc/motd"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_envelope_user)
-                TEST_COMMAND=""
                 # GREEN as of UE16: ENV trailer in CONTAINER_RUN propagates the
                 # shell's envelope-resolved env to the child.
-                SHELL_AUTOSTART_CMD_DEFAULT="su alice -c envprobe HOME USER PATH SHELL"
+                TEST_COMMAND="su alice -c envprobe HOME USER PATH SHELL"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_export)
-                TEST_COMMAND=""
                 # UE15: `set X=v` is shell-local (child sees null); `export Y=v`
                 # propagates via the ENV trailer so envprobe gets Y=exported.
-                SHELL_AUTOSTART_CMD_DEFAULT="set X=local; export Y=exported; envprobe X Y"
+                TEST_COMMAND="set X=local; export Y=exported; envprobe X Y"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_mount_private)
-                TEST_COMMAND=""
                 # Seed shell's /tmp, then spawn the probe. The probe should see an
                 # empty /tmp because its Cluufile declares MOUNT /tmp private.
-                SHELL_AUTOSTART_CMD_DEFAULT="mkdir /tmp/MOUNTPROBE_CANARY; mountprobe"
+                TEST_COMMAND="mkdir /tmp/MOUNTPROBE_CANARY; mountprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_mp_etc)
-                TEST_COMMAND=""
                 # MicroPython opens /etc/motd through libcluu's POSIX shim, which
                 # in turn goes through VFS. Success proves: (a) the mp container
                 # composes correctly with the supervisor envelope, (b) /etc is
@@ -322,58 +399,81 @@ harness_derive_marker_defaults() {
                 # words. Inside double quotes parens are plain text. The
                 # python source itself uses single quotes for the path,
                 # so the outer double quotes nest cleanly.
-                SHELL_AUTOSTART_CMD_DEFAULT="mp -c \"open('/etc/motd').read()\""
+                TEST_COMMAND="mp -c \"open('/etc/motd').read()\""
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_ls)
-                TEST_COMMAND=""
                 # Basic ls of /etc: verifies ls boots, VFS readdir works,
                 # and at least one filename is printed.
-                SHELL_AUTOSTART_CMD_DEFAULT="ls /etc"
+                TEST_COMMAND="ls /etc"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_ls_long)
-                TEST_COMMAND=""
                 # Write a file then ls -l: verify mode string and filename appear.
-                SHELL_AUTOSTART_CMD_DEFAULT="echo hello > /tmp/lf; ls -l /tmp/lf"
+                TEST_COMMAND="echo hello > /tmp/lf; ls -l /tmp/lf"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_ls_color)
-                TEST_COMMAND=""
                 # ls --color=always on /tmp: should emit ANSI escape prefix for dirs.
-                SHELL_AUTOSTART_CMD_DEFAULT="mkdir -p /tmp/cd; ls --color=always /tmp"
+                TEST_COMMAND="mkdir -p /tmp/cd; ls --color=always /tmp"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_ls_recursive)
-                TEST_COMMAND=""
                 # Create nested dir, ls -R, verify sub-entries appear.
-                SHELL_AUTOSTART_CMD_DEFAULT="mkdir -p /tmp/r/sub; touch /tmp/r/a; touch /tmp/r/sub/b; ls -R /tmp/r"
+                TEST_COMMAND="mkdir -p /tmp/r/sub; touch /tmp/r/a; touch /tmp/r/sub/b; ls -R /tmp/r"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_rm)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="mkdir /tmp/rmtest; mkdir /tmp/rmtest/inner; rm -r /tmp/rmtest"
+                TEST_COMMAND="mkdir /tmp/rmtest; mkdir /tmp/rmtest/inner; rm -r /tmp/rmtest"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_shellrc)
-                TEST_COMMAND=""
                 # UE18+UE19+UE20: Verifies that /home/root/.shellrc was
                 # sourced at session-shell startup. The rc file
                 # overrides PATH via `export PATH=...`; if sourcing
                 # worked, envprobe's child sees the overridden PATH
                 # (instead of supervisor's envelope default
                 # /sbin:/bin:/usr/sbin:/usr/bin).
-                SHELL_AUTOSTART_CMD_DEFAULT="envprobe HOME PATH"
+                TEST_COMMAND="envprobe HOME PATH"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_waitpid)
                 TEST_COMMAND="waitprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="waitprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_mmap)
                 TEST_COMMAND="mmapprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="mmapprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             a_poll)
                 TEST_COMMAND="pollprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="pollprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_poll_pipes)
                 TEST_COMMAND="pollprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="pollprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             perf_benchprobe)
                 TEST_COMMAND="benchprobe"
@@ -389,11 +489,15 @@ harness_derive_marker_defaults() {
                 ;;
             c_futex)
                 TEST_COMMAND="futexprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="futexprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             c_futex_race)
                 TEST_COMMAND="futexrace"
-                SHELL_AUTOSTART_CMD_DEFAULT="futexrace"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             m6_ipc_compact)
                 TEST_COMMAND="repeat 8 hello"
@@ -402,93 +506,128 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND="repeat 8 hello"
                 ;;
             m6_ring_io)
-                TEST_COMMAND="echo ringio-marker"
-                SHELL_AUTOSTART_CMD_DEFAULT="ringio"
+                TEST_COMMAND="ringio ; echo ringio-marker"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             p1_setjmp)
                 TEST_COMMAND="setjmpprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="setjmpprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             p1_env)
                 TEST_COMMAND="envprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="envprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             p1_stubs)
                 TEST_COMMAND="stubsprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="stubsprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             p2_pipe)
                 TEST_COMMAND="pipeprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="pipeprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             p2_spawn_pipe)
                 TEST_COMMAND="spawnpipeprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="spawnpipeprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             p3_tls)
                 TEST_COMMAND="tlsprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="tlsprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             p3_pthread)
                 TEST_COMMAND="pthreadprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="pthreadprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             p4_dev)
                 TEST_COMMAND="devprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="devprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             p4_framebuf)
                 TEST_COMMAND="fbprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="fbprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             b_console_blit)
                 TEST_COMMAND="console_blit_bench"
-                SHELL_AUTOSTART_CMD_DEFAULT="console_blit_bench"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_devfb0)
                 TEST_COMMAND="devfb0_probe"
-                SHELL_AUTOSTART_CMD_DEFAULT="devfb0_probe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             p4_mmap)
                 TEST_COMMAND="mmapprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT="mmapprobe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_pipe_builtin)
-                TEST_COMMAND=""
                 # Phase 4 Plan B Stage 0: verify builtin | container works.
                 # echo is an in-process builtin; cat is a container. The
                 # builtin writes via PIPE_DATA_LABEL; cat reads and echoes.
-                SHELL_AUTOSTART_CMD_DEFAULT="echo hello | cat"
+                TEST_COMMAND="echo hello | cat"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_pipe_builtin_chain)
-                TEST_COMMAND=""
                 # Phase 4 Plan B Stage 0: verify builtin | container with
                 # transformation. echo feeds tr which uppercases.
-                SHELL_AUTOSTART_CMD_DEFAULT="echo abc | tr a-z A-Z"
+                TEST_COMMAND="echo abc | tr a-z A-Z"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_pipe_builtin_3stage)
-                TEST_COMMAND=""
                 # Phase 4 Plan B Stage 0: 3-stage pipeline where the first
                 # stage is a shell builtin (echo) and stages 2-3 are
                 # containers (cat|cat). Verifies builtin→pipe→container→pipe
                 # chain: WriteSink::Pipe → first cat → second cat → TTY.
-                SHELL_AUTOSTART_CMD_DEFAULT="echo hello | cat | cat"
+                TEST_COMMAND="echo hello | cat | cat"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_pipe_3stage)
-                TEST_COMMAND=""
                 # Phase 4 Plan E diagnostic: 3-stage cat|grep|head with
                 # synthetic input. Writes 5 lines to /tmp/in.txt, then
                 # pipelines cat → grep alpha → head -1. Expects "alpha"
                 # and EXIT=0 on COM2. Distinct from l2_pipe_three (which
                 # uses /etc/motd) to anchor on predictable synthetic data.
-                SHELL_AUTOSTART_CMD_DEFAULT="echo -e 'alpha\nbeta\ngamma\nalpha\ndelta' > /tmp/in.txt; cat /tmp/in.txt | grep alpha | head -1; echo EXIT=\$?"
+                TEST_COMMAND="echo -e 'alpha\nbeta\ngamma\nalpha\ndelta' > /tmp/in.txt; cat /tmp/in.txt | grep alpha | head -1; echo EXIT=\$?"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_pipe_basic)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd | head -3"
+                TEST_COMMAND="cat /etc/motd | head -3"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_pipe_env)
-                TEST_COMMAND=""
                 # Phase 4 Plan E Stage 2: verify env propagates into pipe
                 # stages. echo is a shell builtin so it expands $PIPETEST
                 # before spawn; wc -c is the spawned binary that inherits
@@ -497,15 +636,22 @@ harness_derive_marker_defaults() {
                 # spawn-env path indirectly via wc character count.
                 # Env propagation fix builds clean; targeted getenv-reading
                 # test deferred to Plan B when printenv is available.
-                SHELL_AUTOSTART_CMD_DEFAULT="export PIPETEST=hello; echo \$PIPETEST | wc -c"
+                TEST_COMMAND="export PIPETEST=hello; echo \$PIPETEST | wc -c"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_pipe_three)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd | grep CLUU | head -1"
+                TEST_COMMAND="cat /etc/motd | grep CLUU | head -1"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_redir_stdout_file)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="cat /etc/motd > /tmp/motdcopy; cat /tmp/motdcopy | head -1"
+                TEST_COMMAND="cat /etc/motd > /tmp/motdcopy; cat /tmp/motdcopy | head -1"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_tab_complete)
                 TEST_COMMAND=""
@@ -531,128 +677,168 @@ harness_derive_marker_defaults() {
                 ;;
             m5_fairness) TEST_COMMAND="repeat 8 hello" ;;
             l2_cat_basic)
-                TEST_COMMAND=""
                 # GNU-close cat: -n numbers all output lines.
                 # Uses /etc/motd as a stable file. Verifies flag parsing
                 # and the debug marker on exit.
-                SHELL_AUTOSTART_CMD_DEFAULT="cat -n /etc/motd"
+                TEST_COMMAND="cat -n /etc/motd"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_cp_recursive)
-                TEST_COMMAND=""
                 # cp -r: copy /etc to /tmp/etccopy, then ls the copy.
                 # Verifies recursive directory copy via libcluu::cli.
-                SHELL_AUTOSTART_CMD_DEFAULT="cp -r /etc /tmp/etccopy"
+                TEST_COMMAND="cp -r /etc /tmp/etccopy"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_head_bytes)
-                TEST_COMMAND=""
                 # head -c N: print first N bytes from /etc/motd.
                 # Verifies -c flag and RequiredArg parsing via libcluu::cli.
-                SHELL_AUTOSTART_CMD_DEFAULT="head -c 20 /etc/motd"
+                TEST_COMMAND="head -c 20 /etc/motd"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_wc_lines)
-                TEST_COMMAND=""
                 # wc -l: count newlines in /etc/motd.
                 # Verifies -l flag and single-column output via libcluu::cli.
-                SHELL_AUTOSTART_CMD_DEFAULT="wc -l /etc/motd"
+                TEST_COMMAND="wc -l /etc/motd"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_grep_recursive)
-                TEST_COMMAND=""
                 # grep -rn: recursive search for 'CLUU' under /etc.
                 # Verifies -r and -n flags via libcluu::cli.
-                SHELL_AUTOSTART_CMD_DEFAULT="grep -rn CLUU /etc"
+                TEST_COMMAND="grep -rn CLUU /etc"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_basename_basic)
-                TEST_COMMAND=""
                 # basename: strip directory from path.
-                SHELL_AUTOSTART_CMD_DEFAULT="basename /etc/users.toml"
+                TEST_COMMAND="basename /etc/users.toml"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("users.toml")
                 ;;
             l2_dirname_basic)
-                TEST_COMMAND=""
                 # dirname: strip last component from path.
-                SHELL_AUTOSTART_CMD_DEFAULT="dirname /etc/users.toml"
+                TEST_COMMAND="dirname /etc/users.toml"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("/etc")
                 ;;
             l2_sleep_basic)
-                TEST_COMMAND=""
                 # sleep: delay then print done.
-                SHELL_AUTOSTART_CMD_DEFAULT="sleep 1; echo done"
+                TEST_COMMAND="sleep 1; echo done"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("done")
                 ;;
             l2_which_basic)
-                TEST_COMMAND=""
                 # which: find self in PATH. Each container's view maps
                 # /bin → /var/images/<self>/bin, so `which <other>` won't
                 # find binaries that don't ship with the which container.
                 # `which which` always works because /bin/which is the
                 # binary the container is running from.
-                SHELL_AUTOSTART_CMD_DEFAULT="which which"
+                TEST_COMMAND="which which"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("/bin/which")
                 ;;
             l2_printf_basic)
-                TEST_COMMAND=""
                 # printf: format string substitution.
-                SHELL_AUTOSTART_CMD_DEFAULT="printf '%s=%d\n' foo 42"
+                TEST_COMMAND="printf '%s=%d\n' foo 42"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("foo=42")
                 ;;
             l2_date_basic)
-                TEST_COMMAND=""
                 # date: print current date — just check year "20xx" appears.
-                SHELL_AUTOSTART_CMD_DEFAULT="date"
+                TEST_COMMAND="date"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("20")
                 ;;
             l2_env_basic)
-                TEST_COMMAND=""
                 # env: print environment — check at least one KEY=VALUE line.
-                SHELL_AUTOSTART_CMD_DEFAULT="env | head -1"
+                TEST_COMMAND="env | head -1"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("=")
                 ;;
             l2_kill_basic)
-                TEST_COMMAND=""
                 # kill --help: verify binary builds and parses --help.
-                SHELL_AUTOSTART_CMD_DEFAULT="kill --help"
+                TEST_COMMAND="kill --help"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("Usage")
                 ;;
             l2_sort_basic)
-                TEST_COMMAND=""
                 # sort: sort three lines lexicographically.
-                SHELL_AUTOSTART_CMD_DEFAULT="printf 'c\nb\na\n' > /tmp/s.in; sort /tmp/s.in"
+                TEST_COMMAND="printf 'c\nb\na\n' > /tmp/s.in; sort /tmp/s.in"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("a" "b" "c")
                 ;;
             l2_uniq_basic)
-                TEST_COMMAND=""
                 # uniq -c: prefix each line with occurrence count.
-                SHELL_AUTOSTART_CMD_DEFAULT="printf 'a\na\nb\n' > /tmp/u.in; uniq -c /tmp/u.in"
+                TEST_COMMAND="printf 'a\na\nb\n' > /tmp/u.in; uniq -c /tmp/u.in"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("2 a" "1 b")
                 ;;
             l2_cut_basic)
-                TEST_COMMAND=""
                 # cut -d: -f2: extract second colon-delimited field.
-                SHELL_AUTOSTART_CMD_DEFAULT="printf 'a:b:c\n' | cut -d: -f2"
+                TEST_COMMAND="printf 'a:b:c\n' | cut -d: -f2"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("b")
                 ;;
             l2_tr_basic)
-                TEST_COMMAND=""
                 # tr a-z A-Z: uppercase ASCII letters.
-                SHELL_AUTOSTART_CMD_DEFAULT="printf 'abc\n' | tr a-z A-Z"
+                TEST_COMMAND="printf 'abc\n' | tr a-z A-Z"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("ABC")
                 ;;
             l2_stat_basic)
-                TEST_COMMAND=""
                 # stat: display file metadata for a freshly-touched file.
-                SHELL_AUTOSTART_CMD_DEFAULT="touch /tmp/sf; stat /tmp/sf"
+                TEST_COMMAND="touch /tmp/sf; stat /tmp/sf"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("File:" "sf" "Size:")
                 ;;
             l2_du_basic)
-                TEST_COMMAND=""
                 # du -s: summarize disk usage for /etc.
-                SHELL_AUTOSTART_CMD_DEFAULT="du -s /etc"
+                TEST_COMMAND="du -s /etc"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("/etc")
                 ;;
             l2_find_basic)
-                TEST_COMMAND=""
                 # find -name: locate files by glob pattern.
-                SHELL_AUTOSTART_CMD_DEFAULT="mkdir -p /tmp/f; touch /tmp/f/a.txt; find /tmp/f -name '*.txt'"
+                TEST_COMMAND="mkdir -p /tmp/f; touch /tmp/f/a.txt; find /tmp/f -name '*.txt'"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 EXPECTED_CONTAINS=("/tmp/f/a.txt")
                 ;;
             l2_vt4_default)
@@ -728,14 +914,16 @@ harness_derive_marker_defaults() {
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-n'
                 ;;
             l2_cluuterm_raw_mode)
-                TEST_COMMAND=""
                 # MicroPython calls tcsetattr(raw) for its REPL on stdin.
                 # This reaches the legacy tty's LineDiscipline via TTY_CTL_LABEL,
                 # which calls set_mode() and emits the raw-mode marker.
                 # Use `mp -c ...` so the process exits and the shell can
                 # observe line_discipline: mode=canonical on restore, but we
                 # only require the initial raw-mode switch.
-                SHELL_AUTOSTART_CMD_DEFAULT="micropython"
+                TEST_COMMAND="micropython"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_vt_legacy_preserved)
                 TEST_COMMAND=""
@@ -773,8 +961,10 @@ harness_derive_marker_defaults() {
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-f5'
                 ;;
             l2_timeserver_pushmode_tick)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="timetick_probe"
+                TEST_COMMAND="timetick_probe"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_text_shell_input)
                 TEST_COMMAND=""
@@ -824,7 +1014,9 @@ harness_derive_marker_defaults() {
                 ;;
             legacy_p1)
                 TEST_COMMAND="minimal"
-                SHELL_AUTOSTART_CMD_DEFAULT="minimal"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             *) TEST_COMMAND="hello" ;;
         esac
