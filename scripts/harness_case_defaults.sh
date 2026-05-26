@@ -181,6 +181,15 @@ harness_derive_marker_defaults() {
                 RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
+            l2_ctrl_d_eof)
+                # ^D at bare prompt → line discipline VEOF → cluuterm DeliverEof
+                # → shell read(0) returns 0 → shell exits cleanly.
+                TEST_COMMAND=""
+                POST_SENDKEY_DEFAULT="ctrl-d"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
             l2_fg)
                 TEST_COMMAND="fg"
                 SHELL_AUTOSTART_CMD_DEFAULT="spawnbg sleepy"

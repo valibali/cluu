@@ -1109,6 +1109,14 @@ case "$MARKER_MODE" in
             "[USER] shell: ready"
         )
         ;;
+    l2_ctrl_d_eof)
+        # ^D at prompt → line discipline VEOF → DeliverEof → shell EOF + exit.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "shell: stdin EOF, exiting"
+        )
+        ;;
     l2_fg)
         required_markers=(
             "TSC calibrated"

@@ -221,7 +221,7 @@ fn run() -> Result<()> {
                 reap_done_jobs(stdout, &mut command_context);
             }
         } else if n == 0 {
-            // EOF on stdin (pts owner / tty service gone). Exit cleanly.
+            let _ = debug_print("shell: stdin EOF, exiting");
             return Ok(());
         } else {
             // Negative = errno set. Yield and retry — typically transient.

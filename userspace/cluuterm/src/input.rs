@@ -47,6 +47,11 @@ pub fn handle(term: &mut Cluuterm, msg: &Message, _payload: &[u8]) {
             term.apply_service_actions(actions);
         }
     } else if ascii != 0 {
+        let mut logbuf = *b"cluuterm: input ascii=00";
+        let hex = b"0123456789abcdef";
+        logbuf[22] = hex[(ascii >> 4) as usize];
+        logbuf[23] = hex[(ascii & 0xF) as usize];
+        let _ = debug_print(unsafe { core::str::from_utf8_unchecked(&logbuf) });
         let actions = term.pts.on_input_byte(ascii);
         term.apply_service_actions(actions);
     }

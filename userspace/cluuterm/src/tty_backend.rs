@@ -95,13 +95,23 @@ impl Pts {
     /// Send `PTS_READ_DELIVER_LABEL` (112) to VFS carrying `bytes`.
     ///
     /// `words[0]` is clobbered by `send_msg_with_payload` with payload_len.
-    /// `pts_id` lives in `words[1]`.
+    /// `pts_id` lives in `words[1]`. `words[2]` is 1 iff this delivery
+    /// signals EOF (caller should grant 0 bytes to the parked reader);
+    /// otherwise an empty `bytes` means "no cooked bytes yet, re-park".
     fn send_deliver(&self, vfs_ep: usize, bytes: &[u8]) {
+        self.send_deliver_inner(vfs_ep, bytes, 0);
+    }
+
+    fn send_deliver_eof(&self, vfs_ep: usize) {
+        self.send_deliver_inner(vfs_ep, &[], 1);
+    }
+
+    fn send_deliver_inner(&self, vfs_ep: usize, bytes: &[u8], eof: usize) {
         use cluu_wire::pts::PTS_READ_DELIVER_LABEL;
         let msg = Message::new(
             PTS_READ_DELIVER_LABEL,
-            [0, self.id as usize, 0, 0, 0, 0],
-            2,
+            [0, self.id as usize, eof, 0, 0, 0],
+            3,
         );
         let _ = libcluu::ipc::send_msg_with_payload(vfs_ep, &msg, bytes);
     }
@@ -142,7 +152,7 @@ impl Pts {
             return;
         }
         if self.eof_pending {
-            self.send_deliver(vfs_ep, &[]);
+            self.send_deliver_eof(vfs_ep);
             self.eof_pending = false;
             return;
         }
@@ -713,7 +723,7 @@ impl Cluuterm {
                 ServiceAction::DeliverEof => {
                     if self.pts.drain_requested.take().is_some() {
                         let vfs_ep = self.vfs_ep;
-                        self.pts.send_deliver(vfs_ep, &[]);
+                        self.pts.send_deliver_eof(vfs_ep);
                     } else {
                         self.pts.eof_pending = true;
                     }

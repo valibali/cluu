@@ -1203,6 +1203,7 @@ impl VfsServer {
     /// parked `reply_token` to unblock the shell's `read(2)`.
     fn handle_pts_read_deliver(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
         let pts_id = msg.words[1] as u32;
+        let eof = msg.words[2] != 0;
 
         let parked = match self
             .pending_pts_reads
@@ -1223,15 +1224,26 @@ impl VfsServer {
 
         let mut reply_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
 
-        if data.is_empty() {
-            // Cluuterm sent zero bytes — no cooked bytes available yet.
-            // Re-park and do nothing; cluuterm will send another
-            // PTS_READ_DELIVER when bytes arrive (via DeliverBytes path).
+        if data.is_empty() && !eof {
+            // Cluuterm sent zero bytes without EOF — no cooked bytes available
+            // yet. Re-park; cluuterm will send another PTS_READ_DELIVER when
+            // bytes arrive (via DeliverBytes path).
             self.pending_pts_reads
                 .entry(pts_id)
                 .or_insert_with(VecDeque::new)
                 .push_front(parked);
             return Ok(());
+        }
+
+        if data.is_empty() {
+            // EOF: reply with 0-byte grant so the parked reader unblocks
+            // with read() == 0.
+            reply_msg.words[0] = 0;
+            let _ = debug_print(&format!(
+                "vfs: pts_read_deliver pts_id={} EOF (0 bytes)",
+                pts_id
+            ));
+            return ipc::reply(parked.reply_token, &reply_msg, IpcFlags::empty());
         }
 
         self.grant_data_to_caller(
