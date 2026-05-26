@@ -62,27 +62,16 @@ fi
 . "$ROOT_DIR/scripts/harness_case_defaults.sh"
 
 # Extract the effective values of the build-affecting env vars from an
-# assignments string like 'MARKER_MODE=foo CLUU_SHELL_AUTOSTART_CMD="spawn x"'.
-# The two things that actually flow into build artifacts are:
-#   - CLUU_SHELL_AUTOSTART_CMD: option_env! in procmgr (rerun-if-env-changed)
-#     — note that harness_run.sh also derives a default from MARKER_MODE when
-#     the caller didn't set one explicitly, so we run the same derivation here
-#   - CLUU_BOOTBOOT_ENV:        baked into target/bootboot_config at build time
-# Prints two lines: the effective value of each var (empty if unset).
+# assignments string like 'MARKER_MODE=foo CLUU_BOOTBOOT_ENV=...'.
+# Only CLUU_BOOTBOOT_ENV flows into build artifacts (target/bootboot_config).
+# Prints one line: the effective value (empty if unset).
 build_signature() {
     local assignments="$1"
     (
         set +u
-        unset CLUU_SHELL_AUTOSTART_CMD CLUU_BOOTBOOT_ENV
+        unset CLUU_BOOTBOOT_ENV
         eval "$assignments"
-        # Run the same MARKER_MODE default-derivation that harness_run.sh does
-        # so we compute the *effective* CLUU_SHELL_AUTOSTART_CMD.
-        TEST_COMMAND="__AUTO__"
-        harness_derive_marker_defaults
-        local effective_autostart="${CLUU_SHELL_AUTOSTART_CMD:-$SHELL_AUTOSTART_CMD_DEFAULT}"
-        printf '%s\n%s\n' \
-            "$effective_autostart" \
-            "${CLUU_BOOTBOOT_ENV-}"
+        printf '%s\n' "${CLUU_BOOTBOOT_ENV-}"
     )
 }
 
@@ -97,9 +86,6 @@ run_case() {
     local env_assignments="$3"
     local effective_mode="$build_mode"
 
-    # Clear stale compile-time autostart from previous cases
-    unset CLUU_SHELL_AUTOSTART_CMD
-
     if [[ "$FORCE_NO_BUILD" -eq 1 ]]; then
         effective_mode="no_build"
     elif [[ "$effective_mode" == "full" && "$BUILT_ONCE" -eq 1 ]]; then
@@ -107,7 +93,7 @@ run_case() {
         sig="$(build_signature "$env_assignments")"
         if [[ "$sig" == "$LAST_BUILD_SIG" ]]; then
             effective_mode="no_build"
-            echo "    (reusing last build — CLUU_SHELL_AUTOSTART_CMD / CLUU_BOOTBOOT_ENV unchanged)"
+            echo "    (reusing last build — CLUU_BOOTBOOT_ENV unchanged)"
         fi
     fi
 

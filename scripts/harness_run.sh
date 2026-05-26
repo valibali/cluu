@@ -13,9 +13,6 @@ IMG="${IMG:-$PROJECT_ROOT/target/cluu.img}"
 USER_DISK="${USER_DISK:-$PROJECT_ROOT/target/userdisk.img}"
 QEMU_GDB="${QEMU_GDB:-0}"
 QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
-# Preferred autostart command env name; HARNESS_AUTOSTART_CMD kept as compatibility alias.
-HARNESS_AUTOEXEC_CMD="${HARNESS_AUTOEXEC_CMD:-${HARNESS_AUTOSTART_CMD:-}}"
-HARNESS_AUTOEXEC_CMD_FILE="${HARNESS_AUTOEXEC_CMD_FILE:-}"
 # Extra shell keystroke injection path (one command per line).
 KEYSTROKE_COMMANDS="${KEYSTROKE_COMMANDS:-}"
 KEYSTROKE_COMMANDS_FILE="${KEYSTROKE_COMMANDS_FILE:-}"
@@ -67,41 +64,6 @@ EXPECT_FAULT="${EXPECT_FAULT:-0}"
 . "$SCRIPT_DIR/harness_case_defaults.sh"
 harness_derive_marker_defaults
 
-# Debug/testing default: when running ad-hoc mode (MARKER_MODE=none) without an explicit
-# typed command, autostart MicroPython from procmgr and avoid injecting spawn hello.
-if [ "$MARKER_MODE" = "none" ] \
-    && [ "$TEST_COMMAND_WAS_UNSET" = "1" ] \
-    && [ -z "$HARNESS_AUTOEXEC_CMD" ]; then
-    HARNESS_AUTOEXEC_CMD="micropython"
-    TEST_COMMAND=""
-fi
-
-# Optional autostart command from file: first non-empty, non-comment line.
-if [ -n "$HARNESS_AUTOEXEC_CMD_FILE" ] && [ -z "$HARNESS_AUTOEXEC_CMD" ]; then
-    if [ ! -f "$HARNESS_AUTOEXEC_CMD_FILE" ]; then
-        echo "ERROR: HARNESS_AUTOEXEC_CMD_FILE not found: $HARNESS_AUTOEXEC_CMD_FILE"
-        exit 1
-    fi
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%$'\r'}"
-        [ -z "$line" ] && continue
-        case "$line" in
-            \#*) continue ;;
-        esac
-        HARNESS_AUTOEXEC_CMD="$line"
-        break
-    done < "$HARNESS_AUTOEXEC_CMD_FILE"
-fi
-
-if [ -z "${CLUU_SHELL_AUTOSTART_CMD:-}" ]; then
-    if [ -n "$SHELL_AUTOSTART_CMD_DEFAULT" ]; then
-        export CLUU_SHELL_AUTOSTART_CMD="$SHELL_AUTOSTART_CMD_DEFAULT"
-    elif [ -n "$HARNESS_AUTOEXEC_CMD" ]; then
-        export CLUU_SHELL_AUTOSTART_CMD="$HARNESS_AUTOEXEC_CMD"
-    else
-        export CLUU_SHELL_AUTOSTART_CMD=""
-    fi
-fi
 if [ -n "$POST_SENDKEY_DEFAULT" ] && [ -z "$POST_SENDKEY" ]; then
     POST_SENDKEY="$POST_SENDKEY_DEFAULT"
 fi

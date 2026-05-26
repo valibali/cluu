@@ -203,7 +203,6 @@ const SERVICE_STACK_TOP: usize = SERVICE_STACK_BASE + SERVICE_STACK_SIZE;
 const STACK_FLAGS: usize = 0x03; // read + write
                                  // PAGE_SIZE is imported from libcluu::*
 const SERVICE_PATH: &str = "/var/images/vt/bin/shell";
-use libcluu::build_env::SHELL_AUTOSTART_CMD;
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
 /// Unified spawn verb (spec 1). Defined in cluu_wire::spawn — re-exported here.
@@ -294,7 +293,6 @@ struct ProcessManager {
     container_instances: BTreeMap<u64, ContainerInstance>,
     container_children: BTreeMap<u64, Vec<u64>>, // parent_cid -> child cids
     autostart_done: bool,
-    auto_login_done: bool,
     envelopes: Vec<envelopes::Envelope>,
     user_records: BTreeMap<String, UserRecord>,
     session_table: BTreeMap<u64, SessionEntry>,
@@ -381,7 +379,6 @@ impl ProcessManager {
             container_instances: BTreeMap::new(),
             container_children: BTreeMap::new(),
             autostart_done: false,
-            auto_login_done: false,
             envelopes: Vec::new(),
             user_records: BTreeMap::new(),
             session_table: BTreeMap::new(),
@@ -1227,105 +1224,6 @@ impl ProcessManager {
         ));
     }
 
-    fn try_auto_login(&mut self) {
-        if self.auto_login_done { return; }
-        if SHELL_AUTOSTART_CMD.is_empty() {
-            // Gate diagnostic: production builds (no CLUU_SHELL_AUTOSTART_CMD)
-            // never auto-login; harness builds bake a command and do.
-            let _ = debug_print("procmgr: autologin skipped (no autostart cmd)");
-            self.auto_login_done = true;
-            return;
-        }
-        if self.user_records.is_empty() { return; }
-        if self.tty_endpoints[0] == 0 { return; }
-
-        self.auto_login_done = true;
-        let _ = debug_print("procmgr: auto-login root on VT:0");
-
-        let (profile, profile_name) = match self.user_records.get("root") {
-            Some(r) => (r.profile, r.profile_name.clone()),
-            None => return,
-        };
-
-        // Resolve envelope and build env. Boot cannot proceed without an
-        // envelope for root.
-        let envelope = match envelopes::lookup_envelope(&self.envelopes, &profile_name) {
-            Some(e) => e.clone(),
-            None => {
-                panic!(
-                    "procmgr: auto-login fail: no envelope for profile '{}'",
-                    profile_name
-                );
-            }
-        };
-        let view_mounts = Self::build_view_from_envelope(&envelope);
-        let resolved_env = envelopes::resolve_env(&envelope, "root");
-        let (user_env, user_envc) = build_envelope_env_payload(&resolved_env);
-
-        let spawn_seq = self.next_spawn_seq();
-        let spawn_start = self.clock_sample();
-        let (shell_argv_payload, shell_argc) = build_shell_argv_payload(SHELL_AUTOSTART_CMD);
-
-        match self.spawn_service_with_env(SERVICE_PATH, DEFAULT_PRIORITY, &shell_argv_payload, shell_argc, &user_env, user_envc, 1, spawn_seq, spawn_start, &[], profile, 0, 0, &[], None, &[], &[], THREAD_CREATE_START_SUSPENDED) {
-            Ok((thread_token, _cookie, pid, stdin_send)) => {
-                let session_cid = self.next_container_id();
-                let shell_cid = self.next_container_id();
-                self.pid_to_container_id.insert(pid, shell_cid);
-                self.container_owner_pids.insert(pid);
-                // parent_container_id=0, is_identity_switch=false: procmgr is the
-                // authoritative spawner for auto-login shell; session_cid is a
-                // just-allocated local ID, not yet a container with a recorded view.
-                self.install_view_and_run(thread_token, &view_mounts, profile, shell_cid, 0, false);
-                self.pid_to_view.insert(pid, view_mounts);
-                let inst_name = self.next_instance_name(session_cid, "shell");
-                self.container_instances.insert(shell_cid, ContainerInstance {
-                    name: String::from("shell"),
-                    instance_name: inst_name,
-                    session_id: session_cid,
-                    container_id: shell_cid,
-                    parent_container_id: session_cid,
-                    pid,
-                    image_path: String::from(SERVICE_PATH),
-                    mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
-                    restart_policy: RestartPolicy::Never,
-                    restart_count: 0,
-                    last_exit_code: 0,
-                    restart_attempt_start: 0,
-                    quota: QuotaSpec::default(),
-                    live_processes: 0,
-                });
-                self.container_children.entry(session_cid)
-                    .or_insert_with(Vec::new).push(shell_cid);
-                self.session_table.insert(session_cid, SessionEntry {
-                    container_id: session_cid,
-                    shell_cid,
-                    pid,
-                    username: String::from("root"),
-                    profile, vt_index: 0,
-                    stdin_endpoint: stdin_send,
-                });
-                self.vt_to_session[0] = session_cid;
-                // Wire shell stdin to tty:0 via TTY_REGISTER so tty transitions to Terminal.
-                let tty_ep = self.tty_endpoints[0];
-                if tty_ep != 0 && stdin_send != 0 {
-                    let reg_msg = Message::new(
-                        libcluu::ipc::TTY_REGISTER_LABEL,
-                        [stdin_send, 0, 0, 0, 0, 0],
-                        1,
-                    );
-                    let _ = ipc::send(tty_ep, &reg_msg, IpcFlags::empty());
-                }
-                let _ = debug_print(&format!(
-                    "procmgr: auto-login session_cid={} shell_cid={} pid={}",
-                    session_cid, shell_cid, pid
-                ));
-            }
-            Err(e) => {
-                let _ = debug_print(&format!("procmgr: auto-login failed: {:?}", e));
-            }
-        }
-    }
-
     fn autostart_container(&mut self, image_name: &str, svc: &libcluu::toml::TomlTable) -> Result<()> {
         // Read manifest
         let manifest_path = format!("/var/images/{}/manifest.toml", image_name);
@@ -2047,7 +1945,6 @@ impl ProcessManager {
                     self.run_autostart();
                     self.load_envelopes();
                     self.parse_users_toml();
-                    self.try_auto_login();
                 } else if name == "main" {
                     // Use service name to determine VT index (e.g., "tty:0" → 0).
                     if let Some(idx) = service_name.strip_prefix("tty:").and_then(|s| s.parse::<usize>().ok()) {
@@ -2061,7 +1958,6 @@ impl ProcessManager {
                             if session_cid != 0 {
                                 self.reattach_session_to_vt(idx, session_cid);
                             }
-                            self.try_auto_login();
                         }
                     }
                 }

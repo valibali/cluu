@@ -1,19 +1,16 @@
 # Shared MARKER_MODE → default derivation for the harness scripts.
 #
-# This file is sourced by both scripts/harness_run.sh (which actually uses the
-# derived TEST_COMMAND / SHELL_AUTOSTART_CMD_DEFAULT / POST_SENDKEY_DEFAULT) and
-# scripts/harness_suite.sh (which uses SHELL_AUTOSTART_CMD_DEFAULT to decide
-# whether a case can skip its rebuild).
+# This file is sourced by scripts/harness_run.sh.
 #
-# The function sets three variables in the caller's shell:
+# The function sets these variables in the caller's shell:
 #   TEST_COMMAND                 — auto-filled if the caller still holds "__AUTO__"
-#   SHELL_AUTOSTART_CMD_DEFAULT  — fallback for CLUU_SHELL_AUTOSTART_CMD
 #   POST_SENDKEY_DEFAULT         — fallback for POST_SENDKEY
+#   SENDKEY_SEQUENCE_DEFAULT     — fallback for SENDKEY_SEQUENCE (login creds)
+#   SENDKEY_SEQUENCE_NOWAIT_DEFAULT, RUN_WAIT_DEFAULT
 #
 # Inputs: MARKER_MODE, TEST_COMMAND.
 
 harness_derive_marker_defaults() {
-    SHELL_AUTOSTART_CMD_DEFAULT=""
     POST_SENDKEY_DEFAULT=""
     SENDKEY_SEQUENCE_NOWAIT_DEFAULT="0"
     RUN_WAIT_DEFAULT=""
@@ -252,15 +249,21 @@ harness_derive_marker_defaults() {
                 ;;
             l2_jobchurn)
                 TEST_COMMAND="jobchurn 3"
-                SHELL_AUTOSTART_CMD_DEFAULT=""
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_jobchurn_heavy)
                 TEST_COMMAND="jobchurn 8"
-                SHELL_AUTOSTART_CMD_DEFAULT=""
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_jobmix)
                 TEST_COMMAND="jobmix"
-                SHELL_AUTOSTART_CMD_DEFAULT=""
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_mkdir)
                 TEST_COMMAND="mkdir /tmp/a; mkdir -p /tmp/b/c/d"
@@ -477,15 +480,21 @@ harness_derive_marker_defaults() {
                 ;;
             perf_benchprobe)
                 TEST_COMMAND="benchprobe"
-                SHELL_AUTOSTART_CMD_DEFAULT=""
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             b_spawn_perf)
                 TEST_COMMAND="benchprobe spawnonly"
-                SHELL_AUTOSTART_CMD_DEFAULT=""
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             b_spawn_warm)
                 TEST_COMMAND="benchprobe spawnonly"
-                SHELL_AUTOSTART_CMD_DEFAULT=""
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             c_futex)
                 TEST_COMMAND="futexprobe"
@@ -673,7 +682,9 @@ harness_derive_marker_defaults() {
                 ;;
             hr7_su_equal)
                 TEST_COMMAND="sutest equal"
-                SHELL_AUTOSTART_CMD_DEFAULT=""
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             m5_fairness) TEST_COMMAND="repeat 8 hello" ;;
             l2_cat_basic)

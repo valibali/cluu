@@ -52,9 +52,6 @@ pub struct TtyContext {
     requested_procmgr: bool,
     /// Whether we've already shown/suppressed the login prompt for this VT.
     shell_spawn_requested: bool,
-    /// VT:0 at boot expects auto-login via TTY_REGISTER from procmgr.
-    /// Suppresses login prompt until auto-login arrives or session dies.
-    auto_login_pending: bool,
     pending_console_output: Vec<u8>,
     console_credit: usize,
     /// Queue of pending read requests waiting for input data.
@@ -114,7 +111,6 @@ impl TtyContext {
             procmgr_spawn: 0,
             requested_procmgr: false,
             shell_spawn_requested: false,
-            auto_login_pending: instance_id == 0 && libcluu::build_env::HARNESS_AUTOLOGIN_ARMED,
             pending_console_output: Vec::new(),
             console_credit: CONSOLE_CREDIT_WINDOW,
             pending_reads: VecDeque::new(),
@@ -162,11 +158,6 @@ impl TtyContext {
         self.shell_spawn_requested = true;
         // If auto-login already wired a shell, don't override Terminal mode.
         if self.mode == TtyMode::Terminal {
-            return;
-        }
-        // VT:0 at boot expects auto-login from procmgr — don't show a login
-        // prompt that would race with the incoming TTY_REGISTER.
-        if self.auto_login_pending {
             return;
         }
         self.mode = TtyMode::Login(LoginState::Username);
@@ -384,21 +375,19 @@ impl TtyContext {
         }
     }
 
-    /// Enter Terminal mode (called on auto-login TTY_REGISTER; Path A — push wiring dropped).
+    /// Enter Terminal mode (called on TTY_REGISTER from session reattach; Path A — push wiring dropped).
     pub fn enter_terminal_mode(&mut self) {
-        self.auto_login_pending = false;
         if self.mode != TtyMode::Terminal {
             self.mode = TtyMode::Terminal;
             self.shell_spawn_requested = true;
             let _ = debug_print(&format!(
-                "tty:{}: auto-login, terminal mode (Path A)", self.instance_id
+                "tty:{}: TTY_REGISTER, terminal mode (Path A)", self.instance_id
             ));
         }
     }
 
     pub fn handle_session_death(&mut self) {
         let _ = debug_print(&format!("tty:{}: session died, returning to login", self.instance_id));
-        self.auto_login_pending = false;
         // Show login prompt and mark as requested so maybe_show_login_prompt
         // doesn't fire a duplicate on the next loop iteration.
         self.shell_spawn_requested = true;
