@@ -49,7 +49,6 @@ pub struct SpawnResult {
     pub notify_endpoint: usize,
     pub status_word: usize,
     pub pid: usize,
-    pub stdin_endpoint: usize,
 }
 
 /// UE17: bare-command PATH resolution + dispatch, plus path-with-slash
@@ -178,7 +177,6 @@ pub(crate) fn spawn_and_wait(
                 procmgr_ep,
                 context.tty_stdout,
                 spawn.notify_endpoint,
-                spawn.stdin_endpoint,
                 spawn.pid,
                 stdout,
                 fg_mode,
@@ -303,7 +301,6 @@ pub fn spawn_process_with_argv_and_redirs(
         notify_endpoint,
         status_word: 0,
         pid: reply.pid as usize,
-        stdin_endpoint: 0,
     })
 }
 
@@ -311,16 +308,10 @@ pub(crate) fn wait_for_exit_or_sigint(
     procmgr_endpoint: usize,
     tty_endpoint: usize,
     notify_endpoint: usize,
-    child_stdin_endpoint: usize,
     child_pid: usize,
     stdout: usize,
     mode: ForegroundMode,
 ) -> Result<()> {
-    if child_stdin_endpoint == 0 {
-        crate::write_stdout(b"spawn: invalid child stdin route\n");
-        return Err(Error::InvalidState);
-    }
-
     let mut ctrl_c_notify_endpoint = 0usize;
     let mut ctrl_c_flags = TTY_FG_FLAG_FORWARD_CTRL_C;
     if mode == ForegroundMode::SignalOnCtrlC {
