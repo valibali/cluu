@@ -70,7 +70,7 @@ impl MsgHandler for Spawn {
         };
 
         #[cfg(not(feature = "host-test"))]
-        let (thread_tok, cookie) = match crate::elf_spawn::real_spawn_user_process(state, pid, &req) {
+        let (thread_tok, cookie) = match crate::elf_spawn::real_spawn_user_process(state, pid, &req, msg.sender_tid) {
             Ok(t) => t,
             Err(e) => {
                 let _ = libcluu::debug_print(&alloc::format!(
@@ -120,6 +120,7 @@ mod tests {
                 fd: 0,
                 kind: FdKind::Pts,
                 cap_token: 1,
+                parent_rfd: 0,
             }],
         }
     }

@@ -309,16 +309,25 @@ let (stdin_cid, stdin_rfd, stdout_cid, stdout_rfd) = {
     ];
 
     // Translate FdInherit entries (cluu_wire) to FdInheritEntry (procmgr-common).
-    // cap_token = VFS client endpoint; session-procmgr derives a narrowed token
-    // from it and writes it into the child's ProcessInfo TOKEN_STDIN/STDOUT/STDERR.
+    // cap_token = VFS client endpoint (informational); parent_rfd = VFS-side
+    // remote fd of the parent (this process). session-procmgr uses sender_tid
+    // as parent_cid and parent_rfd here when calling VFS_DERIVE_CHILD_FD to
+    // mint the child's VFS-backed fd.
     let fd_inherit_entries: alloc::vec::Vec<FdInheritEntry> = fd_inherit
         .iter()
         .map(|fi| {
-            let cap = match &fi.source {
-                FdSource::VfsFd { vfs_client_id, .. } => *vfs_client_id,
-                _ => 0,
+            let (cap, rfd) = match &fi.source {
+                FdSource::VfsFd { vfs_client_id, vfs_remote_fd } => {
+                    (*vfs_client_id, *vfs_remote_fd)
+                }
+                _ => (0, 0),
             };
-            FdInheritEntry { fd: fi.child_fd as i32, kind: FdKind::Pts, cap_token: cap }
+            FdInheritEntry {
+                fd: fi.child_fd as i32,
+                kind: FdKind::Pts,
+                cap_token: cap,
+                parent_rfd: rfd,
+            }
         })
         .collect();
 

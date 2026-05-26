@@ -12,15 +12,16 @@ use core::mem::size_of;
 
 use libcluu::boot::{
     process_info, CWD_MAX, PARAM_ARGC, PARAM_ARGV_OFFSET, PARAM_CWD_LEN, PARAM_CWD_OFFSET,
-    PARAM_ENVC, PARAM_ENV_OFFSET, PROCESS_INFO_ADDR, TOKEN_CLOCK, TOKEN_IPC, TOKEN_REGISTRY,
-    TOKEN_SELF, TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
-    TOKEN_VFS_VIEW_MGR, ProcessInfo,
+    PARAM_ENVC, PARAM_ENV_OFFSET, PARAM_FD_VFS_LEN, PARAM_FD_VFS_OFFSET, PROCESS_INFO_ADDR,
+    TOKEN_CLOCK, TOKEN_IPC, TOKEN_REGISTRY, TOKEN_SELF, TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN,
+    TOKEN_STDLOG, TOKEN_STDOUT, TOKEN_VFS_VIEW_MGR, ProcessInfo,
 };
 use libcluu::fs::VfsClient;
 use libcluu::registry;
 use libcluu::rights::Rights;
 use libcluu::cap::CapProfile;
-use libcluu::ipc::{send_msg_with_payload, VFS_SET_VIEW_LABEL};
+use libcluu::ipc::{send_msg_with_payload, VFS_DERIVE_CHILD_FD_LABEL, VFS_SET_VIEW_LABEL};
+use libcluu::types::IpcFlags;
 use libcluu::syscall::{
     space_create, space_map, space_map_range, thread_create, thread_get_id, thread_resume,
     token_derive, THREAD_CREATE_START_SUSPENDED,
@@ -48,6 +49,7 @@ pub enum RealSpawnError {
     TokenDerive,
     InfoPageBuild,
     InfoPageMap,
+    VfsDeriveChildFd,
 }
 
 /// Perform a real per-session ELF spawn with full ProcessInfo handoff.
@@ -68,6 +70,7 @@ pub fn real_spawn_user_process(
     state: &SessionState,
     pid: i32,
     req: &SpawnReq,
+    parent_tid: usize,
 ) -> Result<(u64, u64), RealSpawnError> {
     // ── 1. Create child address space ──────────────────────────────────────
     let info = process_info();
@@ -114,7 +117,20 @@ pub fn real_spawn_user_process(
     .map_err(|_| RealSpawnError::StackMap)?;
     let stack_top = CHILD_STACK_BASE + CHILD_STACK_SIZE;
 
-    // ── 4. Derive child capability tokens ──────────────────────────────────
+    // ── 4. Create child thread suspended (need child_tid before fd derives) ──
+    // child_tid is VFS's new client_id for the child; VFS authenticates by
+    // kernel-supplied sender_tid on the child's first request.
+    let thread_tok = thread_create(
+        child_space,
+        entry,
+        stack_top,
+        0,
+        THREAD_CREATE_START_SUSPENDED,
+    )
+    .map_err(|_| RealSpawnError::ThreadCreate)?;
+    let child_tid = thread_get_id(thread_tok).map_err(|_| RealSpawnError::ThreadCreate)?;
+
+    // ── 5. Derive child capability tokens ──────────────────────────────────
     let _ = libcluu::debug_print(&alloc::format!(
         "session-procmgr: tokens IPC={} SELF={} SPACE={} REG={} CLK={}",
         info.tokens[TOKEN_IPC], info.tokens[TOKEN_SELF], info.tokens[TOKEN_SPACE],
@@ -169,7 +185,7 @@ pub fn real_spawn_user_process(
     // ("timeserver:main") by clients that need pushmode subscriptions.
     let child_clock = state.timeserver_cap as usize;
 
-    // TOKEN_STDIN/STDOUT/STDERR/STDLOG: derive from fd_inherit entries
+    // ── 6. Derive fd tokens; VFS-backed fds go through VFS_DERIVE_CHILD_FD ──
     // stdin needs IPC_RECV, stdout/stderr/stdlog need IPC_SEND|IPC_CALL
     let stdin_rights = (Rights::IPC_SEND | Rights::IPC_RECV).bits() as usize;
     let stdout_rights = (Rights::IPC_SEND | Rights::IPC_CALL).bits() as usize;
@@ -178,30 +194,69 @@ pub fn real_spawn_user_process(
     let mut child_stdout: usize = 0;
     let mut child_stderr: usize = 0;
     let mut child_stdlog: usize = 0;
+    // Per-fd VFS metadata: (child_client_id, child_remote_fd); zero = not VFS-backed.
+    let mut fd_vfs_meta: [(usize, usize); 4] = [(0, 0); 4];
 
     for entry in &req.fd_inherit {
         let raw = entry.cap_token as usize;
         if raw == 0 {
             continue;
         }
-        match entry.fd {
-            0 => {
-                child_stdin =
-                    token_derive(raw, stdin_rights, u64::MAX).unwrap_or(0);
+        let fd = entry.fd as usize;
+        let rights = if fd == 0 { stdin_rights } else { stdout_rights };
+
+        if entry.parent_rfd != 0 && state.vfs_cap != 0 {
+            // VFS-backed fd: ask VFS to clone the parent's open file to child_tid.
+            // parent_tid is the kernel-authenticated sender_tid VFS uses as parent's cid.
+            match vfs_derive_child_fd(
+                state.vfs_cap as usize,
+                parent_tid,
+                entry.parent_rfd as usize,
+                rights,
+                child_tid,
+            ) {
+                Ok((derived_tok, child_cid, child_rfd)) => {
+                    let _ = libcluu::debug_print(&alloc::format!(
+                        "session-procmgr: vfs_derive_child_fd fd={} OK child_cid={} child_rfd={}",
+                        fd, child_cid, child_rfd,
+                    ));
+                    if fd < 4 {
+                        fd_vfs_meta[fd] = (child_cid, child_rfd);
+                    }
+                    match fd {
+                        0 => child_stdin = derived_tok,
+                        1 => child_stdout = derived_tok,
+                        2 => child_stderr = derived_tok,
+                        3 => child_stdlog = derived_tok,
+                        _ => {}
+                    }
+                }
+                Err(e) => {
+                    let _ = libcluu::debug_print(&alloc::format!(
+                        "session-procmgr: vfs_derive_child_fd FAILED fd={} parent_rfd={} err={:?}",
+                        fd, entry.parent_rfd, e,
+                    ));
+                    // Propagate: missing fd 0 → child FATALs per loud-fail rule.
+                    return Err(RealSpawnError::VfsDeriveChildFd);
+                }
             }
-            1 => {
-                child_stdout =
-                    token_derive(raw, stdout_rights, u64::MAX).unwrap_or(0);
+        } else {
+            // Legacy path: direct token_derive (pipes, tty endpoints, parent_rfd==0).
+            match fd {
+                0 => {
+                    child_stdin = token_derive(raw, stdin_rights, u64::MAX).unwrap_or(0);
+                }
+                1 => {
+                    child_stdout = token_derive(raw, stdout_rights, u64::MAX).unwrap_or(0);
+                }
+                2 => {
+                    child_stderr = token_derive(raw, stdout_rights, u64::MAX).unwrap_or(0);
+                }
+                3 => {
+                    child_stdlog = token_derive(raw, stdout_rights, u64::MAX).unwrap_or(0);
+                }
+                _ => {}
             }
-            2 => {
-                child_stderr =
-                    token_derive(raw, stdout_rights, u64::MAX).unwrap_or(0);
-            }
-            3 => {
-                child_stdlog =
-                    token_derive(raw, stdout_rights, u64::MAX).unwrap_or(0);
-            }
-            _ => {}
         }
     }
 
@@ -215,7 +270,7 @@ pub fn real_spawn_user_process(
 
     let cookie = (pid as u64) ^ 0xC0DE_0000;
 
-    // ── 5. Build ProcessInfo page ──────────────────────────────────────────
+    // ── 7. Build ProcessInfo page ──────────────────────────────────────────
     let mut tokens = [0usize; 17];
     tokens[TOKEN_STDIN] = child_stdin;
     tokens[TOKEN_STDOUT] = child_stdout;
@@ -256,6 +311,7 @@ pub fn real_spawn_user_process(
     //   [argv_data_offset ..]                  = argv payload
     //   [env_data_offset ..]                   = env payload
     //   [cwd_data_offset ..]                   = cwd bytes
+    //   [fd_vfs_trailer_offset ..+64]           = VFS fd trailer (4×16 bytes)
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
     let info_offset = PROCESS_INFO_ADDR - page_base;
     let info_size = size_of::<ProcessInfo>();
@@ -272,6 +328,12 @@ pub fn real_spawn_user_process(
     let env_fits = envc > 0 && !env_payload.is_empty() && env_end <= PAGE_SIZE;
     let cwd_fits = cwd_clamped_len > 0 && cwd_end <= PAGE_SIZE;
 
+    // VFS fd trailer: 4 × 16 bytes = 64 bytes, placed after cwd.
+    const FD_VFS_TRAILER_SIZE: usize = 64;
+    let fd_vfs_trailer_offset = cwd_data_offset + cwd_clamped_len;
+    let any_vfs = fd_vfs_meta.iter().any(|&(cid, _)| cid != 0);
+    let fd_vfs_trailer_fits = any_vfs && fd_vfs_trailer_offset + FD_VFS_TRAILER_SIZE <= PAGE_SIZE;
+
     let mut params = [0u64; 32];
     if argv_fits {
         params[PARAM_ARGC] = argc as u64;
@@ -284,6 +346,10 @@ pub fn real_spawn_user_process(
     if cwd_fits {
         params[PARAM_CWD_OFFSET] = cwd_data_offset as u64;
         params[PARAM_CWD_LEN] = cwd_clamped_len as u64;
+    }
+    if fd_vfs_trailer_fits {
+        params[PARAM_FD_VFS_OFFSET] = fd_vfs_trailer_offset as u64;
+        params[PARAM_FD_VFS_LEN] = FD_VFS_TRAILER_SIZE as u64;
     }
 
     let child_info = ProcessInfo {
@@ -314,8 +380,18 @@ pub fn real_spawn_user_process(
     if cwd_fits {
         page[cwd_data_offset..cwd_end].copy_from_slice(&cwd_bytes[..cwd_clamped_len]);
     }
+    // Write VFS fd trailer: each entry (vfs_client_id u64 LE, vfs_remote_fd u64 LE)
+    if fd_vfs_trailer_fits {
+        let trailer_end = fd_vfs_trailer_offset + FD_VFS_TRAILER_SIZE;
+        let dst = &mut page[fd_vfs_trailer_offset..trailer_end];
+        for (i, &(cid, rfd)) in fd_vfs_meta.iter().enumerate() {
+            let off = i * 16;
+            dst[off..off + 8].copy_from_slice(&(cid as u64).to_le_bytes());
+            dst[off + 8..off + 16].copy_from_slice(&(rfd as u64).to_le_bytes());
+        }
+    }
 
-    // ── 6. Map ProcessInfo page read-only into child ───────────────────────
+    // ── 8. Map ProcessInfo page read-only into child ───────────────────────
     space_map(
         child_space,
         page_base,
@@ -325,25 +401,11 @@ pub fn real_spawn_user_process(
     )
     .map_err(|_| RealSpawnError::InfoPageMap)?;
 
-    // ── 7. Create child thread at entry point (suspended) ─────────────────
-    let thread_tok = thread_create(
-        child_space,
-        entry,
-        stack_top,
-        0,
-        THREAD_CREATE_START_SUSPENDED,
-    )
-    .map_err(|_| RealSpawnError::ThreadCreate)?;
-
-    // ── 8. Install VFS view before resuming ───────────────────────────────
-    // Minimum mounts: "/" and "/dev" so the child can open /dev/pts.
-    // client_tid = 0 means "use sender_tid" which is this procmgr thread;
-    // that only works for self-view.  We need the child's thread token
-    // identity, but VFS_SET_VIEW with client_tid=thread_tok is the right
-    // path.  thread_tok is the kernel thread handle whose tid VFS will use.
+    // ── 9. Install VFS view before resuming ───────────────────────────────
+    // child_tid already computed above; reuse it here.
     let _ = libcluu::debug_print(&alloc::format!(
-        "session-procmgr: elf_spawn VFS_SET_VIEW vfs_cap={} thread_tok={}",
-        state.vfs_cap, thread_tok,
+        "session-procmgr: elf_spawn VFS_SET_VIEW vfs_cap={} child_tid={}",
+        state.vfs_cap, child_tid,
     ));
     if state.vfs_cap != 0 {
         // Use the same default user-profile mount set as root-procmgr so that
@@ -362,10 +424,9 @@ pub fn real_spawn_user_process(
             payload.extend_from_slice(src_bytes);
             payload.extend_from_slice(dst_bytes);
         }
-        let thread_tid = thread_get_id(thread_tok).map_err(|_| RealSpawnError::ThreadCreate)?;
         let mut msg = Message::new(VFS_SET_VIEW_LABEL, [0; 6], 6);
         msg.words[0] = payload.len();
-        msg.words[1] = thread_tid;
+        msg.words[1] = child_tid;
         msg.words[2] = default_mounts.len();
         msg.words[3] = CapProfile::USER.bits() as usize;
         msg.words[4] = 0usize; // container_id
@@ -391,4 +452,33 @@ pub fn real_spawn_user_process(
     thread_resume(thread_tok).map_err(|_| RealSpawnError::ThreadCreate)?;
 
     Ok((thread_tok as u64, cookie))
+}
+
+/// Ask VFS to clone the parent's open file into the child's client_id slot
+/// and mint a narrowed VFS-scoped token from VFS's own endpoint.
+///
+/// Wire format: see [`VFS_DERIVE_CHILD_FD_LABEL`] in libcluu::ipc.
+///
+/// Returns `(derived_token, child_client_id, child_remote_fd)`.
+fn vfs_derive_child_fd(
+    vfs_endpoint: usize,
+    parent_cid: usize,
+    parent_rfd: usize,
+    child_rights: usize,
+    child_tid: usize,
+) -> Result<(usize, usize, usize), RealSpawnError> {
+    if vfs_endpoint == 0 {
+        return Err(RealSpawnError::VfsDeriveChildFd);
+    }
+    let mut msg = Message::new(
+        VFS_DERIVE_CHILD_FD_LABEL,
+        [parent_cid, parent_rfd, child_rights, child_tid, 0, 0],
+        4,
+    );
+    libcluu::ipc::call(vfs_endpoint, &mut msg, IpcFlags::empty())
+        .map_err(|_| RealSpawnError::VfsDeriveChildFd)?;
+    if msg.words[0] != 0 {
+        return Err(RealSpawnError::VfsDeriveChildFd);
+    }
+    Ok((msg.words[1], msg.words[2], msg.words[3]))
 }

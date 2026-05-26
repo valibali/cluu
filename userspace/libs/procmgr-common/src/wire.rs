@@ -37,6 +37,10 @@ pub struct FdInheritEntry {
     pub fd: i32,
     pub kind: FdKind,
     pub cap_token: u64,
+    /// VFS-side remote fd of the *parent* (only meaningful for VfsFile/Pts).
+    /// session-procmgr passes this to VFS_DERIVE_CHILD_FD when minting the
+    /// child's VFS-backed fd.  0 for legacy (tty/pipe) entries.
+    pub parent_rfd: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,7 +100,7 @@ mod tests {
             argv: vec!["ls".into(), "-l".into()],
             envp: vec![("PATH".into(), "/bin".into())],
             cwd: "/".into(),
-            fd_inherit: vec![FdInheritEntry { fd: 0, kind: FdKind::Pts, cap_token: 42 }],
+            fd_inherit: vec![FdInheritEntry { fd: 0, kind: FdKind::Pts, cap_token: 42, parent_rfd: 4 }],
         };
         let bytes = to_allocvec(&req).unwrap();
         let back: SpawnReq = from_bytes(&bytes).unwrap();
