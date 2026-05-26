@@ -19,7 +19,13 @@ use libcluu::boot::{
 use libcluu::fs::VfsClient;
 use libcluu::registry;
 use libcluu::rights::Rights;
-use libcluu::syscall::{space_create, space_map, space_map_range, thread_create, token_derive};
+use libcluu::cap::CapProfile;
+use libcluu::ipc::{send_msg_with_payload, VFS_SET_VIEW_LABEL};
+use libcluu::syscall::{
+    space_create, space_map, space_map_range, thread_create, thread_resume, token_derive,
+    THREAD_CREATE_START_SUSPENDED,
+};
+use libcluu::types::Message;
 use procmgr_common::wire::SpawnReq;
 
 use crate::dispatch::SessionState;
@@ -318,9 +324,67 @@ pub fn real_spawn_user_process(
     )
     .map_err(|_| RealSpawnError::InfoPageMap)?;
 
-    // ── 7. Create child thread at entry point ──────────────────────────────
-    let thread_tok = thread_create(child_space, entry, stack_top, 0, 0)
-        .map_err(|_| RealSpawnError::ThreadCreate)?;
+    // ── 7. Create child thread at entry point (suspended) ─────────────────
+    let thread_tok = thread_create(
+        child_space,
+        entry,
+        stack_top,
+        0,
+        THREAD_CREATE_START_SUSPENDED,
+    )
+    .map_err(|_| RealSpawnError::ThreadCreate)?;
+
+    // ── 8. Install VFS view before resuming ───────────────────────────────
+    // Minimum mounts: "/" and "/dev" so the child can open /dev/pts.
+    // client_tid = 0 means "use sender_tid" which is this procmgr thread;
+    // that only works for self-view.  We need the child's thread token
+    // identity, but VFS_SET_VIEW with client_tid=thread_tok is the right
+    // path.  thread_tok is the kernel thread handle whose tid VFS will use.
+    let _ = libcluu::debug_print(&alloc::format!(
+        "session-procmgr: elf_spawn VFS_SET_VIEW vfs_cap={} thread_tok={}",
+        state.vfs_cap, thread_tok,
+    ));
+    if state.vfs_cap != 0 {
+        let mounts: &[(&str, &str, bool, u64)] = &[
+            ("/", "/", false, 0u64),
+            ("/dev", "/dev", false, 0u64),
+        ];
+        let mut payload = alloc::vec::Vec::new();
+        for (src, dst, writable, memfs_cid) in mounts {
+            let src_bytes = src.as_bytes();
+            let dst_bytes = dst.as_bytes();
+            payload.extend_from_slice(&(src_bytes.len() as u16).to_le_bytes());
+            payload.extend_from_slice(&(dst_bytes.len() as u16).to_le_bytes());
+            payload.push(if *writable { 1u8 } else { 0u8 });
+            payload.extend_from_slice(&memfs_cid.to_le_bytes());
+            payload.extend_from_slice(src_bytes);
+            payload.extend_from_slice(dst_bytes);
+        }
+        let mut msg = Message::new(VFS_SET_VIEW_LABEL, [0; 6], 5);
+        msg.words[0] = payload.len();
+        msg.words[1] = thread_tok; // target client_tid
+        msg.words[2] = mounts.len();
+        msg.words[3] = CapProfile::USER.bits() as usize;
+        msg.words[4] = 0usize; // container_id
+        match send_msg_with_payload(state.vfs_cap as usize, &msg, &payload) {
+            Ok(()) => {
+                let _ = libcluu::debug_print("session-procmgr: VFS_SET_VIEW OK");
+            }
+            Err(e) => {
+                let _ = libcluu::debug_print(&alloc::format!(
+                    "session-procmgr: VFS_SET_VIEW FAILED {:?} — resuming anyway",
+                    e
+                ));
+            }
+        }
+    }
+
+    // ── 9. Resume child ────────────────────────────────────────────────────
+    let _ = libcluu::debug_print(&alloc::format!(
+        "session-procmgr: elf_spawn resuming thread_tok={}",
+        thread_tok
+    ));
+    thread_resume(thread_tok).map_err(|_| RealSpawnError::ThreadCreate)?;
 
     Ok((thread_tok as u64, cookie))
 }
