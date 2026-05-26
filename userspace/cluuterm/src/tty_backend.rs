@@ -57,6 +57,8 @@ pub struct Pts {
     /// Set when VFS has sent a PTS_READ drain-hint and bytes were not yet
     /// available.  Cleared once bytes are drained and PTS_READ_DELIVER sent.
     pub drain_requested: Option<u32>,
+    /// Set when ^D arrives with no parked reader; drained on next PTS_READ.
+    pub eof_pending: bool,
     pub closed: bool,
     procmgr_main: usize,
 }
@@ -70,6 +72,7 @@ impl Pts {
             winsize: Winsize { rows: 24, cols: 80, xpixel: 640, ypixel: 480 },
             ready_bytes: VecDeque::new(),
             drain_requested: None,
+            eof_pending: false,
             closed: false,
             procmgr_main: 0,
         }
@@ -138,6 +141,11 @@ impl Pts {
         if requested == 0 {
             return;
         }
+        if self.eof_pending {
+            self.send_deliver(vfs_ep, &[]);
+            self.eof_pending = false;
+            return;
+        }
         if let Some(bytes) = self.try_take_cooked_bytes(requested) {
             self.send_deliver(vfs_ep, &bytes);
         } else {
@@ -187,7 +195,7 @@ impl Pts {
             None => return,
         };
         let mut ready = PollEvents::empty();
-        if !self.ready_bytes.is_empty() { ready |= PollEvents::POLLIN; }
+        if !self.ready_bytes.is_empty() || self.eof_pending { ready |= PollEvents::POLLIN; }
         if !self.closed                  { ready |= PollEvents::POLLOUT; }
         if self.closed                   { ready |= PollEvents::POLLHUP; }
         reply_ok::<PollReply>(reply_token, PTS_POLL_LABEL, PollReply { ready });
@@ -266,6 +274,7 @@ impl Pts {
             FlushQueue::Input | FlushQueue::Both => {
                 self.line_discipline.flush_input();
                 self.ready_bytes.clear();
+                self.eof_pending = false;
             }
             _ => {}
         }
@@ -702,10 +711,12 @@ impl Cluuterm {
                     self.handle_pts_write(&cooked);
                 }
                 ServiceAction::DeliverEof => {
-                    // EOF: no cooked bytes to drain; VFS-side parked read will
-                    // be replied when cluuterm sends an empty PTS_READ_DELIVER
-                    // or closes. Currently the VFS parks the read until bytes
-                    // arrive; EOF is a rare case handled by pts.closed path.
+                    if self.pts.drain_requested.take().is_some() {
+                        let vfs_ep = self.vfs_ep;
+                        self.pts.send_deliver(vfs_ep, &[]);
+                    } else {
+                        self.pts.eof_pending = true;
+                    }
                 }
             }
         }
