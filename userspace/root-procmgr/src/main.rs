@@ -6163,12 +6163,26 @@ impl ProcessManager {
                         Err(_) => thread_token as u64,
                     };
 
+                // Register exit notification: derive an IPC_SEND-rights token
+                // into procmgr's table from the caller's raw notify endpoint and
+                // store it under the child's exit cookie. Without this, the
+                // PROC_EXIT path at handle_proc_exit finds no notify endpoint
+                // and the caller's wait loop hangs forever.
+                if let Some(raw) = envelope.notify {
+                    if let Ok(derived) =
+                        self.resolve_notify_endpoint(sender_tid, raw as usize)
+                    {
+                        if derived != 0 {
+                            self.exit_notify.insert(cookie, derived);
+                        }
+                    }
+                }
+
                 let result: core::result::Result<SpawnReply, SpawnError> = Ok(SpawnReply {
                     pid: pid as u32,
                     child_thread_token,
                 });
                 let _ = child_stdin_send; // unused for now
-                let _ = cookie;
                 self.send_spawn_unified_reply(reply_token, &result)
             }
             Err(err) => {
