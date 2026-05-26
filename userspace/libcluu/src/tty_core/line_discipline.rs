@@ -114,6 +114,9 @@ pub struct LineDiscipline {
     // --- Spec-2 termios fields (POSIX line discipline) ---
     pub termios: Termios,
     pending_line: alloc::vec::Vec<u8>,
+    /// Insertion point within `pending_line`. Always in `0..=pending_line.len()`.
+    /// Moved by ←/→ arrows; advanced/retracted by inserts and backspace.
+    pending_cursor: usize,
     output_pending: alloc::vec::Vec<u8>,
     eof_seen: bool,
     last_was_cr: bool,
@@ -145,6 +148,7 @@ impl LineDiscipline {
         Self {
             termios: Termios::default_pts(),
             pending_line: alloc::vec::Vec::new(),
+            pending_cursor: 0,
             output_pending: alloc::vec::Vec::new(),
             eof_seen: false,
             last_was_cr: false,
@@ -253,17 +257,31 @@ impl LineDiscipline {
             if !self.pending_line.is_empty() {
                 out.push(LineDiscOutput::Bytes(core::mem::take(&mut self.pending_line)));
             }
+            self.pending_cursor = 0;
             out.push(LineDiscOutput::Eof);
             return out;
         }
         if byte == self.termios.c_cc[Termios::VERASE] || byte == 0x08 {
-            if self.pending_line.pop().is_some() && echoe {
-                out.push(LineDiscOutput::Echo(alloc::vec![b'\x08', b' ', b'\x08']));
+            if self.pending_cursor > 0 {
+                self.pending_line.remove(self.pending_cursor - 1);
+                self.pending_cursor -= 1;
+                if echoe {
+                    let tail_len = self.pending_line.len() - self.pending_cursor;
+                    let mut v = alloc::vec::Vec::with_capacity(tail_len + 4);
+                    v.push(0x08);
+                    v.extend_from_slice(&self.pending_line[self.pending_cursor..]);
+                    v.push(b' ');
+                    for _ in 0..(tail_len + 1) {
+                        v.push(0x08);
+                    }
+                    out.push(LineDiscOutput::Echo(v));
+                }
             }
             return out;
         }
         if byte == self.termios.c_cc[Termios::VKILL] {
             self.pending_line.clear();
+            self.pending_cursor = 0;
             if echok {
                 // Visual line clear: CR + clear-to-EOL.
                 out.push(LineDiscOutput::Echo(alloc::vec![b'\r', 0x1b, b'[', b'K']));
@@ -271,25 +289,43 @@ impl LineDiscipline {
             return out;
         }
         if byte == self.termios.c_cc[Termios::VWERASE] {
-            // Erase last word: pop trailing non-spaces then trailing spaces.
-            let mut popped = false;
-            while let Some(&b) = self.pending_line.last() {
-                if b == b' ' { break; }
-                self.pending_line.pop();
-                popped = true;
+            // Erase last word at cursor: pop trailing non-spaces then trailing
+            // spaces from the prefix up to the cursor. Tail after cursor stays.
+            let mut popped = 0usize;
+            while self.pending_cursor > 0 && self.pending_line[self.pending_cursor - 1] != b' ' {
+                self.pending_line.remove(self.pending_cursor - 1);
+                self.pending_cursor -= 1;
+                popped += 1;
             }
-            while let Some(&b) = self.pending_line.last() {
-                if b != b' ' { break; }
-                self.pending_line.pop();
-                popped = true;
+            while self.pending_cursor > 0 && self.pending_line[self.pending_cursor - 1] == b' ' {
+                self.pending_line.remove(self.pending_cursor - 1);
+                self.pending_cursor -= 1;
+                popped += 1;
             }
-            if popped && echoe {
-                out.push(LineDiscOutput::Echo(alloc::vec![b'\r', 0x1b, b'[', b'K']));
-                out.push(LineDiscOutput::Echo(self.pending_line.clone()));
+            if popped > 0 && echoe {
+                // Walk back over popped chars, redraw tail + spaces, walk back.
+                let tail_len = self.pending_line.len() - self.pending_cursor;
+                let mut v = alloc::vec::Vec::with_capacity(popped + tail_len * 2);
+                for _ in 0..popped {
+                    v.push(0x08);
+                }
+                v.extend_from_slice(&self.pending_line[self.pending_cursor..]);
+                for _ in 0..popped {
+                    v.push(b' ');
+                }
+                for _ in 0..(tail_len + popped) {
+                    v.push(0x08);
+                }
+                out.push(LineDiscOutput::Echo(v));
             }
             return out;
         }
         if byte == b'\n' {
+            // Newline: take whole pending_line regardless of cursor.
+            // Echo any trailing portion first so the visual cursor reaches
+            // end-of-line before the newline lands.
+            let trailing: alloc::vec::Vec<u8> =
+                self.pending_line[self.pending_cursor..].to_vec();
             self.pending_line.push(b'\n');
             let cmd_only = if self.pending_line.ends_with(b"\n") {
                 self.pending_line[..self.pending_line.len() - 1].to_vec()
@@ -299,11 +335,14 @@ impl LineDiscipline {
             self.push_history(&cmd_only);
             self.history_pos = None;
             self.saved_partial = None;
+            self.pending_cursor = 0;
             let line = core::mem::take(&mut self.pending_line);
             out.push(LineDiscOutput::Bytes(line));
             // Echo newline if ECHO or ECHONL is set.
             if echo || self.termios.c_lflag & Termios::ECHONL != 0 {
-                out.push(LineDiscOutput::Echo(alloc::vec![b'\n']));
+                let mut v = trailing;
+                v.push(b'\n');
+                out.push(LineDiscOutput::Echo(v));
             }
             return out;
         }
@@ -315,14 +354,26 @@ impl LineDiscipline {
         if byte == b'\n' && self.termios.c_iflag & Termios::INLCR != 0 {
             return self.feed_byte(b'\r');
         }
-        // Default: append, echo if requested.
+        // Default: insert at cursor, echo with mid-line tail handling.
         if self.history_pos.is_some() {
             self.history_pos = None;
             self.saved_partial = None;
         }
-        self.pending_line.push(byte);
+        self.pending_line.insert(self.pending_cursor, byte);
+        self.pending_cursor += 1;
         if echo {
-            out.push(LineDiscOutput::Echo(alloc::vec![byte]));
+            if self.pending_cursor == self.pending_line.len() {
+                out.push(LineDiscOutput::Echo(alloc::vec![byte]));
+            } else {
+                let tail_len = self.pending_line.len() - self.pending_cursor;
+                let mut v = alloc::vec::Vec::with_capacity(1 + tail_len * 2);
+                v.push(byte);
+                v.extend_from_slice(&self.pending_line[self.pending_cursor..]);
+                for _ in 0..tail_len {
+                    v.push(0x08);
+                }
+                out.push(LineDiscOutput::Echo(v));
+            }
         }
         out
     }
@@ -348,14 +399,10 @@ impl LineDiscipline {
                 };
                 let new_buf = self.history.get(target).cloned().unwrap_or_default();
                 if echo {
-                    let mut redraw = alloc::vec::Vec::with_capacity(self.pending_line.len() * 3 + new_buf.len());
-                    for _ in 0..self.pending_line.len() {
-                        redraw.extend_from_slice(BACKSPACE_SEQ);
-                    }
-                    redraw.extend_from_slice(&new_buf);
-                    out.push(LineDiscOutput::Echo(redraw));
+                    out.push(LineDiscOutput::Echo(self.redraw_pending(&new_buf)));
                 }
                 self.pending_line = new_buf;
+                self.pending_cursor = self.pending_line.len();
                 self.history_pos = Some(target);
             }
             b'B' => {
@@ -365,33 +412,60 @@ impl LineDiscipline {
                     Some(p) if p + 1 < self.history.len() => {
                         let new_buf = self.history[p + 1].clone();
                         if echo {
-                            let mut redraw = alloc::vec::Vec::with_capacity(self.pending_line.len() * 3 + new_buf.len());
-                            for _ in 0..self.pending_line.len() {
-                                redraw.extend_from_slice(BACKSPACE_SEQ);
-                            }
-                            redraw.extend_from_slice(&new_buf);
-                            out.push(LineDiscOutput::Echo(redraw));
+                            out.push(LineDiscOutput::Echo(self.redraw_pending(&new_buf)));
                         }
                         self.pending_line = new_buf;
+                        self.pending_cursor = self.pending_line.len();
                         self.history_pos = Some(p + 1);
                     }
                     Some(_) => {
                         let new_buf = self.saved_partial.take().unwrap_or_default();
                         if echo {
-                            let mut redraw = alloc::vec::Vec::with_capacity(self.pending_line.len() * 3 + new_buf.len());
-                            for _ in 0..self.pending_line.len() {
-                                redraw.extend_from_slice(BACKSPACE_SEQ);
-                            }
-                            redraw.extend_from_slice(&new_buf);
-                            out.push(LineDiscOutput::Echo(redraw));
+                            out.push(LineDiscOutput::Echo(self.redraw_pending(&new_buf)));
                         }
                         self.pending_line = new_buf;
+                        self.pending_cursor = self.pending_line.len();
                         self.history_pos = None;
+                    }
+                }
+            }
+            b'C' => {
+                // Cursor right.
+                if self.pending_cursor < self.pending_line.len() {
+                    let ch = self.pending_line[self.pending_cursor];
+                    self.pending_cursor += 1;
+                    if echo {
+                        out.push(LineDiscOutput::Echo(alloc::vec![ch]));
+                    }
+                }
+            }
+            b'D' => {
+                // Cursor left.
+                if self.pending_cursor > 0 {
+                    self.pending_cursor -= 1;
+                    if echo {
+                        out.push(LineDiscOutput::Echo(alloc::vec![0x08]));
                     }
                 }
             }
             _ => {}
         }
+        out
+    }
+
+    /// Echo bytes that erase `pending_line` (accounting for cursor mid-line)
+    /// and write `new_buf` in its place. First pushes the visual cursor to
+    /// end-of-line by echoing the trailing portion, then BS-space-BS for the
+    /// full old length, then the new content.
+    fn redraw_pending(&self, new_buf: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::with_capacity(self.pending_line.len() * 3 + new_buf.len());
+        if self.pending_cursor < self.pending_line.len() {
+            out.extend_from_slice(&self.pending_line[self.pending_cursor..]);
+        }
+        for _ in 0..self.pending_line.len() {
+            out.extend_from_slice(BACKSPACE_SEQ);
+        }
+        out.extend_from_slice(new_buf);
         out
     }
 
@@ -418,6 +492,7 @@ impl LineDiscipline {
     /// Flush the pending line buffer (used by tcflush(Input)).
     pub fn flush_input(&mut self) {
         self.pending_line.clear();
+        self.pending_cursor = 0;
     }
 
     // ---- Legacy shell-UX API (kept for existing canonical mode) ----
