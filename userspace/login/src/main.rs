@@ -24,7 +24,9 @@ use cluu_wire::session::{
     CompositorSessionHandoffRequest, ProfileSpec, SessionCreateRequest,
     COMPOSITOR_SESSION_HANDOFF_LABEL, RIGHT_SESSION_QUERY, RIGHT_SESSION_SUBSCRIBE,
 };
-use cluu_wire::spawn::{SpawnEnvelope, ViewSource};
+use cluu_wire::spawn::ViewSource;
+use procmgr_common::wire::{SpawnReq, SpawnReply};
+use procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL;
 
 use libcluu::boot::{process_info, space_token, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::ipc::{
@@ -675,34 +677,93 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                 return -1;
                             }
 
-                            // ── 4. Spawn cluuterm ─────────────────────────────────
-                            let primary_envelope = SpawnEnvelope {
-                                image: alloc::string::String::from("cluuterm"),
-                                args: alloc::vec::Vec::new(),
-                                env: alloc::vec![
-                                    (alloc::string::String::from("HOME"),
-                                     alloc::format!("/home/{}", user_name)),
-                                    (alloc::string::String::from("USER"),
-                                     user_name.clone()),
-                                ],
-                                view: ViewSource::Derive(login_view_token()),
-                                fd_inherit: alloc::vec::Vec::new(),
-                                session: Some(ok.token),
-                                notify: None,
-                            };
-                            let primary_pid =
-                                match libcluu::spawn::spawn(primary_envelope) {
-                                    Ok(r) => r.pid,
-                                    Err(e) => {
+                            // ── 4. Spawn cluuterm via session-procmgr ─────────────
+                            let session_spawn_name = alloc::format!(
+                                "session-procmgr:spawn:{}", ok.session_id
+                            );
+                            let session_spawn_ep = {
+                                let mut ep_opt: Option<usize> = None;
+                                for _ in 0..20usize {
+                                    ep_opt = libcluu::registry::lookup_service(
+                                        &session_spawn_name
+                                    );
+                                    if ep_opt.is_some() { break; }
+                                    let _ = libcluu::syscall::yield_cpu();
+                                }
+                                match ep_opt {
+                                    Some(ep) => ep,
+                                    None => {
                                         let _ = debug_print(
                                             &alloc::format!(
-                                                "login: primary spawn failed: {:?}",
-                                                e
+                                                "login: {} not found after retries",
+                                                session_spawn_name
                                             )
                                         );
                                         return -1;
                                     }
+                                }
+                            };
+                            let spawn_req = SpawnReq {
+                                image_path: alloc::string::String::from("/bin/cluuterm"),
+                                argv: alloc::vec![
+                                    alloc::string::String::from("cluuterm"),
+                                ],
+                                envp: alloc::vec![
+                                    (alloc::string::String::from("HOME"),
+                                     alloc::format!("/home/{}", user_name)),
+                                    (alloc::string::String::from("USER"),
+                                     user_name.clone()),
+                                    (alloc::string::String::from("TERM"),
+                                     alloc::string::String::from("xterm-256color")),
+                                ],
+                                cwd: alloc::format!("/home/{}", user_name),
+                                fd_inherit: alloc::vec::Vec::new(),
+                            };
+                            let spawn_payload = match postcard::to_allocvec(&spawn_req) {
+                                Ok(b) => b,
+                                Err(_) => {
+                                    let _ = debug_print("login: SpawnReq serialize failed");
+                                    return -1;
+                                }
+                            };
+                            let spawn_words = [
+                                spawn_payload.len(), 0usize, 0, 0, 0, 0,
+                            ];
+                            let spawn_msg = Message::new(
+                                SESSION_PROCMGR_SPAWN_LABEL, spawn_words, 0,
+                            );
+                            let mut spawn_reply_buf = [0u8; 512];
+                            let (_srply_msg, srply_payload_len) = match
+                                libcluu::ipc::call_with_reply_buf(
+                                    session_spawn_ep, &spawn_msg,
+                                    &spawn_payload, &mut spawn_reply_buf,
+                                )
+                            {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    let _ = debug_print(
+                                        &alloc::format!(
+                                            "login: session spawn IPC failed: {:?}", e
+                                        )
+                                    );
+                                    return -1;
+                                }
+                            };
+                            let hdr_sz = core::mem::size_of::<Message>();
+                            let srply_bytes = &spawn_reply_buf[
+                                hdr_sz..hdr_sz + srply_payload_len
+                            ];
+                            let SpawnReply { pid, cookie: _ } =
+                                match postcard::from_bytes(srply_bytes) {
+                                    Ok(r) => r,
+                                    Err(_) => {
+                                        let _ = debug_print(
+                                            "login: SpawnReply deserialize failed"
+                                        );
+                                        return -1;
+                                    }
                                 };
+                            let primary_pid = pid as u32;
 
                             // ── 5. SESSION_SET_LEADER ─────────────────────────────
                             if libcluu::session::set_leader(ok.token, primary_pid)
