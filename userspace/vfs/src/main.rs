@@ -707,6 +707,12 @@ struct VfsServer {
     /// the payload bytes into the shell's address space, and replies the parked
     /// `reply_token` to unblock the shell.
     pending_pts_reads: BTreeMap<u32, VecDeque<ParkedRead>>,
+    /// Open handles for synthesised virtual-root directories (e.g. `/`, `/dev`
+    /// under a USER view).  High bit is always set so they are distinguishable
+    /// from real fd_table entries at zero cost.
+    virtual_fds: BTreeMap<u32, alloc::vec::Vec<alloc::string::String>>,
+    /// Monotone counter for virtual fd allocation.
+    virtual_fd_counter: u32,
 }
 
 impl VfsServer {
@@ -767,6 +773,8 @@ impl VfsServer {
             pts_registry,
             tty_endpoints: [0usize; 4],
             pending_pts_reads: BTreeMap::new(),
+            virtual_fds: BTreeMap::new(),
+            virtual_fd_counter: 0,
         }
     }
 
@@ -1579,6 +1587,18 @@ impl VfsServer {
         Ok(client_id)
     }
 
+    /// Allocate a new virtual-directory fd id.  High bit marks it as virtual
+    /// so close/readdir can branch without a separate lookup.
+    fn alloc_virtual_fd(
+        &mut self,
+        entries: alloc::vec::Vec<alloc::string::String>,
+    ) -> u32 {
+        let id = 0x8000_0000u32 | (self.virtual_fd_counter & 0x7FFF_FFFF);
+        self.virtual_fd_counter = self.virtual_fd_counter.wrapping_add(1);
+        self.virtual_fds.insert(id, entries);
+        id
+    }
+
     fn handle_open(
         &mut self,
         msg: &Message,
@@ -1610,6 +1630,15 @@ impl VfsServer {
         let (real_path, target) = if write_capable_open {
             match self.view_check_path_writable_with_target(client_id, path) {
                 Ok(pt) => pt,
+                Err(Error::NotFound) => {
+                    // Write to a virtual prefix dir is denied by construction.
+                    if self.views.virtual_resolve(client_id, path).is_some() {
+                        reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                    } else {
+                        reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                    }
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
                 Err(err) => {
                     reply_msg.words[0] = err.to_errno() as usize;
                     return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -1618,6 +1647,19 @@ impl VfsServer {
         } else {
             match self.view_check_path_with_target(client_id, path) {
                 Ok(pt) => pt,
+                Err(Error::NotFound) => {
+                    // Synthesise a virtual directory if path is a proper prefix
+                    // of at least one mount destination in this client's view.
+                    if let Some(entries) = self.views.virtual_resolve(client_id, path) {
+                        let vfd = self.alloc_virtual_fd(entries);
+                        reply_msg.words[0] = 0;
+                        reply_msg.words[1] = vfd as usize;
+                        reply_msg.words[2] = 0; // size=0 for dirs
+                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                    reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
                 Err(err) => {
                     reply_msg.words[0] = err.to_errno() as usize;
                     return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -1773,6 +1815,12 @@ impl VfsServer {
             }
         };
         let fd = msg.words[2];
+        // Virtual directory fd: remove from the synthetic table and reply OK.
+        if fd >= 0x8000_0000 {
+            self.virtual_fds.remove(&(fd as u32));
+            reply_msg.words[0] = 0;
+            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
         // If this is a PTS fd, decrement the refcount before removing it.
         let pts_id = self
             .files
@@ -1997,6 +2045,26 @@ impl VfsServer {
         // View check: resolve virtual path + target.
         let (real_path, target) = match self.view_check_path_with_target(client_id, path) {
             Ok(pt) => pt,
+            Err(Error::NotFound) => {
+                // Virtual prefix dir: synthesise a directory stat.
+                if let Some(entries) = self.views.virtual_resolve(client_id, path) {
+                    let info = StatInfo {
+                        size: 0,
+                        mode: (S_IFDIR | 0o555) as u32,
+                        mtime: 0,
+                        nlink: 2,
+                        uid: 0,
+                        gid: 0,
+                        blocks: 0,
+                    };
+                    let _ = entries; // only needed for the Some guard
+                    reply_msg.words[0] = 0;
+                    let stat_bytes = info.to_bytes();
+                    return reply_with_payload(reply_token, &reply_msg, &stat_bytes);
+                }
+                reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -2202,6 +2270,16 @@ impl VfsServer {
         };
         let (real_path, target) = match self.view_check_path_writable_with_target(client_id, path) {
             Ok(pt) => pt,
+            Err(Error::NotFound) => {
+                // Deny writes to synthesised virtual prefix directories.
+                let err = if self.views.virtual_resolve(client_id, path).is_some() {
+                    Error::PermissionDenied
+                } else {
+                    Error::NotFound
+                };
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -2290,6 +2368,15 @@ impl VfsServer {
         let (real_old, target_old) =
             match self.view_check_path_writable_with_target(client_id, old_path) {
                 Ok(pt) => pt,
+                Err(Error::NotFound) => {
+                    let err = if self.views.virtual_resolve(client_id, old_path).is_some() {
+                        Error::PermissionDenied
+                    } else {
+                        Error::NotFound
+                    };
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
                 Err(err) => {
                     reply_msg.words[0] = err.to_errno() as usize;
                     return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -2298,6 +2385,15 @@ impl VfsServer {
         let (real_new, target_new) =
             match self.view_check_path_writable_with_target(client_id, new_path) {
                 Ok(pt) => pt,
+                Err(Error::NotFound) => {
+                    let err = if self.views.virtual_resolve(client_id, new_path).is_some() {
+                        Error::PermissionDenied
+                    } else {
+                        Error::NotFound
+                    };
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
                 Err(err) => {
                     reply_msg.words[0] = err.to_errno() as usize;
                     return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -3941,6 +4037,42 @@ impl VfsServer {
 
         let (real_path, target) = match self.view_check_path_with_target(client_id, path) {
             Ok(pt) => pt,
+            Err(Error::NotFound) => {
+                // Virtual prefix dir: synthesise entries from the client's view.
+                if let Some(entries) = self.views.virtual_resolve(client_id, path) {
+                    let blob = build_virtual_readdir_blob(&entries);
+                    let count = entries.len();
+                    let blob_len = blob.len();
+                    if blob_len <= INLINE_BUDGET {
+                        reply_msg.words[0] = blob_len;
+                        reply_msg.words[1] = 0;
+                        reply_msg.words[2] = count;
+                        reply_msg.words[3] = 0;
+                        return reply_with_payload(reply_token, &reply_msg, &blob);
+                    }
+                    // Bounce path for large virtual listings (unlikely, but correct).
+                    let bounce = match self.bounce_pool.get(client_id) {
+                        Some(b) => b,
+                        None => {
+                            reply_msg.words[1] = Error::BufferTooSmall.to_errno() as usize;
+                            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                        }
+                    };
+                    if blob_len > bounce.bytes {
+                        reply_msg.words[1] = Error::BufferTooSmall.to_errno() as usize;
+                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                    let dst = bounce.source_base as *mut u8;
+                    unsafe { core::ptr::copy_nonoverlapping(blob.as_ptr(), dst, blob_len) };
+                    reply_msg.words[0] = blob_len;
+                    reply_msg.words[1] = 0;
+                    reply_msg.words[2] = count;
+                    reply_msg.words[3] = 1; // bounce_flag
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+                reply_msg.words[1] = Error::NotFound.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
             Err(err) => {
                 reply_msg.words[1] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
@@ -4670,6 +4802,29 @@ fn map_bounce_pool(space_token: usize) -> Result<usize> {
             Err(err)
         }
     }
+}
+
+/// Serialize a list of virtual directory names into the v2 readdir blob format.
+/// All entries are emitted as directories (S_IFDIR | 0o555).
+fn build_virtual_readdir_blob(names: &[alloc::string::String]) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mode = (S_IFDIR | 0o555) as u32;
+    for name in names {
+        let name_bytes = name.as_bytes();
+        let info = StatInfo {
+            size: 0,
+            mode,
+            mtime: 0,
+            nlink: 2,
+            uid: 0,
+            gid: 0,
+            blocks: 0,
+        };
+        data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        data.extend_from_slice(&info.to_bytes());
+        data.extend_from_slice(name_bytes);
+    }
+    data
 }
 
 /// Count v2-format readdir entries in a serialized blob.

@@ -274,4 +274,166 @@ pub fn narrow_pts_mount(
     }
 }
 
+// ─── Virtual-root synthesis ───────────────────────────────────────────────────
+
+impl VfsViewTable {
+    /// Return the synthetic child names visible under `path` if it is a proper
+    /// prefix of at least one mount destination in the client's view.
+    ///
+    /// Only paths that ARE a prefix but are NOT themselves a mount destination
+    /// produce entries — real mounts are handled by the normal resolve path.
+    /// Entries are first-level basenames, sorted, deduped.
+    pub fn virtual_resolve(
+        &self,
+        client_id: usize,
+        path: &str,
+    ) -> Option<alloc::vec::Vec<alloc::string::String>> {
+        if validate_clean_absolute_path(path).is_err() {
+            return None;
+        }
+        // Canonical prefix: strip trailing slash except for root.
+        let prefix = if path == "/" {
+            "/"
+        } else {
+            path.trim_end_matches('/')
+        };
+
+        // Pick the right mount list — explicit view wins, then profile default.
+        let mounts: &alloc::vec::Vec<ViewMount> = if let Some(v) = self.views.get(&client_id) {
+            &v.mounts
+        } else {
+            // profile fallback: synthesise on the stack is awkward without
+            // alloc; we compute it directly.
+            let profile = self.profiles.get(&client_id).copied()?;
+            // Build a temporary VfsView and recurse once.
+            let tmp = crate::view::default_view_for_profile_pub(profile);
+            return Self::virtual_resolve_from_mounts(&tmp.mounts, prefix);
+        };
+
+        Self::virtual_resolve_from_mounts(mounts, prefix)
+    }
+
+    fn virtual_resolve_from_mounts(
+        mounts: &[ViewMount],
+        prefix: &str,
+    ) -> Option<alloc::vec::Vec<alloc::string::String>> {
+        let mut children: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+
+        for m in mounts {
+            let dst = m.dst.trim_end_matches('/');
+            // Skip if this dst IS the prefix — that is a real mount, not virtual.
+            if dst == prefix {
+                continue;
+            }
+            // Check that dst starts with prefix and the next char is '/'.
+            let rest = if prefix == "/" {
+                // Every absolute dst contributes its first segment.
+                dst.strip_prefix('/')
+            } else {
+                dst.strip_prefix(prefix)
+                    .and_then(|r| r.strip_prefix('/'))
+            };
+            let Some(rest) = rest else { continue };
+            // First segment only (up to the next '/' or end-of-string).
+            let segment = match rest.find('/') {
+                Some(pos) => &rest[..pos],
+                None => rest,
+            };
+            if segment.is_empty() {
+                continue;
+            }
+            if !children.iter().any(|s| s == segment) {
+                children.push(alloc::string::String::from(segment));
+            }
+        }
+
+        if children.is_empty() {
+            None
+        } else {
+            children.sort();
+            Some(children)
+        }
+    }
+}
+
+/// Public wrapper around the profile→VfsView conversion (needed by virtual_resolve).
+pub(crate) fn default_view_for_profile_pub(profile: libcluu::cap::CapProfile) -> VfsView {
+    default_view_for_profile(profile)
+}
+
 // ─── Path helpers ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user_view() -> VfsView {
+        fn m(dst: &str) -> ViewMount {
+            ViewMount {
+                src: alloc::string::String::from(dst),
+                dst: alloc::string::String::from(dst),
+                writable: false,
+                target: MountTarget::MountTable,
+            }
+        }
+        VfsView {
+            mounts: alloc::vec![
+                m("/bin"),
+                m("/lib"),
+                m("/tmp"),
+                m("/home/root"),
+                m("/dev/initrd"),
+                m("/dev/pts"),
+                m("/proc"),
+            ],
+        }
+    }
+
+    fn table_with_view(id: usize, view: VfsView) -> VfsViewTable {
+        let mut t = VfsViewTable::new();
+        t.set_view(id, view);
+        t
+    }
+
+    #[test]
+    fn virtual_root_returns_top_level_names() {
+        let t = table_with_view(1, user_view());
+        let entries = t.virtual_resolve(1, "/").expect("should be virtual");
+        // bin, dev, home, lib, proc, tmp — sorted, deduped
+        assert_eq!(entries, alloc::vec!["bin", "dev", "home", "lib", "proc", "tmp"]);
+    }
+
+    #[test]
+    fn virtual_dev_returns_children() {
+        let t = table_with_view(1, user_view());
+        let entries = t.virtual_resolve(1, "/dev").expect("should be virtual");
+        assert_eq!(entries, alloc::vec!["initrd", "pts"]);
+    }
+
+    #[test]
+    fn virtual_home_returns_children() {
+        let t = table_with_view(1, user_view());
+        let entries = t.virtual_resolve(1, "/home").expect("should be virtual");
+        assert_eq!(entries, alloc::vec!["root"]);
+    }
+
+    #[test]
+    fn real_mount_not_virtual() {
+        let t = table_with_view(1, user_view());
+        // /bin is a real mount dst — should NOT be virtual (None)
+        assert!(t.virtual_resolve(1, "/bin").is_none());
+    }
+
+    #[test]
+    fn non_prefix_path_returns_none() {
+        let t = table_with_view(1, user_view());
+        assert!(t.virtual_resolve(1, "/etc").is_none());
+        assert!(t.virtual_resolve(1, "/home/root/docs").is_none());
+    }
+
+    #[test]
+    fn no_view_no_profile_returns_none() {
+        let t = VfsViewTable::new();
+        assert!(t.virtual_resolve(99, "/").is_none());
+    }
+}
