@@ -499,6 +499,41 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     };
     let _ = debug_print("login: window registered");
 
+    // Tell compositor to destroy our modal before exit. Retries WouldBlock /
+    // Busy because losing this message strands the modal in the z-order
+    // forever. Called from every error path post-registration as well as the
+    // success path, so a partial-init failure never leaks the window.
+    let destroy_window = || {
+        let destroy = Message::new(
+            libcluu::ipc::COMP_WIN_DESTROY_LABEL,
+            [win_id as usize, 0, 0, 0, 0, 0],
+            1,
+        );
+        let mut attempts = 0u32;
+        loop {
+            match libcluu::ipc::send(comp_ep, &destroy, IpcFlags::empty()) {
+                Ok(()) => {
+                    let _ = debug_print("login: WIN_DESTROY sent");
+                    break;
+                }
+                Err(libcluu::Error::WouldBlock) | Err(libcluu::Error::Busy) => {
+                    attempts += 1;
+                    if attempts > 64 {
+                        let _ = debug_print(
+                            "login: WIN_DESTROY gave up after retries",
+                        );
+                        break;
+                    }
+                    let _ = syscall::yield_cpu();
+                }
+                Err(_) => {
+                    let _ = debug_print("login: WIN_DESTROY send failed");
+                    break;
+                }
+            }
+        }
+    };
+
     // Compute modal top-left position using the stacked banner+gap+modal layout.
     // This must match the computation in render_modal so render_fields targets
     // the same modal origin.
@@ -625,6 +660,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                         "login: SESSION_CREATE failed: {:?}", e
                                     );
                                     let _ = debug_print(&msg);
+                                    destroy_window();
                                     return -1;
                                 }
                             };
@@ -637,6 +673,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                 Err(e) => {
                                     let _ = debug_print("login: derive_token failed");
                                     let _ = e;
+                                    destroy_window();
                                     return -1;
                                 }
                             };
@@ -656,6 +693,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                     let _ = debug_print(
                                         "login: compositor:control not found",
                                     );
+                                    destroy_window();
                                     return -1;
                                 }
                             };
@@ -674,6 +712,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                             .is_err()
                             {
                                 let _ = debug_print("login: handoff IPC failed");
+                                destroy_window();
                                 return -1;
                             }
 
@@ -699,6 +738,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                                 session_spawn_name
                                             )
                                         );
+                                        destroy_window();
                                         return -1;
                                     }
                                 }
@@ -723,6 +763,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                 Ok(b) => b,
                                 Err(_) => {
                                     let _ = debug_print("login: SpawnReq serialize failed");
+                                    destroy_window();
                                     return -1;
                                 }
                             };
@@ -746,6 +787,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                             "login: session spawn IPC failed: {:?}", e
                                         )
                                     );
+                                    destroy_window();
                                     return -1;
                                 }
                             };
@@ -760,6 +802,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                         let _ = debug_print(
                                             "login: SpawnReply deserialize failed"
                                         );
+                                        destroy_window();
                                         return -1;
                                     }
                                 };
@@ -770,46 +813,12 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                 .is_err()
                             {
                                 let _ = debug_print("login: set_leader failed");
+                                destroy_window();
                                 return -1;
                             }
                             let _ = debug_print("login: user authenticated");
 
-                            // Tell the compositor to destroy our window before we
-                            // exit so the user immediately sees just the cluuterm
-                            // window. Retry on WouldBlock/Busy because we exit
-                            // right after — a dropped message leaves the modal
-                            // in the z-order forever.
-                            let destroy = Message::new(
-                                libcluu::ipc::COMP_WIN_DESTROY_LABEL,
-                                [win_id as usize, 0, 0, 0, 0, 0],
-                                1,
-                            );
-                            let mut attempts = 0u32;
-                            loop {
-                                match libcluu::ipc::send(
-                                    comp_ep, &destroy, IpcFlags::empty(),
-                                ) {
-                                    Ok(()) => {
-                                        let _ = debug_print("login: WIN_DESTROY sent");
-                                        break;
-                                    }
-                                    Err(libcluu::Error::WouldBlock)
-                                    | Err(libcluu::Error::Busy) => {
-                                        attempts += 1;
-                                        if attempts > 64 {
-                                            let _ = debug_print(
-                                                "login: WIN_DESTROY gave up after retries",
-                                            );
-                                            break;
-                                        }
-                                        let _ = syscall::yield_cpu();
-                                    }
-                                    Err(_) => {
-                                        let _ = debug_print("login: WIN_DESTROY send failed");
-                                        break;
-                                    }
-                                }
-                            }
+                            destroy_window();
                             return 0;
                         }
                         // Moved focus to password — fall through to re-render.
