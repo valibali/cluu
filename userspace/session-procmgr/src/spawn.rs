@@ -54,19 +54,31 @@ impl MsgHandler for Spawn {
         .map_err(|_| HandlerError::Internal("timeserver"))?;
 
         // Disarm guard and reclaim handles so we can release the kernel borrow,
-        // then call spawn_thread. On spawn failure we revoke manually.
+        // then call the spawn primitive. On spawn failure we revoke manually.
         let minted: Vec<u64> = guard.forget();
 
-        let thread_tok = state.kernel.spawn_thread(0xE000_0000, 0xF000_0000);
-        if thread_tok == 0 {
-            // Spawn failed — revoke every cap minted for this child.
-            for h in &minted {
-                state.kernel.revoke(*h);
+        #[cfg(feature = "host-test")]
+        let (thread_tok, cookie) = {
+            let tok = state.kernel.spawn_thread(0xE000_0000, 0xF000_0000);
+            if tok == 0 {
+                for h in &minted {
+                    state.kernel.revoke(*h);
+                }
+                return Err(HandlerError::Internal("spawn_thread"));
             }
-            return Err(HandlerError::Internal("spawn_thread"));
-        }
+            (tok, (pid as u64) ^ 0xC0DE_0000)
+        };
 
-        let cookie = (pid as u64) ^ 0xC0DE_0000;
+        #[cfg(not(feature = "host-test"))]
+        let (thread_tok, cookie) = match crate::elf_spawn::real_spawn_user_process(state, pid, &req) {
+            Ok(t) => t,
+            Err(_) => {
+                for h in &minted {
+                    state.kernel.revoke(*h);
+                }
+                return Err(HandlerError::Internal("real_spawn"));
+            }
+        };
         let local = (pid as u32) & LOCAL_MAX;
         state.child_table.insert(ChildState {
             pid,

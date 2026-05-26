@@ -144,6 +144,7 @@ fn run() -> Result<()> {
         restart: spm::restart::RestartTracker::new(),
         pipes: spm::pipe_registry::PipeRegistry::new(),
         ctty: None,
+        spawn_ep: ep as u64,
     };
 
     let control_ep = registry::control_endpoint();

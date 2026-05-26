@@ -17,3 +17,7 @@ pub mod spawn;
 /// Production kernel adapter — excluded from host-test (uses real x86-64 syscalls).
 #[cfg(not(feature = "host-test"))]
 pub mod real_kernel;
+
+/// Production ELF-spawn primitive — excluded from host-test (uses real VFS + syscalls).
+#[cfg(not(feature = "host-test"))]
+pub mod elf_spawn;
