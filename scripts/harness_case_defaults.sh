@@ -158,16 +158,22 @@ harness_derive_marker_defaults() {
                 SHELL_AUTOSTART_CMD_DEFAULT="sleep 30 & ; kill %1"
                 ;;
             l2_alias_basic)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="alias ll='ls -l' ; alias ll"
+                TEST_COMMAND="alias ll=ls ; alias ll"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_type_basic)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="type cd ; type ls ; type nope"
+                TEST_COMMAND="type cd ; type ls ; type nope"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_help_basic)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="help"
+                TEST_COMMAND="help"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_exit_status)
                 TEST_COMMAND="false ; echo \$?"

@@ -537,20 +537,28 @@ type_ascii_command() {
         case "$ch" in
             ' ') queue_key "spc" ;;
             $'\t') queue_key "tab" ;;
-            '-') queue_key "minus" ;;
-            '_') queue_key "shift-minus" ;;
-            '=') queue_key "equal" ;;
-            '+') queue_key "shift-equal" ;;
+            # HU layout: '-' lives on the slash key (scancode 0x35, base_symbol → b'-').
+            # The US minus scancode (0x0C) maps to 'u' accent letter on HU — wrong.
+            '-') queue_key "slash" ;;
+            # HU layout: '_' lives on shift-slash (scancode 0x35 shifted → b'_').
+            '_') queue_key "question" ;;
+            # HU layout: '=' lives on shift-7 (scancode 0x08 shifted → b'=').
+            # The US equal scancode (0x0D) maps to 'o' accent letter on HU — wrong.
+            '=') queue_key "shift-7" ;;
+            # HU layout: '+' lives on shift-3 (scancode 0x04 shifted → b'+').
+            '+') queue_key "shift-3" ;;
             '.') queue_key "dot" ;;
             ',') queue_key "comma" ;;
-            # HU layout: '/' lives on Shift+6, '?' on the comma key with shift.
-            # The US 'slash' scancode (0x35) maps to '-' on HU.
+            # HU layout: '/' lives on Shift+6 (scancode 0x07 = key 6), '?' on shift-comma.
+            # The US 'slash' scancode (0x35) maps to '-' on HU (base_symbol override).
             '/') queue_key "shift-6" ;;
             '?') queue_key "shift-comma" ;;
             ';') queue_key "semicolon" ;;
             ':') queue_key "shift-semicolon" ;;
-            "'") queue_key "apostrophe" ;;
-            '"') queue_key "shift-apostrophe" ;;
+            # HU layout: '\'' lives on Shift+1 (scancode 0x02 shifted → b'\'').
+            # The US apostrophe scancode (0x28) maps to 'a' accent letter on HU — wrong.
+            "'") queue_key "shift-1" ;;
+            '"') queue_key "shift-2" ;;
             '(') queue_key "shift-9" ;;
             ')') queue_key "shift-0" ;;
             '[') queue_key "bracket_left" ;;
