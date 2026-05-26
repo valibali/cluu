@@ -266,11 +266,9 @@ pub fn spawn_process_with_argv_and_redirs(
         .iter()
         .map(|(k, v)| (String::from(*k), String::from(*v)))
         .collect();
-    let image = if argv.is_empty() {
-        String::from(name)
-    } else {
-        argv[0].clone()
-    };
+    // procmgr prepends binary basename as argv[0] before envelope.args, so
+    // envelope.args contains only argv[1..]. image is the resolved image name.
+    let image = String::from(name);
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
     let envelope = SpawnEnvelope {
         image,
