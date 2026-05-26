@@ -227,8 +227,14 @@ impl PipelineExecutor {
         }
 
         // Foreground: set TTY fg pgid, wait for exit, restore shell.
-        if pgid != 0 && context.tty_stdout != 0 && context.session_id != 0 {
+        let want_fg_swap = pgid != 0 && context.tty_stdout != 0 && context.session_id != 0;
+        if want_fg_swap {
             let _ = tty_set_fg(context.tty_stdout, context.session_id, pgid);
+        }
+        // pts mode: push fg pgid via PTS_SET_PGRP_LABEL on fd 0.
+        let want_pts_fg_swap = pgid != 0 && context.tty_stdout == 0;
+        if want_pts_fg_swap {
+            let _ = libcluu::posix::termios::tcsetpgrp(0, pgid as i32);
         }
 
         // Wait for exit notification.
@@ -242,8 +248,12 @@ impl PipelineExecutor {
         };
 
         // Restore shell as TTY foreground.
-        if pgid != 0 && context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
+        if want_fg_swap && context.shell_pgid != 0 {
             let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
+        }
+        // Restore shell in pts mode.
+        if want_pts_fg_swap && context.shell_pgid != 0 {
+            let _ = libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32);
         }
 
         let _ = libcluu::debug_print(&alloc::format!(
@@ -335,6 +345,10 @@ impl PipelineExecutor {
         // For foreground pipelines, point TTY fg at this pgid before spawning.
         if !bg && pipeline_pgid != 0 && context.tty_stdout != 0 && context.session_id != 0 {
             let _ = tty_set_fg(context.tty_stdout, context.session_id, pipeline_pgid);
+        }
+        // pts mode: push fg pgid via PTS_SET_PGRP_LABEL on fd 0.
+        if !bg && pipeline_pgid != 0 && context.tty_stdout == 0 {
+            let _ = libcluu::posix::termios::tcsetpgrp(0, pipeline_pgid as i32);
         }
 
         // Build a VfsClient once for path → image-name resolution.
@@ -596,10 +610,18 @@ impl PipelineExecutor {
             if context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
                 let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
             }
+            // pts mode: restore shell fg.
+            if context.tty_stdout == 0 && context.shell_pgid != 0 {
+                let _ = libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32);
+            }
         } else if !bg && pipeline_pgid != 0 {
             // Foreground pipeline: restore TTY fg to shell after wait completes.
             if context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
                 let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
+            }
+            // pts mode: restore shell fg.
+            if context.tty_stdout == 0 && context.shell_pgid != 0 {
+                let _ = libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32);
             }
         }
 

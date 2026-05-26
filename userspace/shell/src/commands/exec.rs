@@ -164,6 +164,13 @@ pub(crate) fn spawn_and_wait(
             pgid,
         );
     }
+    // In pts mode (cluuterm/VFS-backed stdin, no legacy tty service endpoint),
+    // set the foreground pgid on fd 0 via PTS_SET_PGRP_LABEL so cluuterm knows
+    // which process group to SIGINT when ^C arrives.
+    let want_pts_fg_swap = pgid != 0 && context.tty_stdout == 0;
+    if want_pts_fg_swap {
+        let _ = libcluu::posix::termios::tcsetpgrp(0, pgid as i32);
+    }
 
     let result = match parsed {
         Ok(()) => {
@@ -196,6 +203,10 @@ pub(crate) fn spawn_and_wait(
             context.session_id,
             context.shell_pgid,
         );
+    }
+    // Restore shell as pts foreground after child exits.
+    if want_pts_fg_swap && context.shell_pgid != 0 {
+        let _ = libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32);
     }
 
     result

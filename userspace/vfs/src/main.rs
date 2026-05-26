@@ -817,6 +817,9 @@ impl VfsServer {
         if msg.tag.label == libcluu::proto::pts::PTS_READ_DELIVER_LABEL {
             return self.handle_pts_read_deliver(msg, payload);
         }
+        if msg.tag.label == libcluu::proto::pts::PTS_SET_PGRP_LABEL {
+            return self.handle_pts_set_pgrp_proxy(msg, payload, sender_tid);
+        }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
             return Ok(());
@@ -1245,6 +1248,106 @@ impl VfsServer {
         ));
 
         ipc::reply(parked.reply_token, &reply_msg, IpcFlags::empty())
+    }
+
+    /// Handle `PTS_SET_PGRP_LABEL` (138) — proxy a tcsetpgrp request from a
+    /// VFS client to the owning cluuterm instance.
+    ///
+    /// Wire layout from libcluu `pts_call_raw` (after Piece 1):
+    ///   `words[0]` = ABI_VERSION
+    ///   `words[1]` = vfs_remote_fd (the VFS-side fd handle for this client)
+    ///   payload    = postcard-encoded `i32` (pgid)
+    ///
+    /// This handler:
+    ///   1. Resolves `sender_tid` → `client_id` (the authenticated client).
+    ///   2. Looks up `vfs_remote_fd` in `self.files` → `OpenFile::Pts`.
+    ///   3. Gets the cluuterm notify endpoint from `pts_registry`.
+    ///   4. Calls cluuterm synchronously with `PTS_SET_PGRP_LABEL` + pgid payload.
+    ///   5. Forwards cluuterm's reply payload back to the original caller.
+    fn handle_pts_set_pgrp_proxy(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
+        let reply_token = match ipc::extract_reply_id(msg) {
+            Some(t) => t,
+            None => {
+                // Fire-and-forget (no reply slot) — nothing to do.
+                return Ok(());
+            }
+        };
+
+        let mut reply_msg = Message::new(libcluu::proto::pts::PTS_SET_PGRP_LABEL, [0; 6], 1);
+
+        // Authenticate caller and resolve client_id from sender TID.
+        let client_id = match (sender_tid != 0).then_some(sender_tid) {
+            Some(id) => id,
+            None => {
+                reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        // `words[1]` carries the VFS-side remote_fd from `pts_call_raw`.
+        let vfs_fd = msg.words[1];
+
+        // Resolve the open file.
+        let pts_id = match self.files.get(client_id, vfs_fd) {
+            Some(OpenFile::Pts(p)) => p.pts_id,
+            Some(_) => {
+                // fd exists but is not a PTS — ENOTTY.
+                reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+            None => {
+                reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        // Get the cluuterm notify endpoint.
+        let cluuterm_ep = match self.pts_registry.notify_endpoint(pts_id) {
+            Some(ep) if ep != 0 => ep,
+            _ => {
+                reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        // Forward PTS_SET_PGRP_LABEL to cluuterm synchronously.
+        // words[0] = ABI_VERSION, words[1] = pts_id (cluuterm may use for routing).
+        // We build a send buffer (header + payload) and an oversized recv buffer so
+        // that the full cluuterm reply (header + postcard payload) is captured and
+        // can be forwarded verbatim to the original caller via ipc_reply.
+        let hdr_len = core::mem::size_of::<Message>();
+        let fwd_req = Message::new(
+            libcluu::proto::pts::PTS_SET_PGRP_LABEL,
+            [libcluu::proto::ABI_VERSION as usize, pts_id as usize, 0, 0, 0, 0],
+            2,
+        );
+        let mut send_buf = alloc::vec![0u8; hdr_len + payload.len()];
+        send_buf[..hdr_len].copy_from_slice(fwd_req.as_bytes());
+        send_buf[hdr_len..].copy_from_slice(payload);
+
+        // 256 bytes is ample for a postcard-encoded SetPgrpReply (a few bytes).
+        let mut recv_buf = [0u8; 256];
+        loop {
+            match libcluu::syscall::ipc_call(cluuterm_ep, &send_buf, &mut recv_buf) {
+                Ok(reply_len) => {
+                    // Forward the raw reply (header + payload) to the original caller.
+                    let _ = libcluu::syscall::ipc_reply(reply_token, &recv_buf[..reply_len]);
+                    return Ok(());
+                }
+                Err(Error::WouldBlock) => {
+                    let _ = libcluu::syscall::yield_cpu();
+                }
+                Err(err) => {
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            }
+        }
     }
 
     /// Handle `VFS_DERIVE_CHILD_FD_LABEL` — clone a parent's open file to a

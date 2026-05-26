@@ -94,23 +94,31 @@ fn translate_err(e: &crate::proto::pts::PtsErr) -> i32 {
 
 // ── IPC helpers ───────────────────────────────────────────────────────────
 
-/// Look up the IPC endpoint for a file descriptor.
-fn endpoint_for_fd(fd: c_int) -> Result<usize, i32> {
+/// Look up the IPC endpoint and VFS-side remote fd for a file descriptor.
+///
+/// Returns `(endpoint, remote_fd)` where `remote_fd` is 0 for non-VFS fds.
+fn endpoint_for_fd(fd: c_int) -> Result<(usize, usize), i32> {
     let table = crate::fd_table::FD_TABLE.lock();
-    let ep = table.get(fd).map(|e| e.endpoint).unwrap_or(0);
+    let entry = table.get(fd);
+    let ep = entry.map(|e| e.endpoint).unwrap_or(0);
+    let rfd = entry.and_then(|e| e.remote_fd).unwrap_or(0);
     if ep == 0 {
         set_errno(EIO);
         Err(EIO)
     } else {
-        Ok(ep)
+        Ok((ep, rfd))
     }
 }
 
 /// Send a PTS_* request (serialized via postcard) and receive the reply
 /// payload as raw bytes (postcard-encoded).
 ///
+/// `remote_fd` is the VFS-side fd handle for the open file; it is embedded in
+/// `words[1]` so VFS can resolve which PTS instance the request targets.  Pass
+/// 0 for non-VFS callers — cluuterm's PTS_* handlers do not read `words[1]`.
+///
 /// Returns the reply payload bytes (past the 72-byte Message header).
-fn pts_call_raw(label: u32, endpoint: usize, request_payload: &[u8]) -> Result<Vec<u8>, i32> {
+fn pts_call_raw(label: u32, endpoint: usize, remote_fd: usize, request_payload: &[u8]) -> Result<Vec<u8>, i32> {
     let hdr_len = core::mem::size_of::<Message>();
 
     // Build send buffer: Message header + payload.
@@ -118,8 +126,9 @@ fn pts_call_raw(label: u32, endpoint: usize, request_payload: &[u8]) -> Result<V
     let mut send_buf = Vec::with_capacity(total_send);
     send_buf.resize(hdr_len, 0u8);
     {
-        let mut hdr = Message::new(label, [0; 6], 1);
+        let mut hdr = Message::new(label, [0; 6], 2);
         hdr.words[0] = crate::proto::ABI_VERSION as usize;
+        hdr.words[1] = remote_fd;
         send_buf[..hdr_len].copy_from_slice(hdr.as_bytes());
     }
     send_buf.extend_from_slice(request_payload);
@@ -156,12 +165,12 @@ fn pts_call_raw(label: u32, endpoint: usize, request_payload: &[u8]) -> Result<V
 macro_rules! pts_call {
     ($fd:expr, $label:expr, $req:expr, $rep_ty:ty) => {{
         (|| -> Result<$rep_ty, i32> {
-            let ep = endpoint_for_fd($fd)?;
+            let (ep, rfd) = endpoint_for_fd($fd)?;
             let payload = postcard::to_allocvec(&$req).map_err(|_| {
                 set_errno(EINVAL);
                 EINVAL
             })?;
-            let reply_bytes = pts_call_raw($label, ep, &payload)?;
+            let reply_bytes = pts_call_raw($label, ep, rfd, &payload)?;
             let reply: $rep_ty = postcard::from_bytes(&reply_bytes).map_err(|_| {
                 set_errno(EIO);
                 EIO
@@ -348,4 +357,24 @@ pub unsafe extern "C" fn _ioctl(fd: c_int, request: c_ulong, argp: *mut c_void) 
 #[no_mangle]
 pub extern "C" fn ioctl(fd: c_int, request: c_ulong, argp: *mut c_void) -> c_int {
     unsafe { _ioctl(fd, request, argp) }
+}
+
+/// Set the foreground process group for the terminal at `fd` (POSIX `tcsetpgrp`).
+///
+/// In VFS-backed (pts) mode this issues `PTS_SET_PGRP_LABEL` via the VFS
+/// endpoint; VFS proxies it to the owning cluuterm.  In direct-endpoint mode
+/// (legacy TTY service) the same label is handled natively.
+///
+/// Returns `Ok(())` on success, `Err(errno)` on failure.
+pub fn tcsetpgrp(fd: c_int, pgid: i32) -> Result<(), i32> {
+    let label = crate::proto::pts::PTS_SET_PGRP_LABEL;
+    match pts_call!(fd, label, pgid, crate::proto::pts::SetPgrpReply) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(ref e)) => {
+            let eno = translate_err(e);
+            set_errno(eno);
+            Err(eno)
+        }
+        Err(eno) => Err(eno),
+    }
 }
