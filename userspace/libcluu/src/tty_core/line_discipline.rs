@@ -224,6 +224,30 @@ impl LineDiscipline {
         }
 
         // Canonical mode below.
+
+        // CSI state machine: must run before any c_cc checks so ESC/bracket
+        // bytes are consumed and never reach pending_line.
+        match self.csi_state {
+            CsiState::Esc => {
+                if byte == b'[' {
+                    self.csi_state = CsiState::Bracket;
+                } else {
+                    self.csi_state = CsiState::Idle;
+                }
+                return out;
+            }
+            CsiState::Bracket => {
+                self.csi_state = CsiState::Idle;
+                return self.handle_csi_final_canon(byte, echo);
+            }
+            CsiState::Idle => {
+                if byte == 0x1B {
+                    self.csi_state = CsiState::Esc;
+                    return out;
+                }
+            }
+        }
+
         if byte == self.termios.c_cc[Termios::VEOF] {
             // EOF: flush pending_line, then signal Eof.
             if !self.pending_line.is_empty() {
@@ -232,7 +256,7 @@ impl LineDiscipline {
             out.push(LineDiscOutput::Eof);
             return out;
         }
-        if byte == self.termios.c_cc[Termios::VERASE] {
+        if byte == self.termios.c_cc[Termios::VERASE] || byte == 0x08 {
             if self.pending_line.pop().is_some() && echoe {
                 out.push(LineDiscOutput::Echo(alloc::vec![b'\x08', b' ', b'\x08']));
             }
@@ -267,6 +291,14 @@ impl LineDiscipline {
         }
         if byte == b'\n' {
             self.pending_line.push(b'\n');
+            let cmd_only = if self.pending_line.ends_with(b"\n") {
+                self.pending_line[..self.pending_line.len() - 1].to_vec()
+            } else {
+                self.pending_line.clone()
+            };
+            self.push_history(&cmd_only);
+            self.history_pos = None;
+            self.saved_partial = None;
             let line = core::mem::take(&mut self.pending_line);
             out.push(LineDiscOutput::Bytes(line));
             // Echo newline if ECHO or ECHONL is set.
@@ -284,9 +316,81 @@ impl LineDiscipline {
             return self.feed_byte(b'\r');
         }
         // Default: append, echo if requested.
+        if self.history_pos.is_some() {
+            self.history_pos = None;
+            self.saved_partial = None;
+        }
         self.pending_line.push(byte);
         if echo {
             out.push(LineDiscOutput::Echo(alloc::vec![byte]));
+        }
+        out
+    }
+
+    /// Handle the final byte of an `ESC [ X` sequence in canonical mode.
+    /// `A`/`B` drive history navigation against `pending_line`. Other finals
+    /// are silently consumed.
+    fn handle_csi_final_canon(&mut self, final_byte: u8, echo: bool) -> alloc::vec::Vec<LineDiscOutput> {
+        let mut out: alloc::vec::Vec<LineDiscOutput> = alloc::vec::Vec::new();
+        match final_byte {
+            b'A' => {
+                // History back.
+                let target = match self.history_pos {
+                    None => {
+                        if self.history.is_empty() {
+                            return out;
+                        }
+                        self.saved_partial = Some(self.pending_line.clone());
+                        self.history.len() - 1
+                    }
+                    Some(0) => 0,
+                    Some(p) => p - 1,
+                };
+                let new_buf = self.history.get(target).cloned().unwrap_or_default();
+                if echo {
+                    let mut redraw = alloc::vec::Vec::with_capacity(self.pending_line.len() * 3 + new_buf.len());
+                    for _ in 0..self.pending_line.len() {
+                        redraw.extend_from_slice(BACKSPACE_SEQ);
+                    }
+                    redraw.extend_from_slice(&new_buf);
+                    out.push(LineDiscOutput::Echo(redraw));
+                }
+                self.pending_line = new_buf;
+                self.history_pos = Some(target);
+            }
+            b'B' => {
+                // History forward.
+                match self.history_pos {
+                    None => {}
+                    Some(p) if p + 1 < self.history.len() => {
+                        let new_buf = self.history[p + 1].clone();
+                        if echo {
+                            let mut redraw = alloc::vec::Vec::with_capacity(self.pending_line.len() * 3 + new_buf.len());
+                            for _ in 0..self.pending_line.len() {
+                                redraw.extend_from_slice(BACKSPACE_SEQ);
+                            }
+                            redraw.extend_from_slice(&new_buf);
+                            out.push(LineDiscOutput::Echo(redraw));
+                        }
+                        self.pending_line = new_buf;
+                        self.history_pos = Some(p + 1);
+                    }
+                    Some(_) => {
+                        let new_buf = self.saved_partial.take().unwrap_or_default();
+                        if echo {
+                            let mut redraw = alloc::vec::Vec::with_capacity(self.pending_line.len() * 3 + new_buf.len());
+                            for _ in 0..self.pending_line.len() {
+                                redraw.extend_from_slice(BACKSPACE_SEQ);
+                            }
+                            redraw.extend_from_slice(&new_buf);
+                            out.push(LineDiscOutput::Echo(redraw));
+                        }
+                        self.pending_line = new_buf;
+                        self.history_pos = None;
+                    }
+                }
+            }
+            _ => {}
         }
         out
     }
