@@ -553,32 +553,40 @@ type_ascii_command() {
             # The US 'slash' scancode (0x35) maps to '-' on HU (base_symbol override).
             '/') queue_key "shift-6" ;;
             '?') queue_key "shift-comma" ;;
-            ';') queue_key "semicolon" ;;
-            ':') queue_key "shift-semicolon" ;;
+            # HU layout: ';' is AltGr+comma (altgr_symbol 0x33 → b';').
+            # The US semicolon scancode (0x27) maps to 'e' letter on HU.
+            ';') queue_key "alt_r-comma" ;;
+            # HU layout: ':' is shift+dot (shifted_symbol 0x34 → b':').
+            ':') queue_key "shift-dot" ;;
             # HU layout: '\'' lives on Shift+1 (scancode 0x02 shifted → b'\'').
             # The US apostrophe scancode (0x28) maps to 'a' accent letter on HU — wrong.
             "'") queue_key "shift-1" ;;
             '"') queue_key "shift-2" ;;
-            '(') queue_key "shift-9" ;;
-            ')') queue_key "shift-0" ;;
-            '[') queue_key "bracket_left" ;;
-            ']') queue_key "bracket_right" ;;
-            '{') queue_key "shift-bracket_left" ;;
-            '}') queue_key "shift-bracket_right" ;;
-            '\\') queue_key "backslash" ;;
-            '|') queue_key "shift-backslash" ;;
-            '!') queue_key "shift-1" ;;
-            '@') queue_key "shift-2" ;;
-            '#') queue_key "shift-3" ;;
-            '$') queue_key "shift-4" ;;
+            # HU layout: '(' = shift-8 (0x09 shifted), ')' = shift-9 (0x0A shifted).
+            '(') queue_key "shift-8" ;;
+            ')') queue_key "shift-9" ;;
+            # HU layout: brackets/braces/backslash/pipe are AltGr combinations.
+            # US bracket scancodes (0x1A/0x1B) map to 'o'/'u' on HU.
+            '[') queue_key "alt_r-f" ;;
+            ']') queue_key "alt_r-g" ;;
+            '{') queue_key "alt_r-b" ;;
+            '}') queue_key "alt_r-n" ;;
+            '\\') queue_key "alt_r-q" ;;
+            '|') queue_key "alt_r-w" ;;
+            # HU layout: '!' = shift-4 (shifted_symbol 0x05 → b'!').
+            '!') queue_key "shift-4" ;;
+            # HU layout: shell symbols sit on AltGr.
+            '@') queue_key "alt_r-v" ;;
+            '#') queue_key "alt_r-x" ;;
+            '$') queue_key "alt_r-semicolon" ;;
             '%') queue_key "shift-5" ;;
-            '^') queue_key "shift-6" ;;
-            '&') queue_key "shift-7" ;;
-            '*') queue_key "shift-8" ;;
-            '<') queue_key "shift-comma" ;;
-            '>') queue_key "shift-dot" ;;
-            '`') queue_key "grave_accent" ;;
-            '~') queue_key "shift-grave_accent" ;;
+            '^') queue_key "alt_r-3" ;;
+            '&') queue_key "alt_r-c" ;;
+            '*') queue_key "alt_r-slash" ;;
+            '<') queue_key "alt_r-m" ;;
+            '>') queue_key "alt_r-dot" ;;
+            '`') queue_key "alt_r-7" ;;
+            '~') queue_key "alt_r-1" ;;
             # HU (QWERTZ) layout swaps y↔z scancodes.  QEMU sendkey uses
             # US key names, so we pre-swap to produce the intended character.
             'y') queue_key "z" ;;
