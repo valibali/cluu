@@ -13,5 +13,6 @@ path = "src/main.rs"
 [dependencies]
 libcluu = { path = "../libcluu", features = ["posix"] }
 cluu_wire = { path = "../cluu_wire" }
+procmgr-common = { path = "../libs/procmgr-common" }
 postcard = { workspace = true }
 serde = { workspace = true }

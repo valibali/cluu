@@ -279,6 +279,7 @@ dependencies = [
  "cluu_wire",
  "libcluu",
  "postcard",
+ "procmgr-common",
  "serde",
 ]
 

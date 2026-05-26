@@ -24,7 +24,9 @@ use libcluu::window_shm::WindowShm;
 use libcluu::{debug_print, registry, syscall};
 
 use cluu_wire::pts::{VFS_REGISTER_PTS_LABEL, VfsRegisterPtsRequest, VfsRegisterPtsReply};
-use cluu_wire::spawn::{FdInherit, FdRights, FdSource, SpawnEnvelope, ViewSource};
+use cluu_wire::spawn::{FdInherit, FdRights, FdSource};
+use procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL;
+use procmgr_common::wire::{FdInheritEntry, FdKind, SpawnReq, SpawnReply};
 
 extern "C" {
     fn _open(path: *const u8, flags: i32, mode: u32) -> i32;
@@ -306,31 +308,84 @@ let (stdin_cid, stdin_rfd, stdout_cid, stdout_rfd) = {
         },
     ];
 
-    let envelope = SpawnEnvelope {
-        image: alloc::string::String::from("shell"),
-        args: alloc::vec::Vec::new(),
-        env: alloc::vec![
+    // Translate FdInherit entries (cluu_wire) to FdInheritEntry (procmgr-common).
+    // cap_token = VFS client endpoint; session-procmgr derives a narrowed token
+    // from it and writes it into the child's ProcessInfo TOKEN_STDIN/STDOUT/STDERR.
+    let fd_inherit_entries: alloc::vec::Vec<FdInheritEntry> = fd_inherit
+        .iter()
+        .map(|fi| {
+            let cap = match &fi.source {
+                FdSource::VfsFd { vfs_client_id, .. } => *vfs_client_id,
+                _ => 0,
+            };
+            FdInheritEntry { fd: fi.child_fd as i32, kind: FdKind::Pts, cap_token: cap }
+        })
+        .collect();
+
+    // TODO(12.4b): read real sid from session envelope once TOKEN_EXTRA_0 carries
+    // it. For now cluuterm is always spawned inside sid=1 (the only session that
+    // login creates in tests).
+    let sid: u32 = 1;
+
+    let spawn_ep_name = alloc::format!("session-procmgr:spawn:{}", sid);
+    let session_spawn_ep = match registry::lookup_service(&spawn_ep_name) {
+        Some(ep) => ep,
+        None => {
+            let _ = debug_print(&alloc::format!(
+                "cluuterm: {} not found in registry", spawn_ep_name));
+            unsafe { _close(pts_in); _close(pts_out); }
+            return Err(15);
+        }
+    };
+
+    let spawn_req = SpawnReq {
+        image_path: alloc::string::String::from("/bin/shell"),
+        argv: alloc::vec![alloc::string::String::from("shell")],
+        envp: alloc::vec![
             (alloc::string::String::from("TERM"),
              alloc::string::String::from("xterm-256color")),
         ],
-        view: ViewSource::Derive(libcluu::token(libcluu::boot::TOKEN_EXTRA_0) as u64),
-        fd_inherit,
-        session: None,
-        notify: None,
+        cwd: alloc::string::String::from("/"),
+        fd_inherit: fd_inherit_entries,
     };
 
-    match libcluu::spawn::spawn(envelope) {
-        Ok(reply) => {
-            let _ = debug_print(&alloc::format!(
-                "cluuterm: spawned shell pid={}\n", reply.pid));
+    let spawn_payload = match postcard::to_allocvec(&spawn_req) {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = debug_print("cluuterm: SpawnReq serialize failed");
+            unsafe { _close(pts_in); _close(pts_out); }
+            return Err(15);
         }
+    };
+
+    let spawn_msg = Message::new(
+        SESSION_PROCMGR_SPAWN_LABEL,
+        [spawn_payload.len(), 0usize, 0, 0, 0, 0],
+        0,
+    );
+    let mut spawn_reply_buf = [0u8; 512];
+    let (_srply_msg, srply_payload_len) = match libcluu::ipc::call_with_reply_buf(
+        session_spawn_ep, &spawn_msg, &spawn_payload, &mut spawn_reply_buf,
+    ) {
+        Ok(r) => r,
         Err(e) => {
             let _ = debug_print(&alloc::format!(
-                "cluuterm: spawn shell failed: {:?}\n", e));
-            unsafe {
-                _close(pts_in);
-                _close(pts_out);
-            }
+                "cluuterm: session spawn IPC failed: {:?}", e));
+            unsafe { _close(pts_in); _close(pts_out); }
+            return Err(15);
+        }
+    };
+
+    let hdr_sz = core::mem::size_of::<Message>();
+    let srply_bytes = &spawn_reply_buf[hdr_sz..hdr_sz + srply_payload_len];
+    match postcard::from_bytes::<SpawnReply>(srply_bytes) {
+        Ok(r) => {
+            let _ = debug_print(&alloc::format!(
+                "cluuterm: spawned shell pid={}", r.pid));
+        }
+        Err(_) => {
+            let _ = debug_print("cluuterm: SpawnReply deserialize failed");
+            unsafe { _close(pts_in); _close(pts_out); }
             return Err(15);
         }
     }
