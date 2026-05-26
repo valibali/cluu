@@ -157,13 +157,11 @@ pub fn real_spawn_user_process(
             RealSpawnError::TokenDerive
         })?;
 
-    // TOKEN_CLOCK: derive from state.timeserver_cap
-    let clock_rights = (Rights::IPC_CALL | Rights::IPC_SEND).bits() as usize;
-    let child_clock = token_derive(state.timeserver_cap as usize, clock_rights, u64::MAX)
-        .map_err(|_| {
-            let _ = libcluu::debug_print("session-procmgr: TOKEN_CLOCK derive FAILED");
-            RealSpawnError::TokenDerive
-        })?;
+    // TOKEN_CLOCK: kernel-minted clock object (Rights::READ only) used by
+    // clock_now syscall.  Not an IPC endpoint — pass through raw, do not
+    // derive with IPC rights.  Timeserver IPC is discovered via registry
+    // ("timeserver:main") by clients that need pushmode subscriptions.
+    let child_clock = state.timeserver_cap as usize;
 
     // TOKEN_STDIN/STDOUT/STDERR/STDLOG: derive from fd_inherit entries
     // stdin needs IPC_RECV, stdout/stderr/stdlog need IPC_SEND|IPC_CALL
