@@ -17,6 +17,10 @@ harness_derive_marker_defaults() {
     POST_SENDKEY_DEFAULT=""
     SENDKEY_SEQUENCE_NOWAIT_DEFAULT="0"
     RUN_WAIT_DEFAULT=""
+    # Standard root/root credentials sendkey sequence for cases that drive
+    # the interactive login flow. Each case that uses this MUST also set
+    # SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1" and RUN_WAIT_DEFAULT to at least 45.
+    CREDS_SENDKEY_ROOT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
     if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         case "$MARKER_MODE" in
             m3_mapfail) TEST_COMMAND="mapfail 12 4" ;;
@@ -166,8 +170,10 @@ harness_derive_marker_defaults() {
                 SHELL_AUTOSTART_CMD_DEFAULT="help"
                 ;;
             l2_exit_status)
-                TEST_COMMAND=""
-                SHELL_AUTOSTART_CMD_DEFAULT="false ; echo \$?"
+                TEST_COMMAND="false ; echo \$?"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
             l2_fg)
                 TEST_COMMAND="fg"

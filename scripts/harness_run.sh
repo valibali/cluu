@@ -445,6 +445,41 @@ wait_for_shell_ready() {
     return 1
 }
 
+# When SENDKEY_SEQUENCE_NOWAIT=1, fire the credential sequence before the
+# shell-ready check so that the login flow can complete and emit
+# "[USER] shell: ready" — which TYPED_COMMANDS then waits for.
+# The SENDKEY_SEQUENCE definition functions (send_key etc.) are defined below
+# in Step 5; duplicate the execution logic inline here for the nowait path.
+_run_sendkey_sequence_nowait() {
+    if [ -n "$SENDKEY_SEQUENCE" ] && [ "$SENDKEY_SEQUENCE_NOWAIT" = "1" ]; then
+        echo "Executing SENDKEY_SEQUENCE (nowait, before shell-ready)..."
+        while IFS= read -r _nowait_line || [ -n "$_nowait_line" ]; do
+            _nowait_line="${_nowait_line%$'\r'}"
+            [ -z "$_nowait_line" ] && continue
+            case "$_nowait_line" in
+                sendkey\ *)
+                    _nw_key="${_nowait_line#sendkey }"
+                    echo "  sendkey $_nw_key"
+                    echo "sendkey $_nw_key" | nc -U -q0 "$MONITOR_SOCK" >/dev/null 2>&1 || true
+                    sleep "${KEY_DELAY:-0.02}"
+                    ;;
+                sleep\ *)
+                    _nw_secs="${_nowait_line#sleep }"
+                    echo "  sleep $_nw_secs"
+                    sleep "$_nw_secs"
+                    ;;
+                *)
+                    echo "  WARN: unknown nowait SENDKEY_SEQUENCE line: $_nowait_line"
+                    ;;
+            esac
+        done <<< "$SENDKEY_SEQUENCE"
+        # Mark as consumed so Step 5 does not re-execute it.
+        _sendkey_sequence_fired=1
+    fi
+}
+_sendkey_sequence_fired=0
+_run_sendkey_sequence_nowait
+
 _need_shell_ready=0
 if [ "${#TYPED_COMMANDS[@]}" -gt 0 ] || [ -n "$POST_SENDKEY" ]; then
     _need_shell_ready=1
@@ -574,7 +609,8 @@ fi
 # SENDKEY_SEQUENCE: newline-separated list of "sendkey <name>" or "sleep <n>".
 # Executed in order after POST_SENDKEY. Used by compositor harness modes that
 # need to inject multiple raw monitor commands (e.g., Ctrl+Alt+F5 then F1).
-if [ -n "$SENDKEY_SEQUENCE" ]; then
+# Skip if already fired above in the nowait path.
+if [ -n "$SENDKEY_SEQUENCE" ] && [ "$_sendkey_sequence_fired" != "1" ]; then
     echo "Executing SENDKEY_SEQUENCE..."
     while IFS= read -r seq_line || [ -n "$seq_line" ]; do
         seq_line="${seq_line%$'\r'}"
