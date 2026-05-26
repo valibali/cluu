@@ -128,19 +128,26 @@ fn run() -> Result<()> {
         sid, ep
     ));
 
+    // Discover system services via registry (vfs is critical for elf_spawn;
+    // timeserver/registry handles are session-procmgr's own ProcessInfo tokens).
+    let vfs_cap = registry::lookup_service("vfs:main").unwrap_or(0) as u64;
+    let registry_cap = info.tokens[libcluu::boot::TOKEN_REGISTRY] as u64;
+    let timeserver_cap = info.tokens[libcluu::boot::TOKEN_CLOCK] as u64;
+
+    let _ = debug_print(&alloc::format!(
+        "session-procmgr: sid={} vfs_cap={} reg={} ts={}",
+        sid, vfs_cap, registry_cap, timeserver_cap
+    ));
+
     // Build the handler state.
-    // NOTE: SessionState.kernel is typed as MockKernel in dispatch.rs
-    // for host-test builds.  In the no_std production binary we keep the
-    // same type for now — spawn.rs will forward to root-procmgr via IPC in
-    // Phase 12.4 when real kernel wiring lands.
     let mut state = spm::dispatch::SessionState {
         sid,
         generation: envelope.generation,
         child_table: spm::child_table::ChildTable::new(sid),
         kernel: procmgr_common::test_kernel::MockKernel::new(),
-        vfs_cap: envelope.caps.iter().find(|(n, _)| n == "vfs").map(|(_, h)| *h).unwrap_or(0),
-        registry_cap: envelope.caps.iter().find(|(n, _)| n == "registry").map(|(_, h)| *h).unwrap_or(0),
-        timeserver_cap: envelope.caps.iter().find(|(n, _)| n == "timeserver").map(|(_, h)| *h).unwrap_or(0),
+        vfs_cap,
+        registry_cap,
+        timeserver_cap,
         restart: spm::restart::RestartTracker::new(),
         pipes: spm::pipe_registry::PipeRegistry::new(),
         ctty: None,
