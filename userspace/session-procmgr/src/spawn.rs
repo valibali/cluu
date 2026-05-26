@@ -72,7 +72,10 @@ impl MsgHandler for Spawn {
         #[cfg(not(feature = "host-test"))]
         let (thread_tok, cookie) = match crate::elf_spawn::real_spawn_user_process(state, pid, &req) {
             Ok(t) => t,
-            Err(_) => {
+            Err(e) => {
+                let _ = libcluu::debug_print(&alloc::format!(
+                    "session-procmgr: real_spawn_user_process failed: {:?}", e
+                ));
                 for h in &minted {
                     state.kernel.revoke(*h);
                 }

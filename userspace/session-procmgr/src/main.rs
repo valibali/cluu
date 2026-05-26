@@ -144,7 +144,7 @@ fn run() -> Result<()> {
         sid,
         generation: envelope.generation,
         child_table: spm::child_table::ChildTable::new(sid),
-        kernel: procmgr_common::test_kernel::MockKernel::new(),
+        kernel: spm::real_kernel::RealKernel,
         vfs_cap,
         registry_cap,
         timeserver_cap,

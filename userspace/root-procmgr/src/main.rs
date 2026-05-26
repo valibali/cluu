@@ -4228,31 +4228,41 @@ impl ProcessManager {
             session_id & 0xFF, byte_len
         ));
 
-        match self.spawn_service_with_env(
+        let spawn_result = self.spawn_service_with_env(
             "/bin/session-procmgr",
-            0,                   // default priority
-            &env_bytes,          // argv_payload = raw envelope bytes
-            byte_len,            // argc = byte count (special convention)
-            &[],                 // no caller env
+            0,                      // default priority
+            &env_bytes,             // argv_payload = raw envelope bytes
+            byte_len,               // argc = byte count (special convention)
+            &[],                    // no caller env
             0,
-            0,                   // owner_tid = 0 (system spawn)
+            0,                      // owner_tid = 0 (system spawn)
             spawn_seq,
             spawn_start,
-            &[],                 // no fd_inherit
-            CapProfile::SERVICE, // session-procmgr needs SERVICE profile
+            &[],                    // no fd_inherit
+            CapProfile::SUPERVISOR, // needs full VFS access to spawn children
             0,
             0,
             &[],
             None,
             &[],
             &[],
-            0,
-        ) {
+            THREAD_CREATE_START_SUSPENDED,
+        );
+        match spawn_result {
             Ok((thread_tok, _cookie, _pid, _)) => {
                 let _ = debug_print(&format!(
                     "procmgr: session-procmgr spawned sid={} thread_tok={}",
                     session_id & 0xFF, thread_tok
                 ));
+                // Give session-procmgr SUPERVISOR-level VFS view so it can
+                // open ELF images for the children it spawns (e.g. /bin/cluuterm).
+                let supervisor_mounts: Vec<(String, String, bool, u64)> = alloc::vec![
+                    ("/".into(), "/".into(), true, 0u64),
+                ];
+                self.install_view_and_run(
+                    thread_tok, &supervisor_mounts,
+                    CapProfile::SUPERVISOR, 0, 0, false,
+                );
             }
             Err(e) => {
                 let _ = debug_print(&format!(
@@ -4399,6 +4409,14 @@ impl ProcessManager {
         let proc_cap = derive_slot(self.token, slot_rights[TOKEN_IPC])?;
         let self_cap = derive_slot(self.token, slot_rights[TOKEN_SELF])?;
         let child_space_token = derive_slot(space_token, slot_rights[TOKEN_SPACE])?;
+        // Derive a profile-narrowed registry handle.  Falls back to raw
+        // passthrough when the profile bit is missing (e.g. SANDBOXED) so
+        // children that never talk to registry still see slot 0.
+        let child_registry_token = if slot_rights[TOKEN_REGISTRY].is_empty() {
+            self.registry_send
+        } else {
+            derive_slot(self.registry_send, slot_rights[TOKEN_REGISTRY])?
+        };
 
         // Create the child thread SUSPENDED before FdInherit parsing so that the child's TID
         // is available for VFS derive_child_fd (which registers the fd slot under child_tid).
@@ -4615,7 +4633,7 @@ impl ProcessManager {
             stdout_ep,
             stderr_ep,
             stdlog_ep,
-            self.registry_send,
+            child_registry_token,
             proc_cap,
             self_cap,
             child_space_token,
@@ -7221,6 +7239,19 @@ fn profile_to_rights(profile: CapProfile) -> [Rights; 16] {
     // SPAWN: needs CREATE+GRANT on self token to create child threads.
     if profile.contains(CapProfile::SPAWN) {
         r[TOKEN_SELF] |= Rights::CREATE | Rights::GRANT;
+    }
+
+    // REGISTRY/VFS/SPAWN: any process that talks to the registry needs SEND+CALL.
+    // SPAWN-capable processes additionally need GRANT so they can re-derive a
+    // narrower registry handle for each of their children.
+    if profile.contains(CapProfile::REGISTRY)
+        || profile.contains(CapProfile::VFS)
+        || profile.contains(CapProfile::SPAWN)
+    {
+        r[TOKEN_REGISTRY] |= Rights::IPC_SEND | Rights::IPC_CALL;
+    }
+    if profile.contains(CapProfile::SPAWN) {
+        r[TOKEN_REGISTRY] |= Rights::GRANT;
     }
 
     // VFS: needs SPACE_MAP to map file data into address space.

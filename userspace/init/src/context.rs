@@ -41,11 +41,16 @@ impl<'a> InitContext<'a> {
         // IPC_CALL is included so callers can use synchronous call-style IPC
         // (required by register_output, unregister_output which now block until
         // the registry has committed the entry and replied).
+        // GRANT is included so spawners (root-procmgr, session-procmgr) can
+        // re-derive narrower handles for their children via profile_to_rights.
         let registry_full = endpoint_create(boot.root_token)?;
         let registry_endpoint =
             token_derive(registry_full, Rights::IPC_RECV.bits() as usize, u64::MAX)?;
-        let registry_send =
-            token_derive(registry_full, (Rights::IPC_SEND | Rights::IPC_CALL).bits() as usize, u64::MAX)?;
+        let registry_send = token_derive(
+            registry_full,
+            (Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT).bits() as usize,
+            u64::MAX,
+        )?;
 
         // Keyboard service needs an IRQ handle token.
         let kbd_irq_token = token_derive(

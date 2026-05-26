@@ -2,13 +2,21 @@ extern crate alloc;
 use alloc::string::String;
 use procmgr_common::handler::{HandlerError, InboundMsg, MsgHandler, Reply};
 use procmgr_common::pid::SessionId;
+#[cfg(feature = "host-test")]
 use procmgr_common::test_kernel::MockKernel;
+
+/// The kernel type used at runtime depends on whether we are in a host-test
+/// build (MockKernel) or a real target build (RealKernel).
+#[cfg(feature = "host-test")]
+pub type KernelImpl = MockKernel;
+#[cfg(not(feature = "host-test"))]
+pub type KernelImpl = crate::real_kernel::RealKernel;
 
 pub struct SessionState {
     pub sid: SessionId,
     pub generation: u32,
     pub child_table: crate::child_table::ChildTable,
-    pub kernel: MockKernel,
+    pub kernel: KernelImpl,
     pub vfs_cap: u64,
     pub registry_cap: u64,
     pub timeserver_cap: u64,
@@ -21,6 +29,7 @@ pub struct SessionState {
     pub spawn_ep: u64,
 }
 
+#[cfg(feature = "host-test")]
 impl SessionState {
     pub fn new_for_test(sid: SessionId) -> Self {
         Self {

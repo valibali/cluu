@@ -70,13 +70,31 @@ pub fn real_spawn_user_process(
     let child_space = space_create(our_space).map_err(|_| RealSpawnError::SpaceCreate)?;
 
     // ── 2. Map ELF via VFS ─────────────────────────────────────────────────
-    let vfs = VfsClient::new(state.vfs_cap as usize, registry::control_endpoint());
+    let ctrl_ep = registry::control_endpoint();
+    let _ = libcluu::debug_print(&alloc::format!(
+        "session-procmgr: elf_spawn vfs_ep={} ctrl_ep={} path={}",
+        state.vfs_cap, ctrl_ep, req.image_path
+    ));
+    let vfs = VfsClient::new(state.vfs_cap as usize, ctrl_ep);
     let file = vfs
         .open(&req.image_path)
-        .map_err(|_| RealSpawnError::VfsOpen)?;
+        .map_err(|e| {
+            let _ = libcluu::debug_print(&alloc::format!(
+                "session-procmgr: VfsOpen failed: {:?}", e
+            ));
+            RealSpawnError::VfsOpen
+        })?;
     let entry = vfs
         .map_elf(file, child_space)
-        .map_err(|_| RealSpawnError::MapElf)?;
+        .map_err(|e| {
+            let _ = libcluu::debug_print(&alloc::format!(
+                "session-procmgr: map_elf failed: {:?}", e
+            ));
+            RealSpawnError::MapElf
+        })?;
+    let _ = libcluu::debug_print(&alloc::format!(
+        "session-procmgr: map_elf OK entry=0x{:x}", entry
+    ));
 
     // ── 3. Allocate stack ──────────────────────────────────────────────────
     space_map_range(
@@ -91,6 +109,11 @@ pub fn real_spawn_user_process(
     let stack_top = CHILD_STACK_BASE + CHILD_STACK_SIZE;
 
     // ── 4. Derive child capability tokens ──────────────────────────────────
+    let _ = libcluu::debug_print(&alloc::format!(
+        "session-procmgr: tokens IPC={} SELF={} SPACE={} REG={} CLK={}",
+        info.tokens[TOKEN_IPC], info.tokens[TOKEN_SELF], info.tokens[TOKEN_SPACE],
+        info.tokens[TOKEN_REGISTRY], info.tokens[TOKEN_CLOCK],
+    ));
 
     // TOKEN_IPC: children may create endpoints + call procmgr/vfs
     let ipc_rights = (Rights::IPC_SEND
@@ -100,31 +123,47 @@ pub fn real_spawn_user_process(
         | Rights::GRANT)
         .bits() as usize;
     let child_ipc = token_derive(info.tokens[TOKEN_IPC], ipc_rights, u64::MAX)
-        .map_err(|_| RealSpawnError::TokenDerive)?;
+        .map_err(|_| {
+            let _ = libcluu::debug_print("session-procmgr: TOKEN_IPC derive FAILED");
+            RealSpawnError::TokenDerive
+        })?;
 
     // TOKEN_SELF: children may spawn threads + grant
     let self_rights =
         (Rights::CREATE | Rights::GRANT | Rights::THREAD_CONTROL).bits() as usize;
     let child_self = token_derive(info.tokens[TOKEN_SELF], self_rights, u64::MAX)
-        .map_err(|_| RealSpawnError::TokenDerive)?;
+        .map_err(|_| {
+            let _ = libcluu::debug_print("session-procmgr: TOKEN_SELF derive FAILED");
+            RealSpawnError::TokenDerive
+        })?;
 
     // TOKEN_SPACE: derived from the new child_space
     let space_rights =
         (Rights::SPACE_MAP | Rights::SPACE_GRANT | Rights::CREATE | Rights::THREAD_CONTROL)
             .bits() as usize;
     let child_space_tok = token_derive(child_space, space_rights, u64::MAX)
-        .map_err(|_| RealSpawnError::TokenDerive)?;
+        .map_err(|_| {
+            let _ = libcluu::debug_print("session-procmgr: TOKEN_SPACE derive FAILED");
+            RealSpawnError::TokenDerive
+        })?;
 
-    // TOKEN_REGISTRY: derive from state.registry_cap
+    // TOKEN_REGISTRY: derive from state.registry_cap.  GRANT included so
+    // grandchildren can also re-derive narrower handles via FdInherit.
     let registry_rights =
         (Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT).bits() as usize;
     let child_registry = token_derive(state.registry_cap as usize, registry_rights, u64::MAX)
-        .map_err(|_| RealSpawnError::TokenDerive)?;
+        .map_err(|_| {
+            let _ = libcluu::debug_print("session-procmgr: TOKEN_REGISTRY derive FAILED");
+            RealSpawnError::TokenDerive
+        })?;
 
     // TOKEN_CLOCK: derive from state.timeserver_cap
     let clock_rights = (Rights::IPC_CALL | Rights::IPC_SEND).bits() as usize;
     let child_clock = token_derive(state.timeserver_cap as usize, clock_rights, u64::MAX)
-        .map_err(|_| RealSpawnError::TokenDerive)?;
+        .map_err(|_| {
+            let _ = libcluu::debug_print("session-procmgr: TOKEN_CLOCK derive FAILED");
+            RealSpawnError::TokenDerive
+        })?;
 
     // TOKEN_STDIN/STDOUT/STDERR/STDLOG: derive from fd_inherit entries
     // stdin needs IPC_RECV, stdout/stderr/stdlog need IPC_SEND|IPC_CALL
