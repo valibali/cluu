@@ -15,7 +15,7 @@ pub fn map_process_info(
     exit_token: usize,
     exit_cookie: usize,
     pid: usize,
-    tokens: &[usize; 16],
+    tokens: &[usize; 17],
     params: &[u64; 32],
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;

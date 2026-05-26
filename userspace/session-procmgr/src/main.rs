@@ -27,7 +27,7 @@ use core::mem::size_of;
 
 #[cfg(not(feature = "host-test"))]
 use libcluu::{
-    boot::{process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, PROCESS_INFO_ADDR},
+    boot::{process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, PROCESS_INFO_ADDR, TOKEN_VFS_VIEW_MGR},
     debug_print, registry,
     ipc::{extract_reply_id, parse_message},
     mem::PAGE_SIZE,
@@ -148,6 +148,7 @@ fn run() -> Result<()> {
     let vfs_cap = registry::lookup_service("vfs:main").unwrap_or(0) as u64;
     let registry_cap = info.tokens[libcluu::boot::TOKEN_REGISTRY] as u64;
     let timeserver_cap = info.tokens[libcluu::boot::TOKEN_CLOCK] as u64;
+    let view_mgr_token = info.tokens[TOKEN_VFS_VIEW_MGR] as u64;
 
     let _ = debug_print(&alloc::format!(
         "session-procmgr: sid={} vfs_cap={} reg={} ts={}",
@@ -167,6 +168,7 @@ fn run() -> Result<()> {
         pipes: spm::pipe_registry::PipeRegistry::new(),
         ctty: None,
         spawn_ep: ep as u64,
+        view_mgr_token,
     };
 
     let control_ep = registry::control_endpoint();

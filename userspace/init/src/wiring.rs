@@ -33,6 +33,7 @@ use libcluu::boot::{
     TOKEN_SELF,
     TOKEN_SELF_THREAD,
     TOKEN_SPACE,
+    TOKEN_VFS_VIEW_MGR,
 };
 use libcluu::syscall::{thread_resume, THREAD_CREATE_START_SUSPENDED};
 use libcluu::boot_manifest::BootManifest;
@@ -65,7 +66,7 @@ trait ServiceWiring {
         ctx: &InitContext<'_>,
         child_token: usize,
         instance_id: Option<u64>,
-        tokens: &mut [usize; 16],
+        tokens: &mut [usize; 17],
         params: &mut [u64; 32],
     ) -> Result<()>;
 
@@ -86,7 +87,7 @@ impl ServiceWiring for ServiceKind {
         ctx: &InitContext<'_>,
         child_token: usize,
         instance_id: Option<u64>,
-        tokens: &mut [usize; 16],
+        tokens: &mut [usize; 17],
         params: &mut [u64; 32],
     ) -> Result<()> {
         // New token layout:
@@ -138,6 +139,7 @@ impl ServiceWiring for ServiceKind {
                 tokens[TOKEN_EXTRA_0] = ctx.exit_endpoint;
                 // Elevated capability token for process management
                 tokens[TOKEN_EXTRA_1] = child_token;
+                tokens[TOKEN_VFS_VIEW_MGR] = ctx.boot.view_mgr_token;
                 params[PARAM_INITRD_SIZE] = ctx.boot.initrd_size as u64;
             }
             ServiceKind::Vfs => {
@@ -250,7 +252,7 @@ pub fn launch_service(
     t.mark("map_stack");
 
     // Assemble process info payload (tokens + params) before mapping it into the child.
-    let mut tokens = [0usize; 16];
+    let mut tokens = [0usize; 17];
     let mut params = [0u64; 32];
 
     // Write profile before configure_tokens — console's configure_tokens
@@ -471,7 +473,7 @@ fn load_service_image<'a>(initrd: &'a [u8], path: &str, name: &str) -> Result<&'
 /// Ensure stdin/stdout/stderr/stdlog endpoints exist for a service.
 ///
 /// These defaults keep logging and basic IO consistent across services.
-fn fill_default_endpoints(token: usize, tokens: &mut [usize; 16]) -> Result<()> {
+fn fill_default_endpoints(token: usize, tokens: &mut [usize; 17]) -> Result<()> {
     if tokens[TOKEN_STDIN] == 0 {
         tokens[TOKEN_STDIN] = endpoint_create(token)?;
     }

@@ -802,6 +802,8 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         // Token operations
         InvokeOp::TokenDerive => invoke_token_derive(token_handle, &token, obj_ref, args),
         InvokeOp::TokenRevoke => invoke_token_revoke(token_handle, &token, obj_ref, args),
+        InvokeOp::TokenGetInfo => invoke_token_get_info(obj_ref),
+        InvokeOp::TokenDeriveScoped => invoke_token_derive_scoped(token_handle, &token, obj_ref, args),
 
         // IRQ operations
         InvokeOp::IrqAttach => invoke_irq_attach(&token, obj_ref, args),
@@ -2729,6 +2731,72 @@ fn invoke_token_revoke(
     })?;
 
     Ok(0)
+}
+
+// Returns a packed descriptor for the object type and any scope fields.
+// Encoding: bits[55:48] = type_tag, bits[47:32] = scope_mask, bits[31:0] = scope_sid.
+// type_tag matches the ObjectRef wire tag (0x09 for VfsViewManager, etc.).
+fn invoke_token_get_info(obj_ref: ObjectRef) -> SyscallResult {
+    use crate::token::scope::ObjectRef;
+    let packed: usize = match obj_ref {
+        ObjectRef::Thread(_) => 0x01usize << 48,
+        ObjectRef::Space(_) => 0x02usize << 48,
+        ObjectRef::Endpoint(_) => 0x03usize << 48,
+        ObjectRef::Irq(_) => 0x04usize << 48,
+        ObjectRef::Clock => 0x06usize << 48,
+        ObjectRef::Frame(_) => 0x07usize << 48,
+        ObjectRef::Notification(_) => 0x08usize << 48,
+        ObjectRef::VfsViewManager { scope_sid, scope_mask } => {
+            (0x09usize << 48) | ((scope_mask as usize) << 32) | (scope_sid as usize)
+        }
+    };
+    Ok(packed)
+}
+
+fn invoke_token_derive_scoped(
+    handle: TokenHandle,
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
+) -> SyscallResult {
+    use crate::token::scope::ObjectRef as OR;
+    use crate::token::{AuthorityId, Issuer, Rights, Timestamp};
+
+    if !token.has_right(Rights::GRANT) {
+        klibcluu::warn("invoke_token_derive_scoped: missing GRANT right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let (parent_scope_sid, parent_scope_mask) = match obj_ref {
+        OR::VfsViewManager { scope_sid, scope_mask } => (scope_sid, scope_mask),
+        _ => {
+            klibcluu::warn("invoke_token_derive_scoped: not a VfsViewManager token");
+            return Err(Error::InvalidArgument);
+        }
+    };
+
+    let new_rights = Rights::from_bits((args.arg3 & 0xffffffff) as u32);
+    let expire = Timestamp::new(args.arg4 as u64);
+    let new_scope_sid = (args.arg5 & 0xffffffff) as u32;
+    let new_scope_mask = (args.arg6 & 0xffff) as u16;
+
+    if new_scope_mask & parent_scope_mask != new_scope_mask {
+        klibcluu::warn("invoke_token_derive_scoped: scope_mask widening rejected");
+        return Err(Error::PermissionDenied);
+    }
+
+    if parent_scope_sid != 0 && new_scope_sid != parent_scope_sid {
+        klibcluu::warn("invoke_token_derive_scoped: scope_sid escape rejected");
+        return Err(Error::PermissionDenied);
+    }
+
+    let new_obj_ref = OR::VfsViewManager { scope_sid: new_scope_sid, scope_mask: new_scope_mask };
+    let issuer = Issuer::Authority(AuthorityId::new(handle.as_raw() as u64));
+
+    let derived = crate::token::try_derive_token(token, new_rights, expire, issuer, new_obj_ref)
+        .map_err(|_| Error::OutOfMemory)?;
+
+    Ok(derived.as_usize())
 }
 
 // IRQ operations

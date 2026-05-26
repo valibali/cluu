@@ -393,6 +393,8 @@ pub enum InvokeOp {
     // Token operations
     TokenDerive = 20,
     TokenRevoke = 21,
+    TokenGetInfo = 22,
+    TokenDeriveScoped = 23,
 
     // IRQ operations
     IrqAttach = 30,
@@ -462,6 +464,8 @@ impl InvokeOp {
             19 => Some(Self::SpaceGetStats),
             20 => Some(Self::TokenDerive),
             21 => Some(Self::TokenRevoke),
+            22 => Some(Self::TokenGetInfo),
+            23 => Some(Self::TokenDeriveScoped),
             30 => Some(Self::IrqAttach),
             31 => Some(Self::IrqAck),
             40 => Some(Self::EndpointCreate),

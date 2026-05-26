@@ -76,6 +76,8 @@ pub enum InvokeOp {
     // Token operations
     TokenDerive = 20,
     TokenRevoke = 21,
+    TokenGetInfo = 22,
+    TokenDeriveScoped = 23,
 
     // IRQ operations
     IrqAttach = 30,
@@ -1003,9 +1005,50 @@ pub fn token_derive(token_handle: usize, new_rights: usize, expire_at: u64) -> R
     }
 }
 
+/// Sub-mint a `VfsViewManager` token narrowed to a specific session scope.
+///
+/// - `parent`: handle with `Rights::GRANT` on a `VfsViewManager` object.
+/// - `new_rights`: rights for the derived token (must be a subset of parent rights).
+/// - `expire_ts`: expiry timestamp (pass `u64::MAX` for no expiry).
+/// - `new_scope_sid`: session ID to bind the derived cap to (0 = keep parent binding).
+/// - `new_scope_mask`: bitmask of VFS view scopes allowed (monotone-decrease from parent).
+///
+/// Rejects non-`VfsViewManager` ObjectRef and any scope expansion.
+pub fn token_derive_scoped(
+    parent: usize,
+    new_rights: u32,
+    expire_ts: u64,
+    new_scope_sid: u32,
+    new_scope_mask: u16,
+) -> Result<usize> {
+    unsafe {
+        invoke(
+            parent,
+            InvokeOp::TokenDeriveScoped,
+            new_rights as usize,
+            expire_ts as usize,
+            new_scope_sid as usize,
+            new_scope_mask as usize,
+        )
+    }
+}
+
 /// Revoke a token, invalidating it and all tokens derived from it.
 pub fn token_revoke(token_handle: usize) -> Result<usize> {
     unsafe { invoke(token_handle, InvokeOp::TokenRevoke, 0, 0, 0, 0) }
+}
+
+/// Query a token's object type and scope fields.
+///
+/// Returns `(type_tag, scope_sid, scope_mask)` packed from the kernel response:
+/// bits[55:48] = type_tag, bits[47:32] = scope_mask, bits[31:0] = scope_sid.
+/// type_tag 0x09 = VfsViewManager; scope_sid 0 = root authority.
+pub fn token_get_info(token_handle: usize) -> Result<(u8, u32, u16)> {
+    let packed = unsafe { invoke(token_handle, InvokeOp::TokenGetInfo, 0, 0, 0, 0)? };
+    let type_tag = ((packed >> 48) & 0xFF) as u8;
+    let scope_mask = ((packed >> 32) & 0xFFFF) as u16;
+    let scope_sid = (packed & 0xFFFF_FFFF) as u32;
+    Ok((type_tag, scope_sid, scope_mask))
 }
 
 /// Destroy a thread

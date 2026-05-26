@@ -66,6 +66,7 @@ members = [
     "userspace/probes/suspendprobe",
     "userspace/probes/cascadeprobe",
     "userspace/probes/detachprobe",
+    "userspace/probes/pm_vfs_view_scope",
     "userspace/virtio-core",
     "userspace/virtio-blk",
     "userspace/probes/vqprobe",

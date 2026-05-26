@@ -27,6 +27,7 @@ pub struct SessionState {
     /// Children receive an IPC_SEND-narrowed derivative as their exit_token.
     /// Zero in host-test builds (MockKernel handles spawn there).
     pub spawn_ep: u64,
+    pub view_mgr_token: u64,
 }
 
 #[cfg(feature = "host-test")]
@@ -44,6 +45,7 @@ impl SessionState {
             pipes: crate::pipe_registry::PipeRegistry::new(),
             ctty: None,
             spawn_ep: 0,
+            view_mgr_token: 0,
         }
     }
 }

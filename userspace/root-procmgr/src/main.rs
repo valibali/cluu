@@ -52,6 +52,7 @@ use libcluu::boot::{
     TOKEN_STDIN,
     TOKEN_STDLOG,
     TOKEN_STDOUT,
+    TOKEN_VFS_VIEW_MGR,
 };
 use libcluu::cap::CapProfile;
 use libcluu::crypto;
@@ -280,6 +281,7 @@ struct ProcessManager {
     grant_base_next: usize, // Reused base address for grant buffer
     clock_token: usize,
     clock_freq: u64,
+    view_mgr_token: usize,
     spawn_seq_next: usize,
     vfs_file_cache: BTreeMap<String, libcluu::fs::client::VfsFile>,
     pending_vfs_views: Vec<PendingVfsView>,
@@ -368,6 +370,7 @@ impl ProcessManager {
             grant_base_next: 0x50100000, // Start after virtqueue region
             clock_token: info.tokens[TOKEN_CLOCK],
             clock_freq: clock_frequency(info.tokens[TOKEN_CLOCK]).unwrap_or(1_000_000_000),
+            view_mgr_token: info.tokens[TOKEN_VFS_VIEW_MGR],
             spawn_seq_next: 1,
             vfs_file_cache: BTreeMap::new(),
             pending_vfs_views: Vec::new(),
@@ -662,7 +665,7 @@ impl ProcessManager {
                 if child_cid > 0
                     && !self.pid_to_container_id.values().any(|&cid| cid == child_cid)
                 {
-                    let _ = send_vfs_container_cleanup(self.vfs_endpoint, child_cid, 1);
+                    let _ = send_vfs_container_cleanup(self.vfs_endpoint, child_cid, 1, self.view_mgr_token);
                 }
                 // Recursively destroy grandchildren
                 self.destroy_container_children(child_cid);
@@ -765,6 +768,7 @@ impl ProcessManager {
             &manager_mounts,
             CapProfile::SUPERVISOR,
             0,
+            self.view_mgr_token,
         ) {
             Ok(()) => {
                 self.manager_vfs_view_registered = true;
@@ -790,6 +794,7 @@ impl ProcessManager {
                 &entry.mounts,
                 entry.profile,
                 entry.container_id,
+                self.view_mgr_token,
             ) {
                 let _ = debug_print(&format!(
                     "procmgr: deferred VFS_SET_VIEW failed tid={} err={:?}",
@@ -1014,7 +1019,7 @@ impl ProcessManager {
             let _ = self.ensure_vfs_endpoint();
             return;
         }
-        if let Err(err) = send_vfs_set_view(self.vfs_endpoint, thread_tid, mounts, profile, container_id) {
+        if let Err(err) = send_vfs_set_view(self.vfs_endpoint, thread_tid, mounts, profile, container_id, self.view_mgr_token) {
             let _ = debug_print(&format!(
                 "procmgr: VFS_SET_VIEW failed tid={} err={:?}",
                 thread_tid, err
@@ -1041,6 +1046,7 @@ impl ProcessManager {
             &empty_mounts,
             CapProfile::empty(),
             0,
+            self.view_mgr_token,
         ) {
             let _ = debug_print(&format!(
                 "procmgr: clear VFS_SET_VIEW failed tid={} err={:?}",
@@ -1993,7 +1999,7 @@ impl ProcessManager {
             // Cascade: destroy child containers before cleaning up this container's storage
             self.destroy_container_children(container_id);
             self.container_instances.remove(&container_id);
-            let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
+            let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1, self.view_mgr_token);
         }
         // HR4: Shell normal exit = explicit logout → session death.
         // Find session whose shell_cid matches the exiting container.
@@ -2148,7 +2154,7 @@ impl ProcessManager {
                 {
                     self.destroy_container_children(container_id);
                     self.container_instances.remove(&container_id);
-                    let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
+                    let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1, self.view_mgr_token);
                 }
                 // HR3: Shell crash — clear shell from session but keep session alive.
                 // No SESSION_DEATH sent; the session survives the crash.
@@ -2376,7 +2382,7 @@ impl ProcessManager {
             self.container_owner_pids.remove(&pid);
         }
         if container_id > 0 {
-            let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
+            let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1, self.view_mgr_token);
         }
 }
 
@@ -3790,7 +3796,7 @@ impl ProcessManager {
 
         // Build tokens (standard layout for system services).
         let slot_rights = profile_to_rights(requested_profile);
-        let mut tokens = [0usize; 16];
+        let mut tokens = [0usize; 17];
         tokens[TOKEN_STDIN] = endpoint_create(self.token)?;
         tokens[TOKEN_STDOUT] = endpoint_create(self.token)?;
         tokens[TOKEN_STDERR] = endpoint_create(self.token)?;
@@ -3800,6 +3806,7 @@ impl ProcessManager {
         tokens[TOKEN_IPC] = derive_slot(self.token, slot_rights[TOKEN_IPC])?;
         tokens[TOKEN_CLOCK] = self.clock_token;
         tokens[TOKEN_REGISTRY] = self.registry_send;
+        tokens[TOKEN_VFS_VIEW_MGR] = self.view_mgr_token;
 
         // Apply TOKEN_EXTRA_0 based on requested mode.
         match token_extra_mode {
@@ -4228,6 +4235,34 @@ impl ProcessManager {
             session_id & 0xFF, byte_len
         ));
 
+        // Scope constants — must match VIEW_SCOPE_* in userspace/vfs/src/main.rs.
+        const VIEW_SCOPE_ROOT: u16 = 0x0001;
+        const VIEW_SCOPE_DEV:  u16 = 0x0002;
+
+        // Sub-mint a sid-scoped VfsViewManager cap for session-procmgr.
+        // session-procmgr gets ROOT + DEV scope so it can read ELF images
+        // and device nodes for the children it spawns, but nothing wider.
+        let scoped_view_mgr = match token_derive_scoped(
+            self.view_mgr_token,
+            Rights::GRANT.bits(),
+            u64::MAX,
+            session_id & 0xFF,
+            VIEW_SCOPE_ROOT | VIEW_SCOPE_DEV,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: SESSION_CREATE scoped view_mgr sub-mint FAILED sid={} {:?}",
+                    session_id & 0xFF, e
+                ));
+                return;
+            }
+        };
+        // Temporarily replace the field so spawn_service_with_env picks up the
+        // scoped cap.  Restored immediately after the call.
+        let saved_view_mgr = self.view_mgr_token;
+        self.view_mgr_token = scoped_view_mgr;
+
         let spawn_result = self.spawn_service_with_env(
             "/bin/session-procmgr",
             0,                      // default priority
@@ -4271,6 +4306,8 @@ impl ProcessManager {
                 ));
             }
         }
+        // Restore root cap; scoped_view_mgr is now owned by the child process.
+        self.view_mgr_token = saved_view_mgr;
     }
 
     #[allow(clippy::too_many_arguments, dead_code)]
@@ -4650,6 +4687,7 @@ impl ProcessManager {
             cwd_bytes,
             redir_bytes,
             &fd_vfs_meta,
+            self.view_mgr_token,
         )?;
 
         // thread_token and thread_tid were obtained above (before FdInherit parsing) so the
@@ -5831,7 +5869,7 @@ impl ProcessManager {
                     {
                         self.destroy_container_children(container_id);
                         self.container_instances.remove(&container_id);
-                        let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1);
+                        let _ = send_vfs_container_cleanup(self.vfs_endpoint, container_id, 1, self.view_mgr_token);
                     }
                 }
 
@@ -7010,11 +7048,12 @@ fn map_process_info_page(
     // page trailer at PARAM_FD_VFS_OFFSET so that the child's init_stdio can
     // build FdEntry::file(...) for VFS-backed fds.
     fd_vfs_meta: &[(usize, usize); 4],
+    view_mgr_token: usize,
 ) -> Result<()> {
     const READ_ONLY: usize = 0x01;
     let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
 
-    let mut tokens = [0usize; 16];
+    let mut tokens = [0usize; 17];
     // Slots 0-3: Standard I/O
     tokens[TOKEN_STDIN] = stdin_token;
     tokens[TOKEN_STDOUT] = stdout_token;
@@ -7034,6 +7073,7 @@ fn map_process_info_page(
     if extra_token_1 != 0 {
         tokens[TOKEN_EXTRA_1] = extra_token_1;
     }
+    tokens[TOKEN_VFS_VIEW_MGR] = view_mgr_token;
 
     let mut params = [0u64; 32];
     // params[0] = pipe_mask for all processes
@@ -7488,6 +7528,7 @@ fn send_vfs_set_view(
     mounts: &[(String, String, bool, u64)],
     profile: CapProfile,
     container_id: u64,
+    view_mgr_token: usize,
 ) -> Result<()> {
     if vfs_endpoint == 0 {
         return Ok(());
@@ -7511,27 +7552,34 @@ fn send_vfs_set_view(
         payload.extend_from_slice(dst_bytes);
     }
 
-    let mut msg = Message::new(ipc::VFS_SET_VIEW_LABEL, [0; 6], 5);
+    let mut msg = Message::new(ipc::VFS_SET_VIEW_LABEL, [0; 6], 6);
     msg.words[0] = payload.len();
     msg.words[1] = client_tid;
     msg.words[2] = mounts.len();
     msg.words[3] = profile.bits() as usize;
     // container_id is u64; usize is 64-bit on x86_64 so the cast is lossless.
     msg.words[4] = container_id as usize;
+    msg.words[5] = view_mgr_token;
     ipc::send_msg_with_payload(vfs_endpoint, &msg, &payload)
 }
 
 /// Send a VFS_CONTAINER_CLEANUP message to VFS for container storage cleanup.
 ///
 /// `mode` 0 = exit (delete tmp/ contents only), 1 = destroy (delete entire container tree).
-fn send_vfs_container_cleanup(vfs_endpoint: usize, container_id: u64, mode: usize) -> Result<()> {
+fn send_vfs_container_cleanup(
+    vfs_endpoint: usize,
+    container_id: u64,
+    mode: usize,
+    view_mgr_token: usize,
+) -> Result<()> {
     if vfs_endpoint == 0 || container_id == 0 {
         return Ok(());
     }
-    let mut msg = Message::new(ipc::VFS_CONTAINER_CLEANUP_LABEL, [0; 6], 3);
-    msg.words[0] = 0; // no payload
+    let mut msg = Message::new(ipc::VFS_CONTAINER_CLEANUP_LABEL, [0; 6], 6);
+    msg.words[0] = 0;
     msg.words[1] = container_id as usize;
     msg.words[2] = mode;
+    msg.words[5] = view_mgr_token;
     send(vfs_endpoint, &msg, IpcFlags::empty())
 }
 

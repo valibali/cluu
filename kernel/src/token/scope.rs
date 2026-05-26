@@ -100,6 +100,11 @@ impl OpaqueScope {
                 input[0] = 0x08;
                 input[8..16].copy_from_slice(&id.as_u64().to_le_bytes());
             }
+            ObjectRef::VfsViewManager { scope_sid, scope_mask } => {
+                input[0] = 0x09;
+                input[8..12].copy_from_slice(&scope_sid.to_le_bytes());
+                input[12..14].copy_from_slice(&scope_mask.to_le_bytes());
+            }
         }
 
         // Add nonce for uniqueness
@@ -160,6 +165,11 @@ pub enum ObjectRef {
     Frame(FrameId),
     /// Async notification object
     Notification(NotificationId),
+    /// VFS view-manager authority cap.
+    ///
+    /// `scope_sid == 0` means root authority (all sessions).
+    /// `scope_mask` is a bitmask of allowed mount-root indices.
+    VfsViewManager { scope_sid: u32, scope_mask: u16 },
 }
 
 /// Notification object identifier

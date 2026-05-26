@@ -465,6 +465,7 @@ fn object_fields(object_ref: ObjectRef) -> (u8, u64) {
         ObjectRef::Clock => (6, 0),
         ObjectRef::Frame(id) => (7, id.as_u64()),
         ObjectRef::Notification(id) => (8, id.as_u64()),
+        ObjectRef::VfsViewManager { scope_sid, .. } => (9, scope_sid as u64),
     }
 }
 

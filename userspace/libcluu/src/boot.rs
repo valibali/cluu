@@ -11,6 +11,7 @@ pub const BOOT_INFO_ADDR: usize = 0x7fe0_0000;
 pub struct BootInfo {
     pub root_token: usize,
     pub clock_token: usize,
+    pub view_mgr_token: usize,
     pub initrd_phys: u64,
     pub initrd_size: u64,
     pub fb_phys: u64,
@@ -58,7 +59,7 @@ pub struct ProcessInfo {
     pub pid: usize,
 
     /// Generic token slots (indexed by convention)
-    pub tokens: [usize; 16],
+    pub tokens: [usize; 17],
 
     /// Generic parameters (service-specific data).
     /// Slots 0-9: existing (see PARAM_* constants below).
@@ -145,6 +146,9 @@ pub const TOKEN_EXTRA_4: usize = 13;
 pub const TOKEN_EXTRA_5: usize = 14;
 /// Extra capability slot 6 (slot 15)
 pub const TOKEN_EXTRA_6: usize = 15;
+
+/// VFS view-manager capability (slot 16)
+pub const TOKEN_VFS_VIEW_MGR: usize = 16;
 
 /// Thread-typed capability for the process's main thread. Only populated
 /// for procmgr — the thread_token is produced by `thread_create()` *after*

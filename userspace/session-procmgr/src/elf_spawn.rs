@@ -14,7 +14,7 @@ use libcluu::boot::{
     process_info, CWD_MAX, PARAM_ARGC, PARAM_ARGV_OFFSET, PARAM_CWD_LEN, PARAM_CWD_OFFSET,
     PARAM_ENVC, PARAM_ENV_OFFSET, PROCESS_INFO_ADDR, TOKEN_CLOCK, TOKEN_IPC, TOKEN_REGISTRY,
     TOKEN_SELF, TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN, TOKEN_STDLOG, TOKEN_STDOUT,
-    ProcessInfo,
+    TOKEN_VFS_VIEW_MGR, ProcessInfo,
 };
 use libcluu::fs::VfsClient;
 use libcluu::registry;
@@ -22,8 +22,8 @@ use libcluu::rights::Rights;
 use libcluu::cap::CapProfile;
 use libcluu::ipc::{send_msg_with_payload, VFS_SET_VIEW_LABEL};
 use libcluu::syscall::{
-    space_create, space_map, space_map_range, thread_create, thread_resume, token_derive,
-    THREAD_CREATE_START_SUSPENDED,
+    space_create, space_map, space_map_range, thread_create, thread_get_id, thread_resume,
+    token_derive, THREAD_CREATE_START_SUSPENDED,
 };
 use libcluu::types::Message;
 use procmgr_common::wire::SpawnReq;
@@ -216,7 +216,7 @@ pub fn real_spawn_user_process(
     let cookie = (pid as u64) ^ 0xC0DE_0000;
 
     // ── 5. Build ProcessInfo page ──────────────────────────────────────────
-    let mut tokens = [0usize; 16];
+    let mut tokens = [0usize; 17];
     tokens[TOKEN_STDIN] = child_stdin;
     tokens[TOKEN_STDOUT] = child_stdout;
     tokens[TOKEN_STDERR] = child_stderr;
@@ -226,6 +226,7 @@ pub fn real_spawn_user_process(
     tokens[TOKEN_IPC] = child_ipc;
     tokens[TOKEN_CLOCK] = child_clock;
     tokens[TOKEN_REGISTRY] = child_registry;
+    tokens[TOKEN_VFS_VIEW_MGR] = state.view_mgr_token as usize;
     // TOKEN_EXTRA_0 = 0 (cluuterm vt; out of scope for 12.4b-2)
 
     // Build argv payload: each arg as null-terminated bytes packed contiguously
@@ -360,12 +361,14 @@ pub fn real_spawn_user_process(
             payload.extend_from_slice(src_bytes);
             payload.extend_from_slice(dst_bytes);
         }
-        let mut msg = Message::new(VFS_SET_VIEW_LABEL, [0; 6], 5);
+        let thread_tid = thread_get_id(thread_tok).map_err(|_| RealSpawnError::ThreadCreate)?;
+        let mut msg = Message::new(VFS_SET_VIEW_LABEL, [0; 6], 6);
         msg.words[0] = payload.len();
-        msg.words[1] = thread_tok; // target client_tid
+        msg.words[1] = thread_tid;
         msg.words[2] = mounts.len();
         msg.words[3] = CapProfile::USER.bits() as usize;
         msg.words[4] = 0usize; // container_id
+        msg.words[5] = state.view_mgr_token as usize;
         match send_msg_with_payload(state.vfs_cap as usize, &msg, &payload) {
             Ok(()) => {
                 let _ = libcluu::debug_print("session-procmgr: VFS_SET_VIEW OK");

@@ -97,6 +97,41 @@ const RING_MIN_REQUESTED_BYTES: usize = 8 * 1024;
 const BOUNCE_POOL_BASE: usize = 0x78000000;
 const BOUNCE_SLOT_BYTES: usize = 64 * 1024;
 const BOUNCE_SLOT_COUNT: usize = 16;
+
+// ── VFS view-manager cap scope masks ─────────────────────────────────────────
+// Each bit represents a mount-root that a sub-minted cap may install views for.
+const VIEW_SCOPE_ROOT: u16 = 1 << 0;
+const VIEW_SCOPE_DEV: u16 = 1 << 1;
+const VIEW_SCOPE_VAR_IMAGES: u16 = 1 << 2;
+const VIEW_SCOPE_HOME: u16 = 1 << 3;
+const VIEW_SCOPE_TMP: u16 = 1 << 4;
+// bits 5–15 reserved
+pub const VIEW_SCOPE_ALL: u16 =
+    VIEW_SCOPE_ROOT | VIEW_SCOPE_DEV | VIEW_SCOPE_VAR_IMAGES | VIEW_SCOPE_HOME | VIEW_SCOPE_TMP;
+
+// Object type tag for ObjectRef::VfsViewManager in the kernel wire encoding.
+const TOKEN_TYPE_VFS_VIEW_MANAGER: u8 = 0x09;
+
+// Word slot carrying the view-manager cap handle in VFS_SET_VIEW and
+// VFS_CONTAINER_CLEANUP messages.  words[0..4] are used by set_view;
+// words[1..2] are used by container_cleanup.  words[5] is free in both.
+const VIEW_MGR_CAP_WORD: usize = 5;
+
+/// Resolve `handle` to its VfsViewManager scope fields via TokenGetInfo.
+///
+/// Returns `Ok((scope_sid, scope_mask))` on success.
+/// Returns `Err(PermissionDenied)` if the handle is 0, invalid, or wrong type.
+fn resolve_view_mgr_cap(handle: usize) -> core::result::Result<(u32, u16), libcluu::Error> {
+    if handle == 0 {
+        return Err(libcluu::Error::PermissionDenied);
+    }
+    let (type_tag, scope_sid, scope_mask) =
+        libcluu::syscall::token_get_info(handle).map_err(|_| libcluu::Error::PermissionDenied)?;
+    if type_tag != TOKEN_TYPE_VFS_VIEW_MANAGER {
+        return Err(libcluu::Error::PermissionDenied);
+    }
+    Ok((scope_sid, scope_mask))
+}
 const BOUNCE_POOL_SIZE: usize = BOUNCE_SLOT_BYTES * BOUNCE_SLOT_COUNT;
 /// Cap for remote grant reads to avoid large transient allocations.
 const REMOTE_READ_CAP: usize = GRANT_BUF_SIZE;
@@ -647,8 +682,6 @@ struct VfsServer {
     free_ring_slots: Vec<usize>,
     clock_token: usize,
     views: view::VfsViewTable,
-    // Bound once from the first privileged procmgr self-view bootstrap message.
-    view_manager_tid: Option<usize>,
     client_containers: BTreeMap<usize, u64>,
     /// Per-container ephemeral in-memory filesystems (keyed by container_id).
     container_memfs: BTreeMap<u64, mount::MemFsBackend>,
@@ -728,7 +761,6 @@ impl VfsServer {
             free_ring_slots,
             clock_token,
             views: view::VfsViewTable::new(),
-            view_manager_tid: None,
             client_containers: BTreeMap::new(),
             container_memfs: BTreeMap::new(),
             bounce_pool,
@@ -856,28 +888,22 @@ impl VfsServer {
         } else {
             0
         };
-        if let Some(manager_tid) = self.view_manager_tid {
-            if manager_tid != sender_tid {
-                let _ = debug_print(&format!(
-                    "vfs: set_view denied sender_tid={} manager_tid={}",
-                    sender_tid, manager_tid
-                ));
-                return Err(Error::PermissionDenied);
-            }
+        let cap_handle = if msg.tag.words as usize >= VIEW_MGR_CAP_WORD + 1 {
+            msg.words[VIEW_MGR_CAP_WORD]
         } else {
-            // Bootstrap manager binding from procmgr self-view installation.
-            let bootstrap_allowed = requested_client_id == 0
-                && mount_count > 0
-                && profile.contains(libcluu::cap::CapProfile::ADMIN);
-            if !bootstrap_allowed {
-                let _ = debug_print("vfs: set_view denied manager bootstrap preconditions");
+            0
+        };
+        match resolve_view_mgr_cap(cap_handle) {
+            Ok((scope_sid, scope_mask)) => {
+                if scope_sid != 0 && scope_mask == 0 {
+                    let _ = debug_print("vfs: set_view denied cap has empty scope_mask");
+                    return Err(Error::PermissionDenied);
+                }
+            }
+            Err(_) => {
+                let _ = debug_print("vfs: set_view denied — no valid view-mgr cap");
                 return Err(Error::PermissionDenied);
             }
-            self.view_manager_tid = Some(sender_tid);
-            let _ = debug_print(&format!(
-                "vfs: view manager bound sender_tid={}",
-                sender_tid
-            ));
         }
 
         let client_id = if requested_client_id == 0 {
@@ -1330,15 +1356,22 @@ impl VfsServer {
     }
 
     fn handle_container_cleanup(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
-        // Only the view manager (procmgr) can trigger cleanup.
-        if let Some(manager_tid) = self.view_manager_tid {
-            if manager_tid != sender_tid {
-                let _ = debug_print("vfs: container_cleanup denied: not view manager");
+        let cap_handle = if msg.tag.words as usize >= VIEW_MGR_CAP_WORD + 1 {
+            msg.words[VIEW_MGR_CAP_WORD]
+        } else {
+            0
+        };
+        match resolve_view_mgr_cap(cap_handle) {
+            Ok((scope_sid, scope_mask)) => {
+                if scope_sid != 0 && scope_mask == 0 {
+                    let _ = debug_print("vfs: container_cleanup denied cap has empty scope_mask");
+                    return Err(Error::PermissionDenied);
+                }
+            }
+            Err(_) => {
+                let _ = debug_print("vfs: container_cleanup denied — no valid view-mgr cap");
                 return Err(Error::PermissionDenied);
             }
-        } else {
-            let _ = debug_print("vfs: container_cleanup denied: no view manager bound");
-            return Err(Error::PermissionDenied);
         }
 
         let container_id = msg.words[1] as u64;

@@ -6,6 +6,7 @@ description = "CLUU virtual filesystem server"
 authors = ["CLUU Team", "Balazs Valkony"]
 license = "MIT"
 
+
 [dependencies]
 libcluu = { path = "../libcluu" }
 postcard = { workspace = true }

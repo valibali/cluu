@@ -17,6 +17,7 @@ use libcluu::Result;
 pub struct BootSnapshot {
     pub root_token: usize,
     pub clock_token: usize,
+    pub view_mgr_token: usize,
     pub initrd_size: usize,
     pub fb_phys: u64,
     pub fb_size: u64,
@@ -34,6 +35,7 @@ pub fn capture_boot_snapshot() -> Result<BootSnapshot> {
     Ok(BootSnapshot {
         root_token: info.root_token,
         clock_token: info.clock_token,
+        view_mgr_token: info.view_mgr_token,
         initrd_size: info.initrd_size as usize,
         fb_phys: info.fb_phys,
         fb_size: info.fb_size,

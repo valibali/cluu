@@ -950,6 +950,13 @@ case "$MARKER_MODE" in
             "viewchild: PASS view passthrough"
         )
         ;;
+    pm_vfs_view_scope)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pm_vfs_view_scope: PASS all cases"
+        )
+        ;;
     f11_deny_inherit)
         required_markers=(
             "TSC calibrated"

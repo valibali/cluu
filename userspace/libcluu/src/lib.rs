@@ -166,6 +166,7 @@ pub use syscall::{
     space_unmap,
     thread_create,
     token_derive,
+    token_derive_scoped,
     // Core syscalls
     yield_cpu,
     InvokeOp,
