@@ -27,6 +27,7 @@ const ADMIN_MOUNTS: &[ViewMountSpec] = &[
 const USER_MOUNTS: &[ViewMountSpec] = &[
     ("/bin", "/bin", false),
     ("/lib", "/lib", false),
+    ("/etc", "/etc", false),
     ("/tmp", "/tmp", true),
     ("/home/root", "/home/root", true),
     ("/dev/initrd", "/dev/initrd", false),
