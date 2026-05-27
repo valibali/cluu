@@ -12,6 +12,8 @@ pub enum KernelCall {
     Mint   { parent: u64, rights: u32, new_handle: u64 },
     Revoke { handle: u64 },
     SpawnThread { entry: u64, stack: u64, tid: u64 },
+    ThreadDestroy { thread_tok: u64 },
+    SpaceDestroy  { space_tok: u64 },
     SendMsg { dest: u64, label: u32, len: usize },
     Recv   { token: u64 },
 }
@@ -55,6 +57,14 @@ impl Kernel for MockKernel {
         self.next_handle += 1;
         self.calls.push(KernelCall::SpawnThread { entry, stack, tid });
         tid
+    }
+
+    fn thread_destroy(&mut self, thread_tok: u64) {
+        self.calls.push(KernelCall::ThreadDestroy { thread_tok });
+    }
+
+    fn space_destroy(&mut self, space_tok: u64) {
+        self.calls.push(KernelCall::SpaceDestroy { space_tok });
     }
 }
 

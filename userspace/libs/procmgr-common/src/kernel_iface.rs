@@ -15,4 +15,10 @@ pub trait Kernel {
     /// Spawn a new thread at `entry` with stack pointer `stack`.
     /// Returns the new thread's TID handle.
     fn spawn_thread(&mut self, entry: u64, stack: u64) -> u64;
+
+    /// Destroy a thread by its thread token. Errors are silently ignored.
+    fn thread_destroy(&mut self, thread_tok: u64);
+
+    /// Destroy an address space by its space token. Errors are silently ignored.
+    fn space_destroy(&mut self, space_tok: u64);
 }

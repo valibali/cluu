@@ -41,4 +41,14 @@ impl Kernel for RealKernel {
         )
         .unwrap_or(0) as u64
     }
+
+    /// Destroy a thread by its thread token. Errors are silently ignored.
+    fn thread_destroy(&mut self, thread_tok: u64) {
+        let _ = libcluu::syscall::thread_destroy(thread_tok as usize);
+    }
+
+    /// Destroy an address space by its space token. Errors are silently ignored.
+    fn space_destroy(&mut self, space_tok: u64) {
+        let _ = libcluu::syscall::space_destroy(space_tok as usize);
+    }
 }

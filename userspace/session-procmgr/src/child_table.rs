@@ -9,6 +9,9 @@ pub struct ChildState {
     pub pid: Pid,
     pub local: LocalPid,
     pub thread_tok: u64,
+    /// Raw address-space token returned by `space_create`; used for
+    /// `space_destroy` on exit.  Zero means unknown (mock / legacy path).
+    pub space_tok: u64,
     pub cookie: u64,
     pub argv0: String,
     pub start_ticks: u64,
@@ -100,6 +103,7 @@ mod tests {
             pid,
             local: 1,
             thread_tok: 0xAAAA,
+            space_tok: 0,
             cookie,
             argv0: "ls".into(),
             start_ticks: 0,
