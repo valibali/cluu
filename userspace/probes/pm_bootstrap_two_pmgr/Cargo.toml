@@ -1,0 +1,15 @@
+[package]
+name = "cluu-pm-bootstrap-two-pmgr"
+version = "0.1.0"
+edition = "2021"
+description = "Procmgr-cap-refactor probe: root-procmgr + session-procmgr endpoints exist and are disjoint"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+cluu_wire = { path = "../../cluu_wire" }
+
+[[bin]]
+name = "pm_bootstrap_two_pmgr"
+path = "src/main.rs"

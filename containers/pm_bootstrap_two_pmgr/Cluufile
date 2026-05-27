@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs registry
+BUILD "cargo build --manifest-path userspace/probes/pm_bootstrap_two_pmgr/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/pm_bootstrap_two_pmgr.elf /bin/pm_bootstrap_two_pmgr
+ENTRYPOINT /bin/pm_bootstrap_two_pmgr
