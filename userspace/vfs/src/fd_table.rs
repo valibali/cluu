@@ -230,6 +230,19 @@ impl FdTable {
         }
     }
 
+    /// Close every open fd for `client_id` and return the removed entries so
+    /// the caller can fire fd-type-specific teardown (e.g. PTS dec_ref).
+    ///
+    /// Used by `handle_set_view` cleared-path so PTS ref-counts decrement when
+    /// a process exits — otherwise PTS_CLOSED never fires and the cluuterm
+    /// window stays open after the shell terminates.
+    pub fn close_all_for_client(&mut self, client_id: usize) -> Vec<OpenFile> {
+        let Some(table) = self.clients.remove(&client_id) else {
+            return Vec::new();
+        };
+        table.entries.into_values().collect()
+    }
+
     /// Return the effective capability rights for `(client_id, fd)`, or
     /// `None` if the entry does not exist.
     pub fn rights(&self, client_id: usize, fd: usize) -> Option<u64> {

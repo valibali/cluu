@@ -925,6 +925,18 @@ impl VfsServer {
         if mount_count == 0 {
             self.client_containers.remove(&client_id);
             if profile_bits == 0 {
+                // Process is exiting (procmgr signals this via empty view).
+                // Close all the client's open fds so PTS ref-counts drop;
+                // when the last consumer of a pts exits, pts_on_close fires
+                // PTS_CLOSED to the cluuterm owner so the window can close.
+                // Without this, PTS_CLOSED never fires for shells spawned
+                // via session-procmgr (no container_cleanup path).
+                let closed = self.files.close_all_for_client(client_id);
+                for file in closed {
+                    if let OpenFile::Pts(p) = file {
+                        self.pts_on_close(p.pts_id);
+                    }
+                }
                 self.views.remove_view(client_id);
                 let _ = debug_print(&format!("vfs: set_view cleared client={}", client_id));
             } else {
