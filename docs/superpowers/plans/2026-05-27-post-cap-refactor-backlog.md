@@ -60,25 +60,21 @@ HU QWERTZ kbd map sends `o` when harness expects `0`. Look at `scripts/harness/t
 
 ---
 
-## B. Plan 2 PTY closeout
+## B. Plan 2 PTY closeout — DONE 5/27 (HEAD `992dc49`)
 
 **Goal:** finish `docs/superpowers/plans/2026-05-18-plan2-terminal-pty-unification.md`. Two tasks left.
 
-**B.1 — Plan 2 Task 8: VFS per-session `/dev/pts/` overlay.**
+**B.1 — Plan 2 Task 8: VFS per-session `/dev/pts/` overlay. DONE 5/27 (`d35c118`).**
 Spec: `docs/superpowers/specs/2026-05-18-terminal-pty-unification-design.md` §"Mount layout".
-Current state: pts fds are inherited via FD VFS trailer (`4037c2d`) but `/dev/pts/<id>` paths are not enumerable through VFS in the child's view. Need a VFS overlay that synthesizes the per-session pts dir on `readdir(/dev/pts)` and resolves `/dev/pts/<id>` to the right pts token.
-- Verify VFS-side dispatch with cap-delegated view (`365dfa0`) is what we ride on top of.
-- Acceptance: `ls /dev/pts` in shell shows the live ptys for the session; nothing from other sessions.
-- New probe: `l2_pts_listing`.
+PtsOverlay + PtsBackend session-aware infra already landed pre-Plan-B; the gap was an acceptance probe. New `l2_pts_listing` probe spawns from shell, `readdir("/dev/pts")`, asserts count ≥ 1. PASS today (single-session). Cross-session isolation half still gated on stub `read_own_session_id() → None` in cluuterm + spec 3 (session through spawn). `l2_pts_cross_session_isolation` probe stays DEFERRED until then.
 
-**B.2 — Plan 2 Task 12: dead-code purge.**
-Legacy `TTY_*` labels and dual-protocol guards. Inventory:
-- `userspace/libcluu/src/ipc.rs:215` — `COMP_WIN_DESTROY_LABEL = 93` (window, not PTY — leave for Plan 4).
-- Old TTY_* labels in cluu_wire / tty service: enumerate via `grep -rn 'TTY_[A-Z_]*_LABEL' userspace/`. Anything not referenced after Plan 2 finishes is dead.
-- Cluuterm dual-protocol guards (`if uses_pts_protocol`): can collapse since every consumer now does PTS_*.
-- Acceptance: build green; `cargo xtask check-cap-purity` (added in Phase 14.1 of cap-refactor) stays green; no new orphan labels.
+**B.2 — Plan 2 Task 12: dead-code purge. DONE 5/27 (`1f9edd6`).**
+- Killed: `TTY_TAB_QUERY_LABEL` const + 168 LOC of dead `handle_tab_query` / `longest_common_prefix` / `emit_tab_list` / `cached_vfs_endpoint` in shell + `commands/completion.rs` placeholder.
+- Re-audited: all other TTY_*_LABEL constants (READ/WRITE/CTL/REGISTER/WRITE_SYNC/READ_REQUEST/POLL_QUERY/SET_FG/GET_FG) still have live producer+consumer pairs; not dead until Plan 2 fully retires push paths.
+- No `uses_pts_protocol` guards left in cluuterm — already collapsed.
+- `cargo xtask check-cap-purity` clean.
 
-**Acceptance:** both tasks done, `l2_pts_listing` green, dead code gone. **Estimated cost:** 2 days.
+**Acceptance:** done; `l2_pts_listing` green standalone + via suite. Full 118-case matrix not re-run (user gated). **Cost actual:** ~0.5 day (infra was already there).
 
 ---
 
