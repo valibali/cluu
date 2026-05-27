@@ -1,0 +1,16 @@
+[package]
+name = "cluu-pm-session-crash-cascade"
+version = "0.1.0"
+edition = "2021"
+description = "Probe: session destroy fires SESSION_ENDED cascade (sibling angle to l3_session_leader_exit_cascades)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+cluu_wire = { path = "../../cluu_wire" }
+postcard = { workspace = true }
+
+[[bin]]
+name = "pm_session_crash_cascade"
+path = "src/main.rs"

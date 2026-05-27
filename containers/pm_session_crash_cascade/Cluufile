@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs registry
+BUILD "cargo build --manifest-path userspace/probes/pm_session_crash_cascade/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/pm_session_crash_cascade.elf /bin/pm_session_crash_cascade
+ENTRYPOINT /bin/pm_session_crash_cascade
