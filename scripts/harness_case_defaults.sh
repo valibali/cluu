@@ -389,6 +389,14 @@ harness_derive_marker_defaults() {
                 RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
+            l2_pts_listing)
+                # Plan 2 Task 8: shell-spawned child can readdir /dev/pts and
+                # see the cluuterm pts hosting its session. PASS if count >= 1.
+                TEST_COMMAND="l2_pts_listing"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
             l2_mp_etc)
                 # MicroPython opens /etc/motd through libcluu's POSIX shim, which
                 # in turn goes through VFS. Success proves: (a) the mp container

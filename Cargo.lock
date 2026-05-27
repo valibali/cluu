@@ -488,6 +488,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-l2-pts-listing"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-l2-pts-service-death-hangup"
 version = "0.1.0"
 dependencies = [

@@ -1643,6 +1643,16 @@ case "$MARKER_MODE" in
             "cat: ok (exit 0)"
         )
         ;;
+    l2_pts_listing)
+        # Plan 2 Task 8: shell child enumerates /dev/pts and sees the
+        # cluuterm pts. Marker comes from userspace/probes/l2_pts_listing,
+        # spawned as `l2_pts_listing` after login.
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "ptslistprobe: PASS"
+        )
+        ;;
     l2_cp_recursive)
         required_markers=(
             "TSC calibrated"
