@@ -1,0 +1,14 @@
+[package]
+name = "cluu-pm-proc-query-all-cap"
+version = "0.1.0"
+edition = "2021"
+description = "Probe: PROC_QUERY_ALL requires privileged cap; unprivileged callers are denied"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "pm_proc_query_all_cap"
+path = "src/main.rs"
