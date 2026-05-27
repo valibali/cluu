@@ -12,6 +12,36 @@
 
 ---
 
+## Status — 2026-05-26 (post-audit)
+
+**Net:** 37/40 tasks LANDED on branch `procmgr-cap-refactor`. Plan body checkboxes
+never ticked during execution; ground truth = code. Audit details below.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| 0 (scaffold) | ✅ LANDED | All 3 crates exist (`userspace/libs/procmgr-common`, `userspace/root-procmgr`, `userspace/session-procmgr`) |
+| 1 (procmgr-common types) | ✅ LANDED | pid/labels/wire/handler/mint_guard + envelopes/manifest_cache/mount_policy/view_table ported. 35 unit tests pass. |
+| 2 (root-procmgr skeleton + MintGuard) | ✅ LANDED | dispatch.rs + mint_guard RAII |
+| 3 (SessionDirectory + Create/Destroy) | ✅ LANDED | session_directory.rs + handlers + proptest |
+| 4 (cap_broker) | ✅ LANDED | sub_mint + monotone-narrowing proptest |
+| 5 (session-procmgr spawn) | ✅ LANDED | ChildTable + spawn.rs + rollback guard |
+| 6 (child_monitor) | ✅ LANDED | exit handler + restart policy SM |
+| 7 (kill/pg_table/ctty) | ✅ LANDED | All 3 handlers in session-procmgr |
+| 8 (pipe_registry) | ✅ LANDED | pipe_registry.rs + handlers |
+| 9 (proc_query_local/all) | ✅ LANDED | local in session-procmgr, all in root-procmgr |
+| 10 (services + restart) | ✅ LANDED | services.rs + restart_root.rs |
+| 11 (escalate + shutdown) | ✅ LANDED | escalate.rs + shutdown.rs |
+| 12 (bootstrap rewire) | ✅ LANDED | real_kernel.rs in both crates; login → SESSION_CREATE; legacy bypass deleted in 6d2bf44 (2026-05-26) |
+| 13.1 (xtask check-cap-purity) | ✅ LANDED | `xtask check-cap-purity` grep gate (commit 70739a4) |
+| 13.2 (pm_* integration tests) | ⚠️ PARTIAL | Only `pm_vfs_view_scope` exists. Plan calls for 7: pm_pid_layout, pm_session_create_destroy, pm_cap_monotone, pm_spawn_rollback, pm_kill_cascade, pm_restart_policy, pm_view_scope |
+| 14.1–14.4 (coverage/perf/merge) | ❌ PENDING | llvm-cov gate, coverage matrix doc, perf ratchet, final acceptance |
+
+**Test summary:** 83 unit tests pass (procmgr-common 35, root-procmgr 28, session-procmgr 35). No ACL-style runtime checks left in code (per audit + commit 70739a4 grep gate).
+
+**To merge to develop:** complete 13.2 missing tests (6 of 7) + decide whether 14.1/14.2/14.3 are merge blockers or post-merge polish. 14.4 (acceptance gate) reads ratchet + coverage outputs.
+
+---
+
 ## Conventions for this Plan
 
 - **TDD strict.** Every behavior is: failing test → minimal impl → green test → commit.
