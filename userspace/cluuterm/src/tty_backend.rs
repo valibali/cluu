@@ -904,6 +904,15 @@ impl Cluuterm {
                     self.pts.handle_pts_read_drain_hint(&msg, vfs_ep);
                 }
 
+                // ── PTS_SET_PGRP (138): shell tcsetpgrp via VFS proxy ──
+                PTS_SET_PGRP_LABEL => {
+                    let pgid: SetPgrpRequest = match postcard::from_bytes(payload) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    self.pts.handle_pts_set_pgrp(pgid, &msg);
+                }
+
                 // ── PTS_CLOSED (110): VFS notifies that all fds closed ──
                 PTS_CLOSED_LABEL => {
                     self.shutdown();
