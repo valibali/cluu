@@ -1,0 +1,15 @@
+[package]
+name = "cluu-pm-session-id-recycle"
+version = "0.1.0"
+edition = "2021"
+description = "Probe: session_id allocation monotone or recycle after destroy"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+cluu_wire = { path = "../../cluu_wire" }
+
+[[bin]]
+name = "pm_session_id_recycle"
+path = "src/main.rs"
