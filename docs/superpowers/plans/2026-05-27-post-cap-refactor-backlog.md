@@ -27,7 +27,7 @@
 | Plan 3 (session lifecycle) | DONE | 12 tasks, 15 commits, all acceptance probes green. SESSION_CREATE/DESTROY/HANDOFF + getty + 2 s timeout deletion all landed. |
 | Plan 4 (window protocol) | NOT STARTED | No `cluu_wire::window` module. Compositor still on legacy `COMP_WIN_*`. 13 tasks, the biggest single piece in this plan. |
 | procmgr-cap-refactor | LANDED 5/27 | 74-commit ff-merge. 8 `pm_*` probes green. Phase 14.3 (spawn-warm cap-possession ACL) explicitly deferred. |
-| Autologin removal | LANDED 5/26 | All harness via interactive login. Followups open: `l2_cat_basic` marker missing, QEMU sendkey `0` → `o` under HU layout. |
+| Autologin removal | LANDED 5/26 | All harness via interactive login. Followups DONE 5/27: A.1 (`/etc` r/o added to USER_MOUNTS) + A.2 (harness `'0'` → `grave_accent`). |
 | VFS view-cap delegation | LANDED 5/26 | Typed cap tag 0x09, op=23 `TokenDeriveScoped`. End-to-end smoke green. |
 
 ## Sequencing rationale
