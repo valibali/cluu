@@ -1,0 +1,15 @@
+[package]
+name = "cluu-pm-cap-revoke-stale"
+version = "0.1.0"
+edition = "2021"
+description = "Probe: derived session caps return Err after parent session is destroyed"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+cluu_wire = { path = "../../cluu_wire" }
+
+[[bin]]
+name = "pm_cap_revoke_stale"
+path = "src/main.rs"
