@@ -4,7 +4,6 @@
 //! Stage 2 of Plan A (cont.): commands_old.rs drained and deleted.
 
 pub mod builtins;
-pub mod completion;
 pub mod exec;
 pub mod redirect;
 

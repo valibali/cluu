@@ -39,14 +39,6 @@ pub use crate::posix::pipe::PIPE_DATA_LABEL;
 /// Pipe EOF marker: write end sends 0-byte message with this label to signal EOF.
 #[cfg(feature = "posix")]
 pub use crate::posix::pipe::PIPE_EOF_LABEL;
-/// tty → shell (synchronous CALL on shell's stdin endpoint): ask shell to
-/// resolve a tab-completion query against its OWN VFS view + CWD. Payload
-/// is the partial last-token bytes the user is typing (no NUL terminator).
-/// Reply payload is the suffix bytes to append after that token, or empty
-/// for "no unique completion." Trailing '/' or ' ' is part of the suffix.
-/// Lives on the same stdin endpoint that delivers TTY_READ_LABEL — shell's
-/// recv loop dispatches by label.
-pub const TTY_TAB_QUERY_LABEL: u32 = 30;
 /// Set the foreground process-group for a session (procmgr/shell → tty).
 /// words[0] = session_id, words[1] = pgid.
 pub const TTY_SET_FG_LABEL: u32 = 40;
