@@ -63,7 +63,7 @@ pub enum RealSpawnError {
 ///   6. Map the page read-only into the child at PROCESS_INFO_ADDR.
 ///   7. thread_create at the ELF entry point.
 ///
-/// Returns `(thread_tok, cookie, space_tok)` on success. Caller is
+/// Returns `(thread_tok, cookie, space_tok, child_tid)` on success. Caller is
 /// responsible for inserting the child into the session's `ChildTable` and
 /// revoking minted caps on failure.
 pub fn real_spawn_user_process(
@@ -71,7 +71,7 @@ pub fn real_spawn_user_process(
     pid: i32,
     req: &SpawnReq,
     parent_tid: usize,
-) -> Result<(u64, u64, u64), RealSpawnError> {
+) -> Result<(u64, u64, u64, usize), RealSpawnError> {
     // ── 1. Create child address space ──────────────────────────────────────
     let info = process_info();
     let our_space = info.tokens[TOKEN_SPACE];
@@ -451,7 +451,7 @@ pub fn real_spawn_user_process(
     ));
     thread_resume(thread_tok).map_err(|_| RealSpawnError::ThreadCreate)?;
 
-    Ok((thread_tok as u64, cookie, child_space as u64))
+    Ok((thread_tok as u64, cookie, child_space as u64, child_tid))
 }
 
 /// Ask VFS to clone the parent's open file into the child's client_id slot

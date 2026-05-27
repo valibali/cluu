@@ -58,7 +58,7 @@ impl MsgHandler for Spawn {
         let minted: Vec<u64> = guard.forget();
 
         #[cfg(feature = "host-test")]
-        let (thread_tok, cookie, space_tok) = {
+        let (thread_tok, cookie, space_tok, child_tid) = {
             let tok = state.kernel.spawn_thread(0xE000_0000, 0xF000_0000);
             if tok == 0 {
                 for h in &minted {
@@ -66,11 +66,11 @@ impl MsgHandler for Spawn {
                 }
                 return Err(HandlerError::Internal("spawn_thread"));
             }
-            (tok, (pid as u64) ^ 0xC0DE_0000, 0u64)
+            (tok, (pid as u64) ^ 0xC0DE_0000, 0u64, 0usize)
         };
 
         #[cfg(not(feature = "host-test"))]
-        let (thread_tok, cookie, space_tok) = match crate::elf_spawn::real_spawn_user_process(state, pid, &req, msg.sender_tid) {
+        let (thread_tok, cookie, space_tok, child_tid) = match crate::elf_spawn::real_spawn_user_process(state, pid, &req, msg.sender_tid) {
             Ok(t) => t,
             Err(e) => {
                 let _ = libcluu::debug_print(&alloc::format!(
@@ -88,6 +88,7 @@ impl MsgHandler for Spawn {
             local,
             thread_tok,
             space_tok,
+            child_tid,
             cookie,
             argv0: req.argv.first().cloned().unwrap_or_default(),
             start_ticks: 0,

@@ -42,6 +42,7 @@ mod tests {
             local,
             thread_tok,
             space_tok: 0,
+            child_tid: 0,
             cookie: 0xC0DE_0000 ^ pid as u64,
             argv0: "ls".into(),
             start_ticks: 0,

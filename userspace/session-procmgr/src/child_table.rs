@@ -12,6 +12,10 @@ pub struct ChildState {
     /// Raw address-space token returned by `space_create`; used for
     /// `space_destroy` on exit.  Zero means unknown (mock / legacy path).
     pub space_tok: u64,
+    /// Kernel-authenticated sender_tid VFS uses as this child's client_id.
+    /// Needed at exit to send VFS_SET_VIEW(empty) so VFS drops the child's
+    /// fd refs (incl. PTS) and emits PTS_CLOSED to the cluuterm owner.
+    pub child_tid: usize,
     pub cookie: u64,
     pub argv0: String,
     pub start_ticks: u64,
@@ -104,6 +108,7 @@ mod tests {
             local: 1,
             thread_tok: 0xAAAA,
             space_tok: 0,
+            child_tid: 0,
             cookie,
             argv0: "ls".into(),
             start_ticks: 0,
