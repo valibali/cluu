@@ -1,0 +1,16 @@
+[package]
+name = "cluu-pm-service-restart"
+version = "0.1.0"
+edition = "2021"
+description = "Probe: RestartPolicy structural wire roundtrip (Option B; runtime restart needs supervisor manifest TODO)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+cluu_wire = { path = "../../cluu_wire" }
+postcard = { workspace = true }
+
+[[bin]]
+name = "pm_service_restart"
+path = "src/main.rs"
