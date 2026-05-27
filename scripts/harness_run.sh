@@ -555,6 +555,11 @@ type_ascii_command() {
             'z') queue_key "y" ;;
             'Y') queue_key "shift-z" ;;
             'Z') queue_key "shift-y" ;;
+            # HU layout: SC 0x0B (US '0' key) is overloaded as letter 'o' in
+            # HuLayout::letter_for_scancode, so plain '0' sends 'o' and
+            # shift-0 sends 'O'. The HU '0' character lives on SC 0x29
+            # (QEMU name `grave_accent`) per HuLayout::base_symbol(0x29).
+            '0') queue_key "grave_accent" ;;
             [a-z0-9]) queue_key "$ch" ;;
             [A-Z]) queue_key "shift-${ch,,}" ;;
             *)
