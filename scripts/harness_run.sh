@@ -503,7 +503,7 @@ type_ascii_command() {
             # The US minus scancode (0x0C) maps to 'u' accent letter on HU — wrong.
             '-') queue_key "slash" ;;
             # HU layout: '_' lives on shift-slash (scancode 0x35 shifted → b'_').
-            '_') queue_key "question" ;;
+            '_') queue_key "shift-slash" ;;
             # HU layout: '=' lives on shift-7 (scancode 0x08 shifted → b'=').
             # The US equal scancode (0x0D) maps to 'o' accent letter on HU — wrong.
             '=') queue_key "shift-7" ;;
@@ -969,6 +969,62 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "[USER] shell: ready"
             "pm_vfs_view_scope: PASS all cases"
+        )
+        ;;
+    pm_pid_layout)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pm_pid_layout: PASS"
+        )
+        ;;
+    pm_session_id_recycle)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pm_session_id_recycle: PASS"
+        )
+        ;;
+    pm_cross_session_no_leak)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pm_cross_session_no_leak: PASS"
+        )
+        ;;
+    pm_cap_revoke_stale)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pm_cap_revoke_stale: PASS"
+        )
+        ;;
+    pm_proc_query_all_cap)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pm_proc_query_all_cap: PASS"
+        )
+        ;;
+    pm_service_restart)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pm_service_restart: PASS"
+        )
+        ;;
+    pm_session_crash_cascade)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pm_session_crash_cascade: PASS"
+        )
+        ;;
+    pm_bootstrap_two_pmgr)
+        required_markers=(
+            "TSC calibrated"
+            "[USER] shell: ready"
+            "pm_bootstrap_two_pmgr: PASS"
         )
         ;;
     f11_deny_inherit)

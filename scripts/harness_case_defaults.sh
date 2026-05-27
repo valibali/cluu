@@ -1029,6 +1029,60 @@ harness_derive_marker_defaults() {
                 RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
                 ;;
+            pm_vfs_view_scope)
+                TEST_COMMAND="container run pm_vfs_view_scope"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
+            pm_pid_layout)
+                TEST_COMMAND="container run pm_pid_layout"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
+            pm_session_id_recycle)
+                TEST_COMMAND="container run pm_session_id_recycle"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
+            pm_cross_session_no_leak)
+                TEST_COMMAND="container run pm_cross_session_no_leak"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
+            pm_cap_revoke_stale)
+                TEST_COMMAND="container run pm_cap_revoke_stale"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
+            pm_proc_query_all_cap)
+                TEST_COMMAND="container run pm_proc_query_all_cap"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
+            pm_service_restart)
+                TEST_COMMAND="container run pm_service_restart"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
+            pm_session_crash_cascade)
+                TEST_COMMAND="container run pm_session_crash_cascade"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
+            pm_bootstrap_two_pmgr)
+                TEST_COMMAND="container run pm_bootstrap_two_pmgr"
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                ;;
             *) TEST_COMMAND="hello" ;;
         esac
     fi

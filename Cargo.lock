@@ -682,6 +682,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-pm-bootstrap-two-pmgr"
+version = "0.1.0"
+dependencies = [
+ "cluu_wire",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-pm-cap-revoke-stale"
+version = "0.1.0"
+dependencies = [
+ "cluu_wire",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-pm-cross-session-no-leak"
+version = "0.1.0"
+dependencies = [
+ "cluu_wire",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-pm-pid-layout"
+version = "0.1.0"
+dependencies = [
+ "cluu_wire",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-pm-proc-query-all-cap"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-pm-service-restart"
+version = "0.1.0"
+dependencies = [
+ "cluu_wire",
+ "libcluu",
+ "postcard",
+]
+
+[[package]]
+name = "cluu-pm-session-crash-cascade"
+version = "0.1.0"
+dependencies = [
+ "cluu_wire",
+ "libcluu",
+ "postcard",
+]
+
+[[package]]
+name = "cluu-pm-session-id-recycle"
+version = "0.1.0"
+dependencies = [
+ "cluu_wire",
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-printf"
 version = "0.1.0"
 dependencies = [
@@ -3065,6 +3130,7 @@ dependencies = [
  "clap",
  "crossterm 0.28.1",
  "ratatui",
+ "serde_json",
  "sha2",
  "walkdir",
 ]

@@ -1,0 +1,15 @@
+[package]
+name = "cluu-pm-pid-layout"
+version = "0.1.0"
+edition = "2021"
+description = "Phase 13.2 probe: PID encoding (sid<<23 | local) invariant"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+cluu_wire = { path = "../../cluu_wire" }
+
+[[bin]]
+name = "pm_pid_layout"
+path = "src/main.rs"

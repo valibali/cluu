@@ -5113,26 +5113,13 @@ impl ProcessManager {
             }
         }
 
-        // Validate caller can grant the requested profile
-        let caller_profile = if sender_tid == 0 {
-            CapProfile::USER
-        } else {
-            match self.tid_to_pid.get(&sender_tid)
-                .and_then(|pid| self.pid_to_profile.get(pid))
-                .copied()
-            {
-                Some(p) => p,
-                None => {
-                    let _ = debug_print(&format!(
-                        "procmgr: container '{}' rejected: sender tid={} not in pid map",
-                        image_name, sender_tid
-                    ));
-                    reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
-                    if let Some(tok) = reply_token { let _ = ipc::reply(tok, &reply_msg, IpcFlags::empty()); }
-                    return Ok(());
-                }
-            }
-        };
+        // Validate caller can grant the requested profile.
+        // Unknown sender_tid (session-procmgr-spawned tasks not tracked by root) defaults to USER
+        // — possession of procmgr:spawn endpoint already gates access; profile is just the ceiling.
+        let caller_profile = self.tid_to_pid.get(&sender_tid)
+            .and_then(|pid| self.pid_to_profile.get(pid))
+            .copied()
+            .unwrap_or(CapProfile::USER);
         if !caller_profile.can_grant(requested_profile) {
             let _ = debug_print(&format!(
                 "procmgr: container '{}' profile escalation denied",
