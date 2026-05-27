@@ -87,8 +87,8 @@ pub fn query(token: TokenHandle) -> Result<SessionQueryReply, SessionErr> {
         &[]
     };
 
-    postcard::from_bytes::<SessionQueryReply>(reply_payload)
-        .map_err(|_| SessionErr::Internal(0xEBu32))
+    postcard::from_bytes::<core::result::Result<SessionQueryReply, SessionErr>>(reply_payload)
+        .map_err(|_| SessionErr::Internal(0xEBu32))?
 }
 
 pub fn subscribe(token: TokenHandle, event_send: TokenHandle) -> Result<(), SessionErr> {

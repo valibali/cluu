@@ -1,0 +1,15 @@
+[package]
+name = "cluu-pm-cross-session-no-leak"
+version = "0.1.0"
+edition = "2021"
+description = "Phase 13 probe: capabilities from session A cannot access session B"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+cluu_wire = { path = "../../cluu_wire" }
+
+[[bin]]
+name = "pm_cross_session_no_leak"
+path = "src/main.rs"

@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc vfs registry
+BUILD "cargo build --manifest-path userspace/probes/pm_cross_session_no_leak/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/pm_cross_session_no_leak.elf /bin/pm_cross_session_no_leak
+ENTRYPOINT /bin/pm_cross_session_no_leak
