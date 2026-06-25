@@ -929,8 +929,9 @@ harness_derive_marker_defaults() {
                 ;;
             l2_cluuterm_two_windows)
                 TEST_COMMAND=""
-                # Press Ctrl+Alt+N to ask compositor to spawn a second cluuterm.
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-n'
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey ctrl-alt-n'
                 ;;
             l2_cluuterm_raw_mode)
                 # MicroPython calls tcsetattr(raw) for its REPL on stdin.
@@ -958,26 +959,25 @@ harness_derive_marker_defaults() {
                 ;;
             l2_compositor_focus)
                 TEST_COMMAND=""
-                # Two compdemos autostart (second entry in autostart.toml); the
-                # harness injects Alt+Tab via SENDKEY_SEQUENCE_DEFAULT to trigger
-                # focus_next and emit "compositor: focus -> ".
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey alt-tab'
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey ctrl-alt-n\nsleep 3\nsendkey alt-tab'
                 ;;
             l2_compositor_destroy)
                 TEST_COMMAND=""
-                # compositor + compdemo autostart; harness injects Ctrl+Alt+N
-                # (spawn second) then Ctrl+Alt+Q (close-request → WIN_DESTROY).
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-q'
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey ctrl-alt-q'
                 ;;
             l2_compositor_legacy_vt)
                 TEST_COMMAND=""
-                # Switch to compositor VT (Ctrl+Alt+F5), then back (Ctrl+Alt+F1).
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-f5\nsleep 3\nsendkey ctrl-alt-f1'
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="30"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 8\nsendkey ctrl-alt-f1\nsleep 3\nsendkey ctrl-alt-f5'
                 ;;
             b_compositor_blit)
                 TEST_COMMAND=""
-                # Switch to compositor VT so tick_frame runs; bench fires after 100 frames.
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 3\nsendkey ctrl-alt-f5'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 8\nsendkey ctrl-alt-f5'
                 ;;
             l2_timeserver_pushmode_tick)
                 TEST_COMMAND="timetick_probe"

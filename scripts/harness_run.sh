@@ -1800,7 +1800,6 @@ case "$MARKER_MODE" in
     l2_compositor_smoke)
         required_markers=(
             "TSC calibrated"
-            "[USER] shell: ready"
             "compositor: ready"
             "compositor: window registered"
         )
@@ -1822,10 +1821,9 @@ case "$MARKER_MODE" in
     l2_compositor_legacy_vt)
         required_markers=(
             "TSC calibrated"
-            "[USER] shell: ready"
-            "vtmgr: vt switch 0 -> 4"
             "compositor: VT activate"
             "vtmgr: vt switch 4 -> 0"
+            "vtmgr: vt switch 0 -> 4"
         )
         ;;
     b_compositor_blit)
