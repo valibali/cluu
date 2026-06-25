@@ -921,6 +921,10 @@ impl Cluuterm {
 
                 // ── Compositor: forwarded keystroke (Task 16) ───────────
                 COMP_INPUT_FORWARD_LABEL => {
+                    if msg.words[5] == 99 {
+                        self.shutdown();
+                        return;
+                    }
                     crate::input::handle(self, &msg, payload);
                 }
 
