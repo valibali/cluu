@@ -120,6 +120,17 @@ if [ "$ALLOW_SLOW_SHELL_WAIT" != "1" ] && [ "$SHELL_READY_WAIT" -gt "$SHELL_READ
 fi
 
 cleanup() {
+    # FB_DUMP_OUT: pmemsave framebuffer via fb_dump.sh while QEMU still alive.
+    if [ -n "${FB_DUMP_OUT:-}" ] && [ -S "$MONITOR_SOCK" ]; then
+        local _fb_phys
+        _fb_phys=$(grep -oE 'fb @[0-9A-Fa-f]+' "$SERIAL_LOG" 2>/dev/null | head -1 | sed 's/fb @/0x/')
+        if [ -n "$_fb_phys" ]; then
+            echo "FB_DUMP: capturing phys=$_fb_phys -> ${FB_DUMP_OUT}"
+            "$(dirname "$0")/fb_dump.sh" -p "$_fb_phys" -o "$FB_DUMP_OUT" 2>&1 || true
+        else
+            echo "FB_DUMP: SKIP — fb_phys not found in $SERIAL_LOG" >&2
+        fi
+    fi
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
         echo "Killing QEMU (pid $QEMU_PID)..."
         kill "$QEMU_PID" 2>/dev/null || true
