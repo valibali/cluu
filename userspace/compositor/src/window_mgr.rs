@@ -89,12 +89,15 @@ impl Compositor {
             let y = 1 + (self.rows.saturating_sub(1).saturating_sub(granted_h)) / 2;
             (x, y)
         } else {
-            let step_x = (id as u16).saturating_mul(8);
-            let step_y = (id as u16).saturating_mul(3);
+            let win_index = self.windows.len() as u16;
             let max_x = self.cols.saturating_sub(granted_w);
             let max_y = self.rows.saturating_sub(granted_h);
-            let x = step_x.min(max_x);
-            let y = (1 + step_y).min(max_y.max(1));
+            let step = 8u16;
+            let per_row = (max_x / step).max(1) + 1;
+            let col = win_index % per_row;
+            let row = win_index / per_row;
+            let x = col.saturating_mul(step).min(max_x);
+            let y = (1 + row.saturating_mul(3)).min(max_y.max(1));
             (x, y)
         };
 

@@ -22,7 +22,7 @@ pub fn render_status(comp: &Compositor) -> String {
         .map(|w| w.title.as_str())
         .unwrap_or("(none)");
     format!(
-        "[{}]  focused: {}   |   windows: {}",
+        " CLUU  [{}]  {}  \u{b7}  {} wins",
         clock_str, focused_title, comp.windows.len()
     )
 }

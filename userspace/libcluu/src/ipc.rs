@@ -227,6 +227,9 @@ pub const COMP_FRAME_READY_LABEL: u32 = 100;
 /// compositor → app input endpoint. User or compositor requested window close.
 /// App should unregister its PTS, destroy the window, and exit cleanly.
 pub const COMP_CLOSE_REQUEST_LABEL: u32 = 101;
+/// App → compositor:client. Query screen dimensions in cells.
+/// Reply: words[0]=cols, words[1]=rows.
+pub const COMP_WIN_QUERY_SCREEN_LABEL: u32 = 102;
 // COMPOSITOR_READY_LABEL removed — compositor no longer swaps system/user mode
 // (Task 9, Plan 3: session lifecycle refactor)
 /// compositor → app input endpoint. Window was resized to new pixel dimensions.
