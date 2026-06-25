@@ -201,6 +201,10 @@ pub const COMP_WIN_REGISTER_REPLY: u32 = 91;
 /// suppressed while this window is focused.  Compositor sizes the window to
 /// the full cell grid regardless of req_w/req_h.
 pub const COMP_WIN_FLAG_FULLSCREEN: u32 = 1 << 0;
+/// WIN_REGISTER flag: suppress chrome (border/title). Window keeps requested dims.
+pub const COMP_WIN_FLAG_NO_CHROME: u32 = 1 << 1;
+/// WIN_REGISTER flag: modal. Pinned to z-top, grabs input, Esc dismisses.
+pub const COMP_WIN_FLAG_MODAL: u32 = 1 << 2;
 /// App → compositor:client. Mark a damage rect on a registered window.
 pub const COMP_WIN_DAMAGE_LABEL: u32 = 92;
 /// App → compositor:client. Free a window.
@@ -223,6 +227,9 @@ pub const COMP_FRAME_READY_LABEL: u32 = 100;
 /// compositor → app input endpoint. User or compositor requested window close.
 /// App should unregister its PTS, destroy the window, and exit cleanly.
 pub const COMP_CLOSE_REQUEST_LABEL: u32 = 101;
+/// App → compositor:client. Query screen dimensions in cells.
+/// Reply: words[0]=cols, words[1]=rows.
+pub const COMP_WIN_QUERY_SCREEN_LABEL: u32 = 102;
 // COMPOSITOR_READY_LABEL removed — compositor no longer swaps system/user mode
 // (Task 9, Plan 3: session lifecycle refactor)
 /// compositor → app input endpoint. Window was resized to new pixel dimensions.

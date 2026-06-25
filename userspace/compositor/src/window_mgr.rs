@@ -26,6 +26,8 @@ impl Compositor {
         flags: u32,
     ) -> Result<(WindowId, u64, u32, u32)> {
         let fullscreen = (flags & libcluu::ipc::COMP_WIN_FLAG_FULLSCREEN) != 0;
+        let no_chrome = (flags & libcluu::ipc::COMP_WIN_FLAG_NO_CHROME) != 0;
+        let modal = (flags & libcluu::ipc::COMP_WIN_FLAG_MODAL) != 0;
         let (granted_w, granted_h) = if fullscreen {
             (self.cols, self.rows)
         } else {
@@ -82,13 +84,20 @@ impl Compositor {
         // out so users can see all windows at once.
         let (x, y) = if fullscreen {
             (0u16, 0u16)
+        } else if modal {
+            let x = (self.cols.saturating_sub(granted_w)) / 2;
+            let y = 1 + (self.rows.saturating_sub(1).saturating_sub(granted_h)) / 2;
+            (x, y)
         } else {
-            let step_x = (id as u16).saturating_mul(8);
-            let step_y = (id as u16).saturating_mul(3);
+            let win_index = self.windows.len() as u16;
             let max_x = self.cols.saturating_sub(granted_w);
             let max_y = self.rows.saturating_sub(granted_h);
-            let x = step_x.min(max_x);
-            let y = (1 + step_y).min(max_y.max(1));
+            let step = 8u16;
+            let per_row = (max_x / step).max(1) + 1;
+            let col = win_index % per_row;
+            let row = win_index / per_row;
+            let x = col.saturating_mul(step).min(max_x);
+            let y = (1 + row.saturating_mul(3)).min(max_y.max(1));
             (x, y)
         };
 
@@ -98,7 +107,7 @@ impl Compositor {
             title_owned.truncate(31);
         }
 
-        self.windows.push(Window {
+        let new_win = Window {
             id,
             owner_pid,
             title: title_owned,
@@ -112,8 +121,18 @@ impl Compositor {
             input_endpoint,
             pending_frame_ready: false,
             fullscreen,
+            no_chrome,
+            modal,
             session_id: None,
-        });
+        };
+        // Modal windows go to z-top (end of Vec). Non-modal windows are
+        // inserted before the first existing modal so modals stay on top.
+        if modal {
+            self.windows.push(new_win);
+        } else {
+            let pos = self.windows.iter().position(|w| w.modal).unwrap_or(self.windows.len());
+            self.windows.insert(pos, new_win);
+        }
         self.focused = Some(id);
         // Mark all the window's cells dirty so the (eventual) compose pass
         // emits chrome + interior.
@@ -196,8 +215,10 @@ impl Compositor {
     /// Cycle focus forward (Alt+Tab). The newly focused window is moved to the
     /// top of the z-order (end of the `windows` Vec) and the grid is fully
     /// dirtied so chrome repaints with the updated focus state.
+    /// Modal windows grab focus — Alt+Tab is disabled while a modal is focused.
     pub fn focus_next(&mut self) {
         if self.windows.is_empty() { return; }
+        if self.focused_is_modal() { return; }
         let cur = self.focused;
         let pos = cur
             .and_then(|id| self.windows.iter().position(|w| w.id == id))
@@ -212,8 +233,10 @@ impl Compositor {
     }
 
     /// Cycle focus backward (Alt+Shift+Tab).
+    /// Modal windows grab focus — Alt+Shift+Tab is disabled while a modal is focused.
     pub fn focus_prev(&mut self) {
         if self.windows.is_empty() { return; }
+        if self.focused_is_modal() { return; }
         let len = self.windows.len();
         let pos = self.focused
             .and_then(|id| self.windows.iter().position(|w| w.id == id))
@@ -342,6 +365,12 @@ impl Compositor {
 }
 
 impl Compositor {
+    /// True if the currently focused window is modal.
+    pub fn focused_is_modal(&self) -> bool {
+        let Some(id) = self.focused else { return false; };
+        self.windows.iter().any(|w| w.id == id && w.modal)
+    }
+
     /// Forward a raw kbd event to the focused window's input endpoint.
     /// `ascii`/`mods`/`scancode`/`extended` come straight from the
     /// `KbdEvent` variant of `protocol::Incoming`.

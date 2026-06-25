@@ -174,6 +174,11 @@ pub struct Window {
     /// When true: window covers the full cell grid (x=0, y=0, w=cols, h=rows).
     /// Compositor skips chrome rendering and status bar for this window while focused.
     pub fullscreen: bool,
+    /// When true: no chrome (border/title) is drawn for this window.
+    /// Interior cells map directly to SHM without chrome offset.
+    pub no_chrome: bool,
+    /// When true: window is modal. Pinned to z-top, grabs input, Esc dismisses.
+    pub modal: bool,
     /// Session that owns this window, if any. Set on session handoff;
     /// `None` for sessionless windows (e.g. login modal, demo shells).
     pub session_id: Option<u32>,

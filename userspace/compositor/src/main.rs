@@ -17,7 +17,8 @@ mod render;
 use libcluu::boot::{process_info, PARAM_NOTIFY_READY_EP, TOKEN_IPC};
 use libcluu::ipc::{
     extract_reply_id, reply, reply_with_payload, send_msg_with_payload,
-    COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL, VTMGR_PIN_VT_LABEL,
+    COMP_WIN_QUERY_SCREEN_LABEL, COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL,
+    VTMGR_PIN_VT_LABEL,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
@@ -352,8 +353,23 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                                 comp.handle_win_set_title(window_id, s);
                             }
                         }
+                        protocol::Incoming::QueryScreenSize => {
+                            let reply_token = extract_reply_id(&msg).unwrap_or(0);
+                            let reply_msg = Message::new(
+                                COMP_WIN_QUERY_SCREEN_LABEL,
+                                [comp.cols as usize, comp.rows as usize, 0, 0, 0, 0],
+                                2,
+                            );
+                            let _ = reply(
+                                reply_token,
+                                &reply_msg,
+                                IpcFlags::empty(),
+                            );
+                        }
                         protocol::Incoming::KbdEvent { ascii, modifiers, scancode, extended } => {
-                            if let Some(hk) = hotkeys::match_hotkey(modifiers, scancode, extended) {
+                            if scancode == hotkeys::SCAN_ESC && comp.focused_is_modal() {
+                                comp.forward_close_request();
+                            } else if let Some(hk) = hotkeys::match_hotkey(modifiers, scancode, extended) {
                                 match hk {
                                     hotkeys::Hotkey::FocusNext  => comp.focus_next(),
                                     hotkeys::Hotkey::FocusPrev  => comp.focus_prev(),
@@ -516,8 +532,8 @@ fn compositor_view_token(_comp: &state::Compositor) -> cluu_wire::TokenHandle {
     0
 }
 
-fn close_window(_comp: &mut state::Compositor, _window_id: u64) {
-    // Stub — real close_window will call handle_win_destroy + SHM free.
+fn close_window(comp: &mut state::Compositor, window_id: u64) {
+    comp.handle_win_destroy(window_id);
 }
 
 fn spawn_login_window(comp: &mut state::Compositor) {

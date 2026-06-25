@@ -30,8 +30,8 @@ use procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL;
 
 use libcluu::boot::{process_info, space_token, TOKEN_EXTRA_0, TOKEN_IPC};
 use libcluu::ipc::{
-    COMP_INPUT_FORWARD_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_FLAG_FULLSCREEN,
-    COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY,
+    COMP_INPUT_FORWARD_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_FLAG_MODAL,
+    COMP_WIN_FLAG_NO_CHROME, COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY,
 };
 use libcluu::syscall::MAP_FRAME_TOKEN;
 use libcluu::types::{IpcFlags, Message};
@@ -417,15 +417,16 @@ fn register_window(my_ep: usize) -> Result<(u32, usize, u32, u32), i32> {
     };
 
     let title = b"CLUU login";
+    let modal_total_h = BANNER_H + BANNER_GAP + MODAL_H;
     let req = Message::new(
         COMP_WIN_REGISTER_LABEL,
         [
-            title.len(),                        // words[0] = payload_len
-            0,                                  // words[1] = req_w (ignored: fullscreen)
-            0,                                  // words[2] = req_h (ignored: fullscreen)
-            my_ep,                              // words[3] = app input/frame endpoint
-            COMP_WIN_FLAG_FULLSCREEN as usize,  // words[4] = flags
-            0,                                  // words[5] = reserved
+            title.len(),                                      // words[0] = payload_len
+            MODAL_W as usize,                                      // words[1] = req_w
+            modal_total_h as usize,                                // words[2] = req_h
+            my_ep,                                            // words[3] = app input/frame endpoint
+            (COMP_WIN_FLAG_MODAL | COMP_WIN_FLAG_NO_CHROME) as usize, // words[4] = flags
+            0,                                                // words[5] = reserved
         ],
         5,
     );

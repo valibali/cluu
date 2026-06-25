@@ -17,7 +17,7 @@
 use libcluu::ipc::{
     KBD_EVENT_LABEL, COMP_SHUTDOWN_LABEL, COMP_VT_ACTIVATE_LABEL,
     COMP_VT_DEACTIVATE_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL,
-    COMP_WIN_REGISTER_LABEL, COMP_WIN_SET_TITLE_LABEL,
+    COMP_WIN_QUERY_SCREEN_LABEL, COMP_WIN_REGISTER_LABEL, COMP_WIN_SET_TITLE_LABEL,
 };
 use libcluu::types::Message;
 
@@ -29,6 +29,7 @@ pub enum Incoming {
     WinDamage { window_id: u64, x: u32, y: u32, w: u32, h: u32 },
     WinDestroy { window_id: u64 },
     WinSetTitle { window_id: u64, title_len: u32 },
+    QueryScreenSize,
     KbdEvent { ascii: u8, modifiers: u8, scancode: u8, extended: u8 },
     VtActivate,
     VtDeactivate,
@@ -62,6 +63,7 @@ pub fn parse(msg: &Message) -> Incoming {
             window_id: msg.words[0] as u64,
             title_len: msg.words[1] as u32,
         },
+        COMP_WIN_QUERY_SCREEN_LABEL => Incoming::QueryScreenSize,
         KBD_EVENT_LABEL => Incoming::KbdEvent {
             ascii:     msg.words[1] as u8,
             modifiers: msg.words[2] as u8,
