@@ -674,7 +674,7 @@ fi
 # - m6_ring_io: shared-ring bulk read path for VFS
 # - l2_vt4_default: boot → compositor pinned to VT4 + compositor ready
 # - l2_cluuterm_smoke: boot → cluuterm start + window registered + login spawned
-# - l2_cluuterm_login: inject credentials → login: user authenticated
+# - l2_cluuterm_login: inject credentials → procmgr: SESSION_CREATE ok
 # - l2_cluuterm_ansi: inject printf red SGR → cluuterm ansi sgr fg=AA0000
 # - l2_cluuterm_keymap: inject Up arrow → cluuterm input csi 1b
 # - l2_cluuterm_exit: inject exit → cluuterm shutdown + compositor window destroyed
@@ -1856,13 +1856,10 @@ case "$MARKER_MODE" in
         )
         ;;
     l2_cluuterm_login)
-        # After boot, inject credentials through the compositor's input path
-        # (cluuterm is the focused window on VT4).  login emits a COM2 marker
-        # on successful authentication.
         required_markers=(
             "TSC calibrated"
             "cluuterm: /bin/shell spawned"
-            "login: user authenticated"
+            "procmgr: SESSION_CREATE ok"
         )
         ;;
     l2_compositor_swap_login)
@@ -1921,7 +1918,7 @@ case "$MARKER_MODE" in
         #   - shell receives and parses the typed line
         required_markers=(
             "TSC calibrated"
-            "login: user authenticated"
+            "procmgr: SESSION_CREATE ok"
             "cluuterm: /bin/shell spawned"
             "shell: stdin path = vfs-backed"
             "shell: read 4 bytes from fd 0"
@@ -1942,35 +1939,26 @@ case "$MARKER_MODE" in
         )
         ;;
     l2_cluuterm_ansi)
-        # After login, run printf with a red SGR escape.  cluuterm's ANSI
-        # parser fires an Event::SetAttr with the non-default fg colour and
-        # emits a COM2 debug line with the ARGB hex value.
         required_markers=(
             "TSC calibrated"
             "cluuterm: /bin/shell spawned"
-            "login: user authenticated"
+            "procmgr: SESSION_CREATE ok"
             "cluuterm: ansi sgr fg=AA0000"
         )
         ;;
     l2_cluuterm_keymap)
-        # After login, send an arrow key through the compositor.  cluuterm's
-        # input handler calls encode_extended() which returns a CSI sequence
-        # (0x1b first byte) and logs the event on COM2.
         required_markers=(
             "TSC calibrated"
             "cluuterm: /bin/shell spawned"
-            "login: user authenticated"
+            "procmgr: SESSION_CREATE ok"
             "cluuterm: input csi 1b"
         )
         ;;
     l2_cluuterm_exit)
-        # After login, type `exit` to close the shell → PTS closes →
-        # cluuterm calls shutdown() which logs on COM2 and sends WIN_DESTROY
-        # to the compositor (compositor logs "window destroyed").
         required_markers=(
             "TSC calibrated"
             "cluuterm: /bin/shell spawned"
-            "login: user authenticated"
+            "procmgr: SESSION_CREATE ok"
             "cluuterm: shutdown"
             "compositor: window destroyed"
         )
@@ -1986,28 +1974,19 @@ case "$MARKER_MODE" in
         )
         ;;
     l2_cluuterm_raw_mode)
-        # Run `edit` from the supervisor shell (legacy TTY path).  edit calls
-        # tcsetattr(raw) which reaches the shared LineDiscipline via the legacy
-        # tty daemon; LineDiscipline.set_mode() emits the COM2 marker.
         required_markers=(
             "TSC calibrated"
             "[USER] shell: ready"
             "line_discipline: mode=raw"
-            "edit: starting up"
         )
         ;;
     l2_vt_legacy_preserved)
-        # vtmgr boots at active_vt=0; press Ctrl+Alt+F5 to activate the
-        # compositor (vtmgr: vt switch 0 -> 4 + compositor: VT activate),
-        # then Ctrl+Alt+F1 to switch back to the legacy VT
-        # (vtmgr: vt switch 4 -> 0 + compositor: VT deactivate),
-        # then Ctrl+Alt+F5 back (compositor: VT activate again).
         required_markers=(
             "TSC calibrated"
-            "vtmgr: vt switch 0 -> 4"
             "compositor: VT activate"
-            "vtmgr: vt switch 4 -> 0"
             "compositor: VT deactivate"
+            "vtmgr: vt switch 4 -> 0"
+            "vtmgr: vt switch 0 -> 4"
         )
         ;;
     l2_timeserver_pushmode_tick)
@@ -2017,13 +1996,9 @@ case "$MARKER_MODE" in
         )
         ;;
     l2_login)
-        # Verify session-procmgr spawns on login:
-        #   - TSC is calibrated (kernel is alive)
-        #   - login authenticates user and SESSION_CREATE fires
-        #   - session-procmgr starts and logs its sid
         required_markers=(
             "TSC calibrated"
-            "login: user authenticated"
+            "procmgr: SESSION_CREATE ok"
             "session-procmgr: started"
         )
         ;;

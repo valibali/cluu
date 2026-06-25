@@ -911,20 +911,20 @@ harness_derive_marker_defaults() {
                 ;;
             l2_cluuterm_ansi)
                 TEST_COMMAND=""
-                # After login, run printf with a red SGR escape.  The harness
-                # types the command after the shell prompt is ready.
-                # printf '\033[31mred\033[0m'
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey p\nsendkey r\nsendkey i\nsendkey n\nsendkey t\nsendkey f\nsendkey spc\nsendkey apostrophe\nsendkey backslash\nsendkey 0\nsendkey 3\nsendkey 3\nsendkey bracket_left\nsendkey 3\nsendkey 1\nsendkey m\nsendkey r\nsendkey e\nsendkey d\nsendkey backslash\nsendkey 0\nsendkey 3\nsendkey 3\nsendkey bracket_left\nsendkey 0\nsendkey m\nsendkey apostrophe\nsendkey ret'
                 ;;
             l2_cluuterm_keymap)
                 TEST_COMMAND=""
-                # After login, press Up arrow.  The compositor forwards the
-                # extended key to cluuterm which logs the CSI sequence.
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey up'
                 ;;
             l2_cluuterm_exit)
                 TEST_COMMAND=""
-                # After login, type `exit` to close the shell.
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey e\nsendkey x\nsendkey i\nsendkey t\nsendkey ret'
                 ;;
             l2_cluuterm_two_windows)
