@@ -84,6 +84,10 @@ impl Compositor {
         // out so users can see all windows at once.
         let (x, y) = if fullscreen {
             (0u16, 0u16)
+        } else if modal {
+            let x = (self.cols.saturating_sub(granted_w)) / 2;
+            let y = 1 + (self.rows.saturating_sub(1).saturating_sub(granted_h)) / 2;
+            (x, y)
         } else {
             let step_x = (id as u16).saturating_mul(8);
             let step_y = (id as u16).saturating_mul(3);
