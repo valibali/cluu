@@ -203,6 +203,8 @@ pub const COMP_WIN_REGISTER_REPLY: u32 = 91;
 pub const COMP_WIN_FLAG_FULLSCREEN: u32 = 1 << 0;
 /// WIN_REGISTER flag: suppress chrome (border/title). Window keeps requested dims.
 pub const COMP_WIN_FLAG_NO_CHROME: u32 = 1 << 1;
+/// WIN_REGISTER flag: modal. Pinned to z-top, grabs input, Esc dismisses.
+pub const COMP_WIN_FLAG_MODAL: u32 = 1 << 2;
 /// App → compositor:client. Mark a damage rect on a registered window.
 pub const COMP_WIN_DAMAGE_LABEL: u32 = 92;
 /// App → compositor:client. Free a window.

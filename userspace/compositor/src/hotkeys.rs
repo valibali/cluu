@@ -13,6 +13,7 @@ const MOD_ALT: u8 = 1 << 2;
 pub const SCAN_TAB: u8 = 0x0F;
 pub const SCAN_Q: u8 = 0x10;
 pub const SCAN_N: u8 = 0x31;
+pub const SCAN_ESC: u8 = 0x01;
 
 /// Extended-key codes (kbd's own KEY_*).
 pub const EXT_NONE: u8 = 0;

@@ -353,7 +353,9 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                             }
                         }
                         protocol::Incoming::KbdEvent { ascii, modifiers, scancode, extended } => {
-                            if let Some(hk) = hotkeys::match_hotkey(modifiers, scancode, extended) {
+                            if scancode == hotkeys::SCAN_ESC && comp.focused_is_modal() {
+                                comp.forward_close_request();
+                            } else if let Some(hk) = hotkeys::match_hotkey(modifiers, scancode, extended) {
                                 match hk {
                                     hotkeys::Hotkey::FocusNext  => comp.focus_next(),
                                     hotkeys::Hotkey::FocusPrev  => comp.focus_prev(),
