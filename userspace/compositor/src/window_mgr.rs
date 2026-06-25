@@ -26,6 +26,7 @@ impl Compositor {
         flags: u32,
     ) -> Result<(WindowId, u64, u32, u32)> {
         let fullscreen = (flags & libcluu::ipc::COMP_WIN_FLAG_FULLSCREEN) != 0;
+        let no_chrome = (flags & libcluu::ipc::COMP_WIN_FLAG_NO_CHROME) != 0;
         let (granted_w, granted_h) = if fullscreen {
             (self.cols, self.rows)
         } else {
@@ -112,6 +113,7 @@ impl Compositor {
             input_endpoint,
             pending_frame_ready: false,
             fullscreen,
+            no_chrome,
             session_id: None,
         });
         self.focused = Some(id);

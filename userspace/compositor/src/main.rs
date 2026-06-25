@@ -516,8 +516,8 @@ fn compositor_view_token(_comp: &state::Compositor) -> cluu_wire::TokenHandle {
     0
 }
 
-fn close_window(_comp: &mut state::Compositor, _window_id: u64) {
-    // Stub — real close_window will call handle_win_destroy + SHM free.
+fn close_window(comp: &mut state::Compositor, window_id: u64) {
+    comp.handle_win_destroy(window_id);
 }
 
 fn spawn_login_window(comp: &mut state::Compositor) {

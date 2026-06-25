@@ -59,7 +59,7 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
         // Fullscreen windows have no chrome — treat every cell as interior.
         // When any window is fullscreen-focused, suppress chrome on all windows
         // (the fullscreen window's interior covers the whole screen anyway).
-        let in_chrome = if win.fullscreen || fullscreen_mode {
+        let in_chrome = if win.fullscreen || win.no_chrome || fullscreen_mode {
             false
         } else {
             local_x < CHROME_LEFT
@@ -73,7 +73,7 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
         }
         // For fullscreen windows the SHM interior coordinate equals the local
         // coordinate directly (no chrome offset).
-        let (ix, iy) = if win.fullscreen {
+        let (ix, iy) = if win.fullscreen || win.no_chrome {
             (local_x, local_y)
         } else {
             (local_x - CHROME_LEFT, local_y - CHROME_TOP)
