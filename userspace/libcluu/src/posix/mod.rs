@@ -110,6 +110,15 @@ pub extern "C" fn __cluu_init() {
     // (opendir, open, stat, etc. all need registry::lookup_service).
     // The name is only used for service registration, not lookups.
     let _ = crate::registry::init("app");
+    // Patch VFS-backed stdio fds (pts mode): the endpoint tokens inherited
+    // from procmgr's FdInherit carry only IPC_SEND|IPC_RECV, not IPC_CALL.
+    // VFS read/write ops need IPC_CALL. Shell does this patch in its run()
+    // function after registry init; C programs (micropython, etc.) that use
+    // __cluu_init need it here too, otherwise read(0) returns EPERM and
+    // busy-spins forever.
+    if let Some(vfs_ep) = crate::registry::lookup_service("vfs:main") {
+        crate::fd_table::patch_vfs_stdio_endpoints(vfs_ep);
+    }
     dir::init_cwd();
     env::init_env();
 }
