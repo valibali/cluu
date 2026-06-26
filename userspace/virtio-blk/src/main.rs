@@ -499,14 +499,6 @@ fn handle_fs_request(
         }
 
         FS_READDIR => {
-            // payload = path
-            // Wire format v2: per entry
-            //   [name_len: u8][is_dir: u8]
-            //   [size: u64 LE][mode: u32 LE][mtime: u64 LE]
-            //   [nlink: u32 LE][uid: u32 LE][gid: u32 LE]
-            //   [name: name_len bytes]
-            // 34 + name_len bytes per entry. Eliminates N+1 stat IPCs in
-            // VFS RemoteBackend.
             let path = core::str::from_utf8(payload).unwrap_or("");
             match fs.resolve_path(path) {
                 Ok(inode) => {
@@ -543,7 +535,14 @@ fn handle_fs_request(
                             let reply_msg =
                                 Message::new(FS_READDIR, [0, 0, entries.len(), 0, 0, 0], 3);
                             if let Some(token) = reply_token {
-                                let _ = reply_with_payload(token, &reply_msg, &data);
+                                if reply_with_payload(token, &reply_msg, &data).is_err() {
+                                    let _ = libcluu::debug_print(&format!(
+                                        "blkdev: FS_READDIR reply failed ({} entries, {} bytes — may exceed IPC_MESSAGE_MAX)",
+                                        entries.len(),
+                                        data.len()
+                                    ));
+                                    send_error_reply_shifted(reply_token, -10);
+                                }
                             }
                         }
                         Err(_) => send_error_reply_shifted(reply_token, -1),
