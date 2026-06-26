@@ -1031,6 +1031,12 @@ harness_derive_marker_defaults() {
                 RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 8\nsendkey x\nsendkey y\nsendkey z\nsendkey ret'
                 ;;
+            l2_cluuterm_cd)
+                TEST_COMMAND=""
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 8\nsendkey c\nsendkey d\nsendkey spc\nsendkey b\nsendkey i\nsendkey n\nsendkey ret\nsleep 1\nsendkey p\nsendkey w\nsendkey d\nsendkey ret'
+                ;;
             legacy_p1)
                 TEST_COMMAND="minimal"
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"

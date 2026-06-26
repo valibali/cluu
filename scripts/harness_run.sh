@@ -1925,6 +1925,24 @@ case "$MARKER_MODE" in
             "shell: unsupported command"
         )
         ;;
+    l2_cluuterm_cd)
+        # Regression guard for the "cd bin freezes shell" bug.
+        # Root cause: VFS stat_path used readdir (reads ALL dir entries)
+        # as a directory probe. /bin has 124 entries → 5KB reply exceeds
+        # kernel IPC_MESSAGE_MAX (4KB). blkdev silently failed to send
+        # the reply, VFS blocked forever waiting for it.
+        # Fix: stat_path now uses open+FS_STAT (2 lightweight IPCs) via
+        # MountBackend::stat_by_path, avoiding the readdir probe entirely.
+        # Markers prove: shell reads "cd bin", cd succeeds, pwd shows /bin.
+        required_markers=(
+            "TSC calibrated"
+            "procmgr: SESSION_CREATE ok"
+            "cluuterm: /bin/shell spawned"
+            "shell: stdin path = vfs-backed"
+            "shell: read 7 bytes from fd 0"
+            "shell: pwd=/bin"
+        )
+        ;;
     l2_envelope_home_propagated)
         # Proves HOME=/home/root is correctly propagated to the graphical-
         # session shell after login (Bug B regression guard).  The load-
