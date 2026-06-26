@@ -818,7 +818,28 @@ impl VfsServer {
             return self.handle_pts_read_deliver(msg, payload);
         }
         if msg.tag.label == libcluu::proto::pts::PTS_SET_PGRP_LABEL {
-            return self.handle_pts_set_pgrp_proxy(msg, payload, sender_tid);
+            return self.forward_pts_verb_to_cluuterm(
+                msg,
+                payload,
+                sender_tid,
+                libcluu::proto::pts::PTS_SET_PGRP_LABEL,
+            );
+        }
+        if msg.tag.label == libcluu::proto::pts::PTS_GET_TERMIOS_LABEL {
+            return self.forward_pts_verb_to_cluuterm(
+                msg,
+                payload,
+                sender_tid,
+                libcluu::proto::pts::PTS_GET_TERMIOS_LABEL,
+            );
+        }
+        if msg.tag.label == libcluu::proto::pts::PTS_SET_TERMIOS_LABEL {
+            return self.forward_pts_verb_to_cluuterm(
+                msg,
+                payload,
+                sender_tid,
+                libcluu::proto::pts::PTS_SET_TERMIOS_LABEL,
+            );
         }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
@@ -1274,25 +1295,31 @@ impl VfsServer {
         ipc::reply(parked.reply_token, &reply_msg, IpcFlags::empty())
     }
 
-    /// Handle `PTS_SET_PGRP_LABEL` (138) — proxy a tcsetpgrp request from a
-    /// VFS client to the owning cluuterm instance.
+    /// Proxy a PTS_* verb from a VFS client to the owning cluuterm instance.
     ///
-    /// Wire layout from libcluu `pts_call_raw` (after Piece 1):
-    ///   `words[0]` = ABI_VERSION
+    /// Used for `PTS_SET_PGRP_LABEL` (138), `PTS_GET_TERMIOS_LABEL` (133),
+    /// and `PTS_SET_TERMIOS_LABEL` (134).  Cluuterm owns the canonical PTS
+    /// state (termios, fg pgid, winsize); VFS just forwards the call so that
+    /// VFS-backed fds (e.g. a shell's stdin after `patch_vfs_stdio_endpoints`)
+    /// can reach cluuterm without a separate endpoint.
+    ///
+    /// Wire layout from libcluu `pts_call_raw`:
+    ///   `words[0]` = payload_len (parse_message convention)
     ///   `words[1]` = vfs_remote_fd (the VFS-side fd handle for this client)
-    ///   payload    = postcard-encoded `i32` (pgid)
+    ///   payload    = postcard-encoded request (verb-specific)
     ///
     /// This handler:
     ///   1. Resolves `sender_tid` → `client_id` (the authenticated client).
     ///   2. Looks up `vfs_remote_fd` in `self.files` → `OpenFile::Pts`.
     ///   3. Gets the cluuterm notify endpoint from `pts_registry`.
-    ///   4. Calls cluuterm synchronously with `PTS_SET_PGRP_LABEL` + pgid payload.
+    ///   4. Calls cluuterm synchronously with `label` + payload.
     ///   5. Forwards cluuterm's reply payload back to the original caller.
-    fn handle_pts_set_pgrp_proxy(
+    fn forward_pts_verb_to_cluuterm(
         &mut self,
         msg: &Message,
         payload: &[u8],
         sender_tid: usize,
+        label: u32,
     ) -> Result<()> {
         let reply_token = match ipc::extract_reply_id(msg) {
             Some(t) => t,
@@ -1302,7 +1329,7 @@ impl VfsServer {
             }
         };
 
-        let mut reply_msg = Message::new(libcluu::proto::pts::PTS_SET_PGRP_LABEL, [0; 6], 1);
+        let mut reply_msg = Message::new(label, [0; 6], 1);
 
         // Authenticate caller and resolve client_id from sender TID.
         let client_id = match (sender_tid != 0).then_some(sender_tid) {
@@ -1339,22 +1366,23 @@ impl VfsServer {
             }
         };
 
-        // Forward PTS_SET_PGRP_LABEL to cluuterm synchronously.
-        // words[0] = ABI_VERSION, words[1] = pts_id (cluuterm may use for routing).
+        // Forward `label` to cluuterm synchronously.
+        // words[0] = payload_len (parse_message convention), words[1] = pts_id.
         // We build a send buffer (header + payload) and an oversized recv buffer so
         // that the full cluuterm reply (header + postcard payload) is captured and
         // can be forwarded verbatim to the original caller via ipc_reply.
         let hdr_len = core::mem::size_of::<Message>();
         let fwd_req = Message::new(
-            libcluu::proto::pts::PTS_SET_PGRP_LABEL,
-            [libcluu::proto::ABI_VERSION as usize, pts_id as usize, 0, 0, 0, 0],
+            label,
+            [payload.len(), pts_id as usize, 0, 0, 0, 0],
             2,
         );
         let mut send_buf = alloc::vec![0u8; hdr_len + payload.len()];
         send_buf[..hdr_len].copy_from_slice(fwd_req.as_bytes());
         send_buf[hdr_len..].copy_from_slice(payload);
 
-        // 256 bytes is ample for a postcard-encoded SetPgrpReply (a few bytes).
+        // 256 bytes is ample for postcard-encoded PTS_* replies (Termios is the
+        // largest at ~50 bytes; SetPgrpReply / SetTermiosReply are a few bytes).
         let mut recv_buf = [0u8; 256];
         loop {
             match libcluu::syscall::ipc_call(cluuterm_ep, &send_buf, &mut recv_buf) {

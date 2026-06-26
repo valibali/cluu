@@ -913,6 +913,20 @@ impl Cluuterm {
                     self.pts.handle_pts_set_pgrp(pgid, &msg);
                 }
 
+                // ── PTS_GET_TERMIOS (133): tcgetattr via VFS proxy ─────
+                PTS_GET_TERMIOS_LABEL => {
+                    self.pts.handle_pts_get_termios(&msg);
+                }
+
+                // ── PTS_SET_TERMIOS (134): tcsetattr via VFS proxy ─────
+                PTS_SET_TERMIOS_LABEL => {
+                    let req: SetTermiosRequest = match postcard::from_bytes(payload) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    self.pts.handle_pts_set_termios(req, &msg);
+                }
+
                 // ── PTS_CLOSED (110): VFS notifies that all fds closed ──
                 PTS_CLOSED_LABEL => {
                     self.shutdown();

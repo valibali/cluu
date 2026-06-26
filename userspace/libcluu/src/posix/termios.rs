@@ -122,12 +122,13 @@ fn pts_call_raw(label: u32, endpoint: usize, remote_fd: usize, request_payload: 
     let hdr_len = core::mem::size_of::<Message>();
 
     // Build send buffer: Message header + payload.
+    // words[0] = payload_len (parse_message convention), words[1] = remote_fd.
     let total_send = hdr_len + request_payload.len();
     let mut send_buf = Vec::with_capacity(total_send);
     send_buf.resize(hdr_len, 0u8);
     {
         let mut hdr = Message::new(label, [0; 6], 2);
-        hdr.words[0] = crate::proto::ABI_VERSION as usize;
+        hdr.words[0] = request_payload.len();
         hdr.words[1] = remote_fd;
         send_buf[..hdr_len].copy_from_slice(hdr.as_bytes());
     }
