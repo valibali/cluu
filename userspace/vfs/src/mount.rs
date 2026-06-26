@@ -80,6 +80,35 @@ pub trait MountBackend: Send + Sync {
     /// Read directory entries at the given relative path.
     fn readdir(&self, rel_path: &str, caller_tid: usize) -> Result<Vec<DirEntry>>;
 
+    /// Stat a path without reading directory entries.
+    ///
+    /// Returns `DirEntryStat` with mode/size/etc. For remote backends this
+    /// is a lightweight open+stat-by-inode IPC pair; for memory-backed
+    /// backends it opens and inspects the file type.
+    ///
+    /// Default implementation: `open` + synthesize from `OpenFile`.
+    /// Override in `RemoteBackend` to avoid the expensive `readdir` probe
+    /// that reads ALL directory entries (which can exceed IPC_MESSAGE_MAX
+    /// for large directories like /bin with 100+ entries).
+    fn stat_by_path(&self, rel_path: &str, full_path: &str, caller_tid: usize) -> Result<DirEntryStat> {
+        let file = self.open(rel_path, full_path, caller_tid)?;
+        let size = file.size() as u64;
+        let mode = match &file {
+            OpenFile::Device(_) => 0o020666u32,
+            OpenFile::Virtual(_) => 0o040755u32,
+            _ => 0o100644u32,
+        };
+        Ok(DirEntryStat {
+            size,
+            mode,
+            mtime: 0,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            blocks: (size + 511) / 512,
+        })
+    }
+
     /// Read file data (for remote backends that need IPC).
     fn read(&self, file: &OpenFile, offset: usize, len: usize) -> Result<Vec<u8>> {
         // Default implementation for memory-backed files
@@ -279,6 +308,50 @@ impl MountBackend for RemoteBackend {
             offset += name_len;
         }
         Ok(entries)
+    }
+
+    fn stat_by_path(&self, rel_path: &str, _full_path: &str, _caller_tid: usize) -> Result<DirEntryStat> {
+        let req = Message::new(FS_OPEN, [rel_path.len(), 0, 0, 0, 0, 0], 1);
+        let mut reply = Message::new(0, [0; 6], 0);
+        call_with_payload(self.endpoint, &req, rel_path.as_bytes(), &mut reply)?;
+
+        let status = reply.words[0] as isize;
+        if status < 0 {
+            return Err(Error::NotFound);
+        }
+
+        let inode = reply.words[1] as u64;
+        let size = reply.words[2] as u64;
+
+        let stat_req = Message::new(FS_STAT, [0, inode as usize, 0, 0, 0, 0], 2);
+        let mut stat_reply = Message::new(0, [0; 6], 0);
+        call_with_payload(self.endpoint, &stat_req, &[], &mut stat_reply)?;
+
+        let stat_status = stat_reply.words[0] as isize;
+        if stat_status < 0 {
+            return Err(Error::from_errno(stat_status));
+        }
+
+        let remote_size = stat_reply.words[1] as u64;
+        let mode_flags = stat_reply.words[2];
+        let mtime = stat_reply.words[3] as u64;
+        let nlink = (stat_reply.words[4] & 0xFFFF) as u32;
+        let uid = ((stat_reply.words[4] >> 16) & 0xFFFF) as u32;
+        let gid = (stat_reply.words[5] & 0xFFFF) as u32;
+        let is_dir = (mode_flags & 1) != 0;
+        let mode = if is_dir { 0o040755u32 } else { 0o100644u32 };
+        let final_size = if remote_size > 0 { remote_size } else { size };
+        let blocks = (final_size + 511) / 512;
+
+        Ok(DirEntryStat {
+            size: final_size,
+            mode,
+            mtime,
+            nlink: if nlink == 0 { 1 } else { nlink },
+            uid,
+            gid,
+            blocks,
+        })
     }
 
     fn realpath(&self, rel_path: &str) -> Result<String> {
@@ -710,6 +783,12 @@ impl MountTable {
     pub fn readdir(&self, path: &str, caller_tid: usize) -> Result<Vec<DirEntry>> {
         let (mount, rel_path) = self.resolve(path)?;
         mount.backend.readdir(rel_path, caller_tid)
+    }
+
+    /// Stat a path without reading directory entries.
+    pub fn stat_by_path(&self, path: &str, caller_tid: usize) -> Result<DirEntryStat> {
+        let (mount, rel_path) = self.resolve(path)?;
+        mount.backend.stat_by_path(rel_path, path, caller_tid)
     }
 
     /// Iterate over registered mount prefixes (e.g. "/", "/proc", "/dev").

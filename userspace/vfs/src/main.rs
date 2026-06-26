@@ -2638,43 +2638,36 @@ impl VfsServer {
     }
 
     fn stat_path(&self, path: &str, caller_tid: usize) -> Result<StatInfo> {
-        // Try readdir first: some remote backends (ext2 over IPC) will
-        // happily "open" a directory inode as a file, which would make us
-        // misreport directories as regular files. readdir fails cleanly on
-        // non-directories, so we can use it as a positive dir probe.
-        if let Ok(entries) = self.mounts.readdir(path, caller_tid) {
-            // Try to get richer stat from a representative entry if available,
-            // otherwise return a synthesized directory stat.
-            let _ = entries; // We don't need them for the directory stat itself.
-            return Ok(StatInfo {
-                size: 0,
-                mode: MODE_DIR as u32,
-                mtime: 0,
-                nlink: 1,
-                uid: 0,
-                gid: 0,
-                blocks: 0,
-            });
+        match self.mounts.stat_by_path(path, caller_tid) {
+            Ok(s) => Ok(StatInfo {
+                size: s.size,
+                mode: s.mode,
+                mtime: s.mtime,
+                nlink: s.nlink,
+                uid: s.uid,
+                gid: s.gid,
+                blocks: s.blocks,
+            }),
+            Err(_) => {
+                if let Ok(file) = self.mounts.open(path, caller_tid) {
+                    let (mode, mtime, nlink, uid, gid) = match &file {
+                        OpenFile::Device(_) => (S_IFCHR as u32 | 0o666, 0u64, 1u32, 0u32, 0u32),
+                        _ => (MODE_FILE as u32, 0, 1, 0, 0),
+                    };
+                    let sz = file.size() as u64;
+                    return Ok(StatInfo {
+                        size: sz,
+                        mode,
+                        mtime,
+                        nlink,
+                        uid,
+                        gid,
+                        blocks: (sz + 511) / 512,
+                    });
+                }
+                Err(Error::NotFound)
+            }
         }
-
-        if let Ok(file) = self.mounts.open(path, caller_tid) {
-            let (mode, mtime, nlink, uid, gid) = match &file {
-                OpenFile::Device(_) => (S_IFCHR as u32 | 0o666, 0u64, 1u32, 0u32, 0u32),
-                _ => (MODE_FILE as u32, 0, 1, 0, 0),
-            };
-            let sz = file.size() as u64;
-            return Ok(StatInfo {
-                size: sz,
-                mode,
-                mtime,
-                nlink,
-                uid,
-                gid,
-                blocks: (sz + 511) / 512,
-            });
-        }
-
-        Err(Error::NotFound)
     }
 
     fn ensure_mutation_allowed(&self, client_id: usize, path: &str) -> Result<()> {
