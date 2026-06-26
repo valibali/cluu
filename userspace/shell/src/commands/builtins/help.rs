@@ -93,9 +93,8 @@ impl BuiltinCommand for ClearBuiltin {
         "clear"
     }
 
-    fn run(&self, _stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
-        let console = context.console_write_endpoint()?;
-        send_with_payload(console, CONSOLE_CLEAR_LABEL, &[])?;
+    fn run(&self, _stdout: usize, _context: &mut CommandContext, _args: &[String]) -> Result<()> {
+        crate::write_stdout(b"\x1b[H\x1b[2J");
         Ok(())
     }
 }

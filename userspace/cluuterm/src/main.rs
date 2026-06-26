@@ -74,7 +74,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     };
 
     // Phase 1: register window with compositor.
-    let (window_id, comp_ep) = match register_window(my_ep) {
+    let (window_id, comp_ep, gw, gh) = match register_window(my_ep) {
         Ok(p) => p,
         Err(code) => {
             let _ = debug_print("cluuterm: WIN_REGISTER failed");
@@ -102,7 +102,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     // Phase 4: run main loop (stub recv loop — Task 15 fills the real body).
     let shm_ptr = SHM_VA as *mut WindowShm;
-    let mut term = tty_backend::Cluuterm::new(COLS, ROWS, shm_ptr, pts_id, window_id, my_ep, comp_ep, vfs_ep);
+    let interior_cols = (gw as usize).saturating_sub(2).max(1);
+    let interior_rows = (gh as usize).saturating_sub(2).max(1);
+    let mut term = tty_backend::Cluuterm::new(interior_cols, interior_rows, shm_ptr, pts_id, window_id, my_ep, comp_ep, vfs_ep);
     term.run();
     0
 }
@@ -125,7 +127,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 ///   words[4] = errno (0 = ok)
 ///
 /// Returns `(win_id, comp_ep)` or an i32 exit code on error.
-fn register_window(my_ep: usize) -> Result<(u32, usize), i32> {
+fn register_window(my_ep: usize) -> Result<(u32, usize, u32, u32), i32> {
     let comp_ep = match registry::lookup_service("compositor:client") {
         Some(ep) => ep,
         None => {
@@ -181,7 +183,7 @@ fn register_window(my_ep: usize) -> Result<(u32, usize), i32> {
         return Err(6);
     }
 
-    Ok((win_id, comp_ep))
+    Ok((win_id, comp_ep, gw as u32, gh as u32))
 }
 
 // ─── PTS_REGISTER ─────────────────────────────────────────────────────────────

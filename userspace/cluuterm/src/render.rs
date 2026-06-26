@@ -141,9 +141,11 @@ pub fn render(term: &mut Cluuterm) {
         (shm_ptr as *mut u8).add(size_of::<WindowShm>()) as *mut u64
     };
 
-    // Chrome border is 1 cell on each side — interior origin is (1,1).
-    let max_ix = shm_w.saturating_sub(2).min(cols);
-    let max_iy = shm_h.saturating_sub(2).min(rows);
+    // Chrome border is 1 cell on each side — but the SHM contains ONLY
+    // interior cells. The compositor handles chrome separately in
+    // compose_cell and reads interior cells starting at (0,0).
+    let max_ix = shm_w.min(cols);
+    let max_iy = shm_h.min(rows);
 
     for iy in 0..max_iy {
         for ix in 0..max_ix {
@@ -153,8 +155,7 @@ pub fn render(term: &mut Cluuterm) {
             let bg  = argb_to_palette_idx(term.bg_cells[term_pos]);
             let cell = pack_cell(ch, fg, bg, 0);
 
-            // SHM cell coordinates include chrome: offset by (1,1).
-            let shm_off = (iy + 1) * shm_w + (ix + 1);
+            let shm_off = iy * shm_w + ix;
             unsafe {
                 core::ptr::write_volatile(cells_base.add(shm_off), cell);
             }
@@ -171,13 +172,11 @@ pub fn render(term: &mut Cluuterm) {
         let bg  = argb_to_palette_idx(term.bg_cells[term_pos]);
         // Swap fg/bg: cursor is rendered as an inverted block.
         let cell = pack_cell(ch, bg, fg, 0);
-        let shm_off = (cy + 1) * shm_w + (cx + 1);
+        let shm_off = cy * shm_w + cx;
         unsafe {
             core::ptr::write_volatile(cells_base.add(shm_off), cell);
-            // Publish cursor position in compositor coords (chrome-offset +1).
-            // Compositor's blink path reads these to dirty/un-invert the cell.
-            core::ptr::write_volatile(&mut (*shm_ptr).cursor_x as *mut u32, (cx + 1) as u32);
-            core::ptr::write_volatile(&mut (*shm_ptr).cursor_y as *mut u32, (cy + 1) as u32);
+            core::ptr::write_volatile(&mut (*shm_ptr).cursor_x as *mut u32, cx as u32);
+            core::ptr::write_volatile(&mut (*shm_ptr).cursor_y as *mut u32, cy as u32);
         }
     }
 

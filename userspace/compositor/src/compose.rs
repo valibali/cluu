@@ -228,10 +228,12 @@ fn read_shm_cell(win: &Window, ix: u16, iy: u16) -> u64 {
     if cursor_visible == 0 {
         let cx = hdr.cursor_x as u16;
         let cy = hdr.cursor_y as u16;
-        // (0, 0) sentinel — clients that don't have a cursor (e.g. the
-        // login modal) never publish coords, so SHM stays zero-init.
-        // The real cluuterm cursor sits at (cursor_x + 1, cursor_y + 1)
-        // for the chrome offset, so it can never land on (0, 0).
+        // Sentinel: clients that don't have a cursor never write cursor_x/y,
+        // so SHM stays zero-init at (0, 0). We can't distinguish "cursor at
+        // (0,0)" from "no cursor" via coords alone, but cursor_visible == 0
+        // already means "hidden" — the un-invert only fires for clients that
+        // previously set cursor_visible to 1 (cluuterm) and then toggled it
+        // to 0 for blink-off. Those clients always have valid cursor coords.
         if (cx != 0 || cy != 0) && ix == cx && iy == cy {
             // The cursor was rendered as an inverted cell (fg/bg swapped) by
             // cluuterm. Re-invert to restore the normal appearance.
