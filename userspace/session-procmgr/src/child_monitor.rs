@@ -72,7 +72,18 @@ impl MsgHandler for ChildExit {
             state.kernel.revoke(h);
         }
 
-        // 6. Session-death cascade (HR4): root-procmgr's responsibility only.
+        // 6. Forward exit notification to parent if requested.
+        if child.notify_ep != 0 {
+            use libcluu::types::Message;
+            let msg = Message::new(
+                PROCMGR_EXIT_LABEL,
+                [child.cookie as usize, exit_code as usize, 0, 0, 0, 0],
+                2,
+            );
+            let _ = libcluu::ipc::send(child.notify_ep as usize, &msg, libcluu::IpcFlags::empty());
+        }
+
+        // 7. Session-death cascade (HR4): root-procmgr's responsibility only.
         //    Session-procmgr has no VT/tty_endpoints — do not replicate here.
 
         Ok(Reply::ok(Self::LABEL))
@@ -101,6 +112,7 @@ mod tests {
             start_ticks: 0,
             minted_caps: alloc::vec![0xA, 0xB],
             pgid: None,
+            notify_ep: 0,
         });
         let msg = InboundMsg {
             label: ChildExit::LABEL,
@@ -161,6 +173,7 @@ mod tests {
             start_ticks: 0,
             minted_caps: alloc::vec![],
             pgid: None,
+            notify_ep: 0,
         });
         let msg = InboundMsg {
             label: ChildExit::LABEL,

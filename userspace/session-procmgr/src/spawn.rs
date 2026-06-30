@@ -94,6 +94,7 @@ impl MsgHandler for Spawn {
             start_ticks: 0,
             minted_caps: minted,
             pgid: None,
+            notify_ep: req.notify.unwrap_or(0),
         });
 
         let reply = SpawnReply { pid, cookie };
@@ -124,6 +125,7 @@ mod tests {
                 cap_token: 1,
                 parent_rfd: 0,
             }],
+            notify: None,
         }
     }
 

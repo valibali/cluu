@@ -21,6 +21,7 @@ pub struct ChildState {
     pub start_ticks: u64,
     pub minted_caps: Vec<u64>,
     pub pgid: Option<u32>,
+    pub notify_ep: u64,
 }
 
 pub struct ChildTable {
@@ -63,6 +64,12 @@ impl ChildTable {
 
     pub fn lookup_by_pid(&self, pid: Pid) -> Option<&ChildState> {
         self.by_pid.get(&pid)
+    }
+
+    pub fn set_pgid(&mut self, pid: Pid, pgid: u32) {
+        if let Some(child) = self.by_pid.get_mut(&pid) {
+            child.pgid = Some(pgid);
+        }
     }
 
     pub fn lookup_by_cookie(&self, cookie: u64) -> Option<&ChildState> {
@@ -114,6 +121,7 @@ mod tests {
             start_ticks: 0,
             minted_caps: alloc::vec![],
             pgid: None,
+            notify_ep: 0,
         };
         table.insert(child);
         assert!(table.lookup_by_pid(pid).is_some());
