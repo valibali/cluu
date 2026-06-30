@@ -338,7 +338,9 @@ impl VfsClient {
         let payload = path.as_bytes();
         let msg = make_payload_message(VFS_READDIR, payload.len(), &[self.client_id]);
 
-        let mut reply_buf = [0u8; 4096];
+        // Heap-allocate reply buffer to avoid 4KB stack frame.
+        let mut reply_buf: Vec<u8> = Vec::with_capacity(4096);
+        reply_buf.resize(4096, 0u8);
         let (reply, payload_len) =
             ipc::call_with_reply_buf(self.endpoint, &msg, payload, &mut reply_buf)?;
         parse_status(reply.words[1])?;
