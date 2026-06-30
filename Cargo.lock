@@ -834,6 +834,8 @@ dependencies = [
  "cluu_lang",
  "cluu_wire",
  "libcluu",
+ "postcard",
+ "procmgr-common",
 ]
 
 [[package]]

@@ -10,6 +10,8 @@ license = "MIT"
 libcluu = { path = "../libcluu", features = ["posix"] }
 cluu_wire = { path = "../cluu_wire" }
 cluu_lang = { path = "../../crates/cluu_lang", optional = true }
+procmgr-common = { path = "../libs/procmgr-common" }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 [features]
 default = ["lang-parser"]
