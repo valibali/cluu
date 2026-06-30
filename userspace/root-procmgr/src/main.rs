@@ -81,7 +81,7 @@ use crate::pg_table::PgTable;
 use libcluu::registry;
 use libcluu::syscall::{
     space_destroy, thread_destroy, thread_get_id, thread_resume, thread_set_fault_endpoint,
-    thread_suspend, token_revoke, THREAD_CREATE_START_SUSPENDED,
+    thread_set_session, thread_suspend, token_revoke, THREAD_CREATE_START_SUSPENDED,
 };
 use libcluu::tar::find_member;
 use libcluu::*;
@@ -308,6 +308,7 @@ struct ProcessManager {
     pending_timers: Vec<TimerEntry>,
     /// Container IDs that have a pending deferred restart (prevents duplicates).
     pending_restarts: BTreeSet<u64>,
+    session_pmgr_endpoints: BTreeSet<usize>,
     /// Persistent shared-ring region for VFS bulk reads. Allocated once on
     /// first `load_from_vfs_ring` and reused for every subsequent call so
     /// the VFS-side grant survives across loads.
@@ -390,6 +391,7 @@ impl ProcessManager {
             instance_counters: BTreeMap::new(),
             pending_timers: Vec::new(),
             pending_restarts: BTreeSet::new(),
+            session_pmgr_endpoints: BTreeSet::new(),
             login_attempts: BTreeMap::new(),
             pipes: Vec::new(),
             pg_table: PgTable::new(),
@@ -937,6 +939,7 @@ impl ProcessManager {
         container_id: u64,
         parent_container_id: u64,
         is_identity_switch: bool,
+        session_id: u64,
     ) {
         // ── monotone-view debug assertion ─────────────────────────────────────
         #[cfg(debug_assertions)]
@@ -984,6 +987,7 @@ impl ProcessManager {
         }
         // ─────────────────────────────────────────────────────────────────────
         self.register_vfs_view_for_thread(thread_token, mounts, profile, container_id);
+        let _ = thread_set_session(thread_token, session_id);
         if let Err(err) = thread_resume(thread_token) {
             let _ = debug_print(&format!(
                 "procmgr: thread_resume failed token={} err={:?}",
@@ -1059,6 +1063,7 @@ impl ProcessManager {
         self.spawn_endpoint = endpoint_create(self.token)?;
         registry::register_output("spawn", self.spawn_endpoint)?;
         registry::register_output("session", self.spawn_endpoint)?;
+        registry::register_output("main", self.spawn_endpoint)?;
         self.fault_endpoint = endpoint_create(self.token)?;
 
         // Request tty:N main for all VTs (non-blocking); grants arrive via registry events.
@@ -1352,7 +1357,7 @@ impl ProcessManager {
                 self.container_owner_pids.insert(pid);
                 // parent_container_id=0, is_identity_switch=false: autostart binaries
                 // are top-level; procmgr is root.
-                self.install_view_and_run(_thread_token, &view_mounts, requested_profile, container_id, 0, false);
+                self.install_view_and_run(_thread_token, &view_mounts, requested_profile, container_id, 0, false, 0);
                 self.pid_to_view.insert(pid, view_mounts);
                 if image_name == "vtmgr" {
                     self.vtmgr_container_id = container_id;
@@ -1601,9 +1606,13 @@ impl ProcessManager {
                     .get(&container_id)
                     .map(|c| c.parent_container_id)
                     .unwrap_or(0);
+                let restart_session_id = self.container_instances
+                    .get(&container_id)
+                    .map(|c| c.session_id)
+                    .unwrap_or(0);
                 self.pid_to_container_id.insert(new_pid, container_id);
                 self.container_owner_pids.insert(new_pid);
-                self.install_view_and_run(new_thread_token, &view_mounts, requested_profile, container_id, restart_parent_cid, false);
+                self.install_view_and_run(new_thread_token, &view_mounts, requested_profile, container_id, restart_parent_cid, false, restart_session_id);
                 self.pid_to_view.insert(new_pid, view_mounts);
 
                 if let Some(container) = self.container_instances.get_mut(&container_id) {
@@ -1960,6 +1969,9 @@ impl ProcessManager {
                             }
                         }
                     }
+                }
+                if service_name.starts_with("session-procmgr") && name.starts_with("main") {
+                    self.session_pmgr_endpoints.insert(token);
                 }
             } else if let registry::RegistryEvent::SubscribeStatus { code } = event {
                 if code != 0 {
@@ -2453,11 +2465,11 @@ impl ProcessManager {
                 // is_identity_switch=true: escalate is an authenticated identity switch;
                 // the target view is authorized by procmgr policy, not constrained by
                 // the caller's view.  Pass caller_container_id for audit trail.
-                self.install_view_and_run(thread_token, &view_mounts, escalate_profile, container_id, caller_container_id, true);
-                self.pid_to_view.insert(pid, view_mounts);
-
                 let sudo_session_id = self.resolve_caller_session(sender_tid)
                     .map(|s| s.container_id).unwrap_or(0);
+                self.install_view_and_run(thread_token, &view_mounts, escalate_profile, container_id, caller_container_id, true, sudo_session_id);
+                self.pid_to_view.insert(pid, view_mounts);
+
                 let sudo_name = format!("sudo:{}", username);
                 let inst_name = self.next_instance_name(sudo_session_id, &sudo_name);
                 self.container_instances.insert(container_id, ContainerInstance {
@@ -2692,11 +2704,11 @@ impl ProcessManager {
                 // is_identity_switch=true: su is an authenticated identity switch;
                 // the target view is authorized by procmgr policy, not constrained by
                 // the caller's view.  Pass caller_container_id for audit trail.
-                self.install_view_and_run(thread_token, &view_mounts, target_profile, container_id, caller_container_id, true);
-                self.pid_to_view.insert(pid, view_mounts);
-
                 let su_session_id = self.resolve_caller_session(sender_tid)
                     .map(|s| s.container_id).unwrap_or(0);
+                self.install_view_and_run(thread_token, &view_mounts, target_profile, container_id, caller_container_id, true, su_session_id);
+                self.pid_to_view.insert(pid, view_mounts);
+
                 let su_name = format!("su:{}", target_username);
                 let inst_name = self.next_instance_name(su_session_id, &su_name);
                 self.container_instances.insert(container_id, ContainerInstance {
@@ -3135,9 +3147,11 @@ impl ProcessManager {
         let pgid   = msg.words[0];
         let signum = msg.words[1];
         let pids   = self.pg_table.members(pgid);
+        let mut local_hit = false;
         for pid in pids {
             if let Some(&cookie) = self.pid_to_cookie.get(&pid) {
                 if let Some(&thread_token) = self.exit_table.get(&cookie) {
+                    local_hit = true;
                     match signum {
                         s if s == SIGSTOP || s == 17 /* SIGTSTP */ => {
                             let _ = thread_suspend(thread_token);
@@ -3179,6 +3193,16 @@ impl ProcessManager {
                         }
                     }
                 }
+            }
+        }
+        if !local_hit {
+            for &ep in &self.session_pmgr_endpoints {
+                let fwd = Message::new(
+                    PROCMGR_PG_SIGNAL_LABEL,
+                    [pgid, signum, 0, 0, 0, 0],
+                    2,
+                );
+                let _ = ipc::send(ep, &fwd, IpcFlags::empty());
             }
         }
         let reply_token = extract_reply_id(msg);
@@ -3228,20 +3252,34 @@ impl ProcessManager {
         };
 
         let query_type = msg.words[0];
-        let target_pid = msg.words[1];
+        let raw_target = msg.words[1];
         let original_caller_tid = msg.words[2];
 
         let mut reply_msg = Message::new(PROCMGR_PROC_QUERY_LABEL, [0; 6], 2);
 
-        // Resolve caller identity for access control.
+        // No runtime ACL here. Visibility is enforced by the kernel's
+        // thread_enumerate (session-scoped) in /proc readdir. If a process
+        // can discover a TID via readdir, it can read its stat. Procmgr
+        // is a metadata service, not a gatekeeper.
+
         let caller_pid = self.tid_to_pid.get(&original_caller_tid).copied().unwrap_or(0);
-        let caller_profile = self.pid_to_profile.get(&caller_pid).copied()
-            .unwrap_or(CapProfile::empty());
-        let session_profile = self.resolve_caller_session(original_caller_tid)
-            .map(|s| s.profile)
-            .unwrap_or(CapProfile::empty());
-        let is_admin = caller_profile.contains(CapProfile::ADMIN)
-            || session_profile.contains(CapProfile::ADMIN);
+
+        // procfs readdir lists kernel TIDs. Translate TID→PID via tid_to_pid.
+        // If the TID is not a known main thread (secondary thread, stale entry),
+        // return NotFound so /proc readers skip it instead of synthesizing
+        // bogus rows with "?" name and mismatched mem data.
+        let target_pid = if raw_target != 0 {
+            match self.tid_to_pid.get(&raw_target).copied() {
+                Some(pid) => pid,
+                None => {
+                    reply_msg.words[1] = Error::NotFound.to_errno() as usize;
+                    let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    return Ok(());
+                }
+            }
+        } else {
+            0
+        };
 
         // Resolve "self" pid.
         let resolved_pid = if target_pid == 0 {
@@ -3250,19 +3288,9 @@ impl ProcessManager {
             target_pid
         };
 
-        // Wire format:
-        //   words[0] = payload byte length (always; reply_with_payload clobbers
-        //              this to payload.len(), so don't use it for errno).
-        //   words[1] = errno (0 = success).
-        //   words[2] = type-specific count (e.g. pid_count for QUERY_LIST,
-        //              content_len for STATUS/STAT/CMDLINE).
-        // Older code put errno in words[0] which collided with the payload-len
-        // clobber and caused all /proc/* reads through procfs to look like
-        // failures (see ps producing zero PID rows pre-fix).
-
         // Query type 3 (list) doesn't need a specific target.
         if query_type == 3 {
-            return self.proc_query_list(reply_token, &mut reply_msg, original_caller_tid, is_admin);
+            return self.proc_query_list(reply_token, &mut reply_msg, original_caller_tid, true);
         }
 
         // For types 0-2, resolved_pid must be valid.
@@ -3272,36 +3300,15 @@ impl ProcessManager {
             return Ok(());
         }
 
-        // Access control: caller must be admin OR target must be in same session.
-        if !is_admin {
-            let caller_session_cid = self.resolve_caller_session(original_caller_tid)
-                .map(|s| s.container_id)
-                .unwrap_or(0);
-            let target_session_cid = self.pid_to_container_id.get(&resolved_pid)
-                .and_then(|&cid| {
-                    let mut walk = cid;
-                    while walk != 0 {
-                        if self.session_table.contains_key(&walk) {
-                            return Some(walk);
-                        }
-                        match self.container_instances.get(&walk) {
-                            Some(inst) => walk = inst.parent_container_id,
-                            None => break,
-                        }
-                    }
-                    None
-                })
-                .unwrap_or(0);
-            if caller_session_cid == 0 || caller_session_cid != target_session_cid {
-                reply_msg.words[1] = Error::PermissionDenied.to_errno() as usize;
-                let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-                return Ok(());
-            }
-        }
+        let inst = self.container_instances.iter()
+            .find(|(_, c)| c.pid == resolved_pid)
+            .map(|(_, c)| c);
 
-        // Look up container instance for the target pid.
-        let cid = self.pid_to_container_id.get(&resolved_pid).copied().unwrap_or(0);
-        let inst = if cid != 0 { self.container_instances.get(&cid) } else { None };
+        if inst.is_none() {
+            reply_msg.words[1] = Error::NotFound.to_errno() as usize;
+            let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            return Ok(());
+        }
 
         match query_type {
             0 => self.proc_query_status(reply_token, &mut reply_msg, resolved_pid, inst),
@@ -3762,7 +3769,7 @@ impl ProcessManager {
         // parent_container_id=0, is_identity_switch=false: procmgr is spawner;
         // no parent to check against.
         let view_mounts = default_view_for_profile(requested_profile);
-        self.install_view_and_run(thread_token, &view_mounts, requested_profile, 0, 0, false);
+        self.install_view_and_run(thread_token, &view_mounts, requested_profile, 0, 0, false, 0);
 
         let _ = debug_print(&format!("procmgr: service '{}' spawned", path));
         Ok(())
@@ -3945,7 +3952,11 @@ impl ProcessManager {
                 // parent_container_id=caller_container_id: POSIX spawn child inherits the
                 // caller's container and view.  Assert the cloned view is not wider than
                 // the parent's recorded view (it should always be equal — but check).
-                self.install_view_and_run(thread_token, &child_view_mounts, child_profile, caller_container_id, caller_container_id, false);
+                let posix_session_id = self.container_instances
+                    .get(&caller_container_id)
+                    .map(|c| c.session_id)
+                    .unwrap_or(0);
+                self.install_view_and_run(thread_token, &child_view_mounts, child_profile, caller_container_id, caller_container_id, false, posix_session_id);
                 self.pid_to_view.insert(pid, child_view_mounts.clone());
                 if sender_tid != 0 {
                     let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
@@ -4046,9 +4057,7 @@ impl ProcessManager {
         self.pid_to_profile.remove(&pid);
         self.pid_to_view.remove(&pid);
         self.container_owner_pids.remove(&pid);
-        // Remove from job-control state if the process was stopped.
         self.pid_stopped.remove(&pid);
-        // Detach from any process group it belonged to.
         if let Some(pgid) = self.pg_table.pgid_of(pid) {
             self.pg_table.detach(pgid, pid);
         }
@@ -4056,6 +4065,12 @@ impl ProcessManager {
             self.tid_to_pid.remove(&thread_tid);
             self.broadcast_blk_tid_cleanup(thread_tid);
         }
+        if let Some(cookie) = self.pid_to_cookie.remove(&pid) {
+            self.cookie_to_pid.remove(&cookie);
+            self.cookie_to_space.remove(&cookie);
+        }
+        self.exit_table.remove(&pid);
+        self.pid_to_container_id.remove(&pid);
         for idx in 0..self.pipes.len() {
             if self.pipes[idx].as_ref().map_or(false, |e| e.creator_pid == pid) {
                 let entry = self.pipes[idx].take().unwrap();
@@ -4192,7 +4207,12 @@ impl ProcessManager {
                 ];
                 self.install_view_and_run(
                     thread_tok, &supervisor_mounts,
-                    CapProfile::SUPERVISOR, 0, 0, false,
+                    CapProfile::SUPERVISOR, 0, 0, false, session_id as u64,
+                );
+                let sid_byte = (session_id & 0xFF) as u8;
+                let _ = registry::request_subscription(
+                    "session-procmgr",
+                    &alloc::format!("main:{}", sid_byte),
                 );
             }
             Err(e) => {
@@ -5472,7 +5492,9 @@ impl ProcessManager {
                 self.container_owner_pids.insert(pid);
                 // parent_cid is caller_container_id (or 0 if detach=true) — set
                 // at the top of handle_container_run.  Assert child view ⊆ parent.
-                self.install_view_and_run(thread_token, &view_mounts, requested_profile, container_id, parent_cid, false);
+                let run_session_id = self.resolve_caller_session(sender_tid)
+                    .map(|s| s.container_id).unwrap_or(0);
+                self.install_view_and_run(thread_token, &view_mounts, requested_profile, container_id, parent_cid, false, run_session_id);
                 self.pid_to_view.insert(pid, view_mounts);
                 // Fix C: removed redundant pid_to_profile insert (spawn_service_with_env already does it)
 
@@ -5493,8 +5515,6 @@ impl ProcessManager {
                 } else {
                     parent_cid
                 };
-                let run_session_id = self.resolve_caller_session(sender_tid)
-                    .map(|s| s.container_id).unwrap_or(0);
                 let inst_name = self.next_instance_name(run_session_id, &display_name);
                 self.container_instances.insert(container_id, ContainerInstance {
                     name: display_name,
@@ -5951,6 +5971,9 @@ impl ProcessManager {
 
                 self.pid_to_container_id.insert(pid, container_id);
                 self.container_owner_pids.insert(pid);
+                let run_session_id = self.resolve_caller_session(sender_tid)
+                    .map(|s| s.container_id)
+                    .unwrap_or(0);
                 self.install_view_and_run(
                     thread_token,
                     &view_mounts,
@@ -5958,6 +5981,7 @@ impl ProcessManager {
                     container_id,
                     parent_cid,
                     false,
+                    run_session_id,
                 );
                 self.pid_to_view.insert(pid, view_mounts.clone());
 
@@ -5985,9 +6009,6 @@ impl ProcessManager {
                 }
 
                 // Register container instance.
-                let run_session_id = self.resolve_caller_session(sender_tid)
-                    .map(|s| s.container_id)
-                    .unwrap_or(0);
                 let inst_name =
                     self.next_instance_name(run_session_id, &envelope.image);
                 let wire_policy =
