@@ -1,3 +1,11 @@
+//! `top` — live process monitor reading from /proc.
+//!
+//! Reads /proc/<tid>/stat for each TID, builds a container hierarchy tree
+//! from cid/pcid, and renders a live updating display.
+//!
+//! Output goes through POSIX `_write(1, ...)` → VFS → PTS_WRITE_LABEL →
+//! cluuterm → compositor SHM. Input is not handled (Ctrl-C via shell signal).
+
 #![no_std]
 #![no_main]
 
@@ -5,27 +13,33 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::mem::size_of;
 
 #[allow(unused_imports)]
 use libcluu::runtime as _;
 
-use libcluu::boot::{
-    process_info, PARAM_FB_HEIGHT, PARAM_FB_WIDTH, TOKEN_CLOCK, TOKEN_SELF, TOKEN_STDIN,
-    TOKEN_STDOUT,
-};
-use libcluu::error::Error;
-use libcluu::ipc::{
-    call_with_reply_buf, parse_message, send_with_payload, PROCMGR_CONTAINER_STATS_LABEL,
-    PROCMGR_QUERY_CTTY_LABEL, TTY_READ_LABEL, TTY_WRITE_LABEL,
-};
-use libcluu::syscall::{
-    sched_get_overflow, SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
-};
-use libcluu::types::Message;
-use libcluu::{debug_print, registry, syscall};
+use libcluu::boot::{process_info, PARAM_FB_HEIGHT, PARAM_FB_WIDTH, TOKEN_CLOCK, TOKEN_SPACE};
+use libcluu::debug_print;
+use libcluu::fs::client::VfsClient;
+use libcluu::registry;
+
+const GRANT_SIZE: usize = 4096;
+
+extern "C" {
+    fn _write(fd: i32, buf: *const u8, n: usize) -> isize;
+    fn usleep(usec: u32) -> i32;
+}
+
+fn write_stdout(bytes: &[u8]) {
+    const MAX_CHUNK: usize = 900;
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let end = (pos + MAX_CHUNK).min(bytes.len());
+        let _ = unsafe { _write(1, bytes[pos..end].as_ptr(), end - pos) };
+        pos = end;
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -39,195 +53,136 @@ fn run() -> libcluu::Result<()> {
     debug_print("top: start")?;
 
     registry::init("top")?;
-    syscall::yield_cpu()?;
+    libcluu::syscall::yield_cpu()?;
 
-    let procmgr_endpoint = registry::subscribe_output("procmgr", "spawn")?;
     let info = process_info();
-    let stdout = info.tokens[TOKEN_STDOUT];
-    let stdin = info.tokens[TOKEN_STDIN];
     let clock_token = info.tokens[TOKEN_CLOCK];
-    let self_token = info.tokens[TOKEN_SELF];
+    let space_token = info.tokens[TOKEN_SPACE];
 
-    // Terminal width from framebuffer params (cols = fb_width / 8px-per-glyph).
-    // Falls back to 80 if procmgr has not yet populated the params.
     let fb_width = info.params[PARAM_FB_WIDTH] as u32;
-    let fb_height = info.params[PARAM_FB_HEIGHT] as u32;
+    let _fb_height = info.params[PARAM_FB_HEIGHT] as u32;
     let cols = if fb_width > 0 { (fb_width / 8) as usize } else { 80 };
-    let _rows = if fb_height > 0 { (fb_height / 16) as usize } else { 25 };
 
-    // TSC frequency for CPU% normalisation (scheduler runs at 250 Hz).
     const SCHED_HZ: u64 = 250;
-    let tsc_hz = syscall::clock_frequency(clock_token).unwrap_or(1_000_000_000);
+    let tsc_hz = libcluu::syscall::clock_frequency(clock_token).unwrap_or(1_000_000_000);
 
-    // Query our controlling terminal (VT) index once at startup.
-    let my_vt: u8 = {
-        let qmsg = Message::new(PROCMGR_QUERY_CTTY_LABEL, [0; 6], 0);
-        let mut rbuf = [0u8; 64];
-        match call_with_reply_buf(procmgr_endpoint, &qmsg, &[], &mut rbuf) {
-            Ok((reply, _)) => reply.words[0] as u8,
-            Err(_) => 0,
+    let vfs_endpoint = match registry::subscribe_output("vfs", "main") {
+        Ok(e) => e,
+        Err(_) => {
+            let _ = debug_print("top: vfs subscribe failed");
+            return Err(libcluu::Error::NotFound);
         }
+    };
+    let vfs = match VfsClient::new_from_registry(vfs_endpoint) {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = debug_print("top: vfs client failed");
+            return Err(libcluu::Error::NotFound);
+        }
+    };
+
+    let grant_base = match libcluu::vspace::VSPACE.lock().alloc(GRANT_SIZE) {
+        Ok(addr) => addr,
+        Err(_) => return Err(libcluu::Error::OutOfMemory),
     };
 
     let mut prev_ticks: BTreeMap<u64, u64> = BTreeMap::new();
     let mut prev_frame_tsc: u64 = 0;
     let mut first_frame = true;
 
-    // Clear screen
-    send_with_payload(stdout, TTY_WRITE_LABEL, b"\x1b[2J\x1b[H")?;
+    write_stdout(b"\x1b[2J\x1b[H");
 
     loop {
-        // 1. Query procmgr stats
-        let msg = Message::new(PROCMGR_CONTAINER_STATS_LABEL, [0; 6], 0);
-        let mut reply_buf = [0u8; 4096];
-        let (reply_msg, payload_len) = match call_with_reply_buf(
-            procmgr_endpoint,
-            &msg,
-            &[],
-            &mut reply_buf,
-        ) {
+        let now_tsc = libcluu::syscall::clock_now(clock_token).unwrap_or(0);
+
+        let records = match read_all_proc_stats(&vfs, space_token, grant_base) {
             Ok(r) => r,
             Err(_) => break,
         };
 
-        let record_count = reply_msg.words[1];
-        let total_containers = reply_msg.words[2];
-        let total_sessions = reply_msg.words[3];
-
-        // 2. Parse records
-        let hdr_len = size_of::<Message>();
-        let payload = &reply_buf[hdr_len..hdr_len + payload_len];
-        let mut records: Vec<TopRecord> = Vec::new();
-        for i in 0..record_count {
-            let off = i * 64;
-            if off + 64 <= payload.len() {
-                records.push(TopRecord::parse(&payload[off..off + 64]));
-            }
-        }
-
-        // 3. Build tree: parent → children, DFS traversal
         let mut children_map: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
         let mut cid_set: BTreeMap<u64, usize> = BTreeMap::new();
         for (idx, rec) in records.iter().enumerate() {
-            cid_set.insert(rec.cid, idx);
-            children_map
-                .entry(rec.parent_cid)
-                .or_insert_with(Vec::new)
-                .push(idx);
+            if rec.cid != 0 {
+                cid_set.insert(rec.cid, idx);
+            }
+            if rec.pcid != 0 {
+                children_map
+                    .entry(rec.pcid)
+                    .or_insert_with(Vec::new)
+                    .push(idx);
+            }
         }
 
-        // Find roots: parent_cid == 0 or parent not in cid_set
         let mut roots: Vec<usize> = Vec::new();
         for (idx, rec) in records.iter().enumerate() {
-            if rec.parent_cid == 0 || !cid_set.contains_key(&rec.parent_cid) {
+            if rec.pcid == 0 || !cid_set.contains_key(&rec.pcid) {
                 roots.push(idx);
             }
         }
-        roots.sort_by_key(|&i| records[i].cid);
+        roots.sort_unstable_by_key(|&i| records[i].cid);
 
-        // DFS to build ordered list with tree prefixes
         let mut ordered: Vec<DfsEntry> = Vec::new();
+        let mut visited: BTreeMap<usize, ()> = BTreeMap::new();
         for (i, &root_idx) in roots.iter().enumerate() {
             let is_last = i == roots.len() - 1;
-            dfs(
-                root_idx,
-                "",
-                is_last,
-                true,
-                &records,
-                &children_map,
-                &mut ordered,
-            );
+            dfs(root_idx, "", is_last, true, &records, &children_map, &mut ordered, &mut visited);
         }
 
-        // Sample TSC at start of render for CPU% denominator.
-        let now_tsc = syscall::clock_now(clock_token).unwrap_or(0);
-
-        // 4. Render frame
         let mut frame = String::new();
         frame.push_str("\x1b[H");
 
-        // Sample H9/H10 scheduler overflow counters (zero on healthy systems).
-        let h9 = sched_get_overflow(self_token, SCHED_OVERFLOW_DEFERRED_FAULT).unwrap_or(0);
-        let h10 = sched_get_overflow(self_token, SCHED_OVERFLOW_PENDING_WAKE).unwrap_or(0);
-
-        // Header line (blue bg, bright white)
         frame.push_str(&format!(
-            "\x1b[97;44m CLUU top   Containers: {}  Sessions: {}  H9:{}  H10:{}  [VT:{}]",
-            total_containers, total_sessions, h9, h10, my_vt
+            "\x1b[97;44m CLUU top   Processes: {}",
+            records.len()
         ));
-        let hdr_content_len = 43 + 14
-            + digit_count(total_containers)
-            + digit_count(total_sessions)
-            + digit_count(h9 as usize)
-            + digit_count(h10 as usize)
-            + digit_count(my_vt as usize);
+        let hdr_content_len = 30 + digit_count(records.len());
         for _ in hdr_content_len..cols {
             frame.push(' ');
         }
         frame.push_str("\x1b[K\x1b[0m\n");
 
-        // Column headers — CID, PCID, NAME, PID, PROFILE, HEAP, MEM, CPU%, ST
         frame.push_str(
-            "\x1b[97m CID PCID NAME                  PID   PROFILE  HEAP    MEM   CPU%  ST  \x1b[K\x1b[0m\n",
+            "\x1b[97m CID PCID NAME                  PID   HEAP    MEM   CPU%  ST  \x1b[K\x1b[0m\n",
         );
-        // Separator: full terminal width using ASCII dash to avoid UTF-8 splitting
         frame.push_str("\x1b[0m");
         for _ in 0..cols {
             frame.push('-');
         }
         frame.push_str("\x1b[K\n");
 
-        // Data rows
         for entry in &ordered {
             let rec = &records[entry.idx];
-            let name_str = rec.name_str();
 
-            let color = if rec.state == 3 {
+            let color = if rec.state == "R" {
                 "\x1b[36m"
-            } else if name_str.starts_with("su:") {
+            } else if rec.name.starts_with("su:") {
                 "\x1b[32m"
-            } else if name_str.starts_with("sudo:") {
+            } else if rec.name.starts_with("sudo:") {
                 "\x1b[33m"
-            } else if rec.state == 2 {
+            } else if rec.state == "Z" {
                 "\x1b[91m"
             } else {
                 "\x1b[0m"
             };
 
             let cid_str = format!("{:>4}", rec.cid);
-
-            let pcid_str = if rec.parent_cid == 0 {
+            let pcid_str = if rec.pcid == 0 {
                 String::from("   -")
             } else {
-                format!("{:>4}", rec.parent_cid)
+                format!("{:>4}", rec.pcid)
             };
 
-            let full_name = format!("{}{}", entry.prefix, name_str);
+            let full_name = format!("{}{}", entry.prefix, rec.name);
             let display_name = if full_name.len() > 22 {
                 &full_name[..22]
             } else {
                 &full_name
             };
 
-            let pid_str = if rec.pid == 0 {
-                String::from("  -  ")
-            } else {
-                format!("{:>5}", rec.pid)
-            };
+            let pid_str = format!("{:>5}", rec.pid);
 
-            let profile_str = match rec.profile_bits {
-                0x8F => String::from("admin    "),
-                0xFF => String::from("super    "),
-                0x0F => String::from("user     "),
-                0x3F => String::from("service  "),
-                0x1F => String::from("svc-dev  "),
-                0x01 => String::from("sandbox  "),
-                0 => String::from("  -      "),
-                p => format!("0x{:04x}   ", p),
-            };
-
-            let heap_str = if rec.pid == 0 {
+            let heap_str = if rec.heap_pages == 0 {
                 String::from(" ---  ")
             } else {
                 let kb = rec.heap_pages as usize * 4;
@@ -238,7 +193,7 @@ fn run() -> libcluu::Result<()> {
                 }
             };
 
-            let mem_str = if rec.pid == 0 {
+            let mem_str = if rec.heap_pages == 0 && rec.other_pages == 0 {
                 String::from(" ---  ")
             } else {
                 let kb = (rec.heap_pages as usize + rec.other_pages as usize) * 4;
@@ -254,38 +209,31 @@ fn run() -> libcluu::Result<()> {
             } else {
                 let prev = prev_ticks.get(&rec.cid).copied().unwrap_or(0);
                 let delta = rec.cpu_ticks.saturating_sub(prev);
-                // Convert elapsed TSC ticks to scheduler ticks (250 Hz APIC timer).
                 let elapsed_tsc = now_tsc.saturating_sub(prev_frame_tsc);
                 let elapsed_sched = (elapsed_tsc * SCHED_HZ / tsc_hz.max(1)).max(1);
                 let pct = (delta * 100 / elapsed_sched).min(100);
                 format!("{:>5}%", pct)
             };
 
-            let st_str = match rec.state {
-                0 => "RUN ",
-                1 => "WAIT",
-                2 => "DEAD",
-                3 => "SESS",
+            let st_str = match rec.state.as_str() {
+                "R" => "RUN ",
+                "Z" => "DEAD",
                 _ => " ?  ",
             };
 
             frame.push_str(&format!(
-                "{}{} {} {:<22} {} {} {} {} {} {}\x1b[K\x1b[0m\n",
-                color, cid_str, pcid_str, display_name, pid_str, profile_str, heap_str, mem_str, cpu_str, st_str
+                "{}{} {} {:<22} {} {} {} {} {}\x1b[K\x1b[0m\n",
+                color, cid_str, pcid_str, display_name, pid_str, heap_str, mem_str, cpu_str, st_str
             ));
         }
 
-        // Footer
         frame.push_str(
-            "\x1b[90m q=quit  r=refresh                                      1s refresh \x1b[K\x1b[0m\n",
+            "\x1b[90m Ctrl-C to quit                                   1s refresh \x1b[K\x1b[0m\n",
         );
         frame.push_str("\x1b[J");
 
-        // Write in chunks, splitting on char boundaries to avoid
-        // breaking multi-byte UTF-8 sequences across IPC messages.
-        send_utf8_chunks(stdout, &frame)?;
+        write_stdout(frame.as_bytes());
 
-        // Update prev_ticks and frame timestamp for next iteration
         prev_ticks.clear();
         for rec in &records {
             prev_ticks.insert(rec.cid, rec.cpu_ticks);
@@ -293,139 +241,124 @@ fn run() -> libcluu::Result<()> {
         prev_frame_tsc = now_tsc;
         first_frame = false;
 
-        // 5. Wait for input with 1000ms timeout
-        let tokens = [stdin];
-        let mut input_buf = [0u8; 128];
-        match syscall::ipc_recv_any(&tokens, &mut input_buf, 1000) {
-            Ok((_index, len)) => {
-                if let Some((imsg, ipayload)) = parse_message(&input_buf[..len]) {
-                    if imsg.tag.label == TTY_READ_LABEL {
-                        if ipayload.contains(&0x03) {
-                            break;
-                        }
-                        if ipayload.contains(&b'q') || ipayload.contains(&b'Q') {
-                            break;
-                        }
-                    }
-                }
-            }
-            Err(Error::Timeout) => { /* continue refresh loop */ }
-            Err(_) => break,
-        }
+        unsafe { let _ = usleep(1_000_000); }
     }
 
-    // Restore screen
-    send_with_payload(stdout, TTY_WRITE_LABEL, b"\x1b[2J\x1b[H")?;
+    let _ = libcluu::vspace::VSPACE.lock().free(grant_base, GRANT_SIZE);
+    write_stdout(b"\x1b[2J\x1b[H");
     Ok(())
 }
 
-/// Send a UTF-8 string in IPC-safe chunks (max 456 bytes payload),
-/// never splitting a multi-byte character across chunks.
-fn send_utf8_chunks(stdout: usize, s: &str) -> libcluu::Result<()> {
-    const MAX_CHUNK: usize = 456;
-    let bytes = s.as_bytes();
-    let mut pos = 0;
-    while pos < bytes.len() {
-        let remaining = bytes.len() - pos;
-        if remaining <= MAX_CHUNK {
-            send_with_payload(stdout, TTY_WRITE_LABEL, &bytes[pos..])?;
-            break;
-        }
-        // Back up from MAX_CHUNK boundary to a char boundary
-        let mut end = pos + MAX_CHUNK;
-        while end > pos && !is_utf8_char_start(bytes[end]) {
-            end -= 1;
-        }
-        if end == pos {
-            // Pathological: single char > 456 bytes; shouldn't happen, send raw
-            end = pos + MAX_CHUNK;
-        }
-        send_with_payload(stdout, TTY_WRITE_LABEL, &bytes[pos..end])?;
-        pos = end;
-    }
-    Ok(())
-}
-
-/// Check if a byte is the start of a UTF-8 character (not a continuation byte).
-fn is_utf8_char_start(b: u8) -> bool {
-    // Continuation bytes are 10xxxxxx (0x80..0xBF)
-    (b & 0xC0) != 0x80
-}
-
-// ---------------------------------------------------------------------------
-// Record parsing & tree helpers
-// ---------------------------------------------------------------------------
-
-struct TopRecord {
+struct ProcRecord {
     cid: u64,
-    parent_cid: u64,
+    pcid: u64,
     pid: u64,
-    profile_bits: u16,
-    state: u8,
-    vt_index: u8,
-    heap_pages: u16,
-    other_pages: u16, // code + stack
+    name: String,
+    state: String,
     cpu_ticks: u64,
-    name: [u8; 24],
+    heap_pages: u32,
+    other_pages: u32,
 }
 
-impl TopRecord {
-    fn parse(data: &[u8]) -> Self {
-        let mut r = Self {
-            cid: 0,
-            parent_cid: 0,
-            pid: 0,
-            profile_bits: 0,
-            state: 0,
-            vt_index: 0xFF,
-            heap_pages: 0,
-            other_pages: 0,
-            cpu_ticks: 0,
-            name: [0u8; 24],
-        };
-        if data.len() >= 64 {
-            r.cid = u64::from_le_bytes([
-                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-            ]);
-            r.parent_cid = u64::from_le_bytes([
-                data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-            ]);
-            r.pid = u64::from_le_bytes([
-                data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
-            ]);
-            r.profile_bits = u16::from_le_bytes([data[24], data[25]]);
-            r.state = data[26];
-            r.vt_index = data[27];
-            r.heap_pages = u16::from_le_bytes([data[28], data[29]]);
-            r.other_pages = u16::from_le_bytes([data[30], data[31]]);
-            r.cpu_ticks = u64::from_le_bytes([
-                data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
-            ]);
-            r.name[..24].copy_from_slice(&data[40..64]);
+fn read_all_proc_stats(
+    vfs: &VfsClient,
+    space_token: usize,
+    grant_base: usize,
+) -> libcluu::Result<Vec<ProcRecord>> {
+    let entries = vfs.readdir("/proc")?;
+
+    let mut records: Vec<ProcRecord> = Vec::new();
+
+    for entry in &entries {
+        if !entry.is_dir
+            || entry.name.is_empty()
+            || !entry.name.bytes().all(|b| b.is_ascii_digit())
+        {
+            continue;
         }
-        r
+
+        let stat_path = format!("/proc/{}/stat", entry.name);
+        let file = match vfs.open(&stat_path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if file.size == 0 {
+            let _ = vfs.close(file);
+            continue;
+        }
+
+        let read_size = file.size.min(GRANT_SIZE);
+        let grant = match vfs.read_grant(file, 0, read_size, space_token, grant_base) {
+            Ok(g) => g,
+            Err(_) => {
+                let _ = vfs.close(file);
+                continue;
+            }
+        };
+
+        if grant.len > 0 && grant.offset + grant.len <= GRANT_SIZE {
+            let addr = grant_base + grant.offset;
+            let data = unsafe { core::slice::from_raw_parts(addr as *const u8, grant.len) };
+            let text = core::str::from_utf8(data).unwrap_or("").trim();
+            if let Some(rec) = parse_stat_line(text) {
+                records.push(rec);
+            }
+        }
+
+        let _ = vfs.close(file);
     }
 
-    fn name_str(&self) -> &str {
-        let end = self.name.iter().position(|&b| b == 0).unwrap_or(24);
-        core::str::from_utf8(&self.name[..end]).unwrap_or("?")
+    Ok(records)
+}
+
+fn parse_stat_line(text: &str) -> Option<ProcRecord> {
+    let paren_open = text.find('(')?;
+    let paren_close = text.rfind(')')?;
+    let pid = text[..paren_open].trim().parse::<u64>().ok()?;
+    let name = text[paren_open + 1..paren_close].to_string();
+    let rest = text[paren_close + 1..].trim();
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if parts.len() < 4 {
+        return None;
     }
+    let state = parts[0].to_string();
+    let cpu_ticks = parts[1].parse::<u64>().unwrap_or(0);
+    let heap_pages = parts[2].parse::<u32>().unwrap_or(0);
+    let other_pages = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    let cid: u64 = parts.get(6).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let pcid: u64 = parts.get(7).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+
+    Some(ProcRecord {
+        cid,
+        pcid,
+        pid,
+        name,
+        state,
+        cpu_ticks,
+        heap_pages,
+        other_pages,
+    })
 }
 
 struct DfsEntry {
     idx: usize,
     prefix: String,
 }
-
 fn dfs(
     idx: usize,
     prefix: &str,
     is_last: bool,
     is_root: bool,
-    records: &[TopRecord],
+    records: &[ProcRecord],
     children_map: &BTreeMap<u64, Vec<usize>>,
     ordered: &mut Vec<DfsEntry>,
+    visited: &mut BTreeMap<usize, ()>,
 ) {
+    if visited.contains_key(&idx) {
+        return;
+    }
+    visited.insert(idx, ());
+
     let connector = if is_root {
         String::new()
     } else if is_last {
@@ -441,7 +374,7 @@ fn dfs(
     let cid = records[idx].cid;
     if let Some(kids) = children_map.get(&cid) {
         let mut sorted = kids.clone();
-        sorted.sort_by_key(|&i| records[i].cid);
+        sorted.sort_unstable_by_key(|&i| records[i].cid);
         for (i, &kid) in sorted.iter().enumerate() {
             let child_prefix = if is_root {
                 String::new()
@@ -451,7 +384,7 @@ fn dfs(
                 format!("{}\u{2502} ", prefix)
             };
             let kid_is_last = i == sorted.len() - 1;
-            dfs(kid, &child_prefix, kid_is_last, false, records, children_map, ordered);
+            dfs(kid, &child_prefix, kid_is_last, false, records, children_map, ordered, visited);
         }
     }
 }
