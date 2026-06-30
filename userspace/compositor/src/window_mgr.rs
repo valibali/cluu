@@ -133,6 +133,18 @@ impl Compositor {
             let pos = self.windows.iter().position(|w| w.modal).unwrap_or(self.windows.len());
             self.windows.insert(pos, new_win);
         }
+        // Mark the previously-focused window's cells dirty so its chrome
+        // re-renders as unfocused (single-line borders) after focus moves.
+        if let Some(prev_id) = self.focused {
+            if let Some(prev) = self.windows.iter().find(|w| w.id == prev_id) {
+                let (px, py, pw, ph) = (prev.x, prev.y, prev.w, prev.h);
+                for cy in py..py.saturating_add(ph) {
+                    for cx in px..px.saturating_add(pw) {
+                        self.cell_dirty.push((cx, cy));
+                    }
+                }
+            }
+        }
         self.focused = Some(id);
         // Mark all the window's cells dirty so the (eventual) compose pass
         // emits chrome + interior.
@@ -144,9 +156,9 @@ impl Compositor {
 
         // Notify app of initial interior dimensions via WIN_CONFIGURE.
         // Interior = total cells minus 2 for chrome (1-cell border each side).
-        if input_endpoint != 0 && granted_w > 2 && granted_h > 2 {
-            let interior_w = (granted_w - 2) as u32;
-            let interior_h = (granted_h - 2) as u32;
+        if input_endpoint != 0 && granted_w > 4 && granted_h > 3 {
+            let interior_w = (granted_w - 4) as u32;
+            let interior_h = (granted_h - 3) as u32;
             let msg = libcluu::types::Message::new(
                 libcluu::ipc::COMP_WIN_CONFIGURE_LABEL,
                 [
@@ -171,18 +183,17 @@ impl Compositor {
     /// Chrome is 1 cell on each side, so interior starts at local (1,1).
     pub fn handle_win_damage(&mut self, id: WindowId, x: u32, y: u32, w: u32, h: u32) {
         let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else { return; };
-        let inner_w = win.w.saturating_sub(2); // 1 chrome col each side
-        let inner_h = win.h.saturating_sub(2); // 1 chrome row each side
+        let inner_w = win.w.saturating_sub(4);
+        let inner_h = win.h.saturating_sub(3);
         let cx0 = (x as u16).min(inner_w);
         let cy0 = (y as u16).min(inner_h);
         let cx1 = ((x as u16).saturating_add(w as u16)).min(inner_w);
         let cy1 = ((y as u16).saturating_add(h as u16)).min(inner_h);
-        // Window has new content — arm FRAME_READY for this window.
         win.pending_frame_ready = true;
         let (win_x, win_y) = (win.x, win.y);
         for iy in cy0..cy1 {
             for ix in cx0..cx1 {
-                let gx = win_x + 1 + ix;
+                let gx = win_x + 2 + ix;
                 let gy = win_y + 1 + iy;
                 self.cell_dirty.push((gx, gy));
             }

@@ -13,6 +13,10 @@ const CHROME_TOP: u16 = 1;
 const CHROME_BOTTOM: u16 = 1;
 const CHROME_LEFT: u16 = 1;
 const CHROME_RIGHT: u16 = 1;
+const PAD_TOP: u16 = 0;
+const PAD_BOTTOM: u16 = 1;
+const PAD_LEFT: u16 = 1;
+const PAD_RIGHT: u16 = 1;
 
 /// Default desktop background cell: codepoint 0x20 (space), fg 0, bg 0.
 pub const BG_CELL: u64 = pack_cell(b' ' as u32, 0, 0, 0);
@@ -71,12 +75,21 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
             let focused = comp.focused == Some(win.id);
             return chrome_glyph(win, local_x, local_y, focused);
         }
-        // For fullscreen windows the SHM interior coordinate equals the local
-        // coordinate directly (no chrome offset).
+        let in_padding = if win.fullscreen || win.no_chrome || fullscreen_mode {
+            false
+        } else {
+            local_x < CHROME_LEFT + PAD_LEFT
+                || local_x >= win.w.saturating_sub(CHROME_RIGHT + PAD_RIGHT)
+                || local_y < CHROME_TOP + PAD_TOP
+                || local_y >= win.h.saturating_sub(CHROME_BOTTOM + PAD_BOTTOM)
+        };
+        if in_padding {
+            return BG_CELL;
+        }
         let (ix, iy) = if win.fullscreen || win.no_chrome {
             (local_x, local_y)
         } else {
-            (local_x - CHROME_LEFT, local_y - CHROME_TOP)
+            (local_x - CHROME_LEFT - PAD_LEFT, local_y - CHROME_TOP - PAD_TOP)
         };
         return read_shm_cell(win, ix, iy);
     }
