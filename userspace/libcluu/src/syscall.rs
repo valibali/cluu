@@ -120,6 +120,10 @@ pub enum InvokeOp {
     NotificationSignal = 81,
     NotificationWait = 82,
     NotificationPoll = 83,
+
+    // Thread enumeration
+    ThreadEnumerate = 84,
+    ThreadSetSession = 85,
 }
 
 /// Page mapping flags for space_map.
@@ -1118,6 +1122,33 @@ pub fn thread_get_id(thread_token: usize) -> Result<usize> {
 pub fn thread_get_stats(thread_token: usize) -> Result<u64> {
     let ticks = unsafe { invoke(thread_token, InvokeOp::ThreadGetStats, 0, 0, 0, 0) }?;
     Ok(ticks as u64)
+}
+
+/// Enumerate all live thread IDs from the kernel.
+///
+/// Fills `buf` with live (non-Dead) TIDs and returns the count written.
+/// `token` may be any token bearing READ (typically `TOKEN_SELF`).
+/// This bypasses procmgr — the kernel is the source of truth for threads.
+pub fn thread_enumerate(token: usize, buf: &mut [u64]) -> Result<usize> {
+    let count = unsafe {
+        invoke(
+            token,
+            InvokeOp::ThreadEnumerate,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+            0,
+            0,
+        )?
+    };
+    Ok(count)
+}
+
+/// Set the session_id on a thread for visibility scoping.
+/// Must be called after `thread_create` and before `thread_resume`.
+/// session_id == 0 means root/system scope (sees all threads in enumerate).
+pub fn thread_set_session(thread_token: usize, session_id: u64) -> Result<()> {
+    unsafe { invoke(thread_token, InvokeOp::ThreadSetSession, session_id as usize, 0, 0, 0) }?;
+    Ok(())
 }
 
 /// Selector values for `sched_get_overflow`.
