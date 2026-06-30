@@ -15,8 +15,8 @@ use core::mem::size_of;
 use libcluu::boot::{process_info, TOKEN_SELF};
 use libcluu::ipc::{call_with_reply_buf, PROCMGR_PROC_QUERY_LABEL};
 use libcluu::syscall::{
-    pmm_get_stats, sched_get_overflow, PMM_STATS_TOTAL_FRAMES, PMM_STATS_USED_FRAMES,
-    SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
+    pmm_get_stats, sched_get_overflow, thread_enumerate, PMM_STATS_TOTAL_FRAMES,
+    PMM_STATS_USED_FRAMES, SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
 };
 use libcluu::types::Message;
 use libcluu::{Error, Result};
@@ -25,7 +25,6 @@ use libcluu::{Error, Result};
 const QUERY_STATUS: usize = 0;
 const QUERY_STAT: usize = 1;
 const QUERY_CMDLINE: usize = 2;
-const QUERY_LIST: usize = 3;
 const QUERY_COMM: usize = 4;
 const QUERY_EXE: usize = 5;
 
@@ -268,13 +267,7 @@ impl ProcfsBackend {
 
         let errno = reply.words[1] as isize;
         if errno != 0 {
-            return if errno == -2 {
-                Err(Error::NotFound)
-            } else if errno == -1 {
-                Err(Error::PermissionDenied)
-            } else {
-                Err(Error::InvalidOperation)
-            };
+            return Err(Error::from_errno(errno));
         }
 
         let data_start = size_of::<Message>();
@@ -308,42 +301,17 @@ impl ProcfsBackend {
         }
     }
 
-    /// Query procmgr for the PID list (visible to caller).
+    /// Enumerate live thread IDs directly from the kernel.
     ///
-    /// Wire format: `words[1]` = errno, `words[2]` = pid_count, payload =
-    /// packed `u32 LE` pid array.
-    fn query_pid_list(&self, caller_tid: usize) -> Result<Vec<u32>> {
-        let req = Message::new(
-            PROCMGR_PROC_QUERY_LABEL,
-            [QUERY_LIST, 0, caller_tid, 0, 0, 0],
-            3,
-        );
-        let mut reply_buf = [0u8; 4096];
-        let (reply, _payload_len) =
-            call_with_reply_buf(self.procmgr_endpoint, &req, &[], &mut reply_buf)?;
-
-        let errno = reply.words[1] as isize;
-        if errno != 0 {
-            return Err(Error::InvalidOperation);
-        }
-
-        let pid_count = reply.words[2];
-        let data_start = size_of::<Message>();
-        let mut pids = Vec::with_capacity(pid_count);
-        for i in 0..pid_count {
-            let offset = data_start + i * 4;
-            if offset + 4 > reply_buf.len() {
-                break;
-            }
-            let pid = u32::from_le_bytes([
-                reply_buf[offset],
-                reply_buf[offset + 1],
-                reply_buf[offset + 2],
-                reply_buf[offset + 3],
-            ]);
-            pids.push(pid);
-        }
-        Ok(pids)
+    /// This bypasses procmgr IPC — the kernel is the source of truth for
+    /// threads. The TIDs returned here are used as directory names in
+    /// /proc readdir. Per-PID detail files (stat, status, etc.) still
+    /// query procmgr, which resolves TID→PID via its tid_to_pid map.
+    fn query_tid_list(&self) -> Result<Vec<u32>> {
+        let self_token = process_info().tokens[TOKEN_SELF];
+        let mut buf = [0u64; 256];
+        let count = thread_enumerate(self_token, &mut buf)?;
+        Ok(buf[..count].iter().map(|&tid| tid as u32).collect())
     }
 }
 
@@ -379,7 +347,7 @@ impl MountBackend for ProcfsBackend {
         Err(Error::NotFound)
     }
 
-    fn readdir(&self, rel_path: &str, caller_tid: usize) -> Result<Vec<DirEntry>> {
+    fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
         use crate::mount::DirEntryStat;
         let rel = rel_path.trim_start_matches('/');
 
@@ -403,11 +371,11 @@ impl MountBackend for ProcfsBackend {
                 stat: dir_stat,
             });
 
-            // Query procmgr for PID list
-            if let Ok(pids) = self.query_pid_list(caller_tid) {
-                for pid in pids {
+            // Enumerate live TIDs directly from the kernel (no procmgr IPC).
+            if let Ok(tids) = self.query_tid_list() {
+                for tid in tids {
                     entries.push(DirEntry {
-                        name: format!("{}", pid),
+                        name: format!("{}", tid),
                         is_dir: true,
                         stat: dir_stat,
                     });
