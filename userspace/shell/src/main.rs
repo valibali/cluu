@@ -161,7 +161,9 @@ fn run() -> Result<()> {
     // pipeline.rs; the shell-level fg track is unnecessary for now.
     #[cfg(feature = "lang-parser")]
     {
-        let session_id = info.params[PARAM_TTY_INSTANCE] as usize;
+        let session_id = read_env_var("CLUU_SESSION_ID")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
         // tty_stdout addresses a real TTY-service endpoint (one that speaks
         // TTY_CTL_LABEL / TTY_REGISTER_LABEL). In the cluuterm/pts flow the
         // shell's stdout token points at a VFS-routed pts endpoint that

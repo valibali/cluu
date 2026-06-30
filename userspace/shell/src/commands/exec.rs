@@ -24,6 +24,8 @@ use libcluu::syscall;
 use libcluu::types::Message;
 use libcluu::{debug_print, Error, IpcFlags, Result};
 use core::mem::size_of;
+use procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL;
+use procmgr_common::wire::{FdInheritEntry, FdKind, SpawnReq, SpawnReply};
 
 use crate::commands::builtins::registry::{CommandContext, ExecResult, ForegroundMode};
 
@@ -174,13 +176,7 @@ pub(crate) fn spawn_and_wait(
 
     let result = match parsed {
         Ok(()) => {
-            // tty_endpoint is the TTY-service control endpoint (TTY_CTL /
-            // TTY_REGISTER). In cluuterm/pts mode `stdout` is a VFS-routed
-            // pts endpoint that doesn't speak that protocol — passing it
-            // here would hang the cleanup `set_tty_foreground` call. Use
-            // `context.tty_stdout` which is 0 in cluuterm mode and a real
-            // TTY endpoint in legacy mode.
-            wait_for_exit_or_sigint(
+            let exit_code = wait_for_exit_or_sigint(
                 procmgr_ep,
                 context.tty_stdout,
                 spawn.notify_endpoint,
@@ -188,6 +184,20 @@ pub(crate) fn spawn_and_wait(
                 stdout,
                 fg_mode,
             )?;
+            let signal_killed = exit_code > 128;
+            if want_fg_swap && context.shell_pgid != 0 {
+                let _ = libcluu::posix::jobs::tty_set_fg(
+                    context.tty_stdout,
+                    context.session_id,
+                    context.shell_pgid,
+                );
+            }
+            if want_pts_fg_swap && context.shell_pgid != 0 {
+                let _ = libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32);
+            }
+            if signal_killed {
+                crate::write_stdout(b"\x1b[2J\x1b[H");
+            }
             Ok(0)
         }
         Err(err) => {
@@ -196,18 +206,6 @@ pub(crate) fn spawn_and_wait(
             Ok(1)
         }
     };
-
-    if want_fg_swap && context.shell_pgid != 0 {
-        let _ = libcluu::posix::jobs::tty_set_fg(
-            context.tty_stdout,
-            context.session_id,
-            context.shell_pgid,
-        );
-    }
-    // Restore shell as pts foreground after child exits.
-    if want_pts_fg_swap && context.shell_pgid != 0 {
-        let _ = libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32);
-    }
 
     result
 }
@@ -230,10 +228,6 @@ pub fn spawn_process_with_argv_and_redirs(
 ) -> Result<SpawnResult> {
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
 
-    // Build the child's env: start from the shell's own (envelope-resolved at
-    // session-login) env, then overlay any vars marked `export` in this
-    // shell. Bash semantics: shell-local `set X=v` does NOT propagate; only
-    // `export X` (or a var that was already inherited as exported) does.
     let mut env_pairs: Vec<(String, String)> = libcluu::posix::snapshot_env();
     for (k, v) in context.exported_pairs() {
         if let Some(idx) = env_pairs.iter().position(|(ek, _)| ek == &k) {
@@ -242,14 +236,7 @@ pub fn spawn_process_with_argv_and_redirs(
             env_pairs.push((k, v));
         }
     }
-    let env_refs: Vec<(&str, &str)> = env_pairs
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
 
-    // Build FdInherit so the child inherits the shell's stdin/stdout/stderr.
-    // Without this, procmgr falls back to freshly-created dead endpoints
-    // and external commands produce no output.
     let fd_inherit: Vec<FdInherit> = {
         let table = FD_TABLE.lock();
         [0u32, 1u32, 2u32]
@@ -271,14 +258,82 @@ pub fn spawn_process_with_argv_and_redirs(
             .collect()
     };
     let argv: Vec<String> = args.iter().map(|s| String::from(*s)).collect();
-    let env: Vec<(String, String)> = env_refs
+    let env: Vec<(String, String)> = env_pairs
         .iter()
-        .map(|(k, v)| (String::from(*k), String::from(*v)))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    // procmgr prepends binary basename as argv[0] before envelope.args, so
-    // envelope.args contains only argv[1..]. image is the resolved image name.
-    let image = String::from(name);
     let notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
+
+    if context.session_id != 0 {
+        let ep_name = alloc::format!("session-procmgr:spawn:{}", context.session_id);
+        if let Some(session_ep) = libcluu::registry::lookup_service(&ep_name) {
+            let _ = debug_print(&format!(
+                "shell: session spawn name={} sid={} ep={}",
+                name, context.session_id, session_ep
+            ));
+
+            let fd_entries: Vec<FdInheritEntry> = fd_inherit
+                .iter()
+                .map(|fi| {
+                    let (cap, rfd) = match &fi.source {
+                        FdSource::VfsFd { vfs_client_id, vfs_remote_fd } => {
+                            (*vfs_client_id, *vfs_remote_fd)
+                        }
+                        _ => (0, 0),
+                    };
+                    FdInheritEntry {
+                        fd: fi.child_fd as i32,
+                        kind: FdKind::Pts,
+                        cap_token: cap,
+                        parent_rfd: rfd,
+                    }
+                })
+                .collect();
+
+            let image_path = if name.contains('/') {
+                String::from(name)
+            } else {
+                alloc::format!("/bin/{}", name)
+            };
+            let cwd = libcluu::posix::current_dir_string();
+            let mut full_argv = alloc::vec![alloc::string::String::from(image_path.rsplit('/').next().unwrap_or(&image_path))];
+            full_argv.extend(argv.iter().cloned());
+            let spawn_req = SpawnReq {
+                image_path,
+                argv: full_argv,
+                envp: env.clone(),
+                cwd,
+                fd_inherit: fd_entries,
+                notify: Some(notify_endpoint as u64),
+            };
+            let payload = postcard::to_allocvec(&spawn_req)
+                .map_err(|_| Error::InvalidState)?;
+            let msg = Message::new(
+                SESSION_PROCMGR_SPAWN_LABEL,
+                [payload.len(), 0, 0, 0, 0, 0],
+                0,
+            );
+            let mut reply_buf = [0u8; 512];
+            let (reply_msg, reply_len) = libcluu::ipc::call_with_reply_buf(
+                session_ep, &msg, &payload, &mut reply_buf,
+            )?;
+            let hdr = size_of::<Message>();
+            let reply_bytes = &reply_buf[hdr..hdr + reply_len];
+            let reply: SpawnReply = postcard::from_bytes(reply_bytes)
+                .map_err(|_| Error::InvalidState)?;
+            let _ = debug_print(&format!(
+                "shell: session spawn done pid={}", reply.pid
+            ));
+            return Ok(SpawnResult {
+                procmgr_endpoint: session_ep,
+                notify_endpoint,
+                status_word: 0,
+                pid: reply.pid as usize,
+            });
+        }
+    }
+
+    let image = String::from(name);
     let envelope = SpawnEnvelope {
         image,
         args: argv,
@@ -322,7 +377,7 @@ pub(crate) fn wait_for_exit_or_sigint(
     child_pid: usize,
     stdout: usize,
     mode: ForegroundMode,
-) -> Result<()> {
+) -> Result<i32> {
     let mut ctrl_c_notify_endpoint = 0usize;
     let mut ctrl_c_flags = TTY_FG_FLAG_FORWARD_CTRL_C;
     if mode == ForegroundMode::SignalOnCtrlC {
@@ -356,7 +411,6 @@ pub(crate) fn wait_for_exit_or_sigint(
             continue;
         };
         if index == 0 {
-            // Exit notification from procmgr.
             if msg.tag.words >= 2 {
                 let exit_code = msg.words[1] as i32;
                 if exit_code > 128 {
@@ -375,7 +429,7 @@ pub(crate) fn wait_for_exit_or_sigint(
                     let line = format!("Exited with status {}\n", exit_code);
                     crate::write_stdout(line.as_bytes());
                 }
-                break Ok(());
+                break Ok(exit_code);
             }
             continue;
         }
