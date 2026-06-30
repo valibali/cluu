@@ -38,11 +38,12 @@ extern "C" {
 const COLS: usize = 80;
 const ROWS: usize = 24;
 
-// Request cell dimensions: terminal interior (COLS×ROWS) + 1-cell chrome on
-// each side. The compositor's WIN_REGISTER protocol expects cell counts, not
-// pixel dimensions. Chrome is 1 cell wide/tall on each edge.
-const WIN_W: u32 = (COLS + 2) as u32;
-const WIN_H: u32 = (ROWS + 2) as u32;
+const CHROME: usize = 1;
+const PAD_TOP: usize = 0;
+const PAD_BOT: usize = 1;
+const PAD_LR: usize = 1;
+const WIN_W: u32 = (COLS + 2 * (CHROME + PAD_LR)) as u32;
+const WIN_H: u32 = (ROWS + (CHROME + PAD_TOP) + (CHROME + PAD_BOT)) as u32;
 
 /// Virtual address at which the compositor SHM is mapped.
 /// Must not overlap with other well-known regions (compdemo uses 0xD000_0000).
@@ -102,8 +103,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     // Phase 4: run main loop (stub recv loop — Task 15 fills the real body).
     let shm_ptr = SHM_VA as *mut WindowShm;
-    let interior_cols = (gw as usize).saturating_sub(2).max(1);
-    let interior_rows = (gh as usize).saturating_sub(2).max(1);
+    let interior_cols = (gw as usize).saturating_sub(2 * (CHROME + PAD_LR)).max(1);
+    let interior_rows = (gh as usize).saturating_sub((CHROME + PAD_TOP) + (CHROME + PAD_BOT)).max(1);
     let mut term = tty_backend::Cluuterm::new(interior_cols, interior_rows, shm_ptr, pts_id, window_id, my_ep, comp_ep, vfs_ep);
     term.run();
     0

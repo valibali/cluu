@@ -764,11 +764,12 @@ impl Cluuterm {
         }
         // Kick compositor so it repaints promptly rather than waiting for
         // its own next tick.  The damage rect covers only the cursor cell.
-        // self.cursor_x/y are terminal-grid coords; the SHM cell space adds
-        // a (+1, +1) chrome offset, so the compositor-visible cell sits at
-        // (cursor_x + 1, cursor_y + 1).
-        let cx = self.cursor_x + 1;
-        let cy = self.cursor_y + 1;
+        // Damage coords are interior coords (0-indexed within the window's
+        // interior) — handle_win_damage adds the +1 chrome offset itself
+        // when converting to compositor grid coords.  render.rs writes the
+        // cursor cell at the same interior coord in SHM, so these match.
+        let cx = self.cursor_x;
+        let cy = self.cursor_y;
         let dmg = Message::new(
             COMP_WIN_DAMAGE_LABEL,
             [
