@@ -21,7 +21,7 @@ use crate::Result;
 pub fn pg_create(procmgr_ep: usize) -> Result<usize> {
     let mut msg = Message::new(PROCMGR_PG_CREATE_LABEL, [0; 6], 0);
     ipc::call(procmgr_ep, &mut msg, IpcFlags::empty())?;
-    Ok(msg.words[1])
+    Ok(msg.words[0])
 }
 
 /// Attach `pid` to an existing `pgid`. Fire-and-forget.
