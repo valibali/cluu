@@ -37,6 +37,9 @@ impl BuiltinCommand for CdBuiltin {
 
         match libcluu::posix::set_current_dir_str(target.as_str()) {
             Ok(()) => {
+                let cwd = libcluu::posix::current_dir_string();
+                context.set("PWD", cwd);
+                context.export_var("PWD");
                 context.set_last_status(0);
             }
             Err(errno) => {
