@@ -759,6 +759,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                 ],
                                 cwd: alloc::format!("/home/{}", user_name),
                                 fd_inherit: alloc::vec::Vec::new(),
+                                notify: None,
                             };
                             let spawn_payload = match postcard::to_allocvec(&spawn_req) {
                                 Ok(b) => b,
