@@ -30,6 +30,7 @@ pub struct SpawnReq {
     pub envp: Vec<(String, String)>,
     pub cwd: String,
     pub fd_inherit: Vec<FdInheritEntry>,
+    pub notify: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,6 +102,7 @@ mod tests {
             envp: vec![("PATH".into(), "/bin".into())],
             cwd: "/".into(),
             fd_inherit: vec![FdInheritEntry { fd: 0, kind: FdKind::Pts, cap_token: 42, parent_rfd: 4 }],
+            notify: None,
         };
         let bytes = to_allocvec(&req).unwrap();
         let back: SpawnReq = from_bytes(&bytes).unwrap();
