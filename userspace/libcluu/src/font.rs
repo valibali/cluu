@@ -356,14 +356,42 @@ pub const ARC_CORNERS: [[u8; GLYPH_H]; 4] = [
 /// Return the 16-row glyph bitmap for a CP437 byte value.
 ///
 /// CP437 0xF0..=0xF3 are overridden with single-cell arc corner bitmaps
-/// (╭╮╰╯). All other values come directly from FONT8X16.
+/// (╭╮╰╯). Box-drawing verticals (0xB3, 0xBA, 0xDA, 0xBF, 0xC0, 0xD9,
+/// 0xC9, 0xBB, 0xC8, 0xBC) are thinned from 2px to 1px to match the 1px
+/// stroke width of their horizontal counterparts (0xC4, 0xCD). All other
+/// values come directly from FONT8X16.
 #[inline]
 pub fn glyph_for_cp437(ch: u8) -> [u8; GLYPH_H] {
     if (0xF0..=0xF3).contains(&ch) {
         return ARC_CORNERS[(ch - 0xF0) as usize];
     }
+    if let Some(g) = thinned_box_glyph(ch) {
+        return g;
+    }
     let idx = (ch as usize) * GLYPH_H;
     let mut glyph = [0u8; GLYPH_H];
     glyph.copy_from_slice(&FONT8X16[idx..idx + GLYPH_H]);
     glyph
+}
+
+fn thinned_box_glyph(ch: u8) -> Option<[u8; GLYPH_H]> {
+    const V: u8 = 0b00001000;
+    const DV: u8 = 0b00010100;
+    const H_R: u8 = 0b00001111;
+    const H_L: u8 = 0b11111000;
+    const DH_R: u8 = 0b00011111;
+    const DH_L: u8 = 0b11111100;
+    match ch {
+        0xB3 => Some([V; 16]),
+        0xBA => Some([DV; 16]),
+        0xDA => Some([0, 0, 0, 0, 0, 0, 0, H_R, V, V, V, V, V, V, V, V]),
+        0xBF => Some([0, 0, 0, 0, 0, 0, 0, H_L, V, V, V, V, V, V, V, V]),
+        0xC0 => Some([V, V, V, V, V, V, V, H_R, 0, 0, 0, 0, 0, 0, 0, 0]),
+        0xD9 => Some([V, V, V, V, V, V, V, H_L, 0, 0, 0, 0, 0, 0, 0, 0]),
+        0xC9 => Some([0, 0, 0, 0, 0, DH_R, DV, DH_R, DV, DV, DV, DV, DV, DV, DV, DV]),
+        0xBB => Some([0, 0, 0, 0, 0, DH_L, DV, DH_L, DV, DV, DV, DV, DV, DV, DV, DV]),
+        0xC8 => Some([DV, DV, DV, DV, DV, DH_R, DV, DH_R, 0, 0, 0, 0, 0, 0, 0, 0]),
+        0xBC => Some([DV, DV, DV, DV, DV, DH_L, DV, DH_L, 0, 0, 0, 0, 0, 0, 0, 0]),
+        _ => None,
+    }
 }
