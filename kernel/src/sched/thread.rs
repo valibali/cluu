@@ -242,6 +242,13 @@ pub struct Thread {
 
     /// Notification object this thread is waiting on (None if not waiting)
     pub notification_wait: Option<NotificationId>,
+
+    /// Session ID for visibility scoping.
+    /// 0 = system/root scope (sees all threads in enumerate).
+    /// Non-zero = session-scoped (enumerate returns only same-session threads).
+    /// Set by procmgr via InvokeOp::ThreadSetSession after thread_create,
+    /// before thread_resume. Defaults to 0 (kernel/system threads).
+    pub session_id: u64,
 }
 
 impl Thread {
@@ -308,8 +315,7 @@ impl Thread {
             time_slice_remaining: 10, // Default 10 ticks
             timeout_deadline: None,
             woke_from_timeout: false,
-            call_reply_info: None,
-            recv_wait_armed: false,
+            call_reply_info: None,            recv_wait_armed: false,
             recv_wait_ticket: 0,
             recv_wait_buf_ptr: 0,
             recv_wait_buf_len: 0,
@@ -319,6 +325,7 @@ impl Thread {
             fault_state: None,
             cpu_ticks_consumed: 0,
             notification_wait: None,
+            session_id: 0,
         }
     }
 
@@ -361,6 +368,7 @@ impl Thread {
             fault_state: None,
             cpu_ticks_consumed: 0,
             notification_wait: None,
+            session_id: 0,
         }
     }
 

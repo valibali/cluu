@@ -437,6 +437,18 @@ pub enum InvokeOp {
     NotificationSignal = 81,
     NotificationWait = 82,
     NotificationPoll = 83,
+
+    // Process/thread enumeration
+    /// Enumerate live thread IDs from the kernel.
+    /// arg3 = user buffer pointer (u64 array), arg4 = capacity in entries.
+    /// Returns count of TIDs written. If buf_ptr==0 or buf_cap==0, returns
+    /// total live thread count without writing.
+    ThreadEnumerate = 84,
+
+    /// Set the session ID on a thread for visibility scoping.
+    /// arg3 = session_id. Only callable with THREAD_CONTROL right.
+    /// Used by procmgr after thread_create, before thread_resume.
+    ThreadSetSession = 85,
 }
 
 impl InvokeOp {
@@ -490,6 +502,8 @@ impl InvokeOp {
             81 => Some(Self::NotificationSignal),
             82 => Some(Self::NotificationWait),
             83 => Some(Self::NotificationPoll),
+            84 => Some(Self::ThreadEnumerate),
+            85 => Some(Self::ThreadSetSession),
             _ => None,
         }
     }

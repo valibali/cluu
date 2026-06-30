@@ -840,6 +840,10 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::NotificationSignal => invoke_notification_signal(&token, obj_ref, args),
         InvokeOp::NotificationWait => invoke_notification_wait(&token, obj_ref, args),
         InvokeOp::NotificationPoll => invoke_notification_poll(&token, obj_ref, args),
+
+        InvokeOp::ThreadEnumerate => invoke_thread_enumerate(&token, obj_ref, args),
+
+        InvokeOp::ThreadSetSession => invoke_thread_set_session(&token, obj_ref, args),
     }
 }
 
@@ -3442,6 +3446,100 @@ fn invoke_notification_poll(
 
     let pending = crate::ipc::notification::poll(notif_id)?;
     Ok(pending as usize)
+}
+
+/// Enumerate live thread IDs from the kernel's thread repository.
+///
+/// arg3 = user buffer pointer (u64 array), arg4 = capacity in entries.
+/// Returns count of TIDs written. If buf_ptr==0 or buf_cap==0, returns
+/// total live thread count without writing.
+fn invoke_thread_enumerate(
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
+) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::READ) {
+        return Err(Error::PermissionDenied);
+    }
+
+    // Resolve caller's session_id from the token's object reference.
+    // TOKEN_SELF resolves to ObjectRef::Thread(caller_tid) → look up session_id.
+    // session_id == 0 means root/system scope: sees all threads.
+    let caller_session_id: u64 = if let ObjectRef::Thread(tid) =
+        crate::token::check_object_type(obj_ref, ObjectType::Thread).unwrap_or(ObjectRef::Thread(
+            crate::sched::ThreadManager::current().unwrap_or(crate::sched::ThreadId::new(0)),
+        )) {
+        crate::sched::ThreadManager::thread_session_id(tid)
+    } else {
+        0
+    };
+
+    let buf_ptr = args.arg3;
+    let buf_cap = args.arg4;
+
+    if buf_ptr == 0 || buf_cap == 0 {
+        let tids = crate::sched::ThreadManager::enumerate_live_tids_in_session(caller_session_id);
+        return Ok(tids.len());
+    }
+
+    let byte_len = buf_cap
+        .checked_mul(core::mem::size_of::<u64>())
+        .ok_or(Error::InvalidParameter)?;
+    crate::syscall::userptr::validate_user_buffer(buf_ptr, byte_len)?;
+
+    let cr3 = crate::sched::ThreadManager::current_page_table_root()
+        .ok_or(Error::InvalidOperation)?;
+
+    let tids = crate::sched::ThreadManager::enumerate_live_tids_in_session(caller_session_id);
+    let to_copy = tids.len().min(buf_cap);
+    let copy_bytes = to_copy * core::mem::size_of::<u64>();
+
+    if to_copy == 0 {
+        return Ok(0);
+    }
+
+    unsafe {
+        crate::syscall::userptr::copy_to_user(
+            buf_ptr,
+            tids.as_ptr() as *const u8,
+            copy_bytes,
+            cr3,
+        )?;
+    }
+
+    Ok(to_copy)
+}
+
+/// Set the session_id on a thread for visibility scoping.
+/// arg3 = session_id. Requires THREAD_CONTROL right on the thread token.
+fn invoke_thread_set_session(
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
+) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::THREAD_CONTROL) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let thread_ref = crate::token::check_object_type(obj_ref, ObjectType::Thread)
+        .map_err(|_| Error::InvalidArgument)?;
+    let thread_id = if let ObjectRef::Thread(id) = thread_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let session_id = args.arg3 as u64;
+
+    if crate::sched::ThreadManager::set_thread_session(thread_id, session_id) {
+        Ok(0)
+    } else {
+        Err(Error::NotFound)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

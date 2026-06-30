@@ -335,6 +335,53 @@ impl ThreadManager {
             .count()
     }
 
+    /// Collect all live (non-Dead) thread IDs into a Vec.
+    /// Used by InvokeOp::ThreadEnumerate to serve /proc readdir
+    /// without going through procmgr IPC.
+    pub fn enumerate_live_tids() -> alloc::vec::Vec<ThreadId> {
+        THREAD_REPOSITORY
+            .lock()
+            .iter()
+            .filter(|(_, thread)| !thread.is_dead())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Collect live thread IDs visible to `caller_session_id`.
+    /// session_id == 0 is root/system scope: sees all threads.
+    /// Non-zero: sees only threads with the same session_id.
+    pub fn enumerate_live_tids_in_session(caller_session_id: u64) -> alloc::vec::Vec<ThreadId> {
+        THREAD_REPOSITORY
+            .lock()
+            .iter()
+            .filter(|(_, t)| !t.is_dead())
+            .filter(|(_, t)| caller_session_id == 0 || t.session_id == caller_session_id)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Read the session_id of a thread. Returns 0 if thread not found
+    /// (treat unknown as root scope — fail-safe for visibility).
+    pub fn thread_session_id(id: ThreadId) -> u64 {
+        THREAD_REPOSITORY
+            .lock()
+            .get(id)
+            .map(|t| t.session_id)
+            .unwrap_or(0)
+    }
+
+    /// Set the session_id on a thread. Called by procmgr via
+    /// InvokeOp::ThreadSetSession after thread_create, before thread_resume.
+    pub fn set_thread_session(id: ThreadId, session_id: u64) -> bool {
+        if let Some(mut repo) = THREAD_REPOSITORY.try_lock() {
+            if let Some(thread) = repo.get_mut(id) {
+                thread.session_id = session_id;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Fallible thread ID allocation with global limit enforcement.
     pub fn try_alloc_thread_id() -> Result<ThreadId, &'static str> {
         loop {
