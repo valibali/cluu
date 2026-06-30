@@ -356,9 +356,12 @@ let (stdin_cid, stdin_rfd, stdout_cid, stdout_rfd) = {
         envp: alloc::vec![
             (alloc::string::String::from("TERM"),
              alloc::string::String::from("xterm-256color")),
+            (alloc::string::String::from("CLUU_SESSION_ID"),
+             alloc::format!("{}", sid)),
         ],
         cwd: alloc::string::String::from("/"),
         fd_inherit: fd_inherit_entries,
+        notify: None,
     };
 
     let spawn_payload = match postcard::to_allocvec(&spawn_req) {
