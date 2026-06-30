@@ -1,6 +1,7 @@
 extern crate alloc;
 use alloc::string::String;
 use procmgr_common::handler::{HandlerError, InboundMsg, MsgHandler, Reply};
+use procmgr_common::kernel_iface::Kernel;
 use procmgr_common::pid::SessionId;
 #[cfg(feature = "host-test")]
 use procmgr_common::test_kernel::MockKernel;
@@ -28,6 +29,7 @@ pub struct SessionState {
     /// Zero in host-test builds (MockKernel handles spawn there).
     pub spawn_ep: u64,
     pub view_mgr_token: u64,
+    pub pg_table: crate::pg_table::PgTable,
 }
 
 #[cfg(feature = "host-test")]
@@ -46,6 +48,7 @@ impl SessionState {
             ctty: None,
             spawn_ep: 0,
             view_mgr_token: 0,
+            pg_table: crate::pg_table::PgTable::new(),
         }
     }
 }
@@ -72,6 +75,48 @@ pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply,
         }
         procmgr_common::labels::SESSION_PROCMGR_PROC_QUERY_LOCAL_LABEL => {
             crate::proc_query_local::ProcQueryLocal::handle(state, msg)
+        }
+        libcluu::ipc::PROCMGR_PG_CREATE_LABEL => {
+            let pgid = state.pg_table.create();
+            Ok(Reply::ok(libcluu::ipc::PROCMGR_PG_CREATE_LABEL).with_word(0, pgid))
+        }
+        libcluu::ipc::PROCMGR_PG_ATTACH_LABEL => {
+            let pgid = msg.words[0];
+            let pid = msg.words[1] as i32;
+            state.pg_table.attach(pgid, pid as usize);
+            state.child_table.set_pgid(pid, pgid as u32);
+            Ok(Reply::ok(libcluu::ipc::PROCMGR_PG_ATTACH_LABEL))
+        }
+        libcluu::ipc::PROCMGR_PG_SIGNAL_LABEL => {
+            let pgid = msg.words[0];
+            let signum = msg.words[1];
+            let SIGINT: usize = 2;
+            let SIGTERM: usize = 15;
+            let SIGKILL: usize = 9;
+            let pids = state.pg_table.members(pgid);
+            for pid in pids {
+                if let Some(child) = state.child_table.lookup_by_pid(pid as i32) {
+                    let tok = child.thread_tok;
+                    let notify_ep = child.notify_ep;
+                    let cookie = child.cookie;
+                    match signum {
+                        s if s == SIGINT || s == SIGTERM || s == SIGKILL => {
+                            state.kernel.thread_destroy(tok);
+                            if notify_ep != 0 {
+                                let exit_code = 128 + signum as i32;
+                                let exit_msg = libcluu::types::Message::new(
+                                    procmgr_common::labels::PROCMGR_EXIT_LABEL,
+                                    [cookie as usize, exit_code as usize, 0, 0, 0, 0],
+                                    2,
+                                );
+                                let _ = libcluu::ipc::send(notify_ep as usize, &exit_msg, libcluu::IpcFlags::empty());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Reply::ok(libcluu::ipc::PROCMGR_PG_SIGNAL_LABEL))
         }
         _ => Err(HandlerError::BadLabel),
     }

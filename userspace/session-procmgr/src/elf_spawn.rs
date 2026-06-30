@@ -24,7 +24,7 @@ use libcluu::ipc::{send_msg_with_payload, VFS_DERIVE_CHILD_FD_LABEL, VFS_SET_VIE
 use libcluu::types::IpcFlags;
 use libcluu::syscall::{
     space_create, space_map, space_map_range, thread_create, thread_get_id, thread_resume,
-    token_derive, THREAD_CREATE_START_SUSPENDED,
+    thread_set_session, token_derive, THREAD_CREATE_START_SUSPENDED,
 };
 use libcluu::types::Message;
 use procmgr_common::wire::SpawnReq;
@@ -32,7 +32,7 @@ use procmgr_common::wire::SpawnReq;
 use crate::dispatch::SessionState;
 
 const CHILD_STACK_BASE: usize = 0x6d00_0000;
-const CHILD_STACK_PAGES: usize = 16;
+const CHILD_STACK_PAGES: usize = 32;
 const CHILD_STACK_SIZE: usize = CHILD_STACK_PAGES * 4096;
 const PROT_RW_USER: usize = 0x7;
 const ANON_ZERO: usize = 0;
@@ -449,6 +449,7 @@ pub fn real_spawn_user_process(
         "session-procmgr: elf_spawn resuming thread_tok={}",
         thread_tok
     ));
+    let _ = thread_set_session(thread_tok, state.sid as u64);
     thread_resume(thread_tok).map_err(|_| RealSpawnError::ThreadCreate)?;
 
     Ok((thread_tok as u64, cookie, child_space as u64, child_tid))

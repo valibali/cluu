@@ -67,14 +67,13 @@ fn read_envelope_from_process_info() -> Option<SessionEnvelope> {
 fn send_reply(reply_opt: Option<usize>, fallback_ep: usize, r: &Reply) -> Result<()> {
     let token = match reply_opt {
         Some(t) => t,
-        None => return Ok(()), // one-way message — no reply expected
+        None => return Ok(()),
     };
     let mut msg = Message::new(r.label, [0; 6], 1);
-    msg.words[0] = r.payload.len();
-    for (i, &w) in r.words.iter().enumerate().take(5) {
-        msg.words[i + 1] = w;
-    }
     if r.payload.is_empty() {
+        for (i, &w) in r.words.iter().enumerate().take(6) {
+            msg.words[i] = w;
+        }
         let bytes = unsafe {
             core::slice::from_raw_parts(
                 &msg as *const Message as *const u8,
@@ -83,6 +82,10 @@ fn send_reply(reply_opt: Option<usize>, fallback_ep: usize, r: &Reply) -> Result
         };
         let _ = libcluu::syscall::ipc_reply(token, bytes);
     } else {
+        msg.words[0] = r.payload.len();
+        for (i, &w) in r.words.iter().enumerate().take(5) {
+            msg.words[i + 1] = w;
+        }
         let header = unsafe {
             core::slice::from_raw_parts(
                 &msg as *const Message as *const u8,
@@ -94,7 +97,7 @@ fn send_reply(reply_opt: Option<usize>, fallback_ep: usize, r: &Reply) -> Result
         buf.extend_from_slice(&r.payload);
         let _ = libcluu::syscall::ipc_reply(token, &buf);
     }
-    let _ = fallback_ep; // suppress unused warning
+    let _ = fallback_ep;
     Ok(())
 }
 
@@ -138,6 +141,9 @@ fn run() -> Result<()> {
     let ep_name = alloc::format!("spawn:{}", sid);
     registry::register_output(&ep_name, ep_grantable)?;
 
+    let main_name = alloc::format!("main:{}", sid);
+    registry::register_output(&main_name, ep_grantable)?;
+
     let _ = debug_print(&alloc::format!(
         "session-procmgr: registered sid={} ep={}",
         sid, ep
@@ -169,6 +175,7 @@ fn run() -> Result<()> {
         ctty: None,
         spawn_ep: ep as u64,
         view_mgr_token,
+        pg_table: spm::pg_table::PgTable::new(),
     };
 
     let control_ep = registry::control_endpoint();
