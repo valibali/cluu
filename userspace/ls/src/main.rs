@@ -467,12 +467,10 @@ pub extern "C" fn main() -> i32 {
         i += 1;
     }
 
-    // Default path: cwd
-    let _ = debug_print("ls: pre-cwd");
     if paths.is_empty() {
-        paths.push(libcluu::posix::current_dir_string());
+        let cwd = getenv_str("PWD").unwrap_or_else(|| libcluu::posix::current_dir_string());
+        paths.push(cwd);
     }
-    let _ = debug_print("ls: post-cwd");
 
     // Connect to VFS
     let _ = debug_print("ls: pre-vfs-subscribe");
