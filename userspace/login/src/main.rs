@@ -41,7 +41,7 @@ use libcluu::{debug_print, registry, syscall};
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
 /// Width of the login modal box in cells (border-inclusive).
-const MODAL_W: u32 = 30;
+const MODAL_W: u32 = 36;
 /// Height of the login modal box in cells (border-inclusive).
 const MODAL_H: u32 = 8;
 
@@ -711,6 +711,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                      user_name.clone()),
                                     (alloc::string::String::from("TERM"),
                                      alloc::string::String::from("xterm-256color")),
+                                    // CLUU_SESSION_ID is the wire name the shell
+                                    // reads at userspace/shell/src/main.rs:171.
+                                    (alloc::string::String::from("CLUU_SESSION_ID"),
+                                     alloc::format!("{}", ok.session_id)),
                                 ],
                                 cwd: alloc::format!("/home/{}", user_name),
                                 fd_inherit: alloc::vec::Vec::new(),

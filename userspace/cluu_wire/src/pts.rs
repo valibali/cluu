@@ -4,6 +4,7 @@
 //! (graphical terminal) speak this verb set. Shell uses one verb set
 //! regardless of which it talks to.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
@@ -248,6 +249,38 @@ pub struct VfsRegisterPtsRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VfsRegisterPtsReply {
     pub assigned_id: u32,
+}
+
+// ----- Shell completion -----
+
+/// Verb label for TAB completion queries from cluuterm to the shell.
+///
+/// Sent by cluuterm when the user presses TAB at the shell prompt. The
+/// shell inspects `CompleteRequest::word` and `consecutive_tabs` and
+/// replies with a `CompleteReply`. See spec
+/// `docs/superpowers/specs/2026-07-01-tab-completion-protocol-design.md` §4.
+pub const SHELL_COMPLETE_QUERY_LABEL: u32 = 143;
+
+/// Request: cluuterm → shell, asking for completions of `word`.
+///
+/// `consecutive_tabs` counts consecutive TAB presses at the same cursor
+/// position (1 = first TAB, 2 = second TAB that may trigger list-all
+/// behavior, etc.).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompleteRequest {
+    pub word: String,
+    pub consecutive_tabs: u8,
+}
+
+/// Reply: shell → cluuterm, carrying the completion candidates.
+///
+/// `common_prefix` is the longest shared prefix of `candidates` (empty if
+/// there is none or no candidates). cluuterm may use it to extend the
+/// current word before deciding to display the full list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompleteReply {
+    pub candidates: Vec<String>,
+    pub common_prefix: String,
 }
 
 // ----- Tests -----

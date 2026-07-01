@@ -12,9 +12,12 @@ mod path_lookup;
 mod pipeline;
 #[cfg(feature = "lang-parser")]
 mod shellrc;
+#[cfg(feature = "lang-parser")]
+mod completion;
 
-use io::write_stdout;
+use io::{write_stderr, write_stdout};
 
+use alloc::boxed::Box;
 use alloc::format;
 #[cfg(feature = "lang-parser")]
 use alloc::string::String;
@@ -23,14 +26,13 @@ use alloc::string::ToString;
 #[cfg(feature = "lang-parser")]
 use alloc::vec::Vec;
 #[cfg(feature = "lang-parser")]
-use commands::{BuiltinFactory, CommandContext, CommandExecutor, ExecResult};
+use commands::{BuiltinFactory, BuiltinRegistry, CommandContext, CommandExecutor, ExecResult};
 #[cfg(feature = "lang-parser")]
 use commands::builtins::jobs::{drain_job_notifications, reap_done_jobs};
 use libcluu::boot::{
     process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, PARAM_TTY_INSTANCE, TOKEN_STDERR, TOKEN_STDIN,
     TOKEN_STDLOG, TOKEN_STDOUT,
 };
-use libcluu::ipc::{send_with_payload, TTY_WRITE_LABEL};
 use libcluu::registry;
 use libcluu::{debug_print, yield_cpu, Result};
 
@@ -96,40 +98,49 @@ fn run() -> Result<()> {
     let mut command_context = CommandContext::new();
     command_context.set_procmgr_spawn(procmgr_spawn);
 
+    #[cfg(feature = "lang-parser")]
+    let registry: &'static BuiltinRegistry =
+        Box::leak(Box::new(BuiltinFactory::new().build()));
+
     // UE18+UE19: source /etc/shellrc and $HOME/.shellrc before the
-    // prompt fires. We build the registry once for sourcing and let
-    // the per-line REPL keep its current behavior of rebuilding
-    // inline. Sourcing is best-effort: a missing file, a broken line,
-    // or even a missing VFS endpoint just logs and moves on so a
-    // stale userdisk can't lock anyone out of their shell.
+    // prompt fires. The registry is built once (above) and shared with
+    // the per-line REPL and the completion thread. Sourcing is
+    // best-effort: a missing file, a broken line, or even a missing VFS
+    // endpoint just logs and moves on so a stale userdisk can't lock
+    // anyone out of their shell.
     #[cfg(feature = "lang-parser")]
     {
         match registry::subscribe_output("vfs", "main") {
             Ok(vfs_ep) => match libcluu::fs::client::VfsClient::new_from_registry(vfs_ep) {
                 Ok(vfs) => {
-                    let factory = BuiltinFactory::new();
-                    let rc_registry = factory.build();
-                    let _ = shellrc::source_file(
-                        "/etc/shellrc",
-                        stdout,
-                        &mut command_context,
-                        &rc_registry,
-                        &vfs,
+                    io::report_err(
+                        shellrc::source_file(
+                            "/etc/shellrc",
+                            stdout,
+                            &mut command_context,
+                            registry,
+                            &vfs,
+                        ),
+                        "shellrc: /etc/shellrc",
                     );
                     if let Some(home) = shellrc::home_from_env() {
                         let path = format!("{}/.shellrc", home);
-                        let _ = shellrc::source_file(
-                            &path,
-                            stdout,
-                            &mut command_context,
-                            &rc_registry,
-                            &vfs,
+                        io::report_err(
+                            shellrc::source_file(
+                                &path,
+                                stdout,
+                                &mut command_context,
+                                registry,
+                                &vfs,
+                            ),
+                            "shellrc: ~/.shellrc",
                         );
                     } else {
                         let _ = debug_print(
                             "shellrc: HOME unset, skipping ~/.shellrc",
                         );
                     }
+                    completion::populate_dir_cache(&vfs);
                 }
                 Err(_) => {
                     let _ = debug_print(
@@ -161,7 +172,7 @@ fn run() -> Result<()> {
     // pipeline.rs; the shell-level fg track is unnecessary for now.
     #[cfg(feature = "lang-parser")]
     {
-        let session_id = read_env_var("CLUU_SESSION_ID")
+        let session_id = libcluu::posix::read_env_var("CLUU_SESSION_ID")
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(0);
         // tty_stdout addresses a real TTY-service endpoint (one that speaks
@@ -182,17 +193,53 @@ fn run() -> Result<()> {
         }
     }
 
+    #[cfg(feature = "lang-parser")]
+    {
+        // Completion endpoint: cluuterm queries this on TAB.
+        let completion_ep = match libcluu::syscall::endpoint_create(
+            info.tokens[libcluu::boot::TOKEN_IPC],
+        ) {
+            Ok(ep) => ep,
+            Err(e) => {
+                let _ = debug_print(&format!("shell: endpoint_create failed: {:?}", e));
+                0
+            }
+        };
+        if completion_ep != 0 {
+            let sid = libcluu::posix::read_env_var("CLUU_SESSION_ID")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            let completion_name = format!("completion:{}", sid);
+            if let Err(e) = registry::register_output(&completion_name, completion_ep) {
+                let _ = debug_print(&format!(
+                    "shell: register_output({}) failed: {:?}",
+                    completion_name, e
+                ));
+            } else {
+                let _ = debug_print(&format!(
+                    "shell: completion endpoint registered as shell:{}",
+                    completion_name
+                ));
+            }
+
+            completion::spawn_completion_thread(completion_ep, registry);
+        }
+    }
+
     debug_print("shell: ready")?;
     write_stdout(b"\x1b[2J\x1b[H");
-    let _ = print_prompt(stdout);
+    io::report_err(print_prompt(stdout), "print_prompt");
     #[cfg(feature = "lang-parser")]
     {
         if let Some(startup_cmd) = startup_command_from_process_info() {
             let _ = debug_print(&format!("shell: startup command '{}'", startup_cmd));
             let mut line = startup_cmd;
             line.push('\n');
-            let _ = parse_and_execute_line(stdout, stdlog, &mut command_context, line.as_bytes());
-            let _ = print_prompt(stdout);
+            io::report_err(
+                parse_and_execute_line(stdout, stdlog, &mut command_context, line.as_bytes(), registry),
+                "startup command",
+            );
+            io::report_err(print_prompt(stdout), "print_prompt");
         }
     }
 
@@ -216,7 +263,7 @@ fn run() -> Result<()> {
         let n = unsafe { _read(0, buf.as_mut_ptr() as *mut core::ffi::c_void, buf.len()) };
         if n > 0 {
             let _ = debug_print(&format!("shell: read(0) got {} bytes", n));
-            handle_line_payload(stdout, stdlog, &mut command_context, &buf[..n as usize])?;
+            handle_line_payload(stdout, stdlog, &mut command_context, &buf[..n as usize], registry)?;
             #[cfg(feature = "lang-parser")]
             {
                 drain_job_notifications(&mut command_context);
@@ -233,49 +280,11 @@ fn run() -> Result<()> {
 }
 
 fn print_prompt(_endpoint: usize) -> Result<()> {
-    let user = read_env_var("USER").unwrap_or_else(|| String::from("cluu"));
+    let user = libcluu::posix::read_env_var("USER").unwrap_or_else(|| String::from("cluu"));
     let cwd = libcluu::posix::current_dir_string();
     let prompt = format!("{}:{}> ", user, cwd);
     crate::write_stdout(prompt.as_bytes());
     Ok(())
-}
-
-/// Read an environment variable from the ProcessInfo page.
-pub(crate) fn read_env_var(name: &str) -> Option<String> {
-    use libcluu::boot::{process_info, PARAM_ENVC, PARAM_ENV_OFFSET};
-
-    let info = process_info();
-    let envc = info.params[PARAM_ENVC] as usize;
-    let env_offset = info.params[PARAM_ENV_OFFSET] as usize;
-    if envc == 0 || env_offset == 0 {
-        return None;
-    }
-
-    let page_base = libcluu::boot::PROCESS_INFO_ADDR & !(4096 - 1);
-    let page_end = page_base + 4096;
-    let mut ptr = (page_base + env_offset) as *const u8;
-    let prefix_len = name.len();
-
-    for _ in 0..envc {
-        if (ptr as usize) >= page_end { break; }
-        let start = ptr;
-        let mut len = 0usize;
-        unsafe {
-            while (start.add(len) as usize) < page_end && *start.add(len) != 0 {
-                len += 1;
-            }
-        }
-        if len == 0 { break; }
-        let kv = unsafe { core::slice::from_raw_parts(start, len) };
-        // Check "NAME=value"
-        if kv.len() > prefix_len && kv[prefix_len] == b'=' && &kv[..prefix_len] == name.as_bytes() {
-            if let Ok(val) = core::str::from_utf8(&kv[prefix_len + 1..]) {
-                return Some(String::from(val));
-            }
-        }
-        ptr = unsafe { start.add(len + 1) };
-    }
-    None
 }
 
 #[cfg(feature = "lang-parser")]
@@ -349,6 +358,7 @@ fn handle_line_payload(
     stdlog: usize,
     context: &mut CommandContext,
     payload: &[u8],
+    registry: &'static BuiltinRegistry,
 ) -> Result<()> {
     let _ = debug_print(&format!("shell: read {} bytes from fd 0", payload.len()));
     #[cfg(not(feature = "lang-parser"))]
@@ -369,7 +379,7 @@ fn handle_line_payload(
             // Print and remove any newly-done background jobs.
             crate::commands::builtins::jobs::reap_done_jobs(stdout, context);
 
-            parse_and_execute_line(stdout, stdlog, context, payload)?;
+            parse_and_execute_line(stdout, stdlog, context, payload, registry)?;
 
             // Drain again after the command completes (catches fast bg exits).
             crate::commands::builtins::jobs::drain_job_notifications(context);
@@ -386,6 +396,7 @@ fn parse_and_execute_line(
     stdlog: usize,
     context: &mut CommandContext,
     payload: &[u8],
+    registry: &'static BuiltinRegistry,
 ) -> Result<()> {
     let line = strip_trailing_newline(payload);
     match core::str::from_utf8(line) {
@@ -400,24 +411,14 @@ fn parse_and_execute_line(
             }
             match cluu_lang::parse_program(text) {
                 Ok(ast) => {
-                    let factory = BuiltinFactory::new();
-                    let registry = factory.build();
                     match registry.execute(stdout, context, &ast) {
                         Ok(ExecResult::Handled) => {}
                         Ok(ExecResult::NotHandled) => {
                             let _ = debug_print("shell: unsupported command");
-                            let _ = send_with_payload(
-                                stdlog,
-                                TTY_WRITE_LABEL,
-                                b"shell: unsupported command\n",
-                            );
+                            write_stderr(b"shell: unsupported command\n");
                         }
                         Err(err) => {
-                            let _ = send_with_payload(
-                                stdlog,
-                                TTY_WRITE_LABEL,
-                                err.to_string().as_bytes(),
-                            );
+                            write_stderr(format!("{}\n", err).as_bytes());
                             let _ = debug_print(&format!("shell: builtin error {}", err));
                         }
                     }
@@ -428,13 +429,13 @@ fn parse_and_execute_line(
                     }
                 }
                 Err(err) => {
-                    let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, err.to_string().as_bytes());
+                    write_stderr(format!("{}\n", err).as_bytes());
                     let _ = debug_print(&format!("shell: parse error {}", err));
                 }
             }
         }
         Err(_) => {
-            let _ = send_with_payload(stdlog, TTY_WRITE_LABEL, b"shell: invalid utf-8\n");
+            write_stderr(b"shell: invalid utf-8\n");
             let _ = debug_print("shell: invalid utf-8");
         }
     }

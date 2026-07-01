@@ -32,6 +32,7 @@ use cluu_wire::pts::{
     GetPgrpReply, SetPgrpRequest, SetPgrpReply,
     FlushRequest, FlushReply, FlushQueue,
     Termios, PtsErr,
+    CompleteRequest, CompleteReply, SHELL_COMPLETE_QUERY_LABEL,
 };
 
 /// Scrollback capacity in rows (matches legacy console `SCROLLBACK_LINES`).
@@ -353,6 +354,13 @@ pub struct Cluuterm {
     /// Populated at construction from the same endpoint used for PTS
     /// registration.  0 until explicitly set.
     pub vfs_ep: usize,
+    /// Cached session id read once from CLUU_SESSION_ID at startup.
+    /// None if the env var was absent or unparseable.
+    pub session_id: Option<u32>,
+    /// Cached shell completion endpoint (`shell:completion:<sid>`).
+    /// Resolved lazily on the first TabRequest; None until then or if
+    /// the shell hasn't registered its completion endpoint yet.
+    pub shell_completion_ep: Option<usize>,
 
     // ── PTS state (unified verb set) ────────────────────────────────────────
     pub pts: Pts,
@@ -393,6 +401,7 @@ impl Cluuterm {
         my_ep: usize,
         comp_ep: usize,
         vfs_ep: usize,
+        session_id: Option<u32>,
     ) -> Self {
         let total = cols * rows;
         let default_attr = Attr::default_attr();
@@ -405,6 +414,8 @@ impl Cluuterm {
             my_ep,
             comp_ep,
             vfs_ep,
+            session_id,
+            shell_completion_ep: None,
             pts: Pts::new(pts_id),
             parser: Parser::new(),
             discipline: libcluu::tty_core::line_discipline::LineDiscipline::new(),
@@ -728,8 +739,166 @@ impl Cluuterm {
                         self.pts.eof_pending = true;
                     }
                 }
+                ServiceAction::TabRequest { line, cursor, consecutive_tabs } => {
+                    self.handle_tab_request(&line, cursor, consecutive_tabs);
+                }
             }
         }
+    }
+
+    // ── TAB completion (shell RPC) ─────────────────────────────────────
+
+    /// Bounded timeout for the shell completion RPC (spec §4.4).
+    /// If the shell is dead or unresponsive, cluuterm must not hang.
+    const COMPLETION_TIMEOUT_MS: usize = 2000;
+
+    fn handle_tab_request(&mut self, line: &[u8], cursor: usize, consecutive_tabs: u8) {
+        let word_bytes: &[u8] = {
+            let mut start = cursor;
+            while start > 0 && !line[start - 1].is_ascii_whitespace() {
+                start -= 1;
+            }
+            &line[start..cursor]
+        };
+        let word = match core::str::from_utf8(word_bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                self.bell();
+                return;
+            }
+        };
+
+        let shell_ep = match self.shell_completion_ep {
+            Some(ep) => ep,
+            None => {
+                let sid = self.session_id.unwrap_or(0);
+                let name = alloc::format!("shell:completion:{}", sid);
+                match registry::lookup_service(&name) {
+                    Some(ep) => {
+                        self.shell_completion_ep = Some(ep);
+                        ep
+                    }
+                    None => {
+                        let _ = debug_print(&alloc::format!(
+                            "cluuterm: no shell completion ep for {}",
+                            name
+                        ));
+                        self.bell();
+                        return;
+                    }
+                }
+            }
+        };
+
+        let req = CompleteRequest {
+            word: alloc::string::String::from(word),
+            consecutive_tabs,
+        };
+        let payload = match postcard::to_allocvec(&req) {
+            Ok(p) => p,
+            Err(_) => {
+                self.bell();
+                return;
+            }
+        };
+
+        let msg = ipc::make_payload_message(
+            SHELL_COMPLETE_QUERY_LABEL,
+            payload.len(),
+            &[],
+        );
+        let header = msg.as_bytes();
+        let mut send_buf = Vec::with_capacity(header.len() + payload.len());
+        send_buf.extend_from_slice(header);
+        send_buf.extend_from_slice(&payload);
+
+        let mut reply_buf = [0u8; 4096];
+        let bytes_received = loop {
+            match syscall::ipc_call_timeout(
+                shell_ep,
+                &send_buf,
+                &mut reply_buf,
+                Self::COMPLETION_TIMEOUT_MS,
+            ) {
+                Ok(n) => break n,
+                Err(libcluu::Error::WouldBlock) => {
+                    let _ = syscall::yield_cpu();
+                }
+                Err(e) => {
+                    let _ = debug_print(&alloc::format!(
+                        "cluuterm: completion query failed: {:?}",
+                        e
+                    ));
+                    self.bell();
+                    return;
+                }
+            }
+        };
+
+        let (_, reply_payload) = match ipc::parse_message(&reply_buf[..bytes_received]) {
+            Some(v) => v,
+            None => {
+                self.bell();
+                return;
+            }
+        };
+        let reply: CompleteReply = match postcard::from_bytes(reply_payload) {
+            Ok(r) => r,
+            Err(_) => {
+                self.bell();
+                return;
+            }
+        };
+
+        self.apply_completion_reply(line, &reply, consecutive_tabs);
+    }
+
+    fn apply_completion_reply(
+        &mut self,
+        line: &[u8],
+        reply: &CompleteReply,
+        consecutive_tabs: u8,
+    ) {
+        if reply.candidates.is_empty() {
+            self.bell();
+            return;
+        }
+        if !reply.common_prefix.is_empty() {
+            let bytes = reply.common_prefix.as_bytes();
+            self.pts.line_discipline.append_completion(bytes);
+            let cooked = self.pts.line_discipline.process_output(bytes);
+            self.handle_pts_write(&cooked);
+            if reply.candidates.len() == 1
+                && !reply.candidates[0].ends_with('/')
+            {
+                self.pts.line_discipline.append_completion(b" ");
+                let cooked = self.pts.line_discipline.process_output(b" ");
+                self.handle_pts_write(&cooked);
+            }
+            return;
+        }
+        if consecutive_tabs >= 2 {
+            let mut listing = alloc::vec![b'\n'];
+            for (i, c) in reply.candidates.iter().enumerate() {
+                if i > 0 {
+                    listing.extend_from_slice(b"  ");
+                }
+                listing.extend_from_slice(c.as_bytes());
+            }
+            listing.push(b'\n');
+            let cooked = self.pts.line_discipline.process_output(&listing);
+            self.handle_pts_write(&cooked);
+
+            let mut redraw = alloc::vec![b'\r', 0x1b, b'[', b'K'];
+            redraw.extend_from_slice(line);
+            let cooked = self.pts.line_discipline.process_output(&redraw);
+            self.handle_pts_write(&cooked);
+        }
+    }
+
+    fn bell(&mut self) {
+        let cooked = self.pts.line_discipline.process_output(&[0x07]);
+        self.handle_pts_write(&cooked);
     }
 
     // ── Shutdown ────────────────────────────────────────────────────────
@@ -809,7 +978,7 @@ impl Cluuterm {
 
     /// Block-receive from `my_ep` and dispatch messages until shutdown.
     pub fn run(&mut self) {
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; 4096];
 
         // Request a timeserver grant up-front so the tick arrives once
         // timeserver registers.  Failure is non-fatal: blink is cosmetic.

@@ -35,6 +35,11 @@ pub enum LineDiscOutput {
     Eof,
     /// Byte consumed; no externally-visible effect (e.g., mid-edit).
     Drop,
+    /// TAB pressed in canonical mode. Carries a snapshot of the pending line,
+    /// the cursor position, and the consecutive-TAB count (1 = single tab,
+    /// 2+ = double tab requesting list). Service routes to the completion
+    /// layer; the line discipline does NOT insert a literal tab.
+    TabRequest { line: alloc::vec::Vec<u8>, cursor: usize, consecutive_tabs: u8 },
 }
 
 /// Signal numbers used by the line discipline → service translation.
@@ -202,6 +207,10 @@ impl LineDiscipline {
         let echoe     = self.termios.c_lflag & Termios::ECHOE  != 0;
         let echok     = self.termios.c_lflag & Termios::ECHOK  != 0;
 
+        if byte != b'\t' {
+            self.consecutive_tabs = 0;
+        }
+
         // ISIG translations always come first regardless of canonical mode.
         if isig {
             if byte == self.termios.c_cc[Termios::VINTR] {
@@ -353,6 +362,15 @@ impl LineDiscipline {
         // INLCR: translate \n to \r on input.
         if byte == b'\n' && self.termios.c_iflag & Termios::INLCR != 0 {
             return self.feed_byte(b'\r');
+        }
+        if byte == b'\t' {
+            self.consecutive_tabs = self.consecutive_tabs.saturating_add(1);
+            out.push(LineDiscOutput::TabRequest {
+                line: self.pending_line.clone(),
+                cursor: self.pending_cursor,
+                consecutive_tabs: self.consecutive_tabs,
+            });
+            return out;
         }
         // Default: insert at cursor, echo with mid-line tail handling.
         if self.history_pos.is_some() {
@@ -955,9 +973,13 @@ impl LineDiscipline {
     /// emitting echo bytes to the console. The buffer cursor follows the
     /// appended bytes.
     pub fn append_completion(&mut self, bytes: &[u8]) {
+        // Both input paths must be updated: feed_byte uses pending_line,
+        // handle_byte uses buffer. Without pending_line the shell never
+        // receives the completed text on Enter.
+        self.pending_line.extend_from_slice(bytes);
+        self.pending_cursor = self.pending_line.len();
         self.buffer.extend_from_slice(bytes);
         self.cursor = self.buffer.len();
-        // Reset history navigation state — the user is editing fresh again.
         self.history_pos = None;
         self.saved_partial = None;
     }
@@ -1254,5 +1276,45 @@ mod spec2_tests {
             _ => None,
         }).flatten().collect();
         assert_eq!(bytes, b"X".to_vec());
+    }
+
+    #[test]
+    fn feed_byte_tab_emits_tabrequest() {
+        let mut ld = LineDiscipline::new();
+        let out = ld.feed_byte(b'\t');
+        let tab = out.iter().find_map(|e| match e {
+            LineDiscOutput::TabRequest { line, cursor, consecutive_tabs } =>
+                Some((line.clone(), *cursor, *consecutive_tabs)),
+            _ => None,
+        });
+        assert!(tab.is_some(), "expected TabRequest event");
+        let (line, _cursor, _count) = tab.unwrap();
+        assert!(line.is_empty(), "snapshot line should be empty");
+        assert!(ld.pending_line.is_empty(), "pending_line should still be empty");
+    }
+
+    #[test]
+    fn feed_byte_tab_increments_count() {
+        let mut ld = LineDiscipline::new();
+        let _ = ld.feed_byte(b'\t');
+        let out = ld.feed_byte(b'\t');
+        let count = out.iter().find_map(|e| match e {
+            LineDiscOutput::TabRequest { consecutive_tabs, .. } => Some(*consecutive_tabs),
+            _ => None,
+        });
+        assert_eq!(count, Some(2));
+    }
+
+    #[test]
+    fn feed_byte_non_tab_resets_count() {
+        let mut ld = LineDiscipline::new();
+        let _ = ld.feed_byte(b'\t');
+        let _ = ld.feed_byte(b'a');
+        let out = ld.feed_byte(b'\t');
+        let count = out.iter().find_map(|e| match e {
+            LineDiscOutput::TabRequest { consecutive_tabs, .. } => Some(*consecutive_tabs),
+            _ => None,
+        });
+        assert_eq!(count, Some(1));
     }
 }

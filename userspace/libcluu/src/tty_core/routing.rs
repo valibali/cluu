@@ -18,6 +18,10 @@ pub enum ServiceAction {
     Echo(alloc::vec::Vec<u8>),
     /// EOF reached; deliver EOF marker to readers.
     DeliverEof,
+    /// TAB pressed in canonical mode. Carries the pending line snapshot,
+    /// cursor, and consecutive-TAB count. The service forwards this to the
+    /// completion layer (cluuterm) — no bytes are delivered or echoed.
+    TabRequest { line: alloc::vec::Vec<u8>, cursor: usize, consecutive_tabs: u8 },
 }
 
 /// Translate one `LineDiscOutput` event into a `ServiceAction`.
@@ -28,6 +32,8 @@ pub fn translate_output(ev: LineDiscOutput) -> Option<ServiceAction> {
         LineDiscOutput::Echo(b)    => Some(ServiceAction::Echo(b)),
         LineDiscOutput::Eof        => Some(ServiceAction::DeliverEof),
         LineDiscOutput::Drop       => None,
+        LineDiscOutput::TabRequest { line, cursor, consecutive_tabs } =>
+            Some(ServiceAction::TabRequest { line, cursor, consecutive_tabs }),
     }
 }
 

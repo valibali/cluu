@@ -672,9 +672,12 @@ harness_derive_marker_defaults() {
                 ;;
             l2_tab_complete)
                 TEST_COMMAND=""
-                # Type "cat /etc/m" then TAB: TTY completes to "cat /etc/motd ".
-                # Press Enter: shell runs cat /etc/motd and emits motd content.
-                KEYSTROKE_COMMANDS=$'cat /etc/m\t'
+                # Type "cat /etc/m" then TAB: shell completes to "cat /etc/motd ".
+                # Enter is appended so the command runs and emits motd content.
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="45"
+                SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
+                KEYSTROKE_COMMANDS=$'cat /etc/m\t\n'
                 ;;
             perf_typing_storm)
                 # Inject 500 chars at KEY_DELAY=0 (as fast as QEMU monitor +

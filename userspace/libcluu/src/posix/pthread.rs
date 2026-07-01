@@ -213,7 +213,7 @@ pub fn tls_block_alloc_size() -> usize {
 /// Allocate a thread stack with a guard page below.
 /// Returns (stack_base, stack_top) where stack_base is the first mapped page
 /// (the guard page at stack_base - PAGE_SIZE is left unmapped).
-fn alloc_thread_stack(num_pages: usize) -> Option<(usize, usize)> {
+pub fn alloc_thread_stack(num_pages: usize) -> Option<(usize, usize)> {
     let size = num_pages * PAGE_SIZE;
     // Reserve: 1 guard page (unmapped) + num_pages stack pages.
     let total = PAGE_SIZE + size;

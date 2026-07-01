@@ -85,7 +85,14 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let _ = debug_print("cluuterm: window registered");
 
     // Phase 2: register pts node with VFS.
-    let (pts_id, vfs_ep) = match register_pts(my_ep) {
+    //
+    // PTS is registered globally (session_id=None) because the VFS MountTable
+    // only has the global PtsBackend.  The session-specific PtsBackend
+    // (narrow_pts_mount) exists but is not yet wired into the view system.
+    // The session_id is still read for the completion RPC endpoint name
+    // (shell:completion:<sid>).
+    let session_id = read_own_session_id();
+    let (pts_id, vfs_ep) = match register_pts(my_ep, None) {
         Ok(pair) => pair,
         Err(code) => {
             let _ = debug_print("cluuterm: PTS_REGISTER failed");
@@ -105,7 +112,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let shm_ptr = SHM_VA as *mut WindowShm;
     let interior_cols = (gw as usize).saturating_sub(2 * (CHROME + PAD_LR)).max(1);
     let interior_rows = (gh as usize).saturating_sub((CHROME + PAD_TOP) + (CHROME + PAD_BOT)).max(1);
-    let mut term = tty_backend::Cluuterm::new(interior_cols, interior_rows, shm_ptr, pts_id, window_id, my_ep, comp_ep, vfs_ep);
+    let mut term = tty_backend::Cluuterm::new(interior_cols, interior_rows, shm_ptr, pts_id, window_id, my_ep, comp_ep, vfs_ep, session_id);
     term.run();
     0
 }
@@ -189,13 +196,14 @@ fn register_window(my_ep: usize) -> Result<(u32, usize, u32, u32), i32> {
 
 // ─── PTS_REGISTER ─────────────────────────────────────────────────────────────
 
-/// Query procmgr for the caller's session_id.
+/// Read this cluuterm's session id from the CLUU_SESSION_ID env var.
 ///
-/// Until spec 3 wires sessions through spawn, this returns `None`
-/// unconditionally. The per-session `/dev/pts/` overlay only activates
-/// once spec 3 populates real session ids.
+/// procmgr sets CLUU_SESSION_ID in the child's ProcessInfo env block at
+/// spawn. Returns None if the var is absent or unparseable; the per-session
+/// `/dev/pts/` overlay only activates with a real session id.
 fn read_own_session_id() -> Option<u32> {
-    None
+    libcluu::posix::read_env_var("CLUU_SESSION_ID")
+        .and_then(|s| s.parse().ok())
 }
 
 /// Register a new `/dev/pts/<id>` slot with the VFS.
@@ -207,7 +215,7 @@ fn read_own_session_id() -> Option<u32> {
 ///
 /// Returns `(pts_id, vfs_ep)` so the caller can pass `vfs_ep` to
 /// `Cluuterm::new` for `PTS_READ_DELIVER_LABEL` replies.
-fn register_pts(my_ep: usize) -> Result<(u32, usize), i32> {
+fn register_pts(my_ep: usize, session_id: Option<u32>) -> Result<(u32, usize), i32> {
     let vfs_ep = match registry::lookup_service("vfs:main") {
         Some(ep) => ep,
         None => {
@@ -217,7 +225,7 @@ fn register_pts(my_ep: usize) -> Result<(u32, usize), i32> {
     };
 
     let req = VfsRegisterPtsRequest {
-        session_id: read_own_session_id(),
+        session_id,
         pts_endpoint: my_ep as u64,
         suggested_id: None,
     };
