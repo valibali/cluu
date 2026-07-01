@@ -41,16 +41,9 @@ use libcluu::{debug_print, registry, syscall};
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
 /// Width of the login modal box in cells (border-inclusive).
-const MODAL_W: u32 = 52;
+const MODAL_W: u32 = 30;
 /// Height of the login modal box in cells (border-inclusive).
-const MODAL_H: u32 = 10;
-
-/// Banner text from shell — rendered above the modal.
-const BANNER: &str = include_str!("../../shell/src/banner.txt");
-/// Number of banner text lines (9 content rows).
-const BANNER_H: u32 = 9;
-/// Gap (blank rows) between banner bottom and modal top.
-const BANNER_GAP: u32 = 1;
+const MODAL_H: u32 = 8;
 
 /// Virtual address for the compositor SHM frame.
 /// Distinct from cluuterm (0xD100_0000) and compdemo (0xD000_0000).
@@ -81,8 +74,6 @@ fn pack_cell(cp: u32, fg: u8, bg: u8, attrs: u64) -> u64 {
 const BLACK:     u8 = 0;
 /// Colour index 7 = light-grey (default text).
 const WHITE:     u8 = 7;
-/// Colour index 4 = blue (window chrome / title bar).
-const BLUE:      u8 = 4;
 /// Colour index 15 = bright white (title text).
 const BR_WHITE:  u8 = 15;
 /// Colour index 8 = dark grey (field background).
@@ -212,79 +203,52 @@ unsafe fn write_str(
 
 /// Render the full-screen login window into the SHM cell buffer.
 ///
-/// The window is `cols × rows` cells (full compositor grid). The banner (9
-/// rows) plus a 1-row gap plus the login modal (MODAL_W=52 × MODAL_H=10) are
-/// vertically stacked and centered together:
-///   total_h = BANNER_H + BANNER_GAP + MODAL_H = 20
-///   stack_y = (rows - total_h) / 2
-///   banner_y_top = stack_y
-///   modal_y_top  = stack_y + BANNER_H + BANNER_GAP
+/// The window is `cols × rows` cells (full compositor grid). The login modal
+/// (MODAL_W × MODAL_H) is centred on a black screen.
 ///
 /// Modal layout (relative to modal top-left):
 ///   Row 0   : top border    "╔══…══╗"
 ///   Row 1   : blank         "║    ║"
-///   Row 2   : title         "║  CLUU login  ║"
+///   Row 2   : username      "║  username: __________  ║"
 ///   Row 3   : blank         "║    ║"
-///   Row 4   : username      "║  username: __________  ║"
+///   Row 4   : password      "║  password: __________  ║"
 ///   Row 5   : blank         "║    ║"
-///   Row 6   : password      "║  password: __________  ║"
-///   Row 7   : blank         "║    ║"
-///   Row 8   : hint/error    "║  [Tab] focus  [Enter] login  ║"
-///   Row 9   : bottom border "╚══…══╝"
+///   Row 6   : hint/error    "║  [Tab] focus  [Enter] login  ║"
+///   Row 7   : bottom border "╚══…══╝"
 ///
-/// All cells outside the modal box are black spaces.
+/// All cells outside the modal box are black spaces. The modal itself is
+/// rendered on a DARK_GREY background with BR_WHITE borders.
 unsafe fn render_modal(cells: *mut u64, w: u32, h: u32, state: &LoginState) {
     // Fill entire screen with black background cells.
     fill_run(cells, 0, 0, w, w * h, b' ' as u32, WHITE, BLACK, 0);
 
-    // Compute stacked layout: banner + gap + modal, all centered vertically.
-    let total_h = BANNER_H + BANNER_GAP + MODAL_H;
-    let stack_y = h.saturating_sub(total_h) / 2;
-    let banner_y_top = stack_y;
-    let modal_y_top = stack_y + BANNER_H + BANNER_GAP;
-
-    // ── Banner: render each line centered horizontally ────────────────────────
-    for (i, line) in BANNER.lines().enumerate() {
-        let chars: alloc::vec::Vec<char> = line.chars().collect();
-        let lx = (w.saturating_sub(chars.len() as u32)) / 2;
-        let ly = banner_y_top + i as u32;
-        for (j, ch) in chars.iter().enumerate() {
-            let cp = *ch as u32;
-            let cell = pack_cell(cp, BR_WHITE, BLACK, 0);
-            core::ptr::write_volatile(
-                cells.add((ly * w + lx + j as u32) as usize),
-                cell,
-            );
-        }
-    }
-
-    // Center the modal box horizontally; use modal_y_top for vertical.
+    // Center the modal box on the screen.
     let mx = (w.saturating_sub(MODAL_W)) / 2;
-    let my = modal_y_top;
+    let my = (h.saturating_sub(MODAL_H)) / 2;
     let mw = MODAL_W;
     let mh = MODAL_H;
 
     // ── Modal row 0 (my+0): top border ╔═…═╗ ────────────────────────────────
     core::ptr::write_volatile(
         cells.add(((my) * w + mx) as usize),
-        pack_cell(0x2554, BR_WHITE, BLUE, 0), // ╔
+        pack_cell(0x2554, BR_WHITE, DARK_GREY, 0), // ╔
     );
-    fill_run(cells, mx + 1, my, w, mw - 2, 0x2550, BR_WHITE, BLUE, 0); // ═
+    fill_run(cells, mx + 1, my, w, mw - 2, 0x2550, BR_WHITE, DARK_GREY, 0); // ═
     core::ptr::write_volatile(
         cells.add(((my) * w + mx + mw - 1) as usize),
-        pack_cell(0x2557, BR_WHITE, BLUE, 0), // ╗
+        pack_cell(0x2557, BR_WHITE, DARK_GREY, 0), // ╗
     );
 
     // ── Modal row (my+mh-1): bottom border ╚═…═╝ ────────────────────────────
     let last_row = my + mh - 1;
     core::ptr::write_volatile(
         cells.add((last_row * w + mx) as usize),
-        pack_cell(0x255A, BR_WHITE, BLUE, 0), // ╚
+        pack_cell(0x255A, BR_WHITE, DARK_GREY, 0), // ╚
     );
-    fill_run(cells, mx + 1, last_row, w, mw - 2, 0x2550, BR_WHITE, BLUE, 0); // ═
+    fill_run(cells, mx + 1, last_row, w, mw - 2, 0x2550, BR_WHITE, DARK_GREY, 0); // ═
     core::ptr::write_volatile(
         cells.add((last_row * w + mx + mw - 1) as usize),
-        pack_cell(0x255D, BR_WHITE, BLUE, 0), // ╝
+        pack_cell(0x255D, BR_WHITE, DARK_GREY, 0), // ╝
     );
 
     // ── Interior rows (my+1)..(my+mh-1): side borders + bg ───────────────────
@@ -293,35 +257,29 @@ unsafe fn render_modal(cells: *mut u64, w: u32, h: u32, state: &LoginState) {
         // Left border ║
         core::ptr::write_volatile(
             cells.add((row * w + mx) as usize),
-            pack_cell(0x2551, BR_WHITE, BLUE, 0),
+            pack_cell(0x2551, BR_WHITE, DARK_GREY, 0),
         );
-        // Interior: blank on dark background
-        fill_run(cells, mx + 1, row, w, mw - 2, b' ' as u32, WHITE, BLACK, 0);
+        // Interior: blank on dark grey background
+        fill_run(cells, mx + 1, row, w, mw - 2, b' ' as u32, WHITE, DARK_GREY, 0);
         // Right border ║
         core::ptr::write_volatile(
             cells.add((row * w + mx + mw - 1) as usize),
-            pack_cell(0x2551, BR_WHITE, BLUE, 0),
+            pack_cell(0x2551, BR_WHITE, DARK_GREY, 0),
         );
     }
 
-    // ── Modal row 2: centred title "CLUU login" ───────────────────────────────
-    let title = b"CLUU login";
-    let title_x = mx + (mw - title.len() as u32) / 2;
-    write_str(cells, title_x, my + 2, w, title, BR_WHITE, BLACK, 1 /* bold */);
-
-    // ── Modal rows 4, 6, and 8: interactive content (fields + hint/error) ─────
+    // ── Modal rows 2, 4, and 6: interactive content (fields + hint/error) ─────
     render_fields(cells, w, mx, my, state);
 }
 
-/// Re-render the username (modal row 4), password (modal row 6), and
-/// hint/error (modal row 8) rows.
+/// Re-render the username (modal row 2), password (modal row 4), and
+/// hint/error (modal row 6) rows.
 ///
 /// `w` is the full screen width (stride for cell addressing).
 /// `mx`/`my` are the modal top-left position on the full-screen grid.
 ///
 /// Called both from `render_modal` (initial paint) and from the input loop
-/// (per-keystroke update).  The chrome rows (borders, title) are left
-/// untouched.
+/// (per-keystroke update).  The chrome rows (borders) are left untouched.
 ///
 /// Field layout (field_x = mx + 2 + prompt.len() = mx + 12, field_w = 10):
 ///   - Filled characters at positions [0..len).
@@ -329,17 +287,18 @@ unsafe fn render_modal(cells: *mut u64, w: u32, h: u32, state: &LoginState) {
 /// The focused field uses YELLOW fg on DARK_GREY bg; the unfocused one uses
 /// WHITE fg on DARK_GREY bg.
 unsafe fn render_fields(cells: *mut u64, w: u32, mx: u32, my: u32, state: &LoginState) {
-    const FIELD_INDENT: u32 = 12; // 2 indent + "username: ".len() = 12
-    const FIELD_W: u32 = 10;      // visible field width
+    const PAD: u32 = 4; // left/right padding inside modal borders
+    const FIELD_INDENT: u32 = PAD + 10; // pad + "username: ".len() = 14
+    const FIELD_W: u32 = 10;            // visible field width
 
     let user_prompt = b"username: ";
     let pass_prompt = b"password: ";
 
+    let row2 = my + 2;
     let row4 = my + 4;
     let row6 = my + 6;
-    let row8 = my + 8;
 
-    // ── Row 4: username ────────────────────────────────────────────────────────
+    // ── Row 2: username ────────────────────────────────────────────────────────
     let (ufg, pfg) = if state.focus == Focus::Username {
         (YELLOW, WHITE)
     } else {
@@ -347,50 +306,50 @@ unsafe fn render_fields(cells: *mut u64, w: u32, mx: u32, my: u32, state: &Login
     };
 
     // Re-draw prompt in the correct colour to show focus on the label too.
-    write_str(cells, mx + 2, row4, w, user_prompt, ufg, BLACK, 0);
+    write_str(cells, mx + PAD, row2, w, user_prompt, ufg, DARK_GREY, 0);
 
     let field_x = mx + FIELD_INDENT;
     let ulen = state.username.len() as u32;
     // Typed characters (shown as-is for username).
     for (i, &c) in state.username.iter().enumerate() {
         core::ptr::write_volatile(
-            cells.add((row4 * w + field_x + i as u32) as usize),
+            cells.add((row2 * w + field_x + i as u32) as usize),
             pack_cell(c as u32, ufg, DARK_GREY, 0),
         );
     }
     // Underscore placeholders for remaining positions.
     if ulen < FIELD_W {
-        fill_run(cells, field_x + ulen, row4, w, FIELD_W - ulen, b'_' as u32, ufg, DARK_GREY, 0);
+        fill_run(cells, field_x + ulen, row2, w, FIELD_W - ulen, b'_' as u32, ufg, DARK_GREY, 0);
     }
 
-    // ── Row 6: password ────────────────────────────────────────────────────────
-    write_str(cells, mx + 2, row6, w, pass_prompt, pfg, BLACK, 0);
+    // ── Row 4: password ────────────────────────────────────────────────────────
+    write_str(cells, mx + PAD, row4, w, pass_prompt, pfg, DARK_GREY, 0);
 
     let plen = state.password.len() as u32;
     // Password characters are masked as '*'.
     for i in 0..plen {
         core::ptr::write_volatile(
-            cells.add((row6 * w + field_x + i) as usize),
+            cells.add((row4 * w + field_x + i) as usize),
             pack_cell(b'*' as u32, pfg, DARK_GREY, 0),
         );
     }
     // Underscore placeholders.
     if plen < FIELD_W {
-        fill_run(cells, field_x + plen, row6, w, FIELD_W - plen, b'_' as u32, pfg, DARK_GREY, 0);
+        fill_run(cells, field_x + plen, row4, w, FIELD_W - plen, b'_' as u32, pfg, DARK_GREY, 0);
     }
 
-    // ── Row 8: hint or error banner ────────────────────────────────────────────
-    // Clear the modal interior of row 8 (preserve side borders from render_modal).
-    fill_run(cells, mx + 1, row8, w, MODAL_W - 2, b' ' as u32, WHITE, BLACK, 0);
+    // ── Row 6: hint or error banner ────────────────────────────────────────────
+    // Clear the modal interior of row 6 (preserve side borders from render_modal).
+    fill_run(cells, mx + 1, row6, w, MODAL_W - 2, b' ' as u32, WHITE, DARK_GREY, 0);
     if state.show_error {
         let err_msg = b"login incorrect";
         let interior = MODAL_W - 2;
         let msg_len = err_msg.len() as u32;
         let err_x = mx + 1 + (interior.saturating_sub(msg_len)) / 2;
-        write_str(cells, err_x, row8, w, err_msg, RED, BLACK, 0);
+        write_str(cells, err_x, row6, w, err_msg, RED, DARK_GREY, 0);
     } else {
         let hint = b"[Tab] focus  [Enter] login";
-        write_str(cells, mx + 2, row8, w, hint, GREEN, BLACK, 0);
+        write_str(cells, mx + PAD, row6, w, hint, GREEN, DARK_GREY, 0);
     }
 }
 
@@ -416,14 +375,13 @@ fn register_window(my_ep: usize) -> Result<(u32, usize, u32, u32), i32> {
         }
     };
 
-    let title = b"CLUU login";
-    let modal_total_h = BANNER_H + BANNER_GAP + MODAL_H;
+    let title = b"login";
     let req = Message::new(
         COMP_WIN_REGISTER_LABEL,
         [
             title.len(),                                      // words[0] = payload_len
-            MODAL_W as usize,                                      // words[1] = req_w
-            modal_total_h as usize,                                // words[2] = req_h
+            MODAL_W as usize,                                 // words[1] = req_w
+            MODAL_H as usize,                                 // words[2] = req_h
             my_ep,                                            // words[3] = app input/frame endpoint
             (COMP_WIN_FLAG_MODAL | COMP_WIN_FLAG_NO_CHROME) as usize, // words[4] = flags
             0,                                                // words[5] = reserved
@@ -535,13 +493,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         }
     };
 
-    // Compute modal top-left position using the stacked banner+gap+modal layout.
-    // This must match the computation in render_modal so render_fields targets
-    // the same modal origin.
-    let total_h = BANNER_H + BANNER_GAP + MODAL_H;
-    let stack_y = gh.saturating_sub(total_h) / 2;
+    // Compute modal top-left position. This must match the computation in
+    // render_modal so render_fields targets the same modal origin.
     let modal_mx = (gw.saturating_sub(MODAL_W)) / 2;
-    let modal_my = stack_y + BANNER_H + BANNER_GAP;
+    let modal_my = (gh.saturating_sub(MODAL_H)) / 2;
 
     // Initialise WindowShm header at SHM_VA.
     let shm_ptr = SHM_VA as *mut WindowShm;
