@@ -96,7 +96,8 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
         } else {
             (local_x - CHROME_LEFT - pad_l, local_y - CHROME_TOP - pad_t)
         };
-        return read_shm_cell(win, ix, iy);
+        let focused = comp.focused == Some(win.id);
+        return read_shm_cell(win, ix, iy, focused);
     }
     BG_CELL
 }
@@ -234,16 +235,23 @@ pub fn render_status_row(comp: &mut Compositor) {
     }
 }
 
-fn read_shm_cell(win: &Window, ix: u16, iy: u16) -> u64 {
+fn read_shm_cell(win: &Window, ix: u16, iy: u16, focused: bool) -> u64 {
     let cell = win.mapping.read_cell(ix, iy).unwrap_or(BG_CELL);
-    // Gate cursor visibility: if the SHM header marks the cursor hidden
-    // (cursor_visible == 0, toggled by the client — e.g. cluuterm) and this
-    // cell is the cursor cell, un-invert it so the cursor disappears.
+    // Gate cursor visibility. The cursor (an inverted fg/bg cell written by
+    // cluuterm at `(cursor_x, cursor_y)` in SHM) is shown only when BOTH:
+    //   (a) the client has marked it visible in the SHM header
+    //       (`cursor_visible == 1`, the blink-on phase), AND
+    //   (b) this window is the focused one.
+    // Inactive windows never show the text cursor — focus moves away and
+    // the cursor cell re-renders as a normal cell on the next dirty pass
+    // (focus changes dirty both windows' cells — see
+    // [[cluu-compositor-focus-chrome-stale]]).
     let hdr = win.mapping.header();
     let cursor_visible = unsafe {
         core::ptr::read_volatile(&hdr.cursor_visible as *const u32)
     };
-    if cursor_visible == 0 {
+    let cursor_hidden = cursor_visible == 0 || !focused;
+    if cursor_hidden {
         let cx = hdr.cursor_x as u16;
         let cy = hdr.cursor_y as u16;
         // Sentinel: clients that don't have a cursor never write cursor_x/y,
