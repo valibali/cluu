@@ -206,6 +206,7 @@ fn unicode_to_cp437(cp: u32) -> u8 {
         0x2557 => 0xBB,                 // ╗
         0x255A => 0xC8,                 // ╚
         0x255D => 0xBC,                 // ╝
+        0x2588 => 0xDB,                 // █ full block (mouse cursor)
         _ => b'?',
     }
 }

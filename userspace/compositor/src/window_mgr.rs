@@ -2,7 +2,7 @@
 //!
 //! All methods are `impl Compositor` blocks; the type itself lives in `state`.
 
-use crate::state::{Compositor, ShmMapping, Window, WindowId, WindowShm, WIN_SHM_MAGIC, WIN_SHM_VERSION};
+use crate::state::{Compositor, DragMode, DragState, ShmMapping, Window, WindowId, WindowShm, WIN_SHM_MAGIC, WIN_SHM_VERSION, GLYPH_W, GLYPH_H};
 use libcluu::Result;
 
 impl Compositor {
@@ -156,9 +156,10 @@ impl Compositor {
 
         // Notify app of initial interior dimensions via WIN_CONFIGURE.
         // Interior = total cells minus 2 for chrome (1-cell border each side).
-        if input_endpoint != 0 && granted_w > 4 && granted_h > 3 {
-            let interior_w = (granted_w - 4) as u32;
-            let interior_h = (granted_h - 3) as u32;
+        if input_endpoint != 0 && granted_w > 2 && granted_h > 2 {
+            let (iw_off, ih_off): (u16, u16) = if modal { (2, 2) } else { (4, 3) };
+            let interior_w = granted_w.saturating_sub(iw_off);
+            let interior_h = granted_h.saturating_sub(ih_off);
             let msg = libcluu::types::Message::new(
                 libcluu::ipc::COMP_WIN_CONFIGURE_LABEL,
                 [
@@ -183,8 +184,10 @@ impl Compositor {
     /// Chrome is 1 cell on each side, so interior starts at local (1,1).
     pub fn handle_win_damage(&mut self, id: WindowId, x: u32, y: u32, w: u32, h: u32) {
         let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else { return; };
-        let inner_w = win.w.saturating_sub(4);
-        let inner_h = win.h.saturating_sub(3);
+        let chrome_off_x: u16 = if win.modal { 1 } else { 2 };
+        let chrome_off_y: u16 = 1;
+        let inner_w = win.w.saturating_sub(chrome_off_x * 2);
+        let inner_h = win.h.saturating_sub(chrome_off_y * 2);
         let cx0 = (x as u16).min(inner_w);
         let cy0 = (y as u16).min(inner_h);
         let cx1 = ((x as u16).saturating_add(w as u16)).min(inner_w);
@@ -193,8 +196,8 @@ impl Compositor {
         let (win_x, win_y) = (win.x, win.y);
         for iy in cy0..cy1 {
             for ix in cx0..cx1 {
-                let gx = win_x + 2 + ix;
-                let gy = win_y + 1 + iy;
+                let gx = win_x + chrome_off_x + ix;
+                let gy = win_y + chrome_off_y + iy;
                 self.cell_dirty.push((gx, gy));
             }
         }
@@ -329,8 +332,10 @@ impl Compositor {
         // Interior = total cells minus 2 for chrome (1-cell border each side).
         let input_ep = self.windows[pos].input_endpoint;
         if input_ep != 0 && new_w > 2 && new_h > 2 {
-            let interior_w = (new_w - 2) as u32;
-            let interior_h = (new_h - 2) as u32;
+            let is_modal = self.windows[pos].modal;
+            let (iw_off, ih_off): (u16, u16) = if is_modal { (2, 2) } else { (4, 3) };
+            let interior_w = new_w.saturating_sub(iw_off);
+            let interior_h = new_h.saturating_sub(ih_off);
             let msg = libcluu::types::Message::new(
                 libcluu::ipc::COMP_WIN_CONFIGURE_LABEL,
                 [
@@ -465,4 +470,213 @@ impl Compositor {
             self.focused = self.windows.last().map(|w| w.id);
         }
     }
+}
+
+const BTN_LEFT: u8 = 1 << 0;
+
+impl Compositor {
+    pub fn handle_mouse_event(&mut self, dx: i32, dy: i32, buttons: u8) {
+        static FIRST_EVENT_LOGGED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !FIRST_EVENT_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            let _ = libcluu::debug_print("compositor: first mouse event received");
+        }
+
+        let old_cell = self.cursor_cell();
+
+        self.pointer_x = (self.pointer_x + dx).max(0).min(self.width_px as i32 - 1);
+        self.pointer_y = (self.pointer_y + dy).max(0).min(self.height_px as i32 - 1);
+
+        let left_pressed  = (buttons & BTN_LEFT) != 0 && (self.pointer_buttons & BTN_LEFT) == 0;
+        let left_released = (buttons & BTN_LEFT) == 0 && (self.pointer_buttons & BTN_LEFT) != 0;
+        self.pointer_buttons = buttons;
+
+        let new_cell = self.cursor_cell();
+
+        if left_pressed {
+            if let Some(win_info) = self.window_at(new_cell.0, new_cell.1) {
+                let is_modal = self.windows.iter()
+                    .find(|w| w.id == win_info.id)
+                    .map(|w| w.modal)
+                    .unwrap_or(false);
+                self.focus_window(win_info.id);
+                if !is_modal {
+                    let mode = if self.is_resize_handle(win_info, new_cell.0, new_cell.1) {
+                        DragMode::Resize
+                    } else {
+                        DragMode::Move
+                    };
+                    self.drag_state = Some(DragState {
+                        window_id: win_info.id,
+                        mode,
+                        start_cell_x: new_cell.0,
+                        start_cell_y: new_cell.1,
+                        start_win_x: win_info.x,
+                        start_win_y: win_info.y,
+                        start_win_w: win_info.w,
+                        start_win_h: win_info.h,
+                    });
+                }
+            }
+        }
+
+        if left_released {
+            self.drag_state = None;
+        }
+
+        if self.drag_state.is_some() && (new_cell.0 != old_cell.0 || new_cell.1 != old_cell.1) {
+            self.apply_drag(new_cell);
+        }
+
+        if old_cell != new_cell {
+            self.cell_dirty.push(old_cell);
+        }
+        self.cell_dirty.push(new_cell);
+        self.cursor_needs_render = true;
+    }
+
+    pub fn cursor_cell(&self) -> (u16, u16) {
+        let cx = (self.pointer_x / GLYPH_W as i32) as u16;
+        let cy = (self.pointer_y / GLYPH_H as i32) as u16;
+        (cx.min(self.cols.saturating_sub(1)), cy.min(self.rows.saturating_sub(1)))
+    }
+
+    pub fn dirty_cursor_cell(&mut self) {
+        let (cx, cy) = self.cursor_cell();
+        self.cell_dirty.push((cx, cy));
+        self.cursor_needs_render = true;
+    }
+
+    pub fn render_cursor(&mut self) {
+        let (cx, cy) = self.cursor_cell();
+        let idx = cy as usize * self.cols as usize + cx as usize;
+        if idx < self.cell_grid.len() {
+            let cell = self.cell_grid[idx];
+            let bg = (cell >> 29) & 0xFF;
+            self.cell_grid[idx] = (cell & !((0x1F_FFFF) | (0xFFu64 << 21)))
+                | (0x2588u64)
+                | (15u64 << 21);
+        }
+    }
+
+    fn window_at(&self, cx: u16, cy: u16) -> Option<WinInfo> {
+        for win in self.windows.iter().rev() {
+            if cx >= win.x && cx < win.x.saturating_add(win.w)
+                && cy >= win.y && cy < win.y.saturating_add(win.h)
+            {
+                return Some(WinInfo { id: win.id, x: win.x, y: win.y, w: win.w, h: win.h });
+            }
+        }
+        None
+    }
+
+    fn is_resize_handle(&self, win: WinInfo, cx: u16, cy: u16) -> bool {
+        cx == win.x.saturating_add(win.w).saturating_sub(1)
+            || cy == win.y.saturating_add(win.h).saturating_sub(1)
+    }
+
+    fn focus_window(&mut self, id: WindowId) {
+        if self.focused == Some(id) { return; }
+        if let Some(prev_id) = self.focused {
+            if let Some(prev) = self.windows.iter().find(|w| w.id == prev_id) {
+                let (px, py, pw, ph) = (prev.x, prev.y, prev.w, prev.h);
+                for cy in py..py.saturating_add(ph) {
+                    for cx in px..px.saturating_add(pw) {
+                        self.cell_dirty.push((cx, cy));
+                    }
+                }
+            }
+        }
+        if let Some(pos) = self.windows.iter().position(|w| w.id == id) {
+            let win = self.windows.remove(pos);
+            let new_id = win.id;
+            let (x, y, w, h) = (win.x, win.y, win.w, win.h);
+            if win.modal {
+                self.windows.push(win);
+            } else {
+                let modal_pos = self.windows.iter().position(|w| w.modal).unwrap_or(self.windows.len());
+                self.windows.insert(modal_pos, win);
+            }
+            self.focused = Some(new_id);
+            for cy in y..y.saturating_add(h) {
+                for cx in x..x.saturating_add(w) {
+                    self.cell_dirty.push((cx, cy));
+                }
+            }
+        }
+    }
+
+    fn apply_drag(&mut self, current_cell: (u16, u16)) {
+        let ds = match self.drag_state {
+            Some(ds) => ds,
+            None => return,
+        };
+        let pos = match self.windows.iter().position(|w| w.id == ds.window_id) {
+            Some(p) => p,
+            None => { self.drag_state = None; return; }
+        };
+        let delta_x = current_cell.0 as i32 - ds.start_cell_x as i32;
+        let delta_y = current_cell.1 as i32 - ds.start_cell_y as i32;
+
+        let (old_x, old_y, old_w, old_h) = {
+            let win = &self.windows[pos];
+            (win.x, win.y, win.w, win.h)
+        };
+
+        match ds.mode {
+            DragMode::Move => {
+                let new_x = (ds.start_win_x as i32 + delta_x)
+                    .max(0)
+                    .min(self.cols as i32 - ds.start_win_w as i32) as u16;
+                let new_y = (ds.start_win_y as i32 + delta_y)
+                    .max(1)
+                    .min(self.rows as i32 - ds.start_win_h as i32) as u16;
+                self.windows[pos].x = new_x;
+                self.windows[pos].y = new_y;
+            }
+            DragMode::Resize => {
+                let new_w = ((ds.start_win_w as i32 + delta_x).max(5))
+                    .min(self.cols as i32 - self.windows[pos].x as i32) as u16;
+                let new_h = ((ds.start_win_h as i32 + delta_y).max(5))
+                    .min(self.rows as i32 - self.windows[pos].y as i32) as u16;
+                self.windows[pos].w = new_w;
+                self.windows[pos].h = new_h;
+
+                let input_ep = self.windows[pos].input_endpoint;
+                if input_ep != 0 && new_w > 2 && new_h > 2 {
+                    let is_modal = self.windows[pos].modal;
+                    let (iw_off, ih_off): (u16, u16) = if is_modal { (2, 2) } else { (4, 3) };
+                    let msg = libcluu::types::Message::new(
+                        libcluu::ipc::COMP_WIN_CONFIGURE_LABEL,
+                        [ds.window_id as usize, new_w.saturating_sub(iw_off) as usize, new_h.saturating_sub(ih_off) as usize, 0, 0, 0],
+                        3,
+                    );
+                    let _ = libcluu::ipc::send(input_ep, &msg, libcluu::types::IpcFlags::empty());
+                }
+            }
+        }
+
+        let (new_x, new_y, new_w, new_h) = {
+            let win = &self.windows[pos];
+            (win.x, win.y, win.w, win.h)
+        };
+        let min_x = old_x.min(new_x);
+        let min_y = old_y.min(new_y);
+        let max_x = (old_x.saturating_add(old_w)).max(new_x.saturating_add(new_w));
+        let max_y = (old_y.saturating_add(old_h)).max(new_y.saturating_add(new_h));
+        for cy in min_y..max_y {
+            for cx in min_x..max_x {
+                self.cell_dirty.push((cx, cy));
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WinInfo {
+    id: WindowId,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
 }

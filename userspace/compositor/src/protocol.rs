@@ -18,6 +18,7 @@ use libcluu::ipc::{
     KBD_EVENT_LABEL, COMP_SHUTDOWN_LABEL, COMP_VT_ACTIVATE_LABEL,
     COMP_VT_DEACTIVATE_LABEL, COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL,
     COMP_WIN_QUERY_SCREEN_LABEL, COMP_WIN_REGISTER_LABEL, COMP_WIN_SET_TITLE_LABEL,
+    MOUSE_EVENT_LABEL,
 };
 use libcluu::types::Message;
 
@@ -31,6 +32,7 @@ pub enum Incoming {
     WinSetTitle { window_id: u64, title_len: u32 },
     QueryScreenSize,
     KbdEvent { ascii: u8, modifiers: u8, scancode: u8, extended: u8 },
+    MouseEvent { dx: i32, dy: i32, buttons: u8 },
     VtActivate,
     VtDeactivate,
     Shutdown,
@@ -69,6 +71,11 @@ pub fn parse(msg: &Message) -> Incoming {
             modifiers: msg.words[2] as u8,
             scancode:  msg.words[3] as u8,
             extended:  msg.words[4] as u8,
+        },
+        MOUSE_EVENT_LABEL => Incoming::MouseEvent {
+            dx:      msg.words[1] as i32,
+            dy:      msg.words[2] as i32,
+            buttons: msg.words[3] as u8,
         },
         COMP_VT_ACTIVATE_LABEL => Incoming::VtActivate,
         COMP_VT_DEACTIVATE_LABEL => Incoming::VtDeactivate,

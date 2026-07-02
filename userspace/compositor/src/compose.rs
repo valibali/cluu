@@ -63,7 +63,8 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
         // Fullscreen windows have no chrome — treat every cell as interior.
         // When any window is fullscreen-focused, suppress chrome on all windows
         // (the fullscreen window's interior covers the whole screen anyway).
-        let in_chrome = if win.fullscreen || win.no_chrome || fullscreen_mode {
+        let suppress_chrome = win.fullscreen || win.no_chrome || win.modal || fullscreen_mode;
+        let in_chrome = if suppress_chrome {
             false
         } else {
             local_x < CHROME_LEFT
@@ -75,21 +76,25 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
             let focused = comp.focused == Some(win.id);
             return chrome_glyph(win, local_x, local_y, focused);
         }
-        let in_padding = if win.fullscreen || win.no_chrome || fullscreen_mode {
+        let pad_l = if win.modal { 0 } else { PAD_LEFT };
+        let pad_r = if win.modal { 0 } else { PAD_RIGHT };
+        let pad_t = if win.modal { 0 } else { PAD_TOP };
+        let pad_b = if win.modal { 0 } else { PAD_BOTTOM };
+        let in_padding = if suppress_chrome {
             false
         } else {
-            local_x < CHROME_LEFT + PAD_LEFT
-                || local_x >= win.w.saturating_sub(CHROME_RIGHT + PAD_RIGHT)
-                || local_y < CHROME_TOP + PAD_TOP
-                || local_y >= win.h.saturating_sub(CHROME_BOTTOM + PAD_BOTTOM)
+            local_x < CHROME_LEFT + pad_l
+                || local_x >= win.w.saturating_sub(CHROME_RIGHT + pad_r)
+                || local_y < CHROME_TOP + pad_t
+                || local_y >= win.h.saturating_sub(CHROME_BOTTOM + pad_b)
         };
         if in_padding {
             return BG_CELL;
         }
-        let (ix, iy) = if win.fullscreen || win.no_chrome {
+        let (ix, iy) = if suppress_chrome {
             (local_x, local_y)
         } else {
-            (local_x - CHROME_LEFT - PAD_LEFT, local_y - CHROME_TOP - PAD_TOP)
+            (local_x - CHROME_LEFT - pad_l, local_y - CHROME_TOP - pad_t)
         };
         return read_shm_cell(win, ix, iy);
     }

@@ -392,6 +392,9 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                                 comp.forward_input_event(ascii, modifiers, scancode, extended);
                             }
                         }
+                        protocol::Incoming::MouseEvent { dx, dy, buttons } => {
+                            comp.handle_mouse_event(dx, dy, buttons);
+                        }
                         protocol::Incoming::VtActivate => {
                             comp.handle_vt_activate();
                             let _ = debug_print("compositor: VT activate");
@@ -434,9 +437,13 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
             }
         }
 
-        // Recompute dirty cells (tick_clock is now fired by TIME_TICK push arm).
         compose::recompute_dirty(&mut comp);
         compose::render_status_row(&mut comp);
+
+        if comp.cursor_needs_render {
+            comp.render_cursor();
+            comp.cursor_needs_render = false;
+        }
         // Arm the frame deadline if the clock tick or status render dirtied
         // the cell grid.  (The message-receive arm above only covers
         // protocol-message-driven dirt; clock-tick dirt arrives here.)

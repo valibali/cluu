@@ -271,6 +271,29 @@ pub struct Compositor {
     /// and verify incoming SESSION_ENDED events.
     pub tracked_sessions: BTreeSet<u32>,
 
+    pub pointer_x: i32,
+    pub pointer_y: i32,
+    pub pointer_buttons: u8,
+    pub drag_state: Option<DragState>,
+    pub cursor_needs_render: bool,
+}
+
+#[derive(Clone, Copy)]
+pub enum DragMode {
+    Move,
+    Resize,
+}
+
+#[derive(Clone, Copy)]
+pub struct DragState {
+    pub window_id: WindowId,
+    pub mode: DragMode,
+    pub start_cell_x: u16,
+    pub start_cell_y: u16,
+    pub start_win_x: u16,
+    pub start_win_y: u16,
+    pub start_win_w: u16,
+    pub start_win_h: u16,
 }
 
 use libcluu::posix::{
@@ -377,6 +400,11 @@ impl Compositor {
             control_endpoint: 0,
             registry_endpoint: 0,
             tracked_sessions: BTreeSet::new(),
+            pointer_x: 0,
+            pointer_y: 0,
+            pointer_buttons: 0,
+            drag_state: None,
+            cursor_needs_render: false,
         })
     }
 }
