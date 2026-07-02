@@ -155,9 +155,11 @@ impl Compositor {
         }
 
         // Notify app of initial interior dimensions via WIN_CONFIGURE.
-        // Interior = total cells minus 2 for chrome (1-cell border each side).
+        // Normal windows: interior = total - (chrome + padding) on each axis.
+        // Modal windows: compose_cell suppresses chrome and reads SHM at
+        // (local_x, local_y) directly, so the interior IS the full grant.
         if input_endpoint != 0 && granted_w > 2 && granted_h > 2 {
-            let (iw_off, ih_off): (u16, u16) = if modal { (2, 2) } else { (4, 3) };
+            let (iw_off, ih_off): (u16, u16) = if modal { (0, 0) } else { (4, 3) };
             let interior_w = granted_w.saturating_sub(iw_off);
             let interior_h = granted_h.saturating_sub(ih_off);
             let msg = libcluu::types::Message::new(
@@ -181,11 +183,19 @@ impl Compositor {
     /// App says "I redrew (x,y,w,h) inside my window's interior". Mark
     /// the corresponding total-grid cells dirty.
     ///
-    /// Chrome is 1 cell on each side, so interior starts at local (1,1).
+    /// Interior coords are 0-based relative to the window's interior origin.
+    /// For normal windows that's local (2, 1) (chrome + padding); for modal
+    /// windows it's local (0, 0) because `compose_cell` suppresses chrome
+    /// and reads SHM at `(local_x, local_y)` directly. The chrome offset
+    /// here MUST match `compose_cell`'s suppression decision, otherwise the
+    /// cells where the client draws its own modal border are never dirtied
+    /// by WIN_DAMAGE and stay stuck at the register-time compose (empty SHM)
+    /// until something else damages them (e.g. mouse hover).
+    /// See [[cluu-modal-damage-clamps-border-out]].
     pub fn handle_win_damage(&mut self, id: WindowId, x: u32, y: u32, w: u32, h: u32) {
         let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else { return; };
-        let chrome_off_x: u16 = if win.modal { 1 } else { 2 };
-        let chrome_off_y: u16 = 1;
+        let chrome_off_x: u16 = if win.modal { 0 } else { 2 };
+        let chrome_off_y: u16 = if win.modal { 0 } else { 1 };
         let inner_w = win.w.saturating_sub(chrome_off_x * 2);
         let inner_h = win.h.saturating_sub(chrome_off_y * 2);
         let cx0 = (x as u16).min(inner_w);
@@ -329,11 +339,10 @@ impl Compositor {
         }
 
         // Notify the app about the new interior dimensions via WIN_CONFIGURE.
-        // Interior = total cells minus 2 for chrome (1-cell border each side).
         let input_ep = self.windows[pos].input_endpoint;
         if input_ep != 0 && new_w > 2 && new_h > 2 {
             let is_modal = self.windows[pos].modal;
-            let (iw_off, ih_off): (u16, u16) = if is_modal { (2, 2) } else { (4, 3) };
+            let (iw_off, ih_off): (u16, u16) = if is_modal { (0, 0) } else { (4, 3) };
             let interior_w = new_w.saturating_sub(iw_off);
             let interior_h = new_h.saturating_sub(ih_off);
             let msg = libcluu::types::Message::new(
@@ -645,7 +654,7 @@ impl Compositor {
                 let input_ep = self.windows[pos].input_endpoint;
                 if input_ep != 0 && new_w > 2 && new_h > 2 {
                     let is_modal = self.windows[pos].modal;
-                    let (iw_off, ih_off): (u16, u16) = if is_modal { (2, 2) } else { (4, 3) };
+                    let (iw_off, ih_off): (u16, u16) = if is_modal { (0, 0) } else { (4, 3) };
                     let msg = libcluu::types::Message::new(
                         libcluu::ipc::COMP_WIN_CONFIGURE_LABEL,
                         [ds.window_id as usize, new_w.saturating_sub(iw_off) as usize, new_h.saturating_sub(ih_off) as usize, 0, 0, 0],
