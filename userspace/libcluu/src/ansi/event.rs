@@ -40,4 +40,8 @@ pub enum Event {
     SetAttr(Attr),
     ResetAttr,
     Scroll(i16),
+    /// DECTCEM (CSI ?25 h / CSI ?25 l). `true` = show, `false` = hide.
+    /// TUI apps (top, kilo) emit this on enter/exit to suppress the
+    /// blinking text cursor while they own the screen.
+    SetCursorVisible(bool),
 }

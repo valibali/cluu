@@ -13,6 +13,8 @@ pub struct Parser {
     param_count: usize,
     current: u16,
     attr: Attr,
+    /// True when the CSI sequence opened with `?` (DEC private mode).
+    private: bool,
 }
 
 // Color tables copied from userspace/console/src/renderer.rs (lines 28-47).
@@ -53,6 +55,7 @@ impl Parser {
             param_count: 0,
             current: 0,
             attr: Attr::default_attr(),
+            private: false,
         }
     }
 
@@ -84,6 +87,7 @@ impl Parser {
                 self.state = EscState::Csi;
                 self.param_count = 0;
                 self.current = 0;
+                self.private = false;
             }
             _ => self.state = EscState::Normal,
         }
@@ -91,6 +95,9 @@ impl Parser {
 
     fn feed_csi<F: FnMut(Event)>(&mut self, b: u8, emit: &mut F) {
         match b {
+            b'?' if self.param_count == 0 && self.current == 0 => {
+                self.private = true;
+            }
             b'0'..=b'9' => {
                 self.current = self.current.saturating_mul(10).saturating_add((b - b'0') as u16);
             }
@@ -149,6 +156,20 @@ impl Parser {
                 self.apply_sgr(emit);
                 self.reset();
             }
+            b'h' if self.private => {
+                self.push_param();
+                if self.param(0, 0) == 25 {
+                    emit(Event::SetCursorVisible(true));
+                }
+                self.reset();
+            }
+            b'l' if self.private => {
+                self.push_param();
+                if self.param(0, 0) == 25 {
+                    emit(Event::SetCursorVisible(false));
+                }
+                self.reset();
+            }
             _ => self.reset(),
         }
     }
@@ -173,6 +194,7 @@ impl Parser {
         self.state = EscState::Normal;
         self.param_count = 0;
         self.current = 0;
+        self.private = false;
     }
 
     fn apply_sgr<F: FnMut(Event)>(&mut self, emit: &mut F) {

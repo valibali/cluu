@@ -69,4 +69,26 @@ mod tests {
     fn erase_line_to_start() {
         assert_eq!(collect(b"\x1b[1K"), vec![Event::EraseLine(EraseMode::ToStart)]);
     }
+
+    #[test]
+    fn dectcem_hide_cursor() {
+        assert_eq!(collect(b"\x1b[?25l"), vec![Event::SetCursorVisible(false)]);
+    }
+
+    #[test]
+    fn dectcem_show_cursor() {
+        assert_eq!(collect(b"\x1b[?25h"), vec![Event::SetCursorVisible(true)]);
+    }
+
+    #[test]
+    fn dectcem_after_other_csi() {
+        // Ensure the `private` flag is reset between sequences — a plain
+        // CSI m after a ?25 l must not be misread as private mode.
+        let evs = collect(b"\x1b[?25l\x1b[31m");
+        assert_eq!(evs, vec![Event::SetCursorVisible(false), Event::SetAttr({
+            let mut a = Attr::default_attr();
+            a.fg = 0x00AA0000;
+            a
+        })]);
+    }
 }
