@@ -126,6 +126,14 @@ pub extern "C" fn kstart() -> ! {
     // Handles CPU exceptions and hardware interrupts
     architecture::x86_64::idt::init();
 
+    // 1.5.0: PS/2 aux (mouse) port init
+    // Enables IRQ12 on the i8042 controller + mouse device streaming.
+    // Must run after IDT (handler installed) but before userspace mouse
+    // driver attaches to IRQ12. Unblocks mouse-driven window handling.
+    unsafe {
+        cluu_kernel::devices::ps2::init_aux();
+    }
+
     // 1.5.1: Enable SMAP/SMEP (Supervisor Mode Access/Execution Prevention)
     unsafe {
         let cpuid7 = core::arch::x86_64::__cpuid_count(7, 0);

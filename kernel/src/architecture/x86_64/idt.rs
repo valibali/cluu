@@ -129,6 +129,7 @@ lazy_static! {
         idt[36].set_handler_fn(serial_interrupt_handler);   // IRQ 4 - Serial COM1
         idt[39].set_handler_fn(serial_interrupt_handler);   // IRQ 7 - Serial COM2
         idt[43].set_handler_fn(virtio_blk_interrupt_handler); // IRQ 11 - virtio-blk-pci
+        idt[44].set_handler_fn(mouse_interrupt_handler);    // IRQ 12 - PS/2 Mouse
 
         // Set up a generic handler for interrupt 0x68 (104)
         idt[0x68].set_handler_fn(generic_interrupt_handler);
@@ -1161,6 +1162,19 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // Always ACK the PIC for IRQ1 while we're still using 8259 routing.
     unsafe {
         pic_eoi(1); // IRQ 1 - Keyboard
+    }
+}
+
+extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let mut port = x86_64::instructions::port::Port::<u8>::new(0x60);
+    let byte = unsafe { port.read() };
+    crate::devices::irq::dispatch_scancode(12, byte);
+
+    if crate::architecture::x86_64::apic::is_enabled() {
+        crate::architecture::x86_64::apic::eoi();
+    }
+    unsafe {
+        pic_eoi(12);
     }
 }
 

@@ -668,6 +668,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-mouse"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-mv"
 version = "0.1.0"
 dependencies = [

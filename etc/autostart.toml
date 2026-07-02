@@ -8,6 +8,9 @@ image = "vtmgr"
 image = "kbd"
 
 [[service]]
+image = "mouse"
+
+[[service]]
 image = "compositor"
 session_mode = 0
 

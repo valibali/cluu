@@ -1,0 +1,14 @@
+[package]
+name = "cluu-mouse"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU PS/2 mouse service"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+
+[[bin]]
+name = "mouse"
+path = "src/main.rs"

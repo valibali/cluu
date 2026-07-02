@@ -23,6 +23,7 @@ members = [
     "userspace/compdemo",
     "userspace/console",
     "userspace/kbd",
+    "userspace/mouse",
     "userspace/tty",
     "userspace/vtmgr",
     "userspace/shell",
