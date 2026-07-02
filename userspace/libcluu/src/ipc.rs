@@ -235,6 +235,9 @@ pub const COMP_WIN_QUERY_SCREEN_LABEL: u32 = 102;
 /// compositor → app input endpoint. Window was resized to new pixel dimensions.
 /// words[0] = pixel_width (u32), words[1] = pixel_height (u32).
 pub const COMP_WIN_CONFIGURE_LABEL: u32 = 103;
+/// mouse → vtmgr:input → compositor:input. Mouse movement/button event.
+/// words[0]=dx(i32 as usize), words[1]=dy(i32 as usize), words[2]=buttons(u8: L=1,R=2,M=4).
+pub const MOUSE_EVENT_LABEL: u32 = 104;
 
 // --- Input routing (vtmgr today; inputd post-extraction). ---
 // client → vtmgr: request a VT switch. vtmgr decides per policy.

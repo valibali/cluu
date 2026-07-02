@@ -881,6 +881,12 @@ harness_derive_marker_defaults() {
                 RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
                 ;;
+            mouse_smoke)
+                TEST_COMMAND=""
+                SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
+                RUN_WAIT_DEFAULT="30"
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 15\nmouse_move 100 0\nsleep 1\nmouse_move 0 50\nsleep 1\nmouse_move -50 -25\nsleep 1\nmouse_button 1\nsleep 1\nmouse_button 0'
+                ;;
             l2_cluuterm_login)
                 TEST_COMMAND=""
                 # After boot, inject credentials into the login modal.
