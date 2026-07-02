@@ -90,7 +90,7 @@ fn run() -> libcluu::Result<()> {
     let mut prev_frame_tsc: u64 = 0;
     let mut first_frame = true;
 
-    write_stdout(b"\x1b[2J\x1b[H");
+    write_stdout(b"\x1b[2J\x1b[H\x1b[?25l");
 
     loop {
         let now_tsc = libcluu::syscall::clock_now(clock_token).unwrap_or(0);
@@ -245,7 +245,7 @@ fn run() -> libcluu::Result<()> {
     }
 
     let _ = libcluu::vspace::VSPACE.lock().free(grant_base, GRANT_SIZE);
-    write_stdout(b"\x1b[2J\x1b[H");
+    write_stdout(b"\x1b[2J\x1b[H\x1b[?25h");
     Ok(())
 }
 
