@@ -157,8 +157,8 @@ struct RecvWaiter {
 const MAX_QUEUE_LEN: usize = 1024;
 const MAX_CALL_QUEUE_LEN: usize = 256;
 const BUSY_LOG_EVERY: u64 = 64;
-const IPC_DIRECT_DEBUG_LIMIT: u64 = 4096;
-const IPC_CALL_DEBUG_LIMIT: u64 = 4096;
+const IPC_DIRECT_DEBUG_LIMIT: u64 = 128;
+const IPC_CALL_DEBUG_LIMIT: u64 = 256;
 /// Runtime kill-switch for rendezvous direct delivery.
 ///
 /// Enabled during kernel boot.
@@ -851,27 +851,45 @@ fn call_with_reply_id_inner(
     };
 
     let dbg_count = IPC_CALL_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
-    if dbg_count >= 200 && dbg_count < IPC_CALL_DEBUG_LIMIT + 200 {
-        klibcluu::info("ipc-call");
-        klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ep=", endpoint.as_u64());
-        klibcluu::log_kv_dec(
-            klibcluu::LogLevel::Info,
+    if dbg_count < IPC_CALL_DEBUG_LIMIT && klibcluu::should_log(klibcluu::LogLevel::Trace) {
+        klibcluu::trace("ipc-call enqueue");
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  endpoint=", endpoint.as_u64());
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Trace,
             "  sender=",
             sender.map(|tid| tid.as_u64()).unwrap_or(0),
         );
-        klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  waiters=", waiters_before as u64);
-        klibcluu::log_kv_dec(
-            klibcluu::LogLevel::Info,
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  reply_id=", reply_id.as_u64());
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Trace,
+            "  payload_len=",
+            payload_len as u64,
+        );
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Trace,
+            "  waiters_before=",
+            waiters_before as u64,
+        );
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Trace,
             "  wake=",
             wake.map(|tid| tid.as_u64()).unwrap_or(0),
         );
-        klibcluu::log_kv_dec(
-            klibcluu::LogLevel::Info,
-            "  direct_recv=",
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Trace,
+            "  direct_receiver=",
             direct_receiver.map(|tid| tid.as_u64()).unwrap_or(0),
         );
-        klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  q_len=", queue_len_after as u64);
-        klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  cq_len=", call_queue_len_after as u64);
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Trace,
+            "  queue_len_after=",
+            queue_len_after as u64,
+        );
+        klibcluu::log_dec(
+            klibcluu::LogLevel::Trace,
+            "  call_queue_len_after=",
+            call_queue_len_after as u64,
+        );
     }
 
     if let Some(receiver_id) = direct_receiver {
@@ -958,8 +976,12 @@ fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
 
 fn send_payload(endpoint: EndpointId, payload: &[u8], log_send: bool) -> Result<(), Error> {
     let sender = crate::sched::ThreadManager::current();
+    // Try to send - if queue is full, block and return (will be retried from userspace when woken)
     let wake = {
+        // Get shard directly (static, no repository lock needed)
         let shard = get_endpoint_shard(endpoint);
+
+        // Lock shard, then endpoint
         let mut shard_guard = shard.lock();
         let ep = shard_guard
             .endpoints
@@ -969,13 +991,15 @@ fn send_payload(endpoint: EndpointId, payload: &[u8], log_send: bool) -> Result<
             DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
             DirectDelivery::DeliveredNoWake(_) => None,
             DirectDelivery::NotDelivered => match ep.send(sender, payload) {
-                Ok(wake) => wake,
+                Ok(wake) => wake, // Success
                 Err(Error::WouldBlock) => {
+                    // Queue is full - sender was added to waiting_senders, need to block.
                     crate::sched::ThreadManager::block_current();
                     crate::architecture::x86_64::syscall::request_resched();
                     return Err(Error::WouldBlock);
                 }
                 Err(Error::Busy) => {
+                    // Fallback for edge cases (shouldn't happen with backpressure)
                     log_endpoint_busy(endpoint, ep.stats(), false);
                     return Err(Error::Busy);
                 }
@@ -984,6 +1008,7 @@ fn send_payload(endpoint: EndpointId, payload: &[u8], log_send: bool) -> Result<
         }
     };
 
+    // Success - wake receiver if any
     if let Some(thread_id) = wake {
         if log_send {
             klibcluu::trace("send_from_user: wake_thread_id=");
@@ -1009,6 +1034,7 @@ fn try_direct_deliver_to_waiting_receiver(
         let Some(waiter) = endpoint.pop_next_receiver_to_wake() else {
             break;
         };
+        direct_debug("attempt", endpoint_id, Some(waiter), data.len());
         let receiver_id = waiter.thread_id;
         if waiter.buf_len == 0 || waiter.buf_ptr == 0 || waiter.page_table_root.is_null() {
             direct_debug("no-recv-buffer", endpoint_id, Some(waiter), data.len());
@@ -1050,12 +1076,14 @@ fn try_direct_deliver_to_waiting_receiver(
         }
         crate::telemetry::record_ipc_direct_delivery();
         if crate::sched::ThreadManager::is_thread_blocked(receiver_id) {
+            direct_debug("delivered-wake", endpoint_id, Some(waiter), data.len());
             return Ok(DirectDelivery::DeliveredWake(receiver_id));
         }
         direct_debug("delivered-nowake", endpoint_id, Some(waiter), data.len());
         return Ok(DirectDelivery::DeliveredNoWake(receiver_id));
     }
 
+    direct_debug("no-waiter", endpoint_id, None, data.len());
     Ok(DirectDelivery::NotDelivered)
 }
 
@@ -1109,19 +1137,19 @@ fn direct_debug(event: &str, endpoint: EndpointId, waiter: Option<RecvWaiter>, l
     if n >= IPC_DIRECT_DEBUG_LIMIT {
         return;
     }
-    klibcluu::info("ipc-direct");
-    klibcluu::info("  event=");
-    klibcluu::info(event);
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "  endpoint=", endpoint.as_u64());
+    klibcluu::trace("ipc-direct");
+    klibcluu::trace("  event=");
+    klibcluu::trace(event);
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "  endpoint=", endpoint.as_u64());
     if let Some(waiter) = waiter {
         klibcluu::log_dec(
-            klibcluu::LogLevel::Info,
+            klibcluu::LogLevel::Trace,
             "  waiter_thread=",
             waiter.thread_id.as_u64(),
         );
-        klibcluu::log_dec(klibcluu::LogLevel::Info, "  waiter_ticket=", waiter.ticket);
+        klibcluu::log_dec(klibcluu::LogLevel::Trace, "  waiter_ticket=", waiter.ticket);
     }
-    klibcluu::log_dec(klibcluu::LogLevel::Info, "  len=", len as u64);
+    klibcluu::log_dec(klibcluu::LogLevel::Trace, "  len=", len as u64);
 }
 
 #[inline(always)]
