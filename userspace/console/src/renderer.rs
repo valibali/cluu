@@ -283,6 +283,11 @@ impl VtScreen {
             Event::Scroll(_) => {
                 // libcluu does not currently emit Scroll events from CSI input.
             }
+            Event::SetCursorVisible(_) => {
+                // Legacy console has no SHM cursor flag; the blinking block
+                // is drawn unconditionally by repaint_all. DECTCEM is a no-op
+                // here — only cluuterm honors it.
+            }
         }
     }
 

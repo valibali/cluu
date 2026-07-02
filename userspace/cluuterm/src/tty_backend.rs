@@ -386,6 +386,11 @@ pub struct Cluuterm {
     blink_armed: bool,
     /// Current blink phase: true → cursor visible, false → cursor hidden.
     blink_phase: bool,
+    /// App-driven cursor visibility (DECTCEM `CSI ?25 h/l`). Defaults to
+    /// `true` (canonical-mode shells want the cursor). TUI apps (top, kilo)
+    /// emit `CSI ?25 l` on enter to suppress the blinking block; the blink
+    /// timer respects this and stays dark while `false`.
+    cursor_user_visible: bool,
 }
 
 // SAFETY: Cluuterm is single-threaded (cluuterm never spawns threads).
@@ -429,6 +434,7 @@ impl Cluuterm {
             time_ep: 0,
             blink_armed: false,
             blink_phase: true,
+            cursor_user_visible: true,
         }
     }
 
@@ -591,6 +597,32 @@ impl Cluuterm {
             }
             Event::Bell  => {}
             Event::Scroll(_n) => s.scroll_up(),
+            Event::SetCursorVisible(v) => {
+                s.cursor_user_visible = v;
+                // Reflect immediately in SHM so the compositor un-inverts
+                // the cursor cell on the next dirty pass — don't wait for
+                // the next 500ms tick.  v && blink_phase preserves the
+                // blink phase: if the app says "show" mid blink-off, the
+                // cursor stays dark until the next tick flips it on.
+                let visible: u32 = if v && s.blink_phase { 1 } else { 0 };
+                unsafe {
+                    core::ptr::write_volatile(
+                        &mut (*s.shm).cursor_visible as *mut u32,
+                        visible,
+                    );
+                }
+                // Damage the cursor cell so the compositor repaints it now
+                // rather than at the next blink tick.  Coords are interior
+                // (see [[cluu-cluuterm-cursor-damage-double-offset]]).
+                let cx = s.cursor_x;
+                let cy = s.cursor_y;
+                let dmg = Message::new(
+                    COMP_WIN_DAMAGE_LABEL,
+                    [s.window_id as usize, cx, cy, 1, 1, 0],
+                    5,
+                );
+                let _ = ipc::send(s.comp_ep, &dmg, IpcFlags::empty());
+            }
         }
     }
 
@@ -924,7 +956,10 @@ impl Cluuterm {
     /// path — only the `cursor_visible` flag and the damage notify change.
     fn tick_blink(&mut self) {
         self.blink_phase = !self.blink_phase;
-        let visible: u32 = if self.blink_phase { 1 } else { 0 };
+        // App-driven DECTCEM hide takes precedence: when the app has hidden
+        // the cursor (`cursor_user_visible == false`), the blink timer
+        // keeps the SHM flag at 0 so the compositor never draws the block.
+        let visible: u32 = if self.cursor_user_visible && self.blink_phase { 1 } else { 0 };
         unsafe {
             core::ptr::write_volatile(
                 &mut (*self.shm).cursor_visible as *mut u32,
