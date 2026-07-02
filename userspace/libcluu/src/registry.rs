@@ -419,9 +419,8 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
     ));
     let derived = token_derive(endpoint_token, send_rights, u64::MAX)?;
     let payload = encode_names(&service_name, &endpoint_name);
-    // Reply directly to the requester with the derived token.
     let reply = make_payload_message(REGISTRY_GRANT_DELIVER_LABEL, payload.len(), &[derived]);
-    match send_with_payload(requester_endpoint, &reply, &payload) {
+    match send_with_payload_nonblocking(requester_endpoint, &reply, &payload) {
         Ok(()) => Ok(()),
         Err(err) => {
             let _ = crate::debug_print(&alloc::format!(
@@ -436,12 +435,23 @@ fn handle_grant_request(msg: &Message, payload: &[u8]) -> Result<()> {
 use crate::ipc::{call_with_payload, make_payload_message, parse_message};
 
 fn send_with_payload(endpoint: usize, msg: &Message, payload: &[u8]) -> Result<()> {
-    // Serialize the message header + payload into a single IPC buffer.
     let header = msg.as_bytes();
     let mut buffer = Vec::with_capacity(header.len() + payload.len());
     buffer.extend_from_slice(header);
     buffer.extend_from_slice(payload);
     crate::syscall::ipc_send(endpoint, &buffer)
+}
+
+fn send_with_payload_nonblocking(endpoint: usize, msg: &Message, payload: &[u8]) -> Result<()> {
+    let header = msg.as_bytes();
+    let mut buffer = Vec::with_capacity(header.len() + payload.len());
+    buffer.extend_from_slice(header);
+    buffer.extend_from_slice(payload);
+    match crate::syscall::ipc_send_nonblocking(endpoint, &buffer) {
+        Ok(()) => Ok(()),
+        Err(crate::error::Error::WouldBlock) => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 /// Synchronous (call-style) send with payload: blocks until the registry replies.

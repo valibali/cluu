@@ -251,7 +251,7 @@ pub fn completion_thread(entry_ep: usize, registry: &'static BuiltinRegistry) {
     loop {
         let _ = registry::handle_grant_requests();
 
-        match syscall::ipc_recv_any(&tokens, &mut buf, 100) {
+        match syscall::ipc_recv_any(&tokens, &mut buf, 50) {
             Ok((_idx, len)) => {
                 if let Some((msg, p)) = ipc::parse_message(&buf[..len]) {
                     if msg.tag.label == SHELL_COMPLETE_QUERY_LABEL {

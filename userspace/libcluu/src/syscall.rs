@@ -338,6 +338,58 @@ pub fn ipc_send(endpoint_token: usize, msg: &[u8]) -> Result<()> {
     Ok(())
 }
 
+pub fn ipc_send_nonblocking(endpoint_token: usize, msg: &[u8]) -> Result<()> {
+    if msg.len() <= IPC_REG_INLINE_MAX_PAYLOAD
+        && IPC_REG_FAST_STATE.load(Ordering::Relaxed) != IPC_REG_FAST_DISABLED
+    {
+        let mut chunk0 = [0u8; 8];
+        let mut chunk1 = [0u8; 8];
+        let mut chunk2 = [0u8; 8];
+        let mut chunk3 = [0u8; 8];
+        copy_inline_chunk(msg, 0, &mut chunk0);
+        copy_inline_chunk(msg, 8, &mut chunk1);
+        copy_inline_chunk(msg, 16, &mut chunk2);
+        copy_inline_chunk(msg, 24, &mut chunk3);
+
+        let fast = unsafe {
+            syscall6(
+                SyscallNumber::Send,
+                endpoint_token,
+                usize::from_ne_bytes(chunk0),
+                IPC_REG_INLINE_FLAG | msg.len(),
+                usize::from_ne_bytes(chunk1),
+                usize::from_ne_bytes(chunk2),
+                usize::from_ne_bytes(chunk3),
+            )
+        };
+
+        match fast {
+            Ok(_) => {
+                IPC_REG_FAST_STATE.store(IPC_REG_FAST_ENABLED, Ordering::Relaxed);
+                return Ok(());
+            }
+            Err(Error::InvalidParameter) | Err(Error::InvalidArgument) => {
+                IPC_REG_FAST_STATE.store(IPC_REG_FAST_DISABLED, Ordering::Relaxed);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    let result = unsafe {
+        syscall3(
+            SyscallNumber::Send,
+            endpoint_token,
+            msg.as_ptr() as usize,
+            msg.len(),
+        )
+    };
+    match result {
+        Ok(_) => Ok(()),
+        Err(Error::WouldBlock) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 /// Receive IPC message from any of the given endpoints (recv_any)
 ///
 /// Waits for a message on any of the provided endpoints. Returns which
