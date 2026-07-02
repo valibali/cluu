@@ -895,6 +895,12 @@ impl ThreadManager {
         .flatten()
     }
 
+    pub fn peek_current_recv_wait_delivery_endpoint() -> Option<crate::token::scope::EndpointId> {
+        let current = Self::current()?;
+        Self::with_thread(current, |thread| thread.peek_recv_wait_delivery_endpoint())
+        .flatten()
+    }
+
     pub fn wake_thread(thread_id: ThreadId) {
         // Try to wake immediately if locks are available
         let priority = {

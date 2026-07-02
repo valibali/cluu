@@ -560,6 +560,10 @@ impl Thread {
     pub fn take_recv_wait_delivery(&mut self) -> Option<RecvWaitDelivery> {
         self.recv_wait_delivery.take()
     }
+
+    pub fn peek_recv_wait_delivery_endpoint(&self) -> Option<crate::token::scope::EndpointId> {
+        self.recv_wait_delivery.as_ref().map(|d| d.endpoint)
+    }
 }
 
 /// Thread Builder

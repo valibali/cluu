@@ -220,10 +220,12 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     // Fast completion for direct deliveries that woke us from a previous blocked recv syscall.
     // The current userspace wrapper retries recv_any after WouldBlock, so consume the pending
     // delivery before re-arming wait state.
-    if let Some((delivered_endpoint, delivered_len, delivered_sender)) =
-        crate::sched::ThreadManager::take_current_recv_wait_delivery()
+    if let Some(delivered_endpoint) =
+        crate::sched::ThreadManager::peek_current_recv_wait_delivery_endpoint()
     {
         if let Some(index) = find_endpoint_index(delivered_endpoint) {
+            let (_, delivered_len, delivered_sender) =
+                crate::sched::ThreadManager::take_current_recv_wait_delivery().unwrap();
             write_sender_tid(delivered_sender)?;
             return Ok((index << 32) | delivered_len);
         }
@@ -323,13 +325,13 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     };
 
     if !blocked {
-        // A sender wake can race just before we park. In that case, do not
-        // self-block; consume any pending delivery/queue state immediately.
         crate::sched::ThreadManager::disarm_current_recv_wait();
-        if let Some((delivered_endpoint, delivered_len, delivered_sender)) =
-            crate::sched::ThreadManager::take_current_recv_wait_delivery()
+        if let Some(delivered_endpoint) =
+            crate::sched::ThreadManager::peek_current_recv_wait_delivery_endpoint()
         {
             if let Some(index) = find_endpoint_index(delivered_endpoint) {
+                let (_, delivered_len, delivered_sender) =
+                    crate::sched::ThreadManager::take_current_recv_wait_delivery().unwrap();
                 write_sender_tid(delivered_sender)?;
                 return Ok((index << 32) | delivered_len);
             }
@@ -348,37 +350,29 @@ pub fn sys_recv(args: SyscallArgs) -> SyscallResult {
     let wait_ticks = crate::sched::ThreadManager::current_tick().saturating_sub(wait_start_tick);
     crate::telemetry::record_ipc_recv_wait_ticks(wait_ticks);
 
-    // After waking, check if it was due to timeout
-    if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
-        crate::sched::ThreadManager::disarm_current_recv_wait();
-        crate::telemetry::record_ipc_recv_timeout();
-        Err(Error::Timeout)
-    } else {
-        crate::sched::ThreadManager::disarm_current_recv_wait();
-        if let Some((delivered_endpoint, delivered_len, delivered_sender)) =
-            crate::sched::ThreadManager::take_current_recv_wait_delivery()
-        {
-            let Some(index) = find_endpoint_index(delivered_endpoint) else {
-                // A direct delivery may target a stale wait registration from an older recv_any
-                // call. Treat this as a spurious wake and continue with normal queue probing.
-                return match try_recv_any() {
-                    Ok((index, len)) => Ok((index << 32) | len),
-                    Err(Error::WouldBlock) => {
-                        crate::telemetry::record_ipc_recv_would_block();
-                        Err(Error::WouldBlock)
-                    }
-                    Err(err) => Err(err),
-                };
-            };
+    let timed_out = crate::sched::ThreadManager::check_and_clear_timeout_wake();
+    crate::sched::ThreadManager::disarm_current_recv_wait();
+
+    if let Some(delivered_endpoint) =
+        crate::sched::ThreadManager::peek_current_recv_wait_delivery_endpoint()
+    {
+        if let Some(index) = find_endpoint_index(delivered_endpoint) {
+            let (_, delivered_len, delivered_sender) =
+                crate::sched::ThreadManager::take_current_recv_wait_delivery().unwrap();
             write_sender_tid(delivered_sender)?;
             return Ok((index << 32) | delivered_len);
         }
+    }
 
+    if timed_out {
+        crate::telemetry::record_ipc_recv_timeout();
+        Err(Error::Timeout)
+    } else {
         match try_recv_any() {
             Ok((index, len)) => Ok((index << 32) | len),
             Err(Error::WouldBlock) => {
                 crate::telemetry::record_ipc_recv_would_block();
-                Err(Error::WouldBlock) // Message arrived on one endpoint, retry will succeed
+                Err(Error::WouldBlock)
             }
             Err(err) => Err(err),
         }
