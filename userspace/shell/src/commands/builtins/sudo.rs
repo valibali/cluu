@@ -77,13 +77,22 @@ impl BuiltinCommand for SudoBuiltin {
             set_tty_foreground(stdout, child_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C)?;
 
             let mut notify_msg = Message::new(0, [0; 6], 0);
-            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+            crate::io::report_err(
+                recv(notify_endpoint, &mut notify_msg, IpcFlags::empty()),
+                "ipc_recv",
+            );
 
             let shell_stdin = process_info().tokens[TOKEN_STDIN];
-            let _ = set_tty_foreground(stdout, shell_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C);
+            crate::io::report_err(
+                set_tty_foreground(stdout, shell_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C),
+                "set_tty_foreground",
+            );
         } else {
             let mut notify_msg = Message::new(0, [0; 6], 0);
-            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+            crate::io::report_err(
+                recv(notify_endpoint, &mut notify_msg, IpcFlags::empty()),
+                "ipc_recv",
+            );
         }
         Ok(())
     }
@@ -158,11 +167,20 @@ impl BuiltinCommand for SuBuiltin {
             if child_stdin != 0 {
                 let mut line = cmd.clone();
                 line.push('\n');
-                let _ = send_with_payload(child_stdin, TTY_READ_LABEL, line.as_bytes());
-                let _ = send_with_payload(child_stdin, TTY_READ_LABEL, b"exit\n");
+                crate::io::report_err(
+                    send_with_payload(child_stdin, TTY_READ_LABEL, line.as_bytes()),
+                    "send_with_payload",
+                );
+                crate::io::report_err(
+                    send_with_payload(child_stdin, TTY_READ_LABEL, b"exit\n"),
+                    "send_with_payload",
+                );
             }
             let mut notify_msg = Message::new(0, [0; 6], 0);
-            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+            crate::io::report_err(
+                recv(notify_endpoint, &mut notify_msg, IpcFlags::empty()),
+                "ipc_recv",
+            );
             return Ok(());
         }
 
@@ -170,13 +188,22 @@ impl BuiltinCommand for SuBuiltin {
             set_tty_foreground(stdout, child_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C)?;
 
             let mut notify_msg = Message::new(0, [0; 6], 0);
-            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+            crate::io::report_err(
+                recv(notify_endpoint, &mut notify_msg, IpcFlags::empty()),
+                "ipc_recv",
+            );
 
             let shell_stdin = process_info().tokens[TOKEN_STDIN];
-            let _ = set_tty_foreground(stdout, shell_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C);
+            crate::io::report_err(
+                set_tty_foreground(stdout, shell_stdin, 0, TTY_FG_FLAG_FORWARD_CTRL_C),
+                "set_tty_foreground",
+            );
         } else {
             let mut notify_msg = Message::new(0, [0; 6], 0);
-            let _ = recv(notify_endpoint, &mut notify_msg, IpcFlags::empty());
+            crate::io::report_err(
+                recv(notify_endpoint, &mut notify_msg, IpcFlags::empty()),
+                "ipc_recv",
+            );
         }
         Ok(())
     }

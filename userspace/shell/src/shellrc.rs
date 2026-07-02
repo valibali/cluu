@@ -104,11 +104,11 @@ fn read_file_via_vfs(vfs: &VfsClient, path: &str) -> LibResult<Vec<u8>> {
     let file = vfs.open(path)?;
     let total = file.size;
     if total == 0 {
-        let _ = vfs.close(file);
+        crate::io::report_err(vfs.close(file), "vfs.close");
         return Ok(Vec::new());
     }
     if total > MAX_RC_BYTES {
-        let _ = vfs.close(file);
+        crate::io::report_err(vfs.close(file), "vfs.close");
         let _ = debug_print(&format!(
             "shellrc: {} is {} bytes, exceeds {} cap — refusing to source",
             path, total, MAX_RC_BYTES
@@ -119,7 +119,7 @@ fn read_file_via_vfs(vfs: &VfsClient, path: &str) -> LibResult<Vec<u8>> {
     let info = process_info();
     let space_token = info.tokens[TOKEN_SPACE];
     if space_token == 0 {
-        let _ = vfs.close(file);
+        crate::io::report_err(vfs.close(file), "vfs.close");
         return Err(libcluu::Error::InvalidState);
     }
 
@@ -127,7 +127,7 @@ fn read_file_via_vfs(vfs: &VfsClient, path: &str) -> LibResult<Vec<u8>> {
     let scratch_base = match libcluu::vspace::VSPACE.lock().alloc(chunk_alloc) {
         Ok(base) => base,
         Err(e) => {
-            let _ = vfs.close(file);
+            crate::io::report_err(vfs.close(file), "vfs.close");
             return Err(e);
         }
     };
@@ -157,7 +157,7 @@ fn read_file_via_vfs(vfs: &VfsClient, path: &str) -> LibResult<Vec<u8>> {
     }
 
     let _ = libcluu::vspace::VSPACE.lock().free(scratch_base, chunk_alloc);
-    let _ = vfs.close(file);
+    crate::io::report_err(vfs.close(file), "vfs.close");
     result.map(|_| out)
 }
 

@@ -269,7 +269,10 @@ impl WriteSink {
     pub fn close(&self) {
         if let WriteSink::Pipe(tok) = self {
             let eof = PIPE_EOF_LABEL.to_le_bytes();
-            let _ = libcluu::syscall::ipc_send(*tok, &eof);
+            crate::io::report_err(
+                libcluu::syscall::ipc_send(*tok, &eof),
+                "ipc_send",
+            );
         }
     }
 }
@@ -306,7 +309,7 @@ pub trait BuiltinCommand {
                     "shell: builtin '{}' does not support redirected/piped output\n",
                     self.name()
                 );
-                let _ = stdout.write_all(m.as_bytes());
+                crate::io::report_err(stdout.write_all(m.as_bytes()), "stdout.write_all");
                 Ok(())
             }
         }

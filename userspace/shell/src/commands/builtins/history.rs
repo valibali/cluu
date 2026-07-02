@@ -73,7 +73,7 @@ pub fn load_history(ctx: &mut CommandContext) {
     let Some(vfs) = vfs_client() else { return; };
     let Ok(file) = vfs.open(&path) else { return; };
     if file.size == 0 {
-        let _ = vfs.close(file);
+        crate::io::report_err(vfs.close(file), "vfs.close");
         return;
     }
 
@@ -81,7 +81,7 @@ pub fn load_history(ctx: &mut CommandContext) {
     let info = libcluu::boot::process_info();
     let space_token = info.tokens[libcluu::boot::TOKEN_SPACE];
     if space_token == 0 {
-        let _ = vfs.close(file);
+        crate::io::report_err(vfs.close(file), "vfs.close");
         return;
     }
     let total = file.size;
@@ -89,7 +89,7 @@ pub fn load_history(ctx: &mut CommandContext) {
     let scratch_base = match libcluu::vspace::VSPACE.lock().alloc(chunk_alloc) {
         Ok(b) => b,
         Err(_) => {
-            let _ = vfs.close(file);
+            crate::io::report_err(vfs.close(file), "vfs.close");
             return;
         }
     };
@@ -113,7 +113,7 @@ pub fn load_history(ctx: &mut CommandContext) {
         }
     }
     let _ = libcluu::vspace::VSPACE.lock().free(scratch_base, chunk_alloc);
-    let _ = vfs.close(file);
+    crate::io::report_err(vfs.close(file), "vfs.close");
 
     if let Ok(s) = core::str::from_utf8(&buf) {
         let lines: Vec<String> = s.lines().map(|l| l.to_string()).collect();
@@ -138,6 +138,6 @@ pub fn save_history(ctx: &CommandContext) {
     // O_WRONLY=1, O_CREAT=0o100, O_TRUNC=0o1000
     const FLAGS: usize = 1 | 0o100 | 0o1000;
     let Ok(file) = vfs.open_with(&path, FLAGS, 0o644) else { return; };
-    let _ = vfs.write(file, 0, bytes);
-    let _ = vfs.close(file);
+    crate::io::report_err(vfs.write(file, 0, bytes), "vfs.write");
+    crate::io::report_err(vfs.close(file), "vfs.close");
 }

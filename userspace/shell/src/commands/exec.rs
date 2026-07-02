@@ -102,6 +102,7 @@ pub(crate) fn try_path_dispatch(
     let status = spawn_and_wait(
         stdout,
         context,
+        name,
         resolved_name.as_str(),
         DEFAULT_PRIORITY,
         &arg_refs,
@@ -115,7 +116,7 @@ pub(crate) fn try_path_dispatch(
 /// optionally overridden by `export PATH=...`). Falls back to a paranoid
 /// `/bin:/usr/bin` default if PATH is unset or empty so PATH lookup at
 /// least works for the standard installed images.
-fn read_path_env() -> String {
+pub(crate) fn read_path_env() -> String {
     for (k, v) in libcluu::posix::snapshot_env() {
         if k == "PATH" {
             return v;
@@ -139,11 +140,12 @@ pub(crate) fn spawn_and_wait(
     stdout: usize,
     context: &mut CommandContext,
     name: &str,
+    image_name: &str,
     priority: usize,
     args: &[&str],
     fg_mode: ForegroundMode,
 ) -> Result<i32> {
-    let spawn = spawn_process_with_argv(context, name, priority, args)?;
+    let spawn = spawn_process_with_argv(context, name, image_name, priority, args)?;
     let parsed = parse_status(spawn.status_word);
     let procmgr_ep = spawn.procmgr_endpoint;
 
@@ -213,15 +215,17 @@ pub(crate) fn spawn_and_wait(
 pub(crate) fn spawn_process_with_argv(
     context: &mut CommandContext,
     name: &str,
+    image_name: &str,
     _priority: usize,
     args: &[&str],
 ) -> Result<SpawnResult> {
-    spawn_process_with_argv_and_redirs(context, name, _priority, args, &[])
+    spawn_process_with_argv_and_redirs(context, name, image_name, _priority, args, &[])
 }
 
 pub fn spawn_process_with_argv_and_redirs(
     context: &mut CommandContext,
     name: &str,
+    image_name: &str,
     _priority: usize,
     args: &[&str],
     redirs: &[RedirAction],

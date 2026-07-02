@@ -170,7 +170,7 @@ impl PipelineExecutor {
                     let line = alloc::format!("shell: write '{}': {:?}\n", target_path, e);
                     crate::write_stdout(line.as_bytes());
                 }
-                let _ = vfs.close(file);
+                crate::io::report_err(vfs.close(file), "vfs.close");
                 return Ok(0);
             }
             // case 3: fall through (other redir kinds — stdin, stderr) to spawn
@@ -181,7 +181,7 @@ impl PipelineExecutor {
         let arg_refs: Vec<&str> = argv.iter().skip(1).map(|s| s.as_str()).collect();
         let redirs = build_redir_actions(context, &cmd.redirs);
 
-        let spawn = match spawn_process_with_argv_and_redirs(context, image_name, 200, &arg_refs, &redirs) {
+        let spawn = match spawn_process_with_argv_and_redirs(context, name, image_name, 200, &arg_refs, &redirs) {
             Ok(s) => s,
             Err(e) => {
                 let line = alloc::format!("shell: spawn error {:?}\n", e);
@@ -195,11 +195,10 @@ impl PipelineExecutor {
             return Ok(127);
         }
 
-        // Assign pgid and attach this process to it.
         let pgid = if let Ok(ep) = context.procmgr_spawn_endpoint() {
             match pg_create(ep) {
                 Ok(id) => {
-                    let _ = pg_attach(ep, id, spawn.pid);
+                    crate::io::report_err(pg_attach(ep, id, spawn.pid), "pg_attach");
                     id
                 }
                 Err(_) => 0,
@@ -209,9 +208,11 @@ impl PipelineExecutor {
         };
 
         if bg {
-            // Background: add to job table and return immediately.
             if pgid != 0 && context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
-                let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
+                crate::io::report_err(
+                    tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid),
+                    "tty_set_fg restore",
+                );
             }
             let job_id = context.jobs.add(
                 pgid,
@@ -226,20 +227,26 @@ impl PipelineExecutor {
             return Ok(0);
         }
 
-        // Foreground: set TTY fg pgid, wait for exit, restore shell.
         let want_fg_swap = pgid != 0 && context.tty_stdout != 0 && context.session_id != 0;
         if want_fg_swap {
-            let _ = tty_set_fg(context.tty_stdout, context.session_id, pgid);
+            crate::io::report_err(
+                tty_set_fg(context.tty_stdout, context.session_id, pgid),
+                "tty_set_fg",
+            );
         }
-        // pts mode: push fg pgid via PTS_SET_PGRP_LABEL on fd 0.
         let want_pts_fg_swap = pgid != 0 && context.tty_stdout == 0;
         if want_pts_fg_swap {
-            let _ = libcluu::posix::termios::tcsetpgrp(0, pgid as i32);
+            crate::io::report_err(
+                libcluu::posix::termios::tcsetpgrp(0, pgid as i32),
+                "tcsetpgrp",
+            );
         }
 
-        // Wait for exit notification.
         let mut buf = [0u8; 256];
-        let _ = libcluu::syscall::ipc_recv(spawn.notify_endpoint, &mut buf);
+        crate::io::report_err(
+            libcluu::syscall::ipc_recv(spawn.notify_endpoint, &mut buf),
+            "ipc_recv exit_notify",
+        );
         let exit_code = if buf.len() >= 24 {
             let bytes = [buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23]];
             i64::from_le_bytes(bytes) as i32
@@ -247,13 +254,17 @@ impl PipelineExecutor {
             0
         };
 
-        // Restore shell as TTY foreground.
         if want_fg_swap && context.shell_pgid != 0 {
-            let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
+            crate::io::report_err(
+                tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid),
+                "tty_set_fg restore",
+            );
         }
-        // Restore shell in pts mode.
         if want_pts_fg_swap && context.shell_pgid != 0 {
-            let _ = libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32);
+            crate::io::report_err(
+                libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32),
+                "tcsetpgrp restore",
+            );
         }
 
         let _ = libcluu::debug_print(&alloc::format!(
@@ -311,7 +322,7 @@ impl PipelineExecutor {
         }
         if let Some(e) = alloc_failed {
             for p in &pipes {
-                let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+                crate::io::report_err(Self::pipe_close(procmgr_ep, p.pipe_id), "pipe_close");
             }
             return Err(e);
         }
@@ -344,11 +355,16 @@ impl PipelineExecutor {
 
         // For foreground pipelines, point TTY fg at this pgid before spawning.
         if !bg && pipeline_pgid != 0 && context.tty_stdout != 0 && context.session_id != 0 {
-            let _ = tty_set_fg(context.tty_stdout, context.session_id, pipeline_pgid);
+            crate::io::report_err(
+                tty_set_fg(context.tty_stdout, context.session_id, pipeline_pgid),
+                "tty_set_fg",
+            );
         }
-        // pts mode: push fg pgid via PTS_SET_PGRP_LABEL on fd 0.
         if !bg && pipeline_pgid != 0 && context.tty_stdout == 0 {
-            let _ = libcluu::posix::termios::tcsetpgrp(0, pipeline_pgid as i32);
+            crate::io::report_err(
+                libcluu::posix::termios::tcsetpgrp(0, pipeline_pgid as i32),
+                "tcsetpgrp",
+            );
         }
 
         // Build a VfsClient once for path → image-name resolution.
@@ -406,7 +422,7 @@ impl PipelineExecutor {
                     );
                     crate::write_stdout(line.as_bytes());
                     for p in &pipes {
-                        let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+                        crate::io::report_err(Self::pipe_close(procmgr_ep, p.pipe_id), "pipe_close");
                     }
                     return Ok(1);
                 }
@@ -419,7 +435,7 @@ impl PipelineExecutor {
                     );
                     crate::write_stdout(line.as_bytes());
                     for p in &pipes {
-                        let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+                        crate::io::report_err(Self::pipe_close(procmgr_ep, p.pipe_id), "pipe_close");
                     }
                     return Ok(1);
                 }
@@ -456,7 +472,7 @@ impl PipelineExecutor {
                 Ok(ep) => ep,
                 Err(e) => {
                     for p in &pipes {
-                        let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+                        crate::io::report_err(Self::pipe_close(procmgr_ep, p.pipe_id), "pipe_close");
                     }
                     return Err(e);
                 }
@@ -482,14 +498,14 @@ impl PipelineExecutor {
                         "shell: pipeline stage '{}' spawn failed: {:?}\n",
                         image_name, e));
                     for p in &pipes {
-                        let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+                        crate::io::report_err(Self::pipe_close(procmgr_ep, p.pipe_id), "pipe_close");
                     }
                     return Ok(127);
                 }
             };
             let child_pid = reply.pid as usize;
             if pipeline_pgid != 0 {
-                let _ = pg_attach(procmgr_ep, pipeline_pgid, child_pid);
+                crate::io::report_err(pg_attach(procmgr_ep, pipeline_pgid, child_pid), "pg_attach");
             }
             spawned_pids.push(child_pid);
             notify_endpoints[i] = notify_endpoint;
@@ -554,7 +570,10 @@ impl PipelineExecutor {
             }
             waited_any = true;
             // ipc_recv blocks (with rolling 30-second timeouts) until a message arrives.
-            let _ = libcluu::syscall::ipc_recv(notify, &mut buf);
+            crate::io::report_err(
+                libcluu::syscall::ipc_recv(notify, &mut buf),
+                "ipc_recv exit_notify",
+            );
 
             // Parse the exit notification: Message layout is
             //   [u32 label][u8 words][u8 extra][u16 pad] = 8 bytes tag
@@ -582,7 +601,7 @@ impl PipelineExecutor {
         // here does not disturb children that are already running. Closing is
         // done after the wait so pipe endpoints remain live while children run.
         for p in &pipes {
-            let _ = Self::pipe_close(procmgr_ep, p.pipe_id);
+            crate::io::report_err(Self::pipe_close(procmgr_ep, p.pipe_id), "pipe_close");
         }
 
         // Job table registration and TTY fg restore.
@@ -608,20 +627,29 @@ impl PipelineExecutor {
             crate::write_stdout((line + "\n").as_bytes());
             // Restore TTY foreground to shell.
             if context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
-                let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
+                crate::io::report_err(
+                    tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid),
+                    "tty_set_fg restore",
+                );
             }
-            // pts mode: restore shell fg.
             if context.tty_stdout == 0 && context.shell_pgid != 0 {
-                let _ = libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32);
+                crate::io::report_err(
+                    libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32),
+                    "tcsetpgrp restore",
+                );
             }
         } else if !bg && pipeline_pgid != 0 {
-            // Foreground pipeline: restore TTY fg to shell after wait completes.
             if context.tty_stdout != 0 && context.session_id != 0 && context.shell_pgid != 0 {
-                let _ = tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid);
+                crate::io::report_err(
+                    tty_set_fg(context.tty_stdout, context.session_id, context.shell_pgid),
+                    "tty_set_fg restore",
+                );
             }
-            // pts mode: restore shell fg.
             if context.tty_stdout == 0 && context.shell_pgid != 0 {
-                let _ = libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32);
+                crate::io::report_err(
+                    libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32),
+                    "tcsetpgrp restore",
+                );
             }
         }
 

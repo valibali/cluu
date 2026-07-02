@@ -53,7 +53,10 @@ impl BuiltinCommand for PoweroffBuiltin {
         crate::write_stdout(b"Powering off...\n");
         let ep = context.procmgr_spawn_endpoint()?;
         let msg = Message::new(PROCMGR_SHUTDOWN_LABEL, [0, 0, 0, 0, 0, 0], 1);
-        let _ = libcluu::ipc::send(ep, &msg, IpcFlags::empty());
+        crate::io::report_err(
+            libcluu::ipc::send(ep, &msg, IpcFlags::empty()),
+            "ipc_send",
+        );
         Ok(())
     }
 }
@@ -69,7 +72,10 @@ impl BuiltinCommand for RebootBuiltin {
         crate::write_stdout(b"Rebooting...\n");
         let ep = context.procmgr_spawn_endpoint()?;
         let msg = Message::new(PROCMGR_SHUTDOWN_LABEL, [1, 0, 0, 0, 0, 0], 1);
-        let _ = libcluu::ipc::send(ep, &msg, IpcFlags::empty());
+        crate::io::report_err(
+            libcluu::ipc::send(ep, &msg, IpcFlags::empty()),
+            "ipc_send",
+        );
         Ok(())
     }
 }

@@ -186,9 +186,9 @@ impl BuiltinCommand for FgBuiltin {
             }
         };
 
-        let _ = pg_resume(procmgr_ep, pgid);
+        crate::io::report_err(pg_resume(procmgr_ep, pgid), "pg_resume");
         if ctx.tty_stdout != 0 && ctx.session_id != 0 {
-            let _ = tty_set_fg(ctx.tty_stdout, ctx.session_id, pgid);
+            crate::io::report_err(tty_set_fg(ctx.tty_stdout, ctx.session_id, pgid), "tty_set_fg");
         }
         if let Some(j) = ctx.jobs.get_mut(id) {
             j.state = JobState::Running;
@@ -199,7 +199,10 @@ impl BuiltinCommand for FgBuiltin {
 
         // Restore shell as TTY foreground.
         if ctx.tty_stdout != 0 && ctx.session_id != 0 && ctx.shell_pgid != 0 {
-            let _ = tty_set_fg(ctx.tty_stdout, ctx.session_id, ctx.shell_pgid);
+            crate::io::report_err(
+                tty_set_fg(ctx.tty_stdout, ctx.session_id, ctx.shell_pgid),
+                "tty_set_fg",
+            );
         }
         Ok(())
     }
@@ -243,7 +246,7 @@ impl BuiltinCommand for BgBuiltin {
             }
         };
 
-        let _ = pg_resume(procmgr_ep, pgid);
+        crate::io::report_err(pg_resume(procmgr_ep, pgid), "pg_resume");
         let cmd_line = ctx.jobs.get(id).map(|j| j.cmd_line.clone()).unwrap_or_default();
         if let Some(j) = ctx.jobs.get_mut(id) {
             j.state = JobState::Running;
@@ -356,7 +359,7 @@ impl BuiltinCommand for KillBuiltin {
                         continue;
                     }
                 };
-                let _ = pg_signal(procmgr_ep, pgid, signum);
+                crate::io::report_err(pg_signal(procmgr_ep, pgid, signum), "pg_signal");
             } else {
                 stdout.write_all(
                     format!("kill: numeric PID kill not yet supported (use %N)\n").as_bytes(),
@@ -442,7 +445,7 @@ pub fn wait_for_job(id: usize, ctx: &mut CommandContext) {
             if notify_ep == 0 {
                 continue;
             }
-            let _ = syscall::ipc_recv(notify_ep, &mut buf);
+            crate::io::report_err(syscall::ipc_recv(notify_ep, &mut buf), "ipc_recv");
             let label = if buf.len() >= 4 {
                 u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
             } else {

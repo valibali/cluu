@@ -30,7 +30,7 @@ impl BuiltinCommand for CdBuiltin {
         }
 
         let target: String = if args.is_empty() {
-            crate::read_env_var("HOME").unwrap_or_else(|| String::from("/"))
+            libcluu::posix::read_env_var("HOME").unwrap_or_else(|| String::from("/"))
         } else {
             args[0].clone()
         };
