@@ -215,6 +215,7 @@ const MAX_TOTAL_THREADS: u64 = 4096;
 
 /// Global scheduler tick counter (incremented by timer interrupt)
 static SCHEDULER_TICKS: AtomicU64 = AtomicU64::new(0);
+static SCHED_HEARTBEAT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Multi-slot pending wake queue (lock-free)
 /// Each slot holds a thread ID (0 = empty). Allows multiple concurrent wakes.
@@ -703,14 +704,20 @@ impl ThreadManager {
             Some(id) => id,
             None => return false,
         };
-        Self::with_thread_mut(current, |thread| {
-            if thread.recv_wait_ticket() != ticket || !thread.is_recv_wait_armed() {
+        let blocked = Self::with_thread_mut(current, |thread| {
+            if !thread.should_block_for_recv_wait(ticket) {
                 return false;
             }
             thread.make_blocked();
             true
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+        if !blocked {
+            klibcluu::info("block-recv-wait SKIP (delivery pending)");
+            klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  tid=", current.as_u64());
+            klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ticket=", ticket);
+        }
+        blocked
     }
 
     /// Block current thread with a timeout deadline
@@ -752,7 +759,7 @@ impl ThreadManager {
             None => return false,
         };
         let should_block = Self::with_thread_mut(current, |thread| {
-            if thread.recv_wait_ticket() != ticket || !thread.is_recv_wait_armed() {
+            if !thread.should_block_for_recv_wait(ticket) {
                 return false;
             }
             thread.set_timeout_deadline(deadline);
@@ -765,6 +772,10 @@ impl ThreadManager {
             TIMEOUT_HEAP
                 .lock()
                 .push(Reverse((deadline, current.as_u64())));
+        } else {
+            klibcluu::info("block-recv-wait-timeout SKIP (delivery pending)");
+            klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  tid=", current.as_u64());
+            klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  ticket=", ticket);
         }
 
         should_block
@@ -902,6 +913,8 @@ impl ThreadManager {
                 Some(repo) => repo,
                 None => {
                     // Can't get lock, queue for later
+                    klibcluu::info("wake-defer-repo");
+                    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  tid=", thread_id.as_u64());
                     Self::queue_pending_wake(thread_id);
                     return;
                 }
@@ -914,7 +927,16 @@ impl ThreadManager {
                     thread.disarm_recv_wait();
                     Some(thread.priority)
                 }
-                _ => None,
+                Some(_) => {
+                    klibcluu::info("wake-dead-or-suspended");
+                    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  tid=", thread_id.as_u64());
+                    None
+                }
+                None => {
+                    klibcluu::info("wake-not-found");
+                    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  tid=", thread_id.as_u64());
+                    None
+                }
             }
         };
 
@@ -926,7 +948,8 @@ impl ThreadManager {
         if let Some(mut scheduler) = SCHEDULER.try_lock() {
             scheduler.add(thread_id, priority);
         } else {
-            // Can't get scheduler lock, queue for later
+            klibcluu::info("wake-defer-sched");
+            klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  tid=", thread_id.as_u64());
             Self::queue_pending_wake(thread_id);
         }
     }
@@ -1001,16 +1024,14 @@ impl ThreadManager {
     /// Queue a thread ID for deferred wake (lock-free)
     fn queue_pending_wake(thread_id: ThreadId) {
         let tid = thread_id.as_u64();
-        // Try each slot until we find an empty one
         for slot in &PENDING_WAKE_QUEUE {
             if slot
                 .compare_exchange(0, tid, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                return; // Successfully queued
+                return;
             }
         }
-        // All slots full — wake lost; thread will eventually be woken by retry logic
         PENDING_WAKE_OVERFLOW.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1375,6 +1396,17 @@ impl ThreadManager {
     pub unsafe extern "C" fn schedule_and_switch(
         current_ctx_ptr: *const Context,
     ) -> *const Context {
+        let hb = SCHED_HEARTBEAT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        if hb % 100 == 0 {
+            klibcluu::info("sched-heartbeat");
+            klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  n=", hb);
+            klibcluu::log_kv_dec(
+                klibcluu::LogLevel::Info,
+                "  cur=",
+                Self::current().map(|t| t.as_u64()).unwrap_or(u64::MAX),
+            );
+        }
+
         // Get current thread ID
         let current_id = match Self::current() {
             Some(id) => id,
@@ -1478,7 +1510,10 @@ impl ThreadManager {
         let state = Self::with_thread(thread_id, |t| (t.is_dead(), t.is_blocked()))
             .unwrap_or((true, false));
         if state.0 || state.1 {
-            // Dead or blocked threads don't go back to scheduler
+            if state.1 {
+                klibcluu::info("expire: thread BLOCKED, not re-queued");
+                klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  tid=", thread_id.as_u64());
+            }
             return;
         }
 
@@ -1498,6 +1533,16 @@ impl ThreadManager {
 
         if pending_threads.is_empty() {
             return;
+        }
+
+        klibcluu::info("drain-pending-wake");
+        klibcluu::log_kv_dec(
+            klibcluu::LogLevel::Trace,
+            "  count=",
+            pending_threads.len() as u64,
+        );
+        for tid in &pending_threads {
+            klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  tid=", tid.as_u64());
         }
 
         // Batch update threads (minimize lock hold time)

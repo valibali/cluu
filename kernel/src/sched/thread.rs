@@ -527,6 +527,17 @@ impl Thread {
         self.recv_wait_buf_len = 0;
     }
 
+    /// Whether the thread should actually transition to Blocked for a recv-wait
+    /// armed with `ticket`. Returns false when the wait is no longer current
+    /// (ticket mismatch, disarmed) OR when a direct delivery is already pending
+    /// — a sender raced between the re-check scan and the block call, and the
+    /// delivery must be consumed by the caller instead of blocking.
+    pub fn should_block_for_recv_wait(&self, ticket: u64) -> bool {
+        self.recv_wait_ticket == ticket
+            && self.recv_wait_armed
+            && self.recv_wait_delivery.is_none()
+    }
+
     pub fn is_recv_wait_armed(&self) -> bool {
         self.recv_wait_armed
     }
@@ -787,5 +798,56 @@ mod tests {
         assert!(thread.is_recv_wait_armed());
         thread.disarm_recv_wait();
         assert!(!thread.is_recv_wait_armed());
+    }
+
+    #[test]
+    fn test_should_block_for_recv_wait_rejects_pending_delivery() {
+        let mut thread = Thread::new(
+            ThreadId::new(1),
+            PhysAddr::new(0x1000),
+            VirtAddr::new(0x400000),
+            VirtAddr::new(0x7ff00000),
+            Priority::DEFAULT,
+            ThreadFlags::empty(),
+        );
+
+        thread.arm_recv_wait_with_buffer(0x10000, 4096);
+        let ticket = thread.recv_wait_ticket();
+
+        assert!(
+            thread.should_block_for_recv_wait(ticket),
+            "armed + ticket match + no delivery should block"
+        );
+
+        thread.set_recv_wait_delivery(RecvWaitDelivery {
+            endpoint: crate::token::scope::EndpointId(1),
+            len: 64,
+            sender: None,
+        });
+
+        assert!(
+            !thread.should_block_for_recv_wait(ticket),
+            "pending delivery must prevent blocking — sender raced between re-check and block"
+        );
+    }
+
+    #[test]
+    fn test_should_block_for_recv_wait_rejects_stale_ticket() {
+        let mut thread = Thread::new(
+            ThreadId::new(1),
+            PhysAddr::new(0x1000),
+            VirtAddr::new(0x400000),
+            VirtAddr::new(0x7ff00000),
+            Priority::DEFAULT,
+            ThreadFlags::empty(),
+        );
+
+        thread.arm_recv_wait_with_buffer(0x10000, 4096);
+        let stale_ticket = thread.recv_wait_ticket().wrapping_sub(1);
+
+        assert!(
+            !thread.should_block_for_recv_wait(stale_ticket),
+            "stale ticket must not block"
+        );
     }
 }

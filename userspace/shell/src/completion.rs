@@ -247,14 +247,9 @@ pub fn completion_thread(entry_ep: usize, registry: &'static BuiltinRegistry) {
     let _ = debug_print("completion: entering IPC loop");
 
     let mut buf = [0u8; 4096];
+    let tokens = [entry_ep];
     loop {
-        let control = registry::control_endpoint();
-        let tokens: Vec<usize> = if control != 0 {
-            alloc::vec![entry_ep, control]
-        } else {
-            alloc::vec![entry_ep]
-        };
-        let (idx, len) = match syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+        let (_idx, len) = match syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
             Ok(v) => v,
             Err(_) => {
                 let _ = syscall::yield_cpu();
