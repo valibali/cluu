@@ -479,6 +479,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     }
 
     // Helper closure: bump generation + send WIN_DAMAGE.
+    // Retries WouldBlock / Busy: the initial damage flush carries the
+    // modal's first full render (border + fields + hint). If it's dropped
+    // the compositor never marks the modal cells dirty and the whole modal
+    // stays empty until something else damages those cells (mouse hover).
     let send_damage = |shm_ptr: *mut WindowShm| {
         unsafe {
             let g = (*shm_ptr).generation;
@@ -492,7 +496,24 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             [win_id as usize, 0, 0, gw as usize, gh as usize, 0],
             5,
         );
-        let _ = libcluu::ipc::send(comp_ep, &dmg, IpcFlags::empty());
+        let mut attempts = 0u32;
+        loop {
+            match libcluu::ipc::send(comp_ep, &dmg, IpcFlags::empty()) {
+                Ok(()) => break,
+                Err(libcluu::Error::WouldBlock) | Err(libcluu::Error::Busy) => {
+                    attempts += 1;
+                    if attempts > 64 {
+                        let _ = debug_print("login: WIN_DAMAGE gave up after retries");
+                        break;
+                    }
+                    let _ = syscall::yield_cpu();
+                }
+                Err(_) => {
+                    let _ = debug_print("login: WIN_DAMAGE send failed");
+                    break;
+                }
+            }
+        }
     };
 
     // Initial damage flush.
