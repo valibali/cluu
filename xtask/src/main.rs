@@ -1494,6 +1494,14 @@ fn build_kernel(profile: &str) -> Result<()> {
         cmd.arg("--release");
     }
 
+    // Opt-in kernel trace logging (LogLevel::Trace). Required for diagnostic
+    // builds that need klibcluu::trace / log_dec(Trace, ...) output on COM2.
+    // Without this, Trace-level calls compile to no-ops even in debug builds.
+    if std::env::var("CLUU_LOG_TRACE").as_deref() == Ok("1") {
+        println!("  CLUU_LOG_TRACE=1: enabling kernel log-trace feature");
+        cmd.args(["--features", "log-trace"]);
+    }
+
     let status = cmd.status().context("Failed to run cargo")?;
     if !status.success() {
         bail!("Failed to build kernel");

@@ -378,6 +378,11 @@ if [ "$QEMU_GDB" = "1" ]; then
     qemu_args+=(-S -s)
 fi
 
+if [ "$QEMU_GDB_SERVER" = "1" ]; then
+    echo "QEMU_GDB_SERVER=1: enabling -s (GDB server on tcp:1234, no pause)"
+    qemu_args+=(-s)
+fi
+
 if [ -n "$QEMU_EXTRA_ARGS" ]; then
     # shellcheck disable=SC2206
     extra_args=( $QEMU_EXTRA_ARGS )
@@ -435,6 +440,16 @@ _run_sendkey_sequence_nowait() {
                     echo "  sendkey $_nw_key"
                     echo "sendkey $_nw_key" | nc -U -q0 "$MONITOR_SOCK" >/dev/null 2>&1 || true
                     sleep "${KEY_DELAY:-0.02}"
+                    ;;
+                mouse_move\ *)
+                    _nw_args="${_nowait_line#mouse_move }"
+                    echo "  mouse_move $_nw_args"
+                    echo "mouse_move $_nw_args" | nc -U -q0 "$MONITOR_SOCK" >/dev/null 2>&1 || true
+                    ;;
+                mouse_button\ *)
+                    _nw_val="${_nowait_line#mouse_button }"
+                    echo "  mouse_button $_nw_val"
+                    echo "mouse_button $_nw_val" | nc -U -q0 "$MONITOR_SOCK" >/dev/null 2>&1 || true
                     ;;
                 sleep\ *)
                     _nw_secs="${_nowait_line#sleep }"
@@ -614,6 +629,16 @@ if [ -n "$SENDKEY_SEQUENCE" ] && [ "$_sendkey_sequence_fired" != "1" ]; then
                 local_key="${seq_line#sendkey }"
                 echo "  sendkey $local_key"
                 send_key "$local_key"
+                ;;
+            mouse_move\ *)
+                local_args="${seq_line#mouse_move }"
+                echo "  mouse_move $local_args"
+                echo "mouse_move $local_args" | nc -U -q0 "$MONITOR_SOCK" >/dev/null 2>&1 || true
+                ;;
+            mouse_button\ *)
+                local_val="${seq_line#mouse_button }"
+                echo "  mouse_button $local_val"
+                echo "mouse_button $local_val" | nc -U -q0 "$MONITOR_SOCK" >/dev/null 2>&1 || true
                 ;;
             sleep\ *)
                 local_secs="${seq_line#sleep }"
@@ -2018,6 +2043,16 @@ case "$MARKER_MODE" in
             "TSC calibrated"
             "procmgr: SESSION_CREATE ok"
             "session-procmgr: started"
+        )
+        ;;
+    mouse_smoke)
+        required_markers=(
+            "TSC calibrated"
+            "ps2: aux port initialized"
+            "mouse: ready"
+            "mouse: irq12 attached"
+            "mouse: vtmgr:input subscribed"
+            "compositor: first mouse event received"
         )
         ;;
     none)
