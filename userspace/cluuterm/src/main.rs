@@ -92,7 +92,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // The session_id is still read for the completion RPC endpoint name
     // (shell:completion:<sid>).
     let session_id = read_own_session_id();
-    let (pts_id, vfs_ep) = match register_pts(my_ep, None) {
+    let (pts_id, vfs_ep) = match register_pts(my_ep, session_id) {
         Ok(pair) => pair,
         Err(code) => {
             let _ = debug_print("cluuterm: PTS_REGISTER failed");
@@ -102,7 +102,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let _ = debug_print("cluuterm: pts registered");
 
     // Phase 3: spawn /bin/shell with fd 0/1/2 wired to /dev/pts/<id>.
-    if let Err(code) = spawn_shell_with_pts(pts_id) {
+    if let Err(code) = spawn_shell_with_pts(pts_id, vfs_ep) {
         let _ = debug_print("cluuterm: spawn /bin/shell failed");
         return code;
     }
@@ -261,14 +261,12 @@ fn register_pts(my_ep: usize, session_id: Option<u32>) -> Result<(u32, usize), i
 /// Opens the pts node, builds FdInherit entries referencing it, and calls
 /// the unified spawn protocol (`libcluu::spawn::spawn`). The parent-side
 /// pts fd is closed after spawn.
-fn spawn_shell_with_pts(pts_id: u32) -> Result<(), i32> {
+fn spawn_shell_with_pts(pts_id: u32, _vfs_ep: usize) -> Result<(), i32> {
     let path_bytes = render::pts_path(pts_id);
 
-    // O_RDONLY = 0; O_WRONLY = 1; we open once RW and build FdInherit entries.
     const O_RDONLY: i32 = 0;
     const O_WRONLY: i32 = 1;
 
-    // Open the pts node for input (fd 0) and output (fd 1, 2).
     let pts_in: i32 = unsafe { _open(path_bytes.as_ptr(), O_RDONLY, 0) };
     if pts_in < 0 {
         let _ = debug_print("cluuterm: open /dev/pts for read failed");
@@ -281,16 +279,15 @@ fn spawn_shell_with_pts(pts_id: u32) -> Result<(), i32> {
         return Err(11);
     }
 
-    // Resolve VFS addresses for fd inheritance.
-let (stdin_cid, stdin_rfd, stdout_cid, stdout_rfd) = {
-            let fd_table = libcluu::fd_table::FD_TABLE.lock();
-            let stdin_entry = fd_table.get(pts_in).ok_or(12)?;
-            let stdout_entry = fd_table.get(pts_out).ok_or(13)?;
-            (
-                stdin_entry.client_id as u64, stdin_entry.remote_fd.unwrap_or(0) as u32,
-                stdout_entry.client_id as u64, stdout_entry.remote_fd.unwrap_or(0) as u32,
-            )
-        };
+    let (stdin_cid, stdin_rfd, stdout_cid, stdout_rfd) = {
+        let fd_table = libcluu::fd_table::FD_TABLE.lock();
+        let stdin_entry = fd_table.get(pts_in).ok_or(12)?;
+        let stdout_entry = fd_table.get(pts_out).ok_or(13)?;
+        (
+            stdin_entry.client_id as u64, stdin_entry.remote_fd.unwrap_or(0) as u32,
+            stdout_entry.client_id as u64, stdout_entry.remote_fd.unwrap_or(0) as u32,
+        )
+    };
 
     let fd_inherit = alloc::vec![
         FdInherit {
@@ -413,10 +410,6 @@ let (stdin_cid, stdin_rfd, stdout_cid, stdout_rfd) = {
         }
     }
 
-    // Close parent-side pts fds.
-    unsafe {
-        _close(pts_in);
-        _close(pts_out);
-    }
+    unsafe { _close(pts_in); _close(pts_out); }
     Ok(())
 }

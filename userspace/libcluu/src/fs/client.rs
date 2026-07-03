@@ -150,7 +150,10 @@ impl VfsClient {
         }
     }
 
-    /// Create a client using the current process registry control endpoint.
+    pub fn client_id(&self) -> usize {
+        self.client_id
+    }
+
     pub fn new_from_registry(endpoint: usize) -> Result<Self> {
         let client_id = crate::registry::control_endpoint();
         if client_id == 0 {
