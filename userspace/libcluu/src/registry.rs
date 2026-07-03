@@ -97,6 +97,14 @@ pub fn control_endpoint() -> usize {
 /// - `Some(token)`: Endpoint token for the service
 /// - `None`: Service not found or lookup failed
 pub fn lookup_service(full_name: &str) -> Option<usize> {
+    if full_name == "vfs:main" {
+        let info = process_info();
+        let session_vfs_ep = info.params[crate::boot::PARAM_SESSION_VFS_EP] as usize;
+        if session_vfs_ep != 0 {
+            return Some(session_vfs_ep);
+        }
+    }
+
     {
         let state = REGISTRY_STATE.lock();
         if let Some(token) = state.lookup_cache.get(full_name) {
@@ -263,6 +271,14 @@ fn register_output_async(endpoint_name: &str, endpoint_token: usize) -> Result<(
 }
 
 pub fn subscribe_output(service_name: &str, endpoint_name: &str) -> Result<usize> {
+    if service_name == "vfs" && endpoint_name == "main" {
+        let info = process_info();
+        let session_vfs_ep = info.params[crate::boot::PARAM_SESSION_VFS_EP] as usize;
+        if session_vfs_ep != 0 {
+            return Ok(session_vfs_ep);
+        }
+    }
+
     let (registry_endpoint, control_endpoint) = {
         let state = REGISTRY_STATE.lock();
         (state.registry_endpoint, state.control_endpoint)

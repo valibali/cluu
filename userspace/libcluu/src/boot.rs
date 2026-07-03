@@ -252,6 +252,7 @@ pub const PARAM_SESSION_MODE: usize = 16;
 /// 0 = no notification expected. Used by procmgr at SESSION_LOGIN kind=1
 /// to gate cluuterm-spawn on user-compositor readiness.
 pub const PARAM_NOTIFY_READY_EP: usize = 17;
+pub const PARAM_SESSION_VFS_EP: usize = 18;
 
 /// Read the process info structure.
 pub fn process_info() -> &'static ProcessInfo {
