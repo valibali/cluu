@@ -42,6 +42,9 @@ use fd_table::{FdTable, OpenFile};
 use mount::MountTable;
 
 use libcluu::boot::TOKEN_EXTRA_0;
+use libcluu::boot::{PARAM_ARGC, PARAM_ARGV_OFFSET, PROCESS_INFO_ADDR};
+use libcluu::mem::PAGE_SIZE;
+use procmgr_common::wire::SessionEnvelope;
 // Accommodate full set_view payloads (13B header + src/dst bytes per mount,
 // now ~10+ entries per container after the mount-policy atomic flip).
 const IPC_MESSAGE_MAX: usize = 1024;
@@ -203,15 +206,27 @@ fn run_vfs() -> Result<()> {
     let info = process_info();
     let endpoint = info.tokens[TOKEN_EXTRA_0];
     let space_token = info.tokens[TOKEN_SPACE];
-    let initrd_size = info.params[PARAM_INITRD_SIZE] as usize;
-    let initrd = map_initrd_slice(initrd_size);
 
-    // Populate /proc/fb with framebuffer info from init
-    let fb_phys = info.params[PARAM_VFS_FB_PHYS];
-    let fb_size = info.params[PARAM_VFS_FB_SIZE];
-    let fb_width = info.params[PARAM_VFS_FB_WIDTH];
-    let fb_height = info.params[PARAM_VFS_FB_HEIGHT];
-    let fb_pitch = info.params[PARAM_VFS_FB_PITCH];
+    let session_envelope = read_session_envelope();
+    let session_sid = session_envelope.as_ref().map(|e| e.sid);
+    let is_session = session_sid.is_some();
+
+    if is_session {
+        let _ = debug_print(&alloc::format!("vfs: session mode sid={}", session_sid.unwrap()));
+    }
+
+    let initrd_size = if is_session { 0 } else { info.params[PARAM_INITRD_SIZE] as usize };
+    let initrd: &'static [u8] = if initrd_size > 0 {
+        map_initrd_slice(initrd_size)
+    } else {
+        &[][..]
+    };
+
+    let fb_phys = if is_session { 0 } else { info.params[PARAM_VFS_FB_PHYS] };
+    let fb_size = if is_session { 0 } else { info.params[PARAM_VFS_FB_SIZE] };
+    let fb_width = if is_session { 0 } else { info.params[PARAM_VFS_FB_WIDTH] };
+    let fb_height = if is_session { 0 } else { info.params[PARAM_VFS_FB_HEIGHT] };
+    let fb_pitch = if is_session { 0 } else { info.params[PARAM_VFS_FB_PITCH] };
     procfs::set_fb_info(procfs::FbInfo {
         phys: fb_phys,
         size: fb_size,
@@ -234,10 +249,19 @@ fn run_vfs() -> Result<()> {
         None
     };
 
-    debug_print("vfs: registering...")?;
-    registry::init("vfs")?;
-    registry::register_default_outputs()?;
-    registry::register_output("main", endpoint)?;
+    if is_session {
+        let sid = session_sid.unwrap();
+        registry::init("session-vfs")?;
+        registry::register_default_outputs()?;
+        let output_name = alloc::format!("main:{}", sid);
+        registry::register_output(&output_name, endpoint)?;
+        let _ = registry::request_subscription("session-vfs", &output_name);
+    } else {
+        debug_print("vfs: registering...")?;
+        registry::init("vfs")?;
+        registry::register_default_outputs()?;
+        registry::register_output("main", endpoint)?;
+    }
 
     debug_print("vfs: waiting for services...")?;
 
@@ -246,12 +270,20 @@ fn run_vfs() -> Result<()> {
         yield_cpu()?;
     }
 
-    // Setup all mount points declaratively
-    let mounts = setup_mounts(initrd, dev_fb_info)?;
+    // Setup mount points.  In session mode /proc is backed by session-procmgr.
+    let procmgr_endpoint = if is_session {
+        let sid = session_sid.unwrap();
+        let ep_name = alloc::format!("main:{}", sid);
+        registry::subscribe_output("session-procmgr", &ep_name)?
+    } else {
+        registry::subscribe_output("procmgr", "spawn")?
+    };
+    let mounts = setup_mounts(initrd, dev_fb_info, procmgr_endpoint)?;
 
-    // Signal that ext2 is mounted (procmgr blocks on this for autostart)
-    registry::register_output("mounted", endpoint)?;
-    debug_print("vfs: published 'mounted' signal")?;
+    if !is_session {
+        registry::register_output("mounted", endpoint)?;
+        debug_print("vfs: published 'mounted' signal")?;
+    }
 
     let grant_buf_base = map_grant_buffer(space_token)?;
     let _ = debug_print(&format!(
@@ -295,22 +327,13 @@ fn run_vfs() -> Result<()> {
 
     debug_print("vfs: ready")?;
 
-    // Subscribe to tty:N main endpoints so /dev/tty* reads can forward
-    // TTY_READ_REQUEST to the live tty service.  Grants arrive asynchronously
-    // as RegistryEvent::Grant in the main loop and populate tty_endpoints[N].
-    for i in 0..4usize {
-        let name = alloc::format!("tty:{}", i);
-        let _ = registry::request_subscription(&name, "main");
+    // Subscribe to tty:N main endpoints (root-VFS only).
+    if !is_session {
+        for i in 0..4usize {
+            let name = alloc::format!("tty:{}", i);
+            let _ = registry::request_subscription(&name, "main");
+        }
     }
-
-    // FIXME(preload): startup-time PRELOAD activation is currently disabled
-    // because the synchronous FS_READ_GRANT path has ~1s per-IPC overhead
-    // regardless of payload size, so preloading ~28 binaries adds ~26s to
-    // boot. Re-enable once VFS gains a pipelined or bulk-read path, or run
-    // preload off the boot critical path. Manifest schema, helper, /bin
-    // symlinks, and the bigger cache budget all still pay dividends via
-    // lazy-cache fill.
-    // server.preload_marked_binaries();
 
     loop {
         let tokens = [endpoint, registry_endpoint];
@@ -328,10 +351,24 @@ fn run_vfs() -> Result<()> {
     }
 }
 
-/// Declarative mount point configuration.
-///
-/// All mount points are defined here in one place.
-fn setup_mounts(initrd: &'static [u8], fb_info: Option<mount::FbInfo>) -> Result<MountTable> {
+fn read_session_envelope() -> Option<SessionEnvelope> {
+    let info = process_info();
+    let byte_len = info.params[PARAM_ARGC] as usize;
+    let byte_off = info.params[PARAM_ARGV_OFFSET] as usize;
+    if byte_len == 0 || byte_off == 0 || byte_off + byte_len > PAGE_SIZE {
+        return None;
+    }
+    let page_base = PROCESS_INFO_ADDR & !(PAGE_SIZE - 1);
+    let ptr = (page_base + byte_off) as *const u8;
+    let raw = unsafe { core::slice::from_raw_parts(ptr, byte_len) };
+    postcard::from_bytes(raw).ok()
+}
+
+fn setup_mounts(
+    initrd: &'static [u8],
+    fb_info: Option<mount::FbInfo>,
+    procmgr_endpoint: usize,
+) -> Result<MountTable> {
     debug_print("vfs: setup_mounts start")?;
     let mut mounts = MountTable::new();
 
@@ -348,8 +385,6 @@ fn setup_mounts(initrd: &'static [u8], fb_info: Option<mount::FbInfo>) -> Result
     mounts.mount_remote("/", blkdev_endpoint, "blkdev");
     debug_print("vfs: mounted / (blkdev)")?;
 
-    // Procfs: static generators + dynamic procmgr IPC for per-PID info
-    let procmgr_endpoint = registry::subscribe_output("procmgr", "spawn")?;
     mounts.mount("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
     debug_print("vfs: mounted /proc (procfs)")?;
 

@@ -10,6 +10,7 @@ license = "MIT"
 [dependencies]
 libcluu = { path = "../libcluu" }
 postcard = { workspace = true }
+procmgr-common = { path = "../libs/procmgr-common" }
 
 [[bin]]
 name = "vfs"
