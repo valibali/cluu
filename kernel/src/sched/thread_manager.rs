@@ -347,15 +347,20 @@ impl ThreadManager {
             .collect()
     }
 
-    /// Collect live thread IDs visible to `caller_session_id`.
-    /// session_id == 0 is root/system scope: sees all threads.
-    /// Non-zero: sees only threads with the same session_id.
-    pub fn enumerate_live_tids_in_session(caller_session_id: u64) -> alloc::vec::Vec<ThreadId> {
+    /// Collect live thread IDs visible to `caller_session_id` with optional
+    /// system_scope. session_id == 0 or system_scope == true: sees all threads.
+    /// Non-zero without system_scope: sees only threads with the same session_id.
+    pub fn enumerate_live_tids_in_session(
+        caller_session_id: u64,
+        caller_system_scope: bool,
+    ) -> alloc::vec::Vec<ThreadId> {
         THREAD_REPOSITORY
             .lock()
             .iter()
             .filter(|(_, t)| !t.is_dead())
-            .filter(|(_, t)| caller_session_id == 0 || t.session_id == caller_session_id)
+            .filter(|(_, t)| {
+                caller_session_id == 0 || caller_system_scope || t.session_id == caller_session_id
+            })
             .map(|(id, _)| *id)
             .collect()
     }
@@ -376,6 +381,28 @@ impl ThreadManager {
         if let Some(mut repo) = THREAD_REPOSITORY.try_lock() {
             if let Some(thread) = repo.get_mut(id) {
                 thread.session_id = session_id;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Read the system_scope flag of a thread. Returns false if thread not
+    /// found (fail-safe: no system scope for unknown threads).
+    pub fn thread_system_scope(id: ThreadId) -> bool {
+        THREAD_REPOSITORY
+            .lock()
+            .get(id)
+            .map(|t| t.system_scope)
+            .unwrap_or(false)
+    }
+
+    /// Set the system_scope flag on a thread. Called by procmgr via
+    /// InvokeOp::ThreadSetSystemScope after thread_create, before thread_resume.
+    pub fn set_thread_system_scope(id: ThreadId, system_scope: bool) -> bool {
+        if let Some(mut repo) = THREAD_REPOSITORY.try_lock() {
+            if let Some(thread) = repo.get_mut(id) {
+                thread.system_scope = system_scope;
                 return true;
             }
         }

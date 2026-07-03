@@ -249,6 +249,13 @@ pub struct Thread {
     /// Set by procmgr via InvokeOp::ThreadSetSession after thread_create,
     /// before thread_resume. Defaults to 0 (kernel/system threads).
     pub session_id: u64,
+
+    /// System-scope visibility flag. When true, thread_enumerate returns
+    /// all threads regardless of session_id (like session_id == 0, but for
+    /// privileged threads living in a non-zero session, e.g. root user).
+    /// Set by procmgr via InvokeOp::ThreadSetSystemScope after thread_create,
+    /// before thread_resume. Defaults to false.
+    pub system_scope: bool,
 }
 
 impl Thread {
@@ -326,6 +333,7 @@ impl Thread {
             cpu_ticks_consumed: 0,
             notification_wait: None,
             session_id: 0,
+            system_scope: false,
         }
     }
 
@@ -369,6 +377,7 @@ impl Thread {
             cpu_ticks_consumed: 0,
             notification_wait: None,
             session_id: 0,
+            system_scope: false,
         }
     }
 

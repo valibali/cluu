@@ -124,6 +124,7 @@ pub enum InvokeOp {
     // Thread enumeration
     ThreadEnumerate = 84,
     ThreadSetSession = 85,
+    ThreadSetSystemScope = 86,
 }
 
 /// Page mapping flags for space_map.
@@ -1200,6 +1201,23 @@ pub fn thread_enumerate(token: usize, buf: &mut [u64]) -> Result<usize> {
 /// session_id == 0 means root/system scope (sees all threads in enumerate).
 pub fn thread_set_session(thread_token: usize, session_id: u64) -> Result<()> {
     unsafe { invoke(thread_token, InvokeOp::ThreadSetSession, session_id as usize, 0, 0, 0) }?;
+    Ok(())
+}
+
+/// Set the system_scope flag on a thread for cross-session visibility.
+/// Must be called after `thread_create` and before `thread_resume`.
+/// When true, thread_enumerate returns all threads regardless of session_id.
+pub fn thread_set_system_scope(thread_token: usize, system_scope: bool) -> Result<()> {
+    unsafe {
+        invoke(
+            thread_token,
+            InvokeOp::ThreadSetSystemScope,
+            if system_scope { 1 } else { 0 },
+            0,
+            0,
+            0,
+        )
+    }?;
     Ok(())
 }
 

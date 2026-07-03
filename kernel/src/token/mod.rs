@@ -449,6 +449,11 @@ pub enum InvokeOp {
     /// arg3 = session_id. Only callable with THREAD_CONTROL right.
     /// Used by procmgr after thread_create, before thread_resume.
     ThreadSetSession = 85,
+
+    /// Set the system_scope flag on a thread for cross-session visibility.
+    /// arg3 = 0 (false) or 1 (true). Only callable with THREAD_CONTROL right.
+    /// Used by procmgr after thread_create, before thread_resume.
+    ThreadSetSystemScope = 86,
 }
 
 impl InvokeOp {
@@ -504,6 +509,7 @@ impl InvokeOp {
             83 => Some(Self::NotificationPoll),
             84 => Some(Self::ThreadEnumerate),
             85 => Some(Self::ThreadSetSession),
+            86 => Some(Self::ThreadSetSystemScope),
             _ => None,
         }
     }

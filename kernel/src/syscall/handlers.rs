@@ -838,6 +838,10 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::ThreadEnumerate => invoke_thread_enumerate(&token, obj_ref, args),
 
         InvokeOp::ThreadSetSession => invoke_thread_set_session(&token, obj_ref, args),
+
+        InvokeOp::ThreadSetSystemScope => {
+            invoke_thread_set_system_scope(&token, obj_ref, args)
+        }
     }
 }
 
@@ -3458,23 +3462,34 @@ fn invoke_thread_enumerate(
         return Err(Error::PermissionDenied);
     }
 
-    // Resolve caller's session_id from the token's object reference.
-    // TOKEN_SELF resolves to ObjectRef::Thread(caller_tid) → look up session_id.
+    // Resolve caller's session_id and system_scope from the token's object
+    // reference. TOKEN_SELF resolves to ObjectRef::Thread(caller_tid).
     // session_id == 0 means root/system scope: sees all threads.
-    let caller_session_id: u64 = if let ObjectRef::Thread(tid) =
-        crate::token::check_object_type(obj_ref, ObjectType::Thread).unwrap_or(ObjectRef::Thread(
+    // system_scope == true means privileged cross-session visibility.
+    let (caller_session_id, caller_system_scope): (u64, bool) =
+        if let ObjectRef::Thread(tid) = crate::token::check_object_type(
+            obj_ref,
+            ObjectType::Thread,
+        )
+        .unwrap_or(ObjectRef::Thread(
             crate::sched::ThreadManager::current().unwrap_or(crate::sched::ThreadId::new(0)),
         )) {
-        crate::sched::ThreadManager::thread_session_id(tid)
-    } else {
-        0
-    };
+            (
+                crate::sched::ThreadManager::thread_session_id(tid),
+                crate::sched::ThreadManager::thread_system_scope(tid),
+            )
+        } else {
+            (0, false)
+        };
 
     let buf_ptr = args.arg3;
     let buf_cap = args.arg4;
 
     if buf_ptr == 0 || buf_cap == 0 {
-        let tids = crate::sched::ThreadManager::enumerate_live_tids_in_session(caller_session_id);
+        let tids = crate::sched::ThreadManager::enumerate_live_tids_in_session(
+            caller_session_id,
+            caller_system_scope,
+        );
         return Ok(tids.len());
     }
 
@@ -3486,7 +3501,10 @@ fn invoke_thread_enumerate(
     let cr3 = crate::sched::ThreadManager::current_page_table_root()
         .ok_or(Error::InvalidOperation)?;
 
-    let tids = crate::sched::ThreadManager::enumerate_live_tids_in_session(caller_session_id);
+    let tids = crate::sched::ThreadManager::enumerate_live_tids_in_session(
+        caller_session_id,
+        caller_system_scope,
+    );
     let to_copy = tids.len().min(buf_cap);
     let copy_bytes = to_copy * core::mem::size_of::<u64>();
 
@@ -3530,6 +3548,36 @@ fn invoke_thread_set_session(
     let session_id = args.arg3 as u64;
 
     if crate::sched::ThreadManager::set_thread_session(thread_id, session_id) {
+        Ok(0)
+    } else {
+        Err(Error::NotFound)
+    }
+}
+
+/// Set the system_scope flag on a thread for cross-session visibility.
+/// arg3 = 0 (false) or non-zero (true). Requires THREAD_CONTROL right.
+fn invoke_thread_set_system_scope(
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
+) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::THREAD_CONTROL) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let thread_ref = crate::token::check_object_type(obj_ref, ObjectType::Thread)
+        .map_err(|_| Error::InvalidArgument)?;
+    let thread_id = if let ObjectRef::Thread(id) = thread_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let system_scope = args.arg3 != 0;
+
+    if crate::sched::ThreadManager::set_thread_system_scope(thread_id, system_scope) {
         Ok(0)
     } else {
         Err(Error::NotFound)
