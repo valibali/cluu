@@ -309,6 +309,7 @@ struct ProcessManager {
     /// Container IDs that have a pending deferred restart (prevents duplicates).
     pending_restarts: BTreeSet<u64>,
     session_pmgr_endpoints: BTreeSet<usize>,
+    session_service_tids: BTreeMap<u32, alloc::vec::Vec<usize>>,
     /// Persistent shared-ring region for VFS bulk reads. Allocated once on
     /// first `load_from_vfs_ring` and reused for every subsequent call so
     /// the VFS-side grant survives across loads.
@@ -392,6 +393,7 @@ impl ProcessManager {
             pending_timers: Vec::new(),
             pending_restarts: BTreeSet::new(),
             session_pmgr_endpoints: BTreeSet::new(),
+            session_service_tids: BTreeMap::new(),
             login_attempts: BTreeMap::new(),
             pipes: Vec::new(),
             pg_table: PgTable::new(),
@@ -4236,6 +4238,12 @@ impl ProcessManager {
                     thread_tok, &supervisor_mounts,
                     CapProfile::SUPERVISOR, 0, 0, false, session_id as u64,
                 );
+                if let Ok(tid) = thread_get_id(thread_tok) {
+                    self.session_service_tids
+                        .entry(session_id)
+                        .or_default()
+                        .push(tid);
+                }
                 let sid_byte = (session_id & 0xFF) as u8;
                 let _ = registry::request_subscription(
                     "session-procmgr",
@@ -4250,6 +4258,138 @@ impl ProcessManager {
             }
         }
         // Restore root cap; scoped_view_mgr is now owned by the child process.
+        self.view_mgr_token = saved_view_mgr;
+    }
+
+    fn spawn_session_vfs_for(&mut self, session_id: u32, user_name: &str) {
+        use procmgr_common::wire::SessionEnvelope;
+
+        let envelope = SessionEnvelope {
+            sid: (session_id & 0xFF) as u8,
+            generation: 0,
+            user_name: user_name.into(),
+            profile: alloc::string::String::new(),
+            pid_base: ((session_id & 0xFF) as i32)
+                << procmgr_common::pid::LOCAL_BITS,
+            caps: alloc::vec::Vec::new(),
+            env_defaults: alloc::vec::Vec::new(),
+            view_spec: alloc::string::String::new(),
+        };
+
+        let env_bytes = match postcard::to_allocvec(&envelope) {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = debug_print(
+                    "procmgr: SESSION spawn_session_vfs_for: envelope ser failed",
+                );
+                return;
+            }
+        };
+        let byte_len = env_bytes.len();
+
+        let spawn_seq = self.spawn_seq_next;
+        self.spawn_seq_next += 1;
+        let spawn_start = self.clock_sample();
+
+        let _ = debug_print(&format!(
+            "procmgr: spawning session-vfs sid={} env_bytes={}",
+            session_id & 0xFF, byte_len
+        ));
+
+        const VIEW_SCOPE_ROOT: u16 = 0x0001;
+        const VIEW_SCOPE_DEV: u16 = 0x0002;
+
+        let scoped_view_mgr = match token_derive_scoped(
+            self.view_mgr_token,
+            Rights::GRANT.bits(),
+            u64::MAX,
+            session_id & 0xFF,
+            VIEW_SCOPE_ROOT | VIEW_SCOPE_DEV,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: SESSION_CREATE session-vfs view_mgr sub-mint FAILED sid={} {:?}",
+                    session_id & 0xFF, e
+                ));
+                return;
+            }
+        };
+        let saved_view_mgr = self.view_mgr_token;
+        self.view_mgr_token = scoped_view_mgr;
+
+        let child_endpoint = match (|| {
+            let ep = endpoint_create(self.token)?;
+            let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT;
+            token_derive(ep, rights.bits() as usize, u64::MAX)
+        })() {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: session-vfs endpoint create FAILED sid={} {:?}",
+                    session_id & 0xFF, e
+                ));
+                self.view_mgr_token = saved_view_mgr;
+                return;
+            }
+        };
+
+        let param_overrides: [(usize, u64); 1] = [
+            (libcluu::boot::PARAM_INITRD_SIZE, 0),
+        ];
+
+        let spawn_result = self.spawn_service_with_env(
+            "/dev/initrd/sys/vfs",
+            0,
+            &env_bytes,
+            byte_len,
+            &[],
+            0,
+            0,
+            spawn_seq,
+            spawn_start,
+            &[],
+            CapProfile::SERVICE,
+            child_endpoint,
+            0,
+            &param_overrides,
+            None,
+            &[],
+            &[],
+            THREAD_CREATE_START_SUSPENDED,
+        );
+        match spawn_result {
+            Ok((thread_tok, _cookie, _pid, _)) => {
+                let _ = debug_print(&format!(
+                    "procmgr: session-vfs spawned sid={} thread_tok={}",
+                    session_id & 0xFF, thread_tok
+                ));
+                let mounts: Vec<(String, String, bool, u64)> = alloc::vec![
+                    ("/".into(), "/".into(), true, 0u64),
+                ];
+                self.install_view_and_run(
+                    thread_tok, &mounts,
+                    CapProfile::SERVICE, 0, 0, false, session_id as u64,
+                );
+                if let Ok(tid) = thread_get_id(thread_tok) {
+                    self.session_service_tids
+                        .entry(session_id)
+                        .or_default()
+                        .push(tid);
+                }
+                let sid_byte = (session_id & 0xFF) as u8;
+                let _ = registry::request_subscription(
+                    "session-vfs",
+                    &alloc::format!("main:{}", sid_byte),
+                );
+            }
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: session-vfs spawn FAILED sid={} {:?}",
+                    session_id & 0xFF, e
+                ));
+            }
+        }
         self.view_mgr_token = saved_view_mgr;
     }
 
@@ -6290,6 +6430,7 @@ impl ProcessManager {
         // Caps are left empty for now; the session-procmgr initialises its
         // kernel adapter with MockKernel until Phase 12.4 wires real caps.
         self.spawn_session_procmgr_for(session_id, &req.user_name);
+        self.spawn_session_vfs_for(session_id, &req.user_name);
 
         let reply =
             cluu_wire::session::SessionCreateReply::Ok(cluu_wire::session::SessionCreateOk {
@@ -6595,6 +6736,11 @@ impl ProcessManager {
         for pid in self.members_of_session(sid) {
             const SIGHUP: u32 = 1;
             self.send_signal(pid, SIGHUP);
+        }
+        if let Some(tids) = self.session_service_tids.remove(&sid) {
+            for tid in tids {
+                let _ = thread_destroy(tid);
+            }
         }
         let event = cluu_wire::session::SessionEndedEvent { session_id: sid };
         let bytes = postcard::to_allocvec(&event).expect("ser");
@@ -7241,7 +7387,7 @@ fn profile_to_rights(profile: CapProfile) -> [Rights; 16] {
 
     // VFS: needs SPACE_MAP to map file data into address space.
     if profile.contains(CapProfile::VFS) {
-        r[TOKEN_SPACE] |= Rights::SPACE_MAP;
+        r[TOKEN_SPACE] |= Rights::SPACE_MAP | Rights::GRANT;
     }
 
     // DEVICE: needs THREAD_CONTROL for interrupt handling threads, and
