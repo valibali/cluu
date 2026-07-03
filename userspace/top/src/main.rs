@@ -1,7 +1,8 @@
 //! `top` — live process monitor reading from /proc.
 //!
 //! Reads /proc/<tid>/stat for each TID, builds a container hierarchy tree
-//! from cid/pcid, and renders a live updating display.
+//! from cid/pcid, and renders a live updating display with htop-style
+//! CPU/memory gauges and fixed-width aligned columns.
 //!
 //! Output goes through POSIX `_write(1, ...)` → VFS → PTS_WRITE_LABEL →
 //! cluuterm → compositor SHM. Input is not handled (Ctrl-C via shell signal).
@@ -19,12 +20,23 @@ use alloc::vec::Vec;
 #[allow(unused_imports)]
 use libcluu::runtime as _;
 
-use libcluu::boot::{process_info, PARAM_FB_HEIGHT, PARAM_FB_WIDTH, TOKEN_CLOCK, TOKEN_SPACE};
+use libcluu::boot::{process_info, PARAM_FB_WIDTH, TOKEN_CLOCK, TOKEN_SPACE};
 use libcluu::debug_print;
 use libcluu::fs::client::VfsClient;
 use libcluu::registry;
 
 const GRANT_SIZE: usize = 4096;
+
+const W_CID: usize = 5;
+const W_PCID: usize = 5;
+const W_NAME: usize = 30;
+const W_PID: usize = 7;
+const W_HEAP: usize = 7;
+const W_MEM: usize = 7;
+const W_CPU: usize = 6;
+const W_ST: usize = 4;
+
+const MIN_COLS_FOR_DUAL_GAUGE: usize = 60;
 
 extern "C" {
     fn _write(fd: i32, buf: *const u8, n: usize) -> isize;
@@ -59,10 +71,6 @@ fn run() -> libcluu::Result<()> {
     let clock_token = info.tokens[TOKEN_CLOCK];
     let space_token = info.tokens[TOKEN_SPACE];
 
-    let fb_width = info.params[PARAM_FB_WIDTH] as u32;
-    let _fb_height = info.params[PARAM_FB_HEIGHT] as u32;
-    let cols = if fb_width > 0 { (fb_width / 8) as usize } else { 80 };
-
     const SCHED_HZ: u64 = 250;
     let tsc_hz = libcluu::syscall::clock_frequency(clock_token).unwrap_or(1_000_000_000);
 
@@ -95,11 +103,22 @@ fn run() -> libcluu::Result<()> {
     loop {
         let now_tsc = libcluu::syscall::clock_now(clock_token).unwrap_or(0);
 
+        let cols = {
+            let fb_w = info.params[PARAM_FB_WIDTH] as u32;
+            let c = if fb_w > 0 { (fb_w / 8) as usize } else { 80 };
+            c.min(80)
+        };
+
+        // Read system memory info (total/used in kB) from /proc/meminfo.
+        let (mem_total_kb, mem_used_kb) =
+            read_meminfo(&vfs, space_token, grant_base).unwrap_or((0, 0));
+
         let records = match read_all_proc_stats(&vfs, space_token, grant_base) {
             Ok(r) => r,
             Err(_) => break,
         };
 
+        // Build container hierarchy tree from cid/pcid.
         let mut children_map: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
         let mut cid_set: BTreeMap<u64, usize> = BTreeMap::new();
         for (idx, rec) in records.iter().enumerate() {
@@ -129,9 +148,29 @@ fn run() -> libcluu::Result<()> {
             dfs(root_idx, "", is_last, true, &records, &children_map, &mut ordered, &mut visited);
         }
 
+        // System CPU%: sum of per-process tick deltas / elapsed sched ticks.
+        let sys_cpu_pct = if first_frame || prev_frame_tsc == 0 {
+            0u32
+        } else {
+            let total_delta: u64 = records
+                .iter()
+                .map(|r| r.cpu_ticks.saturating_sub(prev_ticks.get(&r.cid).copied().unwrap_or(0)))
+                .sum();
+            let elapsed_tsc = now_tsc.saturating_sub(prev_frame_tsc);
+            let elapsed_sched = (elapsed_tsc * SCHED_HZ / tsc_hz.max(1)).max(1);
+            ((total_delta * 100) / elapsed_sched).min(100) as u32
+        };
+
+        let mem_pct = if mem_total_kb > 0 {
+            ((mem_used_kb * 100) / mem_total_kb).min(100) as u32
+        } else {
+            0
+        };
+
         let mut frame = String::new();
         frame.push_str("\x1b[H");
 
+        // Title bar.
         frame.push_str(&format!(
             "\x1b[97;44m CLUU top   Processes: {}",
             records.len()
@@ -142,15 +181,48 @@ fn run() -> libcluu::Result<()> {
         }
         frame.push_str("\x1b[K\x1b[0m\n");
 
-        frame.push_str(
-            "\x1b[97m CID PCID NAME                  PID   HEAP    MEM   CPU%  ST  \x1b[K\x1b[0m\n",
-        );
+        // htop-style CPU + memory gauges (█/░ block elements via the u32
+        // codepoint pipeline). Bar widths scale to terminal width.
+        let cpu_color = gauge_color(sys_cpu_pct);
+        let mem_color = gauge_color(mem_pct);
+        let cpu_pct_str = format!("{}%", sys_cpu_pct);
+        let mem_str = format!("{}/{}", format_mem_kb(mem_used_kb), format_mem_kb(mem_total_kb));
+
+        if cols >= MIN_COLS_FOR_DUAL_GAUGE {
+            // Visible layout: "CPU [bar] PCT  Mem [bar] MEM"
+            // Fixed: "CPU ["=5 "] "=2 PCT=4 "  "=2 "Mem ["=5 "] "=2 MEM=var
+            let overhead = 5 + 2 + 4 + 2 + 5 + 2 + mem_str.len();
+            let remaining = cols.saturating_sub(overhead);
+            let bar_w = remaining / 2;
+            let cpu_bar = render_bar(sys_cpu_pct, bar_w);
+            let mem_bar = render_bar(mem_pct, bar_w);
+            frame.push_str(&format!(
+                "\x1b[97mCPU\x1b[0m {}[{}]\x1b[0m {:<4}  \x1b[97mMem\x1b[0m {}[{}]\x1b[0m {}\x1b[K\n",
+                cpu_color, cpu_bar, cpu_pct_str,
+                mem_color, mem_bar, mem_str,
+            ));
+        } else {
+            let overhead = 5 + 2 + 4;
+            let bar_w = cols.saturating_sub(overhead);
+            let cpu_bar = render_bar(sys_cpu_pct, bar_w);
+            frame.push_str(&format!(
+                "\x1b[97mCPU\x1b[0m {}[{}]\x1b[0m {}\x1b[K\n",
+                cpu_color, cpu_bar, cpu_pct_str,
+            ));
+        }
+
+        // Column header — widths match data rows exactly.
+        frame.push_str(&format!(
+            "\x1b[97m{:>W_CID$} {:>W_PCID$} {:<W_NAME$} {:>W_PID$} {:>W_HEAP$} {:>W_MEM$} {:>W_CPU$} {:<W_ST$}\x1b[K\x1b[0m\n",
+            "CID", "PCID", "NAME", "PID", "HEAP", "MEM", "CPU%", "ST",
+        ));
         frame.push_str("\x1b[0m");
         for _ in 0..cols {
             frame.push('-');
         }
         frame.push_str("\x1b[K\n");
 
+        // Data rows.
         for entry in &ordered {
             let rec = &records[entry.idx];
 
@@ -166,64 +238,53 @@ fn run() -> libcluu::Result<()> {
                 "\x1b[0m"
             };
 
-            let cid_str = format!("{:>4}", rec.cid);
+            let cid_str = format!("{:>1$}", rec.cid, W_CID);
             let pcid_str = if rec.pcid == 0 {
-                String::from("   -")
+                format!("{:>1$}", '-', W_PCID)
             } else {
-                format!("{:>4}", rec.pcid)
+                format!("{:>1$}", rec.pcid, W_PCID)
             };
 
             let full_name = format!("{}{}", entry.prefix, rec.name);
-            let display_name = if full_name.len() > 22 {
-                &full_name[..22]
-            } else {
-                &full_name
-            };
+            let name_str = fit_chars(&full_name, W_NAME);
 
-            let pid_str = format!("{:>5}", rec.pid);
+            let pid_str = format!("{:>1$}", rec.pid, W_PID);
 
             let heap_str = if rec.heap_pages == 0 {
-                String::from(" ---  ")
+                String::from("---")
             } else {
-                let kb = rec.heap_pages as usize * 4;
-                if kb >= 1024 {
-                    format!("{:>4}M ", kb / 1024)
-                } else {
-                    format!("{:>4}K ", kb)
-                }
+                format_mem_kb(rec.heap_pages as u64 * 4)
             };
+            let heap_col = format!("{:>1$}", heap_str, W_HEAP);
 
             let mem_str = if rec.heap_pages == 0 && rec.other_pages == 0 {
-                String::from(" ---  ")
+                String::from("---")
             } else {
-                let kb = (rec.heap_pages as usize + rec.other_pages as usize) * 4;
-                if kb >= 1024 {
-                    format!("{:>4}M ", kb / 1024)
-                } else {
-                    format!("{:>4}K ", kb)
-                }
+                format_mem_kb((rec.heap_pages as u64 + rec.other_pages as u64) * 4)
             };
+            let mem_col = format!("{:>1$}", mem_str, W_MEM);
 
             let cpu_str = if first_frame || prev_frame_tsc == 0 {
-                String::from("  --- ")
+                String::from("---")
             } else {
                 let prev = prev_ticks.get(&rec.cid).copied().unwrap_or(0);
                 let delta = rec.cpu_ticks.saturating_sub(prev);
                 let elapsed_tsc = now_tsc.saturating_sub(prev_frame_tsc);
                 let elapsed_sched = (elapsed_tsc * SCHED_HZ / tsc_hz.max(1)).max(1);
                 let pct = (delta * 100 / elapsed_sched).min(100);
-                format!("{:>5}%", pct)
+                format!("{}%", pct)
             };
+            let cpu_col = format!("{:>1$}", cpu_str, W_CPU);
 
             let st_str = match rec.state.as_str() {
                 "R" => "RUN ",
                 "Z" => "DEAD",
-                _ => " ?  ",
+                _ => "UN  ",
             };
 
             frame.push_str(&format!(
-                "{}{} {} {:<22} {} {} {} {} {}\x1b[K\x1b[0m\n",
-                color, cid_str, pcid_str, display_name, pid_str, heap_str, mem_str, cpu_str, st_str
+                "{}{} {} {} {} {} {} {} {}\x1b[K\x1b[0m\n",
+                color, cid_str, pcid_str, name_str, pid_str, heap_col, mem_col, cpu_col, st_str
             ));
         }
 
@@ -300,7 +361,7 @@ fn read_all_proc_stats(
             let addr = grant_base + grant.offset;
             let data = unsafe { core::slice::from_raw_parts(addr as *const u8, grant.len) };
             let text = core::str::from_utf8(data).unwrap_or("").trim();
-            if let Some(rec) = parse_stat_line(text) {
+            if let Some(rec) = parse_stat_line(text, &entry.name) {
                 records.push(rec);
             }
         }
@@ -311,11 +372,17 @@ fn read_all_proc_stats(
     Ok(records)
 }
 
-fn parse_stat_line(text: &str) -> Option<ProcRecord> {
+fn parse_stat_line(text: &str, tid: &str) -> Option<ProcRecord> {
     let paren_open = text.find('(')?;
     let paren_close = text.rfind(')')?;
     let pid = text[..paren_open].trim().parse::<u64>().ok()?;
-    let name = text[paren_open + 1..paren_close].to_string();
+    let raw_name = text[paren_open + 1..paren_close].to_string();
+    // Never display ? / empty / ??? names — substitute a stable tid reference.
+    let name = if raw_name.is_empty() || raw_name.chars().all(|c| c == '?') {
+        format!("[tid:{}]", tid)
+    } else {
+        raw_name
+    };
     let rest = text[paren_close + 1..].trim();
     let parts: Vec<&str> = rest.split_whitespace().collect();
     if parts.len() < 4 {
@@ -362,9 +429,9 @@ fn dfs(
     let connector = if is_root {
         String::new()
     } else if is_last {
-        format!("{}\u{2514} ", prefix)
+        format!("{}\u{2514}\u{2500}\u{2500} ", prefix)
     } else {
-        format!("{}\u{251C} ", prefix)
+        format!("{}\u{251C}\u{2500}\u{2500} ", prefix)
     };
     ordered.push(DfsEntry {
         idx,
@@ -379,9 +446,9 @@ fn dfs(
             let child_prefix = if is_root {
                 String::new()
             } else if is_last {
-                format!("{}  ", prefix)
+                format!("{}    ", prefix)
             } else {
-                format!("{}\u{2502} ", prefix)
+                format!("{}\u{2502}   ", prefix)
             };
             let kid_is_last = i == sorted.len() - 1;
             dfs(kid, &child_prefix, kid_is_last, false, records, children_map, ordered, visited);
@@ -400,4 +467,103 @@ fn digit_count(n: usize) -> usize {
         count += 1;
     }
     count
+}
+
+/// Read /proc/meminfo and return (total_kb, used_kb).
+fn read_meminfo(vfs: &VfsClient, space_token: usize, grant_base: usize) -> Option<(u64, u64)> {
+    let file = vfs.open("/proc/meminfo").ok()?;
+    if file.size == 0 {
+        let _ = vfs.close(file);
+        return None;
+    }
+    let read_size = file.size.min(GRANT_SIZE);
+    let grant = vfs.read_grant(file, 0, read_size, space_token, grant_base).ok();
+    let result = grant.and_then(|g| {
+        if g.len > 0 && g.offset + g.len <= GRANT_SIZE {
+            let addr = grant_base + g.offset;
+            let data = unsafe { core::slice::from_raw_parts(addr as *const u8, g.len) };
+            let text = core::str::from_utf8(data).unwrap_or("");
+            parse_meminfo(text)
+        } else {
+            None
+        }
+    });
+    let _ = vfs.close(file);
+    result
+}
+
+fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
+    let mut total: Option<u64> = None;
+    let mut used: Option<u64> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("MemTotal:") {
+            total = parse_kb(rest);
+        } else if let Some(rest) = trimmed.strip_prefix("MemUsed:") {
+            used = parse_kb(rest);
+        }
+    }
+    total.zip(used)
+}
+
+fn parse_kb(s: &str) -> Option<u64> {
+    s.trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// Format kB as a human-readable string: 64K, 128M, 2G.
+fn format_mem_kb(kb: u64) -> String {
+    if kb >= 1024 * 1024 {
+        format!("{}G", kb / (1024 * 1024))
+    } else if kb >= 1024 {
+        format!("{}M", kb / 1024)
+    } else {
+        format!("{}K", kb)
+    }
+}
+
+fn render_bar(pct: u32, width: usize) -> String {
+    let filled = ((pct as usize) * width / 100).min(width);
+    let empty = width - filled;
+    let mut bar = String::with_capacity(width);
+    for _ in 0..filled {
+        bar.push('\u{2588}');
+    }
+    for _ in 0..empty {
+        bar.push('\u{2591}');
+    }
+    bar
+}
+
+/// Green under 50%, yellow under 80%, red at/above 80%.
+fn gauge_color(pct: u32) -> &'static str {
+    if pct < 50 {
+        "\x1b[32m"
+    } else if pct < 80 {
+        "\x1b[33m"
+    } else {
+        "\x1b[31m"
+    }
+}
+
+/// Truncate or pad `s` to exactly `width` display characters (char-safe for
+/// multi-byte UTF-8 like the tree connectors └├│).
+fn fit_chars(s: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut count = 0usize;
+    for c in s.chars() {
+        if count >= width {
+            break;
+        }
+        out.push(c);
+        count += 1;
+    }
+    while count < width {
+        out.push(' ');
+        count += 1;
+    }
+    out
 }
