@@ -438,6 +438,54 @@ impl Compositor {
     /// Uses the same payload format as vtmgr's spawn_vt_container:
     /// NUL-terminated image name, no param overrides.
     pub fn spawn_demo(&self) {
+        use procmgr_common::{labels::SESSION_PROCMGR_SPAWN_LABEL, wire::SpawnReq};
+
+        let sid: u32 = 1;
+        let spawn_ep_name = alloc::format!("session-procmgr:spawn:{}", sid);
+        let ep = match libcluu::registry::lookup_service(&spawn_ep_name) {
+            Some(ep) => ep,
+            None => {
+                let _ = libcluu::debug_print(&alloc::format!(
+                    "compositor: spawn_demo: no {} — falling back to root-procmgr",
+                    spawn_ep_name
+                ));
+                self.spawn_demo_via_root();
+                return;
+            }
+        };
+
+        let req = SpawnReq {
+            image_path: alloc::string::String::from("/bin/cluuterm"),
+            argv: alloc::vec![alloc::string::String::from("cluuterm")],
+            envp: alloc::vec![
+                (alloc::string::String::from("TERM"),
+                 alloc::string::String::from("xterm-256color")),
+                (alloc::string::String::from("CLUU_SESSION_ID"),
+                 alloc::format!("{}", sid)),
+            ],
+            cwd: alloc::string::String::from("/"),
+            fd_inherit: alloc::vec::Vec::new(),
+            notify: None,
+        };
+
+        let payload = match postcard::to_allocvec(&req) {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = libcluu::debug_print("compositor: spawn_demo: SpawnReq serialize failed");
+                return;
+            }
+        };
+
+        let msg = libcluu::types::Message::new(
+            SESSION_PROCMGR_SPAWN_LABEL,
+            [payload.len(), 0, 0, 0, 0, 0],
+            0,
+        );
+        let _ = libcluu::ipc::send_msg_with_payload(ep, &msg, &payload);
+        let _ = libcluu::debug_print("compositor: spawn_demo: requested cluuterm via session-procmgr");
+    }
+
+    fn spawn_demo_via_root(&self) {
         let ep = match libcluu::registry::lookup_service("procmgr:spawn") {
             Some(ep) => ep,
             None => {
@@ -445,8 +493,6 @@ impl Compositor {
                 return;
             }
         };
-        // Payload: "cluuterm\0" (NUL-terminated image name, no param overrides).
-        // Wire format: words[0]=payload_len, words[3]=name_nul_term_len, words[4]=param_count.
         let payload = b"cluuterm\0";
         let msg = libcluu::types::Message::new(
             libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL,
@@ -454,7 +500,7 @@ impl Compositor {
             5,
         );
         let _ = libcluu::ipc::send_msg_with_payload(ep, &msg, payload);
-        let _ = libcluu::debug_print("compositor: spawn_demo: requested cluuterm");
+        let _ = libcluu::debug_print("compositor: spawn_demo: requested cluuterm via root-procmgr");
     }
 }
 
