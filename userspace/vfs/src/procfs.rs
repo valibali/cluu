@@ -67,8 +67,8 @@ fn gen_uptime() -> Result<Vec<u8>> {
 
 fn gen_meminfo() -> Result<Vec<u8>> {
     let self_token = process_info().tokens[TOKEN_SELF];
-    let used = pmm_get_stats(self_token, PMM_STATS_USED_FRAMES)?;
-    let total = pmm_get_stats(self_token, PMM_STATS_TOTAL_FRAMES)?;
+    let used = pmm_get_stats(self_token, PMM_STATS_USED_FRAMES).unwrap_or(0);
+    let total = pmm_get_stats(self_token, PMM_STATS_TOTAL_FRAMES).unwrap_or(0);
     let free = total.saturating_sub(used);
     // PAGE_SIZE = 4 KB, so frames * 4 = kB directly.
     let total_kb = total * 4;
@@ -210,8 +210,8 @@ fn gen_fb() -> Result<Vec<u8>> {
 /// Each line carries one counter; both start at 0 on a healthy system.
 fn gen_sched_overflow() -> Result<Vec<u8>> {
     let self_token = process_info().tokens[TOKEN_SELF];
-    let deferred_fault = sched_get_overflow(self_token, SCHED_OVERFLOW_DEFERRED_FAULT)?;
-    let pending_wake = sched_get_overflow(self_token, SCHED_OVERFLOW_PENDING_WAKE)?;
+    let deferred_fault = sched_get_overflow(self_token, SCHED_OVERFLOW_DEFERRED_FAULT).unwrap_or(0);
+    let pending_wake = sched_get_overflow(self_token, SCHED_OVERFLOW_PENDING_WAKE).unwrap_or(0);
     let text = format!(
         "deferred_fault_overflow {}\npending_wake_overflow {}\n",
         deferred_fault, pending_wake
@@ -262,10 +262,20 @@ impl ProcfsBackend {
             3,
         );
         let mut reply_buf = [0u8; 4096];
-        let (reply, payload_len) =
-            call_with_reply_buf(self.procmgr_endpoint, &req, &[], &mut reply_buf)?;
+        let bytes_received =
+            libcluu::syscall::ipc_call_timeout(self.procmgr_endpoint, req.as_bytes(), &mut reply_buf, 500)
+                .map_err(|_| Error::NotFound)?;
 
-        let errno = reply.words[1] as isize;
+        if bytes_received < size_of::<Message>() {
+            return Err(Error::InvalidState);
+        }
+        let reply_hdr = &reply_buf[..size_of::<Message>()];
+        let errno = unsafe {
+            let words_ptr = reply_hdr.as_ptr().add(8) as *const usize;
+            *words_ptr as isize
+        };
+        let payload_len = bytes_received - size_of::<Message>();
+
         if errno != 0 {
             return Err(Error::from_errno(errno));
         }
@@ -310,7 +320,7 @@ impl ProcfsBackend {
     fn query_tid_list(&self) -> Result<Vec<u32>> {
         let self_token = process_info().tokens[TOKEN_SELF];
         let mut buf = [0u64; 256];
-        let count = thread_enumerate(self_token, &mut buf)?;
+        let count = thread_enumerate(self_token, &mut buf).unwrap_or(0);
         Ok(buf[..count].iter().map(|&tid| tid as u32).collect())
     }
 }

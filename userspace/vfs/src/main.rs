@@ -321,6 +321,7 @@ fn run_vfs() -> Result<()> {
         bounce_pool_base,
         BOUNCE_POOL_SIZE,
         mounts,
+        session_sid.map(|s| s as u32),
     );
     let registry_endpoint = registry::control_endpoint();
     let mut buf = [0u8; IPC_MESSAGE_MAX];
@@ -766,6 +767,7 @@ impl VfsServer {
         bounce_pool_base: usize,
         bounce_pool_size: usize,
         mut mounts: MountTable,
+        session_id: Option<u32>,
     ) -> Self {
         let mut free_ring_slots = Vec::new();
         let ring_slots = ring_pool_size / RING_SLOT_BYTES;
@@ -782,9 +784,13 @@ impl VfsServer {
         // PtsBackend; it remains valid because pts_registry lives in Self.
         let pts_registry = alloc::boxed::Box::new(pts::PtsRegistry::new());
         let pts_reg_ptr: *const pts::PtsRegistry = &*pts_registry;
+        let pts_backend = match session_id {
+            Some(sid) => pts::PtsBackend::for_session(pts_reg_ptr, sid),
+            None => pts::PtsBackend::new(pts_reg_ptr),
+        };
         mounts.mount(
             "/dev/pts",
-            alloc::boxed::Box::new(pts::PtsBackend::new(pts_reg_ptr)),
+            alloc::boxed::Box::new(pts_backend),
         );
 
         Self {
