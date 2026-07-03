@@ -3272,6 +3272,33 @@ impl ProcessManager {
             match self.tid_to_pid.get(&raw_target).copied() {
                 Some(pid) => pid,
                 None => {
+                    // TID not in root-procmgr's table — it may be a
+                    // session-procmgr child. Forward the query to each
+                    // session-procmgr endpoint (mirror the PG_SIGNAL
+                    // fan-out at line ~3199). First successful reply wins.
+                    for &ep in &self.session_pmgr_endpoints {
+                        let fwd_msg = Message::new(
+                            PROCMGR_PROC_QUERY_LABEL,
+                            [query_type, raw_target, original_caller_tid, 0, 0, 0],
+                            3,
+                        );
+                        let mut fwd_buf: Vec<u8> = alloc::vec![0u8; 4096];
+                        if let Ok((fwd_reply, fwd_len)) =
+                            libcluu::ipc::call_with_reply_buf(ep, &fwd_msg, &[], &mut fwd_buf)
+                        {
+                            let fwd_errno = fwd_reply.words[1] as isize;
+                            if fwd_errno == 0 && fwd_len > 0 {
+                                reply_msg.words[1] = 0;
+                                reply_msg.words[2] = fwd_len;
+                                let _ = ipc::reply_with_payload(
+                                    reply_token,
+                                    &reply_msg,
+                                    &fwd_buf[..fwd_len],
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
                     reply_msg.words[1] = Error::NotFound.to_errno() as usize;
                     let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                     return Ok(());

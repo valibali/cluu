@@ -22,6 +22,12 @@ pub struct ChildState {
     pub minted_caps: Vec<u64>,
     pub pgid: Option<u32>,
     pub notify_ep: u64,
+    /// PID of the parent process (the process that requested this spawn).
+    /// 0 if the parent is not in this session's child_table (e.g. the session
+    /// leader was spawned by login via session-procmgr, but login itself is a
+    /// root-procmgr child). Used as `pcid` in /proc/<tid>/stat so top nests
+    /// children under their parent.
+    pub parent_pid: Pid,
 }
 
 pub struct ChildTable {
@@ -122,6 +128,7 @@ mod tests {
             minted_caps: alloc::vec![],
             pgid: None,
             notify_ep: 0,
+            parent_pid: 0,
         };
         table.insert(child);
         assert!(table.lookup_by_pid(pid).is_some());

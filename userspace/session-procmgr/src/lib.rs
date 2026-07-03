@@ -10,6 +10,7 @@ pub mod kill;
 pub mod pg_table;
 pub mod pipe_handlers;
 pub mod pipe_registry;
+pub mod proc_query;
 pub mod proc_query_local;
 pub mod restart;
 pub mod spawn;

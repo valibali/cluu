@@ -118,6 +118,9 @@ pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply,
             }
             Ok(Reply::ok(libcluu::ipc::PROCMGR_PG_SIGNAL_LABEL))
         }
+        libcluu::ipc::PROCMGR_PROC_QUERY_LABEL => {
+            crate::proc_query::ProcQuery::handle(state, msg)
+        }
         _ => Err(HandlerError::BadLabel),
     }
 }

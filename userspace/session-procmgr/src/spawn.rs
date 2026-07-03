@@ -83,6 +83,12 @@ impl MsgHandler for Spawn {
             }
         };
         let local = (pid as u32) & LOCAL_MAX;
+        let parent_pid = state
+            .child_table
+            .iter()
+            .find(|c| c.child_tid == msg.sender_tid)
+            .map(|c| c.pid)
+            .unwrap_or(0);
         state.child_table.insert(ChildState {
             pid,
             local,
@@ -95,6 +101,7 @@ impl MsgHandler for Spawn {
             minted_caps: minted,
             pgid: None,
             notify_ep: req.notify.unwrap_or(0),
+            parent_pid,
         });
 
         let reply = SpawnReply { pid, cookie };

@@ -61,10 +61,11 @@ impl MsgHandler for ProcQuery {
                     c.pid,
                     c.thread_tok,
                     c.space_tok,
+                    c.parent_pid,
                 )
             });
 
-        let (name, pid, thread_tok, space_tok) = match child_data {
+        let (name, pid, thread_tok, space_tok, parent_pid) = match child_data {
             Some(d) => d,
             None => {
                 // NotFound: return a reply with errno so VFS can fall
@@ -97,10 +98,11 @@ impl MsgHandler for ProcQuery {
                 let other_pages = code_pages.saturating_add(stack_pages);
                 // Format matches root-procmgr:
                 //   pid (name) state cpu_ticks heap_pages other_pages ppid sid cid pcid
-                // cid/pcid = 0: session children appear as root-level in top.
+                // cid = own PID (session-scoped), pcid = parent's PID so top
+                // nests children under their parent.
                 let content = format!(
-                    "{} ({}) R {} {} {} 0 {} 0 0\n",
-                    pid, name, cpu_ticks, heap_pages, other_pages, sid,
+                    "{} ({}) R {} {} {} 0 {} {} {}\n",
+                    pid, name, cpu_ticks, heap_pages, other_pages, sid, pid, parent_pid,
                 );
                 Ok(success(content.into_bytes()))
             }
