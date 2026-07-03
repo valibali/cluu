@@ -143,12 +143,12 @@ impl VtScreen {
                 (cp, 4)
             } else {
                 // Invalid / truncated UTF-8: substitute '?'.
-                self.apply_event(Event::Print(b'?'));
+                self.apply_event(Event::Print(b'?' as u32));
                 i += 1;
                 continue;
             };
 
-            self.apply_event(Event::Print(unicode_to_cp437(codepoint)));
+            self.apply_event(Event::Print(unicode_to_cp437(codepoint) as u32));
             i += seq_len;
         }
     }
@@ -171,7 +171,7 @@ impl VtScreen {
                 self.set_cell(
                     self.cursor_x,
                     self.cursor_y,
-                    ch,
+                    ch as u8,
                     self.current_fg,
                     self.current_bg,
                 );
@@ -347,7 +347,7 @@ impl VtScreen {
     fn push_history_row(&mut self) {
         let w = self.cols;
         let row = HistoryRow {
-            chars: self.cells[..w].to_vec(),
+            chars: self.cells[..w].iter().map(|&b| b as u32).collect(),
             fg: self.fg_cells[..w].to_vec(),
             bg: self.bg_cells[..w].to_vec(),
         };
@@ -653,8 +653,8 @@ impl<B: ConsoleBackend> Console<B> {
                         let ch = row.chars[x];
                         let fg = row.fg[x];
                         let bg = row.bg[x];
-                        if ch != b' ' || bg != COLOR_BG {
-                            render_glyph(&mut self.backend, x, y, ch, fg, bg);
+                        if ch != 0x20u32 || bg != COLOR_BG {
+                            render_glyph(&mut self.backend, x, y, ch as u8, fg, bg);
                         }
                     }
                 }

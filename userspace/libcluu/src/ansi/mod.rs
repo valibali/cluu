@@ -25,7 +25,7 @@ mod tests {
     #[test]
     fn print_ascii() {
         let evs = collect(b"hi");
-        assert_eq!(evs, vec![Event::Print(b'h'), Event::Print(b'i')]);
+        assert_eq!(evs, vec![Event::Print(b'h' as u32), Event::Print(b'i' as u32)]);
     }
 
     #[test]

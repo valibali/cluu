@@ -5,6 +5,7 @@ enum EscState {
     Normal,
     Escape,
     Csi,
+    Utf8,
 }
 
 pub struct Parser {
@@ -13,8 +14,9 @@ pub struct Parser {
     param_count: usize,
     current: u16,
     attr: Attr,
-    /// True when the CSI sequence opened with `?` (DEC private mode).
     private: bool,
+    utf8_cp: u32,
+    utf8_remaining: u8,
 }
 
 // Color tables copied from userspace/console/src/renderer.rs (lines 28-47).
@@ -56,6 +58,8 @@ impl Parser {
             current: 0,
             attr: Attr::default_attr(),
             private: false,
+            utf8_cp: 0,
+            utf8_remaining: 0,
         }
     }
 
@@ -65,6 +69,7 @@ impl Parser {
                 EscState::Normal => self.feed_normal(b, &mut emit),
                 EscState::Escape => self.feed_escape(b, &mut emit),
                 EscState::Csi => self.feed_csi(b, &mut emit),
+                EscState::Utf8 => self.feed_utf8(b, &mut emit),
             }
         }
     }
@@ -77,7 +82,38 @@ impl Parser {
             0x08 => emit(Event::Backspace),
             b'\t' => emit(Event::Tab),
             0x07 => emit(Event::Bell),
-            _ => emit(Event::Print(b)),
+            0xC0..=0xDF => {
+                self.utf8_cp = (b as u32 & 0x1F) << 6;
+                self.utf8_remaining = 1;
+                self.state = EscState::Utf8;
+            }
+            0xE0..=0xEF => {
+                self.utf8_cp = (b as u32 & 0x0F) << 12;
+                self.utf8_remaining = 2;
+                self.state = EscState::Utf8;
+            }
+            0xF0..=0xF7 => {
+                self.utf8_cp = (b as u32 & 0x07) << 18;
+                self.utf8_remaining = 3;
+                self.state = EscState::Utf8;
+            }
+            0x80..=0xBF | 0xF8..=0xFF => emit(Event::Print(0xFFFD)),
+            _ => emit(Event::Print(b as u32)),
+        }
+    }
+
+    fn feed_utf8<F: FnMut(Event)>(&mut self, b: u8, emit: &mut F) {
+        if b & 0xC0 == 0x80 {
+            self.utf8_remaining -= 1;
+            self.utf8_cp |= (b as u32 & 0x3F) << (6 * self.utf8_remaining);
+            if self.utf8_remaining == 0 {
+                emit(Event::Print(self.utf8_cp));
+                self.state = EscState::Normal;
+            }
+        } else {
+            emit(Event::Print(0xFFFD));
+            self.state = EscState::Normal;
+            self.feed_normal(b, emit);
         }
     }
 

@@ -370,7 +370,7 @@ pub struct Cluuterm {
     pub discipline: libcluu::tty_core::line_discipline::LineDiscipline,
     pub scrollback: Scrollback,
     /// Cell character grid: `cols * rows` bytes, row-major.
-    pub cells: Vec<u8>,
+    pub cells: Vec<u32>,
     /// Foreground colour per cell (ARGB u32).
     pub fg_cells: Vec<u32>,
     /// Background colour per cell (ARGB u32).
@@ -425,7 +425,7 @@ impl Cluuterm {
             parser: Parser::new(),
             discipline: libcluu::tty_core::line_discipline::LineDiscipline::new(),
             scrollback: Scrollback::new(SCROLLBACK_LINES),
-            cells: alloc::vec![b' '; total],
+            cells: alloc::vec![0x20u32; total],
             fg_cells: alloc::vec![default_attr.fg; total],
             bg_cells: alloc::vec![default_attr.bg; total],
             cursor_x: 0,
@@ -518,7 +518,7 @@ impl Cluuterm {
                 };
                 for c in start..end {
                     let i = row * cols + c;
-                    s.cells[i]    = b' ';
+                    s.cells[i]    = 0x20;
                     s.fg_cells[i] = s.current_attr.fg;
                     s.bg_cells[i] = s.current_attr.bg;
                 }
@@ -528,7 +528,7 @@ impl Cluuterm {
                 match mode {
                     EraseMode::All => {
                         for i in 0..total {
-                            s.cells[i]    = b' ';
+                            s.cells[i]    = 0x20;
                             s.fg_cells[i] = s.current_attr.fg;
                             s.bg_cells[i] = s.current_attr.bg;
                         }
@@ -539,7 +539,7 @@ impl Cluuterm {
                         // Current row from cursor_x onward.
                         for c in s.cursor_x..cols {
                             let i = s.cursor_y * cols + c;
-                            s.cells[i]    = b' ';
+                            s.cells[i]    = 0x20;
                             s.fg_cells[i] = s.current_attr.fg;
                             s.bg_cells[i] = s.current_attr.bg;
                         }
@@ -547,7 +547,7 @@ impl Cluuterm {
                         for r in (s.cursor_y + 1)..rows {
                             for c in 0..cols {
                                 let i = r * cols + c;
-                                s.cells[i]    = b' ';
+                                s.cells[i]    = 0x20;
                                 s.fg_cells[i] = s.current_attr.fg;
                                 s.bg_cells[i] = s.current_attr.bg;
                             }
@@ -557,14 +557,14 @@ impl Cluuterm {
                         for r in 0..s.cursor_y {
                             for c in 0..cols {
                                 let i = r * cols + c;
-                                s.cells[i]    = b' ';
+                                s.cells[i]    = 0x20;
                                 s.fg_cells[i] = s.current_attr.fg;
                                 s.bg_cells[i] = s.current_attr.bg;
                             }
                         }
                         for c in 0..=s.cursor_x {
                             let i = s.cursor_y * cols + c;
-                            s.cells[i]    = b' ';
+                            s.cells[i]    = 0x20;
                             s.fg_cells[i] = s.current_attr.fg;
                             s.bg_cells[i] = s.current_attr.bg;
                         }
@@ -640,7 +640,7 @@ impl Cluuterm {
         self.bg_cells.copy_within(cols..total, 0);
         // Blank the newly exposed bottom row.
         for i in (total - cols)..total {
-            self.cells[i]    = b' ';
+            self.cells[i]    = 0x20;
             self.fg_cells[i] = self.current_attr.fg;
             self.bg_cells[i] = self.current_attr.bg;
         }
@@ -662,7 +662,7 @@ impl Cluuterm {
         let total = new_cols * new_rows;
         let default_attr = Attr::default_attr();
 
-        let mut new_cells = alloc::vec![b' '; total];
+        let mut new_cells = alloc::vec![0x20u32; total];
         let mut new_fg = alloc::vec![default_attr.fg; total];
         let mut new_bg = alloc::vec![default_attr.bg; total];
 

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 /// A single row saved in the scrollback history buffer.
 pub struct HistoryRow {
-    pub chars: Vec<u8>,
+    pub chars: Vec<u32>,
     pub fg: Vec<u32>,
     pub bg: Vec<u32>,
 }
@@ -80,7 +80,7 @@ mod tests {
 
     fn row(c: u8) -> HistoryRow {
         HistoryRow {
-            chars: vec![c],
+            chars: vec![c as u32],
             fg: vec![0],
             bg: vec![0],
         }
@@ -93,8 +93,8 @@ mod tests {
         s.push(row(b'b'));
         s.push(row(b'c'));
         assert_eq!(s.len(), 2);
-        assert_eq!(s.row(0).unwrap().chars, vec![b'b']);
-        assert_eq!(s.row(1).unwrap().chars, vec![b'c']);
+        assert_eq!(s.row(0).unwrap().chars, vec![b'b' as u32]);
+        assert_eq!(s.row(1).unwrap().chars, vec![b'c' as u32]);
     }
 
     #[test]
@@ -111,8 +111,8 @@ mod tests {
         s.push(row(b'x'));
         s.push(row(b'y'));
         assert_eq!(s.len(), 2);
-        assert_eq!(s.row(0).unwrap().chars, vec![b'x']);
-        assert_eq!(s.row(1).unwrap().chars, vec![b'y']);
+        assert_eq!(s.row(0).unwrap().chars, vec![b'x' as u32]);
+        assert_eq!(s.row(1).unwrap().chars, vec![b'y' as u32]);
         assert!(s.row(2).is_none());
     }
 

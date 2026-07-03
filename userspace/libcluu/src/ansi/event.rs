@@ -24,7 +24,7 @@ pub enum EraseMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    Print(u8),
+    Print(u32),
     Newline,
     CarriageReturn,
     Backspace,

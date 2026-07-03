@@ -108,7 +108,7 @@ pub fn argb_to_palette_idx(argb: u32) -> u8 {
 /// Pack `(codepoint:21, fg:8, bg:8, attrs:3)` into a single u64 cell word.
 /// Matches the compositor's `compose::pack_cell` format exactly.
 #[inline]
-fn pack_cell(cp: u8, fg: u8, bg: u8, attrs: u8) -> u64 {
+fn pack_cell(cp: u32, fg: u8, bg: u8, attrs: u8) -> u64 {
     (cp as u64 & 0x1F_FFFF)
         | ((fg as u64 & 0xFF) << 21)
         | ((bg as u64 & 0xFF) << 29)

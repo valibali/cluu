@@ -194,19 +194,29 @@ fn unicode_to_cp437(cp: u32) -> u8 {
         0x0000..=0x007F => cp as u8,
         0x2500 => 0xC4,                 // ─
         0x2502 => 0xB3,                 // │
-        0x2550 => 0xCD,                 // ═
-        0x2551 => 0xBA,                 // ║
-        // Sharp box-drawing corners (CP437 standard).
         0x250C => 0xDA,                 // ┌
         0x2510 => 0xBF,                 // ┐
         0x2514 => 0xC0,                 // └
         0x2518 => 0xD9,                 // ┘
-        // Double-line corners (focused-window chrome).
+        0x251C => 0xC3,                 // ├
+        0x2524 => 0xB4,                 // ┤
+        0x2534 => 0xC1,                 // ┴
+        0x252C => 0xC2,                 // ┬
+        0x253C => 0xC5,                 // ┼
+        0x2550 => 0xCD,                 // ═
+        0x2551 => 0xBA,                 // ║
         0x2554 => 0xC9,                 // ╔
         0x2557 => 0xBB,                 // ╗
         0x255A => 0xC8,                 // ╚
         0x255D => 0xBC,                 // ╝
-        0x2588 => 0xDB,                 // █ full block (mouse cursor)
+        0x2580 => 0xDF,                 // ▀ upper half
+        0x2584 => 0xDC,                 // ▄ lower half
+        0x2588 => 0xDB,                 // █ full block
+        0x258C => 0xDD,                 // ▌ left half
+        0x2590 => 0xDE,                 // ▐ right half
+        0x2591 => 0xB0,                 // ░ light shade
+        0x2592 => 0xB1,                 // ▒ medium shade
+        0x2593 => 0xB2,                 // ▓ dark shade
         _ => b'?',
     }
 }
