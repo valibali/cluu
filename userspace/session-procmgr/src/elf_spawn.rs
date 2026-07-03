@@ -12,7 +12,8 @@ use core::mem::size_of;
 
 use libcluu::boot::{
     process_info, CWD_MAX, PARAM_ARGC, PARAM_ARGV_OFFSET, PARAM_CWD_LEN, PARAM_CWD_OFFSET,
-    PARAM_ENVC, PARAM_ENV_OFFSET, PARAM_FD_VFS_LEN, PARAM_FD_VFS_OFFSET, PROCESS_INFO_ADDR,
+    PARAM_ENVC, PARAM_ENV_OFFSET, PARAM_FD_VFS_LEN, PARAM_FD_VFS_OFFSET, PARAM_SESSION_VFS_EP,
+    PROCESS_INFO_ADDR,
     TOKEN_CLOCK, TOKEN_IPC, TOKEN_REGISTRY, TOKEN_SELF, TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN,
     TOKEN_STDLOG, TOKEN_STDOUT, TOKEN_VFS_VIEW_MGR, ProcessInfo,
 };
@@ -206,10 +207,13 @@ pub fn real_spawn_user_process(
         let rights = if fd == 0 { stdin_rights } else { stdout_rights };
 
         if entry.parent_rfd != 0 && state.vfs_cap != 0 {
-            // VFS-backed fd: ask VFS to clone the parent's open file to child_tid.
-            // parent_tid is the kernel-authenticated sender_tid VFS uses as parent's cid.
+            let derive_vfs = if state.session_vfs_cap != 0 {
+                state.session_vfs_cap as usize
+            } else {
+                state.vfs_cap as usize
+            };
             match vfs_derive_child_fd(
-                state.vfs_cap as usize,
+                derive_vfs,
                 parent_tid,
                 entry.parent_rfd as usize,
                 rights,
@@ -351,6 +355,9 @@ pub fn real_spawn_user_process(
         params[PARAM_FD_VFS_OFFSET] = fd_vfs_trailer_offset as u64;
         params[PARAM_FD_VFS_LEN] = FD_VFS_TRAILER_SIZE as u64;
     }
+    if state.session_vfs_cap != 0 {
+        params[PARAM_SESSION_VFS_EP] = state.session_vfs_cap;
+    }
 
     let child_info = ProcessInfo {
         exit_token,
@@ -407,11 +414,7 @@ pub fn real_spawn_user_process(
         "session-procmgr: elf_spawn VFS_SET_VIEW vfs_cap={} child_tid={}",
         state.vfs_cap, child_tid,
     ));
-    if state.vfs_cap != 0 {
-        // Use the same default user-profile mount set as root-procmgr so that
-        // children spawned via session-procmgr have a writable /dev/pts (needed
-        // for cluuterm → shell pts wiring). Hardcoded "/dev" read-only would
-        // make /dev/pts/<id> O_WRONLY opens fail with PermissionDenied.
+    if state.session_vfs_cap != 0 {
         let default_mounts = libcluu::vfs_view::default_mounts_for_profile(CapProfile::USER);
         let mut payload = alloc::vec::Vec::new();
         for (src, dst, writable) in default_mounts {
@@ -431,7 +434,7 @@ pub fn real_spawn_user_process(
         msg.words[3] = CapProfile::USER.bits() as usize;
         msg.words[4] = 0usize; // container_id
         msg.words[5] = state.view_mgr_token as usize;
-        match send_msg_with_payload(state.vfs_cap as usize, &msg, &payload) {
+        match send_msg_with_payload(state.session_vfs_cap as usize, &msg, &payload) {
             Ok(()) => {
                 let _ = libcluu::debug_print("session-procmgr: VFS_SET_VIEW OK");
             }

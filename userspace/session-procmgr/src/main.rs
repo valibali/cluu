@@ -152,6 +152,18 @@ fn run() -> Result<()> {
     // Discover system services via registry (vfs is critical for elf_spawn;
     // timeserver/registry handles are session-procmgr's own ProcessInfo tokens).
     let vfs_cap = registry::lookup_service("vfs:main").unwrap_or(0) as u64;
+    let session_vfs_cap = {
+        let session_vfs_name = alloc::format!("session-vfs:main:{}", sid);
+        let mut cap = 0u64;
+        for _ in 0..200 {
+            if let Some(ep) = registry::lookup_service(&session_vfs_name) {
+                cap = ep as u64;
+                break;
+            }
+            let _ = libcluu::syscall::yield_cpu();
+        }
+        cap
+    };
     let registry_cap = info.tokens[libcluu::boot::TOKEN_REGISTRY] as u64;
     let timeserver_cap = info.tokens[libcluu::boot::TOKEN_CLOCK] as u64;
     let view_mgr_token = info.tokens[TOKEN_VFS_VIEW_MGR] as u64;
@@ -168,6 +180,7 @@ fn run() -> Result<()> {
         child_table: spm::child_table::ChildTable::new(sid),
         kernel: spm::real_kernel::RealKernel,
         vfs_cap,
+        session_vfs_cap,
         registry_cap,
         timeserver_cap,
         restart: spm::restart::RestartTracker::new(),
