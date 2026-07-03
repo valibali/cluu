@@ -7385,9 +7385,12 @@ fn profile_to_rights(profile: CapProfile) -> [Rights; 16] {
         r[TOKEN_REGISTRY] |= Rights::GRANT;
     }
 
-    // VFS: needs SPACE_MAP to map file data into address space.
+    // VFS: needs SPACE_MAP to map file data into address space, and READ on
+    // TOKEN_SELF for thread_enumerate (/proc readdir PID listing) and
+    // pmm_get_stats (/proc/meminfo).
     if profile.contains(CapProfile::VFS) {
         r[TOKEN_SPACE] |= Rights::SPACE_MAP | Rights::GRANT;
+        r[TOKEN_SELF] |= Rights::READ;
     }
 
     // DEVICE: needs THREAD_CONTROL for interrupt handling threads, and
