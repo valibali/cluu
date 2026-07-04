@@ -32,8 +32,23 @@
 /* ProcessInfo addresses */
 .set PROCESS_INFO_ADDR, 0x7FE00100
 .set PAGE_BASE,         0x7FE00000
-.set PARAMS_ARGC,       PROCESS_INFO_ADDR + 200  /* params[6] */
-.set PARAMS_ARGV_OFF,   PROCESS_INFO_ADDR + 208  /* params[7] */
+/*
+ * ProcessInfo layout (#[repr(C)]):
+ *   exit_token:  usize       offset 0
+ *   exit_cookie: usize       offset 8
+ *   pid:         usize       offset 16
+ *   tokens:      [usize; 17] offset 24  (17 * 8 = 136 bytes)
+ *   params:      [u64; 32]   offset 160
+ *
+ * params[6] (PARAM_ARGC)      = offset 160 + 48 = 208
+ * params[7] (PARAM_ARGV_OFF)  = offset 160 + 56 = 216
+ *
+ * NOTE: tokens was expanded from 16 to 17 elements when
+ * TOKEN_VFS_VIEW_MGR=16 was added (commit 365dfa0e).
+ * The old offsets (200/208) must be updated to 208/216.
+ */
+.set PARAMS_ARGC,       PROCESS_INFO_ADDR + 208  /* params[6] */
+.set PARAMS_ARGV_OFF,   PROCESS_INFO_ADDR + 216  /* params[7] */
 
 _start:
     /* Align stack to 16 bytes before any call (SysV ABI). */
