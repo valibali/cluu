@@ -1352,7 +1352,7 @@ case "$MARKER_MODE" in
         required_markers=(
             "TSC calibrated"
             "[USER] shell: ready"
-            "procmgr: container 'mp' started"
+            "shell: session spawn done"
             "micropython: exit 0"
         )
         ;;

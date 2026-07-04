@@ -410,7 +410,7 @@ harness_derive_marker_defaults() {
                 # words. Inside double quotes parens are plain text. The
                 # python source itself uses single quotes for the path,
                 # so the outer double quotes nest cleanly.
-                TEST_COMMAND="mp -c \"open('/etc/motd').read()\""
+                TEST_COMMAND="micropython -c \"open('/etc/motd').read()\""
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
                 SENDKEY_SEQUENCE_DEFAULT="$CREDS_SENDKEY_ROOT"
@@ -946,7 +946,7 @@ harness_derive_marker_defaults() {
                 # MicroPython calls tcsetattr(raw) for its REPL on stdin.
                 # This reaches the legacy tty's LineDiscipline via TTY_CTL_LABEL,
                 # which calls set_mode() and emits the raw-mode marker.
-                # Use `mp -c ...` so the process exits and the shell can
+                # Use `micropython -c ...` so the process exits and the shell can
                 # observe line_discipline: mode=canonical on restore, but we
                 # only require the initial raw-mode switch.
                 TEST_COMMAND="micropython"
