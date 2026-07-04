@@ -13,7 +13,9 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::future::Future;
 use core::mem::size_of;
+use core::pin::Pin;
 use libcluu::ipc::{call_with_payload, call_with_reply_buf};
 use libcluu::tar::{find_member, list_entries};
 use libcluu::types::Message;
@@ -148,6 +150,69 @@ pub trait MountBackend: Send + Sync {
 
     fn realpath(&self, rel_path: &str) -> Result<String> {
         Ok(String::from(rel_path))
+    }
+}
+
+/// Async mount backend trait — for backends that need to await IPC or
+/// other asynchronous operations (single-threaded executor; no `Send` bound).
+///
+/// Object-safe: methods return `Pin<Box<dyn Future + '_>>` so the trait can
+/// be used as `dyn AsyncMountBackend`. The lifetime `'_` ties the future to
+/// `&self`, keeping the borrow checker honest without requiring `Send`.
+pub trait AsyncMountBackend: Sync {
+    /// Backend name for debugging.
+    fn name(&self) -> &'static str;
+
+    /// Open a file at the given relative path (async).
+    fn open_async(
+        &self,
+        rel_path: &str,
+        full_path: &str,
+        caller_tid: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<OpenFile>> + '_>>;
+
+    /// Read directory entries at the given relative path (async).
+    fn readdir_async(
+        &self,
+        rel_path: &str,
+        caller_tid: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirEntry>>> + '_>>;
+}
+
+/// Type-erased mount backend — either sync or async.
+///
+/// `MountTable` stores `AnyMount` per mount point. The sync path dispatches
+/// through `MountBackend` as before; the async path is driven separately via
+/// `get_async_backend()` / `is_async()` by callers that own an executor.
+pub enum AnyMount {
+    /// Synchronous backend — all operations complete immediately.
+    Sync(Box<dyn MountBackend>),
+    /// Asynchronous backend — operations return futures to be polled.
+    Async(Box<dyn AsyncMountBackend>),
+}
+
+impl AnyMount {
+    /// Return the sync backend, or `Err(InvalidOperation)` if this is async.
+    ///
+    /// Used by `MountTable` sync methods (`open`, `readdir`, …) to dispatch
+    /// to the underlying `MountBackend` or reject async mounts.
+    fn as_sync(&self) -> Result<&dyn MountBackend> {
+        match self {
+            AnyMount::Sync(b) => Ok(b.as_ref()),
+            AnyMount::Async(_) => Err(Error::InvalidOperation),
+        }
+    }
+}
+
+impl From<Box<dyn MountBackend>> for AnyMount {
+    fn from(b: Box<dyn MountBackend>) -> Self {
+        AnyMount::Sync(b)
+    }
+}
+
+impl From<Box<dyn AsyncMountBackend>> for AnyMount {
+    fn from(b: Box<dyn AsyncMountBackend>) -> Self {
+        AnyMount::Async(b)
     }
 }
 
@@ -730,7 +795,7 @@ pub struct VirtualFile {
 /// A single mount point configuration.
 struct Mount {
     prefix: &'static str,
-    backend: Box<dyn MountBackend>,
+    backend: AnyMount,
 }
 
 /// Unified mount table.
@@ -743,14 +808,24 @@ impl MountTable {
         Self { mounts: Vec::new() }
     }
 
-    /// Add a mount point with the given backend.
-    pub fn mount(&mut self, prefix: &'static str, backend: Box<dyn MountBackend>) {
-        self.mounts.push(Mount { prefix, backend });
+    /// Add a mount point with the given backend (sync or async).
+    pub fn mount(&mut self, prefix: &'static str, backend: impl Into<AnyMount>) {
+        self.mounts.push(Mount { prefix, backend: backend.into() });
+    }
+
+    /// Convenience: mount a synchronous backend.
+    pub fn mount_sync(&mut self, prefix: &'static str, backend: Box<dyn MountBackend>) {
+        self.mount(prefix, AnyMount::Sync(backend));
+    }
+
+    /// Convenience: mount an asynchronous backend.
+    pub fn mount_async(&mut self, prefix: &'static str, backend: Box<dyn AsyncMountBackend>) {
+        self.mount(prefix, AnyMount::Async(backend));
     }
 
     /// Convenience: mount initrd at a path.
     pub fn mount_initrd(&mut self, prefix: &'static str, data: &'static [u8]) {
-        self.mount(prefix, Box::new(InitrdBackend::new(data)));
+        self.mount_sync(prefix, Box::new(InitrdBackend::new(data)));
     }
 
     /// Convenience: mount remote service at a path.
@@ -760,7 +835,7 @@ impl MountTable {
         endpoint: usize,
         service_name: &'static str,
     ) {
-        self.mount(prefix, Box::new(RemoteBackend::new(endpoint, service_name)));
+        self.mount_sync(prefix, Box::new(RemoteBackend::new(endpoint, service_name)));
     }
 
     /// Convenience: mount virtual filesystem at a path.
@@ -770,25 +845,25 @@ impl MountTable {
         name: &'static str,
         entries: &'static [(&'static str, VirtualEntry)],
     ) {
-        self.mount(prefix, Box::new(VirtualBackend::new(name, entries)));
+        self.mount_sync(prefix, Box::new(VirtualBackend::new(name, entries)));
     }
 
     /// Open a file at the given absolute path.
     pub fn open(&self, path: &str, caller_tid: usize) -> Result<OpenFile> {
         let (mount, rel_path) = self.resolve(path)?;
-        mount.backend.open(rel_path, path, caller_tid)
+        mount.backend.as_sync()?.open(rel_path, path, caller_tid)
     }
 
     /// Read directory entries at the given absolute path.
     pub fn readdir(&self, path: &str, caller_tid: usize) -> Result<Vec<DirEntry>> {
         let (mount, rel_path) = self.resolve(path)?;
-        mount.backend.readdir(rel_path, caller_tid)
+        mount.backend.as_sync()?.readdir(rel_path, caller_tid)
     }
 
     /// Stat a path without reading directory entries.
     pub fn stat_by_path(&self, path: &str, caller_tid: usize) -> Result<DirEntryStat> {
         let (mount, rel_path) = self.resolve(path)?;
-        mount.backend.stat_by_path(rel_path, path, caller_tid)
+        mount.backend.as_sync()?.stat_by_path(rel_path, path, caller_tid)
     }
 
     /// Iterate over registered mount prefixes (e.g. "/", "/proc", "/dev").
@@ -801,17 +876,17 @@ impl MountTable {
 
     pub fn unlink(&self, path: &str) -> Result<()> {
         let (mount, rel_path) = self.resolve(path)?;
-        mount.backend.unlink(rel_path)
+        mount.backend.as_sync()?.unlink(rel_path)
     }
 
     pub fn mkdir(&self, path: &str, mode: usize) -> Result<()> {
         let (mount, rel_path) = self.resolve(path)?;
-        mount.backend.mkdir(rel_path, mode)
+        mount.backend.as_sync()?.mkdir(rel_path, mode)
     }
 
     pub fn rmdir(&self, path: &str) -> Result<()> {
         let (mount, rel_path) = self.resolve(path)?;
-        mount.backend.rmdir(rel_path)
+        mount.backend.as_sync()?.rmdir(rel_path)
     }
 
     pub fn rename(&self, old_path: &str, new_path: &str) -> Result<()> {
@@ -820,7 +895,7 @@ impl MountTable {
         if old_mount.prefix != new_mount.prefix {
             return Err(Error::InvalidOperation);
         }
-        old_mount.backend.rename(rel_old, rel_new)
+        old_mount.backend.as_sync()?.rename(rel_old, rel_new)
     }
 
     pub fn link(&self, old_path: &str, new_path: &str) -> Result<()> {
@@ -829,12 +904,12 @@ impl MountTable {
         if old_mount.prefix != new_mount.prefix {
             return Err(Error::InvalidOperation);
         }
-        old_mount.backend.link(rel_old, rel_new)
+        old_mount.backend.as_sync()?.link(rel_old, rel_new)
     }
 
     pub fn create_file(&self, path: &str, mode: usize) -> Result<()> {
         let (mount, rel_path) = self.resolve(path)?;
-        mount.backend.create_file(rel_path, mode)
+        mount.backend.as_sync()?.create_file(rel_path, mode)
     }
 
     /// Read file data (for remote/virtual backends).
@@ -846,7 +921,7 @@ impl MountTable {
         len: usize,
     ) -> Result<Vec<u8>> {
         let (mount, _) = self.resolve(path_prefix)?;
-        mount.backend.read(file, offset, len)
+        mount.backend.as_sync()?.read(file, offset, len)
     }
 
     /// Check if a path matches a mount point.
@@ -854,9 +929,27 @@ impl MountTable {
         self.resolve(path).is_ok()
     }
 
-    /// Get the backend for a path (for special handling).
+    /// Get the sync backend for a path (for special handling).
+    /// Returns `None` if the path is not mounted or is an async mount.
     pub fn get_backend<'a>(&'a self, path: &'a str) -> Option<&'a dyn MountBackend> {
-        self.resolve(path).ok().map(|(m, _)| m.backend.as_ref())
+        self.resolve(path).ok().and_then(|(m, _)| match &m.backend {
+            AnyMount::Sync(b) => Some(b.as_ref()),
+            AnyMount::Async(_) => None,
+        })
+    }
+
+    /// Get the async backend for a path.
+    /// Returns `None` if the path is not mounted or is a sync mount.
+    pub fn get_async_backend<'a>(&'a self, path: &'a str) -> Option<&'a dyn AsyncMountBackend> {
+        self.resolve(path).ok().and_then(|(m, _)| match &m.backend {
+            AnyMount::Sync(_) => None,
+            AnyMount::Async(b) => Some(b.as_ref()),
+        })
+    }
+
+    /// Returns `true` if the mount at `path` is an async backend.
+    pub fn is_async(&self, path: &str) -> bool {
+        self.resolve(path).ok().is_some_and(|(m, _)| matches!(m.backend, AnyMount::Async(_)))
     }
 
     /// Split `path` into (mount-prefix, rel-within-mount). Returns

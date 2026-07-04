@@ -14,6 +14,7 @@ use libcluu::runtime as _;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::format;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::cmp;
 use core::mem::size_of;
@@ -40,7 +41,9 @@ mod view;
 
 use fd_table::{FdTable, OpenFile};
 use mount::MountTable;
+use mount::DirEntry;
 
+use libcluu::async_runtime::Runtime;
 use libcluu::boot::TOKEN_EXTRA_0;
 use libcluu::boot::{PARAM_ARGC, PARAM_ARGV_OFFSET, PROCESS_INFO_ADDR};
 use libcluu::mem::PAGE_SIZE;
@@ -54,6 +57,11 @@ const FS_READ_GRANT: u32 = 0x306;
 const FS_WRITE: u32 = 0x305;
 const USIZE_BYTES: usize = size_of::<usize>();
 const TWO_USIZE_BYTES: usize = size_of::<usize>() * 2;
+
+enum VfsCompletion {
+    Open { reply_token: usize, client_id: usize, result: Result<OpenFile> },
+    Readdir { reply_token: usize, client_id: usize, result: Result<Vec<DirEntry>> },
+}
 
 // VFS region layout — kept at the legacy [0x6000_0000, 0x7900_0000) range.
 //
@@ -336,18 +344,53 @@ fn run_vfs() -> Result<()> {
         }
     }
 
+    let token_self = info.tokens[TOKEN_SELF];
+    let mut runtime = Runtime::new(token_self)?;
+    let reply_ep = runtime.reply_endpoint();
+
     loop {
-        let tokens = [endpoint, registry_endpoint];
-        let (index, len, sender_tid) =
-            libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, u64::MAX)?;
-        if let Some((msg, payload)) = parse_message(&buf[..len]) {
-            if index == 1 {
-                server.handle_registry_message(&msg, payload, sender_tid);
-                continue;
+        runtime.poll_ready();
+
+        while let Some(comp) = runtime.pop_completion() {
+            if let Ok(vfs_comp) = comp.downcast::<VfsCompletion>() {
+                match *vfs_comp {
+                    VfsCompletion::Open { reply_token, client_id, result } => {
+                        server.complete_async_open(reply_token, client_id, result);
+                    }
+                    VfsCompletion::Readdir { reply_token, client_id, result } => {
+                        server.complete_async_readdir(reply_token, client_id, result);
+                    }
+                }
             }
-            if let Err(err) = server.handle_message(&msg, payload, sender_tid) {
-                vfs_trace!("vfs: handler error {:?}", err);
+        }
+
+        let timeout = if runtime.has_pending() { 1 } else { u64::MAX };
+        let tokens = [endpoint, registry_endpoint, reply_ep];
+        match libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout) {
+            Ok((index, len, sender_tid)) => {
+                if index == 2 {
+                    if let Some((msg, _payload)) = parse_message(&buf[..len]) {
+                        let cookie = msg.words[5];
+                        let payload_start = size_of::<Message>();
+                        let payload_bytes: Vec<u8> = if len > payload_start {
+                            buf[payload_start..len].to_vec()
+                        } else {
+                            Vec::new()
+                        };
+                        runtime.deliver_reply(cookie, msg, payload_bytes);
+                    }
+                } else if index == 1 {
+                    if let Some((msg, payload)) = parse_message(&buf[..len]) {
+                        server.handle_registry_message(&msg, payload, sender_tid);
+                    }
+                } else if let Some((msg, payload)) = parse_message(&buf[..len]) {
+                    if let Err(err) = server.handle_message(&msg, payload, sender_tid, &mut runtime) {
+                        vfs_trace!("vfs: handler error {:?}", err);
+                    }
+                }
             }
+            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => {}
+            Err(e) => return Err(e),
         }
     }
 }
@@ -386,7 +429,7 @@ fn setup_mounts(
     mounts.mount_remote("/", blkdev_endpoint, "blkdev");
     debug_print("vfs: mounted / (blkdev)")?;
 
-    mounts.mount("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
+    mounts.mount_async("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
     debug_print("vfs: mounted /proc (procfs)")?;
 
     // Device files: /dev/null, /dev/zero, /dev/urandom, /dev/tty*, /dev/fb0
@@ -394,7 +437,7 @@ fn setup_mounts(
     if let Some(fb_info) = fb_info {
         dev_backend.set_fb(fb_info);
     }
-    mounts.mount("/dev", alloc::boxed::Box::new(dev_backend));
+    mounts.mount_sync("/dev", alloc::boxed::Box::new(dev_backend));
     debug_print("vfs: mounted /dev (devfs)")?;
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -788,7 +831,7 @@ impl VfsServer {
             Some(sid) => pts::PtsBackend::for_session(pts_reg_ptr, sid),
             None => pts::PtsBackend::new(pts_reg_ptr),
         };
-        mounts.mount(
+        mounts.mount_sync(
             "/dev/pts",
             alloc::boxed::Box::new(pts_backend),
         );
@@ -831,7 +874,7 @@ impl VfsServer {
         // diagnosing slow ELF map paths.
     }
 
-    fn handle_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize) -> Result<()> {
+    fn handle_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize, runtime: &mut Runtime) -> Result<()> {
         // Control messages handled before regular VFS ops.
         if msg.tag.label == libcluu::ipc::VFS_SET_VIEW_LABEL {
             return self.handle_set_view(msg, payload, sender_tid);
@@ -889,6 +932,16 @@ impl VfsServer {
         let reply_token = extract_reply_id(msg).unwrap_or(self.endpoint);
         let authenticated_client = (sender_tid != 0).then_some(sender_tid);
         vfs_trace!("vfs: handling {:?} reply_token={}", op, reply_token);
+
+        // Async dispatch for /proc (PID-keyed procfs)
+        if matches!(op, VfsOp::Open | VfsOp::Readdir) {
+            if let Ok(path_str) = core::str::from_utf8(payload) {
+                if self.mounts.is_async(path_str) {
+                    return self.dispatch_async(op, msg, payload, path_str, reply_token, authenticated_client, runtime);
+                }
+            }
+        }
+
         let result = match op {
             VfsOp::Open => self.handle_open(msg, payload, reply_token, authenticated_client),
             VfsOp::Close => self.handle_close(msg, reply_token, authenticated_client),
@@ -918,6 +971,127 @@ impl VfsServer {
         };
         vfs_trace!("vfs: handled {:?} result={:?}", op, result);
         result
+    }
+
+    fn dispatch_async(
+        &mut self,
+        op: VfsOp,
+        msg: &Message,
+        _payload: &[u8],
+        path: &str,
+        reply_token: usize,
+        caller_client: Option<usize>,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        let client_id = match self.resolve_client_id("async", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                let mut reply_msg = Message::new(
+                    if matches!(op, VfsOp::Open) { VFS_OPEN } else { VFS_READDIR },
+                    [0; 6], 3,
+                );
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        let (real_path, _target) = match self.view_check_path_with_target(client_id, path) {
+            Ok(pt) => pt,
+            Err(err) => {
+                let mut reply_msg = Message::new(
+                    if matches!(op, VfsOp::Open) { VFS_OPEN } else { VFS_READDIR },
+                    [0; 6], 3,
+                );
+                reply_msg.words[0] = err.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        };
+
+        let backend_ref = self.mounts.get_async_backend(path).unwrap();
+        let backend_parts: [usize; 2] = unsafe {
+            core::mem::transmute_copy::<&dyn mount::AsyncMountBackend, [usize; 2]>(&backend_ref)
+        };
+
+        let rel_path = self.mounts.split_path(path).1.to_string();
+        let full_path = path.to_string();
+        let caller_tid = caller_client.unwrap_or(0);
+
+        match op {
+            VfsOp::Open => {
+                runtime.spawn(async move {
+                    // SAFETY: Single-threaded VFS. VfsServer never drops.
+                    let backend: &'static dyn mount::AsyncMountBackend = unsafe {
+                        core::mem::transmute_copy::<[usize; 2], &'static dyn mount::AsyncMountBackend>(&backend_parts)
+                    };
+                    let result = backend.open_async(&rel_path, &full_path, caller_tid).await;
+                    libcluu::async_runtime::push_completion(
+                        VfsCompletion::Open { reply_token, client_id, result }
+                    );
+                });
+            }
+            VfsOp::Readdir => {
+                runtime.spawn(async move {
+                    // SAFETY: Single-threaded VFS. VfsServer never drops.
+                    let backend: &'static dyn mount::AsyncMountBackend = unsafe {
+                        core::mem::transmute_copy::<[usize; 2], &'static dyn mount::AsyncMountBackend>(&backend_parts)
+                    };
+                    let result = backend.readdir_async(&rel_path, caller_tid).await;
+                    libcluu::async_runtime::push_completion(
+                        VfsCompletion::Readdir { reply_token, client_id, result }
+                    );
+                });
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn complete_async_open(&mut self, reply_token: usize, client_id: usize, result: Result<OpenFile>) {
+        let mut reply_msg = Message::new(VFS_OPEN, [0; 6], 3);
+        match result {
+            Ok(file) => {
+                let size = file.size();
+                let fd = self.files.open(client_id, file);
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = fd;
+                reply_msg.words[2] = size;
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+        let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+    }
+
+    fn complete_async_readdir(&mut self, reply_token: usize, _client_id: usize, result: Result<Vec<DirEntry>>) {
+        const INLINE_BUDGET: usize = 3584;
+        let mut reply_msg = Message::new(VFS_READDIR, [0; 6], 4);
+        match result {
+            Ok(entries) => {
+                let count = entries.len();
+                let mut blob = Vec::new();
+                for entry in &entries {
+                    let name_bytes = entry.name.as_bytes();
+                    blob.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+                    blob.extend_from_slice(&entry_to_stat_bytes(entry));
+                    blob.extend_from_slice(name_bytes);
+                }
+                if blob.len() <= INLINE_BUDGET {
+                    reply_msg.words[0] = blob.len();
+                    reply_msg.words[1] = 0;
+                    reply_msg.words[2] = count;
+                    reply_msg.words[3] = 0;
+                    let _ = reply_with_payload(reply_token, &reply_msg, &blob);
+                } else {
+                    reply_msg.words[1] = Error::BufferTooSmall.to_errno() as usize;
+                    let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            }
+            Err(err) => {
+                reply_msg.words[1] = err.to_errno() as usize;
+                let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
     }
 
     fn handle_registry_message(&mut self, msg: &Message, payload: &[u8], _sender_tid: usize) {

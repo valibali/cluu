@@ -1,0 +1,34 @@
+T6 Regression Test Results
+==========================
+
+Build: cargo xtask build → SUCCESS (exit 0)
+
+Pre-existing deadlock (NOT from async work):
+- Baseline commit 7e9e07b4 (no async changes) also deadlocks
+- Symptom: system freezes after "login: window registered" + "compositor: window registered"
+- Zero serial output after freeze point
+- All tests blocked (l2_login, l2_ls, etc.) — system never reaches test markers
+- Keyboard input never reaches login (sendkey at 5s or 12s produces no response)
+- Timeserver stops ticking (no periodic output)
+
+Root cause: NOT INVESTIGATED — pre-existing in committed per-session VFS code.
+Likely in compositor or kbd path after window registration. Login sends
+WIN_DAMAGE after window register; if compositor is blocked, system freezes.
+
+Async work verification:
+- Build succeeds with all async changes
+- Boot reaches same point as baseline (login window registered)
+- No NEW deadlock introduced — same freeze point as baseline
+- VFS async runtime initializes (endpoint_create, mount setup, ready)
+- procfs mounts as async backend
+- session-procmgr PID handlers compile and link
+
+KB notes written:
+- ~/agentic-knowledge/patterns/cluu/cluu-async-runtime-no-std.md
+- ~/agentic-knowledge/decisions/cluu/cluu-pid-keyed-proc.md
+- Committed to agentic-knowledge repo (465c245)
+
+Timeout hack removed:
+- call_with_reply_buf_timeout deleted from libcluu/src/ipc.rs
+- No callers remain (grep confirmed)
+- procfs.rs no longer references it (replaced by IpcCallFuture)

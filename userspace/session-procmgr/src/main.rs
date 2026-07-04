@@ -235,9 +235,10 @@ fn run() -> Result<()> {
         let result = spm::dispatch::dispatch(&mut state, &inbound);
 
         match result {
-            Ok(reply) => {
+            Ok(spm::dispatch::DispatchOutcome::Reply(reply)) => {
                 let _ = send_reply(reply_token, ep, &reply);
             }
+            Ok(spm::dispatch::DispatchOutcome::AlreadySent) => {}
             Err(e) => {
                 // Log the error and send an error reply if the sender is waiting.
                 let _ = debug_print(&alloc::format!(

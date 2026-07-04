@@ -1,32 +1,34 @@
-//! Procfs virtual filesystem implementation.
+//! Procfs virtual filesystem implementation (async).
 //!
 //! Provides system information through virtual files:
-//! - /proc/version, uptime, meminfo, cpuinfo, mounts, fb: static generators
-//! - /proc/self/{status,stat,cmdline}: per-caller process info via procmgr IPC
-//! - /proc/<pid>/{status,stat,cmdline}: per-PID process info via procmgr IPC
-//! - /proc readdir: static entries + PID directories from procmgr
+//! - /proc/version, uptime, meminfo, cpuinfo, mounts, fb, sched_overflow:
+//!   static generators (no IPC, served synchronously inside the async wrapper)
+//! - /proc/<pid>/{stat,status,cmdline,comm,exe}: per-PID process info via
+//!   async IPC to session-procmgr using `IpcCallFuture`
+//! - /proc/self/...: currently returns NotFound (requires TID→PID resolution,
+//!   deferred — `top` uses explicit PIDs from readdir)
+//! - /proc readdir: static entries + PID directories from procmgr `list_pids`
 
 use crate::fd_table::OpenFile;
-use crate::mount::{DirEntry, MountBackend, VirtualFile};
+use crate::mount::{DirEntry, DirEntryStat, AsyncMountBackend, VirtualFile};
+use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::mem::size_of;
+use core::future::Future;
+use core::pin::Pin;
+use libcluu::async_runtime::IpcCallFuture;
 use libcluu::boot::{process_info, TOKEN_SELF};
-use libcluu::ipc::{call_with_reply_buf, PROCMGR_PROC_QUERY_LABEL};
+use libcluu::ipc::{PROCMGR_LIST_PIDS_LABEL, PROCMGR_PROC_INFO_LABEL};
 use libcluu::syscall::{
-    pmm_get_stats, sched_get_overflow, thread_enumerate, PMM_STATS_TOTAL_FRAMES,
+    pmm_get_stats, sched_get_overflow, PMM_STATS_TOTAL_FRAMES,
     PMM_STATS_USED_FRAMES, SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
 };
 use libcluu::types::Message;
 use libcluu::{Error, Result};
+use procmgr_common::wire::ProcInfo;
 
-/// Query type constants for procmgr IPC.
-const QUERY_STATUS: usize = 0;
-const QUERY_STAT: usize = 1;
-const QUERY_CMDLINE: usize = 2;
-const QUERY_COMM: usize = 4;
-const QUERY_EXE: usize = 5;
+// ─── Static content generators (unchanged) ─────────────────────────────────
 
 /// Names of static /proc files (no procmgr IPC needed).
 const STATIC_FILES: &[&str] = &[
@@ -42,8 +44,6 @@ const STATIC_FILES: &[&str] = &[
 /// Per-PID sub-files available under /proc/<pid>/ and /proc/self/.
 const PID_SUBFILES: &[&str] = &["status", "stat", "cmdline", "comm", "exe"];
 
-// ─── Static content generators (unchanged from original) ───────────────────
-
 fn gen_version() -> Result<Vec<u8>> {
     let version = String::from(
         "CLUU microkernel v0.1.0\n\
@@ -54,13 +54,9 @@ fn gen_version() -> Result<Vec<u8>> {
 }
 
 fn gen_uptime() -> Result<Vec<u8>> {
-    // Linux format: "<uptime_seconds>.<centi> <idle_seconds>.<centi>\n"
-    // Idle time tracking isn't wired through the kernel scheduler yet, so we
-    // report it as 0 for now. Once per-CPU idle counters land, plumb them
-    // through TIME_GETCLOCK or a dedicated query and replace the second field.
     let (sec, nsec) = libcluu::time::query(libcluu::time::TIME_GETCLOCK)
         .unwrap_or((0, 0));
-    let centi = (nsec / 10_000_000) as u32; // 0..99
+    let centi = (nsec / 10_000_000) as u32;
     let text = format!("{}.{:02} 0.00\n", sec, centi);
     Ok(text.into_bytes())
 }
@@ -70,7 +66,6 @@ fn gen_meminfo() -> Result<Vec<u8>> {
     let used = pmm_get_stats(self_token, PMM_STATS_USED_FRAMES).unwrap_or(0);
     let total = pmm_get_stats(self_token, PMM_STATS_TOTAL_FRAMES).unwrap_or(0);
     let free = total.saturating_sub(used);
-    // PAGE_SIZE = 4 KB, so frames * 4 = kB directly.
     let total_kb = total * 4;
     let free_kb = free * 4;
     let used_kb = used * 4;
@@ -109,7 +104,6 @@ fn gen_cpuinfo() -> Result<Vec<u8>> {
         base_model
     };
 
-    // Brand string: extended leaves 0x80000002-04 give 48 bytes ASCII.
     let ext_max = unsafe { __cpuid(0x80000000) }.eax;
     let mut brand = [0u8; 48];
     let brand_str = if ext_max >= 0x80000004 {
@@ -127,7 +121,6 @@ fn gen_cpuinfo() -> Result<Vec<u8>> {
         "unknown"
     };
 
-    // Decode a useful subset of feature flags from leaf 1 EDX/ECX.
     let mut flags = String::new();
     let edx_flags: &[(u32, &str)] = &[
         (0, "fpu"), (4, "tsc"), (5, "msr"), (9, "apic"),
@@ -205,9 +198,6 @@ fn gen_fb() -> Result<Vec<u8>> {
     Ok(text.into_bytes())
 }
 
-/// Read scheduler overflow counters (H9 deferred-fault queue, H10 pending-wake
-/// queue) directly from the kernel and format them as a tiny key=value file.
-/// Each line carries one counter; both start at 0 on a healthy system.
 fn gen_sched_overflow() -> Result<Vec<u8>> {
     let self_token = process_info().tokens[TOKEN_SELF];
     let deferred_fault = sched_get_overflow(self_token, SCHED_OVERFLOW_DEFERRED_FAULT).unwrap_or(0);
@@ -232,9 +222,72 @@ fn gen_static(name: &str) -> Result<Vec<u8>> {
     }
 }
 
-// ─── ProcfsBackend ─────────────────────────────────────────────────────────
+// ─── ProcInfo formatting ───────────────────────────────────────────────────
 
-/// Procfs backend — combines static generators with dynamic procmgr IPC.
+/// Format a ProcInfo into the requested subfile format.
+fn format_proc_info(subfile: &str, info: &ProcInfo) -> Result<Vec<u8>> {
+    match subfile {
+        "stat" => {
+            // Linux-style stat: "pid (name) state rest..."
+            // Fields: pid, name, state, cpu_ticks, heap_pages, other_pages,
+            //         ppid, sid, cid, pcid
+            let text = format!(
+                "{} ({}) R 0 0 0 {} 0 {} {}\n",
+                info.pid, info.command, info.ppid, info.pid, info.ppid,
+            );
+            Ok(text.into_bytes())
+        }
+        "status" => {
+            let text = format!(
+                "Name:\t{}\n\
+                 State:\tR (running)\n\
+                 Pid:\t{}\n\
+                 PPid:\t{}\n",
+                info.command, info.pid, info.ppid,
+            );
+            Ok(text.into_bytes())
+        }
+        "cmdline" => {
+            // Null-terminated argv[0]
+            let mut data = info.argv0.as_bytes().to_vec();
+            data.push(0);
+            Ok(data)
+        }
+        "comm" => {
+            let mut text = info.command.clone();
+            text.push('\n');
+            Ok(text.into_bytes())
+        }
+        "exe" => {
+            // Path to executable
+            Ok(info.argv0.as_bytes().to_vec())
+        }
+        _ => Err(Error::NotFound),
+    }
+}
+
+/// Parse "self/subfile" or "<pid>/subfile" from a relative path.
+/// Returns (pid, subfile) where pid=0 means "self".
+fn parse_pid_path(rel: &str) -> Option<(i32, &str)> {
+    let (first, rest) = rel.split_once('/')?;
+    if !PID_SUBFILES.contains(&rest) {
+        return None;
+    }
+    if first == "self" {
+        Some((0, rest))
+    } else {
+        first.parse::<i32>().ok().map(|pid| (pid, rest))
+    }
+}
+
+// ─── ProcfsBackend (async) ─────────────────────────────────────────────────
+
+/// Procfs backend — combines static generators with async procmgr IPC.
+///
+/// Implements `AsyncMountBackend`: `open_async` and `readdir_async` return
+/// `Pin<Box<dyn Future>>` that may await `IpcCallFuture` for procmgr queries.
+/// Static file generation (meminfo, cpuinfo, etc.) is synchronous and wrapped
+/// in an immediately-ready future.
 pub struct ProcfsBackend {
     procmgr_endpoint: usize,
 }
@@ -243,183 +296,144 @@ impl ProcfsBackend {
     pub fn new(procmgr_endpoint: usize) -> Self {
         Self { procmgr_endpoint }
     }
-
-    /// Query procmgr for process data. Returns payload bytes on success.
-    ///
-    /// Wire format (after `reply_with_payload` on the procmgr side):
-    /// - `reply.words[0]` = payload byte length (overwritten by the IPC layer).
-    /// - `reply.words[1]` = errno (0 = success, negative = errno).
-    /// - `reply.words[2]` = type-specific count, redundant with `payload_len`.
-    fn query_procmgr(
-        &self,
-        query_type: usize,
-        target_pid: usize,
-        caller_tid: usize,
-    ) -> Result<Vec<u8>> {
-        let req = Message::new(
-            PROCMGR_PROC_QUERY_LABEL,
-            [query_type, target_pid, caller_tid, 0, 0, 0],
-            3,
-        );
-        let mut reply_buf = [0u8; 4096];
-        let bytes_received =
-            libcluu::syscall::ipc_call_timeout(self.procmgr_endpoint, req.as_bytes(), &mut reply_buf, 500)
-                .map_err(|_| Error::NotFound)?;
-
-        if bytes_received < size_of::<Message>() {
-            return Err(Error::InvalidState);
-        }
-        let reply_hdr = &reply_buf[..size_of::<Message>()];
-        let errno = unsafe {
-            let words_ptr = reply_hdr.as_ptr().add(8) as *const usize;
-            *words_ptr as isize
-        };
-        let payload_len = bytes_received - size_of::<Message>();
-
-        if errno != 0 {
-            return Err(Error::from_errno(errno));
-        }
-
-        let data_start = size_of::<Message>();
-        let data_end = data_start + payload_len;
-        Ok(reply_buf[data_start..data_end].to_vec())
-    }
-
-    /// Parse "self/subfile" or "<pid>/subfile" from a relative path.
-    /// Returns (pid, subfile) where pid=0 means "self".
-    fn parse_pid_path(rel: &str) -> Option<(usize, &str)> {
-        let (first, rest) = rel.split_once('/')?;
-        if !PID_SUBFILES.contains(&rest) {
-            return None;
-        }
-        if first == "self" {
-            Some((0, rest))
-        } else {
-            first.parse::<usize>().ok().map(|pid| (pid, rest))
-        }
-    }
-
-    /// Map a sub-file name to a query type.
-    fn subfile_to_query(subfile: &str) -> usize {
-        match subfile {
-            "status" => QUERY_STATUS,
-            "stat" => QUERY_STAT,
-            "cmdline" => QUERY_CMDLINE,
-            "comm" => QUERY_COMM,
-            "exe" => QUERY_EXE,
-            _ => QUERY_STATUS,
-        }
-    }
-
-    /// Enumerate live thread IDs directly from the kernel.
-    ///
-    /// This bypasses procmgr IPC — the kernel is the source of truth for
-    /// threads. The TIDs returned here are used as directory names in
-    /// /proc readdir. Per-PID detail files (stat, status, etc.) still
-    /// query procmgr, which resolves TID→PID via its tid_to_pid map.
-    fn query_tid_list(&self) -> Result<Vec<u32>> {
-        let self_token = process_info().tokens[TOKEN_SELF];
-        let mut buf = [0u64; 256];
-        let count = thread_enumerate(self_token, &mut buf).unwrap_or(0);
-        Ok(buf[..count].iter().map(|&tid| tid as u32).collect())
-    }
 }
 
-impl MountBackend for ProcfsBackend {
+impl AsyncMountBackend for ProcfsBackend {
     fn name(&self) -> &'static str {
         "procfs"
     }
 
-    fn open(&self, rel_path: &str, full_path: &str, caller_tid: usize) -> Result<OpenFile> {
-        let rel = rel_path.trim_start_matches('/');
+    fn open_async(
+        &self,
+        rel_path: &str,
+        full_path: &str,
+        caller_tid: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<OpenFile>> + '_>> {
+        let rel = rel_path.trim_start_matches('/').to_string();
+        let full = full_path.to_string();
 
-        // Static files
-        if STATIC_FILES.contains(&rel) {
-            let data = gen_static(rel)?;
-            return Ok(OpenFile::Virtual(VirtualFile {
-                data,
-                path: String::from(full_path),
-                rights: u64::MAX,
-            }));
-        }
-
-        // Dynamic: "self/subfile" or "<pid>/subfile"
-        if let Some((pid, subfile)) = Self::parse_pid_path(rel) {
-            let query_type = Self::subfile_to_query(subfile);
-            let data = self.query_procmgr(query_type, pid, caller_tid)?;
-            return Ok(OpenFile::Virtual(VirtualFile {
-                data,
-                path: String::from(full_path),
-                rights: u64::MAX,
-            }));
-        }
-
-        Err(Error::NotFound)
-    }
-
-    fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
-        use crate::mount::DirEntryStat;
-        let rel = rel_path.trim_start_matches('/');
-
-        let file_stat = DirEntryStat { mode: 0o100444u32, nlink: 1, ..Default::default() };
-        let dir_stat  = DirEntryStat { mode: 0o040555u32, nlink: 1, ..Default::default() };
-
-        if rel.is_empty() {
-            // Root /proc directory: static entries + PID directories
-            let mut entries: Vec<DirEntry> = STATIC_FILES
-                .iter()
-                .map(|&name| DirEntry {
-                    name: String::from(name),
-                    is_dir: false,
-                    stat: file_stat,
-                })
-                .collect();
-
-            entries.push(DirEntry {
-                name: String::from("self"),
-                is_dir: true,
-                stat: dir_stat,
-            });
-
-            // Enumerate live TIDs directly from the kernel (no procmgr IPC).
-            if let Ok(tids) = self.query_tid_list() {
-                for tid in tids {
-                    entries.push(DirEntry {
-                        name: format!("{}", tid),
-                        is_dir: true,
-                        stat: dir_stat,
-                    });
-                }
+        Box::pin(async move {
+            // Static files — no IPC needed
+            if STATIC_FILES.contains(&rel.as_str()) {
+                let data = gen_static(&rel)?;
+                return Ok(OpenFile::Virtual(VirtualFile {
+                    data,
+                    path: full,
+                    rights: u64::MAX,
+                }));
             }
 
-            return Ok(entries);
-        }
+            // Dynamic: "self/subfile" or "<pid>/subfile"
+            if let Some((pid, subfile)) = parse_pid_path(&rel) {
+                // "self" (pid=0) requires TID→PID resolution — not yet
+                // supported in the PID-keyed API. Return NotFound.
+                if pid == 0 {
+                    return Err(Error::NotFound);
+                }
 
-        // "self" or "<pid>" directory
-        if rel == "self" {
-            return Ok(PID_SUBFILES
-                .iter()
-                .map(|&name| DirEntry {
-                    name: String::from(name),
-                    is_dir: false,
-                    stat: file_stat,
-                })
-                .collect());
-        }
+                // Async IPC to procmgr: get ProcInfo for this PID
+                let req = Message::new(
+                    PROCMGR_PROC_INFO_LABEL,
+                    [pid as usize, 0, caller_tid, 0, 0, 0],
+                    6,
+                );
+                let (reply, payload) =
+                    IpcCallFuture::new(self.procmgr_endpoint, req).await?;
 
-        if rel.parse::<usize>().is_ok() {
-            // Numeric PID directory — return sub-files.
-            // Access control is enforced at open() time by procmgr.
-            return Ok(PID_SUBFILES
-                .iter()
-                .map(|&name| DirEntry {
-                    name: String::from(name),
-                    is_dir: false,
-                    stat: file_stat,
-                })
-                .collect());
-        }
+                let errno = reply.words[0] as isize;
+                if errno != 0 {
+                    return Err(Error::from_errno(errno));
+                }
 
-        Err(Error::NotFound)
+                // Deserialize ProcInfo from payload
+                let info: ProcInfo = postcard::from_bytes(&payload)
+                    .map_err(|_| Error::InvalidArgument)?;
+
+                let data = format_proc_info(subfile, &info)?;
+                return Ok(OpenFile::Virtual(VirtualFile {
+                    data,
+                    path: full,
+                    rights: u64::MAX,
+                }));
+            }
+
+            Err(Error::NotFound)
+        })
+    }
+
+    fn readdir_async(
+        &self,
+        rel_path: &str,
+        _caller_tid: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirEntry>>> + '_>> {
+        let rel = rel_path.trim_start_matches('/').to_string();
+
+        Box::pin(async move {
+            let file_stat = DirEntryStat { mode: 0o100444u32, nlink: 1, ..Default::default() };
+            let dir_stat  = DirEntryStat { mode: 0o040555u32, nlink: 1, ..Default::default() };
+
+            if rel.is_empty() {
+                // Root /proc: static entries + "self" dir + PID dirs
+                let mut entries: Vec<DirEntry> = STATIC_FILES
+                    .iter()
+                    .map(|&name| DirEntry {
+                        name: String::from(name),
+                        is_dir: false,
+                        stat: file_stat,
+                    })
+                    .collect();
+
+                entries.push(DirEntry {
+                    name: String::from("self"),
+                    is_dir: true,
+                    stat: dir_stat,
+                });
+
+                // Async IPC: get PID list from procmgr
+                let req = Message::new(
+                    PROCMGR_LIST_PIDS_LABEL,
+                    [0, 0, 0, 0, 0, 0],
+                    6,
+                );
+                let (reply, payload) =
+                    IpcCallFuture::new(self.procmgr_endpoint, req).await?;
+
+                let errno = reply.words[0] as isize;
+                if errno == 0 {
+                    // Parse PIDs as raw little-endian u32 array
+                    let pid_count = reply.words[1];
+                    for i in 0..pid_count {
+                        let offset = i * 4;
+                        if offset + 4 > payload.len() {
+                            break;
+                        }
+                        let pid = u32::from_le_bytes(
+                            payload[offset..offset + 4].try_into().unwrap_or([0u8; 4]),
+                        );
+                        entries.push(DirEntry {
+                            name: format!("{}", pid),
+                            is_dir: true,
+                            stat: dir_stat,
+                        });
+                    }
+                }
+
+                return Ok(entries);
+            }
+
+            // "self" or "<pid>" directory — static subfile list
+            if rel == "self" || rel.parse::<i32>().is_ok() {
+                return Ok(PID_SUBFILES
+                    .iter()
+                    .map(|&name| DirEntry {
+                        name: String::from(name),
+                        is_dir: false,
+                        stat: file_stat,
+                    })
+                    .collect());
+            }
+
+            Err(Error::NotFound)
+        })
     }
 }

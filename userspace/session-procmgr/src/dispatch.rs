@@ -13,6 +13,20 @@ pub type KernelImpl = MockKernel;
 #[cfg(not(feature = "host-test"))]
 pub type KernelImpl = crate::real_kernel::RealKernel;
 
+/// Outcome of dispatching an inbound message.
+///
+/// `Reply(r)` — the handler produced a reply that the main loop should send
+/// via `ipc_reply` on the receive channel.
+///
+/// `AlreadySent` — the handler replied directly to the caller's embedded
+/// reply endpoint via `ipc_send` (see `proc_pid`); the main loop must skip
+/// `send_reply` to avoid a double reply on the receive channel.
+#[derive(Debug)]
+pub enum DispatchOutcome {
+    Reply(Reply),
+    AlreadySent,
+}
+
 pub struct SessionState {
     pub sid: SessionId,
     pub generation: u32,
@@ -55,39 +69,41 @@ impl SessionState {
     }
 }
 
-pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply, HandlerError> {
+pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<DispatchOutcome, HandlerError> {
     match msg.label {
         procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL => {
-            crate::spawn::Spawn::handle(state, msg)
+            crate::spawn::Spawn::handle(state, msg).map(DispatchOutcome::Reply)
         }
         procmgr_common::labels::PROCMGR_EXIT_LABEL => {
-            crate::child_monitor::ChildExit::handle(state, msg)
+            crate::child_monitor::ChildExit::handle(state, msg).map(DispatchOutcome::Reply)
         }
         procmgr_common::labels::SESSION_PROCMGR_PIPE_CREATE_LABEL => {
-            crate::pipe_handlers::PipeCreate::handle(state, msg)
+            crate::pipe_handlers::PipeCreate::handle(state, msg).map(DispatchOutcome::Reply)
         }
         procmgr_common::labels::SESSION_PROCMGR_PIPE_CLOSE_LABEL => {
-            crate::pipe_handlers::PipeClose::handle(state, msg)
+            crate::pipe_handlers::PipeClose::handle(state, msg).map(DispatchOutcome::Reply)
         }
         procmgr_common::labels::SESSION_PROCMGR_KILL_LABEL => {
-            crate::kill::Kill::handle(state, msg)
+            crate::kill::Kill::handle(state, msg).map(DispatchOutcome::Reply)
         }
         procmgr_common::labels::SESSION_PROCMGR_CTTY_QUERY_LABEL => {
-            crate::ctty::CttyQuery::handle(state, msg)
+            crate::ctty::CttyQuery::handle(state, msg).map(DispatchOutcome::Reply)
         }
         procmgr_common::labels::SESSION_PROCMGR_PROC_QUERY_LOCAL_LABEL => {
-            crate::proc_query_local::ProcQueryLocal::handle(state, msg)
+            crate::proc_query_local::ProcQueryLocal::handle(state, msg).map(DispatchOutcome::Reply)
         }
         libcluu::ipc::PROCMGR_PG_CREATE_LABEL => {
             let pgid = state.pg_table.create();
-            Ok(Reply::ok(libcluu::ipc::PROCMGR_PG_CREATE_LABEL).with_word(0, pgid))
+            Ok(DispatchOutcome::Reply(
+                Reply::ok(libcluu::ipc::PROCMGR_PG_CREATE_LABEL).with_word(0, pgid),
+            ))
         }
         libcluu::ipc::PROCMGR_PG_ATTACH_LABEL => {
             let pgid = msg.words[0];
             let pid = msg.words[1] as i32;
             state.pg_table.attach(pgid, pid as usize);
             state.child_table.set_pgid(pid, pgid as u32);
-            Ok(Reply::ok(libcluu::ipc::PROCMGR_PG_ATTACH_LABEL))
+            Ok(DispatchOutcome::Reply(Reply::ok(libcluu::ipc::PROCMGR_PG_ATTACH_LABEL)))
         }
         libcluu::ipc::PROCMGR_PG_SIGNAL_LABEL => {
             let pgid = msg.words[0];
@@ -118,10 +134,20 @@ pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Reply,
                     }
                 }
             }
-            Ok(Reply::ok(libcluu::ipc::PROCMGR_PG_SIGNAL_LABEL))
+            Ok(DispatchOutcome::Reply(Reply::ok(libcluu::ipc::PROCMGR_PG_SIGNAL_LABEL)))
         }
         libcluu::ipc::PROCMGR_PROC_QUERY_LABEL => {
-            crate::proc_query::ProcQuery::handle(state, msg)
+            crate::proc_query::ProcQuery::handle(state, msg).map(DispatchOutcome::Reply)
+        }
+        libcluu::ipc::PROCMGR_LIST_PIDS_LABEL => {
+            crate::proc_pid::list_pids_handler(state, msg)
+                .map(|_| DispatchOutcome::AlreadySent)
+                .map_err(|_| HandlerError::Internal("list_pids ipc_send"))
+        }
+        libcluu::ipc::PROCMGR_PROC_INFO_LABEL => {
+            crate::proc_pid::proc_info_handler(state, msg)
+                .map(|_| DispatchOutcome::AlreadySent)
+                .map_err(|_| HandlerError::Internal("proc_info ipc_send"))
         }
         _ => Err(HandlerError::BadLabel),
     }

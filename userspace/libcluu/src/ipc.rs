@@ -156,6 +156,18 @@ pub const PROCMGR_SHUTDOWN_LABEL: u32 = 36;
 /// Reply: words[0]=errno, words[1]=data_len or pid_count, payload=content.
 pub const PROCMGR_PROC_QUERY_LABEL: u32 = 37;
 
+/// List all PIDs in a session: caller → session-procmgr (async via ipc_send).
+/// words[4]=reply_ep, words[5]=caller_cookie.
+/// Handler replies directly via `ipc_send(reply_ep, ...)`: words[0]=errno,
+/// words[1]=pid_count, words[5]=caller_cookie, payload=raw LE u32 PIDs.
+pub const PROCMGR_LIST_PIDS_LABEL: u32 = 0x4A;
+
+/// Per-PID info: caller → session-procmgr (async via ipc_send).
+/// words[0]=pid, words[4]=reply_ep, words[5]=caller_cookie.
+/// Handler replies directly via `ipc_send(reply_ep, ...)`: words[0]=errno,
+/// words[5]=caller_cookie, payload=postcard(ProcInfo) on hit.
+pub const PROCMGR_PROC_INFO_LABEL: u32 = 0x4B;
+
 /// Allocate a new pipe. Reply: words[0]=status, words[1]=write_token,
 /// words[2]=read_token, words[3]=pipe_id.
 pub const PROCMGR_PIPE_CREATE_LABEL: u32 = 38;
