@@ -17,7 +17,7 @@ harness_derive_marker_defaults() {
     # Standard root/root credentials sendkey sequence for cases that drive
     # the interactive login flow. Each case that uses this MUST also set
     # SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1" and RUN_WAIT_DEFAULT to at least 45.
-    CREDS_SENDKEY_ROOT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
+    CREDS_SENDKEY_ROOT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
     if [ "$TEST_COMMAND" = "__AUTO__" ]; then
         case "$MARKER_MODE" in
             m3_mapfail) TEST_COMMAND="mapfail 12 4" ;;
@@ -879,24 +879,24 @@ harness_derive_marker_defaults() {
                 # Same sendkey sequence as l2_cluuterm_login: root/root on VT4.
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
                 ;;
             mouse_smoke)
                 TEST_COMMAND=""
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="30"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 15\nmouse_move 100 0\nsleep 1\nmouse_move 0 50\nsleep 1\nmouse_move -50 -25\nsleep 1\nmouse_button 1\nsleep 1\nmouse_button 0'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 15\nmouse_move 100 0\nsleep 1\nmouse_move 0 50\nsleep 1\nmouse_move -50 -25\nsleep 1\nmouse_button 1\nsleep 1\nmouse_button 0'
                 ;;
             l2_cluuterm_login)
                 TEST_COMMAND=""
                 # After boot, inject credentials into the login modal.
                 # The login modal spawns BEFORE any shell, so `shell: ready`
                 # cannot gate keystroke injection — fire keys unconditionally.
-                #   sleep 5: compositor + login modal ready by ~5s.
+                #   sleep 12: compositor + login modal ready by ~5s.
                 #   sleep 2: password field appears after username Enter.
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
                 ;;
             l2_compositor_swap_login)
                 TEST_COMMAND=""
@@ -905,7 +905,7 @@ harness_derive_marker_defaults() {
                 # session_mode traces.
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
                 ;;
             l2_envelope_home_propagated)
                 TEST_COMMAND=""
@@ -916,31 +916,31 @@ harness_derive_marker_defaults() {
                 # AND propagated through posix_spawn env trailer to the shell).
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret'
                 ;;
             l2_cluuterm_ansi)
                 TEST_COMMAND=""
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey p\nsendkey r\nsendkey i\nsendkey n\nsendkey t\nsendkey f\nsendkey spc\nsendkey apostrophe\nsendkey backslash\nsendkey 0\nsendkey 3\nsendkey 3\nsendkey bracket_left\nsendkey 3\nsendkey 1\nsendkey m\nsendkey r\nsendkey e\nsendkey d\nsendkey backslash\nsendkey 0\nsendkey 3\nsendkey 3\nsendkey bracket_left\nsendkey 0\nsendkey m\nsendkey apostrophe\nsendkey ret'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey p\nsendkey r\nsendkey i\nsendkey n\nsendkey t\nsendkey f\nsendkey spc\nsendkey apostrophe\nsendkey backslash\nsendkey 0\nsendkey 3\nsendkey 3\nsendkey bracket_left\nsendkey 3\nsendkey 1\nsendkey m\nsendkey r\nsendkey e\nsendkey d\nsendkey backslash\nsendkey 0\nsendkey 3\nsendkey 3\nsendkey bracket_left\nsendkey 0\nsendkey m\nsendkey apostrophe\nsendkey ret'
                 ;;
             l2_cluuterm_keymap)
                 TEST_COMMAND=""
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey up'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey up'
                 ;;
             l2_cluuterm_exit)
                 TEST_COMMAND=""
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey e\nsendkey x\nsendkey i\nsendkey t\nsendkey ret'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey e\nsendkey x\nsendkey i\nsendkey t\nsendkey ret'
                 ;;
             l2_cluuterm_two_windows)
                 TEST_COMMAND=""
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey ctrl-alt-n'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey ctrl-alt-n'
                 ;;
             l2_cluuterm_raw_mode)
                 # MicroPython calls tcsetattr(raw) for its REPL on stdin.
@@ -970,13 +970,13 @@ harness_derive_marker_defaults() {
                 TEST_COMMAND=""
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey ctrl-alt-n\nsleep 3\nsendkey alt-tab'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey ctrl-alt-n\nsleep 3\nsendkey alt-tab'
                 ;;
             l2_compositor_destroy)
                 TEST_COMMAND=""
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey ctrl-alt-q'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 3\nsendkey ctrl-alt-q'
                 ;;
             l2_compositor_legacy_vt)
                 TEST_COMMAND=""
@@ -1033,18 +1033,18 @@ harness_derive_marker_defaults() {
                 # BEFORE any shell, so `shell: ready` cannot gate keystroke
                 # injection — we must fire keys unconditionally. The sleep
                 # values inside the sequence handle the timing:
-                #   sleep 5: compositor + login modal are ready by ~5s.
+                #   sleep 12: compositor + login modal are ready by ~5s.
                 #   sleep 2: password field appears after username Enter.
                 #   sleep 3: cluuterm + shell start up after auth (~3s).
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 8\nsendkey x\nsendkey y\nsendkey z\nsendkey ret'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 8\nsendkey x\nsendkey y\nsendkey z\nsendkey ret'
                 ;;
             l2_cluuterm_cd)
                 TEST_COMMAND=""
                 SENDKEY_SEQUENCE_NOWAIT_DEFAULT="1"
                 RUN_WAIT_DEFAULT="45"
-                SENDKEY_SEQUENCE_DEFAULT=$'sleep 5\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 8\nsendkey c\nsendkey d\nsendkey spc\nsendkey b\nsendkey i\nsendkey n\nsendkey ret\nsleep 1\nsendkey p\nsendkey w\nsendkey d\nsendkey ret'
+                SENDKEY_SEQUENCE_DEFAULT=$'sleep 12\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 2\nsendkey r\nsendkey o\nsendkey o\nsendkey t\nsendkey ret\nsleep 8\nsendkey c\nsendkey d\nsendkey spc\nsendkey b\nsendkey i\nsendkey n\nsendkey ret\nsleep 1\nsendkey p\nsendkey w\nsendkey d\nsendkey ret'
                 ;;
             legacy_p1)
                 TEST_COMMAND="minimal"
