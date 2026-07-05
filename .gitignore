@@ -101,3 +101,10 @@ userfs/bin/waitprobe
 .omo/run-continuation/ses_101f1b55dffeDGdAGYQkf4Z3A4.json
 .omo/run-continuation/ses_101fff57effeyNs8KbvoSc61NJ.json
 .omo/run-continuation/ses_10206adfeffeR6gTikYql5Z045.json
+
+# Python harness artifacts
+__pycache__/
+*.pyc
+*.pyo
+python/.venv/
+python/*.egg-info/
