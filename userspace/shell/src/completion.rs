@@ -71,7 +71,12 @@ pub fn populate_dir_cache(vfs: &libcluu::fs::client::VfsClient) {
                 ));
                 cache.push((dir.to_string(), names));
             }
-            Err(_) => {}
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "completion: readdir {} failed: {:?}",
+                    dir, e
+                ));
+            }
         }
     }
     unsafe {
@@ -84,12 +89,33 @@ fn lookup_cached_dir(dir: &str) -> Vec<String> {
     if !CACHE_READY.load(Ordering::Acquire) {
         return Vec::new();
     }
+    if dir == "/" {
+        return lookup_root_entries();
+    }
     unsafe {
         DIR_CACHE.iter()
             .find(|(d, _)| d == dir)
             .map(|(_, names)| names.clone())
             .unwrap_or_default()
     }
+}
+
+fn lookup_root_entries() -> Vec<String> {
+    let mut top: Vec<String> = Vec::new();
+    unsafe {
+        for (d, _) in DIR_CACHE.iter() {
+            let seg = d.trim_start_matches('/');
+            let first = match seg.split('/').next() {
+                Some(s) if !s.is_empty() => s,
+                _ => continue,
+            };
+            let labeled = format!("{}/", first);
+            if !top.iter().any(|s| s == &labeled) {
+                top.push(labeled);
+            }
+        }
+    }
+    top
 }
 
 // ── Pure-logic completion sources ──────────────────────────────────────────
