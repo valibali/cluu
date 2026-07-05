@@ -59,7 +59,7 @@ use libcluu::{Error, Result};
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum number of simultaneously registered pseudo-terminal slaves.
-pub const MAX_PTS_SLOTS: usize = 32;
+pub const MAX_PTS_SLOTS: usize = 256;
 
 // ─── PtsEntry ─────────────────────────────────────────────────────────────────
 

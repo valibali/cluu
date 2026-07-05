@@ -364,9 +364,8 @@ fn run_vfs() -> Result<()> {
             }
         }
 
-        let timeout = if runtime.has_pending() { 1 } else { u64::MAX };
         let tokens = [endpoint, registry_endpoint, reply_ep];
-        match libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout) {
+        match libcluu::syscall::ipc_recv_any_with_sender(&tokens, &mut buf, u64::MAX) {
             Ok((index, len, sender_tid)) => {
                 if index == 2 {
                     if let Some((msg, _payload)) = parse_message(&buf[..len]) {
@@ -429,7 +428,7 @@ fn setup_mounts(
     mounts.mount_remote("/", blkdev_endpoint, "blkdev");
     debug_print("vfs: mounted / (blkdev)")?;
 
-    mounts.mount_async("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
+    mounts.mount_sync("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
     debug_print("vfs: mounted /proc (procfs)")?;
 
     // Device files: /dev/null, /dev/zero, /dev/urandom, /dev/tty*, /dev/fb0

@@ -1,25 +1,21 @@
-//! Procfs virtual filesystem implementation (async).
+//! Procfs virtual filesystem implementation.
 //!
 //! Provides system information through virtual files:
 //! - /proc/version, uptime, meminfo, cpuinfo, mounts, fb, sched_overflow:
-//!   static generators (no IPC, served synchronously inside the async wrapper)
+//!   static generators (no IPC needed)
 //! - /proc/<pid>/{stat,status,cmdline,comm,exe}: per-PID process info via
-//!   async IPC to session-procmgr using `IpcCallFuture`
+//!   synchronous IPC to session-procmgr using `call_with_reply_buf`
 //! - /proc/self/...: currently returns NotFound (requires TID→PID resolution,
 //!   deferred — `top` uses explicit PIDs from readdir)
 //! - /proc readdir: static entries + PID directories from procmgr `list_pids`
 
 use crate::fd_table::OpenFile;
-use crate::mount::{DirEntry, DirEntryStat, AsyncMountBackend, VirtualFile};
-use alloc::boxed::Box;
+use crate::mount::{DirEntry, DirEntryStat, MountBackend, VirtualFile};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::future::Future;
-use core::pin::Pin;
-use libcluu::async_runtime::IpcCallFuture;
 use libcluu::boot::{process_info, TOKEN_SELF};
-use libcluu::ipc::{PROCMGR_LIST_PIDS_LABEL, PROCMGR_PROC_INFO_LABEL};
+use libcluu::ipc::{call_with_reply_buf, PROCMGR_LIST_PIDS_LABEL, PROCMGR_PROC_INFO_LABEL};
 use libcluu::syscall::{
     pmm_get_stats, sched_get_overflow, PMM_STATS_TOTAL_FRAMES,
     PMM_STATS_USED_FRAMES, SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
@@ -280,14 +276,8 @@ fn parse_pid_path(rel: &str) -> Option<(i32, &str)> {
     }
 }
 
-// ─── ProcfsBackend (async) ─────────────────────────────────────────────────
+// ─── ProcfsBackend ─────────────────────────────────────────────────────────
 
-/// Procfs backend — combines static generators with async procmgr IPC.
-///
-/// Implements `AsyncMountBackend`: `open_async` and `readdir_async` return
-/// `Pin<Box<dyn Future>>` that may await `IpcCallFuture` for procmgr queries.
-/// Static file generation (meminfo, cpuinfo, etc.) is synchronous and wrapped
-/// in an immediately-ready future.
 pub struct ProcfsBackend {
     procmgr_endpoint: usize,
 }
@@ -296,144 +286,151 @@ impl ProcfsBackend {
     pub fn new(procmgr_endpoint: usize) -> Self {
         Self { procmgr_endpoint }
     }
+
+    fn list_pids_sync(&self) -> Result<Vec<u32>> {
+        let req = Message::new(
+            PROCMGR_LIST_PIDS_LABEL,
+            [0, 0, 0, 0, 0, 0],
+            6,
+        );
+        let mut reply_buf = [0u8; 4096];
+        let (reply, payload_len) =
+            call_with_reply_buf(self.procmgr_endpoint, &req, &[], &mut reply_buf)?;
+
+        let header_len = core::mem::size_of::<Message>();
+        let payload = &reply_buf[header_len..header_len + payload_len];
+
+        let (errno, pid_count) = if payload_len > 0 {
+            (reply.words[1] as isize, reply.words[2])
+        } else {
+            (reply.words[0] as isize, reply.words[1])
+        };
+
+        if errno != 0 {
+            return Err(Error::from_errno(errno));
+        }
+
+        let mut pids = Vec::with_capacity(pid_count);
+        for i in 0..pid_count {
+            let offset = i * 4;
+            if offset + 4 > payload.len() {
+                break;
+            }
+            let pid = u32::from_le_bytes(
+                payload[offset..offset + 4].try_into().unwrap_or([0u8; 4]),
+            );
+            pids.push(pid);
+        }
+        Ok(pids)
+    }
+
+    fn proc_info_sync(&self, pid: i32, caller_tid: usize) -> Result<ProcInfo> {
+        let req = Message::new(
+            PROCMGR_PROC_INFO_LABEL,
+            [pid as usize, 0, caller_tid, 0, 0, 0],
+            6,
+        );
+        let mut reply_buf = [0u8; 4096];
+        let (reply, payload_len) =
+            call_with_reply_buf(self.procmgr_endpoint, &req, &[], &mut reply_buf)?;
+
+        let header_len = core::mem::size_of::<Message>();
+        let payload = &reply_buf[header_len..header_len + payload_len];
+
+        let errno = if payload_len > 0 {
+            reply.words[1] as isize
+        } else {
+            reply.words[0] as isize
+        };
+
+        if errno != 0 {
+            return Err(Error::from_errno(errno));
+        }
+
+        postcard::from_bytes::<ProcInfo>(payload)
+            .map_err(|_| Error::InvalidArgument)
+    }
 }
 
-impl AsyncMountBackend for ProcfsBackend {
+impl MountBackend for ProcfsBackend {
     fn name(&self) -> &'static str {
         "procfs"
     }
 
-    fn open_async(
-        &self,
-        rel_path: &str,
-        full_path: &str,
-        caller_tid: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<OpenFile>> + '_>> {
-        let rel = rel_path.trim_start_matches('/').to_string();
-        let full = full_path.to_string();
+    fn open(&self, rel_path: &str, full_path: &str, caller_tid: usize) -> Result<OpenFile> {
+        let rel = rel_path.trim_start_matches('/');
 
-        Box::pin(async move {
-            // Static files — no IPC needed
-            if STATIC_FILES.contains(&rel.as_str()) {
-                let data = gen_static(&rel)?;
-                return Ok(OpenFile::Virtual(VirtualFile {
-                    data,
-                    path: full,
-                    rights: u64::MAX,
-                }));
+        if STATIC_FILES.contains(&rel) {
+            let data = gen_static(rel)?;
+            return Ok(OpenFile::Virtual(VirtualFile {
+                data,
+                path: full_path.to_string(),
+                rights: u64::MAX,
+            }));
+        }
+
+        if let Some((pid, subfile)) = parse_pid_path(rel) {
+            if pid == 0 {
+                return Err(Error::NotFound);
             }
 
-            // Dynamic: "self/subfile" or "<pid>/subfile"
-            if let Some((pid, subfile)) = parse_pid_path(&rel) {
-                // "self" (pid=0) requires TID→PID resolution — not yet
-                // supported in the PID-keyed API. Return NotFound.
-                if pid == 0 {
-                    return Err(Error::NotFound);
-                }
+            let info = self.proc_info_sync(pid, caller_tid)?;
+            let data = format_proc_info(subfile, &info)?;
+            return Ok(OpenFile::Virtual(VirtualFile {
+                data,
+                path: full_path.to_string(),
+                rights: u64::MAX,
+            }));
+        }
 
-                // Async IPC to procmgr: get ProcInfo for this PID
-                let req = Message::new(
-                    PROCMGR_PROC_INFO_LABEL,
-                    [pid as usize, 0, caller_tid, 0, 0, 0],
-                    6,
-                );
-                let (reply, payload) =
-                    IpcCallFuture::new(self.procmgr_endpoint, req).await?;
-
-                let errno = reply.words[0] as isize;
-                if errno != 0 {
-                    return Err(Error::from_errno(errno));
-                }
-
-                // Deserialize ProcInfo from payload
-                let info: ProcInfo = postcard::from_bytes(&payload)
-                    .map_err(|_| Error::InvalidArgument)?;
-
-                let data = format_proc_info(subfile, &info)?;
-                return Ok(OpenFile::Virtual(VirtualFile {
-                    data,
-                    path: full,
-                    rights: u64::MAX,
-                }));
-            }
-
-            Err(Error::NotFound)
-        })
+        Err(Error::NotFound)
     }
 
-    fn readdir_async(
-        &self,
-        rel_path: &str,
-        _caller_tid: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirEntry>>> + '_>> {
-        let rel = rel_path.trim_start_matches('/').to_string();
+    fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
+        let rel = rel_path.trim_start_matches('/');
+        let file_stat = DirEntryStat { mode: 0o100444u32, nlink: 1, ..Default::default() };
+        let dir_stat  = DirEntryStat { mode: 0o040555u32, nlink: 1, ..Default::default() };
 
-        Box::pin(async move {
-            let file_stat = DirEntryStat { mode: 0o100444u32, nlink: 1, ..Default::default() };
-            let dir_stat  = DirEntryStat { mode: 0o040555u32, nlink: 1, ..Default::default() };
+        if rel.is_empty() {
+            let mut entries: Vec<DirEntry> = STATIC_FILES
+                .iter()
+                .map(|&name| DirEntry {
+                    name: String::from(name),
+                    is_dir: false,
+                    stat: file_stat,
+                })
+                .collect();
 
-            if rel.is_empty() {
-                // Root /proc: static entries + "self" dir + PID dirs
-                let mut entries: Vec<DirEntry> = STATIC_FILES
-                    .iter()
-                    .map(|&name| DirEntry {
-                        name: String::from(name),
-                        is_dir: false,
-                        stat: file_stat,
-                    })
-                    .collect();
+            entries.push(DirEntry {
+                name: String::from("self"),
+                is_dir: true,
+                stat: dir_stat,
+            });
 
-                entries.push(DirEntry {
-                    name: String::from("self"),
-                    is_dir: true,
-                    stat: dir_stat,
-                });
-
-                // Async IPC: get PID list from procmgr
-                let req = Message::new(
-                    PROCMGR_LIST_PIDS_LABEL,
-                    [0, 0, 0, 0, 0, 0],
-                    6,
-                );
-                let (reply, payload) =
-                    IpcCallFuture::new(self.procmgr_endpoint, req).await?;
-
-                let errno = reply.words[0] as isize;
-                if errno == 0 {
-                    // Parse PIDs as raw little-endian u32 array
-                    let pid_count = reply.words[1];
-                    for i in 0..pid_count {
-                        let offset = i * 4;
-                        if offset + 4 > payload.len() {
-                            break;
-                        }
-                        let pid = u32::from_le_bytes(
-                            payload[offset..offset + 4].try_into().unwrap_or([0u8; 4]),
-                        );
-                        entries.push(DirEntry {
-                            name: format!("{}", pid),
-                            is_dir: true,
-                            stat: dir_stat,
-                        });
-                    }
+            if let Ok(pids) = self.list_pids_sync() {
+                for pid in pids {
+                    entries.push(DirEntry {
+                        name: format!("{}", pid),
+                        is_dir: true,
+                        stat: dir_stat,
+                    });
                 }
-
-                return Ok(entries);
             }
 
-            // "self" or "<pid>" directory — static subfile list
-            if rel == "self" || rel.parse::<i32>().is_ok() {
-                return Ok(PID_SUBFILES
-                    .iter()
-                    .map(|&name| DirEntry {
-                        name: String::from(name),
-                        is_dir: false,
-                        stat: file_stat,
-                    })
-                    .collect());
-            }
+            return Ok(entries);
+        }
 
-            Err(Error::NotFound)
-        })
+        if rel == "self" || rel.parse::<i32>().is_ok() {
+            return Ok(PID_SUBFILES
+                .iter()
+                .map(|&name| DirEntry {
+                    name: String::from(name),
+                    is_dir: false,
+                    stat: file_stat,
+                })
+                .collect());
+        }
+
+        Err(Error::NotFound)
     }
 }

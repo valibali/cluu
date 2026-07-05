@@ -2701,8 +2701,6 @@ fn invoke_token_derive(
 ) -> SyscallResult {
     use crate::token::{AuthorityId, Issuer, Rights, Timestamp};
 
-    klibcluu::trace("invoke_token_derive");
-
     if !token.has_right(Rights::GRANT) {
         klibcluu::warn("invoke_token_derive: missing GRANT right");
         return Err(Error::PermissionDenied);

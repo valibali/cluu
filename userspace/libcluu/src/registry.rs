@@ -292,7 +292,7 @@ pub fn subscribe_output(service_name: &str, endpoint_name: &str) -> Result<usize
     // Ask the registry to broker a grant request to the producer.
     send_with_payload(registry_endpoint, &msg, &payload)?;
 
-    wait_for_grant(endpoint_name)
+    wait_for_grant(service_name, endpoint_name)
 }
 
 pub fn request_subscription(service_name: &str, endpoint_name: &str) -> Result<()> {
@@ -369,7 +369,7 @@ pub fn poll_or_recv_any(
     ipc_recv_any(&tokens, buf, timeout_ms)
 }
 
-fn wait_for_grant(endpoint_name: &str) -> Result<usize> {
+fn wait_for_grant(service_name: &str, endpoint_name: &str) -> Result<usize> {
     let control_endpoint = control_endpoint();
     let mut buf = [0u8; 256];
     // Block forever. If the producer dies before granting, the kernel
@@ -377,23 +377,23 @@ fn wait_for_grant(endpoint_name: &str) -> Result<usize> {
     // (BadToken / Closed). A time-bounded recv would convert "hung" into
     // "spurious NotFound" and trigger cascade kills — banned by the no-
     // timeouts rule (memory/feedback_no_timeouts.md). A hang is data.
-    let _ = endpoint_name;
     loop {
         let (index, len) = ipc_recv_any(&[control_endpoint], &mut buf, u64::MAX)?;
         let _ = index;
         if let Some((msg, payload)) = parse_message(&buf[..len]) {
             if let Some(event) = handle_incoming_message(&msg, payload)? {
                 match event {
-                    RegistryEvent::Grant { service_name: _, name, token } => {
-                        if name == endpoint_name {
+                    RegistryEvent::Grant { service_name: svc, name, token } => {
+                        if name == endpoint_name && svc == service_name {
                             return Ok(token);
                         }
                     }
                     RegistryEvent::SubscribeStatus { code } => {
                         if code != 0 {
                             let _ = crate::debug_print(&alloc::format!(
-                                "registry-client: subscribe FAIL status={} for {}",
+                                "registry-client: subscribe FAIL status={} for {}:{}",
                                 code,
+                                service_name,
                                 endpoint_name
                             ));
                             return Err(error_from_code(code));

@@ -40,7 +40,6 @@ static mut DIR_CACHE: Vec<(String, Vec<String>)> = Vec::new();
 
 /// Directories to pre-cache at startup. Covers the common completion cases.
 const CACHED_DIRS: &[&str] = &[
-    "/",
     "/bin",
     "/etc",
     "/dev",

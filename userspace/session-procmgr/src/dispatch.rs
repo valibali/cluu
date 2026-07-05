@@ -141,13 +141,13 @@ pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Dispat
         }
         libcluu::ipc::PROCMGR_LIST_PIDS_LABEL => {
             crate::proc_pid::list_pids_handler(state, msg)
-                .map(|_| DispatchOutcome::AlreadySent)
-                .map_err(|_| HandlerError::Internal("list_pids ipc_send"))
+                .map(DispatchOutcome::Reply)
+                .map_err(|_| HandlerError::Internal("list_pids reply"))
         }
         libcluu::ipc::PROCMGR_PROC_INFO_LABEL => {
             crate::proc_pid::proc_info_handler(state, msg)
-                .map(|_| DispatchOutcome::AlreadySent)
-                .map_err(|_| HandlerError::Internal("proc_info ipc_send"))
+                .map(DispatchOutcome::Reply)
+                .map_err(|_| HandlerError::Internal("proc_info reply"))
         }
         _ => Err(HandlerError::BadLabel),
     }

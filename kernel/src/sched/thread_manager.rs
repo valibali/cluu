@@ -908,6 +908,7 @@ impl ThreadManager {
                 len,
                 sender,
             });
+            thread.recv_wait_ticket = 0;
         })
         .is_some()
     }
@@ -941,9 +942,8 @@ impl ThreadManager {
             match repo.get_mut(thread_id) {
                 Some(thread) if !thread.is_dead() && !thread.is_suspended() => {
                     thread.make_ready();
-                    thread.clear_timeout_deadline(); // Clear any pending timeout
-                    thread.woke_from_timeout = false; // Not a timeout wake
-                    thread.disarm_recv_wait();
+                    thread.clear_timeout_deadline();
+                    thread.woke_from_timeout = false;
                     Some(thread.priority)
                 }
                 _ => None,
@@ -1015,7 +1015,6 @@ impl ThreadManager {
                 thread.make_ready();
                 thread.clear_timeout_deadline();
                 thread.woke_from_timeout = false;
-                thread.disarm_recv_wait();
                 Some(thread.priority)
             }
         };
@@ -1321,7 +1320,6 @@ impl ThreadManager {
                     thread.make_ready();
                     thread.clear_timeout_deadline();
                     thread.woke_from_timeout = true;
-                    thread.disarm_recv_wait();
                     to_wake.push((thread_id, thread.priority));
                 }
             }
@@ -1536,9 +1534,8 @@ impl ThreadManager {
                 if let Some(thread) = repo.get_mut(thread_id) {
                     if !thread.is_dead() {
                         thread.make_ready();
-                        thread.clear_timeout_deadline(); // Clear any pending timeout
-                        thread.woke_from_timeout = false; // Not a timeout wake
-                        thread.disarm_recv_wait();
+                        thread.clear_timeout_deadline();
+                        thread.woke_from_timeout = false;
                         to_schedule.push((thread_id, thread.priority));
                     }
                 }
