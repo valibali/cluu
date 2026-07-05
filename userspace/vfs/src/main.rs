@@ -924,6 +924,22 @@ impl VfsServer {
                 libcluu::proto::pts::PTS_SET_TERMIOS_LABEL,
             );
         }
+        if msg.tag.label == libcluu::proto::pts::PTS_GET_WINSIZE_LABEL {
+            return self.forward_pts_verb_to_cluuterm(
+                msg,
+                payload,
+                sender_tid,
+                libcluu::proto::pts::PTS_GET_WINSIZE_LABEL,
+            );
+        }
+        if msg.tag.label == libcluu::proto::pts::PTS_SET_WINSIZE_LABEL {
+            return self.forward_pts_verb_to_cluuterm(
+                msg,
+                payload,
+                sender_tid,
+                libcluu::proto::pts::PTS_SET_WINSIZE_LABEL,
+            );
+        }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
             vfs_trace!("vfs: unknown op");
             return Ok(());
@@ -1514,7 +1530,7 @@ impl VfsServer {
     /// Used for `PTS_SET_PGRP_LABEL` (138), `PTS_GET_TERMIOS_LABEL` (133),
     /// and `PTS_SET_TERMIOS_LABEL` (134).  Cluuterm owns the canonical PTS
     /// state (termios, fg pgid, winsize); VFS just forwards the call so that
-    /// VFS-backed fds (e.g. a shell's stdin after `patch_vfs_stdio_endpoints`)
+    /// VFS-backed fds (e.g. a shell's stdin)
     /// can reach cluuterm without a separate endpoint.
     ///
     /// Wire layout from libcluu `pts_call_raw`:

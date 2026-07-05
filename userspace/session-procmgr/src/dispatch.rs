@@ -113,13 +113,32 @@ pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<Dispat
             let SIGKILL: usize = 9;
             let pids = state.pg_table.members(pgid);
             for pid in pids {
-                if let Some(child) = state.child_table.lookup_by_pid(pid as i32) {
+                if let Some(child) = state.child_table.lookup_by_pid(pid as i32).cloned() {
                     let tok = child.thread_tok;
                     let notify_ep = child.notify_ep;
                     let cookie = child.cookie;
+                    let child_tid = child.child_tid;
                     match signum {
                         s if s == SIGINT || s == SIGTERM || s == SIGKILL => {
+                            let _ = state.child_table.remove(pid as i32);
+
+                            if child_tid != 0 {
+                                use libcluu::ipc::{send_msg_with_payload, VFS_SET_VIEW_LABEL};
+                                let mut clear_msg = libcluu::types::Message::new(
+                                    VFS_SET_VIEW_LABEL, [0; 6], 6,
+                                );
+                                clear_msg.words[1] = child_tid;
+                                clear_msg.words[5] = state.view_mgr_token as usize;
+                                let clear_vfs = if state.session_vfs_cap != 0 {
+                                    state.session_vfs_cap as usize
+                                } else {
+                                    state.vfs_cap as usize
+                                };
+                                let _ = send_msg_with_payload(clear_vfs, &clear_msg, &[]);
+                            }
+
                             state.kernel.thread_destroy(tok);
+
                             if notify_ep != 0 {
                                 let exit_code = 128 + signum as i32;
                                 let exit_msg = libcluu::types::Message::new(

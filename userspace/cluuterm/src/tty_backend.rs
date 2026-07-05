@@ -1132,6 +1132,20 @@ impl Cluuterm {
                     self.pts.handle_pts_set_termios(req, &msg);
                 }
 
+                // ── PTS_GET_WINSIZE (135): ioctl TIOCGWINSZ via VFS proxy ─
+                PTS_GET_WINSIZE_LABEL => {
+                    self.pts.handle_pts_get_winsize(&msg);
+                }
+
+                // ── PTS_SET_WINSIZE (136): ioctl TIOCSWINSZ via VFS proxy ─
+                PTS_SET_WINSIZE_LABEL => {
+                    let req: Winsize = match postcard::from_bytes(payload) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    self.pts.handle_pts_set_winsize(req, &msg);
+                }
+
                 // ── PTS_CLOSED (110): VFS notifies that all fds closed ──
                 PTS_CLOSED_LABEL => {
                     self.shutdown();

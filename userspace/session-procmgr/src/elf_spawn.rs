@@ -188,7 +188,7 @@ pub fn real_spawn_user_process(
 
     // ── 6. Derive fd tokens; VFS-backed fds go through VFS_DERIVE_CHILD_FD ──
     // stdin needs IPC_RECV, stdout/stderr/stdlog need IPC_SEND|IPC_CALL
-    let stdin_rights = (Rights::IPC_SEND | Rights::IPC_RECV).bits() as usize;
+    let stdin_rights = (Rights::IPC_SEND | Rights::IPC_RECV | Rights::IPC_CALL).bits() as usize;
     let stdout_rights = (Rights::IPC_SEND | Rights::IPC_CALL).bits() as usize;
 
     let mut child_stdin: usize = 0;

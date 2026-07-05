@@ -55,15 +55,6 @@ fn run() -> Result<()> {
     // never consumed, and registering them globally collides between
     // concurrent shell sessions (second cluuterm's shell would fail to start).
 
-    // Patch VFS-backed stdio fds: init_stdio() runs before the registry is
-    // available so it stores stdin/stdout IPC tokens in FdEntry::endpoint.
-    // After registry::init() we can resolve the real VFS endpoint and fix up
-    // any fds that carry a remote_fd (those need to send FS_READ_GRANT to VFS,
-    // not to the stdin IPC token).
-    if let Some(vfs_ep) = registry::lookup_service("vfs:main") {
-        libcluu::fd_table::patch_vfs_stdio_endpoints(vfs_ep);
-    }
-
     // Procmgr seeds fd 0/1/2 via FdInherit at every spawn. Shell unconditionally
     // reads stdin via POSIX read(0). If the assertion ever trips, procmgr
     // failed to wire FdInherit and the child should exit rather than spin.

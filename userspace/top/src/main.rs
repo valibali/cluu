@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 #[allow(unused_imports)]
 use libcluu::runtime as _;
 
-use libcluu::boot::{process_info, PARAM_FB_WIDTH, TOKEN_CLOCK, TOKEN_SPACE};
+use libcluu::boot::{process_info, TOKEN_CLOCK, TOKEN_SPACE};
 use libcluu::debug_print;
 use libcluu::fs::client::VfsClient;
 use libcluu::registry;
@@ -41,6 +41,27 @@ const MIN_COLS_FOR_DUAL_GAUGE: usize = 60;
 extern "C" {
     fn _write(fd: i32, buf: *const u8, n: usize) -> isize;
     fn usleep(usec: u32) -> i32;
+    fn _ioctl(fd: i32, request: usize, argp: *mut core::ffi::c_void) -> i32;
+}
+
+#[repr(C)]
+struct WinSize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+const TIOCGWINSZ: usize = 0x5413;
+
+fn terminal_cols() -> usize {
+    let mut ws = WinSize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+    let rc = unsafe { _ioctl(1, TIOCGWINSZ, &mut ws as *mut _ as *mut core::ffi::c_void) };
+    if rc == 0 && ws.ws_col > 0 {
+        ws.ws_col as usize
+    } else {
+        80
+    }
 }
 
 fn write_stdout(bytes: &[u8]) {
@@ -104,9 +125,8 @@ fn run() -> libcluu::Result<()> {
         let now_tsc = libcluu::syscall::clock_now(clock_token).unwrap_or(0);
 
         let cols = {
-            let fb_w = info.params[PARAM_FB_WIDTH] as u32;
-            let c = if fb_w > 0 { (fb_w / 8) as usize } else { 80 };
-            c.min(80)
+            let c = terminal_cols();
+            c.min(120)
         };
         let cols = cols.saturating_sub(1);
 
