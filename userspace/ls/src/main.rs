@@ -278,7 +278,13 @@ fn sort_entries(entries: &mut Vec<VfsDirEntry>, key: SortKey, reverse: bool) {
 // ──────────────────────────────────────────────────────────────────────
 
 fn print_str(s: &str) {
-    let _ = _write(1, s.as_ptr() as *const _, s.len());
+    let mut remaining = s.as_bytes();
+    const CHUNK: usize = 512;
+    while !remaining.is_empty() {
+        let n = remaining.len().min(CHUNK);
+        let _ = _write(1, remaining.as_ptr() as *const _, n);
+        remaining = &remaining[n..];
+    }
 }
 
 fn eprint_str(s: &str) {
@@ -307,7 +313,6 @@ fn list_dir(
         }
     };
 
-    // Filter dotfiles unless -a
     if !opts.all {
         entries.retain(|e| !e.name.starts_with('.'));
     }
@@ -498,18 +503,18 @@ pub extern "C" fn main() -> i32 {
     let _ = debug_print(&format!("ls: paths={} cwd-resolved", paths.len()));
     for (idx, raw_path) in paths.iter().enumerate() {
         let path = libcluu::posix::resolve_path(raw_path);
-        let _ = debug_print(&format!("ls: listing '{}'", path));
+    let _ = debug_print(&format!("ls: listing '{}'", path));
 
-        if idx > 0 { print_str("\n"); }
+    if idx > 0 { print_str("\n"); }
 
-        if opts.recursive {
-            list_recursive(&vfs, &path, &opts, color, now, width, 0);
-        } else {
-            list_dir(&vfs, &path, &opts, color, now, width, multi);
-        }
+    if opts.recursive {
+        list_recursive(&vfs, &path, &opts, color, now, width, 0);
+    } else {
+        list_dir(&vfs, &path, &opts, color, now, width, multi);
     }
+}
 
-    let _ = debug_print(&format!("ls: ok (exit {})", exit_code));
+let _ = debug_print(&format!("ls: ok (exit {})", exit_code));
     exit_code
 }
 
