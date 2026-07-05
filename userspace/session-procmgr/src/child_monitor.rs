@@ -40,17 +40,22 @@ impl MsgHandler for ChildExit {
         //    to the cluuterm owner so the window can close.  Must happen
         //    BEFORE thread_destroy because VFS keys views by sender_tid.
         #[cfg(not(feature = "host-test"))]
-        if state.vfs_cap != 0 && child.child_tid != 0 {
+        if child.child_tid != 0 {
             use libcluu::ipc::{send_msg_with_payload, VFS_SET_VIEW_LABEL};
             use libcluu::types::Message;
             let mut clear_msg = Message::new(VFS_SET_VIEW_LABEL, [0; 6], 6);
-            clear_msg.words[0] = 0; // payload len
+            clear_msg.words[0] = 0;
             clear_msg.words[1] = child.child_tid;
-            clear_msg.words[2] = 0; // mount_count
-            clear_msg.words[3] = 0; // profile bits
-            clear_msg.words[4] = 0; // container_id
+            clear_msg.words[2] = 0;
+            clear_msg.words[3] = 0;
+            clear_msg.words[4] = 0;
             clear_msg.words[5] = state.view_mgr_token as usize;
-            let _ = send_msg_with_payload(state.vfs_cap as usize, &clear_msg, &[]);
+            let clear_vfs = if state.session_vfs_cap != 0 {
+                state.session_vfs_cap as usize
+            } else {
+                state.vfs_cap as usize
+            };
+            let _ = send_msg_with_payload(clear_vfs, &clear_msg, &[]);
         }
 
         // 3. Destroy thread.
