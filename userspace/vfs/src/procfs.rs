@@ -10,12 +10,16 @@
 //! - /proc readdir: static entries + PID directories from procmgr `list_pids`
 
 use crate::fd_table::OpenFile;
-use crate::mount::{DirEntry, DirEntryStat, MountBackend, VirtualFile};
+use crate::mount::{DirEntry, DirEntryStat, VirtualFile, AsyncMountBackend};
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::future::Future;
+use core::pin::Pin;
+use libcluu::async_runtime::IpcCallFuture;
 use libcluu::boot::{process_info, TOKEN_SELF};
-use libcluu::ipc::{call_with_reply_buf, PROCMGR_LIST_PIDS_LABEL, PROCMGR_PROC_INFO_LABEL};
+use libcluu::ipc::{PROCMGR_LIST_PIDS_LABEL, PROCMGR_PROC_INFO_LABEL};
 use libcluu::syscall::{
     pmm_get_stats, sched_get_overflow, PMM_STATS_TOTAL_FRAMES,
     PMM_STATS_USED_FRAMES, SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
@@ -287,20 +291,15 @@ impl ProcfsBackend {
         Self { procmgr_endpoint }
     }
 
-    fn list_pids_sync(&self) -> Result<Vec<u32>> {
+    async fn list_pids_async(&self) -> Result<Vec<u32>> {
         let req = Message::new(
             PROCMGR_LIST_PIDS_LABEL,
             [0, 0, 0, 0, 0, 0],
             6,
         );
-        let mut reply_buf = [0u8; 4096];
-        let (reply, payload_len) =
-            call_with_reply_buf(self.procmgr_endpoint, &req, &[], &mut reply_buf)?;
+        let (reply, payload) = IpcCallFuture::new(self.procmgr_endpoint, req).await?;
 
-        let header_len = core::mem::size_of::<Message>();
-        let payload = &reply_buf[header_len..header_len + payload_len];
-
-        let (errno, pid_count) = if payload_len > 0 {
+        let (errno, pid_count) = if !payload.is_empty() {
             (reply.words[1] as isize, reply.words[2])
         } else {
             (reply.words[0] as isize, reply.words[1])
@@ -324,20 +323,15 @@ impl ProcfsBackend {
         Ok(pids)
     }
 
-    fn proc_info_sync(&self, pid: i32, caller_tid: usize) -> Result<ProcInfo> {
+    async fn proc_info_async(&self, pid: i32, caller_tid: usize) -> Result<ProcInfo> {
         let req = Message::new(
             PROCMGR_PROC_INFO_LABEL,
             [pid as usize, 0, caller_tid, 0, 0, 0],
             6,
         );
-        let mut reply_buf = [0u8; 4096];
-        let (reply, payload_len) =
-            call_with_reply_buf(self.procmgr_endpoint, &req, &[], &mut reply_buf)?;
+        let (reply, payload) = IpcCallFuture::new(self.procmgr_endpoint, req).await?;
 
-        let header_len = core::mem::size_of::<Message>();
-        let payload = &reply_buf[header_len..header_len + payload_len];
-
-        let errno = if payload_len > 0 {
+        let errno = if !payload.is_empty() {
             reply.words[1] as isize
         } else {
             reply.words[0] as isize
@@ -347,90 +341,106 @@ impl ProcfsBackend {
             return Err(Error::from_errno(errno));
         }
 
-        postcard::from_bytes::<ProcInfo>(payload)
+        postcard::from_bytes::<ProcInfo>(&payload)
             .map_err(|_| Error::InvalidArgument)
     }
 }
 
-impl MountBackend for ProcfsBackend {
+impl AsyncMountBackend for ProcfsBackend {
     fn name(&self) -> &'static str {
         "procfs"
     }
 
-    fn open(&self, rel_path: &str, full_path: &str, caller_tid: usize) -> Result<OpenFile> {
-        let rel = rel_path.trim_start_matches('/');
+    fn open_async(
+        &self,
+        rel_path: &str,
+        full_path: &str,
+        caller_tid: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<OpenFile>> + '_>> {
+        let rel_path = rel_path.to_string();
+        let full_path = full_path.to_string();
+        Box::pin(async move {
+            let rel = rel_path.trim_start_matches('/');
 
-        if STATIC_FILES.contains(&rel) {
-            let data = gen_static(rel)?;
-            return Ok(OpenFile::Virtual(VirtualFile {
-                data,
-                path: full_path.to_string(),
-                rights: u64::MAX,
-            }));
-        }
-
-        if let Some((pid, subfile)) = parse_pid_path(rel) {
-            if pid == 0 {
-                return Err(Error::NotFound);
+            if STATIC_FILES.contains(&rel) {
+                let data = gen_static(rel)?;
+                return Ok(OpenFile::Virtual(VirtualFile {
+                    data,
+                    path: full_path.to_string(),
+                    rights: u64::MAX,
+                }));
             }
 
-            let info = self.proc_info_sync(pid, caller_tid)?;
-            let data = format_proc_info(subfile, &info)?;
-            return Ok(OpenFile::Virtual(VirtualFile {
-                data,
-                path: full_path.to_string(),
-                rights: u64::MAX,
-            }));
-        }
+            if let Some((pid, subfile)) = parse_pid_path(rel) {
+                if pid == 0 {
+                    return Err(Error::NotFound);
+                }
 
-        Err(Error::NotFound)
+                let info = self.proc_info_async(pid, caller_tid).await?;
+                let data = format_proc_info(subfile, &info)?;
+                return Ok(OpenFile::Virtual(VirtualFile {
+                    data,
+                    path: full_path.to_string(),
+                    rights: u64::MAX,
+                }));
+            }
+
+            Err(Error::NotFound)
+        })
     }
 
-    fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
-        let rel = rel_path.trim_start_matches('/');
-        let file_stat = DirEntryStat { mode: 0o100444u32, nlink: 1, ..Default::default() };
-        let dir_stat  = DirEntryStat { mode: 0o040555u32, nlink: 1, ..Default::default() };
+    fn readdir_async(
+        &self,
+        rel_path: &str,
+        _caller_tid: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirEntry>>> + '_>> {
+        let rel_path = rel_path.to_string();
+        Box::pin(async move {
+            let rel = rel_path.trim_start_matches('/');
+            let file_stat = DirEntryStat { mode: 0o100444u32, nlink: 1, ..Default::default() };
+            let dir_stat  = DirEntryStat { mode: 0o040555u32, nlink: 1, ..Default::default() };
 
-        if rel.is_empty() {
-            let mut entries: Vec<DirEntry> = STATIC_FILES
-                .iter()
-                .map(|&name| DirEntry {
-                    name: String::from(name),
-                    is_dir: false,
-                    stat: file_stat,
-                })
-                .collect();
+            if rel.is_empty() {
+                let mut entries: Vec<DirEntry> = STATIC_FILES
+                    .iter()
+                    .map(|&name| DirEntry {
+                        name: String::from(name),
+                        is_dir: false,
+                        stat: file_stat,
+                    })
+                    .collect();
 
-            entries.push(DirEntry {
-                name: String::from("self"),
-                is_dir: true,
-                stat: dir_stat,
-            });
+                entries.push(DirEntry {
+                    name: String::from("self"),
+                    is_dir: true,
+                    stat: dir_stat,
+                });
 
-            if let Ok(pids) = self.list_pids_sync() {
-                for pid in pids {
-                    entries.push(DirEntry {
-                        name: format!("{}", pid),
-                        is_dir: true,
-                        stat: dir_stat,
-                    });
+                if let Ok(pids) = self.list_pids_async().await {
+                    for pid in pids {
+                        entries.push(DirEntry {
+                            name: format!("{}", pid),
+                            is_dir: true,
+                            stat: dir_stat,
+                        });
+                    }
                 }
+
+                return Ok(entries);
             }
 
-            return Ok(entries);
-        }
+            if rel == "self" || rel.parse::<i32>().is_ok() {
+                return Ok(PID_SUBFILES
+                    .iter()
+                    .map(|&name| DirEntry {
+                        name: String::from(name),
+                        is_dir: false,
+                        stat: file_stat,
+                    })
+                    .collect());
+            }
 
-        if rel == "self" || rel.parse::<i32>().is_ok() {
-            return Ok(PID_SUBFILES
-                .iter()
-                .map(|&name| DirEntry {
-                    name: String::from(name),
-                    is_dir: false,
-                    stat: file_stat,
-                })
-                .collect());
-        }
-
-        Err(Error::NotFound)
+            Err(Error::NotFound)
+        })
     }
 }

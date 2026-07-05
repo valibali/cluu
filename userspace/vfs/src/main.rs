@@ -428,7 +428,7 @@ fn setup_mounts(
     mounts.mount_remote("/", blkdev_endpoint, "blkdev");
     debug_print("vfs: mounted / (blkdev)")?;
 
-    mounts.mount_sync("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
+    mounts.mount_async("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
     debug_print("vfs: mounted /proc (procfs)")?;
 
     // Device files: /dev/null, /dev/zero, /dev/urandom, /dev/tty*, /dev/fb0

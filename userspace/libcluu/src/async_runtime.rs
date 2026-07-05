@@ -285,7 +285,7 @@ impl Runtime {
 /// Reply:   `words[5] = cookie` (echoed back by the responder)
 pub struct IpcCallFuture {
     endpoint: usize,
-    request: Message,
+    send_buf: Vec<u8>,
     cookie: usize,
     state: IpcCallState,
 }
@@ -297,23 +297,26 @@ enum IpcCallState {
 }
 
 impl IpcCallFuture {
-    /// Create a new IPC call future. Fills `words[4]` with the runtime's
-    /// reply endpoint and `words[5]` with a fresh cookie.
-    ///
-    /// # Panics
-    /// Panics if called outside of a runtime context (must be called from
-    /// within a task spawned on the runtime).
     pub fn new(endpoint: usize, mut request: Message) -> Self {
+        Self::new_with_payload(endpoint, &mut request, &[])
+    }
+
+    pub fn new_with_payload(endpoint: usize, request: &mut Message, payload: &[u8]) -> Self {
         let rt = current_runtime();
         let cookie = rt.alloc_cookie();
         let reply_ep = rt.reply_endpoint;
 
         request.words[4] = reply_ep;
         request.words[5] = cookie;
+        request.tag.extra = crate::ipc::ASYNC_REPLY_TAG;
+
+        let mut send_buf = Vec::with_capacity(core::mem::size_of::<Message>() + payload.len());
+        send_buf.extend_from_slice(request.as_bytes());
+        send_buf.extend_from_slice(payload);
 
         Self {
             endpoint,
-            request,
+            send_buf,
             cookie,
             state: IpcCallState::NotSent,
         }
@@ -326,8 +329,7 @@ impl Future for IpcCallFuture {
     fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.state {
             IpcCallState::NotSent => {
-                let msg_bytes = self.request.as_bytes();
-                match syscall::ipc_send(self.endpoint, msg_bytes) {
+                match syscall::ipc_send(self.endpoint, &self.send_buf) {
                     Ok(()) => {
                         self.state = IpcCallState::Waiting;
                         let rt = current_runtime();

@@ -363,6 +363,13 @@ pub const REPLY_ID_TAG: u8 = 2;
 /// Word index where reply ID is stored
 pub const REPLY_ID_WORD: usize = 5;
 
+/// Tag indicating this is an async call (sent via `ipc_send`, not `ipc_call`).
+/// `words[4]` = reply endpoint token, `words[5]` = correlation cookie.
+/// Servers should reply via `ipc_send(words[4], ...)` echoing `words[5]`.
+pub const ASYNC_REPLY_TAG: u8 = 3;
+pub const ASYNC_REPLY_EP_WORD: usize = 4;
+pub const ASYNC_REPLY_COOKIE_WORD: usize = 5;
+
 /// Shared-ring metadata stored in the first bytes of the shared region.
 ///
 /// This is a single-producer/single-consumer ring with one reserved slot to

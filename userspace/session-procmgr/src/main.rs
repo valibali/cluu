@@ -64,39 +64,77 @@ fn read_envelope_from_process_info() -> Option<SessionEnvelope> {
 /// Send a reply back to the caller using the reply token from `msg`.
 /// Falls back to sending on `fallback_ep` if the message was a one-way send.
 #[cfg(not(feature = "host-test"))]
-fn send_reply(reply_opt: Option<usize>, fallback_ep: usize, r: &Reply) -> Result<()> {
-    let token = match reply_opt {
-        Some(t) => t,
-        None => return Ok(()),
-    };
-    let mut msg = Message::new(r.label, [0; 6], 1);
-    if r.payload.is_empty() {
-        for (i, &w) in r.words.iter().enumerate().take(6) {
-            msg.words[i] = w;
+fn send_reply(
+    reply_opt: Option<usize>,
+    fallback_ep: usize,
+    r: &Reply,
+    async_reply: Option<(usize, usize)>,
+) -> Result<()> {
+    if let Some(token) = reply_opt {
+        let mut msg = Message::new(r.label, [0; 6], 1);
+        if r.payload.is_empty() {
+            for (i, &w) in r.words.iter().enumerate().take(6) {
+                msg.words[i] = w;
+            }
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &msg as *const Message as *const u8,
+                    size_of::<Message>(),
+                )
+            };
+            let _ = libcluu::syscall::ipc_reply(token, bytes);
+        } else {
+            msg.words[0] = r.payload.len();
+            for (i, &w) in r.words.iter().enumerate().take(5) {
+                msg.words[i + 1] = w;
+            }
+            let header = unsafe {
+                core::slice::from_raw_parts(
+                    &msg as *const Message as *const u8,
+                    size_of::<Message>(),
+                )
+            };
+            let mut buf = alloc::vec::Vec::with_capacity(header.len() + r.payload.len());
+            buf.extend_from_slice(header);
+            buf.extend_from_slice(&r.payload);
+            let _ = libcluu::syscall::ipc_reply(token, &buf);
         }
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                &msg as *const Message as *const u8,
-                size_of::<Message>(),
-            )
-        };
-        let _ = libcluu::syscall::ipc_reply(token, bytes);
-    } else {
-        msg.words[0] = r.payload.len();
-        for (i, &w) in r.words.iter().enumerate().take(5) {
-            msg.words[i + 1] = w;
-        }
-        let header = unsafe {
-            core::slice::from_raw_parts(
-                &msg as *const Message as *const u8,
-                size_of::<Message>(),
-            )
-        };
-        let mut buf = alloc::vec::Vec::with_capacity(header.len() + r.payload.len());
-        buf.extend_from_slice(header);
-        buf.extend_from_slice(&r.payload);
-        let _ = libcluu::syscall::ipc_reply(token, &buf);
+        return Ok(());
     }
+
+    if let Some((reply_ep, cookie)) = async_reply {
+        let mut msg = Message::new(r.label, [0; 6], 1);
+        msg.words[5] = cookie;
+        if r.payload.is_empty() {
+            for (i, &w) in r.words.iter().enumerate().take(5) {
+                msg.words[i] = w;
+            }
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &msg as *const Message as *const u8,
+                    size_of::<Message>(),
+                )
+            };
+            let _ = libcluu::syscall::ipc_send(reply_ep, bytes);
+        } else {
+            msg.words[0] = r.payload.len();
+            for (i, &w) in r.words.iter().enumerate().take(4) {
+                msg.words[i + 1] = w;
+            }
+            let header = unsafe {
+                core::slice::from_raw_parts(
+                    &msg as *const Message as *const u8,
+                    size_of::<Message>(),
+                )
+            };
+            let mut buf = alloc::vec::Vec::with_capacity(header.len() + r.payload.len());
+            buf.extend_from_slice(header);
+            buf.extend_from_slice(&r.payload);
+            let _ = libcluu::syscall::ipc_send(reply_ep, &buf);
+        }
+        return Ok(());
+    }
+
     let _ = fallback_ep;
     Ok(())
 }
@@ -218,6 +256,13 @@ fn run() -> Result<()> {
             None => continue,
         };
         let reply_token = extract_reply_id(&msg);
+        let async_reply = if reply_token.is_none()
+            && msg.tag.extra == libcluu::ipc::ASYNC_REPLY_TAG
+        {
+            Some((msg.words[4], msg.words[5]))
+        } else {
+            None
+        };
 
         let inbound = InboundMsg {
             label: msg.tag.label,
@@ -236,17 +281,15 @@ fn run() -> Result<()> {
 
         match result {
             Ok(spm::dispatch::DispatchOutcome::Reply(reply)) => {
-                let _ = send_reply(reply_token, ep, &reply);
+                let _ = send_reply(reply_token, ep, &reply, async_reply);
             }
             Ok(spm::dispatch::DispatchOutcome::AlreadySent) => {}
             Err(e) => {
-                // Log the error and send an error reply if the sender is waiting.
                 let _ = debug_print(&alloc::format!(
                     "session-procmgr: handler error label=0x{:x} {:?}",
                     msg.tag.label, e
                 ));
                 if let Some(tok) = reply_token {
-                    // Send a minimal error reply so the caller unblocks.
                     let err_msg = Message::new(msg.tag.label, [0xFFFF_FFFF; 6], 1);
                     let bytes = unsafe {
                         core::slice::from_raw_parts(
@@ -255,6 +298,16 @@ fn run() -> Result<()> {
                         )
                     };
                     let _ = libcluu::syscall::ipc_reply(tok, bytes);
+                } else if let Some((reply_ep, cookie)) = async_reply {
+                    let mut err_msg = Message::new(msg.tag.label, [0xFFFF_FFFF; 6], 1);
+                    err_msg.words[5] = cookie;
+                    let bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            &err_msg as *const Message as *const u8,
+                            size_of::<Message>(),
+                        )
+                    };
+                    let _ = libcluu::syscall::ipc_send(reply_ep, bytes);
                 }
             }
         }
