@@ -283,6 +283,17 @@ pub struct CompleteReply {
     pub common_prefix: String,
 }
 
+/// Verb label for shell→cluuterm announcement of the shell's completion
+/// endpoint token.
+///
+/// Sent on shell startup and re-sent on every prompt redraw so cluuterm
+/// always queries the currently active shell (handles nested shells).
+/// Replaces the previous `shell:completion:<sid>` registry registration,
+/// which collided between nested shells in the same session.
+///
+/// Wire format: `words[0]` = completion endpoint token. No payload.
+pub const SHELL_COMPLETION_ANNOUNCE_LABEL: u32 = 144;
+
 // ----- Tests -----
 
 #[cfg(test)]

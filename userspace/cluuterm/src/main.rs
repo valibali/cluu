@@ -74,6 +74,23 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         }
     };
 
+    // Register a completion-announce endpoint so the shell can send us its
+    // completion endpoint token directly (SHELL_COMPLETION_ANNOUNCE_LABEL).
+    // This replaces the shell's previous `shell:completion:<sid>` registry
+    // registration which collided between nested shells in the same session.
+    // Each cluuterm is in its own session, so `completion_announce:<sid>`
+    // is unique per cluuterm.
+    {
+        let sid_for_name = libcluu::posix::read_env_var("CLUU_SESSION_ID")
+            .unwrap_or_else(|| alloc::string::String::from("0"));
+        let announce_name = alloc::format!("completion_announce:{}", sid_for_name);
+        if let Err(e) = registry::register_output(&announce_name, my_ep) {
+            let _ = debug_print(&alloc::format!(
+                "cluuterm: register completion_announce failed: {:?}", e
+            ));
+        }
+    }
+
     // Phase 1: register window with compositor.
     let (window_id, comp_ep, gw, gh) = match register_window(my_ep) {
         Ok(p) => p,

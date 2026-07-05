@@ -33,6 +33,7 @@ use cluu_wire::pts::{
     FlushRequest, FlushReply, FlushQueue,
     Termios, PtsErr,
     CompleteRequest, CompleteReply, SHELL_COMPLETE_QUERY_LABEL,
+    SHELL_COMPLETION_ANNOUNCE_LABEL,
 };
 
 /// Scrollback capacity in rows (matches legacy console `SCROLLBACK_LINES`).
@@ -803,22 +804,9 @@ impl Cluuterm {
         let shell_ep = match self.shell_completion_ep {
             Some(ep) => ep,
             None => {
-                let sid = self.session_id.unwrap_or(0);
-                let name = alloc::format!("shell:completion:{}", sid);
-                match registry::lookup_service(&name) {
-                    Some(ep) => {
-                        self.shell_completion_ep = Some(ep);
-                        ep
-                    }
-                    None => {
-                        let _ = debug_print(&alloc::format!(
-                            "cluuterm: no shell completion ep for {}",
-                            name
-                        ));
-                        self.bell();
-                        return;
-                    }
-                }
+                let _ = debug_print("cluuterm: no shell completion ep announced yet");
+                self.bell();
+                return;
             }
         };
 
@@ -1176,6 +1164,14 @@ impl Cluuterm {
                 COMP_CLOSE_REQUEST_LABEL => {
                     self.shutdown();
                     return;
+                }
+
+                // ── Shell: completion endpoint announcement ─────────────
+                SHELL_COMPLETION_ANNOUNCE_LABEL => {
+                    let ep = msg.words[0];
+                    if ep != 0 {
+                        self.shell_completion_ep = Some(ep);
+                    }
                 }
 
                 // Unknown labels are silently dropped.
