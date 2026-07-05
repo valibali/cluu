@@ -40,6 +40,41 @@ extern "C" {
     fn _read(fd: core::ffi::c_int, buf: *mut core::ffi::c_void, count: usize) -> isize;
 }
 
+#[cfg(feature = "lang-parser")]
+static COMPLETION_EP: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "lang-parser")]
+fn announce_completion_ep() {
+    use cluu_wire::pts::SHELL_COMPLETION_ANNOUNCE_LABEL;
+    use libcluu::ipc;
+    use libcluu::types::{IpcFlags, Message};
+
+    let ep = COMPLETION_EP.load(core::sync::atomic::Ordering::Acquire);
+    if ep == 0 {
+        return;
+    }
+    let sid = libcluu::posix::read_env_var("CLUU_SESSION_ID")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let name = format!("cluuterm:completion_announce:{}", sid);
+    match registry::lookup_service(&name) {
+        Some(cluuterm_ep) => {
+            let msg = Message::new(
+                SHELL_COMPLETION_ANNOUNCE_LABEL,
+                [ep, 0, 0, 0, 0, 0],
+                0,
+            );
+            let _ = ipc::send(cluuterm_ep, &msg, IpcFlags::empty());
+        }
+        None => {
+            let _ = debug_print(&format!(
+                "shell: cluuterm:completion_announce:{} not registered",
+                sid
+            ));
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     match run() {
@@ -186,7 +221,6 @@ fn run() -> Result<()> {
 
     #[cfg(feature = "lang-parser")]
     {
-        // Completion endpoint: cluuterm queries this on TAB.
         let completion_ep = match libcluu::syscall::endpoint_create(
             info.tokens[libcluu::boot::TOKEN_IPC],
         ) {
@@ -197,23 +231,9 @@ fn run() -> Result<()> {
             }
         };
         if completion_ep != 0 {
-            let sid = libcluu::posix::read_env_var("CLUU_SESSION_ID")
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let completion_name = format!("completion:{}", sid);
-            if let Err(e) = registry::register_output(&completion_name, completion_ep) {
-                let _ = debug_print(&format!(
-                    "shell: register_output({}) failed: {:?}",
-                    completion_name, e
-                ));
-            } else {
-                let _ = debug_print(&format!(
-                    "shell: completion endpoint registered as shell:{}",
-                    completion_name
-                ));
-            }
-
+            COMPLETION_EP.store(completion_ep, core::sync::atomic::Ordering::Release);
             completion::spawn_completion_thread(completion_ep, registry);
+            announce_completion_ep();
         }
     }
 
@@ -271,6 +291,9 @@ fn run() -> Result<()> {
 }
 
 fn print_prompt(_endpoint: usize) -> Result<()> {
+    #[cfg(feature = "lang-parser")]
+    announce_completion_ep();
+
     let user = libcluu::posix::read_env_var("USER").unwrap_or_else(|| String::from("cluu"));
     let cwd = libcluu::posix::current_dir_string();
     let prompt = format!("{}:{}> ", user, cwd);
