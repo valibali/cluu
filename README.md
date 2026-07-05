@@ -166,11 +166,18 @@ docs/                         # design specs, roadmap, internals
 
 ```bash
 cargo xtask build
-bash scripts/harness_suite.sh           # ~30 min, full integration matrix
-bash scripts/harness_repeat.sh l2_rm 5  # run a single case 5 times
+
+# Python gen2 harness (event-driven, structured results)
+cd python
+pip install -e '.[dev]'
+python -m cluu_harness --list              # list registered cases
+python -m cluu_harness --case l2_login --no-build   # run one case
+python -m cluu_harness --no-build          # run all cases
+pytest -m smoke                            # no-QEMU unit tests
+pytest -m slow                             # QEMU-booting cases
 ```
 
-Current matrix: 44/47 passing. Three failures are tracked: `l2_argv` (suite-only flake — see #78), `l2_owner_deny` (test design issue — see #70), `p4_dev` (pre-existing kernel page-fault corner — see #39).
+The Python harness covers a representative subset of cases (11 so far). Remaining cases are being ported from the retired bash harness.
 
 Unit tests for pure-logic modules use `rustc --test` directly because most userspace crates are `#![no_std]`:
 

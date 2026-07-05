@@ -1,122 +1,38 @@
-# CLUU Harness and SLO Tooling
+# CLUU Harness
 
-## Purpose
+The test harness lives in `python/` and is a Python package (`cluu_harness`).
 
-The harness stack is split into reusable layers so new cases and SLO checks can be added without editing multiple scripts.
-
-## Components
-
-1. `scripts/harness_run.sh`
-   - Single-run QEMU harness executor.
-   - Boots CLUU, injects command(s), validates markers/faults.
-   - Shell readiness policy: default `SHELL_READY_WAIT=15` and hard max `SHELL_READY_WAIT_MAX=15`.
-   - Shell-ready timeout is measured from harness boot-resume point (after optional GDB attach/continue).
-   - Override only for explicit debugging with `ALLOW_SLOW_SHELL_WAIT=1`.
-   - Build modes:
-     - Default full mode is incremental and runs `cargo xtask build` (plus toolchain prep only if missing).
-     - `HARNESS_CLEAN_REBUILD=1` forces clean toolchain/image rebuild (`make clean` + newlib/syscalls/crt0 + full build).
-   - Supports overrides for paths and debug:
-     - `SERIAL_LOG`, `MONITOR_SOCK`, `IMG`, `USER_DISK`, `OVMF`
-     - `QEMU_GDB=1` to start QEMU with `-S -s`
-     - `HARNESS_GDB_MODE=manual|auto-continue|script`
-     - `HARNESS_GDB_SCRIPT=...` for scripted GDB verification
-     - `QEMU_EXTRA_ARGS` for additional QEMU flags
-     - `HARNESS_AUTOEXEC_CMD` (or compatibility alias `HARNESS_AUTOSTART_CMD`) to force procmgr shell autostart command at build time
-     - `KEYSTROKE_COMMANDS` / `KEYSTROKE_COMMANDS_FILE` for post-shell keystroke command injection
-   - Debug/ad-hoc default:
-     - When `MARKER_MODE=none` and `TEST_COMMAND` is not explicitly set, harness now defaults to
-       autostarting `spawn micropython` and suppresses auto-typed `spawn hello`.
-   - M6 IPC SLO env gates:
-     - `MAX_IPC_WAIT_P95_MS`, `MAX_IPC_WAIT_P99_MS`, `MAX_IPC_SCAN_AVG_STEPS_X100`
-     - `MAX_IPC_QUEUE_BYTES_PEAK`, `MAX_IPC_QUEUE_MESSAGES_PEAK`
-   - Warm-cache spawn SLO mode (`MARKER_MODE=b_spawn_warm`):
-     - Parses `/bin/noop` `procmgr: spawn_trace ... stage=reply_sent ... dt=...` samples.
-     - Parses `/bin/noop` `vfs: map_elf_trace ... stage=reply ... dt=...` samples.
-     - Emits inline metrics:
-       - `HARNESS noop_spawn_reply_samples=...`
-       - `HARNESS noop_map_elf_reply_samples=...`
-       - `HARNESS noop_spawn_reply_p95_cycles=...`
-       - `HARNESS noop_map_elf_reply_p95_cycles=...`
-     - Optional SLO gates:
-       - `MIN_NOOP_SPAWN_SAMPLES`, `MIN_NOOP_MAP_ELF_SAMPLES`
-       - `MAX_NOOP_SPAWN_REPLY_P95_CYCLES`, `MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES`
-   - Futex smoke mode (`MARKER_MODE=c_futex`):
-     - Runs `spawn futexprobe`.
-     - Validates `Invoke`-based futex mismatch/wake/timeout-or-spurious path.
-     - Required marker: `futexprobe: PASS`.
-   - Futex race mode (`MARKER_MODE=c_futex_race`):
-     - Runs `spawn futexrace`.
-     - Validates waiter-then-waker ordering with in-process `ThreadCreate` + futex wake.
-     - Required marker: `futexrace: PASS`.
-
-2. `scripts/harness_cases.conf`
-   - Central case catalog (`name|build_mode|env_assignments`).
-   - Add new CI scenarios here.
-
-3. `scripts/harness_suite.sh`
-   - Generic case runner consuming `harness_cases.conf`.
-   - Supports:
-     - `--no-build` (force artifact reuse)
-     - `--case NAME` (run one case)
-     - `--list` (enumerate known cases)
-
-4. `scripts/harness_matrix.sh`
-   - Compatibility wrapper to keep existing CI/xtask entrypoints stable.
-   - Delegates to `harness_suite.sh`.
-
-5. `scripts/harness_slo_report.sh`
-   - Standalone SLO parser/enforcer for a serial log.
-   - Extracts and checks:
-     - exit cookie count
-     - delta resource metrics
-     - IPC fairness metrics (`p95`, `p99`, scan average)
-     - IPC queue pressure metrics (`ipc_queue_bytes_peak`, `ipc_queue_messages_peak`) when present in logs
-     - shell readiness latency (`shell_ready_s`, default max 15s)
-     - warm-cache `/bin/noop` sample counts and p95 cycle metrics
-   - `scripts/harness_run.sh` also appends:
-     - `HARNESS build_s=...`
-     - `HARNESS shell_ready_from_resume_s=...`
-     - `HARNESS qemu_to_shell_ready_s=...`
-     - `HARNESS total_s=...`
-
-6. `scripts/harness_slo_sweep.sh`
-   - Repeated fairness runs + per-run SLO report.
-   - Emits CSV at `tmp/harness_slo/summary.csv`.
-
-## Common Commands
+## Quick start
 
 ```bash
-# Full matrix
-cargo xtask harness-matrix
+cd python
+pip install -e '.[dev]'
 
-# Matrix reusing build artifacts
-cargo xtask harness-matrix --no-build
-
-# One case only
-scripts/harness_suite.sh --case m5_fairness --no-build
-
-# Run one harness with shell autoexec + typed commands
-HARNESS_AUTOEXEC_CMD="spawn micropython" KEYSTROKE_COMMANDS=$'print(\"hi\")\nprint(1+2)' \
-./scripts/harness_run.sh --no-build
-
-# Run paused under GDB, auto-continue after attach
-QEMU_GDB=1 HARNESS_GDB_MODE=auto-continue ./scripts/harness_run.sh --no-build
-
-# Fairness SLO sweep
-cargo xtask harness-slo --no-build --repeats 5
-
-# Warm-cache spawn/map_elf sweep
-SLO_MODE=b_spawn_warm MIN_NOOP_SPAWN_SAMPLES=8 MIN_NOOP_MAP_ELF_SAMPLES=8 \
-MAX_NOOP_SPAWN_REPLY_P95_CYCLES=120000000 MAX_NOOP_MAP_ELF_REPLY_P95_CYCLES=30000000 \
-cargo xtask harness-slo --no-build --repeats 5
-
-# Parse/enforce SLOs from an existing log
-scripts/harness_slo_report.sh --log /tmp/cluu-serial-com2.log --min-exit-cookies 6 --max-ipc-wait-p95-ms 16 --max-shell-ready-s 15
+python -m cluu_harness --list                          # list cases
+python -m cluu_harness --case l2_login --no-build      # run one case
+python -m cluu_harness --no-build                      # run all
+pytest -m smoke                                        # no-QEMU unit tests
+pytest -m slow                                         # QEMU cases
+pytest -m "smoke or slow"                              # both
 ```
 
-## CI Extension Workflow
+## Adding a case
 
-1. Add a new case line in `scripts/harness_cases.conf`.
-2. Add marker checks in `scripts/harness_run.sh` for new `MARKER_MODE`.
-3. If new numeric SLO appears, add parsing/check in `scripts/harness_slo_report.sh`.
-4. Gate it in CI via `cargo xtask harness-matrix` and/or `cargo xtask harness-slo`.
+Declare it in `python/cluu_harness/catalog.py` via the `@cluu_case`
+decorator. If the case needs a new `MARKER_MODE`, add a `MarkerModeSpec`
+in `markers.py`. See `python/README.md` for the full guide.
+
+## Env-var compatibility
+
+Every env var the retired bash harness read is also read by the Python
+config (`HarnessConfig`). The same `MARKER_MODE=l2_ls RUN_WAIT=45`
+invocation translates to:
+
+```bash
+MARKER_MODE=l2_ls RUN_WAIT=45 python -m cluu_harness --case l2_ls --no-build
+```
+
+## Status
+
+11 of ~120 cases from the retired bash harness have been ported. Add
+modes to `markers.py` and cases to `catalog.py` as needed.

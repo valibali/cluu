@@ -1,8 +1,0 @@
-{
-  "fb_blit_wc_cycles":     3967400,
-  "fb_blit_wc_max_cycles": 4400000,
-  "compositor_blit_cycles":     94220924,
-  "compositor_blit_max_cycles": 141000000,
-  "_note": "fb_blit_wc: captured 2026-05-10 with WC mapping + 8 KiB LUT (L1-resident) under KVM. Median of 4 runs. compositor_blit: captured 2026-05-11, 3 runs (94.0M / 94.3M / 94.2M cycles), median 94.2M. 1.5x headroom (141M). Measures compositor tick_frame pipeline: cell-grid compose + glyph blit + dirty-rect WC flush, driven by 2 compdemos at ~32Hz.",
-  "_spawn_warm_deferred": "2026-05-27 (procmgr-cap-refactor branch): b_spawn_warm baseline DEFERRED. benchprobe spawnonly hangs after first noop spawn-waitpid cycle because root-procmgr kill ACL rejects sender_tid != stored owner_tid when the spawn went via session-procmgr indirection (root sees session-procmgr as sender, not the real caller). Same ACL-vs-cap-model conflict noted in project_procmgr_acl_redesign. Re-baseline once kill ACL is replaced with cap-possession check, or when owner_tid is plumbed through session-procmgr."
-}
