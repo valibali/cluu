@@ -365,6 +365,15 @@ impl ThreadManager {
             .collect()
     }
 
+    pub fn threads_in_space(pml4_phys: x86_64::PhysAddr) -> alloc::vec::Vec<ThreadId> {
+        THREAD_REPOSITORY
+            .lock()
+            .iter()
+            .filter(|(_, t)| !t.is_dead() && t.page_table_root == pml4_phys)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Read the session_id of a thread. Returns 0 if thread not found
     /// (treat unknown as root scope — fail-safe for visibility).
     pub fn thread_session_id(id: ThreadId) -> u64 {

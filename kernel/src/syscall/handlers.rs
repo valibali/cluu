@@ -1353,6 +1353,15 @@ fn invoke_space_destroy(_token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) 
         return Err(Error::InvalidState);
     }
 
+    // Kill all threads still running in this address space before tearing
+    // down page tables.  Without this, a thread that survived the initial
+    // thread_destroy (e.g. a helper thread the caller didn't know about)
+    // would page-fault on its next instruction fetch.
+    let doomed_tids = crate::sched::ThreadManager::threads_in_space(pml4_phys);
+    for tid in doomed_tids {
+        crate::sched::ThreadManager::mark_thread_dead(tid);
+    }
+
     // Remove from repository (if another thread raced us, we get None)
     let _space = crate::mm::space_repository::remove(space_id).ok_or(Error::NotFound)?;
 
