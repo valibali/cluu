@@ -108,6 +108,7 @@ fn run() -> libcluu::Result<()> {
             let c = if fb_w > 0 { (fb_w / 8) as usize } else { 80 };
             c.min(80)
         };
+        let cols = cols.saturating_sub(1);
 
         // Read system memory info (total/used in kB) from /proc/meminfo.
         let (mem_total_kb, mem_used_kb) =
@@ -175,7 +176,7 @@ fn run() -> libcluu::Result<()> {
             "\x1b[97;44m CLUU top   Processes: {}",
             records.len()
         ));
-        let hdr_content_len = 30 + digit_count(records.len());
+        let hdr_content_len = 23 + digit_count(records.len());
         for _ in hdr_content_len..cols {
             frame.push(' ');
         }
