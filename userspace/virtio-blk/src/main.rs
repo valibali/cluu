@@ -500,12 +500,16 @@ fn handle_fs_request(
 
         FS_READDIR => {
             let path = core::str::from_utf8(payload).unwrap_or("");
+            let start_offset = msg.words[2] as usize;
+            const REPLY_BUDGET: usize = 3500;
             match fs.resolve_path(path) {
                 Ok(inode) => {
                     match fs.readdir(inode) {
                         Ok(entries) => {
+                            let total = entries.len();
                             let mut data = Vec::new();
-                            for entry in &entries {
+                            let mut returned = 0usize;
+                            for entry in entries.iter().skip(start_offset) {
                                 let name_bytes = entry.name.as_bytes();
                                 if name_bytes.len() > 255 {
                                     continue;
@@ -521,24 +525,31 @@ fn handle_fs_request(
                                         (0u64, mode, 0u64, 1u32, 0u32, 0u32)
                                     }
                                 };
-                                data.push(name_bytes.len() as u8);
-                                data.push(if entry.is_dir { 1 } else { 0 });
-                                data.extend_from_slice(&size.to_le_bytes());
-                                data.extend_from_slice(&mode.to_le_bytes());
-                                data.extend_from_slice(&mtime.to_le_bytes());
-                                data.extend_from_slice(&nlink.to_le_bytes());
-                                data.extend_from_slice(&uid.to_le_bytes());
-                                data.extend_from_slice(&gid.to_le_bytes());
-                                data.extend_from_slice(name_bytes);
+                                let mut entry_data = Vec::new();
+                                entry_data.push(name_bytes.len() as u8);
+                                entry_data.push(if entry.is_dir { 1 } else { 0 });
+                                entry_data.extend_from_slice(&size.to_le_bytes());
+                                entry_data.extend_from_slice(&mode.to_le_bytes());
+                                entry_data.extend_from_slice(&mtime.to_le_bytes());
+                                entry_data.extend_from_slice(&nlink.to_le_bytes());
+                                entry_data.extend_from_slice(&uid.to_le_bytes());
+                                entry_data.extend_from_slice(&gid.to_le_bytes());
+                                entry_data.extend_from_slice(name_bytes);
+
+                                if data.len() + entry_data.len() > REPLY_BUDGET {
+                                    break;
+                                }
+                                data.extend_from_slice(&entry_data);
+                                returned += 1;
                             }
 
                             let reply_msg =
-                                Message::new(FS_READDIR, [0, 0, entries.len(), 0, 0, 0], 3);
+                                Message::new(FS_READDIR, [0, 0, returned, total, 0, 0], 5);
                             if let Some(token) = reply_token {
                                 if reply_with_payload(token, &reply_msg, &data).is_err() {
                                     let _ = libcluu::debug_print(&format!(
                                         "blkdev: FS_READDIR reply failed ({} entries, {} bytes — may exceed IPC_MESSAGE_MAX)",
-                                        entries.len(),
+                                        returned,
                                         data.len()
                                     ));
                                     send_error_reply_shifted(reply_token, -10);

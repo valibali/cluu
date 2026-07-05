@@ -325,52 +325,61 @@ impl MountBackend for RemoteBackend {
     }
 
     fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
-        let req = Message::new(FS_READDIR, [rel_path.len(), 0, 0, 0, 0, 0], 1);
-        let mut reply_buf = [0u8; 16384];
-        let (reply, payload_len) =
-            call_with_reply_buf(self.endpoint, &req, rel_path.as_bytes(), &mut reply_buf)?;
+        let mut entries: Vec<DirEntry> = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let req = Message::new(FS_READDIR, [rel_path.len(), 0, offset, 0, 0, 0], 1);
+            let mut reply_buf = [0u8; 4096];
+            let (reply, payload_len) =
+                call_with_reply_buf(self.endpoint, &req, rel_path.as_bytes(), &mut reply_buf)?;
 
-        let status = reply.words[1] as isize;
-        if status < 0 {
-            return Err(Error::NotFound);
-        }
-
-        let entry_count = reply.words[2];
-        let data_start = size_of::<Message>();
-        let data = &reply_buf[data_start..data_start + payload_len];
-
-        // Parse entries (wire format v2). Per entry:
-        //   [name_len: u8][is_dir: u8]
-        //   [size: u64 LE][mode: u32 LE][mtime: u64 LE]
-        //   [nlink: u32 LE][uid: u32 LE][gid: u32 LE]
-        //   [name: name_len bytes]
-        // = 34 + name_len bytes
-        let mut entries: Vec<DirEntry> = Vec::with_capacity(entry_count);
-        let mut offset = 0;
-        for _ in 0..entry_count {
-            if offset + 34 > data.len() { break; }
-            let name_len = data[offset] as usize;
-            let is_dir = data[offset + 1] != 0;
-            offset += 2;
-            let size = u64::from_le_bytes(data[offset..offset+8].try_into().unwrap_or([0u8;8]));
-            offset += 8;
-            let mode = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0u8;4]));
-            offset += 4;
-            let mtime = u64::from_le_bytes(data[offset..offset+8].try_into().unwrap_or([0u8;8]));
-            offset += 8;
-            let nlink = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0u8;4]));
-            offset += 4;
-            let uid = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0u8;4]));
-            offset += 4;
-            let gid = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0u8;4]));
-            offset += 4;
-            if offset + name_len > data.len() { break; }
-            if let Ok(name) = core::str::from_utf8(&data[offset..offset + name_len]) {
-                let blocks = (size + 511) / 512;
-                let stat = DirEntryStat { size, mode, mtime, nlink, uid, gid, blocks };
-                entries.push(DirEntry { name: String::from(name), is_dir, stat });
+            let status = reply.words[1] as isize;
+            if status < 0 {
+                return Err(Error::NotFound);
             }
-            offset += name_len;
+
+            let entry_count = reply.words[2];
+            let total = reply.words[3];
+            let data_start = size_of::<Message>();
+            let data = &reply_buf[data_start..data_start + payload_len];
+
+            // Parse entries (wire format v2). Per entry:
+            //   [name_len: u8][is_dir: u8]
+            //   [size: u64 LE][mode: u32 LE][mtime: u64 LE]
+            //   [nlink: u32 LE][uid: u32 LE][gid: u32 LE]
+            //   [name: name_len bytes]
+            // = 34 + name_len bytes
+            let mut parse_offset = 0;
+            for _ in 0..entry_count {
+                if parse_offset + 34 > data.len() { break; }
+                let name_len = data[parse_offset] as usize;
+                let is_dir = data[parse_offset + 1] != 0;
+                parse_offset += 2;
+                let size = u64::from_le_bytes(data[parse_offset..parse_offset+8].try_into().unwrap_or([0u8;8]));
+                parse_offset += 8;
+                let mode = u32::from_le_bytes(data[parse_offset..parse_offset+4].try_into().unwrap_or([0u8;4]));
+                parse_offset += 4;
+                let mtime = u64::from_le_bytes(data[parse_offset..parse_offset+8].try_into().unwrap_or([0u8;8]));
+                parse_offset += 8;
+                let nlink = u32::from_le_bytes(data[parse_offset..parse_offset+4].try_into().unwrap_or([0u8;4]));
+                parse_offset += 4;
+                let uid = u32::from_le_bytes(data[parse_offset..parse_offset+4].try_into().unwrap_or([0u8;4]));
+                parse_offset += 4;
+                let gid = u32::from_le_bytes(data[parse_offset..parse_offset+4].try_into().unwrap_or([0u8;4]));
+                parse_offset += 4;
+                if parse_offset + name_len > data.len() { break; }
+                if let Ok(name) = core::str::from_utf8(&data[parse_offset..parse_offset + name_len]) {
+                    let blocks = (size + 511) / 512;
+                    let stat = DirEntryStat { size, mode, mtime, nlink, uid, gid, blocks };
+                    entries.push(DirEntry { name: String::from(name), is_dir, stat });
+                }
+                parse_offset += name_len;
+            }
+
+            offset += entry_count;
+            if offset >= total || entry_count == 0 {
+                break;
+            }
         }
         Ok(entries)
     }
