@@ -23,7 +23,12 @@ const ADMIN_MOUNTS: &[ViewMountSpec] = &[
     ("/tmp", "/tmp", true),
     ("/home/root", "/home/root", true),
     ("/dev/initrd", "/dev/initrd", false),
+    ("/dev/null", "/dev/null", false),
+    ("/dev/zero", "/dev/zero", false),
+    ("/dev/urandom", "/dev/urandom", false),
+    ("/dev/tty", "/dev/tty", false),
     ("/dev/pts", "/dev/pts", true),
+    ("/dev/console", "/dev/console", false),
     ("/proc", "/proc", false),
 ];
 const USER_MOUNTS: &[ViewMountSpec] = &[
@@ -33,6 +38,10 @@ const USER_MOUNTS: &[ViewMountSpec] = &[
     ("/tmp", "/tmp", true),
     ("/home/root", "/home/root", true),
     ("/dev/initrd", "/dev/initrd", false),
+    ("/dev/null", "/dev/null", false),
+    ("/dev/zero", "/dev/zero", false),
+    ("/dev/urandom", "/dev/urandom", false),
+    ("/dev/tty", "/dev/tty", false),
     ("/dev/pts", "/dev/pts", true),
     ("/proc", "/proc", false),
 ];

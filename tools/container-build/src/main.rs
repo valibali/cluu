@@ -51,6 +51,7 @@ struct Cluufile {
     endpoint_mode: Option<String>,
     params: Vec<String>,
     devices: Vec<String>,
+    devpaths: Vec<String>,
     deny_inherit: bool,
     deny: Vec<String>,
     detach: bool,
@@ -81,6 +82,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
     let mut endpoint_mode: Option<String> = None;
     let mut params: Vec<String> = Vec::new();
     let mut devices: Vec<String> = Vec::new();
+    let mut devpaths: Vec<String> = Vec::new();
     let mut deny_inherit = false;
     let mut deny: Vec<String> = Vec::new();
     let mut detach = false;
@@ -263,18 +265,25 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
                 if base.is_none() {
                     bail!("{}:{}: FROM must appear before DEVICE", path.display(), lineno);
                 }
-                match rest {
-                    "irq" | "framebuffer" => {
-                        if devices.contains(&rest.to_string()) {
-                            bail!("{}:{}: duplicate DEVICE '{}'", path.display(), lineno, rest);
-                        }
-                        devices.push(rest.to_string());
+                if rest.starts_with("/dev/") {
+                    if devpaths.contains(&rest.to_string()) {
+                        bail!("{}:{}: duplicate DEVICE '{}'", path.display(), lineno, rest);
                     }
-                    _ => {
-                        bail!(
-                            "{}:{}: DEVICE must be 'irq' or 'framebuffer', got '{}'",
-                            path.display(), lineno, rest
-                        );
+                    devpaths.push(rest.to_string());
+                } else {
+                    match rest {
+                        "irq" | "framebuffer" => {
+                            if devices.contains(&rest.to_string()) {
+                                bail!("{}:{}: duplicate DEVICE '{}'", path.display(), lineno, rest);
+                            }
+                            devices.push(rest.to_string());
+                        }
+                        _ => {
+                            bail!(
+                                "{}:{}: DEVICE must be 'irq', 'framebuffer', or '/dev/...' path, got '{}'",
+                                path.display(), lineno, rest
+                            );
+                        }
                     }
                 }
             }
@@ -426,6 +435,7 @@ fn parse_cluufile(path: &Path) -> Result<Cluufile> {
         endpoint_mode,
         params,
         devices,
+        devpaths,
         deny_inherit,
         deny,
         detach,
@@ -539,15 +549,28 @@ fn generate_manifest_toml(cluufile: &Cluufile, container_name: &str, image_dirs:
     }
 
     // [hardware] — only if devices specified
-    if !cluufile.devices.is_empty() {
-        out.push_str("\n[hardware]\ndevices = [");
-        for (i, dev) in cluufile.devices.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
+    if !cluufile.devices.is_empty() || !cluufile.devpaths.is_empty() {
+        out.push_str("\n[hardware]\n");
+        if !cluufile.devices.is_empty() {
+            out.push_str("devices = [");
+            for (i, dev) in cluufile.devices.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("\"{}\"", dev));
             }
-            out.push_str(&format!("\"{}\"", dev));
+            out.push_str("]\n");
         }
-        out.push_str("]\n");
+        if !cluufile.devpaths.is_empty() {
+            out.push_str("devpaths = [");
+            for (i, dp) in cluufile.devpaths.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("\"{}\"", dp));
+            }
+            out.push_str("]\n");
+        }
     }
 
     // [params] — only if param slots specified

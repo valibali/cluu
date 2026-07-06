@@ -4155,6 +4155,79 @@ impl ProcessManager {
         Some(handle)
     }
 
+    fn query_devmgr_for_envelope(
+        &mut self,
+        devpaths: &[String],
+        profile: CapProfile,
+        _session_id: u32,
+    ) -> ViewMountList {
+        if self.devmgr_endpoint == 0 {
+            self.devmgr_endpoint =
+                registry::subscribe_output("devmgr", "main").unwrap_or(0);
+        }
+        let ep = self.devmgr_endpoint;
+        if ep == 0 {
+            return Vec::new();
+        }
+
+        let is_root = profile.contains(CapProfile::ADMIN);
+
+        let mut send_buf: Vec<u8> = Vec::new();
+        let msg = libcluu::ipc::make_payload_message(
+            libcluu::ipc::DEVMGR_LIST_FOR_ENVELOPE_LABEL,
+            0,
+            &[if is_root { 1 } else { 0 }],
+        );
+        send_buf.extend_from_slice(msg.as_bytes());
+        for (i, d) in devpaths.iter().enumerate() {
+            if i > 0 {
+                send_buf.push(b'\n');
+            }
+            send_buf.extend_from_slice(d.as_bytes());
+        }
+        send_buf[core::mem::size_of::<Message>() - 8] = (send_buf.len() - core::mem::size_of::<Message>()) as u8;
+        send_buf[core::mem::size_of::<Message>() - 7] = ((send_buf.len() - core::mem::size_of::<Message>()) >> 8) as u8;
+
+        let mut reply_buf = [0u8; 1024];
+        let result = libcluu::syscall::ipc_call(ep, &send_buf, &mut reply_buf);
+        if result.is_err() {
+            return Vec::new();
+        }
+
+        let reply_msg: &Message = unsafe {
+            &*(reply_buf.as_ptr() as *const Message)
+        };
+        let count = reply_msg.words[0];
+        if count == 0 {
+            return Vec::new();
+        }
+
+        let msg_hdr_size = core::mem::size_of::<Message>();
+        let reply_payload = &reply_buf[msg_hdr_size..];
+        let mut offset = 0usize;
+        let mut mounts: ViewMountList = Vec::new();
+        for _ in 0..count.min(32) {
+            if offset + 2 > reply_payload.len() {
+                break;
+            }
+            let path_len = u16::from_le_bytes([reply_payload[offset], reply_payload[offset + 1]]) as usize;
+            offset += 2;
+            if path_len == 0 || offset + path_len > reply_payload.len() {
+                break;
+            }
+            let path = core::str::from_utf8(&reply_payload[offset..offset + path_len])
+                .unwrap_or("");
+            offset += path_len;
+            offset += 4 + 1 + 8;
+
+            if !path.is_empty() {
+                mounts.push((String::from(path), String::from(path), false, 0u64));
+            }
+        }
+
+        mounts
+    }
+
     /// Spawn a `session-procmgr` instance for the given session.
     ///
     /// Serialises a `procmgr_common::wire::SessionEnvelope` and passes it to
@@ -5513,6 +5586,18 @@ impl ProcessManager {
             .and_then(|t| t.get_array("devices"))
             .map(|a| a.iter().map(|s| s.clone()).collect())
             .unwrap_or_default();
+
+        // DEVPATHS: VFS device paths from Cluufile DEVICE /dev/... declarations.
+        // These are forwarded to devmgr's LIST_FOR_ENVELOPE to resolve which
+        // dynamic /dev nodes this container may see.
+        let devpaths: Vec<String> = doc
+            .table("hardware")
+            .and_then(|t| t.get_array("devpaths"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
+
+        // Query devmgr for visible dynamic devices (adds /dev/input/*, /dev/disk/* etc.)
+        let dynamic_dev_mounts = self.query_devmgr_for_envelope(&devpaths, requested_profile, 0);
         let extra_token_1 = if devices.iter().any(|d| d == "irq") {
             let _ = debug_print(&format!(
                 "procmgr: container '{}' deriving IRQ token",
@@ -5676,6 +5761,10 @@ impl ProcessManager {
                 // matches paths no more specific mount covered. VFS resolves
                 // first-match-wins, so the catch-all must come last.
                 view_mounts.extend(container_catchall_mount(container_id));
+
+                for dm in &dynamic_dev_mounts {
+                    view_mounts.push(dm.clone());
+                }
 
                 // PERSISTENT directives already contribute to view_mounts via
                 // the existing storage-table loop below (preserve that path).
