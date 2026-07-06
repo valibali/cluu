@@ -11,7 +11,6 @@ mod tui;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use walkdir;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -21,6 +20,7 @@ use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use walkdir;
 
 const CLUU_TARGET_TRIPLET: &str = "x86_64-cluu";
 const NEWLIB_TARGET_TRIPLET: &str = "x86_64-unknown-elf";
@@ -392,7 +392,10 @@ fn main() -> Result<()> {
         Commands::BuildSingleContainer { name } => {
             build_single_container(&name)?;
         }
-        Commands::CoverageCheck { report_only, threshold } => {
+        Commands::CoverageCheck {
+            report_only,
+            threshold,
+        } => {
             coverage_check(report_only, threshold)?;
         }
         Commands::CheckCapPurity => {
@@ -779,14 +782,20 @@ fn run_rich_task(
     let task_name = task.name.clone();
     let log_path = logs_dir.join(format!("{}.log", task_name));
     if let Some(ref state) = tui_state {
-        state.lock().expect("tui state lock poisoned").start_task(&task_name);
+        state
+            .lock()
+            .expect("tui state lock poisoned")
+            .start_task(&task_name);
     }
 
     let sink: TaskSink = if let Some(ref state) = tui_state {
         let name_for_sink = task_name.clone();
         let state = Arc::clone(state);
         Arc::new(move |line: String| {
-            state.lock().expect("tui state lock poisoned").push_line(&name_for_sink, line);
+            state
+                .lock()
+                .expect("tui state lock poisoned")
+                .push_line(&name_for_sink, line);
         })
     } else {
         let name_for_sink = task_name.clone();
@@ -799,14 +808,20 @@ fn run_rich_task(
     match result {
         Ok(()) => {
             if let Some(ref state) = tui_state {
-                state.lock().expect("tui state lock poisoned").finish_task(&task_name, false, None);
+                state
+                    .lock()
+                    .expect("tui state lock poisoned")
+                    .finish_task(&task_name, false, None);
             }
             Ok(())
         }
         Err(err) => {
             if let Some(ref state) = tui_state {
                 let fail_log = Some(relative_to_root_display(&log_path));
-                state.lock().expect("tui state lock poisoned").finish_task(&task_name, true, fail_log);
+                state
+                    .lock()
+                    .expect("tui state lock poisoned")
+                    .finish_task(&task_name, true, fail_log);
             }
             Err(err.context(format!(
                 "Task '{}' failed. Log: {}",
@@ -3284,8 +3299,12 @@ fn copy_container_image(src_dir: &Path, dst_dir: &Path) -> Result<()> {
 
 fn check_cap_purity() -> Result<()> {
     let forbidden = [
-        "pid_to_session", "tid_to_pid", "resolve_caller_session",
-        "caller_profile", "can_grant", "session_match",
+        "pid_to_session",
+        "tid_to_pid",
+        "resolve_caller_session",
+        "caller_profile",
+        "can_grant",
+        "session_match",
     ];
     let crates = ["userspace/root-procmgr", "userspace/session-procmgr"];
     // Legacy monolith pending ACL redesign — see project_procmgr_acl_redesign.
@@ -3299,7 +3318,9 @@ fn check_cap_purity() -> Result<()> {
         if !crate_dir.exists() {
             continue;
         }
-        for entry in walkdir::WalkDir::new(&crate_dir).into_iter().filter_map(|e| e.ok())
+        for entry in walkdir::WalkDir::new(&crate_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |x| x == "rs"))
         {
             let body = std::fs::read_to_string(entry.path())
@@ -3338,7 +3359,10 @@ fn check_cap_purity() -> Result<()> {
         for e in &errors {
             eprintln!("cap-purity violation: {}", e);
         }
-        bail!("{} cap-purity violation(s) in non-legacy files", errors.len());
+        bail!(
+            "{} cap-purity violation(s) in non-legacy files",
+            errors.len()
+        );
     }
     println!("  ✓ cap-purity: no violations in modular crates");
     Ok(())
@@ -3361,7 +3385,11 @@ fn coverage_check(report_only: bool, threshold: f64) -> Result<()> {
         bail!("missing prerequisite: cargo-llvm-cov");
     }
 
-    let packages = ["procmgr-common", "cluu-root-procmgr", "cluu-session-procmgr"];
+    let packages = [
+        "procmgr-common",
+        "cluu-root-procmgr",
+        "cluu-session-procmgr",
+    ];
     let mut args: Vec<String> = vec![
         "llvm-cov".into(),
         "--features".into(),
@@ -3389,15 +3417,18 @@ fn coverage_check(report_only: bool, threshold: f64) -> Result<()> {
     // Pull the totals block. cargo-llvm-cov JSON has data[0].totals
     // with `lines.percent` and `branches.percent` (some toolchains emit
     // `regions.percent` instead of branches; check both).
-    let v: serde_json::Value = serde_json::from_str(&stdout)
-        .context("Failed to parse cargo llvm-cov JSON")?;
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout).context("Failed to parse cargo llvm-cov JSON")?;
     let totals = v
         .get("data")
         .and_then(|d| d.get(0))
         .and_then(|x| x.get("totals"))
         .ok_or_else(|| anyhow::anyhow!("missing data[0].totals in coverage JSON"))?;
 
-    let lines = totals.get("lines").and_then(|l| l.get("percent")).and_then(|p| p.as_f64());
+    let lines = totals
+        .get("lines")
+        .and_then(|l| l.get("percent"))
+        .and_then(|p| p.as_f64());
     let branches = totals
         .get("branches")
         .and_then(|b| b.get("percent"))
@@ -3414,7 +3445,10 @@ fn coverage_check(report_only: bool, threshold: f64) -> Result<()> {
 
     println!("Coverage (procmgr crates):");
     println!("  lines:    {:.2}% (threshold {:.2}%)", line_pct, threshold);
-    println!("  branches: {:.2}% (threshold {:.2}%)", branch_pct, threshold);
+    println!(
+        "  branches: {:.2}% (threshold {:.2}%)",
+        branch_pct, threshold
+    );
 
     let mut shortfalls = Vec::new();
     if line_pct < threshold {
@@ -3440,5 +3474,8 @@ fn coverage_check(report_only: bool, threshold: f64) -> Result<()> {
     for s in &shortfalls {
         eprintln!("coverage-check: {}", s);
     }
-    bail!("coverage below threshold ({} shortfall(s))", shortfalls.len());
+    bail!(
+        "coverage below threshold ({} shortfall(s))",
+        shortfalls.len()
+    );
 }

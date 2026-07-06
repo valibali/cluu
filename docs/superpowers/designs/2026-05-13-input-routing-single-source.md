@@ -1,7 +1,7 @@
 # Input Routing — Single Source of Truth
 
 **Date:** 2026-05-13
-**Status:** Design, pre-plan.
+**Status:** Implemented (2026-07-06). inputd extracted per §7; see `.omo/plans/device-model-redesign.md` Phase 3.
 **Owners:** kernel-team
 **Related specs:**
 - `docs/superpowers/specs/2026-05-12-login-flow-design.md` (compositor modal lock §4.6)

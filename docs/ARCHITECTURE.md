@@ -203,7 +203,8 @@ flowchart TB
 - [`virtio-blk`](../userspace/virtio-blk) — disk driver, exposes a block-device endpoint to vfs's ext2 backend.
 - [`tpmd`](../userspace/tpmd) — TPM-backed entropy + password hashing for login.
 - [`timeserver`](../userspace/timeserver) — wall-clock time + monotonic timer subscriptions.
-- [`console / kbd / tty / vtmgr`](../userspace/) — the terminal stack: kbd reads scancodes, tty owns line discipline + history, console renders text into the framebuffer, vtmgr arbitrates between virtual terminals.
+- [`console / kbd / tty / vtmgr / inputd`](../userspace/) — the terminal stack: kbd/mouse read scancodes and forward to inputd, inputd decodes + buffers for `/dev/input/*` and publishes `inputd:input` for the fast path, tty owns line discipline + history, console renders text into the framebuffer, vtmgr arbitrates between virtual terminals and routes input events to the active VT.
+- [`devmgr`](../userspace/devmgr) — general device registry: block, char, input, framebuffer devices register here; VFS enumerates `/dev` dynamically from the registry; procmgr queries `DEVMGR_LIST_FOR_ENVELOPE` at spawn to build the per-container `/dev` view (no runtime ACL — visibility is spawn-time, §AGENTS.md §3).
 - [`shell`](../userspace/shell) — DIY shell with a [`pest` grammar](../userspace/shell/src/cluu_lang) and a Rust executor. Builtins (`cd`, `ls`, `cat`, `touch`, `top`, ...) plus `spawn`-via-procmgr.
 - [`libcluu`](../userspace/libcluu) — the userspace runtime: capability + IPC wrappers, POSIX shim (file/process/pthread/signal), VFS client, registry client, allocator, vspace, args/env decoder.
 
