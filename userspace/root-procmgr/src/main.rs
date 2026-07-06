@@ -563,20 +563,10 @@ impl ProcessManager {
     /// Build a VFS view from a capability profile and user home directory.
     /// Picks profile-based default mounts, then replaces /home/* with the user's home.
     fn build_view_for_profile_and_home(&self, profile: CapProfile, home: &str) -> ViewMountList {
-        // Only the plain ADMIN_PROFILE (USER | ADMIN) uses the restricted admin
-        // session mounts. Supervisor/service profiles contain ADMIN bits too but
-        // need the full device- and root-aware mount set.
-        let base_mounts = if profile == CapProfile::ADMIN_PROFILE {
-            libcluu::vfs_view::admin_session_mounts()
-        } else {
-            libcluu::vfs_view::default_mounts_for_profile(profile)
-        };
-        let mut mounts: ViewMountList = base_mounts.iter()
-            .filter(|&&(_, dst, _)| !dst.starts_with("/home/"))
-            .map(|&(src, dst, w)| (String::from(src), String::from(dst), w, 0u64))
-            .collect();
-        mounts.push((String::from(home), String::from(home), true, 0u64));
-        mounts
+        libcluu::vfs_view::default_mounts_for_profile_and_home(profile, home)
+            .into_iter()
+            .map(|(src, dst, w)| (src, dst, w, 0u64))
+            .collect()
     }
 
     /// Build a VFS view directly from a resolved envelope's mount list.
@@ -4415,9 +4405,11 @@ impl ProcessManager {
                     "procmgr: session-vfs spawned sid={} thread_tok={}",
                     session_id & 0xFF, thread_tok
                 ));
-                let mounts: Vec<(String, String, bool, u64)> = alloc::vec![
-                    ("/".into(), "/".into(), true, 0u64),
-                ];
+                let (profile, home) = match self.user_records.get(user_name) {
+                    Some(rec) => (rec.profile, rec.home.clone()),
+                    None => (CapProfile::USER, alloc::format!("/home/{}", user_name)),
+                };
+                let mounts = self.build_view_for_profile_and_home(profile, &home);
                 self.install_view_and_run(
                     thread_tok, &mounts,
                     CapProfile::SERVICE, 0, 0, false, session_id as u64,

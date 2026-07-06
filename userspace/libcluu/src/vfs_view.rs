@@ -1,6 +1,8 @@
 //! Shared default VFS view policy by capability profile.
 
 use crate::cap::CapProfile;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 pub type ViewMountSpec = (&'static str, &'static str, bool);
 
@@ -52,4 +54,35 @@ pub fn default_mounts_for_profile(profile: CapProfile) -> &'static [ViewMountSpe
 /// This gives USER mounts plus read-only /etc access.
 pub fn admin_session_mounts() -> &'static [ViewMountSpec] {
     ADMIN_MOUNTS
+}
+
+/// Return default mounts for `profile` with `home` substituted in place of the
+/// hardcoded `/home/root` entry.
+///
+/// For profiles whose default mount set already grants full root (`/` → `/`),
+/// the base set is returned unchanged — full root already covers the user's
+/// home, and appending it would create a redundant duplicate mount.
+pub fn default_mounts_for_profile_and_home(
+    profile: CapProfile,
+    home: &str,
+) -> Vec<(String, String, bool)> {
+    let base_mounts: &[ViewMountSpec] = if profile == CapProfile::ADMIN_PROFILE {
+        admin_session_mounts()
+    } else {
+        default_mounts_for_profile(profile)
+    };
+    // Full-root mount set: return as-is.
+    if base_mounts.iter().any(|&(src, _, _)| src == "/") {
+        return base_mounts
+            .iter()
+            .map(|&(src, dst, w)| (String::from(src), String::from(dst), w))
+            .collect();
+    }
+    let mut mounts: Vec<(String, String, bool)> = base_mounts
+        .iter()
+        .filter(|&&(_, dst, _)| !dst.starts_with("/home/"))
+        .map(|&(src, dst, w)| (String::from(src), String::from(dst), w))
+        .collect();
+    mounts.push((String::from(home), String::from(home), true));
+    mounts
 }

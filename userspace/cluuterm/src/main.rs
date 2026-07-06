@@ -340,9 +340,9 @@ fn spawn_shell_with_pts(pts_id: u32, _vfs_ep: usize, my_ep: usize) -> Result<(),
         .collect();
 
     // TODO(12.4b): read real sid from session envelope once TOKEN_EXTRA_0 carries
-    // it. For now cluuterm is always spawned inside sid=1 (the only session that
-    // login creates in tests).
-    let sid: u32 = 1;
+    // it. For now cluuterm reads CLUU_SESSION_ID from its own env (set by login
+    // via session-procmgr spawn). Falls back to 1 for legacy boots.
+    let sid: u32 = read_own_session_id().unwrap_or(1);
 
     let spawn_ep_name = alloc::format!("session-procmgr:spawn:{}", sid);
     let session_spawn_ep = match registry::lookup_service(&spawn_ep_name) {
@@ -355,18 +355,38 @@ fn spawn_shell_with_pts(pts_id: u32, _vfs_ep: usize, my_ep: usize) -> Result<(),
         }
     };
 
+    let parent_env = libcluu::posix::snapshot_env();
+    let mut envp: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> = parent_env
+        .into_iter()
+        .filter(|(k, _)| k != "CLUU_CLUUTERM_EP")
+        .collect();
+    if envp.iter().all(|(k, _)| k != "TERM") {
+        envp.push((
+            alloc::string::String::from("TERM"),
+            alloc::string::String::from("xterm-256color"),
+        ));
+    }
+    if envp.iter().all(|(k, _)| k != "CLUU_SESSION_ID") {
+        envp.push((
+            alloc::string::String::from("CLUU_SESSION_ID"),
+            alloc::format!("{}", sid),
+        ));
+    }
+    if envp.iter().all(|(k, _)| k != "CLUU_CLUUTERM_EP") {
+        envp.push((
+            alloc::string::String::from("CLUU_CLUUTERM_EP"),
+            alloc::format!("{}", my_ep),
+        ));
+    }
+
+    let home = libcluu::posix::read_env_var("HOME").unwrap_or_else(|| alloc::string::String::from("/"));
+    let cwd = if home == "/" { alloc::string::String::from("/") } else { home.clone() };
+
     let spawn_req = SpawnReq {
         image_path: alloc::string::String::from("/bin/shell"),
         argv: alloc::vec![alloc::string::String::from("shell")],
-        envp: alloc::vec![
-            (alloc::string::String::from("TERM"),
-             alloc::string::String::from("xterm-256color")),
-            (alloc::string::String::from("CLUU_SESSION_ID"),
-             alloc::format!("{}", sid)),
-            (alloc::string::String::from("CLUU_CLUUTERM_EP"),
-             alloc::format!("{}", my_ep)),
-        ],
-        cwd: alloc::string::String::from("/"),
+        envp,
+        cwd,
         fd_inherit: fd_inherit_entries,
         notify: None,
     };

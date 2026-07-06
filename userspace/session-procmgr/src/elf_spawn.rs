@@ -513,9 +513,13 @@ pub fn finish_spawn(
         state.vfs_cap, child_tid,
     ));
     if state.session_vfs_cap != 0 {
-        let default_mounts = libcluu::vfs_view::default_mounts_for_profile(CapProfile::USER);
+        let home = alloc::format!("/home/{}", state.user_name);
+        let default_mounts = libcluu::vfs_view::default_mounts_for_profile_and_home(
+            CapProfile::USER,
+            &home,
+        );
         let mut payload = alloc::vec::Vec::new();
-        for (src, dst, writable) in default_mounts {
+        for (src, dst, writable) in &default_mounts {
             let src_bytes = src.as_bytes();
             let dst_bytes = dst.as_bytes();
             payload.extend_from_slice(&(src_bytes.len() as u16).to_le_bytes());

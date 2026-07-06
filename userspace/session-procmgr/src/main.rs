@@ -233,6 +233,7 @@ fn run() -> Result<()> {
     let mut state = spm::dispatch::SessionState {
         sid,
         generation: envelope.generation,
+        user_name: envelope.user_name.clone(),
         child_table: spm::child_table::ChildTable::new(sid),
         kernel: spm::real_kernel::RealKernel,
         vfs_cap,

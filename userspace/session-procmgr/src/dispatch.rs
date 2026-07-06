@@ -37,6 +37,7 @@ pub enum DispatchOutcome {
 pub struct SessionState {
     pub sid: SessionId,
     pub generation: u32,
+    pub user_name: String,
     pub child_table: crate::child_table::ChildTable,
     pub kernel: KernelImpl,
     pub vfs_cap: u64,
@@ -60,6 +61,7 @@ impl SessionState {
         Self {
             sid,
             generation: 0,
+            user_name: String::from("test"),
             child_table: crate::child_table::ChildTable::new(sid),
             kernel: MockKernel::new(),
             vfs_cap: 0xF000,
