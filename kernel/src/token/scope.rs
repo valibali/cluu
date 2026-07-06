@@ -176,13 +176,14 @@ pub enum ObjectRef {
     /// `scope_sid == 0` means root authority (all sessions).
     /// `scope_mask` is a bitmask of allowed mount-root indices.
     VfsViewManager { scope_sid: u32, scope_mask: u16 },
-    /// Block-region authority cap.
+    /// Block-region authority cap (DORMANT — not actively minted or enforced).
     ///
-    /// `device_id` identifies the block device (assigned by devmgr at registration).
-    /// `start_sector` and `sector_count` define the region bounds.
-    /// The kernel verifies these bounds during scoped derivation; the
-    /// actual block I/O is performed by the driver in userspace after
-    /// verifying the token via `TokenGetInfo`.
+    /// Infrastructure exists (ObjectRef variant, TokenDeriveScoped bounds
+    /// check, userspace `verify_block_region` helper) but no root token is
+    /// minted at boot and no driver verifies tokens at the I/O boundary.
+    /// VFS-level isolation via `VfsViewManager` + per-user views is the
+    /// active isolation mechanism. Re-enable by minting a root token in
+    /// `bootstrap.rs` and calling `verify_block_region` in virtio-blk.
     BlockRegion { device_id: u32, start_sector: u64, sector_count: u64 },
 }
 

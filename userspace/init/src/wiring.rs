@@ -111,11 +111,11 @@ impl ServiceWiring for ServiceKind {
                 tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
             }
             ServiceKind::Devmgr => {
-                // Grantable listen endpoint for IPC from drivers and procmgr.
                 tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
-                // Root BlockRegion token (device 0, full disk) minted by the
-                // kernel at boot. devmgr derives scoped child regions from it.
-                tokens[TOKEN_EXTRA_1] = ctx.boot.block_region_token;
+                // BlockRegion cap disabled — VFS-level isolation is the active
+                // mechanism. Field stays 0; devmgr's GRANT_REGION returns
+                // NotFound gracefully. Re-enable in bootstrap.rs if needed.
+                tokens[TOKEN_EXTRA_1] = 0;
             }
             ServiceKind::Console => {
                 // Console will create its own endpoint in Phase 3
