@@ -39,7 +39,7 @@ impl MouseContext {
 
     pub fn ensure_subscriptions(&mut self) {
         if !self.requested_vtmgr_input && self.vtmgr_input_ep == 0 {
-            if registry::request_subscription("vtmgr", "input").is_ok() {
+            if registry::request_subscription("inputd", "input").is_ok() {
                 self.requested_vtmgr_input = true;
             }
         }
@@ -49,9 +49,9 @@ impl MouseContext {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             match event {
                 registry::RegistryEvent::Grant { service_name, name, token } => {
-                    if service_name == "vtmgr" && name == "input" {
+                    if service_name == "inputd" && name == "input" {
                         self.vtmgr_input_ep = token;
-                        let _ = debug_print("mouse: vtmgr:input subscribed");
+                        let _ = debug_print("mouse: inputd:input subscribed");
                     }
                 }
                 registry::RegistryEvent::SubscribeStatus { code } => {

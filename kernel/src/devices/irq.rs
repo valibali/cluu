@@ -22,7 +22,7 @@ use crate::token::EndpointId;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_IRQS: usize = 16;
-const KBD_EVENT_LABEL: u32 = 1;
+const KBD_RAW_LABEL: u32 = 0x600;
 
 /// Lock-free IRQ endpoint array
 ///
@@ -67,7 +67,7 @@ pub fn dispatch_scancode(irq: u8, scancode: u8) {
 
     let msg = UserMessage {
         tag: UserMessageTag {
-            label: KBD_EVENT_LABEL,
+            label: KBD_RAW_LABEL,
             words: 1,
             extra: 0,
         },

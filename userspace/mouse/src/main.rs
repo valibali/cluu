@@ -14,7 +14,7 @@ mod packet;
 mod protocol;
 
 use context::MouseContext;
-use libcluu::ipc::KBD_EVENT_LABEL;
+use libcluu::ipc::KBD_RAW_LABEL;
 use libcluu::types::Message;
 use libcluu::Result;
 use packet::PacketParser;
@@ -58,7 +58,7 @@ fn run() -> Result<()> {
 }
 
 fn handle_mouse_byte(ctx: &mut MouseContext, parser: &mut PacketParser, msg: &Message) {
-    if msg.tag.label != KBD_EVENT_LABEL || msg.tag.words < 1 {
+    if msg.tag.label != KBD_RAW_LABEL || msg.tag.words < 1 {
         return;
     }
     let byte = msg.words[0] as u8;

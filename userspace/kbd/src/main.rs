@@ -17,7 +17,7 @@ mod protocol;
 mod scancode;
 
 use context::{idle_on_error, KbdContext};
-use libcluu::ipc::KBD_EVENT_LABEL;
+use libcluu::ipc::KBD_RAW_LABEL;
 use libcluu::types::Message;
 use libcluu::Result;
 use protocol::{build_kbd_event, parse_message};
@@ -68,7 +68,7 @@ fn run() -> Result<()> {
 /// VT switch combos (Ctrl+Alt+F1..F5) are intercepted and sent to
 /// vtmgr:control as switch requests — the key event is *not* forwarded.
 fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: &Message) {
-    if msg.tag.label != KBD_EVENT_LABEL || msg.tag.words < 1 {
+    if msg.tag.label != KBD_RAW_LABEL || msg.tag.words < 1 {
         return;
     }
 
