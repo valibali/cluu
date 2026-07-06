@@ -50,7 +50,7 @@ use libcluu::mem::PAGE_SIZE;
 use procmgr_common::wire::SessionEnvelope;
 // Accommodate full set_view payloads (13B header + src/dst bytes per mount,
 // now ~10+ entries per container after the mount-policy atomic flip).
-const IPC_MESSAGE_MAX: usize = 1024;
+const IPC_MESSAGE_MAX: usize = 4096;
 /// Remote filesystem IPC label for zero-copy reads into the VFS grant buffer.
 const FS_READ_GRANT: u32 = 0x306;
 /// Remote filesystem IPC label for write operations.
