@@ -38,6 +38,7 @@ pub mod error;
 pub mod font;
 pub mod fs;
 pub mod input_routing;
+pub mod input;
 pub mod ipc;
 pub mod mem;
 pub mod pci;
