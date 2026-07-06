@@ -21,10 +21,17 @@ pub type KernelImpl = crate::real_kernel::RealKernel;
 /// `AlreadySent` — the handler replied directly to the caller's embedded
 /// reply endpoint via `ipc_send` (see `proc_pid`); the main loop must skip
 /// `send_reply` to avoid a double reply on the receive channel.
+///
+/// `NeedsAsyncSpawn(pending)` — the SPAWN handler initiated an async spawn
+/// (VFS-backed fd-derive requests are in flight). The main loop must save
+/// the pending spawn, spawn IpcCallFuture tasks, and defer the reply until
+/// all derives complete.
 #[derive(Debug)]
 pub enum DispatchOutcome {
     Reply(Reply),
     AlreadySent,
+    #[cfg(not(feature = "host-test"))]
+    NeedsAsyncSpawn(crate::elf_spawn::PendingSpawn),
 }
 
 pub struct SessionState {
@@ -72,7 +79,7 @@ impl SessionState {
 pub fn dispatch(state: &mut SessionState, msg: &InboundMsg<'_>) -> Result<DispatchOutcome, HandlerError> {
     match msg.label {
         procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL => {
-            crate::spawn::Spawn::handle(state, msg).map(DispatchOutcome::Reply)
+            crate::spawn::handle_spawn(state, msg)
         }
         procmgr_common::labels::PROCMGR_EXIT_LABEL => {
             crate::child_monitor::ChildExit::handle(state, msg).map(DispatchOutcome::Reply)

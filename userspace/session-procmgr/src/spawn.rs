@@ -8,7 +8,7 @@ use procmgr_common::pid::LOCAL_MAX;
 use procmgr_common::wire::{SpawnReply, SpawnReq};
 use crate::cap_broker_session::{sub_mint, CapRights};
 use crate::child_table::ChildState;
-use crate::dispatch::SessionState;
+use crate::dispatch::{DispatchOutcome, SessionState};
 
 pub const CHILD_VFS_RIGHTS: u32 = 0x03;
 pub const CHILD_REGISTRY_RIGHTS: u32 = 0x01;
@@ -70,11 +70,17 @@ impl MsgHandler for Spawn {
         };
 
         #[cfg(not(feature = "host-test"))]
-        let (thread_tok, cookie, space_tok, child_tid) = match crate::elf_spawn::real_spawn_user_process(state, pid, &req, msg.sender_tid) {
-            Ok(t) => t,
+        let (thread_tok, cookie, space_tok, child_tid) = match crate::elf_spawn::begin_spawn(state, pid, &req, msg.sender_tid) {
+            Ok(crate::elf_spawn::BeginSpawnResult::Complete(result)) => (result.thread_tok, result.cookie, result.space_tok, result.child_tid),
+            Ok(crate::elf_spawn::BeginSpawnResult::NeedsAsync(_)) => {
+                for h in &minted {
+                    state.kernel.revoke(*h);
+                }
+                return Err(HandlerError::Internal("async_spawn_not_supported_in_MsgHandler"));
+            }
             Err(e) => {
                 let _ = libcluu::debug_print(&alloc::format!(
-                    "session-procmgr: real_spawn_user_process failed: {:?}", e
+                    "session-procmgr: begin_spawn failed: {:?}", e
                 ));
                 for h in &minted {
                     state.kernel.revoke(*h);
@@ -108,6 +114,99 @@ impl MsgHandler for Spawn {
         let bytes =
             postcard::to_allocvec(&reply).map_err(|_| HandlerError::Internal("postcard"))?;
         Ok(Reply::ok(Self::LABEL).with_payload(bytes))
+    }
+}
+
+pub fn handle_spawn(
+    state: &mut SessionState,
+    msg: &InboundMsg<'_>,
+) -> Result<DispatchOutcome, HandlerError> {
+    #[cfg(feature = "host-test")]
+    {
+        return Spawn::handle(state, msg).map(DispatchOutcome::Reply);
+    }
+
+    #[cfg(not(feature = "host-test"))]
+    {
+        let req: SpawnReq = postcard::from_bytes(msg.payload)
+            .map_err(|_| HandlerError::BadPayload)?;
+
+        let pid = state
+            .child_table
+            .alloc_pid()
+            .map_err(|_| HandlerError::Eagain)?;
+
+        let mut guard = MintGuard::new(&mut state.kernel);
+        sub_mint(
+            &mut guard,
+            state.vfs_cap,
+            CapRights(0x07),
+            CapRights(CHILD_VFS_RIGHTS),
+        )
+        .map_err(|_| HandlerError::Internal("vfs"))?;
+        sub_mint(
+            &mut guard,
+            state.registry_cap,
+            CapRights(0x03),
+            CapRights(CHILD_REGISTRY_RIGHTS),
+        )
+        .map_err(|_| HandlerError::Internal("registry"))?;
+        sub_mint(
+            &mut guard,
+            state.timeserver_cap,
+            CapRights(0x01),
+            CapRights(CHILD_TIMESERVER_RIGHTS),
+        )
+        .map_err(|_| HandlerError::Internal("timeserver"))?;
+
+        let minted: Vec<u64> = guard.forget();
+
+        let parent_pid = state
+            .child_table
+            .iter()
+            .find(|c| c.child_tid == msg.sender_tid)
+            .map(|c| c.pid)
+            .unwrap_or(0);
+
+        match crate::elf_spawn::begin_spawn(state, pid, &req, msg.sender_tid) {
+            Ok(crate::elf_spawn::BeginSpawnResult::Complete(result)) => {
+                let local = (pid as u32) & LOCAL_MAX;
+                state.child_table.insert(ChildState {
+                    pid,
+                    local,
+                    thread_tok: result.thread_tok,
+                    space_tok: result.space_tok,
+                    child_tid: result.child_tid,
+                    cookie: result.cookie,
+                    argv0: req.argv.first().cloned().unwrap_or_default(),
+                    start_ticks: 0,
+                    minted_caps: minted,
+                    pgid: None,
+                    notify_ep: req.notify.unwrap_or(0),
+                    parent_pid,
+                });
+                let reply = SpawnReply { pid, cookie: result.cookie };
+                let bytes = postcard::to_allocvec(&reply)
+                    .map_err(|_| HandlerError::Internal("postcard"))?;
+                Ok(DispatchOutcome::Reply(
+                    Reply::ok(SESSION_PROCMGR_SPAWN_LABEL).with_payload(bytes),
+                ))
+            }
+            Ok(crate::elf_spawn::BeginSpawnResult::NeedsAsync(mut pending)) => {
+                pending.parent_pid = parent_pid;
+                pending.minted = minted;
+                Ok(DispatchOutcome::NeedsAsyncSpawn(pending))
+            }
+            Err(e) => {
+                let _ = libcluu::debug_print(&alloc::format!(
+                    "session-procmgr: begin_spawn failed: {:?}", e
+                ));
+                for h in &minted {
+                    state.kernel.revoke(*h);
+                }
+                Err(HandlerError::Internal("real_spawn"))
+            }
+        }
     }
 }
 

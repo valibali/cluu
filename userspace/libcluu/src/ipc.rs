@@ -894,6 +894,34 @@ pub fn reply_with_payload(reply_token: usize, msg: &Message, payload: &[u8]) -> 
     Ok(())
 }
 
+/// Reply to a message sender, handling both synchronous (`ipc_reply`) and
+/// asynchronous (`ipc_send` to reply endpoint) reply paths.
+///
+/// If the original message has `ASYNC_REPLY_TAG`, the reply is sent via
+/// `ipc_send` to the reply endpoint in `words[4]`, with the correlation
+/// cookie from `words[5]` echoed back. Otherwise, the reply is sent via
+/// `ipc_reply` using the reply token extracted from the message.
+///
+/// Servers should use this when they need to handle both sync (`ipc_call`)
+/// and async (`IpcCallFuture`) callers transparently.
+pub fn reply_to_sender(
+    original_msg: &Message,
+    reply_msg: &Message,
+    fallback_ep: usize,
+    _flags: IpcFlags,
+) -> Result<()> {
+    if original_msg.tag.extra == ASYNC_REPLY_TAG {
+        let reply_ep = original_msg.words[ASYNC_REPLY_EP_WORD];
+        let cookie = original_msg.words[ASYNC_REPLY_COOKIE_WORD];
+        let mut reply_with_cookie = reply_msg.clone();
+        reply_with_cookie.words[ASYNC_REPLY_COOKIE_WORD] = cookie;
+        send(reply_ep, &reply_with_cookie, IpcFlags::empty())
+    } else {
+        let reply_token = extract_reply_id(original_msg).unwrap_or(fallback_ep);
+        reply(reply_token, reply_msg, IpcFlags::empty())
+    }
+}
+
 /// Copy an IPC call cookie from a request into a reply.
 ///
 /// Servers should call this when replying to ipc_call() so the kernel

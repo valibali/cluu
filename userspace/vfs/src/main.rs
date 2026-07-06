@@ -2006,7 +2006,6 @@ impl VfsServer {
     ///   words[2] = child_client_id (echo of child_tid)
     ///   words[3] = child_remote_fd (freshly allocated under child_client_id)
     fn handle_derive_child_fd(&mut self, msg: &Message) -> Result<()> {
-        let reply_token = extract_reply_id(msg).unwrap_or(self.endpoint);
         let mut reply_msg = Message::new(VFS_DERIVE_CHILD_FD_LABEL, [0; 6], 4);
 
         let parent_cid   = msg.words[0];
@@ -2014,7 +2013,6 @@ impl VfsServer {
         let raw_rights   = msg.words[2] as u64;
         let child_tid    = msg.words[3];
 
-        // 1. Look up the parent's open file.
         let (cloned, parent_rights): (OpenFile, u64) = match self.files.get(parent_cid, parent_fd) {
             Some(f) => (f.clone(), f.rights()),
             None => {
@@ -2023,12 +2021,10 @@ impl VfsServer {
                     parent_cid, parent_fd
                 ));
                 reply_msg.words[0] = Error::NotFound.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
             }
         };
 
-        // Cap-monotone clamp: child rights must be a subset of parent rights.
-        // Refs: [[vfs-view-caps-monotone]]
         let clamped_rights = raw_rights & parent_rights;
         if clamped_rights != raw_rights {
             let _ = debug_print(&format!(
@@ -2038,30 +2034,24 @@ impl VfsServer {
             ));
         }
 
-        // 2. For Pts, bump refcount so the slot lives past the parent's close.
         if let OpenFile::Pts(ref pts) = cloned {
             let _ = self.pts_registry.inc_ref(pts.pts_id);
         }
 
-        // 3. Install the clone under the child's client_id, then record the
-        //    clamped rights so a future re-derive cannot escalate.
         let child_fd = self.files.open(child_tid, cloned);
         if let Some(entry) = self.files.get_mut(child_tid, child_fd) {
             entry.set_rights(clamped_rights);
         }
 
-        // 4. Derive a narrowed token from VFS's own full-rights endpoint,
-        //    using the clamped rights (never broader than parent's).
         let derived = match token_derive(self.endpoint, clamped_rights as usize, u64::MAX) {
             Ok(t) => t,
             Err(e) => {
-                // Roll back the file table entry on derive failure.
                 self.files.close(child_tid, child_fd);
                 let _ = debug_print(&format!(
                     "vfs: derive_child_fd token_derive failed {:?}", e
                 ));
                 reply_msg.words[0] = e.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
             }
         };
 
@@ -2074,7 +2064,7 @@ impl VfsServer {
         reply_msg.words[1] = derived;
         reply_msg.words[2] = child_tid;
         reply_msg.words[3] = child_fd;
-        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+        ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty())
     }
 
     /// Called by handle_open after a successful open of `/dev/pts/<id>`.

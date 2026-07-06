@@ -23,7 +23,7 @@ pub struct SessionEnvelope {
 }
 
 /// Spawn request (session-procmgr child spawn).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnReq {
     pub image_path: String,
     pub argv: Vec<String>,
@@ -33,7 +33,7 @@ pub struct SpawnReq {
     pub notify: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FdInheritEntry {
     pub fd: i32,
     pub kind: FdKind,
@@ -44,7 +44,7 @@ pub struct FdInheritEntry {
     pub parent_rfd: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FdKind {
     VfsFile,
     VfsPipe,

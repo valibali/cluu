@@ -27,7 +27,7 @@ use core::mem::size_of;
 
 #[cfg(not(feature = "host-test"))]
 use libcluu::{
-    boot::{process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, PROCESS_INFO_ADDR, TOKEN_VFS_VIEW_MGR},
+    boot::{process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, PROCESS_INFO_ADDR, TOKEN_SELF, TOKEN_VFS_VIEW_MGR},
     debug_print, registry,
     ipc::{extract_reply_id, parse_message},
     mem::PAGE_SIZE,
@@ -41,6 +41,24 @@ use procmgr_common::{
     handler::{InboundMsg, Reply},
     wire::SessionEnvelope,
 };
+
+#[cfg(not(feature = "host-test"))]
+use libcluu::async_runtime::{IpcCallFuture, Runtime};
+
+#[cfg(not(feature = "host-test"))]
+use alloc::collections::BTreeMap;
+
+#[cfg(not(feature = "host-test"))]
+use libcluu::ipc::VFS_DERIVE_CHILD_FD_LABEL;
+
+#[cfg(not(feature = "host-test"))]
+use procmgr_common::pid::LOCAL_MAX;
+
+#[cfg(not(feature = "host-test"))]
+use procmgr_common::wire::SpawnReply;
+
+#[cfg(not(feature = "host-test"))]
+use procmgr_common::kernel_iface::Kernel;
 
 /// Read the `SessionEnvelope` serialised into the ProcessInfo page by
 /// root-procmgr.  Returns `None` if the page slots are zero or the
@@ -230,17 +248,48 @@ fn run() -> Result<()> {
     };
 
     let control_ep = registry::control_endpoint();
-    let endpoints: [usize; 2] = [ep, control_ep];
+    let token_self = info.tokens[TOKEN_SELF];
+    let mut runtime = Runtime::new(token_self)?;
+    let reply_ep = runtime.reply_endpoint();
+    let mut pending_spawns: BTreeMap<u64, spm::elf_spawn::PendingSpawn> = BTreeMap::new();
+    let endpoints: [usize; 3] = [ep, control_ep, reply_ep];
     let mut buf = [0u8; 4096];
 
     let _ = debug_print(&alloc::format!("session-procmgr: recv loop sid={}", sid));
 
     loop {
+        runtime.poll_ready();
+
+        while let Some(comp) = runtime.pop_completion() {
+            if let Ok(spm_comp) = comp.downcast::<spm::elf_spawn::SpmCompletion>() {
+                handle_spm_completion(
+                    &mut state,
+                    &mut pending_spawns,
+                    ep,
+                    *spm_comp,
+                );
+            }
+        }
+
         let (idx, len, sender_tid) =
             match libcluu::syscall::ipc_recv_any_with_sender(&endpoints, &mut buf, u64::MAX) {
                 Ok(res) => res,
                 Err(_) => continue,
             };
+
+        if idx == 2 {
+            if let Some((msg, _payload)) = parse_message(&buf[..len]) {
+                let cookie = msg.words[5];
+                let payload_start = size_of::<Message>();
+                let payload_bytes: alloc::vec::Vec<u8> = if len > payload_start {
+                    buf[payload_start..len].to_vec()
+                } else {
+                    alloc::vec::Vec::new()
+                };
+                runtime.deliver_reply(cookie, msg, payload_bytes);
+            }
+            continue;
+        }
 
         // Registry events on control_ep — ignore for now.
         if idx == 1 {
@@ -284,6 +333,52 @@ fn run() -> Result<()> {
                 let _ = send_reply(reply_token, ep, &reply, async_reply);
             }
             Ok(spm::dispatch::DispatchOutcome::AlreadySent) => {}
+            Ok(spm::dispatch::DispatchOutcome::NeedsAsyncSpawn(mut pending)) => {
+                pending.reply_token = reply_token;
+                pending.async_reply = async_reply;
+                let spawn_cookie = pending.cookie;
+                let fd_requests: alloc::vec::Vec<spm::elf_spawn::FdDeriveRequest> =
+                    pending.fd_derive_requests.iter().copied().collect();
+                pending_spawns.insert(spawn_cookie, pending);
+                for req in fd_requests {
+                    let spawn_cookie = spawn_cookie;
+                    let fd = req.fd;
+                    let vfs_ep = req.vfs_ep;
+                    let mut request = Message::new(
+                        VFS_DERIVE_CHILD_FD_LABEL,
+                        [req.parent_tid, req.parent_rfd, req.rights, req.child_tid, 0, 0],
+                        4,
+                    );
+                    runtime.spawn(async move {
+                        let result = IpcCallFuture::new(vfs_ep, request).await;
+                        let completion = match result {
+                            Ok((reply, _)) => {
+                                if reply.words[0] == 0 {
+                                    spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdReply {
+                                        cookie: spawn_cookie,
+                                        fd,
+                                        result: Ok((reply.words[1], reply.words[2], reply.words[3])),
+                                    }
+                                } else {
+                                    spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdReply {
+                                        cookie: spawn_cookie,
+                                        fd,
+                                        result: Err(spm::elf_spawn::RealSpawnError::VfsDeriveChildFd),
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdReply {
+                                    cookie: spawn_cookie,
+                                    fd,
+                                    result: Err(spm::elf_spawn::RealSpawnError::VfsDeriveChildFd),
+                                }
+                            }
+                        };
+                        libcluu::async_runtime::push_completion(completion);
+                    });
+                }
+            }
             Err(e) => {
                 let _ = debug_print(&alloc::format!(
                     "session-procmgr: handler error label=0x{:x} {:?}",
@@ -308,6 +403,103 @@ fn run() -> Result<()> {
                         )
                     };
                     let _ = libcluu::syscall::ipc_send(reply_ep, bytes);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "host-test"))]
+fn handle_spm_completion(
+    state: &mut spm::dispatch::SessionState,
+    pending_spawns: &mut BTreeMap<u64, spm::elf_spawn::PendingSpawn>,
+    ep: usize,
+    completion: spm::elf_spawn::SpmCompletion,
+) {
+    match completion {
+        spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdReply { cookie, fd, result } => {
+            let pending = match pending_spawns.get_mut(&cookie) {
+                Some(p) => p,
+                None => return,
+            };
+            if fd < 4 {
+                pending.fd_derive_results[fd] = Some(result);
+            }
+            pending.fd_derive_remaining = pending.fd_derive_remaining.saturating_sub(1);
+            if pending.fd_derive_remaining != 0 {
+                return;
+            }
+
+            let mut pending = match pending_spawns.remove(&cookie) {
+                Some(p) => p,
+                None => return,
+            };
+            let pid = pending.pid;
+            let parent_pid = pending.parent_pid;
+            let reply_token = pending.reply_token;
+            let async_reply = pending.async_reply;
+            let argv0 = pending.req.argv.first().cloned().unwrap_or_default();
+            let notify_ep = pending.req.notify.unwrap_or(0);
+            let minted = core::mem::take(&mut pending.minted);
+
+            match spm::elf_spawn::finish_spawn(state, pending) {
+                Ok(result) => {
+                    let local = (pid as u32) & LOCAL_MAX;
+                    state.child_table.insert(spm::child_table::ChildState {
+                        pid,
+                        local,
+                        thread_tok: result.thread_tok,
+                        space_tok: result.space_tok,
+                        child_tid: result.child_tid,
+                        cookie: result.cookie,
+                        argv0,
+                        start_ticks: 0,
+                        minted_caps: minted,
+                        pgid: None,
+                        notify_ep,
+                        parent_pid,
+                    });
+                    let reply = SpawnReply { pid, cookie: result.cookie };
+                    let bytes = postcard::to_allocvec(&reply).unwrap_or_default();
+                    let reply = Reply::ok(procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL)
+                        .with_payload(bytes);
+                    let _ = send_reply(reply_token, ep, &reply, async_reply);
+                }
+                Err(e) => {
+                    let _ = debug_print(&alloc::format!(
+                        "session-procmgr: finish_spawn failed: {:?}", e
+                    ));
+                    for h in &minted {
+                        state.kernel.revoke(*h);
+                    }
+                    if let Some(tok) = reply_token {
+                        let err_msg = Message::new(
+                            procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL,
+                            [0xFFFF_FFFF; 6],
+                            1,
+                        );
+                        let bytes = unsafe {
+                            core::slice::from_raw_parts(
+                                &err_msg as *const Message as *const u8,
+                                size_of::<Message>(),
+                            )
+                        };
+                        let _ = libcluu::syscall::ipc_reply(tok, bytes);
+                    } else if let Some((reply_ep, cookie)) = async_reply {
+                        let mut err_msg = Message::new(
+                            procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL,
+                            [0xFFFF_FFFF; 6],
+                            1,
+                        );
+                        err_msg.words[5] = cookie;
+                        let bytes = unsafe {
+                            core::slice::from_raw_parts(
+                                &err_msg as *const Message as *const u8,
+                                size_of::<Message>(),
+                            )
+                        };
+                        let _ = libcluu::syscall::ipc_send(reply_ep, bytes);
+                    }
                 }
             }
         }
