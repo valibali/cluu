@@ -922,6 +922,27 @@ pub fn reply_to_sender(
     }
 }
 
+/// Like `reply_to_sender` but appends a payload after the Message header.
+/// Handles both sync (`ipc_reply`) and async (`ipc_send` to reply endpoint) paths.
+pub fn reply_to_sender_with_payload(
+    original_msg: &Message,
+    reply_msg: &Message,
+    payload: &[u8],
+    fallback_ep: usize,
+) -> Result<()> {
+    if original_msg.tag.extra == ASYNC_REPLY_TAG {
+        let reply_ep = original_msg.words[ASYNC_REPLY_EP_WORD];
+        let cookie = original_msg.words[ASYNC_REPLY_COOKIE_WORD];
+        let mut reply_with_cookie = reply_msg.clone();
+        reply_with_cookie.words[0] = payload.len();
+        reply_with_cookie.words[ASYNC_REPLY_COOKIE_WORD] = cookie;
+        send_msg_with_payload(reply_ep, &reply_with_cookie, payload)
+    } else {
+        let reply_token = extract_reply_id(original_msg).unwrap_or(fallback_ep);
+        reply_with_payload(reply_token, reply_msg, payload)
+    }
+}
+
 /// Copy an IPC call cookie from a request into a reply.
 ///
 /// Servers should call this when replying to ipc_call() so the kernel

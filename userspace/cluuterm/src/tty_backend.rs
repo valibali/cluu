@@ -187,101 +187,65 @@ impl Pts {
             && self.fg_pgid != Some(caller_pgid)
         {
             self.send_pg_signal(caller_pgid, SIGTTOU);
-            if let Some(t) = reply_token {
-                reply_err(t, PTS_WRITE_LABEL, PtsErr::Eintr);
-            }
+            reply_err(msg, PTS_WRITE_LABEL, PtsErr::Eintr);
             return None;
         }
 
         let cooked = self.line_discipline.process_output(req);
-        if let Some(t) = reply_token {
-            reply_ok::<WriteReply>(t, PTS_WRITE_LABEL, Ok(req.len() as u32));
-        }
+        reply_ok::<WriteReply>(msg, PTS_WRITE_LABEL, Ok(req.len() as u32));
         Some(cooked)
     }
 
     /// PTS_POLL_LABEL (102)
     fn handle_pts_poll(&mut self, req: PollRequest, msg: &Message) {
-        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
-            Some(t) => t,
-            None => return,
-        };
         let mut ready = PollEvents::empty();
         if !self.ready_bytes.is_empty() || self.eof_pending { ready |= PollEvents::POLLIN; }
         if !self.closed                  { ready |= PollEvents::POLLOUT; }
         if self.closed                   { ready |= PollEvents::POLLHUP; }
-        reply_ok::<PollReply>(reply_token, PTS_POLL_LABEL, PollReply { ready });
+        reply_ok::<PollReply>(msg, PTS_POLL_LABEL, PollReply { ready });
     }
 
     /// PTS_GET_TERMIOS_LABEL (103)
     fn handle_pts_get_termios(&mut self, msg: &Message) {
-        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
-            Some(t) => t,
-            None => return,
-        };
         let t = *self.line_discipline.termios();
-        reply_ok::<GetTermiosReply>(reply_token, PTS_GET_TERMIOS_LABEL, t);
+        reply_ok::<GetTermiosReply>(msg, PTS_GET_TERMIOS_LABEL, t);
     }
 
     /// PTS_SET_TERMIOS_LABEL (104)
     fn handle_pts_set_termios(&mut self, req: SetTermiosRequest, msg: &Message) {
-        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
-            Some(t) => t,
-            None => return,
-        };
         match self.line_discipline.set_termios(req.termios) {
-            Ok(()) => reply_ok::<SetTermiosReply>(reply_token, PTS_SET_TERMIOS_LABEL, Ok(())),
-            Err(_) => reply_ok::<SetTermiosReply>(reply_token, PTS_SET_TERMIOS_LABEL, Err(PtsErr::EinvalTermios)),
+            Ok(()) => reply_ok::<SetTermiosReply>(msg, PTS_SET_TERMIOS_LABEL, Ok(())),
+            Err(_) => reply_ok::<SetTermiosReply>(msg, PTS_SET_TERMIOS_LABEL, Err(PtsErr::EinvalTermios)),
         }
     }
 
     /// PTS_GET_WINSIZE_LABEL (105)
     fn handle_pts_get_winsize(&mut self, msg: &Message) {
-        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
-            Some(t) => t,
-            None => return,
-        };
-        reply_ok::<GetWinsizeReply>(reply_token, PTS_GET_WINSIZE_LABEL, self.winsize);
+        reply_ok::<GetWinsizeReply>(msg, PTS_GET_WINSIZE_LABEL, self.winsize);
     }
 
     /// PTS_SET_WINSIZE_LABEL (106)
     fn handle_pts_set_winsize(&mut self, req: Winsize, msg: &Message) {
-        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
-            Some(t) => t,
-            None => return,
-        };
         self.winsize = req;
         if let Some(pgid) = self.fg_pgid {
             self.send_pg_signal(pgid, SIGWINCH);
         }
-        reply_ok::<SetWinsizeReply>(reply_token, PTS_SET_WINSIZE_LABEL, Ok(()));
+        reply_ok::<SetWinsizeReply>(msg, PTS_SET_WINSIZE_LABEL, Ok(()));
     }
 
     /// PTS_GET_PGRP_LABEL (107)
     fn handle_pts_get_pgrp(&mut self, msg: &Message) {
-        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
-            Some(t) => t,
-            None => return,
-        };
-        reply_ok::<GetPgrpReply>(reply_token, PTS_GET_PGRP_LABEL, self.fg_pgid.unwrap_or(0));
+        reply_ok::<GetPgrpReply>(msg, PTS_GET_PGRP_LABEL, self.fg_pgid.unwrap_or(0));
     }
 
     /// PTS_SET_PGRP_LABEL (108)
     fn handle_pts_set_pgrp(&mut self, req: SetPgrpRequest, msg: &Message) {
-        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
-            Some(t) => t,
-            None => return,
-        };
         self.fg_pgid = Some(req);
-        reply_ok::<SetPgrpReply>(reply_token, PTS_SET_PGRP_LABEL, Ok(()));
+        reply_ok::<SetPgrpReply>(msg, PTS_SET_PGRP_LABEL, Ok(()));
     }
 
     /// PTS_FLUSH_LABEL (109)
     fn handle_pts_flush(&mut self, req: FlushRequest, msg: &Message) {
-        let reply_token = match libcluu::ipc::extract_reply_id(msg) {
-            Some(t) => t,
-            None => return,
-        };
         match req.queue {
             FlushQueue::Input | FlushQueue::Both => {
                 self.line_discipline.flush_input();
@@ -296,7 +260,7 @@ impl Pts {
             }
             _ => {}
         }
-        reply_ok::<FlushReply>(reply_token, PTS_FLUSH_LABEL, Ok(()));
+        reply_ok::<FlushReply>(msg, PTS_FLUSH_LABEL, Ok(()));
     }
 
     /// PTS_CLOSED_LABEL (110)
@@ -318,23 +282,21 @@ impl Pts {
 
 // ── Reply helpers (postcard-serialized IPC replies) ──────────────────────────
 
-fn reply_ok<R: serde::Serialize>(reply_token: usize, label: u32, value: R) {
+fn reply_ok<R: serde::Serialize>(original_msg: &Message, label: u32, value: R) {
     let bytes = postcard::to_allocvec(&value).expect("postcard ser");
     let mut msg = Message::new(label, [0, 0, 0, 0, 0, 0], 0);
     msg.words[0] = bytes.len();
     msg.words[1] = cluu_wire::ABI_VERSION as usize;
-    let _ = libcluu::ipc::reply_with_payload(reply_token, &msg, &bytes);
+    let _ = libcluu::ipc::reply_to_sender_with_payload(original_msg, &msg, &bytes, 0);
 }
 
-fn reply_err(reply_token: usize, label: u32, err: PtsErr) {
-    // Serialize Err(err) directly — postcard doesn't need a type parameter.
-    // We encode a Result<(), PtsErr>::Err(err) as the reply payload.
+fn reply_err(original_msg: &Message, label: u32, err: PtsErr) {
     let value: core::result::Result<(), PtsErr> = core::result::Result::Err(err);
     let bytes = postcard::to_allocvec(&value).expect("postcard ser");
     let mut msg = Message::new(label, [0, 0, 0, 0, 0, 0], 0);
     msg.words[0] = bytes.len();
     msg.words[1] = cluu_wire::ABI_VERSION as usize;
-    let _ = libcluu::ipc::reply_with_payload(reply_token, &msg, &bytes);
+    let _ = libcluu::ipc::reply_to_sender_with_payload(original_msg, &msg, &bytes, 0);
 }
 
 // ── Terminal cell-grid + rendering (preserved from original) ─────────────────

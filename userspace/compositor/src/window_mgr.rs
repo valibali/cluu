@@ -437,7 +437,7 @@ impl Compositor {
     /// auto-registers a window with the compositor on startup.
     /// Uses the same payload format as vtmgr's spawn_vt_container:
     /// NUL-terminated image name, no param overrides.
-    pub fn spawn_demo(&self) {
+    pub fn spawn_cluuterm(&self) {
         use procmgr_common::{labels::SESSION_PROCMGR_SPAWN_LABEL, wire::SpawnReq};
 
         let sid: u32 = 1;
@@ -446,10 +446,10 @@ impl Compositor {
             Some(ep) => ep,
             None => {
                 let _ = libcluu::debug_print(&alloc::format!(
-                    "compositor: spawn_demo: no {} — falling back to root-procmgr",
+                    "compositor: spawn_cluuterm: no {} — falling back to root-procmgr",
                     spawn_ep_name
                 ));
-                self.spawn_demo_via_root();
+                self.spawn_cluuterm_via_root();
                 return;
             }
         };
@@ -471,7 +471,7 @@ impl Compositor {
         let payload = match postcard::to_allocvec(&req) {
             Ok(b) => b,
             Err(_) => {
-                let _ = libcluu::debug_print("compositor: spawn_demo: SpawnReq serialize failed");
+                let _ = libcluu::debug_print("compositor: spawn_cluuterm: SpawnReq serialize failed");
                 return;
             }
         };
@@ -482,14 +482,14 @@ impl Compositor {
             0,
         );
         let _ = libcluu::ipc::send_msg_with_payload(ep, &msg, &payload);
-        let _ = libcluu::debug_print("compositor: spawn_demo: requested cluuterm via session-procmgr");
+        let _ = libcluu::debug_print("compositor: spawn_cluuterm: requested cluuterm via session-procmgr");
     }
 
-    fn spawn_demo_via_root(&self) {
+    fn spawn_cluuterm_via_root(&self) {
         let ep = match libcluu::registry::lookup_service("procmgr:spawn") {
             Some(ep) => ep,
             None => {
-                let _ = libcluu::debug_print("compositor: spawn_demo: no procmgr:spawn");
+                let _ = libcluu::debug_print("compositor: spawn_cluuterm: no procmgr:spawn");
                 return;
             }
         };
@@ -500,7 +500,7 @@ impl Compositor {
             5,
         );
         let _ = libcluu::ipc::send_msg_with_payload(ep, &msg, payload);
-        let _ = libcluu::debug_print("compositor: spawn_demo: requested cluuterm via root-procmgr");
+        let _ = libcluu::debug_print("compositor: spawn_cluuterm: requested cluuterm via root-procmgr");
     }
 }
 

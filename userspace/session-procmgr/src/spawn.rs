@@ -128,8 +128,39 @@ pub fn handle_spawn(
 
     #[cfg(not(feature = "host-test"))]
     {
-        let req: SpawnReq = postcard::from_bytes(msg.payload)
+        let mut req: SpawnReq = postcard::from_bytes(msg.payload)
             .map_err(|_| HandlerError::BadPayload)?;
+
+        // Derive SEND-rights token: caller's raw endpoint token is not
+        // valid in our space (sends silently fail).  Mirrors root-procmgr's
+        // resolve_notify_endpoint (root-procmgr/src/main.rs:4006).
+        let raw_notify = req.notify.unwrap_or(0);
+        let derived_notify = if raw_notify != 0 {
+            use libcluu::rights::Rights;
+            use libcluu::syscall::token_derive;
+            token_derive(raw_notify as usize, Rights::IPC_SEND.bits() as usize, u64::MAX)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        req.notify = if derived_notify != 0 {
+            Some(derived_notify as u64)
+        } else {
+            None
+        };
+
+        // Ensure HOME/USER are always set — some spawners (compositor)
+        // pass minimal envp without them.
+        let home = alloc::format!("/home/{}", state.user_name);
+        if !req.envp.iter().any(|(k, _)| k == "HOME") {
+            req.envp.push((alloc::string::String::from("HOME"), home));
+        }
+        if !req.envp.iter().any(|(k, _)| k == "USER") {
+            req.envp.push((
+                alloc::string::String::from("USER"),
+                state.user_name.clone(),
+            ));
+        }
 
         let pid = state
             .child_table

@@ -35,7 +35,7 @@ pub enum Hotkey {
     ResizeUp,
     ResizeDown,
     CloseRequest,
-    SpawnDemo,
+    SpawnCluuterm,
 }
 
 /// Decode a (modifiers, scancode, extended) tuple into a Hotkey, if any.
@@ -77,7 +77,7 @@ pub fn match_hotkey(mods: u8, scancode: u8, extended: u8) -> Option<Hotkey> {
 
     // Ctrl+Alt+N: spawn demo window.
     if supr && scancode == SCAN_N {
-        return Some(Hotkey::SpawnDemo);
+        return Some(Hotkey::SpawnCluuterm);
     }
 
     None

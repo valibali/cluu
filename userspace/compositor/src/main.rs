@@ -384,8 +384,8 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                                     hotkeys::Hotkey::CloseRequest => {
                                         comp.forward_close_request();
                                     }
-                                    hotkeys::Hotkey::SpawnDemo => {
-                                        comp.spawn_demo();
+                                    hotkeys::Hotkey::SpawnCluuterm => {
+                                        comp.spawn_cluuterm();
                                     }
                                 }
                             } else {
