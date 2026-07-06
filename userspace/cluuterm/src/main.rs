@@ -74,23 +74,6 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         }
     };
 
-    // Register a completion-announce endpoint so the shell can send us its
-    // completion endpoint token directly (SHELL_COMPLETION_ANNOUNCE_LABEL).
-    // This replaces the shell's previous `shell:completion:<sid>` registry
-    // registration which collided between nested shells in the same session.
-    // Each cluuterm is in its own session, so `completion_announce:<sid>`
-    // is unique per cluuterm.
-    {
-        let sid_for_name = libcluu::posix::read_env_var("CLUU_SESSION_ID")
-            .unwrap_or_else(|| alloc::string::String::from("0"));
-        let announce_name = alloc::format!("completion_announce:{}", sid_for_name);
-        if let Err(e) = registry::register_output(&announce_name, my_ep) {
-            let _ = debug_print(&alloc::format!(
-                "cluuterm: register completion_announce failed: {:?}", e
-            ));
-        }
-    }
-
     // Phase 1: register window with compositor.
     let (window_id, comp_ep, gw, gh) = match register_window(my_ep) {
         Ok(p) => p,
@@ -119,7 +102,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let _ = debug_print("cluuterm: pts registered");
 
     // Phase 3: spawn /bin/shell with fd 0/1/2 wired to /dev/pts/<id>.
-    if let Err(code) = spawn_shell_with_pts(pts_id, vfs_ep) {
+    if let Err(code) = spawn_shell_with_pts(pts_id, vfs_ep, my_ep) {
         let _ = debug_print("cluuterm: spawn /bin/shell failed");
         return code;
     }
@@ -278,7 +261,7 @@ fn register_pts(my_ep: usize, session_id: Option<u32>) -> Result<(u32, usize), i
 /// Opens the pts node, builds FdInherit entries referencing it, and calls
 /// the unified spawn protocol (`libcluu::spawn::spawn`). The parent-side
 /// pts fd is closed after spawn.
-fn spawn_shell_with_pts(pts_id: u32, _vfs_ep: usize) -> Result<(), i32> {
+fn spawn_shell_with_pts(pts_id: u32, _vfs_ep: usize, my_ep: usize) -> Result<(), i32> {
     let path_bytes = render::pts_path(pts_id);
 
     const O_RDONLY: i32 = 0;
@@ -380,6 +363,8 @@ fn spawn_shell_with_pts(pts_id: u32, _vfs_ep: usize) -> Result<(), i32> {
              alloc::string::String::from("xterm-256color")),
             (alloc::string::String::from("CLUU_SESSION_ID"),
              alloc::format!("{}", sid)),
+            (alloc::string::String::from("CLUU_CLUUTERM_EP"),
+             alloc::format!("{}", my_ep)),
         ],
         cwd: alloc::string::String::from("/"),
         fd_inherit: fd_inherit_entries,

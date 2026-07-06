@@ -53,26 +53,21 @@ fn announce_completion_ep() {
     if ep == 0 {
         return;
     }
-    let sid = libcluu::posix::read_env_var("CLUU_SESSION_ID")
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
-    let name = format!("cluuterm:completion_announce:{}", sid);
-    match registry::lookup_service(&name) {
-        Some(cluuterm_ep) => {
-            let msg = Message::new(
-                SHELL_COMPLETION_ANNOUNCE_LABEL,
-                [ep, 0, 0, 0, 0, 0],
-                0,
-            );
-            let _ = ipc::send(cluuterm_ep, &msg, IpcFlags::empty());
-        }
+    let cluuterm_ep = match libcluu::posix::read_env_var("CLUU_CLUUTERM_EP")
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        Some(e) => e,
         None => {
-            let _ = debug_print(&format!(
-                "shell: cluuterm:completion_announce:{} not registered",
-                sid
-            ));
+            let _ = debug_print("shell: CLUU_CLUUTERM_EP not set");
+            return;
         }
-    }
+    };
+    let msg = Message::new(
+        SHELL_COMPLETION_ANNOUNCE_LABEL,
+        [ep, 0, 0, 0, 0, 0],
+        0,
+    );
+    let _ = ipc::send(cluuterm_ep, &msg, IpcFlags::empty());
 }
 
 #[no_mangle]
