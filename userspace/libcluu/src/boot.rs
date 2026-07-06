@@ -12,6 +12,7 @@ pub struct BootInfo {
     pub root_token: usize,
     pub clock_token: usize,
     pub view_mgr_token: usize,
+    pub block_region_token: usize,
     pub initrd_phys: u64,
     pub initrd_size: u64,
     pub fb_phys: u64,
