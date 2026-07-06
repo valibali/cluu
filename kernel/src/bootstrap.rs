@@ -196,6 +196,20 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
     //     ...ObjectRef::BlockRegion { device_id: 0, start_sector: 0, sector_count: u64::MAX },
     // );
 
+    let device_region_token_handle = crate::token::create_token(
+        crate::token::OpaqueScope::random(),
+        crate::token::Rights::device_full(),
+        crate::token::Issuer::Kernel,
+        crate::token::Timestamp::far_future(),
+        ObjectRef::DeviceRegion { device_id: 0, region_kind: 0, base: 0, len: u64::MAX },
+    );
+    klibcluu::info("boot-grant: device_region token handle=");
+    klibcluu::log_dec(
+        klibcluu::LogLevel::Info,
+        "",
+        device_region_token_handle.as_usize() as u64,
+    );
+
     let boot_frame = crate::mm::pmm::alloc_frame().ok_or_else(|| {
         klibcluu::error("Failed to allocate boot info frame");
         Error::OutOfMemory
@@ -227,6 +241,7 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
         boot_info.clock_token = clock_token_handle.as_usize();
         boot_info.view_mgr_token = view_mgr_token_handle.as_usize();
         boot_info.block_region_token = 0;
+        boot_info.device_region_token = device_region_token_handle.as_usize();
         boot_info.initrd_phys = initrd_phys;
         boot_info.initrd_size = initrd_size;
         // BOOTBOOT is #[repr(C, packed)] — use read_unaligned to avoid UB from
@@ -316,6 +331,7 @@ struct BootInfo {
     clock_token: usize,
     view_mgr_token: usize,
     block_region_token: usize,
+    device_region_token: usize,
     initrd_phys: u64,
     initrd_size: u64,
     fb_phys: u64,

@@ -2761,6 +2761,11 @@ fn invoke_token_get_info(obj_ref: ObjectRef) -> SyscallResult {
         ObjectRef::BlockRegion { device_id, .. } => {
             (0x0Ausize << 48) | (device_id as usize)
         }
+        ObjectRef::DeviceRegion { device_id, region_kind, .. } => {
+            (0x0Busize << 48)
+                | ((region_kind as usize) << 32)
+                | (device_id as usize)
+        }
     };
     Ok(packed)
 }
@@ -2817,6 +2822,25 @@ fn invoke_token_derive_scoped(
             }
 
             OR::BlockRegion { device_id: parent_device, start_sector: child_start, sector_count: child_count }
+        }
+        OR::DeviceRegion { device_id: parent_device, region_kind: parent_kind, base: parent_base, len: parent_len } => {
+            let child_base = args.arg5 as u64;
+            let child_len = args.arg6 as u64;
+
+            if child_base < parent_base {
+                klibcluu::warn("invoke_token_derive_scoped: device region base below parent");
+                return Err(Error::PermissionDenied);
+            }
+
+            let parent_end = parent_base.saturating_add(parent_len);
+            let child_end = child_base.saturating_add(child_len);
+
+            if child_end > parent_end {
+                klibcluu::warn("invoke_token_derive_scoped: device region exceeds parent bounds");
+                return Err(Error::PermissionDenied);
+            }
+
+            OR::DeviceRegion { device_id: parent_device, region_kind: parent_kind, base: child_base, len: child_len }
         }
         _ => {
             klibcluu::warn("invoke_token_derive_scoped: token type not scoping-capable");
