@@ -85,6 +85,16 @@ class L2Vt4Default:
 
 
 @cluu_case(
+    "l2_dev_nodes",
+    marker_mode="l2_dev_nodes",
+    description="ls /dev regression — dynamic /dev enumeration",
+    tags=["vfs", "dev"],
+)
+class L2DevNodes:
+    pass
+
+
+@cluu_case(
     "m1_recv",
     marker_mode="m1_recv",
     description="recv/wakeup churn checks",
@@ -140,6 +150,7 @@ __all__ = [
     "L2Cd",
     "L2CluutermExit",
     "L2CluutermLogin",
+    "L2DevNodes",
     "L2Ext2Write",
     "L2Login",
     "L2Ls",

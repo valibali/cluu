@@ -141,6 +141,12 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         test_command=None,
         # Pure boot-time marker — no keyboard input needed.
     ),
+    "l2_dev_nodes": CaseDefaults(
+        test_command="ls /dev",
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+    ),
     "none": CaseDefaults(test_command="hello"),
 }
 

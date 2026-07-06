@@ -254,6 +254,11 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             ],
             description="boot → compositor pinned to VT4",
         ),
+        MarkerModeSpec(
+            name="l2_dev_nodes",
+            required_markers=[_TSC, _SHELL_READY, "ls: ok (exit 0)"],
+            description="ls /dev regression — dynamic /dev enumeration",
+        ),
     ]
 }
 
