@@ -177,6 +177,106 @@ pub trait AsyncMountBackend: Sync {
         rel_path: &str,
         caller_tid: usize,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<DirEntry>>> + '_>>;
+
+    /// Stat a path without reading directory entries (async).
+    fn stat_async(
+        &self,
+        rel_path: &str,
+        full_path: &str,
+        caller_tid: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<DirEntryStat>> + '_>> {
+        let _ = (rel_path, full_path, caller_tid);
+        Box::pin(async move { Err(Error::NotImplemented) })
+    }
+
+    /// Read file data (async).
+    fn read_async(
+        &self,
+        file: &OpenFile,
+        offset: usize,
+        len: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + '_>> {
+        let _ = (file, offset, len);
+        Box::pin(async move { Err(Error::NotImplemented) })
+    }
+
+    /// Write file data (async).
+    fn write_async(
+        &self,
+        file: &OpenFile,
+        offset: usize,
+        data: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<usize>> + '_>> {
+        let _ = (file, offset, data);
+        Box::pin(async move { Err(Error::NotImplemented) })
+    }
+
+    /// Unlink a file (async).
+    fn unlink_async(
+        &self,
+        rel_path: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + '_>> {
+        let _ = rel_path;
+        Box::pin(async move { Err(Error::NotImplemented) })
+    }
+
+    /// Create a directory (async).
+    fn mkdir_async(
+        &self,
+        rel_path: &str,
+        mode: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + '_>> {
+        let _ = (rel_path, mode);
+        Box::pin(async move { Err(Error::NotImplemented) })
+    }
+
+    /// Remove a directory (async).
+    fn rmdir_async(
+        &self,
+        rel_path: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + '_>> {
+        let _ = rel_path;
+        Box::pin(async move { Err(Error::NotImplemented) })
+    }
+
+    /// Rename a file (async).
+    fn rename_async(
+        &self,
+        rel_old: &str,
+        rel_new: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + '_>> {
+        let _ = (rel_old, rel_new);
+        Box::pin(async move { Err(Error::NotImplemented) })
+    }
+
+    /// Create a hard link (async).
+    fn link_async(
+        &self,
+        rel_old: &str,
+        rel_new: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + '_>> {
+        let _ = (rel_old, rel_new);
+        Box::pin(async move { Err(Error::NotImplemented) })
+    }
+
+    /// Create a new file (async).
+    fn create_file_async(
+        &self,
+        rel_path: &str,
+        mode: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + '_>> {
+        let _ = (rel_path, mode);
+        Box::pin(async move { Err(Error::NotImplemented) })
+    }
+
+    /// Resolve a path to its canonical form (async).
+    fn realpath_async(
+        &self,
+        rel_path: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + '_>> {
+        let _ = rel_path;
+        Box::pin(async move { Err(Error::NotImplemented) })
+    }
 }
 
 /// Type-erased mount backend — either sync or async.

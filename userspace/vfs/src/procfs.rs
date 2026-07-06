@@ -4,7 +4,7 @@
 //! - /proc/version, uptime, meminfo, cpuinfo, mounts, fb, sched_overflow:
 //!   static generators (no IPC needed)
 //! - /proc/<pid>/{stat,status,cmdline,comm,exe}: per-PID process info via
-//!   synchronous IPC to session-procmgr using `call_with_reply_buf`
+//!   async IPC to session-procmgr using `IpcCallFuture` (deadlock-avoidance)
 //! - /proc/self/...: currently returns NotFound (requires TID→PID resolution,
 //!   deferred — `top` uses explicit PIDs from readdir)
 //! - /proc readdir: static entries + PID directories from procmgr `list_pids`
@@ -438,6 +438,53 @@ impl AsyncMountBackend for ProcfsBackend {
                         stat: file_stat,
                     })
                     .collect());
+            }
+
+            Err(Error::NotFound)
+        })
+    }
+
+    fn stat_async(
+        &self,
+        rel_path: &str,
+        _full_path: &str,
+        caller_tid: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<DirEntryStat>> + '_>> {
+        let rel_path = rel_path.to_string();
+        Box::pin(async move {
+            let rel = rel_path.trim_start_matches('/');
+
+            let dir_stat = DirEntryStat { mode: 0o040555u32, nlink: 1, ..Default::default() };
+            let file_stat = DirEntryStat { mode: 0o100444u32, nlink: 1, ..Default::default() };
+
+            if rel.is_empty() {
+                return Ok(dir_stat);
+            }
+
+            if STATIC_FILES.contains(&rel) {
+                return Ok(file_stat);
+            }
+
+            if rel == "self" {
+                return Ok(dir_stat);
+            }
+
+            if rel.parse::<i32>().is_ok() {
+                return Ok(dir_stat);
+            }
+
+            if let Some((pid, subfile)) = parse_pid_path(rel) {
+                if pid == 0 {
+                    return Err(Error::NotFound);
+                }
+                let info = self.proc_info_async(pid, caller_tid).await?;
+                let data = format_proc_info(subfile, &info)?;
+                return Ok(DirEntryStat {
+                    size: data.len() as u64,
+                    mode: 0o100444u32,
+                    nlink: 1,
+                    ..Default::default()
+                });
             }
 
             Err(Error::NotFound)

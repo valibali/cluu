@@ -14,7 +14,7 @@ use libcluu::runtime as _;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::format;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp;
 use core::mem::size_of;
@@ -41,9 +41,9 @@ mod view;
 
 use fd_table::{FdTable, OpenFile};
 use mount::MountTable;
-use mount::DirEntry;
+use mount::{DirEntry, DirEntryStat};
 
-use libcluu::async_runtime::Runtime;
+use libcluu::async_runtime::{IpcCallFuture, Runtime};
 use libcluu::boot::TOKEN_EXTRA_0;
 use libcluu::boot::{PARAM_ARGC, PARAM_ARGV_OFFSET, PROCESS_INFO_ADDR};
 use libcluu::mem::PAGE_SIZE;
@@ -61,6 +61,19 @@ const TWO_USIZE_BYTES: usize = size_of::<usize>() * 2;
 enum VfsCompletion {
     Open { reply_token: usize, client_id: usize, result: Result<OpenFile> },
     Readdir { reply_token: usize, client_id: usize, result: Result<Vec<DirEntry>> },
+    Stat { reply_token: usize, client_id: usize, result: Result<DirEntryStat> },
+    Read { reply_token: usize, client_id: usize, result: Result<Vec<u8>> },
+    Write { reply_token: usize, client_id: usize, result: Result<usize> },
+    Unlink { reply_token: usize, result: Result<()> },
+    Mkdir { reply_token: usize, result: Result<()> },
+    Rmdir { reply_token: usize, result: Result<()> },
+    Rename { reply_token: usize, result: Result<()> },
+    Link { reply_token: usize, result: Result<()> },
+    CreateFile { reply_token: usize, result: Result<()> },
+    Realpath { reply_token: usize, result: Result<String> },
+    TtyReadGrant { reply_token: usize, target_base: usize, target_space: usize, result: Result<Vec<u8>> },
+    TtyReadRing { reply_token: usize, client_id: usize, max_fill: usize, result: Result<Vec<u8>> },
+    PtsVerb { reply_token: usize, label: u32, result: Result<Vec<u8>> },
 }
 
 // VFS region layout — kept at the legacy [0x6000_0000, 0x7900_0000) range.
@@ -188,6 +201,28 @@ impl StatInfo {
         buf[28..32].copy_from_slice(&self.gid.to_le_bytes());
         buf[32..40].copy_from_slice(&self.blocks.to_le_bytes());
         buf
+    }
+}
+
+fn op_reply_label(op: VfsOp) -> u32 {
+    match op {
+        VfsOp::Open => VFS_OPEN,
+        VfsOp::Close => VFS_CLOSE,
+        VfsOp::ReadGrant => VFS_READ_GRANT,
+        VfsOp::Readdir => VFS_READDIR,
+        VfsOp::MapElf => VFS_MAP_ELF,
+        VfsOp::Write => VFS_WRITE,
+        VfsOp::Stat => VFS_STAT,
+        VfsOp::Fstat => VFS_FSTAT,
+        VfsOp::Unlink => VFS_UNLINK,
+        VfsOp::Mkdir => VFS_MKDIR,
+        VfsOp::Rmdir => VFS_RMDIR,
+        VfsOp::Rename => VFS_RENAME,
+        VfsOp::RingSetup => VFS_RING_SETUP,
+        VfsOp::ReadRing => VFS_READ_RING,
+        VfsOp::Link => VFS_LINK,
+        VfsOp::Realpath => VFS_REALPATH,
+        VfsOp::BounceSetup => VFS_BOUNCE_SETUP,
     }
 }
 
@@ -359,6 +394,45 @@ fn run_vfs() -> Result<()> {
                     }
                     VfsCompletion::Readdir { reply_token, client_id, result } => {
                         server.complete_async_readdir(reply_token, client_id, result);
+                    }
+                    VfsCompletion::Stat { reply_token, client_id: _, result } => {
+                        server.complete_async_stat(reply_token, result);
+                    }
+                    VfsCompletion::Read { reply_token, client_id: _, result } => {
+                        server.complete_async_read(reply_token, result);
+                    }
+                    VfsCompletion::Write { reply_token, client_id: _, result } => {
+                        server.complete_async_write(reply_token, result);
+                    }
+                    VfsCompletion::Unlink { reply_token, result } => {
+                        server.complete_async_simple(reply_token, VFS_UNLINK, result);
+                    }
+                    VfsCompletion::Mkdir { reply_token, result } => {
+                        server.complete_async_simple(reply_token, VFS_MKDIR, result);
+                    }
+                    VfsCompletion::Rmdir { reply_token, result } => {
+                        server.complete_async_simple(reply_token, VFS_RMDIR, result);
+                    }
+                    VfsCompletion::Rename { reply_token, result } => {
+                        server.complete_async_simple(reply_token, VFS_RENAME, result);
+                    }
+                    VfsCompletion::Link { reply_token, result } => {
+                        server.complete_async_simple(reply_token, VFS_LINK, result);
+                    }
+                    VfsCompletion::CreateFile { reply_token, result } => {
+                        server.complete_async_simple(reply_token, VFS_OPEN, result);
+                    }
+                    VfsCompletion::Realpath { reply_token, result } => {
+                        server.complete_async_realpath(reply_token, result);
+                    }
+                    VfsCompletion::TtyReadGrant { reply_token, target_base, target_space, result } => {
+                        server.complete_tty_read_grant(reply_token, target_base, target_space, result);
+                    }
+                    VfsCompletion::TtyReadRing { reply_token, client_id, max_fill, result } => {
+                        server.complete_tty_read_ring(reply_token, client_id, max_fill, result);
+                    }
+                    VfsCompletion::PtsVerb { reply_token, label, result } => {
+                        server.complete_pts_verb(reply_token, label, result);
                     }
                 }
             }
@@ -906,6 +980,7 @@ impl VfsServer {
                 payload,
                 sender_tid,
                 libcluu::proto::pts::PTS_SET_PGRP_LABEL,
+                runtime,
             );
         }
         if msg.tag.label == libcluu::proto::pts::PTS_GET_TERMIOS_LABEL {
@@ -914,6 +989,7 @@ impl VfsServer {
                 payload,
                 sender_tid,
                 libcluu::proto::pts::PTS_GET_TERMIOS_LABEL,
+                runtime,
             );
         }
         if msg.tag.label == libcluu::proto::pts::PTS_SET_TERMIOS_LABEL {
@@ -922,6 +998,7 @@ impl VfsServer {
                 payload,
                 sender_tid,
                 libcluu::proto::pts::PTS_SET_TERMIOS_LABEL,
+                runtime,
             );
         }
         if msg.tag.label == libcluu::proto::pts::PTS_GET_WINSIZE_LABEL {
@@ -930,6 +1007,7 @@ impl VfsServer {
                 payload,
                 sender_tid,
                 libcluu::proto::pts::PTS_GET_WINSIZE_LABEL,
+                runtime,
             );
         }
         if msg.tag.label == libcluu::proto::pts::PTS_SET_WINSIZE_LABEL {
@@ -938,6 +1016,7 @@ impl VfsServer {
                 payload,
                 sender_tid,
                 libcluu::proto::pts::PTS_SET_WINSIZE_LABEL,
+                runtime,
             );
         }
         let Some(op) = VfsOp::from_label(msg.tag.label) else {
@@ -948,12 +1027,25 @@ impl VfsServer {
         let authenticated_client = (sender_tid != 0).then_some(sender_tid);
         vfs_trace!("vfs: handling {:?} reply_token={}", op, reply_token);
 
-        // Async dispatch for /proc (PID-keyed procfs)
-        if matches!(op, VfsOp::Open | VfsOp::Readdir) {
-            if let Ok(path_str) = core::str::from_utf8(payload) {
-                if self.mounts.is_async(path_str) {
-                    return self.dispatch_async(op, msg, payload, path_str, reply_token, authenticated_client, runtime);
+        // Async dispatch for async mounts — path-based ops only.
+        let async_path: Option<&str> = match op {
+            VfsOp::Open | VfsOp::Readdir | VfsOp::Stat
+            | VfsOp::Unlink | VfsOp::Mkdir | VfsOp::Rmdir | VfsOp::Realpath => {
+                core::str::from_utf8(payload).ok()
+            }
+            VfsOp::Rename | VfsOp::Link => {
+                let old_len = msg.words[2];
+                if old_len <= payload.len() {
+                    core::str::from_utf8(&payload[..old_len]).ok()
+                } else {
+                    None
                 }
+            }
+            _ => None,
+        };
+        if let Some(path_str) = async_path {
+            if self.mounts.is_async(path_str) {
+                return self.dispatch_async(op, msg, payload, path_str, reply_token, authenticated_client, runtime);
             }
         }
 
@@ -961,7 +1053,7 @@ impl VfsServer {
             VfsOp::Open => self.handle_open(msg, payload, reply_token, authenticated_client),
             VfsOp::Close => self.handle_close(msg, reply_token, authenticated_client),
             VfsOp::ReadGrant => {
-                self.handle_read_grant(msg, payload, reply_token, authenticated_client)
+                self.handle_read_grant(msg, payload, reply_token, authenticated_client, runtime)
             }
             VfsOp::Readdir => self.handle_readdir(msg, payload, reply_token, authenticated_client),
             VfsOp::MapElf => self.handle_map_elf(msg, reply_token, authenticated_client),
@@ -979,7 +1071,7 @@ impl VfsServer {
             VfsOp::RingSetup => {
                 self.handle_ring_setup(msg, payload, reply_token, authenticated_client)
             }
-            VfsOp::ReadRing => self.handle_read_ring(msg, reply_token, authenticated_client),
+            VfsOp::ReadRing => self.handle_read_ring(msg, reply_token, authenticated_client, runtime),
             VfsOp::BounceSetup => {
                 self.handle_bounce_setup(msg, payload, reply_token, authenticated_client)
             }
@@ -992,7 +1084,7 @@ impl VfsServer {
         &mut self,
         op: VfsOp,
         msg: &Message,
-        _payload: &[u8],
+        payload: &[u8],
         path: &str,
         reply_token: usize,
         caller_client: Option<usize>,
@@ -1001,25 +1093,48 @@ impl VfsServer {
         let client_id = match self.resolve_client_id("async", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
-                let mut reply_msg = Message::new(
-                    if matches!(op, VfsOp::Open) { VFS_OPEN } else { VFS_READDIR },
-                    [0; 6], 3,
-                );
+                let mut reply_msg = Message::new(op_reply_label(op), [0; 6], 1);
                 reply_msg.words[0] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         };
 
-        let (real_path, _target) = match self.view_check_path_with_target(client_id, path) {
+        let (_real_path, _target) = match self.view_check_path_with_target(client_id, path) {
             Ok(pt) => pt,
             Err(err) => {
-                let mut reply_msg = Message::new(
-                    if matches!(op, VfsOp::Open) { VFS_OPEN } else { VFS_READDIR },
-                    [0; 6], 3,
-                );
+                let mut reply_msg = Message::new(op_reply_label(op), [0; 6], 1);
                 reply_msg.words[0] = err.to_errno() as usize;
                 return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
+        };
+
+        // For two-path ops (Rename, Link), parse and view-check the second path.
+        let rel_new_path: Option<String> = if matches!(op, VfsOp::Rename | VfsOp::Link) {
+            let old_len = msg.words[2];
+            if old_len > payload.len() {
+                let mut reply_msg = Message::new(op_reply_label(op), [0; 6], 1);
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+            let new_path = match core::str::from_utf8(&payload[old_len..]) {
+                Ok(p) => p,
+                Err(_) => {
+                    let mut reply_msg = Message::new(op_reply_label(op), [0; 6], 1);
+                    reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            };
+            match self.view_check_path_with_target(client_id, new_path) {
+                Ok(_) => {}
+                Err(err) => {
+                    let mut reply_msg = Message::new(op_reply_label(op), [0; 6], 1);
+                    reply_msg.words[0] = err.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+            }
+            Some(self.mounts.split_path(new_path).1.to_string())
+        } else {
+            None
         };
 
         let backend_ref = self.mounts.get_async_backend(path).unwrap();
@@ -1053,6 +1168,86 @@ impl VfsServer {
                     let result = backend.readdir_async(&rel_path, caller_tid).await;
                     libcluu::async_runtime::push_completion(
                         VfsCompletion::Readdir { reply_token, client_id, result }
+                    );
+                });
+            }
+            VfsOp::Stat => {
+                runtime.spawn(async move {
+                    let backend: &'static dyn mount::AsyncMountBackend = unsafe {
+                        core::mem::transmute_copy::<[usize; 2], &'static dyn mount::AsyncMountBackend>(&backend_parts)
+                    };
+                    let result = backend.stat_async(&rel_path, &full_path, caller_tid).await;
+                    libcluu::async_runtime::push_completion(
+                        VfsCompletion::Stat { reply_token, client_id, result }
+                    );
+                });
+            }
+            VfsOp::Unlink => {
+                runtime.spawn(async move {
+                    let backend: &'static dyn mount::AsyncMountBackend = unsafe {
+                        core::mem::transmute_copy::<[usize; 2], &'static dyn mount::AsyncMountBackend>(&backend_parts)
+                    };
+                    let result = backend.unlink_async(&rel_path).await;
+                    libcluu::async_runtime::push_completion(
+                        VfsCompletion::Unlink { reply_token, result }
+                    );
+                });
+            }
+            VfsOp::Mkdir => {
+                let mode = msg.words[2];
+                runtime.spawn(async move {
+                    let backend: &'static dyn mount::AsyncMountBackend = unsafe {
+                        core::mem::transmute_copy::<[usize; 2], &'static dyn mount::AsyncMountBackend>(&backend_parts)
+                    };
+                    let result = backend.mkdir_async(&rel_path, mode).await;
+                    libcluu::async_runtime::push_completion(
+                        VfsCompletion::Mkdir { reply_token, result }
+                    );
+                });
+            }
+            VfsOp::Rmdir => {
+                runtime.spawn(async move {
+                    let backend: &'static dyn mount::AsyncMountBackend = unsafe {
+                        core::mem::transmute_copy::<[usize; 2], &'static dyn mount::AsyncMountBackend>(&backend_parts)
+                    };
+                    let result = backend.rmdir_async(&rel_path).await;
+                    libcluu::async_runtime::push_completion(
+                        VfsCompletion::Rmdir { reply_token, result }
+                    );
+                });
+            }
+            VfsOp::Rename => {
+                let rel_new = rel_new_path.unwrap_or_default();
+                runtime.spawn(async move {
+                    let backend: &'static dyn mount::AsyncMountBackend = unsafe {
+                        core::mem::transmute_copy::<[usize; 2], &'static dyn mount::AsyncMountBackend>(&backend_parts)
+                    };
+                    let result = backend.rename_async(&rel_path, &rel_new).await;
+                    libcluu::async_runtime::push_completion(
+                        VfsCompletion::Rename { reply_token, result }
+                    );
+                });
+            }
+            VfsOp::Link => {
+                let rel_new = rel_new_path.unwrap_or_default();
+                runtime.spawn(async move {
+                    let backend: &'static dyn mount::AsyncMountBackend = unsafe {
+                        core::mem::transmute_copy::<[usize; 2], &'static dyn mount::AsyncMountBackend>(&backend_parts)
+                    };
+                    let result = backend.link_async(&rel_path, &rel_new).await;
+                    libcluu::async_runtime::push_completion(
+                        VfsCompletion::Link { reply_token, result }
+                    );
+                });
+            }
+            VfsOp::Realpath => {
+                runtime.spawn(async move {
+                    let backend: &'static dyn mount::AsyncMountBackend = unsafe {
+                        core::mem::transmute_copy::<[usize; 2], &'static dyn mount::AsyncMountBackend>(&backend_parts)
+                    };
+                    let result = backend.realpath_async(&rel_path).await;
+                    libcluu::async_runtime::push_completion(
+                        VfsCompletion::Realpath { reply_token, result }
                     );
                 });
             }
@@ -1104,6 +1299,165 @@ impl VfsServer {
             }
             Err(err) => {
                 reply_msg.words[1] = err.to_errno() as usize;
+                let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
+    }
+
+    fn complete_async_stat(&mut self, reply_token: usize, result: Result<DirEntryStat>) {
+        let mut reply_msg = Message::new(VFS_STAT, [0; 6], 1);
+        match result {
+            Ok(stat) => {
+                let info = StatInfo {
+                    size: stat.size,
+                    mode: stat.mode,
+                    mtime: stat.mtime,
+                    nlink: stat.nlink,
+                    uid: stat.uid,
+                    gid: stat.gid,
+                    blocks: stat.blocks,
+                };
+                reply_msg.words[0] = 0;
+                let _ = reply_with_payload(reply_token, &reply_msg, &info.to_bytes());
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
+    }
+
+    fn complete_async_read(&mut self, reply_token: usize, result: Result<Vec<u8>>) {
+        let mut reply_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
+        match result {
+            Ok(data) => {
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = data.len();
+                reply_msg.words[2] = 0;
+                let _ = reply_with_payload(reply_token, &reply_msg, &data);
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
+    }
+
+    fn complete_async_write(&mut self, reply_token: usize, result: Result<usize>) {
+        let mut reply_msg = Message::new(VFS_WRITE, [0; 6], 2);
+        match result {
+            Ok(written) => {
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = written;
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+        let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+    }
+
+    fn complete_async_simple(&mut self, reply_token: usize, label: u32, result: Result<()>) {
+        let mut reply_msg = Message::new(label, [0; 6], 1);
+        match result {
+            Ok(()) => reply_msg.words[0] = 0,
+            Err(err) => reply_msg.words[0] = err.to_errno() as usize,
+        }
+        let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+    }
+
+    fn complete_async_realpath(&mut self, reply_token: usize, result: Result<String>) {
+        let mut reply_msg = Message::new(VFS_REALPATH, [0; 6], 2);
+        match result {
+            Ok(path) => {
+                let bytes = path.into_bytes();
+                reply_msg.words[1] = bytes.len();
+                let _ = reply_with_payload(reply_token, &reply_msg, &bytes);
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            }
+        }
+    }
+
+    fn complete_tty_read_grant(
+        &mut self,
+        reply_token: usize,
+        target_base: usize,
+        target_space: usize,
+        result: Result<Vec<u8>>,
+    ) {
+        let mut reply_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
+        match result {
+            Ok(data) => {
+                let _ = self.grant_data_to_caller(&data, target_base, target_space, &mut reply_msg);
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+        let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+    }
+
+    fn complete_tty_read_ring(
+        &mut self,
+        reply_token: usize,
+        client_id: usize,
+        max_fill: usize,
+        result: Result<Vec<u8>>,
+    ) {
+        let mut reply_msg = Message::new(VFS_READ_RING, [0; 6], 4);
+        match result {
+            Ok(data) => {
+                let Some(session) = self.read_rings.get(&client_id).copied() else {
+                    reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
+                    let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    return;
+                };
+                let backing = unsafe {
+                    core::slice::from_raw_parts_mut(session.source_base as *mut u8, session.bytes)
+                };
+                let mut ring = match SharedRing::attach(backing) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        reply_msg.words[0] = err.to_errno() as usize;
+                        let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                        return;
+                    }
+                };
+                let pushed = ring.push(&data);
+                let notify_seq = if pushed > 0 {
+                    ring.bump_notify_seq()
+                } else {
+                    ring.notify_seq()
+                };
+                let eof = data.len() < max_fill;
+                reply_msg.words[0] = 0;
+                reply_msg.words[1] = pushed;
+                reply_msg.words[2] = notify_seq as usize;
+                reply_msg.words[3] = if eof { 1 } else { 0 };
+            }
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+            }
+        }
+        let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+    }
+
+    fn complete_pts_verb(
+        &mut self,
+        reply_token: usize,
+        label: u32,
+        result: Result<Vec<u8>>,
+    ) {
+        match result {
+            Ok(raw_bytes) => {
+                let _ = libcluu::syscall::ipc_reply(reply_token, &raw_bytes);
+            }
+            Err(err) => {
+                let mut reply_msg = Message::new(label, [0; 6], 1);
+                reply_msg.words[0] = err.to_errno() as usize;
                 let _ = ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
             }
         }
@@ -1550,6 +1904,7 @@ impl VfsServer {
         payload: &[u8],
         sender_tid: usize,
         label: u32,
+        runtime: &mut Runtime,
     ) -> Result<()> {
         let reply_token = match ipc::extract_reply_id(msg) {
             Some(t) => t,
@@ -1596,40 +1951,38 @@ impl VfsServer {
             }
         };
 
-        // Forward `label` to cluuterm synchronously.
-        // words[0] = payload_len (parse_message convention), words[1] = pts_id.
-        // We build a send buffer (header + payload) and an oversized recv buffer so
-        // that the full cluuterm reply (header + postcard payload) is captured and
-        // can be forwarded verbatim to the original caller via ipc_reply.
-        let hdr_len = core::mem::size_of::<Message>();
-        let fwd_req = Message::new(
-            label,
-            [payload.len(), pts_id as usize, 0, 0, 0, 0],
-            2,
-        );
-        let mut send_buf = alloc::vec![0u8; hdr_len + payload.len()];
-        send_buf[..hdr_len].copy_from_slice(fwd_req.as_bytes());
-        send_buf[hdr_len..].copy_from_slice(payload);
-
-        // 256 bytes is ample for postcard-encoded PTS_* replies (Termios is the
-        // largest at ~50 bytes; SetPgrpReply / SetTermiosReply are a few bytes).
-        let mut recv_buf = [0u8; 256];
-        loop {
-            match libcluu::syscall::ipc_call(cluuterm_ep, &send_buf, &mut recv_buf) {
-                Ok(reply_len) => {
-                    // Forward the raw reply (header + payload) to the original caller.
-                    let _ = libcluu::syscall::ipc_reply(reply_token, &recv_buf[..reply_len]);
-                    return Ok(());
+        // Async forward: spawn IpcCallFuture to avoid blocking the recv loop.
+        // The completion handler reconstructs the raw reply (header + payload)
+        // and forwards it verbatim to the original caller via ipc_reply.
+        let payload_vec = payload.to_vec();
+        let pts_id_usize = pts_id as usize;
+        runtime.spawn(async move {
+            let mut fwd_req = Message::new(
+                label,
+                [payload_vec.len(), pts_id_usize, 0, 0, 0, 0],
+                2,
+            );
+            let result = IpcCallFuture::new_with_payload(cluuterm_ep, &mut fwd_req, &payload_vec).await;
+            let completion = match result {
+                Ok((reply_msg, reply_payload)) => {
+                    let mut raw = Vec::with_capacity(
+                        core::mem::size_of::<Message>() + reply_payload.len(),
+                    );
+                    raw.extend_from_slice(reply_msg.as_bytes());
+                    raw.extend_from_slice(&reply_payload);
+                    Ok(raw)
                 }
-                Err(Error::WouldBlock) => {
-                    let _ = libcluu::syscall::yield_cpu();
-                }
-                Err(err) => {
-                    reply_msg.words[0] = err.to_errno() as usize;
-                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
-                }
-            }
-        }
+                Err(e) => Err(e),
+            };
+            libcluu::async_runtime::push_completion(
+                VfsCompletion::PtsVerb {
+                    reply_token,
+                    label,
+                    result: completion,
+                },
+            );
+        });
+        Ok(())
     }
 
     /// Handle `VFS_DERIVE_CHILD_FD_LABEL` — clone a parent's open file to a
@@ -3177,6 +3530,7 @@ impl VfsServer {
         msg: &Message,
         reply_token: usize,
         caller_client: Option<usize>,
+        runtime: &mut Runtime,
     ) -> Result<()> {
         let mut reply_msg = Message::new(VFS_READ_RING, [0; 6], 4);
         let client_id = match self.resolve_client_id("read_ring", caller_client, msg.words[1]) {
@@ -3224,6 +3578,53 @@ impl VfsServer {
             reply_msg.words[2] = ring.notify_seq() as usize;
             reply_msg.words[3] = 0;
             return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+        }
+
+        // Async tty read: spawn IpcCallFuture to avoid blocking the recv loop.
+        // Non-tty device types (null/zero/urandom/fb) stay on the sync path below.
+        if let OpenFile::Device(device) = &file {
+            use fd_table::DeviceType;
+            if matches!(
+                device.device_type,
+                DeviceType::Tty { .. } | DeviceType::Tty0 { .. } | DeviceType::Console { .. }
+            ) {
+                let (stored_ep, vt_idx) = match &device.device_type {
+                    DeviceType::Tty { vt_index, endpoint } => (*endpoint, *vt_index as usize),
+                    DeviceType::Tty0 { endpoint } => (*endpoint, 0),
+                    DeviceType::Console { endpoint } => (*endpoint, 0),
+                    _ => (0, 0),
+                };
+                let ep = if stored_ep != 0 {
+                    stored_ep
+                } else {
+                    self.tty_endpoints.get(vt_idx).copied().unwrap_or(0)
+                };
+                if ep == 0 {
+                    reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
+                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                }
+                let req = Message::new(
+                    libcluu::ipc::TTY_READ_REQUEST_LABEL,
+                    [max_fill, 0, 0, 0, 0, 0],
+                    1,
+                );
+                runtime.spawn(async move {
+                    let result = IpcCallFuture::new(ep, req).await;
+                    let completion = match result {
+                        Ok((_reply, payload)) => Ok(payload),
+                        Err(e) => Err(e),
+                    };
+                    libcluu::async_runtime::push_completion(
+                        VfsCompletion::TtyReadRing {
+                            reply_token,
+                            client_id,
+                            max_fill,
+                            result: completion,
+                        },
+                    );
+                });
+                return Ok(());
+            }
         }
 
         let data = self.read_file_chunk(&file, offset, max_fill)?;
@@ -3323,32 +3724,9 @@ impl VfsServer {
                     DeviceType::Tty { .. }
                     | DeviceType::Tty0 { .. }
                     | DeviceType::Console { .. } => {
-                        let (stored_ep, vt_idx) = match &device.device_type {
-                            DeviceType::Tty { vt_index, endpoint } => (*endpoint, *vt_index as usize),
-                            DeviceType::Tty0 { endpoint } => (*endpoint, 0usize),
-                            DeviceType::Console { endpoint } => (*endpoint, 0usize),
-                            _ => unreachable!(),
-                        };
-                        let ep = if stored_ep != 0 {
-                            stored_ep
-                        } else {
-                            self.tty_endpoints.get(vt_idx).copied().unwrap_or(0)
-                        };
-                        if ep == 0 {
-                            return Err(Error::InvalidState);
-                        }
-                        // Forward read to tty via IPC.
-                        let req = Message::new(
-                            libcluu::ipc::TTY_READ_REQUEST_LABEL,
-                            [requested, 0, 0, 0, 0, 0],
-                            1,
-                        );
-                        let mut tty_buf = [0u8; 256];
-                        let (_reply, payload_len) =
-                            ipc::call_with_reply_buf(ep, &req, &[], &mut tty_buf)?;
-                        let data_start = core::mem::size_of::<Message>();
-                        let data_len = payload_len.min(requested);
-                        Ok(tty_buf[data_start..data_start + data_len].to_vec())
+                        // TTY reads are handled asynchronously by handle_read_ring
+                        // via IpcCallFuture. Reaching here is a programming error.
+                        Err(Error::InvalidState)
                     }
                     DeviceType::Fb { phys, size, width, height, pitch, bpp } => {
                         // 40-byte little-endian FB header:
@@ -3457,6 +3835,7 @@ impl VfsServer {
         payload: &[u8],
         reply_token: usize,
         caller_client: Option<usize>,
+        runtime: &mut Runtime,
     ) -> Result<()> {
         let fd = msg.words[2];
         let offset = msg.words[3];
@@ -3569,6 +3948,50 @@ impl VfsServer {
                 )?;
             }
             OpenFile::Device(device) => {
+                use fd_table::DeviceType;
+                // Async tty read: spawn IpcCallFuture to avoid blocking the recv loop.
+                // Non-tty device types (null/zero/urandom/fb) stay on the sync path below.
+                if matches!(
+                    device.device_type,
+                    DeviceType::Tty { .. } | DeviceType::Tty0 { .. } | DeviceType::Console { .. }
+                ) {
+                    let (stored_ep, vt_idx) = match &device.device_type {
+                        DeviceType::Tty { vt_index, endpoint } => (*endpoint, *vt_index as usize),
+                        DeviceType::Tty0 { endpoint } => (*endpoint, 0),
+                        DeviceType::Console { endpoint } => (*endpoint, 0),
+                        _ => (0, 0),
+                    };
+                    let ep = if stored_ep != 0 {
+                        stored_ep
+                    } else {
+                        self.tty_endpoints.get(vt_idx).copied().unwrap_or(0)
+                    };
+                    if ep == 0 {
+                        reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
+                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    }
+                    let req = Message::new(
+                        libcluu::ipc::TTY_READ_REQUEST_LABEL,
+                        [requested, 0, 0, 0, 0, 0],
+                        1,
+                    );
+                    runtime.spawn(async move {
+                        let result = IpcCallFuture::new(ep, req).await;
+                        let completion = match result {
+                            Ok((_reply, payload)) => Ok(payload),
+                            Err(e) => Err(e),
+                        };
+                        libcluu::async_runtime::push_completion(
+                            VfsCompletion::TtyReadGrant {
+                                reply_token,
+                                target_base,
+                                target_space,
+                                result: completion,
+                            },
+                        );
+                    });
+                    return Ok(());
+                }
                 let _ = debug_print(&format!(
                     "vfs: read_grant device client={} fd={} device_type={:?}",
                     client_id, fd, core::mem::discriminant(&device.device_type)
@@ -4217,49 +4640,9 @@ impl VfsServer {
             DeviceType::Tty { .. }
             | DeviceType::Tty0 { .. }
             | DeviceType::Console { .. } => {
-                // TTY devices: forward read to the tty endpoint via IPC.
-                // For grant-based reads, we proxy through IPC_CALL to the tty.
-                // Resolve vt_index and stored endpoint from the device type.
-                let (stored_ep, vt_idx) = match &device.device_type {
-                    DeviceType::Tty { vt_index, endpoint } => (*endpoint, *vt_index as usize),
-                    DeviceType::Tty0 { endpoint } => (*endpoint, 0usize),
-                    DeviceType::Console { endpoint } => (*endpoint, 0usize),
-                    _ => unreachable!(),
-                };
-                // Fall back to server-level tty_endpoints when the stored endpoint
-                // is 0 (device was opened before the tty service registered).
-                let ep = if stored_ep != 0 {
-                    stored_ep
-                } else {
-                    self.tty_endpoints.get(vt_idx).copied().unwrap_or(0)
-                };
-                if ep == 0 {
-                    return Err(Error::InvalidState);
-                }
-                let _ = debug_print(&format!(
-                    "vfs: read_grant_device tty ep={} vt_idx={} req={}",
-                    ep, vt_idx, requested
-                ));
-                // Send TTY_READ_REQUEST to the tty endpoint and wait for reply.
-                let req = Message::new(
-                    libcluu::ipc::TTY_READ_REQUEST_LABEL,
-                    [requested, 0, 0, 0, 0, 0],
-                    1,
-                );
-                let mut tty_buf = [0u8; 256];
-                let call_result = ipc::call_with_reply_buf(ep, &req, &[], &mut tty_buf);
-                let _ = debug_print(&format!(
-                    "vfs: read_grant_device tty call returned ok={}",
-                    call_result.is_ok()
-                ));
-                let (_reply_msg_out, payload_len) = call_result?;
-                let data_start = core::mem::size_of::<Message>();
-                let data_len = payload_len.min(requested);
-                if data_len > 0 {
-                    let data = &tty_buf[data_start..data_start + data_len];
-                    return self.grant_data_to_caller(data, target_base, target_space, reply_msg);
-                }
-                reply_msg.words[0] = 0;
+                // TTY reads are handled asynchronously by handle_read_grant
+                // via IpcCallFuture. Reaching here is a programming error.
+                reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
                 reply_msg.words[1] = 0;
                 reply_msg.words[2] = 0;
                 Ok(())
