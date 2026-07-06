@@ -845,6 +845,7 @@ struct VfsServer {
     /// Registry of live `/dev/pts/<id>` pseudo-terminal slaves.
     /// Heap-allocated so the address is stable for the `PtsBackend` raw pointer.
     pts_registry: alloc::boxed::Box<pts::PtsRegistry>,
+    dev_registry: alloc::boxed::Box<mount::DevRegistry>,
     /// Live tty:N main endpoints.  Populated lazily as registry grants arrive.
     /// Index 0 = tty:0 (VT0).  Used to satisfy read/write on /dev/tty* and
     /// /dev/tty0 when the DeviceBackend was opened before the tty service
@@ -909,6 +910,12 @@ impl VfsServer {
             alloc::boxed::Box::new(pts_backend),
         );
 
+        let dev_registry = alloc::boxed::Box::new(mount::DevRegistry::new());
+        let dev_reg_ptr: *const mount::DevRegistry = &*dev_registry;
+        let dev_reg_mount = mount::DevRegistryMount::new(dev_reg_ptr);
+        mounts.mount_sync("/dev/input", alloc::boxed::Box::new(dev_reg_mount));
+        let _ = debug_print("vfs: mounted /dev/input (devreg)");
+
         Self {
             endpoint,
             space_token,
@@ -928,6 +935,7 @@ impl VfsServer {
             container_memfs: BTreeMap::new(),
             bounce_pool,
             pts_registry,
+            dev_registry,
             tty_endpoints: [0usize; 4],
             pending_pts_reads: BTreeMap::new(),
             virtual_fds: BTreeMap::new(),
@@ -961,6 +969,9 @@ impl VfsServer {
         // PTS control messages.
         if msg.tag.label == PTS_REGISTER_LABEL {
             return self.handle_pts_register(msg, sender_tid);
+        }
+        if msg.tag.label == libcluu::ipc::VFS_REGISTER_DEV_LABEL {
+            return self.handle_dev_register(msg, payload);
         }
         if msg.tag.label == libcluu::proto::pts::VFS_REGISTER_PTS_LABEL {
             return self.handle_vfs_register_pts(msg, payload, sender_tid);
@@ -1641,6 +1652,33 @@ impl VfsServer {
     /// Handle VFS_CONTAINER_CLEANUP_LABEL: clean up container storage on exit or destroy.
     fn handle_flush(&self) -> Result<()> {
         let _ = debug_print("vfs: flush requested (ext2 writes are synchronous, no-op)");
+        Ok(())
+    }
+
+    fn handle_dev_register(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+        let device_kind = msg.words[0] as u8;
+        let driver_endpoint = msg.words[1];
+        let path_len = msg.words[2].min(payload.len());
+        let path = core::str::from_utf8(&payload[..path_len])
+            .unwrap_or("")
+            .trim_end_matches('\0');
+
+        if path.is_empty() {
+            return Ok(());
+        }
+
+        self.dev_registry.register(mount::DevRegistryEntry {
+            device_id: device_kind as u32,
+            class: device_kind,
+            driver_endpoint,
+            path: alloc::string::String::from(path),
+        });
+
+        let _ = libcluu::debug_print(&alloc::format!(
+            "vfs: registered dev {} (kind={}, ep={})",
+            path, device_kind, driver_endpoint
+        ));
+
         Ok(())
     }
 
@@ -3719,17 +3757,13 @@ impl VfsServer {
                         Err(Error::InvalidState)
                     }
                     DeviceType::Fb { phys, size, width, height, pitch, bpp } => {
-                        // 40-byte little-endian FB header:
-                        //   u32 magic, u32 width, u32 height, u32 pitch, u32 bpp,
-                        //   u32 reserved, u64 size, u64 phys
-                        const FB_HEADER_MAGIC: u32 = 0x4642_4630; // "0FBF" stored LE
+                        const FB_HEADER_MAGIC: u32 = 0x4642_4630;
                         let mut payload = [0u8; 40];
                         payload[0..4].copy_from_slice(&FB_HEADER_MAGIC.to_le_bytes());
                         payload[4..8].copy_from_slice(&width.to_le_bytes());
                         payload[8..12].copy_from_slice(&height.to_le_bytes());
                         payload[12..16].copy_from_slice(&pitch.to_le_bytes());
                         payload[16..20].copy_from_slice(&bpp.to_le_bytes());
-                        // bytes 20..24 reserved (zero)
                         payload[24..32].copy_from_slice(&size.to_le_bytes());
                         payload[32..40].copy_from_slice(&phys.to_le_bytes());
                         let off = offset;
@@ -3738,6 +3772,9 @@ impl VfsServer {
                         }
                         let n = (payload.len() - off).min(requested);
                         Ok(payload[off..off + n].to_vec())
+                    }
+                    DeviceType::Dynamic { .. } => {
+                        Err(Error::InvalidState)
                     }
                 }
             }
@@ -4653,6 +4690,12 @@ impl VfsServer {
                 payload[32..40].copy_from_slice(&phys.to_le_bytes());
                 let n = requested.min(payload.len());
                 self.grant_data_to_caller(&payload[..n], target_base, target_space, reply_msg)
+            }
+            DeviceType::Dynamic { .. } => {
+                reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
+                reply_msg.words[1] = 0;
+                reply_msg.words[2] = 0;
+                Ok(())
             }
         }
     }

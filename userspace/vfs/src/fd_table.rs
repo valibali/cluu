@@ -69,6 +69,13 @@ pub enum DeviceType {
         pitch: u32,
         bpp: u32,
     },
+    /// Devmgr-registered device (input, disk, future classes).
+    /// Reads/writes route to `driver_endpoint` via async IPC.
+    Dynamic {
+        device_id: u32,
+        class: u8,
+        driver_endpoint: usize,
+    },
 }
 
 /// A file entry backed by an in-memory filesystem (per-container tmpfs).

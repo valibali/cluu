@@ -700,13 +700,6 @@ impl DeviceBackend {
         }
     }
 
-    /// Update a tty endpoint (called when registry grants arrive).
-    pub fn set_tty_endpoint(&mut self, index: usize, endpoint: usize) {
-        if index < 4 {
-            self.tty_endpoints[index] = endpoint;
-        }
-    }
-
     /// Set framebuffer geometry (called at VFS boot from PARAM_VFS_FB_* params).
     pub fn set_fb(&mut self, info: FbInfo) {
         self.fb = Some(info);
@@ -796,6 +789,118 @@ impl MountBackend for DeviceBackend {
             is_dir: false,
             stat: dev_stat,
         }).collect())
+    }
+}
+
+/// Entry for a devmgr-registered device visible to this VFS instance.
+#[derive(Clone)]
+pub struct DevRegistryEntry {
+    pub device_id: u32,
+    pub class: u8,
+    pub driver_endpoint: usize,
+    pub path: String,
+}
+
+/// Dynamic /dev registry — devmgr-registered devices (input, disk, etc.).
+///
+/// Heap-allocated in VfsServer; raw pointer handed to `DevRegistryMount`.
+/// Mirrors the PtsRegistry pattern.
+pub struct DevRegistry {
+    entries: alloc::vec::Vec<DevRegistryEntry>,
+}
+
+impl DevRegistry {
+    pub fn new() -> Self {
+        Self {
+            entries: alloc::vec::Vec::new(),
+        }
+    }
+
+    pub fn register(&mut self, entry: DevRegistryEntry) {
+        self.entries.push(entry);
+    }
+
+    pub fn find(&self, rel_path: &str) -> Option<&DevRegistryEntry> {
+        let rel = rel_path.trim_start_matches('/');
+        self.entries.iter().find(|e| {
+            let p = e.path.trim_start_matches("/dev/");
+            p == rel
+        })
+    }
+
+    pub fn list(&self) -> &[DevRegistryEntry] {
+        &self.entries
+    }
+}
+
+pub struct DevRegistryMount {
+    registry: *const DevRegistry,
+}
+
+unsafe impl Send for DevRegistryMount {}
+unsafe impl Sync for DevRegistryMount {}
+
+impl DevRegistryMount {
+    pub fn new(registry: *const DevRegistry) -> Self {
+        Self { registry }
+    }
+
+    fn reg(&self) -> &DevRegistry {
+        unsafe { &*self.registry }
+    }
+}
+
+impl MountBackend for DevRegistryMount {
+    fn name(&self) -> &'static str {
+        "devreg"
+    }
+
+    fn open(&self, rel_path: &str, full_path: &str, _caller_tid: usize) -> Result<OpenFile> {
+        use crate::fd_table::{DeviceFile, DeviceType};
+
+        let entry = self.reg().find(rel_path).ok_or(Error::NotFound)?;
+        Ok(OpenFile::Device(DeviceFile {
+            device_type: DeviceType::Dynamic {
+                device_id: entry.device_id,
+                class: entry.class,
+                driver_endpoint: entry.driver_endpoint,
+            },
+            path: String::from(full_path),
+            rights: u64::MAX,
+        }))
+    }
+
+    fn readdir(&self, rel_path: &str, _caller_tid: usize) -> Result<Vec<DirEntry>> {
+        let rel = rel_path.trim_start_matches('/');
+        if !rel.is_empty() {
+            return Err(Error::NotFound);
+        }
+
+        let dev_stat = DirEntryStat {
+            size: 0,
+            mode: 0o020666u32,
+            mtime: 0,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            blocks: 0,
+        };
+
+        Ok(self
+            .reg()
+            .entries
+            .iter()
+            .map(|e| {
+                let name = alloc::string::String::from(
+                    e.path.trim_start_matches("/dev/"),
+                );
+                DirEntry {
+                    name,
+                    is_dir: false,
+                    stat: dev_stat,
+                }
+            })
+            .collect())
     }
 }
 
