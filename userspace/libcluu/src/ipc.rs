@@ -24,6 +24,7 @@ pub const IPC_BACKOFF_MAX_DEFAULT: u32 = 64;
 /// Inline stack buffer size for small IPC payloads (avoid heap use).
 const IPC_INLINE_STACK_MAX: usize = 512;
 pub const KBD_EVENT_LABEL: u32 = 1;
+pub const KBD_RAW_LABEL: u32 = 0x600;
 pub const TTY_READ_LABEL: u32 = 1;
 pub const TTY_WRITE_LABEL: u32 = 2;
 pub const TTY_CTL_LABEL: u32 = 3;
@@ -293,6 +294,8 @@ pub const VTMGR_UNLOCK_VT_SWITCH_LABEL: u32 = 112;
 //     words[0] = id (u32).  Fire-and-forget (no reply expected).
 // ──────────────────────────────────────────────────────────────────────
 pub const PTS_REGISTER_LABEL: u32   = 0x70;
+pub const VFS_REGISTER_DEV_LABEL: u32 = 0x71;
+pub const DEV_READ_REQUEST_LABEL: u32 = 0x72;
 pub const PTS_UNREGISTER_LABEL: u32 = 0x71;
 pub const PTS_READ_LABEL: u32       = 0x72;
 pub const PTS_WRITE_LABEL: u32      = 0x73;
@@ -351,6 +354,9 @@ pub const BLK_TID_CLEANUP: u32 = 0x315;
 pub const DEVMGR_REGISTER_LABEL: u32 = 0x500;
 pub const DEVMGR_GRANT_REGION_LABEL: u32 = 0x501;
 pub const DEVMGR_REVOKE_LABEL: u32 = 0x502;
+pub const DEVMGR_REGISTER_CHAR_LABEL: u32 = 0x510;
+pub const DEVMGR_GRANT_DEVICE_LABEL: u32 = 0x511;
+pub const DEVMGR_LIST_FOR_ENVELOPE_LABEL: u32 = 0x512;
 
 // tpmd IPC labels (per-service label space)
 pub const TPMD_STARTUP_LABEL: u32    = 1;
