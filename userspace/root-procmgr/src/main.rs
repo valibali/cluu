@@ -61,9 +61,11 @@ use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_id;
 use libcluu::ipc::parse_message;
 use libcluu::ipc::SharedRing;
+use libcluu::ipc::call;
 use libcluu::ipc::CWD_MAGIC as SPAWN_CWD_MAGIC;
 use libcluu::ipc::ENV_MAGIC as SPAWN_ENV_MAGIC;
 use libcluu::ipc::REDIR_MAGIC as SPAWN_REDIR_MAGIC;
+use libcluu::ipc::DEVMGR_GRANT_REGION_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_LIST_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_RUN_LABEL;
 use libcluu::ipc::PROCMGR_CONTAINER_STATS_LABEL;
@@ -276,6 +278,9 @@ struct ProcessManager {
     /// virtio-blk listen endpoint for BLK_TID_CLEANUP broadcasts. Resolved
     /// lazily on first cleanup so we don't depend on blkdev boot order.
     blkdev_endpoint: usize,
+    /// devmgr listen endpoint for BlockRegion token minting at session
+    /// creation. Resolved lazily on first session create.
+    devmgr_endpoint: usize,
     space_token: usize,     // Our address space token for grants
     grant_base_next: usize, // Reused base address for grant buffer
     clock_token: usize,
@@ -366,6 +371,7 @@ impl ProcessManager {
             vfs_endpoint: 0,
             cached_main_tid: 0,
             blkdev_endpoint: 0,
+            devmgr_endpoint: 0,
             space_token: info.tokens[TOKEN_SPACE],
             grant_base_next: 0x50100000, // Start after virtqueue region
             clock_token: info.tokens[TOKEN_CLOCK],
@@ -4128,6 +4134,37 @@ impl ProcessManager {
         let _ = send(self.blkdev_endpoint, &msg, IpcFlags::empty());
     }
 
+    /// Ask devmgr for a scoped BlockRegion token for the new session.
+    /// Returns None if devmgr is unavailable or has no root BlockRegion
+    /// token yet — session creation proceeds without a block cap in that
+    /// case, matching the graceful-degradation principle.
+    fn mint_session_block_region(&mut self) -> Option<usize> {
+        if self.devmgr_endpoint == 0 {
+            self.devmgr_endpoint =
+                registry::subscribe_output("devmgr", "main").unwrap_or(0);
+        }
+        let ep = self.devmgr_endpoint;
+        if ep == 0 {
+            return None;
+        }
+        let mut msg = Message::new(
+            DEVMGR_GRANT_REGION_LABEL,
+            [0, 0, 0, 0, 0, 0],
+            3,
+        );
+        if call(ep, &mut msg, IpcFlags::empty()).is_err() {
+            return None;
+        }
+        if msg.words[0] != 0 {
+            return None;
+        }
+        let handle = msg.words[1];
+        if handle == 0 {
+            return None;
+        }
+        Some(handle)
+    }
+
     /// Spawn a `session-procmgr` instance for the given session.
     ///
     /// Serialises a `procmgr_common::wire::SessionEnvelope` and passes it to
@@ -4139,6 +4176,13 @@ impl ProcessManager {
     fn spawn_session_procmgr_for(&mut self, session_id: u32, user_name: &str) {
         use procmgr_common::wire::SessionEnvelope;
 
+        let block_region_cap = self.mint_session_block_region();
+
+        let mut caps: alloc::vec::Vec<(alloc::string::String, u64)> = alloc::vec::Vec::new();
+        if let Some(handle) = block_region_cap {
+            caps.push(("block_region".into(), handle as u64));
+        }
+
         let envelope = SessionEnvelope {
             sid: (session_id & 0xFF) as u8,
             generation: 0,
@@ -4146,7 +4190,7 @@ impl ProcessManager {
             profile: alloc::string::String::new(),
             pid_base: ((session_id & 0xFF) as i32)
                 << procmgr_common::pid::LOCAL_BITS,
-            caps: alloc::vec::Vec::new(),
+            caps,
             env_defaults: alloc::vec::Vec::new(),
             view_spec: alloc::string::String::new(),
         };
@@ -4264,6 +4308,13 @@ impl ProcessManager {
     fn spawn_session_vfs_for(&mut self, session_id: u32, user_name: &str) {
         use procmgr_common::wire::SessionEnvelope;
 
+        let block_region_cap = self.mint_session_block_region();
+
+        let mut caps: alloc::vec::Vec<(alloc::string::String, u64)> = alloc::vec::Vec::new();
+        if let Some(handle) = block_region_cap {
+            caps.push(("block_region".into(), handle as u64));
+        }
+
         let envelope = SessionEnvelope {
             sid: (session_id & 0xFF) as u8,
             generation: 0,
@@ -4271,7 +4322,7 @@ impl ProcessManager {
             profile: alloc::string::String::new(),
             pid_base: ((session_id & 0xFF) as i32)
                 << procmgr_common::pid::LOCAL_BITS,
-            caps: alloc::vec::Vec::new(),
+            caps,
             env_defaults: alloc::vec::Vec::new(),
             view_spec: alloc::string::String::new(),
         };

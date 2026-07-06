@@ -556,6 +556,7 @@ pub fn resolve_token_object(
         (ObjectRef::Frame(_), ObjectType::Frame) => Ok(obj_ref),
         (ObjectRef::Notification(_), ObjectType::Notification) => Ok(obj_ref),
         (ObjectRef::VfsViewManager { .. }, ObjectType::VfsViewManager) => Ok(obj_ref),
+        (ObjectRef::BlockRegion { .. }, ObjectType::BlockRegion) => Ok(obj_ref),
         _ => Err("Object type mismatch"),
     }
 }
@@ -577,6 +578,7 @@ pub fn check_object_type(
         (ObjectRef::Frame(_), ObjectType::Frame) => Ok(obj_ref),
         (ObjectRef::Notification(_), ObjectType::Notification) => Ok(obj_ref),
         (ObjectRef::VfsViewManager { .. }, ObjectType::VfsViewManager) => Ok(obj_ref),
+        (ObjectRef::BlockRegion { .. }, ObjectType::BlockRegion) => Ok(obj_ref),
         _ => Err("Object type mismatch"),
     }
 }
@@ -726,6 +728,7 @@ pub enum ObjectType {
     Frame,
     Notification,
     VfsViewManager,
+    BlockRegion,
 }
 
 /// Get current timestamp (monotonic nanoseconds since boot)

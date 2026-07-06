@@ -466,6 +466,7 @@ fn object_fields(object_ref: ObjectRef) -> (u8, u64) {
         ObjectRef::Frame(id) => (7, id.as_u64()),
         ObjectRef::Notification(id) => (8, id.as_u64()),
         ObjectRef::VfsViewManager { scope_sid, .. } => (9, scope_sid as u64),
+        ObjectRef::BlockRegion { device_id, .. } => (10, device_id as u64),
     }
 }
 

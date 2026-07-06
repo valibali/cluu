@@ -110,6 +110,13 @@ impl ServiceWiring for ServiceKind {
                 // subscribers (clock_gettime / time / gettimeofday).
                 tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
             }
+            ServiceKind::Devmgr => {
+                // Grantable listen endpoint for IPC from drivers and procmgr.
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                // Root BlockRegion token for device 0 — 0 until the kernel
+                // creates a boot-time BlockRegion token (Phase 4 kernel work).
+                tokens[TOKEN_EXTRA_1] = 0;
+            }
             ServiceKind::Console => {
                 // Console will create its own endpoint in Phase 3
                 tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
@@ -193,6 +200,7 @@ impl ServiceWiring for ServiceKind {
             | ServiceKind::Tty
             | ServiceKind::Vtmgr
             | ServiceKind::VirtioBlk
+            | ServiceKind::Devmgr
             | ServiceKind::Tpmd => Ok(()),
             ServiceKind::Timeserver => Ok(()),
         }

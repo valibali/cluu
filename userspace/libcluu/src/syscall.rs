@@ -1108,6 +1108,56 @@ pub fn token_get_info(token_handle: usize) -> Result<(u8, u32, u16)> {
     Ok((type_tag, scope_sid, scope_mask))
 }
 
+pub fn token_get_info_block_region(token_handle: usize) -> Result<(u8, u32)> {
+    let packed = unsafe { invoke(token_handle, InvokeOp::TokenGetInfo, 0, 0, 0, 0)? };
+    let type_tag = ((packed >> 48) & 0xFF) as u8;
+    let device_id = (packed & 0xFFFF_FFFF) as u32;
+    Ok((type_tag, device_id))
+}
+
+pub fn token_derive_scoped_block_region(
+    parent: usize,
+    new_rights: u32,
+    expire_ts: u64,
+    child_start_sector: u64,
+    child_sector_count: u64,
+) -> Result<usize> {
+    unsafe {
+        invoke(
+            parent,
+            InvokeOp::TokenDeriveScoped,
+            new_rights as usize,
+            expire_ts as usize,
+            child_start_sector as usize,
+            child_sector_count as usize,
+        )
+    }
+}
+
+pub fn verify_block_region(
+    token_handle: usize,
+    expected_device: u32,
+    sector: u64,
+    count: u64,
+) -> Result<()> {
+    let (type_tag, device_id) = token_get_info_block_region(token_handle)?;
+    if type_tag != 0x0A {
+        return Err(Error::PermissionDenied);
+    }
+    if device_id != expected_device {
+        return Err(Error::PermissionDenied);
+    }
+    let derived = token_derive_scoped_block_region(
+        token_handle,
+        0,
+        0,
+        sector,
+        count,
+    )?;
+    let _ = token_revoke(derived);
+    Ok(())
+}
+
 /// Destroy a thread
 ///
 /// # Arguments

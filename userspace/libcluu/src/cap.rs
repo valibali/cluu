@@ -17,6 +17,7 @@ bitflags! {
         const SPACE_GRANT = 1 << 5;
         const NET         = 1 << 6;
         const ADMIN       = 1 << 7;
+        const BLOCK_REGION = 1 << 8;
     }
 }
 

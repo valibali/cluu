@@ -30,6 +30,7 @@ members = [
     "userspace/registry",
     "userspace/session-procmgr",
     "userspace/timeserver",
+    "userspace/devmgr",
     "userspace/cat",
     "userspace/cluu_wire",
     "userspace/grep",
@@ -147,6 +148,7 @@ default-members = [
     "userspace/registry",
     "userspace/session-procmgr",
     "userspace/timeserver",
+    "userspace/devmgr",
     "userspace/cat",
     "userspace/grep",
     "userspace/head",
@@ -430,6 +432,9 @@ debug = 0
 [profile.dev.package."cluu-tpmd"]
 debug = 0
 
+[profile.dev.package."cluu-devmgr"]
+debug = 0
+
 [profile.dev.package."cluu-basename"]
 debug = 0
 
@@ -680,6 +685,9 @@ debug = 0
 debug = 0
 
 [profile.release.package."cluu-tpmd"]
+debug = 0
+
+[profile.release.package."cluu-devmgr"]
 debug = 0
 
 [profile.release.package."cluu-basename"]

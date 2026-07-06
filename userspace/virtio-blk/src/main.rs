@@ -27,8 +27,8 @@ use libcluu::boot::{
 };
 use libcluu::fs::{BlockDevice, Filesystem};
 use libcluu::ipc::{
-    extract_reply_id, reply, reply_with_payload, BLK_CLOSE_SESSION, BLK_OPEN_SESSION,
-    BLK_SUBMIT, BLK_SUBMIT_NACK, BLK_TID_CLEANUP,
+    call, extract_reply_id, reply, reply_with_payload, BLK_CLOSE_SESSION, BLK_OPEN_SESSION,
+    BLK_SUBMIT, BLK_SUBMIT_NACK, BLK_TID_CLEANUP, DEVMGR_REGISTER_LABEL,
 };
 use libcluu::registry;
 use libcluu::syscall::{endpoint_create, ipc_recv_any_with_sender, ipc_send, space_map_range};
@@ -266,6 +266,8 @@ fn run() -> Result<()> {
         }
     };
 
+    register_with_devmgr(capacity_sectors);
+
     // Main service loop: listen + irq + registry on a single thread.
     let mut sessions = BlkSessionRegistry::new();
     let mut buf = [0u8; 4096];
@@ -303,6 +305,38 @@ fn run() -> Result<()> {
             handle_fs_request(fs, &adapter, space_token, &grant_scratch, msg, payload);
         } else {
             handle_block_request(&adapter, msg);
+        }
+    }
+}
+
+fn register_with_devmgr(capacity_sectors: u64) {
+    let devmgr_ep = match registry::subscribe_output("devmgr", "main") {
+        Ok(ep) => ep,
+        Err(e) => {
+            let _ = debug_print(&format!(
+                "virtio-blk: devmgr subscribe failed {:?} — continuing without registration",
+                e
+            ));
+            return;
+        }
+    };
+    let mut msg = Message::new(
+        DEVMGR_REGISTER_LABEL,
+        [0, capacity_sectors as usize, 0, 0, 0, 0],
+        2,
+    );
+    match call(devmgr_ep, &mut msg, IpcFlags::empty()) {
+        Ok(()) => {
+            let _ = debug_print(&format!(
+                "virtio-blk: registered with devmgr ({} sectors, status={})",
+                capacity_sectors, msg.words[0]
+            ));
+        }
+        Err(e) => {
+            let _ = debug_print(&format!(
+                "virtio-blk: devmgr register call failed {:?}",
+                e
+            ));
         }
     }
 }

@@ -32,6 +32,7 @@ pub enum SpacePolicy {
 pub enum ServiceKind {
     Registry,
     Timeserver,
+    Devmgr,
     Console,
     Kbd,
     Tty,
@@ -87,6 +88,7 @@ const TPMD_RIGHTS: Rights = Rights::from_bits_truncate(TPMD_RIGHTS_BITS);
 pub const PRIMORDIAL_SERVICES: &[&str] = &[
     "registry",
     "timeserver",
+    "devmgr",
     "root-procmgr",
     "vfs",
     "virtio-blk",
@@ -114,6 +116,16 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         rights: None,
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Timeserver,
+        instance_id: None,
+        profile: CapProfile::SERVICE,
+    },
+    ServiceSpec {
+        name: "devmgr",
+        path: "sys/devmgr",
+        priority: 188,
+        rights: None,
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::Devmgr,
         instance_id: None,
         profile: CapProfile::SERVICE,
     },

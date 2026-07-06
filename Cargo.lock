@@ -344,6 +344,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-devmgr"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-dirname"
 version = "0.1.0"
 dependencies = [

@@ -2758,6 +2758,9 @@ fn invoke_token_get_info(obj_ref: ObjectRef) -> SyscallResult {
         ObjectRef::VfsViewManager { scope_sid, scope_mask } => {
             (0x09usize << 48) | ((scope_mask as usize) << 32) | (scope_sid as usize)
         }
+        ObjectRef::BlockRegion { device_id, .. } => {
+            (0x0Ausize << 48) | (device_id as usize)
+        }
     };
     Ok(packed)
 }
@@ -2776,30 +2779,51 @@ fn invoke_token_derive_scoped(
         return Err(Error::PermissionDenied);
     }
 
-    let (parent_scope_sid, parent_scope_mask) = match obj_ref {
-        OR::VfsViewManager { scope_sid, scope_mask } => (scope_sid, scope_mask),
+    let new_rights = Rights::from_bits((args.arg3 & 0xffffffff) as u32);
+    let expire = Timestamp::new(args.arg4 as u64);
+
+    let new_obj_ref = match obj_ref {
+        OR::VfsViewManager { scope_sid: parent_sid, scope_mask: parent_mask } => {
+            let new_scope_sid = (args.arg5 & 0xffffffff) as u32;
+            let new_scope_mask = (args.arg6 & 0xffff) as u16;
+
+            if new_scope_mask & parent_mask != new_scope_mask {
+                klibcluu::warn("invoke_token_derive_scoped: scope_mask widening rejected");
+                return Err(Error::PermissionDenied);
+            }
+
+            if parent_sid != 0 && new_scope_sid != parent_sid {
+                klibcluu::warn("invoke_token_derive_scoped: scope_sid escape rejected");
+                return Err(Error::PermissionDenied);
+            }
+
+            OR::VfsViewManager { scope_sid: new_scope_sid, scope_mask: new_scope_mask }
+        }
+        OR::BlockRegion { device_id: parent_device, start_sector: parent_start, sector_count: parent_count } => {
+            let child_start = args.arg5 as u64;
+            let child_count = args.arg6 as u64;
+
+            if child_start < parent_start {
+                klibcluu::warn("invoke_token_derive_scoped: block region start_sector below parent");
+                return Err(Error::PermissionDenied);
+            }
+
+            let parent_end = parent_start.saturating_add(parent_count);
+            let child_end = child_start.saturating_add(child_count);
+
+            if child_end > parent_end {
+                klibcluu::warn("invoke_token_derive_scoped: block region exceeds parent bounds");
+                return Err(Error::PermissionDenied);
+            }
+
+            OR::BlockRegion { device_id: parent_device, start_sector: child_start, sector_count: child_count }
+        }
         _ => {
-            klibcluu::warn("invoke_token_derive_scoped: not a VfsViewManager token");
+            klibcluu::warn("invoke_token_derive_scoped: token type not scoping-capable");
             return Err(Error::InvalidArgument);
         }
     };
 
-    let new_rights = Rights::from_bits((args.arg3 & 0xffffffff) as u32);
-    let expire = Timestamp::new(args.arg4 as u64);
-    let new_scope_sid = (args.arg5 & 0xffffffff) as u32;
-    let new_scope_mask = (args.arg6 & 0xffff) as u16;
-
-    if new_scope_mask & parent_scope_mask != new_scope_mask {
-        klibcluu::warn("invoke_token_derive_scoped: scope_mask widening rejected");
-        return Err(Error::PermissionDenied);
-    }
-
-    if parent_scope_sid != 0 && new_scope_sid != parent_scope_sid {
-        klibcluu::warn("invoke_token_derive_scoped: scope_sid escape rejected");
-        return Err(Error::PermissionDenied);
-    }
-
-    let new_obj_ref = OR::VfsViewManager { scope_sid: new_scope_sid, scope_mask: new_scope_mask };
     let issuer = Issuer::Authority(AuthorityId::new(handle.as_raw() as u64));
 
     let derived = crate::token::try_derive_token(token, new_rights, expire, issuer, new_obj_ref)

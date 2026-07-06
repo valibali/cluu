@@ -105,6 +105,12 @@ impl OpaqueScope {
                 input[8..12].copy_from_slice(&scope_sid.to_le_bytes());
                 input[12..14].copy_from_slice(&scope_mask.to_le_bytes());
             }
+            ObjectRef::BlockRegion { device_id, start_sector, sector_count } => {
+                input[0] = 0x0A;
+                input[8..12].copy_from_slice(&device_id.to_le_bytes());
+                input[12..20].copy_from_slice(&start_sector.to_le_bytes());
+                input[20..28].copy_from_slice(&sector_count.to_le_bytes());
+            }
         }
 
         // Add nonce for uniqueness
@@ -170,6 +176,14 @@ pub enum ObjectRef {
     /// `scope_sid == 0` means root authority (all sessions).
     /// `scope_mask` is a bitmask of allowed mount-root indices.
     VfsViewManager { scope_sid: u32, scope_mask: u16 },
+    /// Block-region authority cap.
+    ///
+    /// `device_id` identifies the block device (assigned by devmgr at registration).
+    /// `start_sector` and `sector_count` define the region bounds.
+    /// The kernel verifies these bounds during scoped derivation; the
+    /// actual block I/O is performed by the driver in userspace after
+    /// verifying the token via `TokenGetInfo`.
+    BlockRegion { device_id: u32, start_sector: u64, sector_count: u64 },
 }
 
 /// Notification object identifier

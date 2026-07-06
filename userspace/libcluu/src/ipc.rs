@@ -336,6 +336,22 @@ pub const BLK_SUBMIT_NACK: u32 = 0x314;
 /// words[0] = exited tid. No reply.
 pub const BLK_TID_CLEANUP: u32 = 0x315;
 
+// ──────────────────────────────────────────────────────────────────────
+// devmgr IPC labels — block device manager service.
+//
+// devmgr owns block devices and mints BlockRegion capability tokens for
+// sessions.  Three labels cover the full lifecycle:
+//
+//   DEVMGR_REGISTER_LABEL   — driver → devmgr at boot (device registration)
+//   DEVMGR_GRANT_REGION_LABEL — procmgr → devmgr at session creation
+//   DEVMGR_REVOKE_LABEL     — procmgr → devmgr at session exit
+//
+// See `userspace/devmgr/src/main.rs` for the wire format of each label.
+// ──────────────────────────────────────────────────────────────────────
+pub const DEVMGR_REGISTER_LABEL: u32 = 0x500;
+pub const DEVMGR_GRANT_REGION_LABEL: u32 = 0x501;
+pub const DEVMGR_REVOKE_LABEL: u32 = 0x502;
+
 // tpmd IPC labels (per-service label space)
 pub const TPMD_STARTUP_LABEL: u32    = 1;
 pub const TPMD_PCR_READ_LABEL: u32   = 2;
