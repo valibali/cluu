@@ -39,6 +39,7 @@ pub enum ServiceKind {
     Procmgr,
     Vfs,
     Vtmgr,
+    Inputd,
     VirtioBlk,
     Tpmd,
 }

@@ -112,10 +112,7 @@ impl ServiceWiring for ServiceKind {
             }
             ServiceKind::Devmgr => {
                 tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
-                // BlockRegion cap disabled — VFS-level isolation is the active
-                // mechanism. Field stays 0; devmgr's GRANT_REGION returns
-                // NotFound gracefully. Re-enable in bootstrap.rs if needed.
-                tokens[TOKEN_EXTRA_1] = 0;
+                tokens[TOKEN_EXTRA_1] = ctx.boot.device_region_token;
             }
             ServiceKind::Console => {
                 // Console will create its own endpoint in Phase 3
@@ -161,8 +158,10 @@ impl ServiceWiring for ServiceKind {
                 params[PARAM_VFS_FB_PITCH] = ctx.boot.fb_pitch as u64;
             }
             ServiceKind::Vtmgr => {
-                // Vtmgr needs a listen endpoint for kbd switch requests.
                 tokens[TOKEN_EXTRA_0] = create_listen_endpoint(ctx.boot.root_token)?;
+            }
+            ServiceKind::Inputd => {
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
             }
             ServiceKind::VirtioBlk => {
                 // VirtioBlk will create its own endpoint in Phase 3
@@ -199,6 +198,7 @@ impl ServiceWiring for ServiceKind {
             | ServiceKind::Kbd
             | ServiceKind::Tty
             | ServiceKind::Vtmgr
+            | ServiceKind::Inputd
             | ServiceKind::VirtioBlk
             | ServiceKind::Devmgr
             | ServiceKind::Tpmd => Ok(()),

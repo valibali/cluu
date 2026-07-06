@@ -431,6 +431,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-inputd"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-jobchurn"
 version = "0.1.0"
 dependencies = [

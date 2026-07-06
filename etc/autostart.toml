@@ -5,6 +5,9 @@ image = "console"
 image = "vtmgr"
 
 [[service]]
+image = "inputd"
+
+[[service]]
 image = "kbd"
 
 [[service]]
