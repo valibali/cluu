@@ -111,6 +111,13 @@ impl OpaqueScope {
                 input[12..20].copy_from_slice(&start_sector.to_le_bytes());
                 input[20..28].copy_from_slice(&sector_count.to_le_bytes());
             }
+            ObjectRef::DeviceRegion { device_id, region_kind, base, len } => {
+                input[0] = 0x0B;
+                input[8..12].copy_from_slice(&device_id.to_le_bytes());
+                input[12] = *region_kind;
+                input[13..21].copy_from_slice(&base.to_le_bytes());
+                input[21..29].copy_from_slice(&len.to_le_bytes());
+            }
         }
 
         // Add nonce for uniqueness
@@ -185,6 +192,14 @@ pub enum ObjectRef {
     /// active isolation mechanism. Re-enable by minting a root token in
     /// `bootstrap.rs` and calling `verify_block_region` in virtio-blk.
     BlockRegion { device_id: u32, start_sector: u64, sector_count: u64 },
+    /// General device-region authority cap (type tag 0x0B).
+    ///
+    /// Generalizes BlockRegion to all device classes. `device_id=0` is the
+    /// all-devices sentinel (root authority). `region_kind` identifies the
+    /// device class: 0=block, 1=char, 2=input, 3=framebuffer, 4=mmio,
+    /// 5=ioport. `base`/`len` are the region bounds (sector for block,
+    /// address for mmio, 0 for char/input).
+    DeviceRegion { device_id: u32, region_kind: u8, base: u64, len: u64 },
 }
 
 /// Notification object identifier
@@ -307,5 +322,24 @@ mod tests {
 
         assert!(matches!(thread_ref, ObjectRef::Thread(_)));
         assert!(matches!(space_ref, ObjectRef::Space(_)));
+    }
+
+    #[test]
+    fn test_device_region_scope_deterministic() {
+        let dr = ObjectRef::DeviceRegion { device_id: 0, region_kind: 0, base: 0, len: u64::MAX };
+        let s1 = OpaqueScope::from_object_ref(&dr, 1);
+        let s2 = OpaqueScope::from_object_ref(&dr, 1);
+        let s3 = OpaqueScope::from_object_ref(&dr, 2);
+        assert_eq!(s1, s2);
+        assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn test_device_region_scope_distinct_from_block_region() {
+        let br = ObjectRef::BlockRegion { device_id: 0, start_sector: 0, sector_count: u64::MAX };
+        let dr = ObjectRef::DeviceRegion { device_id: 0, region_kind: 0, base: 0, len: u64::MAX };
+        let s_br = OpaqueScope::from_object_ref(&br, 1);
+        let s_dr = OpaqueScope::from_object_ref(&dr, 1);
+        assert_ne!(s_br, s_dr);
     }
 }

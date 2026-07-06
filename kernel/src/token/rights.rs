@@ -9,16 +9,16 @@
 //! # Design
 //!
 //! ```text
-//! Generic Rights    │ Thread Rights   │ Space Rights    │ IPC Rights      │ IRQ Rights
-//! ─────────────────┼─────────────────┼─────────────────┼─────────────────┼────────────────
-//! READ     (1<<0)  │ CONTROL  (1<<8) │ MAP      (1<<16)│ SEND     (1<<24)│ HANDLE  (1<<28)
-//! WRITE    (1<<1)  │ SUSPEND  (1<<9) │ UNMAP    (1<<17)│ RECV     (1<<25)│ ACK     (1<<29)
-//! EXECUTE  (1<<2)  │                 │ GRANT    (1<<18)│ CALL     (1<<26)│
-//! CREATE   (1<<3)  │                 │                 │                 │
-//! DESTROY  (1<<4)  │                 │                 │                 │
-//! GRANT    (1<<5)  │                 │                 │                 │
-//! MAP      (1<<6)  │                 │                 │                 │
-//! MANAGE   (1<<7)  │                 │                 │                 │
+//! Generic Rights    │ Thread Rights   │ Device Rights   │ Space Rights    │ IPC Rights      │ IRQ Rights
+//! ─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼────────────────
+//! READ     (1<<0)  │ CONTROL  (1<<8) │ IO       (1<<10)│ MAP      (1<<16)│ SEND     (1<<24)│ HANDLE  (1<<28)
+//! WRITE    (1<<1)  │ SUSPEND  (1<<9) │ MMIO     (1<<11)│ UNMAP    (1<<17)│ RECV     (1<<25)│ ACK     (1<<29)
+//! EXECUTE  (1<<2)  │                 │ DMA      (1<<12)│ GRANT    (1<<18)│ CALL     (1<<26)│ PCI     (1<<30)
+//! CREATE   (1<<3)  │                 │ CONFIG   (1<<13)│                 │ REPLY    (1<<27)│
+//! DESTROY  (1<<4)  │                 │                 │                 │                 │
+//! GRANT    (1<<5)  │                 │                 │                 │                 │
+//! MAP      (1<<6)  │                 │                 │                 │                 │
+//! MANAGE   (1<<7)  │                 │                 │                 │                 │
 //! ```
 
 use core::fmt;
@@ -68,6 +68,15 @@ impl Rights {
 
     /// Suspend/resume thread
     pub const THREAD_SUSPEND: Self = Self(1 << 9);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Device-Specific Rights (10-15)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    pub const DEVICE_IO: Self = Self(1 << 10);
+    pub const DEVICE_MMIO: Self = Self(1 << 11);
+    pub const DEVICE_DMA: Self = Self(1 << 12);
+    pub const DEVICE_CONFIG: Self = Self(1 << 13);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Space-Specific Rights (16-23)
@@ -197,6 +206,18 @@ impl Rights {
         Self(Self::IPC_SEND.0 | Self::IPC_RECV.0 | Self::IPC_CALL.0 | Self::IPC_REPLY.0)
     }
 
+    pub const fn device_full() -> Self {
+        Self(
+            Self::READ.0
+                | Self::WRITE.0
+                | Self::GRANT.0
+                | Self::DEVICE_IO.0
+                | Self::DEVICE_MMIO.0
+                | Self::DEVICE_DMA.0
+                | Self::DEVICE_CONFIG.0,
+        )
+    }
+
     /// Serialize to bytes (for signature computation)
     pub const fn to_bytes(self) -> [u8; 4] {
         self.0.to_le_bytes()
@@ -253,6 +274,12 @@ impl fmt::Debug for Rights {
         // Thread
         write_right("THREAD_CONTROL", Self::THREAD_CONTROL)?;
         write_right("THREAD_SUSPEND", Self::THREAD_SUSPEND)?;
+
+        // Device
+        write_right("DEVICE_IO", Self::DEVICE_IO)?;
+        write_right("DEVICE_MMIO", Self::DEVICE_MMIO)?;
+        write_right("DEVICE_DMA", Self::DEVICE_DMA)?;
+        write_right("DEVICE_CONFIG", Self::DEVICE_CONFIG)?;
 
         // Space
         write_right("SPACE_MAP", Self::SPACE_MAP)?;
