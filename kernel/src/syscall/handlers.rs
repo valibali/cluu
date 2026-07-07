@@ -2091,12 +2091,11 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
         return Err(Error::PermissionDenied);
     }
 
-    // If the target already has something mapped at `target_virt`, drop
-    // its refcount first so we don't leak the prior frame. dec_ref is the
-    // single free path: it auto-retypes to Untyped and frees to PMM when
-    // rc hits 0. For grant-tracked frames we also dec_map_count to keep
-    // the frame_registry in sync (NOT dec_and_maybe_free — that would
-    // double-free, since dec_ref already owns the PMM free).
+    // If the target already has something mapped at `target_virt`, the
+    // refcount drop is handled by map_user_page's Phase 2.6 overwrite path
+    // (elf.rs — it dec_refs the old phys when the PTE is present). We only
+    // update the frame_registry here; calling dec_ref ourselves would
+    // double-dec and trigger the "dec_ref on refcount=0" underflow warning.
     let prior_phys = space_repository::with_space(target_space_id, |target_space| {
         elf::translate_vaddr_with_flags(target_space.page_table_root, VirtAddr::new(target_virt))
     })
@@ -2104,7 +2103,6 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
     .map(|(phys, _)| phys.as_u64() & PHYS_MASK);
     if let Some(old_phys) = prior_phys {
         if old_phys != phys_addr {
-            let _ = crate::mm::frame_table::dec_ref(old_phys);
             if let Some(old_id) = frame_registry::lookup_by_phys(old_phys) {
                 frame_registry::dec_map_count(old_id);
             }
@@ -2125,14 +2123,11 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
 
     match result {
         Some(Ok(())) => {
-            // Re-mapping the *same* physical frame to the same target
-            // address is a no-op refcount-wise (we already decremented a
-            // stale mapping above, which in this case was this same
-            // frame — compensate by not incrementing).
+            // map_user_page's overwrite path dec_ref'd the prior phys (if a
+            // different phys was present). inc_ref the granted phys to record
+            // the new mapping. For same-phys re-grants, map_user_page skips
+            // the dec_ref, so we skip the inc_ref to match.
             if prior_phys != Some(phys_addr) {
-                // Phase 2: inc_ref drives the UserData→Grant transition.
-                // register_grant_mapping maintains the frame_registry for
-                // legacy map_count / lookup_by_phys callers.
                 let _ = crate::mm::frame_table::inc_ref(phys_addr);
                 frame_registry::register_grant_mapping(phys_addr, target_space_id);
             }
@@ -2624,6 +2619,7 @@ fn map_range_4kb(req: MapRange4kbRequest) -> SyscallResult {
         }
 
         // Map the page into the address space
+        let _ = crate::mm::frame_table::retype_to_user(frame_phys, space_id);
         let result = space_repository::with_space_mut(space_id, |space| unsafe {
             elf::map_user_page(
                 virt_addr,

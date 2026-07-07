@@ -420,16 +420,14 @@ pub(crate) unsafe fn map_user_page(
     let pt = &mut *(pt_virt as *mut [u64; 512]);
 
     // Phase 2.6: if a present PTE already occupies this slot, dec_ref the old
-    // physical frame before overwriting. This keeps the refcount in sync when
-    // ELF segments share a page boundary or a remapping replaces an earlier
-    // install. Skipping this would strand the old frame at refcount ≥ 1 with
-    // no PTE, causing a permanent memory leak (UserData/Grant frames) or a
-    // spurious PMM "still referenced" warning on the next retype attempt.
-    // Device-mapped (NO_CACHE) and WC frames are tag=Device in the frame_table;
-    // dec_ref no-ops silently for those.
+    // physical frame before overwriting. Skip when old_phys == new phys
+    // (same-frame re-mapping via space_grant) — dec_ref would auto-free the
+    // frame to PMM, and the caller's inc_ref would race with a re-allocation.
     if pt[pt_idx] & pte_flags::PRESENT != 0 {
         let old_phys = pt[pt_idx] & PHYS_MASK;
-        let _ = crate::mm::frame_table::dec_ref(old_phys);
+        if old_phys != (phys & pte_flags::ADDR_MASK) {
+            let _ = crate::mm::frame_table::dec_ref(old_phys);
+        }
     }
 
     // Map the page.
@@ -678,15 +676,13 @@ pub(crate) unsafe fn map_shared_page(
     let pt = &mut *(crate::mm::physmap::phys_to_virt_u64(pt_phys) as *mut [u64; 512]);
 
     // Phase 2.6: if a present PTE already occupies this slot, dec_ref the old
-    // physical frame before overwriting. This matches map_user_page's overwrite
-    // path and keeps refcounts balanced when a shared (MAP_SHARE_PHYS) page is
-    // remapped. Without this, the old frame's refcount stays elevated (leak)
-    // while teardown later dec_refs the new frame — and if the old frame was
-    // already at refcount 0, the asymmetry surfaces as spurious "dec_ref on
-    // refcount=0" warnings.
+    // physical frame before overwriting. Skip when old_phys == new phys
+    // (same-frame re-mapping) — see map_user_page for the race rationale.
     if pt[pt_idx] & pte_flags::PRESENT != 0 {
         let old_phys = pt[pt_idx] & PHYS_MASK;
-        let _ = crate::mm::frame_table::dec_ref(old_phys);
+        if old_phys != (phys & pte_flags::ADDR_MASK) {
+            let _ = crate::mm::frame_table::dec_ref(old_phys);
+        }
     }
 
     // Mask phys to bits 12-51 — see comment in map_user_page (elf.rs:~335).
