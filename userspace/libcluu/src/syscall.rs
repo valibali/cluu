@@ -125,6 +125,11 @@ pub enum InvokeOp {
     ThreadEnumerate = 84,
     ThreadSetSession = 85,
     ThreadSetSystemScope = 86,
+
+    // Memory pressure notification (M7). Signals a target process's
+    // registered pressure-notification endpoint to release caches.
+    // Must match the kernel's InvokeOp::MemoryPressure discriminant.
+    MemoryPressure = 87,
 }
 
 /// Page mapping flags for space_map.
@@ -149,6 +154,25 @@ pub const MAP_DEVICE_WC: usize = 0x1000;
 /// Always read-only; writable bit ignored. Used by VFS for shared ELF
 /// segments (.text, .rodata).
 pub const MAP_SHARE_PHYS: usize = 0x800;
+
+/// Install a not-present guard page (no physical frame allocated).
+/// Any access to a MAP_GUARD page triggers a page fault, which the kernel
+/// treats as an unrecoverable user fault (kills the thread) unless a
+/// fault_endpoint handler is registered. Used for explicit guard pages
+/// anywhere in the address space (e.g. below process stacks) and for
+/// write-barrier pages when combined with fault_endpoint.
+/// Incompatible with MAP_DEVICE, MAP_DEVICE_WC, MAP_SHARE_PHYS,
+/// MAP_FRAME_TOKEN, and MAP_LARGE_PAGES. data_ptr and data_len must be 0.
+pub const MAP_GUARD: usize = 0x2000;
+
+/// SpaceProtect flag (M9): install not-present PTEs for unmapped addresses
+/// instead of requiring an existing mapping. Used for demand-paged text
+/// segments — no physical frame is allocated at install time, so boot
+/// memory usage drops. When a text page faults on first execution, the
+/// kernel demand-allocates a frame and copies from `source_ptr` (in the
+/// caller's address space). Requires read+exec perms (0x01 | 0x04);
+/// writable is rejected.
+pub const PROTECT_INSTALL_UNMAPPED: usize = 0x08;
 
 /// Raw syscall invocation using x86_64 SYSCALL instruction
 ///
@@ -949,6 +973,42 @@ pub fn space_protect(
     }
 }
 
+/// Install not-present PTEs for a demand-paged text segment (M9).
+///
+/// No physical frame is allocated at install time. When the CPU faults on
+/// a text address, the kernel demand-allocates a frame and copies from
+/// `source_ptr` (in the caller's address space). The caller must keep the
+/// source data alive for the lifetime of the target space.
+///
+/// - `space_token`: Token for the target address space (SPACE_MAP right required)
+/// - `virt_addr`: Starting virtual address (must be page-aligned)
+/// - `num_pages`: Number of text pages
+/// - `file_size`: Number of bytes of source data (rest is zero-filled)
+/// - `source_ptr`: Address of the source text data in the caller's space
+///
+/// Maps with read+exec (not writable).
+#[inline]
+pub fn space_protect_unmapped(
+    space_token: usize,
+    virt_addr: usize,
+    num_pages: usize,
+    file_size: usize,
+    source_ptr: usize,
+) -> Result<usize> {
+    let flags = 0x01 | 0x04 | PROTECT_INSTALL_UNMAPPED;
+    let packed = (num_pages << 32) | (file_size & 0xFFFF_FFFF);
+    unsafe {
+        invoke(
+            space_token,
+            InvokeOp::SpaceProtect,
+            virt_addr,
+            packed,
+            flags,
+            source_ptr,
+        )
+    }
+}
+
 /// Futex wait: block until a wake on `(space_token, user_addr)` or timeout.
 ///
 /// The kernel first checks the 32-bit value at `user_addr`. If it does not
@@ -1621,6 +1681,22 @@ pub fn notification_poll(notif_token: usize) -> Result<u64> {
     Ok(r as u64)
 }
 
+/// Signal memory pressure on a target process's registered pressure
+/// notification endpoint (M7). `level` is a coarse pressure grade:
+/// 0 = soft, 1 = hard, 2 = critical. The kernel ORs bit `(1 << level)`
+/// into the notification's pending word; the target releases caches
+/// when it wakes from `notification_wait`. No-op if no waiter is
+/// registered (bits accumulate). Combined with the OOM callback (C4),
+/// this is the first tier of the two-tier memory-response ladder.
+#[inline]
+pub fn memory_pressure(notif_token: usize, level: u32) -> Result<()> {
+    if level >= 64 {
+        return Err(Error::InvalidArgument);
+    }
+    unsafe { invoke(notif_token, InvokeOp::MemoryPressure, level as usize, 0, 0, 0)? };
+    Ok(())
+}
+
 //
 // ═══════════════════════════════════════════════════════════════════════════
 // Debug Syscall
@@ -1707,5 +1783,25 @@ mod tests {
         assert_eq!(InvokeOp::TokenDerive as usize, 20);
         assert_eq!(InvokeOp::IrqAttach as usize, 30);
         assert_eq!(InvokeOp::EndpointCreate as usize, 40);
+        assert_eq!(InvokeOp::ThreadSetSystemScope as usize, 86);
+        assert_eq!(InvokeOp::MemoryPressure as usize, 87);
+    }
+
+    #[test]
+    fn test_map_guard_flag_value() {
+        assert_eq!(MAP_GUARD, 0x2000);
+    }
+
+    #[test]
+    fn test_map_guard_flag_no_overlap() {
+        let all_other = MAP_DEVICE | MAP_LARGE_PAGES | MAP_FRAME_TOKEN
+            | MAP_DEVICE_WC | MAP_SHARE_PHYS;
+        assert_eq!(MAP_GUARD & all_other, 0, "MAP_GUARD bit overlaps another flag");
+    }
+
+    #[test]
+    fn test_map_guard_flag_distinct_from_perm_bits() {
+        let perm_bits: usize = 0x07;
+        assert_eq!(MAP_GUARD & perm_bits, 0, "MAP_GUARD overlaps permission bits");
     }
 }

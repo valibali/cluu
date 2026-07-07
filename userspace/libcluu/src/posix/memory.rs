@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 extern crate alloc;
+use alloc::vec::Vec;
 
 /// Start of dynamic heap region for newlib's _sbrk.
 /// In c-runtime mode, the Rust allocator delegates to malloc, so _sbrk
@@ -18,8 +19,24 @@ const HEAP_MAX: usize = 0x4000_0000;
 /// Page size.
 const PAGE_SIZE: usize = 4096;
 
-/// Current heap break (end of allocated heap).
-static HEAP_BRK: AtomicUsize = AtomicUsize::new(0x0080_0000);
+/// M6 ASLR: per-process random offset for _sbrk heap start. Bounded to
+/// 128 MB (page-aligned), same range as the Rust allocator's heap ASLR.
+const HEAP_ASLR_RANGE: usize = 128 * 1024 * 1024;
+static HEAP_BRK: AtomicUsize = AtomicUsize::new(0);
+
+fn randomized_heap_start() -> usize {
+    let start = HEAP_BRK.load(Ordering::Relaxed);
+    if start != 0 {
+        return start;
+    }
+    let mut buf = [0u8; 8];
+    klibcluu::crypto::fill_random(&mut buf);
+    let r = u64::from_le_bytes(buf) as usize;
+    let offset = (r & (HEAP_ASLR_RANGE - 1)) & !0xFFF;
+    let randomized = HEAP_START + offset;
+    HEAP_BRK.store(randomized, Ordering::Relaxed);
+    randomized
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // mmap region: 0x4100_0000 .. 0x5000_0000 (240 MB)
@@ -28,10 +45,27 @@ static HEAP_BRK: AtomicUsize = AtomicUsize::new(0x0080_0000);
 const MMAP_REGION_START: usize = 0x4100_0000;
 const MMAP_REGION_END: usize = 0x5000_0000;
 
+// M6 ASLR: per-process random offset added to MMAP_REGION_START. Bounded
+// to 128 MB (page-aligned) so the mmap region stays below MMAP_REGION_END.
+const MMAP_ASLR_RANGE: usize = 128 * 1024 * 1024;
+static MMAP_START_RANDOMIZED: AtomicUsize = AtomicUsize::new(0);
+
+fn randomized_mmap_start() -> usize {
+    let start = MMAP_START_RANDOMIZED.load(Ordering::Relaxed);
+    if start != 0 {
+        return start;
+    }
+    let mut buf = [0u8; 8];
+    klibcluu::crypto::fill_random(&mut buf);
+    let r = u64::from_le_bytes(buf) as usize;
+    let offset = (r & (MMAP_ASLR_RANGE - 1)) & !0xFFF;
+    let randomized = MMAP_REGION_START + offset;
+    MMAP_START_RANDOMIZED.store(randomized, Ordering::Relaxed);
+    randomized
+}
+
 /// Next free address in the mmap region (bump allocator).
 /// Allocation uses first-fit over tracked regions so freed holes are reused.
-/// Maximum tracked mmap regions.
-const MAX_MMAP_REGIONS: usize = 64;
 
 /// A tracked mmap allocation.
 #[derive(Clone, Copy)]
@@ -45,48 +79,38 @@ struct MmapRegion {
 static MMAP_REGIONS: Mutex<MmapRegionTable> = Mutex::new(MmapRegionTable::new());
 
 struct MmapRegionTable {
-    entries: [Option<MmapRegion>; MAX_MMAP_REGIONS],
+    entries: Vec<MmapRegion>,
 }
 
 impl MmapRegionTable {
     const fn new() -> Self {
         Self {
-            entries: [None; MAX_MMAP_REGIONS],
+            entries: Vec::new(),
         }
     }
 
     fn insert(&mut self, region: MmapRegion) -> bool {
-        for slot in self.entries.iter_mut() {
-            if slot.is_none() {
-                *slot = Some(region);
-                return true;
-            }
+        if self.entries.try_reserve(1).is_err() {
+            return false;
         }
-        false
+        self.entries.push(region);
+        true
     }
 
     fn remove(&mut self, addr: usize) -> Option<MmapRegion> {
-        for slot in self.entries.iter_mut() {
-            if let Some(r) = slot {
-                if r.addr == addr {
-                    return slot.take();
-                }
-            }
-        }
-        None
+        let idx = self.entries.iter().position(|r| r.addr == addr)?;
+        Some(self.entries.swap_remove(idx))
     }
 
     fn find_exact(&self, addr: usize, len: usize) -> Option<MmapRegion> {
-        for r in self.entries.iter().flatten() {
-            if r.addr == addr && r.len == len {
-                return Some(*r);
-            }
-        }
-        None
+        self.entries
+            .iter()
+            .find(|r| r.addr == addr && r.len == len)
+            .copied()
     }
 
     fn update_prot_exact(&mut self, addr: usize, len: usize, prot: c_int) -> bool {
-        for r in self.entries.iter_mut().flatten() {
+        for r in self.entries.iter_mut() {
             if r.addr == addr && r.len == len {
                 r.prot = prot;
                 return true;
@@ -96,17 +120,14 @@ impl MmapRegionTable {
     }
 
     fn overlaps(&self, start: usize, end: usize) -> bool {
-        for r in self.entries.iter().flatten() {
+        self.entries.iter().any(|r| {
             let r_end = r.addr.saturating_add(r.len);
-            if start < r_end && r.addr < end {
-                return true;
-            }
-        }
-        false
+            start < r_end && r.addr < end
+        })
     }
 
     fn find_first_fit(&self, len: usize) -> Option<usize> {
-        let mut cursor = MMAP_REGION_START;
+        let mut cursor = randomized_mmap_start();
         while cursor <= MMAP_REGION_END.saturating_sub(len) {
             let end = cursor + len;
             if !self.overlaps(cursor, end) {
@@ -266,6 +287,107 @@ pub extern "C" fn _mmap(
         }
         set_errno(ENOSYS);
         return MAP_FAILED;
+    }
+
+    // MAP_SHARED | MAP_ANONYMOUS with a page-aligned non-zero offset: treat
+    // offset as a source virtual address in the caller's own space and route
+    // to MAP_SHARE_PHYS, creating a read-only alias of the caller's pages at
+    // a new virtual address in the mmap region. This is the userspace wrapper
+    // around the kernel's MAP_SHARE_PHYS flag (handlers.rs MAP_SHARE_PHYS
+    // = 0x800). The kernel remaps the caller's physical frames backing
+    // `offset` into the space identified by `space_token` at `virt_addr`,
+    // always read-only (writable bit ignored).
+    //
+    // Cross-process sharing: the owner maps a writable anonymous region
+    // (offset=0), then calls space_map_range directly with the RECEIVER's
+    // space token + MAP_SHARE_PHYS + the owner's source VA to map those
+    // frames read-only into the receiver. This mmap path covers the same-space
+    // alias case; the cross-process case uses space_map_range directly since
+    // mmap only holds the caller's own space token. See
+    // doc/book/memory_model.md (mmap region section).
+    if is_anonymous && (flags & MAP_SHARED) != 0 && offset != 0 {
+        let src_virt = offset as usize;
+        if src_virt & (PAGE_SIZE - 1) != 0 {
+            set_errno(EINVAL);
+            return MAP_FAILED;
+        }
+        let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let num_pages = aligned_len / PAGE_SIZE;
+
+        // MAP_SHARE_PHYS mappings are always read-only; drop PROT_WRITE so
+        // the tracked prot reflects the actual mapping.
+        let effective_prot = prot & !PROT_WRITE;
+        let mut kern_flags: usize = 0;
+        if effective_prot & PROT_READ != 0 {
+            kern_flags |= 0x01;
+        }
+        if effective_prot & PROT_EXEC != 0 {
+            kern_flags |= 0x04;
+        }
+        if kern_flags == 0 {
+            kern_flags = 0x01;
+        }
+        kern_flags |= crate::syscall::MAP_SHARE_PHYS;
+
+        let space_token = crate::boot::space_token();
+        if space_token == 0 {
+            set_errno(ENOMEM);
+            return MAP_FAILED;
+        }
+
+        let virt_addr = if (flags & MAP_FIXED) != 0 && !addr.is_null() {
+            let a = addr as usize;
+            if a & (PAGE_SIZE - 1) != 0 {
+                set_errno(EINVAL);
+                return MAP_FAILED;
+            }
+            let end = a.saturating_add(aligned_len);
+            if a < MMAP_REGION_START || end > MMAP_REGION_END {
+                set_errno(EINVAL);
+                return MAP_FAILED;
+            }
+            if MMAP_REGIONS.lock().overlaps(a, end) {
+                set_errno(EINVAL);
+                return MAP_FAILED;
+            }
+            a
+        } else {
+            let Some(fit) = MMAP_REGIONS.lock().find_first_fit(aligned_len) else {
+                set_errno(ENOMEM);
+                return MAP_FAILED;
+            };
+            fit
+        };
+
+        // data_len must be non-zero for MAP_SHARE_PHYS (kernel validation);
+        // pass aligned_len to satisfy the check. The kernel does not copy
+        // data for MAP_SHARE_PHYS — it remaps physical frames.
+        match crate::syscall::space_map_range(
+            space_token,
+            virt_addr,
+            src_virt,
+            kern_flags,
+            num_pages,
+            aligned_len,
+        ) {
+            Ok(_) => {}
+            Err(_) => {
+                set_errno(ENOMEM);
+                return MAP_FAILED;
+            }
+        }
+
+        let region = MmapRegion {
+            addr: virt_addr,
+            len: aligned_len,
+            prot: effective_prot,
+        };
+        if !MMAP_REGIONS.lock().insert(region) {
+            let _ = crate::syscall::space_unmap(space_token, virt_addr, num_pages);
+            set_errno(ENOMEM);
+            return MAP_FAILED;
+        }
+        return virt_addr as *mut c_void;
     }
 
     // Validate offset alignment for file-backed mappings
@@ -512,6 +634,216 @@ pub extern "C" fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -> c_int
     -1
 }
 
+// mremap flags
+pub const MREMAP_MAYMOVE: c_int = 0x1;
+pub const MREMAP_DONTUNMAP: c_int = 0x2;
+
+/// Resize an existing mmap mapping in place, or relocate it if growth is
+/// blocked and `MREMAP_MAYMOVE` is set.
+///
+/// Composes existing `space_unmap` + `space_map_range` — no new InvokeOp.
+///
+/// # Arguments
+/// - `old_address`: Start of the existing mapping (page-aligned)
+/// - `old_size`: Current size (must match tracked region's aligned length)
+/// - `new_size`: Requested new size (rounded up to page boundary)
+/// - `flags`: `MREMAP_MAYMOVE` to allow relocation when in-place growth fails
+///
+/// # Returns
+/// Pointer to the resized mapping, or `MAP_FAILED` (-1) on error.
+///
+/// # Errors
+/// - `EINVAL`: `old_address` is NULL, unaligned, or not a tracked region;
+///   `old_size` mismatches the tracked region; `new_size` is 0; flags invalid.
+/// - `ENOMEM`: no space to grow/relocate, or space token unavailable.
+///
+/// # Limitations vs Linux mremap
+/// - `MREMAP_DONTUNMAP` is accepted but treated as a no-op flag (the old
+///   range is always unmapped after relocation — no hole-punching).
+/// - `MREMAP_FIXED` (5th-arg `new_address`) is not supported.
+#[no_mangle]
+pub extern "C" fn mremap(
+    old_address: *mut c_void,
+    old_size: size_t,
+    new_size: size_t,
+    flags: c_int,
+) -> *mut c_void {
+    _mremap(old_address, old_size, new_size, flags)
+}
+
+#[no_mangle]
+pub extern "C" fn _mremap(
+    old_address: *mut c_void,
+    old_size: size_t,
+    new_size: size_t,
+    flags: c_int,
+) -> *mut c_void {
+    // ── Input validation (before any syscall) ─────────────────────────────
+    if old_address.is_null() {
+        set_errno(EINVAL);
+        return MAP_FAILED;
+    }
+    let old_addr = old_address as usize;
+    if old_addr & (PAGE_SIZE - 1) != 0 {
+        set_errno(EINVAL);
+        return MAP_FAILED;
+    }
+    if old_size == 0 || new_size == 0 {
+        set_errno(EINVAL);
+        return MAP_FAILED;
+    }
+    if flags & !(MREMAP_MAYMOVE | MREMAP_DONTUNMAP) != 0 {
+        set_errno(EINVAL);
+        return MAP_FAILED;
+    }
+
+    let old_aligned = (old_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let new_aligned = (new_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let old_pages = old_aligned / PAGE_SIZE;
+    let new_pages = new_aligned / PAGE_SIZE;
+
+    let space_token = crate::boot::space_token();
+    if space_token == 0 {
+        set_errno(ENOMEM);
+        return MAP_FAILED;
+    }
+
+    // ── Lookup tracked region (exact addr + len match) ────────────────────
+    let region = {
+        let table = MMAP_REGIONS.lock();
+        match table.find_exact(old_addr, old_aligned) {
+            Some(r) => r,
+            None => {
+                set_errno(EINVAL);
+                return MAP_FAILED;
+            }
+        }
+    };
+
+    if new_aligned == old_aligned {
+        return old_address;
+    }
+
+    let mut kern_flags: usize = 0;
+    if region.prot & PROT_READ != 0 {
+        kern_flags |= 0x01;
+    }
+    if region.prot & PROT_WRITE != 0 {
+        kern_flags |= 0x02;
+    }
+    if region.prot & PROT_EXEC != 0 {
+        kern_flags |= 0x04;
+    }
+    if kern_flags == 0 {
+        kern_flags = 0x01;
+    }
+
+    // ── Shrink: unmap trailing pages ──────────────────────────────────────
+    if new_aligned < old_aligned {
+        let pages_to_unmap = old_pages - new_pages;
+        let unmap_start = old_addr + new_aligned;
+        if crate::syscall::space_unmap(space_token, unmap_start, pages_to_unmap).is_err() {
+            set_errno(ENOMEM);
+            return MAP_FAILED;
+        }
+        let mut table = MMAP_REGIONS.lock();
+        let _ = table.remove(old_addr);
+        let _ = table.insert(MmapRegion {
+            addr: old_addr,
+            len: new_aligned,
+            prot: region.prot,
+        });
+        return old_address;
+    }
+
+    // ── Grow: try in-place extension first ────────────────────────────────
+    let extra_pages = new_pages - old_pages;
+    let new_end = old_addr + new_aligned;
+
+    // Check whether the extension range is free (excluding the region itself).
+    let can_extend = {
+        let mut table = MMAP_REGIONS.lock();
+        let _ = table.remove(old_addr);
+        let free = !table.overlaps(old_addr + old_aligned, new_end);
+        let _ = table.insert(MmapRegion {
+            addr: old_addr,
+            len: old_aligned,
+            prot: region.prot,
+        });
+        free
+    };
+
+    if can_extend {
+        let map_start = old_addr + old_aligned;
+        match crate::syscall::space_map_range(space_token, map_start, 0, kern_flags, extra_pages, 0)
+        {
+            Ok(_) | Err(crate::Error::AlreadyExists) => {
+                let mut table = MMAP_REGIONS.lock();
+                let _ = table.remove(old_addr);
+                let _ = table.insert(MmapRegion {
+                    addr: old_addr,
+                    len: new_aligned,
+                    prot: region.prot,
+                });
+                return old_address;
+            }
+            Err(_) => { /* fall through to MAYMOVE */ }
+        }
+    }
+
+    if (flags & MREMAP_MAYMOVE) == 0 {
+        set_errno(ENOMEM);
+        return MAP_FAILED;
+    }
+
+    // ── Relocate: find new spot, map, copy, unmap old ─────────────────────
+    let new_addr = {
+        let table = MMAP_REGIONS.lock();
+        match table.find_first_fit(new_aligned) {
+            Some(a) => a,
+            None => {
+                set_errno(ENOMEM);
+                return MAP_FAILED;
+            }
+        }
+    };
+
+    match crate::syscall::space_map_range(space_token, new_addr, 0, kern_flags, new_pages, 0) {
+        Ok(_) | Err(crate::Error::AlreadyExists) => {}
+        Err(_) => {
+            set_errno(ENOMEM);
+            return MAP_FAILED;
+        }
+    }
+
+    // SAFETY: both ranges are mapped in the current address space —
+    // old_addr..old_addr+old_aligned (existing region) and
+    // new_addr..new_addr+new_aligned (just mapped). They do not overlap
+    // because find_first_fit avoids existing regions.
+    let copy_bytes = core::cmp::min(old_size, new_size);
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            old_addr as *const u8,
+            new_addr as *mut u8,
+            copy_bytes,
+        );
+    }
+
+    let _ = crate::syscall::space_unmap(space_token, old_addr, old_pages);
+
+    {
+        let mut table = MMAP_REGIONS.lock();
+        let _ = table.remove(old_addr);
+        let _ = table.insert(MmapRegion {
+            addr: new_addr,
+            len: new_aligned,
+            prot: region.prot,
+        });
+    }
+
+    new_addr as *mut c_void
+}
+
 /// msync — no-op for MAP_PRIVATE mappings.
 #[no_mangle]
 pub extern "C" fn msync(_addr: *mut c_void, _length: size_t, _flags: c_int) -> c_int {
@@ -545,6 +877,9 @@ fn reset_mmap_state_for_tests() {
 /// - Negative increment: Contracts heap (pages not unmapped, just tracked)
 #[no_mangle]
 pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
+    if HEAP_BRK.load(Ordering::SeqCst) == 0 {
+        randomized_heap_start();
+    }
     let old_brk = HEAP_BRK.load(Ordering::SeqCst);
 
     if increment == 0 {
@@ -608,7 +943,12 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
 /// Equivalent to `_sbrk(0)`.
 #[inline]
 pub fn current_brk() -> usize {
-    HEAP_BRK.load(Ordering::SeqCst)
+    let brk = HEAP_BRK.load(Ordering::SeqCst);
+    if brk == 0 {
+        randomized_heap_start()
+    } else {
+        brk
+    }
 }
 
 /// Set heap break to a specific address.
@@ -629,6 +969,9 @@ pub extern "C" fn brk(addr: *mut c_void) -> i32 {
         return -1;
     }
 
+    if HEAP_BRK.load(Ordering::SeqCst) == 0 {
+        randomized_heap_start();
+    }
     let current = HEAP_BRK.load(Ordering::SeqCst);
     let increment = target as isize - current as isize;
 
@@ -673,5 +1016,211 @@ mod tests {
         }));
         assert!(table.update_prot_exact(MMAP_REGION_START, PAGE_SIZE * 2, PROT_READ | PROT_WRITE));
         assert!(!table.update_prot_exact(MMAP_REGION_START, PAGE_SIZE, PROT_EXEC));
+    }
+
+    #[test]
+    fn mmap_region_table_grows_beyond_64() {
+        reset_mmap_state_for_tests();
+        let mut table = MMAP_REGIONS.lock();
+        for i in 0..100 {
+            let addr = MMAP_REGION_START + i * PAGE_SIZE;
+            assert!(
+                table.insert(MmapRegion {
+                    addr,
+                    len: PAGE_SIZE,
+                    prot: PROT_READ,
+                }),
+                "insert failed at region {} (addr={:#x})",
+                i,
+                addr,
+            );
+        }
+        let last_addr = MMAP_REGION_START + 99 * PAGE_SIZE;
+        assert_eq!(
+            table.find_exact(last_addr, PAGE_SIZE).unwrap().addr,
+            last_addr,
+        );
+    }
+
+    #[test]
+    fn find_first_fit_returns_none_when_region_exhausted() {
+        reset_mmap_state_for_tests();
+        let table = MMAP_REGIONS.lock();
+        let huge_len = (MMAP_REGION_END - MMAP_REGION_START) + PAGE_SIZE;
+        assert_eq!(table.find_first_fit(huge_len), None);
+    }
+
+    #[test]
+    fn remove_then_reinsert_does_not_corrupt() {
+        reset_mmap_state_for_tests();
+        let mut table = MMAP_REGIONS.lock();
+        for i in 0..10 {
+            let addr = MMAP_REGION_START + i * PAGE_SIZE;
+            assert!(table.insert(MmapRegion {
+                addr,
+                len: PAGE_SIZE,
+                prot: PROT_READ,
+            }));
+        }
+        let mid_addr = MMAP_REGION_START + 5 * PAGE_SIZE;
+        assert!(table.remove(mid_addr).is_some());
+        assert!(table.find_exact(mid_addr, PAGE_SIZE).is_none());
+        for i in 0..10 {
+            let addr = MMAP_REGION_START + i * PAGE_SIZE;
+            if i == 5 {
+                continue;
+            }
+            assert!(table.find_exact(addr, PAGE_SIZE).is_some(), "missing addr={:#x}", addr);
+        }
+    }
+
+    // ── mremap validation tests (return before any syscall) ───────────────
+
+    #[test]
+    fn mremap_null_addr_returns_einval() {
+        reset_mmap_state_for_tests();
+        let r = _mremap(core::ptr::null_mut(), PAGE_SIZE, PAGE_SIZE * 2, 0);
+        assert_eq!(r, MAP_FAILED);
+        assert_eq!(crate::errno::errno(), EINVAL);
+    }
+
+    #[test]
+    fn mremap_unaligned_addr_returns_einval() {
+        reset_mmap_state_for_tests();
+        let r = _mremap(0x4100_0001 as *mut c_void, PAGE_SIZE, PAGE_SIZE * 2, 0);
+        assert_eq!(r, MAP_FAILED);
+        assert_eq!(crate::errno::errno(), EINVAL);
+    }
+
+    #[test]
+    fn mremap_zero_old_size_returns_einval() {
+        reset_mmap_state_for_tests();
+        let r = _mremap(MMAP_REGION_START as *mut c_void, 0, PAGE_SIZE * 2, 0);
+        assert_eq!(r, MAP_FAILED);
+        assert_eq!(crate::errno::errno(), EINVAL);
+    }
+
+    #[test]
+    fn mremap_zero_new_size_returns_einval() {
+        reset_mmap_state_for_tests();
+        let r = _mremap(MMAP_REGION_START as *mut c_void, PAGE_SIZE, 0, 0);
+        assert_eq!(r, MAP_FAILED);
+        assert_eq!(crate::errno::errno(), EINVAL);
+    }
+
+    #[test]
+    fn mremap_invalid_flags_returns_einval() {
+        reset_mmap_state_for_tests();
+        let r = _mremap(
+            MMAP_REGION_START as *mut c_void,
+            PAGE_SIZE,
+            PAGE_SIZE * 2,
+            0x80,
+        );
+        assert_eq!(r, MAP_FAILED);
+        assert_eq!(crate::errno::errno(), EINVAL);
+    }
+
+    #[test]
+    fn mremap_invalid_addr_no_panic() {
+        reset_mmap_state_for_tests();
+        let r = _mremap(0xDEAD_0000 as *mut c_void, PAGE_SIZE, PAGE_SIZE * 2, MREMAP_MAYMOVE);
+        assert_eq!(r, MAP_FAILED);
+    }
+
+    // ── mremap table-level resize logic (no syscalls) ─────────────────────
+    // These verify the MmapRegionTable state transitions that mremap performs:
+    // grow-in-place, shrink, and relocate.
+
+    #[test]
+    fn mremap_table_grow_in_place() {
+        reset_mmap_state_for_tests();
+        let mut table = MMAP_REGIONS.lock();
+        let addr = MMAP_REGION_START;
+        let old_len = PAGE_SIZE;
+        let new_len = PAGE_SIZE * 2;
+        assert!(table.insert(MmapRegion {
+            addr,
+            len: old_len,
+            prot: PROT_READ | PROT_WRITE,
+        }));
+
+        let region = table.find_exact(addr, old_len).unwrap();
+        let _ = table.remove(addr);
+        let _ = table.insert(MmapRegion {
+            addr,
+            len: new_len,
+            prot: region.prot,
+        });
+
+        let resized = table.find_exact(addr, new_len).unwrap();
+        assert_eq!(resized.addr, addr);
+        assert_eq!(resized.len, new_len);
+        assert_eq!(resized.prot, PROT_READ | PROT_WRITE);
+        assert!(table.find_exact(addr, old_len).is_none());
+    }
+
+    #[test]
+    fn mremap_table_shrink() {
+        reset_mmap_state_for_tests();
+        let mut table = MMAP_REGIONS.lock();
+        let addr = MMAP_REGION_START;
+        let old_len = PAGE_SIZE * 4;
+        let new_len = PAGE_SIZE * 2;
+        assert!(table.insert(MmapRegion {
+            addr,
+            len: old_len,
+            prot: PROT_READ,
+        }));
+
+        let region = table.find_exact(addr, old_len).unwrap();
+        let _ = table.remove(addr);
+        let _ = table.insert(MmapRegion {
+            addr,
+            len: new_len,
+            prot: region.prot,
+        });
+
+        let resized = table.find_exact(addr, new_len).unwrap();
+        assert_eq!(resized.len, new_len);
+        assert!(table.find_exact(addr, old_len).is_none());
+
+        // The freed tail [addr+new_len .. addr+old_len] should be reusable.
+        let tail = table.find_first_fit(PAGE_SIZE * 2);
+        assert_eq!(tail, Some(addr + new_len));
+    }
+
+    #[test]
+    fn mremap_table_relocate() {
+        reset_mmap_state_for_tests();
+        let mut table = MMAP_REGIONS.lock();
+        let old_addr = MMAP_REGION_START;
+        let old_len = PAGE_SIZE;
+        let new_len = PAGE_SIZE * 3;
+
+        // Block in-place growth: place a region right after old_addr.
+        assert!(table.insert(MmapRegion {
+            addr: old_addr + old_len,
+            len: PAGE_SIZE,
+            prot: PROT_READ,
+        }));
+        assert!(table.insert(MmapRegion {
+            addr: old_addr,
+            len: old_len,
+            prot: PROT_READ,
+        }));
+
+        // Simulate MAYMOVE: find a new spot, update tracking.
+        let new_addr = table.find_first_fit(new_len).expect("free slot exists");
+        assert_ne!(new_addr, old_addr);
+        let _ = table.remove(old_addr);
+        let _ = table.insert(MmapRegion {
+            addr: new_addr,
+            len: new_len,
+            prot: PROT_READ,
+        });
+
+        assert!(table.find_exact(new_addr, new_len).is_some());
+        assert!(table.find_exact(old_addr, old_len).is_none());
     }
 }

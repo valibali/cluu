@@ -200,7 +200,7 @@ pub const PROCMGR_JOB_NOTIFY_LABEL: u32 = 86;
 
 // ──────────────────────────────────────────────────────────────────────
 // Compositor protocol (sub-project A — see
-// docs/superpowers/specs/2026-05-10-tui-compositor-design.md §7)
+// doc/book/terminal.md §7)
 // ──────────────────────────────────────────────────────────────────────
 
 /// App → compositor:client. Request a new window. Payload: title bytes.

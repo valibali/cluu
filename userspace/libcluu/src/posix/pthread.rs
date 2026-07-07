@@ -120,12 +120,27 @@ static NEXT_STACK_ADDR: AtomicUsize = AtomicUsize::new(THREAD_STACK_REGION_START
 // TLS template (parsed once from linker symbols)
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[cfg(not(all(feature = "host-test", feature = "posix")))]
 extern "C" {
     static __tdata_start: u8;
     static __tdata_end: u8;
     static __tbss_start: u8;
     static __tbss_end: u8;
 }
+
+#[cfg(all(feature = "host-test", feature = "posix"))]
+mod host_tls_symbols {
+    #[no_mangle]
+    pub(super) static __tdata_start: u8 = 0;
+    #[no_mangle]
+    pub(super) static __tdata_end: u8 = 0;
+    #[no_mangle]
+    pub(super) static __tbss_start: u8 = 0;
+    #[no_mangle]
+    pub(super) static __tbss_end: u8 = 0;
+}
+#[cfg(all(feature = "host-test", feature = "posix"))]
+use host_tls_symbols::*;
 
 struct TlsTemplate {
     tdata_src: usize,
@@ -1073,5 +1088,121 @@ pub extern "C" fn pthread_exit(retval: *mut c_void) -> ! {
 
     loop {
         let _ = crate::syscall::yield_cpu();
+    }
+}
+
+#[cfg(all(test, feature = "host-test", feature = "posix"))]
+mod tests {
+    use super::*;
+    use core::sync::atomic::AtomicBool;
+
+    static DTOR_RAN_0: AtomicBool = AtomicBool::new(false);
+    static DTOR_RAN_1: AtomicBool = AtomicBool::new(false);
+    static DTOR_RAN_2: AtomicBool = AtomicBool::new(false);
+    static DTOR_RAN_3: AtomicBool = AtomicBool::new(false);
+    static DTOR_RAN_4: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn dtor0(_: *mut c_void) { DTOR_RAN_0.store(true, Ordering::SeqCst); }
+    extern "C" fn dtor1(_: *mut c_void) { DTOR_RAN_1.store(true, Ordering::SeqCst); }
+    extern "C" fn dtor2(_: *mut c_void) { DTOR_RAN_2.store(true, Ordering::SeqCst); }
+    extern "C" fn dtor3(_: *mut c_void) { DTOR_RAN_3.store(true, Ordering::SeqCst); }
+    extern "C" fn dtor4(_: *mut c_void) { DTOR_RAN_4.store(true, Ordering::SeqCst); }
+
+    unsafe fn set_fs_base(addr: usize) {
+        let ret: isize;
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 158isize => ret,
+            inlateout("rdi") 0x1002isize => _,
+            inlateout("rsi") addr => _,
+            lateout("rdx") _,
+            lateout("r10") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+        let _ = ret;
+    }
+
+    unsafe fn get_fs_base() -> usize {
+        let mut addr: usize = 0;
+        let ret: isize;
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 158isize => ret,
+            inlateout("rdi") 0x1003isize => _,
+            inlateout("rsi") &mut addr as *mut usize => _,
+            lateout("rdx") _,
+            lateout("r10") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+        let _ = ret;
+        addr
+    }
+
+    /// M4 verification: create 5 pthread keys with destructors, set non-NULL
+    /// values, call `run_key_destructors` (the same function called on
+    /// `pthread_entry` and `pthread_exit`), and assert all 5 destructors ran.
+    #[test]
+    fn pthread_key_destructors_all_run_on_exit() {
+        for f in [&DTOR_RAN_0, &DTOR_RAN_1, &DTOR_RAN_2, &DTOR_RAN_3, &DTOR_RAN_4] {
+            f.store(false, Ordering::SeqCst);
+        }
+
+        // Force lazy_static initialization BEFORE changing FS base.
+        // lazy_static allocates on the heap via the global allocator, which
+        // on the host uses glibc malloc — a TLS-dependent code path.
+        let _ = KEY_DESTRUCTORS.lock();
+
+        let mut tls_block = [0u8; TCB_SIZE];
+        let block_addr = tls_block.as_mut_ptr() as usize;
+
+        let saved_fs = unsafe { get_fs_base() };
+        unsafe { set_fs_base(block_addr); }
+
+        let mut keys = [0u32; 5];
+        let r0 = pthread_key_create(&mut keys[0], Some(dtor0));
+        let r1 = pthread_key_create(&mut keys[1], Some(dtor1));
+        let r2 = pthread_key_create(&mut keys[2], Some(dtor2));
+        let r3 = pthread_key_create(&mut keys[3], Some(dtor3));
+        let r4 = pthread_key_create(&mut keys[4], Some(dtor4));
+
+        let sentinel: usize = 0xBEEF;
+        let s0 = pthread_setspecific(keys[0], sentinel as *const c_void);
+        let s1 = pthread_setspecific(keys[1], sentinel as *const c_void);
+        let s2 = pthread_setspecific(keys[2], sentinel as *const c_void);
+        let s3 = pthread_setspecific(keys[3], sentinel as *const c_void);
+        let s4 = pthread_setspecific(keys[4], sentinel as *const c_void);
+
+        super::run_key_destructors();
+
+        unsafe { set_fs_base(saved_fs); }
+
+        assert_eq!(r0, 0, "key_create 0");
+        assert_eq!(r1, 0, "key_create 1");
+        assert_eq!(r2, 0, "key_create 2");
+        assert_eq!(r3, 0, "key_create 3");
+        assert_eq!(r4, 0, "key_create 4");
+        assert_eq!(s0, 0, "setspecific 0");
+        assert_eq!(s1, 0, "setspecific 1");
+        assert_eq!(s2, 0, "setspecific 2");
+        assert_eq!(s3, 0, "setspecific 3");
+        assert_eq!(s4, 0, "setspecific 4");
+
+        assert!(DTOR_RAN_0.load(Ordering::SeqCst), "dtor0 did not run");
+        assert!(DTOR_RAN_1.load(Ordering::SeqCst), "dtor1 did not run");
+        assert!(DTOR_RAN_2.load(Ordering::SeqCst), "dtor2 did not run");
+        assert!(DTOR_RAN_3.load(Ordering::SeqCst), "dtor3 did not run");
+        assert!(DTOR_RAN_4.load(Ordering::SeqCst), "dtor4 did not run");
+
+        for &k in &keys {
+            assert_eq!(pthread_key_delete(k), 0, "key_delete");
+        }
     }
 }
