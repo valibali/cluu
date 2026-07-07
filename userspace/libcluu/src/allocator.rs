@@ -859,10 +859,11 @@ mod inner {
                     if let Some(p) = n.try_alloc(layout) {
                         return p;
                     }
-                    n.sweep();
-                    if let Some(p) = n.try_alloc(layout) {
-                        return p;
-                    }
+                    // Nursery full: fall through to linked-list allocator.
+                    // Do NOT sweep — sweeping reclaims all nursery memory
+                    // including live allocations (e.g., Vec backing buffers
+                    // for long-lived structs like virtio-blk's InflightSlot),
+                    // causing use-after-sweep corruption.
                     drop(n);
                 }
             }
