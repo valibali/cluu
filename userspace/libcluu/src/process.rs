@@ -21,13 +21,22 @@ use alloc::vec::Vec;
 pub const STACK_CANARY: u64 = 0xDEADBEEF_CAFE_BABE;
 
 pub fn map_segments(space_token: usize, elf: &ElfFile, bytes: &[u8]) -> Result<()> {
+    // set_text_with_source records a single text region per space, so only
+    // one segment can be M9 demand-paged. Subsequent text segments are
+    // eagerly mapped to avoid overwriting the recorded text region.
+    let mut text_demand_paged = false;
     for segment in elf.segments_iter() {
-        map_segment(space_token, segment, bytes)?;
+        map_segment(space_token, segment, bytes, &mut text_demand_paged)?;
     }
     Ok(())
 }
 
-fn map_segment(space_token: usize, segment: &LoadableSegment, bytes: &[u8]) -> Result<()> {
+fn map_segment(
+    space_token: usize,
+    segment: &LoadableSegment,
+    bytes: &[u8],
+    text_demand_paged: &mut bool,
+) -> Result<()> {
     let vaddr = segment.vaddr as usize;
     let mem_size = segment.mem_size as usize;
     if mem_size == 0 {
@@ -49,7 +58,11 @@ fn map_segment(space_token: usize, segment: &LoadableSegment, bytes: &[u8]) -> R
     // fault time. Only executable, non-writable segments are demand-paged
     // — `set_text_with_source` records a single text region per space, so
     // a later writable segment must not overwrite it.
-    let demand_page_text = segment.is_executable() && !segment.is_writable();
+    let demand_page_text =
+        !*text_demand_paged && segment.is_executable() && !segment.is_writable();
+    if demand_page_text {
+        *text_demand_paged = true;
+    }
 
     // Handle non-page-aligned segments (e.g., .bss after .tdata).
     // The first partial page was already mapped by the previous segment,
