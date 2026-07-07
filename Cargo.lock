@@ -316,6 +316,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-cowfork"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-cp"
 version = "0.1.0"
 dependencies = [
@@ -869,6 +876,13 @@ dependencies = [
 
 [[package]]
 name = "cluu-sort"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-stackgrow"
 version = "0.1.0"
 dependencies = [
  "libcluu",

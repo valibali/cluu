@@ -40,17 +40,40 @@ use libcluu::boot_manifest::BootManifest;
 use libcluu::elf::ElfFile;
 use libcluu::tar::find_member;
 use libcluu::*;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::context::InitContext;
 use crate::mappings::{map_framebuffer, map_initrd, map_process_info};
 use crate::services::{ServiceKind, ServiceSpec, SpacePolicy};
 
-// ===== Process layout =====
+// ===== Process layout (M6 ASLR) =====
+// Stacks are placed inside the kernel's 16 MB demand-pageable stack region
+// (USER_STACK_BOTTOM..USER_STACK_TOP) so the page-fault handler can
+// demand-page stack growth. A per-boot random offset shifts all boot-service
+// stacks by the same page-aligned amount, so stack addresses differ across
+// boots. Per-process separation is maintained by STACK_STEP.
 const PROC_STACK_SIZE: usize = 64 * 1024;
-const PROC_STACK_BASE: usize = 0x6f000000;
-const PROC_STACK_TOP: usize = PROC_STACK_BASE + PROC_STACK_SIZE;
+const USER_STACK_TOP: usize = 0x8000_0000;
+const USER_STACK_BOTTOM: usize = USER_STACK_TOP - 16 * 1024 * 1024;
+const STACK_ASLR_RANGE: usize = 15 * 1024 * 1024;
 const STACK_FLAGS: usize = 0x03; // read + write
 const STACK_STEP: usize = PROC_STACK_SIZE + 0x1000;
+const STACK_GUARD_PAGES: usize = 1;
+
+static STACK_ASLR_OFFSET: AtomicUsize = AtomicUsize::new(0);
+
+fn stack_aslr_offset() -> usize {
+    let offset = STACK_ASLR_OFFSET.load(Ordering::Relaxed);
+    if offset != 0 {
+        return offset;
+    }
+    let mut buf = [0u8; 8];
+    klibcluu::crypto::fill_random(&mut buf);
+    let r = u64::from_le_bytes(buf) as usize;
+    let offset = (r & (STACK_ASLR_RANGE - 1)) & !0xFFF;
+    STACK_ASLR_OFFSET.store(offset, Ordering::Relaxed);
+    offset
+}
 
 /// Wiring policy interface. Each service kind implements its own behavior.
 ///
@@ -250,13 +273,14 @@ pub fn launch_service(
     let elf = ElfFile::parse(service_bytes)?;
     t.mark("elf_parse");
 
-    let stack_top = PROC_STACK_TOP - index * STACK_STEP;
+    let aslr_offset = stack_aslr_offset();
+    let stack_top = USER_STACK_TOP - aslr_offset - index * STACK_STEP;
     let space_token = space_create(ctx.boot.root_token)?;
     t.mark("space_create");
 
     map_segments(space_token, &elf, service_bytes)?;
     t.mark("map_segments");
-    map_stack(space_token, stack_top, PROC_STACK_SIZE, STACK_FLAGS)?;
+    map_stack_with_guard(space_token, stack_top, PROC_STACK_SIZE, STACK_FLAGS, STACK_GUARD_PAGES)?;
     t.mark("map_stack");
 
     // Assemble process info payload (tokens + params) before mapping it into the child.

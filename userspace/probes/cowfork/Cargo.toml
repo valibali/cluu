@@ -1,0 +1,14 @@
+[package]
+name = "cluu-cowfork"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU COW fork (M8) primitive validation probe"
+authors = ["CLUU Team"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "cowfork"
+path = "src/main.rs"
