@@ -126,3 +126,17 @@ pub fn remove_by_pml4(pml4_phys: x86_64::PhysAddr) -> Option<AddressSpace> {
         .map(|(&id, _)| id)?;
     repo.spaces.remove(&id)
 }
+
+/// Execute a closure with immutable access to the address space whose PML4
+/// phys matches `pml4_phys`. Returns `None` if no matching space is found.
+///
+/// Used by the page-fault handler (idt.rs) to look up per-process ASLR
+/// layout by reading CR3 and finding the matching address space. Linear
+/// scan — N is bounded by `MAX_ADDRESS_SPACES`.
+pub fn with_space_by_pml4<R>(pml4_phys: x86_64::PhysAddr, f: impl FnOnce(&AddressSpace) -> R) -> Option<R> {
+    let repo = REPOSITORY.lock();
+    repo.spaces
+        .iter()
+        .find(|(_, s)| s.page_table_root == pml4_phys)
+        .map(|(_, space)| f(space))
+}

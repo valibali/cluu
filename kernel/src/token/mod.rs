@@ -454,6 +454,18 @@ pub enum InvokeOp {
     /// arg3 = 0 (false) or 1 (true). Only callable with THREAD_CONTROL right.
     /// Used by procmgr after thread_create, before thread_resume.
     ThreadSetSystemScope = 86,
+
+    /// Memory pressure notification (M7). Coarse-grained cache-release
+    /// signal: procmgr invokes this on a target process's registered
+    /// pressure-notification token (Notification object) to ask the
+    /// target to release caches. Combined with the OOM callback (C4),
+    /// gives a two-tier response: pressure → release caches, OOM → GC.
+    ///
+    /// arg3 = pressure level (0=soft, 1=hard, 2=critical). The kernel
+    /// ORs bit `(1 << level)` into the notification's pending word.
+    /// Requires WRITE right on the notification token. No-op if no
+    /// waiter is registered (bits accumulate until consumed).
+    MemoryPressure = 87,
 }
 
 impl InvokeOp {
@@ -510,6 +522,7 @@ impl InvokeOp {
             84 => Some(Self::ThreadEnumerate),
             85 => Some(Self::ThreadSetSession),
             86 => Some(Self::ThreadSetSystemScope),
+            87 => Some(Self::MemoryPressure),
             _ => None,
         }
     }
@@ -549,6 +562,8 @@ mod tests {
         assert_eq!(InvokeOp::from_usize(17), Some(InvokeOp::FutexWait));
         assert_eq!(InvokeOp::from_usize(18), Some(InvokeOp::FutexWake));
         assert_eq!(InvokeOp::from_usize(7), Some(InvokeOp::ThreadGetId));
+        assert_eq!(InvokeOp::from_usize(86), Some(InvokeOp::ThreadSetSystemScope));
+        assert_eq!(InvokeOp::from_usize(87), Some(InvokeOp::MemoryPressure));
         assert_eq!(InvokeOp::from_usize(999), None);
     }
 }

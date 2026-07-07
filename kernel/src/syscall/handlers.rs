@@ -842,6 +842,8 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::ThreadSetSystemScope => {
             invoke_thread_set_system_scope(&token, obj_ref, args)
         }
+
+        InvokeOp::MemoryPressure => invoke_memory_pressure(&token, obj_ref, args),
     }
 }
 
@@ -1632,6 +1634,8 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
     use crate::mm::{space_repository, PageFlags};
     use crate::token::{ObjectRef, ObjectType, Rights};
 
+    const PROTECT_INSTALL_UNMAPPED: u32 = 0x08;
+
     if !token.has_right(Rights::SPACE_MAP) {
         return Err(Error::PermissionDenied);
     }
@@ -1643,12 +1647,13 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
     if virt_addr & 0xFFF != 0 {
         return Err(Error::InvalidArgument);
     }
-    if (perms & !(0x01 | 0x02 | 0x04)) != 0 {
+    if (perms & !(0x01 | 0x02 | 0x04 | PROTECT_INSTALL_UNMAPPED)) != 0 {
         return Err(Error::InvalidArgument);
     }
 
     let writable = (perms & 0x02) != 0;
     let executable = (perms & 0x04) != 0;
+    let install_unmapped = (perms & PROTECT_INSTALL_UNMAPPED) != 0;
 
     let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
@@ -1659,51 +1664,169 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
         return Err(Error::InvalidArgument);
     };
 
-    let result = space_repository::with_space_mut(space_id, |space| {
-        let physmap_base = x86_64::VirtAddr::new(crate::mm::physmap::PHYS_MAP_BASE);
-        let mut alloc = crate::mm::PmmPageAllocator;
-        let mut vmm = unsafe {
-            crate::mm::vmm::PageTableManager::for_page_table(
-                physmap_base,
-                space.page_table_root,
-                &mut alloc,
-            )
-        };
-
-        // Validate mapping presence first to avoid partial retagging.
-        for i in 0..num_pages {
-            let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
-            if vmm.translate(addr).is_none() {
-                return Err(Error::NotFound);
-            }
+    // M9 demand-paged text: install not-present PTEs for unmapped addresses
+    // and record the source so the page-fault handler can demand-page with
+    // the original content. No physical frame is allocated at install time.
+    if install_unmapped {
+        if writable {
+            klibcluu::warn("invoke_space_protect: PROTECT_INSTALL_UNMAPPED requires read-only");
+            return Err(Error::InvalidArgument);
         }
 
-        let flags = PageFlags {
-            present: true,
-            writable,
-            user: true,
-            write_through: false,
-            cache_disabled: false,
-            accessed: false,
-            dirty: false,
-            huge: false,
-            global: false,
-            no_execute: !executable,
+        let source_ptr = args.arg6 as u64;
+        if source_ptr == 0 {
+            klibcluu::warn("invoke_space_protect: PROTECT_INSTALL_UNMAPPED requires source_ptr");
+            return Err(Error::InvalidArgument);
+        }
+
+        // arg4 packs num_pages (high 32) and file_size (low 32), matching
+        // the space_map_range convention.
+        let num_pages_raw = (args.arg4 >> 32) as usize;
+        let file_size_raw = (args.arg4 & 0xFFFF_FFFF) as usize;
+        let num_pages = if num_pages_raw == 0 { 1 } else { num_pages_raw };
+
+        let caller_root = crate::sched::ThreadManager::current_page_table_root()
+            .ok_or(Error::InvalidState)?;
+
+        // Copy the source text bytes into a kernel heap buffer at install
+        // time. At fault time the page-fault handler copies from this
+        // buffer — no source page-table walk at fault time, which could
+        // fail if the source pages are evicted or retagged between install
+        // and fault.
+        use alloc::boxed::Box;
+        let source_data: Box<[u8]> = {
+            use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+            let mut buf: alloc::vec::Vec<u8> = alloc::vec![0u8; file_size_raw];
+            let mut copied = 0usize;
+            while copied < file_size_raw {
+                let src_va = source_ptr + copied as u64;
+                let src_page = src_va & !0xFFFu64;
+                let src_off = (src_va & 0xFFF) as usize;
+                let src_phys = match crate::elf::translate_vaddr(
+                    caller_root,
+                    x86_64::VirtAddr::new(src_page),
+                ) {
+                    Some(p) => p,
+                    None => {
+                        klibcluu::warn(
+                            "invoke_space_protect: source page not mapped at install time",
+                        );
+                        return Err(Error::InvalidState);
+                    }
+                };
+                let src_virt =
+                    unsafe { crate::mm::physmap::phys_to_virt_u64(src_phys.as_u64()) };
+                let chunk = core::cmp::min(file_size_raw - copied, PAGE_SIZE - src_off);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (src_virt + src_off as u64) as *const u8,
+                        buf.as_mut_ptr().add(copied),
+                        chunk,
+                    );
+                }
+                copied += chunk;
+            }
+            buf.into_boxed_slice()
         };
 
-        for i in 0..num_pages {
-            let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
-            if vmm.protect(addr, flags).is_err() {
-                return Err(Error::InvalidAddress);
-            }
-        }
-        Ok(num_pages)
-    });
+        let result = space_repository::with_space_mut(space_id, |space| {
+            use crate::mm::space::TextSource;
+            use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
 
-    match result {
-        Some(Ok(changed)) => Ok(changed),
-        Some(Err(err)) => Err(err),
-        None => Err(Error::NotFound),
+            for i in 0..num_pages {
+                let addr = virt_addr + (i as u64) * PAGE_SIZE as u64;
+                let map_result = unsafe {
+                    crate::elf::map_guard_page(addr, space.page_table_root, space_id)
+                };
+                if let Err(_) = map_result {
+                    return Err(Error::OutOfMemory);
+                }
+            }
+
+            let total_size = num_pages * PAGE_SIZE;
+            space.set_text_with_source(
+                x86_64::VirtAddr::new(virt_addr),
+                total_size,
+                TextSource {
+                    source_data,
+                    source_vaddr: source_ptr,
+                },
+            );
+            Ok(num_pages)
+        });
+
+        match result {
+            Some(Ok(changed)) => Ok(changed),
+            Some(Err(err)) => Err(err),
+            None => Err(Error::NotFound),
+        }
+    } else {
+        let result = space_repository::with_space_mut(space_id, |space| {
+            let physmap_base = x86_64::VirtAddr::new(crate::mm::physmap::PHYS_MAP_BASE);
+            let mut alloc = crate::mm::PmmPageAllocator;
+            let mut vmm = unsafe {
+                crate::mm::vmm::PageTableManager::for_page_table(
+                    physmap_base,
+                    space.page_table_root,
+                    &mut alloc,
+                )
+            };
+
+            // Validate mapping presence first to avoid partial retagging.
+            for i in 0..num_pages {
+                let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
+                if vmm.translate(addr).is_none() {
+                    return Err(Error::NotFound);
+                }
+            }
+
+            // Security: refuse to escalate a shared (Grant-tagged) frame to
+            // writable. MAP_SHARE_PHYS / space_grant map shared frames
+            // read-only; allowing space_protect to make them writable would
+            // break the read-only guarantee the grant origin established.
+            if writable {
+                for i in 0..num_pages {
+                    let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
+                    if let Some(phys) = vmm.translate(addr) {
+                        let tag = crate::mm::frame_table::tag_of(phys.as_u64());
+                        if tag == crate::mm::frame_table::FrameTag::Grant {
+                            klibcluu::warn(
+                                "invoke_space_protect: cannot escalate shared page to writable",
+                            );
+                            return Err(Error::PermissionDenied);
+                        }
+                    }
+                }
+            }
+
+            let flags = PageFlags {
+                present: true,
+                writable,
+                user: true,
+                write_through: false,
+                cache_disabled: false,
+                accessed: false,
+                dirty: false,
+                huge: false,
+                global: false,
+                no_execute: !executable,
+            };
+
+            for i in 0..num_pages {
+                let addr = x86_64::VirtAddr::new(virt_addr + (i as u64) * 0x1000);
+                if vmm.protect(addr, flags).is_err() {
+                    return Err(Error::InvalidAddress);
+                }
+            }
+            Ok(num_pages)
+        });
+
+        match result {
+            Some(Ok(changed)) => Ok(changed),
+            Some(Err(err)) => Err(err),
+            None => Err(Error::NotFound),
+        }
     }
 }
 
@@ -1969,11 +2092,11 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
     }
 
     // If the target already has something mapped at `target_virt`, drop
-    // its refcount first so we don't leak the prior frame. For grant-
-    // tracked frames, the frame is freed to PMM when its last mapping
-    // goes away. For untracked frames (e.g. an anonymous page from
-    // `space_map_range`), we leak — they stay attributed to the owning
-    // space and will be reclaimed at teardown.
+    // its refcount first so we don't leak the prior frame. dec_ref is the
+    // single free path: it auto-retypes to Untyped and frees to PMM when
+    // rc hits 0. For grant-tracked frames we also dec_map_count to keep
+    // the frame_registry in sync (NOT dec_and_maybe_free — that would
+    // double-free, since dec_ref already owns the PMM free).
     let prior_phys = space_repository::with_space(target_space_id, |target_space| {
         elf::translate_vaddr_with_flags(target_space.page_table_root, VirtAddr::new(target_virt))
     })
@@ -1981,8 +2104,9 @@ fn invoke_space_grant(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
     .map(|(phys, _)| phys.as_u64() & PHYS_MASK);
     if let Some(old_phys) = prior_phys {
         if old_phys != phys_addr {
+            let _ = crate::mm::frame_table::dec_ref(old_phys);
             if let Some(old_id) = frame_registry::lookup_by_phys(old_phys) {
-                frame_registry::dec_and_maybe_free(old_id);
+                frame_registry::dec_map_count(old_id);
             }
         }
     }
@@ -2075,6 +2199,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
     const MAP_DEVICE_WC: u32 = 0x1000;
     const MAP_SHARE_PHYS: u32 = 0x800;
     const MAP_FRAME_TOKEN: u32 = 0x400;
+    const MAP_GUARD: u32 = 0x2000;
     const MAP_TEST_FAILPOINT: u32 = 0x8000_0000;
     const MAP_TEST_FAIL_ON_MAP_STAGE: u32 = 0x4000_0000;
     const MAP_TEST_FAIL_AFTER_SHIFT: u32 = 16;
@@ -2122,6 +2247,7 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
         return Err(Error::InvalidArgument);
     }
     let map_share_phys = (flags & MAP_SHARE_PHYS) != 0;
+    let map_guard = (flags & MAP_GUARD) != 0;
     let fail_after_pages = if (flags & MAP_TEST_FAILPOINT) != 0 {
         let raw = ((flags & MAP_TEST_FAIL_AFTER_MASK) >> MAP_TEST_FAIL_AFTER_SHIFT) as usize;
         Some(raw)
@@ -2268,6 +2394,44 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
                 }
             }
         }
+        return Ok(num_pages);
+    }
+
+    // MAP_GUARD: install not-present PTEs without allocating physical frames.
+    // Any access faults (thread killed or forwarded to fault_endpoint).
+    if map_guard {
+        if map_device || map_device_wc || map_share_phys || map_frame_token || use_large_pages {
+            klibcluu::warn("invoke_space_map_range: MAP_GUARD incompatible with frame-allocating flags");
+            return Err(Error::InvalidArgument);
+        }
+        if data_ptr != 0 || data_len != 0 {
+            klibcluu::warn("invoke_space_map_range: MAP_GUARD does not copy data");
+            return Err(Error::InvalidArgument);
+        }
+        for page_idx in 0..num_pages {
+            let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
+            let map_result = space_repository::with_space_mut(space_id, |space| unsafe {
+                elf::map_guard_page(virt_addr, space.page_table_root, space_id)
+            });
+            match map_result {
+                Some(Ok(())) => {}
+                Some(Err(_)) => {
+                    klibcluu::warn("invoke_space_map_range MAP_GUARD: map_guard_page failed");
+                    return Err(Error::OutOfMemory);
+                }
+                None => {
+                    klibcluu::warn("invoke_space_map_range MAP_GUARD: space not found");
+                    return Err(Error::NotFound);
+                }
+            }
+        }
+        // ASLR: record the guard page boundary so the page-fault handler
+        // can exclude the guard region from demand paging. The first
+        // address above the guard pages is the stack base.
+        let guard_end = virt_start + (num_pages * PAGE_SIZE) as u64;
+        let _ = space_repository::with_space_mut(space_id, |space| {
+            space.set_aslr_stack_guard_end(guard_end);
+        });
         return Ok(num_pages);
     }
 
@@ -3499,6 +3663,47 @@ fn invoke_notification_poll(
 
     let pending = crate::ipc::notification::poll(notif_id)?;
     Ok(pending as usize)
+}
+
+/// Memory pressure notification (M7). Coarse-grained cache-release
+/// signal: caller invokes this on a target process's registered
+/// pressure-notification token to ask the target to release caches.
+///
+/// arg3 = pressure level (0..63). The kernel ORs bit `(1 << level)`
+/// into the notification's pending word. Requires WRITE right on the
+/// notification token. Combined with the OOM callback (C4), this is
+/// the first tier of the two-tier memory-response ladder
+/// (pressure → release caches, OOM → GC).
+fn invoke_memory_pressure(
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
+) -> SyscallResult {
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::WRITE) {
+        klibcluu::warn("invoke_memory_pressure: missing WRITE right");
+        return Err(Error::PermissionDenied);
+    }
+
+    let notif_ref = crate::token::check_object_type(obj_ref, ObjectType::Notification)
+        .map_err(|_| Error::InvalidArgument)?;
+    let notif_id = if let ObjectRef::Notification(id) = notif_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let level = args.arg3 as u32;
+    if level >= 64 {
+        klibcluu::warn("invoke_memory_pressure: level out of range");
+        return Err(Error::InvalidArgument);
+    }
+    let bits = 1u64 << level;
+
+    crate::ipc::notification::signal(notif_id, bits)?;
+    klibcluu::trace("invoke_memory_pressure: signaled");
+    Ok(0)
 }
 
 /// Enumerate live thread IDs from the kernel's thread repository.

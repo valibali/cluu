@@ -816,6 +816,9 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
         if let Some(true) = handle_heap_fault(x86_64::VirtAddr::new(cr2)) {
             return core::ptr::null(); // Resume — lazy alloc succeeded
         }
+        if let Some(true) = handle_text_fault(cr2) {
+            return core::ptr::null(); // Resume — text demand-page succeeded
+        }
     }
 
     // Log the fault details (only for unrecoverable faults)
@@ -933,45 +936,126 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
     }
 }
 
-/// Handle page fault via demand paging (lazy allocation)
+/// Demand-page a heap or stack fault. Returns Some(true) if a page was
+/// mapped, Some(false) if the fault is outside any demand-pageable region,
+/// None on allocation failure. Stack faults route through `handle_stack_fault`
+/// (read+write+no-exec + growth-threshold warnings); heap faults map directly.
 ///
-/// Returns Some(true) if page was successfully allocated,
-/// Some(false) if fault is not in a demand-pageable region,
-/// None if allocation failed.
+/// M6 ASLR: the stack guard boundary is looked up per-process via CR3 →
+/// space_repository. Falls back to the global `USER_STACK_BOTTOM + 0x1000`
+/// for kernel threads and early boot (before the space repository is
+/// populated). Heap region bounds remain global constants — ASLR
+/// randomizes the heap start upward, so the global lower bound is still
+/// correct for demand paging.
 fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
     use crate::mm::space::layout;
     use x86_64::registers::control::Cr3;
 
     let addr = fault_addr.as_u64();
 
-    // Check if fault is in a demand-pageable region
-    // Guard page: bottom page of stack region is NOT demand-paged.
-    // Stack overflow into the guard page triggers an unrecoverable fault.
-    let stack_guard_end = layout::USER_STACK_BOTTOM + 0x1000;
-    let is_stack_region = (stack_guard_end..layout::USER_STACK_TOP).contains(&addr);
+    let (stack_guard_end, stack_top) = current_aslr_stack_bounds().unwrap_or_else(|| {
+        (layout::USER_STACK_BOTTOM + 0x1000, layout::USER_STACK_TOP)
+    });
+    let is_stack_region = (stack_guard_end..stack_top).contains(&addr);
     let is_heap_region = (layout::USER_HEAP_START..layout::USER_HEAP_MAX).contains(&addr);
 
     if !is_stack_region && !is_heap_region {
-        // Fault is not in a demand-pageable region
         return Some(false);
     }
+
+    if is_stack_region {
+        return handle_stack_fault(addr, stack_top);
+    }
+
+    // Heap fault: only demand-map addresses below the process's current brk.
+    // Addresses in the heap range but above brk must NOT be demand-paged —
+    // doing so would bypass sbrk/brk and let a process without SPACE_MAP
+    // allocate writable memory by simply touching it (security: heap brk
+    // limit enforcement). Fall back to the global range check for kernel
+    // threads / early boot, where no AddressSpace is registered for the
+    // current CR3.
+    let (pml4_frame, _) = Cr3::read();
+    let page_table_root = pml4_frame.start_address();
+    let heap_brk = crate::mm::space_repository::with_space_by_pml4(
+        page_table_root,
+        |space| space.heap.current_brk().as_u64(),
+    );
+
+    match heap_brk {
+        Some(brk) => {
+            let is_heap_allocated = addr >= layout::USER_HEAP_START && addr < brk;
+            if !is_heap_allocated {
+                return Some(false);
+            }
+            demand_map_page(addr)
+        }
+        None => demand_map_page(addr),
+    }
+}
+
+/// Look up the current address space's ASLR stack bounds by CR3.
+/// Returns (guard_end, stack_top) where guard_end is the first address
+/// above the guard page and stack_top is the upper bound of the demand-
+/// pageable stack region. Returns None for kernel threads / early boot.
+fn current_aslr_stack_bounds() -> Option<(u64, u64)> {
+    use x86_64::registers::control::Cr3;
+    let (pml4_frame, _) = Cr3::read();
+    let pml4_phys = pml4_frame.start_address();
+    crate::mm::space_repository::with_space_by_pml4(pml4_phys, |space| {
+        (space.aslr_stack_guard_end, crate::mm::space::layout::USER_STACK_TOP)
+    })
+}
+
+/// Stack demand-fault path (M10): warn at 1/4/8 MB growth thresholds, then
+/// map a read+write+no-exec page. The 16 MB hard limit (`USER_STACK_SIZE`)
+/// is enforced structurally — the guard page at `USER_STACK_BOTTOM` is never
+/// demand-paged, so overflow kills the thread rather than silently corrupting.
+fn handle_stack_fault(addr: u64, stack_top: u64) -> Option<bool> {
+    warn_stack_growth_threshold(addr & !0xFFF, stack_top);
+    demand_map_page(addr)
+}
+
+/// Fire a one-shot warning when stack growth crosses 1/4/8 MB. Each threshold
+/// boundary lives in exactly one 4 KB page; firing when that page is faulted
+/// deduplicates naturally (no per-process state, IRQ-safe, no allocation) and
+/// tolerates large stack frames.
+fn warn_stack_growth_threshold(virt_page: u64, stack_top: u64) {
+    const MB: u64 = 1024 * 1024;
+    let thresholds: &[(u64, &str)] = &[
+        (8 * MB, "8 MB"),
+        (4 * MB, "4 MB"),
+        (1 * MB, "1 MB"),
+    ];
+    for &(bytes, label) in thresholds {
+        let boundary = stack_top - bytes;
+        if virt_page <= boundary && boundary < virt_page + 0x1000 {
+            klibcluu::log_str_pair(
+                klibcluu::LogLevel::Warn,
+                "Stack growth: crossed ",
+                label,
+            );
+            klibcluu::warn("Stack growth: approaching 16 MB USER_STACK_SIZE limit");
+            return;
+        }
+    }
+}
+
+/// Allocate a zeroed frame and map it read+write+no-exec at `addr` in the
+/// current CR3. Owner lookup tags intermediate PT frames correctly; falls
+/// back to `KERNEL_OWNER` early in boot (better than sentinel 0).
+fn demand_map_page(addr: u64) -> Option<bool> {
+    use x86_64::registers::control::Cr3;
 
     klibcluu::trace("Demand paging: allocating page for fault at 0x");
     klibcluu::log_hex(klibcluu::LogLevel::Trace, "", addr);
 
-    // Get current page table root from CR3
     let (pml4_frame, _) = Cr3::read();
     let page_table_root = pml4_frame.start_address();
 
-    // Allocate a physical frame.
-    //
-    // try_alloc_frame is mandatory here: pf_with_regs runs from the page
-    // fault exception handler with interrupts disabled.  A blocking
-    // PMM.lock() while another thread holds the PMM (e.g. mid-ELF-mapping)
-    // would spin forever in IRQ context — same halt pattern as 393cd6b.
-    // Returning None on contention triggers the fault path; the failed
-    // page access will retry on the next instruction execution and likely
-    // succeed once the PMM holder finishes.
+    // try_alloc_frame is mandatory: pf_with_regs runs with interrupts
+    // disabled. A blocking PMM.lock() while another thread holds the PMM
+    // would spin forever in IRQ context (halt pattern of 393cd6b). None
+    // here triggers the fault path; the access retries on the next attempt.
     let frame_phys = match crate::mm::pmm::try_alloc_frame() {
         Some(f) => f,
         None => {
@@ -980,18 +1064,12 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
         }
     };
 
-    // Zero the frame via physmap before mapping (security: prevent info leakage)
+    // Zero via physmap before mapping (security: prevent info leakage).
     let frame_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(frame_phys) };
     unsafe {
         core::ptr::write_bytes(frame_virt as *mut u8, 0, 4096);
     }
 
-    // Map the page with user read+write permissions (no execute for stack/heap).
-    // Phase 2.5: look up the real AddressSpaceId for this CR3 so that newly
-    // allocated intermediate PT frames are tagged with the correct owner.
-    // If the space isn't in the repository (e.g. very-early boot), fall back to
-    // KERNEL_OWNER — wrong owner is still better than sentinel 0 which causes
-    // false OwnerMismatch matches against each other.
     let page_table_root_phys = page_table_root.as_u64();
     let demand_owner = {
         let mut found = crate::token::scope::KERNEL_OWNER;
@@ -1002,13 +1080,14 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
         });
         found
     };
-    let virt_page = addr & !0xFFF; // Align to page boundary
+    let virt_page = addr & !0xFFF;
+    let _ = crate::mm::frame_table::retype_to_user(frame_phys, demand_owner);
     let result = unsafe {
         crate::elf::map_user_page(
             virt_page,
             frame_phys,
             true,  // writable
-            false, // not executable
+            false, // not executable — stack AND heap are no-exec
             page_table_root,
             demand_owner,
         )
@@ -1021,7 +1100,123 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
         }
         Err(_) => {
             klibcluu::warn("Demand paging: failed to map page");
-            // Free the frame since mapping failed
+            crate::mm::pmm::free_frame(frame_phys);
+            None
+        }
+    }
+}
+
+/// Demand-page a text segment fault (M9). Returns Some(true) if a page was
+/// mapped with the original text content, Some(false) if the fault is outside
+/// any demand-paged text region, None on allocation or source-translation
+/// failure. Parallel to `handle_heap_fault` but maps read+exec (not r+w)
+/// and copies from the recorded source instead of zero-filling.
+fn handle_text_fault(fault_addr: u64) -> Option<bool> {
+    use x86_64::registers::control::Cr3;
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+    let (pml4_frame, _) = Cr3::read();
+    let page_table_root = pml4_frame.start_address();
+
+    // The source bytes live in a kernel heap buffer inside TextSource, so
+    // the copy must happen while borrowing the space. PMM allocation is
+    // independent of space_repository, so it is safe to do inside this
+    // closure. The mapping + demand-owner lookup happen outside because
+    // for_each cannot be called with the repo lock held.
+    let frame_result = crate::mm::space_repository::with_space_by_pml4(
+        page_table_root,
+        |space| {
+            let text = &space.text;
+            if text.size == 0 {
+                return None;
+            }
+            if fault_addr < text.start.as_u64()
+                || fault_addr >= text.start.as_u64() + text.size as u64
+            {
+                return None;
+            }
+            let source = match space.text_source.as_ref() {
+                Some(s) => s,
+                None => return None,
+            };
+
+            klibcluu::trace("Text demand-fault at 0x");
+            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", fault_addr);
+
+            let frame_phys = match crate::mm::pmm::try_alloc_frame() {
+                Some(f) => f,
+                None => {
+                    klibcluu::warn("Text demand-fault: PMM busy or OOM");
+                    return Some(None);
+                }
+            };
+
+            let frame_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(frame_phys) };
+            unsafe {
+                core::ptr::write_bytes(frame_virt as *mut u8, 0, PAGE_SIZE);
+            }
+
+            let page_start = fault_addr & !0xFFFu64;
+            let page_offset = (page_start - text.start.as_u64()) as usize;
+            let file_size = source.source_data.len();
+            let bytes_to_copy = if page_offset < file_size {
+                let remaining = file_size - page_offset;
+                if remaining > PAGE_SIZE { PAGE_SIZE } else { remaining }
+            } else {
+                0
+            };
+
+            if bytes_to_copy > 0 {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        source.source_data.as_ptr().add(page_offset),
+                        frame_virt as *mut u8,
+                        bytes_to_copy,
+                    );
+                }
+            }
+
+            Some(Some(frame_phys))
+        },
+    );
+
+    let frame_phys = match frame_result {
+        Some(Some(Some(phys))) => phys,
+        Some(Some(None)) => return None, // PMM OOM
+        Some(None) | None => return Some(false), // not a text fault / no source
+    };
+
+    let demand_owner = {
+        let mut found = crate::token::scope::KERNEL_OWNER;
+        crate::mm::space_repository::for_each(|sid, pml4_pa| {
+            if pml4_pa.as_u64() == page_table_root.as_u64() {
+                found = sid;
+            }
+        });
+        found
+    };
+
+    let virt_page = fault_addr & !0xFFFu64;
+    let _ = crate::mm::frame_table::retype_to_user(frame_phys, demand_owner);
+    let result = unsafe {
+        crate::elf::map_user_page(
+            virt_page,
+            frame_phys,
+            false, // not writable
+            true,  // executable
+            page_table_root,
+            demand_owner,
+        )
+    };
+
+    match result {
+        Ok(()) => {
+            klibcluu::trace("Text demand-fault: mapped page at 0x");
+            klibcluu::log_hex(klibcluu::LogLevel::Trace, "", virt_page);
+            Some(true)
+        }
+        Err(_) => {
+            klibcluu::warn("Text demand-fault: failed to map page");
             crate::mm::pmm::free_frame(frame_phys);
             None
         }

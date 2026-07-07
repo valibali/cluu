@@ -104,6 +104,21 @@ where
             return Err(PageFaultError::InvalidAccess);
         }
 
+        // Stack faults: demand-page with read+write+no-exec. The stack region
+        // is demand-pageable across its full extent (see idt.rs::handle_stack_fault
+        // in production); a not-present fault here is a valid stack-growth event.
+        if space.stack.contains(addr) && !error_code.protection_violation {
+            return self.handle_lazy_stack(addr);
+        }
+
+        // Text faults (M9 demand-paged text): demand-page with read+exec.
+        if space.text.size > 0
+            && space.text.contains(addr)
+            && !error_code.protection_violation
+        {
+            return self.handle_lazy_text(addr);
+        }
+
         // Check if this is a lazy heap allocation
         if space.is_valid_heap_address(addr) && !error_code.protection_violation {
             return self.handle_lazy_heap(addr);
@@ -123,6 +138,36 @@ where
 
         // Invalid address (not in any valid region)
         Err(PageFaultError::InvalidAccess)
+    }
+
+    /// Handle lazy stack allocation (M10: stack growth).
+    ///
+    /// Allocates and maps a page for stack expansion with read+write+no-exec.
+    fn handle_lazy_stack(&mut self, addr: VirtAddr) -> Result<(), PageFaultError> {
+        let phys_addr = self.allocator.alloc(0).ok_or(PageFaultError::OutOfMemory)?;
+
+        let flags = PageFlags {
+            present: true,
+            writable: true,
+            user: true,
+            no_execute: true,
+            write_through: false,
+            cache_disabled: false,
+            accessed: false,
+            dirty: false,
+            huge: false,
+            global: false,
+        };
+
+        self.mapper
+            .map(addr, phys_addr, flags)
+            .map_err(|e| match e {
+                MapError::OutOfMemory => PageFaultError::OutOfMemory,
+                MapError::AlreadyMapped => PageFaultError::InvalidAccess,
+                MapError::InvalidAddress => PageFaultError::InvalidAccess,
+            })?;
+
+        Ok(())
     }
 
     /// Handle lazy heap allocation
@@ -147,6 +192,36 @@ where
             writable: true,
             user: true,
             no_execute: true,
+            write_through: false,
+            cache_disabled: false,
+            accessed: false,
+            dirty: false,
+            huge: false,
+            global: false,
+        };
+
+        self.mapper
+            .map(addr, phys_addr, flags)
+            .map_err(|e| match e {
+                MapError::OutOfMemory => PageFaultError::OutOfMemory,
+                MapError::AlreadyMapped => PageFaultError::InvalidAccess,
+                MapError::InvalidAddress => PageFaultError::InvalidAccess,
+            })?;
+
+        Ok(())
+    }
+
+    /// Handle lazy text allocation (M9: demand-paged text).
+    ///
+    /// Allocates and maps a page for text with read+exec (not read+write).
+    fn handle_lazy_text(&mut self, addr: VirtAddr) -> Result<(), PageFaultError> {
+        let phys_addr = self.allocator.alloc(0).ok_or(PageFaultError::OutOfMemory)?;
+
+        let flags = PageFlags {
+            present: true,
+            writable: false,
+            user: true,
+            no_execute: false,
             write_through: false,
             cache_disabled: false,
             accessed: false,
@@ -281,7 +356,7 @@ mod tests {
         let mut space = AddressSpace::new(x86_64::PhysAddr::new(0x1000));
 
         // Grow heap to make the address valid
-        let heap_addr = VirtAddr::new(0x00800000); // USER_HEAP_START
+        let heap_addr = VirtAddr::new(crate::mm::space::layout::USER_HEAP_START);
         space.heap_mut().grow(0x1000).expect("heap grow failed");
 
         let error_code = PageFaultErrorCode {
@@ -355,7 +430,7 @@ mod tests {
         let mut space = AddressSpace::new(x86_64::PhysAddr::new(0x1000));
 
         // Grow heap to make the address valid
-        let heap_addr = VirtAddr::new(0x00800000);
+        let heap_addr = VirtAddr::new(crate::mm::space::layout::USER_HEAP_START);
         space.heap_mut().grow(0x1000).expect("heap grow failed");
 
         let error_code = PageFaultErrorCode {
@@ -384,7 +459,7 @@ mod tests {
         let mut space = AddressSpace::new(x86_64::PhysAddr::new(0x1000));
 
         // Grow heap to make the address valid
-        let heap_addr = VirtAddr::new(0x00800000);
+        let heap_addr = VirtAddr::new(crate::mm::space::layout::USER_HEAP_START);
         space.heap_mut().grow(0x1000).expect("heap grow failed");
 
         let error_code = PageFaultErrorCode {

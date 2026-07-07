@@ -29,6 +29,7 @@
 //! - Implements AddressSpaceManager trait for clean architecture
 
 use crate::mm::traits::PageFlags;
+use alloc::boxed::Box;
 use x86_64::{PhysAddr, VirtAddr};
 
 /// Memory layout constants (preserved from reference)
@@ -92,6 +93,25 @@ pub struct MemoryRegion {
     pub size: usize,
     /// Page flags for this region
     pub flags: PageFlags,
+}
+
+/// Source data for demand-paged text segments (M9).
+///
+/// The source text bytes are copied into a kernel heap buffer at install
+/// time (when `invoke_space_protect` is called with
+/// `PROTECT_INSTALL_UNMAPPED`). At fault time the kernel allocates a fresh
+/// frame and copies `source_data[page_offset..page_offset+bytes_to_copy]`
+/// into it; bytes beyond `source_data.len()` are zero-filled (the frame is
+/// zeroed before copy). Copying at install time avoids translating the
+/// source space's page table at fault time, which could fail if the source
+/// pages are evicted or retagged between install and fault.
+#[derive(Debug)]
+pub struct TextSource {
+    /// Kernel heap buffer containing the source text bytes, copied at
+    /// install time. Freed automatically when TextSource is dropped.
+    pub source_data: Box<[u8]>,
+    /// Original source vaddr (for diagnostics only).
+    pub source_vaddr: u64,
 }
 
 impl MemoryRegion {
@@ -220,6 +240,20 @@ pub struct AddressSpace {
 
     /// Stack region - read+write, grows down
     pub stack: MemoryRegion,
+
+    /// Per-process ASLR: first address above the stack guard page.
+    ///
+    /// The page-fault handler (idt.rs) looks this up by CR3 via
+    /// `space_repository::with_space_by_pml4` and uses it instead of the
+    /// global `layout::USER_STACK_BOTTOM + 0x1000` to correctly exclude the
+    /// guard page from demand paging when ASLR randomizes the stack base.
+    /// Initialized to the global default; updated by the kernel's
+    /// `invoke_space_map_range` handler when a `MAP_GUARD` mapping is
+    /// installed below the stack.
+    pub aslr_stack_guard_end: u64,
+
+    /// Source for demand-paged text (M9). None when text is eagerly mapped.
+    pub text_source: Option<TextSource>,
 }
 
 impl AddressSpace {
@@ -249,6 +283,8 @@ impl AddressSpace {
             data: null_region,
             heap,
             stack: null_region,
+            aslr_stack_guard_end: layout::USER_STACK_BOTTOM + 0x1000,
+            text_source: None,
         }
     }
 
@@ -375,6 +411,20 @@ impl AddressSpace {
         );
     }
 
+    /// Set the text segment region with a demand-paging source (M9).
+    ///
+    /// Installs the text region boundary AND records where the kernel can
+    /// find the original text bytes when a not-present text page faults.
+    pub fn set_text_with_source(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        source: TextSource,
+    ) {
+        self.set_text(start, size);
+        self.text_source = Some(source);
+    }
+
     /// Set the data segment region
     ///
     /// Called by ELF loader after mapping read-write data.
@@ -417,6 +467,16 @@ impl AddressSpace {
                 global: false,
             },
         );
+    }
+
+    /// Update the per-process ASLR stack guard boundary.
+    ///
+    /// Called by `invoke_space_map_range` when a `MAP_GUARD` mapping is
+    /// installed below the stack. `guard_end` is the first address above
+    /// the guard page (= stack base). The page-fault handler uses this
+    /// to exclude the guard page from demand paging.
+    pub fn set_aslr_stack_guard_end(&mut self, guard_end: u64) {
+        self.aslr_stack_guard_end = guard_end;
     }
 
     /// Grow the heap by the given increment

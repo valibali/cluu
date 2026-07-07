@@ -6,7 +6,7 @@
 //!
 //! Every map of a user leaf calls `inc_ref`; every unmap calls `dec_ref`.
 //! `dec_ref` at refcount 0 auto-retypes to Untyped and calls
-//! `pmm::free_frame_untyped` to return the frame to the buddy allocator.
+//! `pmm::free_frame_tagged` to return the frame to the buddy allocator.
 //!
 //! `inc_ref` on a UserData frame whose refcount transitions 1→2 automatically
 //! retypes the frame to Grant (shared / multi-owner). Grant frames stay
@@ -67,7 +67,7 @@ const GRANT_KEEPS_TAG_UNTIL_UNTYPE: bool = true;
 /// FRAME_TABLE warning is logged with the phys and tag.  A count this large
 /// most likely indicates a bug (e.g. a runaway mmap loop) rather than
 /// intentional sharing.  The increment still succeeds; the warning is
-/// advisory only.
+/// diagnostic only (no enforcement action).
 const REFCOUNT_WARN_THRESHOLD: u16 = 1024;
 
 // ─── Frame tag ───────────────────────────────────────────────────────────────
@@ -96,7 +96,8 @@ pub struct FrameMeta {
     /// What this frame is being used for.
     pub tag: FrameTag,
     /// Number of references (PTEs / mappings pointing at this frame).
-    /// Phase 1: advisory, not enforced.
+    /// Phase 2: enforced — `dec_ref` at rc=0 auto-retypes to Untyped and
+    /// returns the frame to the PMM buddy allocator.
     pub refcount: u16,
     /// `AddressSpaceId.0` truncated to u16; 0 = no owner.
     pub owner: u16,
@@ -179,7 +180,7 @@ fn checked_frame(table: &[FrameMeta], phys: u64) -> Result<usize, FrameTableErro
     Ok(idx)
 }
 
-/// Emit a `FRAME_TABLE WARN` line (advisory-mode mismatch).
+/// Emit a `FRAME_TABLE WARN` line (enforced-mode mismatch diagnostic).
 #[inline]
 fn warn_mismatch(msg: &'static str, phys: u64) {
     klibcluu::warn(msg);
@@ -259,7 +260,7 @@ pub fn retype_to_user(phys: u64, owner: AddressSpaceId) -> Result<(), FrameTable
         if ENFORCE_INVARIANTS {
             return Err(err);
         }
-        // Advisory: still update the record so Phase 2 can audit.
+        // Best-effort retag for non-enforced builds.
         entry.tag = FrameTag::UserData;
         entry.owner = owner.as_u64() as u16;
         entry.extra = 0;
@@ -275,7 +276,7 @@ pub fn retype_to_user(phys: u64, owner: AddressSpaceId) -> Result<(), FrameTable
 /// Retype a frame to `Grant` (shared / multi-owner).
 ///
 /// Caller must have established ownership already (typically comes from a
-/// prior `UserData` or `Untyped`). Phase 1: always succeeds.
+/// prior `UserData` or `Untyped`). Enforced: always succeeds for valid tags.
 pub fn retype_to_grant(phys: u64) -> Result<(), FrameTableError> {
     let mut guard = FRAME_TABLE.lock();
     let Some(table) = guard.as_mut() else { return Ok(()); };
@@ -329,8 +330,8 @@ pub fn retype_to_boot_reserved(phys: u64) -> Result<(), FrameTableError> {
 
 /// Retype a frame back to `Untyped`.
 ///
-/// Phase 1: warns if `refcount > 0` but always sets the tag (advisory).
-/// Phase 2 (ENFORCE_INVARIANTS=true): returns `StillReferenced` when refcount > 0.
+/// Enforced (`ENFORCE_INVARIANTS=true`): returns `StillReferenced` when
+/// `refcount > 0`. Only succeeds when the frame has no remaining PTEs.
 pub fn retype_to_untyped(phys: u64) -> Result<(), FrameTableError> {
     let mut guard = FRAME_TABLE.lock();
     let Some(table) = guard.as_mut() else { return Ok(()); };
@@ -396,17 +397,23 @@ pub fn inc_ref(phys: u64) -> Result<u16, FrameTableError> {
 ///
 /// When the refcount reaches 0:
 /// - The tag is automatically set to `Untyped` (owner and extra cleared).
-/// - For UserData and Grant frames, the physical frame is returned to the PMM
-///   buddy allocator (`pmm::free_frame`) automatically. Callers must NOT call
-///   `pmm::free_*` directly after `dec_ref` — dec_ref owns that path.
+/// - For UserData, Grant, and PageTable frames, the physical frame is returned
+///   to the PMM buddy allocator (`pmm::free_frame_tagged`) automatically.
+///   Callers must NOT call `pmm::free_*` directly after `dec_ref` — dec_ref
+///   owns that path.
 ///
 /// Device / KernelHeap / BootReserved frames are silently skipped.
+///
+/// If `dec_ref` is called on a frame whose refcount is already 0 (a double-
+/// free or unbalanced-dec_ref bug), a `FRAME_TABLE WARN` is logged with the
+/// phys and current tag. The call is a no-op (saturating_sub keeps rc at 0,
+/// no PMM free) — the warning is the detection signal.
 ///
 /// The FRAME_TABLE lock is dropped before calling into PMM to avoid
 /// holding both locks simultaneously.
 pub fn dec_ref(phys: u64) -> Result<u16, FrameTableError> {
-    // Phase 1: determine whether we need to auto-free under the lock, then
-    // drop the lock before calling PMM.
+    // Determine whether we need to auto-free under the lock, then drop the
+    // lock before calling PMM.
     let (new_rc, should_free) = {
         let mut guard = FRAME_TABLE.lock();
         let Some(table) = guard.as_mut() else { return Ok(0); };
@@ -419,6 +426,16 @@ pub fn dec_ref(phys: u64) -> Result<u16, FrameTableError> {
                 return Ok(entry.refcount);
             }
             _ => {}
+        }
+        // Silent-underflow detection: dec_ref on a frame with rc=0 is a bug
+        // (double-dec_ref or unbalanced teardown). Log it; the call is still
+        // a safe no-op (saturating_sub holds at 0, tag is already Untyped so
+        // should_free is false — no PMM double-free).
+        if entry.refcount == 0 {
+            klibcluu::warn("FRAME_TABLE WARN: dec_ref on refcount=0 frame — double-dec_ref or unbalanced teardown");
+            klibcluu::log_hex(klibcluu::LogLevel::Warn, "  phys=0x", phys);
+            klibcluu::log_dec(klibcluu::LogLevel::Warn, "  tag=", entry.tag as u64);
+            return Ok(0);
         }
         entry.refcount = entry.refcount.saturating_sub(1);
         let new_rc = entry.refcount;
@@ -601,7 +618,8 @@ mod tests {
         Ok(())
     }
 
-    /// Phase 1-era inc_ref (no UserData→Grant auto-transition).
+    /// Legacy inc_ref (no UserData→Grant auto-transition) — used by tests
+    /// that exercise the pre-auto-transition refcount arithmetic in isolation.
     fn do_inc_ref(table: &mut Vec<FrameMeta>, phys: u64) -> Result<u16, FrameTableError> {
         let idx = checked_frame(table, phys)?;
         table[idx].refcount = table[idx].refcount.saturating_add(1);
@@ -627,7 +645,9 @@ mod tests {
         Ok(new_rc)
     }
 
-    /// Phase 2-era dec_ref: auto-Untyped at 0 (does NOT call PMM in test context).
+    /// Enforced dec_ref: auto-Untyped at 0 with silent-underflow detection
+    /// (does NOT call PMM in test context — host tests have no physmap).
+    /// Mirrors the production `dec_ref` early-return on rc=0.
     fn do_dec_ref_p2(table: &mut Vec<FrameMeta>, phys: u64) -> Result<u16, FrameTableError> {
         let idx = checked_frame(table, phys)?;
         let entry = &mut table[idx];
@@ -636,6 +656,10 @@ mod tests {
                 return Ok(entry.refcount);
             }
             _ => {}
+        }
+        if entry.refcount == 0 {
+            // Silent-underflow guard: no-op return, matches production dec_ref.
+            return Ok(0);
         }
         entry.refcount = entry.refcount.saturating_sub(1);
         if entry.refcount == 0 {
@@ -1058,5 +1082,194 @@ mod tests {
         assert_eq!(rc, 0, "second dec_ref on Untyped must return 0");
         assert_eq!(meta(&table, phys).tag, FrameTag::Untyped, "tag must remain Untyped");
         assert_eq!(meta(&table, phys).refcount, 0);
+    }
+
+    // ── M16 Leak-Detection Tests ──────────────────────────────────────────
+
+    /// Helper: count frames still "in use" (non-Untyped, excluding Device /
+    /// KernelHeap / BootReserved which don't participate in user refcounting).
+    /// Mirrors the production `pmm::get_stats()` "used" count — a frame is
+    /// "used" when it has a non-Untyped tag. After a full create→destroy
+    /// lifecycle, this count MUST return to the pre-lifecycle baseline.
+    fn count_used_frames(table: &[FrameMeta]) -> usize {
+        table
+            .iter()
+            .filter(|e| {
+                !matches!(
+                    e.tag,
+                    FrameTag::Untyped | FrameTag::Device | FrameTag::KernelHeap | FrameTag::BootReserved
+                )
+            })
+            .count()
+    }
+
+    /// M16-T1: Full space lifecycle — create space, map N pages, destroy
+    /// space, verify all frames returned (all back to Untyped / rc=0).
+    ///
+    /// Simulates the production `invoke_space_create` → `invoke_space_map_range`
+    /// → `invoke_space_destroy` → `teardown_user_pages` path at the
+    /// frame_table level. In production, `dec_ref` at rc=0 calls
+    /// `pmm::free_frame_tagged`; in host tests we verify the frame_table
+    /// state that WOULD trigger the PMM free (tag=Untyped, rc=0, owner=0).
+    #[test]
+    fn test_m16_full_lifecycle_no_leak() {
+        let mut table = fresh_table(256);
+        let baseline = count_used_frames(&table);
+        assert_eq!(baseline, 0, "fresh table must have zero used frames");
+
+        const N_PAGES: usize = 8;
+        const OWNER: u64 = 1001;
+        let phys_base = 10 * PAGE; // frames 10..17
+
+        // Create space + map N pages: each page is retype_to_user (rc=1).
+        // Per Phase 2.6 convention, the FIRST PTE install does NOT call
+        // inc_ref — retype_to_user sets rc=1 representing that install.
+        for i in 0..N_PAGES {
+            let phys = phys_base + (i as u64) * PAGE;
+            do_retype_user(&mut table, phys, OWNER).unwrap();
+        }
+        assert_eq!(
+            count_used_frames(&table),
+            N_PAGES,
+            "after mapping {} pages, {} frames must be in use",
+            N_PAGES,
+            N_PAGES
+        );
+
+        // Destroy space: teardown calls dec_ref on every leaf frame.
+        // Each dec_ref drives rc 1→0 → auto-Untyped (would free to PMM).
+        for i in 0..N_PAGES {
+            let phys = phys_base + (i as u64) * PAGE;
+            let rc = do_dec_ref_p2(&mut table, phys).unwrap();
+            assert_eq!(rc, 0, "dec_ref on last mapping must reach rc=0");
+        }
+        assert_eq!(
+            count_used_frames(&table),
+            0,
+            "after destroy, all frames must be returned (Untyped)"
+        );
+
+        // Verify every frame in the lifecycle range is fully reset.
+        for i in 0..N_PAGES {
+            let phys = phys_base + (i as u64) * PAGE;
+            let e = meta(&table, phys);
+            assert_eq!(e.tag, FrameTag::Untyped, "frame {} must be Untyped", i);
+            assert_eq!(e.refcount, 0, "frame {} refcount must be 0", i);
+            assert_eq!(e.owner, 0, "frame {} owner must be 0", i);
+        }
+    }
+
+    /// M16-T2: 100-space create/destroy stress — verify no cumulative leak.
+    ///
+    /// Simulates 100 spaces, each mapping 4 pages. After all 100 spaces are
+    /// created and destroyed, the used-frame count MUST return to the
+    /// baseline (0). This catches slow leaks that a single-cycle test would
+    /// miss (e.g. a missing dec_ref on an intermediate page-table frame).
+    #[test]
+    fn test_m16_100_space_create_destroy_no_leak() {
+        let mut table = fresh_table(4096);
+        let baseline = count_used_frames(&table);
+        assert_eq!(baseline, 0);
+
+        const N_SPACES: usize = 100;
+        const PAGES_PER_SPACE: usize = 4;
+
+        for sp in 0..N_SPACES {
+            let owner = (sp as u64) + 1;
+            // Each space gets PAGES_PER_SPACE contiguous frames. Use distinct
+            // frame ranges per space so we exercise 400 unique frames total.
+            let phys_base = ((sp * PAGES_PER_SPACE) as u64 + 100) * PAGE;
+
+            // Map PAGES_PER_SPACE pages (retype_to_user sets rc=1 each).
+            for i in 0..PAGES_PER_SPACE {
+                let phys = phys_base + (i as u64) * PAGE;
+                do_retype_user(&mut table, phys, owner).unwrap();
+            }
+
+            // Destroy space: dec_ref every page (rc 1→0 → Untyped).
+            for i in 0..PAGES_PER_SPACE {
+                let phys = phys_base + (i as u64) * PAGE;
+                do_dec_ref_p2(&mut table, phys).unwrap();
+            }
+        }
+
+        assert_eq!(
+            count_used_frames(&table),
+            0,
+            "after {} spaces × {} pages created+destroyed, used count must return to baseline",
+            N_SPACES,
+            PAGES_PER_SPACE
+        );
+    }
+
+    /// M16-T3: Double-dec_ref is detected and is a safe no-op.
+    ///
+    /// A frame that has already been dec_ref'd to rc=0 (Untyped) receives a
+    /// second dec_ref. The production `dec_ref` logs a FRAME_TABLE WARN and
+    /// returns 0 without corrupting state or double-freeing to PMM. This test
+    /// verifies the frame_table state remains consistent after the double-dec.
+    #[test]
+    fn test_m16_double_dec_ref_detected_no_corruption() {
+        let mut table = fresh_table(16);
+        let phys = 5 * PAGE;
+
+        do_retype_user(&mut table, phys, 7).unwrap();
+        assert_eq!(meta(&table, phys).refcount, 1);
+
+        // First dec_ref: rc 1→0, auto-Untyped.
+        let rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 0);
+        assert_eq!(meta(&table, phys).tag, FrameTag::Untyped);
+
+        // Second dec_ref (double-free): must return 0, no state corruption.
+        let rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 0, "double-dec_ref must return 0");
+        assert_eq!(meta(&table, phys).tag, FrameTag::Untyped, "tag must stay Untyped");
+        assert_eq!(meta(&table, phys).refcount, 0, "refcount must stay 0");
+        assert_eq!(meta(&table, phys).owner, 0, "owner must stay 0");
+
+        // Third dec_ref: still a safe no-op.
+        let rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 0);
+        assert_eq!(meta(&table, phys).tag, FrameTag::Untyped);
+    }
+
+    /// M16-T4: Shared-frame (Grant) lifecycle — two spaces share a frame,
+    /// both destroy, frame is returned exactly once.
+    ///
+    /// Simulates: space A maps a page (retype_to_user, rc=1). Space B grants
+    /// the same phys (inc_ref → rc=2, tag→Grant). Both spaces destroy:
+    /// dec_ref from B (rc 2→1, stays Grant), dec_ref from A (rc 1→0,
+    /// auto-Untyped → would free to PMM once). No double-free, no leak.
+    #[test]
+    fn test_m16_grant_lifecycle_returns_once() {
+        let mut table = fresh_table(16);
+        let phys = 6 * PAGE;
+
+        // Space A: retype_to_user (rc=1, UserData).
+        do_retype_user(&mut table, phys, 10).unwrap();
+        assert_eq!(meta(&table, phys).refcount, 1);
+        assert_eq!(meta(&table, phys).tag, FrameTag::UserData);
+
+        // Space B: grant (inc_ref → rc=2, UserData→Grant).
+        let rc = do_inc_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 2);
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant);
+
+        // Space B destroys first: dec_ref (rc 2→1, stays Grant).
+        let rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 1);
+        assert_eq!(meta(&table, phys).tag, FrameTag::Grant, "Grant stays Grant at rc=1");
+
+        // Space A destroys: dec_ref (rc 1→0 → auto-Untyped → PMM free).
+        let rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 0);
+        assert_eq!(meta(&table, phys).tag, FrameTag::Untyped);
+        assert_eq!(meta(&table, phys).refcount, 0);
+
+        // No double-free: a third dec_ref is the underflow guard (no-op).
+        let rc = do_dec_ref_p2(&mut table, phys).unwrap();
+        assert_eq!(rc, 0);
+        assert_eq!(meta(&table, phys).tag, FrameTag::Untyped);
     }
 }

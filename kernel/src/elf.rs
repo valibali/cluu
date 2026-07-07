@@ -445,6 +445,131 @@ pub(crate) unsafe fn map_user_page(
     Ok(())
 }
 
+/// Install a not-present guard PTE for a single 4KB virtual page.
+///
+/// Walks the page table hierarchy (allocating intermediate tables as needed)
+/// but does NOT allocate a physical frame for the final PTE. The PTE is set
+/// to `USER | NO_EXECUTE` with `PRESENT` clear, so any access faults. The
+/// fault handler kills the thread or forwards to a registered fault_endpoint.
+/// `teardown_user_pages` skips not-present PTEs, so no frame is freed on
+/// space destruction.
+pub(crate) unsafe fn map_guard_page(
+    virt: u64,
+    page_table_root: PhysAddr,
+    owner: crate::token::scope::AddressSpaceId,
+) -> Result<(), ElfLoadError> {
+    use core::ptr::write_bytes;
+
+    let pml4_idx = ((virt >> 39) & 0x1FF) as usize;
+    let pdpt_idx = ((virt >> 30) & 0x1FF) as usize;
+    let pd_idx = ((virt >> 21) & 0x1FF) as usize;
+    let pt_idx = ((virt >> 12) & 0x1FF) as usize;
+
+    let table_flags = pte_flags::PRESENT | pte_flags::WRITABLE | pte_flags::USER;
+
+    let pml4_virt = crate::mm::physmap::phys_to_virt_u64(page_table_root.as_u64());
+    let pml4 = &mut *(pml4_virt as *mut [u64; 512]);
+
+    const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    let pdpt_phys = if pml4[pml4_idx] & 0x1 != 0 {
+        pml4[pml4_idx] & PHYS_MASK
+    } else {
+        let pdpt_phys = crate::mm::pmm::alloc_frame_tagged("guard_pdpt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
+        write_bytes(pdpt_virt as *mut u8, 0, 4096);
+        pml4[pml4_idx] = (pdpt_phys & pte_flags::ADDR_MASK) | table_flags;
+        if let Err(e) = crate::mm::frame_table::retype_to_pt(pdpt_phys, 3, owner) {
+            #[cfg(debug_assertions)]
+            panic!("map_guard_page: retype PDPT 0x{:x} owner={} failed: {:?}",
+                   pdpt_phys, owner.as_u64(), e);
+            #[cfg(not(debug_assertions))]
+            {
+                let _ = e;
+                return Err(ElfLoadError::MappingFailed("retype_to_pt PDPT failed"));
+            }
+        }
+        pdpt_phys
+    };
+
+    let pdpt_virt = crate::mm::physmap::phys_to_virt_u64(pdpt_phys);
+    let pdpt = &mut *(pdpt_virt as *mut [u64; 512]);
+
+    let pd_phys = if pdpt[pdpt_idx] & 0x1 != 0 {
+        let existing_pd_phys = pdpt[pdpt_idx] & PHYS_MASK;
+        if let Err(e) = crate::mm::frame_table::retype_to_pt(existing_pd_phys, 2, owner) {
+            klibcluu::error("map_guard_page: reuse-PD retype failed — cross-space alias");
+            #[cfg(debug_assertions)]
+            panic!("map_guard_page: reuse PD cross-space alias: {:?}", e);
+            #[cfg(not(debug_assertions))]
+            { let _ = e; }
+        }
+        existing_pd_phys
+    } else {
+        let pd_phys = crate::mm::pmm::alloc_frame_tagged("guard_pd")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
+        write_bytes(pd_virt as *mut u8, 0, 4096);
+        pdpt[pdpt_idx] = (pd_phys & pte_flags::ADDR_MASK) | table_flags;
+        if let Err(e) = crate::mm::frame_table::retype_to_pt(pd_phys, 2, owner) {
+            #[cfg(debug_assertions)]
+            panic!("map_guard_page: retype PD 0x{:x} owner={} failed: {:?}",
+                   pd_phys, owner.as_u64(), e);
+            #[cfg(not(debug_assertions))]
+            {
+                let _ = e;
+                return Err(ElfLoadError::MappingFailed("retype_to_pt PD failed"));
+            }
+        }
+        pd_phys
+    };
+
+    let pd_virt = crate::mm::physmap::phys_to_virt_u64(pd_phys);
+    let pd = &mut *(pd_virt as *mut [u64; 512]);
+
+    let pt_phys = if pd[pd_idx] & 0x1 != 0 {
+        let existing_pt_phys = pd[pd_idx] & PHYS_MASK;
+        if let Err(e) = crate::mm::frame_table::retype_to_pt(existing_pt_phys, 1, owner) {
+            klibcluu::error("map_guard_page: reuse-PT retype failed — cross-space alias");
+            #[cfg(debug_assertions)]
+            panic!("map_guard_page: reuse PT cross-space alias: {:?}", e);
+            #[cfg(not(debug_assertions))]
+            { let _ = e; }
+        }
+        existing_pt_phys
+    } else {
+        let pt_phys = crate::mm::pmm::alloc_frame_tagged("guard_pt")
+            .ok_or(ElfLoadError::MemoryAllocationFailed)?;
+        let pt_virt = crate::mm::physmap::phys_to_virt_u64(pt_phys);
+        write_bytes(pt_virt as *mut u8, 0, 4096);
+        pd[pd_idx] = (pt_phys & pte_flags::ADDR_MASK) | table_flags;
+        if let Err(e) = crate::mm::frame_table::retype_to_pt(pt_phys, 1, owner) {
+            #[cfg(debug_assertions)]
+            panic!("map_guard_page: retype PT 0x{:x} owner={} failed: {:?}",
+                   pt_phys, owner.as_u64(), e);
+            #[cfg(not(debug_assertions))]
+            {
+                let _ = e;
+                return Err(ElfLoadError::MappingFailed("retype_to_pt PT failed"));
+            }
+        }
+        pt_phys
+    };
+
+    let pt_virt = crate::mm::physmap::phys_to_virt_u64(pt_phys);
+    let pt = &mut *(pt_virt as *mut [u64; 512]);
+
+    // Not-present PTE: USER set (intent: user-accessible), NO_EXECUTE set
+    // (guard is never executable), PRESENT clear. Address field is 0 — no
+    // physical frame is allocated for a guard page.
+    pt[pt_idx] = pte_flags::USER | pte_flags::NO_EXECUTE;
+
+    core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+
+    Ok(())
+}
+
 /// Map a single 4KB shared physical frame into user address space.
 ///
 /// Phase 2: installs a READ-ONLY PTE for `phys` and calls `inc_ref(phys)` to
@@ -551,6 +676,19 @@ pub(crate) unsafe fn map_shared_page(
     };
 
     let pt = &mut *(crate::mm::physmap::phys_to_virt_u64(pt_phys) as *mut [u64; 512]);
+
+    // Phase 2.6: if a present PTE already occupies this slot, dec_ref the old
+    // physical frame before overwriting. This matches map_user_page's overwrite
+    // path and keeps refcounts balanced when a shared (MAP_SHARE_PHYS) page is
+    // remapped. Without this, the old frame's refcount stays elevated (leak)
+    // while teardown later dec_refs the new frame — and if the old frame was
+    // already at refcount 0, the asymmetry surfaces as spurious "dec_ref on
+    // refcount=0" warnings.
+    if pt[pt_idx] & pte_flags::PRESENT != 0 {
+        let old_phys = pt[pt_idx] & PHYS_MASK;
+        let _ = crate::mm::frame_table::dec_ref(old_phys);
+    }
+
     // Mask phys to bits 12-51 — see comment in map_user_page (elf.rs:~335).
     pt[pt_idx] = (phys & pte_flags::ADDR_MASK) | page_flags;
     // Phase 2: inc_ref records this mapping in the typed-frame table.
