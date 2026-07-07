@@ -258,7 +258,7 @@ pub struct VfsRegisterPtsReply {
 /// Sent by cluuterm when the user presses TAB at the shell prompt. The
 /// shell inspects `CompleteRequest::word` and `consecutive_tabs` and
 /// replies with a `CompleteReply`. See spec
-/// `docs/superpowers/specs/2026-07-01-tab-completion-protocol-design.md` §4.
+/// `doc/book/terminal.md` §4.
 pub const SHELL_COMPLETE_QUERY_LABEL: u32 = 143;
 
 /// Request: cluuterm → shell, asking for completions of `word`.

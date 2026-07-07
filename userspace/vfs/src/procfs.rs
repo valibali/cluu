@@ -24,6 +24,7 @@ use libcluu::syscall::{
     pmm_get_stats, sched_get_overflow, PMM_STATS_TOTAL_FRAMES,
     PMM_STATS_USED_FRAMES, SCHED_OVERFLOW_DEFERRED_FAULT, SCHED_OVERFLOW_PENDING_WAKE,
 };
+use libcluu::allocator::AllocStats;
 use libcluu::types::Message;
 use libcluu::{Error, Result};
 use procmgr_common::wire::ProcInfo;
@@ -224,6 +225,23 @@ fn gen_static(name: &str) -> Result<Vec<u8>> {
 
 // ─── ProcInfo formatting ───────────────────────────────────────────────────
 
+/// Format /proc/<pid>/status content. Pure (no IPC, no syscall) so it
+/// can be unit-tested with a fake `AllocStats`.
+fn format_status(info: &ProcInfo, stats: &AllocStats) -> Result<Vec<u8>> {
+    let text = format!(
+        "Name:\t{}\n\
+         State:\tR (running)\n\
+         Pid:\t{}\n\
+         PPid:\t{}\n\
+         HeapTotal:\t{}\n\
+         HeapUsed:\t{}\n\
+         HeapPeak:\t{}\n\
+         HeapFree:\t{}\n",
+        info.command, info.pid, info.ppid, stats.total, stats.used, stats.peak, stats.free,
+    );
+    Ok(text.into_bytes())
+}
+
 /// Format a ProcInfo into the requested subfile format.
 fn format_proc_info(subfile: &str, info: &ProcInfo) -> Result<Vec<u8>> {
     match subfile {
@@ -238,14 +256,12 @@ fn format_proc_info(subfile: &str, info: &ProcInfo) -> Result<Vec<u8>> {
             Ok(text.into_bytes())
         }
         "status" => {
-            let text = format!(
-                "Name:\t{}\n\
-                 State:\tR (running)\n\
-                 Pid:\t{}\n\
-                 PPid:\t{}\n",
-                info.command, info.pid, info.ppid,
-            );
-            Ok(text.into_bytes())
+            // Heap* fields reflect THIS process's (VFS's) allocator, not the
+            // target PID's — cross-process allocator queries need a ProcInfo
+            // wire extension (out of scope); space_get_stats gives page counts,
+            // not the total/used/peak/free byte counters asked for here.
+            let stats = libcluu::allocator::stats();
+            format_status(info, &stats)
         }
         "cmdline" => {
             // Null-terminated argv[0]
@@ -489,5 +505,53 @@ impl AsyncMountBackend for ProcfsBackend {
 
             Err(Error::NotFound)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_proc(pid: i32, ppid: i32, name: &str) -> ProcInfo {
+        ProcInfo {
+            pid,
+            ppid,
+            state: 0,
+            command: String::from(name),
+            argv0: String::from(name),
+            start_ticks: 0,
+        }
+    }
+
+    fn status_text(stats: &AllocStats) -> alloc::string::String {
+        let info = fake_proc(2, 1, "shell");
+        let bytes = format_status(&info, stats).expect("format_status");
+        alloc::string::String::from_utf8(bytes).expect("utf8")
+    }
+
+    #[test]
+    fn status_includes_heap_fields_with_real_values() {
+        let stats = AllocStats { total: 4096, used: 1024, peak: 2048, free: 3072, largest_free: 3072 };
+        let text = status_text(&stats);
+        assert!(text.contains("Name:\tshell\n"), "missing Name: {}", text);
+        assert!(text.contains("Pid:\t2\n"), "missing Pid: {}", text);
+        assert!(text.contains("PPid:\t1\n"), "missing PPid: {}", text);
+        assert!(text.contains("HeapTotal:\t4096\n"), "missing HeapTotal: {}", text);
+        assert!(text.contains("HeapUsed:\t1024\n"), "missing HeapUsed: {}", text);
+        assert!(text.contains("HeapPeak:\t2048\n"), "missing HeapPeak: {}", text);
+        assert!(text.contains("HeapFree:\t3072\n"), "missing HeapFree: {}", text);
+    }
+
+    #[test]
+    fn status_with_zero_stats_does_not_crash() {
+        // Adversarial: PMM/allocator not ready → all-zero stats. Must still
+        // produce a well-formed status with 0 values, not panic or empty out.
+        let stats = AllocStats { total: 0, used: 0, peak: 0, free: 0, largest_free: 0 };
+        let text = status_text(&stats);
+        assert!(!text.is_empty(), "empty status on zero stats");
+        assert!(text.contains("HeapTotal:\t0\n"), "zero HeapTotal missing: {}", text);
+        assert!(text.contains("HeapUsed:\t0\n"), "zero HeapUsed missing: {}", text);
+        assert!(text.contains("HeapPeak:\t0\n"), "zero HeapPeak missing: {}", text);
+        assert!(text.contains("HeapFree:\t0\n"), "zero HeapFree missing: {}", text);
     }
 }

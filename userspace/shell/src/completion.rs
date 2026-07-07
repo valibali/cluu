@@ -11,7 +11,7 @@
 //! listings at startup into a static, and the completion thread reads
 //! from that cache.
 //!
-//! Spec: docs/superpowers/specs/2026-07-01-tab-completion-protocol-design.md §7
+//! Spec: doc/book/terminal.md §7
 
 extern crate alloc;
 

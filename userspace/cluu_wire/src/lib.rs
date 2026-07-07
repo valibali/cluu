@@ -4,11 +4,10 @@
 //! shared between libcluu callers and service implementations
 //! (procmgr, vfs, compositor, etc.).
 //!
-//! Specs:
-//! - `docs/superpowers/specs/2026-05-18-unified-spawn-protocol-design.md`
-//! - `docs/superpowers/specs/2026-05-18-terminal-pty-unification-design.md`
-//! - `docs/superpowers/specs/2026-05-18-session-lifecycle-design.md`
-//! - `docs/superpowers/specs/2026-05-18-window-protocol-design.md`
+//! Specs (extracted into book chapters):
+//! - `doc/book/procmgr.md` (unified spawn protocol)
+//! - `doc/book/terminal.md` (terminal-pty unification, window protocol)
+//! - `doc/book/sessions.md` (session lifecycle)
 
 #![cfg_attr(not(feature = "host-test"), no_std)]
 

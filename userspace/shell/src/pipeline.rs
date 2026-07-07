@@ -1,7 +1,7 @@
 //! Pipeline executor — turns a multi-command Pipeline AST into spawn calls
 //! wired with pipes between stages.
 //!
-//! See `docs/superpowers/specs/2026-04-27-pipes-design.md` §6.
+//! See `doc/book/ipc.md` §6.
 //! Single-command pipelines stay on the existing single-command path in
 //! `commands.rs`. This module owns the multi-command (`a | b | c ...`) case.
 

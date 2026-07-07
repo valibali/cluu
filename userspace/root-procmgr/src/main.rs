@@ -82,8 +82,9 @@ use libcluu::ipc::PROCMGR_SPAWN_SERVICE_LABEL;
 use crate::pg_table::PgTable;
 use libcluu::registry;
 use libcluu::syscall::{
-    space_destroy, thread_destroy, thread_get_id, thread_resume, thread_set_fault_endpoint,
-    thread_set_session, thread_suspend, token_revoke, THREAD_CREATE_START_SUSPENDED,
+    space_destroy, space_grant, thread_destroy, thread_get_id, thread_resume,
+    thread_set_fault_endpoint, thread_set_session, thread_suspend, token_revoke,
+    THREAD_CREATE_START_SUSPENDED,
 };
 use libcluu::tar::find_member;
 use libcluu::*;
@@ -180,7 +181,7 @@ struct SessionEntry {
 }
 
 /// One pipe — an IPC endpoint with two rights-restricted tokens minted from it.
-/// See docs/superpowers/specs/2026-04-27-pipes-design.md §4.
+/// See doc/book/ipc.md §4.
 struct PipeEntry {
     /// Underlying endpoint root token owned by procmgr.
     endpoint: usize,
@@ -650,6 +651,7 @@ impl ProcessManager {
                         let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
                     }
                     if let Some(st) = self.cookie_to_space.remove(&cookie) {
+                        self.verify_stack_canary(st, cookie, child_pid as u32);
                         let _ = space_destroy(st);
                     }
                     if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
@@ -1665,6 +1667,7 @@ impl ProcessManager {
         // 3. Destroy kernel objects
         if thread_token != 0 { let _ = thread_destroy(thread_token); }
         if let Some(st) = self.cookie_to_space.remove(&cookie) {
+            self.verify_stack_canary(st, cookie, pid as u32);
             let _ = space_destroy(st);
         }
         if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
@@ -1739,6 +1742,23 @@ impl ProcessManager {
             RestartPolicy::Never => {} // should_restart_container already filters this
         }
         Ok(())
+    }
+
+    fn verify_stack_canary(&self, space_token: usize, cookie: usize, pid: u32) {
+        if space_token == 0 || self.space_token == 0 {
+            return;
+        }
+        let grant_addr = self.grant_base_next;
+        if space_grant(space_token, self.space_token, SERVICE_STACK_BASE, grant_addr, 0).is_err() {
+            return;
+        }
+        let actual: u64 = unsafe { core::ptr::read_volatile((grant_addr + 8) as *const u64) };
+        if actual != libcluu::process::STACK_CANARY {
+            let _ = debug_print(&format!(
+                "STACK CANARY CORRUPTED: pid={} cookie={} expected={:#018x} actual={:#018x}",
+                pid, cookie, libcluu::process::STACK_CANARY, actual
+            ));
+        }
     }
 
     fn poll_exit_notifications(&mut self) -> Result<()> {
@@ -1889,6 +1909,7 @@ impl ProcessManager {
             let _ = debug_print(&format!("TRACE: reaped thread token {}", thread_token));
         }
         if let Some(st) = self.cookie_to_space.remove(&cookie) {
+            self.verify_stack_canary(st, cookie, dead_pid);
             let _ = space_destroy(st);
         }
         // Revoke all derived tokens/endpoints created for this child
@@ -2048,6 +2069,7 @@ impl ProcessManager {
                     let _ = thread_destroy(tt);
                 }
                 if let Some(st) = self.cookie_to_space.remove(&cookie) {
+                    self.verify_stack_canary(st, cookie, pid as u32);
                     let _ = space_destroy(st);
                 }
                 if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
@@ -2270,6 +2292,7 @@ impl ProcessManager {
                 let _ = thread_destroy(thread_token);
             }
             if let Some(st) = self.cookie_to_space.remove(&cookie) {
+                self.verify_stack_canary(st, cookie, pid as u32);
                 let _ = space_destroy(st);
             }
             if let Some(tokens) = self.cookie_to_tokens.remove(&cookie) {
@@ -6057,6 +6080,7 @@ impl ProcessManager {
                         let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
                     }
                     if let Some(st) = self.cookie_to_space.remove(&cookie) {
+                        self.verify_stack_canary(st, cookie, target_pid as u32);
                         let _ = space_destroy(st);
                     }
                     // Revoke all derived tokens/endpoints created for this child

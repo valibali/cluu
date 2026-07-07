@@ -9,7 +9,7 @@
 // against libcluu, and is staged into the userdisk image.
 //
 // Pre-flight findings (recorded during Phase 0 / Task 0; full notes in
-// docs/superpowers/plans/2026-04-29-editor.md §"T0 Findings"):
+// doc/book/services.md §"T0 Findings"):
 //
 // - Raw-mode setup/teardown: no native libcluu helper. The shell uses
 //   private `tty_get_lflag` / `tty_set_lflag` helpers in

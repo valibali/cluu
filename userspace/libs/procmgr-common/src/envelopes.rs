@@ -4,7 +4,7 @@
 //! /etc/users.toml has a profile field that selects an envelope. The
 //! envelope provides the mount view + env defaults at session-login.
 //!
-//! See docs/superpowers/specs/2026-04-28-user-envelope-design.md.
+//! See doc/book/sessions.md.
 
 extern crate alloc;
 
