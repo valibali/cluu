@@ -36,7 +36,7 @@ This repo is at a "Show & Tell" stage. The kernel is solid. Userspace is thin bu
 - **No network.** No driver, no socket layer, no DHCP, no anything.
 - **No package manager**, no shell scripting beyond what's in `userspace/shell/src/cluu_lang/`.
 
-This is not a v1 release. It's a checkpoint. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full plan and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the structural map.
+This is not a v1 release. It's a checkpoint. See [`doc/book/roadmap.md`](doc/book/roadmap.md) for the full plan and [`doc/book/architecture.md`](doc/book/architecture.md) for the structural map.
 
 ---
 
@@ -138,7 +138,7 @@ Profiles are capability bitmasks (IPC, VFS, REGISTRY, ADMIN, DEVICE, SUPERVISOR)
 
 **No new audits.** This isn't a research artifact and there's no paper. The kernel was audited at 9/10 internally; freeze begins now (see ROADMAP §3) until userspace catches up.
 
-For diagrams and the architectural map, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). For the long-form per-subsystem deep dive, see [`docs/INTERNALS.md`](docs/INTERNALS.md).
+For diagrams and the architectural map, see [`doc/book/architecture.md`](doc/book/architecture.md). For the long-form per-subsystem deep dive, see [`doc/book/kernel.md`](doc/book/kernel.md).
 
 ---
 
@@ -159,7 +159,7 @@ userspace/
 └── ...
 containers/                   # one Cluufile per container image
 scripts/                      # build + harness drivers
-docs/                         # design specs, roadmap, internals
+doc/book/                    # design specs, roadmap, internals (rendered book)
 ```
 
 ## Tests
@@ -193,7 +193,7 @@ rustc --edition 2021 --test userspace/procmgr/src/mount_policy.rs -o /tmp/t && /
 - **Phase 3 (revised)**: ship v1 with what Phases 0-2 give us. Don't gate v1 on network.
 - **Phase 4 / v1.1**: SpaceDestroy, leak audit, virtio-net, DHCP, sockets, wget.
 
-The full plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+The full plan: [`doc/book/roadmap.md`](doc/book/roadmap.md).
 
 ## Status
 
@@ -202,4 +202,4 @@ The full plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - Develops on `develop`, releases (eventually) on `master`.
 - License: see [`LICENSE`](LICENSE) (MIT).
 
-If you boot it and find something broken, please open an issue. If you want to read about how it's built, [`docs/INTERNALS.md`](docs/INTERNALS.md) is the long form. If you just want to know what's coming next, [`docs/ROADMAP.md`](docs/ROADMAP.md).
+If you boot it and find something broken, please open an issue. If you want to read about how it's built, [`doc/book/kernel.md`](doc/book/kernel.md) is the long form. If you just want to know what's coming next, [`doc/book/roadmap.md`](doc/book/roadmap.md).

@@ -31,5 +31,5 @@ Things that don't work yet (honest list — Phase 1+2 work):
   MicroPython
   network — there is none
 
-Source: see /etc/architecture, then docs/ARCHITECTURE.md and
-docs/ROADMAP.md in the repo.
+Source: see /etc/architecture, then doc/book/architecture.md and
+doc/book/roadmap.md in the repo.

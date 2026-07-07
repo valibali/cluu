@@ -9,8 +9,8 @@
 A hobby microkernel + minimal POSIX-flavored userspace in Rust (no_std),
 seL4-inspired, pre-v1. Kernel knows three things: **threads**, **capability
 tokens**, **IPC**. Everything else (processes, filesystem, scheduler policy,
-network) lives in userspace services. See `docs/ARCHITECTURE.md` for the map
-and `docs/INTERNALS.md` for the long form.
+network) lives in userspace services. See `doc/book/architecture.md` for the map
+and `doc/book/kernel.md` for the long form.
 
 ## 2. Capability and visibility (the core invariant)
 
@@ -95,12 +95,12 @@ async mounts.
 the sync `call_with_reply_buf` path. That constraint was based on the
 pre-async-runtime state. The async runtime has since proven stable and
 is the only structural fix for the single-threaded mutual-blocking IPC
-deadlock class (see `gotchas/cluu-single-threaded-mutual-blocking-ipc-deadlock`).
+deadlock class (see `doc/book/gotchas.md#cluu-single-threaded-mutual-blocking-ipc-deadlock`).
 The sync-only constraint was lifted on 2026-07-06.
 
 ## 8. Debugging and verification
 
-- **Harness** (`scripts/harness_run.sh`, `docs/HARNESS.md`): boot CLUU in
+- **Harness** (`scripts/harness_run.sh`, `doc/book/testing.md`): boot CLUU in
   headless QEMU, inject keystrokes via monitor socket, validate serial
   markers on COM2. Use `TEST_COMMAND`, `MARKER_MODE`, `KEYSTROKE_COMMANDS`,
   `SENDKEY_SEQUENCE` for case control. Login creds in harness: `root`/`root`
@@ -109,7 +109,7 @@ The sync-only constraint was lifted on 2026-07-06.
   to resume a paused boot, or `cargo xtask run --debug` for an interactive
   `-S -s` session on `localhost:1234` with telnet serial on `:4321`. Kernel
   ELF at `target/x86_64-cluu-kernel/debug/deps/kernel-*.elf`; userspace
-  ELFs at `target/x86_64-cluu-user/debug/<name>.elf`. See `docs/debug-guide.md`.
+  ELFs at `target/x86_64-cluu-user/debug/<name>.elf`. See `doc/book/debugging.md`.
 - **Evidence before assertions.** Reproduce the bug, capture the serial log
   and/or GDB backtrace, then propose a fix. Never claim "should work"
   without a verification run.

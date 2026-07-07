@@ -1,0 +1,433 @@
+# Gotchas
+
+Load-bearing traps in CLUU. Each entry names the symptom, the code site, why
+the trap exists, and the structural fix (shipped or planned).
+
+## allocator-reentrancy-leak
+
+The default Rust userspace allocator (`LockedAllocator` in
+`userspace/libcluu/src/allocator.rs`) leaks memory on re-entrant `free`.
+
+### The code
+
+`allocator.rs:530-536`:
+
+```rust
+unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+    if let Some(mut guard) = self.inner.try_lock() {
+        guard.dealloc(ptr)
+    } else {
+        // Avoid deadlock on re-entrant free; leak as a safe fallback.
+    }
+}
+```
+
+`alloc` (`allocator.rs:522-528`) has the same `try_lock` shape and returns
+`null_mut` on contention.
+
+### Why it exists
+
+The allocator is a single `spin::Mutex`. A re-entrant call, a `free` that
+fires while the mutex is already held by the same thread, would deadlock if
+it used a blocking `lock()`. The classic trigger is a GC: an `alloc` holds
+the mutex, the allocator runs a GC callback, and the GC tries to `free`
+unreachable objects. The `try_lock` fallback turns the deadlock into a leak:
+the re-entrant `free` is dropped and the block is never returned to the free
+list.
+
+This is the same single-threaded-mutual-blocking class as
+[ipc-deadlock](#single-threaded-mutual-blocking-ipc-deadlock): a
+single-threaded server cannot service a re-entrant request without yielding,
+and the allocator has no yield point.
+
+### Impact
+
+- Pure Rust binaries that never re-enter the allocator are unaffected.
+- Interpreters that run a GC inside `malloc`/`free` will leak on every
+  collection that touches the allocator recursively.
+- The leak is bounded by heap size. The process eventually OOMs rather than
+  deadlocks, which is the safer failure mode.
+
+### Fix (C2 upgrade)
+
+Add a deferred-free list: on re-entrant `dealloc`, push the pointer onto a
+thread-local deferred list instead of dropping it; drain the list on the next
+non-re-entrant `alloc`/`dealloc`. This preserves the no-deadlock guarantee
+while reclaiming the memory. Tracked with the allocator-improvements work
+stream.
+
+### See also
+
+- [Memory Model](../memory_model/index.html) for allocator paths and region
+  layout.
+- [Interpreter Porting](../interpreter_porting/index.html) for why
+  GC-bearing interpreters should bring their own heap and avoid the global
+  allocator for GC-managed objects.
+- AGENTS.md §7 for the canonical deadlock-avoidance rationale behind the
+  async runtime; the allocator fix follows the same "don't block re-entrant"
+  shape.
+
+## single-threaded-mutual-blocking-ipc-deadlock
+
+A single-threaded server that makes a synchronous IPC `call` to a service
+which itself needs to `call` back into the first server deadlocks. Both
+block forever: the first server is blocked in `call` and cannot run its
+`recv` loop; the second server is blocked in `call` waiting for the first to
+reply.
+
+### The pattern
+
+```text
+  VFS (single thread)              procmgr (single thread)
+    │                                 │
+    │── CALL(procmgr_ep, /proc/x) ───→│   (VFS blocked, waiting for reply)
+    │                                 │   (procmgr needs to query VFS
+    │                                 │    to resolve the proc entry)
+    │←── CALL(vfs_ep, view_lookup) ───│   (procmgr blocked, waiting for VFS)
+    │                                 │
+    │         both deadlock           │
+```
+
+Any pair of single-threaded services that mutually `call` each other during
+request handling hits this. The trigger is not a bug in either service; it
+is a structural property of synchronous IPC between single-threaded servers
+with no re-entrancy point.
+
+### Why it exists
+
+CLUU's IPC is synchronous and rendezvous-based (sender blocks until receiver
+ready, receiver blocks until sender arrives). There is no buffered queue
+inside the kernel. A `call` blocks the caller until the server `reply`s.
+A single-threaded server running its `recv` loop cannot accept a new request
+while it is blocked in a downstream `call`.
+
+### The structural fix: async runtime
+
+The async runtime in `libcluu::async_runtime` is the canonical
+deadlock-avoidance mechanism for single-threaded servers. VFS and
+session-procmgr use it. The runtime (`Runtime`, `IpcCallFuture`, `spawn`,
+completion queue) lets a single-threaded server have multiple outstanding
+downstream IPC calls without blocking its own `recv` loop. VFS dispatches
+IPC-bound backend operations through `dispatch_async()`, so a `ProcfsBackend`
+call to procmgr and a procmgr callback into VFS can both be in flight without
+either side blocking itself.
+
+devmgr stays sync. It is a leaf service with no downstream IPC, so the
+deadlock class cannot arise.
+
+### History
+
+The original AGENTS.md §7 forbade async for `top` and `/proc` and mandated
+the sync `call_with_reply_buf` path. That constraint was based on the
+pre-async-runtime state. The async runtime has since proven stable and is the
+only structural fix for this deadlock class. The sync-only constraint was
+lifted on 2026-07-06.
+
+### See also
+
+- [Virtual Filesystem](../vfs/index.html#sync-vs-async-backends) for the
+  `AsyncMountBackend` dispatch path.
+- [allocator-reentrancy-leak](#allocator-reentrancy-leak) for the same
+  single-threaded-mutual-blocking shape in the allocator.
+- AGENTS.md §7 for the canonical statement of the async runtime policy.
+
+## pts-plumbing-fix (2026-05-21)
+
+After the login → cluuterm → shell path landed green to the `read(0)`
+loop, pts bidirectional plumbing was broken: shell `write(1)` → pts →
+cluuterm dropped all bytes (nothing reached the terminal window), and
+kbd → cluuterm → pts → shell `read(0)` delivered nothing. Architect
+review found four issues:
+
+- **Bug A — `Pts::handle_pts_write` drops bytes on missing reply_token.**
+  VFS forwards shell stdout via `send_msg_with_payload`
+  (fire-and-forget, no reply slot). Cluuterm's handler bailed when
+  `extract_reply_id` returned `None`, before calling
+  `line_discipline.process_output()`. Fix: cook bytes unconditionally;
+  reply becomes optional (send ack only if `reply_token` present).
+- **Bug B — Dual parallel stdin buffers, mismatched.** `Pts` owned
+  `ready_bytes` + `pending_readers`; `Cluuterm` owned `stdin_buf` +
+  `pending_pts_read`. The `run()` `PTS_READ_LABEL` handler used the
+  Cluuterm-level pair; `apply_service_actions::DeliverBytes` wrote to
+  the Pts-level pair. Kbd bytes went to a dead buffer; shell read
+  waited on the other buffer forever. Fix: drop the Cluuterm-level
+  duplicates; `Pts.ready_bytes` + `Pts.pending_readers` become
+  canonical. Route `PTS_READ_LABEL` through `Pts::handle_pts_read`.
+- **Bug C — VFS `derive_child_fd` cap-monotone violation.**
+  `token_derive` minted from VFS's own full-rights endpoint without
+  clamping `child_rights` against the parent `OpenFile`'s rights. Child
+  could receive caps strictly broader than parent's — violated
+  `vfs-view-caps-monotone`. Fix: each `OpenFile` variant carries an
+  effective rights mask; `derive_child_fd` clamps
+  `child_rights & parent_rights` before `token_derive`.
+- **Bug D — Cross-process deadlock risk in VFS `PTS_READ`.** VFS used
+  synchronous `call_with_reply_buf` to cluuterm for pts reads.
+  Cluuterm could defer reply (`PendingRead`); during that window VFS
+  was blocked inside `call_with_reply_buf`. If cluuterm called VFS for
+  any reason during that window → cycle. Fix: new label
+  `PTS_READ_DELIVER = 112`. VFS parks the shell's `reply_token` in
+  `pending_pts_reads[pts_id]`, sends `PTS_READ_LABEL`
+  fire-and-forget to cluuterm (signals "drain"), does NOT reply to
+  shell. Cluuterm sends `PTS_READ_DELIVER` with bytes when ready; VFS
+  pops the parked read, grants bytes, replies. VFS thread never blocks
+  on cluuterm.
+
+## plan-lessons-overview
+
+The 39 implementation plans (preserved in git history) carry two kinds of
+load-bearing knowledge: design decisions (extracted into chapter content by
+the spec-extraction pass) and *lessons learned* — the traps, diagnostic
+moves, and discipline rules that surfaced during execution. The entries
+below distill the latter, 2-5 lines per plan. Cross-reference the plan file
+by date-stamped slug for the long form.
+
+## pipe-token-revocation-cascade (2026-04-27-pipes)
+
+A pipe is one IPC endpoint with two rights-restricted tokens minted via
+`kernel::TokenDerive`. Revoking the parent endpoint invalidates all derived
+child tokens — procmgr relies on this cascade for `PIPE_CLOSE` and
+per-process exit cleanup. The YAGNI deferral on the `generation` counter
+(ABA protection for `pipe_id` reuse) was deliberate: index reuse never
+mattered for the demo runs. If a harness case ever shows a stale-id bug,
+the gen-counter path is the structural fix.
+
+## cluufile-strict-mount-mismatch (2026-04-28-user-envelope)
+
+`MOUNT /etc readwrite` in a Cluufile against an envelope that grants `/etc`
+read-only fails spawn with `EACCES`. Strict mode is the only correct mode:
+silent narrowing surprises users, silent widening violates the monotone cap
+discipline (binary ⊆ shell ⊆ envelope ⊆ procmgr). `validate_cluufile_against_parent`
+does longest-prefix-match per directive and rejects any Rw demand on a Ro
+parent mount.
+
+## vfs-open-o-wronly-creat-on-memfs-timeout (2026-04-29-editor)
+
+`VfsClient::open_with(path, O_WRONLY | O_CREAT, 0o644)` on a shell MemFs
+`/tmp` path can time out (task #80). Until that root cause is fixed, harness
+cases that exercise save target ext2-backed paths (`/home/root/...`), not
+`/tmp`. Atomic save is `open_with(tmp, ...)` → `write` → `close` →
+`rename(tmp, final)`; `VfsClient::rename` exists and is the rename
+primitive.
+
+## harness-cannot-inject-escape-bytes (2026-04-29-editor)
+
+`KEYSTROKE_COMMANDS` always types whole lines + Enter; `POST_SENDKEY` sends
+one key. There is no native path for raw escape-sequence byte streams. The
+workaround for `l2_edit_*` cases: drive the editor from a parent shell that
+injects bytes via `send_with_payload(child_stdin, TTY_READ_LABEL, ...)`,
+the same pattern `SuBuiltin` uses. The console SGR parser silently consumes
+`CSI 7 m` (reverse video), `CSI ?25 l/h` (cursor hide/show), `CSI 39 m` /
+`CSI 49 m` (default fg/bg) — use `CSI 0 m` to reset, color bg for status
+lines instead of reverse video.
+
+## virtio-notify-batching-lever (2026-05-06-virtio-blk-modern)
+
+Notify batching is the biggest throughput lever, not queue depth or
+zero-copy alone. Each `notify` is a MMIO exit; amortising one notify across
+N submits collapses the exit cost. `DmaPool` must forbid a region crossing
+a 4 KiB page boundary so the cached page-phys is unambiguous. WC perf gain
+is invisible under QEMU TCG (every memory type behaves as WB); functional
+correctness is TCG-verifiable, perf delta requires KVM.
+
+## probes-out-of-default-build (2026-05-07-phase4-A-workspace-cleanup)
+
+11 probe crates moved under `userspace/probes/` and dropped from
+`default-members`. `cargo xtask build` does not compile probes;
+`cargo xtask build-probes` builds them. The 3,612-line `commands.rs` was
+split into `commands/` module hierarchy with a `BuiltinRegistry` trait —
+each file ≤ ~400 LOC. Test-only builtins (19 of them) were extracted into
+probe binaries invoked via `/probes/<name>`, not as shell builtins.
+
+## shared-cli-parser-dry (2026-05-07-phase4-B-cli-and-utils)
+
+A single-pass arg parser in `libcluu::cli` (clustered short flags, long
+opts, optional/required attachment, `--`, auto `--help`/`--version`) is
+shared by every util. DRY across 11 existing + 15 new utils. GNU exit-code
+convention: 0 success, 1 runtime failure, 2 usage error. Without the shared
+parser, every util reinvents the same flag-loop bugs.
+
+## vfs-wire-protocol-bump-cost (2026-05-07-phase4-C-ls-and-vfs-stat)
+
+Bumping `VfsStat` to carry mtime/nlink/uid/gid/blocks and `readdir` to
+return `(name, stat)` pairs in one round trip required touching the wire
+format, every backend (ext2, ramfs, memfs, procfs, devfs), and the client.
+Wire-format changes are expensive — they cascade through every backend and
+every caller. Plan them as discrete phases; don't sneak fields in.
+
+## zero-kernel-commits-job-control (2026-05-07-phase4-D-job-control)
+
+Full POSIX job control (Ctrl-Z, fg, bg, SIGSTOP/SIGCONT/SIGINT, job table,
+`kill %N`) shipped with zero kernel commits — `InvokeOp::ThreadSuspend` /
+`ThreadResume` already existed. Three-component split: procmgr owns
+`pgid → [pid]` lifetime + state machine; TTY tracks `fg_pgid_per_session`
+and decodes Ctrl-C / Ctrl-Z; shell carries `JobTable`. The lesson: before
+proposing a kernel change for a userspace feature, audit the existing
+invoke-op surface.
+
+## diagnostic-first-pipe-reverify (2026-05-07-phase4-E-pipe-reverify)
+
+The plan was diagnostic-first: run a 3-stage smoke against the existing
+executor, capture exact failure or success, *then* fix. The 3-stage path
+worked; the real gap was env propagation through pipe stages, not the pipe
+mechanism. The fix was lifting the ENV trailer from the single-cmd path
+into a shared payload builder reused by `pipeline.rs`. Document the wait
+semantics; don't leave a TODO in the executor.
+
+## framebuffer-pat-msr-wc (2026-05-09-framebuffer-perf-wc)
+
+Program the x86_64 PAT MSR (0x277) at boot to install a Linux-compatible
+layout where index 1 = WC. UC-, UC, WB stay where firmware put them;
+existing PTE encodings keep their semantics. `MAP_DEVICE_WC = 0x200` is the
+new `SpaceMap` flag; PTE bits PCD=0, PWT=1, PAT=0 → index 1. The new flag
+bit is unused on old kernels, so the same flag value falls back gracefully.
+WC perf gain is real only under KVM or baremetal — TCG treats every memory
+type as WB.
+
+## fast-symlink-60-byte-i-block (2026-05-09-symlink-following-resolution)
+
+Fast symlinks store their target inline in the 60 bytes that would
+otherwise hold direct/indirect block pointers. `Inode::parse` originally
+decoded those bytes as `[u32; 12] + 3 * u32`, throwing away the raw view.
+`inline_block_bytes()` re-serialises them so targets ≤60 bytes read without
+a data-block fetch. Four hard-coded `strip_prefix("/bin/")` sites in the
+shell were replaced with `VfsClient::realpath()` + image-name extraction.
+Procmgr is hardened to reject image names containing `/`.
+
+## glyph-atlas-precomputed-mask (2026-05-10-fb-atlas-and-devfb0)
+
+Per-cell `render_glyph` was a per-bit branch + 16 row writes per cell. The
+atlas swaps in a precomputed `[u32; GLYPH_W*GLYPH_H]` mask template per
+char (`0xFFFF_FFFF` / `0x0000_0000`) plus an SIMD-friendly
+`(mask & fg) | (!mask & bg)` blend, then `put_pixels_row`. `/dev/fb0` is a
+`DeviceBackend::Fb` variant: `open` returns the device file, `read` returns
+geometry, `write` clamps a buffer onto the front-buffer, `mmap` routes
+through `MAP_DEVICE_WC`. No new syscalls.
+
+## broadcast-frame-ready-damage-gate (2026-05-13-vt-hardening)
+
+The compositor flushed the fb at 60 Hz and broadcast `COMP_FRAME_READY` to
+every window regardless of damage. cluuterm's `posix_spawn` of `/bin/login`
+blocked its recv loop ~0.5 s; 30 FRAME_READY messages piled up at ep=84
+(q=30 in serial). Fix: gate broadcast on actual damage since last
+broadcast per window. Uncontrolled fire-and-forget fan-out to a
+single-threaded server is a queue-depth bug waiting to happen.
+
+## vtmgr-active-vt-init-race (2026-05-12-vtmgr-boot-vt-fix)
+
+`VtmgrContext::active_vt` was initialised to `0`; boot relied on the
+compositor-grant arrival happening *after* `VTMGR_PIN_VT_LABEL` to switch
+to the compositor VT. The race: if the compositor grant arrived first,
+`active_vt` was still 0 and the switch never fired. Fix: init
+`active_vt = DEFAULT_COMPOSITOR_VT` and drop the `boot_switch_pending`
+machinery entirely. The lesson: don't make boot depend on the order of
+independent grant arrivals.
+
+## vtmgr-single-input-decider (2026-05-13-input-routing-vtmgr)
+
+vtmgr is the single source of truth for active-VT AND the sole input
+router. kbd shrinks to pure IRQ/decoder/forward driver; vtmgr subscribes to
+`compositor:input` and `tty:0..3:main`, holding all 5 outbound send-tokens.
+Two IPC hops per keystroke (kbd → vtmgr → target); negligible latency at
+human typing rates. The win: true single-decider, modal-lock trivially
+enforceable, SOLID for future `inputd` extraction (literal rename of
+`vtmgr:input` → `inputd:input`).
+
+## autologin-gate-on-build-constant (2026-05-12-autologin-rip)
+
+`try_auto_login` becomes a no-op when `SHELL_AUTOSTART_CMD.is_empty()`.
+`tty.auto_login_pending` mirrors the same gate via a shared `libcluu`
+constant so both crates read the same value. The text-mode interactive
+login in `tty/src/context.rs` becomes the default user-facing entry point
+on every text VT. Harness cases that depended on `CLUU_SHELL_AUTOSTART_CMD`
+keep working without per-test changes.
+
+## posix-read-0-unification (2026-05-14-bug-c-shell-stdin-via-fd0)
+
+Bug C: shell input via `TOKEN_STDIN` push (`TTY_READ_LABEL`) breaks under
+cluuterm (VFS-backed fd 0). The legacy VT0 path pushed; the cluuterm path
+used POSIX `read(0)` via pts. Dual paths were technical debt. The fix:
+procmgr opens the right `/dev/...` node at shell-spawn time using its own
+`VfsClient`, builds an FDAC payload, and injects it through the existing
+`spawn_service_with_env` path. The tty service shrinks to a VFS backend
+that only answers `TTY_READ_REQUEST_LABEL` pulls; all push-send sites die.
+
+## vt-text-vs-vt-graphical-envelope (2026-05-14-plan2-envelope-vt-user-substitution)
+
+`/etc/envelopes.toml` carries per-shape mount lists (`vt_text` vs
+`vt_graphical`); `{vt}` and `{user}` substitutions apply at SESSION_LOGIN.
+Each session sees the strict subset of `/dev` (and elsewhere) defined by
+its envelope and VT index. Root needs a real `env_template` (HOME etc.) —
+an empty root template was the root cause of HOME-not-propagating (Bug B).
+`vfs_view.rs` already enforces monotone narrowing; substitution must not
+slip past that check.
+
+## compositor-swap-on-login (2026-05-14-plan3-compositor-swap)
+
+At login on VT4, procmgr kills the system-mode compositor (autostarted at
+boot to host the login modal) and spawns a fresh compositor under the
+user's envelope inside the session container. The *same* binary runs in
+both modes; what differs is the VFS view + envelope env it inherits. On
+logout (Plan 5), procmgr respawns the system compositor. No new compositor
+binary — mode is a flag read from `ProcessInfo` params.
+
+## procmgr-spawn-broker-not-capability (2026-05-14-plan4-procmgr-spawn-broker)
+
+The user-mode compositor holds zero spawn capability of its own. To open a
+menu app, it sends `PROCMGR_SPAWN_SESSION_LABEL` to procmgr; procmgr
+verifies the caller is the live session compositor (sender_tid lookup) and
+spawns the named image as a sibling in the same session container. Pure
+broker pattern — no additional capability handed to the compositor. A
+separate label from `PROCMGR_SPAWN_LABEL` ensures arbitrary processes can't
+trigger the broker path.
+
+## session-cascade-teardown (2026-05-14-plan5-logout-teardown)
+
+When a session-root process exits (clean logout, crash, or `exit`),
+procmgr walks `container_children[session_cid]` in reverse-dependency
+order, sends `THREAD_KILL` to each, reaps exit cookies, drops the
+session_table entry, then respawns the appropriate stand-in (system
+compositor for VT4, login prompt for VT0-3). The exit-cookie handler is
+the hook point; existing `poll_exit_notifications` already drains the
+channel.
+
+## postcard-wire-format (2026-05-18-plan1-unified-spawn-protocol)
+
+Six existing spawn paths (init kernel batch, procmgr autostart,
+SESSION_LOGIN internal, PROCMGR_SPAWN, PROCMGR_CONTAINER_RUN, cluuterm
+posix_spawn) collapsed into one IPC verb (`PROCMGR_SPAWN_UNIFIED_LABEL =
+80`) carrying a postcard-serialized `SpawnEnvelope`. Postcard is the wire
+format for all new verbs; `cluu_proto` is the shared types crate. A
+one-shot `PROCMGR_PRIMORDIAL_SEED_LABEL = 81` handles init → procmgr
+handoff. `ViewObject` becomes a procmgr-owned typed object; restart policy
+moves from envelope to manifest.
+
+## cap-possession-equals-authority (2026-05-21-procmgr-cap-refactor)
+
+All runtime identity checks in procmgr were deleted. Authority is
+structural: `root-procmgr` mints session-scoped caps; each
+`session-procmgr` sub-mints child-scoped caps; cap derivation is
+monotone-narrowing. PIDs encode `(8-bit session_id | 23-bit local pid)`.
+Cascade teardown on session-procmgr death is via cap revocation. Three
+crates: `procmgr-common` (lib), `root-procmgr` (bin), `session-procmgr`
+(bin). `MintGuard` is RAII rollback for failed multi-step mints. A
+`cap-purity` lint gate (`xtask check-cap-purity`) grep-rejects new identity
+checks.
+
+## env-merge-caller-wins (2026-05-21-spawn-env-merge)
+
+`procmgr::handle_spawn_unified` merges `/etc/envelopes.toml` defaults
+*under* the caller-supplied env: resolve caller's session → look up user
+profile → resolve envelope → `resolve_env` → overlay caller's
+`envelope.env` on top. Caller wins on key conflict. No merge on the
+no-session (boot/service) path — boot services don't have user envelopes.
+No new IPC verb, no wire change.
+
+## kernel-freeze-discipline (2026-05-27-post-cap-refactor-backlog)
+
+Kernel freeze is active through ~2026-10-21. No kernel commit lands without
+naming the userspace failure that forced it. No new syscalls — every verb
+goes through existing IPC + tokens. No timeouts as deadlock guards —
+cap-revocation unblocks waiters. Commit per task; `cargo xtask build` clean
+between tasks; no multi-day WIP on `develop`. The coverage gate
+(`cargo xtask coverage-check`) must stay green. Deleting legacy code is the
+highest-ROI cleanup during the freeze.

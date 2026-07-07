@@ -11,7 +11,7 @@
 # {user} in env_template values is substituted with the logging-in
 # user's name at session-login.
 #
-# See docs/superpowers/specs/2026-04-28-user-envelope-design.md.
+# See doc/book/sessions.md.
 
 [envelope.user]
 

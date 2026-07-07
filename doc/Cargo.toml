@@ -1,0 +1,13 @@
+[package]
+name = "cluu-doc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Comprehensive CLUU documentation (rustdoc-rendered)"
+
+[lib]
+path = "src/lib.rs"
+
+# Standalone workspace root so `cargo doc --manifest-path doc/Cargo.toml`
+# works without being absorbed into the kernel/userspace workspace.
+[workspace]

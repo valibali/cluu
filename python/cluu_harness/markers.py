@@ -3,7 +3,7 @@
 Ported from the giant ``case "$MARKER_MODE" in`` block in
 ``scripts/harness_run.sh``. The bash version has ~120 modes; this
 module ships a representative subset covering every category documented
-in ``docs/HARNESS.md`` plus the per-mode post-checks (FAIL-marker
+in ``doc/book/testing.md`` plus the per-mode post-checks (FAIL-marker
 detection, metric gating). New modes are added by extending
 :data:`MARKER_MODES` — no shell edits required.
 """
@@ -49,7 +49,7 @@ def _SHELL(markers: list[str]) -> list[str]:
     return [_SHELL_READY, *markers]
 
 
-# Representative subset — covers every category from docs/HARNESS.md.
+# Representative subset — covers every category from doc/book/testing.md.
 # To add a new mode: append a MarkerModeSpec here. No other file changes.
 MARKER_MODES: dict[str, MarkerModeSpec] = {
     m.name: m

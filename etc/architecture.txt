@@ -18,7 +18,7 @@ Mount policy: containers inherit a parent's `/tmp` by default
 (`MOUNT /tmp inherit`), so `mkdir /tmp/x; rm -r /tmp/x` across spawns
 just works. Containers can opt into isolation with `MOUNT /tmp private`
 (the shell does this — its `/tmp` is its own session). See
-`docs/ARCHITECTURE.md` §"Mount policy".
+`doc/book/architecture.md` §"Mount policy".
 
 Graphics: the console renders text into the GPU framebuffer (not
 legacy VGA text mode). Userspace can `framebuffer_acquire()` to grab
@@ -27,4 +27,4 @@ there yet is a compositor, windowing, or GUI shell; that's v2 work.
 
 What this is for: a shippable hobby OS. Text-first now, GUI 2027+.
 Not a Linux competitor. Not a research artifact. See
-`docs/ROADMAP.md`.
+`doc/book/roadmap.md`.
