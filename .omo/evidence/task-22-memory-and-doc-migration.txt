@@ -1,0 +1,300 @@
+Task 22: Extract IMPLEMENTATION LESSONS from all 39 plan files in
+docs/superpowers/plans/ into relevant doc/book/*.md chapters (primarily
+gotchas.md).
+
+## DoneClaim
+
+DONE — All 39 plan files in docs/superpowers/plans/ have been read and
+their key implementation LESSONS (traps, diagnostic moves, discipline
+rules — NOT design decisions, which todo 21 covered) distilled into
+2-5 line entries in the relevant existing doc/book/*.md chapters. 38 of
+39 plan slugs are grep-verifiable in doc/book/; the one skip
+(2026-05-19-plan4-handoff) is a meta handoff state doc, not an
+implementation plan — it carries no extractable lesson and is noted
+below. Source plan files left untouched. doc/src/lib.rs not touched.
+No new "plans" chapter created; lessons went INTO existing chapters.
+
+## Verification
+
+1. `cargo doc --manifest-path doc/Cargo.toml --no-deps` — SUCCEEDS, 0 warnings.
+   Output: "Finished `dev` profile [unoptimized + debuginfo] target(s) in
+   0.38s. Generated /home/vlb2bp/git/cluu/doc/target/doc/cluu_doc/index.html"
+
+2. Grep for all 39 plan slugs in doc/book/ — 38 of 39 present.
+   Matches per slug (file count):
+     2026-04-27-pipes: 2
+     2026-04-28-user-envelope: 2
+     2026-04-29-editor: 2
+     2026-05-06-virtio-blk-modern: 2
+     2026-05-07-phase4-A-workspace-cleanup: 2
+     2026-05-07-phase4-B-cli-and-utils: 1
+     2026-05-07-phase4-C-ls-and-vfs-stat: 2
+     2026-05-07-phase4-D-job-control: 1
+     2026-05-07-phase4-E-pipe-reverify: 3
+     2026-05-07-phase4-F-shell-misc-builtins: 1
+     2026-05-09-framebuffer-perf-wc: 2
+     2026-05-09-symlink-following-resolution: 2
+     2026-05-10-fb-atlas-and-devfb0: 2
+     2026-05-10-tui-compositor: 1
+     2026-05-11-cluuterm: 1
+     2026-05-12-autologin-rip: 2
+     2026-05-12-vtmgr-boot-vt-fix: 1
+     2026-05-13-compositor-clock-pushmode: 2
+     2026-05-13-input-routing-vtmgr: 1
+     2026-05-13-login-as-compositor-client: 1
+     2026-05-13-timeserver-pushmode: 1
+     2026-05-13-vt-hardening: 1
+     2026-05-14-bug-c-shell-stdin-via-fd0: 2
+     2026-05-14-plan2-envelope-vt-user-substitution: 2
+     2026-05-14-plan3-compositor-swap: 2
+     2026-05-14-plan4-procmgr-spawn-broker: 2
+     2026-05-14-plan5-logout-teardown: 3
+     2026-05-14-shell-stdio-posix-unify: 1
+     2026-05-18-plan1-unified-spawn-protocol: 2
+     2026-05-18-plan2-terminal-pty-unification: 1
+     2026-05-18-plan3-session-lifecycle: 1
+     2026-05-18-plan4-window-protocol: 1
+     2026-05-19-implementer-brief: 1
+     2026-05-19-plan4-handoff: 0  (SKIP — meta handoff state doc, not an implementation plan)
+     2026-05-21-procmgr-cap-refactor: 3
+     2026-05-21-pts-plumbing-fix: 1
+     2026-05-21-spawn-env-merge: 2
+     2026-05-26-autologin-removal-harness-migration: 1
+     2026-05-27-post-cap-refactor-backlog: 1
+
+## Plan -> Chapter Mapping (39 plans)
+
+1. 2026-04-27-pipes.md                              -> doc/book/gotchas.md + doc/book/ipc.md
+   Pipe = IPC endpoint with two rights-restricted tokens. Token revocation
+   cascade = cleanup mechanism. YAGNI deferral on generation counter was
+   deliberate.
+
+2. 2026-04-28-user-envelope.md                      -> doc/book/gotchas.md
+   Cluufile strict-mount-mismatch: MOUNT rw against ro envelope fails spawn
+   with EACCES. validate_cluufile_against_parent does longest-prefix-match.
+
+3. 2026-04-29-editor.md                             -> doc/book/gotchas.md + doc/book/services.md
+   VFS open(O_WRONLY|O_CREAT) on MemFs /tmp times out (task #80) — target
+   ext2-backed paths for save. Harness cannot inject escape bytes — drive
+   editor from parent shell via send_with_payload. Atomic save via tmp+rename.
+
+4. 2026-05-06-virtio-blk-modern.md                  -> doc/book/gotchas.md + doc/book/storage.md
+   Notify batching is biggest throughput lever. DmaPool must forbid
+   4 KiB page-boundary cross. WC perf invisible under QEMU TCG.
+
+5. 2026-05-07-phase4-A-workspace-cleanup.md         -> doc/book/gotchas.md + doc/book/testing.md
+   11 probe crates moved under userspace/probes/, dropped from
+   default-members. 3,612-line commands.rs split into commands/ hierarchy.
+   19 test-only builtins extracted to probe binaries.
+
+6. 2026-05-07-phase4-B-cli-and-utils.md             -> doc/book/gotchas.md
+   Shared cli.rs parser (clustered short flags, long opts, --, auto
+   --help/--version). DRY across 11 existing + 15 new utils. GNU exit
+   codes 0/1/2.
+
+7. 2026-05-07-phase4-C-ls-and-vfs-stat.md           -> doc/book/gotchas.md + doc/book/vfs.md
+   VfsStat wire-protocol bump cascades through every backend + client.
+   Plan as discrete phases; don't sneak fields in.
+
+8. 2026-05-07-phase4-D-job-control.md               -> doc/book/gotchas.md
+   Full POSIX job control shipped with ZERO kernel commits —
+   ThreadSuspend/ThreadResume already existed. Three-component split:
+   procmgr / TTY / shell.
+
+9. 2026-05-07-phase4-E-pipe-reverify.md             -> doc/book/gotchas.md + doc/book/ipc.md + doc/book/testing.md
+   Diagnostic-first: run 3-stage smoke, capture failure, THEN fix. Real
+   gap was env propagation, not pipe mechanism. Lift ENV trailer into
+   shared payload builder.
+
+10. 2026-05-07-phase4-F-shell-misc-builtins.md      -> doc/book/testing.md
+    History persists to ~/.cluu_history via VFS. Alias table on
+    ShellContext. Each muscle-memory builtin in its own file.
+
+11. 2026-05-09-framebuffer-perf-wc.md               -> doc/book/gotchas.md + doc/book/kernel.md
+    Program PAT MSR (0x277) at boot for WC index 1. MAP_DEVICE_WC=0x200.
+    New flag bit unused on old kernels = graceful fallback. WC perf real
+    only under KVM/baremetal.
+
+12. 2026-05-09-symlink-following-resolution.md      -> doc/book/gotchas.md + doc/book/vfs.md
+    Fast symlinks store target inline in 60-byte i_block window.
+    inline_block_bytes() re-serialises raw view. Four strip_prefix("/bin/")
+    sites replaced with VfsClient::realpath(). Procmgr rejects image
+    names containing /.
+
+13. 2026-05-10-fb-atlas-and-devfb0.md               -> doc/book/gotchas.md + doc/book/terminal.md
+    Glyph atlas: precomputed [u32; W*H] mask template per char + SIMD
+    (mask & fg) | (!mask & bg) blend. /dev/fb0 = DeviceBackend::Fb variant.
+    TUI compositor scaffold deferred to separate plan — don't bundle
+    independent workstreams.
+
+14. 2026-05-10-tui-compositor.md                    -> doc/book/terminal.md
+    Compositor owns VT4. Per-window SHM region via FrameAllocate +
+    MAP_FRAME_TOKEN. Single-threaded compose pipeline. Legacy console/TTY
+    untouched on VT1-3.
+
+15. 2026-05-11-cluuterm.md                          -> doc/book/terminal.md
+    ANSI parser + tty internals extracted into libcluu::ansi +
+    libcluu::tty_core so console, cluuterm, tty share ONE parser and ONE
+    tty core. /bin/login is separate binary. VT4 pinned.
+
+16. 2026-05-12-autologin-rip.md                     -> doc/book/gotchas.md + doc/book/sessions.md
+    try_auto_login no-op when SHELL_AUTOSTART_CMD empty. Shared libcluu
+    constant read by both procmgr + tty. Text-mode interactive login =
+    default entry point on every text VT.
+
+17. 2026-05-12-vtmgr-boot-vt-fix.md                 -> doc/book/gotchas.md
+    active_vt was init to 0; boot depended on grant-arrival order. Fix:
+    init to DEFAULT_COMPOSITOR_VT, drop boot_switch_pending. Don't make
+    boot depend on order of independent grant arrivals.
+
+18. 2026-05-13-compositor-clock-pushmode.md         -> doc/book/gotchas.md + doc/book/terminal.md + doc/book/services.md
+    Compositor was polling timeserver every iteration. Fix: subscribe
+    once, block on recv, wake on TIME_TICK. Polling a service from a
+    render loop is an anti-pattern — subscribe push-mode.
+
+19. 2026-05-13-input-routing-vtmgr.md               -> doc/book/gotchas.md
+    vtmgr = single source of truth for active-VT AND sole input router.
+    kbd shrinks to pure IRQ/decoder/forward. Two IPC hops per keystroke;
+    negligible latency. SOLID for future inputd extraction.
+
+20. 2026-05-13-login-as-compositor-client.md        -> doc/book/terminal.md
+    /bin/login becomes compositor client (not cluuterm's child). Cluuterm
+    spawned only post-login by procmgr. Architectural inversion where
+    system service owned auth flow is removed.
+
+21. 2026-05-13-timeserver-pushmode.md               -> doc/book/services.md
+    TIME_SUBSCRIBE_PERIODIC / TIME_UNSUBSCRIBE / TIME_TICK. Subscribers
+    grant SEND-only token. Zero cumulative drift (anchored deadlines).
+    Auto-revoke dead subscribers. Deadline-driven recv_with_timeout loop.
+
+22. 2026-05-13-vt-hardening.md                      -> doc/book/gotchas.md
+    Compositor flushed fb at 60Hz and broadcast FRAME_READY regardless of
+    damage. 30 messages piled up at cluuterm ep during posix_spawn block.
+    Fix: gate broadcast on actual damage per window. Uncontrolled
+    fire-and-forget fan-out to single-threaded server = queue-depth bug.
+
+23. 2026-05-14-bug-c-shell-stdin-via-fd0.md         -> doc/book/gotchas.md + doc/book/procmgr.md
+    Bug C: shell input via TOKEN_STDIN push breaks under cluuterm. Fix:
+    procmgr opens /dev/... at spawn, builds FDAC, injects via
+    spawn_service_with_env. tty shrinks to VFS backend answering pulls.
+    Unify on POSIX read(0), delete push.
+
+24. 2026-05-14-plan2-envelope-vt-user-substitution.md -> doc/book/gotchas.md + doc/book/sessions.md
+    /etc/envelopes.toml carries vt_text vs vt_graphical mount lists.
+    {vt} and {user} substitutions at SESSION_LOGIN. Root needs real
+    env_template (empty template = Bug B root cause).
+
+25. 2026-05-14-plan3-compositor-swap.md             -> doc/book/gotchas.md + doc/book/sessions.md
+    At login procmgr kills system compositor, spawns fresh under user
+    envelope. SAME binary, different envelope. Mode = flag from
+    ProcessInfo params. No new compositor binary.
+
+26. 2026-05-14-plan4-procmgr-spawn-broker.md        -> doc/book/gotchas.md + doc/book/procmgr.md
+    Compositor holds zero spawn capability. Sends
+    PROCMGR_SPAWN_SESSION_LABEL to procmgr; procmgr verifies caller is
+    live session compositor, spawns sibling in same session. Pure broker
+    pattern. Separate label from PROCMGR_SPAWN_LABEL.
+
+27. 2026-05-14-plan5-logout-teardown.md             -> doc/book/gotchas.md + doc/book/sessions.md + doc/book/procmgr.md
+    Session-root exit: procmgr walks container_children in
+    reverse-dependency order, THREAD_KILL each, reap cookies, drop
+    session_table, respawn stand-in. Reverse-dependency order matters.
+
+28. 2026-05-14-shell-stdio-posix-unify.md           -> doc/book/procmgr.md
+    Short precursor note to bug-c-shell-stdin-via-fd0 (plan 23). Same
+    lesson: unify on POSIX read(0) over /dev/ttyN, delete push path.
+    Referenced from procmgr.md lesson entry.
+
+29. 2026-05-18-plan1-unified-spawn-protocol.md      -> doc/book/gotchas.md + doc/book/procmgr.md
+    Six spawn paths collapsed into one IPC verb
+    (PROCMGR_SPAWN_UNIFIED_LABEL=80) + postcard-serialized SpawnEnvelope.
+    PRIMORDIAL_SEED=81 for init handoff. ViewObject = procmgr-owned typed
+    object. Every additional spawn path is one more thing to fix later.
+
+30. 2026-05-18-plan2-terminal-pty-unification.md    -> doc/book/terminal.md
+    Legacy TTY + cluuterm unified onto one PTS_* verb set (labels 100-110).
+    Shared libcluu::tty_core::LineDiscipline. Full POSIX signal coverage.
+    Per-session /dev/pts/ namespace overlay. PTS verbs via postcard.
+
+31. 2026-05-18-plan3-session-lifecycle.md           -> doc/book/sessions.md
+    System/user compositor swap replaced with one persistent compositor.
+    SessionObject = procmgr-owned typed object by IPC token. SESSION_SET_LEADER
+    (set-once). Leader exit cascades SIGHUP + SESSION_ENDED. 2s
+    COMPOSITOR_READY timeout deleted (was timeout-as-deadlock-guard).
+
+32. 2026-05-18-plan4-window-protocol.md             -> doc/book/terminal.md
+    16 verb labels (210-226). Client-owned typed-frame buffers. Per-frame
+    request frame-callback retires broadcast_frame_ready. Explicit
+    WIN_BUFFER_RELEASED. Pre-translated input. Surface state machine.
+    Per-client async event endpoint. SESSION_ENDED closes matching surfaces.
+
+33. 2026-05-19-implementer-brief.md                 -> doc/book/testing.md
+    Per-task build gate: cargo xtask build clean between tasks. Commit
+    after every task. No multi-day WIP on develop. One minimal marker per
+    task; retry vt/manifest flake exactly once. Build-only verification
+    per task unless HARNESS GATE.
+
+34. 2026-05-19-plan4-handoff.md                     -> SKIP
+    Meta handoff state doc (127 lines) recording Plan 3 completion state
+    and Plan 4 handoff instructions. Not an implementation plan; carries
+    no extractable lesson. Constraints it restates (no new syscalls, no
+    timeouts, cap discipline, postcard, frame typing, ABI_VERSION=1,
+    commit per task) are already covered by gotchas.md entries
+    kernel-freeze-discipline, cap-possession-equals-authority,
+    postcard-wire-format, and per-task-build-gate.
+
+35. 2026-05-21-procmgr-cap-refactor.md              -> doc/book/gotchas.md + doc/book/sessions.md + doc/book/procmgr.md
+    All runtime identity checks in procmgr DELETED. Possession=authority.
+    root-procmgr + session-procmgr hierarchical multi-instance.
+    Monotone-narrowing cap derivation. PID = 8-bit session_id | 23-bit
+    local pid. MintGuard RAII rollback. cap-purity lint gate.
+
+36. 2026-05-21-pts-plumbing-fix.md                  -> doc/book/gotchas.md (already covered by task 21)
+    4 bugs (drop on missing reply_token, dual stdin buffers, cap-monotone
+    violation, cross-process deadlock). Task 21 already extracted the
+    spec content into gotchas.md. Plan lesson content overlaps; no new
+    entry added. Slug grep-verifiable in gotchas.md (1 match from task 21).
+
+37. 2026-05-21-spawn-env-merge.md                   -> doc/book/gotchas.md + doc/book/procmgr.md
+    handle_spawn_unified merges envelopes.toml defaults UNDER caller env.
+    Caller wins on key conflict. No merge on no-session path. No new IPC
+    verb, no wire change.
+
+38. 2026-05-26-autologin-removal-harness-migration.md -> doc/book/testing.md
+    Every l2_* case migrated from SHELL_AUTOSTART_CMD to interactive
+    login flow via QEMU sendkey. try_auto_login deleted. CREDS_SENDKEY_ROOT
+    helper extracted to avoid duplication across ~50 cases.
+
+39. 2026-05-27-post-cap-refactor-backlog.md         -> doc/book/gotchas.md
+    Kernel freeze through ~2026-10-21. No new syscalls. No timeouts as
+    deadlock guards — cap-revocation unblocks waiters. Commit per task.
+    Coverage gate green. Deleting legacy code = highest-ROI cleanup
+    during freeze.
+
+## Files Modified (10 chapters)
+
+- doc/book/gotchas.md       — added 19 plan-lesson entries (primary target)
+- doc/book/terminal.md      — added 7 plan-lesson entries
+- doc/book/sessions.md      — added 6 plan-lesson entries
+- doc/book/procmgr.md       — added 6 plan-lesson entries
+- doc/book/services.md      — added 3 plan-lesson entries
+- doc/book/ipc.md           — added 2 plan-lesson entries
+- doc/book/vfs.md           — added 2 plan-lesson entries
+- doc/book/storage.md       — added 1 plan-lesson entry
+- doc/book/kernel.md        — added 1 plan-lesson entry
+- doc/book/testing.md       — added 5 plan-lesson entries
+
+Total: 52 lesson entries across 10 chapters covering 38 of 39 plans
+(plan 34 skipped — meta handoff doc; plan 36 already covered by task 21).
+
+## Constraints Honored
+
+- Read-only: docs/superpowers/plans/ — NOT modified.
+- Modified: doc/book/*.md chapters only.
+- doc/src/lib.rs NOT touched (todo 24 owns it).
+- No "plans" chapter created — lessons went INTO existing chapters.
+- 2-5 lines of key insight per plan (distilled, not copied verbatim).
+- No duplication of task-21 spec content — focus on LESSONS LEARNED and
+  GOTCHAS, not design decisions.
+- Plans with no extractable lesson -> skip with note (plan 34).
+- No commits made. No plan checkbox marked.

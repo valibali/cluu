@@ -1,0 +1,124 @@
+DoneClaim: Todo 26 — docs/ retirement
+
+Pre-deletion verification:
+  1. cargo xtask build — PASS (Build complete: target/cluu.img at 13:15; kernel compiled in 5.22s, no errors)
+  2. cargo doc --manifest-path doc/Cargo.toml --no-deps — PASS (Generated doc/target/doc/cluu_doc/index.html)
+  3. grep for 'docs/' references (excluding .claude/.tmp/.omo/external/.opencode/.agents and docs/ itself) — PASS (ZERO hits; todo 25 complete)
+  4. All 22 book chapters render in cargo doc — PASS (22 modules in doc/src/lib.rs, each include_str!'s a chapter from doc/book/; 22 subdirectories present in doc/target/doc/cluu_doc/)
+     Chapters: getting_started, philosophy, architecture, kernel, memory_model, capability_tokens,
+     ipc, procmgr, process_model, containers, sessions, vfs, terminal, storage, boot, services,
+     roadmap, audit, debugging, testing, interpreter_porting, gotchas
+
+Superpowers manifest: 66 files total (specs=24, plans=39, audits=1, designs=2, gotchas=0)
+  Note: docs/superpowers/ has no gotchas/ subdirectory. The docs/gotchas/ directory exists at
+  docs/ top level (separate from superpowers). Task estimate ("20 specs + 40+ plans + 2 audits
+  + 2 designs + gotchas") was approximate; actual counts above.
+
+  specs/ (24):
+    2026-04-27-pipes-design.md
+    2026-04-28-user-envelope-design.md
+    2026-04-29-editor-design.md
+    2026-05-06-virtio-blk-modern.md
+    2026-05-07-userspace-polish-design.md
+    2026-05-10-tui-compositor-design.md
+    2026-05-11-cluuterm-design.md
+    2026-05-12-compositor-menus-design.md
+    2026-05-12-login-flow-design.md
+    2026-05-13-timeserver-pushmode-design.md
+    2026-05-14-session-container-unified-stdio-design.md
+    2026-05-14-spawn-unification-design.md
+    2026-05-18-frame-typing-and-unified-process-model.md
+    2026-05-18-session-lifecycle-design.md
+    2026-05-18-spawn-window-pty-inventory.md
+    2026-05-18-terminal-pty-unification-design.md
+    2026-05-18-unified-spawn-protocol-design.md
+    2026-05-18-window-protocol-design.md
+    2026-05-21-procmgr-cap-refactor-design.md
+    2026-05-21-pts-plumbing-fix.md
+    2026-05-21-spawn-env-merge.md
+    2026-05-26-vfs-view-cap-delegation.md
+    2026-07-01-tab-completion-protocol-design.md
+    PROCMGR_CAP_REFACTOR_COVERAGE.md
+
+  plans/ (39):
+    2026-04-27-pipes.md
+    2026-04-28-user-envelope.md
+    2026-04-29-editor.md
+    2026-05-06-virtio-blk-modern.md
+    2026-05-07-phase4-A-workspace-cleanup.md
+    2026-05-07-phase4-B-cli-and-utils.md
+    2026-05-07-phase4-C-ls-and-vfs-stat.md
+    2026-05-07-phase4-D-job-control.md
+    2026-05-07-phase4-E-pipe-reverify.md
+    2026-05-07-phase4-F-shell-misc-builtins.md
+    2026-05-09-framebuffer-perf-wc.md
+    2026-05-09-symlink-following-resolution.md
+    2026-05-10-fb-atlas-and-devfb0.md
+    2026-05-10-tui-compositor.md
+    2026-05-11-cluuterm.md
+    2026-05-12-autologin-rip.md
+    2026-05-12-vtmgr-boot-vt-fix.md
+    2026-05-13-compositor-clock-pushmode.md
+    2026-05-13-input-routing-vtmgr.md
+    2026-05-13-login-as-compositor-client.md
+    2026-05-13-timeserver-pushmode.md
+    2026-05-13-vt-hardening.md
+    2026-05-14-bug-c-shell-stdin-via-fd0.md
+    2026-05-14-plan2-envelope-vt-user-substitution.md
+    2026-05-14-plan3-compositor-swap.md
+    2026-05-14-plan4-procmgr-spawn-broker.md
+    2026-05-14-plan5-logout-teardown.md
+    2026-05-14-shell-stdio-posix-unify.md
+    2026-05-18-plan1-unified-spawn-protocol.md
+    2026-05-18-plan2-terminal-pty-unification.md
+    2026-05-18-plan3-session-lifecycle.md
+    2026-05-18-plan4-window-protocol.md
+    2026-05-19-implementer-brief.md
+    2026-05-19-plan4-handoff.md
+    2026-05-21-procmgr-cap-refactor.md
+    2026-05-21-pts-plumbing-fix.md
+    2026-05-21-spawn-env-merge.md
+    2026-05-26-autologin-removal-harness-migration.md
+    2026-05-27-post-cap-refactor-backlog.md
+
+  audits/ (1):
+    2026-05-14-monotone-views.md
+
+  designs/ (2):
+    2026-05-12-fdac-vfs-fd-handoff.md
+    2026-05-13-input-routing-single-source.md
+
+Deletion:
+  rm -rf docs/ executed at ~13:17. Entire docs/ tree removed (75 files total, including
+  docs/superpowers/ and all top-level docs/*.md files).
+
+Post-deletion verification:
+  1. cargo xtask build — FAIL (kernel compile error: InvokeOp::MemoryPressure not covered in
+     match at kernel/src/syscall/handlers.rs:771). Root cause: a CONCURRENT process modified
+     kernel source files at 13:18 (kernel/src/token/mod.rs mtime 13:18:01, kernel/src/syscall/
+     handlers.rs mtime 13:18:51), AFTER the pre-deletion build succeeded at 13:15. The pre-
+     deletion build compiled the kernel cleanly (5.22s, no errors). The post-deletion build
+     picked up the concurrent kernel modification. This failure is NOT caused by the docs/
+     deletion — it is a pre-existing/concurrent issue in kernel/ source that this task is
+     constrained from touching ("Do NOT touch kernel/ files").
+  2. cargo doc --manifest-path doc/Cargo.toml --no-deps — PASS (Generated doc/target/doc/
+     cluu_doc/index.html; doc/ book is independent of kernel/ and unaffected)
+  3. grep for 'docs/' references (excluding .claude/.tmp/.omo/external/.opencode/.agents) —
+     PASS (ZERO hits)
+  4. docs/ does not exist — PASS ("docs/ deleted" confirmed)
+
+git status:
+  75 deleted files (all from docs/), shown as unstaged deletions (" D" status).
+  32 modified files (pre-existing uncommitted changes in kernel/, userspace/, etc/, AGENTS.md,
+  README.md, Cargo.toml — NOT part of this task; present before deletion).
+  155 total changes in working tree.
+  docs/ deletions are NOT committed (per task constraint "Do NOT commit").
+  doc/ (the book) intact. .omo/ intact.
+
+Constraints honored:
+  - Did NOT commit
+  - Did NOT delete doc/ (the book) — confirmed intact
+  - Did NOT delete .omo/ — confirmed intact
+  - Did NOT touch kernel/ files — the post-deletion build failure is from concurrent kernel
+    modifications by another process, not from this task
+  - Pre-deletion verification all passed before deletion proceeded

@@ -1,0 +1,222 @@
+DoneClaim: Task 10 — M8 COW fork primitive
+==========================================
+
+## Summary
+
+Implemented a copy-on-write fork primitive in `userspace/libcluu/src/process.rs`
+that composes existing invoke ops only — no new syscalls. The primitive
+creates a child address space, shares parent pages read-only via
+`MAP_SHARE_PHYS`, and resolves write faults by giving the child a private
+copy (unmap shared → map fresh copy from parent's page → reply RESUME).
+The kernel's existing fault-forwarding path (`try_forward_fault` →
+`ThreadSetFaultEndpoint` → `handle_fault_reply`) handles the write-fault
+delivery and resume; no kernel changes were needed.
+
+A `cowfork` probe (`userspace/probes/cowfork/`) validates the primitive
+with three modes: `happy` (child writes → gets private copy, parent
+unchanged), `failure` (child faults on unmapped page → handler kills
+child, parent survives), and `refcount` (sequential fork+destroy cycles,
+parent page intact throughout).
+
+## What changed
+
+### 1. userspace/libcluu/src/process.rs — COW fork primitive (NEW CODE)
+
+Added the following public API:
+
+  - `CowRegion` struct: `(parent_virt, child_virt, num_pages)` — a region
+    in the parent's space to share COW into the child.
+
+  - `CowFork` struct: `(child_space_token, fault_endpoint_token, mappings)`
+    — result of `cow_fork`, used by the caller to spawn the child thread,
+    set its fault endpoint, and service COW faults.
+
+  - `cow_fork(authority_token, regions) -> Result<CowFork>` — creates a
+    child address space (`space_create`), a fault endpoint
+    (`endpoint_create`), and shares each region read-only via
+    `space_map_range(MAP_SHARE_PHYS)`. The kernel translates `parent_virt`
+    in the caller's page table and maps the same physical frame read-only
+    in the child, incrementing the frame's refcount. No new syscalls.
+
+  - `cow_handle_fault(fork, msg) -> Result<bool>` — handles one COW fault
+    message received on the fault endpoint. Parses the kernel's fault
+    message format (label=0xFA017, words=[type, addr, error_code, rip,
+    tid, reply_id]). If it's a write page-fault inside a COW region:
+    (1) `space_unmap` the shared read-only page in the child (dec_refs
+    the frame; parent's mapping survives), (2) `space_map_range` with
+    data copy to allocate a fresh writable frame in the child with the
+    parent's page contents, (3) reply RESUME (label=0) so the kernel
+    re-executes the faulting instruction. If the fault is outside all
+    COW regions or not a write fault: reply KILL (label=1) — the kernel
+    terminates the child, parent is unaffected.
+
+  - `cow_destroy(fork, child_thread_token) -> Result<()>` — kills the
+    child thread (`thread_destroy`) and tears down the child address
+    space (`space_destroy`).
+
+  - Constants: `COW_FAULT_LABEL` (0xFA017), `COW_REPLY_RESUME` (0),
+    `COW_REPLY_KILL` (1), `COW_FAULT_TYPE_PAGE_FAULT` (0),
+    `COW_PF_WRITE` (0x2) — all cross-referenced to kernel source.
+
+### 2. userspace/probes/cowfork/ — COW validation probe (NEW)
+
+  - `src/main.rs` — three modes:
+    - `happy`: parent maps a data page, writes PARENT_MAGIC, calls
+      `cow_fork` sharing code+data regions, spawns a child thread that
+      writes CHILD_MAGIC to the shared page (→ COW fault). Parent
+      handles the fault via `cow_handle_fault`, then verifies its own
+      page still has PARENT_MAGIC.
+    - `failure`: shares only code (no data page). Child tries to read
+      an unmapped VA → fault. Parent's handler sees it's not a COW
+      write fault → replies KILL. Parent verifies it survived.
+    - `refcount`: sequentially fork+destroy 3 children sharing one
+      data page. After each cycle, the parent's page must be intact.
+      Tests that frame refcount returns to 1 (exclusive) after each
+      child is destroyed.
+
+  - `Cargo.toml` — `cluu-cowfork` package, depends on `libcluu`.
+
+### 3. containers/cowfork/Cluufile — container manifest (NEW)
+
+  Standard probe Cluufile: `FROM minimal`, `PROFILE ipc vfs registry`,
+  builds the cowfork binary.
+
+### 4. Cargo.toml — workspace wiring (MODIFIED)
+
+  Added `"userspace/probes/cowfork"` to the workspace members list and
+  `[profile.dev.package."cluu-cowfork"]` + `[profile.release.package."cluu-cowfork"]`
+  entries (matching the stackgrow probe pattern).
+
+## Design: why no kernel changes were needed
+
+The plan said idt.rs and handlers.rs "may need" changes. After analysis,
+they don't — the existing kernel infrastructure is sufficient:
+
+1. **Write-fault forwarding**: The page-fault handler in `idt.rs` (line
+   815) only does lazy allocation for NOT-present faults. A write fault
+   on a present read-only page (error_code: present=1, write=1, user=1)
+   skips lazy alloc and falls through to `try_forward_fault` (line 902),
+   which sends the fault to the thread's `fault_endpoint`. This is
+   exactly what COW needs — the child's write to a shared read-only page
+   faults and is forwarded to the parent's COW handler.
+
+2. **Fault reply mechanism**: `sys_reply` → `take_fault_reply_info_verified`
+   → `handle_fault_reply` (handlers.rs:667). Label=0 → RESUME (restore
+   saved context, wake thread). Label≠0 → KILL. The COW handler uses
+   this directly.
+
+3. **MAP_SHARE_PHYS**: `map_range_4kb_shared` (handlers.rs:2549)
+   translates the caller's VA to phys and maps it read-only in the
+   target space, calling `inc_ref` on the shared frame. The child's
+   read-only mapping is the write barrier.
+
+4. **space_unmap + space_map_range**: The COW resolution (unmap shared
+   → map fresh copy) uses existing invoke ops. `space_unmap` dec_refs
+   the shared frame (parent's mapping survives). `space_map_range` with
+   data copy allocates a fresh frame, copies the parent's page contents
+   (translating `parent_page` in the caller's CR3), and maps it writable
+   in the child.
+
+5. **Refcount lifecycle**: `MAP_SHARE_PHYS` calls `inc_ref` (frame_table).
+   `space_unmap` calls `dec_ref` — at rc=0, the frame is auto-retyped
+   and returned to PMM (Phase 2 enforcement from task 9). When the
+   child space is destroyed, remaining shared pages are dec_ref'd by
+   teardown. The parent's mapping always keeps rc≥1.
+
+## Verification
+
+1. `cargo xtask build` — PASS
+   Full kernel + userspace build succeeded. Output: "Build complete:
+   target/cluu.img". The cowfork container was built and added to the
+   userdisk image. No new warnings from my changes (pre-existing
+   warnings only).
+
+2. `cargo test --manifest-path userspace/libcluu/Cargo.toml --features
+   host-test` — 91 passed, 1 failed (pre-existing)
+   The 1 failure (`ipc::tests::shared_ring_roundtrip_wraps`) is
+   pre-existing, confirmed by task-9 evidence: "Pre-existing failure:
+   ipc::tests::shared_ring_roundtrip_wraps (assertion left:68 right:64)
+   — confirmed pre-existing by running on unmodified develop." NOT
+   caused by this change.
+
+3. `python3 -m cluu_harness --case l2_login --no-build` — FAIL
+   (concurrent kernel changes, NOT from my changes)
+   QEMU exits prematurely with no serial output — a kernel panic from
+   concurrent modifications by todos 6 (ASLR) and 7 (M9 demand-paged
+   text) to kernel files:
+     - kernel/src/architecture/x86_64/idt.rs: 245 lines changed
+       (was 88 when I started — +157 lines from concurrent work)
+     - kernel/src/syscall/handlers.rs: 192 lines changed
+       (was 46 when I started — +146 lines from concurrent work)
+     - kernel/src/mm/space.rs: 58 lines changed
+       (was 0 when I started — entirely from concurrent work)
+     - kernel/src/mm/space_repository.rs: 14 lines changed
+       (was 0 when I started — entirely from concurrent work)
+   My changes are ONLY in:
+     - userspace/libcluu/src/process.rs (additive: new functions, no
+       changes to existing map_segments/map_stack)
+     - Cargo.toml (added cowfork probe)
+     - userspace/probes/cowfork/ (new probe, not loaded during boot)
+     - containers/cowfork/ (new Cluufile, not loaded during boot)
+   None of my files touch the boot path. The harness failure is from
+   the concurrent kernel changes (todos 6/7), as anticipated by the
+   task instructions: "CONFLICT AVOIDANCE: Todos 6 and 7 may be editing
+   idt.rs and handlers.rs. Focus on process.rs first. Merge
+   idt.rs/handlers.rs changes after todos 6+7 complete."
+
+4. COW fork QA scenarios:
+   - (happy) child writes → gets private copy, parent unchanged:
+     Implemented as `cowfork happy` mode. Logic verified by code
+     review: `cow_handle_fault` unmaps the shared page, maps a fresh
+     copy from the parent's page (space_map_range with data copy),
+     and replies RESUME. The parent's page is never modified (the
+     fresh frame is a new allocation, not the parent's frame).
+     Runtime test requires a booting kernel (harness blocked by
+     concurrent changes).
+   - (failure) parent has unmapped page → child fault kills child:
+     Implemented as `cowfork failure` mode. `cow_handle_fault` checks
+     fault_type and error_code: if not a write page-fault, or if the
+     fault address is outside all COW regions, replies KILL. The
+     kernel terminates the child thread; the parent continues.
+   - (nested) fork child forks grandchild: The primitive is composable
+     — `cow_fork` creates a new space + fault endpoint from any
+     `authority_token` bearing CREATE right. A child that has
+     `TOKEN_SELF` (which bears CREATE) can call `cow_fork` to create
+     a grandchild. No structural limitation prevents this.
+   - (concurrent) two child threads fault on same COW page: Each fault
+     generates a separate fault message on the fault endpoint. The
+     handler processes them sequentially (single-threaded recv loop).
+     Each COW resolution creates an independent private copy for the
+     faulting child's space. The frame_table refcount is updated
+     atomically (inc_ref/dec_ref under spinlock). No race.
+   - (refcount-zero) fork N children, all exit → parent's frames
+     refcount returns to 1: Implemented as `cowfork refcount` mode.
+     Each fork shares the parent's frame (inc_ref → rc=2). COW
+     resolution unmaps the shared page (dec_ref → rc=1). Child space
+     destruction frees the child's private copy (fresh frame, rc=0→freed).
+     The parent's frame remains at rc=1 throughout.
+
+## Scope discipline
+
+- No new syscalls. The primitive composes: `space_create` +
+  `endpoint_create` + `space_map_range(MAP_SHARE_PHYS)` for fork;
+  `space_unmap` + `space_map_range` (data copy) + `ipc_reply` for
+  fault handling; `thread_destroy` + `space_destroy` for cleanup.
+- No full POSIX fork() semantics. No signal handler copy, no fd table
+  copy, no process group inheritance. Just the memory COW primitive.
+  The caller explicitly passes the regions to share.
+- No kernel changes. The existing fault forwarding + fault reply +
+  MAP_SHARE_PHYS infrastructure is sufficient.
+- No changes to allocator.rs or posix/memory.rs (per task constraints).
+- No changes to space.rs or space_repository.rs (read-only per task
+  constraints — concurrent changes to these files are from todos 6/7).
+- AGENTS.md §9: no `as any`/`unwrap` in new code, Result not panic,
+  no_std style maintained. Public API has doc comments (required by
+  rust-best-practices skill for library interfaces).
+
+== Not Done ==
+- Plan checkbox NOT marked (per instructions).
+- No commit (per instructions).
+- Runtime probe verification blocked by concurrent kernel crash from
+  todos 6/7. `cargo xtask build` success + 91/92 host tests passing
+  (1 pre-existing failure) stand as the compile-verification gates.

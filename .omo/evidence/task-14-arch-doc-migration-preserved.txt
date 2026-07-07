@@ -1,0 +1,138 @@
+TASK 14: Doc migration — ARCHITECTURE.md → architecture.md
+Plan: .omo/plans/memory-and-doc-migration.md (todo 14)
+Date: 2026-07-07
+
+============================================================
+DONECLAIM
+============================================================
+
+WHAT CHANGED
+------------
+Changed files:
+  - doc/book/architecture.md (target, the ONLY edited file)
+
+Read-only references (not modified):
+  - docs/ARCHITECTURE.md (source, 414 lines — NOT deleted; todo 25 handles that)
+  - doc/src/lib.rs:50-51 (include_str! pattern — NOT changed; todo 23 handles that)
+
+SUMMARY
+-------
+Merged knowledge from docs/ARCHITECTURE.md (414 lines) into
+doc/book/architecture.md (was 202 lines, now 387 lines). Rewrote for the
+book's terse style; no text copied verbatim. Added 3 new top-level sections
+(Kernel subsystems, Container model, Mount policy) and 2 new subsections
+(Spawn sequence, Profile bits and default mounts, Test surface). Enriched
+existing sections with missing knowledge: token field structure, IPC message
+type taxonomy, IPC cycle numbers, reply-token injection, crate counts, boot
+time budget, terminal-stack data flow, test counts, unit-test note.
+
+The book uses ASCII diagrams (no mermaid); rustdoc does not render mermaid.
+Source mermaid diagrams were converted to ASCII/text tables matching the
+existing book convention.
+
+============================================================
+VERIFICATION
+============================================================
+
+1. cargo doc — MUST succeed
+   Command: cargo doc --manifest-path doc/Cargo.toml --no-deps
+   Result:  PASS (exit 0)
+   Output:  Documenting cluu-doc v0.1.0
+            Finished `dev` profile [unoptimized + debuginfo] target(s)
+            Generated /home/vlb2bp/git/cluu/target/doc/cluu_doc/index.html
+
+2. Heading coverage — every docs/ARCHITECTURE.md ## heading has a home
+   in doc/book/architecture.md. Mapping below.
+
+3. No content duplicated — knowledge rewritten, not copied. Source mermaid
+   converted to ASCII tables/diagrams. Numbers preserved (cycle counts, crate
+   counts, test counts) but prose rewritten.
+
+4. Anti-slop: no em dashes (—/–), no AI-slop words (delve, leverage, utilize,
+   in order to, moving forward, etc.). Checked via grep: clean.
+
+5. Adversarial — misleading_success_output: confirmed the rendered HTML at
+   target/doc/cluu_doc/architecture/index.html contains the new sections.
+   Heading IDs found in HTML: kernel-subsystems, container-model,
+   mount-policy, spawn-sequence, profile-bits-and-default-mounts,
+   test-surface. Keyword hits: "suspend-bracket" (1), "memfs_cid" (2),
+   "1,200" (1), "ReplyId" (1). The cargo doc success is real, not from
+   ignoring the new content.
+
+============================================================
+HEADING-COVERAGE MAPPING
+(docs/ARCHITECTURE.md → doc/book/architecture.md)
+============================================================
+
+docs/ARCHITECTURE.md heading                          → book section
+---------------------------------------------------   → ---------------------------
+## 1. The 30-second mental model                      → Intro + ## The kernel/userspace boundary
+   (three-tier framing, arrow-direction insight)        (arrow-direction now in intro paragraph)
+## 2. Kernel layout                                   → NEW ## Kernel subsystems
+### What each subsystem owns                          →   (ownership table, 7 rows)
+### Kernel size signal                                →   (63 .rs files, ~50 KLOC, 0 driver LOC)
+## 3. The capability token system                     → ### Capability tokens
+   (token fields, unforgeable, InvokeOp rule)           (enriched: 5 token fields + unforgeable)
+                                                       → ## The syscall surface
+                                                          (InvokeOp-vs-syscall design rule)
+## 4. IPC — the central nervous system                → ### IPC (3 message types, cycle numbers,
+   (3 message types, ~1,200-1,600 cycles, reply-tokens)   reply-token injection)
+                                                       → ## IPC flow (registry pattern, sequence)
+## 5. Userspace service map                           → ## Userspace service topology
+   (roles, counts: 27 crates, 114 .rs files)            (all services + counts added)
+## 6. The container model                             → NEW ## Container model
+   (Cluufile, spawn diagram, SUSPENDED bracket)          (Cluufile example, spawn sequence,
+                                                          suspend-bracket rationale)
+### Container profile bits                            → NEW ### Profile bits and default mounts
+   (USER/DEVICE/ADMIN/SUPERVISOR mount tiers)           (mount-tier table)
+## 7. Mount policy                                    → NEW ## Mount policy
+   (MOUNT directive, /tmp sharing sequence, memfs_cid)   (4 policies, /tmp sharing ASCII,
+                                                          memfs_cid wire field)
+## 8. Boot sequence                                   → ## Boot sequence
+   (mermaid + time budget ~10-15s)                       (time budget paragraph added)
+## 9. The terminal stack                              → ### Terminal stack
+   (mermaid data flow kbd→tty→shell→console→fb)         (ASCII data-flow diagram added)
+## 10. Build and test surface                         → ## Build system + NEW ### Test surface
+   (47 cases/44 passing, rustc --test note)              (test counts + unit-test note)
+## 11. Where to read further                          → Book cross-links throughout each section
+   (companion-doc table)                                 (each section links to its deep-dive
+                                                          chapter; book TOC in lib.rs replaces
+                                                          the companion table)
+
+ALL 11 top-level docs sections + 2 subsections have a home in the book.
+3 new ## sections + 3 new ### subsections added; 0 docs headings unaccounted.
+
+============================================================
+NUMBERS RECONCILIATION
+============================================================
+The book's existing numbers were preserved (52 InvokeOps, 7 syscalls). The
+docs/ARCHITECTURE.md said "~70 invoke ops" and "basically a dozen actual
+syscalls." AGENTS.md says "~51 invoke ops today, ~12 syscalls total." These
+counts drift across sources. Per task scope (merge MISSING knowledge, do not
+change existing book content), the book's existing 52/7 numbers were kept and
+the conflicting ~70/dozen figures were NOT introduced. This is a known
+cross-source inconsistency, not a regression introduced by this task.
+
+============================================================
+RISKS
+============================================================
+1. Number drift (above): InvokeOp/syscall counts differ across docs/ARCHITECTURE.md,
+   AGENTS.md, and the book. Book kept at 52/7. Reconcile in a separate pass if
+   the canonical count matters; this task's scope was knowledge merge, not
+   number correction.
+
+2. Cross-link targets: new sections link to ../containers/index.html,
+   ../vfs/index.html, ../kernel/index.html, ../terminal/index.html,
+   ../capability_tokens/index.html, ../boot/index.html. All are existing
+   modules in doc/src/lib.rs, so links resolve. Not verified by clicking;
+   verified by module existence in lib.rs.
+
+3. docs/ARCHITECTURE.md NOT deleted (correct — todo 25 is HARD-GATED on
+   todo 24 cross-ref updates). docs/ still on disk; will be removed in todo 25
+   after all 26+ cross-references updated.
+
+4. doc/src/lib.rs NOT changed (correct — todo 23 handles module registration).
+   architecture module already registered at lib.rs:50-51.
+
+5. No commit made (per task instructions). No plan checkbox marked (per task
+   instructions).

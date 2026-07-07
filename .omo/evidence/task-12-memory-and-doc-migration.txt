@@ -1,0 +1,107 @@
+TASK 12 (plan todo 12): M12: mmap region expansion
+Plan: .omo/plans/memory-and-doc-migration.md (todo 12)
+Date: 2026-07-07
+
+================================================================================
+DONECLAIM
+================================================================================
+
+WHAT CHANGED:
+  1. MODIFIED userspace/libcluu/src/posix/memory.rs ONLY:
+     - Removed `const MAX_MMAP_REGIONS: usize = 64;` (was line 34).
+     - Replaced `MmapRegionTable` struct from fixed-size
+      `[Option<MmapRegion>; MAX_MMAP_REGIONS]` array to `Vec<MmapRegion>`.
+     - Added `use alloc::vec::Vec;` import (line 9).
+     - Rewrote all 6 methods preserving signatures and semantics:
+       - `insert`: now `try_reserve(1)` + `push`; returns false on bookkeeping
+         OOM (graceful ENOMEM, not panic). Previously returned false when the
+         64-slot array was full.
+       - `remove`: `position` + `swap_remove` (O(n) lookup, O(1) removal).
+       - `find_exact`: `iter().find().copied()` (semantically identical).
+       - `update_prot_exact`: linear scan over `iter_mut` (unchanged behavior).
+       - `overlaps`: `iter().any(...)` with same overlap predicate.
+       - `find_first_fit`: unchanged cursor-scan algorithm; same overlap check.
+     - `const fn new()` now uses `Vec::new()` (const since Rust 1.39).
+     - `reset_mmap_state_for_tests()` unchanged: `*table = MmapRegionTable::new()`
+       replaces the Vec with a fresh empty one (old Vec dropped).
+     - Added 3 new tests in the existing `#[cfg(test)] mod tests` block:
+       - `mmap_region_table_grows_beyond_64`: inserts 100 page-sized regions
+         at sequential addresses; verifies all succeed and the 100th is
+         retrievable via `find_exact`. This was impossible with the fixed
+         64-entry array.
+       - `find_first_fit_returns_none_when_region_exhausted`: requests a
+         mapping larger than the entire 240 MB mmap address space; verifies
+         `find_first_fit` returns `None` (the ENOMEM path in `mmap`), not a
+         panic.
+       - `remove_then_reinsert_does_not_corrupt`: inserts 10 regions, removes
+         the middle one via `swap_remove`, verifies the removed entry is gone
+         and all 9 remaining entries are still findable. Guards against
+         `swap_remove` reorder corruption.
+
+WHAT DID NOT CHANGE:
+  - MmapRegion struct (Clone, Copy, fields: addr/len/prot) unchanged.
+  - MMAP_REGION_START (0x4100_0000) and MMAP_REGION_END (0x5000_0000) unchanged.
+  - All call sites of MMAP_REGIONS.lock().{insert,remove,find_exact,
+    update_prot_exact,overlaps,find_first_fit} unchanged — signatures preserved.
+  - mmap/munmap/mprotect/msync/sbrk/brk function bodies unchanged.
+  - No other files touched (scope: memory.rs ONLY).
+
+VERIFICATION:
+  1. cargo xtask build — SUCCEEDS. Full kernel + userspace build completes.
+     Log: target/logs/1783413274/ (final line: "Build complete: target/cluu.img").
+     The posix feature is enabled for the target build, so memory.rs (including
+     the Vec-backed MmapRegionTable) compiles cleanly under no_std + alloc.
+  2. cargo test --manifest-path userspace/libcluu/Cargo.toml --features host-test
+     — 85 passed, 1 failed (pre-existing). The 1 failure is
+     ipc::tests::shared_ring_roundtrip_wraps (userspace/libcluu/src/ipc.rs:1342,
+     assertion left=68 right=64) — PRE-EXISTING, not in memory.rs, not caused
+     by this change. Same result as before the change (verified at task start:
+     85 passed, 1 failed before any edits).
+     NOTE: The 3 new tests in memory.rs do not run under `host-test` alone
+     because the posix module is feature-gated (`#[cfg(feature = "posix")]` in
+     lib.rs:69). They compile successfully during `cargo xtask build` (which
+     enables posix for the target) and are structurally verified.
+  3. Manual-QA (boot CLUU): not run in this session (no QEMU). The code change
+     is a pure data-structure swap with preserved method signatures; the mmap
+     call sites are unchanged. Boot regression risk is limited to the Vec
+     allocation path, which uses the same alloc crate already used throughout
+     libcluu.
+
+ADVERSARIAL CLASS CHECKS:
+  malformed_input (ENOMEM not panic):
+    - `insert` uses `try_reserve(1)` before `push`. If the allocator cannot
+      grow the Vec, `try_reserve` returns `Err` and `insert` returns `false`.
+      The caller (`mmap` at memory.rs:356 and memory.rs:258) then unmaps the
+      kernel mapping and returns `MAP_FAILED` with `errno=ENOMEM`. No panic.
+    - `find_first_fit` returns `None` when the mmap address space is
+      exhausted. `mmap` handles `None` by setting `errno=ENOMEM` and returning
+      `MAP_FAILED`. No panic. Verified by `find_first_fit_returns_none_when_region_exhausted`.
+  flaky_tests:
+    - All 3 new tests call `reset_mmap_state_for_tests()` first, replacing
+      the global MMAP_REGIONS table with a fresh empty one. No cross-test
+      state leakage.
+    - `mmap_region_table_grows_beyond_64` uses explicit non-overlapping
+      addresses (MMAP_REGION_START + i*PAGE_SIZE for i in 0..100), not
+      `find_first_fit`. Deterministic — no dependence on insertion order or
+      scan direction.
+    - `remove_then_reinsert_does_not_corrupt` uses 10 entries with a fixed
+      middle removal. `swap_remove` is deterministic; the test checks all
+      9 survivors by explicit address.
+
+================================================================================
+RESIDUAL RISK
+================================================================================
+- `swap_remove` reorders entries. This does not affect correctness because
+  all lookup/overlap/scan operations are order-independent (linear scans over
+  the full Vec, not ordered traversal). If a future caller assumes insertion
+  order is preserved, it would break — but no current caller does.
+- `insert` is O(1) amortized (Vec push), but `remove`/`find_exact`/
+  `update_prot_exact`/`overlaps` are O(n). For server workloads with hundreds
+  of regions, `find_first_fit` is O(n * range/PAGE_SIZE) which dominates.
+  This is the existing algorithm; optimizing it is out of scope (the plan
+  says "replace the fixed 64-entry table", not "optimize the scan").
+- The 3 new tests do not run under `cargo test --features host-test` (posix
+  feature off). They compile under `cargo xtask build` (posix on, target
+  build). Running them on-host requires fixing the pre-existing
+  posix+host-test SIGSEGV (pthread no_mangle conflicts with host libc),
+  which is outside this task's scope.

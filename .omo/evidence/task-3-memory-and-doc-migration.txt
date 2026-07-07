@@ -1,0 +1,86 @@
+DoneClaim: task-3-memory-and-doc-migration (M2: Heap fragmentation reporting)
+
+== Summary ==
+Added `fragmentation()` method to `LinkedListAllocator` and exposed the largest
+free-block size via a new `AllocStats.largest_free` field. The fragmentation
+ratio is `largest_free / free`: 1.0 when free space is contiguous, approaching
+0 as the free list fragments.
+
+== Changes ==
+File: userspace/libcluu/src/allocator.rs
+
+1. AllocStats struct (line ~46): added `pub largest_free: usize` field with
+   doc comment explaining the fragmentation ratio semantics.
+
+2. LinkedListAllocator::fragmentation(&mut self) -> (usize, usize) (line ~271):
+   New method that walks the free list (same pattern as `coalesce`) and returns
+   (largest_free_block, total_free_bytes). Returns (0, 0) for an empty heap.
+   Uses `as_mut()` walk pattern matching existing `coalesce`/`try_alloc` code.
+   No `unwrap()` — uses `match` to advance current pointer.
+
+3. LinkedListAllocator::stats() (line ~251): changed signature from `&self` to
+   `&mut self` (needed to call `fragmentation`). Calls `self.fragmentation()` to
+   populate `largest_free`. LockedAllocator::stats(&self) still works because
+   `self.inner.lock()` returns a MutexGuard with DerefMut.
+
+4. c-runtime `stats()` (line ~110): added `largest_free: 0` to the zero-AllocStats.
+
+5. host-test `stats()` (line ~576): added `largest_free: 0` to the zero-AllocStats.
+
+6. Test module (line ~655, inside `inner` under `#[cfg(not(feature = "c-runtime"))]`):
+   Two unit tests:
+   - `fragmentation_largest_free_after_freeing_middle_block`: allocs 3 blocks
+     (8KiB, 32KiB, 8KiB) from a 64KiB test heap, frees the middle (32KiB) block,
+     asserts `stats().largest_free == middle_block_size` (read from AllocHeader).
+     The middle block is larger than the trailing free remainder (~16KiB), so it
+     is guaranteed to be the largest free region. p1 and p3 are still live, so
+     no coalescing occurs — the freed region stays exactly middle_block_size.
+   - `fragmentation_empty_heap_returns_zero`: creates a fresh LinkedListAllocator
+     (no free regions), asserts `stats().largest_free == 0`. No panic.
+
+   Test setup avoids `init()` (which calls `boot::space_token()` → reads raw
+   memory address 0x7fe0_0100, unavailable in host-test mode). Instead, manually
+   sets heap_start/heap_end/heap_max/dynamic_start and calls `add_free_region`
+   on a 64KiB static `TestHeap` array (4096-aligned).
+
+== Verification ==
+
+1. `cargo test --manifest-path userspace/libcluu/Cargo.toml --features host-test`
+   Result: 82 passed, 1 failed, 0 ignored (83 total)
+   - allocator::inner::tests::fragmentation_empty_heap_returns_zero ... ok
+   - allocator::inner::tests::fragmentation_largest_free_after_freeing_middle_block ... ok
+   - Pre-existing failure: ipc::tests::shared_ring_roundtrip_wraps (assertion
+     left:68 right:64) — confirmed pre-existing by running on unmodified develop
+     (git stash + test + stash pop). NOT caused by this change.
+
+2. `cargo xtask build`
+   Result: Build complete: target/cluu.img
+   Full kernel + userspace build succeeded.
+
+== Adversarial Classes ==
+
+- flaky tests: Tests are deterministic. No timing, no external state, no I/O.
+  The test heap is a private static array; allocations follow a fixed pattern.
+  The assertion reads a concrete value (AllocHeader.size) rather than relying
+  on any runtime condition.
+
+- misleading_success_output: The main test asserts `assert_eq!(stats.largest_free,
+  middle_block_size)` — an exact equality check against a value read from the
+  AllocHeader. It also asserts `stats.largest_free >= 32 * 1024` as a floor
+  guard. The empty-heap test asserts `assert_eq!(stats.largest_free, 0)`. Both
+  tests would fail loudly if `fragmentation()` returned wrong values.
+
+== Scope Discipline ==
+- No allocator algorithm change. `fragmentation()` is read-only (walks free list
+  without mutation). The `stats()` signature change from `&self` to `&mut self`
+  is required because `fragmentation` uses the same `as_mut()` walk pattern as
+  the existing `coalesce` method (the `&'static mut ListNode` in `ListNode.next`
+  makes a read-only `as_ref()` walk impractical with the borrow checker).
+- No new syscalls, no capability/IPC changes, no cross-session leaks.
+- AGENTS.md §9: no `as any`, no `unwrap` in new code (test uses `match` to
+  advance the walk pointer), `Result` not needed (pure data-structure walk),
+  no_std style maintained.
+
+== Not Done ==
+- Plan checkbox NOT marked (per instructions).
+- No commit (per instructions).

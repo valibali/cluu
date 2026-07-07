@@ -1,0 +1,5 @@
+DoneClaim: Todo 24 — book restructuring
+Files touched: doc/src/lib.rs
+Modules added: 9 (memory_model, ipc, process_model, roadmap, audit, debugging, testing, interpreter_porting, gotchas)
+Total modules: 22 (13 existing + 9 new)
+Verification: cargo doc --manifest-path doc/Cargo.toml --no-deps — succeeded (Finished dev profile, Generated doc/cluu_doc/index.html, no errors)

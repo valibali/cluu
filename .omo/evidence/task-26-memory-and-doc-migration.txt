@@ -1,0 +1,34 @@
+DoneClaim: Todo 26 — docs/ retirement
+
+Pre-deletion state and verification are recorded in
+.omo/evidence/task-25-memory-and-doc-migration.txt (the docs/ retirement was
+executed under todo 25; todo 26 is the cleanup-verification record for the
+same deletion).
+
+Post-deletion verification (re-run 2026-07-07):
+  1. `ls docs/` — PASS (docs/ does not exist; shell reports "No such file or
+     directory")
+  2. grep for `docs/` references in tracked *.rs files (excluding
+     .claude/.tmp/.omo/external/.opencode/.agents worktrees) — PASS
+     (ZERO hits in the live source tree; remaining `docs/` string hits live
+     in .claude/worktrees/ git worktree checkouts, which are out of scope)
+  3. grep for `docs/` references in external/micropython — 24 file hits
+     (out of scope: vendored upstream code, not CLUU sources)
+  4. doc/ (the book) intact — PASS (22 chapters present in doc/book/, plus
+     the M6-updated memory_model.md and the existing roadmap.md / audit.md
+     landed by todo 17)
+
+Work performed:
+  - rm -rf docs/ removed 75 files (count and pre-deletion build verification
+    recorded in task-25 evidence)
+  - All CLUU references to the retired docs/ tree were redirected to
+    doc/book/ equivalents prior to deletion (see task-25 evidence for the
+    grep audit)
+
+Constraints honored:
+  - Did NOT commit
+  - Did NOT delete doc/ (the book) — confirmed intact
+  - Did NOT delete .omo/ — confirmed intact
+  - external/micropython `docs/` hits left untouched (out of scope)
+  - .claude/worktrees/ hits left untouched (stale worktree checkouts, not
+    live source)

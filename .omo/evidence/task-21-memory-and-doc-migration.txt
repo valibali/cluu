@@ -1,0 +1,194 @@
+Task 21: Extract design knowledge from all docs/superpowers/specs/ files into relevant doc/book/*.md chapters.
+
+## DoneClaim
+
+DONE — All 22 spec files in docs/superpowers/specs/ have been read and their
+key design decisions distilled (3-10 lines each, architecture decisions /
+constraints / trade-offs / gotchas — not verbatim copies) into the relevant
+existing doc/book/*.md chapters. No new "specs" chapter created; knowledge
+went INTO existing chapters. Source spec files left untouched. doc/book/
+debugging.md and doc/book/testing.md not touched (owned by todo 19 worker).
+doc/src/lib.rs not touched (owned by todo 24).
+
+## Verification
+
+1. `cargo doc --manifest-path doc/Cargo.toml --no-deps` — SUCCEEDS, 0 warnings.
+   Output: "Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.44s
+   Generated /home/vlb2bp/git/cluu/doc/target/doc/cluu_doc/index.html"
+
+2. Grep for all 22 spec filenames in doc/book/ — 23 matches across 10 files
+   (one spec referenced from 2 chapters = 23, not 22; all 22 spec filenames
+   present). Matches in: terminal.md (6), procmgr.md (5), sessions.md (4),
+   services.md (2), ipc.md (1), storage.md (1), process_model.md (1),
+   roadmap.md (1), vfs.md (1), gotchas.md (1).
+
+## Spec -> Chapter Mapping (22 specs)
+
+1. 2026-04-27-pipes-design.md                 -> doc/book/ipc.md
+   Pipe = IPC endpoint with two rights-restricted tokens (send-only
+   write_token, recv-only read_token). Procmgr is lifecycle authority.
+   Token revocation = EOF + SIGPIPE propagation. No kernel "pipe" concept.
+
+2. 2026-04-28-user-envelope-design.md         -> doc/book/sessions.md
+   User envelope at session-login: mount view + env + PATH per profile
+   class (admin/user/service). /etc/envelopes.toml. Cluufile MOUNT strict
+   (fail loudly on mismatch). Monotone cap discipline: binary ⊆ shell ⊆
+   envelope ⊆ procmgr.
+
+3. 2026-04-29-editor-design.md                -> doc/book/services.md
+   vi-flavored modal editor, ~3000 LOC no_std+alloc. Piece table buffer.
+   Vim-style coarse undo grouping. UTF-8 byte-safe. Literal-only search.
+   Atomic save via .edit~ temp + rename.
+
+4. 2026-05-06-virtio-blk-modern.md            -> doc/book/storage.md
+   Modern virtio 1.0+ transport. Zero-copy (device DMAs into caller's
+   granted pages). Multiple in-flight (queue_depth default 32). IRQ-driven
+   completion. Notify batching = biggest throughput lever. Target >=150
+   MB/s. Pure userspace, reusable virtio-core for Phase 4 virtio-net.
+
+5. 2026-05-07-userspace-polish-design.md      -> doc/book/roadmap.md
+   Phase 4 cross-cutting SOLID discipline. Job control pure userspace via
+   existing ThreadSuspend/ThreadResume (zero kernel commits). 3-stage pipe
+   reverify confirmed n-stage path works; env propagation was the real gap.
+
+6. 2026-05-10-tui-compositor-design.md        -> doc/book/terminal.md
+   Userspace compositor owns VT4. Cell payload = packed u64 (21-bit
+   codepoint + 8-bit fg/bg + 3-bit attrs). SHM window region with
+   generation acquire/release (lockless). Tier-3 2x2-cell rounded corners.
+   Pure userspace (MAP_DEVICE_WC, FrameAllocate/Free, MAP_FRAME_TOKEN).
+
+7. 2026-05-11-cluuterm-design.md              -> doc/book/terminal.md
+   Terminal emulator as compositor window. libcluu::ansi + libcluu::tty_core
+   shared by console + cluuterm + tty. /bin/login replaces inline login UI.
+   VT4 pinned, default active VT. v2 uplift: SIGINT/SIGTSTP/SIGQUIT,
+   TERM env, TIOCGWINSZ+SIGWINCH, ANSI parser extensions, alt-screen,
+   scrollback.
+
+8. 2026-05-12-compositor-menus-design.md      -> doc/book/terminal.md
+   Mac-style menu bar replaces status bar. F1 system menu. APP directive
+   in Cluufile -> build-time apps.toml manifest. WIN_MENU_SET IPC for
+   focused-window menus. Keyboard navigation only (mouse deferred).
+
+9. 2026-05-12-login-flow-design.md            -> doc/book/sessions.md
+   Compositor-native modal /bin/login. authd primordial service (owns
+   /etc/users.toml, consumes tpmd). session_kind byte (0=tty, 1=compositor).
+   getty for VT0-VT3. vtmgr boot-VT fix. Modal-lock compositor-enforced.
+
+10. 2026-05-13-timeserver-pushmode-design.md  -> doc/book/services.md
+    Push-mode tick API. Subscriber grants timeserver SEND-only token.
+    10ms granularity. No cumulative drift (anchored deadlines). No pile-up
+    (coalescing). Subscriber death = kernel revokes token, 3 fails removes.
+    Purely additive.
+
+11. 2026-05-14-session-container-unified-stdio-design.md -> doc/book/sessions.md
+    seL4 cap propagation underneath, POSIX surface on top. All stdio via
+    /dev. POSIX read(0) everywhere (no TTY_READ_LABEL push path). tty
+    refactored to same shape as cluuterm from VFS point of view. Three
+    dispatch legs converge in libcluu _read/_write. FDAC <-> seL4 mapping.
+
+12. 2026-05-14-spawn-unification-design.md    -> doc/book/procmgr.md
+    posix_spawn under CONTAINER_RUN. Every spawn resolves to image name,
+    goes through CONTAINER_RUN. /bin/<name> symlinks at image-install time.
+    PROCMGR_SPAWN_LABEL deleted. Superseded by 2026-05-18 broader spec.
+
+13. 2026-05-18-frame-typing-and-unified-process-model.md -> doc/book/process_model.md
+    Kernel-side frame ownership via FrameMeta (tag + refcount + owner).
+    Frame types: Untyped/PageTable/UserData/Grant/Device/KernelHeap.
+    Refcount semantics (seL4 vstore). Unified teardown via dec_ref loop.
+    Kernel knows 5 things: threads, address spaces, endpoints, tokens,
+    typed frames. No Process struct. 4-phase migration.
+
+14. 2026-05-18-session-lifecycle-design.md    -> doc/book/sessions.md
+    SessionObject = procmgr-owned typed object addressed by IPC token.
+    One persistent compositor (no system/user swap). Login = regular
+    compositor client. SESSION_SET_LEADER (set-once). Leader exit cascades
+    SIGHUP + SESSION_ENDED fanout. Verb set labels 82-88. Refcount
+    discipline. Multi-user concurrent. 2s COMPOSITOR_READY timeout deleted.
+
+15. 2026-05-18-spawn-window-pty-inventory.md  -> doc/book/procmgr.md
+    Inventory of 6 spawn paths, parallel fd-inheritance mechanisms
+    (dup2 vs FdInherit), legacy-TTY vs PTS split, fragmented session-state
+    ownership, "two cluuterms" ps bug, 2s COMPOSITOR_READY timeout
+    violation. Map that motivated the unification.
+
+16. 2026-05-18-terminal-pty-unification-design.md -> doc/book/terminal.md
+    One verb set (PTS_*, labels 100-110) for both tty and cluuterm. Shared
+    line-discipline library. Full POSIX signal set (SIGINT/SIGTSTP/SIGQUIT/
+    SIGWINCH/SIGTTIN/SIGTTOU). POSIX termios surface. Per-session /dev/pts/
+    namespace. TERM env propagation. Resize -> SIGWINCH.
+
+17. 2026-05-18-unified-spawn-protocol-design.md -> doc/book/procmgr.md
+    One verb (PROCMGR_SPAWN_UNIFIED_LABEL=80), one envelope
+    (cluu_proto::SpawnEnvelope), one procmgr::spawn function, one-shot
+    PROCMGR_PRIMORDIAL_SEED=81. FdInherit sole fd-wiring mechanism. Process
+    identity = basename(manifest entrypoint). Restart policy in Cluufile.
+    View derivation capability-style (typed ViewObject table). Session field
+    Option<TokenHandle>. No new timeouts.
+
+18. 2026-05-18-window-protocol-design.md      -> doc/book/terminal.md
+    Formal Wayland-shape protocol: 16 labels (210-226). Client-owned typed
+    frames. Per-frame request frame-callback (broadcast_frame_ready retired).
+    Explicit buffer-release event. Surface-local damage rects. Pre-translated
+    input events. Surface-to-session integration (SESSION_ENDED -> WIN_CLOSED).
+    Per-client async event endpoint.
+
+19. 2026-05-21-procmgr-cap-refactor-design.md -> doc/book/procmgr.md
+    Kill all runtime identity checks (possession=authority). Hierarchical
+    multi-instance (root-procmgr SYSTEM + session-procmgr per-session).
+    PID layout: 8-bit session_id | 23-bit local pid. Generation counter
+    for stale caps. SOLID module split (procmgr-common + root + session).
+    MintGuard RAII rollback. cap-purity lint. Fresh pm_* test suite.
+
+20. 2026-05-21-pts-plumbing-fix.md            -> doc/book/gotchas.md
+    4 bugs: (A) handle_pts_write drops bytes on missing reply_token, (B)
+    dual parallel stdin buffers mismatched, (C) VFS derive_child_fd
+    cap-monotone violation, (D) cross-process deadlock in VFS PTS_READ.
+    Fixes: cook unconditionally, unify into Pts, clamp child_rights &
+    parent_rights, new PTS_READ_DELIVER=112 async label.
+
+21. 2026-05-21-spawn-env-merge.md             -> doc/book/procmgr.md
+    handle_spawn_unified env merge. Single source of truth for default env
+    in /etc/envelopes.toml. Merge: resolved envelope env + caller env
+    (caller wins on conflict). No merge on no-session (boot/service path).
+    No new IPC verb, no wire change.
+
+22. 2026-05-26-vfs-view-cap-delegation.md     -> doc/book/vfs.md
+    View-manager handle token replaces tid-based ACL. ObjectRef::VfsViewManager
+    { scope_sid, scope_mask }. Cap chain monotone-decreasing (root ->
+    session). scope_mask = bitmask of well-known mount roots. Legacy
+    view_manager_tid stays as soft fallback behind feature flag.
+
+23. 2026-07-01-tab-completion-protocol-design.md -> doc/book/terminal.md
+    TAB completion via synchronous RPC cluuterm -> shell pthread.
+    LineDiscOutput::TabRequest variant. Stateless handler (cwd/PATH/VFS
+    read fresh). Sources: builtins -> PATH executables -> filenames.
+    SHELL_COMPLETE_QUERY_LABEL=143. shell:completion:<sid> endpoint.
+    Bounded timeout (bell on expiry).
+
+## Files Modified (10 chapters)
+
+- doc/book/ipc.md            — added Pipes section (1 spec)
+- doc/book/storage.md        — added Modern virtio-blk design section (1 spec)
+- doc/book/services.md       — added Push-mode tick API + Editor design sections (2 specs)
+- doc/book/vfs.md            — added View-manager cap delegation section (1 spec)
+- doc/book/roadmap.md        — augmented Phase 4 with SOLID cross-cutting principle (1 spec)
+- doc/book/sessions.md       — added User envelope, Compositor-native login, Session lifecycle,
+                               Session-as-container + unified /dev stdio sections (4 specs)
+- doc/book/procmgr.md        — augmented unified spawn protocol with Spawn-path inventory,
+                               Unified spawn protocol design, Spawn env merge, Procmgr cap-model
+                               refactor sections (5 specs)
+- doc/book/terminal.md       — added TUI compositor, cluuterm (+v2 uplift), Compositor menus,
+                               Terminal+PTY unification, Window protocol, Tab completion
+                               sections (6 specs)
+- doc/book/gotchas.md        — added pts-plumbing-fix section (1 spec)
+- doc/book/process_model.md  — added Frame typing + unified process model section (1 spec)
+
+## Constraints Honored
+
+- Read-only: docs/superpowers/specs/ — NOT modified.
+- Modified: doc/book/*.md chapters only.
+- doc/src/lib.rs NOT touched (todo 24 owns it).
+- doc/book/debugging.md and doc/book/testing.md NOT touched (todo 19 owns them).
+- No "specs" chapter created — knowledge went INTO existing chapters.
+- 3-10 lines of key decisions per spec (distilled, not copied verbatim).
+- No commits made. No plan checkbox marked.

@@ -1,0 +1,149 @@
+DoneClaim — task-18-memory-and-doc-migration
+============================================
+
+Task: Implement plan todo 18 (Doc migration: ROADMAP.md -> roadmap.md +
+KERNEL_AUDIT.md -> audit.md) from .omo/plans/memory-and-doc-migration.md.
+
+Plan reference: .omo/plans/memory-and-doc-migration.md lines 227-233
+(todo "18. Doc migration: ROADMAP.md -> roadmap.md + KERNEL_AUDIT.md ->
+audit.md"). Acceptance criteria: both new files compile via cargo doc;
+ROADMAP reflects current status (Phase 3 in progress); AUDIT preserves
+finding IDs (C-8, etc.).
+
+Changed files
+-------------
+CREATED:
+  doc/book/roadmap.md   (337 lines, 15632 bytes)
+  doc/book/audit.md     (332 lines, 17539 bytes)
+
+READ-ONLY (source material, not modified):
+  docs/ROADMAP.md       (268 lines)
+  docs/KERNEL_AUDIT.md  (290 lines)
+  doc/src/lib.rs        (81 lines, NOT modified per scope; todo 23 adds
+                         the module includes)
+  doc/Cargo.toml        (13 lines, not modified)
+
+Not deleted (per scope, todo 25 handles docs/ retirement):
+  docs/ROADMAP.md, docs/KERNEL_AUDIT.md
+
+What was done
+-------------
+1. Read docs/ROADMAP.md (268 lines) and docs/KERNEL_AUDIT.md (290 lines)
+   in full. Read doc/book/ directory and existing chapters
+   (architecture.md, philosophy.md) to match book style: terse, technical,
+   headings, tables, fenced code blocks, no em dashes (per Category
+   Context anti-AI-slop rules).
+2. Wrote doc/book/roadmap.md: distilled the personal-compass prose into a
+   reference chapter. Structure: State of the OS; What CLUU is/is not;
+   Kernel freeze; Drift patterns; Phases 0-6 with goal/exit
+   criteria/known unknowns. Phase status reflects current state:
+     Phase 0: DONE
+     Phase 1: DONE 2026-04-27
+     Phase 2: DONE 2026-05-06
+     Phase 3: IN PROGRESS (SpaceDestroy [x] shipped; poll/select,
+              warnings<5, H9/H10, soak test still [ ])
+     Phase 4: DONE 2026-05-08 (inserted between Phase 3 and original
+              Phase 4; network bumped to Phase 5; ship bumped to Phase 6)
+     Phase 5: PENDING (network)
+     Phase 6: PENDING (ship)
+   No stale Phase 1 items marked as todo. All completed items marked
+   done. SpaceDestroy exit criterion marked [x] (shipped, per source
+   line 177).
+3. Wrote doc/book/audit.md: distilled the v5 kernel audit. Structure:
+   Scope and limits; Audit history (v1-v5 table); v5 ratings; What
+   changed in v5; Correctness (9.6/10) with sub-sections for O(1)
+   ReplyMap, Per-CPU TokenCache, Register IPC fast path, Fault reply
+   map, Previously verified, Findings; Speed (9.2/10); Efficiency
+   (9.4/10); Architecture assessment; Recommendations; Final verdict.
+   All 8 finding IDs preserved exactly:
+     C-1: FIXED in v4 (sys_invoke discards ObjectRef)
+     C-2: FIXED in v4 (EndpointRepository bypasses count)
+     C-3: INFO, Unchanged (TOCTOU in zero-reference check)
+     C-4: FIXED in v4 (Shard lock on cache hit)
+     C-5: INFO, Unchanged (Direct delivery reply binding race)
+     C-6: INFO, Unchanged (Queued message delayed binding)
+     C-7: INFO, New in v5 (Per-CPU cache uses UnsafeCell)
+     C-8: INFO, New in v5 (Dead thread cleanup allocates Vec)
+4. Rewrote for book style, did not copy verbatim. Reordered sections for
+   reference use (history table up front, then current ratings, then
+   detail). Preserved all numeric data (cycle counts, memory sizes,
+   scores) exactly.
+
+Verification commands and results
+---------------------------------
+
+1. cargo doc --manifest-path doc/Cargo.toml --no-deps
+   (repo's doc crate; new files NOT yet in lib.rs per scope)
+   Result: PASS
+   Output:
+     Documenting cluu-doc v0.1.0 (/home/vlb2bp/git/cluu/doc)
+     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.63s
+     Generated /home/vlb2bp/git/cluu/doc/target/doc/cluu_doc/index.html
+   Note: This passes because the new files are not yet include_str!'d
+   into lib.rs (todo 23 does that). Meaningful rustdoc verification of
+   the new markdown content is step 2 below.
+
+2. Temp test crate at /tmp/opencode/cluu-doc-test/ that include_str!s
+   both new files, then `cargo doc --manifest-path
+   /tmp/opencode/cluu-doc-test/Cargo.toml --no-deps`.
+   Result: PASS (zero warnings)
+   First run produced one rustdoc warning: `word[5]` in audit.md was
+   parsed as an intra-doc link. Fixed by rephrasing to "word index 5".
+   Re-run after fix: clean.
+   Final output:
+     Documenting cluu-doc-test v0.1.0 (/tmp/opencode/cluu-doc-test)
+     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.34s
+     Generated /tmp/opencode/cluu-doc-test/target/doc/cluu_doc_test/index.html
+
+3. Status verification: Phase 3 marked IN PROGRESS (roadmap.md:194),
+   all completed phases marked DONE with dates, pending phases marked
+   PENDING. grep "IN PROGRESS|DONE 2026|PENDING" returns 6 matches,
+   one per Phase 1-6 (Phase 0 marked DONE in body without date, per
+   source).
+   Result: PASS
+
+4. Finding ID preservation: grep "^| C-[1-8]" in audit.md returns
+   8 matches (C-1 through C-8), all with original severity, location,
+   description, and status.
+   Result: PASS
+
+5. Scope verification: doc/src/lib.rs still has 13 include_str! calls
+   (unchanged from before). docs/ROADMAP.md and docs/KERNEL_AUDIT.md
+   not modified (todo 25 retires them).
+   Result: PASS
+
+6. Anti-AI-slop verification: grep for em dashes, en dashes, and banned
+   phrases (delve, leverage, utilize, robust, streamline, facilitate,
+   "in order to", "moving forward", "circle back", "at the end of the
+   day", "it's important to note") in both new files.
+   Result: PASS (zero matches)
+   Note: First draft had em dashes in phase headings
+   ("Phase 0 — Seal..."); replaced with colons per Category Context.
+
+7. Manual QA: both files have real content (337 and 332 lines
+   respectively, not stubs). Headings well-structured: 47 total
+   headings across both files (15 H2 + 32 H3 in audit; 6 H2 + 7 H3 in
+   roadmap, plus the H1 title in each). No broken markdown (rustdoc
+   parses both files cleanly).
+
+Risks
+-----
+- The new files are NOT yet wired into doc/src/lib.rs (intentional, per
+  scope: todo 23 adds the module includes). Until todo 23 lands, the
+  chapters will not appear in the rendered book TOC. This is expected.
+- The temp test crate at /tmp/opencode/cluu-doc-test/ is outside the
+  repo and will not affect the build. It can be deleted; it exists only
+  to verify the markdown compiles under rustdoc.
+- ROADMAP source mentions README.md still says "Phase 1 (in progress)"
+  which is stale relative to the roadmap's own Phase 1 DONE 2026-04-27
+  marking. The README staleness is out of scope for this task (todo 24
+  handles cross-reference updates); the new roadmap.md correctly
+  reflects the roadmap source's status.
+- Phase 3 is marked IN PROGRESS with 4 of 5 exit criteria still
+  unchecked. If the plan's track A memory work (todos 1-13) lands
+  SpaceDestroy-related items, the exit criteria in roadmap.md may need
+  re-checking. As of this writing, the source docs/ROADMAP.md line 177
+  shows SpaceDestroy as [x] (shipped) and the other four as [ ], which
+  is what roadmap.md reflects.
+
+Not committed. Plan checkbox not marked (per task instructions).

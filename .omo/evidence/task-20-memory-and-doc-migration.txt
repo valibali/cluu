@@ -1,0 +1,264 @@
+TASK 19 — Doc migration: IPC_REGISTRY + REPO_LAYOUT + INTERPRETER_PORTING + DOC-FINDINGS + gotchas
+Plan: .omo/plans/memory-and-doc-migration.md (todo 19, 5 independent sub-tasks)
+Worker: Sisyphus-Junior (glm-5.2-fp8)
+Date: 2026-07-07
+
+================================================================
+DoneClaim
+================================================================
+
+CLAIM: All 5 sub-tasks (19a-19e) complete. All target files compile via
+`cargo doc --manifest-path doc/Cargo.toml --no-deps`. Both new files
+(interpreter_porting.md, gotchas.md) verified to compile as rustdoc via a
+temp test crate in /tmp/opencode/task19-verify that include_str!s them.
+All 8 findings (F-001..F-008) distributed into book chapters; grep confirms
+each F-NNN appears in exactly one chapter.
+
+================================================================
+Sub-task results
+================================================================
+
+----------------------------------------------------------------
+19a — IPC_REGISTRY.md → capability_tokens.md  [PASS]
+----------------------------------------------------------------
+
+Source: docs/IPC_REGISTRY.md (71 lines)
+Target: doc/book/capability_tokens.md (127 → 217 lines)
+
+Added new section "## Userspace service discovery (registry)" between
+"## Token inspection" and "## The crypto". Content covers:
+- Registry responsibilities (stores grant endpoints, not output tokens)
+- Protocol labels table (7 REGISTRY_* IPC labels, distinct from kernel
+  InvokeOp numbers — no duplication with the existing InvokeOp dispatch
+  table)
+- Grant flow ASCII diagram (Requester → Registry → Producer)
+- Startup defaults (TOKEN_REGISTRY, TOKEN_IPC, registry::init)
+- Replacing build-time wiring (lazy subscription)
+- Output ordering (tty buffering before console subscription)
+- Lifecycle (unregister, producer death → re-subscribe)
+
+No duplication: the existing InvokeOp dispatch table covers kernel authority
+ops; the new section covers userspace service discovery IPC labels —
+different namespaces, different layers.
+
+Verification: `cargo doc` succeeds. grep confirms 7 REGISTRY_ labels present.
+
+----------------------------------------------------------------
+19b — REPO_LAYOUT.md → getting_started.md  [PASS]
+----------------------------------------------------------------
+
+Source: docs/REPO_LAYOUT.md (38 lines)
+Target: doc/book/getting_started.md (168 → 210 lines)
+
+Added new section "## Repository layout" at end of file (after
+"## What's actually distinctive"). Content covers:
+- Top-level directory table (kernel/, klibcluu/, userspace/, tests/kernel/,
+  xtask/, tools/, doc/, docs/, scripts/, external/, target/, tmp/)
+- Userspace layout (libcluu, libcluu_syscalls, c-programs, service crates)
+- Naming rules (kebab-case, no ambiguous names, explicit tooling dirs)
+- Cleanliness rules (no tracked binaries/downloads, make clean, CI hygiene)
+
+Adjusted from source: docs/archive/plans/ does not exist in the repo (removed
+from the table). Added doc/ as the rendered book location. Noted docs/ is
+legacy material pending retirement.
+
+Verification: `cargo doc` succeeds. grep confirms "Repository layout",
+"kebab-case", "Cleanliness rules" present.
+
+----------------------------------------------------------------
+19c — INTERPRETER-PORTING.md → interpreter_porting.md (NEW)  [PASS]
+----------------------------------------------------------------
+
+Source: docs/INTERPRETER-PORTING.md (138 lines)
+Target: doc/book/interpreter_porting.md (143 lines, NEW file)
+
+Rewritten for book style. Content:
+- The canonical pattern (MicroPython static heap + gc_init)
+- CLUU memory model recap (stack/heap/mmap/pthread stacks, with cross-ref
+  to ../memory_model/index.html)
+- GC options on CLUU (3 patterns: bring-your-own-heap, conservative scan,
+  write-barrier via fault_endpoint)
+- What CLUU does NOT provide (no mprotect-after-map, no stack growth, no
+  memory-pressure callback, no allocator-GC cooperation)
+- Reference port: MicroPython (source layout, xtask entry, porting surface)
+- Porting checklist (6 items)
+
+Cross-refs updated to book-relative links:
+- docs/INTERNALS.md → ../memory_model/index.html
+- docs/gotchas/cluu-allocator-reentrancy-leak.md → ../gotchas/index.html#allocator-reentrancy-leak
+- doc/book/kernel.md → ../kernel/index.html#fault-forwarding-threadsetfaultendpoint
+- doc/book/capability_tokens.md → ../capability_tokens/index.html#spaceprotect-semantics
+
+Verification: temp test crate in /tmp/opencode/task19-verify include_str!s
+the file and `cargo doc` succeeds.
+
+----------------------------------------------------------------
+19d — DOC-FINDINGS.md → distributed into chapters  [PASS]
+----------------------------------------------------------------
+
+Source: docs/DOC-FINDINGS.md (170 lines, 8 findings F-001..F-008)
+Target: distributed into 4 book chapters (no separate findings chapter)
+
+F-NNN → chapter mapping:
+  F-001 → doc/book/kernel.md        (Stale boot-sequence TODO in main.rs header, resolved)
+  F-002 → doc/book/kernel.md        (Duplicate stale boot-sequence comment in architecture/mod.rs, resolved)
+  F-003 → doc/book/kernel.md        (Broken rustdoc example in mm/mod.rs, resolved)
+  F-004 → doc/book/capability_tokens.md (Syscall count contradiction: docs said ~12, code has 7, open)
+  F-005 → doc/book/kernel.md        (Stale submodule list in architecture/x86_64/mod.rs, resolved)
+  F-006 → doc/book/services.md      (ramfs service is unimplemented stub, open)
+  F-007 → doc/book/services.md      (devmgr boot root block and device tokens identical, open)
+  F-008 → doc/book/memory_model.md  (Memory model was undocumented, resolved)
+
+No findings deferred: none of the 8 findings needed to go into sessions.md,
+procmgr.md, or process_model.md (todo 17's files), so no deferrals.
+
+Each chapter received a "## Documentation findings" section at the end with
+the relevant F-NNN heading and summary. For F-006, also added a ramfs stub
+entry to the service catalog in services.md noting it is not wired.
+
+Verification: `grep -rn 'F-00[1-8]' doc/book/` returns 8 unique finding
+headings across 4 chapters. `cargo doc` succeeds.
+
+----------------------------------------------------------------
+19e — gotchas/cluu-allocator-reentrancy-leak.md → gotchas.md (NEW)  [PASS]
+----------------------------------------------------------------
+
+Source: docs/gotchas/cluu-allocator-reentrancy-leak.md (60 lines)
+Target: doc/book/gotchas.md (132 lines, NEW file)
+
+Created gotchas.md with TWO entries:
+
+1. "## allocator-reentrancy-leak" — rewritten from source in book style.
+   Covers: the code (allocator.rs:530-536 try_lock pattern), why it exists
+   (single Mutex, re-entrant free from GC would deadlock), impact (bounded
+   leak, OOM not deadlock), fix (C2 deferred-free list), see-also with
+   cross-refs to memory_model, interpreter_porting, AGENTS.md §7.
+
+2. "## single-threaded-mutual-blocking-ipc-deadlock" — STUB section created
+   because AGENTS.md §7 references
+   `gotchas/cluu-single-threaded-mutual-blocking-ipc-deadlock` but NO file
+   exists in docs/gotchas/. Content based on AGENTS.md §7 context:
+   - The pattern (VFS ↔ procmgr mutual call deadlock, ASCII diagram)
+   - Why it exists (synchronous rendezvous IPC, single-threaded servers)
+   - The structural fix (async runtime: Runtime, IpcCallFuture, spawn,
+     completion queue, dispatch_async())
+   - History (sync-only constraint lifted 2026-07-06)
+   - See-also cross-refs to vfs.md sync-vs-async-backends, the allocator
+     gotcha, AGENTS.md §7
+
+The task said: "if that gotcha file doesn't exist, create a stub section in
+gotchas.md for it." Done — the stub is a full section (not a one-liner)
+because AGENTS.md §7 provides enough context to describe the deadlock class
+and its fix accurately.
+
+Verification: temp test crate include_str!s the file and `cargo doc`
+succeeds. grep confirms both ## headings present.
+
+================================================================
+Verification summary
+================================================================
+
+1. `cargo doc --manifest-path doc/Cargo.toml --no-deps` — PASS
+   Output: "Finished `dev` profile [unoptimized + debuginfo] target(s)"
+   "Generated /home/vlb2bp/git/cluu/doc/target/doc/cluu_doc/index.html"
+   This verifies all MODIFIED chapters compile: capability_tokens.md,
+   getting_started.md, kernel.md, memory_model.md, services.md.
+
+2. Temp test crate /tmp/opencode/task19-verify — PASS
+   Created Cargo.toml + src/lib.rs that include_str!s interpreter_porting.md
+   and gotchas.md (the two NEW files not yet wired into doc/src/lib.rs —
+   todo 23 does that).
+   `cargo doc --no-deps` output: "Finished" + "Generated"
+   This verifies both new files will compile when todo 23 includes them.
+
+3. Grep F-NNN mapping — PASS
+   `grep -rn 'F-00[1-8]' doc/book/` returns 8 finding headings:
+     doc/book/capability_tokens.md:208:### F-004
+     doc/book/kernel.md:262:### F-001
+     doc/book/kernel.md:271:### F-002
+     doc/book/kernel.md:278:### F-003 (inline ref)
+     doc/book/kernel.md:285:### F-005
+     doc/book/memory_model.md:155:### F-008
+     doc/book/services.md:269:### F-006
+     doc/book/services.md:277:### F-007
+   All 8 findings distributed. No finding lost.
+
+================================================================
+Conflict avoidance
+================================================================
+
+Did NOT touch (todo 17 owns these):
+  - doc/book/sessions.md       (mtime 09:55:28, before my session)
+  - doc/book/procmgr.md        (mtime 09:54:41, before my session)
+  - doc/book/process_model.md  (mtime 09:55:22, before my session)
+
+Did NOT touch (todo 23 owns this):
+  - doc/src/lib.rs             (mtime 2026-07-06 22:45, before my session)
+
+My modified files (mtime 10:02-10:04 on 2026-07-07):
+  - doc/book/capability_tokens.md  (19a + F-004)
+  - doc/book/getting_started.md    (19b)
+  - doc/book/interpreter_porting.md (19c, NEW)
+  - doc/book/gotchas.md            (19e, NEW)
+  - doc/book/kernel.md             (F-001, F-002, F-003, F-005)
+  - doc/book/memory_model.md       (F-008)
+  - doc/book/services.md           (F-006, F-007)
+
+No findings needed deferral to todo 17's files.
+
+================================================================
+Scope compliance
+================================================================
+
+- Did NOT delete any source files (docs/* preserved, todo 25 does retirement).
+- Did NOT change doc/src/lib.rs (todo 23 does that).
+- Did NOT create a separate DOC-FINDINGS chapter (findings distributed).
+- Did NOT commit, push, or mark plan checkbox.
+- Did NOT touch sessions.md, procmgr.md, process_model.md.
+
+================================================================
+Manual QA
+================================================================
+
+19a: capability_tokens.md — "## Userspace service discovery (registry)"
+     section present at line 117. 7 REGISTRY_* labels in a table. No
+     duplication with InvokeOp dispatch table (different namespace).
+
+19b: getting_started.md — "## Repository layout" section present at line 170.
+     Top-level table, userspace layout, naming rules, cleanliness rules.
+
+19c: interpreter_porting.md — 143 lines, real content (MicroPython, gc_init,
+     fault_endpoint, 3 GC patterns, porting checklist). Not a stub.
+
+19d: 8 findings distributed across 4 chapters. Each has ### F-NNN heading.
+
+19e: gotchas.md — 2 entries: allocator-reentrancy-leak (rewritten from
+     source) + single-threaded-mutual-blocking-ipc-deadlock (stub from
+     AGENTS.md §7 context, since the source file does not exist).
+
+================================================================
+Residual risk
+================================================================
+
+- interpreter_porting.md and gotchas.md are not yet wired into doc/src/lib.rs.
+  They compile standalone (verified via temp crate) but won't appear in the
+  rendered book until todo 23 adds the module includes. This is by design
+  (the task explicitly says "Do NOT change doc/src/lib.rs — todo 23 does
+  that").
+
+- The single-threaded-mutual-blocking-ipc-deadlock gotcha is a stub section
+  based on AGENTS.md §7 context, not a pre-existing source file. If the
+  original author had more detail in mind, todo 24 (cross-ref updates) or a
+  future gotcha pass can expand it. The stub is accurate per AGENTS.md §7
+  and the allocator-reentrancy-leak.md cross-reference.
+
+- F-004, F-006, F-007 remain "open" (real code issues). The book documents
+  them as open findings; the code is not changed by this doc-migration task.
+
+================================================================
+Temp artifacts
+================================================================
+
+/tmp/opencode/task19-verify/ — temp test crate for rustdoc verification of
+the two new files. Can be deleted; left in place in case review wants to
+re-run `cargo doc` in it.

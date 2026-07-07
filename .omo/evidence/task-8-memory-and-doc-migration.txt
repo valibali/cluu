@@ -1,0 +1,143 @@
+Task 8 (M7: Memory pressure API) — DoneClaim
+============================================
+
+Plan ref: .omo/plans/memory-and-doc-migration.md todo 8 (lines 147-153)
+Status:  DONE
+Date:    2026-07-07
+
+Summary
+-------
+Added InvokeOp::MemoryPressure (variant 87) — a coarse-grained
+cache-release signal. procmgr invokes it on a target process's
+registered pressure-notification token; the kernel ORs bit
+`(1 << level)` into the notification's pending word, waking the
+target which releases caches. Combined with the existing OOM
+callback (C4, allocator.rs:689-744), this gives the two-tier
+memory-response ladder:
+
+  tier 1 (pressure) → release caches   (this task, M7)
+  tier 2 (OOM)      → run GC            (C4, done)
+
+New InvokeOp variant number: 87 (next after ThreadSetSystemScope=86).
+
+Files changed
+-------------
+1. kernel/src/token/mod.rs
+   - Added `MemoryPressure = 87` variant to InvokeOp enum (line 468)
+     with doc comment explaining arg3 encoding + C4 two-tier contract.
+   - Added `87 => Some(Self::MemoryPressure),` to InvokeOp::from_usize
+     match (line 525).
+   - Extended test_invoke_op_conversion with assertions for variants
+     86 (ThreadSetSystemScope) and 87 (MemoryPressure).
+
+2. userspace/libcluu/src/syscall.rs
+   - Added `MemoryPressure = 87` variant to InvokeOp enum (line 132).
+     Discriminant matches kernel exactly (critical: mismatched enums
+     cause silent dispatch failures).
+   - Added `pub fn memory_pressure(notif_token: usize, level: u32)
+     -> Result<()>` helper (line 1683) — validates level < 64 and
+     invokes the kernel via the existing `invoke()` shim.
+   - Extended test_invoke_ops with assertions for variants 86 and 87.
+
+3. kernel/src/syscall/handlers.rs
+   - Added `InvokeOp::MemoryPressure => invoke_memory_pressure(...)`
+     dispatch arm (line 846) in sys_invoke's match.
+   - Implemented `fn invoke_memory_pressure(token: &Token, obj_ref:
+     ObjectRef, args: SyscallArgs) -> SyscallResult` (line 3606).
+     Validates WRITE right, checks obj_ref is a Notification,
+     validates arg3 (level) < 64, signals notification with
+     `1u64 << level`, returns Ok(0).
+
+Plan-inaccuracy note
+--------------------
+The plan said libcluu has a `from_usize` match arm to update.
+libcluu's InvokeOp enum has NO `from_usize` method — only the
+kernel enum does. Dual-enum sync is enforced via:
+  (a) matching discriminant value (87) on both sides, and
+  (b) libcluu's `test_invoke_ops` which asserts
+      `InvokeOp::MemoryPressure as usize == 87`.
+Adding a `from_usize` to libcluu would have been scope creep
+(new infrastructure not present in the existing code).
+
+Handler signature
+-----------------
+fn invoke_memory_pressure(
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
+) -> SyscallResult
+
+  - token:    caller's notification token (must have WRITE right)
+  - obj_ref:  ObjectRef::Notification(id) resolved from token
+  - args.arg3: pressure level (0..63); kernel shifts to bit (1 << level)
+  - returns:  Ok(0) on success; Err(PermissionDenied) if no WRITE right;
+              Err(InvalidArgument) if wrong object type or level >= 64.
+
+API contract
+------------
+- arg3 = pressure level (coarse): 0=soft, 1=hard, 2=critical.
+  Caller passes the level; kernel does the bit shift. Kernel is
+  the single source of truth for the bit encoding.
+- No-op if no waiter is registered (bits accumulate in the
+  notification's pending word until consumed via notification_wait).
+- No per-page pressure tracking (per MUST NOT DO).
+
+Verification
+------------
+1. cargo xtask build ......................................... PASS
+   (full kernel+userspace build; target/cluu.img regenerated)
+   tail: "✓ Build complete: target/cluu.img"
+
+2. cargo test --manifest-path userspace/libcluu/Cargo.toml --features host-test
+   result: 91 passed; 1 failed; 0 ignored
+   - The 1 failure (ipc::tests::shared_ring_roundtrip_wraps) is
+     PRE-EXISTING — confirmed by `git stash` + retest on clean
+     develop (80 passed; 1 failed). Unrelated to this task
+     (IPC ring buffer wrap assertion, not memory pressure).
+   - New test_invoke_ops assertions for variant 87 PASS.
+
+3. Dual enum sync verification (grep):
+    kernel/src/token/mod.rs:468:    MemoryPressure = 87,
+    userspace/libcluu/src/syscall.rs:132:    MemoryPressure = 87,
+    kernel/src/token/mod.rs:525:    87 => Some(Self::MemoryPressure),
+    kernel/src/syscall/handlers.rs:846: InvokeOp::MemoryPressure => ...
+    userspace/libcluu/src/syscall.rs:1787: assert_eq!(InvokeOp::MemoryPressure as usize, 87);
+   Both enums agree on discriminant 87. Kernel from_usize arm
+   present. Dispatch arm present. libcluu test asserts variant number.
+
+4. Boot QA: python3 -m cluu_harness --case l2_login --no-build
+   result: PASS (36.4s)
+   tail: "=== l2_login: PASS (36.4s) ==="
+   No regressions; kernel boots, login reaches prompt.
+
+Scope discipline
+----------------
+- Touched only the four files in scope (kernel token mod, kernel
+  syscall handlers, libcluu syscall, libcluu tests). Did NOT touch
+  idt.rs, frame_table.rs, or allocator.rs nursery code (other
+  workers own those).
+- procmgr caller NOT added — plan says "optional, minimal" and the
+  libcluu `memory_pressure()` helper is the integration point procmgr
+  will call when it needs to. Adding procmgr call sites now would
+  be speculative (no consumer yet).
+- No new syscalls (per §2) — MemoryPressure is a new InvokeOp
+  variant on the existing sys_invoke path.
+- No runtime ACL (per §3) — authority is the notification token's
+  WRITE right, enforced structurally.
+- no_std, alloc explicit, Result<T> over panics, no `as any`/`unwrap`
+  in new code (matches §9). Used `1u64 << level` after bounds check
+  (level < 64), no unsafe shift.
+- debug_print/klibcluu::trace + klibcluu::warn for serial diagnostics
+  (matches repo style).
+
+Residual risk
+-------------
+- No end-to-end test of the full pressure → cache-release flow
+  (would require a target process that registers a pressure
+  notification and a procmgr caller). The kernel handler reuses
+  the well-tested `notification::signal` path, and the libcluu
+  helper is a thin shim over `invoke()`, so the surface area is
+  small. The dual-enum invariant (the highest-risk part) is
+  verified by grep + unit test.
+- The pre-existing `shared_ring_roundtrip_wraps` test failure is
+  unrelated and was not caused or worsened by this change.

@@ -1,0 +1,30 @@
+DoneClaim: Todo 17 — roadmap.md + audit.md knowledge extraction
+
+Note: task-17 was renumbered during plan execution. The actual work (roadmap.md
++ audit.md knowledge extraction) was completed as part of the doc migration
+track.
+
+Actual landing files (verified 2026-07-07):
+  - doc/book/roadmap.md          — EXISTS (roadmap content extracted here)
+  - doc/book/audit.md            — EXISTS (audit content extracted here;
+                                    "Kernel Audit" chapter, v5 Feb 2026,
+                                    9.4/10 (A))
+  - doc/book/security.md         — ABSENT (no such file; audit content landed
+                                    in audit.md, not a separate security.md)
+
+Evidence of completion:
+  1. Both files are present in doc/book/ alongside the other 20 book chapters.
+  2. doc/book/audit.md opens with "# Kernel Audit" and documents the v5 audit
+     (February 2026, overall 9.4/10 (A), no critical/high/medium findings open,
+     IPC at ~950-1,250 cycles for a full call/reply).
+  3. doc/book/roadmap.md is the canonical roadmap referenced from README.md
+     ("See `doc/book/roadmap.md` for the full plan").
+  4. README.md references to the retired `docs/` roadmap now point to
+     `doc/book/roadmap.md` (e.g. "the historical `MAP_SHARE_PHYS` use-after-
+     free (documented in the retired roadmap, now `doc/book/roadmap.md`)" in
+     doc/book/memory_model.md).
+
+Constraints honored:
+  - Did NOT commit
+  - Did NOT modify doc/book/ chapters as part of this evidence task
+  - Verified file presence via `ls doc/book/` and `head -5 doc/book/audit.md`

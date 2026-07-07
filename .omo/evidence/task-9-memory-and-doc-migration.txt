@@ -1,0 +1,208 @@
+DoneClaim: Task 9 — M16 Frame typing — verify existing + enforce refcount
+======================================================================
+
+## Summary
+
+M16 was VERIFICATION + ENFORCEMENT, not new construction. The frame typing
+system already existed (`FrameTag` enum with 7 variants, `FrameMeta` struct,
+`inc_ref`/`dec_ref` with auto UserData→Grant transition). The `dec_ref`
+function already called `pmm::free_frame_tagged` when refcount hit 0 — the
+enforcement was already wired. The GAP was stale doc comments saying
+"Phase 1: advisory, not enforced" that no longer reflected reality, plus a
+real refcount-leak bug in the grant path and missing silent-underflow
+detection.
+
+## What changed
+
+### 1. kernel/src/mm/frame_table.rs — stale comments flipped to enforced
+
+All "Phase 1: advisory" / "advisory" comments updated to reflect that
+refcount IS enforced (dec_ref auto-frees to PMM at rc=0):
+
+  - Line 9: module doc — `pmm::free_frame_untyped` → `pmm::free_frame_tagged`
+    (corrected function name to match actual call)
+  - Line 70: REFCOUNT_WARN_THRESHOLD doc — "advisory only" → "diagnostic
+    only (no enforcement action)" (this warning IS by design advisory —
+    it's about the high-refcount threshold, not refcount enforcement)
+  - Line 99: FrameMeta.refcount doc — "Phase 1: advisory, not enforced" →
+    "Phase 2: enforced — dec_ref at rc=0 auto-retypes to Untyped and
+    returns the frame to the PMM buddy allocator"
+  - Line 182: warn_mismatch doc — "advisory-mode mismatch" → "enforced-mode
+    mismatch diagnostic"
+  - Line 278: retype_to_grant doc — "Phase 1: always succeeds" → "Enforced:
+    always succeeds for valid tags"
+  - Line 332: retype_to_untyped doc — "Phase 1: warns...advisory" →
+    "Enforced (ENFORCE_INVARIANTS=true): returns StillReferenced when
+    refcount > 0"
+  - Line 408: dec_ref inline — "Phase 1: determine..." → "Determine..."
+  - Line 604: test helper doc — "Phase 1-era inc_ref" → "Legacy inc_ref"
+
+Grep verifies: `grep -n "advisory\|Phase 1" kernel/src/mm/frame_table.rs`
+returns ZERO matches.
+
+### 2. kernel/src/mm/frame_table.rs — silent-underflow detection in dec_ref
+
+Added a guard at the top of dec_ref (after the Device/KernelHeap/BootReserved
+skip): if `entry.refcount == 0`, log a FRAME_TABLE WARN with phys and tag,
+then return Ok(0) as a safe no-op.
+
+Before: a double-dec_ref would silently saturating_sub(0→0) with no signal.
+After: the warning is the detection signal. The call is still safe (no PMM
+double-free — should_free is false because tag is already Untyped).
+
+Also updated the do_dec_ref_p2 test helper to mirror this early-return
+behavior so tests accurately reflect production semantics.
+
+### 3. kernel/src/mm/frame_table.rs — 4 leak-detection tests added
+
+  - M16-T1: test_m16_full_lifecycle_no_leak — create space (retype N=8 pages
+    to UserData), map (no inc_ref per Phase 2.6 convention), destroy (dec_ref
+    all), verify all frames return to Untyped/rc=0/owner=0. Mirrors
+    pmm_get_stats before/after: count_used_frames returns to baseline 0.
+
+  - M16-T2: test_m16_100_space_create_destroy_no_leak — 100 spaces × 4 pages
+    each, create+destroy all, verify used count returns to 0. Catches slow
+    leaks a single-cycle test would miss.
+
+  - M16-T3: test_m16_double_dec_ref_detected_no_corruption — alloc, dec_ref
+    to 0, then double-dec_ref (and triple). Verify rc stays 0, tag stays
+    Untyped, no state corruption. Confirms the underflow guard is safe.
+
+  - M16-T4: test_m16_grant_lifecycle_returns_once — two spaces share a frame
+    (Grant), both destroy, frame returned exactly once (no double-free, no
+    leak). Third dec_ref is the underflow guard (no-op).
+
+All 4 tests verified via standalone extraction (host test runner) — ALL PASS.
+Kernel tests can't link on host (pre-existing: vmm.rs references bootboot
+symbol only defined in kernel linker script), so tests were extracted to a
+standalone runner with identical logic.
+
+### 4. kernel/src/syscall/handlers.rs — grant path refcount-leak fix
+
+**BUG FOUND AND FIXED** at invoke_space_grant (line 1982-1988):
+
+The grant path displaced a prior mapping at target_virt by calling
+`frame_registry::dec_and_maybe_free(old_id)` — the LEGACY path that
+bypasses frame_table refcounting. This had two problems:
+  1. For anonymous (non-registry) pages, NO dec_ref was called → frame_table
+     refcount leaked (the PTE was overwritten, so teardown would never find
+     it to dec_ref).
+  2. `dec_and_maybe_free` calls `pmm::free_order_tagged` directly, which
+     would double-free when teardown later calls dec_ref on the same phys.
+
+**FIX**: Replaced `dec_and_maybe_free(old_id)` with `dec_ref(old_phys)` +
+`dec_map_count(old_id)`, matching the CORRECT pattern already used by
+`invoke_space_unmap` (line 1612-1618). Now:
+  - `dec_ref` is the single PMM free path (handles auto-untype + free at rc=0)
+  - `dec_map_count` keeps the frame_registry in sync WITHOUT freeing
+  - Anonymous pages get their dec_ref too (no more leak)
+
+The comment at the call site was updated to explain why dec_and_maybe_free
+is wrong (would double-free) and dec_ref+dec_map_count is correct.
+
+## Audit: inc_ref/dec_ref call sites in handlers.rs
+
+All 9 call sites audited — correctly paired:
+
+  - 1292: retag_pt_owner — fixes PML4 owner from KERNEL_OWNER sentinel to
+    real space_id after space_repository::insert. Paired with retype_to_pt
+    in alloc_pml4 (vmm.rs:1530). VERIFIED CORRECT.
+  - 1404-1405: dec_ref in rollback_mapped_4kb — error cleanup for failed
+    map_range. Paired with the retype_to_user/inc_ref in the map path.
+    VERIFIED CORRECT.
+  - 1483-1485: inc_ref for MAP_FRAME_TOKEN in invoke_space_map — second
+    mapping of an existing UserData frame. Paired with dec_ref in unmap
+    (1612) and teardown. VERIFIED CORRECT.
+  - 1546: dec_ref on error cleanup (Some(Err)) — undoes 1485's inc_ref.
+    VERIFIED CORRECT.
+  - 1556: dec_ref on error cleanup (None) — undoes 1485's inc_ref.
+    VERIFIED CORRECT.
+  - 1612: dec_ref in invoke_space_unmap — paired with original map's
+    retype_to_user (rc=1) or inc_ref (rc>1). VERIFIED CORRECT.
+  - 2013: inc_ref in invoke_space_grant — new grant mapping. Paired with
+    dec_ref in target's teardown. VERIFIED CORRECT.
+  - 2244: inc_ref for MAP_FRAME_TOKEN in invoke_space_map_range — same
+    pattern as 1485, batch version. VERIFIED CORRECT.
+  - 2260, 2266: dec_ref on error cleanup — undoes 2244's inc_ref.
+    VERIFIED CORRECT.
+
+  - 1982-1988 (grant prior-mapping displacement): WAS BUGGY (used
+    dec_and_maybe_free, leaking frame_table refcount). FIXED to use
+    dec_ref + dec_map_count.
+
+## Verification
+
+1. `cargo xtask build` — PASS
+   Full kernel + userspace build succeeded. Output: "Build complete:
+   target/cluu.img". Kernel lib compiled with only pre-existing warnings
+   (unused imports pmm, unused constants MOUSE_ACK/MOUSE_BAT) — no errors,
+   no new warnings from my changes.
+
+2. Grep verifies no "advisory" or "Phase 1" comments remain in
+   frame_table.rs — PASS
+   `grep -n "advisory\|Phase 1" kernel/src/mm/frame_table.rs` → 0 matches.
+
+3. M16 leak-detection tests — PASS (4/4)
+   Standalone extraction runner (host test, mirrors kernel test logic):
+     ✓ test_m16_full_lifecycle_no_leak
+     ✓ test_m16_100_space_create_destroy_no_leak
+     ✓ test_m16_double_dec_ref_detected_no_corruption
+     ✓ test_m16_grant_lifecycle_returns_once
+
+4. `cargo test --manifest-path userspace/libcluu/Cargo.toml --features host-test`
+   — 85 passed, 1 failed (pre-existing)
+   The 1 failure (ipc::tests::shared_ring_roundtrip_wraps) is pre-existing,
+   confirmed by task-3 evidence: "Pre-existing failure: ipc::tests::
+   shared_ring_roundtrip_wraps (assertion left:68 right:64) — confirmed
+   pre-existing by running on unmodified develop." NOT caused by this change.
+
+5. dec_ref enforcement verified — `pmm::free_frame_tagged(phys, "dec_ref_auto")`
+   is called when refcount drops to 0 (frame_table.rs:453). This IS the
+   enforcement: frames are actually returned to the PMM buddy allocator,
+   not just logged.
+
+## Adversarial Classes
+
+- misleading_success_output: The enforcement is REAL — dec_ref calls
+  pmm::free_frame_tagged which calls PMM.lock().free_order_tagged(), the
+  actual buddy allocator free path. The M16-T1/T2 tests verify the
+  frame_table state (tag=Untyped, rc=0) that WOULD trigger the PMM free
+  in production. In host tests we can't call PMM (no physmap), so we
+  verify the frame_table predicate (should_free = true when rc=0 and
+  tag is UserData/Grant/PageTable) rather than the PMM call itself.
+  The production code path is: dec_ref → should_free=true → drop lock →
+  pmm::free_frame_tagged → PMM.lock().free_order_tagged. This is the
+  SAME buddy allocator the system boots with.
+
+- dirty worktree: Pre-existing modified files (kernel/src/elf.rs,
+  userspace/init/src/wiring.rs, userspace/libcluu/src/allocator.rs,
+  userspace/libcluu/src/lib.rs, userspace/libcluu/src/posix/pthread.rs,
+  userspace/libcluu/src/process.rs, userspace/libcluu/src/syscall.rs,
+  userspace/root-procmgr/src/main.rs, userspace/vfs/src/procfs.rs) were
+  NOT touched by this task. Only kernel/src/mm/frame_table.rs and
+  kernel/src/syscall/handlers.rs were modified. The handlers.rs diff
+  also contains a pre-existing MAP_GUARD block (from task-1, already
+  committed in the dirty worktree) — my only change is the grant-path
+  fix at lines 1982-1988.
+
+## Scope Discipline
+
+- No second frame-typing system created. The existing frame_table.rs IS
+  the system — I only updated doc comments, added underflow detection,
+  and added tests.
+- No buddy allocator replacement. pmm::free_frame_tagged calls into the
+  existing buddy allocator unchanged.
+- No new syscalls. All changes are within existing invoke op handlers
+  and the frame_table module.
+- Bug fix in handlers.rs is minimal: 3 lines changed (dec_and_maybe_free
+  → dec_ref + dec_map_count), matching the existing unmap pattern.
+- AGENTS.md §9: no `as any`, no `unwrap` in new code (tests use .unwrap()
+  on Results that are guaranteed Ok by test setup — matches existing test
+  convention), Result not panic, no_std style maintained.
+
+== Not Done ==
+- Plan checkbox NOT marked (per instructions).
+- No commit (per instructions).
+- No boot regression test via harness (kernel tests can't link on host due
+  to pre-existing bootboot symbol issue; `cargo xtask build` success is the
+  compile-verification gate, matching the pattern used by tasks 1-4).

@@ -1,0 +1,203 @@
+DoneClaim — task-19-memory-and-doc-migration (todo 19: debug-guide + HARNESS)
+=============================================================================
+
+Task: Implement plan todo 19 (Doc migration: debug-guide.md -> debugging.md
++ HARNESS.md -> testing.md) from .omo/plans/memory-and-doc-migration.md.
+
+Plan reference: .omo/plans/memory-and-doc-migration.md lines 235-241
+(todo "19. Doc migration: debug-guide.md -> debugging.md + HARNESS.md ->
+testing.md"). Acceptance criteria: both new files compile via cargo doc;
+debug commands verified current (QEMU_GDB, HARNESS_GDB_MODE, cargo xtask
+run --debug, python -m cluu_harness). User-specified scope addition:
+document the PYTHON harness (python -m cluu_harness) as the primary testing
+tool; the bash harness (scripts/harness_run.sh) is retired.
+
+Changed files
+-------------
+CREATED:
+  doc/book/debugging.md   (269 lines, 11971 bytes)
+  doc/book/testing.md     (227 lines, 10369 bytes)
+
+READ-ONLY (source material, not modified):
+  docs/debug-guide.md     (295 lines)
+  docs/HARNESS.md         (38 lines)
+  scripts/harness_run.sh  (verified retired; not invoked)
+  python/cluu_harness/    (read cli.py, __main__.py, config.py, catalog.py,
+                           markers.py, case_defaults.py, sendkey.py,
+                           gdb.py to confirm commands and env vars)
+  xtask/src/main.rs       (verified --debug flag at line 129-131, run_qemu
+                           debug branch at lines 2046-2068)
+  Makefile                (verified run-debug and run-debug-build targets
+                           at lines 27-28 and 39-40)
+  doc/src/lib.rs          (81 lines, NOT modified per scope; todo 23/24
+                          handles the include_str! additions)
+  doc/Cargo.toml          (not modified)
+
+Not deleted (per scope, todo 25 handles docs/ retirement):
+  docs/debug-guide.md, docs/HARNESS.md
+
+Pre-existing evidence preserved:
+  The existing .omo/evidence/task-19-memory-and-doc-migration.txt held the
+  DoneClaim for plan todo 20 (the 5 sub-tasks: IPC_REGISTRY, REPO_LAYOUT,
+  INTERPRETER_PORTING, DOC-FINDINGS, gotchas). The plan's evidence-filename
+  column has an off-by-one: todo 19 lists task-18, todo 20 lists task-19,
+  but task-18 is already taken by todo 18. Per the user's explicit task
+  instruction to write to task-19, the previous content was copied to
+  .omo/evidence/task-20-memory-and-doc-migration.txt before this overwrite
+  so todo 20's evidence is not lost.
+
+What was done
+-------------
+1. Read docs/debug-guide.md (295 lines) and docs/HARNESS.md (38 lines) in
+   full. Read the existing book style by examining doc/book/boot.md (143
+   lines) for terse-technical tone, heading structure, table format, and
+   fenced code blocks. Read doc/src/lib.rs (81 lines) to confirm the
+   include_str! pattern and that I must NOT add modules (todo 23/24 does
+   that).
+
+2. Read the current Python harness implementation in full to ensure
+   testing.md documents the live tool, not the retired bash harness:
+   - python/cluu_harness/cli.py (128 lines): all 8 CLI flags.
+   - python/cluu_harness/__main__.py (10 lines): entry point.
+   - python/cluu_harness/config.py (277 lines): all env vars, GdbConfig.
+   - python/cluu_harness/catalog.py (161 lines): 13 registered cases.
+   - python/cluu_harness/markers.py (325 lines): MARKER_MODES table,
+     MarkerModeSpec fields, post-check registry.
+   - python/cluu_harness/case_defaults.py (166 lines): _CREDS_SENDKEY_ROOT,
+     per-mode defaults, sendkey_sequence_nowait convention.
+   - python/cluu_harness/sendkey.py (114 lines): HU QWERTZ layout map.
+   - python/cluu_harness/gdb.py (131 lines): manual/auto-continue/script
+     modes.
+   - python/README.md: quick start, pytest integration, knowledge vault.
+
+3. Verified the debug commands are current against source:
+   - xtask/src/main.rs line 129-131: `debug: bool` arg with `#[arg(long)]`,
+     comment "Enable debug mode (pause for GDB, telnet serial on 4321)".
+   - xtask/src/main.rs line 2046-2068: debug branch adds `-s`, `-S`,
+     `-serial stdio`, `-serial telnet:localhost:4321,server,nowait`.
+   - Makefile line 27-28: `run-debug: cargo xtask run --debug`.
+   - Makefile line 39-40: `run-debug-build: cargo xtask run --build --debug`.
+   - python/cluu_harness/config.py: all 10 HARNESS_GDB_* and QEMU_GDB*
+     env vars I documented are present (grep count = 13 matches across
+     the 10 names, confirming field defaults reference each).
+   - python/cluu_harness/gdb.py: three modes (manual, auto-continue,
+     script) match my table exactly.
+
+4. Verified the testing commands are current:
+   - `python3 -m cluu_harness --help` output matches my CLI flags table
+     exactly: --list, --list-modes, --case, --no-build, --marker-mode,
+     --serial-log, --verbose/-v, --stop-on-fail. (Note: the repo's own
+     docs use `python -m cluu_harness`; this environment only has
+     `python3` on PATH, but the invocation is identical. The harness
+     README and HARNESS.md both use `python -m cluu_harness`, so I kept
+     that form for consistency with the repo.)
+   - `python3 -m cluu_harness --list` returns 13 registered cases
+     (b_spawn_warm, c_futex, l2_cd, l2_cluuterm_exit, l2_cluuterm_login,
+     l2_dev_nodes, l2_ext2unlink, l2_ext2write, l2_login, l2_ls,
+     l2_mkdir, l2_vt4_default, m1_recv, m5_fairness).
+   - `python3 -m cluu_harness --list-modes` returns the MARKER_MODE names
+     I reference.
+
+5. Wrote doc/book/debugging.md (269 lines). Structure: QEMU debug mode;
+   connecting GDB (kernel ELF path, higher-half entry, common commands);
+   reading the serial log (COM2, telnet mirror, /tmp/cluu-serial-com2.log,
+   streaming-not-snapshot caveat); harness GDB modes (manual/auto-continue/
+   script table + supporting env var table + two worked examples); debug
+   scenarios (kernel init, page fault, userspace service, boot hang);
+   troubleshooting (GDB connection, telnet, no serial, QEMU window); VSCode
+   launch.json; command reference table. Rewrote for book style: did not
+   copy debug-guide.md verbatim. Dropped stale content: the debug-guide
+   referenced `make run-debug-build` which I verified still exists, but
+   condensed the redundant "Quick Start / Debug Workflow / Command
+   Reference" triple listing into one command reference table.
+
+6. Wrote doc/book/testing.md (227 lines). Structure: setup; running cases
+   (CLI flags table); pytest integration; unit tests outside the harness
+   (rustc --test pattern, libcluu host-test); MARKER_MODE system
+   (MarkerModeSpec fields, recurring markers); adding a case (decorator +
+   programmatic); env-var compatibility (bash-to-Python translation table
+   + common env var table); sendkey sequences (CREDS_SENDKEY_ROOT, three
+   constraints: 12s sleep, nowait for login, HU QWERTZ); login credentials
+   (root/root in harness vs admin/admin in production); serial-is-a-stream
+   caveat; FB dump; status. Rewrote for book style: did not copy
+   HARNESS.md verbatim. Expanded significantly from the 38-line HARNESS.md
+   by distilling the python/README.md and the harness source itself, since
+   the user specified the Python harness is the primary tool and the
+   testing chapter must cover marker mode, keystroke sequences, and test
+   commands in book-level depth.
+
+Verification commands and results
+---------------------------------
+
+1. cargo doc --manifest-path doc/Cargo.toml --no-deps
+   (repo's doc crate; new files NOT yet in lib.rs per scope)
+   Result: PASS
+   Output:
+     Documenting cluu-doc v0.1.0 (/home/vlb2bp/git/cluu/doc)
+     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s
+     Generated /home/vlb2bp/git/cluu/doc/target/doc/cluu_doc/index.html
+   Note: This passes because the new files are not yet include_str!'d
+   into lib.rs (todo 23/24 does that). Meaningful rustdoc verification of
+   the new markdown content is step 2 below.
+
+2. Temp test crate at /tmp/opencode/cluu-doc-test/ that include_str!s
+   both new files, then `cargo doc --manifest-path
+   /tmp/opencode/cluu-doc-test/Cargo.toml --no-deps`.
+   Result: PASS (zero warnings, zero errors)
+   Output:
+     Documenting cluu-doc-test v0.1.0 (/tmp/opencode/cluu-doc-test)
+     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Generated /tmp/opencode/cluu-doc-test/target/doc/cluu_doc_test/index.html
+   Re-ran after `touch src/lib.rs` to force a rebuild and surface any
+   cached warnings: still clean.
+
+3. Debug commands verified current against source:
+   - cargo xtask run --debug: xtask/src/main.rs:129-131 (arg decl),
+     :2046-2068 (QEMU flag injection). PASS.
+   - make run-debug / make run-debug-build: Makefile:27-28, :39-40. PASS.
+   - QEMU_GDB, QEMU_GDB_SERVER, HARNESS_GDB_MODE, HARNESS_GDB_BIN,
+     HARNESS_GDB_TARGET, HARNESS_GDB_TIMEOUT, HARNESS_GDB_MANUAL_TIMEOUT,
+     HARNESS_GDB_SCRIPT, HARNESS_GDB_SYMBOL, HARNESS_GDB_BATCH: all 10
+     present in python/cluu_harness/config.py:92-121. PASS.
+   - HARNESS_GDB_MODE values {manual, auto-continue, script}: validated
+     in GdbConfig.__post_init__ (config.py:107) and dispatched in
+     gdb.py:61-68. PASS.
+   - python -m cluu_harness CLI: `python3 -m cluu_harness --help` output
+     matches my flags table exactly. PASS.
+
+4. Anti-AI-slop verification: grep for em dashes, en dashes, and banned
+   phrases (delve, leverage, utilize, robust, streamline, facilitate,
+   "in order to", "moving forward", "circle back", "at the end of the
+   day", "it's important to note", "I'd be happy to", "certainly",
+   "please don't hesitate") in both new files.
+   Result: PASS (zero matches, grep exit=1)
+
+5. Manual QA: both files have real content (269 and 227 lines
+   respectively, not stubs). Headings well-structured: 35 total headings
+   across both files (19 in debugging, 16 in testing). No broken markdown
+   (rustdoc parses both files cleanly via the temp test crate).
+
+Risks
+-----
+- The new files are NOT yet wired into doc/src/lib.rs (intentional, per
+  scope: todo 23/24 adds the module includes). Until then, the chapters
+  will not appear in the rendered book TOC. This is expected.
+- The temp test crate at /tmp/opencode/cluu-doc-test/ is outside the
+  repo and will not affect the build. It can be deleted; it exists only
+  to verify the markdown compiles under rustdoc.
+- The repo's docs use `python -m cluu_harness` as the canonical
+  invocation. This environment has only `python3` on PATH (no `python`
+  symlink), so I verified the CLI with `python3 -m cluu_harness --help`.
+  The documented invocation `python -m cluu_harness` matches the repo's
+  own HARNESS.md and python/README.md and works on any system with the
+  `python` symlink; on systems without it, users substitute `python3`.
+  This is a packaging detail, not a doc accuracy issue.
+- The existing .omo/evidence/task-19-memory-and-doc-migration.txt held
+  the DoneClaim for plan todo 20 (5 sub-tasks). Per the user's explicit
+  instruction to write to task-19, I copied the prior content to
+  .omo/evidence/task-20-memory-and-doc-migration.txt before overwriting.
+  Both DoneClaims now coexist under non-colliding names. If the
+  orchestrator prefers a different naming scheme, the files can be
+  renamed; no content was lost.
+
+Not committed. Plan checkbox not marked (per task instructions).

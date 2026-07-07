@@ -1,0 +1,150 @@
+TASK 15 (plan todo 16): Doc migration INTERNALS.md -> kernel.md + memory_model.md + ipc.md
+Plan: .omo/plans/memory-and-doc-migration.md (todo 16, evidence file named task-15)
+Date: 2026-07-07
+
+================================================================================
+DONECLAIM
+================================================================================
+
+WHAT CHANGED:
+  1. CREATED doc/book/memory_model.md (151 lines) — new chapter: address space
+     layout, heap (Rust path + C-runtime path), stack (main + pthread), mmap
+     region, demand paging and fault handling, guard pages, NULL guard,
+     allocator re-entrancy caveat. Rewritten terse/technical, not verbatim.
+  2. CREATED doc/book/ipc.md (109 lines) — new chapter: synchronous
+     rendezvous, operations (send/recv/call/reply/replyrecv), buffer transfer
+     (copy/grant/map), endpoint registry and dataflow, tokens over IPC
+     (cross-ref to capability_tokens). Rewritten terse/technical, not verbatim.
+  3. MODIFIED doc/book/kernel.md (215 -> 255 lines, +40 lines):
+     - Expanded ### Scheduler subsection: added 256 priority levels, FIFO
+       fairness within a level, cooperative + preemptive modes, policy/mechanism
+       separation (was missing from book version).
+     - Added ### Interrupts & exceptions subsection: full IDT, PF->VMM
+       integration, timer IRQ -> preemption, IRQ-safe logging cross-ref.
+     - Added ### Logging subsection: zero-cost release, IRQ-safe, allocation-
+       free, manual formatting, UART-backed, diagnostic-not-runtime.
+     - Added ## Subsystem status section: compact status note from Kernel
+       Status Overview (stale "145/145 tests" count omitted; defers to
+       audit/roadmap chapters).
+  4. doc/src/lib.rs NOT modified (todo 23 adds the new module includes).
+
+WHAT DID NOT CHANGE:
+  - docs/INTERNALS.md untouched (todo 25 deletes it).
+  - doc/src/lib.rs untouched (todo 23 wires the new modules).
+  - No other files touched.
+
+VERIFICATION:
+  1. cargo doc --manifest-path doc/Cargo.toml — SUCCEEDS, zero warnings.
+     (kernel.md is already in lib.rs; memory_model.md and ipc.md are not yet
+      included — todo 23 adds them.)
+  2. Throwaway rustdoc compile of all three files via temp crate in /tmp with
+     #![deny(rustdoc::broken_intra_doc_links)] — SUCCEEDS, zero warnings, after
+     fixing one ```rust block (comment-only) -> ```text in memory_model.md.
+     This proves the new files WILL compile when todo 23 includes them.
+  3. Code-fence balance: memory_model.md=4 (2 blocks), ipc.md=4 (2 blocks),
+     kernel.md=2 (1 block). All even.
+  4. Em-dash check (anti-slop rule): memory_model.md=0, ipc.md=0, my kernel.md
+     additions=0. (kernel.md has 46 pre-existing em dashes in untouched
+     content; not refactored per scope discipline.)
+  5. New files have real content, not stubs: memory_model.md=151 lines /
+     13 headings, ipc.md=109 lines / 6 headings.
+  6. lib.rs confirmed unchanged: `git diff --stat doc/src/lib.rs` empty.
+
+NO-DUPLICATION CHECK:
+  - memory_model.md owns the memory model; kernel.md owns kernel subsystem
+    mechanics; ipc.md owns the userspace IPC model + endpoint registry.
+  - Syscall surface enum lives in kernel.md (existing); ipc.md references it,
+    does not re-list it.
+  - Token authority model lives in capability_tokens.md (existing); ipc.md
+    cross-references it, does not re-derive it.
+  - KNOWN OVERLAP (noted, acceptable): pthread-stack sizing appears in
+    kernel.md ### Sync subsection (pre-existing, contextual to futex) AND
+    memory_model.md ### Pthread stacks (canonical memory-layout treatment).
+    Different framing, different chapter role. Not duplicated prose.
+
+================================================================================
+HEADING -> FILE MAPPING (every ## and ### in docs/INTERNALS.md)
+================================================================================
+
+LEGEND:
+  [TARGET]  = goes into one of the 3 files this task owns
+  [EXISTING] = already covered by an existing book chapter (no action needed)
+  [DEFERRED] = covered by a later todo's new chapter
+  [NA]       = no knowledge content (artwork placeholder / stale block)
+
+#  INTERNALS.md heading                                  | Mapping
+--+-------------------------------------------------------+--------------------------------------
+1  ## Getting Started (Quick Run)                        | [EXISTING] getting_started.md
+2  ## Motivation                                         | [EXISTING] philosophy.md
+3  ## Design Pillars                                     | [EXISTING] philosophy.md
+4  ## High-Level Architecture                            | [EXISTING] architecture.md (todo 14/15)
+5  ## Kernel Status Overview                             | [TARGET] kernel.md ## Subsystem status
+6  ## Memory Model                                       | [TARGET] memory_model.md (chapter title)
+7  ### Address Spaces                                    | [TARGET] memory_model.md ## Address space layout
+8  ### User stack                                        | [TARGET] memory_model.md ## Stack > ### Main process stack
+9  ### Pthread stacks                                    | [TARGET] memory_model.md ## Stack > ### Pthread stacks
+10 ### Kernel demand-paging                              | [TARGET] memory_model.md ## Demand paging and fault handling
+11 ### Heap — Rust path (default)                        | [TARGET] memory_model.md ## Heap > ### Rust path (default)
+12 ### Heap — C-runtime path (feature-gated)             | [TARGET] memory_model.md ## Heap > ### C-runtime path (feature-gated)
+13 ### mmap region                                       | [TARGET] memory_model.md ## mmap region
+14 ### Allocator re-entrancy caveat                      | [TARGET] memory_model.md ## Allocator re-entrancy caveat
+15 ### NULL guard                                        | [TARGET] memory_model.md ## NULL guard + ## Guard pages
+16 ## Scheduler                                          | [TARGET] kernel.md ### Scheduler (expanded)
+17 ## IPC Model                                          | [TARGET] ipc.md ## Synchronous rendezvous + ## Operations + ## Buffer transfer
+18 ## Endpoint Registry and Dataflow                     | [TARGET] ipc.md ## Endpoint registry and dataflow + ## Tokens over IPC
+19 ## Token-Based Authority System                       | [EXISTING] capability_tokens.md (cross-ref from ipc.md)
+20 ### Core Properties                                   | [EXISTING] capability_tokens.md
+21 ## Syscall Surface (Minimal)                          | [EXISTING] kernel.md ### Syscall (already present)
+22 ## Interrupts & Exceptions                            | [TARGET] kernel.md ### Interrupts & exceptions (new)
+23 ## Logging                                            | [TARGET] kernel.md ### Logging (new)
+24 ## Userspace                                          | [EXISTING] services.md
+25 ### Core Services (Current)                           | [EXISTING] services.md
+26 ## Screenshots                                        | [NA] artwork placeholder, no knowledge content
+27 ## Bootloader                                         | [EXISTING] boot.md
+28 ## Build System                                       | [EXISTING] getting_started.md (todo 19b)
+29 ### High-Level Principles                             | [EXISTING] getting_started.md
+30 ### Makefile Interface (Convenience)                  | [EXISTING] getting_started.md
+31 ### Preferred Interface: cargo xtask                  | [EXISTING] getting_started.md
+32 ### Debug Workflow                                    | [DEFERRED] debugging.md (todo 18)
+33 ### xtask Responsibilities                            | [EXISTING] getting_started.md
+34 ## Current Milestone                                  | [DEFERRED] roadmap.md (todo 17)
+35 ## Non-Goals                                          | [EXISTING] philosophy.md
+36 ## Philosophy                                         | [EXISTING] philosophy.md
+37 ## Status                                             | [DEFERRED] roadmap.md (todo 17) / stale block
+
+SUMMARY:
+  [TARGET]   headings: 11  (rows 5-8, 10-18, 22-23) -> kernel.md(4) + memory_model.md(10 incl. title) + ipc.md(2)
+  [EXISTING] headings: 19  -> already in other book chapters, no action
+  [DEFERRED] headings: 3   -> later todos (17 roadmap, 18 debugging)
+  [NA]       headings: 1   -> screenshots (no content)
+  UNACCOUNTED: 0
+
+Every ## and ### heading in docs/INTERNALS.md has a home. No heading is
+unaccounted. The 11 [TARGET] headings are the kernel/memory/ipc content this
+task owns; they are split across the three files with no duplication.
+
+================================================================================
+ADVERSARIAL CLASS CHECKS
+================================================================================
+stale_state: Read CURRENT docs/INTERNALS.md (654 lines, read in full at task
+  start). All headings extracted via grep at task time. No stale assumptions
+  about content.
+
+misleading_success_output: New files verified to contain real prose, not
+  stubs. memory_model.md = 151 lines / 13 headings covering all 9 Memory Model
+  subsections + guard pages. ipc.md = 109 lines / 6 headings covering IPC Model
+  + Endpoint Registry. kernel.md = +40 real lines (scheduler expansion,
+  interrupts, logging, status). All compile under rustdoc with
+  broken_intra_doc_links denied and zero warnings.
+
+================================================================================
+RESIDUAL RISK
+================================================================================
+- New files reference chapters not yet created (interpreter_porting, gotchas,
+  audit, roadmap) via plain markdown URL links (../X/index.html). These are
+  NOT rustdoc intra-doc links, so they do not break the build; they render as
+  hyperlinks that resolve once todos 17/18/19c/19e create those chapters.
+- Pthread-stack sizing appears in both kernel.md (Sync subsection, pre-existing)
+  and memory_model.md (Stack section). Different framing; noted, not a true
+  duplication. A future cleanup could trim the kernel.md mention, but that is
+  outside this task's scope.
