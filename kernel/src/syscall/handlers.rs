@@ -1529,6 +1529,7 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
         }
     }
 
+    let _ = crate::mm::frame_table::retype_to_user(frame_phys, space_id);
     let result = space_repository::with_space_mut(space_id, |space| unsafe {
         elf::map_user_page(
             virt_addr,
@@ -2757,6 +2758,7 @@ fn map_remaining_4kb(
             write_bytes(frame_virt, 0, PAGE_SIZE);
         }
 
+        let _ = crate::mm::frame_table::retype_to_user(frame_phys, space_id);
         let result = space_repository::with_space_mut(space_id, |space| unsafe {
             elf::map_user_page(
                 virt_addr,
