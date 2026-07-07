@@ -431,3 +431,64 @@ cap-revocation unblocks waiters. Commit per task; `cargo xtask build` clean
 between tasks; no multi-day WIP on `develop`. The coverage gate
 (`cargo xtask coverage-check`) must stay green. Deleting legacy code is the
 highest-ROI cleanup during the freeze.
+
+## frame-aliasing-double-dec-ref (2026-07-07-memory-model-fixes)
+
+**Symptom:** 1094 `FRAME_TABLE WARN: dec_ref on refcount=0` warnings during boot, micropython spawn crash at CR2=0x20001 RIP=0x4348c1.
+
+**Code sites:**
+- `kernel/src/syscall/handlers.rs`: `invoke_space_grant` (line ~2100)
+- `kernel/src/elf.rs`: `map_user_page`, `map_shared_page` Phase 2.6 overwrite path
+- `kernel/src/syscall/handlers.rs`: `map_range_4kb`, `invoke_space_map`, `map_remaining_4kb`
+
+**Three root causes:**
+
+1. `invoke_space_grant` explicitly `dec_ref`'d the prior mapping at the target address, then `map_user_page`'s Phase 2.6 overwrite path `dec_ref`'d the SAME prior phys again (PTE still present). Double-dec. Fix: remove the explicit dec_ref; let `map_user_page` handle it.
+
+2. `map_user_page` and `map_shared_page` unconditionally `dec_ref`'d `old_phys` on PTE overwrite, even when `old_phys == new phys` (same-frame re-grant via `space_grant` ring buffer reuse). `dec_ref` auto-freed the frame to PMM, then `inc_ref` raced with a re-allocation. Fix: skip `dec_ref` when `old_phys == new phys`.
+
+3. `map_range_4kb`, `invoke_space_map`, and `map_remaining_4kb` allocated frames via `pmm::alloc_frame` (Untyped, rc=0) but never `retype_to_user`'d them. `space_grant`'s `inc_ref` bumped rc from 0 to 1, but teardown of BOTH spaces `dec_ref`'d twice, so the second hit rc=0 warning, and the auto-free between the two `dec_ref`s let PMM re-allocate the frame while still mapped (text corruption). Fix: `retype_to_user` before `map_user_page` (rc=1, tag=UserData). `space_grant` `inc_ref` to rc=2 (Grant). Both teardowns `dec_ref` to 0. Balanced.
+
+**Why the trap existed:** The frame refcount invariant ("every mapped frame has rc≥1, every Grant frame has rc≥2") was enforced inconsistently across the four allocation paths. Only `load_segment_batch` (the in-kernel ELF loader) called `retype_to_user`; the syscall-driven paths assumed `pmm::alloc_frame` returned UserData-tagged frames, but it returns Untyped.
+
+**Impact before fix:** 1094 warnings per boot, frame aliasing causing text corruption, micropython spawn crash.
+
+**Impact after fix:** 0 warnings, no corruption, micropython spawns cleanly.
+
+## nursery-sweep-use-after-sweep (2026-07-07-memory-model-fixes)
+
+**Symptom:** virtio-blk crash at CR2=0x20001 RIP=0x4348c1 during micropython spawn. `InflightSlot.status_region.virt` corrupted from valid DMA pool address (0x51001a20) to garbage (0x20001).
+
+**Code site:** `userspace/libcluu/src/allocator.rs`: `NurseryAllocator::alloc`
+
+**Root cause:** The `NurseryAllocator`'s `sweep` reclaims ALL nursery memory when the nursery fills up, including live allocations. The nursery's own safety contract states: "sweeping reclaims all nursery memory regardless of liveness. This is safe only when callers do not retain nursery pointers across a sweep."
+
+`Vec` backing buffers violate this contract. virtio-blk's `Vec<InflightSlot>` (56 bytes per slot, under the 256-byte nursery threshold) had its backing buffer in the nursery. When the nursery swept, new small allocations overwrote the Vec's buffer, corrupting `InflightSlot.status_region.virt` from a valid DMA pool address (0x51001a20) to garbage (0x20001). The subsequent dereference in `drain_completions` crashed with a page fault at the corrupted address.
+
+**Fix:** When the nursery is full, fall through to the linked-list allocator instead of sweeping. This preserves live nursery allocations at the cost of wasting nursery memory after it fills up once. For long-running services like virtio-blk, the nursery fills up early and subsequent small allocations go to the linked-list allocator, which is correct and only slightly slower.
+
+**Why the trap existed:** The nursery was designed as a tcache-style fast path with bulk-free semantics, assuming all nursery allocations were short-lived. `Vec<InflightSlot>` is a long-lived allocation that happens to be small enough to fit in the nursery. The safety contract was documented but not enforced; there was no mechanism to prevent long-lived allocations from landing in the nursery.
+
+**Impact before fix:** virtio-blk crash on micropython spawn, intermittent memory corruption in any service using small long-lived heap allocations.
+
+**Impact after fix:** No crash, no corruption. Micropython spawns successfully.
+
+**See also:** [Memory Model](../memory_model/index.html) for the allocator paths. The nursery allocator is in `userspace/libcluu/src/allocator.rs`.
+
+## m9-single-text-region (2026-07-06-m9-demand-paged-text)
+
+**Symptom:** M9 demand-paged text crashed when an ELF had multiple executable segments. Only the first segment would demand-page; the second would overwrite the recorded text region, causing entry-point faults.
+
+**Code site:** `userspace/libcluu/src/process.rs`: `map_segment` (the `text_demand_paged` guard)
+
+**Root cause:** `set_text_with_source` records a single `TextSource` per address space. When M9 was first enabled, every executable non-writable segment called `space_protect_unmapped`, overwriting the previously recorded text source. The second segment's source bytes would replace the first's, so when the first segment's pages faulted, they'd be filled with the second segment's bytes.
+
+**Fix:** Only the FIRST executable non-writable segment is demand-paged. Subsequent executable segments are eagerly mapped. The `text_demand_paged` flag in `map_segments` ensures `set_text_with_source` is called at most once per space.
+
+**Why the trap existed:** M9 was designed assuming one text segment per ELF (the common case for Rust binaries). Some ELFs (e.g., C programs with separate `.text` and `.init` sections) have multiple executable segments. The `TextSource` struct was a single-slot field, not a list.
+
+**Impact before fix:** Any ELF with multiple executable segments would crash on entry.
+
+**Impact after fix:** Only the first executable segment is demand-paged; subsequent ones are eagerly mapped (small memory cost, correct behavior).
+
+**See also:** [Memory Model](../memory_model/index.html) for M9 demand-paged text. `kernel/src/mm/space.rs`: `set_text_with_source`. `kernel/src/architecture/x86_64/idt.rs`: `handle_text_fault`.
