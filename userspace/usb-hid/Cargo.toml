@@ -1,0 +1,17 @@
+[package]
+name = "cluu-usb-hid"
+version = "0.1.0"
+edition = "2021"
+description = "Boot-protocol HID keyboard+mouse driver for CLUU (xHCI-backed)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[lib]
+name = "cluu_usb_hid"
+path = "src/lib.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-dma-core = { path = "../dma-core" }
+cluu-driver-framework = { path = "../driver-framework" }
+cluu-xhci-core = { path = "../xhci-core" }

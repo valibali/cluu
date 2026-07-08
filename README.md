@@ -22,7 +22,7 @@ This repo is at a "Show & Tell" stage. The kernel is solid. Userspace is thin bu
 - Graceful shutdown (Ctrl-Alt-Del → reboot/poweroff).
 - Capability-based IPC at ~1,200-1,600 cycles for a full call/reply.
 - A declarative container model: every userspace binary has a `Cluufile` (think Dockerfile, but for a single binary) that defines its capability profile, mount policy, restart policy, and entrypoint. See [`containers/`](containers/).
-- **MicroPython** (`spawn micropython`): runs as a container, executes scripts, can read files via the POSIX shim. Limitations: REPL ergonomics are rough (no line editing inside the REPL prompt), no socket support, no threading, large scripts may bump into heap limits.
+- **MicroPython** (`spawn micropython`): runs as a container, executes scripts, can read files via the POSIX shim. Limitations: REPL ergonomics are rough (no line editing inside the REPL prompt), no socket support, large scripts may bump into heap limits.
 - **POSIX-ish C runtime** via a custom-patched newlib targeting `x86_64-cluu-elf`. C programs (see [`userspace/c-programs/`](userspace/c-programs/)) build with the standard toolchain and use stdio, malloc, pthreads, futexes, signals.
 
 ## What does NOT work yet (honest)
@@ -32,7 +32,7 @@ This repo is at a "Show & Tell" stage. The kernel is solid. Userspace is thin bu
 - **Tab completion.**
 - **In-line cursor editing.** Arrow keys do history (↑/↓) but ←/→ inside a typed line do nothing.
 - **No editor.** Nothing TUI runs yet (Phase 2 will port `kilo`).
-- **MicroPython is rough.** Runs and reads files, but REPL line editing is missing, no sockets, no threads, heap limits are tight. Phase 2 will tighten this.
+- **MicroPython is rough.** Runs and reads files, but REPL line editing is missing, no sockets, heap limits are tight. Phase 2 will tighten this.
 - **No network.** No driver, no socket layer, no DHCP, no anything.
 - **No package manager**, no shell scripting beyond what's in `userspace/shell/src/cluu_lang/`.
 

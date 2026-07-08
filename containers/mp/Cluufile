@@ -1,5 +1,6 @@
 FROM minimal
 PROFILE ipc vfs
+MOUNT /etc ro
 BUILD "cargo xtask build-micropython" target/micropython-build/micropython /bin/micropython
 ENTRYPOINT /bin/micropython
 PRELOAD

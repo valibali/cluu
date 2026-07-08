@@ -1349,7 +1349,7 @@ extern "C" fn timer_interrupt_should_schedule() -> u8 {
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let mut port = x86_64::instructions::port::Port::<u8>::new(0x60);
     let scancode = unsafe { port.read() };
-    crate::devices::irq::dispatch_scancode(1, scancode);
+    crate::devices::irq::dispatch_irq(1, crate::devices::irq::KBD_RAW_LABEL, scancode);
 
     if crate::architecture::x86_64::apic::is_enabled() {
         crate::architecture::x86_64::apic::eoi();
@@ -1363,7 +1363,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let mut port = x86_64::instructions::port::Port::<u8>::new(0x60);
     let byte = unsafe { port.read() };
-    crate::devices::irq::dispatch_scancode(12, byte);
+    crate::devices::irq::dispatch_irq(12, crate::devices::irq::KBD_RAW_LABEL, byte);
 
     if crate::architecture::x86_64::apic::is_enabled() {
         crate::architecture::x86_64::apic::eoi();
@@ -1396,12 +1396,12 @@ extern "x86-interrupt" fn serial_interrupt_handler(_stack_frame: InterruptStackF
 /// (boot got as far as `ext2 filesystem mounted` before the next IRQ
 /// brought the system down).
 extern "x86-interrupt" fn virtio_blk_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    crate::devices::irq::dispatch_scancode(11, 0);
+    crate::devices::irq::dispatch_irq(11, crate::devices::irq::KBD_RAW_LABEL, 0);
     if crate::architecture::x86_64::apic::is_enabled() {
         crate::architecture::x86_64::apic::eoi();
     }
     unsafe {
-        pic_eoi(11); // IRQ 11 - sends EOI to PIC2 + cascade EOI to PIC1
+        pic_eoi(11);
     }
 }
 

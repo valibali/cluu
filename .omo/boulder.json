@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "active_work_id": "memory-and-doc-migration",
+  "works": {
+    "memory-and-doc-migration": {
+      "work_id": "memory-and-doc-migration",
+      "active_plan": ".omo/plans/memory-and-doc-migration.md",
+      "plan_name": "memory-and-doc-migration",
+      "session_ids": ["opencode:sisyphus"],
+      "status": "active",
+      "worktree_path": null
+    }
+  }
+}

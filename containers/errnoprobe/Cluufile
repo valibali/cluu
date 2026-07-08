@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c errnoprobe userspace/c-programs/errnoprobe.c" target/x86_64-cluu-user/debug/errnoprobe.elf /bin/errnoprobe
+ENTRYPOINT /bin/errnoprobe

@@ -1,0 +1,16 @@
+[package]
+name = "cluu-xhciprobe"
+version = "0.1.0"
+edition = "2021"
+description = "xHCI controller discovery and reset smoke test"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu" }
+cluu-xhci-core = { path = "../../xhci-core" }
+cluu-dma-core = { path = "../../dma-core" }
+
+[[bin]]
+name = "xhciprobe"
+path = "src/main.rs"

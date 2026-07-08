@@ -256,6 +256,8 @@ pub unsafe fn init(initrd_phys: u64, initrd_size: u64) -> Result<ThreadId, Error
             core::ptr::addr_of!(crate::bootboot::bootboot.fb_height).read_unaligned();
         boot_info.fb_pitch =
             core::ptr::addr_of!(crate::bootboot::bootboot.fb_scanline).read_unaligned();
+        boot_info.acpi_ptr = core::ptr::addr_of!(crate::bootboot::bootboot.arch.x86_64.acpi_ptr)
+            .read_unaligned();
     }
 
     klibcluu::info("");
@@ -339,6 +341,7 @@ struct BootInfo {
     fb_width: u32,
     fb_height: u32,
     fb_pitch: u32,
+    acpi_ptr: u64,
 }
 
 fn verify_boot_manifest(initrd: &[u8], init_elf: &[u8]) -> Result<(), Error> {
@@ -475,4 +478,53 @@ fn hex_nibble(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(10 + (b - b'a')),
         _ => None,
     }
+}
+
+const RSDP_SIGNATURE: &[u8; 8] = b"RSD PTR ";
+
+fn scan_rsdp() -> u64 {
+    let bootboot = unsafe { &crate::bootboot::bootboot };
+    const BOOTBOOT_HEADER_SIZE: usize = 128;
+    let mmap_bytes = bootboot.size as usize - BOOTBOOT_HEADER_SIZE;
+    let mmap_entries = mmap_bytes / 16;
+    let mmap_ptr = &bootboot.mmap as *const crate::bootboot::MMapEnt;
+
+    klibcluu::info("scan_rsdp: scanning mmap entries");
+    for i in 0..mmap_entries {
+        let entry = unsafe { &*mmap_ptr.add(i) };
+        let entry_type = entry.size & 0xF;
+        let size = entry.size & !0xF;
+        if size == 0 { continue; }
+
+        klibcluu::info("  mmap entry type=");
+        klibcluu::log_dec(klibcluu::LogLevel::Info, "", entry_type);
+        klibcluu::info(" ptr=0x");
+        klibcluu::log_hex(klibcluu::LogLevel::Info, "", entry.ptr);
+        klibcluu::info(" size=0x");
+        klibcluu::log_hex(klibcluu::LogLevel::Info, "", size);
+
+        if entry_type == crate::bootboot::MMAP_ACPI as u64 || entry.ptr < 0x10_0000 {
+            if let Some(addr) = scan_region_for_rsdp(entry.ptr, size) {
+                klibcluu::info("RSDP found via kernel scan");
+                return addr;
+            }
+        }
+    }
+    0
+}
+
+fn scan_region_for_rsdp(start: u64, size: u64) -> Option<u64> {
+    let end = start.checked_add(size)?;
+    let mut addr = start;
+    while addr + 36 <= end {
+        let virt = crate::mm::physmap::phys_to_virt(x86_64::PhysAddr::new(addr));
+        let bytes = unsafe {
+            core::slice::from_raw_parts(virt.as_u64() as *const u8, 8)
+        };
+        if bytes == RSDP_SIGNATURE {
+            return Some(addr);
+        }
+        addr += 16;
+    }
+    None
 }

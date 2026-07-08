@@ -1,0 +1,15 @@
+[package]
+name = "cluu-acpiprobe"
+version = "0.1.0"
+edition = "2021"
+description = "ACPI table discovery smoke test"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu" }
+cluu-acpi = { path = "../../acpi" }
+
+[[bin]]
+name = "acpiprobe"
+path = "src/main.rs"

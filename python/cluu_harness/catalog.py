@@ -144,9 +144,106 @@ class L2Ext2Write:
     pass
 
 
+@cluu_case(
+    "errnoprobe",
+    marker_mode="errnoprobe",
+    description="per-thread errno isolation — two threads, distinct errno",
+    tags=["pthread", "errno", "c-program"],
+)
+class ErrnoProbe:
+    pass
+
+
+@cluu_case(
+    "stackprobe",
+    marker_mode="stackprobe",
+    description="pthread_attr_setstacksize honored — 256 KiB stack",
+    tags=["pthread", "stack", "c-program"],
+)
+class StackProbe:
+    pass
+
+
+@cluu_case(
+    "dtachprobe",
+    marker_mode="dtachprobe",
+    description="detached thread stack reclamation — 50 detach cycles",
+    tags=["pthread", "detach", "c-program"],
+)
+class DtachProbe:
+    pass
+
+
+@cluu_case(
+    "mmapprobe",
+    marker_mode="mmapprobe",
+    description="mmap + mprotect including PROT_NONE",
+    tags=["mmap", "mprotect", "c-program"],
+)
+class MmapProbe:
+    pass
+
+
+@cluu_case(
+    "gc_stress",
+    marker_mode="gc_stress",
+    description="MicroPython cross-thread GC stack scanning",
+    tags=["micropython", "gc", "thread"],
+)
+class GcStress:
+    pass
+
+
+@cluu_case(
+    "acpiprobe",
+    marker_mode="acpiprobe",
+    description="ACPI RSDP discovery + FADT parsing on real QEMU",
+    tags=["acpi", "discovery"],
+)
+class AcpiProbe:
+    pass
+
+
+@cluu_case(
+    "xhciprobe",
+    marker_mode="xhciprobe",
+    description="xHCI PCI discovery + controller reset + slot enable",
+    tags=["xhci", "usb"],
+)
+class XhciProbe:
+    pass
+
+
+@cluu_case(
+    "usb_input_probe",
+    marker_mode="usb_input_probe",
+    description="usb-input primordial service boots + xHCI init",
+    tags=["usb", "primordial"],
+)
+class UsbInputProbe:
+    pass
+
+
+@cluu_case(
+    "dynprobe",
+    marker_mode="dynprobe",
+    description="Dynamic linking probe: ld-cluu reloc + TLS + Dynamic parsing",
+    tags=["dynamic", "tls", "reloc"],
+)
+class DynProbe:
+    pass
+
+
 __all__ = [
     "BSpawnWarm",
     "CFutex",
+    "DtachProbe",
+    "ErrnoProbe",
+    "GcStress",
+    "AcpiProbe",
+    "XhciProbe",
+    "UsbInputProbe",
+    "DynProbe",
     "L2Cd",
     "L2CluutermExit",
     "L2CluutermLogin",
@@ -158,4 +255,6 @@ __all__ = [
     "L2Vt4Default",
     "M1Recv",
     "M5Fairness",
+    "MmapProbe",
+    "StackProbe",
 ]

@@ -32,9 +32,10 @@
 //! the user pointer so `dealloc` can recover the block size without the
 //! `Layout`. Heap growth is bounded by `USER_HEAP_MAX` (1 GiB) and proceeds
 //! in page-aligned chunks of at least `MIN_HEAP_GROW` (256 KiB), doubling
-//! each grow up to `MAX_HEAP_GROW` (16 MiB). The `GlobalAlloc` impl uses
-//! `try_lock` and leaks on re-entrant `dealloc` to avoid deadlock inside
-//! an allocator re-entry. The `host-test` feature stubs out the
+//! each grow up to `MAX_HEAP_GROW` (16 MiB). The `GlobalAlloc` impl blocks
+//! on `alloc` (safe — alloc never re-enters alloc) and uses `try_lock` +
+//! deferred-free on `dealloc` to avoid re-entrant deadlock when a Drop
+//! fires mid-alloc (GC callback scenario). The `host-test` feature stubs
 //! `#[global_allocator]` so host unit tests use the std heap.
 //!
 //! ## Cross-references
@@ -754,27 +755,28 @@ mod inner {
 
     unsafe impl GlobalAlloc for LockedAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            if let Some(mut guard) = self.inner.try_lock() {
-                self.drain_deferred(&mut guard);
-                let ptr = guard.alloc(layout);
-                if !ptr.is_null() {
-                    return ptr;
-                }
-                // OOM: release the main lock before calling the handler so the
-                // handler can alloc/free without re-entrancy issues.
-                drop(guard);
-                let handler = *self.oom_handler.lock();
-                if let Some(h) = handler {
-                    h();
-                    if let Some(mut guard2) = self.inner.try_lock() {
-                        self.drain_deferred(&mut guard2);
-                        return guard2.alloc(layout);
-                    }
-                }
-                ptr::null_mut()
-            } else {
-                ptr::null_mut()
+            // Block until the lock is acquired. alloc never re-enters alloc
+            // (the grow path calls space_map_range syscall only, and the OOM
+            // handler runs after drop(guard)), so a blocking lock is safe.
+            // dealloc stays on try_lock + deferred-free to avoid re-entrant
+            // deadlock when a Drop fires mid-alloc (GC callback scenario).
+            let mut guard = self.inner.lock();
+            self.drain_deferred(&mut guard);
+            let ptr = guard.alloc(layout);
+            if !ptr.is_null() {
+                return ptr;
             }
+            // OOM: release the main lock before calling the handler so the
+            // handler can alloc/free without re-entrancy issues.
+            drop(guard);
+            let handler = *self.oom_handler.lock();
+            if let Some(h) = handler {
+                h();
+                let mut guard2 = self.inner.lock();
+                self.drain_deferred(&mut guard2);
+                return guard2.alloc(layout);
+            }
+            ptr::null_mut()
         }
 
         unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {

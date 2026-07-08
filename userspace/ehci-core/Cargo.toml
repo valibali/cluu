@@ -1,0 +1,16 @@
+[package]
+name = "cluu-ehci-core"
+version = "0.1.0"
+edition = "2021"
+description = "EHCI USB 2.0 host controller driver for CLUU"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[lib]
+name = "cluu_ehci_core"
+path = "src/lib.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-driver-framework = { path = "../driver-framework" }
+cluu-dma-core = { path = "../dma-core" }

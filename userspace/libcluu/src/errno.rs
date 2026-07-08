@@ -95,15 +95,17 @@ pub const EINPROGRESS: i32 = 115; // Operation now in progress
 // ═══════════════════════════════════════════════════════════════════════════
 
 lazy_static! {
-    /// Per-thread errno cells keyed by current thread token.
-    ///
-    /// In CLUU userspace, `token_self()` uniquely identifies the current thread.
+    /// Per-thread errno cells keyed by per-thread token (FS:8 via `pthread_self()`).
     pub(crate) static ref ERRNO_BY_THREAD: Mutex<BTreeMap<usize, Box<i32>>> = Mutex::new(BTreeMap::new());
 }
 
-#[inline]
+/// Per-thread errno cells keyed by per-thread token (FS:8).
+///
+/// `pthread_self()` reads the FS:8 per-thread token (set by `init_tls`
+/// for the main thread and `pthread_create` for child threads), with
+/// fallback to `token_self()` when FS:8 is 0 (before `init_tls` runs).
 fn errno_key() -> usize {
-    crate::boot::token_self()
+    crate::posix::pthread::pthread_self() as usize
 }
 
 /// Set the global errno value.

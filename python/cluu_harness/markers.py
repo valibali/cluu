@@ -259,6 +259,51 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             required_markers=[_TSC, _SHELL_READY, "ls: ok (exit 0)"],
             description="ls /dev regression — dynamic /dev enumeration",
         ),
+        MarkerModeSpec(
+            name="errnoprobe",
+            required_markers=[_TSC, _SHELL_READY, "ERRNO_OK"],
+            description="per-thread errno isolation — two threads, distinct errno",
+        ),
+        MarkerModeSpec(
+            name="stackprobe",
+            required_markers=[_TSC, _SHELL_READY, "STACK_OK"],
+            description="pthread_attr_setstacksize honored — 256 KiB stack",
+        ),
+        MarkerModeSpec(
+            name="dtachprobe",
+            required_markers=[_TSC, _SHELL_READY, "DETACH_OK"],
+            description="detached thread stack reclamation — 50 detach cycles",
+        ),
+        MarkerModeSpec(
+            name="mmapprobe",
+            required_markers=[_TSC, _SHELL_READY, "mmapprobe: PASS complete"],
+            description="mmap + mprotect including PROT_NONE",
+        ),
+        MarkerModeSpec(
+            name="gc_stress",
+            required_markers=[_TSC, _SHELL_READY, "C3_GC_OTHERS_OK"],
+            description="MicroPython cross-thread GC stack scanning",
+        ),
+        MarkerModeSpec(
+            name="acpiprobe",
+            required_markers=[_TSC, _SHELL_READY, "ACPI_TABLES_OK"],
+            description="ACPI RSDP discovery + FADT parsing on real QEMU",
+        ),
+        MarkerModeSpec(
+            name="xhciprobe",
+            required_markers=[_TSC, _SHELL_READY, "XHCI_PROBE_OK"],
+            description="xHCI PCI discovery + controller reset + slot enable",
+        ),
+        MarkerModeSpec(
+            name="usb_input_probe",
+            required_markers=[_TSC, "USB_INPUT_OK"],
+            description="usb-input primordial service boots + xHCI init",
+        ),
+        MarkerModeSpec(
+            name="dynprobe",
+            required_markers=[_TSC, _SHELL_READY, "DYNPROBE_OK"],
+            description="Dynamic linking probe: ld-cluu reloc + TLS + Dynamic parsing",
+        ),
     ]
 }
 

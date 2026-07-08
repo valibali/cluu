@@ -1,0 +1,5 @@
+FROM minimal
+PROFILE ipc vfs
+MOUNT /tmp inherit
+BUILD "cargo build -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --manifest-path userspace/probes/dynprobe/Cargo.toml --target triplets/x86_64-cluu-user.json" target/x86_64-cluu-user/debug/dynprobe.elf /bin/dynprobe
+ENTRYPOINT /bin/dynprobe

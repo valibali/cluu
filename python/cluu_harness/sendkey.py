@@ -73,7 +73,7 @@ _HU_MAP: dict[str, str] = {
 }
 
 # Letters (lowercase) and digits 1-9 use their own key name directly.
-for _c in "abcdefghijlmnopqrstuvwx123456789":  # 'y','z','0' handled above
+for _c in "abcdefghijklmnopqrstuvwx123456789":  # 'y','z','0' handled above
     _HU_MAP.setdefault(_c, _c)
 
 # Uppercase letters → shift-<lowercase>

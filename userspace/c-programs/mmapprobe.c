@@ -79,13 +79,17 @@ int main(void) {
     printf("mmapprobe: PASS mprotect to rx addr=%p len=%zu\n", region, len);
 
     errno = 0;
-    if (mprotect(region, len, PROT_NONE) == 0) {
-        debug_print("mmapprobe: FAIL mprotect prot-none unexpectedly succeeded");
-        printf("mmapprobe: FAIL mprotect prot-none unexpectedly succeeded\n");
-        return 13;
+    if (mprotect(region, len, PROT_NONE) != 0) {
+        return fail("mmapprobe: FAIL mprotect prot-none", 13);
     }
-    debug_print("mmapprobe: PASS mprotect prot-none unsupported");
-    printf("mmapprobe: PASS mprotect prot-none unsupported errno=%d\n", errno);
+    debug_print("mmapprobe: PASS mprotect prot-none");
+
+    if (mprotect(region, len, PROT_READ) != 0) {
+        return fail("mmapprobe: FAIL mprotect restore read", 15);
+    }
+    volatile char prot_none_check = p[0];
+    (void)prot_none_check;
+    debug_print("mmapprobe: PASS mprotect restore read");
 
     if (mprotect(region, len, PROT_READ | PROT_WRITE) != 0) {
         return fail("mmapprobe: FAIL mprotect restore rw", 14);

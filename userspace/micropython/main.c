@@ -22,7 +22,7 @@
 // (mp's stdout goes to TTY/console/framebuffer, not COM2).
 extern void debug_print(const char *msg);
 
-#define HEAP_SIZE (1024 * 1024)  // 1MB GC heap
+#define HEAP_SIZE (8 * 1024 * 1024)  // 8MB GC heap
 
 static char heap[HEAP_SIZE];
 
@@ -56,8 +56,23 @@ static int do_str(const char *str) {
         mp_obj_t module_fun = mp_compile(&parse_tree, MP_QSTR__lt_stdin_gt_, false);
         mp_call_function_0(module_fun);
         nlr_pop();
+
+        mp_obj_t marker = mp_load_global(qstr_from_str("_serial_marker"));
+        if (marker != MP_OBJ_NULL && mp_obj_is_str(marker)) {
+            const char *s = mp_obj_str_get_str(marker);
+            debug_print(s);
+        }
         return 0;
     } else {
+        if (mp_obj_is_exception_instance(nlr.ret_val)) {
+            mp_obj_exception_t *exc = MP_OBJ_TO_PTR(nlr.ret_val);
+            if (mp_obj_get_type(nlr.ret_val) == &mp_type_SystemExit) {
+                if (exc->args == NULL || exc->args->len == 0) {
+                    return 0;
+                }
+                return (int)mp_obj_get_int(exc->args->items[0]);
+            }
+        }
         mp_obj_print_exception(&mp_plat_print, MP_OBJ_FROM_PTR(nlr.ret_val));
         return 1;
     }
@@ -100,6 +115,28 @@ int main(int argc, char **argv) {
     // If argv has -c "command", execute it and exit
     if (argc >= 3 && strcmp(argv[1], "-c") == 0) {
         ret = do_str(argv[2]);
+    } else if (argc >= 2 && argv[1][0] != '\0') {
+        // Execute script file from argv[1]
+        FILE *f = fopen(argv[1], "r");
+        if (f == NULL) {
+            fprintf(stderr, "cannot open %s\n", argv[1]);
+            ret = 1;
+        } else {
+            fseek(f, 0, SEEK_END);
+            long fsize = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            char *src = malloc(fsize + 1);
+            if (src != NULL) {
+                size_t nread = fread(src, 1, fsize, f);
+                src[nread] = '\0';
+                ret = do_str(src);
+                free(src);
+            } else {
+                fprintf(stderr, "out of memory\n");
+                ret = 1;
+            }
+            fclose(f);
+        }
     } else {
         // Friendly/raw REPL expects byte-at-a-time, no local echo.
         if (setup_repl_tty_mode(&saved_termios) == 0) {
@@ -123,9 +160,13 @@ int main(int argc, char **argv) {
     mp_deinit();
 
     {
-        char buf[32];
-        snprintf(buf, sizeof buf, "micropython: exit %d", ret);
-        debug_print(buf);
+        char buf[64];
+        if (ret == 0) {
+            debug_print("micropython: exit 0");
+        } else {
+            snprintf(buf, sizeof buf, "micropython: exit %d", ret);
+            debug_print(buf);
+        }
     }
 
     return ret;

@@ -1,0 +1,14 @@
+[package]
+name = "cluu-acpi"
+version = "0.1.0"
+edition = "2021"
+description = "ACPI table discovery and parsing for CLUU (RSDP, FADT, MCFG)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[lib]
+name = "cluu_acpi"
+path = "src/lib.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu" }

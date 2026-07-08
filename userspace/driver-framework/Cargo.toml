@@ -1,0 +1,16 @@
+[package]
+name = "cluu-driver-framework"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable driver framework traits for CLUU userspace drivers"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[lib]
+name = "cluu_driver_framework"
+path = "src/lib.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-dma-core = { path = "../dma-core" }
+spin = { workspace = true }

@@ -18,6 +18,8 @@ typedef struct _mp_thread_t {
     atomic_int exit_flag;   // Cooperative exit: 1 = please exit
     void *arg;
     void *(*entry)(void *);
+    void *stack_start;      // Stack base (lowest address) for GC scanning
+    size_t stack_len;       // Stack length in bytes
     struct _mp_thread_t *next;
 } mp_thread_t;
 
@@ -58,6 +60,10 @@ void mp_thread_init(void) {
     thread_entry0.id = pthread_self();
     thread_entry0.ready = 1;
     atomic_init(&thread_entry0.exit_flag, 0);
+    // Main thread stack: fixed range 0x7F000000..0x80000000 (crt0.S)
+    extern void debug_print(const char *msg);
+    thread_entry0.stack_start = (void *)0x7F000000;
+    thread_entry0.stack_len = 0x1000000; // 16 MiB
     thread_entry0.next = NULL;
     thread_mutex_owner = 0;
     thread_mutex_depth = 0;
@@ -132,6 +138,8 @@ mp_uint_t mp_thread_create(void *(*entry)(void *), void *arg, size_t *stack_size
     th->arg = arg;
     th->ready = 0;
     atomic_init(&th->exit_flag, 0);
+    th->stack_start = NULL;
+    th->stack_len = *stack_size;
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -150,6 +158,13 @@ mp_uint_t mp_thread_create(void *(*entry)(void *), void *arg, size_t *stack_size
         free(th);
         pthread_attr_destroy(&attr);
         mp_raise_OSError(ret);
+    }
+    // Retrieve actual stack region from libcluu for GC scanning.
+    extern int cluu_thread_stack_region(unsigned long tid, size_t *base, size_t *size);
+    size_t base = 0, sz = 0;
+    if (cluu_thread_stack_region(th->id, &base, &sz) == 0) {
+        th->stack_start = (void *)base;
+        th->stack_len = sz;
     }
     pthread_attr_destroy(&attr);
     thread_mutex_unlock_recursive();
@@ -199,7 +214,11 @@ int mp_thread_mutex_lock(mp_thread_mutex_t *mutex, int wait) {
     thread_mutex_unlock_recursive();
 
     if (wait) {
-        return pthread_mutex_lock(mutex) == 0;
+        // Release the GIL before blocking so other threads can run.
+        mp_thread_unix_end_atomic_section();
+        int ret = pthread_mutex_lock(mutex) == 0;
+        mp_thread_unix_begin_atomic_section();
+        return ret;
     } else {
         return pthread_mutex_trylock(mutex) == 0;
     }
@@ -220,15 +239,37 @@ void mp_thread_unix_end_atomic_section(void) {
     thread_mutex_unlock_recursive();
 }
 
-// GC needs to scan other threads' stacks
+// GC needs to scan other threads' stacks and callee-saved registers.
+// Conservative whole-stack scan (esp32 port pattern): suspend the peer,
+// scan its entire stack region + callee-saved register file, resume.
+// The kernel's saved Context has rbx/r12-r15/rbp/rsp at suspend time;
+// cluu_thread_get_regs fetches them so the GC sees all pointer roots.
+typedef struct {
+    uint64_t rbx, r12, r13, r14, r15, rbp, rsp;
+} cluu_callee_saved_regs_t;
+
+extern int cluu_thread_get_regs(unsigned long tid, cluu_callee_saved_regs_t *regs);
+
 void mp_thread_gc_others(void) {
     thread_mutex_lock_recursive();
+    pthread_t self = pthread_self();
+    extern int cluu_thread_suspend(unsigned long tid);
+    extern int cluu_thread_resume(unsigned long tid);
     for (mp_thread_t *th = thread_list; th != NULL; th = th->next) {
-        // Skip current thread (GC scans its own stack)
-        if (pthread_equal(th->id, pthread_self())) continue;
+        if (pthread_equal(th->id, self)) continue;
         if (!th->ready) continue;
-        // MicroPython runtime handles the actual stack scanning
-        // via mp_thread_set_state() — we just need the list traversal
+        if (th->stack_start == NULL || th->stack_len == 0) {
+            gc_collect_root(&th->arg, 1);
+            continue;
+        }
+        cluu_thread_suspend(th->id);
+        gc_collect_root(&th->arg, 1);
+        cluu_callee_saved_regs_t regs;
+        if (cluu_thread_get_regs(th->id, &regs) == 0) {
+            gc_collect_root((void **)&regs, sizeof(regs) / sizeof(void *));
+        }
+        gc_collect_root(th->stack_start, th->stack_len / sizeof(void *));
+        cluu_thread_resume(th->id);
     }
     thread_mutex_unlock_recursive();
 }

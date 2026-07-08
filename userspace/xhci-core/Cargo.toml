@@ -1,0 +1,16 @@
+[package]
+name = "cluu-xhci-core"
+version = "0.1.0"
+edition = "2021"
+description = "xHCI host controller core for CLUU (PCI enum, reset, TRB rings)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[lib]
+name = "cluu_xhci_core"
+path = "src/lib.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-dma-core = { path = "../dma-core" }
+cluu-driver-framework = { path = "../driver-framework" }

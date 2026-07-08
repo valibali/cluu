@@ -31,6 +31,7 @@ extern crate alloc;
 use super::{c_int, c_void};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -42,7 +43,7 @@ use spin::Mutex;
 /// pthread_t is the thread token handle returned by ThreadCreate.
 pub type pthread_t = usize;
 
-/// pthread_attr_t — ignored for now (all threads use defaults).
+/// pthread_attr_t — stores stack size in bytes (0 = use default 64 KB).
 pub type pthread_attr_t = usize;
 
 /// Offset within the TCB where the thread token is stored.
@@ -79,6 +80,9 @@ struct PthreadInternal {
     exit_value: AtomicUsize,
     exited: AtomicU32, // futex word: 0=running, 1=exited
     detached: AtomicU32,
+    /// Prevents double-free across join/detach/reap paths.
+    /// 0 = unclaimed, 1 = claimed by a cleanup path.
+    cleanup_claimed: AtomicU32,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -103,6 +107,35 @@ lazy_static! {
 static KEY_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 
 const PAGE_SIZE: usize = 4096;
+
+/// Deferred-reclaim entry for detached threads that exited on their own.
+/// A detached thread can't free its own stack (it's running on it), so
+/// pthread_entry pushes an entry here and pthread_create drains it.
+struct ReapEntry {
+    stack_base: usize,
+    stack_pages: usize,
+    tls_block: usize,
+    tls_size: usize,
+    internal_ptr: usize,
+}
+
+static REAP_QUEUE: Mutex<Vec<ReapEntry>> = Mutex::new(Vec::new());
+
+fn reap_dead_threads() {
+    let entries: Vec<ReapEntry> = core::mem::take(&mut *REAP_QUEUE.lock());
+    let space = crate::boot::space_token();
+    for e in entries {
+        let _ = crate::syscall::space_unmap(space, e.stack_base, e.stack_pages);
+        if let Ok(layout) = core::alloc::Layout::from_size_align(e.tls_size, 16) {
+            unsafe {
+                alloc::alloc::dealloc(e.tls_block as *mut u8, layout);
+            }
+        }
+        unsafe {
+            drop(Box::from_raw(e.internal_ptr as *mut PthreadInternal));
+        }
+    }
+}
 
 /// Default thread stack: 64 KB (16 pages).
 const DEFAULT_STACK_PAGES: usize = 16;
@@ -326,6 +359,25 @@ extern "C" fn pthread_entry(startup: *mut PthreadStartup) -> ! {
         table.remove(&my_token);
     }
 
+    // If detached and not yet claimed by pthread_detach, push to reap queue.
+    // A detached thread can't free its own stack (running on it), so
+    // pthread_create drains REAP_QUEUE on the next call.
+    if internal_ref.detached.load(Ordering::Acquire) != 0 {
+        if internal_ref
+            .cleanup_claimed
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            REAP_QUEUE.lock().push(ReapEntry {
+                stack_base: internal_ref.stack_base,
+                stack_pages: internal_ref.stack_size / PAGE_SIZE,
+                tls_block: internal_ref.tls_block,
+                tls_size: internal_ref.tls_block_size,
+                internal_ptr: internal as usize,
+            });
+        }
+    }
+
     // Destroy ourselves — the kernel marks thread dead and switches away.
     let _ = crate::syscall::thread_destroy(my_token);
 
@@ -343,7 +395,7 @@ extern "C" fn pthread_entry(startup: *mut PthreadStartup) -> ! {
 ///
 /// # Arguments
 /// - `thread`: Output — receives the new thread's pthread_t
-/// - `attr`: Thread attributes (ignored, pass NULL)
+/// - `attr`: Thread attributes (may be NULL; stack size from `pthread_attr_setstacksize`)
 /// - `start_routine`: Function the new thread will execute
 /// - `arg`: Argument passed to start_routine
 ///
@@ -352,7 +404,7 @@ extern "C" fn pthread_entry(startup: *mut PthreadStartup) -> ! {
 #[no_mangle]
 pub extern "C" fn pthread_create(
     thread: *mut pthread_t,
-    _attr: *const pthread_attr_t,
+    attr: *const pthread_attr_t,
     start_routine: extern "C" fn(*mut c_void) -> *mut c_void,
     arg: *mut c_void,
 ) -> c_int {
@@ -360,10 +412,20 @@ pub extern "C" fn pthread_create(
         return crate::errno::EINVAL;
     }
 
+    reap_dead_threads();
+
     let space = crate::boot::space_token();
 
+    let stack_size = if !attr.is_null() {
+        let sz = unsafe { *attr };
+        if sz == 0 { DEFAULT_STACK_SIZE } else { sz }
+    } else {
+        DEFAULT_STACK_SIZE
+    };
+    let stack_pages = (stack_size + PAGE_SIZE - 1) / PAGE_SIZE;
+
     // 1. Allocate stack with guard page.
-    let (stack_base, stack_top) = match alloc_thread_stack(DEFAULT_STACK_PAGES) {
+    let (stack_base, stack_top) = match alloc_thread_stack(stack_pages) {
         Some(s) => s,
         None => return crate::errno::EAGAIN,
     };
@@ -372,7 +434,7 @@ pub extern "C" fn pthread_create(
     let (tls_block, tls_tcb_addr) = match alloc_tls_block() {
         Some(t) => t,
         None => {
-            let _ = crate::syscall::space_unmap(space, stack_base, DEFAULT_STACK_PAGES);
+            let _ = crate::syscall::space_unmap(space, stack_base, stack_pages);
             return crate::errno::EAGAIN;
         }
     };
@@ -381,12 +443,13 @@ pub extern "C" fn pthread_create(
     let internal = Box::new(PthreadInternal {
         token: 0, // set after thread_create
         stack_base,
-        stack_size: DEFAULT_STACK_SIZE,
+        stack_size: stack_pages * PAGE_SIZE,
         tls_block,
         tls_block_size: tls_block_alloc_size(),
         exit_value: AtomicUsize::new(0),
         exited: AtomicU32::new(0),
         detached: AtomicU32::new(0),
+        cleanup_claimed: AtomicU32::new(0),
     });
     let internal_ptr = Box::into_raw(internal);
 
@@ -429,7 +492,7 @@ pub extern "C" fn pthread_create(
             unsafe {
                 alloc::alloc::dealloc(tls_block as *mut u8, layout);
             }
-            let _ = crate::syscall::space_unmap(space, stack_base, DEFAULT_STACK_PAGES);
+            let _ = crate::syscall::space_unmap(space, stack_base, stack_pages);
             return crate::errno::EAGAIN;
         }
     };
@@ -583,24 +646,36 @@ pub extern "C" fn pthread_detach(thread: pthread_t) -> c_int {
 
     // If the thread has already exited, clean up now.
     if internal.exited.load(Ordering::Acquire) != 0 {
-        let token = internal.token;
+        if internal
+            .cleanup_claimed
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
         {
-            let mut threads = THREADS.lock();
-            threads.remove(&thread);
-        }
-
-        let _ = crate::syscall::thread_destroy(token);
-        let tls_block = internal.tls_block;
-        let tls_size = internal.tls_block_size;
-        if let Ok(layout) = core::alloc::Layout::from_size_align(tls_size, 16) {
-            unsafe {
-                alloc::alloc::dealloc(tls_block as *mut u8, layout);
+            let token = internal.token;
+            let stack_base = internal.stack_base;
+            let stack_pages = internal.stack_size / PAGE_SIZE;
+            {
+                let mut threads = THREADS.lock();
+                threads.remove(&thread);
             }
-        }
-        // Note: stack leak for detached threads (known limitation).
 
-        unsafe {
-            drop(Box::from_raw(internal_raw as *mut PthreadInternal));
+            let _ = crate::syscall::thread_destroy(token);
+            let _ = crate::syscall::space_unmap(
+                crate::boot::space_token(),
+                stack_base,
+                stack_pages,
+            );
+            let tls_block = internal.tls_block;
+            let tls_size = internal.tls_block_size;
+            if let Ok(layout) = core::alloc::Layout::from_size_align(tls_size, 16) {
+                unsafe {
+                    alloc::alloc::dealloc(tls_block as *mut u8, layout);
+                }
+            }
+
+            unsafe {
+                drop(Box::from_raw(internal_raw as *mut PthreadInternal));
+            }
         }
     }
 
@@ -633,6 +708,78 @@ pub extern "C" fn pthread_equal(t1: pthread_t, t2: pthread_t) -> c_int {
         1
     } else {
         0
+    }
+}
+
+/// Get a thread's stack region [base, base+size) for GC stack scanning.
+/// Returns 0 on success, -1 if thread not found.
+#[no_mangle]
+pub extern "C" fn cluu_thread_stack_region(
+    tid: pthread_t,
+    base: *mut usize,
+    size: *mut usize,
+) -> c_int {
+    let threads = THREADS.lock();
+    match threads.get(&tid) {
+        Some(&raw) => {
+            let internal = unsafe { &*(raw as *const PthreadInternal) };
+            unsafe {
+                *base = internal.stack_base;
+                *size = internal.stack_size;
+            }
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Suspend a thread (for GC stack scanning). Returns 0 on success.
+#[no_mangle]
+pub extern "C" fn cluu_thread_suspend(tid: pthread_t) -> c_int {
+    match crate::syscall::thread_suspend(tid) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Resume a previously suspended thread. Returns 0 on success.
+#[no_mangle]
+pub extern "C" fn cluu_thread_resume(tid: pthread_t) -> c_int {
+    match crate::syscall::thread_resume(tid) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CluuCalleeSavedRegs {
+    pub rbx: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rbp: u64,
+    pub rsp: u64,
+}
+
+#[no_mangle]
+pub extern "C" fn cluu_thread_get_regs(tid: pthread_t, regs: *mut CluuCalleeSavedRegs) -> c_int {
+    if regs.is_null() {
+        return -1;
+    }
+    match unsafe {
+        crate::syscall::invoke(
+            tid,
+            crate::syscall::InvokeOp::ThreadGetStats,
+            regs as usize,
+            0,
+            0,
+            0,
+        )
+    } {
+        Ok(_) => 0,
+        Err(_) => -1,
     }
 }
 

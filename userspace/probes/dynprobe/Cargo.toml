@@ -1,0 +1,15 @@
+[package]
+name = "dynprobe"
+version = "0.1.0"
+edition = "2021"
+description = "Dynamic linking probe: ld-cluu reloc engine + TLS + Dynamic section parsing"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu" }
+cluu-ld-cluu = { path = "../../ld-cluu" }
+
+[[bin]]
+name = "dynprobe"
+path = "src/main.rs"

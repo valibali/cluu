@@ -108,14 +108,12 @@ fn run() -> Result<()> {
                         let _ = debug_print(&format!(
                             "init: procmgr '{}' requested poweroff (code 42)", name
                         ));
-                        // QEMU ACPI poweroff: write 0x2000 to port 0x604
-                        let _ = libcluu::syscall::port_out16(ctx.pci_token, 0x604, 0x2000);
+                        acpi_poweroff(&ctx);
                     }
                     43 => {
                         let _ = debug_print(&format!(
                             "init: procmgr '{}' requested reboot (code 43)", name
                         ));
-                        // x86 reset: write 0x06 to port 0xCF9
                         let _ = libcluu::syscall::port_out8(ctx.pci_token, 0xCF9, 0x06);
                     }
                     _ => {
@@ -123,8 +121,28 @@ fn run() -> Result<()> {
                             "init: FATAL — primordial '{}' exited (code {}), system halt",
                             name, exit_code
                         ));
-                    }
-                }
+    }
+}
+
+fn acpi_poweroff(ctx: &context::InitContext) {
+    let rsdp_phys = ctx.boot.acpi_ptr;
+    if rsdp_phys != 0 {
+        let _ = debug_print("init: ACPI RSDP found, deriving S5 from FADT");
+        if let Ok(fadt) = cluu_acpi::find_fadt_from_phys(ctx.boot.root_token, rsdp_phys) {
+            let pm1a_cnt = fadt.pm1a_cnt_blk as u16;
+            if pm1a_cnt != 0 {
+                let _ = debug_print(&format!("init: PM1a_CNT=0x{:04x}", pm1a_cnt));
+                let slp_typ: u16 = 0;
+                let slp_en: u16 = 1 << 13;
+                let val = slp_typ | slp_en;
+                let _ = libcluu::syscall::port_out16(ctx.pci_token, pm1a_cnt as u16, val);
+                return;
+            }
+        }
+    }
+    let _ = debug_print("init: FADT-derived S5 failed, falling back to QEMU 0x604");
+    let _ = libcluu::syscall::port_out16(ctx.pci_token, 0x604, 0x2000);
+}
                 // Halt regardless — if ACPI/reset failed, spin forever
                 loop { let _ = yield_cpu(); }
             }

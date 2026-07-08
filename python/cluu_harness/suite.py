@@ -81,6 +81,12 @@ def run_case(case: Case, cfg: HarnessConfig | None = None) -> CaseResult:
     # Apply per-case overrides onto a config copy (env-style).
     cfg = _apply_case_overrides(cfg, case)
 
+    # usb_input_probe: usb-ehci + usb-kbd/mouse (both default to USB 2.0 high-speed)
+    if case.marker_mode in ("xhciprobe", "usb_input_probe"):
+        usb_args = "-device usb-ehci,id=ehci -device usb-kbd,bus=ehci.0 -device usb-mouse,bus=ehci.0"
+        existing = cfg.qemu_extra_args.strip()
+        cfg.qemu_extra_args = (existing + " " + usb_args).strip() if existing else usb_args
+
     spec = get_spec(cfg.marker_mode)
     required_markers = (
         case.required_markers_override

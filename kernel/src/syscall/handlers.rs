@@ -24,6 +24,18 @@ use crate::syscall::{SyscallArgs, SyscallResult};
 use crate::token::{lookup_token, InvokeOp, TokenHandle};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CalleeSavedRegs {
+    pub rbx: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rbp: u64,
+    pub rsp: u64,
+}
+
 const IPC_REG_INLINE_FLAG: usize = 1usize << (usize::BITS - 1);
 const IPC_REG_INLINE_MAX_PAYLOAD: usize = 32;
 /// Flag bit on `invoke_thread_create`'s `args.arg6`: create the thread
@@ -1157,7 +1169,7 @@ fn invoke_thread_get_id(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -
     Ok(thread_id.as_u64() as usize)
 }
 
-fn invoke_thread_get_stats(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -> SyscallResult {
+fn invoke_thread_get_stats(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::READ) {
@@ -1171,6 +1183,32 @@ fn invoke_thread_get_stats(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs
     } else {
         return Err(Error::InvalidArgument);
     };
+
+    if args.arg3 != 0 {
+        let regs = crate::sched::ThreadManager::with_thread(thread_id, |t| {
+            CalleeSavedRegs {
+                rbx: t.context.rbx,
+                r12: t.context.r12,
+                r13: t.context.r13,
+                r14: t.context.r14,
+                r15: t.context.r15,
+                rbp: t.context.rbp,
+                rsp: t.context.rsp,
+            }
+        }).ok_or(Error::NotFound)?;
+        let caller_cr3 = crate::sched::ThreadManager::current_page_table_root()
+            .ok_or(Error::InvalidArgument)?;
+        crate::syscall::userptr::validate_user_buffer(args.arg3, core::mem::size_of::<CalleeSavedRegs>())?;
+        unsafe {
+            crate::syscall::userptr::copy_to_user(
+                args.arg3,
+                &regs as *const CalleeSavedRegs as *const u8,
+                core::mem::size_of::<CalleeSavedRegs>(),
+                caller_cr3,
+            )?;
+        }
+        return Ok(0);
+    }
 
     let cpu_ticks = crate::sched::ThreadManager::with_thread(thread_id, |t| t.cpu_ticks_consumed)
         .unwrap_or(0);
@@ -1652,6 +1690,7 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
         return Err(Error::InvalidArgument);
     }
 
+    let readable = (perms & 0x01) != 0;
     let writable = (perms & 0x02) != 0;
     let executable = (perms & 0x04) != 0;
     let install_unmapped = (perms & PROTECT_INSTALL_UNMAPPED) != 0;
@@ -1801,10 +1840,11 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
                 }
             }
 
+            let any_access = readable || writable || executable;
             let flags = PageFlags {
                 present: true,
                 writable,
-                user: true,
+                user: any_access,
                 write_through: false,
                 cache_disabled: false,
                 accessed: false,

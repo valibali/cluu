@@ -22,7 +22,7 @@ use crate::token::EndpointId;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_IRQS: usize = 16;
-const KBD_RAW_LABEL: u32 = 0x600;
+pub const KBD_RAW_LABEL: u32 = 0x600;
 
 /// Lock-free IRQ endpoint array
 ///
@@ -47,18 +47,16 @@ pub fn attach(irq: u8, endpoint_id: EndpointId) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn dispatch_scancode(irq: u8, scancode: u8) {
+pub fn dispatch_irq(irq: u8, label: u32, data: u8) {
     let irq_index = irq as usize;
     if irq_index >= MAX_IRQS {
         return;
     }
 
-    // Lock-free read (IRQ handlers can't block, so this is critical)
     let endpoint_raw = IRQ_ENDPOINTS[irq_index].load(Ordering::Acquire);
     if endpoint_raw == 0 {
-        // No endpoint bound for this IRQ
         if IRQ_MISS_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
-            klibcluu::warn("dispatch_scancode: no endpoint bound for IRQ");
+            klibcluu::warn("dispatch_irq: no endpoint bound for IRQ");
         }
         return;
     }
@@ -67,11 +65,11 @@ pub fn dispatch_scancode(irq: u8, scancode: u8) {
 
     let msg = UserMessage {
         tag: UserMessageTag {
-            label: KBD_RAW_LABEL,
+            label,
             words: 1,
             extra: 0,
         },
-        words: [scancode as usize, 0, 0, 0, 0, 0],
+        words: [data as usize, 0, 0, 0, 0, 0],
     };
     let msg_bytes = unsafe {
         core::slice::from_raw_parts(
@@ -89,12 +87,14 @@ pub fn dispatch_scancode(irq: u8, scancode: u8) {
             IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         Err(Error::WouldBlock) => {
-            // Queue full — userspace consumer fell behind.  Counted but
-            // not logged per-event; visible in telemetry snapshots.
             IRQ_LOCK_BUSY_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         Err(_) => {
             IRQ_SEND_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+pub fn dispatch_scancode(irq: u8, scancode: u8) {
+    dispatch_irq(irq, KBD_RAW_LABEL, scancode);
 }

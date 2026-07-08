@@ -14,8 +14,11 @@ const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
 const PT_LOAD: u32 = 1;
+const PT_INTERP: u32 = 3;
+const PT_DYNAMIC: u32 = 2;
 const EM_X86_64: u16 = 62;
 const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
 
 /// ELF segment flags
 const PF_X: u32 = 1 << 0; // Execute
@@ -70,6 +73,33 @@ pub enum BootElfError {
 /// Loader result alias.
 pub type BootElfResult<T> = core::result::Result<T, BootElfError>;
 
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuxvType {
+    Null = 0,
+    Phdr = 3,
+    Phent = 4,
+    Phnum = 5,
+    Pagesz = 6,
+    Base = 7,
+    Flags = 8,
+    Entry = 9,
+    Random = 25,
+    SysinfoEhdr = 33,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AuxvEntry {
+    pub kind: AuxvType,
+    pub value: u64,
+}
+
+impl AuxvEntry {
+    pub const fn null() -> Self {
+        Self { kind: AuxvType::Null, value: 0 }
+    }
+}
+
 /// Information about a loadable segment.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LoadableSegment {
@@ -121,11 +151,22 @@ pub struct ParsedElf {
     pub entry_point: u64,
     pub segments: [Option<LoadableSegment>; MAX_SEGMENTS],
     pub segment_count: usize,
+    pub elf_type: u16,
+    pub program_headers_offset: u64,
+    pub program_header_count: u16,
+    pub program_header_size: u16,
+    pub dynamic_offset: u64,
+    pub interp_offset: u64,
+    pub interp_size: u64,
 }
 
 impl ParsedElf {
     /// Get segment by index
     #[inline]
+    pub fn is_dyn(&self) -> bool {
+        self.elf_type == ET_DYN
+    }
+
     pub fn get_segment(&self, index: usize) -> Option<&LoadableSegment> {
         if index < self.segment_count {
             self.segments[index].as_ref()
@@ -159,13 +200,13 @@ impl ParsedElf {
         if ehdr.e_ident[5] != ELFDATA2LSB {
             return Err(BootElfError::InvalidFormat);
         }
-        if ehdr.e_type != ET_EXEC {
+        if ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN {
             return Err(BootElfError::InvalidFormat);
         }
         if ehdr.e_machine != EM_X86_64 {
             return Err(BootElfError::InvalidFormat);
         }
-        if ehdr.e_entry == 0 {
+        if ehdr.e_entry == 0 && ehdr.e_type != ET_DYN {
             return Err(BootElfError::InvalidFormat);
         }
 
@@ -181,25 +222,40 @@ impl ParsedElf {
             entry_point: ehdr.e_entry,
             segments: [None; MAX_SEGMENTS],
             segment_count: 0,
+            elf_type: ehdr.e_type,
+            program_headers_offset: ehdr.e_phoff,
+            program_header_count: ehdr.e_phnum,
+            program_header_size: ehdr.e_phentsize,
+            dynamic_offset: 0,
+            interp_offset: 0,
+            interp_size: 0,
         };
 
         for i in 0..phnum {
-            if parsed.segment_count >= MAX_SEGMENTS {
-                break;
-            }
-
             let ph_offset = phoff + i * phentsize;
             let phdr = unsafe { &*(data.as_ptr().add(ph_offset) as *const Elf64Phdr) };
 
-            if phdr.p_type == PT_LOAD {
-                parsed.segments[parsed.segment_count] = Some(LoadableSegment {
-                    vaddr: phdr.p_vaddr,
-                    file_offset: phdr.p_offset,
-                    file_size: phdr.p_filesz,
-                    mem_size: phdr.p_memsz,
-                    flags: phdr.p_flags,
-                });
-                parsed.segment_count += 1;
+            match phdr.p_type {
+                PT_LOAD => {
+                    if parsed.segment_count < MAX_SEGMENTS {
+                        parsed.segments[parsed.segment_count] = Some(LoadableSegment {
+                            vaddr: phdr.p_vaddr,
+                            file_offset: phdr.p_offset,
+                            file_size: phdr.p_filesz,
+                            mem_size: phdr.p_memsz,
+                            flags: phdr.p_flags,
+                        });
+                        parsed.segment_count += 1;
+                    }
+                }
+                PT_DYNAMIC => {
+                    parsed.dynamic_offset = phdr.p_offset;
+                }
+                PT_INTERP => {
+                    parsed.interp_offset = phdr.p_offset;
+                    parsed.interp_size = phdr.p_filesz;
+                }
+                _ => {}
             }
         }
 

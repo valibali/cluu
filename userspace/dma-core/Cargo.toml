@@ -1,0 +1,14 @@
+[package]
+name = "cluu-dma-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared DMA pool allocator for CLUU userspace drivers"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[lib]
+name = "cluu_dma_core"
+path = "src/lib.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu" }

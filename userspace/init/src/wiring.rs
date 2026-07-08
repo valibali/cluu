@@ -197,6 +197,16 @@ impl ServiceWiring for ServiceKind {
             ServiceKind::Tpmd => {
                 // Tpmd uses its elevated token for MMIO mapping (via TOKEN_SPACE rights)
             }
+            ServiceKind::UsbInput => {
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                tokens[TOKEN_EXTRA_1] = child_token;
+                let usb_irq_token = token_derive(
+                    ctx.boot.root_token,
+                    Rights::IRQ_HANDLE.bits() as usize,
+                    u64::MAX,
+                )?;
+                tokens[TOKEN_EXTRA_2] = usb_irq_token;
+            }
         }
         Ok(())
     }
@@ -224,7 +234,8 @@ impl ServiceWiring for ServiceKind {
             | ServiceKind::Inputd
             | ServiceKind::VirtioBlk
             | ServiceKind::Devmgr
-            | ServiceKind::Tpmd => Ok(()),
+            | ServiceKind::Tpmd
+            | ServiceKind::UsbInput => Ok(()),
             ServiceKind::Timeserver => Ok(()),
         }
     }

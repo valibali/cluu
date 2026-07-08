@@ -10,20 +10,26 @@ The default Rust userspace allocator (`LockedAllocator` in
 
 ### The code
 
-`allocator.rs:530-536`:
+`allocator.rs`:
 
 ```rust
 unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
     if let Some(mut guard) = self.inner.try_lock() {
+        self.drain_deferred(&mut guard);
         guard.dealloc(ptr)
     } else {
-        // Avoid deadlock on re-entrant free; leak as a safe fallback.
+        // Re-entrant: defer the free to the next successful alloc/dealloc.
+        let mut deferred = self.deferred.lock();
+        if deferred.count < DEFERRED_FREE_CAP {
+            deferred.ptrs[deferred.count] = ptr as usize;
+            deferred.count += 1;
+        }
     }
 }
 ```
 
-`alloc` (`allocator.rs:522-528`) has the same `try_lock` shape and returns
-`null_mut` on contention.
+`alloc` (`allocator.rs`) uses a blocking `lock()` and drains the
+deferred-free queue before each allocation.
 
 ### Why it exists
 
@@ -43,18 +49,23 @@ and the allocator has no yield point.
 ### Impact
 
 - Pure Rust binaries that never re-enter the allocator are unaffected.
-- Interpreters that run a GC inside `malloc`/`free` will leak on every
-  collection that touches the allocator recursively.
-- The leak is bounded by heap size. The process eventually OOMs rather than
-  deadlocks, which is the safer failure mode.
+- Interpreters that run a GC inside `malloc`/`free` no longer leak on
+  re-entrant `dealloc` — the deferred-free queue (64 entries) buffers
+  them for the next `alloc`/`dealloc` to drain.
+- `alloc` uses a blocking `lock()` (safe — alloc never re-enters alloc).
+- Residual: if 64+ re-entrant frees happen before any drain, the overflow
+  entries are leaked (same as old behavior, but now with a 64-entry buffer
+  instead of 0).
 
-### Fix (C2 upgrade)
+### Deferred-free mechanism (LANDED)
 
-Add a deferred-free list: on re-entrant `dealloc`, push the pointer onto a
-thread-local deferred list instead of dropping it; drain the list on the next
-non-re-entrant `alloc`/`dealloc`. This preserves the no-deadlock guarantee
-while reclaiming the memory. Tracked with the allocator-improvements work
-stream.
+The deferred-free list is implemented: on re-entrant `dealloc`, push the
+pointer onto a 64-entry ring buffer (`DEFERRED_FREE_CAP = 64`) instead of
+dropping it; drain the list on the next non-re-entrant `alloc`/`dealloc`.
+`alloc` uses a blocking `lock()` and drains before each allocation.
+`dealloc` keeps `try_lock` + deferred-free to preserve the no-deadlock
+guarantee for re-entrant frees. See `allocator.rs` (`DeferredFreeList`,
+`drain_deferred`).
 
 ### See also
 

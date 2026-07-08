@@ -42,6 +42,7 @@ pub enum ServiceKind {
     Inputd,
     VirtioBlk,
     Tpmd,
+    UsbInput,
 }
 
 // Capability grant for procmgr (it needs to create, map, and manage children).
@@ -83,6 +84,17 @@ const TPMD_RIGHTS_BITS: u32 = Rights::SPACE_MAP.bits()
     | Rights::CREATE.bits();
 
 const TPMD_RIGHTS: Rights = Rights::from_bits_truncate(TPMD_RIGHTS_BITS);
+
+const USB_INPUT_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
+    | Rights::SPACE_MAP.bits()
+    | Rights::IPC_SEND.bits()
+    | Rights::IPC_RECV.bits()
+    | Rights::CREATE.bits()
+    | Rights::GRANT.bits()
+    | Rights::IRQ_HANDLE.bits()
+    | Rights::IRQ_ACK.bits();
+
+const USB_INPUT_RIGHTS: Rights = Rights::from_bits_truncate(USB_INPUT_RIGHTS_BITS);
 
 /// Primordial services whose death causes init to panic.
 /// If any of these exit, the system is in an unrecoverable state.
@@ -168,6 +180,16 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         rights: Some(TPMD_RIGHTS),
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Tpmd,
+        instance_id: None,
+        profile: CapProfile::SERVICE,
+    },
+    ServiceSpec {
+        name: "usb-input",
+        path: "sys/usb-input",
+        priority: 170,
+        rights: Some(USB_INPUT_RIGHTS),
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::UsbInput,
         instance_id: None,
         profile: CapProfile::SERVICE,
     },

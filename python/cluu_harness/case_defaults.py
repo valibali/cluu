@@ -147,6 +147,60 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         sendkey_sequence_nowait=True,
         run_wait_s=45,
     ),
+    "errnoprobe": CaseDefaults(
+        test_command="errnoprobe",
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+    ),
+    "stackprobe": CaseDefaults(
+        test_command="stackprobe",
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+    ),
+    "dtachprobe": CaseDefaults(
+        test_command="dtachprobe",
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+    ),
+    "mmapprobe": CaseDefaults(
+        test_command="mmapprobe",
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+    ),
+    "gc_stress": CaseDefaults(
+        test_command="micropython /etc/gc_stress.py",
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=90,
+    ),
+    "acpiprobe": CaseDefaults(
+        test_command="acpiprobe",
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+    ),
+    "xhciprobe": CaseDefaults(
+        test_command="xhciprobe",
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=60,
+    ),
+    "usb_input_probe": CaseDefaults(
+        test_command="",  # primordial service, no shell command needed
+        sendkey_sequence="",
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+    ),
+    "dynprobe": CaseDefaults(
+        test_command="dynprobe",
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+    ),
     "none": CaseDefaults(test_command="hello"),
 }
 

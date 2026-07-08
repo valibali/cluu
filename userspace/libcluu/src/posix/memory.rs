@@ -607,11 +607,6 @@ pub extern "C" fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -> c_int
     if prot & PROT_EXEC != 0 {
         kern_flags |= 0x04;
     }
-    if prot == PROT_NONE {
-        // x86 user mappings do not currently support true PROT_NONE without guard-page support.
-        set_errno(ENOSYS);
-        return -1;
-    }
 
     let space_token = crate::boot::space_token();
     if space_token == 0 {

@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c dtachprobe userspace/c-programs/dtachprobe.c" target/x86_64-cluu-user/debug/dtachprobe.elf /bin/dtachprobe
+ENTRYPOINT /bin/dtachprobe

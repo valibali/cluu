@@ -26,6 +26,7 @@ pub struct BootSnapshot {
     pub fb_width: u32,
     pub fb_height: u32,
     pub fb_pitch: u32,
+    pub acpi_ptr: u64,
 }
 
 /// Read boot info and capture values init depends on.
@@ -46,6 +47,7 @@ pub fn capture_boot_snapshot() -> Result<BootSnapshot> {
         fb_width: info.fb_width,
         fb_height: info.fb_height,
         fb_pitch: info.fb_pitch,
+        acpi_ptr: info.acpi_ptr,
     })
 }
 

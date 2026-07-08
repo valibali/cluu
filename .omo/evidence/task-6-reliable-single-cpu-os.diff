@@ -1,0 +1,23 @@
+T6: Doc staleness fixes (4 documents)
+
+1. doc/book/interpreter_porting.md:46
+   - "64 KB, fixed, no growth" → "64 KiB initially mapped, demand-grows to 16 MiB ceiling"
+
+2. doc/book/interpreter_porting.md:91-93
+   - "No stack growth. 64 KB is fixed." → "Stack grows on demand. 64 KiB initially mapped; demand-pages to 16 MiB ceiling."
+
+3. README.md:25,35
+   - Removed "no threading" from MicroPython limitations (mpconfigport.h:33-34 sets MICROPY_PY_THREAD=1)
+
+4. doc/book/gotchas.md:13-23,51-57
+   - Updated code snippet to show current deferred-free implementation
+   - "Fix (C2 upgrade)" → "Deferred-free mechanism (LANDED)" — describes the actual implementation
+   - Updated impact section: no longer leaks on re-entrant dealloc (64-entry buffer)
+
+5. doc/book/memory_model.md:80
+   - "64 KiB, fixed, no growth" → "64 KiB initially mapped, demand-grows to 16 MiB ceiling"
+
+6. doc/book/memory_model.md:98
+   - "64 KiB (16 pages, DEFAULT_STACK_PAGES = 16)" → "Default 64 KiB... configurable via pthread_attr_setstacksize"
+
+Verification: grep -rn "64 KB.*fixed|no growth.*stack|no threading|planned.*deferred|Add a deferred-free|prot-none.*unsupported" doc/book/ → no matches

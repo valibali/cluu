@@ -1,0 +1,16 @@
+[package]
+name = "cluu-uhci-core"
+version = "0.1.0"
+edition = "2021"
+description = "UHCI USB 1.1 host controller driver for CLUU (I/O port based)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[lib]
+name = "cluu_uhci_core"
+path = "src/lib.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-driver-framework = { path = "../driver-framework" }
+cluu-dma-core = { path = "../dma-core" }

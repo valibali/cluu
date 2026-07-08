@@ -238,6 +238,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 
 [[package]]
+name = "cluu-acpi"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-acpiprobe"
+version = "0.1.0"
+dependencies = [
+ "cluu-acpi",
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-argvprobe"
 version = "0.1.0"
 dependencies = [
@@ -365,6 +380,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-dma-core"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-driver-framework"
+version = "0.1.0"
+dependencies = [
+ "cluu-dma-core",
+ "libcluu",
+ "spin",
+]
+
+[[package]]
 name = "cluu-du"
 version = "0.1.0"
 dependencies = [
@@ -375,6 +406,15 @@ dependencies = [
 name = "cluu-edit"
 version = "0.1.0"
 dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-ehci-core"
+version = "0.1.0"
+dependencies = [
+ "cluu-dma-core",
+ "cluu-driver-framework",
  "libcluu",
 ]
 
@@ -432,6 +472,7 @@ dependencies = [
 name = "cluu-init"
 version = "0.1.0"
 dependencies = [
+ "cluu-acpi",
  "cluu-root-procmgr",
  "klibcluu",
  "libcluu",
@@ -635,6 +676,13 @@ dependencies = [
  "cluu_wire",
  "libcluu",
  "postcard",
+]
+
+[[package]]
+name = "cluu-ld-cluu"
+version = "0.1.0"
+dependencies = [
+ "klibcluu",
 ]
 
 [[package]]
@@ -975,9 +1023,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-uhci-core"
+version = "0.1.0"
+dependencies = [
+ "cluu-dma-core",
+ "cluu-driver-framework",
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-uniq"
 version = "0.1.0"
 dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-usb-hid"
+version = "0.1.0"
+dependencies = [
+ "cluu-dma-core",
+ "cluu-driver-framework",
+ "cluu-xhci-core",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-usb-input"
+version = "0.1.0"
+dependencies = [
+ "cluu-dma-core",
+ "cluu-driver-framework",
+ "cluu-ehci-core",
  "libcluu",
 ]
 
@@ -1012,6 +1089,7 @@ name = "cluu-virtio-core"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.10.0",
+ "cluu-dma-core",
  "libcluu",
  "spin",
 ]
@@ -1049,6 +1127,24 @@ dependencies = [
 name = "cluu-which"
 version = "0.1.0"
 dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-xhci-core"
+version = "0.1.0"
+dependencies = [
+ "cluu-dma-core",
+ "cluu-driver-framework",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-xhciprobe"
+version = "0.1.0"
+dependencies = [
+ "cluu-dma-core",
+ "cluu-xhci-core",
  "libcluu",
 ]
 
@@ -1289,6 +1385,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "dynprobe"
+version = "0.1.0"
+dependencies = [
+ "cluu-ld-cluu",
+ "libcluu",
 ]
 
 [[package]]

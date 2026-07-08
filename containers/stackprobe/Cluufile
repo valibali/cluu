@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-c stackprobe userspace/c-programs/stackprobe.c" target/x86_64-cluu-user/debug/stackprobe.elf /bin/stackprobe
+ENTRYPOINT /bin/stackprobe

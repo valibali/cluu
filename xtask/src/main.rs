@@ -1401,6 +1401,9 @@ fn build_userspace(profile: &str) -> Result<()> {
     let userspace_crates = [
         "userspace/libcluu",    // Library must be first
         "userspace/virtio-blk", // Driver library
+        "userspace/dma-core",   // DMA library
+        "userspace/xhci-core",  // xHCI driver library
+        "userspace/usb-hid",    // USB HID library
         "userspace/ext2",       // Filesystem library
         "userspace/init",       // System programs
         "userspace/root-procmgr",
@@ -1425,6 +1428,8 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/ps",
         "userspace/touch",
         "userspace/tpmd",
+        "userspace/usb-input",
+        "userspace/probes/dynprobe",
         "userspace/basename",
         "userspace/date",
         "userspace/dirname",
@@ -1632,6 +1637,7 @@ fn create_initrd(profile: &str) -> Result<()> {
         "vfs",
         "virtio-blk",
         "tpmd",
+        "usb-input",
     ];
     let mut copied_sys_paths = Vec::new();
     for prog in &sys_programs {
@@ -1707,6 +1713,16 @@ fn manifest_rights_mask(path: &str) -> u32 {
                 | RIGHT_GRANT
         }
         "sys/virtio-blk" => {
+            RIGHT_PCI_ACCESS
+                | RIGHT_SPACE_MAP
+                | RIGHT_IPC_SEND
+                | RIGHT_IPC_RECV
+                | RIGHT_CREATE
+                | RIGHT_GRANT
+                | RIGHT_IRQ_HANDLE
+                | RIGHT_IRQ_ACK
+        }
+        "sys/usb-input" => {
             RIGHT_PCI_ACCESS
                 | RIGHT_SPACE_MAP
                 | RIGHT_IPC_SEND
@@ -1953,6 +1969,12 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
             fs::copy(&src, etc_dir.join(name))?;
             println!("  Added /etc/{}", name);
         }
+    }
+
+    let gc_stress_src = project_root().join("userspace/micropython/gc_stress.py");
+    if gc_stress_src.exists() {
+        fs::copy(&gc_stress_src, etc_dir.join("gc_stress.py"))?;
+        println!("  Added /etc/gc_stress.py");
     }
 
     let disk_path = project_root().join("target/userdisk.img");
@@ -2864,6 +2886,9 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("spawnpipeprobe", "userspace/c-programs/spawnpipeprobe.c"),
         ("tlsprobe", "userspace/c-programs/tlsprobe.c"),
         ("pthreadprobe", "userspace/c-programs/pthreadprobe.c"),
+        ("errnoprobe", "userspace/c-programs/errnoprobe.c"),
+        ("stackprobe", "userspace/c-programs/stackprobe.c"),
+        ("dtachprobe", "userspace/c-programs/dtachprobe.c"),
         ("devprobe", "userspace/c-programs/devprobe.c"),
         ("fbprobe", "userspace/c-programs/fbprobe.c"),
         ("devfb0_probe", "userspace/c-programs/devfb0_probe.c"),

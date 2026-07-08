@@ -43,9 +43,11 @@ a contiguous span the global allocator never touches.
 See [Memory Model](../memory_model/index.html) for the full map. The numbers
 that matter to an interpreter:
 
-- **Stack:** 64 KB, fixed, no growth. `mp_stack_set_limit(40000)` is safe
-  (leaves headroom for the C frames between the runtime entry and the
-  interpreter's stack check).
+- **Stack:** 64 KiB initially mapped, demand-grows to a 16 MiB ceiling
+  (`USER_STACK_SIZE` in `kernel/src/mm/space.rs`). The kernel page-fault
+  handler maps new stack pages on demand. `mp_stack_set_limit(40000)`
+  is safe (leaves headroom for the C frames between the runtime entry
+  and the interpreter's stack check).
 - **Heap:** 1 GiB max (`USER_HEAP_MAX = 0x0400_0000`). Rust linked-list
   allocator (default) or newlib `_sbrk` (c-runtime feature). The two are
   feature-gated, never coexisting.
@@ -88,9 +90,10 @@ upgrade.
   [Capability Tokens](../capability_tokens/index.html#spaceprotect-semantics)),
   but neither the Rust linked-list allocator nor newlib `_sbrk` calls it. A
   write-barrier GC must call `mprotect` itself.
-- **No stack growth.** 64 KB is fixed. An interpreter that recurses deeply
-  must implement its own stack-overflow check (MicroPython's
-  `mp_stack_set_limit`) or run on an explicit stack allocated from the heap.
+- **Stack grows on demand.** 64 KiB is initially mapped; the kernel
+  demand-pages up to a 16 MiB ceiling. An interpreter that recurses deeply
+  still needs its own stack-overflow check (MicroPython's
+  `mp_stack_set_limit`) or an explicit stack allocated from the heap.
 - **No memory-pressure callback.** Until the C4 upgrade lands, there is no
   way for the allocator to notify a process that it is near OOM. An
   interpreter must poll or set its own soft limit.

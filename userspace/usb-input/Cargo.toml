@@ -1,0 +1,17 @@
+[package]
+name = "cluu-usb-input"
+version = "0.1.0"
+edition = "2021"
+description = "USB HID input service (EHCI-backed keyboard + mouse)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-ehci-core = { path = "../ehci-core" }
+cluu-dma-core = { path = "../dma-core" }
+cluu-driver-framework = { path = "../driver-framework" }
+
+[[bin]]
+name = "usb-input"
+path = "src/main.rs"

@@ -21,6 +21,7 @@ pub struct BootInfo {
     pub fb_width: u32,
     pub fb_height: u32,
     pub fb_pitch: u32,
+    pub acpi_ptr: u64,
 }
 
 /// Virtual address where the initrd is mapped in userspace.

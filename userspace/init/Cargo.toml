@@ -9,6 +9,7 @@ license = "MIT"
 [dependencies]
 libcluu = { path = "../libcluu" }
 cluu-root-procmgr = { path = "../root-procmgr" }
+cluu-acpi = { path = "../acpi" }
 klibcluu = { path = "../../klibcluu" }
 
 [[bin]]

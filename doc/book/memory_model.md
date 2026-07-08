@@ -77,7 +77,7 @@ With the `c-runtime` feature, `NewlibAllocator` delegates to `malloc` / `free`
 
 ### Main process stack
 
-64 KiB, fixed, no growth. `PROC_STACK_SIZE = 64 * 1024`
+64 KiB initially mapped, demand-grows to 16 MiB ceiling. `PROC_STACK_SIZE = 64 * 1024`
 (`userspace/init/src/wiring.rs:121`). procmgr maps it through `map_stack`
 (`userspace/libcluu/src/process.rs:120`) with a single `space_map_range`
 call.
@@ -95,8 +95,9 @@ MiB ceiling.
 
 ### Pthread stacks
 
-64 KiB (16 pages, `DEFAULT_STACK_PAGES = 16`,
-`userspace/libcluu/src/posix/pthread.rs:108`), allocated from
+Default 64 KiB (16 pages, `DEFAULT_STACK_PAGES = 16`,
+`userspace/libcluu/src/posix/pthread.rs:108`), configurable via
+`pthread_attr_setstacksize` (honored by `pthread_create`). Allocated from
 `0x6000_0000..0x7000_0000` (`THREAD_STACK_REGION_START` / `_END`,
 `pthread.rs:113-114`). Each thread gets a guard page below its stack:
 `alloc_thread_stack` (`pthread.rs:213-235`) leaves `stack_base - PAGE_SIZE`

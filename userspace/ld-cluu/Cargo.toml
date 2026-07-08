@@ -1,0 +1,14 @@
+[package]
+name = "cluu-ld-cluu"
+version = "0.1.0"
+edition = "2021"
+description = "Dynamic linker/loader for CLUU (self-reloc, DT_NEEDED, reloc engine)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[lib]
+name = "cluu_ld_cluu"
+path = "src/lib.rs"
+
+[dependencies]
+klibcluu = { path = "../../klibcluu" }
