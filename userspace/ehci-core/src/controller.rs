@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::format;
+use alloc::vec::Vec;
 use cluu_dma_core::{DmaPool, DmaRegion};
 use cluu_driver_framework::mmio::{MmioAccess, MmioRegion};
 use cluu_driver_framework::pci::{self, PciDeviceInfo};
@@ -10,7 +11,7 @@ use crate::queue::{
     setup_token_packet, PID_IN, PID_OUT, PID_SETUP, QueueHead, QtD,
     REQ_GET_DESCRIPTOR, REQ_SET_ADDRESS, REQ_SET_CONFIGURATION, REQ_SET_IDLE,
     REQ_SET_PROTOCOL, REQ_TYPE_CLASS, REQ_TYPE_DEV_TO_HOST, REQ_TYPE_HOST_TO_DEV,
-    REQ_TYPE_RECIPIENT_INTERFACE, DESC_DEVICE,
+    REQ_TYPE_RECIPIENT_INTERFACE, DESC_DEVICE, DESC_CONFIGURATION,
 };
 use crate::regs::{
     EhciRegs, PORTSC_CCS, PORTSC_CSC, PORTSC_PED, PORTSC_PEC, PORTSC_PP, PORTSC_RESET,
@@ -21,13 +22,16 @@ use crate::regs::{
 const FRAME_LIST_SIZE: usize = 1024;
 const FRAME_LIST_BYTES: usize = FRAME_LIST_SIZE * 4;
 
+/// Maximum number of simultaneous interrupt-IN devices (e.g. kbd + mouse).
+pub const MAX_INTR_SLOTS: usize = 2;
+
 pub struct EhciController {
     pub regs: EhciRegs,
     pub pci_dev: PciDeviceInfo,
     pub n_ports: u8,
     pub async_head: DmaRegion,
     pub periodic_list: DmaRegion,
-    pub intr_qh: DmaRegion,
+    pub intr_qhs: [DmaRegion; MAX_INTR_SLOTS],
 }
 
 impl EhciController {
@@ -55,7 +59,8 @@ impl EhciController {
 
         let async_head = pool.alloc(core::mem::size_of::<QueueHead>(), 32)?;
         let periodic_list = pool.alloc(FRAME_LIST_BYTES, 4096)?;
-        let intr_qh = pool.alloc(core::mem::size_of::<QueueHead>(), 32)?;
+        let intr_qh0 = pool.alloc(core::mem::size_of::<QueueHead>(), 32)?;
+        let intr_qh1 = pool.alloc(core::mem::size_of::<QueueHead>(), 32)?;
 
         Ok(Self {
             regs,
@@ -63,7 +68,7 @@ impl EhciController {
             n_ports,
             async_head,
             periodic_list,
-            intr_qh,
+            intr_qhs: [intr_qh0, intr_qh1],
         })
     }
 
@@ -103,18 +108,28 @@ impl EhciController {
         self.regs.set_async_list_base(async_phys);
 
         let frame_list_ptr = self.periodic_list.virt as *mut u32;
-        let intr_phys = self.intr_qh.phys as u32;
-        let intr_qh = unsafe { &mut *(self.intr_qh.virt as *mut QueueHead) };
-        intr_qh.terminate_next();
-        intr_qh.terminate_qtd();
-        intr_qh.set_h_addr(0);
-        intr_qh.set_ep_number(1);
-        intr_qh.set_eps(2);
-        intr_qh.set_max_packet_len(8);
+        let intr_phys0 = self.intr_qhs[0].phys as u32;
+        let intr_phys1 = self.intr_qhs[1].phys as u32;
+
+        let intr_qh0 = unsafe { &mut *(self.intr_qhs[0].virt as *mut QueueHead) };
+        intr_qh0.terminate_qtd();
+        intr_qh0.set_h_addr(0);
+        intr_qh0.set_ep_number(1);
+        intr_qh0.set_eps(2);
+        intr_qh0.set_max_packet_len(8);
+        intr_qh0.set_next_qh(intr_phys1 | 0x2);
+
+        let intr_qh1 = unsafe { &mut *(self.intr_qhs[1].virt as *mut QueueHead) };
+        intr_qh1.terminate_next();
+        intr_qh1.terminate_qtd();
+        intr_qh1.set_h_addr(0);
+        intr_qh1.set_ep_number(1);
+        intr_qh1.set_eps(2);
+        intr_qh1.set_max_packet_len(8);
 
         for i in 0..FRAME_LIST_SIZE {
             unsafe {
-                core::ptr::write_volatile(frame_list_ptr.add(i), intr_phys | 0x2);
+                core::ptr::write_volatile(frame_list_ptr.add(i), intr_phys0 | 0x2);
             }
         }
         self.regs.set_periodic_list_base(self.periodic_list.phys as u32);
@@ -148,6 +163,21 @@ impl EhciController {
             }
         }
         None
+    }
+
+    pub fn find_connected_ports(&self) -> Vec<u8> {
+        let mut ports = Vec::new();
+        for port in 0..self.n_ports {
+            let sc = self.regs.portsc(port);
+            if sc & PORTSC_CCS != 0 {
+                let _ = debug_print(&format!(
+                    "ehci-core: port {} connected (PORTSC=0x{:08x})",
+                    port, sc
+                ));
+                ports.push(port);
+            }
+        }
+        ports
     }
 
     pub fn reset_port(&self, port: u8) -> Result<u8> {
@@ -427,6 +457,26 @@ impl EhciController {
         Ok(buf)
     }
 
+    pub fn get_config_descriptor(
+        &mut self,
+        pool: &mut DmaPool,
+        addr: u8,
+        ep_speed: u8,
+        max_pkt: u16,
+    ) -> Result<[u8; 64]> {
+        let setup = setup_token_packet(
+            REQ_TYPE_DEV_TO_HOST,
+            REQ_GET_DESCRIPTOR,
+            (DESC_CONFIGURATION as u16) << 8,
+            0,
+            64,
+        );
+        let mut buf = [0u8; 64];
+        let n = self.control_transfer(pool, addr, ep_speed, max_pkt, &setup, Some(&mut buf), true)?;
+        let _ = debug_print(&format!("ehci-core: GET_DESCRIPTOR config, got {} bytes", n));
+        Ok(buf)
+    }
+
     pub fn set_configuration(
         &mut self,
         pool: &mut DmaPool,
@@ -477,10 +527,14 @@ impl EhciController {
     pub fn setup_interrupt_in(
         &mut self,
         pool: &mut DmaPool,
+        slot: usize,
         addr: u8,
         max_pkt: u16,
         report_dma: &DmaRegion,
     ) -> Result<()> {
+        if slot >= MAX_INTR_SLOTS {
+            return Err(Error::InvalidArgument);
+        }
         let td_dma = pool.alloc(core::mem::size_of::<QtD>(), 32)?;
         let td = unsafe { &mut *(td_dma.virt as *mut QtD) };
         *td = QtD::new();
@@ -491,23 +545,26 @@ impl EhciController {
         td.set_ioc();
         td.set_buffer(report_dma.phys as u32);
 
-        let intr_qh = unsafe { &mut *(self.intr_qh.virt as *mut QueueHead) };
+        let intr_qh = unsafe { &mut *(self.intr_qhs[slot].virt as *mut QueueHead) };
         intr_qh.set_h_addr(addr);
         intr_qh.set_ep_number(1);
         intr_qh.set_eps(2);
         intr_qh.set_max_packet_len(max_pkt);
         intr_qh.set_qtd_ptr(td_dma.phys as u32);
 
-        let _ = debug_print("ehci-core: interrupt IN queued");
+        let _ = debug_print(&format!("ehci-core: interrupt IN queued (slot={})", slot));
         Ok(())
     }
 
-    pub fn poll_interrupt(&self, _report_dma: &DmaRegion, _max_len: usize) -> Option<usize> {
+    pub fn poll_interrupt(&self, slot: usize, _report_dma: &DmaRegion, _max_len: usize) -> Option<usize> {
+        if slot >= MAX_INTR_SLOTS {
+            return None;
+        }
         let sts = self.regs.usbsts();
         if sts & USBSTS_INT != 0 {
             self.regs.set_usbsts(sts);
         }
-        let intr_qh = unsafe { &*(self.intr_qh.virt as *const QueueHead) };
+        let intr_qh = unsafe { &*(self.intr_qhs[slot].virt as *const QueueHead) };
         if intr_qh.is_active() {
             return None;
         }

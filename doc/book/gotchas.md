@@ -503,3 +503,21 @@ highest-ROI cleanup during the freeze.
 **Impact after fix:** Only the first executable segment is demand-paged; subsequent ones are eagerly mapped (small memory cost, correct behavior).
 
 **See also:** [Memory Model](../memory_model/index.html) for M9 demand-paged text. `kernel/src/mm/space.rs`: `set_text_with_source`. `kernel/src/architecture/x86_64/idt.rs`: `handle_text_fault`.
+
+## usb-input-irq11-conflict (2026-07-09-usb-input-ehci-irq)
+
+**Symptom:** `usb-input` cannot use EHCI IRQ for interrupt-IN completion. Attaching IRQ 11 steals it from virtio-blk, breaking all disk reads — login fails because procmgr cannot load container images from `/var/images`.
+
+**Code site:** `kernel/src/devices/irq.rs`: `attach()` — `IRQ_ENDPOINTS[irq_index].store(endpoint, Release)` overwrites the previous binding. Single endpoint per IRQ line, no chaining.
+
+**Root cause:** QEMU's PCI topology assigns both the virtio-blk PCI device and the usb-ehci controller to legacy IRQ 11. The kernel's IRQ routing is a flat array indexed by IRQ number — last `irq_attach` wins. `virtio-blk` attaches first (boot order), then `usb-input` overwrites IRQ 11's endpoint. All subsequent IRQ 11 deliveries go to usb-input's endpoint; virtio-blk never receives its completions.
+
+**Why the trap exists:** The kernel does not support shared IRQ lines (no interrupt chaining, no level-triggered multicast). This is a pre-v1 simplification — real hardware shares IRQs routinely.
+
+**Workaround (shipped):** `usb-input` uses polling instead of IRQ. The main loop calls `ipc_recv_any` with a 10ms timeout, then polls `EhciController::poll_interrupt` on all device slots. The kernel blocks the thread during the recv timeout (CPU HLTs), so 100 wakeups/sec × microseconds of register reads = negligible host CPU. Do NOT attempt `irq_attach` for EHCI until the kernel supports shared IRQ delivery.
+
+**Prior bug:** The original `usb-input` main loop also used `ipc_recv_any` with timeout `0` (non-blocking) + `yield_cpu()` on error — a tight busy loop that caused 100% host CPU. The 10ms timeout fixes both the original busy-loop and the IRQ conflict.
+
+**Impact:** `usb-input` works correctly with polling. Keyboard/mouse input is forwarded to `inputd:input` → `vtmgr` → `tty`/`compositor`. Latency is bounded by the 10ms poll interval (imperceptible for human input).
+
+**See also:** `userspace/usb-input/src/main.rs` (poll loop), `userspace/virtio-core/src/irq.rs` (`IrqSource` — the IRQ attach helper that virtio-blk uses), `kernel/src/devices/irq.rs` (single-endpoint routing).

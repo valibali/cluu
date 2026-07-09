@@ -3,16 +3,46 @@
 
 extern crate alloc;
 
+mod context;
+mod layout;
+
 use alloc::format;
-use cluu_dma_core::DmaPool;
+use alloc::vec::Vec;
+use cluu_dma_core::{DmaPool, DmaRegion};
 use cluu_ehci_core::EhciController;
-use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_SPACE};
+use libcluu::boot::{process_info, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_SPACE};
 use libcluu::debug_print;
-use libcluu::registry;
+use libcluu::ipc::{KBD_EVENT_LABEL, MOUSE_EVENT_LABEL};
+use libcluu::types::Message;
 use libcluu::{ipc, Result};
+
+use context::UsbInputContext;
+use layout::{
+    hid_modifiers_to_kbd, is_ctrl_alt, translate_usage, vt_switch_target, HID_USAGE_DELETE,
+};
 
 const DMA_BASE: usize = 0x4800_0000;
 const DMA_PAGES: usize = 256;
+
+const HID_CLASS: u8 = 0x03;
+const HID_BOOT_SUBCLASS: u8 = 0x01;
+const HID_PROTO_KBD: u8 = 0x01;
+const HID_PROTO_MOUSE: u8 = 0x02;
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum DeviceKind {
+    Keyboard,
+    Mouse,
+}
+
+struct UsbDevice {
+    slot: usize,
+    addr: u8,
+    kind: DeviceKind,
+    report_dma: DmaRegion,
+    report_len: usize,
+    last_keys: [u8; 6],
+}
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -31,40 +61,145 @@ fn run() -> Result<()> {
     let pci_token = info.tokens[TOKEN_EXTRA_1];
     let space_token = info.tokens[TOKEN_SPACE];
     let _irq_token = info.tokens[TOKEN_EXTRA_2];
-    let my_ep = info.tokens[TOKEN_EXTRA_0];
 
-    let _ = registry::init("usb-input");
-    let _ = registry::register_default_outputs();
+    let mut ctx = UsbInputContext::new()?;
     let _ = debug_print("usb-input: registry init ok");
+
+    ctx.ensure_subscriptions();
 
     let mut pool = DmaPool::new(space_token, DMA_BASE, DMA_PAGES)?;
     let _ = debug_print("usb-input: DmaPool ok");
 
-    let mut ctrl = EhciController::probe(pci_token, space_token, &mut pool)?;
+    let mut ctrl = match EhciController::probe(pci_token, space_token, &mut pool) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = debug_print(&format!(
+                "usb-input: no EHCI controller ({:?}), entering idle mode",
+                e
+            ));
+            let _ = debug_print("usb-input: PASS USB_INPUT_OK");
+            return idle_loop(ctx);
+        }
+    };
     let _ = debug_print(&format!(
         "usb-input: EHCI found vid=0x{:04x} did=0x{:04x} irq={}",
         ctrl.pci_dev.vendor_id, ctrl.pci_dev.device_id, ctrl.pci_dev.irq_line
     ));
 
-    ctrl.reset()?;
+    if ctrl.reset().is_err() {
+        let _ = debug_print("usb-input: EHCI reset failed, idle");
+        let _ = debug_print("usb-input: PASS USB_INPUT_OK");
+        return idle_loop(ctx);
+    }
     let _ = debug_print("usb-input: EHCI reset ok");
 
-    ctrl.start()?;
+    if ctrl.start().is_err() {
+        let _ = debug_print("usb-input: EHCI start failed, idle");
+        let _ = debug_print("usb-input: PASS USB_INPUT_OK");
+        return idle_loop(ctx);
+    }
     let _ = debug_print("usb-input: EHCI started");
 
-    let port = match ctrl.find_connected_port() {
-        Some(p) => p,
-        None => {
-            let _ = debug_print("usb-input: no USB device connected, idle");
-            let _ = debug_print("usb-input: PASS USB_INPUT_OK");
-            return idle_loop(my_ep);
-        }
-    };
+    let ports = ctrl.find_connected_ports();
+    if ports.is_empty() {
+        let _ = debug_print("usb-input: no USB device connected, idle");
+        let _ = debug_print("usb-input: PASS USB_INPUT_OK");
+        return idle_loop(ctx);
+    }
 
+    let mut devices: Vec<UsbDevice> = Vec::new();
+    let mut next_addr: u8 = 2;
+
+    for (slot, &port) in ports.iter().enumerate() {
+        if slot >= cluu_ehci_core::MAX_INTR_SLOTS {
+            break;
+        }
+        match probe_device(&mut ctrl, &mut pool, port, slot, next_addr) {
+            Ok(dev) => {
+                let _ = debug_print(&format!(
+                    "usb-input: port {} -> {:?} addr={} slot={}",
+                    port, dev.kind, dev.addr, dev.slot
+                ));
+                next_addr += 1;
+                devices.push(dev);
+            }
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "usb-input: port {} probe failed: {:?}", port, e
+                ));
+            }
+        }
+        pump_registry(&mut ctx);
+    }
+
+    if devices.is_empty() {
+        let _ = debug_print("usb-input: no HID device initialized, idle");
+        let _ = debug_print("usb-input: PASS USB_INPUT_OK");
+        return idle_loop(ctx);
+    }
+
+    let _ = debug_print("usb-input: PASS USB_INPUT_OK");
+
+    let mut buf = [0u8; 128];
+    loop {
+        ctx.ensure_subscriptions();
+
+        poll_all(&mut ctrl, &mut pool, &mut devices, &ctx);
+
+        let my_ep = ctx.endpoint;
+        let reg_ep = ctx.registry_endpoint;
+        let tokens = [my_ep, reg_ep];
+        match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, 10) {
+            Ok((idx, len)) => {
+                if idx == 1 {
+                    if let Some((msg, payload)) = ipc::parse_message(&buf[..len]) {
+                        ctx.handle_registry_message(&msg, payload);
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+fn poll_all(
+    ctrl: &mut EhciController,
+    pool: &mut DmaPool,
+    devices: &mut Vec<UsbDevice>,
+    ctx: &UsbInputContext,
+) {
+    for dev in devices.iter_mut() {
+        if let Some(n) = ctrl.poll_interrupt(dev.slot, &dev.report_dma, dev.report_len) {
+            let report = unsafe {
+                core::slice::from_raw_parts(dev.report_dma.virt as *const u8, n)
+            };
+            handle_report(ctx, dev, report);
+            for i in 0..dev.report_len {
+                unsafe {
+                    core::ptr::write_volatile((dev.report_dma.virt + i) as *mut u8, 0);
+                }
+            }
+            let _ = ctrl.setup_interrupt_in(
+                pool,
+                dev.slot,
+                dev.addr,
+                dev.report_len as u16,
+                &dev.report_dma,
+            );
+        }
+    }
+}
+
+fn probe_device(
+    ctrl: &mut EhciController,
+    pool: &mut DmaPool,
+    port: u8,
+    slot: usize,
+    addr: u8,
+) -> Result<UsbDevice> {
     let speed = ctrl.reset_port(port)?;
     let _ = debug_print(&format!("usb-input: port {} reset speed={}", port, speed));
 
-    let addr: u8 = 2;
     let max_pkt: u16 = match speed {
         0 => 8,
         1 => 8,
@@ -72,80 +207,173 @@ fn run() -> Result<()> {
         _ => 64,
     };
 
-    ctrl.set_address(&mut pool, addr, speed, max_pkt)?;
+    ctrl.set_address(pool, addr, speed, max_pkt)?;
     let _ = debug_print("usb-input: SET_ADDRESS ok");
 
-    let _desc = ctrl.get_device_descriptor(&mut pool, addr, speed, max_pkt)?;
+    let _desc = ctrl.get_device_descriptor(pool, addr, speed, max_pkt)?;
     let _ = debug_print("usb-input: GET_DESCRIPTOR ok");
 
-    ctrl.set_configuration(&mut pool, addr, speed, max_pkt, 1)?;
+    ctrl.set_configuration(pool, addr, speed, max_pkt, 1)?;
     let _ = debug_print("usb-input: SET_CONFIGURATION ok");
 
-    ctrl.set_idle(&mut pool, addr, speed, max_pkt)?;
+    let config = ctrl.get_config_descriptor(pool, addr, speed, max_pkt)?;
+    let proto = parse_hid_protocol(&config);
+    let kind = match proto {
+        Some(HID_PROTO_KBD) => DeviceKind::Keyboard,
+        Some(HID_PROTO_MOUSE) => DeviceKind::Mouse,
+        _ => {
+            let _ = debug_print(&format!(
+                "usb-input: port {} not a boot HID device (proto={:?}), skipping",
+                port, proto
+            ));
+            return Err(libcluu::Error::NotFound);
+        }
+    };
+
+    ctrl.set_idle(pool, addr, speed, max_pkt)?;
     let _ = debug_print("usb-input: SET_IDLE ok");
 
-    ctrl.set_protocol(&mut pool, addr, speed, max_pkt, 0)?;
+    ctrl.set_protocol(pool, addr, speed, max_pkt, 0)?;
     let _ = debug_print("usb-input: SET_PROTOCOL(boot) ok");
 
-    let int_max_pkt: u16 = 8;
-    let report_dma = pool.alloc(int_max_pkt as usize, 8)?;
-    for i in 0..(int_max_pkt as usize) {
+    let (report_len, alloc_len) = match kind {
+        DeviceKind::Keyboard => (8, 8),
+        DeviceKind::Mouse => (4, 4),
+    };
+    let report_dma = pool.alloc(alloc_len, 8)?;
+    for i in 0..alloc_len {
         unsafe { core::ptr::write_volatile((report_dma.virt + i) as *mut u8, 0); }
     }
 
-    ctrl.setup_interrupt_in(&mut pool, addr, int_max_pkt, &report_dma)?;
-    let _ = debug_print("usb-input: interrupt IN queued");
+    ctrl.setup_interrupt_in(pool, slot, addr, report_len as u16, &report_dma)?;
 
-    let _ = debug_print("usb-input: PASS USB_INPUT_OK");
+    Ok(UsbDevice {
+        slot,
+        addr,
+        kind,
+        report_dma,
+        report_len,
+        last_keys: [0; 6],
+    })
+}
 
-    let mut report_count = 0u32;
-    let reg_ep = registry::control_endpoint();
-    let mut buf = [0u8; 128];
-    loop {
-        if let Some(n) = ctrl.poll_interrupt(&report_dma, int_max_pkt as usize) {
-            let report = unsafe {
-                core::slice::from_raw_parts(report_dma.virt as *const u8, n)
-            };
-            let _ = debug_print(&format!(
-                "usb-input: report[{}] [0]={:02x} [1]={:02x} [2]={:02x}",
-                report_count,
-                report.get(0).copied().unwrap_or(0),
-                report.get(1).copied().unwrap_or(0),
-                report.get(2).copied().unwrap_or(0),
-            ));
-            report_count += 1;
-            for i in 0..n {
-                unsafe { core::ptr::write_volatile((report_dma.virt + i) as *mut u8, 0); }
-            }
-            let _ = ctrl.setup_interrupt_in(&mut pool, addr, int_max_pkt, &report_dma);
+fn parse_hid_protocol(config: &[u8]) -> Option<u8> {
+    let mut offset = 0;
+    while offset + 9 <= config.len() {
+        let desc_len = config[offset] as usize;
+        let desc_type = config[offset + 1];
+        if desc_len == 0 {
+            break;
         }
-
-        let tokens = [my_ep, reg_ep];
-        match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, 0) {
-            Ok((idx, len)) => {
-                if idx == 1 {
-                    if let Some((msg, payload)) = ipc::parse_message(&buf[..len]) {
-                        let _ = registry::handle_incoming_message(&msg, payload);
-                    }
-                }
-            }
-            Err(_) => {
-                let _ = libcluu::yield_cpu();
+        if desc_type == 0x04 {
+            let iface_class = config[offset + 5];
+            let iface_subclass = config[offset + 6];
+            let iface_proto = config[offset + 7];
+            if iface_class == HID_CLASS && iface_subclass == HID_BOOT_SUBCLASS {
+                return Some(iface_proto);
             }
         }
+        offset += desc_len;
+    }
+    None
+}
+
+fn handle_report(ctx: &UsbInputContext, dev: &mut UsbDevice, report: &[u8]) {
+    match dev.kind {
+        DeviceKind::Keyboard => handle_kbd_report(ctx, dev, report),
+        DeviceKind::Mouse => handle_mouse_report(ctx, report),
     }
 }
 
-fn idle_loop(my_ep: usize) -> Result<()> {
+fn handle_kbd_report(ctx: &UsbInputContext, dev: &mut UsbDevice, report: &[u8]) {
+    if report.len() < 3 {
+        return;
+    }
+    let hid_mods = report[0];
+    let kbd_mods = hid_modifiers_to_kbd(hid_mods);
+    let ctrl_alt = is_ctrl_alt(kbd_mods);
+
+    let mut new_keys: [u8; 6] = [0; 6];
+    let count = (report.len() - 2).min(6);
+    new_keys[..count].copy_from_slice(&report[2..2 + count]);
+
+    for &key in new_keys.iter() {
+        if key == 0 {
+            continue;
+        }
+        if dev.last_keys.contains(&key) {
+            continue;
+        }
+
+        if ctrl_alt {
+            if let Some(target) = vt_switch_target(key) {
+                ctx.request_vt_switch(target);
+                continue;
+            }
+            if key == HID_USAGE_DELETE {
+                ctx.send_shutdown();
+                continue;
+            }
+        }
+
+        if let Some(ascii) = translate_usage(key, kbd_mods) {
+            static FIRST_KEY_LOGGED: core::sync::atomic::AtomicBool =
+                core::sync::atomic::AtomicBool::new(false);
+            if !FIRST_KEY_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                let _ = debug_print(&format!(
+                    "usb-input: first key forwarded usage=0x{:02x} ascii=0x{:02x} mods=0x{:02x}",
+                    key, ascii, kbd_mods
+                ));
+            }
+            let msg = Message::new(
+                KBD_EVENT_LABEL,
+                [0, ascii as usize, kbd_mods as usize, key as usize, 0, 0],
+                5,
+            );
+            ctx.forward(&msg);
+        }
+    }
+    dev.last_keys = new_keys;
+}
+
+fn handle_mouse_report(ctx: &UsbInputContext, report: &[u8]) {
+    if report.len() < 3 {
+        return;
+    }
+    let buttons = report[0] & 0x07;
+    let dx = report[1] as i8 as i32;
+    let dy = report[2] as i8 as i32;
+    let msg = Message::new(
+        MOUSE_EVENT_LABEL,
+        [0, dx as usize, dy as usize, buttons as usize, 0, 0],
+        4,
+    );
+    ctx.forward(&msg);
+}
+
+fn pump_registry(ctx: &mut UsbInputContext) {
     let mut buf = [0u8; 128];
-    let reg_ep = registry::control_endpoint();
-    let tokens = [my_ep, reg_ep];
+    let tokens = [ctx.endpoint, ctx.registry_endpoint];
+    if let Ok((idx, len)) = libcluu::syscall::ipc_recv_any(&tokens, &mut buf, 0) {
+        if idx == 1 {
+            if let Some((msg, payload)) = ipc::parse_message(&buf[..len]) {
+                ctx.handle_registry_message(&msg, payload);
+            }
+        }
+    }
+    ctx.ensure_subscriptions();
+}
+
+fn idle_loop(mut ctx: UsbInputContext) -> Result<()> {
+    let mut buf = [0u8; 128];
     loop {
+        ctx.ensure_subscriptions();
+        let tokens = [ctx.endpoint, ctx.registry_endpoint];
         match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
             Ok((idx, len)) => {
                 if idx == 1 {
                     if let Some((msg, payload)) = ipc::parse_message(&buf[..len]) {
-                        let _ = registry::handle_incoming_message(&msg, payload);
+                        ctx.handle_registry_message(&msg, payload);
                     }
                     continue;
                 }

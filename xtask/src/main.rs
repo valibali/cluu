@@ -2059,6 +2059,13 @@ fn run_qemu(debug: bool) -> Result<()> {
         &format!("file={},format=raw,if=none,id=userblk", user_disk.display()),
         "-device",
         "virtio-blk-pci,drive=userblk,disable-legacy=on,disable-modern=off",
+        // USB 2.0 EHCI host controller + keyboard/mouse
+        "-device",
+        "usb-ehci,id=ehci",
+        "-device",
+        "usb-kbd,bus=ehci.0",
+        "-device",
+        "usb-mouse,bus=ehci.0",
         "-display",
         "gtk",
         "-no-reboot",
