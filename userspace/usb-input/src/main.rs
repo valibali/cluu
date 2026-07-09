@@ -316,18 +316,18 @@ fn handle_kbd_report(ctx: &UsbInputContext, dev: &mut UsbDevice, report: &[u8]) 
             }
         }
 
-        if let Some(ascii) = translate_usage(key, kbd_mods) {
+        if let Some((scancode, ascii)) = translate_usage(key, kbd_mods) {
             static FIRST_KEY_LOGGED: core::sync::atomic::AtomicBool =
                 core::sync::atomic::AtomicBool::new(false);
             if !FIRST_KEY_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed) {
                 let _ = debug_print(&format!(
-                    "usb-input: first key forwarded usage=0x{:02x} ascii=0x{:02x} mods=0x{:02x}",
-                    key, ascii, kbd_mods
+                    "usb-input: first key forwarded usage=0x{:02x} scancode=0x{:02x} ascii=0x{:02x} mods=0x{:02x}",
+                    key, scancode, ascii, kbd_mods
                 ));
             }
             let msg = Message::new(
                 KBD_EVENT_LABEL,
-                [0, ascii as usize, kbd_mods as usize, key as usize, 0, 0],
+                [0, ascii as usize, kbd_mods as usize, scancode as usize, 0, 0],
                 5,
             );
             ctx.forward(&msg);

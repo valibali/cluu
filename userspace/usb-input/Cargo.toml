@@ -6,6 +6,10 @@ description = "USB HID input service (EHCI-backed keyboard + mouse)"
 authors = ["CLUU Team", "Balazs Valkony"]
 license = "MIT"
 
+[features]
+default = ["hu-layout"]
+hu-layout = []
+
 [dependencies]
 libcluu = { path = "../libcluu" }
 cluu-ehci-core = { path = "../ehci-core" }
