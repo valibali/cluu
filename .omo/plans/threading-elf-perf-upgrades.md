@@ -111,14 +111,36 @@ Harness full run with debug kernel; asserts never fire.
 
 ---
 
-## P0-3: Parallel autostart (FUTURE OPTIMIZATION)
+## P0-3: Parallel autostart (CLOSED — not worth pursuing)
 
-> **Deferred 2026-07-09:** Measurement shows the serial autostart window is
-> ~500ms of `space_map_range` kernel invoke ops (57%) + ~300ms ext2 reads
-> (37%, now preloaded into VFS cache). P2-prewarm is enabled for post-boot
-> `spawn` responsiveness. The remaining ~500ms serial map-compute would
-> require giving procmgr an async runtime — non-trivial complexity for
-> sub-second savings. Revisit if boot time becomes a user-facing problem.
+> **Instrumented 2026-07-09 (SPAWN_PROFILE + ELF_PROFILE baseline run):**
+>
+> Serial autostart window = ~640ms (8 spawns × ~80ms avg). Per-stage split:
+>
+> | Stage | Range | % of total |
+> |-------|-------|------------|
+> | space_create | 137-258us | <1% |
+> | elf_fetch (VFS IPC round-trip) | 53-151ms | **81-94%** |
+> | map_segments | 1.5-2.5ms | 2-4% |
+> | stack_map | ~2ms | 2-3% |
+> | thread_start | ~3ms | 3-5% |
+>
+> VFS map_elf breakdown: request→elf_cached 3-6ms (P2-prewarm cache hit),
+> elf_cached→segments_mapped 14-20ms (space_map_range syscalls),
+> segments_mapped→reply 3-5ms.
+>
+> P2-prewarm already eliminated disk I/O — `elf_cached` is 3-6ms, not the
+> 30+ms it would be cold. The dominant remaining cost is the IPC round-trip
+> (procmgr→VFS call + reply) per spawn, NOT map compute.
+>
+> **Verdict: NOT worth pursuing.** Parallelizing 8 spawns saves ~475ms
+> (640ms serial - 165ms max-single), which is 5.7% of the 8.3s boot wall
+> clock. Requires giving procmgr an async runtime (moderate complexity:
+> &mut self into async, completion-queue drain). The cost/benefit doesn't
+> justify the complexity at pre-v1 scale. Revisit only if boot time
+> becomes a user-facing complaint AND the IPC round-trip is confirmed as
+> the bottleneck (not VFS recv-loop starvation, which P0-3 wouldn't fix
+> anyway since VFS is single-threaded).
 
 ### Prerequisite: instrument first (user's Q3 answer)
 

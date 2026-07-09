@@ -8,6 +8,12 @@
 //! create VT buffers (CONSOLE_CREATE_VT_LABEL), asks procmgr to spawn
 //! tty:N (via PROCMGR_SPAWN_SERVICE_LABEL), and sends CONSOLE_ACTIVATE/DEACTIVATE
 //! to switch the visible VT.
+//!
+//! First server adopted to `AsyncServerMain` (wire-validation PoC). vtmgr
+//! itself has no downstream blocking `ipc::call` — all downstream is
+//! fire-and-forget `send` — so the async runtime is exercised but not
+//! load-bearing here. The PoC proves the skeleton drops into a real server
+//! loop and the build holds.
 
 extern crate alloc;
 
@@ -15,9 +21,11 @@ mod context;
 mod input_routing;
 
 use context::VtmgrContext;
+use libcluu::boot::{process_info, TOKEN_SELF};
 use libcluu::ipc::{
     parse_message, KBD_EVENT_LABEL, MOUSE_EVENT_LABEL, VTMGR_PIN_VT_LABEL, VTMGR_REQUEST_VT_SWITCH_LABEL,
 };
+use libcluu::server_main::AsyncServerMain;
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, yield_cpu, Result};
 
@@ -34,23 +42,32 @@ fn run() -> Result<()> {
     let mut buf = [0u8; 128];
     let mut saw_error = false;
 
+    let token_self = process_info().tokens[TOKEN_SELF];
+    let mut server = AsyncServerMain::new(token_self, ctx.endpoint)?;
+
     loop {
         ctx.ensure_subscriptions();
+        server.poll_ready();
 
-        let tokens = [ctx.endpoint, ctx.registry_endpoint];
-        match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
-            Ok((index, len)) => {
+        let tokens = [ctx.endpoint, ctx.registry_endpoint, server.reply_endpoint()];
+        match server.recv_any(&tokens, &mut buf, u64::MAX) {
+            Ok((msg, payload, _len, index)) => {
                 saw_error = false;
-                let Some((msg, payload)) = parse_message(&buf[..len]) else {
-                    continue;
-                };
 
                 if index == 1 {
-                    ctx.handle_registry_message(&msg, payload);
+                    ctx.handle_registry_message(&msg, &payload);
                     continue;
                 }
 
-                handle_vtmgr_message(&mut ctx, &msg, payload);
+                // index 2 = reply to our own async call (none today, but drain it)
+                if index == 2 {
+                    if let Some(cookie) = libcluu::ipc::extract_reply_id(&msg) {
+                        server.deliver_reply(cookie, msg, payload);
+                    }
+                    continue;
+                }
+
+                handle_vtmgr_message(&mut ctx, &msg, &payload);
             }
             Err(err) => {
                 if err != libcluu::Error::WouldBlock && !saw_error {
@@ -60,6 +77,7 @@ fn run() -> Result<()> {
                 let _ = yield_cpu();
             }
         }
+        server.drain_completions();
     }
 }
 
