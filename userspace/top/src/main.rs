@@ -29,12 +29,13 @@ const GRANT_SIZE: usize = 4096;
 
 const W_CID: usize = 5;
 const W_PCID: usize = 5;
-const W_NAME: usize = 30;
 const W_PID: usize = 7;
 const W_HEAP: usize = 7;
 const W_MEM: usize = 7;
 const W_CPU: usize = 6;
 const W_ST: usize = 4;
+const MIN_NAME: usize = 10;
+const MAX_NAME: usize = 40;
 
 const MIN_COLS_FOR_DUAL_GAUGE: usize = 60;
 
@@ -128,7 +129,14 @@ fn run() -> libcluu::Result<()> {
             let c = terminal_cols();
             c.min(120)
         };
-        let cols = cols.saturating_sub(1);
+
+        let fixed_width = W_CID + 1 + W_PCID + 1 + W_PID + 1 + W_HEAP + 1 + W_MEM + 1 + W_CPU + 1 + W_ST;
+        let w_name = if cols > fixed_width + MIN_NAME + 2 {
+            (cols.saturating_sub(fixed_width + 2)).min(MAX_NAME)
+        } else {
+            MIN_NAME
+        };
+        let row_width = fixed_width + 1 + w_name;
 
         // Read system memory info (total/used in kB) from /proc/meminfo.
         let (mem_total_kb, mem_used_kb) =
@@ -197,7 +205,7 @@ fn run() -> libcluu::Result<()> {
             records.len()
         ));
         let hdr_content_len = 23 + digit_count(records.len());
-        for _ in hdr_content_len..cols {
+        for _ in hdr_content_len..(cols + 1) {
             frame.push(' ');
         }
         frame.push_str("\x1b[K\x1b[0m\n");
@@ -210,10 +218,8 @@ fn run() -> libcluu::Result<()> {
         let mem_str = format!("{}/{}", format_mem_kb(mem_used_kb), format_mem_kb(mem_total_kb));
 
         if cols >= MIN_COLS_FOR_DUAL_GAUGE {
-            // Visible layout: "CPU [bar] PCT  Mem [bar] MEM"
-            // Fixed: "CPU ["=5 "] "=2 PCT=4 "  "=2 "Mem ["=5 "] "=2 MEM=var
             let overhead = 5 + 2 + 4 + 2 + 5 + 2 + mem_str.len();
-            let remaining = cols.saturating_sub(overhead);
+            let remaining = (cols + 1).saturating_sub(overhead);
             let bar_w = remaining / 2;
             let cpu_bar = render_bar(sys_cpu_pct, bar_w);
             let mem_bar = render_bar(mem_pct, bar_w);
@@ -224,7 +230,7 @@ fn run() -> libcluu::Result<()> {
             ));
         } else {
             let overhead = 5 + 2 + 4;
-            let bar_w = cols.saturating_sub(overhead);
+            let bar_w = (cols + 1).saturating_sub(overhead);
             let cpu_bar = render_bar(sys_cpu_pct, bar_w);
             frame.push_str(&format!(
                 "\x1b[97mCPU\x1b[0m {}[{}]\x1b[0m {}\x1b[K\n",
@@ -233,12 +239,14 @@ fn run() -> libcluu::Result<()> {
         }
 
         // Column header — widths match data rows exactly.
+        let name_hdr = fit_chars("NAME", w_name);
+        let name_pad = " ".repeat(w_name.saturating_sub(4));
         frame.push_str(&format!(
-            "\x1b[97m{:>W_CID$} {:>W_PCID$} {:<W_NAME$} {:>W_PID$} {:>W_HEAP$} {:>W_MEM$} {:>W_CPU$} {:<W_ST$}\x1b[K\x1b[0m\n",
-            "CID", "PCID", "NAME", "PID", "HEAP", "MEM", "CPU%", "ST",
+            "\x1b[97m{:>W_CID$} {:>W_PCID$} {}{} {:>W_PID$} {:>W_HEAP$} {:>W_MEM$} {:>W_CPU$} {:<W_ST$}\x1b[K\x1b[0m\n",
+            "CID", "PCID", "NAME", name_pad, "PID", "HEAP", "MEM", "CPU%", "ST",
         ));
         frame.push_str("\x1b[0m");
-        for _ in 0..cols {
+        for _ in 0..row_width {
             frame.push('-');
         }
         frame.push_str("\x1b[K\n");
@@ -267,7 +275,7 @@ fn run() -> libcluu::Result<()> {
             };
 
             let full_name = format!("{}{}", entry.prefix, rec.name);
-            let name_str = fit_chars(&full_name, W_NAME);
+            let name_str = fit_chars(&full_name, w_name);
 
             let pid_str = format!("{:>1$}", rec.pid, W_PID);
 

@@ -28,6 +28,7 @@ static THREAD_SUSPEND_CALLS: AtomicU64 = AtomicU64::new(0);
 static THREAD_SUSPEND_SUCCESS: AtomicU64 = AtomicU64::new(0);
 static THREAD_RESUME_CALLS: AtomicU64 = AtomicU64::new(0);
 static THREAD_RESUME_SUCCESS: AtomicU64 = AtomicU64::new(0);
+static CALL_REPLY_MAP_INSERT_FAIL: AtomicU64 = AtomicU64::new(0);
 static RESOURCE_DELTA_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 const TOKEN_AUDIT_CAPACITY: usize = 256;
 const IPC_WAIT_HIST_BUCKETS: usize = 12;
@@ -158,6 +159,7 @@ pub struct Snapshot {
     pub thread_suspend_success: u64,
     pub thread_resume_calls: u64,
     pub thread_resume_success: u64,
+    pub call_reply_map_insert_fail: u64,
     pub token_audit_next_seq: u64,
     pub token_audit_stored: usize,
     pub token_audit_dropped: u64,
@@ -294,6 +296,11 @@ pub fn record_thread_resume(success: bool) {
     }
 }
 
+#[inline(always)]
+pub fn record_call_reply_map_insert_fail() {
+    CALL_REPLY_MAP_INSERT_FAIL.fetch_add(1, Ordering::Relaxed);
+}
+
 fn wait_percentile_ms(events: u64, percentile: u64) -> u64 {
     if events == 0 {
         return 0;
@@ -352,6 +359,7 @@ pub fn snapshot() -> Snapshot {
         thread_suspend_success: THREAD_SUSPEND_SUCCESS.load(Ordering::Relaxed),
         thread_resume_calls: THREAD_RESUME_CALLS.load(Ordering::Relaxed),
         thread_resume_success: THREAD_RESUME_SUCCESS.load(Ordering::Relaxed),
+        call_reply_map_insert_fail: CALL_REPLY_MAP_INSERT_FAIL.load(Ordering::Relaxed),
         token_audit_next_seq: audit.next_seq,
         token_audit_stored: audit.stored,
         token_audit_dropped: audit.dropped,
@@ -565,6 +573,7 @@ pub fn log_bootstrap_snapshot(stage: &str) {
     klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_suspend_success=", s.thread_suspend_success);
     klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_resume_calls=", s.thread_resume_calls);
     klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  thread_resume_success=", s.thread_resume_success);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  call_reply_map_insert_fail=", s.call_reply_map_insert_fail);
     klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  token_audit_next_seq=", s.token_audit_next_seq);
     klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  token_audit_stored=", s.token_audit_stored as u64);
     klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  token_audit_dropped=", s.token_audit_dropped);
@@ -577,6 +586,8 @@ pub fn log_bootstrap_snapshot(stage: &str) {
     klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_mapped_frames=", s.resources.mapped_frames);
     klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_pmm_used_frames=", s.resources.pmm_used_frames);
     klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  resources_pmm_total_frames=", s.resources.pmm_total_frames);
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  pending_wake_overflow=", crate::sched::thread_manager::pending_wake_overflow_count());
+    klibcluu::log_kv_dec(klibcluu::LogLevel::Info, "  deferred_fault_overflow=", crate::sched::thread_manager::deferred_fault_overflow_count());
 
     if stage == "post-bootstrap" {
         set_resource_baseline_from_current();

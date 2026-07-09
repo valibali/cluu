@@ -115,13 +115,16 @@ class M5Fairness:
 
 
 @cluu_case(
-    "b_spawn_warm",
-    marker_mode="b_spawn_warm",
-    description="spawn warm-cache benchmark + noop p95 SLO checks",
-    tags=["spawn", "bench", "slo"],
+    "s_stress_churn",
+    marker_mode="s_stress_churn",
+    description="heavy load: spawn/stop/cont churn + interleaved job mix",
+    tags=["stress", "spawn", "signal"],
 )
-class BSpawnWarm:
+class SStressChurn:
     pass
+
+
+
 
 
 @cluu_case(

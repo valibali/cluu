@@ -1363,6 +1363,14 @@ pub fn thread_set_session(thread_token: usize, session_id: u64) -> Result<()> {
     Ok(())
 }
 
+/// Set the priority of a thread (0=lowest, 255=highest).
+/// Must be called after `thread_create` and before `thread_resume` for
+/// initial priority; may also be called on a live thread to adjust at runtime.
+pub fn thread_set_priority(thread_token: usize, priority: u8) -> Result<()> {
+    unsafe { invoke(thread_token, InvokeOp::ThreadSetPriority, priority as usize, 0, 0, 0) }?;
+    Ok(())
+}
+
 /// Set the system_scope flag on a thread for cross-session visibility.
 /// Must be called after `thread_create` and before `thread_resume`.
 /// When true, thread_enumerate returns all threads regardless of session_id.

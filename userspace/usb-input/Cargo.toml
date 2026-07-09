@@ -7,7 +7,7 @@ authors = ["CLUU Team", "Balazs Valkony"]
 license = "MIT"
 
 [features]
-default = ["hu-layout"]
+default = []
 hu-layout = []
 
 [dependencies]

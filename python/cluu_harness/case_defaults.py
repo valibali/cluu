@@ -70,11 +70,12 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         run_wait_s=45,
     ),
     "m5_fairness": CaseDefaults(test_command="repeat 8 hello"),
-    "b_spawn_warm": CaseDefaults(
-        test_command="benchprobe spawnonly",
+    "s_stress_churn": CaseDefaults(
+        test_command="cpuburn mixed 200",
+        keystroke_commands=["cpuburn cpu 50 &"],
         sendkey_sequence=_creds(),
         sendkey_sequence_nowait=True,
-        run_wait_s=45,
+        run_wait_s=120,
     ),
     "c_futex": CaseDefaults(
         test_command="futexprobe",

@@ -1,5 +1,6 @@
 FROM minimal
 PROFILE ipc registry device space_grant
+PRELOAD
 ENDPOINT grantable
 DEVICE framebuffer
 PARAM session_mode

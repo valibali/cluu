@@ -103,6 +103,33 @@ Both cooperative and preemptive modes exist. In `INITMODE` (boot),
 `ThreadFlags::COOPERATIVE` prevents preemption — threads yield explicitly.
 In `NORMALMODE` (after boot), preemption is active.
 
+### The non-preemptible-kernel invariant (single-CPU)
+
+Kernel syscall and IRQ-handler code runs to completion without preemption.
+The APIC timer IRQ checks the interrupted CPL: if CPL=3 (userspace), it
+always reschedules; if CPL=0 (kernel) it only reschedules when the current
+thread is idle (`interrupts.asm:661-668`, `idt.rs:1339-1347`). There is no
+`preempt_disable` counter — non-preemptibility is structural, not counted.
+
+This invariant is load-bearing for every check-then-block sequence in the
+kernel:
+
+- Futex `enqueue → block` (`handlers.rs:1993-2000`)
+- Recv 3-tier arm/register/recheck (`handlers.rs:271-329`)
+- Endpoint direct-deliver (`endpoint.rs:1022+`)
+- `wake_thread` try_lock + `queue_pending_wake` fallback
+  (`thread_manager.rs:941-972`)
+
+If kernel preemption is ever introduced, every site listed above must be
+audited. The `PerCpuReplyMap` `UnsafeCell<ReplyMap>` with `unsafe impl Sync`
+(`thread_manager.rs:179-192`) is correct **only** under this invariant plus
+the single-CPU assumption.
+
+**SMP note:** SMP is a post-v1 (2027) possibility. This invariant dies with
+SMP — every check-then-block site listed above needs a `preempt_disable`
+section or a lock-ordering re-audit. The `cpu_id` field in `PerCpuData`
+(`syscall.rs:84`) is a placeholder; no SMP abstraction is wired today.
+
 ### Context switch
 
 The context switch is a two-step process:

@@ -509,10 +509,12 @@ debug = 0
 debug = 0
 
 [profile.release]
-opt-level = 2
-lto = false
+opt-level = "z"
+lto = true
 panic = "abort"
 debug-assertions = false
+strip = true
+codegen-units = 1
 
 [profile.release.package.libcluu]
 debug = 0

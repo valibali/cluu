@@ -2882,6 +2882,7 @@ fn build_c_programs(profile: &str) -> Result<()> {
         ("mmapprobe", "userspace/c-programs/mmapprobe.c"),
         ("pollprobe", "userspace/c-programs/pollprobe.c"),
         ("benchprobe", "userspace/c-programs/benchprobe.c"),
+        ("cpuburn", "userspace/c-programs/cpuburn.c"),
         ("futexprobe", "userspace/c-programs/futexprobe.c"),
         ("futexrace", "userspace/c-programs/futexrace.c"),
         ("setjmpprobe", "userspace/c-programs/setjmpprobe.c"),

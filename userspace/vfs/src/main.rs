@@ -369,6 +369,10 @@ fn run_vfs() -> Result<()> {
     let registry_endpoint = registry::control_endpoint();
     let mut buf = [0u8; IPC_MESSAGE_MAX];
 
+    if !is_session {
+        server.preload_marked_binaries();
+    }
+
     debug_print("vfs: ready")?;
 
     // Subscribe to tty:N main endpoints (root-VFS only).
@@ -950,9 +954,16 @@ impl VfsServer {
         clock_now(self.clock_token).unwrap_or(0)
     }
 
-    fn log_map_elf_stage(&self, _fd: usize, _stage: &str, _start_ts: u64) {
-        // 4-stage per-spawn trace silenced for INFO clarity; un-stub when
-        // diagnosing slow ELF map paths.
+    fn log_map_elf_stage(&self, fd: usize, stage: &str, start_ts: u64) {
+        const ELF_PROFILE: bool = false;
+        if !ELF_PROFILE {
+            return;
+        }
+        let now = self.clock_sample();
+        let elapsed_us = now.saturating_sub(start_ts);
+        let _ = debug_print(&format!(
+            "vfs: map_elf[{}] {} +{}us", fd, stage, elapsed_us
+        ));
     }
 
     fn handle_message(&mut self, msg: &Message, payload: &[u8], sender_tid: usize, runtime: &mut Runtime) -> Result<()> {
@@ -4299,7 +4310,6 @@ impl VfsServer {
     /// latency drops to ~map_segments time only.
     ///
     /// Best-effort: any per-container failure is logged and skipped.
-    #[allow(dead_code)]
     fn preload_marked_binaries(&mut self) {
         let images_dir = "/var/images";
         let containers = match self.mounts.readdir(images_dir, 0) {
@@ -4370,7 +4380,6 @@ impl VfsServer {
     /// Read a small file's complete contents through the local mount table
     /// (no view, no client tracking). Used by internal startup helpers like
     /// `preload_marked_binaries`.
-    #[allow(dead_code)]
     fn read_internal_file(&self, path: &str) -> Option<Vec<u8>> {
         let opened = self.mounts.open(path, 0).ok()?;
         let prefix = path;

@@ -156,20 +156,17 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             category="fairness",
             description="mixed-load fairness/latency telemetry SLO checks",
         ),
-        # ---- warm-cache spawn ----------------------------------------
+        # ---- heavy load stress ---------------------------------------
         MarkerModeSpec(
-            name="b_spawn_warm",
+            name="s_stress_churn",
             required_markers=[
                 _TSC,
                 _SHELL_READY,
-                "benchprobe: ipc_clock",
-                "benchprobe: spawn_wait",
-                "procmgr: spawn path /bin/noop",
-                "vfs: open '/bin/noop'",
-                "vfs: map_elf_trace",
+                "cpuburn: PASS mode=mixed",
+                "cpuburn: PASS mode=cpu",
             ],
-            category="warm_spawn",
-            description="spawn warm-cache benchmark + noop p95 SLO checks",
+            category="stress",
+            description="heavy load: concurrent CPU burn + mixed CPU/IPC stress",
         ),
         # ---- futex ---------------------------------------------------
         MarkerModeSpec(

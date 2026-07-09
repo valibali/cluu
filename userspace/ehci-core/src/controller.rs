@@ -552,7 +552,6 @@ impl EhciController {
         intr_qh.set_max_packet_len(max_pkt);
         intr_qh.set_qtd_ptr(td_dma.phys as u32);
 
-        let _ = debug_print(&format!("ehci-core: interrupt IN queued (slot={})", slot));
         Ok(())
     }
 

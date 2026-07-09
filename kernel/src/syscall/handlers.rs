@@ -1023,12 +1023,31 @@ fn invoke_thread_resume(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs) -
 }
 
 fn invoke_thread_set_priority(
-    _token: &Token,
-    _obj_ref: ObjectRef,
-    _args: SyscallArgs,
+    token: &Token,
+    obj_ref: ObjectRef,
+    args: SyscallArgs,
 ) -> SyscallResult {
-    klibcluu::warn("invoke_thread_set_priority not yet implemented");
-    Err(Error::NotImplemented)
+    use crate::token::{ObjectRef, ObjectType, Rights};
+
+    if !token.has_right(Rights::THREAD_CONTROL) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let thread_ref = crate::token::check_object_type(obj_ref, ObjectType::Thread)
+        .map_err(|_| Error::InvalidArgument)?;
+    let thread_id = if let ObjectRef::Thread(id) = thread_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let new_priority = crate::sched::thread::Priority::new(args.arg3 as u8);
+
+    if crate::sched::ThreadManager::set_thread_priority(thread_id, new_priority) {
+        Ok(0)
+    } else {
+        Err(Error::NotFound)
+    }
 }
 
 /// Set the fault handler endpoint for a thread

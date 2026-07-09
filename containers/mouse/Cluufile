@@ -1,5 +1,6 @@
 FROM minimal
 PROFILE ipc registry device
+PRELOAD
 ENDPOINT listen
 DEVICE irq
 BUILD "cargo build --manifest-path userspace/mouse/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/mouse.elf /bin/mouse

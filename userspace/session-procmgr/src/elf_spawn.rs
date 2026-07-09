@@ -31,7 +31,7 @@ use libcluu::cap::CapProfile;
 use libcluu::ipc::{send_msg_with_payload, VFS_SET_VIEW_LABEL};
 use libcluu::syscall::{
     space_create, space_map, space_map_range, thread_create, thread_get_id, thread_resume,
-    thread_set_session, token_derive, THREAD_CREATE_START_SUSPENDED,
+    thread_set_priority, thread_set_session, token_derive, THREAD_CREATE_START_SUSPENDED,
 };
 use libcluu::types::Message;
 use procmgr_common::wire::SpawnReq;
@@ -161,16 +161,15 @@ pub fn begin_spawn(
         "session-procmgr: map_elf OK entry=0x{:x}", entry
     ));
 
-    space_map_range(
+    let stack_top = CHILD_STACK_BASE + CHILD_STACK_SIZE;
+    libcluu::map_stack_with_guard(
         child_space,
-        CHILD_STACK_BASE,
-        ANON_ZERO,
+        stack_top,
+        CHILD_STACK_SIZE,
         PROT_RW_USER,
-        CHILD_STACK_PAGES,
-        0,
+        1,
     )
     .map_err(|_| RealSpawnError::StackMap)?;
-    let stack_top = CHILD_STACK_BASE + CHILD_STACK_SIZE;
 
     let thread_tok = thread_create(
         child_space,
@@ -554,6 +553,7 @@ pub fn finish_spawn(
         thread_tok
     ));
     let _ = thread_set_session(thread_tok, state.sid as u64);
+    let _ = thread_set_priority(thread_tok, 96);
     thread_resume(thread_tok).map_err(|_| RealSpawnError::ThreadCreate)?;
 
     Ok(SpawnResult {

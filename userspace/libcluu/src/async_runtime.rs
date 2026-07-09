@@ -73,24 +73,42 @@ pub fn push_completion<T: Any>(completion: T) {
 }
 
 // ---------------------------------------------------------------------------
-// Noop waker — the runtime manages the ready queue directly
+// Task waker — encodes TaskId in the raw waker, pushes to ready_queue on wake
 // ---------------------------------------------------------------------------
 
 const NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(
-    |_| noop_raw_waker(),
-    |_| {},
-    |_| {},
-    |_| {},
+    waker_clone,
+    waker_wake,
+    waker_wake_by_ref,
+    waker_drop,
 );
 
-fn noop_raw_waker() -> RawWaker {
-    RawWaker::new(core::ptr::null(), &NOOP_VTABLE)
+fn waker_clone(ptr: *const ()) -> RawWaker {
+    RawWaker::new(ptr, &NOOP_VTABLE)
 }
 
-fn noop_waker() -> Waker {
-    // SAFETY: The noop vtable does nothing — wake/wake_by_ref are no-ops.
-    // The runtime handles task scheduling directly via the ready queue.
-    unsafe { Waker::from_raw(noop_raw_waker()) }
+fn waker_wake(ptr: *const ()) {
+    let task_id = ptr as TaskId;
+    let rt_ptr = CURRENT_RUNTIME.load(Ordering::Relaxed);
+    if rt_ptr.is_null() {
+        return;
+    }
+    unsafe { (*rt_ptr).ready_queue.push_back(task_id) };
+}
+
+fn waker_wake_by_ref(ptr: *const ()) {
+    let task_id = ptr as TaskId;
+    let rt_ptr = CURRENT_RUNTIME.load(Ordering::Relaxed);
+    if rt_ptr.is_null() {
+        return;
+    }
+    unsafe { (*rt_ptr).ready_queue.push_back(task_id) };
+}
+
+fn waker_drop(_ptr: *const ()) {}
+
+fn task_waker(task_id: TaskId) -> Waker {
+    unsafe { Waker::from_raw(RawWaker::new(task_id as *const (), &NOOP_VTABLE)) }
 }
 
 // ---------------------------------------------------------------------------
@@ -121,14 +139,15 @@ struct Task {
 pub struct Runtime {
     tasks: BTreeMap<TaskId, Task>,
     pending_cookies: BTreeMap<usize, TaskId>,
+    cookie_targets: BTreeMap<usize, usize>,
     replies: BTreeMap<usize, (Message, Vec<u8>)>,
     ready_queue: VecDeque<TaskId>,
+    retry_queue: VecDeque<TaskId>,
+    cancelled_cookies: VecDeque<usize>,
     next_task_id: TaskId,
     next_cookie: usize,
     reply_endpoint: usize,
     current_task_id: Option<TaskId>,
-    /// Completion queue: async tasks push typed results here for the main
-    /// loop to drain (when `&mut self` work is needed after `.await`).
     completions: VecDeque<Box<dyn Any>>,
 }
 
@@ -143,10 +162,13 @@ impl Runtime {
         Ok(Self {
             tasks: BTreeMap::new(),
             pending_cookies: BTreeMap::new(),
+            cookie_targets: BTreeMap::new(),
             replies: BTreeMap::new(),
             ready_queue: VecDeque::new(),
+            retry_queue: VecDeque::new(),
+            cancelled_cookies: VecDeque::new(),
             next_task_id: 0,
-            next_cookie: 1, // 0 is reserved for "no cookie"
+            next_cookie: 1,
             reply_endpoint,
             current_task_id: None,
             completions: VecDeque::new(),
@@ -184,9 +206,10 @@ impl Runtime {
     /// Sets `CURRENT_RUNTIME` so that `IpcCallFuture::poll` can register
     /// pending cookies and allocate reply correlation state.
     pub fn poll_ready(&mut self) {
-        // Set current runtime pointer
         let self_ptr: *mut Runtime = self;
         let old = CURRENT_RUNTIME.swap(self_ptr, Ordering::Relaxed);
+
+        self.ready_queue.append(&mut self.retry_queue);
 
         while let Some(task_id) = self.ready_queue.pop_front() {
             let task = match self.tasks.get_mut(&task_id) {
@@ -196,31 +219,24 @@ impl Runtime {
 
             self.current_task_id = Some(task_id);
 
-            let waker = noop_waker();
+            let waker = task_waker(task_id);
             let mut cx = Context::from_waker(&waker);
 
-            // SAFETY: We are not moving the future out of the Pin<Box>,
-            // only polling it. The Box is pinned and stable.
             let poll_result = task.future.as_mut().poll(&mut cx);
 
             match poll_result {
                 Poll::Ready(()) => {
                     self.tasks.remove(&task_id);
+                    self.pending_cookies.retain(|_, tid| *tid != task_id);
                 }
-                Poll::Pending => {
-                    // Task is still alive. If it registered a cookie (via
-                    // IpcCallFuture), it's in pending_cookies. The task
-                    // will be re-queued when the reply arrives.
-                    // If no cookie was registered, the task is effectively
-                    // dead (nothing will wake it). This is a bug in the
-                    // future — but we leave it in tasks to avoid loss.
-                }
+                Poll::Pending => {}
             }
         }
 
         self.current_task_id = None;
 
-        // Restore previous runtime pointer
+        self.detect_dead_tasks();
+
         CURRENT_RUNTIME.store(old, Ordering::Relaxed);
     }
 
@@ -232,6 +248,7 @@ impl Runtime {
     /// - `payload`: the reply payload bytes (after the Message header)
     pub fn deliver_reply(&mut self, cookie: usize, msg: Message, payload: Vec<u8>) {
         self.replies.insert(cookie, (msg, payload));
+        self.cookie_targets.remove(&cookie);
         if let Some(task_id) = self.pending_cookies.remove(&cookie) {
             self.ready_queue.push_back(task_id);
         }
@@ -246,14 +263,63 @@ impl Runtime {
 
     /// Register a pending cookie for the current task. Called by
     /// `IpcCallFuture::poll` when transitioning to the Waiting state.
-    fn register_pending(&mut self, cookie: usize, task_id: TaskId) {
+    fn register_pending(&mut self, cookie: usize, task_id: TaskId, endpoint: usize) {
         self.pending_cookies.insert(cookie, task_id);
+        self.cookie_targets.insert(cookie, endpoint);
     }
 
-    /// Try to take the reply data for a cookie. Called by
-    /// `IpcCallFuture::poll` when in the Waiting state.
     fn take_reply(&mut self, cookie: usize) -> Option<(Message, Vec<u8>)> {
         self.replies.remove(&cookie)
+    }
+
+    pub fn cancel_endpoint(&mut self, endpoint: usize) {
+        let mut to_cancel = alloc::vec::Vec::new();
+        for (&cookie, &ep) in &self.cookie_targets {
+            if ep == endpoint {
+                to_cancel.push(cookie);
+            }
+        }
+        for cookie in to_cancel {
+            self.cookie_targets.remove(&cookie);
+            if let Some(task_id) = self.pending_cookies.remove(&cookie) {
+                self.cancelled_cookies.push_back(cookie);
+                self.ready_queue.push_back(task_id);
+            }
+        }
+    }
+
+    fn take_cancelled_cookie(&mut self, cookie: usize) -> bool {
+        if let Some(idx) = self.cancelled_cookies.iter().position(|&c| c == cookie) {
+            self.cancelled_cookies.swap_remove_back(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn detect_dead_tasks(&mut self) {
+        let pending_task_ids: alloc::collections::BTreeSet<TaskId> =
+            self.pending_cookies.values().copied().collect();
+        let live_count = self.tasks.len();
+        let mut dead = alloc::vec::Vec::new();
+        for (&id, _) in &self.tasks {
+            if !pending_task_ids.contains(&id) {
+                dead.push(id);
+            }
+        }
+        for id in dead {
+            let _ = crate::debug_print(&alloc::format!(
+                "async_runtime: dead task {} — Pending with no waker (bug in future)\n",
+                id
+            ));
+            self.tasks.remove(&id);
+        }
+        let leaked = live_count.saturating_sub(self.tasks.len());
+        if leaked > 0 {
+            let _ = crate::debug_print(&alloc::format!(
+                "async_runtime: reaped {} dead task(s)\n", leaked
+            ));
+        }
     }
 
     pub fn push_completion<T: Any>(&mut self, completion: T) {
@@ -337,38 +403,37 @@ impl Future for IpcCallFuture {
                             "IpcCallFuture::poll: no current task — \
                              must be called from within a spawned task",
                         );
-                        rt.register_pending(self.cookie, task_id);
+                        rt.register_pending(self.cookie, task_id, self.endpoint);
                         Poll::Pending
                     }
                     Err(Error::WouldBlock) => {
-                        // Endpoint queue full — retry on next poll.
-                        // The noop waker means we need to re-queue ourselves.
-                        // Since the runtime's poll_ready loop drives us, and
-                        // we haven't registered a cookie, we need to be
-                        // re-polled. Push our task back to the ready queue.
                         let rt = current_runtime();
                         if let Some(tid) = rt.current_task_id {
-                            rt.ready_queue.push_back(tid);
+                            rt.retry_queue.push_back(tid);
                         }
                         Poll::Pending
                     }
                     Err(e) => {
                         self.state = IpcCallState::Done;
+                        let rt = current_runtime();
+                        rt.pending_cookies.remove(&self.cookie);
+                        rt.cookie_targets.remove(&self.cookie);
                         Poll::Ready(Err(e))
                     }
                 }
             }
             IpcCallState::Waiting => {
                 let rt = current_runtime();
+                if rt.take_cancelled_cookie(self.cookie) {
+                    self.state = IpcCallState::Done;
+                    return Poll::Ready(Err(Error::NotFound));
+                }
                 match rt.take_reply(self.cookie) {
                     Some((msg, payload)) => {
                         self.state = IpcCallState::Done;
                         Poll::Ready(Ok((msg, payload)))
                     }
                     None => {
-                        // Reply not yet delivered. This can happen if the
-                        // task is polled before the reply arrives (e.g.,
-                        // due to WouldBlock re-queue). Stay pending.
                         Poll::Pending
                     }
                 }

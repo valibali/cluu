@@ -90,29 +90,6 @@ unsafe impl GlobalAlloc for LoggingAllocator {
             }
             klibcluu::log_hex(klibcluu::LogLevel::Warn, "  Caller RIP: 0x", caller_rip);
 
-            // Dump a short stack trace to see the call chain
-            klibcluu::warn("  Stack trace:");
-            let mut rbp: u64;
-            unsafe {
-                core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags));
-            }
-            for i in 0..16 {
-                if rbp == 0 || (rbp & 0x7) != 0 {
-                    break;
-                }
-                let ret_addr = unsafe { *((rbp + 8) as *const u64) };
-                if ret_addr == 0 || ret_addr > 0xffff_ffff_ffff_0000 {
-                    break;
-                }
-                klibcluu::log_hex(klibcluu::LogLevel::Warn, "    #", i as u64);
-                klibcluu::log_hex(klibcluu::LogLevel::Warn, "  rip=0x", ret_addr);
-                let next_rbp = unsafe { *(rbp as *const u64) };
-                if next_rbp <= rbp || next_rbp > 0xffff_ffff_ffff_0000 {
-                    break;
-                }
-                rbp = next_rbp;
-            }
-
             // Note: Progressive 1MB → 2MB → 4MB allocations suggest either:
             // 1. Multiple separate allocations
             // 2. Allocator trying different strategies

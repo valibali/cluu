@@ -25,6 +25,8 @@ extern crate alloc;
 pub mod allocator;
 pub mod ansi;
 pub mod async_runtime;
+pub mod coalesced_notify;
+pub mod server_main;
 pub mod cli;
 pub mod args;
 pub mod atlas;

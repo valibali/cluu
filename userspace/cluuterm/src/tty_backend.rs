@@ -535,20 +535,6 @@ impl Cluuterm {
                 }
             }
             Event::SetAttr(a)  => {
-                // Emit a harness-observable marker when a coloured SGR is applied.
-                // Only log when the foreground colour differs from the reset default
-                // to keep noise low during normal operation.
-                if a.fg != Attr::default_attr().fg {
-                    let fg = a.fg & 0x00FF_FFFF; // strip alpha
-                    let mut buf = *b"cluuterm: ansi sgr fg=000000";
-                    let hex = b"0123456789ABCDEF";
-                    for i in 0..6usize {
-                        buf[22 + i] = hex[((fg >> (4 * (5 - i))) & 0xF) as usize];
-                    }
-                    // SAFETY: buf is valid ASCII.
-                    let s_str = unsafe { core::str::from_utf8_unchecked(&buf) };
-                    let _ = debug_print(s_str);
-                }
                 s.current_attr = a;
             }
             Event::ResetAttr   => s.current_attr = Attr::default_attr(),

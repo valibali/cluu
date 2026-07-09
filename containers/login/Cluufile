@@ -1,5 +1,6 @@
 FROM minimal
 PROFILE ipc vfs registry
+PRELOAD
 BUILD "cargo build --manifest-path userspace/login/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/login.elf /bin/login
 ENTRYPOINT /bin/login
 RESTART never

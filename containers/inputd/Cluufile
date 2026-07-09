@@ -1,5 +1,6 @@
 FROM minimal
 PROFILE ipc registry
+PRELOAD
 ENDPOINT grantable
 BUILD "cargo build --manifest-path userspace/inputd/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/inputd.elf /bin/inputd
 ENTRYPOINT /bin/inputd

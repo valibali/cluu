@@ -106,9 +106,12 @@ with no re-entrancy point.
 
 ### Why it exists
 
-CLUU's IPC is synchronous and rendezvous-based (sender blocks until receiver
-ready, receiver blocks until sender arrives). There is no buffered queue
-inside the kernel. A `call` blocks the caller until the server `reply`s.
+CLUU's IPC is synchronous and rendezvous-based for `call`/`reply`, but
+endpoints also have bounded buffered queues (`MAX_QUEUE_LEN=1024`,
+`MAX_CALL_QUEUE_LEN=256`). When a queue is full, senders park in
+`waiting_senders` and are woken on drain or on endpoint destruction
+(`endpoint.rs:296-301, 574-614`). A `call` blocks the caller until the
+server `reply`s; a `send` to a full queue blocks until space frees.
 A single-threaded server running its `recv` loop cannot accept a new request
 while it is blocked in a downstream `call`.
 

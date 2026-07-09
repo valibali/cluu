@@ -418,6 +418,30 @@ impl ThreadManager {
         false
     }
 
+    pub fn set_thread_priority(id: ThreadId, priority: Priority) -> bool {
+        let old = Self::with_thread_mut(id, |t| {
+            let prev = t.priority;
+            t.priority = priority;
+            prev
+        });
+        match old {
+            Some(prev) if prev != priority => {
+                let is_ready = Self::with_thread(id, |t| {
+                    t.state == crate::sched::thread::ThreadState::Ready
+                }).unwrap_or(false);
+                if is_ready {
+                    if let Some(mut scheduler) = SCHEDULER.try_lock() {
+                        scheduler.remove(id);
+                        scheduler.add(id, priority);
+                    }
+                }
+                true
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
     /// Fallible thread ID allocation with global limit enforcement.
     pub fn try_alloc_thread_id() -> Result<ThreadId, &'static str> {
         loop {
@@ -446,7 +470,59 @@ impl ThreadManager {
     /// Returns None if no threads are ready.
     pub fn pick_next() -> Option<ThreadId> {
         let mut scheduler = SCHEDULER.lock();
-        scheduler.pick_next()
+        let picked = scheduler.pick_next();
+        if picked.is_none() {
+            Self::idle_watchdog_dump();
+        }
+        picked
+    }
+
+    fn idle_watchdog_dump() {
+        use crate::sched::thread::ThreadState;
+        static WATCHDOG_FIRED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        let live_non_idle = {
+            let repo = THREAD_REPOSITORY.lock();
+            repo.iter()
+                .filter(|(_, t)| {
+                    !t.is_dead()
+                        && t.state != ThreadState::Blocked
+                        && !t.is_suspended()
+                        && t.priority.0 >= 32
+                })
+                .count()
+        };
+        if live_non_idle == 0 {
+            return;
+        }
+        if WATCHDOG_FIRED
+            .compare_exchange(
+                false,
+                true,
+                core::sync::atomic::Ordering::SeqCst,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+        klibcluu::warn("idle_watchdog: pick_next=None but live non-idle threads exist:");
+        let repo = THREAD_REPOSITORY.lock();
+        for (id, t) in repo.iter() {
+            if t.is_dead() {
+                continue;
+            }
+            klibcluu::log_kv_dec(
+                klibcluu::LogLevel::Warn,
+                "  tid=",
+                id.as_u64(),
+            );
+            klibcluu::log_kv_dec(
+                klibcluu::LogLevel::Warn,
+                "  prio=",
+                t.priority.0 as u64,
+            );
+        }
     }
 
     /// Yield current thread (expire to expired array for fair scheduling)
@@ -561,19 +637,31 @@ impl ThreadManager {
 
         // Clean up FAULT_REPLY_MAP entries involving this thread.
         // Dead faulted_thread: remove the entry (thread is gone).
-        // Dead server: the faulted thread stays blocked (no good recovery).
+        // Dead server: kill the faulted thread — it can't recover without a
+        // fault handler. Mirrors the CALL_REPLY_MAP dead-server path.
         {
             let map = unsafe { FAULT_REPLY_MAP.get() };
             let mut to_remove = alloc::vec::Vec::new();
+            let mut faulted_to_kill = alloc::vec::Vec::new();
             for i in 0..REPLY_MAP_SLOTS {
                 if let Some((_rid, info)) = &map.slots[i] {
                     if info.faulted_thread == thread_id {
+                        to_remove.push(map.slots[i].as_ref().unwrap().0);
+                    } else if info.server_thread_id == Some(thread_id) {
+                        faulted_to_kill.push(info.faulted_thread);
                         to_remove.push(map.slots[i].as_ref().unwrap().0);
                     }
                 }
             }
             for rid in to_remove {
                 map.remove(rid);
+            }
+            // Kill faulted threads outside the map scan. Safe to call
+            // mark_thread_dead recursively: we hold no locks here, and the
+            // FAULT_REPLY_MAP entries for this server are already removed so
+            // the inner call won't re-enter for the same pair.
+            for faulted_tid in faulted_to_kill {
+                let _ = Self::mark_thread_dead(faulted_tid);
             }
         }
 
@@ -594,7 +682,11 @@ impl ThreadManager {
 
     /// Store call reply info for a reply ID. Returns false if map is full.
     pub fn set_call_reply_info(reply_id: ReplyId, info: CallReplyInfo) -> bool {
-        unsafe { CALL_REPLY_MAP.get() }.insert(reply_id, info)
+        let ok = unsafe { CALL_REPLY_MAP.get() }.insert(reply_id, info);
+        if !ok {
+            crate::telemetry::record_call_reply_map_insert_fail();
+        }
+        ok
     }
 
     /// Take and remove call reply info for a reply ID (one-time use)

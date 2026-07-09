@@ -83,7 +83,7 @@ use crate::pg_table::PgTable;
 use libcluu::registry;
 use libcluu::syscall::{
     space_destroy, space_grant, thread_destroy, thread_get_id, thread_resume,
-    thread_set_fault_endpoint, thread_set_session, thread_suspend, token_revoke,
+    thread_set_fault_endpoint, thread_set_priority, thread_set_session, thread_suspend, token_revoke,
     THREAD_CREATE_START_SUSPENDED,
 };
 use libcluu::tar::find_member;
@@ -725,10 +725,16 @@ impl ProcessManager {
         true
     }
 
-    fn log_spawn_stage(&self, _seq: usize, _stage: &str, _start_ts: u64) {
-        // Per-stage spawn timing was useful when diagnosing slow boot; in
-        // normal operation it produces 6 lines per spawn at INFO.  Re-enable
-        // by un-stubbing if you need the breakdown again.
+    fn log_spawn_stage(&self, seq: usize, stage: &str, start_ts: u64) {
+        const SPAWN_PROFILE: bool = false;
+        if !SPAWN_PROFILE {
+            return;
+        }
+        let now = self.clock_sample();
+        let elapsed_us = now.saturating_sub(start_ts);
+        let _ = debug_print(&format!(
+            "procmgr: spawn[{}] {} +{}us", seq, stage, elapsed_us
+        ));
     }
 
     fn queue_pending_vfs_view(
@@ -940,6 +946,7 @@ impl ProcessManager {
         parent_container_id: u64,
         is_identity_switch: bool,
         session_id: u64,
+        priority: u8,
     ) {
         // ── monotone-view debug assertion ─────────────────────────────────────
         #[cfg(debug_assertions)]
@@ -988,6 +995,7 @@ impl ProcessManager {
         // ─────────────────────────────────────────────────────────────────────
         self.register_vfs_view_for_thread(thread_token, mounts, profile, container_id);
         let _ = thread_set_session(thread_token, session_id);
+        let _ = thread_set_priority(thread_token, priority);
         if let Err(err) = thread_resume(thread_token) {
             let _ = debug_print(&format!(
                 "procmgr: thread_resume failed token={} err={:?}",
@@ -1229,6 +1237,13 @@ impl ProcessManager {
         ));
     }
 
+    fn manifest_priority(&self, image_name: &str) -> u8 {
+        root_procmgr::manifest_cache::MANIFEST_CACHE
+            .get_or_load(image_name, || None)
+            .map(|m| m.priority)
+            .unwrap_or(96)
+    }
+
     fn autostart_container(&mut self, image_name: &str, svc: &libcluu::toml::TomlTable) -> Result<()> {
         // Read manifest
         let manifest_path = format!("/var/images/{}/manifest.toml", image_name);
@@ -1357,7 +1372,7 @@ impl ProcessManager {
                 self.container_owner_pids.insert(pid);
                 // parent_container_id=0, is_identity_switch=false: autostart binaries
                 // are top-level; procmgr is root.
-                self.install_view_and_run(_thread_token, &view_mounts, requested_profile, container_id, 0, false, 0);
+                self.install_view_and_run(_thread_token, &view_mounts, requested_profile, container_id, 0, false, 0, self.manifest_priority(&image_name));
                 self.pid_to_view.insert(pid, view_mounts);
                 if image_name == "vtmgr" {
                     self.vtmgr_container_id = container_id;
@@ -1612,7 +1627,7 @@ impl ProcessManager {
                     .unwrap_or(0);
                 self.pid_to_container_id.insert(new_pid, container_id);
                 self.container_owner_pids.insert(new_pid);
-                self.install_view_and_run(new_thread_token, &view_mounts, requested_profile, container_id, restart_parent_cid, false, restart_session_id);
+                self.install_view_and_run(new_thread_token, &view_mounts, requested_profile, container_id, restart_parent_cid, false, restart_session_id, self.manifest_priority(&image_name));
                 self.pid_to_view.insert(new_pid, view_mounts);
 
                 if let Some(container) = self.container_instances.get_mut(&container_id) {
@@ -2488,7 +2503,7 @@ impl ProcessManager {
                 // the caller's view.  Pass caller_container_id for audit trail.
                 let sudo_session_id = self.resolve_caller_session(sender_tid)
                     .map(|s| s.container_id).unwrap_or(0);
-                self.install_view_and_run(thread_token, &view_mounts, escalate_profile, container_id, caller_container_id, true, sudo_session_id);
+                self.install_view_and_run(thread_token, &view_mounts, escalate_profile, container_id, caller_container_id, true, sudo_session_id, 96);
                 self.pid_to_view.insert(pid, view_mounts);
 
                 let sudo_name = format!("sudo:{}", username);
@@ -2727,7 +2742,7 @@ impl ProcessManager {
                 // the caller's view.  Pass caller_container_id for audit trail.
                 let su_session_id = self.resolve_caller_session(sender_tid)
                     .map(|s| s.container_id).unwrap_or(0);
-                self.install_view_and_run(thread_token, &view_mounts, target_profile, container_id, caller_container_id, true, su_session_id);
+                self.install_view_and_run(thread_token, &view_mounts, target_profile, container_id, caller_container_id, true, su_session_id, 96);
                 self.pid_to_view.insert(pid, view_mounts);
 
                 let su_name = format!("su:{}", target_username);
@@ -3817,7 +3832,7 @@ impl ProcessManager {
         // parent_container_id=0, is_identity_switch=false: procmgr is spawner;
         // no parent to check against.
         let view_mounts = default_view_for_profile(requested_profile);
-        self.install_view_and_run(thread_token, &view_mounts, requested_profile, 0, 0, false, 0);
+        self.install_view_and_run(thread_token, &view_mounts, requested_profile, 0, 0, false, 0, 96);
 
         let _ = debug_print(&format!("procmgr: service '{}' spawned", path));
         Ok(())
@@ -4004,7 +4019,7 @@ impl ProcessManager {
                     .get(&caller_container_id)
                     .map(|c| c.session_id)
                     .unwrap_or(0);
-                self.install_view_and_run(thread_token, &child_view_mounts, child_profile, caller_container_id, caller_container_id, false, posix_session_id);
+                self.install_view_and_run(thread_token, &child_view_mounts, child_profile, caller_container_id, caller_container_id, false, posix_session_id, 96);
                 self.pid_to_view.insert(pid, child_view_mounts.clone());
                 if sender_tid != 0 {
                     let entry = self.sender_live_children.entry(sender_tid).or_insert(0);
@@ -4366,7 +4381,7 @@ impl ProcessManager {
                 ];
                 self.install_view_and_run(
                     thread_tok, &supervisor_mounts,
-                    CapProfile::SUPERVISOR, 0, 0, false, session_id as u64,
+                    CapProfile::SUPERVISOR, 0, 0, false, session_id as u64, 128,
                 );
                 if let Ok(tid) = thread_get_id(thread_tok) {
                     self.session_service_tids
@@ -4508,7 +4523,7 @@ impl ProcessManager {
                 let mounts = self.build_view_for_profile_and_home(profile, &home);
                 self.install_view_and_run(
                     thread_tok, &mounts,
-                    CapProfile::SERVICE, 0, 0, false, session_id as u64,
+                    CapProfile::SERVICE, 0, 0, false, session_id as u64, 128,
                 );
                 if let Ok(tid) = thread_get_id(thread_tok) {
                     self.session_service_tids
@@ -4636,11 +4651,12 @@ impl ProcessManager {
             self.log_spawn_stage(spawn_seq, "map_segments_done", spawn_start);
         }
 
-        libcluu::map_stack(
+        libcluu::map_stack_with_guard(
             space_token,
             SERVICE_STACK_TOP,
             SERVICE_STACK_SIZE,
             STACK_FLAGS,
+            1,
         )?;
         self.log_spawn_stage(spawn_seq, "stack_map_done", spawn_start);
 
@@ -5816,7 +5832,7 @@ impl ProcessManager {
                 // at the top of handle_container_run.  Assert child view ⊆ parent.
                 let run_session_id = self.resolve_caller_session(sender_tid)
                     .map(|s| s.container_id).unwrap_or(0);
-                self.install_view_and_run(thread_token, &view_mounts, requested_profile, container_id, parent_cid, false, run_session_id);
+                self.install_view_and_run(thread_token, &view_mounts, requested_profile, container_id, parent_cid, false, run_session_id, self.manifest_priority(&image_name));
                 self.pid_to_view.insert(pid, view_mounts);
                 // Fix C: removed redundant pid_to_profile insert (spawn_service_with_env already does it)
 
@@ -5978,11 +5994,17 @@ impl ProcessManager {
                     }
                 }
             }
+            let priority: u8 = doc
+                .table("exec")
+                .and_then(|t| t.get_str("priority"))
+                .and_then(|s| s.parse::<u8>().ok())
+                .unwrap_or(96);
             Some(CachedManifest {
                 entrypoint,
                 restart_policy: wire_policy,
                 allow_sessionless,
                 cap_profile_bits,
+                priority,
             })
         })();
 
@@ -6305,6 +6327,7 @@ impl ProcessManager {
                     parent_cid,
                     false,
                     run_session_id,
+                    self.manifest_priority(&envelope.image),
                 );
                 self.pid_to_view.insert(pid, view_mounts.clone());
 
