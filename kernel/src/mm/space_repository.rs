@@ -13,7 +13,7 @@ use spin::Mutex;
 /// This limits BTreeMap growth which can cause large heap allocations
 const MAX_ADDRESS_SPACES: usize = 256;
 
-struct Repository {
+pub struct Repository {
     next_id: u64,
     spaces: BTreeMap<AddressSpaceId, AddressSpace>,
 }
@@ -44,7 +44,7 @@ impl Repository {
         id
     }
 
-    fn get_mut(&mut self, id: AddressSpaceId) -> Option<&mut AddressSpace> {
+    pub fn get_mut(&mut self, id: AddressSpaceId) -> Option<&mut AddressSpace> {
         self.spaces.get_mut(&id)
     }
 
@@ -73,6 +73,13 @@ where
 {
     let mut repo = REPOSITORY.lock();
     repo.get_mut(id).map(f)
+}
+
+/// Acquire the repository lock directly. Caller must not re-enter
+/// space_repository (no insert/remove/with_space/etc) while holding
+/// the guard, or it will deadlock.
+pub fn lock_repository() -> spin::MutexGuard<'static, Repository> {
+    REPOSITORY.lock()
 }
 
 /// Execute a closure with immutable access to a stored address space.

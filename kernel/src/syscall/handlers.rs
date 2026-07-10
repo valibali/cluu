@@ -1438,36 +1438,49 @@ fn rollback_mapped_4kb(
     virt_start: u64,
     mapped_pages: usize,
 ) {
-    use crate::mm::{frame_registry, pmm, space_repository};
+    use crate::mm::space_repository;
+    if mapped_pages == 0 {
+        return;
+    }
+
+    let _ = space_repository::with_space_mut(space_id, |space| {
+        rollback_mapped_4kb_locked(space_id, virt_start, mapped_pages, space.page_table_root);
+    });
+}
+
+fn rollback_mapped_4kb_locked(
+    space_id: crate::token::scope::AddressSpaceId,
+    virt_start: u64,
+    mapped_pages: usize,
+    pt_root: x86_64::PhysAddr,
+) {
+    use crate::mm::{frame_registry};
     use x86_64::VirtAddr;
 
     if mapped_pages == 0 {
         return;
     }
 
-    let _ = space_repository::with_space_mut(space_id, |space| {
-        let physmap_base = x86_64::VirtAddr::new(crate::mm::physmap::PHYS_MAP_BASE);
-        let mut alloc = crate::mm::PmmPageAllocator;
-        let mut vmm = unsafe {
-            crate::mm::vmm::PageTableManager::for_page_table(
-                physmap_base,
-                space.page_table_root,
-                &mut alloc,
-            )
-        };
+    let physmap_base = x86_64::VirtAddr::new(crate::mm::physmap::PHYS_MAP_BASE);
+    let mut alloc = crate::mm::PmmPageAllocator;
+    let mut vmm = unsafe {
+        crate::mm::vmm::PageTableManager::for_page_table(
+            physmap_base,
+            pt_root,
+            &mut alloc,
+        )
+    };
 
-        for i in 0..mapped_pages {
-            let addr = VirtAddr::new(virt_start + (i as u64) * 0x1000);
-            if let Ok(phys) = vmm.unmap(addr) {
-                let phys_addr = phys.as_u64();
-                // Phase 2: dec_ref is the single free path.
-                let _ = crate::mm::frame_table::dec_ref(phys_addr);
-                if let Some(frame_id) = frame_registry::lookup_by_phys(phys_addr) {
-                    frame_registry::dec_map_count(frame_id);
-                }
+    for i in 0..mapped_pages {
+        let addr = VirtAddr::new(virt_start + (i as u64) * 0x1000);
+        if let Ok(phys) = vmm.unmap(addr) {
+            let phys_addr = phys.as_u64();
+            let _ = crate::mm::frame_table::dec_ref(phys_addr);
+            if let Some(frame_id) = frame_registry::lookup_by_phys(phys_addr) {
+                frame_registry::dec_map_count(frame_id);
             }
         }
-    });
+    }
 }
 
 fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
@@ -2602,9 +2615,7 @@ fn map_range_4kb(req: MapRange4kbRequest) -> SyscallResult {
     use crate::elf;
     use crate::mm::{physmap, pmm, space_repository};
     use core::ptr::write_bytes;
-    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
-
-    let MapRange4kbRequest {
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;    let MapRange4kbRequest {
         space_id,
         virt_start,
         data_ptr,
@@ -2619,26 +2630,32 @@ fn map_range_4kb(req: MapRange4kbRequest) -> SyscallResult {
 
     let mut bytes_copied = 0usize;
     let mut mapped_pages = 0usize;
+
+    let mut repo = space_repository::lock_repository();
+    let space = match repo.get_mut(space_id) {
+        Some(s) => s,
+        None => return Err(Error::NotFound),
+    };
+    let pt_root = space.page_table_root;
+
     for page_idx in 0..num_pages {
         if !fail_on_map_stage && fail_after_pages.is_some_and(|limit| mapped_pages >= limit) {
-            rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+            rollback_mapped_4kb_locked(space_id, virt_start, mapped_pages, pt_root);
             klibcluu::warn("map_range_4kb: injected failpoint triggered");
             return Err(Error::OutOfMemory);
         }
 
         let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
 
-        // Allocate physical frame
         let frame_phys = match pmm::alloc_frame() {
             Some(frame) => frame,
             None => {
-                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+                rollback_mapped_4kb_locked(space_id, virt_start, mapped_pages, pt_root);
                 return Err(Error::OutOfMemory);
             }
         };
         let frame_virt = unsafe { physmap::phys_to_virt_u64(frame_phys) as *mut u8 };
 
-        // Copy data if available, zero-fill the rest
         if data_ptr != 0 && bytes_copied < data_len {
             let remaining_data = data_len - bytes_copied;
             let copy_len = remaining_data.min(PAGE_SIZE);
@@ -2653,19 +2670,17 @@ fn map_range_4kb(req: MapRange4kbRequest) -> SyscallResult {
             };
             if copy_res.is_err() {
                 pmm::free_frame(frame_phys);
-                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+                rollback_mapped_4kb_locked(space_id, virt_start, mapped_pages, pt_root);
                 return Err(Error::InvalidAddress);
             }
             bytes_copied += copy_len;
 
-            // Zero-fill the rest of the page
             if copy_len < PAGE_SIZE {
                 unsafe {
                     write_bytes(frame_virt.add(copy_len), 0, PAGE_SIZE - copy_len);
                 }
             }
         } else {
-            // Zero-fill entire page
             unsafe {
                 write_bytes(frame_virt, 0, PAGE_SIZE);
             }
@@ -2673,39 +2688,32 @@ fn map_range_4kb(req: MapRange4kbRequest) -> SyscallResult {
 
         if fail_on_map_stage && fail_after_pages.is_some_and(|limit| mapped_pages >= limit) {
             pmm::free_frame(frame_phys);
-            rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+            rollback_mapped_4kb_locked(space_id, virt_start, mapped_pages, pt_root);
             klibcluu::warn("map_range_4kb: injected map-stage failpoint triggered");
             return Err(Error::OutOfMemory);
         }
 
-        // Map the page into the address space
         let _ = crate::mm::frame_table::retype_to_user(frame_phys, space_id);
-        let result = space_repository::with_space_mut(space_id, |space| unsafe {
+        let result = unsafe {
             elf::map_user_page(
                 virt_addr,
                 frame_phys,
                 writable,
                 executable,
-                space.page_table_root,
+                pt_root,
                 space_id,
             )
-        });
+        };
 
         match result {
-            Some(Ok(())) => {
+            Ok(()) => {
                 mapped_pages += 1;
             }
-            Some(Err(_)) => {
+            Err(_) => {
                 klibcluu::warn("map_range_4kb: map_user_page failed");
                 pmm::free_frame(frame_phys);
-                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
+                rollback_mapped_4kb_locked(space_id, virt_start, mapped_pages, pt_root);
                 return Err(Error::OutOfMemory);
-            }
-            None => {
-                klibcluu::warn("map_range_4kb: space not found");
-                pmm::free_frame(frame_phys);
-                rollback_mapped_4kb(space_id, virt_start, mapped_pages);
-                return Err(Error::NotFound);
             }
         }
     }
@@ -2746,40 +2754,44 @@ fn map_range_4kb_shared(req: MapRangeSharedRequest) -> SyscallResult {
         caller_page_table_root,
     } = req;
 
+    // Pre-translate all source VAs to physical addresses OUTSIDE the space lock.
+    // The caller's page table is distinct from the target space, so this avoids
+    // any risk of double-locking the repository.
+    let mut src_physes: [u64; 512] = [0; 512];
+    if num_pages > 512 {
+        klibcluu::warn("map_range_4kb_shared: num_pages exceeds batch limit 512");
+        return Err(Error::InvalidArgument);
+    }
     for page_idx in 0..num_pages {
         let src_virt = (data_ptr as u64).wrapping_add((page_idx * PAGE_SIZE) as u64);
-
-        // Translate caller's virtual address to physical via their page table.
-        // This is done OUTSIDE the target-space lock to avoid double-acquiring
-        // the repository lock (caller and target may differ).
-        let src_phys = match elf::translate_vaddr(
+        match elf::translate_vaddr(
             caller_page_table_root,
             x86_64::VirtAddr::new(src_virt),
         ) {
-            Some(phys) => phys.as_u64() & !0xFFF, // page-aligned physical address
+            Some(phys) => src_physes[page_idx] = phys.as_u64() & !0xFFF,
             None => {
                 klibcluu::warn("map_range_4kb_shared: source page not mapped in caller space");
                 return Err(Error::InvalidArgument);
             }
-        };
+        }
+    }
 
+    // Single lock acquisition for the entire batch.
+    let mut repo = space_repository::lock_repository();
+    let space = match repo.get_mut(space_id) {
+        Some(s) => s,
+        None => return Err(Error::NotFound),
+    };
+
+    for page_idx in 0..num_pages {
         let target_virt = virt_start.wrapping_add((page_idx * PAGE_SIZE) as u64);
+        let src_phys = src_physes[page_idx];
 
-        // Map src_phys into the target space READ-ONLY. map_shared_page calls
-        // inc_ref(src_phys) to record the new mapping in the frame_table so
-        // dec_ref in teardown handles the lifetime correctly.
-        let result = space_repository::with_space_mut(space_id, |space| unsafe {
-            elf::map_shared_page(target_virt, src_phys, executable, space.page_table_root, space_id)
-        });
-
-        match result {
-            Some(Ok(())) => {}
-            Some(Err(_)) => {
-                klibcluu::warn("map_range_4kb_shared: map_user_page failed");
+        match unsafe { elf::map_shared_page(target_virt, src_phys, executable, space.page_table_root, space_id) } {
+            Ok(()) => {}
+            Err(_) => {
+                klibcluu::warn("map_range_4kb_shared: map_shared_page failed");
                 return Err(Error::OutOfMemory);
-            }
-            None => {
-                return Err(Error::NotFound);
             }
         }
     }
