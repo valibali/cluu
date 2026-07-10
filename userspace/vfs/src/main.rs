@@ -4365,8 +4365,12 @@ impl VfsServer {
                 if entry.size > FILE_CACHE_MAX_SIZE {
                     continue;
                 }
-                if self.cache_ext2_file(&entry).is_some() {
+                if let Some(cache_entry) = self.cache_ext2_file(&entry) {
                     preloaded += 1;
+                    let data = unsafe {
+                        core::slice::from_raw_parts(cache_entry.base as *const u8, cache_entry.len)
+                    };
+                    let _ = self.cache.get_or_build_elf_meta(entry.inode, entry.size, data);
                 }
             }
         }
@@ -5080,14 +5084,13 @@ impl VfsServer {
     fn handle_map_elf(
         &mut self,
         msg: &Message,
-        reply_token: usize,
+        _reply_token: usize,
         caller_client: Option<usize>,
     ) -> Result<()> {
         let fd = msg.words[2];
         let target_space = msg.words[3];
         let map_start = self.clock_sample();
         let mut reply_msg = Message::new(VFS_MAP_ELF, [0; 6], 3);
-        // DIAG(unmap-bug): log map_elf entry so ordering vs container_cleanup is visible
         let _ = debug_print(&format!(
             "vfs: handle_map_elf START fd={} target_space={} cache_entries={}",
             fd, target_space, self.cache.entries.len()
@@ -5097,13 +5100,13 @@ impl VfsServer {
             Ok(id) => id,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
             }
         };
         let Some(file) = self.files.get(client_id, fd).cloned() else {
             let _ = debug_print(&format!("vfs: map_elf miss client_id={} fd={}", client_id, fd));
             reply_msg.words[0] = Error::NotFound.to_errno() as usize;
-            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
         };
 
         match file {
@@ -5118,10 +5121,9 @@ impl VfsServer {
 
                 let Some(cache_entry) = cache_entry else {
                     reply_msg.words[0] = Error::InvalidOperation.to_errno() as usize;
-                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
                 };
 
-                // DIAG(unmap-bug): log every map_elf with the cache entry VA and size
                 let _ = debug_print(&format!(
                     "vfs: map_elf inode={} cache_base={:#x} cache_len={} target_space={}",
                     entry.inode, cache_entry.base, cache_entry.len, target_space
@@ -5138,7 +5140,7 @@ impl VfsServer {
                     Ok(meta) => meta,
                     Err(err) => {
                         reply_msg.words[0] = err.to_errno() as usize;
-                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                        return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
                     }
                 };
                 if let Err(err) = self.map_cached_elf_segments(target_space, &elf_meta, data) {
@@ -5146,10 +5148,9 @@ impl VfsServer {
                         "vfs: map_elf FAILED inode={} err={:?}", entry.inode, err
                     ));
                     reply_msg.words[0] = err.to_errno() as usize;
-                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
                 }
                 self.log_map_elf_stage(fd, "segments_mapped", map_start);
-                // DIAG(unmap-bug): confirm success
                 let _ = debug_print(&format!(
                     "vfs: map_elf OK inode={} entry={:#x} target_space={}",
                     entry.inode, elf_meta.entry_point, target_space
@@ -5169,12 +5170,12 @@ impl VfsServer {
                     Ok(elf) => elf,
                     Err(_) => {
                         reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
-                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                        return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
                     }
                 };
                 if let Err(err) = self.map_elf_segments(target_space, &elf, data) {
                     reply_msg.words[0] = err.to_errno() as usize;
-                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
                 }
                 self.log_map_elf_stage(fd, "segments_mapped", map_start);
                 reply_msg.words[0] = 0;
@@ -5187,7 +5188,7 @@ impl VfsServer {
         }
 
         self.log_map_elf_stage(fd, "reply", map_start);
-        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+        ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty())
     }
 
     fn map_elf_segments(&self, target_space: usize, elf: &ElfFile, data: &[u8]) -> Result<()> {

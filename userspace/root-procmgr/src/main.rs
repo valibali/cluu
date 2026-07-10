@@ -117,6 +117,27 @@ enum TimerAction {
     Restart(u64), // container_id
 }
 
+struct PipelinedPrep {
+    image_name: String,
+    space_token: usize,
+    cookie: usize,
+    priority: usize,
+    profile: CapProfile,
+    extra_token: usize,
+    extra_token_1: usize,
+    container_id: u64,
+    argv_payload: Vec<u8>,
+    argc: usize,
+    param_overrides: Vec<(usize, u64)>,
+    restart_policy: RestartPolicy,
+    spawn_seq: usize,
+    spawn_start: u64,
+    image_dir: String,
+    env_data: Vec<u8>,
+    envc: usize,
+    binary_vfs_path: String,
+}
+
 /// A pending timer entry in the timer queue.
 struct TimerEntry {
     deadline: u64, // TSC tick deadline
@@ -1135,7 +1156,20 @@ impl ProcessManager {
         let services = doc.array_tables("service");
         let _ = debug_print(&format!("procmgr: autostart {} service(s)", services.len()));
 
-        for svc in &services {
+        match self.pipelined_autostart(&services[..]) {
+            Ok(()) => {}
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: pipelined autostart failed {:?}, falling back to serial", e
+                ));
+                self.run_autostart_serial(&services[..]);
+            }
+        }
+        let _ = debug_print("procmgr: autostart complete");
+    }
+
+    fn run_autostart_serial(&mut self, services: &[&libcluu::toml::TomlTable]) {
+        for svc in services {
             let image_name = match svc.get_str("image") {
                 Some(n) => n,
                 None => {
@@ -1150,7 +1184,409 @@ impl ProcessManager {
                 ));
             }
         }
-        let _ = debug_print("procmgr: autostart complete");
+    }
+
+    fn pipelined_autostart(&mut self, services: &[&libcluu::toml::TomlTable]) -> Result<()> {
+        use libcluu::ipc::ASYNC_REPLY_TAG;
+        use libcluu::fs::VFS_MAP_ELF;
+
+        let reply_ep = endpoint_create(self.token)?;
+
+        let mut preps: Vec<PipelinedPrep> = Vec::new();
+        for svc in services {
+            let image_name = match svc.get_str("image") {
+                Some(n) => alloc::string::String::from(n),
+                None => continue,
+            };
+            match self.prep_autostart_spawn(&image_name, svc, reply_ep) {
+                Ok(prep) => preps.push(prep),
+                Err(e) => {
+                    let _ = debug_print(&format!(
+                        "procmgr: pipelined prep '{}' failed: {:?}", image_name, e
+                    ));
+                }
+            }
+        }
+
+        let _ = debug_print(&format!(
+            "procmgr: pipelined autostart {} prepped, collecting replies", preps.len()
+        ));
+
+        let registry_ep = registry::control_endpoint();
+        let mut buf = [0u8; 4096];
+        let mut completed = 0usize;
+
+        while completed < preps.len() {
+            let tokens = if registry_ep != 0 {
+                [reply_ep, registry_ep]
+            } else {
+                [reply_ep, reply_ep]
+            };
+            match libcluu::syscall::ipc_recv_any(&tokens, &mut buf, u64::MAX) {
+                Ok((index, len)) => {
+                    let Some((msg, payload)) = parse_message(&buf[..len]) else {
+                        continue;
+                    };
+                    if index == 0 || (registry_ep == 0 && index == 1 && msg.tag.label != VFS_MAP_ELF) {
+                        if registry_ep != 0 && index == 1 {
+                            let _ = self.handle_registry_event(&msg, payload);
+                            continue;
+                        }
+                        let cookie = msg.words[5];
+                        let prep_idx = preps.iter().position(|p| p.cookie == cookie && p.cookie != 0);
+                        if let Some(idx) = prep_idx {
+                            let status = msg.words[0];
+                            let entry_point = msg.words[1];
+                            preps[idx].cookie = 0;
+                            completed += 1;
+                            if status == 0 {
+                                self.complete_autostart_spawn(&mut preps[idx], entry_point);
+                            } else {
+                                let _ = debug_print(&format!(
+                                    "procmgr: pipelined map_elf failed for '{}' status={}",
+                                    preps[idx].image_name, status
+                                ));
+                            }
+                        }
+                    } else if registry_ep != 0 && index == 1 {
+                        let _ = self.handle_registry_event(&msg, payload);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn prep_autostart_spawn(
+        &mut self,
+        image_name: &str,
+        svc: &libcluu::toml::TomlTable,
+        reply_ep: usize,
+    ) -> Result<PipelinedPrep> {
+        use libcluu::ipc::ASYNC_REPLY_TAG;
+        use libcluu::fs::VFS_MAP_ELF;
+
+        let manifest_path = format!("/var/images/{}/manifest.toml", image_name);
+        let manifest_contents = self.read_file_from_vfs(&manifest_path)
+            .ok_or(Error::NotFound)?;
+        let manifest_str = core::str::from_utf8(&manifest_contents)
+            .map_err(|_| Error::InvalidArgument)?;
+        let doc = libcluu::toml::parse(manifest_str)
+            .map_err(|_| Error::InvalidArgument)?;
+
+        let binary = doc.table("exec").and_then(|t| t.get_str("binary"))
+            .ok_or(Error::InvalidArgument)?;
+        let restart_policy = parse_restart_policy(&doc);
+
+        let mut requested_profile = CapProfile::USER;
+        if let Some(profile_table) = doc.table("profile") {
+            if let Some(caps) = profile_table.get_array("capabilities") {
+                for cap_name in caps {
+                    if let Some(cap) = parse_capability(cap_name) {
+                        requested_profile |= cap;
+                    }
+                }
+            }
+        }
+
+        let mut container_id = self.next_container_id();
+        let has_persistent_storage = doc
+            .table("storage")
+            .and_then(|t| t.get_array("persistent_dirs"))
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if has_persistent_storage {
+            if !self.create_container_dirs(container_id, image_name) {
+                container_id = 0;
+            }
+        }
+
+        let binary_vfs_path = format!("/var/images/{}{}", image_name, binary);
+        let priority = doc.table("scheduling")
+            .and_then(|t| t.get_str("priority"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_PRIORITY);
+
+        let endpoint_mode = doc.table("tokens")
+            .and_then(|t| t.get_str("endpoint_mode"));
+        let extra_token = match endpoint_mode {
+            Some("listen") => {
+                let ep = endpoint_create(self.token)?;
+                token_derive(ep, Rights::IPC_RECV.bits() as usize, u64::MAX).unwrap_or(0)
+            }
+            Some("grantable") => {
+                let ep = endpoint_create(self.token)?;
+                let rights = Rights::IPC_RECV | Rights::IPC_SEND | Rights::IPC_CALL | Rights::GRANT;
+                token_derive(ep, rights.bits() as usize, u64::MAX).unwrap_or(0)
+            }
+            _ => 0,
+        };
+
+        let devices: Vec<String> = doc.table("hardware")
+            .and_then(|t| t.get_array("devices"))
+            .map(|a| a.iter().map(|s| s.clone()).collect())
+            .unwrap_or_default();
+        let extra_token_1 = if devices.iter().any(|d| d == "irq") {
+            token_derive(self.token, Rights::IRQ_HANDLE.bits() as usize, u64::MAX).unwrap_or(0)
+        } else {
+            0
+        };
+
+        let mut argv_payload: Vec<u8> = Vec::new();
+        argv_payload.extend_from_slice(binary.as_bytes());
+        argv_payload.push(0);
+        let argc = 1usize;
+
+        let spawn_seq = self.next_spawn_seq();
+        let spawn_start = self.clock_sample();
+
+        let mut overrides_buf: [(usize, u64); 12] = [(0, 0); 12];
+        let mut n_overrides = 0;
+        if image_name == "console" {
+            overrides_buf[n_overrides] = (PARAM_CONSOLE_INSTANCE, 0);
+            n_overrides += 1;
+            overrides_buf[n_overrides] = (PARAM_CONSOLE_ACTIVE, 1);
+            n_overrides += 1;
+        }
+        let param_overrides: Vec<(usize, u64)> = overrides_buf[..n_overrides].to_vec();
+
+        let (env_data, envc) = build_default_env_payload();
+        let space_token = space_create(self.token)?;
+        self.log_spawn_stage(spawn_seq, "space_create_done", spawn_start);
+        self.log_spawn_stage(spawn_seq, "elf_fetch_start", spawn_start);
+
+        self.ensure_vfs_endpoint()?;
+        let client_id = registry::control_endpoint();
+        let client = VfsClient::new(self.vfs_endpoint, client_id);
+        let file = self.cached_vfs_file(&client, &binary_vfs_path)
+            .map_err(|_| Error::NotFound)?;
+        let map_token = token_derive(space_token, Rights::SPACE_MAP.bits() as usize, u64::MAX)?;
+
+        let cookie = self.next_exit_cookie() * 1000 + spawn_seq;
+        let mut msg = Message::new(VFS_MAP_ELF, [0; 6], 6);
+        msg.tag.extra = ASYNC_REPLY_TAG;
+        msg.words[0] = 0;
+        msg.words[1] = client_id;
+        msg.words[2] = file.fd;
+        msg.words[3] = map_token;
+        msg.words[4] = reply_ep;
+        msg.words[5] = cookie;
+
+        libcluu::ipc::send(self.vfs_endpoint, &msg, IpcFlags::empty())?;
+
+        let _ = debug_print(&format!(
+            "procmgr: pipelined map_elf sent for '{}' cookie={} fd={}",
+            image_name, cookie, file.fd
+        ));
+
+        let image_dir = format!("/var/images/{}", image_name);
+
+        Ok(PipelinedPrep {
+            image_name: alloc::string::String::from(image_name),
+            space_token,
+            cookie,
+            priority,
+            profile: requested_profile,
+            extra_token,
+            extra_token_1,
+            container_id,
+            argv_payload,
+            argc,
+            param_overrides,
+            restart_policy,
+            spawn_seq,
+            spawn_start,
+            image_dir,
+            env_data,
+            envc,
+            binary_vfs_path,
+        })
+    }
+
+    fn complete_autostart_spawn(&mut self, prep: &mut PipelinedPrep, entry_point: usize) {
+        let spawn_seq = prep.spawn_seq;
+        let spawn_start = prep.spawn_start;
+        let space_token = prep.space_token;
+        let profile = prep.profile;
+        let priority = prep.priority;
+
+        self.log_spawn_stage(spawn_seq, "elf_fetch_done", spawn_start);
+        self.log_spawn_stage(spawn_seq, "map_segments_done", spawn_start);
+
+        if libcluu::map_stack_with_guard(
+            space_token,
+            SERVICE_STACK_TOP,
+            SERVICE_STACK_SIZE,
+            STACK_FLAGS,
+            1,
+        ).is_err() {
+            let _ = debug_print(&format!("procmgr: pipelined stack_map failed for '{}'", prep.image_name));
+            return;
+        }
+        self.log_spawn_stage(spawn_seq, "stack_map_done", spawn_start);
+
+        let send_rights = Rights::IPC_SEND.bits() as usize;
+        let child_endpoint = match token_derive(self.exit_endpoint, send_rights, u64::MAX) {
+            Ok(t) => t,
+            Err(e) => { let _ = debug_print(&format!("procmgr: pipelined token_derive exit failed {:?}", e)); return; }
+        };
+        let exit_cookie = self.next_exit_cookie();
+        let pid = self.next_pid();
+        let stdin_endpoint = match endpoint_create(self.token) {
+            Ok(t) => t,
+            Err(e) => { let _ = debug_print(&format!("procmgr: pipelined endpoint_create failed {:?}", e)); return; }
+        };
+        let (stdout_endpoint, stderr_endpoint, stdlog_endpoint) = if self.tty_endpoints[0] != 0 {
+            (self.tty_endpoints[0], self.tty_endpoints[0], self.tty_endpoints[0])
+        } else {
+            match (endpoint_create(self.token), endpoint_create(self.token), endpoint_create(self.token)) {
+                (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                _ => { let _ = debug_print("procmgr: pipelined stdio endpoint_create failed"); return; }
+            }
+        };
+
+        let slot_rights = profile_to_rights(profile);
+        let proc_cap = match derive_slot(self.token, slot_rights[TOKEN_IPC]) {
+            Ok(t) => t, Err(e) => { let _ = debug_print(&format!("procmgr: pipelined derive ipc failed {:?}", e)); return; }
+        };
+        let self_cap = match derive_slot(self.token, slot_rights[TOKEN_SELF]) {
+            Ok(t) => t, Err(e) => { let _ = debug_print(&format!("procmgr: pipelined derive self failed {:?}", e)); return; }
+        };
+        let child_space_token = match derive_slot(space_token, slot_rights[TOKEN_SPACE]) {
+            Ok(t) => t, Err(e) => { let _ = debug_print(&format!("procmgr: pipelined derive space failed {:?}", e)); return; }
+        };
+        let child_registry_token = if slot_rights[TOKEN_REGISTRY].is_empty() {
+            self.registry_send
+        } else {
+            match derive_slot(self.registry_send, slot_rights[TOKEN_REGISTRY]) {
+                Ok(t) => t, Err(_) => self.registry_send,
+            }
+        };
+
+        let thread_token = match thread_create(space_token, entry_point, SERVICE_STACK_TOP, priority, THREAD_CREATE_START_SUSPENDED) {
+            Ok(t) => t,
+            Err(e) => { let _ = debug_print(&format!("procmgr: pipelined thread_create failed {:?}", e)); return; }
+        };
+        if self.fault_endpoint != 0 {
+            let _ = thread_set_fault_endpoint(thread_token, self.fault_endpoint);
+        }
+        let thread_tid = match thread_get_id(thread_token) {
+            Ok(t) => t,
+            Err(e) => { let _ = debug_print(&format!("procmgr: pipelined thread_get_id failed {:?}", e)); return; }
+        };
+        self.log_spawn_stage(spawn_seq, "thread_start_done", spawn_start);
+
+        let parent_stdin_send = match token_derive(
+            stdin_endpoint,
+            (Rights::IPC_SEND.bits() | Rights::IPC_CALL.bits()) as usize,
+            u64::MAX,
+        ) {
+            Ok(token) => token,
+            Err(_) => 0,
+        };
+
+        let mut eo_buf = [(0usize, 0u64); 12];
+        let mut n_eo = 0usize;
+        for &(idx, val) in prep.param_overrides.iter().take(12) {
+            eo_buf[n_eo] = (idx, val);
+            n_eo += 1;
+        }
+        let effective_overrides = &eo_buf[..n_eo];
+
+        let fd_vfs_meta: [(usize, usize); 4] = [(0, 0); 4];
+        let pipe_mask: u8 = 0;
+
+        if map_process_info_page(
+            space_token,
+            child_endpoint,
+            exit_cookie,
+            pid,
+            stdin_endpoint,
+            stdout_endpoint,
+            stderr_endpoint,
+            stdlog_endpoint,
+            child_registry_token,
+            proc_cap,
+            self_cap,
+            child_space_token,
+            self.clock_token,
+            &prep.argv_payload,
+            prep.argc,
+            &prep.env_data,
+            prep.envc,
+            pipe_mask,
+            profile,
+            prep.extra_token,
+            prep.extra_token_1,
+            effective_overrides,
+            &[],
+            &[],
+            &fd_vfs_meta,
+            self.view_mgr_token,
+        ).is_err() {
+            let _ = debug_print(&format!("procmgr: pipelined map_process_info_page failed for '{}'", prep.image_name));
+            return;
+        }
+
+        self.exit_table.insert(exit_cookie, thread_token);
+        self.pid_to_cookie.insert(pid, exit_cookie);
+        self.cookie_to_pid.insert(exit_cookie, pid);
+        self.pid_owner_tid.insert(pid, 0);
+        self.pid_to_tid.insert(pid, thread_tid);
+        self.tid_to_pid.insert(thread_tid, pid);
+        self.pid_to_profile.insert(pid, profile);
+        self.cookie_to_space.insert(exit_cookie, space_token);
+
+        let mut derived_tokens: Vec<usize> = [
+            child_endpoint,
+            stdin_endpoint,
+            proc_cap,
+            self_cap,
+            child_space_token,
+        ]
+        .into_iter()
+        .filter(|&t| t != 0)
+        .collect();
+        if parent_stdin_send != 0 && parent_stdin_send != stdin_endpoint {
+            derived_tokens.push(parent_stdin_send);
+        }
+        self.cookie_to_tokens.insert(exit_cookie, derived_tokens);
+
+        let view_mounts = default_view_for_profile(profile);
+        self.pid_to_container_id.insert(pid, prep.container_id);
+        self.container_owner_pids.insert(pid);
+        self.install_view_and_run(
+            thread_token, &view_mounts, profile, prep.container_id, 0, false, 0,
+            self.manifest_priority(&prep.image_name),
+        );
+        self.pid_to_view.insert(pid, view_mounts);
+        if prep.image_name == "vtmgr" {
+            self.vtmgr_container_id = prep.container_id;
+        }
+        let inst_name = self.next_instance_name(0, &prep.image_name);
+        self.container_instances.insert(prep.container_id, ContainerInstance {
+            name: prep.image_name.clone(),
+            instance_name: inst_name,
+            session_id: 0,
+            container_id: prep.container_id,
+            parent_container_id: 0,
+            pid,
+            image_path: prep.image_dir.clone(),
+            mapped_pages: (SERVICE_STACK_SIZE / PAGE_SIZE + 1) as u32,
+            restart_policy: prep.restart_policy.clone(),
+            restart_count: 0,
+            last_exit_code: 0,
+            restart_attempt_start: 0,
+            quota: QuotaSpec::default(),
+            live_processes: 0,
+        });
+        self.autostart_order.push(prep.container_id);
+        let _ = debug_print(&format!(
+            "procmgr: pipelined autostart '{}' started pid={} cid={}",
+            prep.image_name, pid, prep.container_id
+        ));
     }
 
     fn load_envelopes(&mut self) {
