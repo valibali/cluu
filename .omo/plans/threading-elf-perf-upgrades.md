@@ -10,7 +10,7 @@
 >    (MAX_QUEUE_LEN=1024, waiting_senders backpressure). gotchas.md:110 is
 >    outdated.
 
-## Status: P0 + P1 implemented; P0-3 + P1-1/P1-2 deferred; side-quests done
+## Status: P0 + P1 implemented; P0-3 closed; async adoption surveyed + done; side-quests done
 
 ### Shipped this session
 
@@ -330,6 +330,51 @@ Level-triggered: `notify(ep, label, key)` marks a pending bit and sends
 one `ipc_send`. `ack(ep, label)` clears it. Duplicate `notify` before
 `ack` is coalesced. `cancel_endpoint(ep)` drops all pending for that ep.
 Not adopted by compositor yet — adoption is future work.
+
+---
+
+## Async adoption survey (2026-07-10)
+
+### AsyncServerMain adoption: DONE (vtmgr PoC, no further migration needed)
+
+**vtmgr**: migrated as wire-validation PoC. `AsyncServerMain` wraps the recv
+loop, `poll_ready` + `drain_completions` wired. Harness green (l2_login,
+l2_cluuterm_login, l2_vt4_default). Commit `855d4c61`.
+
+**cluuterm**: surveyed, NOT migrated. All 4 blocking `ipc::call` sites
+(main.rs:161, 245, 409; tty_backend.rs:940) are **setup-phase only** — they
+run before the persistent recv loop starts. The recv loop (tty_backend.rs
+:973-1128) has **zero downstream blocking calls** — all PTS verb handlers
+(handle_pts_write, handle_pts_read_drain_hint, handle_pts_get_termios, etc.)
+use fire-and-forget `send`/`send_msg_with_payload`. No deadlock surface on
+the hot path. Migration would be a 1129-LOC high-risk refactor for zero
+functional benefit. Oracle-confirmed.
+
+**compositor**: surveyed, NOT migrated. Single blocking `ipc::call` (timeserver
+subscribe, one-time arm). Uses `recv_any_with_sender` variant (skeleton gap —
+`AsyncServerMain` wraps plain `recv_any` only). Has own deadline scheduler.
+No per-message blocking.
+
+**login**: surveyed, NOT migrated. One-shot bootstrap, not a persistent server.
+Blocking calls only on Enter (session create + token derive + compositor
+handoff). No recv-loop blocking.
+
+**kbd, inputd, tty, console**: surveyed, NOT migrated. All are `send`/`reply`-
+only leaves/coordinators. Zero downstream `ipc::call`. No async benefit.
+
+**Conclusion**: The async runtime is validated infrastructure on standby.
+No CLUU server has per-message blocking IPC on its recv-loop hot path today.
+Revisit per-server if a future handler adds blocking `ipc::call`.
+
+### CoalescedNotify adoption: assessed, not a drop-in
+
+compositor `broadcast_frame_ready` (main.rs:42) is the fan-out site — loops
+windows, `ipc::send(COMP_FRAME_READY_LABEL)` per window. BUT: compositor
+already has manual coalescing via `pending_frame_ready` flag (set on damage,
+cleared on send-success). `CoalescedNotify` requires an explicit `ack()` from
+the receiver — compositor is fire-and-forget with no ack. Different pattern.
+Adoption would need either a protocol change (add acks) or a `CoalescedNotify`
+modification (clear-on-send mode). Deferred.
 
 ---
 
