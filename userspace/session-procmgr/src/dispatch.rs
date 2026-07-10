@@ -1,5 +1,7 @@
 extern crate alloc;
 use alloc::string::String;
+use alloc::collections::BTreeMap;
+use libcluu::fs::client::VfsFile;
 use procmgr_common::handler::{HandlerError, InboundMsg, MsgHandler, Reply};
 use procmgr_common::kernel_iface::Kernel;
 use procmgr_common::pid::SessionId;
@@ -53,6 +55,7 @@ pub struct SessionState {
     pub spawn_ep: u64,
     pub view_mgr_token: u64,
     pub pg_table: crate::pg_table::PgTable,
+    pub vfs_file_cache: BTreeMap<String, VfsFile>,
 }
 
 #[cfg(feature = "host-test")]
@@ -74,6 +77,7 @@ impl SessionState {
             spawn_ep: 0,
             view_mgr_token: 0,
             pg_table: crate::pg_table::PgTable::new(),
+            vfs_file_cache: BTreeMap::new(),
         }
     }
 }

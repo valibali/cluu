@@ -125,7 +125,7 @@ pub enum SpmCompletion {
 }
 
 pub fn begin_spawn(
-    state: &SessionState,
+    state: &mut SessionState,
     pid: i32,
     req: &SpawnReq,
     parent_tid: usize,
@@ -136,19 +136,24 @@ pub fn begin_spawn(
     let child_space = space_create(our_space).map_err(|_| RealSpawnError::SpaceCreate)?;
 
     let ctrl_ep = registry::control_endpoint();
-    let _ = libcluu::debug_print(&alloc::format!(
-        "session-procmgr: elf_spawn vfs_ep={} ctrl_ep={} path={}",
-        state.vfs_cap, ctrl_ep, req.image_path
-    ));
     let vfs = VfsClient::new(state.vfs_cap as usize, ctrl_ep);
-    let file = vfs
-        .open(&req.image_path)
-        .map_err(|e| {
-            let _ = libcluu::debug_print(&alloc::format!(
-                "session-procmgr: VfsOpen failed: {:?}", e
-            ));
-            RealSpawnError::VfsOpen
-        })?;
+
+    let file = if let Some(cached) = state.vfs_file_cache.get(&req.image_path).copied() {
+        cached
+    } else {
+        let opened = vfs
+            .open(&req.image_path)
+            .map_err(|e| {
+                let _ = libcluu::debug_print(&alloc::format!(
+                    "session-procmgr: VfsOpen failed: {:?}", e
+                ));
+                RealSpawnError::VfsOpen
+            })?;
+        if state.vfs_file_cache.len() < 64 {
+            state.vfs_file_cache.insert(req.image_path.clone(), opened);
+        }
+        opened
+    };
     let entry = vfs
         .map_elf(file, child_space)
         .map_err(|e| {

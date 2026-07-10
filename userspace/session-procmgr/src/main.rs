@@ -246,6 +246,7 @@ fn run() -> Result<()> {
         spawn_ep: ep as u64,
         view_mgr_token,
         pg_table: spm::pg_table::PgTable::new(),
+        vfs_file_cache: alloc::collections::BTreeMap::new(),
     };
 
     let control_ep = registry::control_endpoint();

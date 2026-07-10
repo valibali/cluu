@@ -5,3 +5,5 @@ PARAM tty_instance
 BUILD "cargo build --manifest-path userspace/tty/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/tty.elf /bin/tty
 BUILD "cargo build --manifest-path userspace/shell/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/shell.elf /bin/shell
 ENTRYPOINT /bin/tty
+
+PRELOAD

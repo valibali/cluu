@@ -2,3 +2,5 @@ FROM minimal
 PROFILE ipc spawn registry vfs
 BUILD "cargo build --manifest-path userspace/cluuterm/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/cluuterm.elf /bin/cluuterm
 ENTRYPOINT /bin/cluuterm
+
+PRELOAD

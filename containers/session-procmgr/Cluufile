@@ -3,3 +3,5 @@ PROFILE ipc spawn registry vfs
 BUILD "cargo build --manifest-path userspace/session-procmgr/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/session-procmgr.elf /bin/session-procmgr
 ENTRYPOINT /bin/session-procmgr
 RESTART never
+
+PRELOAD
