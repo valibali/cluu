@@ -567,6 +567,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                             let user_name =
                                 alloc::string::String::from_utf8_lossy(&state.username)
                                     .into_owned();
+                            let password =
+                                alloc::string::String::from_utf8_lossy(&state.password)
+                                    .into_owned();
                             // ── 1. SESSION_CREATE ──────────────────────────────────
                             let create_reply = libcluu::session::create(SessionCreateRequest {
                                 user_name: user_name.clone(),
@@ -583,16 +586,22 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                                     ],
                                     umask: 0o022,
                                 },
+                                password,
                             });
                             let ok = match create_reply {
                                 Ok(o) => o,
                                 Err(ref e) => {
-                                    let msg = alloc::format!(
+                                    let _ = debug_print(&alloc::format!(
                                         "login: SESSION_CREATE failed: {:?}", e
-                                    );
-                                    let _ = debug_print(&msg);
-                                    destroy_window();
-                                    return -1;
+                                    ));
+                                    state.show_error = true;
+                                    state.password.clear();
+                                    state.focus = Focus::Username;
+                                    unsafe {
+                                        render_fields(cells_ptr, gw, modal_mx, modal_my, &state);
+                                    }
+                                    send_damage(shm_ptr);
+                                    continue;
                                 }
                             };
 

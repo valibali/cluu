@@ -1684,7 +1684,30 @@ impl ProcessManager {
             "procmgr: loaded {} user record(s)", self.user_records.len()
         ));
     }
+}
 
+fn verify_password(stored: &str, supplied: &str) -> bool {
+    if stored.is_empty() {
+        return true;
+    }
+    if let Some(rest) = stored.strip_prefix("$sha256$") {
+        let parts: Vec<&str> = rest.splitn(2, '$').collect();
+        if parts.len() != 2 {
+            return false;
+        }
+        let salt = parts[0];
+        let expected_hex = parts[1];
+        let mut input = alloc::vec::Vec::new();
+        input.extend_from_slice(salt.as_bytes());
+        input.extend_from_slice(supplied.as_bytes());
+        let hash = crypto::sha256(&input);
+        let actual_hex: alloc::string::String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+        return actual_hex == expected_hex;
+    }
+    stored == supplied
+}
+
+impl ProcessManager {
     fn manifest_priority(&self, image_name: &str) -> u8 {
         root_procmgr::manifest_cache::MANIFEST_CACHE
             .get_or_load(image_name, || None)
@@ -7005,26 +7028,61 @@ impl ProcessManager {
         // key conflict (matches login's intent to override TERM etc.).
         // Spawn no longer re-walks /etc/envelopes.toml per child.
         let mut req = req;
-        if let Some(rec) = self.user_records.get(&req.user_name) {
-            if let Some(env_def) =
-                envelopes::lookup_envelope(&self.envelopes, &rec.profile_name)
-            {
-                let resolved = envelopes::resolve_env(env_def, &req.user_name);
-                let mut merged: alloc::collections::BTreeMap<String, String> = resolved;
-                for (k, v) in req.profile.env.drain(..) {
-                    merged.insert(k, v);
-                }
-                req.profile.env = merged.into_iter().collect();
-            } else {
+
+        let rec = match self.user_records.get(&req.user_name) {
+            Some(r) => r,
+            None => {
                 let _ = debug_print(&format!(
-                    "procmgr: SESSION_CREATE user '{}' profile '{}' has no envelope; session env = caller-only",
-                    req.user_name, rec.profile_name
+                    "procmgr: SESSION_CREATE unknown user '{}'", req.user_name
                 ));
+                let reply = cluu_wire::session::SessionCreateReply::Err(
+                    cluu_wire::session::SessionCreateErr::PermissionDenied,
+                );
+                let bytes = postcard::to_allocvec(&reply).expect("ser");
+                self.send_session_reply(
+                    reply_id,
+                    cluu_wire::session::PROCMGR_SESSION_CREATE_LABEL,
+                    &bytes,
+                );
+                return Ok(());
             }
+        };
+
+        if !verify_password(&rec.password, &req.password) {
+            let _ = debug_print(&format!(
+                "procmgr: SESSION_CREATE auth failed for '{}'", req.user_name
+            ));
+            let reply = cluu_wire::session::SessionCreateReply::Err(
+                cluu_wire::session::SessionCreateErr::PermissionDenied,
+            );
+            let bytes = postcard::to_allocvec(&reply).expect("ser");
+            self.send_session_reply(
+                reply_id,
+                cluu_wire::session::PROCMGR_SESSION_CREATE_LABEL,
+                &bytes,
+            );
+            return Ok(());
+        }
+
+        req.profile.home = rec.home.clone();
+        for (k, v) in req.profile.env.iter_mut() {
+            if k == "HOME" { *v = rec.home.clone(); }
+            if k == "USER" { *v = req.user_name.clone(); }
+        }
+
+        if let Some(env_def) =
+            envelopes::lookup_envelope(&self.envelopes, &rec.profile_name)
+        {
+            let resolved = envelopes::resolve_env(env_def, &req.user_name);
+            let mut merged: alloc::collections::BTreeMap<String, String> = resolved;
+            for (k, v) in req.profile.env.drain(..) {
+                merged.insert(k, v);
+            }
+            req.profile.env = merged.into_iter().collect();
         } else {
             let _ = debug_print(&format!(
-                "procmgr: SESSION_CREATE user '{}' has no user_records entry; session env = caller-only",
-                req.user_name
+                "procmgr: SESSION_CREATE user '{}' profile '{}' has no envelope; session env = caller-only",
+                req.user_name, rec.profile_name
             ));
         }
 

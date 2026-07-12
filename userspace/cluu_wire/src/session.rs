@@ -66,6 +66,7 @@ pub struct ProfileSpec {
 pub struct SessionCreateRequest {
     pub user_name: String,
     pub profile:   ProfileSpec,
+    pub password:  String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,6 +142,7 @@ mod tests {
         let req = SessionCreateRequest {
             user_name: String::from("dave"),
             profile: sample_profile(),
+            password: String::new(),
         };
         let bytes = postcard::to_allocvec(&req).expect("ser");
         let decoded: SessionCreateRequest = postcard::from_bytes(&bytes).expect("deser");

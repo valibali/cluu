@@ -45,7 +45,8 @@ fn run() -> Result<(), ()> {
 
     // 1. Create a session.
     let req = SessionCreateRequest {
-        user_name: String::from("revstale"),
+        user_name: String::from("root"),
+        password: String::new(),
         profile: ProfileSpec {
             home: String::from("/tmp"),
             initial_view: ViewSource::Derive(0xC0FFEE),

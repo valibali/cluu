@@ -25,7 +25,8 @@ pub extern "C" fn main() -> i32 {
     // 2. Spawn the shell in that session.
 
     let req = SessionCreateRequest {
-        user_name: String::from("testuser"),
+        user_name: String::from("root"),
+        password: String::new(),
         profile: ProfileSpec {
             home: String::from("/home/testuser"),
             initial_view: ViewSource::Derive(0xC0FFEE),

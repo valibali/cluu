@@ -164,6 +164,7 @@ pub extern "C" fn main() -> i32 {
 
     let create_reply = libcluu::session::create(SessionCreateRequest {
         user_name: user_name.clone(),
+        password: String::new(),
         profile: ProfileSpec {
             home: format!("/home/{}", user_name),
             initial_view: ViewSource::Derive(getty_view_token()),

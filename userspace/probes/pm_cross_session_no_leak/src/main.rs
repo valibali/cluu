@@ -35,6 +35,7 @@ pub extern "C" fn main() -> i32 {
 fn make_req(user: &str, home: &str) -> SessionCreateRequest {
     SessionCreateRequest {
         user_name: String::from(user),
+        password: String::new(),
         profile: ProfileSpec {
             home: String::from(home),
             initial_view: ViewSource::Derive(0xC0FFEE),
@@ -65,7 +66,7 @@ fn run() -> Result<(), ()> {
     ));
 
     // 2. Create session B.
-    let req_b = make_req("bob", "/tmp/bob");
+    let req_b = make_req("guest", "/tmp/bob");
     let b = match libcluu::session::create(req_b) {
         Ok(o) => o,
         Err(e) => {

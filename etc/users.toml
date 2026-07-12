@@ -27,3 +27,10 @@ shell = "/bin/shell"
 profile = "user"
 # no escalate = sudo rejected
 password = ""
+
+[user.valibali]
+home = "/home/valibali"
+shell = "/bin/shell"
+profile = "admin"
+escalate = "supervisor"
+password = "$sha256$019bf1efe0e0bf325f434905971a174b$4074badbc969b0fc6ac0be001c141b56f8a970ff3cf65dc378a3c9034e7c1187"

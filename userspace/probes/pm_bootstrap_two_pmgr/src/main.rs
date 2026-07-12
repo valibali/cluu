@@ -58,7 +58,8 @@ fn run() -> Result<(), ()> {
 
     // 2. Create a session — root-procmgr spawns a session-procmgr for it.
     let req = SessionCreateRequest {
-        user_name: String::from("bootstrap"),
+        user_name: String::from("root"),
+        password: String::new(),
         profile: ProfileSpec {
             home: String::from("/tmp"),
             initial_view: ViewSource::Derive(0xC0FFEE),

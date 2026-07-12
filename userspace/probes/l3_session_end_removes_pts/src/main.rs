@@ -21,7 +21,8 @@ pub extern "C" fn main() -> i32 {
     let label = "l3_session_end_removes_pts";
 
     let req = SessionCreateRequest {
-        user_name: String::from("testuser"),
+        user_name: String::from("root"),
+        password: String::new(),
         profile: ProfileSpec {
             home: String::from("/home/testuser"),
             initial_view: cluu_wire::spawn::ViewSource::Derive(0xC0FFEE),

@@ -35,6 +35,7 @@ const LABEL: &str = "pm_session_id_recycle";
 fn make_request(user: &str) -> SessionCreateRequest {
     SessionCreateRequest {
         user_name: String::from(user),
+        password: String::new(),
         profile: ProfileSpec {
             home: String::from("/tmp"),
             initial_view: ViewSource::Derive(0xC0FFEE),
@@ -92,15 +93,15 @@ fn run() -> Result<(), ()> {
     let _ = debug_print(&format!("{}: start\n", LABEL));
 
     // Step 1: create three sessions.
-    let (tok1, sid1) = create_one("recycle_a")?;
-    let (tok2, sid2) = match create_one("recycle_b") {
+    let (tok1, sid1) = create_one("root")?;
+    let (tok2, sid2) = match create_one("root") {
         Ok(v) => v,
         Err(()) => {
             let _ = destroy_one(tok1, "tok1_cleanup_on_create2_fail");
             return Err(());
         }
     };
-    let (tok3, sid3) = match create_one("recycle_c") {
+    let (tok3, sid3) = match create_one("root") {
         Ok(v) => v,
         Err(()) => {
             let _ = destroy_one(tok2, "tok2_cleanup_on_create3_fail");
@@ -134,7 +135,7 @@ fn run() -> Result<(), ()> {
     }
 
     // Step 3: create a fourth session and capture its sid.
-    let (tok4, sid4) = match create_one("recycle_d") {
+    let (tok4, sid4) = match create_one("root") {
         Ok(v) => v,
         Err(()) => {
             let _ = destroy_one(tok3, "tok3");

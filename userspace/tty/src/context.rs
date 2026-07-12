@@ -348,6 +348,7 @@ impl TtyContext {
         };
         let req = SessionCreateRequest {
             user_name: user_name.clone(),
+            password: alloc::string::String::new(),
             profile,
         };
 
