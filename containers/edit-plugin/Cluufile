@@ -1,0 +1,4 @@
+FROM minimal
+PROFILE ipc
+BUILD "cargo xtask build-micropython" target/micropython-build/micropython /bin/micropython
+ENTRYPOINT /bin/micropython

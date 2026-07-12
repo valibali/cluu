@@ -1,0 +1,14 @@
+[package]
+name = "cluu-l2-net-denied"
+version = "0.1.0"
+edition = "2021"
+description = "Negative test: container without NET profile cannot reach netd"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "l2_net_denied"
+path = "src/main.rs"

@@ -1,0 +1,12 @@
+[package]
+name = "cluu-l2-dns-basic"
+version = "0.1.0"
+edition = "2021"
+description = "DNS resolution probe"
+
+[dependencies]
+libcluu = { path = "../../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "l2_dns_basic"
+path = "src/main.rs"

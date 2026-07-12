@@ -1,0 +1,8 @@
+[package]
+name = "cluu-irc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }
+libtui = { package = "cluu-libtui", path = "../libtui", features = ["runtime"] }

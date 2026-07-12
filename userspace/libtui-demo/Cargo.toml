@@ -1,0 +1,8 @@
+[package]
+name = "cluu-libtui-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+libtui = { package = "cluu-libtui", path = "../libtui", features = ["runtime"] }

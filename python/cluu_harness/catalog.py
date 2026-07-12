@@ -95,6 +95,26 @@ class L2DevNodes:
 
 
 @cluu_case(
+    "l2_poll_pipes",
+    marker_mode="l2_poll_pipes",
+    description="poll()/select() on pipes, TTYs, /dev pseudo-files",
+    tags=["poll", "pipe", "c-program"],
+)
+class L2PollPipes:
+    pass
+
+
+@cluu_case(
+    "l2_soak_test",
+    marker_mode="l2_soak_test",
+    description="pipeline soak — bounded memory + no orphans",
+    tags=["soak", "pipeline", "stress"],
+)
+class L2SoakTest:
+    pass
+
+
+@cluu_case(
     "m1_recv",
     marker_mode="m1_recv",
     description="recv/wakeup churn checks",
@@ -237,6 +257,201 @@ class DynProbe:
     pass
 
 
+@cluu_case(
+    "l2_color_256",
+    marker_mode="l2_color_256",
+    description="256-color SGR parsing (CSI 38;5;N / 48;5;N)",
+    tags=["ansi", "sgr", "color"],
+)
+class L2Color256:
+    pass
+
+
+@cluu_case(
+    "l2_attr_render",
+    marker_mode="l2_attr_render",
+    description="underline/reverse SGR parsing (CSI 4/24/7/27)",
+    tags=["ansi", "sgr", "attr"],
+)
+class L2AttrRender:
+    pass
+
+
+@cluu_case(
+    "l2_alt_screen",
+    marker_mode="l2_alt_screen",
+    description="alt-screen buffer enter/exit (CSI ?1049h/l)",
+    tags=["ansi", "alt-screen"],
+)
+class L2AltScreen:
+    pass
+
+
+@cluu_case(
+    "l2_net_boot",
+    marker_mode="l2_net_boot",
+    description="boot with virtio-net-pci NIC present (CLUU_NET=1)",
+    tags=["net", "pci", "boot"],
+)
+class L2NetBoot:
+    pass
+
+
+@cluu_case(
+    "l2_socket_basic",
+    marker_mode="l2_socket_basic",
+    description="BSD socket API loopback echo test",
+    tags=["net", "socket"],
+)
+class L2SocketBasic:
+    pass
+
+
+@cluu_case(
+    "l2_net_denied",
+    marker_mode="l2_net_denied",
+    description="negative test: container without NET cannot reach netd",
+    tags=["net", "cap", "negative"],
+)
+class L2NetDenied:
+    pass
+
+
+@cluu_case(
+    "l2_dhcp_ping",
+    marker_mode="l2_dhcp_ping",
+    description="DHCP acquisition + ICMP echo to QEMU gateway (10.0.2.2)",
+    tags=["net", "dhcp", "icmp", "ping"],
+)
+class L2DhcpPing:
+    pass
+
+
+@cluu_case(
+    "l2_dns_basic",
+    marker_mode="l2_dns_basic",
+    description="DNS resolution via QEMU SLIRP DNS forwarder (10.0.2.3)",
+    tags=["net", "dns"],
+)
+class L2DnsBasic:
+    pass
+
+
+@cluu_case(
+    "l2_wget_basic",
+    marker_mode="l2_wget_basic",
+    description="wget HTTP GET to host-side HTTP server via 10.0.2.2",
+    tags=["net", "http", "wget"],
+)
+class L2WgetBasic:
+    pass
+
+
+@cluu_case(
+    "l2_curl_basic",
+    marker_mode="l2_curl_basic",
+    description="curl HTTP GET to host-side HTTP server via 10.0.2.2",
+    tags=["net", "http", "curl"],
+)
+class L2CurlBasic:
+    pass
+
+
+@cluu_case(
+    "l2_libtui_demo",
+    marker_mode="l2_libtui_demo",
+    description="libtui demo renders and exits on q",
+    tags=["tui", "libtui"],
+)
+class L2LibtuiDemo:
+    pass
+
+
+@cluu_case(
+    "l2_edit_cluuterm",
+    marker_mode="l2_edit_cluuterm",
+    description="edit works under cluuterm PTS raw mode",
+    tags=["edit", "cluuterm", "tui"],
+)
+class L2EditCluuterm:
+    pass
+
+
+@cluu_case(
+    "l2_edit_libtui",
+    marker_mode="l2_edit_libtui",
+    description="edit via libtui Program event loop + diff renderer",
+    tags=["edit", "libtui", "tui"],
+)
+class L2EditLibtui:
+    pass
+
+
+@cluu_case("l2_fm_basic", marker_mode="l2_fm_basic", description="file manager browses VFS", tags=["tui", "fm"])
+class L2FmBasic: pass
+
+@cluu_case("l2_pager_basic", marker_mode="l2_pager_basic", description="pager scrolls a file", tags=["tui", "pager"])
+class L2PagerBasic: pass
+
+@cluu_case("l2_hexdump_basic", marker_mode="l2_hexdump_basic", description="hex viewer shows hex+ASCII", tags=["tui", "hexdump"])
+class L2HexdumpBasic: pass
+
+@cluu_case("l2_calc_basic", marker_mode="l2_calc_basic", description="calculator evaluates expressions", tags=["tui", "calc"])
+class L2CalcBasic: pass
+
+@cluu_case("l2_diff_basic", marker_mode="l2_diff_basic", description="diff viewer shows differences", tags=["tui", "diff"])
+class L2DiffBasic: pass
+
+@cluu_case("l2_irc_basic", marker_mode="l2_irc_basic", description="IRC client connects to server", tags=["net", "irc"])
+class L2IrcBasic: pass
+
+@cluu_case("l2_httpd_basic", marker_mode="l2_httpd_basic", description="HTTP server listens on port 8080", tags=["net", "httpd"])
+class L2HttpdBasic: pass
+
+@cluu_case("l2_ntp_basic", marker_mode="l2_ntp_basic", description="NTP client queries time", tags=["net", "ntp"])
+class L2NtpBasic: pass
+
+@cluu_case("l2_git_basic", marker_mode="l2_git_basic", description="git init/add/commit/log", tags=["dev", "git"])
+class L2GitBasic: pass
+
+@cluu_case("l2_sed_basic", marker_mode="l2_sed_basic", description="stream editor substitute command", tags=["dev", "sed"])
+class L2SedBasic: pass
+
+@cluu_case("l2_awk_basic", marker_mode="l2_awk_basic", description="text processor pattern-action", tags=["dev", "awk"])
+class L2AwkBasic: pass
+
+@cluu_case("l2_make_basic", marker_mode="l2_make_basic", description="build tool executes Makefile rules", tags=["dev", "make"])
+class L2MakeBasic: pass
+
+@cluu_case("l2_mail_basic", marker_mode="l2_mail_basic", description="IMAP client connects to server", tags=["net", "mail"])
+class L2MailBasic: pass
+
+@cluu_case("l2_feed_basic", marker_mode="l2_feed_basic", description="RSS reader fetches + displays items", tags=["net", "feed"])
+class L2FeedBasic: pass
+
+@cluu_case("l2_notes_basic", marker_mode="l2_notes_basic", description="notes lists + opens files", tags=["tui", "notes"])
+class L2NotesBasic: pass
+
+@cluu_case("l2_glow_basic", marker_mode="l2_glow_basic", description="markdown viewer renders", tags=["tui", "glow"])
+class L2GlowBasic: pass
+
+@cluu_case("l2_sysmon_basic", marker_mode="l2_sysmon_basic", description="system monitor shows /proc stats", tags=["sys", "sysmon"])
+class L2SysmonBasic: pass
+
+@cluu_case("l2_pkg_basic", marker_mode="l2_pkg_basic", description="package manager lists installed containers", tags=["sys", "pkg"])
+class L2PkgBasic: pass
+
+@cluu_case("l2_mp_spike", marker_mode="l2_mp_spike", description="MicroPython feasibility spike — 100 cycles + heap stable", tags=["edit", "micropython"])
+class L2MpSpike: pass
+
+@cluu_case("l2_mp_no_vfs", marker_mode="l2_mp_no_vfs", description="negative test: edit-plugin cannot open files (no vfs)", tags=["edit", "micropython", "security"])
+class L2MpNoVfs: pass
+
+
+@cluu_case("l2_plugin_api", marker_mode="l2_plugin_api", description="editor plugin API — keymap + command callbacks via MicroPython IPC", tags=["edit", "plugin", "micropython"])
+class L2PluginApi: pass
+
+
 __all__ = [
     "BSpawnWarm",
     "CFutex",
@@ -247,15 +462,48 @@ __all__ = [
     "XhciProbe",
     "UsbInputProbe",
     "DynProbe",
+    "L2AltScreen",
+    "L2AttrRender",
     "L2Cd",
     "L2CluutermExit",
     "L2CluutermLogin",
+    "L2Color256",
+    "L2DhcpPing",
     "L2DevNodes",
     "L2Ext2Write",
     "L2Login",
     "L2Ls",
     "L2Mkdir",
+    "L2NetBoot",
+    "L2NetDenied",
+    "L2PollPipes",
+    "L2SocketBasic",
     "L2Vt4Default",
+    "L2DnsBasic",
+    "L2WgetBasic",
+    "L2CurlBasic",
+    "L2LibtuiDemo",
+    "L2EditCluuterm",
+    "L2EditLibtui",
+    "L2FmBasic",
+    "L2PagerBasic",
+    "L2HexdumpBasic",
+    "L2CalcBasic",
+    "L2DiffBasic",
+    "L2IrcBasic",
+    "L2HttpdBasic",
+    "L2NtpBasic",
+    "L2GitBasic",
+    "L2SedBasic",
+    "L2AwkBasic",
+    "L2MakeBasic",
+    "L2MailBasic",
+    "L2FeedBasic",
+    "L2NotesBasic",
+    "L2GlowBasic",
+    "L2SysmonBasic",
+    "L2PkgBasic",
+    "L2PluginApi",
     "M1Recv",
     "M5Fairness",
     "MmapProbe",

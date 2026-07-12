@@ -1,0 +1,37 @@
+[package]
+name = "cluu-netd"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU network daemon (smoltcp-based TCP/IP stack)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+# Feature mapping vs. the task spec: smoltcp has no `device-medium` or `iface`
+# features in any released version. The device medium is selected via
+# `medium-ethernet` (enables `Medium::Ethernet` + pulls in `socket`), and the
+# `iface` module is compiled unconditionally. `alloc` is added so `SocketSet`
+# (heap-backed `managed::Vec`) links on our alloc-capable no_std target.
+smoltcp = { version = "0.13.1", default-features = false, features = [
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+    "socket-icmp",
+    "socket-raw",
+    "socket-dhcpv4",
+    "socket-dns",
+    "medium-ethernet",
+    "alloc",
+] }
+
+[dev-dependencies]
+libcluu = { path = "../libcluu", features = ["host-test"] }
+
+[features]
+default = []
+host-test = ["libcluu/host-test"]
+
+[[bin]]
+name = "netd"
+path = "src/main.rs"

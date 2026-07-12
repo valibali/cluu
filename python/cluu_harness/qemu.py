@@ -179,7 +179,7 @@ class QemuController:
         args = [
             "qemu-system-x86_64",
             "-bios", str(cfg.ovmf),
-            "-machine", "q35",
+            "-machine", "pc",
             "-m", "1G",
             "-accel", os.environ.get("QEMU_ACCEL", "kvm"),
             "-cpu", os.environ.get("QEMU_CPU", "host"),
@@ -203,6 +203,11 @@ class QemuController:
             args.append("-s")
         if cfg.qemu_extra_args:
             args.extend(cfg.qemu_extra_args.split())
+        if cfg.cluu_net:
+            args.extend([
+                "-netdev", "user,id=net0",
+                "-device", "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off,vectors=0,addr=0x5",
+            ])
         if cfg.autoexec_cmd:
             # Forwarded to the build via env; xtask reads it. We just
             # pass it through the environment of the build step.

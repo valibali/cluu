@@ -1,0 +1,6 @@
+FROM minimal
+PROFILE ipc registry net
+MOUNT /tmp inherit
+BUILD "cargo build --manifest-path userspace/ping/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/ping.elf /bin/ping
+ENTRYPOINT /bin/ping
+PRELOAD

@@ -88,6 +88,7 @@ members = [
     "userspace/acpi",
     "userspace/ld-cluu",
     "userspace/virtio-blk",
+    "userspace/virtio-net",
     "userspace/usb-input",
     "userspace/probes/vqprobe",
     "userspace/probes/blkprobe",
@@ -134,6 +135,33 @@ members = [
     "userspace/probes/l3_session_end_removes_pts",
     "userspace/probes/l3_compositor_receives_session_ended",
     "userspace/probes/l3_getty_auth_spawns_shell",
+    "userspace/netd",
+    "userspace/ping",
+    "userspace/wget",
+    "userspace/curl",
+    "userspace/libtui",
+    "userspace/libtui-demo",
+    "userspace/fm",
+    "userspace/pager",
+    "userspace/hexdump",
+    "userspace/calc",
+    "userspace/diff",
+    "userspace/git",
+    "userspace/sed",
+    "userspace/awk",
+    "userspace/make",
+    "userspace/probes/l2_socket_basic",
+    "userspace/probes/l2_net_denied",
+    "userspace/probes/l2_dns_basic",
+    "userspace/mail",
+    "userspace/feed",
+    "userspace/notes",
+    "userspace/glow",
+    "userspace/sysmon",
+    "userspace/pkg",
+    "userspace/irc",
+    "userspace/httpd",
+    "userspace/ntp",
 
     # Language tooling
     "crates/cluu_lang",
@@ -186,6 +214,7 @@ default-members = [
     "userspace/acpi",
     "userspace/ld-cluu",
     "userspace/virtio-blk",
+    "userspace/virtio-net",
     "userspace/usb-input",
     "userspace/tpmd",
     "userspace/basename",
@@ -223,6 +252,12 @@ default-members = [
     "userspace/probes/l3_session_end_removes_pts",
     "userspace/probes/l3_compositor_receives_session_ended",
     "userspace/probes/l3_getty_auth_spawns_shell",
+    "userspace/probes/l2_socket_basic",
+    "userspace/probes/l2_net_denied",
+    "userspace/git",
+    "userspace/sed",
+    "userspace/awk",
+    "userspace/make",
 ]
 
 [workspace.package]
@@ -509,8 +544,8 @@ debug = 0
 debug = 0
 
 [profile.release]
-opt-level = "z"
-lto = true
+opt-level = 2
+lto = false
 panic = "abort"
 debug-assertions = false
 strip = true

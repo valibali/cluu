@@ -1,0 +1,15 @@
+[package]
+name = "cluu-virtio-net"
+version = "0.1.0"
+edition = "2021"
+description = "virtio-net frame send/receive driver for CLUU"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-virtio-core = { path = "../virtio-core" }
+
+[[bin]]
+name = "virtio-net"
+path = "src/main.rs"

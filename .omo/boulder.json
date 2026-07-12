@@ -1,12 +1,12 @@
 {
   "schema_version": 2,
-  "active_work_id": "memory-and-doc-migration",
+  "active_work_id": "cluu-next-phase",
   "works": {
-    "memory-and-doc-migration": {
-      "work_id": "memory-and-doc-migration",
-      "active_plan": ".omo/plans/memory-and-doc-migration.md",
-      "plan_name": "memory-and-doc-migration",
-      "session_ids": ["opencode:sisyphus"],
+    "cluu-next-phase": {
+      "work_id": "cluu-next-phase",
+      "active_plan": ".omo/plans/cluu-next-phase.md",
+      "plan_name": "cluu-next-phase",
+      "session_ids": ["codex:cluu-next-phase"],
       "status": "active",
       "worktree_path": null
     }

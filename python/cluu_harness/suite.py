@@ -8,6 +8,7 @@ itself drives the steps in order.
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from dataclasses import dataclass, field
@@ -86,6 +87,29 @@ def run_case(case: Case, cfg: HarnessConfig | None = None) -> CaseResult:
         usb_args = "-device usb-ehci,id=ehci -device usb-kbd,bus=ehci.0 -device usb-mouse,bus=ehci.0"
         existing = cfg.qemu_extra_args.strip()
         cfg.qemu_extra_args = (existing + " " + usb_args).strip() if existing else usb_args
+
+    # l2_net_boot / l2_socket_basic / l2_dhcp_ping / l2_wget / l2_curl / l2_dns: add virtio-net-pci NIC
+    if case.marker_mode in ("l2_net_boot", "l2_dhcp_ping", "l2_socket_basic", "l2_net_denied", "l2_dns_basic", "l2_wget_basic", "l2_curl_basic"):
+        cfg.cluu_net = True
+
+    http_server_proc = None
+    if case.marker_mode in ("l2_wget_basic", "l2_curl_basic"):
+        import http.server
+        import socketserver
+        import tempfile
+        import os
+        import threading
+
+        http_dir = tempfile.mkdtemp(prefix="cluu-http-")
+        with open(os.path.join(http_dir, "index.html"), "w") as f:
+            f.write("<html><body>CLUU test page</body></html>")
+        handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=http_dir)
+        socketserver.TCPServer.allow_reuse_address = True
+        http_server_proc = socketserver.TCPServer(("127.0.0.1", 9876), handler)
+        http_server_proc.timeout = 0.1
+        t = threading.Thread(target=http_server_proc.serve_forever, daemon=True)
+        t.start()
+        log.info("host HTTP server started on 127.0.0.1:9876 (serving %s)", http_dir)
 
     spec = get_spec(cfg.marker_mode)
     required_markers = (
@@ -226,6 +250,9 @@ def run_case(case: Case, cfg: HarnessConfig | None = None) -> CaseResult:
         log.exception("case %s raised", case.name)
     finally:
         qemu.cleanup()
+        if http_server_proc is not None:
+            http_server_proc.shutdown()
+            http_server_proc.server_close()
         result.elapsed_s = time.monotonic() - start
 
     return result

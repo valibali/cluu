@@ -167,6 +167,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -260,6 +266,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-awk"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-basename"
 version = "0.1.0"
 dependencies = [
@@ -270,6 +283,14 @@ dependencies = [
 name = "cluu-blkprobe"
 version = "0.1.0"
 dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-calc"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
  "libcluu",
 ]
 
@@ -345,6 +366,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-curl"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-cut"
 version = "0.1.0"
 dependencies = [
@@ -369,6 +397,14 @@ dependencies = [
 name = "cluu-devmgr"
 version = "0.1.0"
 dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-diff"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
  "libcluu",
 ]
 
@@ -406,7 +442,10 @@ dependencies = [
 name = "cluu-edit"
 version = "0.1.0"
 dependencies = [
+ "cluu-libtui",
+ "cluu_wire",
  "libcluu",
+ "postcard",
 ]
 
 [[package]]
@@ -448,9 +487,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-feed"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-find"
 version = "0.1.0"
 dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-fm"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-git"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-glow"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
  "libcluu",
 ]
 
@@ -463,6 +533,21 @@ dependencies = [
 
 [[package]]
 name = "cluu-head"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-hexdump"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-httpd"
 version = "0.1.0"
 dependencies = [
  "libcluu",
@@ -482,6 +567,14 @@ dependencies = [
 name = "cluu-inputd"
 version = "0.1.0"
 dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-irc"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
  "libcluu",
 ]
 
@@ -544,6 +637,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-l2-dns-basic"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-l2-net-denied"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-l2-pts-cross-session-isolation"
 version = "0.1.0"
 dependencies = [
@@ -587,6 +694,13 @@ dependencies = [
 
 [[package]]
 name = "cluu-l2-sigwinch-delivered"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-l2-socket-basic"
 version = "0.1.0"
 dependencies = [
  "libcluu",
@@ -686,6 +800,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-libtui"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-libtui-demo"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-login"
 version = "0.1.0"
 dependencies = [
@@ -697,6 +826,21 @@ dependencies = [
 
 [[package]]
 name = "cluu-ls"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-mail"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-make"
 version = "0.1.0"
 dependencies = [
  "libcluu",
@@ -759,7 +903,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-netd"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+ "smoltcp",
+]
+
+[[package]]
+name = "cluu-notes"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-ntp"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-ownerdeny"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-pager"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-ping"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-pkg"
 version = "0.1.0"
 dependencies = [
  "libcluu",
@@ -893,6 +1082,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-sed"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-session-procmgr"
 version = "0.1.0"
 dependencies = [
@@ -961,6 +1157,14 @@ dependencies = [
 name = "cluu-sutest"
 version = "0.1.0"
 dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-sysmon"
+version = "0.1.0"
+dependencies = [
+ "cluu-libtui",
  "libcluu",
 ]
 
@@ -1095,6 +1299,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-virtio-net"
+version = "0.1.0"
+dependencies = [
+ "cluu-virtio-core",
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-vqprobe"
 version = "0.1.0"
 dependencies = [
@@ -1118,6 +1330,13 @@ dependencies = [
 
 [[package]]
 name = "cluu-wc"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-wget"
 version = "0.1.0"
 dependencies = [
  "libcluu",
@@ -1329,6 +1548,46 @@ dependencies = [
  "darling_core",
  "quote",
  "syn 2.0.112",
+]
+
+[[package]]
+name = "defmt"
+version = "0.3.100"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0963443817029b2024136fc4dd07a5107eb8f977eaf18fcd1fdeb11306b64ad"
+dependencies = [
+ "defmt 1.1.1",
+]
+
+[[package]]
+name = "defmt"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2953bfe4f93bbd20cc71198842756f77d161884c99ebbabc41d80231ded88d1"
+dependencies = [
+ "bitflags 1.3.2",
+ "defmt-macros",
+]
+
+[[package]]
+name = "defmt-macros"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bad9c72e7ca2137e0dc3813245a0d282fd6daad32fd800af018306a9169b5fe8"
+dependencies = [
+ "defmt-parser",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.112",
+]
+
+[[package]]
+name = "defmt-parser"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1572,6 +1831,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1596,6 +1864,16 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+
+[[package]]
+name = "heapless"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
+dependencies = [
+ "hash32",
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "heck"
@@ -1825,6 +2103,12 @@ dependencies = [
  "nix",
  "winapi",
 ]
+
+[[package]]
+name = "managed"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
 
 [[package]]
 name = "memchr"
@@ -2551,6 +2835,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "smoltcp"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f73d40463bba65efc9adc6370b56df76d563cc46e2482bba58351b4afb7535e"
+dependencies = [
+ "bitflags 1.3.2",
+ "byteorder",
+ "cfg-if",
+ "defmt 0.3.100",
+ "heapless",
+ "managed",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2567,6 +2865,12 @@ checksum = "5b9eb1a2f4c41445a3a0ff9abc5221c5fcd28e1f13cd7c0397706f9ac938ddb0"
 dependencies = [
  "lock_api",
 ]
+
+[[package]]
+name = "stable_deref_trait"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "static_assertions"

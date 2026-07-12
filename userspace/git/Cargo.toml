@@ -1,0 +1,14 @@
+[package]
+name = "cluu-git"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU git-minimal utility (local-only)"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }
+
+[[bin]]
+name = "git"
+path = "src/main.rs"

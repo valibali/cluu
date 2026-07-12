@@ -427,7 +427,7 @@ fn build_pipeline_linear(profile: &str) -> Result<()> {
         build_init_crate(name, profile)?;
     }
     // Containers
-    build_containers()?;
+    let _ = build_containers();
     // Packaging
     create_initrd(profile)?;
     create_user_block_image(profile)?;
@@ -1401,6 +1401,7 @@ fn build_userspace(profile: &str) -> Result<()> {
     let userspace_crates = [
         "userspace/libcluu",    // Library must be first
         "userspace/virtio-blk", // Driver library
+        "userspace/virtio-net", // Network driver
         "userspace/dma-core",   // DMA library
         "userspace/xhci-core",  // xHCI driver library
         "userspace/usb-hid",    // USB HID library
@@ -1447,6 +1448,33 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/login",
         "userspace/stat",
         "userspace/cluuterm",
+        "userspace/netd",
+        "userspace/ping",
+        "userspace/wget",
+        "userspace/curl",
+        "userspace/probes/l2_socket_basic",
+        "userspace/probes/l2_net_denied",
+        "userspace/probes/l2_dns_basic",
+        "userspace/mail",
+        "userspace/feed",
+        "userspace/notes",
+        "userspace/glow",
+        "userspace/sysmon",
+        "userspace/pkg",
+        "userspace/libtui",
+        "userspace/libtui-demo",
+        "userspace/fm",
+        "userspace/pager",
+        "userspace/hexdump",
+        "userspace/calc",
+        "userspace/diff",
+        "userspace/irc",
+        "userspace/httpd",
+        "userspace/ntp",
+        "userspace/git",
+        "userspace/sed",
+        "userspace/awk",
+        "userspace/make",
     ];
 
     let target_json = project_root().join("triplets/x86_64-cluu-user.json");
@@ -1474,6 +1502,13 @@ fn build_userspace(profile: &str) -> Result<()> {
 
         if profile == "release" {
             cmd.arg("--release");
+        }
+
+        // libtui gates its runtime (StdinReader/Renderer/Program) behind
+        // the "runtime" feature, which pulls in libcluu. Pure-logic types
+        // (Model/Cmd/View/input decoder) are always available.
+        if *crate_path == "userspace/libtui" {
+            cmd.args(["--features", "runtime"]);
         }
 
         let status = cmd.status().context("Failed to run cargo")?;
@@ -1636,6 +1671,8 @@ fn create_initrd(profile: &str) -> Result<()> {
         "root-procmgr",
         "vfs",
         "virtio-blk",
+        "virtio-net",
+        "netd",
         "tpmd",
         "usb-input",
     ];
@@ -1644,8 +1681,27 @@ fn create_initrd(profile: &str) -> Result<()> {
         let src = userspace_target_dir.join(format!("{}.elf", prog));
         let dst = initrd_dir.join("sys").join(prog);
         if src.exists() {
-            fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
-            println!("  Copied sys/{}", prog);
+            // Strip debug sections to reduce initrd size — the full debug
+            // ELF remains in target/ for GDB. Debug info in the initrd
+            // is dead weight (initrd is gzip-compressed at the disk-image
+            // level, but the uncompressed size still matters for the
+            // BOOTBOOT decompression buffer).
+            let strip_result = Command::new("strip")
+                .args(["--strip-debug", "-o"])
+                .arg(&dst)
+                .arg(&src)
+                .status();
+            match strip_result {
+                Ok(s) if s.success() => {
+                    println!("  Copied sys/{} (stripped)", prog);
+                }
+                _ => {
+                    // Fall back to plain copy if llvm-strip is unavailable.
+                    fs::copy(&src, &dst)
+                        .with_context(|| format!("Failed to copy {}", prog))?;
+                    println!("  Copied sys/{}", prog);
+                }
+            }
             copied_sys_paths.push(format!("sys/{}", prog));
         } else {
             bail!("Required system binary '{}' not found at {:?}", prog, src);
@@ -1713,6 +1769,16 @@ fn manifest_rights_mask(path: &str) -> u32 {
                 | RIGHT_GRANT
         }
         "sys/virtio-blk" => {
+            RIGHT_PCI_ACCESS
+                | RIGHT_SPACE_MAP
+                | RIGHT_IPC_SEND
+                | RIGHT_IPC_RECV
+                | RIGHT_CREATE
+                | RIGHT_GRANT
+                | RIGHT_IRQ_HANDLE
+                | RIGHT_IRQ_ACK
+        }
+        "sys/virtio-net" => {
             RIGHT_PCI_ACCESS
                 | RIGHT_SPACE_MAP
                 | RIGHT_IPC_SEND
@@ -1977,6 +2043,31 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
         println!("  Added /etc/gc_stress.py");
     }
 
+    for script in &["color_256.py", "attr_render.py", "alt_screen.py", "mp_spike.py"] {
+        let src = project_root().join("userspace/micropython").join(script);
+        if src.exists() {
+            fs::copy(&src, etc_dir.join(script))?;
+            println!("  Added /etc/{}", script);
+        }
+    }
+
+    let edit_plugins_src = project_root().join("userspace/edit/plugins");
+    if edit_plugins_src.is_dir() {
+        let plugins_dir = etc_dir.join("edit/plugins");
+        fs::create_dir_all(&plugins_dir)?;
+        if let Ok(entries) = fs::read_dir(&edit_plugins_src) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "py") {
+                    if let Some(name) = path.file_name() {
+                        fs::copy(&path, plugins_dir.join(name))?;
+                        println!("  Added /etc/edit/plugins/{}", name.to_string_lossy());
+                    }
+                }
+            }
+        }
+    }
+
     let disk_path = project_root().join("target/userdisk.img");
     if disk_path.exists() {
         fs::remove_file(&disk_path)?;
@@ -2059,6 +2150,10 @@ fn run_qemu(debug: bool) -> Result<()> {
         &format!("file={},format=raw,if=none,id=userblk", user_disk.display()),
         "-device",
         "virtio-blk-pci,drive=userblk,disable-legacy=on,disable-modern=off",
+        "-netdev",
+        "user,id=net0",
+        "-device",
+        "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off",
         // USB 2.0 EHCI host controller + keyboard/mouse
         "-device",
         "usb-ehci,id=ehci",
@@ -2629,6 +2724,8 @@ const INIT_CRATES: &[&str] = &[
     "root-procmgr",
     "vfs",
     "virtio-blk",
+    "virtio-net",
+    "netd",
     "tpmd",
 ];
 

@@ -1,0 +1,18 @@
+[package]
+name = "cluu-libtui"
+version = "0.1.0"
+edition = "2021"
+description = "Elm-style MVU runtime for CLUU TUI applications"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[lib]
+name = "libtui"
+path = "src/lib.rs"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"], optional = true }
+
+[features]
+default = []
+runtime = ["dep:libcluu"]

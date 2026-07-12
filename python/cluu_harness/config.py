@@ -235,6 +235,10 @@ class HarnessConfig:
     qemu_extra_args: str = field(default_factory=lambda: _env_str("QEMU_EXTRA_ARGS", ""))
     qemu_gdb: GdbConfig = field(default_factory=GdbConfig)
 
+    # Virtio-net NIC: when True, QEMU gets -netdev user + virtio-net-pci
+    # (vectors=0 = legacy INTX, matching virtio-blk).
+    cluu_net: bool = field(default_factory=lambda: _env_bool("CLUU_NET"))
+
     # Test command (None = unset; "__AUTO__" = derive from marker_mode)
     test_command: str | None = field(
         default_factory=lambda: os.environ.get("TEST_COMMAND", "__AUTO__")
