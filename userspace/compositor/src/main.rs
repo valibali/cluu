@@ -61,9 +61,8 @@ fn broadcast_frame_ready(comp: &mut state::Compositor) {
     }
 }
 
-/// Return the current monotonic time in milliseconds.
-/// Reuses the already-cached timeserver endpoint to avoid a registry lookup.
-/// Returns 0 if the endpoint is not yet resolved.
+#[allow(dead_code)]
+// rationale: monotonic clock helper for future status-bar clock rendering.
 fn clock_now_ms(cached_ep: &mut usize) -> u64 {
     if *cached_ep == 0 {
         if let Some(ep) = registry::lookup_service("timeserver:main") {
@@ -509,7 +508,7 @@ fn handle_session_ended(comp: &mut state::Compositor, _msg: &Message, payload: &
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn reply_postcard<R: serde::Serialize>(
-    comp: &state::Compositor,
+    _comp: &state::Compositor,
     msg: &Message,
     label: u32,
     value: &R,

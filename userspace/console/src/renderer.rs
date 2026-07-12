@@ -27,6 +27,9 @@ const GLYPH_H: usize = 16;
 
 const COLOR_BG: u32 = 0x00000000;
 const COLOR_FG: u32 = 0x00FFFFFF;
+#[allow(dead_code)]
+// rationale: ANSI color palettes for future SGR color support in the
+// legacy console renderer; currently only fg/bg are used.
 const ANSI_COLORS: [u32; 8] = [
     0x00000000, // black
     0x00AA0000, // red
@@ -37,6 +40,8 @@ const ANSI_COLORS: [u32; 8] = [
     0x0000AAAA, // cyan
     0x00AAAAAA, // white/gray
 ];
+#[allow(dead_code)]
+// rationale: see ANSI_COLORS above.
 const ANSI_BRIGHT_COLORS: [u32; 8] = [
     0x00555555, // bright black
     0x00FF5555, // bright red
@@ -287,6 +292,10 @@ impl VtScreen {
                 // Legacy console has no SHM cursor flag; the blinking block
                 // is drawn unconditionally by repaint_all. DECTCEM is a no-op
                 // here — only cluuterm honors it.
+            }
+            Event::AltScreen(_) => {
+                // Alt-screen is a cluuterm feature; the legacy console
+                // renderer has a single grid and ignores the switch.
             }
         }
     }

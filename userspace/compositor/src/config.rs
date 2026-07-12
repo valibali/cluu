@@ -10,7 +10,8 @@
 /// Minimum milliseconds between successive framebuffer flushes (~60 fps cap).
 pub const MIN_FRAME_MS: u64 = 16;
 
-/// Milliseconds between status-bar clock refreshes (1 s).
+#[allow(dead_code)]
+// rationale: clock-bar refresh interval for future status-bar rendering.
 pub const CLOCK_PERIOD_MS: u64 = 1000;
 
 // ---------------------------------------------------------------------------

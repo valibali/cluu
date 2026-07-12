@@ -22,15 +22,13 @@ use alloc::format;
 #[cfg(feature = "lang-parser")]
 use alloc::string::String;
 #[cfg(feature = "lang-parser")]
-use alloc::string::ToString;
-#[cfg(feature = "lang-parser")]
 use alloc::vec::Vec;
 #[cfg(feature = "lang-parser")]
 use commands::{BuiltinFactory, BuiltinRegistry, CommandContext, CommandExecutor, ExecResult};
 #[cfg(feature = "lang-parser")]
 use commands::builtins::jobs::{drain_job_notifications, reap_done_jobs};
 use libcluu::boot::{
-    process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, PARAM_TTY_INSTANCE, TOKEN_STDERR, TOKEN_STDIN,
+    process_info, PARAM_ARGC, PARAM_ARGV_OFFSET, TOKEN_STDERR, TOKEN_STDIN,
     TOKEN_STDLOG, TOKEN_STDOUT,
 };
 use libcluu::registry;
@@ -402,7 +400,7 @@ fn handle_line_payload(
 #[cfg(feature = "lang-parser")]
 fn parse_and_execute_line(
     stdout: usize,
-    stdlog: usize,
+    _stdlog: usize,
     context: &mut CommandContext,
     payload: &[u8],
     registry: &'static BuiltinRegistry,

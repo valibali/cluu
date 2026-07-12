@@ -68,21 +68,21 @@ fn run() -> Result<()> {
     // libcluu's mmap detects the FB magic and routes to MAP_DEVICE_WC.
     const FB_HEADER_MAGIC: u32 = 0x4642_4630; // "FB0\0"
     let path = b"/dev/fb0\0";
-    let fd = unsafe { _open(path.as_ptr() as *const i8, O_RDWR, 0) };
+    let fd = _open(path.as_ptr() as *const i8, O_RDWR, 0);
     if fd < 0 {
         let _ = debug_print("console: open /dev/fb0 failed");
         return Err(Error::NotFound);
     }
     let mut hdr = [0u8; 40];
-    let n = unsafe { _read(fd, hdr.as_mut_ptr() as *mut c_void, 40) };
+    let n = _read(fd, hdr.as_mut_ptr() as *mut c_void, 40);
     if n != 40 {
-        unsafe { _close(fd); }
+        _close(fd);
         let _ = debug_print("console: short read /dev/fb0");
         return Err(Error::InvalidArgument);
     }
     let magic = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
     if magic != FB_HEADER_MAGIC {
-        unsafe { _close(fd); }
+        _close(fd);
         let _ = debug_print("console: bad fb header magic");
         return Err(Error::InvalidArgument);
     }
@@ -97,17 +97,15 @@ fn run() -> Result<()> {
         hdr[32], hdr[33], hdr[34], hdr[35],
         hdr[36], hdr[37], hdr[38], hdr[39],
     ]);
-    let mapped = unsafe {
-        mmap(
+    let mapped = mmap(
             core::ptr::null_mut::<c_void>(),
             fb_size as usize,
             PROT_READ | PROT_WRITE,
             MAP_SHARED,
             fd,
             0,
-        )
-    };
-    unsafe { _close(fd); }
+        );
+    _close(fd);
     if mapped as isize == -1 || mapped.is_null() {
         let _ = debug_print("console: mmap /dev/fb0 failed");
         return Err(Error::InvalidArgument);

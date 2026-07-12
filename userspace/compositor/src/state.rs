@@ -89,6 +89,8 @@ pub use libcluu::window_shm::{WindowShm, WIN_SHM_MAGIC, WIN_SHM_VERSION};
 /// accessors instead of scattering `unsafe` blocks across the codebase.
 pub struct ShmMapping {
     ptr: core::ptr::NonNull<u8>,
+    #[allow(dead_code)]
+    // rationale: SHM mapping size retained for future bounds-checked accessors.
     pub size: usize,
 }
 
@@ -147,6 +149,8 @@ pub struct Window {
     pub id: WindowId,
     /// TID of the registering thread (used as a pid surrogate until
     /// a real pid-from-tid lookup API exists — spec §10).
+    #[allow(dead_code)]
+    // rationale: owner_pid stored for future per-window kill-on-close.
     pub owner_pid: u32,
     /// Window title shown in the top chrome row.  At most 31 bytes.
     pub title: String,
@@ -194,7 +198,8 @@ pub struct Window {
 pub struct Compositor {
     /// Write-combined mapping of the hardware framebuffer (via `/dev/fb0` mmap).
     pub fb_ptr: *mut u8,
-    /// Physical base address of the framebuffer (from /dev/fb0 header, for debug).
+    #[allow(dead_code)]
+    // rationale: fb_phys/fb_size stored for debug diagnostics; not read yet.
     pub fb_phys: u64,
     /// Total byte length of the fb mapping.
     pub fb_size: usize,
@@ -313,21 +318,21 @@ impl Compositor {
     pub fn init() -> Result<Self> {
         // 1. Open /dev/fb0
         let path = b"/dev/fb0\0";
-        let fd = unsafe { _open(path.as_ptr() as *const i8, O_RDWR, 0) };
+        let fd = _open(path.as_ptr() as *const i8, O_RDWR, 0);
         if fd < 0 {
             return Err(Error::NotFound);
         }
 
         // 2. Read 40-byte header
         let mut hdr = [0u8; 40];
-        let n = unsafe { _read(fd, hdr.as_mut_ptr() as *mut c_void, 40) };
+        let n = _read(fd, hdr.as_mut_ptr() as *mut c_void, 40);
         if n != 40 {
-            unsafe { _close(fd); }
+            _close(fd);
             return Err(Error::InvalidArgument);
         }
         let magic = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
         if magic != FB_HEADER_MAGIC {
-            unsafe { _close(fd); }
+            _close(fd);
             return Err(Error::InvalidArgument);
         }
         let width_px  = u32::from_le_bytes([hdr[ 4], hdr[ 5], hdr[ 6], hdr[ 7]]);
@@ -346,19 +351,17 @@ impl Compositor {
 
         // 3. mmap — libcluu::posix::mmap detects the FB magic and routes to
         //    MAP_DEVICE_WC automatically for MAP_SHARED + /dev/fb0 fds.
-        let mapped = unsafe {
-            mmap(
+        let mapped = mmap(
                 core::ptr::null_mut::<c_void>(),
                 fb_size,
                 PROT_READ | PROT_WRITE,
                 MAP_SHARED,
                 fd,
                 0,
-            )
-        };
+            );
 
         // 4. Close fd — mmap holds its own reference via the kernel mapping.
-        unsafe { _close(fd); }
+        _close(fd);
 
         if mapped as isize == -1 || mapped.is_null() {
             return Err(Error::InvalidArgument);

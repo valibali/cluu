@@ -261,6 +261,8 @@ fn rewrite_path(path: &str, dst_prefix: &str, src_prefix: &str) -> Option<String
 ///
 /// The `registry_ptr` must point to the live `PtsRegistry` owned by the
 /// VFS server.  SAFETY: same lifetime contract as other `PtsBackend` uses.
+#[allow(dead_code)]
+// rationale: per-session PTS mount narrowing for future session-scoped VFS views.
 pub fn narrow_pts_mount(
     registry_ptr: *const PtsRegistry,
     session_id: Option<u32>,

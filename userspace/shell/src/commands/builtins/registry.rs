@@ -87,6 +87,9 @@ pub struct CommandContext {
     /// `unset X` removes X from both.
     pub(crate) exported: BTreeSet<String>,
     pub(crate) procmgr_spawn: usize,
+    #[allow(dead_code)]
+    // rationale: console_write endpoint cached for future direct-console writes;
+    // currently shell uses write_stderr/write_stdout helpers instead.
     pub(crate) console_write: usize,
     /// Exit status of the most recently executed builtin/command.
     /// Read by `echo $?` (Shell-B). `cd`/`pwd` write here.
@@ -202,6 +205,8 @@ impl CommandContext {
         Ok(self.procmgr_spawn)
     }
 
+    #[allow(dead_code)]
+    // rationale: retained for future direct-console-write path.
     pub(crate) fn console_write_endpoint(&mut self) -> Result<usize> {
         if self.console_write == 0 {
             self.console_write = registry::subscribe_output("console:0", "write")?;
@@ -228,6 +233,8 @@ pub enum WriteSink {
     /// rests on the caller keeping the Vec alive across the builtin call.
     Capture(*mut alloc::vec::Vec<u8>),
     /// Reserved — direct file token. Unused for now; Capture is the path.
+    #[allow(dead_code)]
+    // rationale: placeholder for future file-redirection path.
     File(usize),
 }
 

@@ -71,10 +71,14 @@ impl DevRegistry {
         self.devices.get(&id)
     }
 
+    #[allow(dead_code)]
+    // rationale: mutable accessor and path lookup for future devmgr management.
     pub fn get_mut(&mut self, id: DeviceId) -> Option<&mut DeviceEntry> {
         self.devices.get_mut(&id)
     }
 
+    #[allow(dead_code)]
+    // rationale: path-based device lookup for future devmgr queries; used in tests.
     pub fn find_by_path(&self, path: &str) -> Option<DeviceId> {
         self.devices
             .iter()

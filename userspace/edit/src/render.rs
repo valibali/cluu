@@ -1,234 +1,265 @@
-//! Render the editor into an ANSI byte stream + send via TTY_WRITE.
-//! See spec §8 and the plan's T0 findings for the SGR adaptations.
+//! Build a `libtui::View` from the editor state.
 //!
-//! Adaptations from raw plan (per T0 console-renderer survey):
-//! - No `CSI ?25 l/h` (cursor hide/show is silently dropped) — we just
-//!   position the cursor last in each frame.
-//! - No `CSI 7 m` (reverse) for the status line — the console doesn't
-//!   honor it. We use `CSI 47;30 m` (white bg + black fg) and reset
-//!   with `CSI 0 m` at end-of-line.
+//! Replaces the old CSI byte-stream renderer. The Program runtime
+//! diff-renders the View against the previous frame and writes only
+//! changed cells to the terminal.
 
 extern crate alloc;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
-use crate::mode::{Editor, Mode};
 
-pub fn render(state: &mut Editor) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 * 1024);
-    // Per T0 finding 4: the console renderer doesn't honor `CSI ?25 l/h`,
-    // so we don't try to hide the cursor — we just position it last.
-    out.extend_from_slice(b"\x1b[H");           // home
-    paint_content(state, &mut out);
-    paint_status(state, &mut out);
-    paint_message(state, &mut out);
-    place_cursor(state, &mut out);               // cursor lands here
-    out
+use crate::mode::{Editor, Mode, PromptKind};
+use libtui::{Cell, View, COLOR_BLACK, COLOR_WHITE, COLOR_YELLOW};
+
+pub struct RenderData {
+    pub total_lines: usize,
+    pub line_idx: Vec<usize>,
+    pub buf_bytes: Vec<u8>,
+    pub cursor_line: usize,
+    pub cursor_col: usize,
 }
 
-fn paint_content(state: &mut Editor, out: &mut Vec<u8>) {
+pub fn compute_render_data(editor: &mut Editor) -> RenderData {
+    let total_lines = editor.buf.pieces.line_count();
+    let line_idx = editor.buf.pieces.line_index().to_vec();
+    let buf_bytes = editor.buf.pieces.read_all();
+    let (cursor_line, cursor_col) = editor.buf.pieces.line_col(editor.buf.cursor);
+    RenderData { total_lines, line_idx, buf_bytes, cursor_line, cursor_col }
+}
+
+pub fn build_view(state: &Editor, data: &RenderData) -> View {
+    let width = state.viewport.width as usize;
+    let height = (state.viewport.height as usize) + 2;
+    let mut v = View::new(width, height);
+
     if state.settings.wrap {
-        paint_content_wrapped(state, out);
+        paint_content_wrapped(state, data, &mut v);
     } else {
-        paint_content_scrolled(state, out);
+        paint_content_scrolled(state, data, &mut v);
     }
+    paint_status(state, data, &mut v);
+    paint_message(state, &mut v);
+
+    v
 }
 
-fn paint_content_scrolled(state: &mut Editor, out: &mut Vec<u8>) {
-    crate::search::refresh_matches(state);
-    let total_lines = state.buf.pieces.line_count();
-    let line_idx = state.buf.pieces.line_index().to_vec();
-    let buf_bytes = state.buf.pieces.read_all();
-    let matches = state.search.matches.clone();
-    let hl_on = state.settings.hlsearch && !state.search.pattern.is_empty();
-
-    let gutter = if state.settings.number {
-        let total = state.buf.pieces.line_count();
-        let digits = alloc::format!("{}", total).len();
-        digits + 1   // " 123 "
-    } else {
-        0
-    };
-    let content_w = (state.viewport.width as usize).saturating_sub(gutter);
-
-    for row in 0..state.viewport.height {
-        let file_line = state.viewport.top_line + row as usize;
-        let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
-        if file_line >= total_lines {
-            if state.settings.number {
-                for _ in 0..gutter { out.push(b' '); }
-            }
-            out.push(b'~');
-            continue;
-        }
-        if state.settings.number {
-            let _ = write_str(out, &alloc::format!("{:>w$} ", file_line + 1, w = gutter - 1));
-        }
-        let start = line_idx[file_line];
-        let end = if file_line + 1 < line_idx.len() { line_idx[file_line + 1].saturating_sub(1) } else { buf_bytes.len() };
-        let mut col_skipped = 0;
-        let mut col_drawn = 0;
-        let mut highlighted = false;
-        for (i, &b) in buf_bytes[start..end].iter().enumerate() {
-            if col_skipped < state.viewport.left_col { col_skipped += 1; continue; }
-            if col_drawn >= content_w { break; }
-            let abs = start + i;
-            let in_match = hl_on && matches.iter().any(|r| r.contains(&abs));
-            if in_match && !highlighted {
-                out.extend_from_slice(b"\x1b[33m");
-                highlighted = true;
-            } else if !in_match && highlighted {
-                out.extend_from_slice(b"\x1b[0m");
-                highlighted = false;
-            }
-            let display = if b >= 0x20 && b < 0x7F { b } else if b == b'\t' { b' ' } else { b'?' };
-            out.push(display);
-            col_drawn += 1;
-        }
-        if highlighted { out.extend_from_slice(b"\x1b[0m"); }
-    }
-}
-
-fn paint_content_wrapped(state: &mut Editor, out: &mut Vec<u8>) {
-    crate::search::refresh_matches(state);
-    let total_lines = state.buf.pieces.line_count();
-    let line_idx = state.buf.pieces.line_index().to_vec();
-    let buf_bytes = state.buf.pieces.read_all();
-    let matches = state.search.matches.clone();
-    let hl_on = state.settings.hlsearch && !state.search.pattern.is_empty();
-    let mut row: u16 = 0;
-
-    let gutter = if state.settings.number {
-        let total = state.buf.pieces.line_count();
-        let digits = alloc::format!("{}", total).len();
+fn gutter_width(state: &Editor, total_lines: usize) -> usize {
+    if state.settings.number {
+        let digits = format!("{}", total_lines).len();
         digits + 1
     } else {
         0
-    };
+    }
+}
+
+fn paint_content_scrolled(state: &Editor, data: &RenderData, v: &mut View) {
+    let total_lines = data.total_lines;
+    let line_idx = &data.line_idx;
+    let buf_bytes = &data.buf_bytes;
+    let matches = &state.search.matches;
+    let hl_on = state.settings.hlsearch && !state.search.pattern.is_empty();
+
+    let gutter = gutter_width(state, data.total_lines);
     let content_w = (state.viewport.width as usize).saturating_sub(gutter);
 
-    let mut file_line = state.viewport.top_line;
-    while row < state.viewport.height && file_line < total_lines {
+    for row in 0..state.viewport.height as usize {
+        let file_line = state.viewport.top_line + row;
+        if file_line >= total_lines {
+            if state.settings.number {
+                for g in 0..gutter {
+                    v.set(row, g, Cell::new(' '));
+                }
+            }
+            v.set(row, gutter, Cell::new('~'));
+            continue;
+        }
+        if state.settings.number {
+            let label = format!("{:>w$} ", file_line + 1, w = gutter - 1);
+            for (ci, ch) in label.chars().enumerate() {
+                v.set(row, ci, Cell::new(ch));
+            }
+        }
         let start = line_idx[file_line];
-        let end = if file_line + 1 < line_idx.len() { line_idx[file_line + 1].saturating_sub(1) } else { buf_bytes.len() };
+        let end = if file_line + 1 < line_idx.len() {
+            line_idx[file_line + 1].saturating_sub(1)
+        } else {
+            buf_bytes.len()
+        };
+        let mut col_skipped = 0;
+        let mut col_drawn = 0;
+        for (i, &b) in buf_bytes[start..end].iter().enumerate() {
+            if col_skipped < state.viewport.left_col {
+                col_skipped += 1;
+                continue;
+            }
+            if col_drawn >= content_w {
+                break;
+            }
+            let abs = start + i;
+            let in_match = hl_on && matches.iter().any(|r| r.contains(&abs));
+            let display = if b >= 0x20 && b < 0x7F {
+                b as char
+            } else if b == b'\t' {
+                ' '
+            } else {
+                '?'
+            };
+            let mut cell = Cell::new(display);
+            if in_match {
+                cell = cell.fg(COLOR_YELLOW);
+            }
+            v.set(row, gutter + col_drawn, cell);
+            col_drawn += 1;
+        }
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+fn paint_content_wrapped(state: &Editor, data: &RenderData, v: &mut View) {
+    let total_lines = data.total_lines;
+    let line_idx = &data.line_idx;
+    let buf_bytes = &data.buf_bytes;
+    let matches = &state.search.matches;
+    let hl_on = state.settings.hlsearch && !state.search.pattern.is_empty();
+
+    let gutter = gutter_width(state, data.total_lines);
+    let content_w = (state.viewport.width as usize).saturating_sub(gutter);
+    let max_rows = state.viewport.height as usize;
+
+    let mut row = 0;
+    let mut file_line = state.viewport.top_line;
+    while row < max_rows && file_line < total_lines {
+        let start = line_idx[file_line];
+        let end = if file_line + 1 < line_idx.len() {
+            line_idx[file_line + 1].saturating_sub(1)
+        } else {
+            buf_bytes.len()
+        };
         let line = &buf_bytes[start..end];
         let mut col = 0;
         let mut first_row = true;
-        while col < line.len() && row < state.viewport.height {
-            let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
+        while col < line.len() && row < max_rows {
             if state.settings.number {
                 if first_row {
-                    let _ = write_str(out, &alloc::format!("{:>w$} ", file_line + 1, w = gutter - 1));
+                    let label = format!("{:>w$} ", file_line + 1, w = gutter - 1);
+                    for (ci, ch) in label.chars().enumerate() {
+                        v.set(row, ci, Cell::new(ch));
+                    }
                 } else {
-                    for _ in 0..gutter { out.push(b' '); }
+                    for g in 0..gutter {
+                        v.set(row, g, Cell::new(' '));
+                    }
                 }
             }
             let take = content_w.min(line.len() - col);
             for (i, &b) in line[col..col + take].iter().enumerate() {
                 let abs = start + col + i;
                 let in_match = hl_on && matches.iter().any(|r| r.contains(&abs));
-                if in_match { out.extend_from_slice(b"\x1b[33m"); }
-                let display = if b >= 0x20 && b < 0x7F { b } else if b == b'\t' { b' ' } else { b'?' };
-                out.push(display);
-                if in_match { out.extend_from_slice(b"\x1b[0m"); }
+                let display = if b >= 0x20 && b < 0x7F {
+                    b as char
+                } else if b == b'\t' {
+                    ' '
+                } else {
+                    '?'
+                };
+                let mut cell = Cell::new(display);
+                if in_match {
+                    cell = cell.fg(COLOR_YELLOW);
+                }
+                v.set(row, gutter + i, cell);
             }
             col += take;
             first_row = false;
             row += 1;
         }
-        if line.is_empty() && row < state.viewport.height {
-            let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
+        if line.is_empty() && row < max_rows {
             if state.settings.number {
-                let _ = write_str(out, &alloc::format!("{:>w$} ", file_line + 1, w = gutter - 1));
+                let label = format!("{:>w$} ", file_line + 1, w = gutter - 1);
+                for (ci, ch) in label.chars().enumerate() {
+                    v.set(row, ci, Cell::new(ch));
+                }
             }
             row += 1;
         }
         file_line += 1;
     }
-    while row < state.viewport.height {
-        let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row + 1));
+    while row < max_rows {
         if state.settings.number {
-            for _ in 0..gutter { out.push(b' '); }
+            for g in 0..gutter {
+                v.set(row, g, Cell::new(' '));
+            }
         }
-        out.push(b'~');
+        v.set(row, gutter, Cell::new('~'));
         row += 1;
     }
 }
 
-fn paint_status(state: &mut Editor, out: &mut Vec<u8>) {
-    let row = state.viewport.height + 1;
-    // Per T0 finding 4: `CSI 7 m` (reverse) is a no-op in CLUU's console.
-    // Use a white bg + black fg for the status line instead.
-    let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K\x1b[47m\x1b[30m", row));
+fn paint_status(state: &Editor, data: &RenderData, v: &mut View) {
+    let row = state.viewport.height as usize;
     let mode_tag = match state.mode {
-        Mode::Normal      => "        ",
-        Mode::Insert      => "-- INSERT --",
-        Mode::VisualChar  => "-- VISUAL --",
-        Mode::VisualLine  => "-- V\u{00b7}LINE --",
+        Mode::Normal => "        ",
+        Mode::Insert => "-- INSERT --",
+        Mode::VisualChar => "-- VISUAL --",
+        Mode::VisualLine => "-- V.LINE --",
         Mode::OperatorPending(_) => "        ",
         Mode::ExPrompt(_) => "        ",
     };
     let path = state.buf.path.as_deref().unwrap_or("[No Name]");
     let dirty = if state.buf.dirty { "[+]" } else { "" };
-    let (line, col) = state.buf.pieces.line_col(state.buf.cursor);
-    let total = state.buf.pieces.line_count();
+    let line = data.cursor_line;
+    let col = data.cursor_col;
+    let total = data.total_lines;
     let pct = if total <= 1 { 100 } else { (line * 100) / total };
-    let left = alloc::format!("{}   {} {}", mode_tag, path, dirty);
-    let right = alloc::format!("L {}:C {}  {}%", line + 1, col + 1, pct);
+    let left = format!("{}   {} {}", mode_tag, path, dirty);
+    let right = format!("L {}:C {}  {}%", line + 1, col + 1, pct);
     let pad = (state.viewport.width as usize).saturating_sub(left.len() + right.len());
-    let _ = write_str(out, &left);
-    for _ in 0..pad { out.push(b' '); }
-    let _ = write_str(out, &right);
-    out.extend_from_slice(b"\x1b[0m");          // reset all attrs (39/49 not supported individually)
+
+    let bg_cell = Cell::new(' ').bg(COLOR_WHITE).fg(COLOR_BLACK);
+    for c in 0..state.viewport.width as usize {
+        v.set(row, c, bg_cell);
+    }
+    for (ci, ch) in left.chars().enumerate() {
+        v.set(row, ci, Cell::new(ch).bg(COLOR_WHITE).fg(COLOR_BLACK));
+    }
+    for (ci, ch) in right.chars().enumerate() {
+        let pos = left.len() + pad + ci;
+        v.set(row, pos, Cell::new(ch).bg(COLOR_WHITE).fg(COLOR_BLACK));
+    }
 }
 
-fn paint_message(state: &mut Editor, out: &mut Vec<u8>) {
-    let row = state.viewport.height + 2;
-    let _ = write_str(out, &alloc::format!("\x1b[{};1H\x1b[K", row));
+fn paint_message(state: &Editor, v: &mut View) {
+    let row = (state.viewport.height as usize) + 1;
     if let Some(p) = state.prompt.as_ref() {
         let prefix = match p.kind {
-            crate::mode::PromptKind::Ex => ":",
-            crate::mode::PromptKind::SearchFwd => "/",
-            crate::mode::PromptKind::SearchBwd => "?",
+            PromptKind::Ex => ":",
+            PromptKind::SearchFwd => "/",
+            PromptKind::SearchBwd => "?",
         };
-        out.push(prefix.as_bytes()[0]);
-        let _ = write_str(out, &p.buf);
+        for (ci, ch) in prefix.chars().enumerate() {
+            v.set(row, ci, Cell::new(ch));
+        }
+        for (ci, ch) in p.buf.chars().enumerate() {
+            v.set(row, 1 + ci, Cell::new(ch));
+        }
     } else {
-        let _ = write_str(out, &state.message);
+        for (ci, ch) in state.message.chars().enumerate() {
+            v.set(row, ci, Cell::new(ch));
+        }
     }
 }
 
-fn place_cursor(state: &mut Editor, out: &mut Vec<u8>) {
-    let (line, col) = state.buf.pieces.line_col(state.buf.cursor);
-    let gutter = if state.settings.number {
-        alloc::format!("{}", state.buf.pieces.line_count()).len() + 1
-    } else { 0 };
-    let row = (line.saturating_sub(state.viewport.top_line) + 1) as u16;
-    let column = (col.saturating_sub(state.viewport.left_col) + 1 + gutter) as u16;
-    let _ = write_str(out, &alloc::format!("\x1b[{};{}H", row, column));
-}
-
-fn write_str(out: &mut Vec<u8>, s: &str) -> Result<(), ()> {
-    out.extend_from_slice(s.as_bytes());
-    Ok(())
-}
-
-/// Send the rendered bytes to the TTY via TTY_WRITE_LABEL on the
-/// stdout endpoint. Uses `send_with_retry` (same as `_write`/cat) so a
-/// busy/full TTY queue retries instead of silently dropping the frame.
-/// Per-frame edits are 1-6KB; without retry the editor renders nothing
-/// visible because writes drop on backpressure.
-pub fn flush_to_tty(bytes: &[u8]) {
-    let stdout = libcluu::boot::stdout();
-    if stdout == 0 {
-        return;
+pub fn cursor_pos(state: &Editor, data: &RenderData) -> Option<(usize, usize)> {
+    let gutter = gutter_width(state, data.total_lines);
+    let row = data.cursor_line.saturating_sub(state.viewport.top_line);
+    let column = data.cursor_col.saturating_sub(state.viewport.left_col) + gutter;
+    if row < state.viewport.height as usize {
+        Some((row, column))
+    } else {
+        None
     }
-    let _ = libcluu::ipc::send_with_retry(
-        stdout,
-        libcluu::ipc::TTY_WRITE_LABEL,
-        bytes,
-    );
 }
 
-/// Adjust viewport so the cursor is on screen.
 pub fn ensure_cursor_visible(state: &mut Editor) {
     let (line, col) = state.buf.pieces.line_col(state.buf.cursor);
     let scrolloff = 3;

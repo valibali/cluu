@@ -65,7 +65,9 @@ pub const MAX_PTS_SLOTS: usize = 256;
 
 /// Metadata for a single registered PTS slot.
 pub struct PtsEntry {
-    /// Allocated id (matches the key in the BTreeMap for convenience).
+    #[allow(dead_code)]
+    // rationale: id is the BTreeMap key; stored for convenience but currently
+    // only accessed via the map key, not the field.
     pub id: u32,
     /// Authenticated sender tid of the PTS_REGISTER_LABEL request.
     /// Used to validate PTS_UNREGISTER_LABEL ownership.
@@ -75,7 +77,8 @@ pub struct PtsEntry {
     pub notify_endpoint: usize,
     /// Number of currently open VFS file-descriptors pointing at this PTS.
     pub refcount: u32,
-    /// Session this PTS belongs to (None = global namespace, visible to all).
+    #[allow(dead_code)]
+    // rationale: session_id stored for future per-session PTS diagnostics.
     pub session_id: Option<u32>,
 }
 
@@ -108,7 +111,8 @@ impl PtsOverlay {
         }
     }
 
-    /// Get a reference to the correct map for a session.
+    #[allow(dead_code)]
+    // rationale: per-session map accessor for future session-scoped PTS queries.
     fn map_for_session(
         &self,
         session_id: Option<u32>,
@@ -283,12 +287,14 @@ impl PtsRegistry {
         self.find_entry(id).map(|e| e.owner_tid)
     }
 
-    /// Return `true` if `id` is currently registered.
+    #[allow(dead_code)]
+    // rationale: PTS existence check for future PTS lifecycle management.
     pub fn contains(&self, id: u32) -> bool {
         self.find_entry(id).is_some()
     }
 
-    /// Iterate over all currently registered ids (in sorted order, global first).
+    #[allow(dead_code)]
+    // rationale: PTS id iteration for future PTS listing/debugging.
     pub fn ids(&self) -> impl Iterator<Item = u32> + '_ {
         let global_ids = self.overlay.global.keys().copied();
         let session_ids = self
@@ -333,6 +339,8 @@ impl PtsRegistry {
     }
 
     /// Full overlay access for constructing a session-private PtsBackend.
+    #[allow(dead_code)]
+    // rationale: overlay accessor for future PTS diagnostics.
     pub fn overlay(&self) -> &PtsOverlay {
         &self.overlay
     }
@@ -346,6 +354,8 @@ impl PtsRegistry {
     /// (Owner-death cleanup is **stubbed** in Task 13; this method is the hook
     /// point Task 14+ will call once the procmgr→VFS death notification is
     /// wired.)
+    #[allow(dead_code)]
+    // rationale: owner eviction for future thread-death cleanup.
     pub fn evict_owner(&mut self, dead_tid: usize) -> Vec<(u32, usize)> {
         let mut notifiable = Vec::new();
 

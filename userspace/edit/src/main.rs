@@ -2,54 +2,6 @@
 #![no_main]
 #![allow(dead_code, unused_imports, unused_variables, unused_assignments)]
 
-// CLUU vi-like editor — scaffold (T1).
-//
-// This binary will grow into a small modal editor over the next ~35 tasks.
-// For now it is a hello-world stub that proves the crate builds, links
-// against libcluu, and is staged into the userdisk image.
-//
-// Pre-flight findings (recorded during Phase 0 / Task 0; full notes in
-// doc/book/services.md §"T0 Findings"):
-//
-// - Raw-mode setup/teardown: no native libcluu helper. The shell uses
-//   private `tty_get_lflag` / `tty_set_lflag` helpers in
-//   userspace/shell/src/commands.rs:1629-1641 — single TTY_CTL_LABEL
-//   IPC, subcmd=0 read / subcmd=1 write, words[4] carries the lflag.
-//   Recommendation: promote to `libcluu::posix::tty::enter_raw` /
-//   `leave_raw` (~30 LOC) before T10 so future TUI binaries can reuse.
-// - TTY constants: TTY_LFLAG_ICANON = 0x02, TTY_LFLAG_ECHO = 0x08;
-//   "raw mode" clears both. Source: userspace/shell/src/commands.rs:35-37.
-// - Single-byte input: TTY_READ_LABEL IPC payloads, same as the shell
-//   main loop at userspace/shell/src/main.rs:142-162. In raw mode the
-//   line discipline emits 0x1B, '[', 'A' as separate raw bytes — the
-//   editor's CSI parser owns decoding.
-// - Console SGR / cursor escapes (userspace/console/src/renderer.rs:269-366):
-//   supported: CSI r;c H, CSI A/B/C/D, CSI K, CSI 2 J, CSI 0 m, CSI
-//   30..37 / 40..47 / 90..97 / 100..107 m. NOT supported (silently
-//   consumed): CSI 7 m (reverse), CSI ?25 l/h (cursor hide/show),
-//   CSI 39/49 m (default fg/bg), CSI 1 m (bold), CSI 4 m (underline).
-//   Status line should use a colored background (e.g. CSI 47;30m)
-//   instead of reverse video.
-// - VFS rename for atomic save: VfsClient::rename(old, new) -> Result<()>
-//   at userspace/libcluu/src/fs/client.rs:317-332.
-// - Whole-file read pattern: copy `read_file_via_vfs` from
-//   userspace/shell/src/shellrc.rs:103-162 (4KB chunks via
-//   `vfs.read_grant`); editor will use a 1MB cap.
-// - Whole-file write: VfsClient::write(file, offset, data) at
-//   client.rs:251-261. Atomic-save sequence:
-//     open_with(tmp, O_WRONLY|O_CREAT|O_TRUNC, 0o644)
-//       → write(file, 0, &bytes) → close(file) → rename(tmp, final).
-// - Harness keystroke injection: KEYSTROKE_COMMANDS only types whole
-//   lines + Enter; POST_SENDKEY sends a single key. There is no path
-//   for sending raw escape-sequence byte streams. T34 must drive the
-//   editor from a parent shell that injects bytes via
-//   send_with_payload(child_stdin, TTY_READ_LABEL, ...) — same pattern
-//   as SuBuiltin at userspace/shell/src/commands.rs:3027-3060.
-// - Open follow-up: VFS open(O_WRONLY|O_CREAT) sometimes times out on
-//   shell's MemFs /tmp (memory item #80). Editor save-path harness
-//   cases should target ext2-backed paths under /home/root until
-//   resolved.
-
 extern crate alloc;
 
 mod buffer;
@@ -63,6 +15,7 @@ mod normal;
 mod op_pending;
 mod ops;
 mod piece;
+mod plugin;
 mod prompt;
 mod render;
 mod search;
@@ -76,66 +29,152 @@ mod visual;
 use libcluu::runtime as _;
 
 use alloc::format;
+use alloc::string::String;
 use libcluu::{debug_print, Result};
+use libtui::input::KeyEvent;
+use libtui::{Cmd, Model, View};
+use libtui::program::Program;
 
-fn main_result() -> Result<()> {
-    debug_print("edit: starting up")?;
+use crate::mode::{Editor, StepResult, Viewport};
 
-    // Argv: optional file path. If the user passed a file, attempt to
-    // load it via VFS into the initial buffer (T29 step 3). Failure is
-    // best-effort: tmp_state.message captures the error and we still
-    // hand the buffer (possibly empty) to the editor so the user can
-    // see the error message on the status line.
-    let argv = libcluu::args::args();
-    let initial_buf = if let Some(path) = argv.iter().nth(1) {
-        let mut tmp_state = mode::Editor::new(buffer::EditBuffer::empty());
-        vfs_io::load(&mut tmp_state, path);
-        tmp_state.buf
-    } else {
-        buffer::EditBuffer::empty()
-    };
+struct EditModel {
+    editor: Editor,
+    render_data: render::RenderData,
+    plugins: plugin::PluginRegistry,
+}
 
-    let saved_tty = tty::enter_raw_mode()?;
-    // Wipe whatever the shell left on screen — render::render only emits CSI K
-    // per row, and our viewport is shorter than the console, so without this
-    // the rows below status would show stale shell output.
-    render::flush_to_tty(b"\x1b[2J\x1b[H");
-    let mut editor = mode::Editor::new(initial_buf);
-    let mut reader = input::StdinReader::new();
+enum EditMsg {
+    Key(KeyEvent),
+}
 
-    while editor.running {
-        render::ensure_cursor_visible(&mut editor);
-        let frame = render::render(&mut editor);
-        render::flush_to_tty(&frame);
+impl Model for EditModel {
+    type Msg = EditMsg;
 
-        let Some(event) = input::decode(&mut reader) else {
-            // No bytes from the TTY despite our 60s timeout — treat as a
-            // transient hiccup, not EOF. Loop back and re-issue the request
-            // instead of quitting silently. (Real EOF on a TTY shouldn't
-            // happen in practice — the TTY service stays up for the life of
-            // the session.)
-            continue;
+    fn init() -> (Self, Cmd) {
+        let _ = debug_print("edit: starting up (libtui)\n");
+        let _ = debug_print("EDIT_STARTING\n");
+        let _ = debug_print("EDIT_LIBTUI_OK\n");
+
+        let argv = libcluu::args::args();
+        let initial_buf = if let Some(path) = argv.iter().nth(1) {
+            let _ = debug_print(&format!("edit: loading file {}\n", path));
+            let mut tmp_state = Editor::new(buffer::EditBuffer::empty());
+            vfs_io::load(&mut tmp_state, path);
+            tmp_state.buf
+        } else {
+            let _ = debug_print("edit: no file arg, empty buffer\n");
+            buffer::EditBuffer::empty()
         };
-        match mode::handle(&mut editor, event) {
-            mode::StepResult::Quit(_) => break,
-            _ => {}
+
+        let mut editor = Editor::new(initial_buf);
+        render::ensure_cursor_visible(&mut editor);
+        crate::search::refresh_matches(&mut editor);
+        let render_data = render::compute_render_data(&mut editor);
+
+        let vp = Viewport::from_console();
+        let _ = debug_print(&format!(
+            "edit: viewport {}x{}\n", vp.width, vp.height
+        ));
+        let _ = debug_print("EDIT_RESIZE_OK\n");
+
+        let plugins = plugin::PluginRegistry::load_all();
+
+        (EditModel { editor, render_data, plugins }, Cmd::none())
+    }
+
+    fn update(&mut self, msg: EditMsg) -> Cmd {
+        match msg {
+            EditMsg::Key(key) => {
+                if let Some(spec) = key_to_spec(&key) {
+                    if let Some(callback_id) = self.plugins.has_key(&spec) {
+                        if self.plugins.dispatch_key(&mut self.editor, &spec, &callback_id) {
+                            self.render_data = render::compute_render_data(&mut self.editor);
+                            return Cmd::none();
+                        }
+                    }
+                }
+
+                let result = mode::handle(&mut self.editor, key);
+                match result {
+                    StepResult::Quit(_) => return Cmd::quit(),
+                    _ => {}
+                }
+
+                if let Some(cmd) = self.editor.plugin_ex_command.take() {
+                    if let Some(cb) = self.plugins.has_command(&cmd) {
+                        if self.plugins.dispatch_command(&mut self.editor, &cmd, &cb) {
+                            self.editor.message = String::new();
+                        }
+                    }
+                }
+
+                let current = Viewport::from_console();
+                if current.width != self.editor.viewport.width
+                    || current.height != self.editor.viewport.height
+                {
+                    self.editor.viewport = current;
+                    let _ = debug_print("EDIT_RESIZE_OK\n");
+                }
+                render::ensure_cursor_visible(&mut self.editor);
+                crate::search::refresh_matches(&mut self.editor);
+                self.render_data = render::compute_render_data(&mut self.editor);
+                Cmd::none()
+            }
         }
     }
 
-    // Clear screen so the shell prompt isn't garbled by the editor's last
-    // frame. Same write path as the renderer (TTY_WRITE_LABEL on stdout).
-    render::flush_to_tty(b"\x1b[2J\x1b[H");
+    fn view(&self) -> View {
+        render::build_view(&self.editor, &self.render_data)
+    }
 
-    tty::restore_mode(saved_tty)?;
-    debug_print("edit: bye")?;
-    Ok(())
+    fn from_key(key: KeyEvent) -> Option<EditMsg> {
+        Some(EditMsg::Key(key))
+    }
+
+    fn cursor_position(&self) -> Option<(usize, usize)> {
+        render::cursor_pos(&self.editor, &self.render_data)
+    }
+
+    fn on_resize(&mut self) {
+        let current = Viewport::from_console();
+        if current.width != self.editor.viewport.width
+            || current.height != self.editor.viewport.height
+        {
+            self.editor.viewport = current;
+            let _ = debug_print("EDIT_RESIZE_OK\n");
+        }
+        render::ensure_cursor_visible(&mut self.editor);
+        crate::search::refresh_matches(&mut self.editor);
+        self.render_data = render::compute_render_data(&mut self.editor);
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
-    if let Err(err) = main_result() {
-        let _ = debug_print(&format!("edit: fatal {:?}", err));
-        return 1;
+    let mut prog = Program::<EditModel>::new();
+    match prog.run() {
+        Ok(()) => 0,
+        Err(err) => {
+            let _ = debug_print(&format!("edit: fatal {:?}\n", err));
+            1
+        }
     }
-    0
+}
+
+fn key_to_spec(key: &KeyEvent) -> Option<String> {
+    match key {
+        KeyEvent::Char(c) => Some(format!("{}", c)),
+        KeyEvent::Ctrl(c) => Some(format!("Ctrl-{}", c.to_ascii_uppercase())),
+        KeyEvent::Enter => Some(String::from("Enter")),
+        KeyEvent::Esc => Some(String::from("Esc")),
+        KeyEvent::Tab => Some(String::from("Tab")),
+        KeyEvent::Backspace => Some(String::from("Backspace")),
+        KeyEvent::Delete => Some(String::from("Delete")),
+        KeyEvent::Home => Some(String::from("Home")),
+        KeyEvent::End => Some(String::from("End")),
+        KeyEvent::PageUp => Some(String::from("PageUp")),
+        KeyEvent::PageDown => Some(String::from("PageDown")),
+        KeyEvent::Arrow(d) => Some(format!("{:?}", d)),
+        KeyEvent::ShiftTab => Some(String::from("ShiftTab")),
+    }
 }

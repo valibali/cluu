@@ -129,6 +129,7 @@ lazy_static! {
         idt[36].set_handler_fn(serial_interrupt_handler);   // IRQ 4 - Serial COM1
         idt[39].set_handler_fn(serial_interrupt_handler);   // IRQ 7 - Serial COM2
         idt[43].set_handler_fn(virtio_blk_interrupt_handler); // IRQ 11 - virtio-blk-pci
+        idt[42].set_handler_fn(virtio_net_interrupt_handler); // IRQ 10 - virtio-net-pci
         idt[44].set_handler_fn(mouse_interrupt_handler);    // IRQ 12 - PS/2 Mouse
 
         // Set up a generic handler for interrupt 0x68 (104)
@@ -1402,6 +1403,20 @@ extern "x86-interrupt" fn virtio_blk_interrupt_handler(_stack_frame: InterruptSt
     }
     unsafe {
         pic_eoi(11);
+    }
+}
+
+// IRQ 10 — virtio-net-pci at PCI slot 4 (00:04.0) on i440fx maps INTA#
+// to PIRQA → IRQ 10. Without this gate, the first virtio-net interrupt
+// hits a null descriptor and triple-faults the kernel.
+// Conditional freeze-exception: required for virtio-net frame I/O.
+extern "x86-interrupt" fn virtio_net_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::devices::irq::dispatch_irq(10, crate::devices::irq::KBD_RAW_LABEL, 0);
+    if crate::architecture::x86_64::apic::is_enabled() {
+        crate::architecture::x86_64::apic::eoi();
+    }
+    unsafe {
+        pic_eoi(10);
     }
 }
 

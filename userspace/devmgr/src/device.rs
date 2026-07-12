@@ -28,6 +28,8 @@ impl DeviceClass {
         }
     }
 
+    #[allow(dead_code)]
+    // rationale: region-kind conversion for future devmgr IPC.
     pub fn as_region_kind(self) -> u8 {
         self as u8
     }
@@ -35,6 +37,8 @@ impl DeviceClass {
 
 pub struct DeviceEntry {
     pub class: DeviceClass,
+    #[allow(dead_code)]
+    // rationale: driver endpoint stored for future direct-driver IPC.
     pub driver_endpoint: usize,
     pub path: String,
     pub root_token: usize,

@@ -7,7 +7,7 @@ use crate::mode::{Editor, Mode, StepResult};
 
 pub fn handle(state: &mut Editor, event: KeyEvent) -> StepResult {
     match event {
-        KeyEvent::Esc | KeyEvent::Ctrl('[') => {
+        KeyEvent::Esc | KeyEvent::Ctrl('[') | KeyEvent::Ctrl('c') => {
             state.undo.commit_session(state.buf.cursor, &state.buf.pieces);
             state.mode = Mode::Normal;
             StepResult::Redraw

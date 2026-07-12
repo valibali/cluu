@@ -35,7 +35,6 @@ use libcluu::ipc::{
 };
 use libcluu::registry;
 use libcluu::syscall::ipc_recv_any_with_sender;
-use libcluu::types::Message;
 use libcluu::{debug_print, yield_cpu, Error, Result};
 
 use dev_registry::DevRegistry;

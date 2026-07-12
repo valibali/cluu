@@ -480,8 +480,14 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
+#[allow(dead_code, static_mut_refs)]
+// rationale: ACPI RSDP scanning is a future kernel feature (ACPI table
+// discovery for Phase 4 hardware init). Retained for the upcoming
+// acpi-aware boot path; not yet called from the boot sequence.
 const RSDP_SIGNATURE: &[u8; 8] = b"RSD PTR ";
 
+#[allow(dead_code, static_mut_refs)]
+// rationale: future ACPI RSDP scanning — see RSDP_SIGNATURE above.
 fn scan_rsdp() -> u64 {
     let bootboot = unsafe { &crate::bootboot::bootboot };
     const BOOTBOOT_HEADER_SIZE: usize = 128;
@@ -513,6 +519,8 @@ fn scan_rsdp() -> u64 {
     0
 }
 
+#[allow(dead_code)]
+// rationale: future ACPI RSDP scanning — see RSDP_SIGNATURE above.
 fn scan_region_for_rsdp(start: u64, size: u64) -> Option<u64> {
     let end = start.checked_add(size)?;
     let mut addr = start;

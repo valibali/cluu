@@ -45,6 +45,9 @@ const MOUSE_RESET: u8 = 0xFF;
 const MOUSE_SET_DEFAULTS: u8 = 0xF6;
 const MOUSE_ENABLE_STREAM: u8 = 0xF4;
 
+#[allow(dead_code)]
+// rationale: PS/2 mouse protocol ACK/BAT response codes for future
+// mouse-init handshake; not yet needed by the current polled driver.
 const MOUSE_ACK: u8 = 0xFA;
 const MOUSE_BAT_OK: u8 = 0xAA;
 

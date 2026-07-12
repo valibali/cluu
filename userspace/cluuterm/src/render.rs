@@ -6,8 +6,11 @@
 //! glyph renderer during the next frame flush.
 //!
 //! ARGB colours stored in `fg_cells`/`bg_cells` are converted to xterm-256
-//! palette indices via a nearest-match scan over the 16 basic ANSI colours;
-//! this covers every colour the libcluu ANSI parser can produce.
+//! palette indices via exact-match over the 16 basic colours, then a
+//! nearest-match scan over the full 256-entry palette for colours outside
+//! the basic set. When the ANSI parser set an explicit 256-colour index
+//! (CSI 38;5;N / 48;5;N), the index is encoded in the alpha byte
+//! (0xFF00_00NN) and passed through directly without RGB conversion.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -16,36 +19,10 @@ use core::mem::size_of;
 use libcluu::window_shm::WindowShm;
 use crate::tty_backend::Cluuterm;
 
-// ── xterm-256 basic colours (indices 0-15) ───────────────────────────────────
-//
-// These ARGB values match the compositor's `xterm_256_palette()` entries 0-15
-// (plus the alpha byte set to 0 since the cluuterm Attr stores only RGB).
-// White (index 7 = 0xC0C0C0 → "light gray") and bright-white (index 15) are
-// both present so the default fg (0x00FFFFFF = bright-white) maps to index 15.
-
-const PALETTE_16: [u32; 16] = [
-    0x00000000, // 0  black
-    0x00800000, // 1  red
-    0x00008000, // 2  green
-    0x00808000, // 3  dark-yellow / olive
-    0x00000080, // 4  blue
-    0x00800080, // 5  magenta
-    0x00008080, // 6  cyan
-    0x00C0C0C0, // 7  light-gray
-    0x00808080, // 8  dark-gray (bright-black)
-    0x00FF0000, // 9  bright-red
-    0x0000FF00, // 10 bright-green
-    0x00FFFF00, // 11 bright-yellow
-    0x000000FF, // 12 bright-blue
-    0x00FF00FF, // 13 bright-magenta
-    0x0000FFFF, // 14 bright-cyan
-    0x00FFFFFF, // 15 bright-white
-];
-
-// Mapping from the cluuterm ANSI-parser colour values to the 16 basic indices.
 // The parser uses a slightly different set of ARGB values (copied from the
-// legacy console colour table). We carry a second table so nearest-match works
-// even when the raw value doesn't appear literally in PALETTE_16.
+// legacy console colour table) than the compositor's palette entries 0-15.
+// We carry these tables so exact-match works even when the raw value from
+// the parser doesn't appear literally in PALETTE_256.
 const PARSER_ANSI: [u32; 8] = [
     0x00000000, // 0 → black
     0x00AA0000, // 1 → red
@@ -67,12 +44,51 @@ const PARSER_BRIGHT: [u32; 8] = [
     0x00FFFFFF, // 15 → bright-white
 ];
 
+/// Full xterm-256 palette (0x00RRGGBB, no alpha) for nearest-match fallback.
+/// Matches the compositor's `xterm_256_palette()` entries with the alpha
+/// byte stripped (cluuterm stores colours as 0x00RRGGBB).
+const fn build_xterm_256() -> [u32; 256] {
+    let mut p = [0u32; 256];
+    let basic: [u32; 16] = [
+        0x000000, 0x800000, 0x008000, 0x808000,
+        0x000080, 0x800080, 0x008080, 0xC0C0C0,
+        0x808080, 0xFF0000, 0x00FF00, 0xFFFF00,
+        0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
+    ];
+    let mut i = 0;
+    while i < 16 {
+        p[i] = basic[i];
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 216 {
+        let r = (i / 36) % 6;
+        let g = (i / 6) % 6;
+        let b = i % 6;
+        let rf = if r == 0 { 0 } else { (r as u32) * 40 + 55 };
+        let gf = if g == 0 { 0 } else { (g as u32) * 40 + 55 };
+        let bf = if b == 0 { 0 } else { (b as u32) * 40 + 55 };
+        p[16 + i] = (rf << 16) | (gf << 8) | bf;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 24 {
+        let v = 8 + (i as u32) * 10;
+        p[232 + i] = (v << 16) | (v << 8) | v;
+        i += 1;
+    }
+    p
+}
+
+const PALETTE_256: [u32; 256] = build_xterm_256();
+
 /// Convert an ARGB u32 (as stored in `Attr::fg`/`Attr::bg`) to the nearest
 /// xterm-256 palette index.
 ///
 /// Fast path: exact-match scan over the 16 basic colours (covers every colour
-/// the libcluu ANSI parser can produce). Fallback: brute-force nearest by
-/// squared Euclidean distance in RGB space over the full 16-entry set.
+/// the libcluu ANSI parser can produce from SGR 30-37/90-97). Fallback:
+/// brute-force nearest by squared Euclidean distance in RGB space over the
+/// full 256-entry xterm palette (covers the 6×6×6 cube and grayscale ramp).
 pub fn argb_to_palette_idx(argb: u32) -> u8 {
     // Strip the alpha byte — cluuterm stores colours as 0x00RRGGBB.
     let rgb = argb & 0x00FF_FFFF;
@@ -85,14 +101,14 @@ pub fn argb_to_palette_idx(argb: u32) -> u8 {
         if c == rgb { return (8 + i) as u8; }
     }
 
-    // Nearest-colour fallback over the compositor palette entries 0-15.
+    // Nearest-colour fallback over the full xterm-256 palette.
     let r0 = ((rgb >> 16) & 0xFF) as i32;
     let g0 = ((rgb >>  8) & 0xFF) as i32;
     let b0 = ( rgb        & 0xFF) as i32;
 
     let mut best_idx = 0u8;
     let mut best_dist = i32::MAX;
-    for (i, &c) in PALETTE_16.iter().enumerate() {
+    for (i, &c) in PALETTE_256.iter().enumerate() {
         let r1 = ((c >> 16) & 0xFF) as i32;
         let g1 = ((c >>  8) & 0xFF) as i32;
         let b1 = ( c        & 0xFF) as i32;
@@ -103,6 +119,17 @@ pub fn argb_to_palette_idx(argb: u32) -> u8 {
         }
     }
     best_idx
+}
+
+/// Decode a per-cell colour value to an xterm-256 palette index.
+/// Alpha byte 0xFF → explicit palette index in the low byte (from
+/// CSI 38;5;N / 48;5;N). Alpha byte 0x00 → ARGB, convert via nearest-match.
+fn decode_palette_idx(raw: u32) -> u8 {
+    if (raw >> 24) == 0xFF {
+        (raw & 0xFF) as u8
+    } else {
+        argb_to_palette_idx(raw)
+    }
 }
 
 /// Pack `(codepoint:21, fg:8, bg:8, attrs:3)` into a single u64 cell word.
@@ -151,9 +178,10 @@ pub fn render(term: &mut Cluuterm) {
         for ix in 0..max_ix {
             let term_pos = iy * cols + ix;
             let ch  = term.cells[term_pos];
-            let fg  = argb_to_palette_idx(term.fg_cells[term_pos]);
-            let bg  = argb_to_palette_idx(term.bg_cells[term_pos]);
-            let cell = pack_cell(ch, fg, bg, 0);
+            let fg  = decode_palette_idx(term.fg_cells[term_pos]);
+            let bg  = decode_palette_idx(term.bg_cells[term_pos]);
+            let attrs = term.attr_cells[term_pos];
+            let cell = pack_cell(ch, fg, bg, attrs);
 
             let shm_off = iy * shm_w + ix;
             unsafe {
@@ -168,10 +196,11 @@ pub fn render(term: &mut Cluuterm) {
     if cx < max_ix && cy < max_iy {
         let term_pos = cy * cols + cx;
         let ch  = term.cells[term_pos];
-        let fg  = argb_to_palette_idx(term.fg_cells[term_pos]);
-        let bg  = argb_to_palette_idx(term.bg_cells[term_pos]);
+        let fg  = decode_palette_idx(term.fg_cells[term_pos]);
+        let bg  = decode_palette_idx(term.bg_cells[term_pos]);
+        let attrs = term.attr_cells[term_pos];
         // Swap fg/bg: cursor is rendered as an inverted block.
-        let cell = pack_cell(ch, bg, fg, 0);
+        let cell = pack_cell(ch, bg, fg, attrs);
         let shm_off = cy * shm_w + cx;
         unsafe {
             core::ptr::write_volatile(cells_base.add(shm_off), cell);

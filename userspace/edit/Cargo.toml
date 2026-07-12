@@ -9,3 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 libcluu = { path = "../libcluu", features = ["posix"] }
+libtui = { package = "cluu-libtui", path = "../libtui", features = ["runtime"] }
+postcard = { workspace = true }
+cluu_wire = { path = "../cluu_wire" }

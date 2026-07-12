@@ -1449,7 +1449,7 @@ fn rollback_mapped_4kb(
 }
 
 fn rollback_mapped_4kb_locked(
-    space_id: crate::token::scope::AddressSpaceId,
+    _space_id: crate::token::scope::AddressSpaceId,
     virt_start: u64,
     mapped_pages: usize,
     pt_root: x86_64::PhysAddr,
@@ -1637,7 +1637,7 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
 }
 
 fn invoke_space_unmap(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
-    use crate::mm::{frame_registry, pmm, space_repository};
+    use crate::mm::{frame_registry, space_repository};
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     if !token.has_right(Rights::SPACE_MAP) {

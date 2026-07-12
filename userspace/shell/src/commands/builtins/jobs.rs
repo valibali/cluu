@@ -30,6 +30,9 @@ pub enum JobState {
 pub struct Job {
     pub id: usize,
     pub pgid: usize,
+    #[allow(dead_code)]
+    // rationale: pids vector retained for future signal-delivery to all PIDs
+    // in a job; currently only pgid is used for group signals.
     pub pids: Vec<usize>,
     /// Per-pid notify endpoints (parallel to `pids`).
     pub notify_endpoints: Vec<usize>,
@@ -520,7 +523,7 @@ fn handle_proc_exit_bytes(buf: &[u8], job_id: usize, ctx: &mut CommandContext) {
 }
 
 /// Print `[N]+ Done  cmd` lines for all completed bg jobs, then remove them.
-pub fn reap_done_jobs(stdout: usize, ctx: &mut CommandContext) {
+pub fn reap_done_jobs(_stdout: usize, ctx: &mut CommandContext) {
     let mut done_ids: Vec<(usize, String)> = Vec::new();
     for j in ctx.jobs.iter() {
         if j.state == JobState::Done && j.bg {
@@ -536,6 +539,8 @@ pub fn reap_done_jobs(stdout: usize, ctx: &mut CommandContext) {
 
 // ─── shellcrash (debug gate) ──────────────────────────────────────────────────
 
+#[allow(dead_code)]
+// rationale: debug-only builtin registered conditionally for crash-testing.
 pub(crate) struct ShellCrashBuiltin;
 
 impl BuiltinCommand for ShellCrashBuiltin {
@@ -545,7 +550,7 @@ impl BuiltinCommand for ShellCrashBuiltin {
 
     fn run(
         &self,
-        stdout: usize,
+        _stdout: usize,
         _context: &mut CommandContext,
         _args: &[String],
     ) -> Result<()> {

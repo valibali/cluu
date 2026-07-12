@@ -113,9 +113,14 @@ impl Compositor {
                 let cp = (cell & 0x1F_FFFF) as u32;
                 let fg_idx = ((cell >> 21) & 0xFF) as u8;
                 let bg_idx = ((cell >> 29) & 0xFF) as u8;
-                let _attrs = ((cell >> 37) & 0x07) as u8; // bold/etc later
-                let fg = self.palette[fg_idx as usize];
-                let bg = self.palette[bg_idx as usize];
+                let attrs = ((cell >> 37) & 0x07) as u8;
+                let underline = (attrs & 0b010) != 0;
+                let reverse = (attrs & 0b100) != 0;
+                let mut fg = self.palette[fg_idx as usize];
+                let mut bg = self.palette[bg_idx as usize];
+                if reverse {
+                    core::mem::swap(&mut fg, &mut bg);
+                }
 
                 // Map Unicode → CP437 → font byte. Codepoints outside
                 // BMP-ASCII / CP437 fall back to '?' via the helper.
@@ -131,6 +136,12 @@ impl Compositor {
                     libcluu::simd::blend_row(mask, fg, bg, &mut row_buffer);
                     let off = (py + row) * pitch_words + px;
                     self.backbuf[off..off + glyph_w].copy_from_slice(&row_buffer);
+                }
+                if underline {
+                    let off = (py + glyph_h - 1) * pitch_words + px;
+                    for x in 0..glyph_w {
+                        self.backbuf[off + x] = fg;
+                    }
                 }
             }
         }

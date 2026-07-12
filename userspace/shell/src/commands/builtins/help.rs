@@ -5,7 +5,6 @@ use alloc::format;
 use alloc::string::String;
 
 use libcluu::fs::client::VfsClient;
-use libcluu::ipc::{send_with_payload, CONSOLE_CLEAR_LABEL};
 use libcluu::registry;
 use libcluu::Result;
 

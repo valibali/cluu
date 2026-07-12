@@ -200,7 +200,7 @@ Exit criteria:
   `syscall/handlers.rs::invoke_space_destroy`, libcluu wrapper, called by
   procmgr at exit/kill paths. This was the longest-deferred memory-leak
   source.
-- [ ] Userspace `poll()`/`select()` work for pipes, TTYs, and `/dev`
+- [x] Userspace `poll()`/`select()` work for pipes, TTYs, and `/dev`
   pseudo-files. Sockets deferred to Phase 5.
 - [ ] Compiler warnings across the tree below 5 total (currently ~30).
 - [ ] H9/H10 overflow counters exposed in `/proc` and visible from `top`.

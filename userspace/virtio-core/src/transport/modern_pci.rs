@@ -164,8 +164,7 @@ impl Transport for ModernPciTransport {
         unsafe {
             w16(self.common_va, O_QUEUE_SELECT, idx);
             let dev_max_size = r16(self.common_va, O_QUEUE_SIZE);
-            // Don't override queue_size — use whatever the device reports as
-            // its max. The Virtqueue caller is expected to size to dev_max.
+            w16(self.common_va, O_QUEUE_SIZE, vq.queue_size);
             w64(self.common_va, O_QUEUE_DESC, vq.desc_region.phys);
             w64(self.common_va, O_QUEUE_DRIVER, vq.avail_region.phys);
             w64(self.common_va, O_QUEUE_DEVICE, vq.used_region.phys);

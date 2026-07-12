@@ -101,23 +101,25 @@ impl Viewport {
     /// reserve 2 rows for the status + message lines. Falls back to 80×24 if
     /// the params are zero — `boot_info()` only works for init, not children.
     pub fn from_console() -> Self {
-        const GLYPH_W: u64 = 8;
-        const GLYPH_H: u64 = 16;
-        let info = libcluu::boot::process_info();
-        let fb_w = info.params[libcluu::boot::PARAM_FB_WIDTH];
-        let fb_h = info.params[libcluu::boot::PARAM_FB_HEIGHT];
-        if fb_w == 0 || fb_h == 0 {
-            return Self::default_80x24();
+        extern "C" {
+            fn _ioctl(fd: i32, request: usize, argp: *mut core::ffi::c_void) -> i32;
         }
-        let cols = fb_w / GLYPH_W;
-        let rows = fb_h / GLYPH_H;
-        let content_rows = rows.saturating_sub(2);
-        Viewport {
-            top_line: 0,
-            left_col: 0,
-            height: content_rows.min(u16::MAX as u64) as u16,
-            width: cols.min(u16::MAX as u64) as u16,
+        #[repr(C)]
+        struct WinSize { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 }
+        const TIOCGWINSZ: usize = 0x5413;
+        let mut ws = WinSize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        let rc = unsafe { _ioctl(1, TIOCGWINSZ, &mut ws as *mut _ as *mut core::ffi::c_void) };
+        if rc == 0 && ws.ws_col > 0 {
+            let cols = ws.ws_col as u64;
+            let rows = ws.ws_row as u64;
+            let content_rows = rows.saturating_sub(2);
+            return Viewport {
+                top_line: 0, left_col: 0,
+                height: content_rows.min(u16::MAX as u64) as u16,
+                width: cols.min(u16::MAX as u64) as u16,
+            };
         }
+        Self::default_80x24()
     }
 }
 
@@ -138,7 +140,7 @@ pub struct Editor {
     pub awaiting_replace: bool,
     pub ex_history: alloc::vec::Vec<alloc::string::String>,
     pub search_history: alloc::vec::Vec<alloc::string::String>,
-    // More fields added in later tasks (search state, etc.)
+    pub plugin_ex_command: Option<alloc::string::String>,
 }
 
 impl Editor {
@@ -160,6 +162,7 @@ impl Editor {
             awaiting_replace: false,
             ex_history: alloc::vec::Vec::new(),
             search_history: alloc::vec::Vec::new(),
+            plugin_ex_command: None,
         }
     }
 }

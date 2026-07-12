@@ -250,8 +250,8 @@ impl FdTable {
         table.entries.into_values().collect()
     }
 
-    /// Return the effective capability rights for `(client_id, fd)`, or
-    /// `None` if the entry does not exist.
+    #[allow(dead_code)]
+    // rationale: capability-rights query for future per-fd permission checks.
     pub fn rights(&self, client_id: usize, fd: usize) -> Option<u64> {
         self.get(client_id, fd).map(|f| f.rights())
     }

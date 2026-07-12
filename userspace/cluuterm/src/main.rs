@@ -174,8 +174,8 @@ fn register_window(my_ep: usize) -> Result<(u32, usize, u32, u32), i32> {
     }
 
     // Map the SHM frame token into our address space.
-    let cells_bytes = gw * gh * 8;
-    let total = (32 + cells_bytes + 0xFFF) & !0xFFF;
+    let max_cells_bytes = 256 * 64 * 8;
+    let total = (32 + max_cells_bytes + 0xFFF) & !0xFFF;
     let num_pages = total / 0x1000;
     let space = space_token();
     if syscall::space_map_range(

@@ -17,7 +17,6 @@ use libcluu::ipc::{
     TTY_REGISTER_LABEL,
 };
 use libcluu::posix::tty::{
-    get_lflag as tty_get_lflag, set_lflag as tty_set_lflag,
     TTY_LFLAG_ECHO, TTY_LFLAG_ICANON,
 };
 use libcluu::syscall;
@@ -32,6 +31,9 @@ use crate::commands::builtins::registry::{CommandContext, ExecResult, Foreground
 const PROCMGR_KILL_LABEL: u32 = 3;
 const SIGINT: usize = 2;
 const DEFAULT_PRIORITY: usize = 200;
+#[allow(dead_code)]
+// rationale: default termios lflag for tty reset; not yet wired into the
+// shell's foreground/background switching (Phase 1 tty-raw-mode work).
 const TTY_LFLAG_DEFAULT: usize = TTY_LFLAG_ICANON | TTY_LFLAG_ECHO;
 
 pub(crate) fn infer_foreground_mode(path: &str) -> ForegroundMode {
@@ -222,10 +224,10 @@ pub(crate) fn spawn_process_with_argv(
 pub fn spawn_process_with_argv_and_redirs(
     context: &mut CommandContext,
     name: &str,
-    image_name: &str,
+    _image_name: &str,
     _priority: usize,
     args: &[&str],
-    redirs: &[RedirAction],
+    _redirs: &[RedirAction],
 ) -> Result<SpawnResult> {
     let procmgr_endpoint = context.procmgr_spawn_endpoint()?;
 
@@ -315,7 +317,7 @@ pub fn spawn_process_with_argv_and_redirs(
                 0,
             );
             let mut reply_buf = [0u8; 512];
-            let (reply_msg, reply_len) = libcluu::ipc::call_with_reply_buf(
+            let (_reply_msg, reply_len) = libcluu::ipc::call_with_reply_buf(
                 session_ep, &msg, &payload, &mut reply_buf,
             )?;
             let hdr = size_of::<Message>();
@@ -373,17 +375,15 @@ pub fn spawn_process_with_argv_and_redirs(
 
 pub(crate) fn wait_for_exit_or_sigint(
     procmgr_endpoint: usize,
-    tty_endpoint: usize,
+    _tty_endpoint: usize,
     notify_endpoint: usize,
     child_pid: usize,
-    stdout: usize,
+    _stdout: usize,
     mode: ForegroundMode,
 ) -> Result<i32> {
     let mut ctrl_c_notify_endpoint = 0usize;
-    let mut ctrl_c_flags = TTY_FG_FLAG_FORWARD_CTRL_C;
     if mode == ForegroundMode::SignalOnCtrlC {
         ctrl_c_notify_endpoint = syscall::endpoint_create(process_info().tokens[TOKEN_IPC])?;
-        ctrl_c_flags = TTY_FG_FLAG_NOTIFY_CTRL_C | TTY_FG_FLAG_FORWARD_CTRL_C;
     }
 
     // Unified PTS_* path: foreground routing is handled service-side via
@@ -402,7 +402,7 @@ pub(crate) fn wait_for_exit_or_sigint(
         &tokens[..1]
     };
 
-    let mut result = loop {
+    let result = loop {
         let (index, len) = match syscall::ipc_recv_any(active_tokens, &mut buf, u64::MAX) {
             Ok(v) => v,
             Err(Error::WouldBlock) => continue,

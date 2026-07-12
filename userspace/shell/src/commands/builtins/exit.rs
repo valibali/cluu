@@ -49,7 +49,7 @@ impl BuiltinCommand for PoweroffBuiltin {
         "poweroff"
     }
 
-    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+    fn run(&self, _stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
         crate::write_stdout(b"Powering off...\n");
         let ep = context.procmgr_spawn_endpoint()?;
         let msg = Message::new(PROCMGR_SHUTDOWN_LABEL, [0, 0, 0, 0, 0, 0], 1);
@@ -68,7 +68,7 @@ impl BuiltinCommand for RebootBuiltin {
         "reboot"
     }
 
-    fn run(&self, stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
+    fn run(&self, _stdout: usize, context: &mut CommandContext, _args: &[String]) -> Result<()> {
         crate::write_stdout(b"Rebooting...\n");
         let ep = context.procmgr_spawn_endpoint()?;
         let msg = Message::new(PROCMGR_SHUTDOWN_LABEL, [1, 0, 0, 0, 0, 0], 1);

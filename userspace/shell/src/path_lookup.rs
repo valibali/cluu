@@ -8,7 +8,7 @@
 //! hit wins; lookup falls through to "unsupported command" otherwise.
 
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use libcluu::fs::client::VfsClient;
 
 /// Resolve a bare command name against $PATH. Walks PATH dirs in order,

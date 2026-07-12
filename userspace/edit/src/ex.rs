@@ -138,6 +138,9 @@ pub fn dispatch(state: &mut Editor, line: &str) {
         }
         ExCmd::Set(args) => crate::settings::dispatch(state, args),
         ExCmd::Help => crate::help::open(state),
-        ExCmd::Unknown(s) => state.message = alloc::format!("E492: Not an editor command: {}", s),
+        ExCmd::Unknown(s) => {
+            state.plugin_ex_command = Some(s.into());
+            state.message = alloc::format!("E492: Not an editor command: {}", s);
+        }
     }
 }

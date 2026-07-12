@@ -16,7 +16,6 @@
 
 use crate::tty_backend::Cluuterm;
 use libcluu::tty_core::keymap::encode_extended;
-use libcluu::tty_core::routing::route_input_byte;
 use libcluu::types::Message;
 
 /// Handle a `COMP_INPUT_FORWARD_LABEL` message.

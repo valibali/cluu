@@ -112,6 +112,10 @@ impl Virtqueue {
     pub fn free_capacity(&self) -> u16 {
         self.num_free
     }
+
+    pub fn last_used_idx(&self) -> u16 {
+        self.last_used_idx
+    }
 }
 
 /// A reservation of `n` chained descriptor slots.
@@ -254,17 +258,17 @@ impl Virtqueue {
             let elem = *ring_base.add(self.last_used_idx as usize & (self.queue_size as usize - 1));
             let head = elem.id as u16;
             let written = elem.len;
-            // Acquire fence so subsequent reads of buffers see the device's writes.
             fence(Ordering::Acquire);
             self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
-            // Take the cookie before freeing the chain.
+            if (head as usize) >= self.cookies.len() {
+                return None;
+            }
             let cookie = self.cookies[head as usize].take();
+            if cookie.is_none() {
+                return None;
+            }
 
-            // Free the whole chain (rebuild the chain shape so free_chain
-            // walks it). collect_chain reads NEXT bits up to the last desc.
-            // Since alloc_chain cleared NEXT only on the tail, the chain
-            // walk works for any size including 1.
             let descs = self.collect_chain(head);
             let n = descs.len() as u16;
             let tail = *descs.last().unwrap();

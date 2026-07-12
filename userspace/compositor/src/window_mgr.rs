@@ -40,9 +40,9 @@ impl Compositor {
             return Err(libcluu::Error::InvalidArgument);
         }
 
-        let cells_bytes = granted_w as usize * granted_h as usize * 8;
+        let max_cells_bytes = self.cols as usize * self.rows as usize * 8;
         let header_bytes = core::mem::size_of::<WindowShm>();
-        let total_bytes = header_bytes + cells_bytes;
+        let total_bytes = header_bytes + max_cells_bytes;
         let (token, allocated) = crate::shm::alloc_frame(total_bytes)?;
 
         let id = self.next_id;
@@ -72,7 +72,7 @@ impl Compositor {
             (*hdr).generation = 0;
             // Zero cell area
             let cells_ptr = mapping.as_ptr().add(header_bytes);
-            core::ptr::write_bytes(cells_ptr, 0, cells_bytes);
+            core::ptr::write_bytes(cells_ptr, 0, max_cells_bytes);
         }
 
         // Fullscreen windows are pinned at (0, 0). Normal windows cascade,
@@ -345,6 +345,13 @@ impl Compositor {
             let (iw_off, ih_off): (u16, u16) = if is_modal { (0, 0) } else { (4, 3) };
             let interior_w = new_w.saturating_sub(iw_off);
             let interior_h = new_h.saturating_sub(ih_off);
+            {
+                let hdr = self.windows[pos].mapping.as_ptr() as *mut WindowShm;
+                unsafe {
+                    core::ptr::write_volatile(&mut (*hdr).width as *mut u32, interior_w as u32);
+                    core::ptr::write_volatile(&mut (*hdr).height as *mut u32, interior_h as u32);
+                }
+            }
             let msg = libcluu::types::Message::new(
                 libcluu::ipc::COMP_WIN_CONFIGURE_LABEL,
                 [
@@ -486,10 +493,10 @@ impl Compositor {
     }
 
     fn spawn_cluuterm_via_root(&self) {
-        let ep = match libcluu::registry::lookup_service("procmgr:spawn") {
+        let ep = match libcluu::registry::lookup_service("root-procmgr:spawn") {
             Some(ep) => ep,
             None => {
-                let _ = libcluu::debug_print("compositor: spawn_cluuterm: no procmgr:spawn");
+                let _ = libcluu::debug_print("compositor: spawn_cluuterm: no root-procmgr:spawn");
                 return;
             }
         };
@@ -596,6 +603,8 @@ impl Compositor {
         (cx.min(self.cols.saturating_sub(1)), cy.min(self.rows.saturating_sub(1)))
     }
 
+    #[allow(dead_code)]
+    // rationale: cursor-dirty helper for future incremental cursor rendering.
     pub fn dirty_cursor_cell(&mut self) {
         let (cx, cy) = self.cursor_cell();
         self.cell_dirty.push((cx, cy));
@@ -607,7 +616,7 @@ impl Compositor {
         let idx = cy as usize * self.cols as usize + cx as usize;
         if idx < self.cell_grid.len() {
             let cell = self.cell_grid[idx];
-            let bg = (cell >> 29) & 0xFF;
+            let _bg = (cell >> 29) & 0xFF;
             self.cell_grid[idx] = (cell & !((0x1F_FFFF) | (0xFFu64 << 21)))
                 | (0x2588u64)
                 | (15u64 << 21);
@@ -701,9 +710,18 @@ impl Compositor {
                 if input_ep != 0 && new_w > 2 && new_h > 2 {
                     let is_modal = self.windows[pos].modal;
                     let (iw_off, ih_off): (u16, u16) = if is_modal { (0, 0) } else { (4, 3) };
+                    let interior_w = new_w.saturating_sub(iw_off);
+                    let interior_h = new_h.saturating_sub(ih_off);
+                    {
+                        let hdr = self.windows[pos].mapping.as_ptr() as *mut WindowShm;
+                        unsafe {
+                            core::ptr::write_volatile(&mut (*hdr).width as *mut u32, interior_w as u32);
+                            core::ptr::write_volatile(&mut (*hdr).height as *mut u32, interior_h as u32);
+                        }
+                    }
                     let msg = libcluu::types::Message::new(
                         libcluu::ipc::COMP_WIN_CONFIGURE_LABEL,
-                        [ds.window_id as usize, new_w.saturating_sub(iw_off) as usize, new_h.saturating_sub(ih_off) as usize, 0, 0, 0],
+                        [ds.window_id as usize, interior_w as usize, interior_h as usize, 0, 0, 0],
                         3,
                     );
                     let _ = libcluu::ipc::send(input_ep, &msg, libcluu::types::IpcFlags::empty());

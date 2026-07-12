@@ -27,8 +27,8 @@ use libcluu::registry;
 
 const GRANT_SIZE: usize = 4096;
 
-const W_CID: usize = 5;
-const W_PCID: usize = 5;
+const W_CID: usize = 7;
+const W_PCID: usize = 7;
 const W_PID: usize = 7;
 const W_HEAP: usize = 7;
 const W_MEM: usize = 7;
@@ -55,13 +55,13 @@ struct WinSize {
 
 const TIOCGWINSZ: usize = 0x5413;
 
-fn terminal_cols() -> usize {
+fn terminal_size() -> (usize, usize) {
     let mut ws = WinSize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
     let rc = unsafe { _ioctl(1, TIOCGWINSZ, &mut ws as *mut _ as *mut core::ffi::c_void) };
     if rc == 0 && ws.ws_col > 0 {
-        ws.ws_col as usize
+        (ws.ws_col as usize, ws.ws_row.max(1) as usize)
     } else {
-        80
+        (80, 24)
     }
 }
 
@@ -120,19 +120,26 @@ fn run() -> libcluu::Result<()> {
     let mut prev_frame_tsc: u64 = 0;
     let mut first_frame = true;
 
+    let mut prev_cols: usize = 0;
+    let mut prev_rows: usize = 0;
+
     write_stdout(b"\x1b[2J\x1b[H\x1b[?25l");
 
     loop {
         let now_tsc = libcluu::syscall::clock_now(clock_token).unwrap_or(0);
 
-        let cols = {
-            let c = terminal_cols();
-            c.min(120)
-        };
+        let (raw_cols, raw_rows) = terminal_size();
+        let cols = raw_cols;
+        let resized = raw_cols != prev_cols || raw_rows != prev_rows;
+        if resized && prev_cols != 0 {
+            write_stdout(b"\x1b[2J");
+        }
+        prev_cols = raw_cols;
+        prev_rows = raw_rows;
 
         let fixed_width = W_CID + 1 + W_PCID + 1 + W_PID + 1 + W_HEAP + 1 + W_MEM + 1 + W_CPU + 1 + W_ST;
         let w_name = if cols > fixed_width + MIN_NAME + 2 {
-            (cols.saturating_sub(fixed_width + 2)).min(MAX_NAME)
+            cols.saturating_sub(fixed_width + 2)
         } else {
             MIN_NAME
         };
@@ -141,6 +148,11 @@ fn run() -> libcluu::Result<()> {
         // Read system memory info (total/used in kB) from /proc/meminfo.
         let (mem_total_kb, mem_used_kb) =
             read_meminfo(&vfs, space_token, grant_base).unwrap_or((0, 0));
+
+        // Read H9/H10 scheduler overflow counters from /proc/sched_overflow.
+        // H9 = deferred_fault_overflow, H10 = pending_wake_overflow.
+        let (h9, h10) =
+            read_sched_overflow(&vfs, space_token, grant_base).unwrap_or((0, 0));
 
         let records = match read_all_proc_stats(&vfs, space_token, grant_base) {
             Ok(r) => r,
@@ -205,7 +217,8 @@ fn run() -> libcluu::Result<()> {
             records.len()
         ));
         let hdr_content_len = 23 + digit_count(records.len());
-        for _ in hdr_content_len..(cols + 1) {
+        let pad_len = cols.saturating_sub(hdr_content_len + 1);
+        for _ in 0..pad_len {
             frame.push(' ');
         }
         frame.push_str("\x1b[K\x1b[0m\n");
@@ -219,7 +232,7 @@ fn run() -> libcluu::Result<()> {
 
         if cols >= MIN_COLS_FOR_DUAL_GAUGE {
             let overhead = 5 + 2 + 4 + 2 + 5 + 2 + mem_str.len();
-            let remaining = (cols + 1).saturating_sub(overhead);
+            let remaining = cols.saturating_sub(overhead + 1);
             let bar_w = remaining / 2;
             let cpu_bar = render_bar(sys_cpu_pct, bar_w);
             let mem_bar = render_bar(mem_pct, bar_w);
@@ -230,7 +243,7 @@ fn run() -> libcluu::Result<()> {
             ));
         } else {
             let overhead = 5 + 2 + 4;
-            let bar_w = (cols + 1).saturating_sub(overhead);
+            let bar_w = cols.saturating_sub(overhead + 1);
             let cpu_bar = render_bar(sys_cpu_pct, bar_w);
             frame.push_str(&format!(
                 "\x1b[97mCPU\x1b[0m {}[{}]\x1b[0m {}\x1b[K\n",
@@ -238,12 +251,10 @@ fn run() -> libcluu::Result<()> {
             ));
         }
 
-        // Column header — widths match data rows exactly.
         let name_hdr = fit_chars("NAME", w_name);
-        let name_pad = " ".repeat(w_name.saturating_sub(4));
         frame.push_str(&format!(
-            "\x1b[97m{:>W_CID$} {:>W_PCID$} {}{} {:>W_PID$} {:>W_HEAP$} {:>W_MEM$} {:>W_CPU$} {:<W_ST$}\x1b[K\x1b[0m\n",
-            "CID", "PCID", "NAME", name_pad, "PID", "HEAP", "MEM", "CPU%", "ST",
+            "\x1b[97m{:>W_CID$} {:>W_PCID$} {} {:>W_PID$} {:>W_HEAP$} {:>W_MEM$} {:>W_CPU$} {:<W_ST$}\x1b[K\x1b[0m\n",
+            "CID", "PCID", name_hdr, "PID", "HEAP", "MEM", "CPU%", "ST",
         ));
         frame.push_str("\x1b[0m");
         for _ in 0..row_width {
@@ -251,8 +262,10 @@ fn run() -> libcluu::Result<()> {
         }
         frame.push_str("\x1b[K\n");
 
-        // Data rows.
-        for entry in &ordered {
+        let fixed_rows = 6;
+        let max_data_rows = raw_rows.saturating_sub(fixed_rows);
+        for (i, entry) in ordered.iter().enumerate() {
+            if i >= max_data_rows { break; }
             let rec = &records[entry.idx];
 
             let color = if rec.state == "R" {
@@ -311,12 +324,17 @@ fn run() -> libcluu::Result<()> {
                 _ => "UN  ",
             };
 
-            frame.push_str(&format!(
+            let line = format!(
                 "{}{} {} {} {} {} {} {} {}\x1b[K\x1b[0m\n",
                 color, cid_str, pcid_str, name_str, pid_str, heap_col, mem_col, cpu_col, st_str
-            ));
+            );
+            frame.push_str(&line);
         }
 
+        frame.push_str(&format!(
+            "\x1b[90m H9: {}  H10: {}\x1b[K\x1b[0m\n",
+            h9, h10,
+        ));
         frame.push_str(
             "\x1b[90m Ctrl-C to quit                                   1s refresh \x1b[K\x1b[0m\n",
         );
@@ -541,6 +559,44 @@ fn parse_kb(s: &str) -> Option<u64> {
         .trim()
         .parse::<u64>()
         .ok()
+}
+
+/// Read /proc/sched_overflow and return (H9, H10) overflow counters.
+/// H9 = deferred_fault_overflow, H10 = pending_wake_overflow.
+fn read_sched_overflow(vfs: &VfsClient, space_token: usize, grant_base: usize) -> Option<(u64, u64)> {
+    let file = vfs.open("/proc/sched_overflow").ok()?;
+    if file.size == 0 {
+        let _ = vfs.close(file);
+        return None;
+    }
+    let read_size = file.size.min(GRANT_SIZE);
+    let grant = vfs.read_grant(file, 0, read_size, space_token, grant_base).ok();
+    let result = grant.and_then(|g| {
+        if g.len > 0 && g.offset + g.len <= GRANT_SIZE {
+            let addr = grant_base + g.offset;
+            let data = unsafe { core::slice::from_raw_parts(addr as *const u8, g.len) };
+            let text = core::str::from_utf8(data).unwrap_or("");
+            parse_sched_overflow(text)
+        } else {
+            None
+        }
+    });
+    let _ = vfs.close(file);
+    result
+}
+
+fn parse_sched_overflow(text: &str) -> Option<(u64, u64)> {
+    let mut h9: Option<u64> = None;
+    let mut h10: Option<u64> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("deferred_fault_overflow ") {
+            h9 = rest.trim().parse::<u64>().ok();
+        } else if let Some(rest) = trimmed.strip_prefix("pending_wake_overflow ") {
+            h10 = rest.trim().parse::<u64>().ok();
+        }
+    }
+    h9.zip(h10)
 }
 
 /// Format kB as a human-readable string: 64K, 128M, 2G.

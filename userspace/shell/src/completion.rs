@@ -85,6 +85,9 @@ pub fn populate_dir_cache(vfs: &libcluu::fs::client::VfsClient) {
     CACHE_READY.store(true, Ordering::Release);
 }
 
+#[allow(static_mut_refs)]
+// rationale: DIR_CACHE is a static mut written once during populate_dir_cache
+// and read-only thereafter. The shared reference is safe under this protocol.
 fn lookup_cached_dir(dir: &str) -> Vec<String> {
     if !CACHE_READY.load(Ordering::Acquire) {
         return Vec::new();
@@ -100,6 +103,8 @@ fn lookup_cached_dir(dir: &str) -> Vec<String> {
     }
 }
 
+#[allow(static_mut_refs)]
+// rationale: DIR_CACHE is a static mut — see lookup_cached_dir above.
 fn lookup_root_entries() -> Vec<String> {
     let mut top: Vec<String> = Vec::new();
     unsafe {
@@ -218,6 +223,9 @@ fn dedup(cands: &mut Vec<String>) {
 
 static mut COMPLETION_ARG: Option<(usize, &'static BuiltinRegistry)> = None;
 
+#[allow(static_mut_refs)]
+// rationale: COMPLETION_ARG is a static mut set once before thread spawn
+// and consumed via take() in the thread entry. The mutable reference is safe.
 pub extern "C" fn completion_thread_entry() -> ! {
     let (entry_ep, registry) = unsafe {
         match COMPLETION_ARG.take() {
@@ -225,14 +233,14 @@ pub extern "C" fn completion_thread_entry() -> ! {
             None => {
                 let _ = debug_print("completion: COMPLETION_ARG not set");
                 loop {
-                    libcluu::yield_cpu();
+                    let _ = libcluu::yield_cpu();
                 }
             }
         }
     };
     completion_thread(entry_ep, registry);
     loop {
-        libcluu::yield_cpu();
+        let _ = libcluu::yield_cpu();
     }
 }
 
