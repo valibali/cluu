@@ -56,7 +56,7 @@ pub extern "C" fn main() -> i32 {
     let _ = vfs.close(created);
 
     // Spawn ownerprobe
-    let procmgr_endpoint = match registry::subscribe_output("procmgr", "spawn") {
+    let procmgr_endpoint = match registry::subscribe_output("root-procmgr", "spawn") {
         Ok(ep) => ep,
         Err(err) => {
             let line = format!("ext2ownerdeny: FAIL procmgr unavailable {:?}", err);

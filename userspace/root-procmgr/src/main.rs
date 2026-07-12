@@ -36,7 +36,6 @@ use libcluu::boot::{
     PARAM_FD_VFS_OFFSET,
     PARAM_FD_VFS_LEN,
     PARAM_INITRD_SIZE,
-    PARAM_NOTIFY_READY_EP,
     PARAM_TTY_INSTANCE,
     PROCESS_INFO_ADDR,
     // New token slot constants
@@ -135,6 +134,8 @@ struct PipelinedPrep {
     image_dir: String,
     env_data: Vec<u8>,
     envc: usize,
+    #[allow(dead_code)]
+    // rationale: stored for future VFS path debugging; currently only written.
     binary_vfs_path: String,
 }
 
@@ -229,8 +230,6 @@ const STACK_FLAGS: usize = 0x03; // read + write
 const SERVICE_PATH: &str = "/var/images/vt/bin/shell";
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const PROCMGR_SPAWN_LABEL: u32 = 2;
-/// Unified spawn verb (spec 1). Defined in cluu_wire::spawn — re-exported here.
-const PROCMGR_SPAWN_UNIFIED_LABEL: u32 = cluu_wire::spawn::PROCMGR_SPAWN_UNIFIED_LABEL;
 const PROCMGR_KILL_LABEL: u32 = 3;
 const PROCMGR_FAULT_LABEL: u32 = 0xFA017;
 const DEFAULT_PRIORITY: usize = 200;
@@ -296,6 +295,9 @@ struct ProcessManager {
     vfs_endpoint: usize,    // VFS service endpoint
     /// Cached value of procmgr's main-thread tid; 0 means not yet looked up.
     /// Used by VFS-backed FdInherit injection (see `procmgr_main_tid`).
+    #[allow(dead_code)]
+    // rationale: only reader is procmgr_main_tid which is itself dead code
+    // retained for future FdInherit injection. Field is written during init.
     cached_main_tid: usize,
     /// virtio-blk listen endpoint for BLK_TID_CLEANUP broadcasts. Resolved
     /// lazily on first cleanup so we don't depend on blkdev boot order.
@@ -605,6 +607,9 @@ impl ProcessManager {
 
     /// Build a ViewMountList from already-resolved mount strings.
     /// Each entry is "mode:path". Unknown modes or malformed entries are skipped.
+    #[allow(dead_code)]
+    // rationale: utility for future manifest-driven view construction from
+    // pre-parsed mount strings; currently the envelope path is used instead.
     fn build_view_from_mount_strings(strings: &[String]) -> ViewMountList {
         let mut mounts = ViewMountList::new();
         for raw in strings {
@@ -848,6 +853,9 @@ impl ProcessManager {
     /// expects on a VFS-backed FdInherit entry. `client_id` is procmgr's main-thread
     /// tid (what VFS authenticated the open under); `remote_fd` is VFS's
     /// table fd for the open. Both nonzero on success.
+    #[allow(dead_code)]
+    // rationale: legacy text-VT session spawn helper; retained for the
+    // session-spawn rework that will re-wire dev-tty fd inheritance.
     fn open_dev_tty_for_session(&mut self, vt: usize) -> Result<(usize, usize)> {
         if vt >= 4 {
             return Err(Error::InvalidArgument);
@@ -878,6 +886,9 @@ impl ProcessManager {
     /// init populates TOKEN_SELF_THREAD with a Thread-typed capability for
     /// procmgr's main thread before resuming it.  We call `thread_get_id` on
     /// that capability to obtain the tid that VFS keys client_id entries under.
+    #[allow(dead_code)]
+    // rationale: called only by open_dev_tty_for_session (also dead); retained
+    // for the session-spawn rework.
     fn procmgr_main_tid(&mut self) -> Result<usize> {
         if self.cached_main_tid != 0 {
             return Ok(self.cached_main_tid);
@@ -900,6 +911,8 @@ impl ProcessManager {
     ///   u32 count = 3
     ///   3 × FdInherit { u32 target_fd, u32 flags, usize endpoint,
     ///                   usize vfs_client_id, usize vfs_remote_fd }
+    #[allow(dead_code)]
+    // rationale: legacy text-VT fd-inherit builder; retained for session-spawn rework.
     fn build_devtty_fd_inherit(&self, vfs_client_id: usize, vfs_remote_fd: usize)
         -> Vec<u8>
     {
@@ -1087,7 +1100,7 @@ impl ProcessManager {
     }
 
     fn init(&mut self) -> Result<()> {
-        registry::init("procmgr")?;
+        registry::init("root-procmgr")?;
         registry::register_default_outputs()?;
         self.spawn_endpoint = endpoint_create(self.token)?;
         registry::register_output("spawn", self.spawn_endpoint)?;
@@ -1187,7 +1200,6 @@ impl ProcessManager {
     }
 
     fn pipelined_autostart(&mut self, services: &[&libcluu::toml::TomlTable]) -> Result<()> {
-        use libcluu::ipc::ASYNC_REPLY_TAG;
         use libcluu::fs::VFS_MAP_ELF;
 
         let reply_ep = endpoint_create(self.token)?;
@@ -1262,7 +1274,7 @@ impl ProcessManager {
     fn prep_autostart_spawn(
         &mut self,
         image_name: &str,
-        svc: &libcluu::toml::TomlTable,
+        _svc: &libcluu::toml::TomlTable,
         reply_ep: usize,
     ) -> Result<PipelinedPrep> {
         use libcluu::ipc::ASYNC_REPLY_TAG;
@@ -1680,7 +1692,7 @@ impl ProcessManager {
             .unwrap_or(96)
     }
 
-    fn autostart_container(&mut self, image_name: &str, svc: &libcluu::toml::TomlTable) -> Result<()> {
+    fn autostart_container(&mut self, image_name: &str, _svc: &libcluu::toml::TomlTable) -> Result<()> {
         // Read manifest
         let manifest_path = format!("/var/images/{}/manifest.toml", image_name);
         let manifest_contents = self.read_file_from_vfs(&manifest_path)
@@ -2443,6 +2455,8 @@ impl ProcessManager {
                 if service_name.starts_with("session-procmgr") && name.starts_with("main") {
                     self.session_pmgr_endpoints.insert(token);
                 }
+                let full_name = format!("{}:{}", service_name, name);
+                registry::cache_grant(&full_name, token);
             } else if let registry::RegistryEvent::SubscribeStatus { code } = event {
                 if code != 0 {
                     // Reset all failed requested bits so we retry.
@@ -6729,7 +6743,14 @@ impl ProcessManager {
             spawn_start,
             &fd_inherit_bytes,
             requested_profile,
-            0,   // extra_token
+            {
+                if requested_profile.contains(CapProfile::NET)
+                    && registry::lookup_cached("netd:main").is_none()
+                {
+                    let _ = registry::request_subscription("netd", "main");
+                }
+                procmgr_common::envelopes::derive_netd_token(requested_profile).unwrap_or(0)
+            },
             0,   // extra_token_1
             &[], // param_overrides
             None, // caller_view: derive from profile default

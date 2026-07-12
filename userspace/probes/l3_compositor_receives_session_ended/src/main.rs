@@ -10,7 +10,6 @@ extern crate libcluu;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
-use libcluu::runtime as _;
 
 use cluu_wire::session::{
     ProfileSpec, SessionCreateRequest,
@@ -21,10 +20,10 @@ pub extern "C" fn main() -> i32 {
     let label = "l3_compositor_receives_session_ended";
 
     // 1. Look up compositor:control endpoint.
-    let compositor_ep = match libcluu::registry::lookup_service("compositor:control") {
+    let _compositor_ep = match libcluu::registry::lookup_service("compositor:control") {
         Some(ep) => ep,
         None => {
-            libcluu::debug_print(&format!("{}: compositor:control not found — DEFERRED\n", label));
+            let _ = libcluu::debug_print(&format!("{}: compositor:control not found — DEFERRED\n", label));
             return 0;
         }
     };
@@ -42,17 +41,17 @@ pub extern "C" fn main() -> i32 {
     let ok = match libcluu::session::create(req) {
         Ok(o) => o,
         Err(e) => {
-            libcluu::debug_print(&format!("{}: CREATE failed {:?}\n", label, e));
+            let _ = libcluu::debug_print(&format!("{}: CREATE failed {:?}\n", label, e));
             return 1;
         }
     };
-    libcluu::debug_print(&format!("{}: CREATE ok sid={}\n", label, ok.session_id));
+    let _ = libcluu::debug_print(&format!("{}: CREATE ok sid={}\n", label, ok.session_id));
 
     // 3. Destroy session — harness monitors compositor for SESSION_ENDED event.
     let _ = libcluu::session::destroy(ok.token);
-    libcluu::debug_print(&format!("{}: DESTROY ok\n", label));
+    let _ = libcluu::debug_print(&format!("{}: DESTROY ok\n", label));
 
     // 4. The harness verifies compositor log for "SESSION_ENDED" message.
-    libcluu::debug_print(&format!("{}: PASS (compositor event verified by harness)\n", label));
+    let _ = libcluu::debug_print(&format!("{}: PASS (compositor event verified by harness)\n", label));
     0
 }

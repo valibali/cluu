@@ -24,7 +24,7 @@ fn run() -> libcluu::Result<()> {
     registry::init("escalateprobe")?;
     syscall::yield_cpu()?;
 
-    let procmgr_ep = registry::subscribe_output("procmgr", "spawn")?;
+    let procmgr_ep = registry::subscribe_output("root-procmgr", "spawn")?;
     debug_print("escalateprobe: got procmgr endpoint")?;
 
     // Try to spawn "devicereq" which requires DEVICE capability.

@@ -7,7 +7,7 @@ use alloc::format;
 use cluu_ld_cluu::{
     apply_relocs,
     tls::{TlsBlock, TlsModule, __tls_get_addr, init_thread_tls},
-    DynamicInfo, DynTag,
+    DynamicInfo,
 };
 use libcluu::debug_print;
 use libcluu::Result;
@@ -50,7 +50,7 @@ fn run() -> Result<()> {
 fn test_relocs() -> Result<()> {
     let _ = debug_print("dynprobe: testing R_X86_64_RELATIVE reloc");
 
-    let mut buf = alloc::vec![0u8; 256];
+    let buf = alloc::vec![0u8; 256];
     let base = buf.as_ptr() as usize;
 
     let target_offsets = [0usize, 8, 16];

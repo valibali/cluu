@@ -135,15 +135,15 @@ impl TtyContext {
                 self.requested_console = true;
             }
         }
-        // Subscribe to procmgr so we can send login requests.
+        // Subscribe to root-procmgr so we can send login requests.
         if self.procmgr_spawn == 0 && !self.requested_procmgr {
-            if registry::request_subscription("procmgr", "spawn").is_ok() {
+            if registry::request_subscription("root-procmgr", "spawn").is_ok() {
                 self.requested_procmgr = true;
             }
         }
-        // Subscribe to procmgr main endpoint for PG_SIGNAL (job control).
+        // Subscribe to root-procmgr main endpoint for PG_SIGNAL (job control).
         if self.procmgr_main == 0 && !self.requested_procmgr_main {
-            if registry::request_subscription("procmgr", "main").is_ok() {
+            if registry::request_subscription("root-procmgr", "main").is_ok() {
                 self.requested_procmgr_main = true;
             }
         }

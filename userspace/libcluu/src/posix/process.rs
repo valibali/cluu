@@ -851,7 +851,7 @@ fn translate_fd_actions(
     }
     let inner = unsafe { &**file_actions };
     if inner.count == 0 { return alloc::vec::Vec::new(); }
-    let table = crate::fd_table::FD_TABLE.lock();
+    let _table = crate::fd_table::FD_TABLE.lock();
     let mut out = alloc::vec::Vec::new();
     for i in 0..inner.count as usize {
         let a = &inner.actions[i];

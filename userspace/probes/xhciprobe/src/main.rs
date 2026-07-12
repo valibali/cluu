@@ -11,7 +11,7 @@ use cluu_dma_core::DmaPool;
 use cluu_xhci_core::XhciController;
 use libcluu::boot::process_info;
 use libcluu::debug_print;
-use libcluu::syscall::pci_config_read;
+
 
 const PCI_TOKEN_SLOT: usize = 9;
 const DMA_BASE: usize = 0x4200_0000;

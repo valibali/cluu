@@ -26,7 +26,7 @@ extern "C" fn handler(_sig: i32) {
 pub extern "C" fn main() -> i32 {
     let marker = b"l2_sigttin_background_read";
     let sig: libcluu::posix::c_int = 21; // SIGTTIN (POSIX)
-    libcluu::posix::signal::signal(sig, handler as libcluu::posix::signal::sighandler_t);
+    libcluu::posix::signal::signal(sig, handler as extern "C" fn(i32) as libcluu::posix::signal::sighandler_t);
 
     libcluu::posix::signal::raise(sig);
 

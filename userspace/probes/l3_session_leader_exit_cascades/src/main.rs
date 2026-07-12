@@ -10,7 +10,6 @@ extern crate libcluu;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
-use libcluu::runtime as _;
 
 use cluu_wire::session::{
     ProfileSpec, SessionCreateRequest,
@@ -33,20 +32,20 @@ pub extern "C" fn main() -> i32 {
     let ok = match libcluu::session::create(req) {
         Ok(o) => o,
         Err(e) => {
-            libcluu::debug_print(&format!("{}: CREATE failed {:?}\n", label, e));
+            let _ = libcluu::debug_print(&format!("{}: CREATE failed {:?}\n", label, e));
             return 1;
         }
     };
-    libcluu::debug_print(&format!("{}: CREATE ok sid={}\n", label, ok.session_id));
+    let _ = libcluu::debug_print(&format!("{}: CREATE ok sid={}\n", label, ok.session_id));
 
     let my_pid = libcluu::boot::pid() as u32;
 
     if let Err(e) = libcluu::session::set_leader(ok.token, my_pid) {
-        libcluu::debug_print(&format!("{}: SET_LEADER failed {:?}\n", label, e));
+        let _ = libcluu::debug_print(&format!("{}: SET_LEADER failed {:?}\n", label, e));
         let _ = libcluu::session::destroy(ok.token);
         return 1;
     }
-    libcluu::debug_print(&format!("{}: SET_LEADER ok\n", label));
+    let _ = libcluu::debug_print(&format!("{}: SET_LEADER ok\n", label));
 
     // Subscribe so we can receive SESSION_ENDED on the reply endpoint.
     // We use our own reply endpoint as the event target (hack: we'll do
@@ -54,17 +53,17 @@ pub extern "C" fn main() -> i32 {
     let reply_ep = libcluu::syscall::endpoint_create(libcluu::boot::token_ipc()).unwrap() as u64;
 
     if let Err(e) = libcluu::session::subscribe(ok.token, reply_ep as u64) {
-        libcluu::debug_print(&format!("{}: SUBSCRIBE failed {:?}\n", label, e));
+        let _ = libcluu::debug_print(&format!("{}: SUBSCRIBE failed {:?}\n", label, e));
         let _ = libcluu::session::destroy(ok.token);
         return 1;
     }
-    libcluu::debug_print(&format!("{}: SUBSCRIBE ok\n", label));
+    let _ = libcluu::debug_print(&format!("{}: SUBSCRIBE ok\n", label));
 
     // Spawn a child that sleeps briefly then exits; this child does NOT get set
     // as leader. The leader (us) exits below, which should trigger cascade.
 
     // Destroy implicitly happens when we exit / procmgr cascades.
     // We exit normally — procmgr kills the session and fans out SESSION_ENDED.
-    libcluu::debug_print(&format!("{}: PASS (cascade verified via boot harness)\n", label));
+    let _ = libcluu::debug_print(&format!("{}: PASS (cascade verified via boot harness)\n", label));
     0
 }

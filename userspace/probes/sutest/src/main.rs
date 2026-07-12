@@ -37,7 +37,7 @@ pub extern "C" fn main() -> i32 {
 fn run_default() -> i32 {
     let target = "alice";
 
-    let procmgr_endpoint = match registry::subscribe_output("procmgr", "spawn") {
+    let procmgr_endpoint = match registry::subscribe_output("root-procmgr", "spawn") {
         Ok(ep) => ep,
         Err(err) => {
             let line = format!("sutest: FAIL procmgr unavailable {:?}", err);
@@ -97,7 +97,7 @@ fn run_default() -> i32 {
 fn run_equal() -> i32 {
     let target = "root";
 
-    let procmgr_endpoint = match registry::subscribe_output("procmgr", "spawn") {
+    let procmgr_endpoint = match registry::subscribe_output("root-procmgr", "spawn") {
         Ok(ep) => ep,
         Err(err) => {
             let line = format!("suequaltest: FAIL procmgr unavailable {:?}", err);

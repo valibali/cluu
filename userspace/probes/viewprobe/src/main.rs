@@ -24,7 +24,7 @@ fn run() -> libcluu::Result<()> {
     registry::init("viewprobe")?;
     syscall::yield_cpu()?;
 
-    let procmgr_ep = registry::subscribe_output("procmgr", "spawn")?;
+    let procmgr_ep = registry::subscribe_output("root-procmgr", "spawn")?;
     debug_print("viewprobe: got procmgr endpoint")?;
 
     // Spawn "viewchild" as a nested container.

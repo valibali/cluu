@@ -11,7 +11,6 @@ extern crate libcluu;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
-use libcluu::runtime as _;
 
 use cluu_wire::session::{
     ProfileSpec, SessionCreateRequest,
@@ -34,26 +33,26 @@ pub extern "C" fn main() -> i32 {
     let ok = match libcluu::session::create(req) {
         Ok(o) => o,
         Err(e) => {
-            libcluu::debug_print(&format!("{}: CREATE failed {:?}\n", label, e));
+            let _ = libcluu::debug_print(&format!("{}: CREATE failed {:?}\n", label, e));
             return 1;
         }
     };
-    libcluu::debug_print(&format!("{}: CREATE ok sid={}\n", label, ok.session_id));
+    let _ = libcluu::debug_print(&format!("{}: CREATE ok sid={}\n", label, ok.session_id));
 
     // Query to verify it exists.
     match libcluu::session::query(ok.token) {
         Ok(r) => {
-            libcluu::debug_print(&format!("{}: QUERY ok state={:?}\n", label, r.state));
+            let _ = libcluu::debug_print(&format!("{}: QUERY ok state={:?}\n", label, r.state));
         }
         Err(e) => {
-            libcluu::debug_print(&format!("{}: QUERY failed {:?}\n", label, e));
+            let _ = libcluu::debug_print(&format!("{}: QUERY failed {:?}\n", label, e));
             return 1;
         }
     }
 
     // PT cleanup is verified externally by the harness after session destroy.
     let _ = libcluu::session::destroy(ok.token);
-    libcluu::debug_print(&format!("{}: DESTROY ok\n", label));
-    libcluu::debug_print(&format!("{}: PASS (pts cleanup verified by harness)\n", label));
+    let _ = libcluu::debug_print(&format!("{}: DESTROY ok\n", label));
+    let _ = libcluu::debug_print(&format!("{}: PASS (pts cleanup verified by harness)\n", label));
     0
 }

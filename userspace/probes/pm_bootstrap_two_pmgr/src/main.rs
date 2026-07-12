@@ -40,7 +40,7 @@ fn run() -> Result<(), ()> {
     let _ = debug_print(&format!("{}: start\n", LABEL));
 
     // 1. Look up root-procmgr.
-    let root_name = "procmgr:spawn";
+    let root_name = "root-procmgr:spawn";
     let root_ep = match libcluu::registry::lookup_service(root_name) {
         Some(t) => t,
         None => {

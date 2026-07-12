@@ -36,7 +36,7 @@ pub extern "C" fn main() -> i32 {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(9);
 
-    let procmgr_endpoint = match registry::subscribe_output("procmgr", "spawn") {
+    let procmgr_endpoint = match registry::subscribe_output("root-procmgr", "spawn") {
         Ok(ep) => ep,
         Err(err) => {
             let line = format!("killdeny: FAIL procmgr unavailable {:?}", err);

@@ -12,7 +12,7 @@ use crate::types::Message;
 
 /// CLUU IPC message header size: MessageTag (label u32 + words u8 + extra u8 + pad u16 = 8 bytes)
 /// + [usize; 6] words array (6 × 8 = 48 bytes) = 56 bytes total.
-const IPC_MSG_HEADER_SIZE: usize = 8 + 6 * core::mem::size_of::<usize>();
+const IPC_MSG_HEADER_SIZE: usize = 8 + 6 * size_of::<usize>();
 
 /// Maximum reply payload size for spawn responses (SpawnReply or SpawnError).
 const SPAWN_REPLY_BUF_SIZE: usize = 512;

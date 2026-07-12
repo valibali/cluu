@@ -80,9 +80,9 @@ impl KbdContext {
             }
         }
 
-        // Subscribe to procmgr:spawn for shutdown combo.
+        // Subscribe to root-procmgr:spawn for shutdown combo.
         if self.procmgr_endpoint == 0 && !self.requested_procmgr {
-            if registry::request_subscription("procmgr", "spawn").is_ok() {
+            if registry::request_subscription("root-procmgr", "spawn").is_ok() {
                 self.requested_procmgr = true;
             }
         }
@@ -99,7 +99,7 @@ impl KbdContext {
                     } else if service_name == "vtmgr" && name == "control" {
                         self.vtmgr_control_ep = token;
                         let _ = debug_print("kbd: vtmgr:control subscribed");
-                    } else if service_name == "procmgr" && name == "spawn" {
+                    } else if service_name == "root-procmgr" && name == "spawn" {
                         self.procmgr_endpoint = token;
                         let _ = debug_print("kbd: procmgr spawn subscribed");
                     }

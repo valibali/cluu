@@ -62,13 +62,17 @@ enum VfsCompletion {
     Open { reply_token: usize, client_id: usize, result: Result<OpenFile> },
     Readdir { reply_token: usize, client_id: usize, result: Result<Vec<DirEntry>> },
     Stat { reply_token: usize, client_id: usize, result: Result<DirEntryStat> },
-    Read { reply_token: usize, client_id: usize, result: Result<Vec<u8>> },
-    Write { reply_token: usize, client_id: usize, result: Result<usize> },
+    #[allow(dead_code)]
+    // rationale: Read/Write/CreateFile completions for future async VFS ops.
+    Read { reply_token: usize, #[allow(dead_code)] client_id: usize, result: Result<Vec<u8>> },
+    #[allow(dead_code)]
+    Write { reply_token: usize, #[allow(dead_code)] client_id: usize, result: Result<usize> },
     Unlink { reply_token: usize, result: Result<()> },
     Mkdir { reply_token: usize, result: Result<()> },
     Rmdir { reply_token: usize, result: Result<()> },
     Rename { reply_token: usize, result: Result<()> },
     Link { reply_token: usize, result: Result<()> },
+    #[allow(dead_code)]
     CreateFile { reply_token: usize, result: Result<()> },
     Realpath { reply_token: usize, result: Result<String> },
     TtyReadGrant { reply_token: usize, target_base: usize, target_space: usize, result: Result<Vec<u8>> },
@@ -319,7 +323,7 @@ fn run_vfs() -> Result<()> {
         let ep_name = alloc::format!("main:{}", sid);
         registry::subscribe_output("session-procmgr", &ep_name)?
     } else {
-        registry::subscribe_output("procmgr", "spawn")?
+        registry::subscribe_output("root-procmgr", "spawn")?
     };
     let mounts = setup_mounts(initrd, dev_fb_info, procmgr_endpoint)?;
 
@@ -2140,7 +2144,7 @@ impl VfsServer {
         }
     }
 
-    fn handle_container_cleanup(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
+    fn handle_container_cleanup(&mut self, msg: &Message, _sender_tid: usize) -> Result<()> {
         let cap_handle = if msg.tag.words as usize >= VIEW_MGR_CAP_WORD + 1 {
             msg.words[VIEW_MGR_CAP_WORD]
         } else {

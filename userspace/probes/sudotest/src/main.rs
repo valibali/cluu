@@ -20,7 +20,7 @@ const PROCMGR_KILL_LABEL: u32 = 3;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
-    let procmgr_endpoint = match registry::subscribe_output("procmgr", "spawn") {
+    let procmgr_endpoint = match registry::subscribe_output("root-procmgr", "spawn") {
         Ok(ep) => ep,
         Err(err) => {
             let line = format!("sudotest: FAIL procmgr unavailable {:?}", err);

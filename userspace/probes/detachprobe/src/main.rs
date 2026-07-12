@@ -24,7 +24,7 @@ fn run() -> libcluu::Result<()> {
     registry::init("detachprobe")?;
     syscall::yield_cpu()?;
 
-    let procmgr_ep = registry::subscribe_output("procmgr", "spawn")?;
+    let procmgr_ep = registry::subscribe_output("root-procmgr", "spawn")?;
     debug_print("detachprobe: got procmgr endpoint")?;
 
     // Spawn "survivor" as a nested child container.

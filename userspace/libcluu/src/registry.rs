@@ -88,7 +88,7 @@ pub fn control_endpoint() -> usize {
     REGISTRY_STATE.lock().control_endpoint
 }
 
-/// Look up a service by its full name (e.g., "vfs:main", "procmgr:spawn").
+/// Look up a service by its full name (e.g., "vfs:main", "root-procmgr:spawn").
 ///
 /// This is a convenience function that subscribes to the service and returns
 /// the granted endpoint token. The service name should be in "service:output" format.
@@ -97,6 +97,19 @@ pub fn control_endpoint() -> usize {
 /// - `Some(token)`: Endpoint token for the service
 /// - `None`: Service not found or lookup failed
 pub fn lookup_service(full_name: &str) -> Option<usize> {
+    // Virtual routing: "procmgr:spawn" never hits the registry.
+    // Session processes → session-procmgr:spawn:{sid}
+    // Boot processes → root-procmgr:spawn
+    if full_name == "procmgr:spawn" {
+        if let Some(sid) = crate::env::read_env_var("CLUU_SESSION_ID") {
+            if !sid.is_empty() {
+                let session_name = alloc::format!("session-procmgr:spawn:{}", sid);
+                return lookup_service(&session_name);
+            }
+        }
+        return lookup_service("root-procmgr:spawn");
+    }
+
     if full_name == "vfs:main" {
         let info = process_info();
         let session_vfs_ep = info.params[crate::boot::PARAM_SESSION_VFS_EP] as usize;
@@ -125,6 +138,19 @@ pub fn lookup_service(full_name: &str) -> Option<usize> {
     let mut state = REGISTRY_STATE.lock();
     state.lookup_cache.insert(full_name.to_string(), token);
     Some(token)
+}
+
+/// Check the lookup cache without blocking.  Returns the cached token
+/// if the service has been previously resolved, or `None` otherwise.
+pub fn lookup_cached(full_name: &str) -> Option<usize> {
+    let state = REGISTRY_STATE.lock();
+    state.lookup_cache.get(full_name).copied()
+}
+
+/// Cache a granted endpoint token under the given full name.
+pub fn cache_grant(full_name: &str, token: usize) {
+    let mut state = REGISTRY_STATE.lock();
+    state.lookup_cache.insert(full_name.to_string(), token);
 }
 
 /// Register an output endpoint with the registry.
@@ -271,6 +297,16 @@ fn register_output_async(endpoint_name: &str, endpoint_token: usize) -> Result<(
 }
 
 pub fn subscribe_output(service_name: &str, endpoint_name: &str) -> Result<usize> {
+    // Virtual routing for procmgr:spawn — mirrors lookup_service.
+    if service_name == "procmgr" && endpoint_name == "spawn" {
+        if let Some(sid) = crate::env::read_env_var("CLUU_SESSION_ID") {
+            if !sid.is_empty() {
+                return subscribe_output("session-procmgr", &alloc::format!("spawn:{}", sid));
+            }
+        }
+        return subscribe_output("root-procmgr", "spawn");
+    }
+
     if service_name == "vfs" && endpoint_name == "main" {
         let info = process_info();
         let session_vfs_ep = info.params[crate::boot::PARAM_SESSION_VFS_EP] as usize;

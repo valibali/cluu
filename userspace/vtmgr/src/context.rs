@@ -111,9 +111,9 @@ impl VtmgrContext {
             }
         }
 
-        // Subscribe to procmgr's spawn endpoint (for sending service spawn requests).
+        // Subscribe to root-procmgr's spawn endpoint (for sending service spawn requests).
         if self.procmgr_spawn_endpoint == 0 && !self.requested_procmgr_spawn {
-            if registry::request_subscription("procmgr", "spawn").is_ok() {
+            if registry::request_subscription("root-procmgr", "spawn").is_ok() {
                 self.requested_procmgr_spawn = true;
             }
         }

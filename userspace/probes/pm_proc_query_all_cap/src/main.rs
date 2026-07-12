@@ -59,7 +59,7 @@ fn run() -> Result<(), ()> {
     // itself under `procmgr:spawn` (and `procmgr:session` aliased to the
     // same endpoint). Both names land on the same recv loop, which
     // dispatches by label.
-    let procmgr_ep = match registry::lookup_service("procmgr:spawn") {
+    let procmgr_ep = match registry::lookup_service("root-procmgr:spawn") {
         Some(ep) => ep,
         None => {
             let _ = debug_print(&format!(

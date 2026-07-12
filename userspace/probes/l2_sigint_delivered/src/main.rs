@@ -28,7 +28,7 @@ pub extern "C" fn main() -> i32 {
     let marker = b"l2_sigint_delivered";
     // Install handler via libcluu POSIX signal()
     let sig: libcluu::posix::c_int = 2; // SIGINT
-    libcluu::posix::signal::signal(sig, handler as libcluu::posix::signal::sighandler_t);
+    libcluu::posix::signal::signal(sig, handler as extern "C" fn(i32) as libcluu::posix::signal::sighandler_t);
 
     // Self-trigger
     libcluu::posix::signal::raise(sig);

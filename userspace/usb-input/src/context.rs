@@ -56,7 +56,7 @@ impl UsbInputContext {
             }
         }
         if !self.requested_procmgr && self.procmgr_spawn_ep == 0 {
-            if registry::request_subscription("procmgr", "spawn").is_ok() {
+            if registry::request_subscription("root-procmgr", "spawn").is_ok() {
                 self.requested_procmgr = true;
             }
         }
@@ -72,7 +72,7 @@ impl UsbInputContext {
                     } else if service_name == "vtmgr" && name == "control" {
                         self.vtmgr_control_ep = token;
                         let _ = debug_print("usb-input: vtmgr:control subscribed");
-                    } else if service_name == "procmgr" && name == "spawn" {
+                    } else if service_name == "root-procmgr" && name == "spawn" {
                         self.procmgr_spawn_ep = token;
                         let _ = debug_print("usb-input: procmgr spawn subscribed");
                     }

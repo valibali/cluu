@@ -161,6 +161,12 @@ pub fn handle_spawn(
                 state.user_name.clone(),
             ));
         }
+        if !req.envp.iter().any(|(k, _)| k == "CLUU_SESSION_ID") {
+            req.envp.push((
+                alloc::string::String::from("CLUU_SESSION_ID"),
+                alloc::format!("{}", state.sid),
+            ));
+        }
 
         let pid = state
             .child_table

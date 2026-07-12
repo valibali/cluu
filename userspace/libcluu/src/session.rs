@@ -15,7 +15,7 @@ pub fn create(req: SessionCreateRequest) -> Result<SessionCreateOk, SessionCreat
     let payload = postcard::to_allocvec(&req)
         .map_err(|_| SessionCreateErr::Internal(0xE0u32))?;
 
-    let procmgr_ep = crate::registry::lookup_service("procmgr:session")
+    let procmgr_ep = crate::registry::lookup_service("root-procmgr:session")
         .ok_or(SessionCreateErr::Internal(0xE1u32))?;
 
     let words = [payload.len(), ABI_VERSION as usize, 0, 0, 0, 0];
@@ -42,7 +42,7 @@ pub fn destroy(token: TokenHandle) -> Result<(), SessionErr> {
     let payload = postcard::to_allocvec(&req)
         .map_err(|_| SessionErr::Internal(0xE4u32))?;
 
-    let procmgr_ep = crate::registry::lookup_service("procmgr:session")
+    let procmgr_ep = crate::registry::lookup_service("root-procmgr:session")
         .ok_or(SessionErr::Internal(0xE5u32))?;
 
     let words = [payload.len(), ABI_VERSION as usize, 0, 0, 0, 0];
@@ -69,7 +69,7 @@ pub fn query(token: TokenHandle) -> Result<SessionQueryReply, SessionErr> {
     let payload = postcard::to_allocvec(&req)
         .map_err(|_| SessionErr::Internal(0xE8u32))?;
 
-    let procmgr_ep = crate::registry::lookup_service("procmgr:session")
+    let procmgr_ep = crate::registry::lookup_service("root-procmgr:session")
         .ok_or(SessionErr::Internal(0xE9u32))?;
 
     let words = [payload.len(), ABI_VERSION as usize, 0, 0, 0, 0];
@@ -96,7 +96,7 @@ pub fn subscribe(token: TokenHandle, event_send: TokenHandle) -> Result<(), Sess
     let payload = postcard::to_allocvec(&req)
         .map_err(|_| SessionErr::Internal(0xECu32))?;
 
-    let procmgr_ep = crate::registry::lookup_service("procmgr:session")
+    let procmgr_ep = crate::registry::lookup_service("root-procmgr:session")
         .ok_or(SessionErr::Internal(0xEDu32))?;
 
     let words = [payload.len(), ABI_VERSION as usize, 0, 0, 0, 0];
@@ -123,7 +123,7 @@ pub fn derive_token(token: TokenHandle, rights: u32) -> Result<TokenHandle, Sess
     let payload = postcard::to_allocvec(&req)
         .map_err(|_| SessionErr::Internal(0xF0u32))?;
 
-    let procmgr_ep = crate::registry::lookup_service("procmgr:session")
+    let procmgr_ep = crate::registry::lookup_service("root-procmgr:session")
         .ok_or(SessionErr::Internal(0xF1u32))?;
 
     let words = [payload.len(), ABI_VERSION as usize, 0, 0, 0, 0];
@@ -150,7 +150,7 @@ pub fn set_leader(token: TokenHandle, leader_pid: u32) -> Result<(), SessionErr>
     let payload = postcard::to_allocvec(&req)
         .map_err(|_| SessionErr::Internal(0xF4u32))?;
 
-    let procmgr_ep = crate::registry::lookup_service("procmgr:session")
+    let procmgr_ep = crate::registry::lookup_service("root-procmgr:session")
         .ok_or(SessionErr::Internal(0xF5u32))?;
 
     let words = [payload.len(), ABI_VERSION as usize, 0, 0, 0, 0];

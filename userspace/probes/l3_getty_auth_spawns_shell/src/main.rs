@@ -10,7 +10,6 @@ extern crate libcluu;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
-use libcluu::runtime as _;
 
 use cluu_wire::session::{
     ProfileSpec, SessionCreateRequest,
@@ -42,11 +41,11 @@ pub extern "C" fn main() -> i32 {
     let ok = match libcluu::session::create(req) {
         Ok(o) => o,
         Err(e) => {
-            libcluu::debug_print(&format!("{}: CREATE failed {:?}\n", label, e));
+            let _ = libcluu::debug_print(&format!("{}: CREATE failed {:?}\n", label, e));
             return 1;
         }
     };
-    libcluu::debug_print(&format!("{}: CREATE ok sid={}\n", label, ok.session_id));
+    let _ = libcluu::debug_print(&format!("{}: CREATE ok sid={}\n", label, ok.session_id));
 
     // Spawn a shell.
     let envelope = SpawnEnvelope {
@@ -66,16 +65,16 @@ pub extern "C" fn main() -> i32 {
     let spawn_result = libcluu::spawn::spawn(envelope);
     match spawn_result {
         Ok(reply) => {
-            libcluu::debug_print(&format!("{}: SPAWN shell ok pid={}\n", label, reply.pid));
+            let _ = libcluu::debug_print(&format!("{}: SPAWN shell ok pid={}\n", label, reply.pid));
         }
         Err(e) => {
-            libcluu::debug_print(&format!("{}: SPAWN shell failed {:?}\n", label, e));
+            let _ = libcluu::debug_print(&format!("{}: SPAWN shell failed {:?}\n", label, e));
             let _ = libcluu::session::destroy(ok.token);
             return 1;
         }
     }
 
     let _ = libcluu::session::destroy(ok.token);
-    libcluu::debug_print(&format!("{}: PASS\n", label));
+    let _ = libcluu::debug_print(&format!("{}: PASS\n", label));
     0
 }

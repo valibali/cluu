@@ -15,7 +15,6 @@ extern crate alloc;
 #[allow(unused_imports)]
 use libcluu::runtime as _;
 
-use alloc::format;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {

@@ -10,7 +10,6 @@ extern crate libcluu;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
-use libcluu::runtime as _;
 
 use cluu_wire::session::{
     ProfileSpec, SessionCreateRequest, SessionState,
@@ -36,39 +35,39 @@ pub extern "C" fn main() -> i32 {
     let ok = match libcluu::session::create(req) {
         Ok(o) => o,
         Err(e) => {
-            libcluu::debug_print(&format!("{}: CREATE failed {:?}\n", label, e));
+            let _ = libcluu::debug_print(&format!("{}: CREATE failed {:?}\n", label, e));
             return 1;
         }
     };
-    libcluu::debug_print(&format!("{}: CREATE ok sid={}\n", label, ok.session_id));
+    let _ = libcluu::debug_print(&format!("{}: CREATE ok sid={}\n", label, ok.session_id));
 
     let reply = match libcluu::session::query(ok.token) {
         Ok(r) => r,
         Err(e) => {
-            libcluu::debug_print(&format!("{}: QUERY failed {:?}\n", label, e));
+            let _ = libcluu::debug_print(&format!("{}: QUERY failed {:?}\n", label, e));
             return 1;
         }
     };
 
     if reply.session_id != ok.session_id {
-        libcluu::debug_print(&format!("{}: session_id mismatch {}\n", label, reply.session_id));
+        let _ = libcluu::debug_print(&format!("{}: session_id mismatch {}\n", label, reply.session_id));
         return 1;
     }
     if reply.user_name != "testuser" {
-        libcluu::debug_print(&format!("{}: user_name mismatch {}\n", label, reply.user_name));
+        let _ = libcluu::debug_print(&format!("{}: user_name mismatch {}\n", label, reply.user_name));
         return 1;
     }
     if reply.state != SessionState::Live {
-        libcluu::debug_print(&format!("{}: bad state {:?}\n", label, reply.state));
+        let _ = libcluu::debug_print(&format!("{}: bad state {:?}\n", label, reply.state));
         return 1;
     }
 
-    libcluu::debug_print(&format!(
+    let _ = libcluu::debug_print(&format!(
         "{}: QUERY ok user={} leader={:?} members={:?}\n",
         label, reply.user_name, reply.leader_pid, reply.member_pids
     ));
 
     let _ = libcluu::session::destroy(ok.token);
-    libcluu::debug_print(&format!("{}: PASS\n", label));
+    let _ = libcluu::debug_print(&format!("{}: PASS\n", label));
     0
 }

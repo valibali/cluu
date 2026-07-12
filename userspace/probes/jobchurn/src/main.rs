@@ -18,6 +18,8 @@ use libcluu::types::Message;
 use libcluu::{registry, IpcFlags};
 
 const PROCMGR_KILL_LABEL: u32 = 3;
+#[allow(dead_code)]
+// rationale: priority constant for future spawn-with-priority testing.
 const DEFAULT_PRIORITY: usize = 200;
 
 fn parse_status(raw: usize) -> libcluu::Result<()> {
@@ -68,7 +70,7 @@ pub extern "C" fn main() -> i32 {
         return 1;
     }
 
-    let procmgr_ep = match registry::subscribe_output("procmgr", "spawn") {
+    let procmgr_ep = match registry::subscribe_output("root-procmgr", "spawn") {
         Ok(ep) => ep,
         Err(err) => {
             let line = format!("jobchurn: FAIL procmgr unavailable {:?}", err);

@@ -43,7 +43,8 @@ const SCROLLBACK_LINES: usize = 200;
 const SIGWINCH: u32 = 28;
 /// Signal number for SIGTTOU (POSIX) — used for TOSTOP check.
 const SIGTTOU: u32 = 22;
-/// Signal number for SIGTTIN (POSIX) — used for bg-read check.
+#[allow(dead_code)]
+// rationale: SIGTTIN constant for future bg-read signal delivery.
 const SIGTTIN: u32 = 21;
 
 // ── Per-PTS state ────────────────────────────────────────────────────────────
@@ -178,7 +179,7 @@ impl Pts {
         _caller_pid: u32,
         caller_pgid: i32,
     ) -> Option<Vec<u8>> {
-        let reply_token = libcluu::ipc::extract_reply_id(msg);
+        let _reply_token = libcluu::ipc::extract_reply_id(msg);
 
         // TOSTOP check: background process writing to terminal gets SIGTTOU.
         let lflag = self.line_discipline.termios().c_lflag;
@@ -196,8 +197,9 @@ impl Pts {
         Some(cooked)
     }
 
-    /// PTS_POLL_LABEL (102)
-    fn handle_pts_poll(&mut self, req: PollRequest, msg: &Message) {
+    #[allow(dead_code)]
+    // rationale: PTS poll/get_pgrp/flush handlers for future PTS IPC expansion.
+    fn handle_pts_poll(&mut self, _req: PollRequest, msg: &Message) {
         let mut ready = PollEvents::empty();
         if !self.ready_bytes.is_empty() || self.eof_pending { ready |= PollEvents::POLLIN; }
         if !self.closed                  { ready |= PollEvents::POLLOUT; }
@@ -301,11 +303,30 @@ fn reply_err(original_msg: &Message, label: u32, err: PtsErr) {
 
 // ── Terminal cell-grid + rendering (preserved from original) ─────────────────
 
+/// Pack bold/underline/reverse into 3 attr bits.
+/// Bit layout: bit 0=bold, bit 1=underline, bit 2=reverse.
+fn pack_attrs(a: Attr) -> u8 {
+    (a.bold as u8) | ((a.underline as u8) << 1) | ((a.reverse as u8) << 2)
+}
+
+/// Encode a colour for per-cell storage. When `index` is `Some(n)`, the
+/// alpha byte is set to 0xFF and the low byte carries the xterm-256
+/// palette index. When `None`, the ARGB value is stored as-is (alpha 0x00).
+fn encode_color(rgb: u32, index: Option<u8>) -> u32 {
+    match index {
+        Some(idx) => 0xFF00_0000 | (idx as u32),
+        None => rgb,
+    }
+}
+
 pub struct Cluuterm {
     pub cols: usize,
     pub rows: usize,
     /// Pointer to the SHM header mapped at SHM_VA.
     pub shm: *mut WindowShm,
+    #[allow(dead_code)]
+    // rationale: pts_id/session_id stored for future PTS diagnostics;
+    // discipline is used for termios queries but not directly read yet.
     pub pts_id: u32,
     pub window_id: u32,
     /// My endpoint (receives FRAME_READY + INPUT_FORWARD from compositor,
@@ -317,8 +338,8 @@ pub struct Cluuterm {
     /// Populated at construction from the same endpoint used for PTS
     /// registration.  0 until explicitly set.
     pub vfs_ep: usize,
-    /// Cached session id read once from CLUU_SESSION_ID at startup.
-    /// None if the env var was absent or unparseable.
+    #[allow(dead_code)]
+    // rationale: see pts_id above.
     pub session_id: Option<u32>,
     /// Cached shell completion endpoint (`shell:completion:<sid>`).
     /// Resolved lazily on the first TabRequest; None until then or if
@@ -330,14 +351,32 @@ pub struct Cluuterm {
 
     // ── Terminal state ──────────────────────────────────────────────────
     pub parser: Parser,
+    #[allow(dead_code)]
+    // rationale: see pts_id above.
     pub discipline: libcluu::tty_core::line_discipline::LineDiscipline,
     pub scrollback: Scrollback,
     /// Cell character grid: `cols * rows` bytes, row-major.
     pub cells: Vec<u32>,
     /// Foreground colour per cell (ARGB u32).
     pub fg_cells: Vec<u32>,
-    /// Background colour per cell (ARGB u32).
+    /// Background colour per cell (ARGB u32, or 0xFFxxxxxx for palette index).
     pub bg_cells: Vec<u32>,
+    /// Packed attrs per cell (bit 0=bold, bit 1=underline, bit 2=reverse).
+    pub attr_cells: Vec<u8>,
+    /// Alt-screen grid storage (CSI ?1049). Empty until first enter.
+    /// When `in_alt_screen` is true, the active grid (`cells`/`fg_cells`/
+    /// `bg_cells`) holds the alt buffer and these hold the saved main
+    /// buffer; when false, the active grid is main and these hold the
+    /// alt buffer (or are empty if never entered).
+    alt_cells: Vec<u32>,
+    alt_fg_cells: Vec<u32>,
+    alt_bg_cells: Vec<u32>,
+    alt_attr_cells: Vec<u8>,
+    /// True while the alt-screen buffer is active (`CSI ?1049h`).
+    in_alt_screen: bool,
+    /// Saved main-grid cursor for restore on alt-screen exit.
+    saved_cursor_x: usize,
+    saved_cursor_y: usize,
     pub cursor_x: usize,
     pub cursor_y: usize,
     pub current_attr: Attr,
@@ -384,13 +423,30 @@ impl Cluuterm {
             vfs_ep,
             session_id,
             shell_completion_ep: None,
-            pts: Pts::new(pts_id),
+            pts: {
+                let mut p = Pts::new(pts_id);
+                p.winsize = Winsize {
+                    rows: rows as u16,
+                    cols: cols as u16,
+                    xpixel: (cols * 8) as u16,
+                    ypixel: (rows * 16) as u16,
+                };
+                p
+            },
             parser: Parser::new(),
             discipline: libcluu::tty_core::line_discipline::LineDiscipline::new(),
             scrollback: Scrollback::new(SCROLLBACK_LINES),
             cells: alloc::vec![0x20u32; total],
             fg_cells: alloc::vec![default_attr.fg; total],
             bg_cells: alloc::vec![default_attr.bg; total],
+            attr_cells: alloc::vec![0u8; total],
+            alt_cells: Vec::new(),
+            alt_fg_cells: Vec::new(),
+            alt_bg_cells: Vec::new(),
+            alt_attr_cells: Vec::new(),
+            in_alt_screen: false,
+            saved_cursor_x: 0,
+            saved_cursor_y: 0,
             cursor_x: 0,
             cursor_y: 0,
             current_attr: default_attr,
@@ -427,9 +483,11 @@ impl Cluuterm {
         match ev {
             Event::Print(b) => {
                 let pos = s.cursor_y * cols + s.cursor_x;
+                let attr = s.current_attr;
                 s.cells[pos] = b;
-                s.fg_cells[pos] = s.current_attr.fg;
-                s.bg_cells[pos] = s.current_attr.bg;
+                s.fg_cells[pos] = encode_color(attr.fg, attr.fg_index);
+                s.bg_cells[pos] = encode_color(attr.bg, attr.bg_index);
+                s.attr_cells[pos] = pack_attrs(attr);
                 s.cursor_x += 1;
                 if s.cursor_x >= cols {
                     s.cursor_x = 0;
@@ -479,40 +537,47 @@ impl Cluuterm {
                     EraseMode::ToStart => (0, s.cursor_x + 1),
                     EraseMode::All     => (0, cols),
                 };
+                let attr = s.current_attr;
                 for c in start..end {
                     let i = row * cols + c;
                     s.cells[i]    = 0x20;
-                    s.fg_cells[i] = s.current_attr.fg;
-                    s.bg_cells[i] = s.current_attr.bg;
+                    s.fg_cells[i] = encode_color(attr.fg, attr.fg_index);
+                    s.bg_cells[i] = encode_color(attr.bg, attr.bg_index);
+                    s.attr_cells[i] = pack_attrs(attr);
                 }
             }
             Event::EraseDisplay(mode) => {
                 let total = cols * rows;
+                let attr = s.current_attr;
+                let fg = encode_color(attr.fg, attr.fg_index);
+                let bg = encode_color(attr.bg, attr.bg_index);
+                let pa = pack_attrs(attr);
                 match mode {
                     EraseMode::All => {
                         for i in 0..total {
                             s.cells[i]    = 0x20;
-                            s.fg_cells[i] = s.current_attr.fg;
-                            s.bg_cells[i] = s.current_attr.bg;
+                            s.fg_cells[i] = fg;
+                            s.bg_cells[i] = bg;
+                            s.attr_cells[i] = pa;
                         }
                         s.cursor_x = 0;
                         s.cursor_y = 0;
                     }
                     EraseMode::ToEnd => {
-                        // Current row from cursor_x onward.
                         for c in s.cursor_x..cols {
                             let i = s.cursor_y * cols + c;
                             s.cells[i]    = 0x20;
-                            s.fg_cells[i] = s.current_attr.fg;
-                            s.bg_cells[i] = s.current_attr.bg;
+                            s.fg_cells[i] = fg;
+                            s.bg_cells[i] = bg;
+                            s.attr_cells[i] = pa;
                         }
-                        // Rows below.
                         for r in (s.cursor_y + 1)..rows {
                             for c in 0..cols {
                                 let i = r * cols + c;
                                 s.cells[i]    = 0x20;
-                                s.fg_cells[i] = s.current_attr.fg;
-                                s.bg_cells[i] = s.current_attr.bg;
+                                s.fg_cells[i] = fg;
+                                s.bg_cells[i] = bg;
+                                s.attr_cells[i] = pa;
                             }
                         }
                     }
@@ -521,15 +586,17 @@ impl Cluuterm {
                             for c in 0..cols {
                                 let i = r * cols + c;
                                 s.cells[i]    = 0x20;
-                                s.fg_cells[i] = s.current_attr.fg;
-                                s.bg_cells[i] = s.current_attr.bg;
+                                s.fg_cells[i] = fg;
+                                s.bg_cells[i] = bg;
+                                s.attr_cells[i] = pa;
                             }
                         }
                         for c in 0..=s.cursor_x {
                             let i = s.cursor_y * cols + c;
                             s.cells[i]    = 0x20;
-                            s.fg_cells[i] = s.current_attr.fg;
-                            s.bg_cells[i] = s.current_attr.bg;
+                            s.fg_cells[i] = fg;
+                            s.bg_cells[i] = bg;
+                            s.attr_cells[i] = pa;
                         }
                     }
                 }
@@ -572,26 +639,74 @@ impl Cluuterm {
                 );
                 let _ = ipc::send(s.comp_ep, &dmg, IpcFlags::empty());
             }
+            Event::AltScreen(enter) => {
+                if enter {
+                    if s.in_alt_screen {
+                        return;
+                    }
+                    s.saved_cursor_x = s.cursor_x;
+                    s.saved_cursor_y = s.cursor_y;
+                    let total = cols * rows;
+                    let default_attr = Attr::default_attr();
+                    if s.alt_cells.len() != total {
+                        s.alt_cells = alloc::vec![0x20u32; total];
+                        s.alt_fg_cells = alloc::vec![default_attr.fg; total];
+                        s.alt_bg_cells = alloc::vec![default_attr.bg; total];
+                        s.alt_attr_cells = alloc::vec![0u8; total];
+                    }
+                    core::mem::swap(&mut s.cells, &mut s.alt_cells);
+                    core::mem::swap(&mut s.fg_cells, &mut s.alt_fg_cells);
+                    core::mem::swap(&mut s.bg_cells, &mut s.alt_bg_cells);
+                    core::mem::swap(&mut s.attr_cells, &mut s.alt_attr_cells);
+                    for i in 0..total {
+                        s.cells[i]    = 0x20;
+                        s.fg_cells[i] = default_attr.fg;
+                        s.bg_cells[i] = default_attr.bg;
+                        s.attr_cells[i] = 0;
+                    }
+                    s.cursor_x = 0;
+                    s.cursor_y = 0;
+                    s.in_alt_screen = true;
+                } else {
+                    if !s.in_alt_screen {
+                        return;
+                    }
+                    core::mem::swap(&mut s.cells, &mut s.alt_cells);
+                    core::mem::swap(&mut s.fg_cells, &mut s.alt_fg_cells);
+                    core::mem::swap(&mut s.bg_cells, &mut s.alt_bg_cells);
+                    core::mem::swap(&mut s.attr_cells, &mut s.alt_attr_cells);
+                    s.cursor_x = s.saved_cursor_x;
+                    s.cursor_y = s.saved_cursor_y;
+                    s.in_alt_screen = false;
+                }
+            }
         }
     }
 
     fn scroll_up(&mut self) {
         let cols = self.cols;
         let total = cols * self.rows;
-        let row = HistoryRow {
-            chars: self.cells[0..cols].to_vec(),
-            fg:    self.fg_cells[0..cols].to_vec(),
-            bg:    self.bg_cells[0..cols].to_vec(),
-        };
-        self.scrollback.push(row);
+        if !self.in_alt_screen {
+            let row = HistoryRow {
+                chars: self.cells[0..cols].to_vec(),
+                fg:    self.fg_cells[0..cols].to_vec(),
+                bg:    self.bg_cells[0..cols].to_vec(),
+            };
+            self.scrollback.push(row);
+        }
         self.cells.copy_within(cols..total, 0);
         self.fg_cells.copy_within(cols..total, 0);
         self.bg_cells.copy_within(cols..total, 0);
-        // Blank the newly exposed bottom row.
+        self.attr_cells.copy_within(cols..total, 0);
+        let attr = self.current_attr;
+        let fg = encode_color(attr.fg, attr.fg_index);
+        let bg = encode_color(attr.bg, attr.bg_index);
+        let pa = pack_attrs(attr);
         for i in (total - cols)..total {
             self.cells[i]    = 0x20;
-            self.fg_cells[i] = self.current_attr.fg;
-            self.bg_cells[i] = self.current_attr.bg;
+            self.fg_cells[i] = fg;
+            self.bg_cells[i] = bg;
+            self.attr_cells[i] = pa;
         }
         if self.cursor_y > 0 {
             self.cursor_y -= 1;
@@ -614,6 +729,7 @@ impl Cluuterm {
         let mut new_cells = alloc::vec![0x20u32; total];
         let mut new_fg = alloc::vec![default_attr.fg; total];
         let mut new_bg = alloc::vec![default_attr.bg; total];
+        let mut new_attr = alloc::vec![0u8; total];
 
         // Copy-over existing content that fits in the new grid.
         let copy_cols = new_cols.min(self.cols);
@@ -627,13 +743,21 @@ impl Cluuterm {
                 .copy_from_slice(&self.fg_cells[old_start..old_start + copy_cols]);
             new_bg[new_start..new_start + copy_cols]
                 .copy_from_slice(&self.bg_cells[old_start..old_start + copy_cols]);
+            new_attr[new_start..new_start + copy_cols]
+                .copy_from_slice(&self.attr_cells[old_start..old_start + copy_cols]);
         }
 
         self.cells = new_cells;
         self.fg_cells = new_fg;
         self.bg_cells = new_bg;
+        self.attr_cells = new_attr;
         self.cols = new_cols;
         self.rows = new_rows;
+
+        self.alt_cells.clear();
+        self.alt_fg_cells.clear();
+        self.alt_bg_cells.clear();
+        self.alt_attr_cells.clear();
 
         // Clamp cursor.
         if self.cursor_x >= new_cols {
@@ -959,15 +1083,21 @@ impl Cluuterm {
             let _ = debug_print("cluuterm: timeserver subscription request failed — no blink");
         }
 
-        // Request procmgr:main subscription for pg_signal (job control).
-        if registry::request_subscription("procmgr", "main").is_ok() {
+        // Request procmgr main subscription for pg_signal (job control).
+        // Session cluuterm → session-procmgr:main:{sid}; boot cluuterm → root-procmgr:main.
+        let (pmgr_svc, pmgr_main_name) = match self.session_id {
+            Some(sid) => ("session-procmgr", alloc::format!("main:{}", sid)),
+            None => ("root-procmgr", alloc::string::String::from("main")),
+        };
+        if registry::request_subscription(pmgr_svc, &pmgr_main_name).is_ok() {
             let _ = debug_print("cluuterm: procmgr main subscription requested");
         }
 
         // The registry control endpoint carries Grant / SubscribeStatus events.
         // Include it alongside my_ep so we receive the timeserver grant.
         let ctrl_ep = registry::control_endpoint();
-        // Index of the registry endpoint in the `tokens` array below.
+        #[allow(dead_code)]
+        // rationale: registry endpoint index retained for future re-subscription.
         const REGISTRY_IDX: usize = 1;
 
         loop {
@@ -1002,7 +1132,15 @@ impl Cluuterm {
                             self.time_ep = token;
                             self.arm_blink_timer();
                         }
-                        if service_name == "procmgr" && name == "main" {
+                        let expected_main = self.session_id
+                            .map(|sid| alloc::format!("main:{}", sid))
+                            .unwrap_or_else(|| alloc::string::String::from("main"));
+                        let expected_svc = if self.session_id.is_some() {
+                            "session-procmgr"
+                        } else {
+                            "root-procmgr"
+                        };
+                        if service_name == expected_svc && name == expected_main {
                             self.pts.set_procmgr_ep(token);
                         }
                     }
