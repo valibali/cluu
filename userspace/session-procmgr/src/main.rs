@@ -234,6 +234,7 @@ fn run() -> Result<()> {
         sid,
         generation: envelope.generation,
         user_name: envelope.user_name.clone(),
+        profile_name: envelope.profile.clone(),
         child_table: spm::child_table::ChildTable::new(sid),
         kernel: spm::real_kernel::RealKernel,
         vfs_cap,

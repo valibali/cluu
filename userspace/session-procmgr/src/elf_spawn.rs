@@ -518,8 +518,15 @@ pub fn finish_spawn(
     ));
     if state.session_vfs_cap != 0 {
         let home = alloc::format!("/home/{}", state.user_name);
+        let profile = match state.profile_name.as_str() {
+            "supervisor" => CapProfile::SUPERVISOR,
+            "admin" => CapProfile::ADMIN_PROFILE,
+            "service" => CapProfile::SERVICE,
+            "sandboxed" => CapProfile::SANDBOXED,
+            _ => CapProfile::USER,
+        };
         let default_mounts = libcluu::vfs_view::default_mounts_for_profile_and_home(
-            CapProfile::USER,
+            profile,
             &home,
         );
         let mut payload = alloc::vec::Vec::new();
@@ -537,7 +544,7 @@ pub fn finish_spawn(
         msg.words[0] = payload.len();
         msg.words[1] = child_tid;
         msg.words[2] = default_mounts.len();
-        msg.words[3] = CapProfile::USER.bits() as usize;
+        msg.words[3] = profile.bits() as usize;
         msg.words[4] = 0usize;
         msg.words[5] = state.view_mgr_token as usize;
         match send_msg_with_payload(state.session_vfs_cap as usize, &msg, &payload) {

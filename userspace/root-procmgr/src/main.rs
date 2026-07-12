@@ -4747,7 +4747,7 @@ impl ProcessManager {
     /// reads those raw bytes on startup and deserialises the envelope.
     ///
     /// Errors are logged but NOT fatal — the session is created regardless.
-    fn spawn_session_procmgr_for(&mut self, session_id: u32, user_name: &str) {
+    fn spawn_session_procmgr_for(&mut self, session_id: u32, user_name: &str, profile_name: &str) {
         use procmgr_common::wire::SessionEnvelope;
 
         let block_region_cap = self.mint_session_block_region();
@@ -4761,7 +4761,7 @@ impl ProcessManager {
             sid: (session_id & 0xFF) as u8,
             generation: 0,
             user_name: user_name.into(),
-            profile: alloc::string::String::new(),
+            profile: profile_name.into(),
             pid_base: ((session_id & 0xFF) as i32)
                 << procmgr_common::pid::LOCAL_BITS,
             caps,
@@ -7123,7 +7123,8 @@ impl ProcessManager {
         // SessionEnvelope and pass it to the child via argv bytes.
         // Caps are left empty for now; the session-procmgr initialises its
         // kernel adapter with MockKernel until Phase 12.4 wires real caps.
-        self.spawn_session_procmgr_for(session_id, &req.user_name);
+        let profile_name = rec.profile_name.clone();
+        self.spawn_session_procmgr_for(session_id, &req.user_name, &profile_name);
         self.spawn_session_vfs_for(session_id, &req.user_name);
 
         let reply =
