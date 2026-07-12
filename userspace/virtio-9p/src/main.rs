@@ -26,13 +26,14 @@ use libcluu::ipc::{extract_reply_id, reply, reply_with_payload};
 use libcluu::registry;
 use libcluu::syscall::{endpoint_create, ipc_recv_any_with_sender, pci_config_read, space_map_range, virt_to_phys};
 use libcluu::types::{IpcFlags, Message};
-use libcluu::{debug_print, Error, Result};
+use libcluu::{debug_print, space_grant, Error, Result, PAGE_SIZE};
 
 use protocol::*;
 
 const FS_OPEN: u32 = 0x300;
 const FS_CLOSE: u32 = 0x301;
 const FS_READ: u32 = 0x302;
+const FS_READ_GRANT: u32 = 0x306;
 const FS_STAT: u32 = 0x303;
 const FS_READDIR: u32 = 0x304;
 const FS_WRITE: u32 = 0x305;
@@ -53,6 +54,9 @@ const MSIZE: usize = 8 * 1024;
 const REQ_BUF_VA: usize = 0x5500_0000;
 const RESP_BUF_VA: usize = 0x5520_0000;
 const BUF_PAGES: usize = 2;
+
+const GRANT_SCRATCH_BASE: usize = 0x5600_0000;
+const GRANT_SCRATCH_SIZE: usize = 4 * 1024 * 1024;
 
 const ROOT_FID: u32 = 0;
 const FIRST_FID: u32 = 1;
@@ -490,6 +494,12 @@ fn run() -> Result<()> {
 
     let pool = DmaPool::new(space_token, DMA_POOL_VA, DMA_POOL_PAGES)?;
 
+    let grant_scratch_pages = GRANT_SCRATCH_SIZE.div_ceil(PAGE_SIZE);
+    match space_map_range(space_token, GRANT_SCRATCH_BASE, 0, 0x03, grant_scratch_pages, 0) {
+        Ok(_) | Err(Error::AlreadyExists) => {}
+        Err(e) => return Err(e),
+    }
+
     let bar_phys = pci_device.cap_bar_phys;
     let bar_size = pci_device.cap_bar_size;
     let mut transport = ModernPciTransport::new(
@@ -506,14 +516,15 @@ fn run() -> Result<()> {
     transport.write_driver_features(want)?;
 
     let cfg_va = transport.device_cfg_va;
-    let mut tag_bytes = [0u8; 32];
-    unsafe {
-        for i in 0..32 {
-            tag_bytes[i] = core::ptr::read_volatile((cfg_va + i) as *const u8);
+    let mount_tag: String = unsafe {
+        let tag_len = core::ptr::read_volatile(cfg_va as *const u16) as usize;
+        let max = tag_len.min(255);
+        let mut buf = [0u8; 256];
+        for i in 0..max {
+            buf[i] = core::ptr::read_volatile((cfg_va + 2 + i) as *const u8);
         }
-    }
-    let tag_len = tag_bytes.iter().position(|&b| b == 0).unwrap_or(32);
-    let mount_tag = core::str::from_utf8(&tag_bytes[..tag_len]).unwrap_or("<invalid>");
+        String::from(core::str::from_utf8(&buf[..max]).unwrap_or("<invalid>"))
+    };
     debug_print(&format!("virtio-9p: mount_tag={:?}", mount_tag))?;
 
     let intr_line_word = pci_config_read(
@@ -579,11 +590,11 @@ fn run() -> Result<()> {
             continue;
         }
 
-        handle_fs_request(&mut client, msg, payload);
+        handle_fs_request(&mut client, space_token, msg, payload);
     }
 }
 
-fn handle_fs_request(client: &mut NinepClient, msg: &Message, payload: &[u8]) {
+fn handle_fs_request(client: &mut NinepClient, space_token: usize, msg: &Message, payload: &[u8]) {
     let reply_token = extract_reply_id(msg);
 
     match msg.tag.label {
@@ -619,6 +630,70 @@ fn handle_fs_request(client: &mut NinepClient, msg: &Message, payload: &[u8]) {
                     }
                 }
                 Err(_) => send_error_reply_shifted(reply_token, -1),
+            }
+        }
+
+        FS_READ_GRANT => {
+            let fid = msg.words[2] as u32;
+            let offset = msg.words[3] as u64;
+            let len = msg.words[4];
+
+            let Some((target_base, target_space)) = parse_usize_pair(payload) else {
+                send_error_reply(reply_token, -2);
+                return;
+            };
+
+            if len == 0 {
+                let reply_msg = Message::new(FS_READ_GRANT, [0, 0, 0, 0, 0, 0], 2);
+                if let Some(token) = reply_token {
+                    let _ = reply(token, &reply_msg, IpcFlags::empty());
+                }
+                return;
+            }
+
+            if len > GRANT_SCRATCH_SIZE {
+                send_error_reply(reply_token, -4);
+                return;
+            }
+
+            match client.read(fid, offset, len as u32) {
+                Ok(data) => {
+                    let bytes_read = data.len();
+                    if bytes_read == 0 {
+                        let reply_msg = Message::new(FS_READ_GRANT, [0, 0, 0, 0, 0, 0], 2);
+                        if let Some(token) = reply_token {
+                            let _ = reply(token, &reply_msg, IpcFlags::empty());
+                        }
+                        return;
+                    }
+
+                    let scratch = unsafe {
+                        core::slice::from_raw_parts_mut(GRANT_SCRATCH_BASE as *mut u8, GRANT_SCRATCH_SIZE)
+                    };
+                    scratch[..bytes_read].copy_from_slice(&data);
+
+                    let pages = bytes_read.div_ceil(PAGE_SIZE);
+                    let mut grant_err = None;
+                    for page_idx in 0..pages {
+                        let src = GRANT_SCRATCH_BASE + page_idx * PAGE_SIZE;
+                        let dst = target_base + page_idx * PAGE_SIZE;
+                        if let Err(err) = space_grant(space_token, target_space, src, dst, 0x02) {
+                            grant_err = Some(err);
+                            break;
+                        }
+                    }
+
+                    if grant_err.is_some() {
+                        send_error_reply(reply_token, -1);
+                        return;
+                    }
+
+                    let reply_msg = Message::new(FS_READ_GRANT, [0, bytes_read, 0, 0, 0, 0], 3);
+                    if let Some(token) = reply_token {
+                        let _ = reply(token, &reply_msg, IpcFlags::empty());
+                    }
+                }
+                Err(_) => send_error_reply(reply_token, -1),
             }
         }
 
@@ -767,7 +842,7 @@ fn handle_fs_request(client: &mut NinepClient, msg: &Message, payload: &[u8]) {
 
 fn open_path(client: &mut NinepClient, path: &str) -> Result<(u32, u64, bool)> {
     let fid = client.walk_path(path)?;
-    match client.lopen(fid, 0x01) {
+    match client.lopen(fid, 0x00) {
         Ok(()) => {
             let attr = client.getattr(fid).ok();
             let (is_dir, size) = attr
@@ -930,4 +1005,18 @@ fn send_error_reply_shifted(reply_token: Option<usize>, code: isize) {
         let reply_msg = Message::new(0, [0, code as usize, 0, 0, 0, 0], 2);
         let _ = reply(token, &reply_msg, IpcFlags::empty());
     }
+}
+
+fn parse_usize_pair(payload: &[u8]) -> Option<(usize, usize)> {
+    if payload.len() < core::mem::size_of::<usize>() * 2 {
+        return None;
+    }
+    let mut bytes = [0u8; core::mem::size_of::<usize>()];
+    bytes.copy_from_slice(&payload[..core::mem::size_of::<usize>()]);
+    let first = usize::from_ne_bytes(bytes);
+    bytes.copy_from_slice(
+        &payload[core::mem::size_of::<usize>()..core::mem::size_of::<usize>() * 2],
+    );
+    let second = usize::from_ne_bytes(bytes);
+    Some((first, second))
 }

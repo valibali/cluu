@@ -17,6 +17,7 @@ pub enum Error {
     NotImplemented,
     Busy,
     InvalidParameter,
+    NoSpace,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -40,6 +41,7 @@ impl Error {
             Error::NotImplemented => -13,
             Error::Busy => -14,
             Error::InvalidParameter => -15,
+            Error::NoSpace => -16,
         }
     }
 }

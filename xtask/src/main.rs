@@ -2167,6 +2167,9 @@ fn run_qemu(debug: bool) -> Result<()> {
         "-device",
         "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off",
         // Host folder share via virtio-9p-pci (PCI slot 7 = addr=0x7).
+        // slot 7 INTA# → PIRQD → IRQ 11 (shared with virtio-blk slot 3).
+        // Kernel supports shared IRQ: both drivers receive IRQ 11, each
+        // checks its own virtio ISR to claim/dismiss.
         // security_model=none maps uid/gid straight through (no xattr).
         "-fsdev",
         "local,id=hostshare,path=/home/vlb2bp/cluu-host-share,security_model=none",
