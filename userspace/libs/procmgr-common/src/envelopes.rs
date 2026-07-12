@@ -161,6 +161,14 @@ pub fn lookup_envelope<'a>(envelopes: &'a [Envelope], name: &str) -> Option<&'a 
     envelopes.iter().find(|e| e.name == name)
 }
 
+pub fn derive_netd_token(profile: libcluu::cap::CapProfile) -> Option<usize> {
+    use libcluu::cap::CapProfile;
+    if !profile.contains(CapProfile::NET) {
+        return None;
+    }
+    libcluu::registry::lookup_cached("netd:main")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

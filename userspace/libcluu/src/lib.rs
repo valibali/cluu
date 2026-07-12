@@ -36,6 +36,7 @@ pub mod cap;
 pub mod crypto;
 pub mod device_io;
 pub mod elf;
+pub mod env;
 pub mod error;
 pub mod font;
 pub mod fs;

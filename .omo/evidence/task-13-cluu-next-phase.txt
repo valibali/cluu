@@ -1,0 +1,84 @@
+TASK 13: cluu-next-phase — ANSI parser 256-color, underline, reverse
+=====================================================================
+
+DATE: 2026-07-10
+STATUS: COMPLETE
+
+CHANGES
+-------
+
+1. userspace/libcluu/src/ansi/state.rs
+   - Line 13: params cap lifted from [u16; 4] to [u16; 16]
+   - Line 56: init updated to [0; 16]
+   - apply_sgr(): rewritten from `for` to `while` loop to support
+     multi-param SGR codes (38;5;N, 48;5;N, 38;2;r;g;b)
+   - Added SGR codes: 4 (underline on), 24 (underline off),
+     7 (reverse on), 27 (reverse off)
+   - Added 256-color fg: 38;5;N → attr.fg_index = Some(N as u8)
+   - Added 256-color bg: 48;5;N → attr.bg_index = Some(N as u8)
+   - Truecolor (38;2;r;g;b / 48;2;r;g;b): deferred, params skipped
+   - 16-color codes (30-37, 40-47, 90-97, 100-107): now clear
+     fg_index/bg_index to None when setting RGB color
+   - Out-of-range palette indices (>255) silently skipped
+
+2. userspace/libcluu/src/ansi/event.rs
+   - Attr struct extended: added underline: bool, reverse: bool,
+     fg_index: Option<u8>, bg_index: Option<u8>
+   - default_attr() updated with new fields (underline: false,
+     reverse: false, fg_index: None, bg_index: None)
+
+3. userspace/libcluu/src/ansi/mod.rs
+   - 15 new tests added (26 total, 0 regressions):
+     * sgr_256_fg: CSI 38;5;196m → fg_index=Some(196)
+     * sgr_256_bg: CSI 48;5;21m → bg_index=Some(21)
+     * sgr_256_fg_and_bg: CSI 38;5;196;48;5;21m (6 params, exceeds old cap of 4)
+     * sgr_256_index_zero: CSI 38;5;0m → fg_index=Some(0) (not treated as missing)
+     * sgr_underline_on: CSI 4m → underline=true
+     * sgr_underline_off: CSI 4m CSI 24m → underline=false after 24
+     * sgr_reverse_on: CSI 7m → reverse=true
+     * sgr_reverse_off: CSI 7m CSI 27m → reverse=false after 27
+     * sgr_bold_underline_reverse_combined: CSI 1;4;7m → all three set
+     * sgr_16_color_clears_256_index: CSI 38;5;196m CSI 31m → fg_index=None, fg=RGB
+     * sgr_256_out_of_range_no_panic: CSI 38;5;999m → no SetAttr, no panic
+     * sgr_38_5_truncated_no_panic: CSI 38;5;m → no panic
+     * sgr_38_5_non_numeric_no_panic: CSI 38;5;abcm → no panic
+     * sgr_truecolor_skipped_no_panic: CSI 38;2;255;0;0m → no SetAttr, no panic
+     * sgr_38_alone_no_panic: CSI 38m → no panic
+
+4. Harness cases registered (python/cluu_harness/):
+   - markers.py: l2_color_256 (marker COLOR_256_OK), l2_attr_render (marker ATTR_RENDER_OK)
+   - case_defaults.py: both use micropython /etc/<script>.py, root creds, 45s wait
+   - catalog.py: @cluu_case entries + __all__ updated
+
+5. MicroPython scripts:
+   - userspace/micropython/color_256.py: writes CSI 38;5;196m + CSI 48;5;21m + text
+   - userspace/micropython/attr_render.py: writes CSI 1m + CSI 4m + CSI 7m + text
+   - Both set _serial_marker for debug_print exit marker
+
+6. xtask/src/main.rs: added copy step for color_256.py and attr_render.py
+
+CONSTRAINTS MET
+---------------
+- No truecolor (38;2;r;g;b) rendering — deferred, params skipped
+- Existing 16-color parsing unchanged — all 11 original tests pass
+- u64 cell format in cluuterm NOT changed (todo 15's job)
+- no_std + alloc patterns followed
+- Result<T> over panics, no unwrap() in new code
+- Code style matches existing ansi module
+
+VERIFICATION
+------------
+- rustc --test: 26 passed, 0 failed, 0 ignored
+- cargo build: compiles cleanly, 2 pre-existing warnings (no new warnings)
+- python3 -m pytest -m smoke: 44 passed, 25 deselected
+- python3 -m cluu_harness --case l2_color_256 --no-build: PASS (98.1s)
+- python3 -m cluu_harness --case l2_attr_render --no-build: PASS (102.1s)
+
+ADVERSARIAL CLASSES
+-------------------
+- malformed_input: 5 tests for invalid/truncated/out-of-range SGR — all pass, no panics
+- stale_state: 11 original tests still pass (sgr_red_fg, erase_line, etc.)
+- misleading_success_output: tests check specific event types and values (fg_index, underline, reverse)
+- flaky_tests: N/A (unit tests deterministic)
+- dirty_worktree: N/A
+- hung_commands: N/A

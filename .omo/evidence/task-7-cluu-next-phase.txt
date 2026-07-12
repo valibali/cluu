@@ -1,0 +1,108 @@
+Task 7 — cluu-next-phase: netd crate skeleton + smoltcp dependency
+===================================================================
+Date: 2026-07-10
+Status: COMPLETE — all three verifications pass.
+
+FILES CHANGED
+-------------
+NEW   userspace/netd/Cargo.toml          — cluu-netd package, libcluu + smoltcp deps
+NEW   userspace/netd/src/main.rs         — no_std/no_main skeleton + #[cfg(test)] smoltcp poll
+MOD   Cargo.toml                          — added "userspace/netd" to workspace members
+MOD   xtask/src/main.rs                   — added "userspace/netd" to build_userspace crate list
+
+IMPLEMENTATION NOTES
+--------------------
+- Crate pattern follows userspace/cat, userspace/mkdir, userspace/virtio-blk:
+  `#![no_std]` + `#![no_main]` on the no_std target; `libcluu::runtime as _`
+  supplies the panic handler and `_start` entry stub.
+- Host-testability: main.rs uses `#![cfg_attr(not(test), no_std)]` and
+  `#![cfg_attr(not(test), no_main)]` so `cargo test` links std and the test
+  harness provides main. Under test, libcluu::runtime is not imported (its
+  panic handler is gated on target_os = "none" anyway). libcluu and its
+  transitive deps (klibcluu, cluu_wire, spin, x86_64, ...) compile cleanly
+  on the host for the test build.
+- smoltcp version: 0.13.1 (latest available; `cargo search smoltcp` = 0.13.1).
+  Task allowed "0.12.0 (or latest available)". 0.13.1 chosen because the
+  Context7 API docs (from main = 0.13.x) match the Interface/Device/poll
+  signatures used in the smoke test exactly.
+
+FEATURE MAPPING (deviation from task spec — documented in Cargo.toml)
+--------------------------------------------------------------------
+The task listed features `iface` and `device-medium`. Neither exists in ANY
+released smoltcp version (verified against both 0.12.0 and 0.13.1
+Cargo.toml [features]). Real equivalents used:
+  task "device-medium"  -> "medium-ethernet"  (enables Medium::Ethernet + pulls "socket")
+  task "iface"          -> (none)             (smoltcp::iface module is compiled
+                                              unconditionally; no feature gate)
+  added "alloc"         -> required so SocketSet (heap-backed managed::Vec)
+                           links on the alloc-capable no_std target.
+Full feature set: proto-ipv4, socket-tcp, socket-udp, socket-icmp,
+socket-raw, socket-dhcpv4, socket-dns, medium-ethernet, alloc.
+default-features = false (no std, no phy-raw_socket/tuntap, no log).
+
+smoltcp offline/proxy note: `cargo search smoltcp` succeeded (online),
+smoltcp 0.13.1 + deps (byteorder, managed, heapless, hash32, stable_deref_trait,
+defmt) resolved and downloaded through the configured proxy.
+
+VERIFICATION
+------------
+[1] no_std target compile (smoltcp actually compiled for the custom target):
+    $ cargo build --manifest-path userspace/netd/Cargo.toml \
+        --target triplets/x86_64-cluu-user.json \
+        -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+    Result: EXIT 0. Output included:
+      Compiling smoltcp v0.13.1
+      Compiling cluu-netd v0.1.0 (.../userspace/netd)
+      Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.04s
+    NOTE: bare `cargo build --target x86_64-cluu-user` (without -Z build-std)
+    would fail per the gotcha cluu-no_std-cargo-check-needs-xtask-target
+    (no_std + no_main needs build-std=core,alloc + the custom target spec).
+    The -Z build-std flags mirror exactly what xtask's build_userspace uses.
+
+[2] host smoke test:
+    $ cargo test --manifest-path userspace/netd/Cargo.toml
+    Result: EXIT 0.
+      Compiling smoltcp v0.13.1
+      Compiling libcluu v0.1.0
+      Compiling cluu-netd v0.1.0
+      running 1 test
+      test tests::interface_poll_once ... ok
+      test result: ok. 1 passed; 0 failed; 0 ignored
+    The test builds a smoltcp::iface::Interface over a DummyDevice
+    (implements smoltcp::phy::Device with GAT RxToken/TxToken, receive/transmit
+    return None, Medium::Ethernet) and calls iface.poll(Instant::ZERO, ...)
+    once, asserting PollResult::None (no sockets, no traffic).
+
+[3] full build:
+    $ cargo xtask build
+    Result: EXIT 0.
+      ✓ userdisk.img created
+      ✓ initrd directory created
+      ✓ cluu.img created
+      ✓ Build complete: target/cluu.img
+    netd.elf produced by the xtask userspace step:
+      target/x86_64-cluu-user/debug/netd.elf  (4411752 bytes)
+    First xtask run hit a transient failure at the `userdisk` task:
+    run_internal_xtask_task does Command::new(current_exe()).spawn() and got
+    "No such file or directory" because editing xtask/src/main.rs forced a
+    mid-run xtask recompile that relocated the running exe. Confirmed
+    transient: `cargo xtask create-user-block-image --profile dev` succeeds
+    directly (EXIT 0), and a second `cargo xtask build` (xtask cached) passes
+    end-to-end. Unrelated to netd — netd.elf was built in the first run too.
+
+ADVERSARIAL CLASS COVERAGE
+--------------------------
+- stale_state: workspace build still succeeds after adding the crate — verified
+  by `cargo xtask build` EXIT 0 producing cluu.img with netd in the build list.
+- misleading_success_output: smoltcp genuinely compiled for the no_std
+  x86_64-cluu-user target (not just std) — the target-build output shows
+  "Compiling smoltcp v0.13.1" under the --target triplets/x86_64-cluu-user.json
+  + build-std invocation, and netd.elf links. The host test additionally
+  exercises the smoltcp Interface/poll API at runtime (test passes).
+
+CONSTRAINTS HONORED
+-------------------
+- No smoltcp<->async-runtime integration (skeleton only).
+- smoltcp is userspace-only; not added to kernel.
+- no_std + alloc, Result/i32 returns, no unwrap() in new code.
+- Matches existing crate patterns (cat/mkdir/virtio-blk).

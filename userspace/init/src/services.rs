@@ -41,6 +41,7 @@ pub enum ServiceKind {
     Vtmgr,
     Inputd,
     VirtioBlk,
+    Virtio9p,
     Tpmd,
     UsbInput,
 }
@@ -77,6 +78,17 @@ const VIRTIOBLK_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
 
 const VIRTIOBLK_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIOBLK_RIGHTS_BITS);
 
+const VIRTIO9P_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
+    | Rights::SPACE_MAP.bits()
+    | Rights::IPC_SEND.bits()
+    | Rights::IPC_RECV.bits()
+    | Rights::CREATE.bits()
+    | Rights::GRANT.bits()
+    | Rights::IRQ_HANDLE.bits()
+    | Rights::IRQ_ACK.bits();
+
+const VIRTIO9P_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIO9P_RIGHTS_BITS);
+
 // tpmd needs MMIO mapping for TIS interface + IPC for future service
 const TPMD_RIGHTS_BITS: u32 = Rights::SPACE_MAP.bits()
     | Rights::IPC_SEND.bits()
@@ -105,6 +117,7 @@ pub const PRIMORDIAL_SERVICES: &[&str] = &[
     "root-procmgr",
     "vfs",
     "virtio-blk",
+    "virtio-9p",
 ];
 
 // Boot-critical services in launch order.
@@ -170,6 +183,16 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         rights: Some(VIRTIOBLK_RIGHTS),
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::VirtioBlk,
+        instance_id: None,
+        profile: CapProfile::SERVICE,
+    },
+    ServiceSpec {
+        name: "virtio-9p",
+        path: "sys/virtio-9p",
+        priority: 179,
+        rights: Some(VIRTIO9P_RIGHTS),
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::Virtio9p,
         instance_id: None,
         profile: CapProfile::SERVICE,
     },

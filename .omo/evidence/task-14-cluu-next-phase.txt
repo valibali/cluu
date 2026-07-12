@@ -1,0 +1,93 @@
+TASK 14: cluu-next-phase — Alt-screen buffer support (CSI ?1049h/l)
+=====================================================================
+
+DATE: 2026-07-10
+STATUS: COMPLETE
+
+CHANGES
+-------
+
+1. userspace/libcluu/src/ansi/event.rs
+   - Added Event::AltScreen(bool) variant to the Event enum.
+     true = enter alt screen, false = exit alt screen.
+     Documented: scrollback wired only to main grid.
+
+2. userspace/libcluu/src/ansi/state.rs
+   - feed_csi() private-mode handler: converted `if param == 25` to a
+     `match` covering both 25 (DECTCEM) and 1049 (alt-screen).
+   - CSI ?1049h → emit Event::AltScreen(true)
+   - CSI ?1049l → emit Event::AltScreen(false)
+   - Unknown private-mode params (including ?47, ?1047) are silently
+     dropped — no event emitted, no panic.
+
+3. userspace/libcluu/src/ansi/mod.rs
+   - 4 new tests added (30 total, 0 regressions):
+     * alt_screen_enter: CSI ?1049h → Event::AltScreen(true)
+     * alt_screen_exit: CSI ?1049l → Event::AltScreen(false)
+     * alt_screen_unknown_final_byte_no_panic: CSI ?1049x → no crash,
+       no AltScreen event (adversarial: malformed_input)
+     * alt_screen_does_not_emit_cursor_visible: CSI ?1049h must not
+       emit SetCursorVisible (adversarial: misleading_success_output)
+
+4. userspace/cluuterm/src/tty_backend.rs
+   - Cluuterm struct: added alt_cells, alt_fg_cells, alt_bg_cells
+     (Vec<u32>), in_alt_screen (bool), saved_cursor_x/y (usize).
+   - new(): initializes new fields (alt grids empty, flag false).
+   - apply_event_ptr(): added Event::AltScreen(enter) handler:
+     * enter: save cursor, swap active↔alt grids, clear active grid,
+       cursor→(0,0), set in_alt_screen=true. Idempotent if already in alt.
+     * exit: swap back, restore saved cursor, in_alt_screen=false.
+       Idempotent if not in alt.
+   - scroll_up(): scrollback.push() gated on !in_alt_screen (alt grid
+     scrolls internally but never writes to scrollback).
+   - resize_grid(): clears alt grid storage on resize (alt content
+     doesn't survive resize; gets cleared on re-entry anyway).
+
+5. userspace/console/src/renderer.rs
+   - apply_event(): added Event::AltScreen(_) no-op arm. Legacy console
+     has a single grid; alt-screen is a cluuterm feature. Required
+     because the match is exhaustive.
+
+6. userspace/micropython/alt_screen.py (new)
+   - Prints "main", then enters alt screen (CSI ?1049h), clears (CSI 2J),
+     homes cursor (CSI H), writes "alt", exits alt screen (CSI ?1049l).
+   - Sets _serial_marker = "ALTSCREEN_OK" (emitted via debug_print by
+     the micropython runtime).
+
+7. xtask/src/main.rs
+   - Added "alt_screen.py" to the micropython script copy list so it
+     gets packaged into /etc/alt_screen.py on the userdisk image.
+
+8. Harness registration (python/cluu_harness/):
+   - markers.py: l2_alt_screen (required marker ALTSCREEN_OK)
+   - case_defaults.py: test_command="micropython /etc/alt_screen.py",
+     root creds, 45s wait
+   - catalog.py: @cluu_case entry + __all__ updated with L2AltScreen
+
+CONSTRAINTS MET
+---------------
+- Only ?1049 implemented — ?47/?1047 (legacy alt-screen) NOT wired
+- Scrollback wired only to main grid (gated on !in_alt_screen)
+- u64 cell format NOT changed
+- no_std + alloc patterns, Result<T> over panics, no unwrap() in new code
+- Code style matches existing ansi module and tty_backend
+
+VERIFICATION
+------------
+- rustc --edition 2021 --test userspace/libcluu/src/ansi/mod.rs:
+  30 passed, 0 failed, 0 ignored (26 original + 4 new)
+- cargo xtask build: compiles cleanly, target/cluu.img + userdisk.img built
+  (alt_screen.py packaged into target/userfs/etc/alt_screen.py)
+- python3 -m cluu_harness --list: l2_alt_screen appears in case list
+- python3 -m pytest -m smoke: 46 passed, 27 deselected (harness registration valid)
+
+ADVERSARIAL CLASSES
+-------------------
+- stale_state: 26 original tests still pass — no regressions
+- malformed_input: CSI ?1049x (unknown final byte) → no crash, no event
+- misleading_success_output: alt_screen_does_not_emit_cursor_visible
+  test checks Event::AltScreen(true) specifically, not just "no crash";
+  also asserts no SetCursorVisible emitted (disambiguates from ?25)
+- flaky_tests: N/A (unit tests deterministic)
+- dirty_worktree: N/A
+- hung_commands: N/A

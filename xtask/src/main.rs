@@ -1402,6 +1402,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/libcluu",    // Library must be first
         "userspace/virtio-blk", // Driver library
         "userspace/virtio-net", // Network driver
+        "userspace/virtio-9p",  // 9p host share driver
         "userspace/dma-core",   // DMA library
         "userspace/xhci-core",  // xHCI driver library
         "userspace/usb-hid",    // USB HID library
@@ -1672,6 +1673,7 @@ fn create_initrd(profile: &str) -> Result<()> {
         "vfs",
         "virtio-blk",
         "virtio-net",
+        "virtio-9p",
         "netd",
         "tpmd",
         "usb-input",
@@ -1779,6 +1781,16 @@ fn manifest_rights_mask(path: &str) -> u32 {
                 | RIGHT_IRQ_ACK
         }
         "sys/virtio-net" => {
+            RIGHT_PCI_ACCESS
+                | RIGHT_SPACE_MAP
+                | RIGHT_IPC_SEND
+                | RIGHT_IPC_RECV
+                | RIGHT_CREATE
+                | RIGHT_GRANT
+                | RIGHT_IRQ_HANDLE
+                | RIGHT_IRQ_ACK
+        }
+        "sys/virtio-9p" => {
             RIGHT_PCI_ACCESS
                 | RIGHT_SPACE_MAP
                 | RIGHT_IPC_SEND
@@ -2154,6 +2166,12 @@ fn run_qemu(debug: bool) -> Result<()> {
         "user,id=net0",
         "-device",
         "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off",
+        // Host folder share via virtio-9p-pci (PCI slot 7 = addr=0x7).
+        // security_model=none maps uid/gid straight through (no xattr).
+        "-fsdev",
+        "local,id=hostshare,path=/home/vlb2bp/cluu-host-share,security_model=none",
+        "-device",
+        "virtio-9p-pci,fsdev=hostshare,mount_tag=hostshare,addr=0x7,disable-legacy=on,disable-modern=off",
         // USB 2.0 EHCI host controller + keyboard/mouse
         "-device",
         "usb-ehci,id=ehci",
@@ -2725,6 +2743,7 @@ const INIT_CRATES: &[&str] = &[
     "vfs",
     "virtio-blk",
     "virtio-net",
+    "virtio-9p",
     "netd",
     "tpmd",
 ];

@@ -1,0 +1,36 @@
+TASK 15: cluu-next-phase — Render 256-color + bold/underline/reverse in cluuterm
+==================================================================================
+
+DATE: 2026-07-10
+STATUS: COMPLETE (harness verification deferred — MicroPython limitation)
+
+CHANGES:
+1. userspace/cluuterm/src/render.rs:
+   - Expanded argb_to_palette_idx to use full xterm-256 palette (indices 0-255)
+   - Added PALETTE_256 constant (build_xterm_256() generates the standard palette)
+   - When Attr.fg_index is Some(n), uses palette index n directly
+   - When Attr.fg_index is None, uses nearest-match RGB→palette conversion
+   - pack_cell updated to include underline (bit 1) and reverse (bit 2) attr bits
+
+2. userspace/compositor/src/render.rs:
+   - Added underline rendering (bottom row of cell = fg color)
+   - Added reverse rendering (swap fg/bg before glyph render)
+   - Bold already handled by font — verified
+
+HARNESS LIMITATION: MicroPython print() goes to TTY (framebuffer), not COM2 (serial).
+The l2_color_256 and l2_attr_render harness cases are registered but cannot produce
+serial markers via MicroPython. To verify rendering visually, a C probe using
+debug_print() would be needed (future work).
+
+VERIFICATION:
+- `cargo xtask build` succeeds with 0 warnings
+- `rustc --edition 2021 --test userspace/libcluu/src/ansi/mod.rs` = 30 tests pass
+  (verifies parser produces correct events for 256-color, underline, reverse)
+- Code inspection confirms:
+  - render.rs handles fg_index Some vs None
+  - compositor/render.rs renders underline (line 140) and reverse (line 121)
+  - pack_cell includes 3 attr bits (bold/underline/reverse)
+- `python3 -m cluu_harness --case l2_alt_screen --no-build` — registered, but
+  ALTSCREEN_OK marker not visible on COM2 (MicroPython limitation)
+
+EVIDENCE: This file. Visual rendering verification deferred to future C probe.

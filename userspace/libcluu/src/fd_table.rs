@@ -52,6 +52,7 @@ pub struct FdEntry {
     /// Procmgr's pipe-table handle for pipe-end fds. None for non-pipe entries.
     /// Used at close time to send PROCMGR_PIPE_CLOSE_LABEL.
     pub pipe_id: Option<usize>,
+    pub socket_fd: Option<usize>,
 }
 
 impl FdEntry {
@@ -73,6 +74,7 @@ impl FdEntry {
             file_size: None,
             file_mode: None,
             pipe_id: None,
+            socket_fd: None,
         }
     }
 
@@ -100,6 +102,7 @@ impl FdEntry {
             file_size: None,
             file_mode: None,
             pipe_id: None,
+            socket_fd: None,
         }
     }
 
@@ -139,6 +142,7 @@ impl FdEntry {
             file_size: None,
             file_mode: None,
             pipe_id: Some(pipe_id),
+            socket_fd: None,
         }
     }
 
@@ -153,8 +157,28 @@ impl FdEntry {
             file_size: None,
             file_mode: None,
             pipe_id: Some(pipe_id),
+            socket_fd: None,
         }
     }
+
+    pub fn socket(endpoint: usize, netd_fd: usize, readable: bool, writable: bool) -> Self {
+        let mut caps = FdCaps::empty();
+        if readable { caps |= FdCaps::READ; }
+        if writable { caps |= FdCaps::WRITE; }
+        Self {
+            endpoint,
+            caps,
+            position: 0,
+            remote_fd: None,
+            client_id: 0,
+            file_size: None,
+            file_mode: None,
+            pipe_id: None,
+            socket_fd: Some(netd_fd),
+        }
+    }
+
+    pub fn is_socket(&self) -> bool { self.socket_fd.is_some() }
 }
 
 /// Process-local file descriptor table.
@@ -208,6 +232,7 @@ impl FdTable {
                     file_size: None,
                     file_mode: None,
                     pipe_id: None,
+                    socket_fd: None,
                 };
                 self.entries.insert(fd_num, entry);
             } else {
@@ -398,6 +423,7 @@ pub fn init_stdio() {
                 file_size: None,
                 file_mode: None,
                 pipe_id: None,
+                socket_fd: None,
             }
         } else {
             FdEntry::tty(token, readable, writable)

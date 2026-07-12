@@ -3,11 +3,15 @@ pub struct Attr {
     pub fg: u32,
     pub bg: u32,
     pub bold: bool,
+    pub underline: bool,
+    pub reverse: bool,
+    pub fg_index: Option<u8>,
+    pub bg_index: Option<u8>,
 }
 
 impl Attr {
     pub const fn default_attr() -> Self {
-        Self { fg: 0x00FFFFFF, bg: 0x00000000, bold: false }
+        Self { fg: 0x00FFFFFF, bg: 0x00000000, bold: false, underline: false, reverse: false, fg_index: None, bg_index: None }
     }
 }
 
@@ -44,4 +48,5 @@ pub enum Event {
     /// TUI apps (top, kilo) emit this on enter/exit to suppress the
     /// blinking text cursor while they own the screen.
     SetCursorVisible(bool),
+    AltScreen(bool),
 }

@@ -1,0 +1,87 @@
+Task 6: cluu-next-phase — virtio-net driver crate
+==================================================
+
+Date: 2026-07-10
+Status: IMPLEMENTED — harness verification DEFERRED to orchestrator
+
+SUMMARY
+-------
+Created userspace/virtio-net/ crate: a virtio-net frame send/receive driver
+on virtio-core, wired into init's boot services. Implements RX/TX virtqueue
+frame I/O via IPC (NET_PKT_SEND, NET_PKT_RECV, NET_REGISTER_RECV, NET_GET_MAC).
+No TCP/IP stack — raw Ethernet frames only.
+
+FILES CREATED
+-------------
+- userspace/virtio-net/Cargo.toml     — crate manifest (bin "virtio-net")
+- userspace/virtio-net/src/main.rs    — driver (~300 LOC)
+
+FILES MODIFIED
+--------------
+- userspace/libcluu/src/ipc.rs        — NET_PKT_SEND/RECV/REGISTER_RECV/GET_MAC labels (0x400-0x403)
+- userspace/init/src/services.rs      — VirtioNet ServiceKind, VIRTIONET_RIGHTS, SERVICE_LIST entry, PRIMORDIAL_SERVICES
+- userspace/init/src/context.rs       — virtio_net_irq_token field + derivation
+- userspace/init/src/wiring.rs        — VirtioNet configure_tokens (TOKEN_EXTRA_0/1/2) + map_resources
+- Cargo.toml                          — workspace members + default-members
+- xtask/src/main.rs                   — INIT_CRATES, userspace_crates, sys_programs, manifest rights, QEMU -device virtio-net-pci
+- kernel/src/architecture/x86_64/idt.rs — IDT gate for IRQ 10 (conditional freeze-exception)
+
+IRQ ROUTING ANALYSIS
+--------------------
+QEMU i440fx PCI topology (default machine type, no -machine flag):
+  Slot 0: host bridge (00:00.0)
+  Slot 1: PIIX3 ISA/IDE bridge (00:01.0)
+  Slot 2: virtio-blk-pci (00:02.0) → INTA# → PIRQC → IRQ 11
+  Slot 3: usb-ehci (00:03.0)       → INTA# → PIRQD → IRQ 11 (conflict, polling)
+  Slot 4: virtio-net-pci (00:04.0) → INTA# → PIRQA → IRQ 10  ← NEW
+
+virtio-net gets IRQ 10, which is DIFFERENT from virtio-blk's IRQ 11.
+No IRQ conflict with existing devices.
+
+CONDITIONAL KERNEL FIX (freeze-exception)
+------------------------------------------
+The kernel IDT had no gate for IRQ 10 (IDT[42]). Without it, the first
+virtio-net interrupt hits a null gate descriptor and triple-faults the
+kernel. Added virtio_net_interrupt_handler at IDT[42] following the
+exact pattern of virtio_blk_interrupt_handler (IDT[43]):
+
+  - dispatch_irq(10, KBD_RAW_LABEL, 0)  — deliver to userspace endpoint
+  - APIC EOI if enabled
+  - PIC EOI for IRQ 10
+
+This is a CONDITIONAL freeze-exception per task constraints:
+  - Unlocked by: virtio-net frame I/O requires interrupt delivery
+  - The kernel fix commit's first line MUST reference the failing test
+  - Harness verification DEFERRED — orchestrator will validate
+
+DRIVER ARCHITECTURE
+-------------------
+- PCI probe: vendor 0x1AF4, device 0x1000 (transitional) / 0x1041 (modern)
+- Feature negotiation: VERSION_1 + VIRTIO_NET_F_MAC only (no CSUM/GSO/MRG_RXBUF)
+- Virtqueues: RX (q0, 64 entries), TX (q1, 64 entries), no controlq
+- RX: 32 pre-allocated buffers (10-byte vnet_hdr + 1514-byte max frame)
+  posted as writable descriptors; on IRQ drain used ring, deliver frame
+  to registered endpoint, re-post buffer
+- TX: 8 pre-allocated buffers; on NET_PKT_SEND copy frame + zeroed vnet_hdr,
+  submit read-only descriptor, notify device; on IRQ drain used ring,
+  return buffer to free-list
+- IRQ: legacy INTX (vectors=0), PCI Interrupt Line register read at 0x3C
+- IPC surface: NET_PKT_SEND (transmit), NET_PKT_RECV (push to listener),
+  NET_REGISTER_RECV (register endpoint), NET_GET_MAC (query MAC)
+- Registry: registers as "netdev:main"
+- Address space: DMA pool at 0x5500_0000, MMIO at 0x5600_0000
+  (distinct from virtio-blk's 0x5100_0000 / 0x5200_0000)
+
+VERIFICATION
+------------
+- cargo xtask build: PASS (compiles with virtio-net crate)
+- New warnings: 0 (all existing warnings pre-date this change)
+- Harness run: DEFERRED to orchestrator (per task constraint — no QEMU)
+
+KNOWN LIMITATIONS
+-----------------
+- No TCP/IP stack (by design — frame I/O only)
+- No MSI-X (legacy INTX only, vectors=0)
+- Single-threaded main loop (recv_any on listen + IRQ + registry)
+- No flow control / backpressure on RX (fixed 32-buffer pool)
+- TX blocks if all 8 TX buffers are in flight (returns Error::Busy)

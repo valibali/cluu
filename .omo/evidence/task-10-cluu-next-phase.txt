@@ -1,0 +1,65 @@
+Task 10: BSD socket API + netd token delivery
+==============================================
+
+Status: COMPLETE
+Date: 2026-07-11
+
+== Summary ==
+
+BSD socket API (383 LOC) wrapping IPC calls to netd. Netd token delivered
+at spawn via TOKEN_EXTRA_0 for containers with NET profile. Containers
+without NET get no token — structural absence, no runtime ACL (§3).
+
+== Fixes Applied ==
+
+### Bug 1: NET_SEND word order (socket.rs)
+`parse_message` uses `words[0]` as payload byte count. socket.rs `send()`
+and `sendto()` put `netd_fd` in `words[0]` — same truncation bug as ping.
+Fix: swap to `[len, netd_fd, ...]` matching the parse_message convention.
+
+### Bug 2: TCP connect local port 0 (netd/src/main.rs)
+smoltcp `TcpSocket::connect()` rejects `local_endpoint.port == 0` with
+`Err(Unaddressable)`. Fix: assign ephemeral ports starting at 49152.
+
+### Bug 3: TCP connect local address UNSPECIFIED (netd/src/main.rs)
+smoltcp rejects `Some(Ipv4Address::UNSPECIFIED)` as local addr. Fix: pass
+`None` so smoltcp auto-selects source address via `get_source_address`.
+
+### Bug 4: TCP connect success check (netd/src/main.rs)
+Connect loop checked `can_send()` which is true in `SynSent` state —
+exited before handshake completed. Fix: check `state() == Established`.
+
+### Bug 5: Loopback ARP resolution (netd/src/main.rs)
+smoltcp on Ethernet medium requires ARP for 127.0.0.1. No device responds
+to ARP for loopback. Fix: `inject_loopback_arp()` helper injects fake ARP
+reply (127.0.0.1 → own_mac) into rx_queue before TCP ops. TxToken::consume
+loops frames with dst==own_mac back to rx_queue, completing the loopback
+path. Boot-time injection expires after 60s (neighbor cache lifetime), so
+fresh ARP is injected before each connect/accept.
+
+### Bug 6: Probes not in disk image (xtask/src/main.rs)
+l2_socket_basic and l2_net_denied probes existed on disk but weren't
+registered in the xtask build system. Fix: added to userspace_crates list.
+
+== Verification ==
+
+### l2_net_denied: PASS (65.3s)
+  - Container without NET profile → has_netd() returns false
+  - NET_CAP_NEGATIVE_OK marker present
+
+### l2_socket_basic: PASS (69.3s)
+  - TCP socket/bind/listen/connect/accept/send/recv loopback echo
+  - l2_socket_basic: PASS marker present
+
+### l2_dhcp_ping: PASS (65.2s)
+  - No regression
+
+### Build: 0 warnings
+
+== Files Changed ==
+  userspace/libcluu/src/posix/socket.rs  — NET_SEND word order fix (send, sendto)
+  userspace/netd/src/main.rs             — ephemeral port, local addr None,
+                                             connect state check, loopback ARP,
+                                             inject_loopback_arp helper,
+                                             debug print cleanup
+  xtask/src/main.rs                      — registered l2_socket_basic, l2_net_denied

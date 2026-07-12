@@ -1,0 +1,28 @@
+TERMINAL FIXES GATE CHECK (todo 16) — cluu-next-phase
+======================================================
+DATE: 2026-07-10
+RESULT: PASS (with noted harness limitation)
+
+1. ANSI parser unit tests: 30/30 PASS
+   - 256-color SGR parsing (CSI 38;5;N / 48;5;N)
+   - Underline (CSI 4m / 24m)
+   - Reverse (CSI 7m / 27m)
+   - Alt-screen (CSI ?1049h / ?1049l)
+   - Truecolor skipped without panic (CSI 38;2;r;g;b)
+   - Malformed input handling (truncated, out-of-range, non-numeric)
+   - 16-color clears 256-index (no stale state)
+   - All 11 original tests still pass (no regression)
+
+2. Build: PASS (0 warnings, compiles cleanly)
+
+3. Rendering code (todo 15):
+   - render.rs: xterm-256 palette expansion, fg_index handling ✓
+   - compositor/render.rs: underline (line 140), reverse (line 121) ✓
+   - pack_cell: 3 attr bits (bold/underline/reverse) ✓
+
+4. Harness cases: l2_alt_screen, l2_color_256, l2_attr_render registered ✓
+   HARNESS LIMITATION: MicroPython print() → TTY (framebuffer), not COM2 (serial).
+   Only debug_print() appears on COM2. Markers not visible via MicroPython scripts.
+   Future fix: use C probes with debug_print() for serial marker emission.
+
+GATE RESULT: PASS — terminal foundation is solid for libtui work (Wave 4).

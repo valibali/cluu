@@ -1,0 +1,22 @@
+Task 21: Edit under cluuterm (PTS termios migration)
+=====================================================
+Date: 2026-07-11
+Status: PASS
+
+Root cause: edit used legacy TTY_CTL_LABEL for raw mode. Under cluuterm
+(PTS path), TOKEN_STDOUT doesn't speak TTY_CTL — blocking call hangs forever.
+
+Fix: Dual-path raw mode entry in userspace/edit/src/tty.rs:
+1. Try legacy TTY_CTL with 500ms timeout (VT1-3)
+2. On timeout, fall back to tcgetattr/tcsetattr on fd 1 (cluuterm/VT4)
+   which goes through VFS → cluuterm PTS handler
+
+Serial log trace:
+  edit: trying legacy TTY_CTL (500ms timeout)
+  edit: legacy failed: Timeout
+  edit: trying PTS termios via tcgetattr(fd=1)
+  edit: tcgetattr OK lflag=0x91f
+  edit: raw mode entered via PTS termios
+  edit: raw mode OK
+
+Harness: l2_edit_cluuterm PASS (75.4s) — EDIT_STARTING marker found

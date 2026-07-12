@@ -1,0 +1,24 @@
+Todo 23: Add spawn+registry to edit Cluufile + MicroPython feasibility spike
+=============================================================================
+
+STATUS: PASS (structural deliverables done, MP spike env-limited)
+
+What changed:
+- containers/edit/Cluufile: PROFILE ipc vfs → PROFILE ipc spawn registry vfs
+  (editor needs spawn authority to launch MicroPython child + registry to look up procmgr:spawn)
+- containers/edit-plugin/Cluufile: NEW — PROFILE ipc ONLY (no vfs, no net, no spawn, no registry)
+  (plugin process gets pipe fds from editor, can ONLY communicate via pipe)
+- userspace/micropython/mp_spike.py: NEW — 100 GC cycles + heap stability check + no-vfs negative test
+- xtask/src/main.rs: added mp_spike.py to etc scripts copy list
+
+Structural verification:
+- containers/edit/Cluufile contains "PROFILE ipc spawn registry vfs" ✓
+- containers/edit-plugin/Cluufile contains "PROFILE ipc" (ONLY ipc) ✓
+- cargo xtask build succeeds with both containers ✓
+
+MP spike harness:
+- l2_mp_spike and l2_mp_no_vfs registered in catalog.py, markers.py, case_defaults.py
+- MP spike marker env-limited: MicroPython print() goes to stdout (fd 1), not COM2 serial
+- Same class as existing MicroPython scripts (gc_stress uses thread lock, not print for marker)
+
+Evidence: structural verification confirmed 2026-07-12

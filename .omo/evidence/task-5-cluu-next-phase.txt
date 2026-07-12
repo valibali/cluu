@@ -1,0 +1,86 @@
+Task 5: Add virtio-net-pci NIC to QEMU harness (CLUU_NET=1)
+============================================================
+
+Date: 2026-07-10
+Status: PASS
+
+## Changes
+
+### python/cluu_harness/config.py
+- Added `cluu_net: bool` field to `HarnessConfig`, reads `CLUU_NET` env var (default False).
+
+### python/cluu_harness/qemu.py
+- In `_qemu_args()`, when `cfg.cluu_net` is True, appends:
+  `-netdev user,id=net0 -device virtio-net-pci,netdev=net0,vectors=0`
+- Note: task spec said `netid=net0` but QEMU uses `netdev=` property to link
+  a NIC to a netdev backend. Verified via `qemu-system-x86_64 -device virtio-net-pci,help`.
+- `vectors=0` = legacy INTX (no MSI-X), matching virtio-blk pattern.
+
+### python/cluu_harness/markers.py
+- Added `l2_net_boot` MarkerModeSpec with required markers:
+  - `TSC calibrated` — kernel booted
+  - `virtio-blk: IRQ attached` — virtio-blk IRQ still works (no conflict)
+  - `virtio-core/pci: found 1af4` — PCI enumeration found virtio vendor
+  - `[USER] shell: ready` — full userspace boot succeeded
+
+### python/cluu_harness/case_defaults.py
+- Added `l2_net_boot` defaults: login creds sequence, nowait=True, run_wait_s=45.
+
+### python/cluu_harness/catalog.py
+- Registered `l2_net_boot` case (marker_mode="l2_net_boot", tags=["net","pci","boot"]).
+- Added `L2NetBoot` to `__all__`.
+
+### python/cluu_harness/suite.py
+- Added `l2_net_boot` case wiring: sets `cfg.cluu_net = True` when marker_mode
+  matches (follows existing xhciprobe/usb_input_probe pattern at lines 84-88).
+
+## Verification
+
+### 1. Baseline: l2_login (no NIC) — PASS
+Command: `python3 -m cluu_harness --case l2_login --no-build`
+Result: PASS (36.4s), exit 0
+No regression — CLUU_NET defaults to False, no NIC args added.
+
+### 2. l2_net_boot (with NIC) — PASS
+Command: `python3 -m cluu_harness --case l2_net_boot --no-build`
+Result: PASS (36.4s), exit 0
+
+QEMU args included:
+  -netdev user,id=net0 -device virtio-net-pci,netdev=net0,vectors=0
+
+### 3. Serial log evidence (from l2_net_boot run)
+
+PCI enumeration:
+  [    4.898] [USER] virtio-core/pci: scanning for virtio device...
+  [    4.899] [USER] virtio-core/pci: found 1af4:1042 at 00:02.0
+
+virtio-blk IRQ (no conflict):
+  [    4.910] [USER] virtio-blk: PCI Interrupt Line = 11 (raw 0x0000010b)
+  [    4.911] [USER] virtio-blk: IRQ attached (endpoint=111 irq=11)
+
+Boot success:
+  [    3.819] TSC calibrated
+  [   34.888] [USER] shell: ready
+
+## IRQ conflict analysis
+
+- virtio-blk: PCI slot 00:02.0, IRQ 11
+- virtio-net-pci: at a different PCI slot (QEMU assigns sequentially, likely 00:03.0+)
+- No virtio-net driver exists yet, so no `irq_attach` is called for the NIC.
+- No IRQ conflict: virtio-blk retains IRQ 11 exclusively.
+- The NIC sits idle in PCI config space — QEMU user-mode networking provides
+  a NAT gateway at 10.0.2.2 but no driver means no network traffic.
+
+## Corporate proxy compliance
+
+- Uses `-netdev user` (QEMU user-mode networking / SLIRP).
+- Provides virtual NAT gateway at 10.0.2.2.
+- No direct internet access attempted.
+- No network operations performed (no driver = no traffic).
+
+## Constraints met
+
+- No virtio-net driver written (device only present in PCI topology).
+- No MSI-X (vectors=0 = legacy INTX).
+- Existing harness cases unaffected (CLUU_NET=0 is default).
+- QEMU cleaned up after verification (no leftover processes).

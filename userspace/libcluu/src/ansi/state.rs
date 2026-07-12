@@ -49,6 +49,25 @@ fn ansi_bright_color(i: u16) -> u32 {
     ANSI_BRIGHT_COLORS[i as usize % 8]
 }
 
+fn ansi_256_color(idx: u8) -> u32 {
+    match idx {
+        0..=15 => {
+            if idx < 8 { ansi_color(idx as u16) }
+            else { ansi_bright_color((idx - 8) as u16) }
+        }
+        16..=231 => {
+            let i = (idx - 16) as u32;
+            let r = i / 36; let g = (i / 6) % 6; let b = i % 6;
+            let cv = |v: u32| if v == 0 { 0 } else { v * 40 + 55 };
+            (cv(r) << 16) | (cv(g) << 8) | cv(b)
+        }
+        232..=255 => {
+            let v = (idx - 232) as u32 * 10 + 8;
+            (v << 16) | (v << 8) | v
+        }
+    }
+}
+
 impl Parser {
     pub fn new() -> Self {
         Self {
@@ -194,15 +213,19 @@ impl Parser {
             }
             b'h' if self.private => {
                 self.push_param();
-                if self.param(0, 0) == 25 {
-                    emit(Event::SetCursorVisible(true));
+                match self.param(0, 0) {
+                    25 => emit(Event::SetCursorVisible(true)),
+                    1049 => emit(Event::AltScreen(true)),
+                    _ => {}
                 }
                 self.reset();
             }
             b'l' if self.private => {
                 self.push_param();
-                if self.param(0, 0) == 25 {
-                    emit(Event::SetCursorVisible(false));
+                match self.param(0, 0) {
+                    25 => emit(Event::SetCursorVisible(false)),
+                    1049 => emit(Event::AltScreen(false)),
+                    _ => {}
                 }
                 self.reset();
             }
@@ -236,31 +259,81 @@ impl Parser {
     fn apply_sgr<F: FnMut(Event)>(&mut self, emit: &mut F) {
         // If no params were accumulated (bare ESC[m), treat as reset.
         if self.param_count == 0 {
+            self.attr = Attr::default_attr();
             emit(Event::ResetAttr);
             return;
         }
         for i in 0..self.param_count {
             let p = self.params[i];
             match p {
-                0 => emit(Event::ResetAttr),
+                0 => {
+                    self.attr = Attr::default_attr();
+                    emit(Event::ResetAttr);
+                }
                 1 => {
                     self.attr.bold = true;
                     emit(Event::SetAttr(self.attr));
                 }
+                4 => {
+                    self.attr.underline = true;
+                    emit(Event::SetAttr(self.attr));
+                }
+                7 => {
+                    self.attr.reverse = true;
+                    emit(Event::SetAttr(self.attr));
+                }
+                24 => {
+                    self.attr.underline = false;
+                    emit(Event::SetAttr(self.attr));
+                }
+                27 => {
+                    self.attr.reverse = false;
+                    emit(Event::SetAttr(self.attr));
+                }
                 30..=37 => {
                     self.attr.fg = ansi_color(p - 30);
+                    self.attr.fg_index = Some((p - 30) as u8);
+                    emit(Event::SetAttr(self.attr));
+                }
+                38 => {
+                    if i + 2 < self.param_count && self.params[i + 1] == 5 {
+                        let idx = self.params[i + 2] as u8;
+                        self.attr.fg = ansi_256_color(idx);
+                        self.attr.fg_index = Some(idx);
+                        emit(Event::SetAttr(self.attr));
+                    }
+                }
+                39 => {
+                    self.attr.fg = Attr::default_attr().fg;
+                    self.attr.fg_index = None;
                     emit(Event::SetAttr(self.attr));
                 }
                 40..=47 => {
                     self.attr.bg = ansi_color(p - 40);
+                    self.attr.bg_index = Some((p - 40) as u8);
+                    emit(Event::SetAttr(self.attr));
+                }
+                48 => {
+                    if i + 2 < self.param_count && self.params[i + 1] == 5 {
+                        let idx = self.params[i + 2] as u8;
+                        self.attr.bg = ansi_256_color(idx);
+                        self.attr.bg_index = Some(idx);
+                        emit(Event::SetAttr(self.attr));
+                    }
+                }
+                49 => {
+                    self.attr.bg = Attr::default_attr().bg;
+                    self.attr.bg_index = None;
                     emit(Event::SetAttr(self.attr));
                 }
                 90..=97 => {
                     self.attr.fg = ansi_bright_color(p - 90);
+                    self.attr.fg_index = Some((p - 90 + 8) as u8);
                     emit(Event::SetAttr(self.attr));
                 }
                 100..=107 => {
                     self.attr.bg = ansi_bright_color(p - 100);
+                    self.attr.bg_index = Some((p - 100 + 8) as u8);
                     emit(Event::SetAttr(self.attr));
                 }
                 _ => {}

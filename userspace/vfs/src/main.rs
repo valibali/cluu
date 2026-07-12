@@ -521,6 +521,18 @@ fn setup_mounts(
     mounts.mount_sync("/dev", alloc::boxed::Box::new(dev_backend));
     debug_print("vfs: mounted /dev (devfs)")?;
 
+    let hostfs_endpoint = match registry::subscribe_output("hostfs", "main") {
+        Ok(ep) => ep,
+        Err(e) => {
+            debug_print(&format!("vfs: hostfs not available ({:?}), /host disabled", e))?;
+            0
+        }
+    };
+    if hostfs_endpoint != 0 {
+        mounts.mount_remote("/host", hostfs_endpoint, "hostfs");
+        debug_print("vfs: mounted /host (hostfs)")?;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Future mount points can be added here:
     // - mounts.mount_virtual("/sys", "sysfs", sysfs::ENTRIES);

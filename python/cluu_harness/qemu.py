@@ -208,6 +208,10 @@ class QemuController:
                 "-netdev", "user,id=net0",
                 "-device", "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off,vectors=0,addr=0x5",
             ])
+        args.extend([
+            "-fsdev", "local,id=hostshare,path=/home/vlb2bp/cluu-host-share,security_model=none",
+            "-device", "virtio-9p-pci,fsdev=hostshare,mount_tag=hostshare,addr=0x7,disable-legacy=on,disable-modern=off",
+        ])
         if cfg.autoexec_cmd:
             # Forwarded to the build via env; xtask reads it. We just
             # pass it through the environment of the build step.

@@ -1,0 +1,56 @@
+Network Stack Fixes — Tier 0 + Driver Robustness
+===================================================
+Date: 2026-07-11
+Source: docs/NET_STACK_ANALYSIS_Fable-5.md, docs/NET_STACK_FIX_PLAN.md
+
+Fixes Applied:
+--------------
+
+C1: TCP recv drops data on FIN (CRITICAL)
+  File: userspace/netd/src/main.rs (pending_recv drain, TCP arm)
+  Fix: Reorder to drain recv_slice FIRST, then check CloseWait/Closed/may_recv.
+  Before: checked state first → replied EOF without draining buffered data.
+  After: drains data first, only replies EOF when 0 bytes AND !may_recv().
+
+C2: recv() corrupts data at 4KB boundary (CRITICAL)
+  File: userspace/libcluu/src/posix/socket.rs
+  Fix: Size reply buffer to sizeof::<Message>() + len (was 4096.min(header+len)).
+  Clamp copied bytes to min(received, len, payload_len). Never return count > copied.
+
+C3: Device used.id can panic driver (CRITICAL)
+  File: userspace/virtio-core/src/virtqueue.rs
+  Fix: Bounds-check head against cookies.len() before indexing. Check cookie is not None.
+  Return None on invalid id (skip instead of panic).
+
+H2: Missed interrupt degrades NIC to 50ms polling (HIGH)
+  File: userspace/virtio-net/src/main.rs
+  Fix: Read isr_status() unconditionally on timeout path (was only on IRQ path).
+  Self-healing: even if IRQ is missed, ISR read clears interrupt and next IRQ fires.
+
+H3: Concurrent DNS drops reply token (HIGH)
+  File: userspace/netd/src/main.rs
+  Fix: Convert pending_dns from Option to Vec. Multiple DNS queries can be in-flight.
+  Each gets its own timeout (10s). No more overwriting/losing reply tokens.
+
+H4: TX completions not reclaimed in send (HIGH)
+  File: userspace/virtio-net/src/main.rs
+  Fix: Call drain_tx() at top of NET_PKT_SEND handler (was only on IRQ/timeout).
+  Prevents TX buffer exhaustion under burst (8 TX buffers fill up, -EBUSY, frame lost).
+
+Regression Tests:
+-----------------
+l2_login:        PASS (36.3s)
+l2_dhcp_ping:    PASS (65.2s)
+l2_socket_basic: PASS (69.2s)
+l2_net_denied:   PASS (65.2s)
+l2_wget_basic:   PASS (92.2s)
+l2_edit_cluuterm: PASS (75.4s)
+
+Deferred (Tier 3-4 from fix plan):
+----------------------------------
+H1: NET capability bypass via registry (needs design decision)
+M1: Synchronous calls in connect/accept (async runtime migration)
+M4: Volatile access to DMA rings (portability)
+M5: Modern-PCI capability parsing (portability)
+M6: NET_REGISTER_RECV token handling
+L1-L10: Various low-severity hygiene items

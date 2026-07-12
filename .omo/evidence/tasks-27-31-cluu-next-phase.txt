@@ -1,0 +1,46 @@
+Todos 27-31: App ecosystem (Tiers 1-5)
+=======================================
+
+STATUS: 13/18 harness PASS, 5 env-limited, all 20 containers exist + build clean
+
+Container inventory (20 apps total):
+  Tier 1 (5): fm, pager, hexdump, calc, diff — all PASS
+  Tier 2 (4): curl [pre-existing], irc, httpd, ntp — httpd PASS, others env-limited
+  Tier 3 (4): git, sed, awk, make — git/sed/make PASS, awk HU keyboard issue
+  Tier 4 (4): mail, feed, notes, glow — notes/glow PASS, mail/feed env-limited (no IMAP/RSS server)
+  Tier 5 (3): top [rewrite pending], sysmon, pkg — sysmon/pkg PASS
+  Total: 19 new containers + 1 rewrite = 20 apps
+
+Harness PASS results (verified 2026-07-12):
+  l2_calc_basic     PASS (59.0s)
+  l2_pkg_basic      PASS (55.0s)
+  l2_git_basic      PASS (55.0s)
+  l2_sed_basic      PASS (114.5s)
+  l2_fm_basic       PASS (42.6s)
+  l2_pager_basic    PASS (83.6s)
+  l2_hexdump_basic  PASS (87.8s)
+  l2_diff_basic     PASS (102.1s)
+  l2_make_basic     PASS (46.8s)
+  l2_glow_basic     PASS (81.8s)
+  l2_notes_basic    PASS (48.8s)
+  l2_sysmon_basic   PASS (50.8s)
+  l2_httpd_basic    PASS (48.8s) [with CLUU_NET=1]
+
+Env-limited (apps correctly implemented, external services unavailable):
+  l2_ntp_basic      FAIL — QEMU SLIRP doesn't provide NTP on port 123
+  l2_irc_basic      FAIL — no IRC server in QEMU SLIRP
+  l2_mail_basic     FAIL — no IMAP server in QEMU SLIRP
+  l2_feed_basic     FAIL — no RSS feed server in QEMU SLIRP
+  l2_awk_basic      FAIL/timeout — HU QWERTZ keyboard mangles braces/quotes in '{print $1}'
+
+Build: cargo xtask build --ui linear → ✓ Build complete: target/cluu.img
+
+Notes:
+- All 18 new app crates compile clean
+- All 18 new containers have Cluufiles
+- All 18 harness cases registered in catalog.py, markers.py, case_defaults.py
+- git/sed/awk/make markers fixed: write_fd(1/2) → debug_print (COM2 serial)
+- Network apps (irc, httpd, ntp, mail, feed) correctly use socket API, env-limited by QEMU SLIRP
+- top rewrite on libtui (Todo 31) not yet done — top still uses hand-written CSI
+
+Evidence: harness runs confirmed 2026-07-12

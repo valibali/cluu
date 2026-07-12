@@ -392,6 +392,27 @@ pub const ASYNC_REPLY_TAG: u8 = 3;
 pub const ASYNC_REPLY_EP_WORD: usize = 4;
 pub const ASYNC_REPLY_COOKIE_WORD: usize = 5;
 
+// ── netd IPC labels ───────────────────────────────────────────────────────
+pub const NET_SOCKET: u32        = 0x700;
+pub const NET_BIND: u32          = 0x701;
+pub const NET_CONNECT: u32       = 0x702;
+pub const NET_LISTEN: u32        = 0x703;
+pub const NET_ACCEPT: u32        = 0x704;
+pub const NET_SEND: u32          = 0x705;
+pub const NET_RECV: u32          = 0x706;
+pub const NET_CLOSE: u32         = 0x707;
+pub const NET_POLL: u32          = 0x708;
+pub const NET_DNS_RESOLVE: u32   = 0x709;
+pub const NET_GET_MAC: u32       = 0x70A;
+pub const NET_PKT_SEND: u32      = 0x70B;
+pub const NET_PKT_RECV: u32      = 0x70D;
+pub const NET_REGISTER_RECV: u32 = 0x70C;
+
+pub const NET_SOCK_TCP: usize   = 1;
+pub const NET_SOCK_UDP: usize   = 2;
+pub const NET_SOCK_ICMP: usize  = 3;
+pub const NET_SOCK_RAW: usize   = 4;
+
 /// Shared-ring metadata stored in the first bytes of the shared region.
 ///
 /// This is a single-producer/single-consumer ring with one reserved slot to

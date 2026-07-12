@@ -1,0 +1,12 @@
+[package]
+name = "cluu-virtio-9p"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-virtio-core = { path = "../virtio-core" }
+
+[[bin]]
+name = "virtio-9p"
+path = "src/main.rs"

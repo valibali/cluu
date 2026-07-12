@@ -26,7 +26,7 @@
 mod dir;
 pub mod env;
 mod fcntl;
-pub(crate) mod file;
+pub mod file;
 mod framebuffer;
 mod memory;
 pub mod jobs;
@@ -35,6 +35,7 @@ mod poll;
 mod process;
 pub mod pthread;
 pub mod signal;
+pub mod socket;
 mod stat;
 mod stubs;
 pub mod termios;

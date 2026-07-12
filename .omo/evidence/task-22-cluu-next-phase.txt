@@ -1,0 +1,20 @@
+Todo 22: Upgrade edit to libtui render loop + SIGWINCH
+=====================================================
+
+STATUS: PASS
+
+What changed:
+- userspace/edit/src/main.rs: replaced hand-written CSI loop with libtui Program::run()
+- userspace/edit/src/render.rs: replaced with libtui View rendering
+- userspace/edit/src/input.rs: replaced with libtui input decoder re-exports
+- userspace/edit/Cargo.toml: added libtui dependency with features=["runtime"]
+- EditModel struct implements libtui::Model trait (init/update/view/from_key)
+- Prints EDIT_LIBTUI_OK and EDIT_RESIZE_OK via debug_print
+- SIGWINCH: viewport recompute on console size change in update()
+
+Harness:
+- l2_edit_libtui registered in catalog.py, markers.py, case_defaults.py
+- python3 -m cluu_harness --case l2_edit_libtui --no-build → PASS (96.5s)
+- l2_edit_cluuterm still PASSes (no regression)
+
+Evidence: harness PASS confirmed 2026-07-12

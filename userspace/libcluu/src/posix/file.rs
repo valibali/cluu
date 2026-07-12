@@ -378,6 +378,33 @@ fn read_tty(_stdin_endpoint: usize, buffer: &mut [u8]) -> ssize_t {
     }
 }
 
+pub fn read_tty_timeout(buffer: &mut [u8], timeout_ms: usize) -> ssize_t {
+    let tty_ep = match get_tty_endpoint() {
+        Some(ep) => ep,
+        None => {
+            set_errno(EBADF);
+            return -1;
+        }
+    };
+    let mut msg = Message::new(TTY_READ_REQUEST_LABEL, [0; 6], 1);
+    msg.words[0] = buffer.len();
+    let mut reply_buf = [0u8; 512];
+    match crate::syscall::ipc_call_timeout(tty_ep, msg.as_bytes(), &mut reply_buf, timeout_ms) {
+        Ok(0) => 0,
+        Ok(bytes) => {
+            if bytes <= core::mem::size_of::<Message>() {
+                return 0;
+            }
+            let data_len = bytes - core::mem::size_of::<Message>();
+            let to_copy = data_len.min(buffer.len());
+            buffer[..to_copy]
+                .copy_from_slice(&reply_buf[core::mem::size_of::<Message>()..][..to_copy]);
+            to_copy as ssize_t
+        }
+        Err(e) => crate::errno::return_error(e),
+    }
+}
+
 fn write_tty(endpoint: usize, buffer: &[u8]) -> ssize_t {
     // Use TTY_WRITE protocol with retry
     match crate::ipc::send_with_retry(endpoint, TTY_WRITE_LABEL, buffer) {

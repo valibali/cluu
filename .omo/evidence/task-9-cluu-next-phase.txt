@@ -1,0 +1,61 @@
+Task 9: DHCP + ARP + ICMP ping
+===============================
+
+Status: COMPLETE
+Date: 2026-07-11
+
+== Summary ==
+
+DHCP acquisition, ARP resolution, and ICMP ping all working. The key
+bug was an IPC payload truncation: `parse_message` uses `words[0]` as
+the payload byte count, but the NET_SEND message put `fd` in `words[0]`.
+For fd=1, the 18-byte ICMP echo request was truncated to 1 byte.
+smoltcp's `Icmpv4Repr::parse` silently dropped the malformed packet.
+
+== Fixes Applied ==
+
+### Bug 1: Broadcast frames looped back (netd/src/main.rs)
+`NetdTxToken::consume` looped broadcast frames (dst=ff:ff:ff:ff:ff:ff)
+to rx_queue instead of tx_queue. DHCP DISCOVER never reached the wire.
+Fix: only loop back unicast-to-self frames.
+
+### Bug 2: IPC payload truncation (ping/src/main.rs + netd/src/main.rs)
+`parse_message` uses `words[0]` as payload byte count. NET_SEND had
+`fd` in `words[0]` instead of payload length. For fd=1, ICMP packet
+truncated to 1 byte, silently dropped by smoltcp.
+Fix: swap words[0] and words[1] — payload_len first, fd second.
+
+### Bug 3: ICMP send didn't flush TX (netd/src/main.rs)
+After `send_slice`, `iface.poll()` was called but TX frames weren't
+drained in the NET_SEND handler. The main loop's async `drain_tx`
+only ran after the 200ms recv timeout.
+Fix: drain TX synchronously in the NET_SEND handler after `iface.poll()`.
+
+### Bug 4: ICMP recv returned EAGAIN immediately (netd/src/main.rs)
+Ping's NET_RECV calls returned EAGAIN because the ICMP reply hadn't
+arrived yet. The main loop's 200ms timeout meant the reply could arrive
+but the recv handler never re-checked.
+Fix: deferred reply pattern — NET_RECV stores pending recv, main loop
+checks after each `iface.poll()` and replies when data is ready.
+
+### Ping Cluufile: added `net` to PROFILE
+Was `PROFILE ipc registry`, needed `PROFILE ipc registry net` for
+netd token delivery via spawn envelope.
+
+== Verification ==
+
+### l2_dhcp_ping: PASS (65.2s)
+  - `netd: DHCP acquired IP 10.0.2.15` at ~9s
+  - `ping: echo request sent to 10.0.2.2` at ~63s
+  - `PING_OK` marker present
+
+### l2_login: PASS (36.4s)
+  - No regression
+
+### Build: 0 warnings
+
+== Files Changed ==
+  userspace/netd/src/main.rs     — broadcast fix, IPC word swap, TX drain,
+                                    deferred ICMP recv, debug print cleanup
+  userspace/ping/src/main.rs     — IPC word swap (words[0]=len, words[1]=fd)
+  containers/ping/Cluufile       — added `net` to PROFILE

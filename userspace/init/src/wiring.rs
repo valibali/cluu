@@ -194,6 +194,11 @@ impl ServiceWiring for ServiceKind {
                 // IRQ token for IRQ 11 (virtio-blk on QEMU PIC).
                 tokens[TOKEN_EXTRA_2] = ctx.virtio_blk_irq_token;
             }
+            ServiceKind::Virtio9p => {
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                tokens[TOKEN_EXTRA_1] = child_token;
+                tokens[TOKEN_EXTRA_2] = ctx.virtio_9p_irq_token;
+            }
             ServiceKind::Tpmd => {
                 // Tpmd uses its elevated token for MMIO mapping (via TOKEN_SPACE rights)
             }
@@ -233,6 +238,7 @@ impl ServiceWiring for ServiceKind {
             | ServiceKind::Vtmgr
             | ServiceKind::Inputd
             | ServiceKind::VirtioBlk
+            | ServiceKind::Virtio9p
             | ServiceKind::Devmgr
             | ServiceKind::Tpmd
             | ServiceKind::UsbInput => Ok(()),

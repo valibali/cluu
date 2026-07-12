@@ -130,6 +130,8 @@ lazy_static! {
         idt[39].set_handler_fn(serial_interrupt_handler);   // IRQ 7 - Serial COM2
         idt[43].set_handler_fn(virtio_blk_interrupt_handler); // IRQ 11 - virtio-blk-pci
         idt[42].set_handler_fn(virtio_net_interrupt_handler); // IRQ 10 - virtio-net-pci
+        idt[37].set_handler_fn(virtio_9p_interrupt_handler_irq5);  // IRQ 5  - virtio-9p-pci (slot 7 → PIRQD)
+        idt[41].set_handler_fn(virtio_9p_interrupt_handler_irq9);  // IRQ 9  - virtio-9p-pci fallback
         idt[44].set_handler_fn(mouse_interrupt_handler);    // IRQ 12 - PS/2 Mouse
 
         // Set up a generic handler for interrupt 0x68 (104)
@@ -1417,6 +1419,31 @@ extern "x86-interrupt" fn virtio_net_interrupt_handler(_stack_frame: InterruptSt
     }
     unsafe {
         pic_eoi(10);
+    }
+}
+
+// virtio-9p-pci at slot 7. QEMU i440FX routes slot 7 INTA# to PIRQD → IRQ 5;
+// the driver reads the actual IRQ from the PCI Interrupt Line register and
+// irq_attach()'s to it. Two gates cover the plausible routings (IRQ 5 and
+// the alternate IRQ 9) so an unexpected PIRQ mapping doesn't hit a null
+// gate and triple-fault. Each handler EOIs its own IRQ.
+extern "x86-interrupt" fn virtio_9p_interrupt_handler_irq5(_stack_frame: InterruptStackFrame) {
+    crate::devices::irq::dispatch_irq(5, crate::devices::irq::KBD_RAW_LABEL, 0);
+    if crate::architecture::x86_64::apic::is_enabled() {
+        crate::architecture::x86_64::apic::eoi();
+    }
+    unsafe {
+        pic_eoi(5);
+    }
+}
+
+extern "x86-interrupt" fn virtio_9p_interrupt_handler_irq9(_stack_frame: InterruptStackFrame) {
+    crate::devices::irq::dispatch_irq(9, crate::devices::irq::KBD_RAW_LABEL, 0);
+    if crate::architecture::x86_64::apic::is_enabled() {
+        crate::architecture::x86_64::apic::eoi();
+    }
+    unsafe {
+        pic_eoi(9);
     }
 }
 
