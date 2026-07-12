@@ -244,7 +244,12 @@ cluuterm to minimum viable terminal for ncurses-style TUI apps:
 
 - **Signals**: Ctrl-C → SIGINT, Ctrl-Z → SIGTSTP, Ctrl-\ → SIGQUIT via
   `procmgr PTS_KILL_FG` to foreground pgrp. Raw mode passes byte
-  through (terminal apps set `ISIG=0`).
+  through — `enter_raw()` in `libcluu/src/posix/tty.rs` clears ISIG
+  (`TTY_LFLAG_ISIG = 0x01`) in addition to ICANON and ECHO. The line
+  discipline (`libcluu/src/tty_core/line_discipline.rs:feed_byte`) checks
+  ISIG **before** the canonical/raw split, so 0x03 is intercepted as
+  SIGINT even in raw mode unless ISIG is explicitly cleared. TUI apps
+  (edit, top) handle 0x03 as a normal key event after `enter_raw()`.
 - **TERM env**: cluuterm publishes `TERM=xterm-256color`; tty service
   `TERM=vt100`. Propagated via `SpawnEnvelope.env`.
 - **TIOCGWINSZ + SIGWINCH**: `ioctl(TIOCGWINSZ)` on pts fds returns

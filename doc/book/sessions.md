@@ -13,10 +13,20 @@ Each login creates:
 2. **A session-vfs**, owns the session's VFS view, layered on top of the
    root-VFS's ext2/initrd backends. It is the per-session filesystem namespace.
 
-Children spawned inside a session carry `PARAM_SESSION_VFS_EP` so
-`subscribe_output("vfs", "main")` resolves to the **session-VFS**, not the
-root-VFS. This redirection is in `libcluu::registry` and is the canonical way a
-session binary reaches its session-VFS.
+ Children spawned inside a session carry `PARAM_SESSION_VFS_EP` so
+ `subscribe_output("vfs", "main")` resolves to the **session-VFS**, not the
+ root-VFS. This redirection is in `libcluu::registry` and is the canonical way a
+ session binary reaches its session-VFS.
+
+ Similarly, children spawned inside a session have `CLUU_SESSION_ID` set in
+ their environment. When `lookup_service("procmgr:spawn")` or
+ `subscribe_output("procmgr", "spawn")` is called, the registry short-circuits
+ to `session-procmgr:spawn:{sid}` (session processes) or
+ `root-procmgr:spawn` (boot processes). The name `"procmgr:spawn"` is purely
+ virtual — it never hits the registry. There is no fallthrough: session
+ processes cannot reach root-procmgr, and boot processes cannot reach
+ session-procmgr. This closes the session escape path for spawn and pipe
+ operations.
 
 ## The session invariant
 

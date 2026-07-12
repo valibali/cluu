@@ -524,3 +524,53 @@ highest-ROI cleanup during the freeze.
 **Impact:** `usb-input` works correctly with polling. Keyboard/mouse input is forwarded to `inputd:input` → `vtmgr` → `tty`/`compositor`. Latency is bounded by the 10ms poll interval (imperceptible for human input).
 
 **See also:** `userspace/usb-input/src/main.rs` (poll loop), `userspace/virtio-core/src/irq.rs` (`IrqSource` — the IRQ attach helper that virtio-blk uses), `kernel/src/devices/irq.rs` (single-endpoint routing).
+
+## isig-checked-before-raw-canonical-split (2026-07-12-edit-isig)
+
+**Symptom:** Edit (or any TUI app behind cluuterm PTS) gets killed by Ctrl+C. Process never runs cleanup() — alt screen not exited, TTY not restored, shell left with broken terminal (white screen, no echo).
+
+**Code site:** `userspace/libcluu/src/tty_core/line_discipline.rs:207-242` — `feed_byte()`. `userspace/libcluu/src/posix/tty.rs:98` — `enter_raw()`.
+
+**Root cause:** CLUU's line discipline checks ISIG **before** the canonical/raw mode split. Even in raw mode (ICANON cleared), 0x03 is intercepted as SIGINT if ISIG is still set. `enter_raw()` only cleared `ICANON | ECHO` — NOT ISIG.
+
+**Fix:** `enter_raw()` now also clears `TTY_LFLAG_ISIG = 0x01` in both the legacy TTY_CTL path and the PTS tcsetattr path. `restore()` re-enables ISIG from saved termios.
+
+**Key insight:** Standard termios treats ISIG as independent from ICANON. Raw mode doesn't automatically disable signal generation. You MUST explicitly clear ISIG.
+
+**See also:** `userspace/libcluu/src/posix/tty.rs`, `userspace/cluu_wire/src/pts.rs:93` (`ISIG: u32 = 0x0001`), `include/sys/termios.h:23`.
+
+## procmgr-name-ambiguity-session-escape (2026-07-12-registry-rename)
+
+**Symptom:** Session processes could spawn via root procmgr instead of session-procmgr, bypassing session isolation. Edit plugins failed with `InvalidArgument` because root procmgr can't map ELF into session address space.
+
+**Code site:** `userspace/root-procmgr/src/main.rs:1103` — `registry::init()`. `userspace/libcluu/src/registry.rs` — `lookup_service()` and `subscribe_output()`.
+
+**Root cause:** Root procmgr registered as `"procmgr"` — ambiguous. `libcluu::spawn::spawn()` hardcoded `lookup_service("procmgr:spawn")` — always went to root procmgr. `subscribe_output("procmgr", "spawn")` had no session routing — 15 callers all got root procmgr.
+
+**Fix:** Root procmgr renamed to `"root-procmgr"`. `"procmgr:spawn"` is now purely virtual in `lookup_service` and `subscribe_output` — routes based on `CLUU_SESSION_ID` env var. Session → `session-procmgr:spawn:{sid}`, boot → `root-procmgr:spawn`. No fallthrough either way.
+
+**Key insight:** Both `lookup_service` AND `subscribe_output` need the virtual routing — only updating one creates an escape path. The env var is set at spawn (ProcessInfo page is read-only) — declarative, not runtime ACL.
+
+**See also:** `userspace/libcluu/src/registry.rs`, `userspace/session-procmgr/src/spawn.rs` (sets CLUU_SESSION_ID env for children), `doc/book/sessions.md`.
+
+## top-cid-overflow-format-width (2026-07-12-top-wrapping)
+
+**Symptom:** `top` data rows wrapped by 2 chars on 80-col terminal. Header aligned but data rows exceeded 80 columns.
+
+**Root cause:** CLUU CIDs are 7 digits (8388609 = 0x800001). `W_CID` was 5. Rust's `format!("{:>5}", 8388609)` does NOT truncate — it overflows to 7 chars. Format width is a MINIMUM, not a maximum.
+
+**Fix:** `W_CID` and `W_PCID` changed from 5 to 7 (matching `W_PID`).
+
+**See also:** `userspace/top/src/main.rs`.
+
+## program-run-no-resize-detection (2026-07-12-libtui-resize)
+
+**Symptom:** Edit doesn't detect terminal resize until a key is pressed. Old cells persist — white status bar fragments, misaligned content.
+
+**Root cause:** `Program::run()` uses blocking `decode()` read. Model's viewport only updates on key event. `Model::on_resize()` existed but was never called by Program.
+
+**Fix:** Query console dims via `_ioctl(1, TIOCGWINSZ)` at top of run loop. On change: clear screen, reset `prev_buffer`, call `model.on_resize()`.
+
+**Key insight:** Do NOT add SIGWINCH handler or timeout reads — previous attempts lost keypresses. The blocking `decode()` must stay. ioctl at loop top is cheap and detects resize on next iteration.
+
+**See also:** `userspace/libtui/src/program.rs`, `userspace/libtui/src/lib.rs:57` (`Model::on_resize()`), `userspace/edit/src/main.rs` (`EditModel::on_resize()`).
