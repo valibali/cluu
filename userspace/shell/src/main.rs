@@ -322,54 +322,14 @@ fn run_async_loop(
     let vfs_ep = match registry::subscribe_output("vfs", "main") {
         Ok(ep) => ep,
         Err(_) => {
-            let _ = debug_print("shell: vfs endpoint unavailable, no cache warm");
+            let _ = debug_print("shell: vfs endpoint unavailable, no completion");
             0
         }
     };
 
     if vfs_ep != 0 {
-        let vfs = VfsClient::new_from_registry(vfs_ep).unwrap_or(VfsClient::new(vfs_ep, 0));
-        for dir in completion::initial_dirs() {
-            if completion::mark_pending(&dir) {
-                let vfs_ep = vfs.endpoint();
-                let dir_clone = dir.clone();
-                rt.spawn(async move {
-                    let client = VfsClient::new(vfs_ep, 0);
-                    let fut = client.readdir_async(&dir_clone);
-                    match fut.await {
-                        Ok((reply, payload)) => {
-                            match VfsClient::parse_readdir_async_reply(&reply, &payload) {
-                                Ok(entries) => {
-                                    let names: Vec<String> = entries.iter()
-                                        .map(|e| {
-                                            if e.is_dir {
-                                                format!("{}/", e.name)
-                                            } else {
-                                                e.name.clone()
-                                            }
-                                        })
-                                        .collect();
-                                    completion::store_entries(&dir_clone, names);
-                                }
-                                Err(e) => {
-                                    let _ = debug_print(&format!(
-                                        "completion: readdir parse {} failed: {:?}",
-                                        dir_clone, e
-                                    ));
-                                    completion::store_entries(&dir_clone, Vec::new());
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let _ = debug_print(&format!(
-                                "completion: readdir {} failed: {:?}",
-                                dir_clone, e
-                            ));
-                            completion::store_entries(&dir_clone, Vec::new());
-                        }
-                    }
-                });
-            }
+        if let Ok(vfs) = VfsClient::new_from_registry(vfs_ep) {
+            completion::set_vfs_client(vfs);
         }
     }
 
@@ -421,9 +381,13 @@ fn run_async_loop(
                 Ok((reply, _)) => {
                     let grant = match VfsClient::parse_read_grant_async_reply(&reply, grant_base) {
                         Ok(g) => g,
-                        Err(_) => break,
+                        Err(_) => {
+                            libcluu::async_runtime::push_completion(StdinRead { data: Vec::new() });
+                            break;
+                        }
                     };
                     if grant.len == 0 {
+                        libcluu::async_runtime::push_completion(StdinRead { data: Vec::new() });
                         break;
                     }
                     let data = unsafe {
@@ -435,7 +399,10 @@ fn run_async_loop(
                     offset += grant.len;
                     libcluu::async_runtime::push_completion(StdinRead { data });
                 }
-                Err(_) => break,
+                Err(_) => {
+                    libcluu::async_runtime::push_completion(StdinRead { data: Vec::new() });
+                    break;
+                }
             }
         }
     });

@@ -1,17 +1,7 @@
-//! TAB completion candidate computation + lazy async directory cache.
+//! TAB completion candidate computation + lazy directory cache.
 //!
-//! The shell main loop is async (libcluu::async_runtime). Completion queries
-//! arrive on the completion endpoint and are handled inline. Directory
-//! listings are fetched lazily via async VFS readdir on first TAB press —
-//! no pre-caching thread, no startup cost.
-//!
-//! # Lock safety
-//!
-//! `DIR_CACHE` uses `spin::Mutex` but is never held across an `.await`.
-//! The readdir task collects results in a local `Vec`, then locks the
-//! cache only to insert — fully synchronous, no yield point. Since the
-//! runtime is single-threaded, the lock is uncontended; it exists solely
-//! to satisfy Rust's aliasing rules for the static.
+//! Directory listings are fetched lazily via sync VFS readdir on first
+//! TAB press for each directory — no pre-caching, no startup cost.
 
 extern crate alloc;
 
@@ -23,7 +13,7 @@ use crate::commands::BuiltinRegistry;
 use libcluu::types::Message;
 use libcluu::{debug_print, ipc};
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use spin::Mutex;
 
 use cluu_wire::pts::{
@@ -31,55 +21,65 @@ use cluu_wire::pts::{
 };
 use cluu_wire::ABI_VERSION;
 
-// ── Lazy directory cache ────────────────────────────────────────────────────
+static DIR_CACHE: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
 
-static DIR_CACHE: Mutex<DirCache> = Mutex::new(DirCache::empty());
+static VFS_CLIENT: Mutex<Option<libcluu::fs::client::VfsClient>> = Mutex::new(None);
 
-struct DirCache {
-    entries: BTreeMap<String, Vec<String>>,
-    pending: BTreeSet<String>,
+pub fn set_vfs_client(client: libcluu::fs::client::VfsClient) {
+    *VFS_CLIENT.lock() = Some(client);
 }
 
-impl DirCache {
-    const fn empty() -> Self {
-        Self {
-            entries: BTreeMap::new(),
-            pending: BTreeSet::new(),
+fn ensure_dir_cached(dir: &str) {
+    if DIR_CACHE.lock().contains_key(dir) {
+        return;
+    }
+    let vfs_ep = VFS_CLIENT.lock().as_ref().map(|v| v.endpoint());
+    let vfs_ep = match vfs_ep {
+        Some(ep) => ep,
+        None => return,
+    };
+    let vfs = libcluu::fs::client::VfsClient::new(vfs_ep, libcluu::registry::control_endpoint());
+    let mut retries = 0u32;
+    loop {
+        match vfs.readdir(dir) {
+            Ok(entries) => {
+                let names: Vec<String> = entries.iter()
+                    .map(|e| {
+                        if e.is_dir {
+                            format!("{}/", e.name)
+                        } else {
+                            e.name.clone()
+                        }
+                    })
+                    .collect();
+                let _ = debug_print(&format!(
+                    "completion: cached {} entries for {}",
+                    names.len(), dir
+                ));
+                DIR_CACHE.lock().insert(String::from(dir), names);
+                return;
+            }
+            Err(libcluu::Error::Busy) if retries < 3 => {
+                retries += 1;
+                let _ = libcluu::yield_cpu();
+                continue;
+            }
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "completion: readdir {} failed: {:?}",
+                    dir, e
+                ));
+                DIR_CACHE.lock().insert(String::from(dir), Vec::new());
+                return;
+            }
         }
     }
 }
 
-const BASE_CACHED_DIRS: &[&str] = &["/bin", "/etc", "/dev", "/tmp", "/home"];
-
-pub fn initial_dirs() -> Vec<String> {
-    let home = crate::shellrc::home_from_env().unwrap_or_else(|| String::from("/"));
-    let mut dirs: Vec<String> = BASE_CACHED_DIRS.iter().map(|s| String::from(*s)).collect();
-    dirs.push(home);
-    dirs.push(String::from("/var"));
-    dirs.push(String::from("/var/images"));
-    dirs
-}
-
-pub fn mark_pending(dir: &str) -> bool {
-    let mut cache = DIR_CACHE.lock();
-    if cache.entries.contains_key(dir) || cache.pending.contains(dir) {
-        return false;
-    }
-    cache.pending.insert(String::from(dir));
-    true
-}
-
-pub fn store_entries(dir: &str, entries: Vec<String>) {
-    let mut cache = DIR_CACHE.lock();
-    cache.pending.remove(dir);
-    cache.entries.insert(String::from(dir), entries);
-}
-
 fn lookup_cached_dir(dir: &str) -> Vec<String> {
-    let cache = DIR_CACHE.lock();
     if dir == "/" {
         let mut top: Vec<String> = Vec::new();
-        for (d, _) in cache.entries.iter() {
+        for d in DIR_CACHE.lock().keys() {
             let seg = d.trim_start_matches('/');
             let first = match seg.split('/').next() {
                 Some(s) if !s.is_empty() => s,
@@ -92,7 +92,11 @@ fn lookup_cached_dir(dir: &str) -> Vec<String> {
         }
         return top;
     }
-    cache.entries.get(dir).cloned().unwrap_or_default()
+    if DIR_CACHE.lock().contains_key(dir) {
+        return DIR_CACHE.lock().get(dir).cloned().unwrap_or_default();
+    }
+    ensure_dir_cached(dir);
+    DIR_CACHE.lock().get(dir).cloned().unwrap_or_default()
 }
 
 // ── Pure-logic completion sources ──────────────────────────────────────────
