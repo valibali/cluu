@@ -173,37 +173,14 @@ pub fn handle_spawn(
             .alloc_pid()
             .map_err(|_| HandlerError::Eagain)?;
 
-        let mut guard = MintGuard::new(&mut state.kernel);
-        sub_mint(
-            &mut guard,
-            state.vfs_cap,
-            CapRights(0x07),
-            CapRights(CHILD_VFS_RIGHTS),
-        )
-        .map_err(|_| HandlerError::Internal("vfs"))?;
-        sub_mint(
-            &mut guard,
-            state.registry_cap,
-            CapRights(0x03),
-            CapRights(CHILD_REGISTRY_RIGHTS),
-        )
-        .map_err(|_| HandlerError::Internal("registry"))?;
-        sub_mint(
-            &mut guard,
-            state.timeserver_cap,
-            CapRights(0x01),
-            CapRights(CHILD_TIMESERVER_RIGHTS),
-        )
-        .map_err(|_| HandlerError::Internal("timeserver"))?;
-
-        let minted: Vec<u64> = guard.forget();
-
         let parent_pid = state
             .child_table
             .iter()
             .find(|c| c.child_tid == msg.sender_tid)
             .map(|c| c.pid)
             .unwrap_or(0);
+
+        let minted: Vec<u64> = Vec::new();
 
         match crate::elf_spawn::begin_spawn(state, pid, &req, msg.sender_tid) {
             Ok(crate::elf_spawn::BeginSpawnResult::Complete(result)) => {
@@ -222,6 +199,7 @@ pub fn handle_spawn(
                     notify_ep: req.notify.unwrap_or(0),
                     parent_pid,
                 });
+                register_child_with_root(state, pid as u32);
                 let reply = SpawnReply { pid, cookie: result.cookie };
                 let bytes = postcard::to_allocvec(&reply)
                     .map_err(|_| HandlerError::Internal("postcard"))?;
@@ -245,6 +223,24 @@ pub fn handle_spawn(
             }
         }
     }
+}
+
+#[cfg(not(feature = "host-test"))]
+pub fn register_child_with_root(state: &SessionState, child_pid: u32) {
+    if state.session_token == 0 {
+        return;
+    }
+    let root_session_ep = match libcluu::registry::lookup_service("root-procmgr:session") {
+        Some(ep) => ep,
+        None => return,
+    };
+    let msg = libcluu::types::Message::new(
+        cluu_wire::session::PROCMGR_SESSION_CHILD_REGISTER_LABEL,
+        [child_pid as usize, state.sid as usize, state.session_token as usize, 0, 0, 0],
+        0,
+    );
+    let mut reply_buf = [0u8; 128];
+    let _ = libcluu::ipc::call_with_reply_buf(root_session_ep, &msg, &[], &mut reply_buf);
 }
 
 #[cfg(test)]
