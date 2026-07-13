@@ -153,7 +153,7 @@ impl PluginRegistry {
         let (sw, sr) = create_pipe().ok_or(String::from("pipe1"))?;
         let (ow, or_) = create_pipe().ok_or(String::from("pipe2"))?;
         let env = SpawnEnvelope {
-            image: String::from("edit-plugin"),
+            image: String::from("micropython"),
             args: alloc::vec![String::from("micropython"), String::from("-c"), script],
             env: Vec::new(),
             view: ViewSource::Derive(libcluu::token(TOKEN_EXTRA_0) as u64),
