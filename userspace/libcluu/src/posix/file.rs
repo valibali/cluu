@@ -413,7 +413,7 @@ fn write_tty(endpoint: usize, buffer: &[u8]) -> ssize_t {
     }
 }
 
-fn ensure_grant_buffer() -> Option<usize> {
+pub fn ensure_grant_buffer() -> Option<usize> {
     if GRANT_BUF_READY.load(Ordering::SeqCst) {
         return Some(GRANT_BUF_BASE);
     }

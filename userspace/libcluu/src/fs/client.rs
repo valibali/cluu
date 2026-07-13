@@ -9,6 +9,7 @@ use crate::fs::protocol::{
     VFS_READDIR, VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP,
     VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
 };
+use crate::async_runtime::IpcCallFuture;
 use crate::ipc::{self, make_payload_message};
 use crate::types::Message;
 use alloc::string::String;
@@ -152,6 +153,10 @@ impl VfsClient {
 
     pub fn client_id(&self) -> usize {
         self.client_id
+    }
+
+    pub fn endpoint(&self) -> usize {
+        self.endpoint
     }
 
     pub fn new_from_registry(endpoint: usize) -> Result<Self> {
@@ -369,6 +374,65 @@ impl VfsClient {
         };
 
         Ok(entries)
+    }
+
+    /// Create an `IpcCallFuture` for an async VFS_READDIR call.
+    /// Must be called from within a `Runtime::poll_ready` context (i.e.,
+    /// inside a spawned async task). The returned future resolves to
+    /// `(Message, Vec<u8>)` — use `parse_readdir_async_reply` to decode.
+    pub fn readdir_async(&self, path: &str) -> IpcCallFuture {
+        let payload = path.as_bytes();
+        let mut msg = make_payload_message(VFS_READDIR, payload.len(), &[self.client_id]);
+        IpcCallFuture::new_with_payload(self.endpoint, &mut msg, payload)
+    }
+
+    /// Parse the reply from a `readdir_async` call. Inline replies only;
+    /// returns `BufferTooSmall` if the server used a bounce buffer.
+    pub fn parse_readdir_async_reply(
+        reply: &Message,
+        payload: &[u8],
+    ) -> Result<Vec<VfsDirEntry>> {
+        parse_status(reply.words[1])?;
+        let entry_count = reply.words[2];
+        let bounce_flag = reply.words[3];
+        if bounce_flag != 0 {
+            return Err(Error::BufferTooSmall);
+        }
+        Ok(parse_readdir_blob(payload, entry_count))
+    }
+
+    /// Create an `IpcCallFuture` for an async VFS_READ_GRANT call.
+    /// Same runtime constraint as `readdir_async`. The reply carries
+    /// `[status, len, offset]` in words; actual data is in the caller's
+    /// grant buffer at `target_base + offset`.
+    pub fn read_grant_async(
+        &self,
+        file: VfsFile,
+        offset: usize,
+        len: usize,
+        target_space_token: usize,
+        target_base: usize,
+    ) -> IpcCallFuture {
+        let mut payload = [0u8; core::mem::size_of::<usize>() * 2];
+        payload[..core::mem::size_of::<usize>()].copy_from_slice(&target_base.to_ne_bytes());
+        payload[core::mem::size_of::<usize>()..]
+            .copy_from_slice(&target_space_token.to_ne_bytes());
+        let mut msg = make_payload_message(
+            VFS_READ_GRANT,
+            payload.len(),
+            &[self.client_id, file.fd, offset, len],
+        );
+        IpcCallFuture::new_with_payload(self.endpoint, &mut msg, &payload)
+    }
+
+    /// Parse the reply from a `read_grant_async` call.
+    pub fn parse_read_grant_async_reply(reply: &Message, target_base: usize) -> Result<VfsGrant> {
+        parse_status(reply.words[0])?;
+        Ok(VfsGrant {
+            base: target_base,
+            offset: reply.words[2],
+            len: reply.words[1],
+        })
     }
 
     /// Write data to a file.
