@@ -426,20 +426,19 @@ called by cluuterm and explicitly dropped by `userspace/tty/`. The
 retired recv-on-stdin-endpoint mechanism meant the shell only saw
 complete lines and couldn't react to mid-line TAB.
 
-The fix is a synchronous RPC from cluuterm to a shell pthread, with a
-stateless handler. Key decisions:
+The fix is a synchronous RPC from cluuterm to the shell's completion
+endpoint, handled inline by the shell's async main loop. Key decisions:
 
 - **`LineDiscOutput::TabRequest { line, cursor, consecutive_tabs }`**
   — new variant. TAB branch in `feed_byte` does NOT insert into
   `pending_line`, does NOT echo; emits `TabRequest`. `consecutive_tabs`
   resets to 0 on any non-TAB byte.
-- **Shell pthread** — dedicated thread sidesteps the fact that the
-  shell main loop blocks in `_read(0)` (POSIX, VFS-backed) and can't
-  multiplex on a stdin endpoint without reverting Path A. The handler
-  is **stateless**: reads cwd (`current_dir_string()`), PATH
-  (`snapshot_env()`), and VFS endpoint fresh on each query. Only
-  shared data is `BuiltinRegistry` (immutable after startup) and VFS
-  send token (immutable). No mutex required.
+- **Async main loop** — the shell uses `libcluu::async_runtime::Runtime`
+  with `ipc_recv_any` on `[completion_ep, reply_ep]`. Completion queries
+  are handled inline; no separate thread. This replaced the earlier
+  pthread approach which had no VFS view and couldn't call
+  `vfs.readdir` directly. The async runtime gives the shell's main
+  thread full VFS access for lazy cache population.
 - **Completion sources** (priority order for bare word with no slash):
   builtin command names → PATH executables → (filenames only when word
   contains a slash). Word WITH slash: filename completion only.
@@ -457,16 +456,20 @@ stateless handler. Key decisions:
   startup (namespaced by session id, no collision). cluuterm reads
   `CLUU_SESSION_ID` from spawn env (passed by session-procmgr), looks
   up the endpoint lazily on first TAB, caches it.
-- **Directory cache** (`populate_dir_cache`): pre-caches common dirs at
-  shell startup. The list is `$HOME`-aware — base dirs (`/bin`, `/etc`,
-  `/dev`, `/tmp`, `/home`) plus `$HOME` from env. `/var` and
-  `/var/images` are probed but fail silently for non-supervisor views
-  (correct capability-scoped behavior — the VFS view doesn't mount
-  `/var` for USER/ADMIN profiles). Hardcoding `/home/root` broke
-  completion for non-root users.
-- **`BuiltinRegistry` lifetime**: current per-line rebuild must change
-  to a single long-lived build (`Box::leak` or `&'static`) so the
-  pthread can reference it.
+- **Lazy directory cache** — `DirCache` (`BTreeMap<String, Vec<String>>`
+  + `BTreeSet<String>` pending set, behind `spin::Mutex`). At startup,
+  the shell spawns async `readdir` tasks for `/bin`, `/etc`, `/dev`,
+  `/tmp`, `/home`, `$HOME`, `/var`, `/var/images`. Cache is populated
+  as replies arrive; queries against uncached dirs return empty (not a
+  hang). `/var` probes fail silently for non-supervisor views (correct
+  capability-scoped behavior). The lock is never held across an
+  `.await` — contention is impossible in the single-threaded runtime.
+- **Stdin reads** — the shell spawns a continuous async task that
+  calls `VfsClient::read_grant_async()` on fd 0 and pushes `StdinRead`
+  completions to the runtime. The main loop drains these and processes
+  lines. This replaced the blocking `_read(0)` loop.
+- **`BuiltinRegistry` lifetime**: built once at startup via
+  `Box::leak` and shared by the main loop and completion handler.
 - **Bounded timeout**: cluuterm uses `call_with_reply_buf` with a
   timeout; on timeout, bell + continue. Don't hang the terminal if the
   shell is slow.

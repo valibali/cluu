@@ -46,6 +46,19 @@ single-threaded VFS: `ProcfsBackend` and the PTS-verb dispatch arms go through
 `dispatch_async()` so VFS never blocks on a downstream IPC that itself needs
 VFS.
 
+### Async caller support
+
+Since 2026-07-13, VFS supports async callers (e.g., the shell) alongside
+sync callers. `handle_read_grant` and `handle_readdir` use
+`ipc::reply_to_sender` / `reply_to_sender_with_payload` which check
+`msg.tag.extra == ASYNC_REPLY_TAG`: if set, the reply is sent via
+`ipc::send` to the caller's reply endpoint with the correlation cookie;
+otherwise, the normal `ipc::reply` path is used. The PTS read-grant path
+parks the caller's reply info (`reply_ep` + `cookie` for async,
+`reply_token` for sync) in `ParkedRead` and uses `reply_parked()` when
+cluuterm delivers bytes. This lets the shell use `IpcCallFuture` for
+stdin reads and readdir without blocking its single-threaded event loop.
+
 ## VfsOp
 
 The `VfsOp` enum defines every filesystem operation:

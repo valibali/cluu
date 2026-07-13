@@ -328,10 +328,18 @@ allocates fd table entries after an async open completes.
 
 ### Usage
 
-VFS (`userspace/vfs/src/main.rs`) and session-procmgr use the async runtime.
-devmgr stays sync (leaf service, no downstream IPC). The sync `MountBackend`
-trait remains for in-process backends (memfs, ext2-via-remote cached reads,
+VFS (`userspace/vfs/src/main.rs`), session-procmgr, and the shell
+(`userspace/shell/src/main.rs`) use the async runtime. devmgr stays
+sync (leaf service, no downstream IPC). The sync `MountBackend` trait
+remains for in-process backends (memfs, ext2-via-remote cached reads,
 devfs null/zero/urandom) that never cross a process boundary.
+
+The shell adopted the async runtime on 2026-07-13, replacing a
+pthread-based completion thread that lacked a VFS view. The shell's
+main loop uses `ipc_recv_any` on `[completion_ep, reply_ep]`, spawns
+async `readdir` tasks for cache warming, and reads stdin via
+`read_grant_async` — all on a single thread with no locks held across
+yield points.
 
 ## EHCI interrupt polling (no threading)
 
