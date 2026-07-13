@@ -132,6 +132,9 @@ enum Commands {
         /// Build UI mode when used with --build
         #[arg(long, value_enum, default_value_t = BuildUi::Rich)]
         ui: BuildUi,
+        /// Pin QEMU to a specific host CPU core (e.g. --pin-core 3)
+        #[arg(long)]
+        pin_core: Option<usize>,
     },
     /// Run all tests
     Test,
@@ -288,11 +291,12 @@ fn main() -> Result<()> {
             profile,
             debug,
             ui,
+            pin_core,
         } => {
             if build {
                 build_pipeline(&profile, ui)?;
             }
-            run_qemu(debug)?;
+            run_qemu(debug, pin_core)?;
         }
         Commands::Test => {
             run_tests()?;
@@ -2110,7 +2114,7 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_qemu(debug: bool) -> Result<()> {
+fn run_qemu(debug: bool, pin_core: Option<usize>) -> Result<()> {
     let img_path = project_root().join("target/cluu.img");
     let user_disk = project_root().join("target/userdisk.img");
 
@@ -2139,7 +2143,14 @@ fn run_qemu(debug: bool) -> Result<()> {
         .find(|p| PathBuf::from(p).exists())
         .context("OVMF.fd not found. Install ovmf package.")?;
 
-    let mut cmd = Command::new("qemu-system-x86_64");
+    let mut cmd = if let Some(core) = pin_core {
+        println!("▸ Pinning QEMU to host CPU core {}", core);
+        let mut c = Command::new("taskset");
+        c.args(["-c", &core.to_string(), "qemu-system-x86_64"]);
+        c
+    } else {
+        Command::new("qemu-system-x86_64")
+    };
 
     // KVM acceleration with host CPU for accurate instruction behavior
     // This exposes real hardware alignment requirements (SSE/AVX)
