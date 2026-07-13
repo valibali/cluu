@@ -153,9 +153,9 @@ class HarnessConfig:
 
     # Boot / shell timing (safety bounds, NOT pass criterion)
     boot_wait_s: int = field(default_factory=lambda: _env_int("BOOT_WAIT", 0))
-    shell_ready_wait_s: int = field(default_factory=lambda: _env_int("SHELL_READY_WAIT", 45))
+    shell_ready_wait_s: int = field(default_factory=lambda: _env_int("SHELL_READY_WAIT", 60))
     shell_ready_wait_max_s: int = field(
-        default_factory=lambda: _env_int("SHELL_READY_WAIT_MAX", 45)
+        default_factory=lambda: _env_int("SHELL_READY_WAIT_MAX", 90)
     )
     allow_slow_shell_wait: bool = field(
         default_factory=lambda: _env_bool("ALLOW_SLOW_SHELL_WAIT")

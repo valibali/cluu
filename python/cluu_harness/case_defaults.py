@@ -32,10 +32,12 @@ class CaseDefaults:
 
 
 # Standard root/root credentials sendkey sequence. Per
-# cluu-harness-sendkey-sleep-must-match-boot, the prefix sleep is 12s
-# (kbd attaches at ~9.4s, login window at ~9.8s).
+# cluu-harness-sendkey-sleep-must-match-boot — the prefix sleep must
+# exceed the login-window-ready time. Boot with full userdisk (150+
+# containers, 7 MB micropython binary) reaches login at ~16-22s; 25s
+# gives headroom for slow boots.
 _CREDS_SENDKEY_ROOT: list[str] = [
-    "sleep 12",
+    "sleep 25",
     "sendkey r", "sendkey o", "sendkey o", "sendkey t", "sendkey ret",
     "sleep 2",
     "sendkey r", "sendkey o", "sendkey o", "sendkey t", "sendkey ret",
