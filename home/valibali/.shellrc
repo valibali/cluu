@@ -1,0 +1,2 @@
+# /home/root/.shellrc — root's personal startup file.
+export PATH=/bin:/usr/bin:/home/valibali/bin

@@ -38,22 +38,29 @@ use cluu_wire::ABI_VERSION;
 static CACHE_READY: AtomicBool = AtomicBool::new(false);
 static mut DIR_CACHE: Vec<(String, Vec<String>)> = Vec::new();
 
-/// Directories to pre-cache at startup. Covers the common completion cases.
-const CACHED_DIRS: &[&str] = &[
+/// Directories always pre-cached at startup (visible in every profile's
+/// VFS view). User-specific directories ($HOME, /var, /var/images) are
+/// appended dynamically by `populate_dir_cache` based on the session's
+/// HOME and whether the view grants /var (supervisor only).
+const BASE_CACHED_DIRS: &[&str] = &[
     "/bin",
     "/etc",
     "/dev",
     "/tmp",
-    "/var",
-    "/var/images",
     "/home",
-    "/home/root",
 ];
 
 /// Called from the main thread (which has VFS access) to populate the cache.
 pub fn populate_dir_cache(vfs: &libcluu::fs::client::VfsClient) {
+    let home = crate::shellrc::home_from_env().unwrap_or_else(|| String::from("/"));
+    let mut dirs: Vec<String> = BASE_CACHED_DIRS.iter().map(|s| String::from(*s)).collect();
+    dirs.push(home.clone());
+    // /var and /var/images are only visible in the supervisor (root) view.
+    // Probe /var; if readdir succeeds the view grants it, so cache it.
+    dirs.push(String::from("/var"));
+    dirs.push(String::from("/var/images"));
     let mut cache: Vec<(String, Vec<String>)> = Vec::new();
-    for dir in CACHED_DIRS {
+    for dir in &dirs {
         match vfs.readdir(dir) {
             Ok(entries) => {
                 let names: Vec<String> = entries.iter()
