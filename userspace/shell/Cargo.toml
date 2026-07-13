@@ -12,6 +12,7 @@ cluu_wire = { path = "../cluu_wire" }
 cluu_lang = { path = "../../crates/cluu_lang", optional = true }
 procmgr-common = { path = "../libs/procmgr-common" }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+spin = { version = "0.9", default-features = false, features = ["spin_mutex"] }
 
 [features]
 default = ["lang-parser"]

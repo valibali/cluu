@@ -1,17 +1,17 @@
-//! TAB completion candidate computation + stateless thread handler.
+//! TAB completion candidate computation + lazy async directory cache.
 //!
-//! The shell main loop blocks in POSIX `_read(0)` and cannot react to
-//! mid-line TAB. A dedicated raw thread (spawned from main) blocks on
-//! `ipc_recv_any` over a registered completion endpoint and answers
-//! `SHELL_COMPLETE_QUERY_LABEL` queries from cluuterm.
+//! The shell main loop is async (libcluu::async_runtime). Completion queries
+//! arrive on the completion endpoint and are handled inline. Directory
+//! listings are fetched lazily via async VFS readdir on first TAB press —
+//! no pre-caching thread, no startup cost.
 //!
-//! VFS views are per-thread (set by session-procmgr for the main thread
-//! only). The completion thread has no VFS view, so it cannot call
-//! `vfs.readdir` directly. Instead, the main thread pre-caches directory
-//! listings at startup into a static, and the completion thread reads
-//! from that cache.
+//! # Lock safety
 //!
-//! Spec: doc/book/terminal.md §7
+//! `DIR_CACHE` uses `spin::Mutex` but is never held across an `.await`.
+//! The readdir task collects results in a local `Vec`, then locks the
+//! cache only to insert — fully synchronous, no yield point. Since the
+//! runtime is single-threaded, the lock is uncontended; it exists solely
+//! to satisfy Rust's aliasing rules for the static.
 
 extern crate alloc;
 
@@ -21,101 +21,65 @@ use alloc::vec::Vec;
 
 use crate::commands::BuiltinRegistry;
 use libcluu::types::Message;
-use libcluu::{debug_print, ipc, registry, syscall};
-use core::sync::atomic::{AtomicBool, Ordering};
+use libcluu::{debug_print, ipc};
+
+use alloc::collections::{BTreeMap, BTreeSet};
+use spin::Mutex;
 
 use cluu_wire::pts::{
     CompleteReply, CompleteRequest, SHELL_COMPLETE_QUERY_LABEL,
 };
 use cluu_wire::ABI_VERSION;
 
-// ── Directory cache ─────────────────────────────────────────────────────────
+// ── Lazy directory cache ────────────────────────────────────────────────────
 
-/// Pre-cached directory listing: path → entry names.
-/// Populated by the main thread at startup (which has VFS access).
-/// The completion thread reads from this without needing its own VFS view.
-/// Protected by a simple spinlock via CACHE_READY flag.
-static CACHE_READY: AtomicBool = AtomicBool::new(false);
-static mut DIR_CACHE: Vec<(String, Vec<String>)> = Vec::new();
+static DIR_CACHE: Mutex<DirCache> = Mutex::new(DirCache::empty());
 
-/// Directories always pre-cached at startup (visible in every profile's
-/// VFS view). User-specific directories ($HOME, /var, /var/images) are
-/// appended dynamically by `populate_dir_cache` based on the session's
-/// HOME and whether the view grants /var (supervisor only).
-const BASE_CACHED_DIRS: &[&str] = &[
-    "/bin",
-    "/etc",
-    "/dev",
-    "/tmp",
-    "/home",
-];
+struct DirCache {
+    entries: BTreeMap<String, Vec<String>>,
+    pending: BTreeSet<String>,
+}
 
-/// Called from the main thread (which has VFS access) to populate the cache.
-pub fn populate_dir_cache(vfs: &libcluu::fs::client::VfsClient) {
-    let home = crate::shellrc::home_from_env().unwrap_or_else(|| String::from("/"));
-    let mut dirs: Vec<String> = BASE_CACHED_DIRS.iter().map(|s| String::from(*s)).collect();
-    dirs.push(home.clone());
-    // /var and /var/images are only visible in the supervisor (root) view.
-    // Probe /var; if readdir succeeds the view grants it, so cache it.
-    dirs.push(String::from("/var"));
-    dirs.push(String::from("/var/images"));
-    let mut cache: Vec<(String, Vec<String>)> = Vec::new();
-    for dir in &dirs {
-        match vfs.readdir(dir) {
-            Ok(entries) => {
-                let names: Vec<String> = entries.iter()
-                    .map(|e| {
-                        if e.is_dir {
-                            format!("{}/", e.name)
-                        } else {
-                            e.name.clone()
-                        }
-                    })
-                    .collect();
-                let _ = debug_print(&format!(
-                    "completion: cached {} entries for {}",
-                    names.len(), dir
-                ));
-                cache.push((dir.to_string(), names));
-            }
-            Err(e) => {
-                let _ = debug_print(&format!(
-                    "completion: readdir {} failed: {:?}",
-                    dir, e
-                ));
-            }
+impl DirCache {
+    const fn empty() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            pending: BTreeSet::new(),
         }
     }
-    unsafe {
-        DIR_CACHE = cache;
-    }
-    CACHE_READY.store(true, Ordering::Release);
 }
 
-#[allow(static_mut_refs)]
-// rationale: DIR_CACHE is a static mut written once during populate_dir_cache
-// and read-only thereafter. The shared reference is safe under this protocol.
+const BASE_CACHED_DIRS: &[&str] = &["/bin", "/etc", "/dev", "/tmp", "/home"];
+
+pub fn initial_dirs() -> Vec<String> {
+    let home = crate::shellrc::home_from_env().unwrap_or_else(|| String::from("/"));
+    let mut dirs: Vec<String> = BASE_CACHED_DIRS.iter().map(|s| String::from(*s)).collect();
+    dirs.push(home);
+    dirs.push(String::from("/var"));
+    dirs.push(String::from("/var/images"));
+    dirs
+}
+
+pub fn mark_pending(dir: &str) -> bool {
+    let mut cache = DIR_CACHE.lock();
+    if cache.entries.contains_key(dir) || cache.pending.contains(dir) {
+        return false;
+    }
+    cache.pending.insert(String::from(dir));
+    true
+}
+
+pub fn store_entries(dir: &str, entries: Vec<String>) {
+    let mut cache = DIR_CACHE.lock();
+    cache.pending.remove(dir);
+    cache.entries.insert(String::from(dir), entries);
+}
+
 fn lookup_cached_dir(dir: &str) -> Vec<String> {
-    if !CACHE_READY.load(Ordering::Acquire) {
-        return Vec::new();
-    }
+    let cache = DIR_CACHE.lock();
     if dir == "/" {
-        return lookup_root_entries();
-    }
-    unsafe {
-        DIR_CACHE.iter()
-            .find(|(d, _)| d == dir)
-            .map(|(_, names)| names.clone())
-            .unwrap_or_default()
-    }
-}
-
-#[allow(static_mut_refs)]
-// rationale: DIR_CACHE is a static mut — see lookup_cached_dir above.
-fn lookup_root_entries() -> Vec<String> {
-    let mut top: Vec<String> = Vec::new();
-    unsafe {
-        for (d, _) in DIR_CACHE.iter() {
+        let mut top: Vec<String> = Vec::new();
+        for (d, _) in cache.entries.iter() {
             let seg = d.trim_start_matches('/');
             let first = match seg.split('/').next() {
                 Some(s) if !s.is_empty() => s,
@@ -126,15 +90,13 @@ fn lookup_root_entries() -> Vec<String> {
                 top.push(labeled);
             }
         }
+        return top;
     }
-    top
+    cache.entries.get(dir).cloned().unwrap_or_default()
 }
 
 // ── Pure-logic completion sources ──────────────────────────────────────────
 
-/// Compute completion candidates for `word`.
-/// - Word contains '/': filename completion only.
-/// - Bare word: builtin names + PATH executables, deduped.
 pub fn complete(word: &str, registry: &BuiltinRegistry) -> Vec<String> {
     if word.contains('/') {
         complete_filename(word)
@@ -226,88 +188,9 @@ fn dedup(cands: &mut Vec<String>) {
     cands.dedup();
 }
 
-// ── Raw thread infrastructure ───────────────────────────────────────────────
+// ── Completion query handler (called from main loop) ───────────────────────
 
-static mut COMPLETION_ARG: Option<(usize, &'static BuiltinRegistry)> = None;
-
-#[allow(static_mut_refs)]
-// rationale: COMPLETION_ARG is a static mut set once before thread spawn
-// and consumed via take() in the thread entry. The mutable reference is safe.
-pub extern "C" fn completion_thread_entry() -> ! {
-    let (entry_ep, registry) = unsafe {
-        match COMPLETION_ARG.take() {
-            Some(v) => v,
-            None => {
-                let _ = debug_print("completion: COMPLETION_ARG not set");
-                loop {
-                    let _ = libcluu::yield_cpu();
-                }
-            }
-        }
-    };
-    completion_thread(entry_ep, registry);
-    loop {
-        let _ = libcluu::yield_cpu();
-    }
-}
-
-pub fn spawn_completion_thread(entry_ep: usize, registry: &'static BuiltinRegistry) {
-    unsafe {
-        COMPLETION_ARG = Some((entry_ep, registry));
-    }
-
-    let space = libcluu::boot::space_token();
-
-    let (stack_base, stack_top) = match libcluu::posix::pthread::alloc_thread_stack(16) {
-        Some(s) => s,
-        None => {
-            let _ = debug_print("completion: alloc_thread_stack failed");
-            return;
-        }
-    };
-
-    match libcluu::syscall::thread_create(
-        space,
-        completion_thread_entry as *const () as usize,
-        stack_top,
-        128,
-        0,
-    ) {
-        Ok(_tid) => {
-            let _ = debug_print("completion: thread started");
-        }
-        Err(e) => {
-            let _ = debug_print(&format!("completion: thread_create failed: {:?}", e));
-            let _ = libcluu::syscall::space_unmap(space, stack_base, 16);
-        }
-    }
-}
-
-pub fn completion_thread(entry_ep: usize, registry: &'static BuiltinRegistry) {
-    let _ = debug_print("completion: entering IPC loop");
-
-    let mut buf = [0u8; 4096];
-    let tokens = [entry_ep];
-    loop {
-        let _ = registry::handle_grant_requests();
-
-        match syscall::ipc_recv_any(&tokens, &mut buf, 50) {
-            Ok((_idx, len)) => {
-                if let Some((msg, p)) = ipc::parse_message(&buf[..len]) {
-                    if msg.tag.label == SHELL_COMPLETE_QUERY_LABEL {
-                        handle_completion_query(&msg, p, registry);
-                        continue;
-                    }
-                    let _ = registry::handle_incoming_message(&msg, p);
-                }
-                continue;
-            }
-            Err(_) => continue,
-        }
-    }
-}
-
-fn handle_completion_query(
+pub fn handle_completion_query(
     msg: &Message,
     payload: &[u8],
     registry: &'static BuiltinRegistry,

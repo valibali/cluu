@@ -1109,6 +1109,7 @@ dependencies = [
  "libcluu",
  "postcard",
  "procmgr-common",
+ "spin",
 ]
 
 [[package]]

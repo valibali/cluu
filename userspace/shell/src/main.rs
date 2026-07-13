@@ -39,6 +39,11 @@ extern "C" {
 }
 
 #[cfg(feature = "lang-parser")]
+struct StdinRead {
+    data: Vec<u8>,
+}
+
+#[cfg(feature = "lang-parser")]
 static COMPLETION_EP: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "lang-parser")]
@@ -159,7 +164,6 @@ fn run() -> Result<()> {
                             "shellrc: HOME unset, skipping ~/.shellrc",
                         );
                     }
-                    completion::populate_dir_cache(&vfs);
                 }
                 Err(_) => {
                     let _ = debug_print(
@@ -213,6 +217,8 @@ fn run() -> Result<()> {
     }
 
     #[cfg(feature = "lang-parser")]
+    let mut rt = None;
+    #[cfg(feature = "lang-parser")]
     {
         let completion_ep = match libcluu::syscall::endpoint_create(
             info.tokens[libcluu::boot::TOKEN_IPC],
@@ -225,8 +231,16 @@ fn run() -> Result<()> {
         };
         if completion_ep != 0 {
             COMPLETION_EP.store(completion_ep, core::sync::atomic::Ordering::Release);
-            completion::spawn_completion_thread(completion_ep, registry);
             announce_completion_ep();
+
+            match libcluu::async_runtime::Runtime::new(info.tokens[libcluu::boot::TOKEN_IPC]) {
+                Ok(runtime) => {
+                    rt = Some(runtime);
+                }
+                Err(e) => {
+                    let _ = debug_print(&format!("shell: async runtime init failed: {:?}", e));
+                }
+            }
         }
     }
 
@@ -261,24 +275,211 @@ fn run() -> Result<()> {
     // can be reintroduced via a poll() with timeout once /dev/ttyN poll
     // semantics are wired (see plan 2026-05-14-shell-stdio-posix-unify).
     let _ = registry_endpoint; // silence warning until something needs it again
+    let _ = debug_print("shell: entering main loop");
+
+    #[cfg(feature = "lang-parser")]
+    {
+        if let Some(mut runtime) = rt {
+            return run_async_loop(
+                &mut runtime,
+                stdout,
+                stdlog,
+                &mut command_context,
+                registry,
+            );
+        }
+    }
+
+    // Fallback: blocking read(0) loop (no lang-parser or runtime init failed)
     let mut buf = [0u8; 256];
-    let _ = debug_print("shell: entering read(0) loop");
     loop {
         let n = unsafe { _read(0, buf.as_mut_ptr() as *mut core::ffi::c_void, buf.len()) };
         if n > 0 {
-            let _ = debug_print(&format!("shell: read(0) got {} bytes", n));
             handle_line_payload(stdout, stdlog, &mut command_context, &buf[..n as usize], registry)?;
-            #[cfg(feature = "lang-parser")]
-            {
-                drain_job_notifications(&mut command_context);
-                reap_done_jobs(stdout, &mut command_context);
-            }
         } else if n == 0 {
-            let _ = debug_print("shell: stdin EOF, exiting");
             return Ok(());
         } else {
-            // Negative = errno set. Yield and retry — typically transient.
             let _ = yield_cpu();
+        }
+    }
+}
+
+#[cfg(feature = "lang-parser")]
+fn run_async_loop(
+    rt: &mut libcluu::async_runtime::Runtime,
+    stdout: usize,
+    stdlog: usize,
+    command_context: &mut CommandContext,
+    registry: &'static BuiltinRegistry,
+) -> Result<()> {
+    use libcluu::fs::client::VfsClient;
+    use libcluu::ipc;
+    use libcluu::syscall::ipc_recv_any_with_sender;
+
+    let completion_ep = COMPLETION_EP.load(core::sync::atomic::Ordering::Acquire);
+    let reply_ep = rt.reply_endpoint();
+
+    let vfs_ep = match registry::subscribe_output("vfs", "main") {
+        Ok(ep) => ep,
+        Err(_) => {
+            let _ = debug_print("shell: vfs endpoint unavailable, no cache warm");
+            0
+        }
+    };
+
+    if vfs_ep != 0 {
+        let vfs = VfsClient::new_from_registry(vfs_ep).unwrap_or(VfsClient::new(vfs_ep, 0));
+        for dir in completion::initial_dirs() {
+            if completion::mark_pending(&dir) {
+                let vfs_ep = vfs.endpoint();
+                let dir_clone = dir.clone();
+                rt.spawn(async move {
+                    let client = VfsClient::new(vfs_ep, 0);
+                    let fut = client.readdir_async(&dir_clone);
+                    match fut.await {
+                        Ok((reply, payload)) => {
+                            match VfsClient::parse_readdir_async_reply(&reply, &payload) {
+                                Ok(entries) => {
+                                    let names: Vec<String> = entries.iter()
+                                        .map(|e| {
+                                            if e.is_dir {
+                                                format!("{}/", e.name)
+                                            } else {
+                                                e.name.clone()
+                                            }
+                                        })
+                                        .collect();
+                                    completion::store_entries(&dir_clone, names);
+                                }
+                                Err(e) => {
+                                    let _ = debug_print(&format!(
+                                        "completion: readdir parse {} failed: {:?}",
+                                        dir_clone, e
+                                    ));
+                                    completion::store_entries(&dir_clone, Vec::new());
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = debug_print(&format!(
+                                "completion: readdir {} failed: {:?}",
+                                dir_clone, e
+                            ));
+                            completion::store_entries(&dir_clone, Vec::new());
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    let grant_base = match libcluu::posix::ensure_grant_buffer() {
+        Some(base) => base,
+        None => {
+            let _ = debug_print("shell: grant buffer init failed, falling back to blocking read");
+            let mut buf = [0u8; 256];
+            loop {
+                let n = unsafe { _read(0, buf.as_mut_ptr() as *mut core::ffi::c_void, buf.len()) };
+                if n > 0 {
+                    handle_line_payload(stdout, stdlog, command_context, &buf[..n as usize], registry)?;
+                } else if n == 0 {
+                    return Ok(());
+                } else {
+                    let _ = yield_cpu();
+                }
+            }
+        }
+    };
+
+    let space_token = libcluu::boot::space_token();
+    let stdin_fd_entry = {
+        let table = libcluu::fd_table::FD_TABLE.lock();
+        table.get(0).cloned()
+    };
+    let stdin_entry = match stdin_fd_entry {
+        Some(e) => e,
+        None => {
+            let _ = debug_print("shell: fd 0 missing");
+            return Err(libcluu::Error::InvalidState);
+        }
+    };
+    let stdin_remote_fd = match stdin_entry.remote_fd {
+        Some(fd) => fd,
+        None => {
+            let _ = debug_print("shell: fd 0 not VFS-backed");
+            return Err(libcluu::Error::InvalidState);
+        }
+    };
+    let stdin_vfs = VfsClient::new(stdin_entry.endpoint, stdin_entry.client_id);
+    let stdin_file = libcluu::fs::client::VfsFile { fd: stdin_remote_fd, size: 0 };
+
+    rt.spawn(async move {
+        let mut offset = 0usize;
+        loop {
+            let fut = stdin_vfs.read_grant_async(stdin_file, offset, 256, space_token, grant_base);
+            match fut.await {
+                Ok((reply, _)) => {
+                    let grant = match VfsClient::parse_read_grant_async_reply(&reply, grant_base) {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+                    if grant.len == 0 {
+                        break;
+                    }
+                    let data = unsafe {
+                        core::slice::from_raw_parts(
+                            (grant.base + grant.offset) as *const u8,
+                            grant.len,
+                        )
+                    }.to_vec();
+                    offset += grant.len;
+                    libcluu::async_runtime::push_completion(StdinRead { data });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut buf = [0u8; 4096];
+    loop {
+        rt.poll_ready();
+
+        while let Some(comp) = rt.pop_completion() {
+            if let Ok(stdin_read) = comp.downcast::<StdinRead>() {
+                if stdin_read.data.is_empty() {
+                    let _ = debug_print("shell: stdin EOF, exiting");
+                    return Ok(());
+                }
+                handle_line_payload(stdout, stdlog, command_context, &stdin_read.data, registry)?;
+                drain_job_notifications(command_context);
+                reap_done_jobs(stdout, command_context);
+            }
+        }
+
+        let tokens = [completion_ep, reply_ep];
+        match ipc_recv_any_with_sender(&tokens, &mut buf, 50) {
+            Ok((0, len, _)) => {
+                if let Some((msg, payload)) = ipc::parse_message(&buf[..len]) {
+                    if msg.tag.label == cluu_wire::pts::SHELL_COMPLETE_QUERY_LABEL {
+                        completion::handle_completion_query(&msg, payload, registry);
+                    }
+                }
+            }
+            Ok((1, len, _)) => {
+                if let Some((msg, _)) = ipc::parse_message(&buf[..len]) {
+                    let cookie = msg.words[5];
+                    let payload_start = core::mem::size_of::<libcluu::types::Message>();
+                    let payload_bytes: Vec<u8> = if len > payload_start {
+                        buf[payload_start..len].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    rt.deliver_reply(cookie, msg, payload_bytes);
+                }
+            }
+            Ok(_) => {}
+            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => {}
+            Err(e) => return Err(e),
         }
     }
 }
