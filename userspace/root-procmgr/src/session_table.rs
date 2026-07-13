@@ -99,6 +99,20 @@ impl SessionTable {
         Ok((entry.session_id, entry.rights))
     }
 
+    /// Resolve a session token by possession only (no owner_pid check).
+    /// Used by session-procmgr which holds the token via envelope caps
+    /// but is not the original creator. Capability-based: possession = authority.
+    pub fn resolve_by_possession(&self, token: TokenHandle, required_rights: u32)
+        -> Result<(SessionId, u32 /* rights */), SessionErr>
+    {
+        let g = self.inner.lock();
+        let entry = g.tokens.get(&token).ok_or(SessionErr::InvalidToken)?;
+        if (entry.rights & required_rights) != required_rights {
+            return Err(SessionErr::InsufficientRights);
+        }
+        Ok((entry.session_id, entry.rights))
+    }
+
     pub fn derive_token(
         &self, parent_token: TokenHandle, caller_pid: u32, requested_rights: u32,
         recipient_pid: u32,

@@ -167,6 +167,11 @@ fn run() -> Result<()> {
         }
     };
 
+    let session_token = envelope.caps.iter()
+        .find(|(k, _)| k == "session_token")
+        .map(|(_, v)| *v)
+        .unwrap_or(0);
+
     let sid = envelope.sid;
     let _ = debug_print(&alloc::format!("session-procmgr: started sid={}", sid));
 
@@ -248,6 +253,7 @@ fn run() -> Result<()> {
         view_mgr_token,
         pg_table: spm::pg_table::PgTable::new(),
         vfs_file_cache: alloc::collections::BTreeMap::new(),
+        session_token,
     };
 
     let control_ep = registry::control_endpoint();
@@ -462,6 +468,7 @@ fn handle_spm_completion(
                         notify_ep,
                         parent_pid,
                     });
+                    spm::spawn::register_child_with_root(state, pid as u32);
                     let reply = SpawnReply { pid, cookie: result.cookie };
                     let bytes = postcard::to_allocvec(&reply).unwrap_or_default();
                     let reply = Reply::ok(procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL)

@@ -57,6 +57,7 @@ pub struct SessionState {
     pub view_mgr_token: u64,
     pub pg_table: crate::pg_table::PgTable,
     pub vfs_file_cache: BTreeMap<String, VfsFile>,
+    pub session_token: u64,
 }
 
 #[cfg(feature = "host-test")]
@@ -80,6 +81,7 @@ impl SessionState {
             view_mgr_token: 0,
             pg_table: crate::pg_table::PgTable::new(),
             vfs_file_cache: BTreeMap::new(),
+            session_token: 0,
         }
     }
 }

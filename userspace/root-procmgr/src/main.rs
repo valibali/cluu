@@ -338,7 +338,7 @@ struct ProcessManager {
     /// Container IDs that have a pending deferred restart (prevents duplicates).
     pending_restarts: BTreeSet<u64>,
     session_pmgr_endpoints: BTreeSet<usize>,
-    session_service_tids: BTreeMap<u32, alloc::vec::Vec<usize>>,
+    session_service_tokens: BTreeMap<u32, alloc::vec::Vec<usize>>,
     /// Persistent shared-ring region for VFS bulk reads. Allocated once on
     /// first `load_from_vfs_ring` and reused for every subsequent call so
     /// the VFS-side grant survives across loads.
@@ -423,7 +423,7 @@ impl ProcessManager {
             pending_timers: Vec::new(),
             pending_restarts: BTreeSet::new(),
             session_pmgr_endpoints: BTreeSet::new(),
-            session_service_tids: BTreeMap::new(),
+            session_service_tokens: BTreeMap::new(),
             login_attempts: BTreeMap::new(),
             pipes: Vec::new(),
             pg_table: PgTable::new(),
@@ -2666,6 +2666,9 @@ impl ProcessManager {
         if msg.tag.label == cluu_wire::session::PROCMGR_SESSION_SET_LEADER_LABEL {
             return self.handle_session_set_leader(msg, payload, sender_tid);
         }
+        if msg.tag.label == cluu_wire::session::PROCMGR_SESSION_CHILD_REGISTER_LABEL {
+            return self.handle_session_child_register(msg, payload, sender_tid);
+        }
         if msg.tag.label == libcluu::ipc::PROCMGR_ESCALATE_LABEL {
             return self.handle_escalate(msg, payload, sender_tid);
         }
@@ -4747,7 +4750,7 @@ impl ProcessManager {
     /// reads those raw bytes on startup and deserialises the envelope.
     ///
     /// Errors are logged but NOT fatal — the session is created regardless.
-    fn spawn_session_procmgr_for(&mut self, session_id: u32, user_name: &str, profile_name: &str) {
+    fn spawn_session_procmgr_for(&mut self, session_id: u32, user_name: &str, profile_name: &str, session_token: u64) {
         use procmgr_common::wire::SessionEnvelope;
 
         let block_region_cap = self.mint_session_block_region();
@@ -4756,6 +4759,7 @@ impl ProcessManager {
         if let Some(handle) = block_region_cap {
             caps.push(("block_region".into(), handle as u64));
         }
+        caps.push(("session_token".into(), session_token));
 
         let envelope = SessionEnvelope {
             sid: (session_id & 0xFF) as u8,
@@ -4856,11 +4860,11 @@ impl ProcessManager {
                     thread_tok, &supervisor_mounts,
                     CapProfile::SUPERVISOR, 0, 0, false, session_id as u64, 128,
                 );
-                if let Ok(tid) = thread_get_id(thread_tok) {
-                    self.session_service_tids
+                if let Ok(_tid) = thread_get_id(thread_tok) {
+                    self.session_service_tokens
                         .entry(session_id)
                         .or_default()
-                        .push(tid);
+                        .push(thread_tok);
                 }
                 let sid_byte = (session_id & 0xFF) as u8;
                 let _ = registry::request_subscription(
@@ -4998,11 +5002,11 @@ impl ProcessManager {
                     thread_tok, &mounts,
                     CapProfile::SERVICE, 0, 0, false, session_id as u64, 128,
                 );
-                if let Ok(tid) = thread_get_id(thread_tok) {
-                    self.session_service_tids
+                if let Ok(_tid) = thread_get_id(thread_tok) {
+                    self.session_service_tokens
                         .entry(session_id)
                         .or_default()
-                        .push(tid);
+                        .push(thread_tok);
                 }
                 let sid_byte = (session_id & 0xFF) as u8;
                 let _ = registry::request_subscription(
@@ -7124,7 +7128,7 @@ impl ProcessManager {
         // Caps are left empty for now; the session-procmgr initialises its
         // kernel adapter with MockKernel until Phase 12.4 wires real caps.
         let profile_name = rec.profile_name.clone();
-        self.spawn_session_procmgr_for(session_id, &req.user_name, &profile_name);
+        self.spawn_session_procmgr_for(session_id, &req.user_name, &profile_name, token);
         self.spawn_session_vfs_for(session_id, &req.user_name);
 
         let reply =
@@ -7214,6 +7218,38 @@ impl ProcessManager {
             cluu_wire::session::PROCMGR_SESSION_SET_LEADER_LABEL,
             &bytes,
         );
+        Ok(())
+    }
+
+    fn handle_session_child_register(
+        &mut self,
+        msg: &Message,
+        _payload: &[u8],
+        sender_tid: usize,
+    ) -> Result<()> {
+        let reply_id = extract_reply_id(msg);
+        let child_pid = msg.words[0] as u32;
+        let _session_id = msg.words[1] as u32;
+
+        let result = root_procmgr::session_table::SESSION_TABLE.resolve_by_possession(
+            msg.words[2] as u64,
+            cluu_wire::session::RIGHT_SESSION_CONTROL,
+        );
+        let reply_label = cluu_wire::session::PROCMGR_SESSION_CHILD_REGISTER_LABEL;
+        match result {
+            Err(e) => {
+                let reply = cluu_wire::session::SessionSetLeaderReply::Err(e);
+                let bytes = postcard::to_allocvec(&reply).expect("ser");
+                self.send_session_reply(reply_id, reply_label, &bytes);
+            }
+            Ok((sid, _)) => {
+                self.pid_to_session.insert(child_pid as usize, sid);
+                self.session_creators.insert(child_pid, sid);
+                let reply = cluu_wire::session::SessionSetLeaderReply::Ok(());
+                let bytes = postcard::to_allocvec(&reply).expect("ser");
+                self.send_session_reply(reply_id, reply_label, &bytes);
+            }
+        }
         Ok(())
     }
 
@@ -7432,9 +7468,9 @@ impl ProcessManager {
             const SIGHUP: u32 = 1;
             self.send_signal(pid, SIGHUP);
         }
-        if let Some(tids) = self.session_service_tids.remove(&sid) {
-            for tid in tids {
-                let _ = thread_destroy(tid);
+        if let Some(tokens) = self.session_service_tokens.remove(&sid) {
+            for tok in tokens {
+                let _ = thread_destroy(tok);
             }
         }
         let event = cluu_wire::session::SessionEndedEvent { session_id: sid };

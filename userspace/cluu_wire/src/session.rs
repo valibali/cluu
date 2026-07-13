@@ -16,6 +16,7 @@ pub const PROCMGR_SESSION_SUBSCRIBE_LABEL:     u32 = 92;
 pub const PROCMGR_SESSION_DERIVE_TOKEN_LABEL:  u32 = 93;
 pub const SESSION_ENDED_LABEL:                 u32 = 94;   // async event
 pub const PROCMGR_SESSION_SET_LEADER_LABEL:    u32 = 95;
+pub const PROCMGR_SESSION_CHILD_REGISTER_LABEL: u32 = 96;
 
 // Compositor:control verb (for the login → compositor handoff).
 pub const COMPOSITOR_SESSION_HANDOFF_LABEL:    u32 = 200;
