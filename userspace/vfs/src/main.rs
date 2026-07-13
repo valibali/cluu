@@ -603,14 +603,37 @@ struct FreeBlock {
 /// `PTS_READ_DELIVER_LABEL`, VFS pops this, grants the bytes into `target_base`
 /// inside `caller_space`, then replies `reply_token` to unblock the shell.
 struct ParkedRead {
-    /// Reply slot that unblocks the shell when answered.
+    /// Reply slot that unblocks the shell when answered (sync path).
     reply_token: usize,
+    /// Async reply endpoint (0 = sync call; non-zero = async IpcCallFuture caller).
+    reply_ep: usize,
+    /// Async correlation cookie (valid only when reply_ep != 0).
+    cookie: usize,
     /// Space token of the shell process (for `space_grant`).
     caller_space: usize,
     /// Grant target base address in the shell's address space.
     target_base: usize,
     /// Maximum bytes the shell requested.
     requested: usize,
+}
+
+fn reply_parked(parked: &ParkedRead, reply_msg: &Message, payload: &[u8]) -> Result<()> {
+    if parked.reply_ep != 0 {
+        let mut msg = reply_msg.clone();
+        msg.words[0] = payload.len();
+        msg.words[libcluu::ipc::ASYNC_REPLY_COOKIE_WORD] = parked.cookie;
+        if payload.is_empty() {
+            ipc::send(parked.reply_ep, &msg, IpcFlags::empty())
+        } else {
+            ipc::send_msg_with_payload(parked.reply_ep, &msg, payload)
+        }
+    } else {
+        if payload.is_empty() {
+            ipc::reply(parked.reply_token, reply_msg, IpcFlags::empty())
+        } else {
+            ipc::reply_with_payload(parked.reply_token, reply_msg, payload)
+        }
+    }
 }
 
 impl FileCache {
@@ -1925,7 +1948,7 @@ impl VfsServer {
                 "vfs: pts_read_deliver pts_id={} EOF (0 bytes)",
                 pts_id
             ));
-            return ipc::reply(parked.reply_token, &reply_msg, IpcFlags::empty());
+            return reply_parked(&parked, &reply_msg, &[]);
         }
 
         self.grant_data_to_caller(
@@ -1941,7 +1964,7 @@ impl VfsServer {
             data.len()
         ));
 
-        ipc::reply(parked.reply_token, &reply_msg, IpcFlags::empty())
+        reply_parked(&parked, &reply_msg, &[])
     }
 
     /// Proxy a PTS_* verb from a VFS client to the owning cluuterm instance.
@@ -2519,7 +2542,9 @@ impl VfsServer {
                     return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
                 }
                 // #region agent log
-                let _ = debug_print(&format!("vfs: open FAILED {:?}", err));
+                if err != Error::NotFound {
+                    let _ = debug_print(&format!("vfs: open FAILED {:?}", err));
+                }
                 // #endregion
                 reply_msg.words[0] = err.to_errno() as usize;
             }
@@ -3887,7 +3912,7 @@ impl VfsServer {
         &mut self,
         msg: &Message,
         payload: &[u8],
-        reply_token: usize,
+        _reply_token: usize,
         caller_client: Option<usize>,
         runtime: &mut Runtime,
     ) -> Result<()> {
@@ -3895,11 +3920,13 @@ impl VfsServer {
         let offset = msg.words[3];
         let requested = msg.words[4];
         let mut reply_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
+        let ep = self.endpoint;
+        let reply_simple = |rm: &Message| ipc::reply_to_sender(msg, rm, ep, IpcFlags::empty());
         let client_id = match self.resolve_client_id("read_grant", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
                 reply_msg.words[0] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return reply_simple(&reply_msg);
             }
         };
         vfs_trace!(
@@ -3912,24 +3939,24 @@ impl VfsServer {
 
         let Some((target_base, target_space)) = parse_usize_pair(payload) else {
             reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
-            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            return reply_simple(&reply_msg);
         };
 
         let Some(file) = self.files.get(client_id, fd).cloned() else {
             reply_msg.words[0] = Error::NotFound.to_errno() as usize;
-            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            return reply_simple(&reply_msg);
         };
 
         if requested == 0 {
             reply_msg.words[0] = 0;
             reply_msg.words[1] = 0;
             reply_msg.words[2] = 0;
-            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            return reply_simple(&reply_msg);
         }
 
         if target_base & (PAGE_SIZE - 1) != 0 {
             reply_msg.words[0] = Error::InvalidArgument as isize as usize;
-            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+            return reply_simple(&reply_msg);
         }
 
         match file {
@@ -4022,7 +4049,7 @@ impl VfsServer {
                     };
                     if ep == 0 {
                         reply_msg.words[0] = Error::InvalidState.to_errno() as usize;
-                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                        return reply_simple(&reply_msg);
                     }
                     let req = Message::new(
                         libcluu::ipc::TTY_READ_REQUEST_LABEL,
@@ -4037,7 +4064,7 @@ impl VfsServer {
                         };
                         libcluu::async_runtime::push_completion(
                             VfsCompletion::TtyReadGrant {
-                                reply_token,
+                                reply_token: _reply_token,
                                 target_base,
                                 target_space,
                                 result: completion,
@@ -4106,13 +4133,23 @@ impl VfsServer {
                     Some(ep) if ep != 0 => ep,
                     _ => {
                         reply_msg.words[0] = Error::NotFound.to_errno() as usize;
-                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                        return reply_simple(&reply_msg);
                     }
                 };
 
                 // Park the shell's blocked read.
+                let (reply_ep, cookie) = if msg.tag.extra == libcluu::ipc::ASYNC_REPLY_TAG {
+                    (
+                        msg.words[libcluu::ipc::ASYNC_REPLY_EP_WORD],
+                        msg.words[libcluu::ipc::ASYNC_REPLY_COOKIE_WORD],
+                    )
+                } else {
+                    (0, 0)
+                };
                 let parked = ParkedRead {
-                    reply_token,
+                    reply_token: _reply_token,
+                    reply_ep,
+                    cookie,
                     caller_space: target_space,
                     target_base,
                     requested,
@@ -4136,7 +4173,7 @@ impl VfsServer {
             }
         }
 
-        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+        reply_simple(&reply_msg)
     }
 
     fn read_grant_memory(
@@ -4835,18 +4872,20 @@ impl VfsServer {
         &mut self,
         msg: &Message,
         payload: &[u8],
-        reply_token: usize,
+        _reply_token: usize,
         caller_client: Option<usize>,
     ) -> Result<()> {
-        // Inline budget: leave room for the Message header inside IPC_MESSAGE_MAX.
         const INLINE_BUDGET: usize = 3584;
+        let ep = self.endpoint;
+        let reply_simple = |rm: &Message| ipc::reply_to_sender(msg, rm, ep, IpcFlags::empty());
+        let reply_blob = |rm: &Message, blob: &[u8]| ipc::reply_to_sender_with_payload(msg, rm, blob, ep);
 
         let mut reply_msg = Message::new(VFS_READDIR, [0; 6], 4);
         let client_id = match self.resolve_client_id("readdir", caller_client, msg.words[1]) {
             Ok(id) => id,
             Err(err) => {
                 reply_msg.words[1] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return reply_simple(&reply_msg);
             }
         };
 
@@ -4854,14 +4893,13 @@ impl VfsServer {
             Ok(path) => path,
             Err(_) => {
                 reply_msg.words[1] = Error::InvalidArgument.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return reply_simple(&reply_msg);
             }
         };
 
         let (real_path, target) = match self.view_check_path_with_target(client_id, path) {
             Ok(pt) => pt,
             Err(Error::NotFound) => {
-                // Virtual prefix dir: synthesise entries from the client's view.
                 if let Some(entries) = self.views.virtual_resolve(client_id, path) {
                     let blob = build_virtual_readdir_blob(&entries);
                     let count = entries.len();
@@ -4871,40 +4909,38 @@ impl VfsServer {
                         reply_msg.words[1] = 0;
                         reply_msg.words[2] = count;
                         reply_msg.words[3] = 0;
-                        return reply_with_payload(reply_token, &reply_msg, &blob);
+                        return reply_blob(&reply_msg, &blob);
                     }
-                    // Bounce path for large virtual listings (unlikely, but correct).
                     let bounce = match self.bounce_pool.get(client_id) {
                         Some(b) => b,
                         None => {
                             reply_msg.words[1] = Error::BufferTooSmall.to_errno() as usize;
-                            return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                            return reply_simple(&reply_msg);
                         }
                     };
                     if blob_len > bounce.bytes {
                         reply_msg.words[1] = Error::BufferTooSmall.to_errno() as usize;
-                        return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                        return reply_simple(&reply_msg);
                     }
                     let dst = bounce.source_base as *mut u8;
                     unsafe { core::ptr::copy_nonoverlapping(blob.as_ptr(), dst, blob_len) };
                     reply_msg.words[0] = blob_len;
                     reply_msg.words[1] = 0;
                     reply_msg.words[2] = count;
-                    reply_msg.words[3] = 1; // bounce_flag
-                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    reply_msg.words[3] = 1;
+                    return reply_simple(&reply_msg);
                 }
                 reply_msg.words[1] = Error::NotFound.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return reply_simple(&reply_msg);
             }
             Err(err) => {
                 reply_msg.words[1] = err.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return reply_simple(&reply_msg);
             }
         };
 
         vfs_trace!("vfs: readdir '{}'", path);
 
-        // Build blob + count.
         let (blob, count) = if let view::MountTarget::MemFs { container_id } = target {
             match self.build_readdir_blob_memfs(container_id, &real_path, client_id) {
                 Ok(blob) => {
@@ -4913,17 +4949,12 @@ impl VfsServer {
                 }
                 Err(err) => {
                     reply_msg.words[1] = err.to_errno() as usize;
-                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    return reply_simple(&reply_msg);
                 }
             }
         } else {
             match self.mounts.readdir(&real_path, client_id) {
                 Ok(mut entries) => {
-                    // Merge in any view mount whose `dst` is a direct child of
-                    // the requested logical `path`. Mirrors Unix mount semantics
-                    // (mount point name appears in parent listing) but stays
-                    // bound to the caller's view, so a USER-profile session
-                    // sees /proc but not /dev, while DEVICE sees both.
                     let parent = path.trim_end_matches('/');
                     let parent = if parent.is_empty() { "/" } else { parent };
                     let push_child = |entries: &mut alloc::vec::Vec<crate::mount::DirEntry>, name: &str| {
@@ -4946,10 +4977,6 @@ impl VfsServer {
                     let mut wildcard_view = false;
                     if let Some(view) = self.views.get_view(client_id) {
                         for m in &view.mounts {
-                            // dst="/" means the view delegates everything to
-                            // the global mount table (supervisor-style). Don't
-                            // try to merge "/" itself; flag it so the global
-                            // mount table's direct children get merged below.
                             if m.dst == "/" {
                                 wildcard_view = true;
                                 continue;
@@ -4995,27 +5022,24 @@ impl VfsServer {
                 }
                 Err(err) => {
                     reply_msg.words[1] = err.to_errno() as usize;
-                    return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                    return reply_simple(&reply_msg);
                 }
             }
         };
 
-        // Inline path: blob fits in IPC payload.
         if blob.len() <= INLINE_BUDGET {
             reply_msg.words[0] = blob.len();
             reply_msg.words[1] = 0;
             reply_msg.words[2] = count;
-            reply_msg.words[3] = 0; // bounce_flag = 0
-            return reply_with_payload(reply_token, &reply_msg, &blob);
+            reply_msg.words[3] = 0;
+            return reply_blob(&reply_msg, &blob);
         }
 
-        // Bounce path: copy into client's bounce buffer if one is set up.
-        // BufferTooSmall signals the client to call BOUNCE_SETUP and retry.
         let bounce = match self.bounce_pool.get(client_id) {
             Some(b) if blob.len() <= b.bytes => b,
             _ => {
                 reply_msg.words[1] = Error::BufferTooSmall.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return reply_simple(&reply_msg);
             }
         };
 
@@ -5029,8 +5053,8 @@ impl VfsServer {
         reply_msg.words[0] = blob.len();
         reply_msg.words[1] = 0;
         reply_msg.words[2] = count;
-        reply_msg.words[3] = 1; // bounce_flag
-        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+        reply_msg.words[3] = 1;
+        reply_simple(&reply_msg)
     }
 
     /// Build the v2-format readdir blob for a MemFs-backed mount target.
