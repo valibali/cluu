@@ -413,14 +413,16 @@ impl VfsClient {
         target_space_token: usize,
         target_base: usize,
     ) -> IpcCallFuture {
-        let mut payload = [0u8; core::mem::size_of::<usize>() * 2];
+        let mut payload = [0u8; core::mem::size_of::<usize>() * 3];
         payload[..core::mem::size_of::<usize>()].copy_from_slice(&target_base.to_ne_bytes());
-        payload[core::mem::size_of::<usize>()..]
+        payload[core::mem::size_of::<usize>()..core::mem::size_of::<usize>() * 2]
             .copy_from_slice(&target_space_token.to_ne_bytes());
+        payload[core::mem::size_of::<usize>() * 2..]
+            .copy_from_slice(&len.to_ne_bytes());
         let mut msg = make_payload_message(
             VFS_READ_GRANT,
             payload.len(),
-            &[self.client_id, file.fd, offset, len],
+            &[self.client_id, file.fd, offset],
         );
         IpcCallFuture::new_with_payload(self.endpoint, &mut msg, &payload)
     }

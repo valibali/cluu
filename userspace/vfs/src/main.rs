@@ -3918,7 +3918,20 @@ impl VfsServer {
     ) -> Result<()> {
         let fd = msg.words[2];
         let offset = msg.words[3];
-        let requested = msg.words[4];
+        let is_async = msg.tag.extra == libcluu::ipc::ASYNC_REPLY_TAG;
+        let requested = if is_async {
+            if payload.len() < core::mem::size_of::<usize>() * 3 {
+                let mut reply_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                let ep = self.endpoint;
+                return ipc::reply_to_sender(msg, &reply_msg, ep, IpcFlags::empty());
+            }
+            let mut bytes = [0u8; core::mem::size_of::<usize>()];
+            bytes.copy_from_slice(&payload[core::mem::size_of::<usize>() * 2..][..core::mem::size_of::<usize>()]);
+            usize::from_ne_bytes(bytes)
+        } else {
+            msg.words[4]
+        };
         let mut reply_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
         let ep = self.endpoint;
         let reply_simple = |rm: &Message| ipc::reply_to_sender(msg, rm, ep, IpcFlags::empty());
