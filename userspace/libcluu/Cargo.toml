@@ -17,6 +17,9 @@ postcard = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 
+[build-dependencies]
+fontdue = "0.9"
+
 [lib]
 name = "libcluu"
 crate-type = ["rlib"]

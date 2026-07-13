@@ -274,12 +274,20 @@ impl Parser {
                     self.attr.bold = true;
                     emit(Event::SetAttr(self.attr));
                 }
+                3 => {
+                    self.attr.italic = true;
+                    emit(Event::SetAttr(self.attr));
+                }
                 4 => {
                     self.attr.underline = true;
                     emit(Event::SetAttr(self.attr));
                 }
                 7 => {
                     self.attr.reverse = true;
+                    emit(Event::SetAttr(self.attr));
+                }
+                23 => {
+                    self.attr.italic = false;
                     emit(Event::SetAttr(self.attr));
                 }
                 24 => {

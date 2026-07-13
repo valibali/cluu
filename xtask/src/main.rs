@@ -2749,6 +2749,7 @@ const INIT_CRATES: &[&str] = &[
     "virtio-9p",
     "netd",
     "tpmd",
+    "usb-input",
 ];
 
 /// Build a single init primordial crate by name.

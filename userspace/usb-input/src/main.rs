@@ -18,7 +18,8 @@ use libcluu::{ipc, Result};
 
 use context::UsbInputContext;
 use layout::{
-    hid_modifiers_to_kbd, is_ctrl_alt, translate_usage, vt_switch_target, HID_USAGE_DELETE,
+    hid_modifiers_to_kbd, hid_usage_to_extended, is_ctrl_alt, pack_mods_for_ipc, translate_scancode,
+    hid_to_ps2_scancode, vt_switch_target, HID_USAGE_DELETE,
 };
 
 const DMA_BASE: usize = 0x4800_0000;
@@ -316,18 +317,27 @@ fn handle_kbd_report(ctx: &UsbInputContext, dev: &mut UsbDevice, report: &[u8]) 
             }
         }
 
-        if let Some((scancode, ascii)) = translate_usage(key, kbd_mods) {
+        let extended = hid_usage_to_extended(key);
+        let scancode = hid_to_ps2_scancode(key).unwrap_or(0);
+        let ascii = if extended != 0 {
+            0u8
+        } else {
+            translate_scancode(scancode, kbd_mods).unwrap_or(0)
+        };
+
+        if ascii != 0 || extended != 0 {
             static FIRST_KEY_LOGGED: core::sync::atomic::AtomicBool =
                 core::sync::atomic::AtomicBool::new(false);
             if !FIRST_KEY_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed) {
                 let _ = debug_print(&format!(
-                    "usb-input: first key forwarded usage=0x{:02x} scancode=0x{:02x} ascii=0x{:02x} mods=0x{:02x}",
-                    key, scancode, ascii, kbd_mods
+                    "usb-input: first key forwarded usage=0x{:02x} scancode=0x{:02x} ascii=0x{:02x} extended={} mods=0x{:02x}",
+                    key, scancode, ascii, extended, kbd_mods
                 ));
             }
+            let msg_mods = pack_mods_for_ipc(kbd_mods);
             let msg = Message::new(
                 KBD_EVENT_LABEL,
-                [0, ascii as usize, kbd_mods as usize, scancode as usize, 0, 0],
+                [0, ascii as usize, msg_mods as usize, scancode as usize, extended as usize, 0],
                 5,
             );
             ctx.forward(&msg);

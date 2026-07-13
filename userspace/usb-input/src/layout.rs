@@ -18,6 +18,23 @@ const MOD_RGUI: u8 = 1 << 7;
 pub const MOD_SHIFT: u8 = 1 << 0;
 pub const MOD_CTRL: u8 = 1 << 1;
 pub const MOD_ALT: u8 = 1 << 2;
+/// Internal-only bit: Right Alt (AltGr) is tracked separately from Left Alt
+/// so the layout tables can apply the AltGr layer. For downstream IPC
+/// messages, MOD_ALT is OR'd in when AltGr is held (matching kbd's
+/// `Modifiers::as_bits()` which packs `altgr` into `MOD_ALT`).
+pub const MOD_ALTGR: u8 = 1 << 6;
+
+/// Extended key codes for non-ASCII keys (arrows, nav). Must match
+/// `userspace/kbd/src/protocol.rs` KEY_* constants.
+pub const KEY_UP: u8 = 1;
+pub const KEY_DOWN: u8 = 2;
+pub const KEY_LEFT: u8 = 3;
+pub const KEY_RIGHT: u8 = 4;
+pub const KEY_HOME: u8 = 5;
+pub const KEY_END: u8 = 6;
+pub const KEY_DELETE: u8 = 7;
+pub const KEY_PAGE_UP: u8 = 8;
+pub const KEY_PAGE_DOWN: u8 = 9;
 
 pub fn hid_modifiers_to_kbd(hid_mods: u8) -> u8 {
     let mut out = 0u8;
@@ -27,7 +44,22 @@ pub fn hid_modifiers_to_kbd(hid_mods: u8) -> u8 {
     if hid_mods & (MOD_LCTRL | MOD_RCTRL) != 0 {
         out |= MOD_CTRL;
     }
-    if hid_mods & (MOD_LALT | MOD_RALT) != 0 {
+    if hid_mods & MOD_LALT != 0 {
+        out |= MOD_ALT;
+    }
+    if hid_mods & MOD_RALT != 0 {
+        out |= MOD_ALTGR;
+    }
+    out
+}
+
+/// Pack internal modifier bits into the downstream IPC format.
+/// AltGr (MOD_ALTGR) is folded into MOD_ALT to match kbd's
+/// `Modifiers::as_bits()` behaviour — downstream consumers (compositor
+/// hotkeys, cluuterm) only check MOD_SHIFT/MOD_CTRL/MOD_ALT.
+pub fn pack_mods_for_ipc(kbd_mods: u8) -> u8 {
+    let mut out = kbd_mods & !MOD_ALTGR;
+    if kbd_mods & MOD_ALTGR != 0 {
         out |= MOD_ALT;
     }
     out
@@ -112,16 +144,34 @@ pub fn hid_to_ps2_scancode(usage: u8) -> Option<u8> {
         0x3C => Some(0x3D), // F3
         0x3D => Some(0x3E), // F4
         0x3E => Some(0x3F), // F5
+        0x49 => Some(0x52), // Insert
+        0x4A => Some(0x47), // Home
+        0x4B => Some(0x49), // PageUp
         0x4C => Some(0x53), // Delete
-        0x4F => Some(0x47), // Home
-        0x50 => Some(0x4F), // End
-        0x51 => Some(0x51), // PageDown
-        0x52 => Some(0x49), // PageUp
-        0x4A => Some(0x48), // Up arrow
-        0x4B => Some(0x4B), // Left arrow
-        0x4D => Some(0x4D), // Right arrow
-        0x4E => Some(0x50), // Down arrow
+        0x4D => Some(0x4F), // End
+        0x4E => Some(0x51), // PageDown
+        0x4F => Some(0x4D), // Right arrow
+        0x50 => Some(0x4B), // Left arrow
+        0x51 => Some(0x50), // Down arrow
+        0x52 => Some(0x48), // Up arrow
         _ => None,
+    }
+}
+
+/// Map HID navigation key usages to extended key codes.
+/// Returns 0 for non-navigation keys.
+pub fn hid_usage_to_extended(usage: u8) -> u8 {
+    match usage {
+        0x52 => KEY_UP,
+        0x51 => KEY_DOWN,
+        0x50 => KEY_LEFT,
+        0x4F => KEY_RIGHT,
+        0x4A => KEY_HOME,
+        0x4D => KEY_END,
+        0x4C => KEY_DELETE,
+        0x4B => KEY_PAGE_UP,
+        0x4E => KEY_PAGE_DOWN,
+        _ => 0,
     }
 }
 
@@ -129,6 +179,13 @@ pub fn hid_to_ps2_scancode(usage: u8) -> Option<u8> {
 pub fn translate_scancode(scancode: u8, mods: u8) -> Option<u8> {
     let shift = mods & MOD_SHIFT != 0;
     let ctrl = mods & MOD_CTRL != 0;
+    let altgr = mods & MOD_ALTGR != 0;
+
+    if altgr {
+        if let Some(symbol) = altgr_symbol(scancode) {
+            return Some(symbol);
+        }
+    }
 
     if let Some(letter) = letter_for_scancode(scancode) {
         let uppercase = shift ^ caps_lock();
@@ -196,6 +253,17 @@ fn shifted_symbol(scancode: u8) -> Option<u8> {
     }
 }
 
+fn altgr_symbol(scancode: u8) -> Option<u8> {
+    #[cfg(feature = "hu-layout")]
+    {
+        hu_altgr_symbol(scancode).or_else(|| us_altgr_symbol(scancode))
+    }
+    #[cfg(not(feature = "hu-layout"))]
+    {
+        us_altgr_symbol(scancode)
+    }
+}
+
 // ── US QWERTY ──────────────────────────────────────────────────────
 
 fn us_letter(scancode: u8) -> Option<u8> {
@@ -241,6 +309,10 @@ fn us_shifted_symbol(scancode: u8) -> Option<u8> {
     }
 }
 
+fn us_altgr_symbol(_scancode: u8) -> Option<u8> {
+    None
+}
+
 // ── Hungarian QWERTZ ───────────────────────────────────────────────
 //
 // On a real HU keyboard the top row is 0 ' + ! " # ... and the
@@ -253,6 +325,15 @@ fn hu_letter(scancode: u8) -> Option<u8> {
     match scancode {
         0x15 => Some(b'z'),  // y position → z in QWERTZ
         0x2C => Some(b'y'),  // z position → y in QWERTZ
+        0x0B => Some(b'o'),  // ö → approximated as o
+        0x0C => Some(b'u'),  // ü → approximated as u
+        0x0D => Some(b'o'),  // ó → approximated as o
+        0x1A => Some(b'o'),  // ő → approximated as o
+        0x1B => Some(b'u'),  // ú → approximated as u
+        0x27 => Some(b'e'),  // é → approximated as e
+        0x28 => Some(b'a'),  // á → approximated as a
+        0x2B => Some(b'u'),  // ű → approximated as u
+        0x56 => Some(b'i'),  // í → approximated as i (ISO 102nd key)
         _ => None,
     }
 }
@@ -293,6 +374,54 @@ fn hu_shifted_symbol(scancode: u8) -> Option<u8> {
         0x33 => Some(b'?'),
         0x34 => Some(b':'),
         0x35 => Some(b'_'),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "hu-layout")]
+fn hu_altgr_symbol(scancode: u8) -> Option<u8> {
+    match scancode {
+        0x02 => Some(b'~'),
+        0x03 => Some(b'^'),
+        0x04 => Some(b'^'),
+        0x05 => Some(b'~'),
+        0x06 => Some(b'0'),
+        0x07 => Some(b','),
+        0x08 => Some(b'`'),
+        0x09 => Some(b'.'),
+        0x0A => Some(b'\''),
+        0x0B => Some(b'"'),
+        0x0C => Some(b'"'),
+        0x0D => Some(b','),
+        0x10 => Some(b'\\'),
+        0x11 => Some(b'|'),
+        0x12 => Some(b'A'),
+        0x16 => Some(b'E'),
+        0x17 => Some(b'I'),
+        0x1A => Some(b'/'),
+        0x1B => Some(b'*'),
+        0x1E => Some(b'a'),
+        0x1F => Some(b'd'),
+        0x20 => Some(b'D'),
+        0x21 => Some(b'['),
+        0x22 => Some(b']'),
+        0x24 => Some(b'i'),
+        0x25 => Some(b'l'),
+        0x26 => Some(b'L'),
+        0x27 => Some(b'$'),
+        0x28 => Some(b's'),
+        0x2B => Some(b'$'),
+        0x56 => Some(b'<'),
+        0x32 => Some(b'<'),
+        0x33 => Some(b';'),
+        0x34 => Some(b'>'),
+        0x35 => Some(b'*'),
+        0x2C => Some(b'>'),
+        0x2D => Some(b'#'),
+        0x2E => Some(b'&'),
+        0x2F => Some(b'@'),
+        0x30 => Some(b'{'),
+        0x31 => Some(b'}'),
         _ => None,
     }
 }

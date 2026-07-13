@@ -113,9 +113,11 @@ impl Compositor {
                 let cp = (cell & 0x1F_FFFF) as u32;
                 let fg_idx = ((cell >> 21) & 0xFF) as u8;
                 let bg_idx = ((cell >> 29) & 0xFF) as u8;
-                let attrs = ((cell >> 37) & 0x07) as u8;
-                let underline = (attrs & 0b010) != 0;
-                let reverse = (attrs & 0b100) != 0;
+                let attrs = ((cell >> 37) & 0x0F) as u8;
+                let bold = (attrs & 0b0001) != 0;
+                let underline = (attrs & 0b0010) != 0;
+                let reverse = (attrs & 0b0100) != 0;
+                let italic = (attrs & 0b1000) != 0;
                 let mut fg = self.palette[fg_idx as usize];
                 let mut bg = self.palette[bg_idx as usize];
                 if reverse {
@@ -125,15 +127,14 @@ impl Compositor {
                 // Map Unicode → CP437 → font byte. Codepoints outside
                 // BMP-ASCII / CP437 fall back to '?' via the helper.
                 let ch = unicode_to_cp437(cp);
-                let glyph = font_glyph(ch);
+                let glyph = font_glyph_alpha(ch, bold, italic);
 
                 let px = cx * glyph_w;
                 let py = cy * glyph_h;
                 let mut row_buffer = [0u32; 8];
                 for row in 0..glyph_h {
-                    let line = glyph[row];
-                    let mask = libcluu::atlas::mask_for_byte(line);
-                    libcluu::simd::blend_row(mask, fg, bg, &mut row_buffer);
+                    let alpha_row = &glyph[row * glyph_w..(row + 1) * glyph_w];
+                    libcluu::simd::blend_alpha_row(alpha_row, fg, bg, &mut row_buffer);
                     let off = (py + row) * pitch_words + px;
                     self.backbuf[off..off + glyph_w].copy_from_slice(&row_buffer);
                 }
@@ -196,8 +197,14 @@ impl Compositor {
 fn read_tsc() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
-fn font_glyph(ch: u8) -> [u8; 16] {
-    libcluu::font::glyph_for_cp437(ch)
+fn font_glyph_alpha(ch: u8, bold: bool, italic: bool) -> [u8; 128] {
+    if italic {
+        libcluu::font::glyph_alpha_for_cp437_italic(ch)
+    } else if bold {
+        libcluu::font::glyph_alpha_for_cp437_bold(ch)
+    } else {
+        libcluu::font::glyph_alpha_for_cp437(ch)
+    }
 }
 
 fn unicode_to_cp437(cp: u32) -> u8 {

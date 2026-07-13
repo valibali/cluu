@@ -21,6 +21,7 @@ pub struct Style {
     pub fg: Option<u8>,
     pub bg: Option<u8>,
     pub bold: bool,
+    pub italic: bool,
     pub underline: bool,
     pub reverse: bool,
 }
@@ -32,14 +33,14 @@ impl Style {
     pub fn fg(mut self, fg: u8) -> Self { self.fg = Some(fg); self }
     pub fn bg(mut self, bg: u8) -> Self { self.bg = Some(bg); self }
     pub fn bold(mut self) -> Self { self.bold = true; self }
+    pub fn italic(mut self) -> Self { self.italic = true; self }
     pub fn underline(mut self) -> Self { self.underline = true; self }
     pub fn reverse(mut self) -> Self { self.reverse = true; self }
 
-    /// SGR escape: always begins with reset `\x1b[0`, appends `;1`;`;4`;`;7`;
-    /// `;38;5;N` (fg); `;48;5;N` (bg), then `m`. Empty style -> `\x1b[0m`.
     pub fn to_sgr(&self) -> String {
         let mut s = String::from("\x1b[0");
         if self.bold { s.push_str(";1"); }
+        if self.italic { s.push_str(";3"); }
         if self.underline { s.push_str(";4"); }
         if self.reverse { s.push_str(";7"); }
         if let Some(fg) = self.fg { s.push_str(&format!(";38;5;{}", fg)); }

@@ -21,12 +21,12 @@ const PAD_RIGHT: u16 = 1;
 /// Default desktop background cell: codepoint 0x20 (space), fg 0, bg 0.
 pub const BG_CELL: u64 = pack_cell(b' ' as u32, 0, 0, 0);
 
-/// Pack `(codepoint:21, fg:8, bg:8, attrs:3)` into a single u64.
+/// Pack `(codepoint:21, fg:8, bg:8, attrs:4)` into a single u64.
 pub const fn pack_cell(cp: u32, fg: u8, bg: u8, attrs: u8) -> u64 {
     (cp as u64 & 0x1F_FFFF)
         | ((fg as u64 & 0xFF) << 21)
         | ((bg as u64 & 0xFF) << 29)
-        | ((attrs as u64 & 0x07) << 37)
+        | ((attrs as u64 & 0x0F) << 37)
 }
 
 /// Walk the compositor's dirty cell list and refresh `cell_grid` accordingly.
@@ -266,7 +266,7 @@ fn read_shm_cell(win: &Window, ix: u16, iy: u16, focused: bool) -> u64 {
             let cp    = cell & 0x1F_FFFF;
             let fg    = (cell >> 21) & 0xFF;
             let bg    = (cell >> 29) & 0xFF;
-            let attrs = (cell >> 37) & 0x07;
+            let attrs = (cell >> 37) & 0x0F;
             return cp | (bg << 21) | (fg << 29) | (attrs << 37);
         }
     }

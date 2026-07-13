@@ -303,10 +303,13 @@ fn reply_err(original_msg: &Message, label: u32, err: PtsErr) {
 
 // ── Terminal cell-grid + rendering (preserved from original) ─────────────────
 
-/// Pack bold/underline/reverse into 3 attr bits.
-/// Bit layout: bit 0=bold, bit 1=underline, bit 2=reverse.
+/// Pack bold/italic/underline/reverse into 4 attr bits.
+/// Bit layout: bit 0=bold, bit 1=underline, bit 2=reverse, bit 3=italic.
 fn pack_attrs(a: Attr) -> u8 {
-    (a.bold as u8) | ((a.underline as u8) << 1) | ((a.reverse as u8) << 2)
+    (a.bold as u8)
+        | ((a.underline as u8) << 1)
+        | ((a.reverse as u8) << 2)
+        | ((a.italic as u8) << 3)
 }
 
 /// Encode a colour for per-cell storage. When `index` is `Some(n)`, the

@@ -775,25 +775,13 @@ fn render_glyph<B: ConsoleBackend>(
     fg: u32,
     bg: u32,
 ) {
-    if let Some(glyph) = shade_glyph(ch) {
-        let mut row_buffer = [0u32; GLYPH_W];
-        for (row, line) in glyph.iter().enumerate() {
-            for (col, pixel) in row_buffer.iter_mut().enumerate().take(GLYPH_W) {
-                let bit = (line >> (7 - col)) & 1;
-                *pixel = if bit != 0 { fg } else { bg };
-            }
-            backend.put_pixels_row(x * GLYPH_W, y * GLYPH_H + row, &row_buffer);
-        }
-        return;
-    }
-
-    let glyph = font_glyph(ch);
+    let glyph = font_glyph_alpha(ch);
     let px = x * GLYPH_W;
     let py = y * GLYPH_H;
     let mut row_buffer = [0u32; GLYPH_W];
-    for (row, line) in glyph.iter().enumerate() {
-        let mask = libcluu::atlas::mask_for_byte(*line);
-        libcluu::simd::blend_row(mask, fg, bg, &mut row_buffer);
+    for row in 0..GLYPH_H {
+        let alpha_row = &glyph[row * GLYPH_W..(row + 1) * GLYPH_W];
+        libcluu::simd::blend_alpha_row(alpha_row, fg, bg, &mut row_buffer);
         backend.put_pixels_row(px, py + row, &row_buffer);
     }
 }
@@ -812,31 +800,8 @@ fn render_cursor_block<B: ConsoleBackend>(
 }
 
 /// Load the glyph bitmap for a single CP437 byte value.
-fn font_glyph(ch: u8) -> [u8; GLYPH_H] {
-    if let Some(glyph) = shade_glyph(ch) {
-        return glyph;
-    }
-    libcluu::font::glyph_for_cp437(ch)
-}
-
-fn shade_glyph(ch: u8) -> Option<[u8; GLYPH_H]> {
-    match ch {
-        0xDB => Some([0xFF; GLYPH_H]),        // full block
-        0xB0 => Some(make_shade(0x88, 0x22)), // light shade
-        0xB1 => Some(make_shade(0xAA, 0x55)), // medium shade
-        0xB2 => Some(make_shade(0xEE, 0x77)), // dark shade
-        _ => None,
-    }
-}
-
-fn make_shade(a: u8, b: u8) -> [u8; GLYPH_H] {
-    let mut glyph = [0u8; GLYPH_H];
-
-    for (row, cell) in glyph.iter_mut().enumerate() {
-        *cell = if row % 2 == 0 { a } else { b };
-    }
-
-    glyph
+fn font_glyph_alpha(ch: u8) -> [u8; 128] {
+    libcluu::font::glyph_alpha_for_cp437(ch)
 }
 
 /// Map a Unicode codepoint to the closest CP437 glyph index.
