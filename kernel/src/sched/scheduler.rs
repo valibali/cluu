@@ -202,18 +202,22 @@ impl SchedulingPolicy for PriorityBitmapScheduler {
     }
 
     fn remove(&mut self, thread_id: ThreadId) {
-        // If it's the current thread, just clear current
+        // Clear current if it matches. Do NOT early-return — the thread may
+        // also be in active/expired if a prior wake_thread raced and added it
+        // while it was already self.current. Always clean all three locations
+        // to guarantee full eviction from the scheduler.
         if let Some((current_id, _)) = self.current {
             if current_id == thread_id {
                 self.current = None;
-                return;
             }
         }
 
-        // Try to remove from both arrays
-        if !self.active.remove(thread_id) {
-            self.expired.remove(thread_id);
-        }
+        // Always clean both arrays. A thread should normally be in at most one
+        // of {current, active, expired}, but a duplicate-add via wake_thread
+        // can violate that invariant; this defense-in-depth ensures remove()
+        // always fully evicts the thread.
+        self.active.remove(thread_id);
+        self.expired.remove(thread_id);
     }
 
     fn set_priority(&mut self, thread_id: ThreadId, new_priority: Priority) {
@@ -315,6 +319,29 @@ mod tests {
         assert_eq!(sched.pick_next(), Some(ThreadId::new(1)));
         sched.expire_current();
         assert_eq!(sched.pick_next(), Some(ThreadId::new(3)));
+    }
+
+    #[test]
+    fn test_remove_current_thread_also_cleans_arrays() {
+        // Regression: if a thread was in both self.current AND active (via a
+        // duplicate wake_thread.add), remove() must clean BOTH. The old
+        // early-return only cleared self.current, leaving the stale active
+        // entry — pick_next then returned a dead thread.
+        let mut sched = PriorityBitmapScheduler::new();
+
+        sched.add(ThreadId::new(1), Priority::new(100));
+        sched.pick_next(); // tid=1 is now self.current
+
+        // Simulate the duplicate-add bug: add tid=1 to active while it's
+        // already self.current (this is what wake_thread did before the fix).
+        sched.add(ThreadId::new(1), Priority::new(100));
+
+        // remove(tid=1) must evict from BOTH self.current AND active.
+        sched.remove(ThreadId::new(1));
+
+        // If the bug is present, pick_next returns tid=1 (from stale active).
+        // After the fix, active is empty and pick_next returns None.
+        assert_eq!(sched.pick_next(), None);
     }
 
     #[test]

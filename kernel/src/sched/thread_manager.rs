@@ -776,22 +776,41 @@ impl ThreadManager {
     /// (idling on IST stack is unsafe — re-entrant exceptions would clobber it).
     /// Instead, halts if no threads are available (shouldn't happen if a fault
     /// message was just sent to wake a handler).
+    ///
+    /// **Microkernel isolation invariant**: A userspace page fault must NEVER
+    /// cause the kernel to halt or enter a fault loop. This function guarantees
+    /// that the returned context belongs to a LIVE, runnable thread. Dead or
+    /// stale scheduler entries are skipped and cleaned up.
     pub fn schedule_next_from_fault() -> *const Context {
         Self::drain_pending_wake();
-        let next_id = match Self::pick_next() {
-            Some(id) => {
-                klibcluu::warn("fault_sched: next tid=");
-                klibcluu::log_dec(klibcluu::LogLevel::Warn, "", id.as_u64());
-                id
-            }
-            None => {
-                klibcluu::error("schedule_next_from_fault: no runnable threads!");
-                loop {
-                    x86_64::instructions::interrupts::enable();
-                    x86_64::instructions::hlt();
+
+        let next_id = loop {
+            let candidate = match Self::pick_next() {
+                Some(id) => id,
+                None => {
+                    klibcluu::error("schedule_next_from_fault: no runnable threads!");
+                    loop {
+                        x86_64::instructions::interrupts::enable();
+                        x86_64::instructions::hlt();
+                    }
                 }
+            };
+
+            let is_alive = Self::with_thread(candidate, |t| !t.is_dead()).unwrap_or(false);
+            if is_alive {
+                break candidate;
+            }
+
+            klibcluu::warn("fault_sched: skipping dead tid=");
+            klibcluu::log_dec(klibcluu::LogLevel::Warn, "", candidate.as_u64());
+            {
+                let mut scheduler = SCHEDULER.lock();
+                scheduler.remove(candidate);
             }
         };
+
+        klibcluu::warn("fault_sched: next tid=");
+        klibcluu::log_dec(klibcluu::LogLevel::Warn, "", next_id.as_u64());
         Self::set_current(next_id);
         let ctx = Self::get_context_ptr(next_id);
         if !ctx.is_null() {
@@ -1041,7 +1060,17 @@ impl ThreadManager {
                 }
             };
             match repo.get_mut(thread_id) {
-                Some(thread) if !thread.is_dead() && !thread.is_suspended() => {
+                // Only wake threads that are actually Blocked. Waking a Ready
+                // or Running thread would call scheduler.add() and create a
+                // duplicate entry — the thread would appear in both
+                // self.current AND active, which can cause a dead thread to be
+                // re-scheduled after mark_thread_dead (scheduler.remove only
+                // cleared self.current, not the stale active entry).
+                Some(thread)
+                    if !thread.is_dead()
+                        && !thread.is_suspended()
+                        && thread.is_blocked() =>
+                {
                     thread.make_ready();
                     thread.clear_timeout_deadline();
                     thread.woke_from_timeout = false;
@@ -1633,7 +1662,10 @@ impl ThreadManager {
             let mut repo = THREAD_REPOSITORY.lock();
             for thread_id in pending_threads {
                 if let Some(thread) = repo.get_mut(thread_id) {
-                    if !thread.is_dead() {
+                    // Only schedule if still blocked — the thread may have been
+                    // woken by another path while sitting in the pending queue.
+                    // Adding a Ready thread creates a scheduler duplicate.
+                    if !thread.is_dead() && thread.is_blocked() {
                         thread.make_ready();
                         thread.clear_timeout_deadline();
                         thread.woke_from_timeout = false;

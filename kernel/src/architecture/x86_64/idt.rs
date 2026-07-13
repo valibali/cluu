@@ -845,10 +845,6 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
     // fault — but we trust f.rsp here because we got here on the user IRQ
     // path, which means RSP was valid enough to push the iretq frame.
     if is_userspace && f.rip == cr2 && f.rip < 0x4_4000_0000 {
-        // Whichever register held the bad target tells us which call site
-        // is misbehaving. Most indirect-call patterns use RAX (Rust's
-        // default for `call rax`-style trait/closure dispatch) but the
-        // compiler is free to use any GPR. Dump them all.
         COM2.write_str("PF: GPRs at fault:\n");
         uart_hex("  rax=", f.rax);
         uart_hex("  rbx=", f.rbx);
@@ -866,40 +862,11 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
         uart_hex("  r14=", f.r14);
         uart_hex("  r15=", f.r15);
 
-        // Aliasing diagnostic: walk page tables to find any other space that
-        // maps the same physical frame as the faulting RIP page. `translate_vaddr`
-        // returns Option, so this is memory-safe even when the address isn't
-        // mapped in the faulting process.
-        use x86_64::registers::control::Cr3;
-        let faulting_root = Cr3::read_raw().0.start_address();
-        let fault_page = f.rip & !0xFFF;
-        let fault_phys = crate::elf::translate_vaddr(
-            faulting_root,
-            x86_64::VirtAddr::new(fault_page),
-        );
-        if let Some(p) = fault_phys {
-            let phys_aligned = p.as_u64() & !0xFFF;
-            uart_hex("PF: faulting page -> phys ", phys_aligned);
-            crate::mm::space_repository::for_each(|space_id, root| {
-                if root == faulting_root {
-                    return;
-                }
-                if let Some(va) = crate::elf::find_first_va_for_phys(root, phys_aligned) {
-                    COM2.write_str("PF: ALIAS in space_id=");
-                    uart_hex("", space_id.as_u64());
-                    uart_hex("PF:  -> va ", va);
-                }
-            });
-        } else {
-            COM2.write_str("PF: faulting page not mapped in this CR3\n");
-        }
-
-        // NOTE: A previous diagnostic block read 6 qwords from a hardcoded
-        // table at 0x43c968 (console-specific) and 72 qwords around f.rsp.
-        // Both could fault on unmapped pages while CR3 is the faulting
-        // process's, producing a nested kernel PF that clobbered the IST
-        // stack and halted the kernel. Removed 2026-05-15. If you need a
-        // stack walk, gate every read on a translate_vaddr Some() check.
+        // Do NOT walk page tables here. CR3 is the faulting process's, and
+        // if its page tables were torn down (space_destroy raced a stale
+        // scheduler entry), PTEs contain garbage phys addresses. phys_to_virt
+        // of garbage lands outside physmap → kernel PF → IST clobber → halt.
+        // A userspace fault must never halt the kernel.
     }
 
     // Userspace fault that can't be handled by lazy alloc
