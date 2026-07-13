@@ -39,7 +39,7 @@ Reads scancodes from the PS/2 controller (scancode set 2), decodes them via the
 HU QWERTZ keymap, and forwards key events to `vtmgr:input`.
 
 - **Layout**: Hungarian QWERTZ. Direct US scancodes produce wrong characters;
-  the HU map is in `layout.rs`.
+  the HU map is in `layout.rs`. Includes AltGr dead-key support.
 - **VT switch**: Ctrl+Alt+F1..F5 sends `VTMGR_REQUEST_VT_SWITCH_LABEL`.
 - **Shutdown**: Ctrl+Alt+Del triggers system shutdown.
 - **Scrollback**: Shift+PageUp/Down scrolls the console buffer.
@@ -48,6 +48,30 @@ HU QWERTZ keymap, and forwards key events to `vtmgr:input`.
 
 Modules: `context` (KbdContext), `layout` (keymap), `protocol` (labels),
 `scancode` (set 2 decoding).
+
+## usb-input — USB HID keyboard/mouse driver
+
+`userspace/usb-input/src/main.rs`
+
+Owns the full EHCI stack (PCI probe, reset, enumeration, interrupt IN polling).
+Translates USB HID boot-protocol keyboard reports to PS/2 scancodes + ASCII,
+then forwards key events to `inputd:input` using the same `KBD_EVENT_LABEL`
+wire format as `kbd`.
+
+- **Layout**: Hungarian QWERTZ (same tables as `kbd`, with AltGr support via
+  `MOD_ALTGR` bit). HID usage → PS/2 scancode translation in `layout.rs`
+  preserves compatibility with the compositor's PS/2-scancode hotkey matcher.
+- **Nav keys**: HID usages 0x49–0x52 (Insert/Home/PgUp/Delete/End/PgDn/
+  arrows) are mapped to extended key codes (KEY_UP..KEY_PAGE_DOWN) and
+  forwarded via `words[4]` — the same encoding `kbd` uses. The compositor
+  and tty decode these via `encode_extended()` into xterm CSI sequences.
+- **VT switch / shutdown**: Ctrl+Alt+F1..F5 and Ctrl+Alt+Del are intercepted
+  before forwarding (same as `kbd`).
+- **IPC**: Sends `KBD_EVENT_LABEL` to `inputd:input`. Mouse reports sent as
+  `MOUSE_EVENT_LABEL`.
+
+Modules: `context` (UsbInputContext, registry wiring), `layout` (HID→PS/2
+scancode + HU keymap).
 
 ## mouse — PS/2 mouse driver
 
@@ -84,6 +108,15 @@ Modules: `context` (VtmgrContext), `input_routing`.
 
 Renders text to the GPU framebuffer (not legacy VGA). Used by text VTs (1–3).
 
+- **Font**: 0xProto Nerd Font v2.502 (OFL-1.1). Rasterized at build time by
+  `libcluu/build.rs` using `fontdue` into three 8-bit alpha glyph banks
+  (Regular, Bold, Italic) — 256 glyphs × 128 bytes each = 32 KiB per variant.
+  Anti-aliased via `blend_alpha_row` (per-pixel alpha compositing). Original
+  VGA CP437 box-drawing/block-element glyphs (0xB0–0xDF) preserved in
+  `FONT_CP437_BOXES` for consistent border rendering. Arc corners (╭╮╰╯)
+  and thinned box verticals override the font for 1px stroke consistency.
+  Italic is supported end-to-end: `Attr.italic` → SGR 3/23 → 4-bit packed
+  attrs → compositor selects italic glyph bank.
 - **Glyph atlas**: pre-rendered glyphs blitted to the framebuffer via SIMD.
 - **Double buffering**: front/back buffers; flip on damage.
 - **Framebuffer**: via `/dev/fb0` (opened through VFS).
