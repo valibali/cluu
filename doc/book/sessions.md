@@ -429,17 +429,28 @@ spread across procmgr (`SessionEntry`), VFS (`PtsEntry`), and cluuterm
   leader_pid, state, refcount, subscribers, created_at }`. Member
   tracking is derived on demand by walking `ProcessEntry.session_id` —
   no redundant member list (keeps procmgr stateless per
-  `feedback_procmgr_stateless`).
+  `feedback_procmgr_stateless`). Children spawned by session-procmgr
+  (not root-procmgr) are registered via `SESSION_CHILD_REGISTER` so
+  root-procmgr's `pid_to_session` map stays consistent for
+  `SET_LEADER`'s `check_member` predicate.
 - **Session leader** is explicit via `SESSION_SET_LEADER` (set-once).
   Leader exit (clean, crash, or kill) cascades: SIGHUP to members,
   fanout `SESSION_ENDED` to subscribers, cleanup via cap revocation.
   Creator death before `SET_LEADER` also destroys the session (orphan
   protection).
-- **Verb set** (labels 82–88): `SESSION_CREATE`, `SESSION_DESTROY`,
+- **Verb set** (labels 89–96): `SESSION_CREATE`, `SESSION_DESTROY`,
   `SESSION_QUERY`, `SESSION_SUBSCRIBE`, `SESSION_DERIVE_TOKEN`,
-  `SESSION_ENDED` (async event), `SESSION_SET_LEADER`. Rights bitmask:
+  `SESSION_ENDED` (async event), `SESSION_SET_LEADER`,
+  `SESSION_CHILD_REGISTER`. Rights bitmask:
   `CONTROL | QUERY | SUBSCRIBE | JOIN`. `DERIVE_TOKEN` narrows; derived
   rights must be a strict subset — enforced in procmgr.
+  `SESSION_CHILD_REGISTER` is called by session-procmgr after each
+  successful spawn to report the child PID to root-procmgr. Root-procmgr
+  inserts the PID into `pid_to_session` so `SESSION_SET_LEADER`'s
+  `check_member` predicate succeeds for children spawned via
+  session-procmgr (which bypasses root-procmgr's spawn path). The session
+  token (RIGHT_SESSION_CONTROL) is the authority — possession proves the
+  caller received it from the session creator. No runtime ACL.
 - **Refcount discipline**: `DERIVE_TOKEN` bumps refcount; `procmgr::spawn`
   with `envelope.session = Some(token)` does NOT bump again (child
   membership tracked via `ProcessEntry.session_id`); subscriber

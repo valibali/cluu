@@ -574,3 +574,37 @@ highest-ROI cleanup during the freeze.
 **Key insight:** Do NOT add SIGWINCH handler or timeout reads — previous attempts lost keypresses. The blocking `decode()` must stay. ioctl at loop top is cheap and detects resize on next iteration.
 
 **See also:** `userspace/libtui/src/program.rs`, `userspace/libtui/src/lib.rs:57` (`Model::on_resize()`), `userspace/edit/src/main.rs` (`EditModel::on_resize()`).
+
+## session-procmgr-children-invisible-to-set-leader (2026-07-13-session-child-register)
+
+**Symptom:** `login: set_leader failed` → `userspace: exiting with error`. Login crashes after spawning cluuterm. System survives only because cluuterm was already running.
+
+**Root cause:** Root-procmgr's `set_leader` calls `check_member(leader_pid)` → `pid_to_session.get(pid)`. Session-procmgr spawns children (cluuterm, shell) but root-procmgr never learns their PIDs — they bypass root-procmgr's spawn path entirely. `pid_to_session` has no entry → `LeaderNotMember` → login treats it as fatal.
+
+**Fix:** Added `PROCMGR_SESSION_CHILD_REGISTER_LABEL` (label 96). Session-procmgr sends child PID + session token to root-procmgr after each successful spawn. Root-procmgr resolves the token via `resolve_by_possession` (capability-based — possession = authority, no owner_pid check) and inserts the PID into `pid_to_session`. The session token is passed to session-procmgr via envelope caps at spawn time.
+
+**Key insight:** This is NOT runtime ACL. `pid_to_session` is session lifecycle bookkeeping (membership tracking for exit cleanup + leader validation). Root-procmgr already maintains it for directly-spawned children. Session-procmgr children were simply missing from it.
+
+**See also:** `userspace/root-procmgr/src/main.rs` (`handle_session_child_register`), `userspace/session-procmgr/src/spawn.rs` (`register_child_with_root`), `userspace/root-procmgr/src/session_table.rs` (`resolve_by_possession`), `doc/book/sessions.md`.
+
+## session-service-tids-vs-tokens (2026-07-13-thread-destroy-token)
+
+**Symptom:** `invoke_thread_destroy: missing DESTROY right` (x2) during session teardown. Threads never get destroyed — leaked.
+
+**Root cause:** `session_service_tids` stored TIDs (from `thread_get_id()`) but `destroy_session` passed them to `thread_destroy()` which expects **token handles**. The kernel's `invoke_thread_destroy` looks up the token, checks `Rights::DESTROY` — a raw TID is not a valid token handle → `PermissionDenied`.
+
+**Fix:** Store thread **tokens** instead of TIDs. Renamed field to `session_service_tokens`. `thread_destroy(token)` now receives a valid token with `DESTROY` right (kernel mints thread tokens with `thread_full()` which includes `DESTROY`).
+
+**See also:** `userspace/root-procmgr/src/main.rs` (`spawn_session_procmgr_for`, `destroy_session`), `kernel/src/syscall/handlers.rs` (`invoke_thread_create` — mints `thread_full()` rights, `invoke_thread_destroy` — requires `DESTROY`).
+
+## dead-sub-mint-grant-warnings (2026-07-13-spawn-sub-mint)
+
+**Symptom:** `invoke_token_derive: missing GRANT right` (x2) on every session-procmgr spawn.
+
+**Root cause:** `handle_spawn` in session-procmgr called `sub_mint` on `state.vfs_cap`, `state.registry_cap`, and `state.timeserver_cap`. These caps lack `GRANT` right — they were derived by root-procmgr with `IPC_SEND | IPC_CALL` only (no GRANT). The minted caps were stored in `minted_caps` for later revocation, but `begin_spawn` does its own token derivation independently — the sub_minted caps were never used.
+
+**Fix:** Removed the 3 dead `sub_mint` calls. `minted_caps` is now an empty `Vec::new()`. Revocation still works (empty loop is a no-op).
+
+**Key insight:** The sub_mint calls were a vestige from when session-procmgr used `MockKernel` for testing. The production path (`begin_spawn`) always did its own derivation. The dead code produced kernel warnings and minted caps that were either 0 (failed) or unused.
+
+**See also:** `userspace/session-procmgr/src/spawn.rs` (`handle_spawn`), `userspace/session-procmgr/src/elf_spawn.rs` (`begin_spawn` — the real token derivation), `userspace/session-procmgr/src/cap_broker_session.rs` (`sub_mint`).

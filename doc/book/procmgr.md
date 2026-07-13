@@ -289,6 +289,12 @@ the system, not by code paths that could regress. Key decisions:
   cap-ids, drops → revoke on early return. Single happy-path
   `mem::forget(guard)` after successful start. Prevents cap leak (cap
   pointing to a half-built process).
+- **Session service teardown**: root-procmgr tracks per-session service
+  thread **tokens** (not TIDs) in `session_service_tokens`. On
+  `destroy_session`, `thread_destroy` is called with the token handle —
+  the kernel's `invoke_thread_destroy` requires a token with
+  `Rights::DESTROY`, not a raw TID. Storing TIDs caused silent
+  `missing DESTROY right` warnings and leaked threads.
 - **Testing: fresh `pm_*` suite, not legacy `l2_*`.** Coverage targets:
   C1 (statement + branch) ≥ 95% per crate; C2 (path) ≥ 90% on critical
   handlers, 100% on cap-mint paths. Mock kernel surface for unit tests

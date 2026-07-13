@@ -424,6 +424,13 @@ stateless handler. Key decisions:
   startup (namespaced by session id, no collision). cluuterm reads
   `CLUU_SESSION_ID` from spawn env (passed by session-procmgr), looks
   up the endpoint lazily on first TAB, caches it.
+- **Directory cache** (`populate_dir_cache`): pre-caches common dirs at
+  shell startup. The list is `$HOME`-aware — base dirs (`/bin`, `/etc`,
+  `/dev`, `/tmp`, `/home`) plus `$HOME` from env. `/var` and
+  `/var/images` are probed but fail silently for non-supervisor views
+  (correct capability-scoped behavior — the VFS view doesn't mount
+  `/var` for USER/ADMIN profiles). Hardcoding `/home/root` broke
+  completion for non-root users.
 - **`BuiltinRegistry` lifetime**: current per-line rebuild must change
   to a single long-lived build (`Box::leak` or `&'static`) so the
   pthread can reference it.
