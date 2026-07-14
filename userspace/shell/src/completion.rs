@@ -64,6 +64,10 @@ fn ensure_dir_cached(dir: &str) {
                 let _ = libcluu::yield_cpu();
                 continue;
             }
+            Err(libcluu::Error::NotFound) => {
+                DIR_CACHE.lock().insert(String::from(dir), Vec::new());
+                return;
+            }
             Err(e) => {
                 let _ = debug_print(&format!(
                     "completion: readdir {} failed: {:?}",

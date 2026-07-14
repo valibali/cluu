@@ -576,13 +576,13 @@ fn parse_and_execute_line(
     let line = strip_trailing_newline(payload);
     match core::str::from_utf8(line) {
         Ok(text) => {
-            // Push non-empty lines into history before execution.
-            if !text.trim().is_empty() {
-                context.history.push(String::from(text));
-                context.cmd_count += 1;
-                if context.cmd_count % 10 == 0 {
-                    crate::commands::builtins::history::save_history(context);
-                }
+            if text.trim().is_empty() {
+                return Ok(());
+            }
+            context.history.push(String::from(text));
+            context.cmd_count += 1;
+            if context.cmd_count % 10 == 0 {
+                crate::commands::builtins::history::save_history(context);
             }
             match cluu_lang::parse_program(text) {
                 Ok(ast) => {
