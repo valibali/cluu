@@ -39,14 +39,65 @@ fn main() {
     write_font_array(&mut file, "FONT_0XPROTO_REGULAR_ALPHA", &regular_data);
     write_font_array(&mut file, "FONT_0XPROTO_BOLD_ALPHA", &bold_data);
     write_font_array(&mut file, "FONT_0XPROTO_ITALIC_ALPHA", &italic_data);
+
+    write_srgb_luts();
+}
+
+fn write_srgb_luts() {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+
+    let srgb_to_linear: [u32; 256] = {
+        let mut lut = [0u32; 256];
+        for i in 0..256u32 {
+            let c = i as f64 / 255.0;
+            let lin = if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            };
+            lut[i as usize] = (lin * 255.0).round() as u32;
+        }
+        lut
+    };
+
+    let linear_to_srgb: [u8; 256] = {
+        let mut lut = [0u8; 256];
+        for i in 0..256u32 {
+            let c = i as f64 / 255.0;
+            let srgb = if c <= 0.0031308 {
+                c * 12.92
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            };
+            lut[i as usize] = (srgb * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+        lut
+    };
+
+    let srgb_path = std::path::Path::new(&out_dir).join("srgb_lut.rs");
+    let mut f = std::fs::File::create(&srgb_path).expect("failed to create srgb_lut.rs");
+    write!(f, "[").unwrap();
+    for (i, &v) in srgb_to_linear.iter().enumerate() {
+        if i % 16 == 0 { writeln!(f).unwrap(); }
+        write!(f, "{},", v).unwrap();
+    }
+    writeln!(f, "]").unwrap();
+
+    let lin_path = std::path::Path::new(&out_dir).join("linear_srgb_lut.rs");
+    let mut f = std::fs::File::create(&lin_path).expect("failed to create linear_srgb_lut.rs");
+    write!(f, "[").unwrap();
+    for (i, &v) in linear_to_srgb.iter().enumerate() {
+        if i % 16 == 0 { writeln!(f).unwrap(); }
+        write!(f, "{},", v).unwrap();
+    }
+    writeln!(f, "]").unwrap();
 }
 
 const GLYPH_W: usize = 8;
 const GLYPH_H: usize = 16;
 const GLYPH_ALPHA_SIZE: usize = GLYPH_W * GLYPH_H;
-const FONT_SIZE: f32 = 13.0;
+const FONT_SIZE: f32 = 13.5;
 const BASELINE: i32 = 13;
-const SS_FACTOR: usize = 2;
 
 fn rasterize_font(font: &Font, cp437: &[char; 256]) -> [u8; 32768] {
     let mut result = [0u8; 32768];
@@ -56,7 +107,7 @@ fn rasterize_font(font: &Font, cp437: &[char; 256]) -> [u8; 32768] {
             continue;
         }
 
-        let (metrics, bitmap) = font.rasterize(ch, FONT_SIZE * SS_FACTOR as f32);
+        let (metrics, bitmap) = font.rasterize(ch, FONT_SIZE);
         let gw = metrics.width;
         let gh = metrics.height as i32;
         if gw == 0 || gh == 0 {
@@ -64,34 +115,20 @@ fn rasterize_font(font: &Font, cp437: &[char; 256]) -> [u8; 32768] {
         }
 
         let x_start = if metrics.xmin > 0 { metrics.xmin as usize } else { 0 };
-        let y_start = BASELINE * SS_FACTOR as i32 - metrics.ymin - gh;
-
-        let mut sums = [[0u32; GLYPH_W]; GLYPH_H];
-        let mut counts = [[0u32; GLYPH_W]; GLYPH_H];
+        let y_start = BASELINE - metrics.ymin - gh;
 
         for row in 0..gh {
-            let cell_row = (y_start + row) / SS_FACTOR as i32;
+            let cell_row = y_start + row;
             if cell_row < 0 || cell_row >= GLYPH_H as i32 {
                 continue;
             }
             for col in 0..gw {
-                let cell_col = (x_start + col) / SS_FACTOR;
+                let cell_col = x_start + col;
                 if cell_col >= GLYPH_W {
-                    continue;
+                    break;
                 }
-                let cr = cell_row as usize;
-                let cc = cell_col;
-                sums[cr][cc] += bitmap[(row as usize) * gw + col] as u32;
-                counts[cr][cc] += 1;
-            }
-        }
-
-        for row in 0..GLYPH_H {
-            for col in 0..GLYPH_W {
-                if counts[row][col] > 0 {
-                    result[i * GLYPH_ALPHA_SIZE + row * GLYPH_W + col] =
-                        (sums[row][col] / counts[row][col]) as u8;
-                }
+                let alpha = bitmap[(row as usize) * gw + col];
+                result[i * GLYPH_ALPHA_SIZE + (cell_row as usize) * GLYPH_W + cell_col] = alpha;
             }
         }
     }
