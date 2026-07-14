@@ -46,6 +46,7 @@ const GLYPH_H: usize = 16;
 const GLYPH_ALPHA_SIZE: usize = GLYPH_W * GLYPH_H;
 const FONT_SIZE: f32 = 13.0;
 const BASELINE: i32 = 13;
+const SS_FACTOR: usize = 2;
 
 fn rasterize_font(font: &Font, cp437: &[char; 256]) -> [u8; 32768] {
     let mut result = [0u8; 32768];
@@ -55,7 +56,7 @@ fn rasterize_font(font: &Font, cp437: &[char; 256]) -> [u8; 32768] {
             continue;
         }
 
-        let (metrics, bitmap) = font.rasterize(ch, FONT_SIZE);
+        let (metrics, bitmap) = font.rasterize(ch, FONT_SIZE * SS_FACTOR as f32);
         let gw = metrics.width;
         let gh = metrics.height as i32;
         if gw == 0 || gh == 0 {
@@ -63,23 +64,34 @@ fn rasterize_font(font: &Font, cp437: &[char; 256]) -> [u8; 32768] {
         }
 
         let x_start = if metrics.xmin > 0 { metrics.xmin as usize } else { 0 };
+        let y_start = BASELINE * SS_FACTOR as i32 - metrics.ymin - gh;
 
-        // font coords: baseline=0, up=positive, ymin=bottom edge (negative=descender)
-        // screen coords: top=0, down=positive, baseline at row BASELINE
-        let y_start = BASELINE - metrics.ymin - gh;
+        let mut sums = [[0u32; GLYPH_W]; GLYPH_H];
+        let mut counts = [[0u32; GLYPH_W]; GLYPH_H];
 
         for row in 0..gh {
-            let cell_row = y_start + row;
+            let cell_row = (y_start + row) / SS_FACTOR as i32;
             if cell_row < 0 || cell_row >= GLYPH_H as i32 {
                 continue;
             }
             for col in 0..gw {
-                let cell_col = x_start + col;
+                let cell_col = (x_start + col) / SS_FACTOR;
                 if cell_col >= GLYPH_W {
-                    break;
+                    continue;
                 }
-                let alpha = bitmap[(row as usize) * gw + col];
-                result[i * GLYPH_ALPHA_SIZE + (cell_row as usize) * GLYPH_W + cell_col] = alpha;
+                let cr = cell_row as usize;
+                let cc = cell_col;
+                sums[cr][cc] += bitmap[(row as usize) * gw + col] as u32;
+                counts[cr][cc] += 1;
+            }
+        }
+
+        for row in 0..GLYPH_H {
+            for col in 0..GLYPH_W {
+                if counts[row][col] > 0 {
+                    result[i * GLYPH_ALPHA_SIZE + row * GLYPH_W + col] =
+                        (sums[row][col] / counts[row][col]) as u8;
+                }
             }
         }
     }
