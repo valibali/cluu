@@ -111,15 +111,15 @@ Renders text to the GPU framebuffer (not legacy VGA). Used by text VTs (1–3).
 - **Font**: 0xProto Nerd Font v2.502 (OFL-1.1). Rasterized at build time by
   `libcluu/build.rs` using `fontdue` into three 8-bit alpha glyph banks
   (Regular, Bold, Italic) — 256 glyphs × 128 bytes each = 32 KiB per variant.
-  2× supersampled antialiasing: fontdue rasterizes at 26pt, then 2×2 source
-  pixel blocks are averaged into the 8×16 output grid, producing smooth
-  intermediate alpha values at glyph edges. Runtime alpha compositing via
-  `blend_alpha_row` (per-pixel lerp, scalar). Original
-  VGA CP437 box-drawing/block-element glyphs (0xB0–0xDF) preserved in
-  `FONT_CP437_BOXES` for consistent border rendering. Arc corners (╭╮╰╯)
-  and thinned box verticals override the font for 1px stroke consistency.
-  Italic is supported end-to-end: `Attr.italic` → SGR 3/23 → 4-bit packed
-  attrs → compositor selects italic glyph bank.
+  Font size 13.5pt for optimal 0xProto stroke alignment to the 8×16 grid.
+  Gamma-correct alpha compositing via `blend_alpha_row`: fg/bg are converted
+  to linear light via compile-time sRGB LUTs, blended, then converted back
+  to sRGB. This makes glyph edges appear sharper than linear-in-sRGB
+  blending. Original VGA CP437 box-drawing/block-element glyphs (0xB0–0xDF)
+  preserved in `FONT_CP437_BOXES` for consistent border rendering. Arc
+  corners (╭╮╰╯) and thinned box verticals override the font for 1px stroke
+  consistency. Italic is supported end-to-end: `Attr.italic` → SGR 3/23 →
+  4-bit packed attrs → compositor selects italic glyph bank.
 - **Glyph atlas**: pre-rendered glyphs blitted to the framebuffer via SIMD.
 - **Double buffering**: front/back buffers; flip on damage.
 - **Framebuffer**: via `/dev/fb0` (opened through VFS).
