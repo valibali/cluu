@@ -1928,12 +1928,14 @@ fn invoke_space_get_stats(token: &Token, obj_ref: ObjectRef, _args: SyscallArgs)
 
     let result = space_repository::with_space(space_id, |space| {
         let heap_start = space.heap.start().as_u64();
+        let heap_max = space.heap.max().as_u64();
         let stack_start = space.stack.start.as_u64();
         let stack_end = stack_start + space.stack.size as u64;
         unsafe {
             crate::mm::vmm::count_user_pages(
                 space.page_table_root,
                 heap_start,
+                heap_max,
                 stack_start,
                 stack_end,
             )

@@ -1416,6 +1416,7 @@ pub unsafe fn teardown_user_pages(pml4_phys: PhysAddr) {
 pub unsafe fn count_user_pages(
     pml4_phys: PhysAddr,
     heap_start: u64,
+    heap_max: u64,
     stack_start: u64,
     stack_end: u64,
 ) -> (u16, u16, u16) {
@@ -1452,13 +1453,12 @@ pub unsafe fn count_user_pages(
                     continue;
                 }
                 if pde & pte_flags::HUGE != 0 {
-                    // 2MB huge page — count as 512 pages in appropriate region
                     let va = ((pml4_idx as u64) << 39)
                         | ((pdpt_idx as u64) << 30)
                         | ((pd_idx as u64) << 21);
                     if va >= stack_start && va < stack_end {
                         stack += 512;
-                    } else if va >= heap_start && va < stack_start {
+                    } else if va >= heap_start && va < heap_max {
                         heap += 512;
                     } else {
                         code += 512;
@@ -1480,7 +1480,7 @@ pub unsafe fn count_user_pages(
                         | ((pt_idx as u64) << 12);
                     if va >= stack_start && va < stack_end {
                         stack += 1;
-                    } else if va >= heap_start && va < stack_start {
+                    } else if va >= heap_start && va < heap_max {
                         heap += 1;
                     } else {
                         code += 1;

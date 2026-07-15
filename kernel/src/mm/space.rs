@@ -345,7 +345,16 @@ impl AddressSpace {
 
         klibcluu::trace("Copied kernel mappings to new user PML4");
 
-        Ok(Self::new(pml4_phys))
+        let mut space = Self::new(pml4_phys);
+        // Record the canonical stack region so space_get_stats /
+        // count_user_pages can classify heap pages (range
+        // [heap_start, stack_start)) correctly.  Without this,
+        // stack.start stays 0 and no page is ever counted as heap.
+        space.set_stack(
+            VirtAddr::new(layout::USER_STACK_BOTTOM),
+            layout::USER_STACK_SIZE,
+        );
+        Ok(space)
     }
 
     /// Switch to this address space
@@ -377,7 +386,7 @@ impl AddressSpace {
     pub fn is_user_accessible(&self, addr: VirtAddr) -> bool {
         self.text.contains(addr)
             || self.data.contains(addr)
-            || self.heap.contains_allocated(addr)
+            || self.heap.contains_valid(addr)
             || self.stack.contains(addr)
     }
 
@@ -477,17 +486,6 @@ impl AddressSpace {
     /// to exclude the guard page from demand paging.
     pub fn set_aslr_stack_guard_end(&mut self, guard_end: u64) {
         self.aslr_stack_guard_end = guard_end;
-    }
-
-    /// Grow the heap by the given increment
-    ///
-    /// Implements the `sbrk` system call.
-    /// Returns the new break address, or None if the increment would exceed heap limits.
-    ///
-    /// Note: Physical pages are NOT allocated here - they're allocated on first
-    /// access via the page fault handler (lazy allocation).
-    pub fn sbrk(&mut self, increment: isize) -> Option<VirtAddr> {
-        self.heap.grow(increment)
     }
 
     /// Get a reference to the heap region
