@@ -480,7 +480,7 @@ pub fn ipc_recv_any_with_sender(
                 return Err(Error::WouldBlock);
             }
             Err(Error::WouldBlock) => {
-                // Kernel woke us up after blocking, retry to actually get the message
+                crate::yield_cpu();
                 continue;
             }
             Err(err) => return Err(err),

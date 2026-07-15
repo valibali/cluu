@@ -15,6 +15,7 @@ use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp;
 use core::mem::size_of;
@@ -371,7 +372,10 @@ fn run_vfs() -> Result<()> {
         session_sid.map(|s| s as u32),
     );
     let registry_endpoint = registry::control_endpoint();
-    let mut buf = [0u8; IPC_MESSAGE_MAX];
+    // Heap-allocated IPC buffer: keeps the 4KB receive buffer off the VFS
+    // service stack (64KB), reducing stack pressure during deep handler call
+    // chains under heavy client churn (terminal flood scenario).
+    let mut buf = vec![0u8; IPC_MESSAGE_MAX].into_boxed_slice();
 
     if !is_session {
         server.preload_marked_binaries();
@@ -470,7 +474,9 @@ fn run_vfs() -> Result<()> {
                     }
                 }
             }
-            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => {}
+            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => {
+                let _ = libcluu::yield_cpu();
+            }
             Err(e) => return Err(e),
         }
     }

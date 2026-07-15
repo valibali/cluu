@@ -445,7 +445,9 @@ fn run_async_loop(
                 }
             }
             Ok(_) => {}
-            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => {}
+            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => {
+                let _ = libcluu::yield_cpu();
+            }
             Err(e) => return Err(e),
         }
     }
