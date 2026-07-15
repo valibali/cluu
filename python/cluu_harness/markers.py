@@ -385,6 +385,11 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             description="curl HTTP GET to host-side HTTP server via 10.0.2.2",
         ),
         MarkerModeSpec(
+            name="l2_curl_badurl_survive",
+            required_markers=[_TSC, _SHELL_READY, "SHELL_ALIVE"],
+            description="curl with bad URL exits cleanly, shell survives",
+        ),
+        MarkerModeSpec(
             name="l2_libtui_demo",
             required_markers=[_TSC, _SHELL_READY, "LIBTUI_DEMO_OK"],
             fail_marker=None,

@@ -49,6 +49,25 @@ def _creds() -> list[str]:
     return list(_CREDS_SENDKEY_ROOT)
 
 
+def _type_command(cmd: str) -> list[str]:
+    """Translate a command string to sendkey entries (with ret)."""
+    from cluu_harness.sendkey import command_to_sendkeys
+
+    return [f"sendkey {k}" for k in command_to_sendkeys(cmd)]
+
+
+def _build_cluuterm_flood(n: int) -> list[str]:
+    """Generate sendkey sequence to spawn n cluuterms via Ctrl+Alt+N hotkey.
+
+    Each spawn needs >500ms gap to pass the compositor debounce.
+    2s gap ensures QEMU sendkey reliably delivers each event.
+    """
+    seq: list[str] = ["sleep 3"]
+    for _ in range(n):
+        seq += ["sendkey ctrl-alt-n", "sleep 2"]
+    return seq
+
+
 # MARKER_MODE → defaults. Keep alphabetical for grep-ability.
 # When adding an entry, set sendkey_sequence_nowait=True if the case
 # injects credentials (login modal spawns before any shell — see
@@ -275,6 +294,16 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         sendkey_sequence=_creds(),
         sendkey_sequence_nowait=True,
         run_wait_s=90,
+    ),
+    "l2_curl_badurl_survive": CaseDefaults(
+        test_command=None,
+        sendkey_sequence=_creds()
+        + _build_cluuterm_flood(5)
+        + _type_command("curl 10.0.2.2:9876")
+        + ["sleep 5"]
+        + _type_command("dprint SHELL_ALIVE"),
+        sendkey_sequence_nowait=True,
+        run_wait_s=150,
     ),
     "l2_libtui_demo": CaseDefaults(
         test_command="libtui-demo",

@@ -358,6 +358,16 @@ class L2CurlBasic:
 
 
 @cluu_case(
+    "l2_curl_badurl_survive",
+    marker_mode="l2_curl_badurl_survive",
+    description="curl with bad URL exits cleanly, shell survives",
+    tags=["net", "curl", "crash"],
+)
+class L2CurlBadurlSurvive:
+    pass
+
+
+@cluu_case(
     "l2_libtui_demo",
     marker_mode="l2_libtui_demo",
     description="libtui demo renders and exits on q",

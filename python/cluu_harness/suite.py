@@ -89,7 +89,7 @@ def run_case(case: Case, cfg: HarnessConfig | None = None) -> CaseResult:
         cfg.qemu_extra_args = (existing + " " + usb_args).strip() if existing else usb_args
 
     # l2_net_boot / l2_socket_basic / l2_dhcp_ping / l2_wget / l2_curl / l2_dns: add virtio-net-pci NIC
-    if case.marker_mode in ("l2_net_boot", "l2_dhcp_ping", "l2_socket_basic", "l2_net_denied", "l2_dns_basic", "l2_wget_basic", "l2_curl_basic"):
+    if case.marker_mode in ("l2_net_boot", "l2_dhcp_ping", "l2_socket_basic", "l2_net_denied", "l2_dns_basic", "l2_wget_basic", "l2_curl_basic", "l2_curl_badurl_survive"):
         cfg.cluu_net = True
 
     http_server_proc = None
