@@ -199,6 +199,14 @@ impl ServiceWiring for ServiceKind {
                 tokens[TOKEN_EXTRA_1] = child_token;
                 tokens[TOKEN_EXTRA_2] = ctx.virtio_9p_irq_token;
             }
+            ServiceKind::VirtioNet => {
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                tokens[TOKEN_EXTRA_1] = child_token;
+                tokens[TOKEN_EXTRA_2] = ctx.virtio_net_irq_token;
+            }
+            ServiceKind::Netd => {
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+            }
             ServiceKind::Tpmd => {
                 // Tpmd uses its elevated token for MMIO mapping (via TOKEN_SPACE rights)
             }
@@ -239,6 +247,8 @@ impl ServiceWiring for ServiceKind {
             | ServiceKind::Inputd
             | ServiceKind::VirtioBlk
             | ServiceKind::Virtio9p
+            | ServiceKind::VirtioNet
+            | ServiceKind::Netd
             | ServiceKind::Devmgr
             | ServiceKind::Tpmd
             | ServiceKind::UsbInput => Ok(()),

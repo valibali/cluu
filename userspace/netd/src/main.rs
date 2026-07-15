@@ -32,7 +32,8 @@ use libcluu::ipc::{
 };
 use libcluu::registry;
 use libcluu::syscall::{
-    clock_frequency, clock_now, endpoint_create, ipc_recv_any_with_sender, ipc_recv_nonblocking,
+    clock_frequency, clock_now, endpoint_create, ipc_recv_any_with_sender,
+    ipc_recv_nonblocking,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, yield_cpu, Result};
@@ -56,6 +57,7 @@ use smoltcp::wire::{
 const ETH_MTU: usize = 1514;
 const IPC_BUF_SIZE: usize = 4096;
 const POLL_TIMEOUT_MS: u64 = 200;
+const CONNECT_TIMEOUT_MS: u32 = 10_000;
 const TCP_RX_BUF: usize = 4096;
 const TCP_TX_BUF: usize = 4096;
 const UDP_RX_BUF: usize = 2048;
@@ -159,6 +161,7 @@ fn run() -> Result<()> {
 
     let mut pending_recv: Vec<(Option<usize>, u32, usize)> = Vec::new();
     let mut pending_dns: Vec<(usize, dns::QueryHandle, u32, u32)> = Vec::new();
+    let mut pending_connect: Vec<(usize, SocketHandle, u32, u32)> = Vec::new();
 
     loop {
         runtime.poll_ready();
@@ -171,6 +174,37 @@ fn run() -> Result<()> {
         drain_tx(&mut device, &mut runtime, netdev_ep);
         runtime.poll_ready();
         while runtime.pop_completion().is_some() {}
+
+        if !pending_connect.is_empty() {
+            let now_ms = now_instant(clock_token).millis() as u32;
+            let mut still_pending = Vec::new();
+            for (rt, handle, label, start_ms) in pending_connect.drain(..) {
+                let state = {
+                    let sock = sockets.get_mut::<TcpSocket>(handle);
+                    sock.state()
+                };
+                use smoltcp::socket::tcp::State::*;
+                match state {
+                    Established => {
+                        let r = Message::new(label, [0, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(rt, &r, IpcFlags::empty());
+                    }
+                    Closed => {
+                        let r = Message::new(label, [(-22isize) as usize, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(rt, &r, IpcFlags::empty());
+                    }
+                    _ => {
+                        if now_ms.saturating_sub(start_ms) > CONNECT_TIMEOUT_MS {
+                            let r = Message::new(label, [(-110isize) as usize, 0, 0, 0, 0, 0], 1);
+                            let _ = reply(rt, &r, IpcFlags::empty());
+                        } else {
+                            still_pending.push((rt, handle, label, start_ms));
+                        }
+                    }
+                }
+            }
+            pending_connect = still_pending;
+        }
 
         poll_dhcp(&mut sockets, dhcp_handle, &mut iface);
 
@@ -362,13 +396,14 @@ fn run() -> Result<()> {
                             &mut buf,
                             &mut pending_recv,
                             &mut pending_dns,
+                            &mut pending_connect,
                         );
                     }
                     let _ = yield_cpu();
                 }
                 _ => {}
             },
-            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => {}
+            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => { let _ = libcluu::yield_cpu(); }
             Err(e) => {
                 let _ = debug_print(&format!("netd: recv error {:?}\n", e));
             }
@@ -409,7 +444,7 @@ fn run_idle(listen_ep: usize, token_self: usize) -> Result<()> {
                     }
                 }
             }
-            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => {}
+            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => { let _ = libcluu::yield_cpu(); }
             Err(e) => {
                 let _ = debug_print(&format!("netd: idle recv error {:?}\n", e));
             }
@@ -553,6 +588,7 @@ fn handle_socket_op(
     ipc_buf: &mut [u8],
     pending_recv: &mut Vec<(Option<usize>, u32, usize)>,
     pending_dns: &mut Vec<(usize, dns::QueryHandle, u32, u32)>,
+    pending_connect: &mut Vec<(usize, SocketHandle, u32, u32)>,
 ) {
     let reply_token = extract_reply_id(msg);
     let label = msg.tag.label;
@@ -647,33 +683,22 @@ fn handle_socket_op(
                     match connect_result {
                         Ok(()) => {
                             inject_loopback_arp(device);
-                            let mut connected = false;
-                            for _ in 0..200 {
-                                drain_rx_tx(device, pkt_recv_ep, netdev_ep, ipc_buf);
-                                let now = now_instant(clock_token);
-                                let _ = iface.poll(now, device, sockets);
-                                drain_rx_tx(device, pkt_recv_ep, netdev_ep, ipc_buf);
-                                let state = {
-                                    let sock = sockets.get_mut::<TcpSocket>(handle);
-                                    sock.state()
-                                };
-                                use smoltcp::socket::tcp::State::*;
-                                if state == Established || state == Closed {
-                                    connected = state == Established;
-                                    break;
-                                }
-                                let _ = yield_cpu();
+                            if let Some(rt) = reply_token {
+                                let now_ms = now_instant(clock_token).millis() as u32;
+                                pending_connect.push((rt, handle, label, now_ms));
                             }
-                            if connected { 0 } else { (-22isize) as usize }
+                            None
                         }
-                        Err(_) => (-22isize) as usize,
+                        Err(_) => Some((-22isize) as usize),
                     }
                 }
-                _ => (-22isize) as usize,
+                _ => Some((-22isize) as usize),
             };
-            if let Some(rt) = reply_token {
-                let r = Message::new(label, [status, 0, 0, 0, 0, 0], 1);
-                let _ = reply(rt, &r, IpcFlags::empty());
+            if let Some(s) = status {
+                if let Some(rt) = reply_token {
+                    let r = Message::new(label, [s, 0, 0, 0, 0, 0], 1);
+                    let _ = reply(rt, &r, IpcFlags::empty());
+                }
             }
         }
         NET_LISTEN => {

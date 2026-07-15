@@ -42,6 +42,8 @@ pub enum ServiceKind {
     Inputd,
     VirtioBlk,
     Virtio9p,
+    VirtioNet,
+    Netd,
     Tpmd,
     UsbInput,
 }
@@ -88,6 +90,17 @@ const VIRTIO9P_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
     | Rights::IRQ_ACK.bits();
 
 const VIRTIO9P_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIO9P_RIGHTS_BITS);
+
+const VIRTIONET_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
+    | Rights::SPACE_MAP.bits()
+    | Rights::IPC_SEND.bits()
+    | Rights::IPC_RECV.bits()
+    | Rights::CREATE.bits()
+    | Rights::GRANT.bits()
+    | Rights::IRQ_HANDLE.bits()
+    | Rights::IRQ_ACK.bits();
+
+const VIRTIONET_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIONET_RIGHTS_BITS);
 
 // tpmd needs MMIO mapping for TIS interface + IPC for future service
 const TPMD_RIGHTS_BITS: u32 = Rights::SPACE_MAP.bits()
@@ -193,6 +206,26 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         rights: Some(VIRTIO9P_RIGHTS),
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Virtio9p,
+        instance_id: None,
+        profile: CapProfile::SERVICE,
+    },
+    ServiceSpec {
+        name: "virtio-net",
+        path: "sys/virtio-net",
+        priority: 178,
+        rights: Some(VIRTIONET_RIGHTS),
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::VirtioNet,
+        instance_id: None,
+        profile: CapProfile::SERVICE,
+    },
+    ServiceSpec {
+        name: "netd",
+        path: "sys/netd",
+        priority: 177,
+        rights: None,
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::Netd,
         instance_id: None,
         profile: CapProfile::SERVICE,
     },

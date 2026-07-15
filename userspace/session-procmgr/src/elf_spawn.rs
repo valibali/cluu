@@ -21,7 +21,7 @@ use libcluu::boot::{
     process_info, CWD_MAX, PARAM_ARGC, PARAM_ARGV_OFFSET, PARAM_CWD_LEN, PARAM_CWD_OFFSET,
     PARAM_ENVC, PARAM_ENV_OFFSET, PARAM_FD_VFS_LEN, PARAM_FD_VFS_OFFSET, PARAM_SESSION_VFS_EP,
     PROCESS_INFO_ADDR,
-    TOKEN_CLOCK, TOKEN_IPC, TOKEN_REGISTRY, TOKEN_SELF, TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN,
+    TOKEN_CLOCK, TOKEN_EXTRA_0, TOKEN_IPC, TOKEN_REGISTRY, TOKEN_SELF, TOKEN_SPACE, TOKEN_STDERR, TOKEN_STDIN,
     TOKEN_STDLOG, TOKEN_STDOUT, TOKEN_VFS_VIEW_MGR, ProcessInfo,
 };
 use libcluu::fs::VfsClient;
@@ -405,6 +405,9 @@ pub fn finish_spawn(
     tokens[TOKEN_REGISTRY] = pending.child_registry;
     tokens[TOKEN_VFS_VIEW_MGR] = state.view_mgr_token as usize;
 
+    if let Some(ep) = libcluu::registry::lookup_service("netd:main") {
+        tokens[TOKEN_EXTRA_0] = ep;
+    }
     let mut argv_payload: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     for arg in &pending.req.argv {
         argv_payload.extend_from_slice(arg.as_bytes());
