@@ -111,22 +111,6 @@ pub trait AddressSpaceManager: Send {
     fn current(&self) -> Option<&Self::SpaceHandle>;
 }
 
-/// Page fault handler
-///
-/// This trait defines the interface for handling page faults.
-pub trait PageFaultHandler: Send {
-    /// Handle a page fault
-    ///
-    /// # Arguments
-    /// * `addr` - The virtual address that caused the fault
-    /// * `error_code` - Error code from the CPU
-    fn handle_fault(
-        &mut self,
-        addr: VirtAddr,
-        error_code: PageFaultErrorCode,
-    ) -> Result<(), PageFaultError>;
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Type Definitions
 // ═══════════════════════════════════════════════════════════════════════════

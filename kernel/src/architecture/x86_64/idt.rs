@@ -643,112 +643,6 @@ extern "C" fn gpf_with_regs(frame: *const GpfDebugFrame) -> *const Context {
     }
 }
 
-#[allow(dead_code)]
-extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: x86_64::structures::idt::PageFaultErrorCode,
-) {
-    use klibcluu::uart::COM2;
-    use x86_64::registers::control::Cr2;
-
-    #[inline(always)]
-    fn uart_hex(prefix: &str, value: u64) {
-        COM2.write_str(prefix);
-        COM2.write_str("0x");
-        let mut started = false;
-        for shift in (0..16).rev() {
-            let nibble = (value >> (shift * 4)) & 0xF;
-            if nibble != 0 || started || shift == 0 {
-                started = true;
-                let c = if nibble < 10 {
-                    b'0' + (nibble as u8)
-                } else {
-                    b'a' + ((nibble - 10) as u8)
-                };
-                COM2.write_byte(c);
-            }
-        }
-        COM2.write_str("\n");
-    }
-
-    // Read the faulting address from CR2
-    // CR2 always contains the faulting address; if invalid, system is in bad state
-    let fault_addr = match Cr2::read() {
-        Ok(addr) => addr,
-        Err(_) => {
-            COM2.write_str("[WARN]  Failed to read CR2 register (invalid fault address)\n");
-            loop {
-                x86_64::instructions::hlt();
-            }
-        }
-    };
-
-    // Extract stack frame values
-    let rip = stack_frame.instruction_pointer.as_u64();
-    let cs = stack_frame.code_segment.0 as u64;
-    let rsp = stack_frame.stack_pointer.as_u64();
-    let ss = stack_frame.stack_segment.0 as u64;
-    let rflags = stack_frame.cpu_flags.bits();
-
-    // Parse error code flags
-    let is_present =
-        error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION);
-    let is_write =
-        error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE);
-    let is_user = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
-    let is_instruction_fetch =
-        error_code.contains(x86_64::structures::idt::PageFaultErrorCode::INSTRUCTION_FETCH);
-
-    // Log page fault with detailed information
-    COM2.write_str("[WARN]  PAGE_FAULT\n");
-    uart_hex("PF: Fault address (CR2)=", fault_addr.as_u64());
-    uart_hex("PF: RIP=", rip);
-    uart_hex("PF: CS=", cs);
-    uart_hex("PF: RSP=", rsp);
-    uart_hex("PF: SS=", ss);
-    uart_hex("PF: RFLAGS=", rflags);
-
-    // Log error code details
-    if is_user {
-        COM2.write_str("[WARN]  PF: Fault in USERSPACE (Ring 3)\n");
-    } else {
-        COM2.write_str("[WARN]  PF: Fault in KERNEL (Ring 0)\n");
-    }
-
-    if is_present {
-        COM2.write_str("[WARN]  PF: Protection violation (page is present)\n");
-    } else {
-        COM2.write_str("[WARN]  PF: Page not present\n");
-    }
-
-    if is_write {
-        COM2.write_str("[WARN]  PF: Caused by WRITE\n");
-    } else {
-        COM2.write_str("[WARN]  PF: Caused by READ\n");
-    }
-
-    if is_instruction_fetch {
-        COM2.write_str("[WARN]  PF: Caused by INSTRUCTION FETCH\n");
-    }
-
-    // If page is not present and fault is from user mode, try lazy allocation
-    if !is_present && is_user {
-        if let Some(success) = handle_heap_fault(fault_addr) {
-            if success {
-                // Page allocated successfully, resume execution
-                klibcluu::warn("[PF] Handled (lazy heap alloc)");
-                return;
-            }
-        }
-    }
-
-    // Unrecoverable page fault
-    klibcluu::warn("[PF] UNRECOVERABLE - halting");
-    loop {
-        x86_64::instructions::hlt();
-    }
-}
-
 #[repr(C)]
 struct PfDebugFrame {
     rax: u64,
@@ -919,7 +813,6 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
 /// correct for demand paging.
 fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
     use crate::mm::space::layout;
-    use x86_64::registers::control::Cr3;
 
     let addr = fault_addr.as_u64();
 
@@ -927,40 +820,12 @@ fn handle_heap_fault(fault_addr: x86_64::VirtAddr) -> Option<bool> {
         (layout::USER_STACK_BOTTOM + 0x1000, layout::USER_STACK_TOP)
     });
     let is_stack_region = (stack_guard_end..stack_top).contains(&addr);
-    let is_heap_region = (layout::USER_HEAP_START..layout::USER_HEAP_MAX).contains(&addr);
 
-    if !is_stack_region && !is_heap_region {
+    if !is_stack_region {
         return Some(false);
     }
 
-    if is_stack_region {
-        return handle_stack_fault(addr, stack_top);
-    }
-
-    // Heap fault: only demand-map addresses below the process's current brk.
-    // Addresses in the heap range but above brk must NOT be demand-paged —
-    // doing so would bypass sbrk/brk and let a process without SPACE_MAP
-    // allocate writable memory by simply touching it (security: heap brk
-    // limit enforcement). Fall back to the global range check for kernel
-    // threads / early boot, where no AddressSpace is registered for the
-    // current CR3.
-    let (pml4_frame, _) = Cr3::read();
-    let page_table_root = pml4_frame.start_address();
-    let heap_brk = crate::mm::space_repository::with_space_by_pml4(
-        page_table_root,
-        |space| space.heap.current_brk().as_u64(),
-    );
-
-    match heap_brk {
-        Some(brk) => {
-            let is_heap_allocated = addr >= layout::USER_HEAP_START && addr < brk;
-            if !is_heap_allocated {
-                return Some(false);
-            }
-            demand_map_page(addr)
-        }
-        None => demand_map_page(addr),
-    }
+    handle_stack_fault(addr, stack_top)
 }
 
 /// Look up the current address space's ASLR stack bounds by CR3.

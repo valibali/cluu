@@ -85,7 +85,7 @@ pub mod heap;
 pub mod space;
 
 // Page fault handler
-pub mod fault;
+
 
 pub mod space_repository;
 
@@ -107,11 +107,10 @@ pub mod mock;
 // Re-export key types for convenience
 pub use traits::{
     AddressSpaceManager, AllocationStats, CreateSpaceError, DestroySpaceError, MapError,
-    PageAllocator, PageFaultError, PageFaultErrorCode, PageFaultHandler, PageFlags, UnmapError,
+    PageAllocator, PageFaultError, PageFaultErrorCode, PageFlags, UnmapError,
     VirtualMemoryMapper,
 };
 
-pub use fault::FaultHandler;
 pub use mock::MockPageAllocator;
 pub use space::{layout, AddressSpace, HeapRegion, MemoryRegion};
 pub use user_map::{map_phys_to_userspace, unmap_phys_from_userspace};
