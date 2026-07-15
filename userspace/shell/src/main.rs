@@ -381,6 +381,7 @@ fn run_async_loop(
                 Ok((reply, _)) => {
                     let grant = match VfsClient::parse_read_grant_async_reply(&reply, grant_base) {
                         Ok(g) => g,
+                        Err(libcluu::Error::WouldBlock) => continue,
                         Err(_) => {
                             libcluu::async_runtime::push_completion(StdinRead { data: Vec::new() });
                             break;

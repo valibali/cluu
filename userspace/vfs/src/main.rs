@@ -2130,6 +2130,26 @@ impl VfsServer {
 
         if let OpenFile::Pts(ref pts) = cloned {
             let _ = self.pts_registry.inc_ref(pts.pts_id);
+
+            // Evict any pending reads on this PTS. When a child fd is
+            // derived from a PTS fd, the parent (shell) may have a stale
+            // async read parked in the queue from its stdin reader loop.
+            // Without this drain, the parent's read would consume bytes
+            // meant for the foreground child (FIFO delivery, first-parked
+            // wins).  Reply WouldBlock so the caller re-arms.
+            if let Some(queue) = self.pending_pts_reads.get_mut(&pts.pts_id) {
+                let mut cancel_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
+                cancel_msg.words[0] = Error::WouldBlock.to_errno() as usize;
+                while let Some(parked) = queue.pop_front() {
+                    if parked.reply_ep != 0 {
+                        let mut msg = cancel_msg.clone();
+                        msg.words[libcluu::ipc::ASYNC_REPLY_COOKIE_WORD] = parked.cookie;
+                        let _ = ipc::send(parked.reply_ep, &msg, IpcFlags::empty());
+                    } else {
+                        let _ = ipc::reply(parked.reply_token, &cancel_msg, IpcFlags::empty());
+                    }
+                }
+            }
         }
 
         let child_fd = self.files.open(child_tid, cloned);
