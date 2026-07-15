@@ -10,7 +10,7 @@ use alloc::format;
 use alloc::vec::Vec;
 use cluu_dma_core::{DmaPool, DmaRegion};
 use cluu_ehci_core::EhciController;
-use libcluu::boot::{process_info, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_SPACE};
+use libcluu::boot::{process_info, TOKEN_CLOCK, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_SPACE};
 use libcluu::debug_print;
 use libcluu::ipc::{KBD_EVENT_LABEL, MOUSE_EVENT_LABEL};
 use libcluu::types::Message;
@@ -30,10 +30,23 @@ const HID_BOOT_SUBCLASS: u8 = 0x01;
 const HID_PROTO_KBD: u8 = 0x01;
 const HID_PROTO_MOUSE: u8 = 0x02;
 
+const REPEAT_INITIAL_MS: u64 = 500;
+const REPEAT_INTERVAL_MS: u64 = 50;
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum DeviceKind {
     Keyboard,
     Mouse,
+}
+
+struct RepeatState {
+    key: u8,
+    press_tsc: u64,
+    last_repeat_tsc: u64,
+    scancode: u8,
+    ascii: u8,
+    extended: u8,
+    mods: u8,
 }
 
 struct UsbDevice {
@@ -43,6 +56,7 @@ struct UsbDevice {
     report_dma: DmaRegion,
     report_len: usize,
     last_keys: [u8; 6],
+    repeat: Option<RepeatState>,
 }
 
 #[no_mangle]
@@ -62,6 +76,8 @@ fn run() -> Result<()> {
     let pci_token = info.tokens[TOKEN_EXTRA_1];
     let space_token = info.tokens[TOKEN_SPACE];
     let _irq_token = info.tokens[TOKEN_EXTRA_2];
+    let clock_token = info.tokens[TOKEN_CLOCK];
+    let tsc_hz = libcluu::syscall::clock_frequency(clock_token).unwrap_or(0);
 
     let mut ctx = UsbInputContext::new()?;
     let _ = debug_print("usb-input: registry init ok");
@@ -145,7 +161,7 @@ fn run() -> Result<()> {
     loop {
         ctx.ensure_subscriptions();
 
-        poll_all(&mut ctrl, &mut pool, &mut devices, &ctx);
+        poll_all(&mut ctrl, &mut pool, &mut devices, &ctx, clock_token, tsc_hz);
 
         let my_ep = ctx.endpoint;
         let reg_ep = ctx.registry_endpoint;
@@ -168,13 +184,15 @@ fn poll_all(
     pool: &mut DmaPool,
     devices: &mut Vec<UsbDevice>,
     ctx: &UsbInputContext,
+    clock_token: usize,
+    tsc_hz: u64,
 ) {
     for dev in devices.iter_mut() {
         if let Some(n) = ctrl.poll_interrupt(dev.slot, &dev.report_dma, dev.report_len) {
             let report = unsafe {
                 core::slice::from_raw_parts(dev.report_dma.virt as *const u8, n)
             };
-            handle_report(ctx, dev, report);
+            handle_report(ctx, dev, report, clock_token, tsc_hz);
             for i in 0..dev.report_len {
                 unsafe {
                     core::ptr::write_volatile((dev.report_dma.virt + i) as *mut u8, 0);
@@ -255,6 +273,7 @@ fn probe_device(
         report_dma,
         report_len,
         last_keys: [0; 6],
+        repeat: None,
     })
 }
 
@@ -279,14 +298,33 @@ fn parse_hid_protocol(config: &[u8]) -> Option<u8> {
     None
 }
 
-fn handle_report(ctx: &UsbInputContext, dev: &mut UsbDevice, report: &[u8]) {
+fn handle_report(
+    ctx: &UsbInputContext,
+    dev: &mut UsbDevice,
+    report: &[u8],
+    clock_token: usize,
+    tsc_hz: u64,
+) {
     match dev.kind {
-        DeviceKind::Keyboard => handle_kbd_report(ctx, dev, report),
+        DeviceKind::Keyboard => handle_kbd_report(ctx, dev, report, clock_token, tsc_hz),
         DeviceKind::Mouse => handle_mouse_report(ctx, report),
     }
 }
 
-fn handle_kbd_report(ctx: &UsbInputContext, dev: &mut UsbDevice, report: &[u8]) {
+fn tsc_to_ms(delta_tsc: u64, tsc_hz: u64) -> u64 {
+    if tsc_hz == 0 {
+        return 0;
+    }
+    delta_tsc * 1000 / tsc_hz
+}
+
+fn handle_kbd_report(
+    ctx: &UsbInputContext,
+    dev: &mut UsbDevice,
+    report: &[u8],
+    clock_token: usize,
+    tsc_hz: u64,
+) {
     if report.len() < 3 {
         return;
     }
@@ -303,6 +341,33 @@ fn handle_kbd_report(ctx: &UsbInputContext, dev: &mut UsbDevice, report: &[u8]) 
             continue;
         }
         if dev.last_keys.contains(&key) {
+            if let Some(ref mut rep) = dev.repeat {
+                if rep.key == key {
+                    let now_tsc = libcluu::syscall::clock_now(clock_token).unwrap_or(0);
+                    let elapsed_ms = tsc_to_ms(now_tsc.saturating_sub(rep.press_tsc), tsc_hz);
+                    if elapsed_ms >= REPEAT_INITIAL_MS {
+                        let since_last =
+                            tsc_to_ms(now_tsc.saturating_sub(rep.last_repeat_tsc), tsc_hz);
+                        if since_last >= REPEAT_INTERVAL_MS {
+                            rep.last_repeat_tsc = now_tsc;
+                            let msg_mods = pack_mods_for_ipc(rep.mods);
+                            let msg = Message::new(
+                                KBD_EVENT_LABEL,
+                                [
+                                    0,
+                                    rep.ascii as usize,
+                                    msg_mods as usize,
+                                    rep.scancode as usize,
+                                    rep.extended as usize,
+                                    0,
+                                ],
+                                5,
+                            );
+                            ctx.forward(&msg);
+                        }
+                    }
+                }
+            }
             continue;
         }
 
@@ -341,8 +406,28 @@ fn handle_kbd_report(ctx: &UsbInputContext, dev: &mut UsbDevice, report: &[u8]) 
                 5,
             );
             ctx.forward(&msg);
+
+            if !ctrl_alt {
+                let now_tsc = libcluu::syscall::clock_now(clock_token).unwrap_or(0);
+                dev.repeat = Some(RepeatState {
+                    key,
+                    press_tsc: now_tsc,
+                    last_repeat_tsc: now_tsc,
+                    scancode,
+                    ascii,
+                    extended,
+                    mods: kbd_mods,
+                });
+            }
         }
     }
+
+    if let Some(ref rep) = dev.repeat {
+        if !new_keys.contains(&rep.key) {
+            dev.repeat = None;
+        }
+    }
+
     dev.last_keys = new_keys;
 }
 

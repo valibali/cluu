@@ -281,6 +281,7 @@ pub struct Compositor {
     pub pointer_buttons: u8,
     pub drag_state: Option<DragState>,
     pub cursor_needs_render: bool,
+
 }
 
 #[derive(Clone, Copy)]
