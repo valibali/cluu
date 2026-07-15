@@ -135,6 +135,13 @@ enum Commands {
         /// Pin QEMU to a specific host CPU core (e.g. --pin-core 3)
         #[arg(long)]
         pin_core: Option<usize>,
+        /// Start a host HTTP server on port 9876 for virtio-net demos
+        /// (guest can curl 10.0.2.2:9876). Use --no-net to disable.
+        #[arg(long, default_value_t = true)]
+        net: bool,
+        /// Override the host HTTP server port (default: 9876)
+        #[arg(long, default_value_t = 9876)]
+        port: u16,
     },
     /// Run all tests
     Test,
@@ -292,11 +299,13 @@ fn main() -> Result<()> {
             debug,
             ui,
             pin_core,
+            net,
+            port,
         } => {
             if build {
                 build_pipeline(&profile, ui)?;
             }
-            run_qemu(debug, pin_core)?;
+            run_qemu(debug, pin_core, net, port)?;
         }
         Commands::Test => {
             run_tests()?;
@@ -1703,8 +1712,7 @@ fn create_initrd(profile: &str) -> Result<()> {
                 }
                 _ => {
                     // Fall back to plain copy if llvm-strip is unavailable.
-                    fs::copy(&src, &dst)
-                        .with_context(|| format!("Failed to copy {}", prog))?;
+                    fs::copy(&src, &dst).with_context(|| format!("Failed to copy {}", prog))?;
                     println!("  Copied sys/{}", prog);
                 }
             }
@@ -1878,7 +1886,7 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     // Create bootboot config file. Optional extra BOOTBOOT environment lines
     // can be injected via CLUU_BOOTBOOT_ENV (newline or ';' separated).
     let mut bootboot_config =
-        String::from("// BOOTBOOT configuration\nscreen=1280x720\nkernel=sys/core\n");
+        String::from("// BOOTBOOT configuration\nscreen=1728x900\nkernel=sys/core\n");
     if let Ok(extra_env) = std::env::var("CLUU_BOOTBOOT_ENV") {
         for line in extra_env
             .split(['\n', ';'])
@@ -2059,7 +2067,12 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
         println!("  Added /etc/gc_stress.py");
     }
 
-    for script in &["color_256.py", "attr_render.py", "alt_screen.py", "mp_spike.py"] {
+    for script in &[
+        "color_256.py",
+        "attr_render.py",
+        "alt_screen.py",
+        "mp_spike.py",
+    ] {
         let src = project_root().join("userspace/micropython").join(script);
         if src.exists() {
             fs::copy(&src, etc_dir.join(script))?;
@@ -2114,7 +2127,7 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_qemu(debug: bool, pin_core: Option<usize>) -> Result<()> {
+fn run_qemu(debug: bool, pin_core: Option<usize>, net: bool, port: u16) -> Result<()> {
     let img_path = project_root().join("target/cluu.img");
     let user_disk = project_root().join("target/userdisk.img");
 
@@ -2230,7 +2243,42 @@ fn run_qemu(debug: bool, pin_core: Option<usize>) -> Result<()> {
         cmd.args(["-serial", "stdio"]);
     }
 
+    let mut httpd_child: Option<std::process::Child> = None;
+    if net {
+        let www_dir = std::env::temp_dir().join("cluu-httpd-demo");
+        let _ = std::fs::create_dir_all(&www_dir);
+        let _ = std::fs::write(
+            www_dir.join("index.html"),
+            "<html><body><h1>CLUU virtio-net demo</h1><p>Hello from the host!</p></body></html>",
+        );
+        match Command::new("python3")
+            .args(["-m", "http.server", &port.to_string(), "--bind", "127.0.0.1"])
+            .current_dir(&www_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                println!(
+                    "  Network: host HTTP server on http://127.0.0.1:{} (pid {})",
+                    port,
+                    child.id()
+                );
+                println!("  From inside CLUU: curl 10.0.2.2:{}", port);
+                httpd_child = Some(child);
+            }
+            Err(e) => {
+                eprintln!("  Network: failed to start host HTTP server: {}", e);
+            }
+        }
+    }
+
     let status = cmd.status().context("Failed to run QEMU")?;
+
+    if let Some(mut child) = httpd_child {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     if !status.success() {
         bail!("QEMU exited with error");
