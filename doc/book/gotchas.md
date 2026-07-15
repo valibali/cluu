@@ -608,3 +608,43 @@ highest-ROI cleanup during the freeze.
 **Key insight:** The sub_mint calls were a vestige from when session-procmgr used `MockKernel` for testing. The production path (`begin_spawn`) always did its own derivation. The dead code produced kernel warnings and minted caps that were either 0 (failed) or unused.
 
 **See also:** `userspace/session-procmgr/src/spawn.rs` (`handle_spawn`), `userspace/session-procmgr/src/elf_spawn.rs` (`begin_spawn` — the real token derivation), `userspace/session-procmgr/src/cap_broker_session.rs` (`sub_mint`).
+
+## ipc-recv-wouldblock-spin (2026-07-15-wouldblock-yield)
+
+**Symptom:** QEMU burns 100% of a host CPU core when a userspace service blocks on `ipc_recv_any_with_sender` with `timeout_ms = u64::MAX`. The kernel idle loop uses `hlt` (0% CPU when idle), so the spin is userspace.
+
+**Root cause:** The userspace `ipc_recv_any_with_sender` wrapper retried on `Err(WouldBlock)` in a tight `loop { continue; }` without yielding. When the kernel's `block_current_recv_wait` returned false (spurious wakeup race — ticket mismatch or pending direct delivery), the kernel returned `WouldBlock`, and userspace re-issued the syscall immediately. This starved the scheduler, prevented HLT, and burned a full core.
+
+The same pattern existed in VFS, shell, and netd main loops: `Err(Timeout) | Err(WouldBlock) => {}` — bare continue without yield.
+
+**Fix:** `yield_cpu()` on the `WouldBlock` retry path in `ipc_recv_any_with_sender`. Same fix applied to all service main loops (`vfs`, `shell`, `netd`): `Err(Timeout) | Err(WouldBlock) => { let _ = yield_cpu(); }`.
+
+**Key insight:** The wrapper's job is to retry after a spurious wakeup, but it must yield between retries so the scheduler can HLT. Without the yield, the tight retry loop starves the scheduler. `yield_cpu()` is not a band-aid — it's the correct fix: the syscall contract says "try again later", and yield is how you say "later" in a cooperative scheduler.
+
+**See also:** `userspace/libcluu/src/syscall.rs` (`ipc_recv_any_with_sender`), `userspace/vfs/src/main.rs` (main loop), `userspace/shell/src/main.rs` (async loop), `userspace/netd/src/main.rs` (recv loops), `kernel/src/syscall/handlers.rs` (`sys_recv` — `block_current_recv_wait` returning false).
+
+## usb-hid-no-hardware-typematic (2026-07-15-usb-key-repeat)
+
+**Symptom:** Held USB-HID keys never repeat. Unlike PS/2 keyboards (which have hardware typematic — the controller auto-repeats held keys), USB-HID keyboards only report current key state. The `handle_kbd_report` function in `usb-input` skipped held keys (`if dev.last_keys.contains(&key) { continue; }`), so no key repeat was ever generated.
+
+**Root cause:** USB-HID boot-protocol keyboard reports are state snapshots (which keys are down right now), not transition events (press/release). The HID spec has no typematic — repeat is entirely the host's responsibility. The original code treated "key still held" as "no event", which is correct for event detection but wrong for typematic.
+
+**Fix:** Software typematic in `usb-input/src/main.rs`. A `RepeatState` struct tracks the held key, press timestamp (`clock_now` TSC), last repeat timestamp, and cached event fields. After 500ms initial delay, repeats at 50ms intervals (20/sec — standard USB HID typematic rate). Ctrl+Alt+key shortcuts (VT switch, shutdown) are exempt — they never auto-repeat. Key release clears repeat state.
+
+Previously a 500ms debounce was bolted onto the compositor's `SpawnCluuterm` hotkey to work around the missing repeat. That debounce was removed once proper key repeat landed in the driver.
+
+**Key insight:** The debounce was a band-aid that masked the real bug. The correct fix is in the input driver, not the consumer. Any hotkey consumer would have needed its own debounce — N band-aids instead of 1 root-cause fix.
+
+**See also:** `userspace/usb-input/src/main.rs` (`handle_kbd_report`, `RepeatState`, `tsc_to_ms`), `userspace/compositor/src/main.rs` (`SpawnCluuterm` hotkey — debounce removed), `doc/book/terminal.md` (usb-input section — key repeat documented).
+
+## allocator-magic-corruption-detection (2026-07-15-alloc-hardening)
+
+**Symptom:** Session-VFS crash during 19-terminal flood (38 clients). RIP=0x6d00cdd0, RSP=0x6d00cd60 (RIP=RSP+0x70) — `ret` jumped into NX stack page. objdump identified crash in `BTreeMap::deallocating_next_unchecked`. Root cause: heavy BTreeMap churn → heap metadata corruption → corrupted free list → dealloc followed bad pointers → wrote stack address over return address.
+
+**Root cause:** The linked-list allocator's `dealloc` blindly trusted the `AllocHeader` — a corrupted header (from a use-after-free or buffer overflow elsewhere) would poison the free list, turning a localized corruption into a cascading smash that overwrites return addresses.
+
+**Fix:** `ALLOC_MAGIC` (0xA110_C8ED_BEEF_F00D) written to `AllocHeader` at allocation time, validated in `dealloc`. Magic mismatch → leak the block + warn (do NOT add to free list). Size sanity check (size==0 or size > heap range → leak + warn). This stops the cascade: a corrupted header is quarantined rather than propagated.
+
+**Key insight:** The magic doesn't fix the underlying corruption (that's a use-after-free or buffer overflow somewhere in the BTreeMap churn path). It stops the cascade from turning a localized bug into a stack smash. The OS must be resilient to churn — leak-and-warn is better than corrupt-and-crash. The 4KB VFS IPC buffer was also moved from stack to `Box<[u8]>` to reduce stack pressure during deep handler call chains.
+
+**See also:** `userspace/libcluu/src/allocator.rs` (`AllocHeader`, `ALLOC_MAGIC`, `dealloc`), `userspace/vfs/src/main.rs` (Box IPC buffer), `doc/book/memory_model.md`.

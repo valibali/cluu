@@ -67,6 +67,14 @@ wire format as `kbd`.
   and tty decode these via `encode_extended()` into xterm CSI sequences.
 - **VT switch / shutdown**: Ctrl+Alt+F1..F5 and Ctrl+Alt+Del are intercepted
   before forwarding (same as `kbd`).
+- **Key repeat**: USB-HID keyboards report current key state, not
+  press/release transitions. Unlike PS/2 (hardware typematic), USB-HID
+  needs software repeat. `handle_kbd_report` tracks the held key and its
+  press timestamp via TSC (`clock_now` / `clock_frequency` capability
+  token invokes — no IPC roundtrip). After 500ms initial delay, repeats
+  at 50ms intervals (20 repeats/sec). Ctrl+Alt+key shortcuts (VT switch,
+  shutdown) are exempt — they never auto-repeat. Key release clears
+  repeat state.
 - **IPC**: Sends `KBD_EVENT_LABEL` to `inputd:input`. Mouse reports sent as
   `MOUSE_EVENT_LABEL`.
 
