@@ -204,24 +204,23 @@ fn get_tls_template() -> TlsTemplate {
 /// ```
 ///
 /// Used by both init_tls (main thread) and pthread_create (child threads).
+#[repr(align(64))]
+struct MainTlsBlock([u8; 4096]);
+static mut MAIN_TLS_BLOCK: MainTlsBlock = MainTlsBlock([0; 4096]);
+static mut MAIN_TLS_USED: bool = false;
+
 pub fn alloc_tls_block() -> Option<(usize, usize)> {
     let tmpl = get_tls_template();
 
-    // Align TLS data size to 16 (matches linker's ALIGN(16) for @tpoff relocations).
     let tls_aligned = (tmpl.total_size + 15) & !15;
-
-    // Block: TLS data (aligned) + TCB (self-ptr + thread token + key values).
     let block_size = tls_aligned + TCB_SIZE;
 
     let layout = core::alloc::Layout::from_size_align(block_size, 16).ok()?;
     let block = unsafe { alloc::alloc::alloc_zeroed(layout) };
     if block.is_null() {
-        return None;
+        return alloc_tls_block_static(&tmpl, tls_aligned, block_size);
     }
-
     let block_addr = block as usize;
-
-    // Copy .tdata template at start of block.
     // In x86_64 TLS variant II, the compiler accesses TLS variables at
     // negative offsets from the TCB (FS base). The linker uses the aligned
     // TLS segment size for @tpoff, so variables are at tcb - tls_aligned + offset.
@@ -245,6 +244,37 @@ pub fn alloc_tls_block() -> Option<(usize, usize)> {
     // FS:16..FS:528 (key values) already zeroed by alloc_zeroed.
 
     Some((block_addr, tcb_addr))
+}
+
+fn alloc_tls_block_static(
+    tmpl: &TlsTemplate,
+    tls_aligned: usize,
+    block_size: usize,
+) -> Option<(usize, usize)> {
+    if block_size > 4096 {
+        return None;
+    }
+    unsafe {
+        if MAIN_TLS_USED {
+            return None;
+        }
+        MAIN_TLS_USED = true;
+        let block = MAIN_TLS_BLOCK.0.as_mut_ptr();
+        for i in 0..block_size {
+            *block.add(i) = 0;
+        }
+        let block_addr = block as usize;
+        if tmpl.tdata_size > 0 {
+            core::ptr::copy_nonoverlapping(
+                tmpl.tdata_src as *const u8,
+                block,
+                tmpl.tdata_size,
+            );
+        }
+        let tcb_addr = block_addr + tls_aligned;
+        core::ptr::write(tcb_addr as *mut usize, tcb_addr);
+        Some((block_addr, tcb_addr))
+    }
 }
 
 /// Size of allocated TLS block (for deallocation).

@@ -120,17 +120,12 @@ pub extern "C" fn __cluu_init() {
 pub fn init_tls() {
     let (_block_addr, tcb_addr) = match pthread::alloc_tls_block() {
         Some(t) => t,
-        None => return, // Can't set up TLS — continue without it
+        None => return,
     };
 
-    // Set FS base to point to the TCB.  Use the space token rather than
-    // TOKEN_SELF because procmgr's TOKEN_SELF may not reference a Thread
-    // object (it's derived from the IPC capability).  The kernel accepts a
-    // Space token as authorization to set FS base for the current thread.
     let space_token = crate::boot::space_token();
     let _ = crate::syscall::thread_set_fs_base(space_token, tcb_addr);
 
-    // Store main thread token at FS:8 so pthread_self() works
     let self_token = crate::boot::token_self();
     unsafe {
         core::ptr::write((tcb_addr + 8) as *mut usize, self_token);
