@@ -238,8 +238,11 @@ mod inner {
 
     static mut NURSERY_HEAP: NurseryHeap = NurseryHeap([0; NURSERY_SIZE]);
 
+    const ALLOC_MAGIC: u64 = 0xA110_C8ED_BEEF_F00D;
+
     #[repr(C)]
     struct AllocHeader {
+        magic: u64,
         size: usize,
     }
 
@@ -287,10 +290,6 @@ mod inner {
 
         unsafe fn init(&mut self) {
             let heap_start = randomized_heap_start();
-            // Shift heap_max by the same ASLR offset so the heap retains its
-            // full 56 MB capacity (USER_HEAP_MAX - USER_HEAP_START) regardless
-            // of where ASLR placed the start. The ceiling stays well below the
-            // mmap region (0x4100_0000) since the offset is bounded to 128 MB.
             self.heap_max = heap_start + (USER_HEAP_MAX - USER_HEAP_START);
             self.dynamic_start = heap_start;
             self.used = 0;
@@ -533,6 +532,7 @@ mod inner {
 
                         let header = header_start as *mut AllocHeader;
                         header.write(AllocHeader {
+                            magic: ALLOC_MAGIC,
                             size: alloc_end - header_start,
                         });
                     }
@@ -572,10 +572,25 @@ mod inner {
             }
             let header_size = size_of::<AllocHeader>();
             let header_ptr = unsafe { ptr.sub(header_size) } as *mut AllocHeader;
+            let magic = unsafe { (*header_ptr).magic };
             let size = unsafe { (*header_ptr).size };
-            if size == 0 {
+            if magic != ALLOC_MAGIC {
+                if magic == 0 {
+                    return;
+                }
+                klibcluu::warn("alloc: dealloc magic mismatch — leaking corrupted block");
+                klibcluu::log_hex(klibcluu::LogLevel::Warn, "  ptr=0x", ptr as u64);
+                klibcluu::log_hex(klibcluu::LogLevel::Warn, "  magic=0x", magic);
                 return;
             }
+            if size == 0 || size > self.heap_end.saturating_sub(self.heap_start) {
+                klibcluu::warn("alloc: dealloc size corruption — leaking block");
+                klibcluu::log_hex(klibcluu::LogLevel::Warn, "  ptr=0x", ptr as u64);
+                klibcluu::log_hex(klibcluu::LogLevel::Warn, "  size=0x", size as u64);
+                return;
+            }
+
+            unsafe { (*header_ptr).magic = 0; }
 
             self.used = self.used.saturating_sub(size);
             unsafe {
