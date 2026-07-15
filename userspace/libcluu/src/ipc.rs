@@ -1049,10 +1049,12 @@ pub fn parse_message(buf: &[u8]) -> Option<(Message, &[u8])> {
     let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
     let header = core::mem::size_of::<Message>();
     let payload_len = msg.words[0];
-    let end = if header + payload_len <= buf.len() {
+    // Avoid `header + payload_len <= buf.len()` — that wraps on usize
+    // and produces an inverted slice (56..44) that panics.
+    let end = if payload_len <= buf.len().saturating_sub(header) {
         header + payload_len
     } else {
-        header // clamp: return empty payload
+        header
     };
     Some((msg, &buf[header..end]))
 }

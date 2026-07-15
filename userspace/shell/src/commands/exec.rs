@@ -475,7 +475,8 @@ pub(crate) fn parse_ipc_message(buf: &[u8]) -> Option<(Message, &[u8])> {
     let msg = unsafe { (buf.as_ptr() as *const Message).read_unaligned() };
     let mut payload_len = msg.words[0];
     let header = size_of::<Message>();
-    if header + payload_len > buf.len() {
+    // Wraparound-safe: see libcluu::ipc::parse_message for the trap.
+    if payload_len > buf.len().saturating_sub(header) {
         payload_len = 0;
     }
     Some((msg, &buf[header..header + payload_len]))
