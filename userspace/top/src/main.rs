@@ -599,12 +599,17 @@ fn parse_sched_overflow(text: &str) -> Option<(u64, u64)> {
     h9.zip(h10)
 }
 
-/// Format kB as a human-readable string: 64K, 128M, 2G.
+/// Format kB as a human-readable string with one decimal place for M/G:
+/// 256K, 1.5M, 12.0M, 2.3G.
 fn format_mem_kb(kb: u64) -> String {
     if kb >= 1024 * 1024 {
-        format!("{}G", kb / (1024 * 1024))
+        let whole = kb / (1024 * 1024);
+        let frac = (kb % (1024 * 1024)) * 10 / (1024 * 1024);
+        format!("{}.{}G", whole, frac)
     } else if kb >= 1024 {
-        format!("{}M", kb / 1024)
+        let whole = kb / 1024;
+        let frac = (kb % 1024) * 10 / 1024;
+        format!("{}.{}M", whole, frac)
     } else {
         format!("{}K", kb)
     }
