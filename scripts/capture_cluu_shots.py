@@ -3,7 +3,7 @@
 
 Boots CLUU via the same QEMU invocation the harness uses, drives the
 guest with sendkey sequences, and at scripted checkpoints dumps the
-1280x720 BGRA32 framebuffer to disk via QEMU's ``pmemsave``. Raw frames
+1728x900 BGRA32 framebuffer to disk via QEMU's ``pmemsave``. Raw frames
 are converted to PNG via ImageMagick and stitched into GIFs via ffmpeg.
 
 Idempotent: re-running with the same args overwrites assets.
@@ -24,7 +24,7 @@ Scenes are defined below as ``Scene`` dataclasses. A scene that fails
 and a note is left in its companion ``.md`` so the doc-suite generator
 can tell a missing asset from a failed one.
 
-The framebuffer is 1280x720 BGRA32 = 3,686,400 bytes (per the user's
+The framebuffer is 1728x900 BGRA32 = 3,686,400 bytes (per the user's
 confirmation; matches ``QemuController.capture_fb_dump``). The phys
 address is parsed from the serial log line ``fb @<PHYS>`` (same regex
 as the harness, ``_FB_PHYS_RE`` in ``qemu.py``).

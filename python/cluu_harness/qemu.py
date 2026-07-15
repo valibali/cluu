@@ -262,7 +262,7 @@ class QemuController:
             return False
         phys = int(m.group(1), 16)
         log.info("FB_DUMP: capturing phys=0x%x -> %s", phys, out_path)
-        # 1280x720 BGRA32 = 3686400 bytes (per knowledge note).
+        # 1728x900 BGRA32 = 3686400 bytes (per knowledge note).
         self._run.monitor.pmemsave(phys, 3686400, out_path)
         return True
 

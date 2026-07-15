@@ -424,7 +424,7 @@ assembled. It:
    `fb @<PHYS> <SIZE> bytes` (same regex the existing harness
    uses, `_FB_PHYS_RE` in `qemu.py`).
 5. Converts raw frames → PNG via ImageMagick
-   (`convert -size 1280x720 -depth 8 -colorspace sRGBA` with
+   (`convert -size 1728x900 -depth 8 -colorspace sRGBA` with
    byte-order handling for BGRA32 → RGBA).
 6. Stitches PNG sequences → GIF via `ffmpeg` (palette gen +
    palette use for quality) or ImageMagick
