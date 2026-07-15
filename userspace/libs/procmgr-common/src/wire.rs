@@ -87,6 +87,13 @@ pub struct ProcInfo {
     pub command: String,
     pub argv0: String,
     pub start_ticks: u64,
+    /// Cumulative CPU ticks consumed by the process's main thread
+    /// (from `thread_get_stats`).  Zero when unavailable.
+    pub cpu_ticks: u64,
+    /// Heap pages (from `space_get_stats`).  Zero when unavailable.
+    pub heap_pages: u32,
+    /// Code + stack pages (from `space_get_stats`).  Zero when unavailable.
+    pub other_pages: u32,
 }
 
 #[cfg(test)]

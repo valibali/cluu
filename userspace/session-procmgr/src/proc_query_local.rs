@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use procmgr_common::handler::{HandlerError, InboundMsg, MsgHandler, Reply};
 use procmgr_common::labels::SESSION_PROCMGR_PROC_QUERY_LOCAL_LABEL;
 use procmgr_common::wire::{ProcInfo, ProcQueryLocalReply, ProcQueryLocalReq};
+use libcluu::syscall::{thread_get_stats, space_get_stats};
 use crate::dispatch::SessionState;
 
 pub struct ProcQueryLocal;
@@ -16,6 +17,10 @@ impl MsgHandler for ProcQueryLocal {
         let mut procs = Vec::new();
         for c in state.child_table.iter() {
             if req.pids.is_empty() || req.pids.contains(&c.pid) {
+                let cpu_ticks = thread_get_stats(c.thread_tok as usize).unwrap_or(0);
+                let (code_pages, heap_pages, stack_pages) =
+                    space_get_stats(c.space_tok as usize).unwrap_or((0, 0, 0));
+                let other_pages = code_pages.saturating_add(stack_pages);
                 procs.push(ProcInfo {
                     pid: c.pid,
                     ppid: 0,
@@ -23,6 +28,9 @@ impl MsgHandler for ProcQueryLocal {
                     command: c.argv0.clone(),
                     argv0: c.argv0.clone(),
                     start_ticks: c.start_ticks,
+                    cpu_ticks,
+                    heap_pages: heap_pages as u32,
+                    other_pages: other_pages as u32,
                 });
             }
         }

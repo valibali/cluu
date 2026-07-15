@@ -13,6 +13,7 @@ use procmgr_common::pid::Pid;
 use procmgr_common::wire::ProcInfo;
 
 use libcluu::ipc::{PROCMGR_LIST_PIDS_LABEL, PROCMGR_PROC_INFO_LABEL};
+use libcluu::syscall::{thread_get_stats, space_get_stats};
 use libcluu::Result;
 
 use crate::dispatch::SessionState;
@@ -39,6 +40,10 @@ pub fn proc_info_handler(state: &SessionState, msg: &InboundMsg<'_>) -> Result<R
 
     match child {
         Some(c) => {
+            let cpu_ticks = thread_get_stats(c.thread_tok as usize).unwrap_or(0);
+            let (code_pages, heap_pages, stack_pages) =
+                space_get_stats(c.space_tok as usize).unwrap_or((0, 0, 0));
+            let other_pages = code_pages.saturating_add(stack_pages);
             let info = ProcInfo {
                 pid: c.pid,
                 ppid: c.parent_pid,
@@ -46,6 +51,9 @@ pub fn proc_info_handler(state: &SessionState, msg: &InboundMsg<'_>) -> Result<R
                 command: c.argv0.clone(),
                 argv0: c.argv0.clone(),
                 start_ticks: c.start_ticks,
+                cpu_ticks,
+                heap_pages: heap_pages as u32,
+                other_pages: other_pages as u32,
             };
             let bytes = postcard::to_allocvec(&info)
                 .map_err(|_| libcluu::Error::InvalidArgument)?;

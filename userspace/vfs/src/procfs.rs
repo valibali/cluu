@@ -250,8 +250,10 @@ fn format_proc_info(subfile: &str, info: &ProcInfo) -> Result<Vec<u8>> {
             // Fields: pid, name, state, cpu_ticks, heap_pages, other_pages,
             //         ppid, sid, cid, pcid
             let text = format!(
-                "{} ({}) R 0 0 0 {} 0 {} {}\n",
-                info.pid, info.command, info.ppid, info.pid, info.ppid,
+                "{} ({}) R {} {} {} {} 0 {} {}\n",
+                info.pid, info.command,
+                info.cpu_ticks, info.heap_pages, info.other_pages,
+                info.ppid, info.pid, info.ppid,
             );
             Ok(text.into_bytes())
         }
@@ -520,6 +522,9 @@ mod tests {
             command: String::from(name),
             argv0: String::from(name),
             start_ticks: 0,
+            cpu_ticks: 0,
+            heap_pages: 0,
+            other_pages: 0,
         }
     }
 

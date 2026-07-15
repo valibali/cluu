@@ -79,6 +79,9 @@ mod tests {
                 command: "x".into(),
                 argv0: "x".into(),
                 start_ticks: 0,
+                cpu_ticks: 0,
+                heap_pages: 0,
+                other_pages: 0,
             }],
         }
     }
