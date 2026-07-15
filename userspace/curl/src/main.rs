@@ -146,6 +146,7 @@ pub extern "C" fn main() -> i32 {
     }
 
     let mut total: usize = 0;
+    let mut last_byte: u8 = 0;
     let mut buf = [0u8; 4096];
     loop {
         let n = socket::recv(fd, buf.as_mut_ptr(), buf.len(), 0);
@@ -158,6 +159,7 @@ pub extern "C" fn main() -> i32 {
         } else {
             let _ = libcluu::posix::_write(1, buf.as_ptr() as *const c_void, n);
         }
+        last_byte = buf[n - 1];
         total += n;
     }
 
@@ -166,6 +168,11 @@ pub extern "C" fn main() -> i32 {
     if total == 0 {
         let _ = debug_print("CURL_FAIL: no data received\n");
         return 1;
+    }
+
+    if output_file.is_none() && last_byte != b'\n' {
+        let nl = b"\n";
+        let _ = libcluu::posix::_write(1, nl.as_ptr() as *const c_void, 1);
     }
 
     if !silent {
