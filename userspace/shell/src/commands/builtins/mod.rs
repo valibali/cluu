@@ -16,6 +16,7 @@ pub mod exit;
 pub mod arith;
 pub mod sudo;
 pub mod container;
+pub mod dprint;
 
 use registry::BuiltinRegistry;
 
@@ -32,4 +33,5 @@ pub fn register_all(registry: &mut BuiltinRegistry) {
     arith::register(registry);
     sudo::register(registry);
     container::register(registry);
+    dprint::register(registry);
 }
