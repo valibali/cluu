@@ -2123,9 +2123,9 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
             "-L",
             "cluuuser",
             "-b",
-            "4096",
+            "1024",
             disk_path.to_str().unwrap(),
-            "262144", // 1GB image (262144 blocks * 4KiB)
+            "1048576", // 1GB image (1048576 blocks * 1KiB)
         ])
         .status()
         .context("Failed to run mke2fs for user disk")?;
