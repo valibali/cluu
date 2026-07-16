@@ -672,3 +672,17 @@ The "2x speed" was actually severe underrun: at 48kHz, 8×4KB = 170ms of buffer 
 **Fix:** Add `disable()` after `hlt()` in `idle_until_runnable`.
 
 **See also:** `kernel/src/sched/thread_manager.rs:1477`, `doc/book/kernel.md`.
+
+## dma-pool-alloc-contiguous-not-physical (2026-07-16-storage-throughput)
+
+**Symptom:** 64KB 9p reads hang the virtio-9p service. Smaller reads work fine.
+
+**Root cause:** `DmaPool::alloc_contiguous(N)` allocates N pages from the pool's virtual address range, but the kernel's `space_map_range` (with `source_ptr=0`) calls `pmm::alloc_frame()` per page — individual frame allocations with NO physical contiguity guarantee. `alloc_contiguous` returns `phys` = the first page's physical address only. When used as a single virtio descriptor for a multi-page buffer, the device writes past the first page into unrelated physical memory.
+
+With 4KB reads (1 page), this is invisible — one page, one descriptor, correct phys. With 64KB reads (16 pages), QEMU writes 64KB to the first page's physical address, corrupting 15 pages of unrelated memory and never completing the transfer.
+
+**Fix:** For multi-page DMA buffers, build a scatter-gather descriptor chain with one descriptor per page, using `virt_to_phys(space_token, va + i * PAGE_SIZE)` for each page's physical address. Do NOT rely on `alloc_contiguous` returning physically contiguous memory.
+
+**Key insight:** The name `alloc_contiguous` is misleading — it means contiguous in virtual address space, not physical. Virtio devices operate on physical addresses. Always use per-page `virt_to_phys` for descriptor setup when the buffer spans multiple pages.
+
+**See also:** `userspace/dma-core/src/dma.rs` (`alloc_contiguous`), `kernel/src/syscall/handlers.rs` (`invoke_space_map_range`, `pmm::alloc_frame` per page), `userspace/virtio-9p/src/main.rs` (`round_trip`).
