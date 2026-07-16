@@ -95,6 +95,7 @@ struct NinepClient {
     vq: Virtqueue,
     req_region: DmaRegion,
     resp_region: DmaRegion,
+    space_token: usize,
     next_fid: u32,
     msize: u32,
 }
@@ -103,6 +104,7 @@ impl NinepClient {
     fn new(
         mut transport: ModernPciTransport,
         mut pool: DmaPool,
+        space_token: usize,
     ) -> Result<Self> {
         let vq = Virtqueue::new(&mut pool, 64)?;
         transport.configure_queue(0, &vq)?;
@@ -116,6 +118,7 @@ impl NinepClient {
             vq,
             req_region,
             resp_region,
+            space_token,
             next_fid: FIRST_FID,
             msize: MSIZE as u32,
         })
@@ -543,7 +546,7 @@ fn run() -> Result<()> {
         irq.endpoint, irq.irq_number
     ))?;
 
-    let mut client = NinepClient::new(transport, pool)?;
+    let mut client = NinepClient::new(transport, pool, space_token)?;
 
     let msize = client.version()?;
     debug_print(&format!("virtio-9p: version negotiated, msize={}", msize))?;
