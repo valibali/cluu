@@ -648,3 +648,27 @@ Previously a 500ms debounce was bolted onto the compositor's `SpawnCluuterm` hot
 **Key insight:** The magic doesn't fix the underlying corruption (that's a use-after-free or buffer overflow somewhere in the BTreeMap churn path). It stops the cascade from turning a localized bug into a stack smash. The OS must be resilient to churn — leak-and-warn is better than corrupt-and-crash. The 4KB VFS IPC buffer was also moved from stack to `Box<[u8]>` to reduce stack pressure during deep handler call chains.
 
 **See also:** `userspace/libcluu/src/allocator.rs` (`AllocHeader`, `ALLOC_MAGIC`, `dealloc`), `userspace/vfs/src/main.rs` (Box IPC buffer), `doc/book/memory_model.md`.
+
+## virtio-snd-qemu-ignores-buffer-params (2026-07-16-virtio-snd)
+
+**Symptom:** MP3 playback at 48kHz sounds 2x speed with periodic gaps/pops. 22kHz plays correctly. Decode timing shows 1x realtime for both.
+
+**Root cause:** QEMU's virtio-snd implementation does NOT use `buffer_bytes`/`period_bytes` for playback. `AUD_open_out` receives only `{freq, fmt, nchannels}` — no buffer/period sizes. The host audio backend (PulseAudio) handles all buffering and rate-control. `AUD_write` is rate-limited by actual playback speed.
+
+The "2x speed" was actually severe underrun: at 48kHz, 8×4KB = 170ms of buffer drains while waiting ~400ms for the next 9p read. Half the audio content is gaps → file finishes in half the time → perceived as 2x. At 22kHz, the same 8×4KB = 372ms — barely enough to cover the 9p latency → sounds correct.
+
+**Fix:** Full-file-to-memory load before playback starts. Eliminates all I/O stalls during playback. The device is never starved.
+
+**Key insight:** `buffer_bytes`/`period_bytes` in `set_params` are stored by QEMU but never used for TX buffering. Don't rely on device-side buffering to smooth I/O jitter. Either pipeline enough data ahead or preload entirely.
+
+**See also:** `userspace/mp3player/src/main.rs` (`play_mp3` full-file load), `userspace/virtio-snd/src/session.rs`, QEMU `hw/audio/virtio-snd.c` (`virtio_snd_pcm_prepare`, `virtio_snd_pcm_out_cb`).
+
+## idle-until-runnable-missing-cli (2026-07-16-virtio-snd-irq)
+
+**Symptom:** Kernel crash to RIP=0x2 when virtio-snd and virtio-net share IRQ 10. Only happens when both devices are active.
+
+**Root cause:** `idle_until_runnable` did `sti; hlt` but never `cli`. The comment "Interrupts are disabled again after hlt returns" was FALSE — `hlt` does not clear IF. After the wake IRQ's `iretq` restored RFLAGS (IF=1 from the `sti`), the post-idle critical section ran with interrupts enabled. A nested device IRQ (shared IRQ 10) landing in that window corrupted the `iretq` frame under construction → jump to RIP=0x2.
+
+**Fix:** Add `disable()` after `hlt()` in `idle_until_runnable`.
+
+**See also:** `kernel/src/sched/thread_manager.rs:1477`, `doc/book/kernel.md`.

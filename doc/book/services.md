@@ -59,6 +59,35 @@ Userspace virtio-blk driver for QEMU's `virtio-blk-pci`. Exposes
 
 See [Storage Stack](../storage/index.html).
 
+### virtio-snd — Audio Device Driver
+
+`userspace/virtio-snd/src/main.rs`
+
+Userspace virtio-snd driver for QEMU's `virtio-sound-pci`. Implements the
+virtio-snd device protocol (virtio 1.2 §5.14) entirely in userspace — the
+kernel provides only IRQ dispatch and PCI config syscalls.
+
+- **PCI probe**: Scans for vendor 1af4:1059, maps capability bars, configures
+  4 virtqueues (control, event, TX, RX).
+- **Control queue**: `set_params` → `prepare` → `start` → `stop` → `release`
+  lifecycle. Self-test runs 16-period TX roundtrip at boot.
+- **TX queue (playback)**: PCM data transferred via grant-based shared memory,
+  not inline IPC. Each session has 8 pre-allocated ring slots (4KB periods).
+  `pcm_start` is deferred until the first `SUBMIT_PCM` to prevent initial
+  buffer underrun.
+- **Rate enum**: Matches the virtio-snd spec exactly (5512–384000 Hz).
+  Non-spec rates (12000, 24000) removed.
+- **IPC**: `AUDIO_OPEN_SESSION`, `AUDIO_SUBMIT_PCM` (fire-and-forget, metadata
+  only — PCM arrives via grant page), `AUDIO_COMPLETE` (completion callback to
+  caller's per-session endpoint), `AUDIO_CLOSE`, `AUDIO_TID_CLEANUP`.
+- **Registry**: Published as `snddev:main`.
+
+**QEMU note**: QEMU's virtio-snd implementation ignores `buffer_bytes`/
+`period_bytes` for playback — it delegates all buffering to the host audio
+backend (PulseAudio). `AUD_write` is rate-limited by actual playback speed.
+The driver's `buffer_bytes=32768`/`period_bytes=4096` are stored but not used
+by QEMU for TX buffering.
+
 ### devmgr — Device Manager
 
 `userspace/devmgr/src/main.rs`
@@ -321,6 +350,7 @@ profile and mount policy. Key utilities:
 | `shell` | ipc vfs registry admin | DIY shell |
 | `cluuterm` | ipc vfs compositor | Terminal emulator |
 | `micropython` | ipc vfs | Python interpreter |
+| `mp3player` | ipc vfs registry | MP3 playback via virtio-snd |
 | `hello` | ipc vfs | Demo container |
 
 See [Container Encapsulation](../containers/index.html) for the Cluufile model.

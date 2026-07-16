@@ -320,6 +320,30 @@ genuinely hard. Pivot trigger: if after 3 weeks of Phase 5 you do not have
 DHCP plus ping, ship UDP-only and defer TCP to v1.1. Note the pivot
 decision somewhere durable; do not silently slip.
 
+### Interlude: virtio-snd audio driver (DONE 2026-07-16)
+
+Userspace virtio-snd driver + mp3player container, built as a side quest
+between Phase 4 and Phase 5. Proves the userspace driver model extends to
+streaming devices, not just block/net.
+
+Shipped:
+
+- **virtio-snd driver** (`userspace/virtio-snd/`): PCI probe, 4 virtqueues,
+  control queue lifecycle, grant-based TX. Registered as `snddev:main`.
+  Rate enum matches virtio-snd spec exactly.
+- **mp3player** (`userspace/mp3player/`): nanomp3 decoder, auto-detect
+  rate/channels, full-file-to-memory load before playback.
+- **libcluu audio_client**: `AudioSessionClient` with grant-based PCM
+  submission, completion polling, rate constants.
+- **Kernel fix**: `idle_until_runnable` missing `cli` after `hlt` —
+  nested IRQ on shared IRQ 10 corrupted `iretq` frame → RIP=0x2 crash.
+- **IPC_MESSAGE_MAX**: 4096 → 8192 to fit audio IPC metadata.
+
+Key finding: QEMU's virtio-snd ignores `buffer_bytes`/`period_bytes` for
+playback — PA backend handles all buffering. Device underruns are caused
+by I/O stalls (9p read latency), not buffer misconfiguration. Full-file
+load eliminates the underrun class for mp3player.
+
 ### Phase 6: Ship (PENDING)
 
 Goal: a stranger can run CLUU from a download link and see it work.
