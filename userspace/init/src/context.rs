@@ -20,6 +20,7 @@ pub struct InitContext<'a> {
     pub virtio_blk_irq_token: usize,
     pub virtio_9p_irq_token: usize,
     pub virtio_net_irq_token: usize,
+    pub virtio_snd_irq_token: usize,
     pub pci_token: usize,
 }
 
@@ -80,6 +81,12 @@ impl<'a> InitContext<'a> {
             u64::MAX,
         )?;
 
+        let virtio_snd_irq_token = token_derive(
+            boot.root_token,
+            Rights::IRQ_HANDLE.bits() as usize,
+            u64::MAX,
+        )?;
+
         // PCI_ACCESS token for ACPI shutdown/reset port I/O.
         let pci_token = token_derive(
             boot.root_token,
@@ -99,6 +106,7 @@ impl<'a> InitContext<'a> {
             virtio_blk_irq_token,
             virtio_9p_irq_token,
             virtio_net_irq_token,
+            virtio_snd_irq_token,
             pci_token,
         })
     }

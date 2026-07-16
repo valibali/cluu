@@ -42,19 +42,21 @@ impl DmaPool {
         if !align.is_power_of_two() {
             return Err(Error::InvalidArgument);
         }
-        let aligned = (self.next_offset + align - 1) & !(align - 1);
+        if len > PAGE_SIZE {
+            return Err(Error::Overflow);
+        }
+        let mut aligned = (self.next_offset + align - 1) & !(align - 1);
         if aligned + len > self.size {
             return Err(Error::Overflow);
         }
-        let page_idx = aligned / PAGE_SIZE;
+        let mut page_idx = aligned / PAGE_SIZE;
         let last_byte_page = (aligned + len - 1) / PAGE_SIZE;
         if page_idx != last_byte_page {
-            let new_offset = (page_idx + 1) * PAGE_SIZE;
-            if new_offset + len > self.size {
+            aligned = (page_idx + 1) * PAGE_SIZE;
+            if aligned + len > self.size {
                 return Err(Error::Overflow);
             }
-            self.next_offset = new_offset;
-            return self.alloc(len, align);
+            page_idx = aligned / PAGE_SIZE;
         }
         let virt = self.base_va + aligned;
         let phys_base = self.page_phys[page_idx];
@@ -74,15 +76,6 @@ impl DmaPool {
             return Err(Error::Overflow);
         }
         let page_idx = aligned / PAGE_SIZE;
-        let last_byte_page = (aligned + len - 1) / PAGE_SIZE;
-        if page_idx != last_byte_page {
-            let new_offset = (page_idx + 1) * PAGE_SIZE;
-            if new_offset + len > self.size {
-                return Err(Error::Overflow);
-            }
-            self.next_offset = new_offset;
-            return self.alloc_contiguous(pages);
-        }
         let virt = self.base_va + aligned;
         let phys_base = self.page_phys[page_idx];
         self.next_offset = aligned + len;

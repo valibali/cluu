@@ -1479,7 +1479,13 @@ impl ThreadManager {
         x86_64::instructions::interrupts::enable();
         // Halt until next interrupt
         x86_64::instructions::hlt();
-        // Interrupts are disabled again after hlt returns
+        // hlt does NOT clear IF. The wake IRQ returns via iretq which restores
+        // RFLAGS (IF=1 from the sti above). We must re-disable before returning,
+        // because schedule_and_switch's post-idle critical section and the timer
+        // asm's iretq-frame construction are not re-entrant and assume IF=0.
+        // A nested device IRQ (e.g. shared IRQ 10 from virtio-net + virtio-snd)
+        // landing in that window corrupts the iretq frame → jump to 0x2.
+        x86_64::instructions::interrupts::disable();
     }
 
     /// Start the scheduler and jump to the first thread

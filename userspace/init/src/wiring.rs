@@ -204,6 +204,11 @@ impl ServiceWiring for ServiceKind {
                 tokens[TOKEN_EXTRA_1] = child_token;
                 tokens[TOKEN_EXTRA_2] = ctx.virtio_net_irq_token;
             }
+            ServiceKind::VirtioSnd => {
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                tokens[TOKEN_EXTRA_1] = child_token;
+                tokens[TOKEN_EXTRA_2] = ctx.virtio_snd_irq_token;
+            }
             ServiceKind::Netd => {
                 tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
             }
@@ -248,6 +253,7 @@ impl ServiceWiring for ServiceKind {
             | ServiceKind::VirtioBlk
             | ServiceKind::Virtio9p
             | ServiceKind::VirtioNet
+            | ServiceKind::VirtioSnd
             | ServiceKind::Netd
             | ServiceKind::Devmgr
             | ServiceKind::Tpmd

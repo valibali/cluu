@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
-pub const IPC_MESSAGE_MAX: usize = 4096; // One page - reduces syscall overhead for large transfers
+pub const IPC_MESSAGE_MAX: usize = 8192;
 
 const IPC_INLINE_MAX: usize = 64;
 

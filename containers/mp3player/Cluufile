@@ -1,0 +1,7 @@
+FROM minimal
+PROFILE ipc vfs registry
+MOUNT /tmp inherit
+MOUNT /host inherit
+BUILD "cargo build --manifest-path userspace/mp3player/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/mp3player.elf /bin/mp3player
+ENTRYPOINT /bin/mp3player
+PRELOAD

@@ -340,6 +340,20 @@ pub const BLK_SUBMIT_NACK: u32 = 0x314;
 pub const BLK_TID_CLEANUP: u32 = 0x315;
 
 // ──────────────────────────────────────────────────────────────────────
+// virtio-snd audio IPC labels.
+//
+// `AUDIO_OPEN_SESSION` and `AUDIO_CLOSE` go to the driver's listen endpoint.
+// `AUDIO_SUBMIT_PCM` is fire-and-forget; `AUDIO_COMPLETE` flows back to the
+// caller's per-session completion endpoint.
+// words[0] = session_id (or completion_endpoint for OPEN_SESSION).
+pub const AUDIO_OPEN_SESSION: u32 = 0x600;
+pub const AUDIO_SUBMIT_PCM: u32 = 0x601;
+pub const AUDIO_COMPLETE: u32 = 0x602;
+pub const AUDIO_CLOSE: u32 = 0x603;
+/// Procmgr → virtio-snd: a tid has exited; reap any sessions owned by it.
+pub const AUDIO_TID_CLEANUP: u32 = 0x604;
+
+// ──────────────────────────────────────────────────────────────────────
 // devmgr IPC labels — block device manager service.
 //
 // devmgr owns block devices and mints BlockRegion capability tokens for

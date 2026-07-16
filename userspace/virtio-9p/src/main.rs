@@ -24,7 +24,7 @@ use cluu_virtio_core::virtqueue::{Virtqueue, VRING_DESC_F_NEXT, VRING_DESC_F_WRI
 use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_IPC, TOKEN_SPACE};
 use libcluu::ipc::{extract_reply_id, reply, reply_with_payload};
 use libcluu::registry;
-use libcluu::syscall::{endpoint_create, ipc_recv_any_with_sender, pci_config_read, space_map_range, virt_to_phys};
+use libcluu::syscall::{endpoint_create, ipc_recv_any_with_sender, pci_config_read, space_map_range};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, space_grant, Error, Result, PAGE_SIZE};
 
@@ -47,13 +47,13 @@ const FS_REALPATH: u32 = 0x30D;
 const IPC_MESSAGE_MAX: usize = 256;
 
 const DMA_POOL_VA: usize = 0x5300_0000;
-const DMA_POOL_PAGES: usize = 64;
+const DMA_POOL_PAGES: usize = 256;
 const MMIO_VA_BASE: usize = 0x5400_0000;
 
-const MSIZE: usize = 8 * 1024;
+const MSIZE: usize = 64 * 1024;
 const REQ_BUF_VA: usize = 0x5500_0000;
 const RESP_BUF_VA: usize = 0x5520_0000;
-const BUF_PAGES: usize = 2;
+const BUF_PAGES: usize = 16;
 
 const GRANT_SCRATCH_BASE: usize = 0x5600_0000;
 const GRANT_SCRATCH_SIZE: usize = 4 * 1024 * 1024;
@@ -103,23 +103,19 @@ impl NinepClient {
     fn new(
         mut transport: ModernPciTransport,
         mut pool: DmaPool,
-        space_token: usize,
     ) -> Result<Self> {
         let vq = Virtqueue::new(&mut pool, 64)?;
         transport.configure_queue(0, &vq)?;
         transport.set_driver_ok()?;
 
-        space_map_range(space_token, REQ_BUF_VA, 0, 0x03, BUF_PAGES, 0)?;
-        space_map_range(space_token, RESP_BUF_VA, 0, 0x03, BUF_PAGES, 0)?;
-
-        let req_phys = virt_to_phys(space_token, REQ_BUF_VA)? as u64;
-        let resp_phys = virt_to_phys(space_token, RESP_BUF_VA)? as u64;
+        let req_region = pool.alloc_contiguous(MSIZE.div_ceil(PAGE_SIZE))?;
+        let resp_region = pool.alloc_contiguous(MSIZE.div_ceil(PAGE_SIZE))?;
 
         Ok(Self {
             transport,
             vq,
-            req_region: DmaRegion { virt: REQ_BUF_VA, phys: req_phys, len: MSIZE },
-            resp_region: DmaRegion { virt: RESP_BUF_VA, phys: resp_phys, len: MSIZE },
+            req_region,
+            resp_region,
             next_fid: FIRST_FID,
             msize: MSIZE as u32,
         })
@@ -547,7 +543,7 @@ fn run() -> Result<()> {
         irq.endpoint, irq.irq_number
     ))?;
 
-    let mut client = NinepClient::new(transport, pool, space_token)?;
+    let mut client = NinepClient::new(transport, pool)?;
 
     let msize = client.version()?;
     debug_print(&format!("virtio-9p: version negotiated, msize={}", msize))?;

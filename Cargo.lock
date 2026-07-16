@@ -889,6 +889,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-mp3player"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+ "nanomp3",
+]
+
+[[package]]
 name = "cluu-mv"
 version = "0.1.0"
 dependencies = [
@@ -1309,6 +1317,14 @@ dependencies = [
 
 [[package]]
 name = "cluu-virtio-net"
+version = "0.1.0"
+dependencies = [
+ "cluu-virtio-core",
+ "libcluu",
+]
+
+[[package]]
+name = "cluu-virtio-snd"
 version = "0.1.0"
 dependencies = [
  "cluu-virtio-core",
@@ -2170,6 +2186,12 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "nanomp3"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f69bdf7e634dc76798adc292ebd4f6e8e125cde6843a264fe398c52c3f7e8541"
 
 [[package]]
 name = "nix"

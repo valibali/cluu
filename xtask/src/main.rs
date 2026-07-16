@@ -1687,6 +1687,7 @@ fn create_initrd(profile: &str) -> Result<()> {
         "virtio-blk",
         "virtio-net",
         "virtio-9p",
+        "virtio-snd",
         "netd",
         "tpmd",
         "usb-input",
@@ -1812,6 +1813,16 @@ fn manifest_rights_mask(path: &str) -> u32 {
                 | RIGHT_IRQ_HANDLE
                 | RIGHT_IRQ_ACK
         }
+        "sys/virtio-snd" => {
+            RIGHT_PCI_ACCESS
+                | RIGHT_SPACE_MAP
+                | RIGHT_IPC_SEND
+                | RIGHT_IPC_RECV
+                | RIGHT_CREATE
+                | RIGHT_GRANT
+                | RIGHT_IRQ_HANDLE
+                | RIGHT_IRQ_ACK
+        }
         "sys/usb-input" => {
             RIGHT_PCI_ACCESS
                 | RIGHT_SPACE_MAP
@@ -1886,7 +1897,7 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     // Create bootboot config file. Optional extra BOOTBOOT environment lines
     // can be injected via CLUU_BOOTBOOT_ENV (newline or ';' separated).
     let mut bootboot_config =
-        String::from("// BOOTBOOT configuration\nscreen=1728x900\nkernel=sys/core\n");
+        String::from("// BOOTBOOT configuration\nscreen=1700x850\nkernel=sys/core\n");
     if let Ok(extra_env) = std::env::var("CLUU_BOOTBOOT_ENV") {
         for line in extra_env
             .split(['\n', ';'])
@@ -2156,13 +2167,24 @@ fn run_qemu(debug: bool, pin_core: Option<usize>, net: bool, port: u16) -> Resul
         .find(|p| PathBuf::from(p).exists())
         .context("OVMF.fd not found. Install ovmf package.")?;
 
+    let qemu_bin = std::env::var("QEMU_BIN").unwrap_or_else(|_| {
+        let local = format!("{}/.local/bin/qemu-system-x86_64", std::env::var("HOME").unwrap_or_default());
+        if std::path::Path::new(&local).exists() { local } else { "qemu-system-x86_64".to_string() }
+    });
+    // Ensure custom QEMU finds its bundled libslirp (if built with internal slirp subproject).
+    let local_lib = format!("{}/.local/lib/x86_64-linux-gnu", std::env::var("HOME").unwrap_or_default());
+    if std::path::Path::new(&local_lib).exists() {
+        let cur = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+        let new_ld = if cur.is_empty() { local_lib.clone() } else { format!("{}:{}", local_lib, cur) };
+        std::env::set_var("LD_LIBRARY_PATH", new_ld);
+    }
     let mut cmd = if let Some(core) = pin_core {
         println!("▸ Pinning QEMU to host CPU core {}", core);
         let mut c = Command::new("taskset");
-        c.args(["-c", &core.to_string(), "qemu-system-x86_64"]);
+        c.args(["-c", &core.to_string(), &qemu_bin]);
         c
     } else {
-        Command::new("qemu-system-x86_64")
+        Command::new(&qemu_bin)
     };
 
     // KVM acceleration with host CPU for accurate instruction behavior
@@ -2190,6 +2212,10 @@ fn run_qemu(debug: bool, pin_core: Option<usize>, net: bool, port: u16) -> Resul
         "user,id=net0",
         "-device",
         "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off",
+        "-audiodev",
+        "pa,id=snd0",
+        "-device",
+        "virtio-sound-pci,audiodev=snd0,addr=0x6,disable-legacy=on,disable-modern=off",
         // Host folder share via virtio-9p-pci (PCI slot 7 = addr=0x7).
         // slot 7 INTA# → PIRQD → IRQ 11 (shared with virtio-blk slot 3).
         // Kernel supports shared IRQ: both drivers receive IRQ 11, each
@@ -2252,7 +2278,13 @@ fn run_qemu(debug: bool, pin_core: Option<usize>, net: bool, port: u16) -> Resul
             "<html><body><h1>CLUU virtio-net demo</h1><p>Hello from the host!</p></body></html>",
         );
         match Command::new("python3")
-            .args(["-m", "http.server", &port.to_string(), "--bind", "127.0.0.1"])
+            .args([
+                "-m",
+                "http.server",
+                &port.to_string(),
+                "--bind",
+                "127.0.0.1",
+            ])
             .current_dir(&www_dir)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -2806,6 +2838,7 @@ const INIT_CRATES: &[&str] = &[
     "virtio-blk",
     "virtio-net",
     "virtio-9p",
+    "virtio-snd",
     "netd",
     "tpmd",
     "usb-input",

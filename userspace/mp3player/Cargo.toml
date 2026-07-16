@@ -1,0 +1,15 @@
+[package]
+name = "cluu-mp3player"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU mp3 player"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }
+nanomp3 = "0.1.1"
+
+[[bin]]
+name = "mp3player"
+path = "src/main.rs"

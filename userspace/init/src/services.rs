@@ -43,6 +43,7 @@ pub enum ServiceKind {
     VirtioBlk,
     Virtio9p,
     VirtioNet,
+    VirtioSnd,
     Netd,
     Tpmd,
     UsbInput,
@@ -102,6 +103,17 @@ const VIRTIONET_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
 
 const VIRTIONET_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIONET_RIGHTS_BITS);
 
+const VIRTIO_SND_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
+    | Rights::SPACE_MAP.bits()
+    | Rights::IPC_SEND.bits()
+    | Rights::IPC_RECV.bits()
+    | Rights::CREATE.bits()
+    | Rights::GRANT.bits()
+    | Rights::IRQ_HANDLE.bits()
+    | Rights::IRQ_ACK.bits();
+
+const VIRTIO_SND_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIO_SND_RIGHTS_BITS);
+
 // tpmd needs MMIO mapping for TIS interface + IPC for future service
 const TPMD_RIGHTS_BITS: u32 = Rights::SPACE_MAP.bits()
     | Rights::IPC_SEND.bits()
@@ -131,6 +143,7 @@ pub const PRIMORDIAL_SERVICES: &[&str] = &[
     "vfs",
     "virtio-blk",
     "virtio-9p",
+    "virtio-snd",
 ];
 
 // Boot-critical services in launch order.
@@ -216,6 +229,16 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         rights: Some(VIRTIONET_RIGHTS),
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::VirtioNet,
+        instance_id: None,
+        profile: CapProfile::SERVICE,
+    },
+    ServiceSpec {
+        name: "virtio-snd",
+        path: "sys/virtio-snd",
+        priority: 176,
+        rights: Some(VIRTIO_SND_RIGHTS),
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::VirtioSnd,
         instance_id: None,
         profile: CapProfile::SERVICE,
     },
