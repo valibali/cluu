@@ -32,9 +32,9 @@ use nanomp3::Decoder;
 
 const PERIOD_BYTES: usize = 4096;
 const SCRATCH_VA: usize = 0x7000_0000;
-const SCRATCH_PAGES: usize = 16;
+const SCRATCH_PAGES: usize = 24;
 const RING_SLOTS: usize = 8;
-const READ_CHUNK: usize = 4096;
+const READ_CHUNK: usize = 64 * 1024;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {

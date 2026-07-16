@@ -158,6 +158,19 @@ def run_case(case: Case, cfg: HarnessConfig | None = None) -> CaseResult:
                 case.sendkey_sequence_nowait is None
                 and _derive_nowait(cfg, case)
             ):
+                wait_marker = _resolve_pre_sendkey_wait_marker(cfg, case)
+                if wait_marker:
+                    pre_outcome = serial.wait_for([wait_marker], timeout_s=cfg.shell_ready_wait_s)
+                    if pre_outcome.result != WaitResult.MATCHED:
+                        result.error = (
+                            f"pre-sendkey marker {wait_marker!r} not seen within "
+                            f"{cfg.shell_ready_wait_s}s"
+                        )
+                        result.missing_markers = pre_outcome.missing_markers
+                        result.fault_lines = pre_outcome.fault_lines
+                        result.elapsed_s = time.monotonic() - start
+                        _dump_serial_tail(result, serial)
+                        return result
                 _run_sendkey_sequence(qemu.monitor, _resolve_sequence(cfg, case))
                 sendkey_fired_nowait = True
 
@@ -185,6 +198,7 @@ def run_case(case: Case, cfg: HarnessConfig | None = None) -> CaseResult:
             # 8. Type the test command(s) + extra keystroke commands.
             typed = _typed_commands(cfg, case)
             if typed:
+                time.sleep(2)
                 _type_commands(qemu.monitor, typed, cfg)
 
             # 9. Post-sendkey (e.g. ctrl-c for SIGINT cases).
@@ -344,6 +358,12 @@ def _resolve_sequence(cfg: HarnessConfig, case: Case) -> list[str]:
     if case.sendkey_sequence:
         return case.sendkey_sequence
     return get_defaults(case.marker_mode).sendkey_sequence
+
+
+def _resolve_pre_sendkey_wait_marker(cfg: HarnessConfig, case: Case) -> str | None:
+    if case.pre_sendkey_wait_marker is not None:
+        return case.pre_sendkey_wait_marker
+    return get_defaults(case.marker_mode).pre_sendkey_wait_marker
 
 
 def _typed_commands(cfg: HarnessConfig, case: Case) -> list[str]:

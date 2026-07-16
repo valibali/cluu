@@ -462,6 +462,26 @@ class L2MpNoVfs: pass
 class L2PluginApi: pass
 
 
+@cluu_case("l2_audio_boot", marker_mode="l2_audio_boot", description="virtio-snd driver boot + control/TX self-test", tags=["audio", "virtio-snd"])
+class L2AudioBoot: pass
+
+
+@cluu_case("l2_audio_play", marker_mode="l2_audio_play", description="mp3player raw-PCM playback via virtio-snd", tags=["audio", "virtio-snd", "mp3player"])
+class L2AudioPlay: pass
+
+
+@cluu_case("l2_blk_basic", marker_mode="l2_blk_basic", description="single sector-0 read via BlkSession", tags=["storage", "virtio-blk", "blkprobe"])
+class L2BlkBasic: pass
+
+
+@cluu_case("l2_blk_perf", marker_mode="l2_blk_perf", description="64 MB sequential read, >=150 MB/s floor", tags=["storage", "virtio-blk", "blkprobe", "perf"])
+class L2BlkPerf: pass
+
+
+@cluu_case("l2_blk_concurrent", marker_mode="l2_blk_concurrent", description="4 sessions x 100 concurrent reads", tags=["storage", "virtio-blk", "blkprobe"])
+class L2BlkConcurrent: pass
+
+
 __all__ = [
     "BSpawnWarm",
     "CFutex",

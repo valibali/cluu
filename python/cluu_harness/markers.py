@@ -533,6 +533,47 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             fail_marker=None,
             description="editor plugin API — keymap + command callbacks via MicroPython IPC",
         ),
+        MarkerModeSpec(
+            name="l2_audio_boot",
+            required_markers=[
+                _TSC,
+                "VIRTIO_SND_PCI",
+                "VIRTIO_SND_OK",
+                "VIRTIO_SND_TX_OK",
+            ],
+            category="boot",
+            description="virtio-snd driver boot + control/TX self-test",
+        ),
+        MarkerModeSpec(
+            name="l2_audio_play",
+            required_markers=[
+                _TSC,
+                _SHELL_READY,
+                "VIRTIO_SND_PCI",
+                "VIRTIO_SND_OK",
+                "MP3PLAYER_OPEN",
+                "MP3PLAYER_DONE",
+            ],
+            description="mp3player MP3 playback via virtio-snd",
+        ),
+        MarkerModeSpec(
+            name="l2_blk_basic",
+            required_markers=[_TSC, _SHELL_READY, "blkprobe: ALL OK"],
+            fail_marker="blkprobe: [FAIL]",
+            description="single sector-0 read via BlkSession",
+        ),
+        MarkerModeSpec(
+            name="l2_blk_perf",
+            required_markers=[_TSC, _SHELL_READY, "blkprobe: ALL OK"],
+            fail_marker="blkprobe: [FAIL]",
+            description="64 MB sequential read, >=150 MB/s floor",
+        ),
+        MarkerModeSpec(
+            name="l2_blk_concurrent",
+            required_markers=[_TSC, _SHELL_READY, "blkprobe: ALL OK"],
+            fail_marker="blkprobe: [FAIL]",
+            description="4 sessions x 100 concurrent reads",
+        ),
     ]
 }
 

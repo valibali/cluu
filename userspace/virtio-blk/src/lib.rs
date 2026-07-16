@@ -333,11 +333,11 @@ impl BlockDevice for ModernBlkAdapter {
                 if my_status.is_some() {
                     break;
                 }
-                spins += 1;
-                if spins.is_multiple_of(1024) {
-                    let _ = libcluu::syscall::yield_cpu();
-                }
-                core::hint::spin_loop();
+            spins += 1;
+            if spins % 100_000 == 0 {
+                let _ = libcluu::syscall::yield_cpu();
+            }
+            core::hint::spin_loop();
             }
             if my_status.unwrap() != 0 {
                 drop(inner);

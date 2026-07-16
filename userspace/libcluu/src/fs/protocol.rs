@@ -65,6 +65,8 @@ pub const VFS_FLUSH: u32 = 0x20F;
 pub const VFS_REALPATH: u32 = 0x210;
 /// Setup a per-client bounce buffer for big single-shot reply payloads.
 pub const VFS_BOUNCE_SETUP: u32 = 0x211;
+/// Read an entire file (≤4MB) into the caller's grant buffer in one round-trip.
+pub const VFS_READ_FILE_BULK: u32 = 0x212;
 
 /// Structured enum for protocol routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +88,7 @@ pub enum VfsOp {
     Link,
     Realpath,
     BounceSetup,
+    ReadFileBulk,
 }
 
 impl VfsOp {
@@ -108,6 +111,7 @@ impl VfsOp {
             VFS_LINK => Some(Self::Link),
             VFS_REALPATH => Some(Self::Realpath),
             VFS_BOUNCE_SETUP => Some(Self::BounceSetup),
+            VFS_READ_FILE_BULK => Some(Self::ReadFileBulk),
             _ => None,
         }
     }

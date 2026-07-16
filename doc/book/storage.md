@@ -36,9 +36,11 @@ result through `libcluu::fs::BlockDevice`.
 ### Sync vs async paths
 
 - **Sync path**: `read_bytes`/`write_bytes` spin-poll the device used ring under
-  `inner.lock()` and yield every 1024 spins. The IRQ-via-IPC wait path is
+  `inner.lock()` and yield every 100 000 spins. The IRQ-via-IPC wait path is
   intentionally NOT used here because it triggers unrelated process-jump
   faults in CLUU's current IPC layer; spin-poll preserves the baseline.
+  The main service loop has a 50 ms `recv_any` timeout fallback so a dropped
+  IRQ still gets a `drain_and_route` pass within 50 ms.
 - **Async path**: `BLK_SUBMIT` callers get a `BLK_COMPLETE` reply routed through
   the same completion path. `drain_and_route` is the IRQ-path counterpart: it
   acks the ISR, re-checks `deferred` against `pending`, drains fresh
@@ -82,7 +84,8 @@ Userspace ext2 driver that implements `libcluu::fs::Filesystem` over any
 
 - Root inode is always inode 2.
 - Superblock is read from byte offset 1024; block size is
-  `1024 << sb.log_block_size`.
+  `1024 << sb.log_block_size`. Disk images are created with `-b 4096`
+  (4 KiB blocks) so the runtime block size is 4096.
 - Inode size is `sb.inode_size` for rev_level ≥ 1, else 128.
 - **Triple-indirect blocks are NOT implemented.** `get_block_num` returns
   `Error::InvalidOperation` for those indices. Files are bounded at the
@@ -170,3 +173,68 @@ is invisible under QEMU TCG (every memory type behaves as WB); functional
 correctness is TCG-verifiable, perf delta requires KVM. `BlkRequestQueue`
 owns the virtqueue; cookie packed as `(session_id, request_id)` lets
 out-of-order `pop_used` completions route back to the right caller.
+
+## Storage throughput pass (2026-07-16)
+
+Targeted optimization round: ext2 throughput from ~9 MB/s to 803 MB/s,
+9p host-share throughput from ~596 KB/s to multi-MB/s.
+
+### ext2 path (virtio-blk)
+
+- **ext2 block size 1024→4096** (`xtask/src/main.rs`): `mke2fs -b 4096` with
+  262 144 blocks (1 GB). 4× fewer block lookups, 4× larger coalesced runs in
+  `ext2::read_file`.
+- **IRQ poll fallback** (`virtio-blk/src/main.rs`): main loop uses a 50 ms
+  `recv_any` timeout instead of blocking forever. If `dispatch_irq` drops an
+  IRQ message (shard lock busy), the poll fallback still drains completions
+  within 50 ms.
+- **Spin-poll yield frequency** (`virtio-blk/src/lib.rs`): `yield_cpu` every
+  100 000 spins (was 1024). The old frequency caused a scheduler round-trip
+  every ~100 µs, capping throughput at ~9 MB/s. The new frequency lets the
+  spin loop run at full speed while still yielding eventually.
+- **`dispatch_irq` retry** (`kernel/src/devices/irq.rs`): on `WouldBlock`
+  (shard lock busy), retry `try_send` up to 8 times with `spin_loop` between
+  attempts. Reduces IRQ message drop rate under contention.
+
+### 9p path (virtio-9p host share)
+
+- **Scatter-gather per-page descriptors** (`virtio-9p/src/main.rs`):
+  `round_trip` now builds one descriptor per response-buffer page using
+  `virt_to_phys(space_token, va + i * PAGE_SIZE)`. Fixes the
+  `DmaPool::alloc_contiguous` physical-contiguity bug that corrupted memory
+  for >4 KB 9p reads.
+- **MSIZE 64 KB→256 KB** (`virtio-9p/src/main.rs`): QEMU 11.0.2 accepts
+  256 KB via `TVERSION` negotiation. Virtqueue expanded 64→128 descriptors
+  (1 req + 64 response pages). 4× fewer round-trips for large reads.
+- **mp3player READ_CHUNK 4 KB→64 KB** (`mp3player/src/main.rs`): 16× fewer
+  IPC round-trips during file load. `SCRATCH_PAGES` 16→24 to fit the larger
+  grant buffer window.
+
+### VFS bulk read
+
+- **`VFS_READ_FILE_BULK` IPC** (`libcluu/src/fs/protocol.rs`,
+  `libcluu/src/fs/client.rs`, `vfs/src/main.rs`): new IPC label 0x212 that
+  reads an entire file (≤4 MB) into the caller's grant buffer in one
+  round-trip. `VfsClient::read_file_bulk(file, target_space, target_base)`
+  skips the per-chunk loop. Server-side `handle_read_file_bulk` mirrors
+  `handle_read_grant`'s Ext2/Memory/Virtual/MemFs arms but passes
+  `offset=0, len=file_size`. Files >4 MB get `BufferTooSmall` (caller falls
+  back to chunked `read_grant`).
+
+### What was NOT done
+
+- **Virtqueue 256→1024**: reverted. `DmaPool::alloc` rejects allocations
+  >1 page; a 1024-desc table (16 KB) overflows. Fixing requires kernel PMM
+  physically-contiguous allocation — future work.
+- **IRQ-driven `read_bytes`**: spin-poll retained. The `try_send` drop-on-
+  `WouldBlock` path still exists (bounded retry mitigates but does not
+  eliminate). Converting `read_bytes` to block on the IRQ endpoint requires
+  a reliable IRQ delivery guarantee first.
+
+### Harness
+
+- **`l2_blk_basic`**, **`l2_blk_perf`**, **`l2_blk_concurrent`** registered
+  in the Python harness (`markers.py`, `catalog.py`, `case_defaults.py`).
+  `blkprobe` binary already existed with the right markers
+  (`blkprobe: ALL OK`, `blkprobe: [FAIL]`, `blkprobe: perf … mb_per_s=N`).
+  `l2_blk_perf` gates on a 150 MB/s floor; measured 803 MB/s.

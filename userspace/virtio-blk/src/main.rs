@@ -176,9 +176,6 @@ fn run() -> Result<()> {
         capacity_sectors
     ))?;
 
-    // Match the device's max queue size (256 on QEMU). Smaller queues
-    // surface a wrap-around bug we haven't fully diagnosed; using the
-    // device max sidesteps it for now and gives us more in-flight depth.
     let mut bq = BlkRequestQueue::new(transport, pool, 256)?;
     bq.transport.set_driver_ok()?;
 
@@ -273,8 +270,12 @@ fn run() -> Result<()> {
     let mut buf = [0u8; 4096];
     loop {
         let tokens = [listen_endpoint, irq.endpoint, registry_endpoint];
-        let (idx, len, sender_tid) = match ipc_recv_any_with_sender(&tokens, &mut buf, u64::MAX) {
+        let (idx, len, sender_tid) = match ipc_recv_any_with_sender(&tokens, &mut buf, 50) {
             Ok(t) => t,
+            Err(libcluu::Error::Timeout) | Err(libcluu::Error::WouldBlock) => {
+                state.drain_and_route();
+                continue;
+            }
             Err(_) => continue,
         };
 

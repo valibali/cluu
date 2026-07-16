@@ -5,8 +5,8 @@
 
 use crate::error::{Error, Result};
 use crate::fs::protocol::{
-    VFS_BOUNCE_SETUP, VFS_CLOSE, VFS_FSTAT, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN,
-    VFS_READDIR, VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP,
+VFS_BOUNCE_SETUP, VFS_CLOSE, VFS_FSTAT, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN,
+VFS_READDIR, VFS_READ_FILE_BULK, VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP,
     VFS_RMDIR, VFS_STAT, VFS_UNLINK, VFS_WRITE,
 };
 use crate::async_runtime::IpcCallFuture;
@@ -258,6 +258,30 @@ impl VfsClient {
             VFS_READ_GRANT,
             payload.len(),
             &[self.client_id, file.fd, offset, len],
+        );
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload(self.endpoint, &msg, &payload, &mut reply)?;
+        parse_status(reply.words[0])?;
+        Ok(VfsGrant {
+            base: target_base,
+            offset: reply.words[2],
+            len: reply.words[1],
+        })
+    }
+
+    pub fn read_file_bulk(
+        &self,
+        file: VfsFile,
+        target_space_token: usize,
+        target_base: usize,
+    ) -> Result<VfsGrant> {
+        let mut payload = [0u8; core::mem::size_of::<usize>() * 2];
+        payload[..core::mem::size_of::<usize>()].copy_from_slice(&target_base.to_ne_bytes());
+        payload[core::mem::size_of::<usize>()..].copy_from_slice(&target_space_token.to_ne_bytes());
+        let msg = make_payload_message(
+            VFS_READ_FILE_BULK,
+            payload.len(),
+            &[self.client_id, file.fd],
         );
         let mut reply = Message::new(0, [0; 6], 0);
         ipc::call_with_payload(self.endpoint, &msg, &payload, &mut reply)?;

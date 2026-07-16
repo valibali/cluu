@@ -64,6 +64,8 @@ class Case:
     tags: list[str] = field(default_factory=list)
     # Human-readable description (shown by --list).
     description: str = ""
+    # Marker to wait for before firing sendkey_sequence (event-driven login).
+    pre_sendkey_wait_marker: str | None = None
 
 
 class _Registry:

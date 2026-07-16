@@ -344,6 +344,30 @@ playback — PA backend handles all buffering. Device underruns are caused
 by I/O stalls (9p read latency), not buffer misconfiguration. Full-file
 load eliminates the underrun class for mp3player.
 
+### Interlude: storage throughput pass (DONE 2026-07-16)
+
+Targeted optimization round after the audio driver exposed 9p read latency
+as the underrun root cause. ext2 throughput: ~9 MB/s → 803 MB/s. 9p
+host-share: ~596 KB/s → multi-MB/s.
+
+Shipped:
+
+- **9p scatter-gather** (`virtio-9p`): per-page descriptors in `round_trip`
+  via `virt_to_phys` — fixes `DmaPool::alloc_contiguous` physical-
+  contiguity bug. Unblocks >4 KB 9p reads.
+- **9p MSIZE 64 KB→256 KB**: QEMU 11.0.2 accepts via `TVERSION`. 4× fewer
+  round-trips.
+- **ext2 block size 1024→4096**: `mke2fs -b 4096`. 4× fewer block lookups.
+- **VFS `read_file_bulk` IPC** (0x212): one round-trip for files ≤4 MB.
+- **IRQ poll fallback + retry**: 50 ms `recv_any` timeout in virtio-blk
+  main loop; `dispatch_irq` retries `try_send` 8× on `WouldBlock`.
+- **Spin-poll yield frequency**: every 100 000 spins (was 1024).
+- **mp3player READ_CHUNK 4 KB→64 KB**: 16× fewer IPC round-trips.
+- **Harness**: `l2_blk_basic`/`l2_blk_perf`/`l2_blk_concurrent` registered.
+
+Not done: virtqueue 256→1024 (blocked by `DmaPool::alloc` 1-page limit);
+IRQ-driven `read_bytes` (blocked by `try_send` drop reliability).
+
 ### Phase 6: Ship (PENDING)
 
 Goal: a stranger can run CLUU from a download link and see it work.

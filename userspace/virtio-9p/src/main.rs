@@ -50,10 +50,10 @@ const DMA_POOL_VA: usize = 0x5300_0000;
 const DMA_POOL_PAGES: usize = 256;
 const MMIO_VA_BASE: usize = 0x5400_0000;
 
-const MSIZE: usize = 64 * 1024;
+const MSIZE: usize = 256 * 1024;
 const REQ_BUF_VA: usize = 0x5500_0000;
 const RESP_BUF_VA: usize = 0x5520_0000;
-const BUF_PAGES: usize = 16;
+const BUF_PAGES: usize = 64;
 
 const GRANT_SCRATCH_BASE: usize = 0x5600_0000;
 const GRANT_SCRATCH_SIZE: usize = 4 * 1024 * 1024;
@@ -106,7 +106,7 @@ impl NinepClient {
         mut pool: DmaPool,
         space_token: usize,
     ) -> Result<Self> {
-        let vq = Virtqueue::new(&mut pool, 64)?;
+        let vq = Virtqueue::new(&mut pool, 128)?;
         transport.configure_queue(0, &vq)?;
         transport.set_driver_ok()?;
 
@@ -135,8 +135,11 @@ impl NinepClient {
             return Err(Error::BufferTooSmall);
         }
 
-        let chain = self.vq.alloc_chain(2).ok_or(Error::Busy)?;
-        let descs = self.collect_chain(chain.head, 2);
+        let resp_pages = (MSIZE / PAGE_SIZE) as u16;
+        let total_descs = 1 + resp_pages;
+
+        let chain = self.vq.alloc_chain(total_descs).ok_or(Error::Busy)?;
+        let descs = self.collect_chain(chain.head, total_descs);
 
         self.vq.desc_set(
             descs[0],
@@ -145,13 +148,25 @@ impl NinepClient {
             VRING_DESC_F_NEXT,
             descs[1],
         );
-        self.vq.desc_set(
-            descs[1],
-            self.resp_region.phys,
-            MSIZE as u32,
-            VRING_DESC_F_WRITE,
-            0,
-        );
+
+        for i in 0..resp_pages as usize {
+            let va = self.resp_region.virt + i * PAGE_SIZE;
+            let phys = libcluu::syscall::virt_to_phys(self.space_token, va)? as u64;
+            let is_last = i + 1 == resp_pages as usize;
+            let flags = if is_last {
+                VRING_DESC_F_WRITE
+            } else {
+                VRING_DESC_F_WRITE | VRING_DESC_F_NEXT
+            };
+            let next = if is_last { 0 } else { descs[i + 2] };
+            self.vq.desc_set(
+                descs[i + 1],
+                phys,
+                PAGE_SIZE as u32,
+                flags,
+                next,
+            );
+        }
 
         self.vq.submit(chain, 1);
         self.transport.notify(0);
@@ -169,7 +184,7 @@ impl NinepClient {
                 });
             }
             spins += 1;
-            if spins % 1024 == 0 {
+            if spins % 100_000 == 0 {
                 let _ = libcluu::syscall::yield_cpu();
             }
             core::hint::spin_loop();

@@ -681,8 +681,10 @@ The "2x speed" was actually severe underrun: at 48kHz, 8×4KB = 170ms of buffer 
 
 With 4KB reads (1 page), this is invisible — one page, one descriptor, correct phys. With 64KB reads (16 pages), QEMU writes 64KB to the first page's physical address, corrupting 15 pages of unrelated memory and never completing the transfer.
 
-**Fix:** For multi-page DMA buffers, build a scatter-gather descriptor chain with one descriptor per page, using `virt_to_phys(space_token, va + i * PAGE_SIZE)` for each page's physical address. Do NOT rely on `alloc_contiguous` returning physically contiguous memory.
+**Fix (applied 2026-07-16):** For multi-page DMA buffers, build a scatter-gather descriptor chain with one descriptor per page, using `virt_to_phys(space_token, va + i * PAGE_SIZE)` for each page's physical address. Do NOT rely on `alloc_contiguous` returning physically contiguous memory. The virtio-9p `round_trip` now uses 65 descriptors (1 req + 64 resp pages) for 256KB MSIZE.
+
+**Additional limitation:** `DmaPool::alloc` (not just `alloc_contiguous`) rejects any single allocation >1 page (`len > PAGE_SIZE → Overflow`). This means virtqueue descriptor tables must fit in one 4KB page, limiting virtqueue size to 256 descriptors (256×16 = 4096 bytes). Expanding to 1024 descriptors requires kernel PMM physically-contiguous allocation support.
 
 **Key insight:** The name `alloc_contiguous` is misleading — it means contiguous in virtual address space, not physical. Virtio devices operate on physical addresses. Always use per-page `virt_to_phys` for descriptor setup when the buffer spans multiple pages.
 
-**See also:** `userspace/dma-core/src/dma.rs` (`alloc_contiguous`), `kernel/src/syscall/handlers.rs` (`invoke_space_map_range`, `pmm::alloc_frame` per page), `userspace/virtio-9p/src/main.rs` (`round_trip`).
+**See also:** `userspace/dma-core/src/dma.rs` (`alloc_contiguous`, `alloc`), `kernel/src/syscall/handlers.rs` (`invoke_space_map_range`, `pmm::alloc_frame` per page), `userspace/virtio-9p/src/main.rs` (`round_trip`), `doc/book/storage.md` (Storage throughput pass).

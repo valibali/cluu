@@ -176,8 +176,12 @@ class QemuController:
 
     def _qemu_args(self) -> list[str]:
         cfg = self.cfg
+        qemu_bin = os.environ.get("QEMU_BIN", "")
+        if not qemu_bin:
+            local = os.path.expanduser("~/.local/bin/qemu-system-x86_64")
+            qemu_bin = local if os.path.exists(local) else "qemu-system-x86_64"
         args = [
-            "qemu-system-x86_64",
+            qemu_bin,
             "-bios", str(cfg.ovmf),
             "-machine", "pc",
             "-m", "1G",
@@ -211,6 +215,8 @@ class QemuController:
         args.extend([
             "-fsdev", "local,id=hostshare,path=/home/vlb2bp/cluu-host-share,security_model=none",
             "-device", "virtio-9p-pci,fsdev=hostshare,mount_tag=hostshare,addr=0x7,disable-legacy=on,disable-modern=off",
+            "-audiodev", "pa,id=snd0",
+            "-device", "virtio-sound-pci,audiodev=snd0,addr=0x6,disable-legacy=on,disable-modern=off",
         ])
         if cfg.autoexec_cmd:
             # Forwarded to the build via env; xtask reads it. We just
@@ -262,7 +268,7 @@ class QemuController:
             return False
         phys = int(m.group(1), 16)
         log.info("FB_DUMP: capturing phys=0x%x -> %s", phys, out_path)
-        # 1728x900 BGRA32 = 3686400 bytes (per knowledge note).
+        # 1700x850 BGRA32 = 3686400 bytes (per knowledge note).
         self._run.monitor.pmemsave(phys, 3686400, out_path)
         return True
 

@@ -22,7 +22,7 @@ use core::mem::size_of;
 use libcluu::elf::{ElfFile, LoadableSegment};
 use libcluu::fs::protocol::{
     VfsOp, VFS_CLOSE, VFS_FSTAT, VFS_LINK, VFS_MAP_ELF, VFS_MKDIR, VFS_OPEN, VFS_READDIR,
-    VFS_BOUNCE_SETUP, VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT,
+    VFS_BOUNCE_SETUP, VFS_READ_FILE_BULK, VFS_READ_GRANT, VFS_READ_RING, VFS_REALPATH, VFS_RENAME, VFS_RING_SETUP, VFS_RMDIR, VFS_STAT,
     VFS_UNLINK, VFS_WRITE,
 };
 use libcluu::ipc::{
@@ -228,6 +228,7 @@ fn op_reply_label(op: VfsOp) -> u32 {
         VfsOp::Link => VFS_LINK,
         VfsOp::Realpath => VFS_REALPATH,
         VfsOp::BounceSetup => VFS_BOUNCE_SETUP,
+        VfsOp::ReadFileBulk => VFS_READ_FILE_BULK,
     }
 }
 
@@ -1141,6 +1142,9 @@ impl VfsServer {
             VfsOp::ReadRing => self.handle_read_ring(msg, reply_token, authenticated_client, runtime),
             VfsOp::BounceSetup => {
                 self.handle_bounce_setup(msg, payload, reply_token, authenticated_client)
+            }
+            VfsOp::ReadFileBulk => {
+                self.handle_read_file_bulk(msg, payload, reply_token, authenticated_client)
             }
         };
         vfs_trace!("vfs: handled {:?} result={:?}", op, result);
@@ -4209,6 +4213,120 @@ impl VfsServer {
                 let _ = ipc::send_msg_with_payload(ep, &drain_hint, &[]);
                 // Shell stays blocked; we do NOT call ipc::reply here.
                 return Ok(());
+            }
+        }
+
+        reply_simple(&reply_msg)
+    }
+
+    fn handle_read_file_bulk(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+        _reply_token: usize,
+        caller_client: Option<usize>,
+    ) -> Result<()> {
+        let fd = msg.words[2];
+        let mut reply_msg = Message::new(VFS_READ_FILE_BULK, [0; 6], 3);
+        let ep = self.endpoint;
+        let reply_simple = |rm: &Message| ipc::reply_to_sender(msg, rm, ep, IpcFlags::empty());
+        let client_id = match self.resolve_client_id("read_file_bulk", caller_client, msg.words[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                reply_msg.words[0] = err.to_errno() as usize;
+                return reply_simple(&reply_msg);
+            }
+        };
+
+        let Some((target_base, target_space)) = parse_usize_pair(payload) else {
+            reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+            return reply_simple(&reply_msg);
+        };
+
+        let Some(file) = self.files.get(client_id, fd).cloned() else {
+            reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+            return reply_simple(&reply_msg);
+        };
+
+        if target_base & (PAGE_SIZE - 1) != 0 {
+            reply_msg.words[0] = Error::InvalidArgument as isize as usize;
+            return reply_simple(&reply_msg);
+        }
+
+        match file {
+            OpenFile::Memory(entry) => {
+                if entry.size > GRANT_BUF_SIZE {
+                    reply_msg.words[0] = Error::BufferTooSmall.to_errno() as usize;
+                    return reply_simple(&reply_msg);
+                }
+                self.read_grant_memory(&entry, 0, entry.size, target_base, target_space, &mut reply_msg)?;
+            }
+            OpenFile::Ext2(entry) => {
+                if entry.size > GRANT_BUF_SIZE {
+                    reply_msg.words[0] = Error::BufferTooSmall.to_errno() as usize;
+                    return reply_simple(&reply_msg);
+                }
+                if entry.size == 0 {
+                    reply_msg.words[0] = 0;
+                    reply_msg.words[1] = 0;
+                    reply_msg.words[2] = 0;
+                    return reply_simple(&reply_msg);
+                }
+                if let Some(cache_entry) = self.cache.get(entry.inode, entry.size) {
+                    self.read_grant_cached_region(
+                        cache_entry.base, cache_entry.len,
+                        0, entry.size, target_base, target_space, &mut reply_msg,
+                    )?;
+                } else if let Some(cache_entry) = self.cache_ext2_file(&entry) {
+                    self.read_grant_cached_region(
+                        cache_entry.base, cache_entry.len,
+                        0, entry.size, target_base, target_space, &mut reply_msg,
+                    )?;
+                } else {
+                    self.read_grant_remote_chunked(
+                        entry.endpoint, entry.inode, entry.size,
+                        0, entry.size, target_base, target_space, &mut reply_msg,
+                    )?;
+                }
+            }
+            OpenFile::Virtual(vfile) => {
+                if vfile.data.len() > GRANT_BUF_SIZE {
+                    reply_msg.words[0] = Error::BufferTooSmall.to_errno() as usize;
+                    return reply_simple(&reply_msg);
+                }
+                self.read_grant_virtual(
+                    &vfile.data, 0, vfile.data.len(),
+                    target_base, target_space, &mut reply_msg,
+                )?;
+            }
+            OpenFile::MemFs(entry) => {
+                if entry.size > GRANT_BUF_SIZE {
+                    reply_msg.words[0] = Error::BufferTooSmall.to_errno() as usize;
+                    return reply_simple(&reply_msg);
+                }
+                let read_result: Result<Vec<u8>> = {
+                    match self.container_memfs.get(&entry.container_id) {
+                        Some(backend) => backend.borrow().read(entry.inode_id, 0, entry.size),
+                        None => Err(Error::NotFound),
+                    }
+                };
+                match read_result {
+                    Ok(data) if !data.is_empty() => {
+                        self.grant_data_to_caller(&data, target_base, target_space, &mut reply_msg)?;
+                    }
+                    Ok(_) => {
+                        reply_msg.words[0] = 0;
+                        reply_msg.words[1] = 0;
+                        reply_msg.words[2] = 0;
+                    }
+                    Err(err) => {
+                        reply_msg.words[0] = err.to_errno() as usize;
+                    }
+                }
+            }
+            OpenFile::Device(_) | OpenFile::Pts(_) => {
+                reply_msg.words[0] = Error::InvalidArgument.to_errno() as usize;
+                return reply_simple(&reply_msg);
             }
         }
 

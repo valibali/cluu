@@ -103,7 +103,30 @@ pub fn dispatch_irq(irq: u8, label: u32, data: u8) {
                 delivered = true;
             }
             Err(Error::WouldBlock) => {
-                IRQ_LOCK_BUSY_COUNT.fetch_add(1, Ordering::Relaxed);
+                let mut delivered_now = false;
+                for _ in 0..8 {
+                    core::hint::spin_loop();
+                    match endpoint::try_send(endpoint_id, msg_bytes) {
+                        Ok(Some(thread_id)) => {
+                            IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed);
+                            ThreadManager::wake_thread(thread_id);
+                            delivered = true;
+                            delivered_now = true;
+                            break;
+                        }
+                        Ok(None) => {
+                            IRQ_DELIVERED_COUNT.fetch_add(1, Ordering::Relaxed);
+                            delivered = true;
+                            delivered_now = true;
+                            break;
+                        }
+                        Err(Error::WouldBlock) => continue,
+                        Err(_) => break,
+                    }
+                }
+                if !delivered_now {
+                    IRQ_LOCK_BUSY_COUNT.fetch_add(1, Ordering::Relaxed);
+                }
             }
             Err(_) => {
                 IRQ_SEND_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);

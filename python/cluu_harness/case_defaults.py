@@ -29,6 +29,9 @@ class CaseDefaults:
     run_wait_s: int | None = None
     # Extra keystroke commands to inject (KEYSTROKE_COMMANDS in bash).
     keystroke_commands: list[str] = field(default_factory=list)
+    # Marker to wait for before firing sendkey_sequence (event-driven login).
+    # If set, replaces blind "sleep N" prefix in the sequence.
+    pre_sendkey_wait_marker: str | None = None
 
 
 # Standard root/root credentials sendkey sequence. Per
@@ -47,6 +50,29 @@ _CREDS_SENDKEY_ROOT: list[str] = [
 def _creds() -> list[str]:
     """Return a fresh copy of the credential sequence (mutable)."""
     return list(_CREDS_SENDKEY_ROOT)
+
+
+def _creds_slow() -> list[str]:
+    """Credentials with longer sleep for virtio-snd boot (~30s to login)."""
+    return [
+        "sleep 40",
+        "sendkey r", "sendkey o", "sendkey o", "sendkey t", "sendkey ret",
+        "sleep 2",
+        "sendkey r", "sendkey o", "sendkey o", "sendkey t", "sendkey ret",
+    ]
+
+
+def _creds_no_sleep() -> list[str]:
+    """Credentials without the blind sleep prefix (for event-driven cases)."""
+    return list(_CREDS_NO_SLEEP)
+
+
+_CREDS_NO_SLEEP: list[str] = [
+    "sleep 2",
+    "sendkey r", "sendkey o", "sendkey o", "sendkey t", "sendkey ret",
+    "sleep 2",
+    "sendkey r", "sendkey o", "sendkey o", "sendkey t", "sendkey ret",
+]
 
 
 def _type_command(cmd: str) -> list[str]:
@@ -480,6 +506,38 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         run_wait_s=60,
     ),
     "none": CaseDefaults(test_command="hello"),
+    "l2_audio_boot": CaseDefaults(
+        test_command="",
+        run_wait_s=45,
+    ),
+    "l2_audio_play": CaseDefaults(
+        test_command="mp3player /host/winamp.mp3",
+        sendkey_sequence=_creds_no_sleep(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=120,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_blk_basic": CaseDefaults(
+        test_command="blkprobe basic",
+        sendkey_sequence=_creds_no_sleep(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=30,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_blk_perf": CaseDefaults(
+        test_command="blkprobe perf",
+        sendkey_sequence=_creds_no_sleep(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=60,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_blk_concurrent": CaseDefaults(
+        test_command="blkprobe concurrent",
+        sendkey_sequence=_creds_no_sleep(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=30,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
 }
 
 
