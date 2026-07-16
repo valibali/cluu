@@ -32,8 +32,9 @@ use nanomp3::Decoder;
 
 const PERIOD_BYTES: usize = 4096;
 const SCRATCH_VA: usize = 0x7000_0000;
-const SCRATCH_PAGES: usize = 16;
+const SCRATCH_PAGES: usize = 48;
 const RING_SLOTS: usize = 8;
+const READ_CHUNK: usize = 64 * 1024;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -151,7 +152,7 @@ fn open_audio_for_mp3(
             debug_print("mp3player: no MP3 frames found")?;
             return Err(Error::InvalidArgument);
         }
-        let want = (4096).min(file_size - offset);
+        let want = READ_CHUNK.min(file_size - offset);
         let grant = vfs.read_grant(file, offset, want, space_token, vfs_scratch)?;
         let chunk = unsafe {
             core::slice::from_raw_parts((grant.base + grant.offset) as *const u8, grant.len)
@@ -243,7 +244,7 @@ fn play_raw(
     {
         let mut offset = 0usize;
         while offset < file_size {
-            let want = (4096).min(file_size - offset);
+            let want = READ_CHUNK.min(file_size - offset);
             let grant = vfs.read_grant(file, offset, want, space_token, vfs_scratch)?;
             let chunk = unsafe {
                 core::slice::from_raw_parts((grant.base + grant.offset) as *const u8, grant.len)
@@ -298,7 +299,7 @@ fn play_mp3(
     {
         let mut offset = 0usize;
         while offset < file_size {
-            let want = (4096).min(file_size - offset);
+            let want = READ_CHUNK.min(file_size - offset);
             let grant = vfs.read_grant(file, offset, want, space_token, vfs_scratch)?;
             let chunk = unsafe {
                 core::slice::from_raw_parts((grant.base + grant.offset) as *const u8, grant.len)
