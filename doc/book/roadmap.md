@@ -363,10 +363,12 @@ Shipped:
   main loop; `dispatch_irq` retries `try_send` 8× on `WouldBlock`.
 - **Spin-poll yield frequency**: every 100 000 spins (was 1024).
 - **mp3player READ_CHUNK 4 KB→64 KB**: 16× fewer IPC round-trips.
+- **Virtio indirect descriptors** (`VIRTIO_F_RING_INDIRECT_DESC`): large
+  scatter-gather requests use 1-page indirect tables instead of overflowing
+  the 256-desc main queue. Supports 4 MB reads.
 - **Harness**: `l2_blk_basic`/`l2_blk_perf`/`l2_blk_concurrent` registered.
 
-Not done: virtqueue 256→1024 (blocked by `DmaPool::alloc` 1-page limit);
-IRQ-driven `read_bytes` (blocked by `try_send` drop reliability).
+Not done: IRQ-driven `read_bytes` (blocked by `try_send` drop reliability).
 
 ### Phase 6: Ship (PENDING)
 

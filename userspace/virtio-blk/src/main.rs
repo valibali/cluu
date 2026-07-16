@@ -163,7 +163,7 @@ fn run() -> Result<()> {
     // Reset, negotiate features (VERSION_1 only — no fancy device features yet).
     transport.reset()?;
     let dev_feats = transport.read_device_features()?;
-    let want = FeatureBits::VERSION_1.bits() & dev_feats;
+    let want = (FeatureBits::VERSION_1 | FeatureBits::RING_INDIRECT_DESC).bits() & dev_feats;
     transport.write_driver_features(want)?;
 
     // Read device capacity from device_cfg (capacity at offset 0, u64).

@@ -683,7 +683,7 @@ With 4KB reads (1 page), this is invisible — one page, one descriptor, correct
 
 **Fix (applied 2026-07-16):** For multi-page DMA buffers, build a scatter-gather descriptor chain with one descriptor per page, using `virt_to_phys(space_token, va + i * PAGE_SIZE)` for each page's physical address. Do NOT rely on `alloc_contiguous` returning physically contiguous memory. The virtio-9p `round_trip` now uses 65 descriptors (1 req + 64 resp pages) for 256KB MSIZE.
 
-**Additional limitation:** `DmaPool::alloc` (not just `alloc_contiguous`) rejects any single allocation >1 page (`len > PAGE_SIZE → Overflow`). This means virtqueue descriptor tables must fit in one 4KB page, limiting virtqueue size to 256 descriptors (256×16 = 4096 bytes). Expanding to 1024 descriptors requires kernel PMM physically-contiguous allocation support.
+**Additional limitation:** `DmaPool::alloc` (not just `alloc_contiguous`) rejects any single allocation >1 page (`len > PAGE_SIZE → Overflow`). This means virtqueue descriptor tables must fit in one 4KB page, limiting the main virtqueue to 256 descriptors. Large scatter-gather requests use virtio indirect descriptors (`VIRTIO_F_RING_INDIRECT_DESC`, bit 28) instead — each indirect table is a separate 1-page buffer containing 256 entries, chained in the main ring.
 
 **Key insight:** The name `alloc_contiguous` is misleading — it means contiguous in virtual address space, not physical. Virtio devices operate on physical addresses. Always use per-page `virt_to_phys` for descriptor setup when the buffer spans multiple pages.
 

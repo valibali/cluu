@@ -221,11 +221,25 @@ Targeted optimization round: ext2 throughput from ~9 MB/s to 803 MB/s,
   `offset=0, len=file_size`. Files >4 MB get `BufferTooSmall` (caller falls
   back to chunked `read_grant`).
 
+### Indirect descriptors (virtio-blk)
+
+- **`VIRTIO_F_RING_INDIRECT_DESC`** (feature bit 28, `virtio-core/src/transport/mod.rs`):
+  negotiated at driver init. Allows a single main-ring descriptor to point
+  to an indirect descriptor table — a separate DMA buffer containing up to
+  256 `VRingDesc` entries (1 page = 4096/16).
+- **`submit_read`/`submit_write`** (`virtio-blk/src/request_queue.rs`):
+  when a request needs >254 data-page descriptors (would overflow the
+  256-desc queue), the driver switches to indirect mode. Main-ring chain:
+  `header → indirect_table_0 → … → indirect_table_K → status`. Each
+  indirect table holds 256 data-page descriptors, chained internally via
+  `VRING_DESC_F_NEXT`. A 4 MB read (1024 pages) uses 6 main-ring
+  descriptors + 4 indirect table pages.
+- **Recycling**: indirect table `DmaRegion`s are stored in `InflightSlot`
+  and returned to `free_indirect` on completion, same as header/status
+  pairs. Steady-state pool usage is bounded by high-water-mark depth.
+
 ### What was NOT done
 
-- **Virtqueue 256→1024**: reverted. `DmaPool::alloc` rejects allocations
-  >1 page; a 1024-desc table (16 KB) overflows. Fixing requires kernel PMM
-  physically-contiguous allocation — future work.
 - **IRQ-driven `read_bytes`**: spin-poll retained. The `try_send` drop-on-
   `WouldBlock` path still exists (bounded retry mitigates but does not
   eliminate). Converting `read_bytes` to block on the IRQ endpoint requires

@@ -9,6 +9,7 @@ pub use modern_pci::ModernPciTransport;
 bitflags::bitflags! {
     pub struct FeatureBits: u64 {
         const VERSION_1 = 1 << 32;       // virtio 1.0 compliance
+        const RING_INDIRECT_DESC = 1 << 28; // indirect descriptor tables
         // device-class feature bits live in higher namespaces (e.g. blk uses 0..16)
     }
 }

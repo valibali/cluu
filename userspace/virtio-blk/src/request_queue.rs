@@ -7,9 +7,13 @@
 use crate::protocol::{VirtioBlkReqHeader, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT};
 use cluu_virtio_core::dma::{DmaPool, DmaRegion};
 use cluu_virtio_core::transport::Transport;
-use cluu_virtio_core::virtqueue::{Virtqueue, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+use cluu_virtio_core::virtqueue::{
+    Virtqueue, VRingDesc, VRING_DESC_F_INDIRECT, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE,
+};
 use alloc::vec::Vec;
 use libcluu::{Error, Result};
+
+const INDIRECT_ENTRIES_PER_PAGE: usize = 4096 / core::mem::size_of::<VRingDesc>();
 
 /// Per-request bookkeeping while a request is in flight: the DMA region
 /// holding the on-the-wire header + status byte for THIS request.
@@ -17,6 +21,7 @@ pub struct InflightSlot {
     pub cookie: u64,
     pub header_region: DmaRegion,
     pub status_region: DmaRegion,
+    pub indirect_regions: Vec<DmaRegion>,
 }
 
 pub struct BlkRequestQueue<T: Transport> {
@@ -24,9 +29,8 @@ pub struct BlkRequestQueue<T: Transport> {
     pub vq: Virtqueue,
     pub pool: DmaPool,
     pub in_flight: Vec<InflightSlot>,
-    /// Recycled (header, status) DMA region pairs returned from completed
-    /// requests. Pre-allocated regions are reused before tapping the pool.
     free_slots: Vec<(DmaRegion, DmaRegion)>,
+    free_indirect: Vec<DmaRegion>,
 }
 
 impl<T: Transport> BlkRequestQueue<T> {
@@ -39,6 +43,7 @@ impl<T: Transport> BlkRequestQueue<T> {
             pool,
             in_flight: Vec::new(),
             free_slots: Vec::new(),
+            free_indirect: Vec::new(),
         })
     }
 
@@ -60,9 +65,6 @@ impl<T: Transport> BlkRequestQueue<T> {
             return Err(Error::InvalidArgument);
         }
 
-        // Acquire (header, status) DMA pair: prefer the recycled free-list
-        // before tapping the bump pool. This bounds steady-state pool usage
-        // to high-water-mark in_flight depth, not lifetime request count.
         let (header_region, status_region) = match self.free_slots.pop() {
             Some(pair) => pair,
             None => {
@@ -72,18 +74,6 @@ impl<T: Transport> BlkRequestQueue<T> {
             }
         };
 
-        let n_descs = (page_phys.len() + 2) as u16; // header + N + status
-        let chain = match self.vq.alloc_chain(n_descs) {
-            Some(c) => c,
-            None => {
-                // Return the regions to the free-list so the next request
-                // can reuse them; they outlive request lifetimes.
-                self.free_slots.push((header_region, status_region));
-                return Err(Error::Busy);
-            }
-        };
-
-        // Fill header.
         unsafe {
             let h = header_region.virt as *mut VirtioBlkReqHeader;
             (*h).type_ = VIRTIO_BLK_T_IN;
@@ -91,31 +81,49 @@ impl<T: Transport> BlkRequestQueue<T> {
             (*h).sector = lba;
         }
         unsafe {
-            *(status_region.virt as *mut u8) = 0xFF; // sentinel; device overwrites
+            *(status_region.virt as *mut u8) = 0xFF;
         }
 
-        // Walk the chain to fill descriptors.
-        // Build chain links: every desc except the last has NEXT.
+        let qsize = self.vq.queue_size as usize;
+        let direct_descs = page_phys.len() + 2;
+
+        if direct_descs <= qsize {
+            self.submit_read_direct(page_phys, total_bytes, cookie, header_region, status_region)
+        } else {
+            self.submit_read_indirect(page_phys, total_bytes, cookie, header_region, status_region)
+        }
+    }
+
+    fn submit_read_direct(
+        &mut self,
+        page_phys: &[u64],
+        total_bytes: usize,
+        cookie: u64,
+        header_region: DmaRegion,
+        status_region: DmaRegion,
+    ) -> Result<()> {
+        let n_descs = (page_phys.len() + 2) as u16;
+        let chain = match self.vq.alloc_chain(n_descs) {
+            Some(c) => c,
+            None => {
+                self.free_slots.push((header_region, status_region));
+                return Err(Error::Busy);
+            }
+        };
+
         let descs = self.collect_chain_indices(chain.head, n_descs);
         for (i, &didx) in descs.iter().enumerate() {
             let is_last = i == descs.len() - 1;
             if i == 0 {
-                // Header: device reads, driver writes (default == OUT_FROM_DRIVER).
                 let next_link = if is_last { 0 } else { descs[i + 1] };
                 let flags = if is_last { 0 } else { VRING_DESC_F_NEXT };
-                self.vq
-                    .desc_set(didx, header_region.phys, 16, flags, next_link);
+                self.vq.desc_set(didx, header_region.phys, 16, flags, next_link);
             } else if i == descs.len() - 1 {
-                // Status: device writes.
-                self.vq
-                    .desc_set(didx, status_region.phys, 1, VRING_DESC_F_WRITE, 0);
+                self.vq.desc_set(didx, status_region.phys, 1, VRING_DESC_F_WRITE, 0);
             } else {
-                // Buffer pages: device writes (this is a read request, so
-                // the buffer is filled BY the device).
                 let page_idx = i - 1;
                 let bytes_in_page = if page_idx == page_phys.len() - 1 {
-                    let rem = total_bytes - page_idx * 4096;
-                    rem
+                    total_bytes - page_idx * 4096
                 } else {
                     4096
                 };
@@ -135,6 +143,102 @@ impl<T: Transport> BlkRequestQueue<T> {
             cookie,
             header_region,
             status_region,
+            indirect_regions: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn submit_read_indirect(
+        &mut self,
+        page_phys: &[u64],
+        total_bytes: usize,
+        cookie: u64,
+        header_region: DmaRegion,
+        status_region: DmaRegion,
+    ) -> Result<()> {
+        let num_indirect_tables = page_phys.len().div_ceil(INDIRECT_ENTRIES_PER_PAGE);
+        let main_descs = (2 + num_indirect_tables) as u16;
+
+        let chain = match self.vq.alloc_chain(main_descs) {
+            Some(c) => c,
+            None => {
+                self.free_slots.push((header_region, status_region));
+                return Err(Error::Busy);
+            }
+        };
+
+        let mut indirect_regions: Vec<DmaRegion> = Vec::with_capacity(num_indirect_tables);
+        for _ in 0..num_indirect_tables {
+            let region = match self.free_indirect.pop() {
+                Some(r) => r,
+                None => self.pool.alloc(4096, 4096)?,
+            };
+            indirect_regions.push(region);
+        }
+
+        for (table_idx, table_region) in indirect_regions.iter().enumerate() {
+            let table_ptr = table_region.virt as *mut VRingDesc;
+            let start = table_idx * INDIRECT_ENTRIES_PER_PAGE;
+            let end = (start + INDIRECT_ENTRIES_PER_PAGE).min(page_phys.len());
+            let count = end - start;
+
+            unsafe {
+                core::ptr::write_bytes(table_ptr as *mut u8, 0, 4096);
+            }
+
+            for j in 0..count {
+                let page_idx = start + j;
+                let bytes_in_page = if page_idx == page_phys.len() - 1 {
+                    total_bytes - page_idx * 4096
+                } else {
+                    4096
+                };
+                let is_last_in_table = j == count - 1;
+                unsafe {
+                    let entry = table_ptr.add(j);
+                    (*entry).addr = page_phys[page_idx];
+                    (*entry).len = bytes_in_page as u32;
+                    (*entry).flags = VRING_DESC_F_WRITE
+                        | if is_last_in_table { 0 } else { VRING_DESC_F_NEXT };
+                    (*entry).next = if is_last_in_table { 0 } else { (j + 1) as u16 };
+                }
+            }
+        }
+
+        let descs = self.collect_chain_indices(chain.head, main_descs);
+        for (i, &didx) in descs.iter().enumerate() {
+            let is_last = i == descs.len() - 1;
+            if i == 0 {
+                let next_link = descs[i + 1];
+                self.vq.desc_set(didx, header_region.phys, 16, VRING_DESC_F_NEXT, next_link);
+            } else if is_last {
+                self.vq.desc_set(didx, status_region.phys, 1, VRING_DESC_F_WRITE, 0);
+            } else {
+                let table_idx = i - 1;
+                let table_region = &indirect_regions[table_idx];
+                let table_entries = {
+                    let start = table_idx * INDIRECT_ENTRIES_PER_PAGE;
+                    let end = (start + INDIRECT_ENTRIES_PER_PAGE).min(page_phys.len());
+                    end - start
+                };
+                let table_bytes = (table_entries * core::mem::size_of::<VRingDesc>()) as u32;
+                let next_link = if is_last { 0 } else { descs[i + 1] };
+                self.vq.desc_set(
+                    didx,
+                    table_region.phys,
+                    table_bytes,
+                    VRING_DESC_F_INDIRECT | VRING_DESC_F_NEXT,
+                    next_link,
+                );
+            }
+        }
+
+        self.vq.submit(chain, cookie);
+        self.in_flight.push(InflightSlot {
+            cookie,
+            header_region,
+            status_region,
+            indirect_regions,
         });
         Ok(())
     }
@@ -166,15 +270,6 @@ impl<T: Transport> BlkRequestQueue<T> {
             }
         };
 
-        let n_descs = (page_phys.len() + 2) as u16;
-        let chain = match self.vq.alloc_chain(n_descs) {
-            Some(c) => c,
-            None => {
-                self.free_slots.push((header_region, status_region));
-                return Err(Error::Busy);
-            }
-        };
-
         unsafe {
             let h = header_region.virt as *mut VirtioBlkReqHeader;
             (*h).type_ = VIRTIO_BLK_T_OUT;
@@ -185,21 +280,43 @@ impl<T: Transport> BlkRequestQueue<T> {
             *(status_region.virt as *mut u8) = 0xFF;
         }
 
+        let qsize = self.vq.queue_size as usize;
+        let direct_descs = page_phys.len() + 2;
+
+        if direct_descs <= qsize {
+            self.submit_write_direct(page_phys, total_bytes, cookie, header_region, status_region)
+        } else {
+            self.submit_write_indirect(page_phys, total_bytes, cookie, header_region, status_region)
+        }
+    }
+
+    fn submit_write_direct(
+        &mut self,
+        page_phys: &[u64],
+        total_bytes: usize,
+        cookie: u64,
+        header_region: DmaRegion,
+        status_region: DmaRegion,
+    ) -> Result<()> {
+        let n_descs = (page_phys.len() + 2) as u16;
+        let chain = match self.vq.alloc_chain(n_descs) {
+            Some(c) => c,
+            None => {
+                self.free_slots.push((header_region, status_region));
+                return Err(Error::Busy);
+            }
+        };
+
         let descs = self.collect_chain_indices(chain.head, n_descs);
         for (i, &didx) in descs.iter().enumerate() {
             let is_last = i == descs.len() - 1;
             if i == 0 {
-                // Header: device reads, OUT (no WRITE flag).
                 let next_link = if is_last { 0 } else { descs[i + 1] };
                 let flags = if is_last { 0 } else { VRING_DESC_F_NEXT };
-                self.vq
-                    .desc_set(didx, header_region.phys, 16, flags, next_link);
+                self.vq.desc_set(didx, header_region.phys, 16, flags, next_link);
             } else if i == descs.len() - 1 {
-                // Status: device writes.
-                self.vq
-                    .desc_set(didx, status_region.phys, 1, VRING_DESC_F_WRITE, 0);
+                self.vq.desc_set(didx, status_region.phys, 1, VRING_DESC_F_WRITE, 0);
             } else {
-                // Buffer pages: device READS them — no VRING_DESC_F_WRITE.
                 let page_idx = i - 1;
                 let bytes_in_page = if page_idx == page_phys.len() - 1 {
                     total_bytes - page_idx * 4096
@@ -222,6 +339,101 @@ impl<T: Transport> BlkRequestQueue<T> {
             cookie,
             header_region,
             status_region,
+            indirect_regions: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn submit_write_indirect(
+        &mut self,
+        page_phys: &[u64],
+        total_bytes: usize,
+        cookie: u64,
+        header_region: DmaRegion,
+        status_region: DmaRegion,
+    ) -> Result<()> {
+        let num_indirect_tables = page_phys.len().div_ceil(INDIRECT_ENTRIES_PER_PAGE);
+        let main_descs = (2 + num_indirect_tables) as u16;
+
+        let chain = match self.vq.alloc_chain(main_descs) {
+            Some(c) => c,
+            None => {
+                self.free_slots.push((header_region, status_region));
+                return Err(Error::Busy);
+            }
+        };
+
+        let mut indirect_regions: Vec<DmaRegion> = Vec::with_capacity(num_indirect_tables);
+        for _ in 0..num_indirect_tables {
+            let region = match self.free_indirect.pop() {
+                Some(r) => r,
+                None => self.pool.alloc(4096, 4096)?,
+            };
+            indirect_regions.push(region);
+        }
+
+        for (table_idx, table_region) in indirect_regions.iter().enumerate() {
+            let table_ptr = table_region.virt as *mut VRingDesc;
+            let start = table_idx * INDIRECT_ENTRIES_PER_PAGE;
+            let end = (start + INDIRECT_ENTRIES_PER_PAGE).min(page_phys.len());
+            let count = end - start;
+
+            unsafe {
+                core::ptr::write_bytes(table_ptr as *mut u8, 0, 4096);
+            }
+
+            for j in 0..count {
+                let page_idx = start + j;
+                let bytes_in_page = if page_idx == page_phys.len() - 1 {
+                    total_bytes - page_idx * 4096
+                } else {
+                    4096
+                };
+                let is_last_in_table = j == count - 1;
+                unsafe {
+                    let entry = table_ptr.add(j);
+                    (*entry).addr = page_phys[page_idx];
+                    (*entry).len = bytes_in_page as u32;
+                    (*entry).flags = if is_last_in_table { 0 } else { VRING_DESC_F_NEXT };
+                    (*entry).next = if is_last_in_table { 0 } else { (j + 1) as u16 };
+                }
+            }
+        }
+
+        let descs = self.collect_chain_indices(chain.head, main_descs);
+        for (i, &didx) in descs.iter().enumerate() {
+            let is_last = i == descs.len() - 1;
+            if i == 0 {
+                let next_link = descs[i + 1];
+                self.vq.desc_set(didx, header_region.phys, 16, VRING_DESC_F_NEXT, next_link);
+            } else if is_last {
+                self.vq.desc_set(didx, status_region.phys, 1, VRING_DESC_F_WRITE, 0);
+            } else {
+                let table_idx = i - 1;
+                let table_region = &indirect_regions[table_idx];
+                let table_entries = {
+                    let start = table_idx * INDIRECT_ENTRIES_PER_PAGE;
+                    let end = (start + INDIRECT_ENTRIES_PER_PAGE).min(page_phys.len());
+                    end - start
+                };
+                let table_bytes = (table_entries * core::mem::size_of::<VRingDesc>()) as u32;
+                let next_link = if is_last { 0 } else { descs[i + 1] };
+                self.vq.desc_set(
+                    didx,
+                    table_region.phys,
+                    table_bytes,
+                    VRING_DESC_F_INDIRECT | VRING_DESC_F_NEXT,
+                    next_link,
+                );
+            }
+        }
+
+        self.vq.submit(chain, cookie);
+        self.in_flight.push(InflightSlot {
+            cookie,
+            header_region,
+            status_region,
+            indirect_regions,
         });
         Ok(())
     }
@@ -236,7 +448,6 @@ impl<T: Transport> BlkRequestQueue<T> {
     pub fn drain_completions(&mut self) -> Vec<(u64, u8, u32)> {
         let mut out = Vec::new();
         while let Some((cookie, len)) = self.vq.pop_used() {
-            // Find the in-flight slot for this cookie to read its status.
             let pos = match self.in_flight.iter().position(|s| s.cookie == cookie) {
                 Some(p) => p,
                 None => continue,
@@ -244,8 +455,10 @@ impl<T: Transport> BlkRequestQueue<T> {
             let slot = self.in_flight.swap_remove(pos);
             let status = unsafe { *(slot.status_region.virt as *const u8) };
             out.push((cookie, status, len));
-            // Recycle the DMA regions back into the free-list.
             self.free_slots.push((slot.header_region, slot.status_region));
+            for region in slot.indirect_regions {
+                self.free_indirect.push(region);
+            }
         }
         out
     }
