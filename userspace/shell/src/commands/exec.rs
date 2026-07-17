@@ -19,6 +19,7 @@ use libcluu::ipc::{
 use libcluu::posix::tty::{
     TTY_LFLAG_ECHO, TTY_LFLAG_ICANON,
 };
+use libcluu::posix::termios::{tcgetattr, tcsetattr, Termios};
 use libcluu::syscall;
 use libcluu::types::Message;
 use libcluu::{debug_print, Error, IpcFlags, Result};
@@ -171,6 +172,18 @@ pub(crate) fn spawn_and_wait(
         );
     }
     let want_pts_fg_swap = pgid != 0 && context.tty_stdout == 0;
+
+    let saved_termios: Option<Termios> = if want_pts_fg_swap {
+        let mut t: Termios = unsafe { core::mem::zeroed() };
+        if tcgetattr(0, &mut t) == 0 {
+            Some(t)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     if want_pts_fg_swap {
         let _ = libcluu::posix::termios::tcsetpgrp(0, pgid as i32);
     }
@@ -196,12 +209,18 @@ pub(crate) fn spawn_and_wait(
             if want_pts_fg_swap && context.shell_pgid != 0 {
                 let _ = libcluu::posix::termios::tcsetpgrp(0, context.shell_pgid as i32);
             }
+            if let Some(ref saved) = saved_termios {
+                let _ = tcsetattr(0, 0, saved);
+            }
             if signal_killed {
                 crate::write_stdout(b"\x1b[2J\x1b[H");
             }
             Ok(0)
         }
         Err(err) => {
+            if let Some(ref saved) = saved_termios {
+                let _ = tcsetattr(0, 0, saved);
+            }
             let line = format!("spawn: {:?}\n", err);
             crate::write_stdout(line.as_bytes());
             Ok(1)
