@@ -539,6 +539,35 @@ highest-ROI cleanup during the freeze.
 
 **See also:** `userspace/libcluu/src/posix/tty.rs`, `userspace/cluu_wire/src/pts.rs:93` (`ISIG: u32 = 0x0001`), `include/sys/termios.h:23`.
 
+## shell-termios-not-restored-after-child-exit (2026-07-17-ctrl-d-bug)
+
+**Symptom:** After Ctrl+C kills a micropython REPL process, Ctrl+D does
+not close the shell. The shell appears stuck — keystrokes are swallowed
+or produce garbage.
+
+**Root cause:** Children like micropython enter raw termios mode via
+`tcsetattr` on startup. If the child exits abnormally (crash, `_exit`,
+signal from Ctrl+C), `restore_repl_tty_mode` is never called — the PTS
+stays in raw mode. The shell regains foreground pgrp via `tcsetpgrp`
+but never restores termios. In raw mode, Ctrl+D (0x04) is delivered as
+a literal byte, not the VEOF character — the shell's line discipline
+never sees EOF.
+
+**Fix:** `spawn_and_wait` in `userspace/shell/src/commands/exec.rs` now
+saves termios via `tcgetattr(0)` before spawning a child and restores
+via `tcsetattr(0, TCSANOW, &saved)` after the child exits (both normal
+and error paths). This matches POSIX shell behavior — never trust the
+child to restore terminal state.
+
+**Key insight:** `tcsetpgrp` restores foreground process group routing,
+but does NOT restore termios. These are independent: pgrp controls who
+receives signals, termios controls input processing (canonical vs raw,
+signal generation, echo). Both must be saved and restored.
+
+**See also:** `userspace/shell/src/commands/exec.rs` (`spawn_and_wait`),
+`userspace/libcluu/src/posix/termios.rs` (`tcgetattr`/`tcsetattr`),
+`doc/book/terminal.md` (Shell termios save/restore).
+
 ## procmgr-name-ambiguity-session-escape (2026-07-12-registry-rename)
 
 **Symptom:** Session processes could spawn via root procmgr instead of session-procmgr, bypassing session isolation. Edit plugins failed with `InvalidArgument` because root procmgr can't map ELF into session address space.

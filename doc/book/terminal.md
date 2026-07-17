@@ -371,6 +371,13 @@ one set regardless of which it talks to. Key decisions:
   `ioctl(TIOCGWINSZ|TIOCSWINSZ|TIOCGPGRP|TIOCSPGRP)` all functional.
   Default termios: `ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL |
   IEXTEN`, OPOST+ONLCR, ICRNL+BRKINT.
+- **Shell termios save/restore**: `spawn_and_wait` saves termios via
+  `tcgetattr(0)` before spawning a child and restores via
+  `tcsetattr(0, TCSANOW, &saved)` after child exit. Children that enter
+  raw mode (micropython REPL, edit, top) may not restore on abnormal exit
+  (crash, `_exit`, signal). Without the shell-side restore, the PTS stays
+  in raw mode — Ctrl-D is delivered as 0x04 byte instead of EOF, breaking
+  shell exit.
 - **Per-session `/dev/pts/` namespace**. Cross-session pts access
   denied (ENOENT). `/dev/tty1..3` stays in global namespace
   (boot/recovery). VFS view derive substitutes `/dev/pts/` with a
