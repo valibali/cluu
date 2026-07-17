@@ -89,14 +89,16 @@ Sub-mints child-scoped caps from the session cap.
 4. Build child view from envelope mount policy
 5. Verify monotone: child view ≤ session view
 6. Kernel: space_create + thread_create(START_SUSPENDED)
-7. VFS (async): VFS_DERIVE_CHILD_FD, derive child's fd table
+7. VFS (async): VFS_DERIVE_CHILD_FD_BATCH, derive all child fds in one IPC
 8. VFS: VFS_SET_VIEW, install child's view
 9. Kernel: thread_resume, child starts
 ```
 
-The async runtime is used for step 7 because `VFS_DERIVE_CHILD_FD` is an IPC
-call to VFS, and session-procmgr is single-threaded. Without async, this would
-deadlock if VFS needed to call back into session-procmgr.
+The async runtime is used for step 7 because `VFS_DERIVE_CHILD_FD_BATCH` is an
+IPC call to VFS, and session-procmgr is single-threaded. Without async, this
+would deadlock if VFS needed to call back into session-procmgr. The batch label
+(`0x78`) replaces the older per-fd `VFS_DERIVE_CHILD_FD` (`0x77`) — all stdio
+fds (stdin/stdout/stderr) are derived in one round-trip instead of three.
 
 ## procmgr-common
 
