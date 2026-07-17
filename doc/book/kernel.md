@@ -183,7 +183,17 @@ Early boot assembly + init thread construction.
 
 ### ELF (`kernel/src/elf.rs`)
 
-ELF loading helpers.
+ELF loading helpers: 4-level page-table walk (`map_user_page`), zero-copy
+shared mapping (`map_shared_page`), guard-page installation
+(`map_guard_page`), and large-page mapping. The kernel does not parse ELF
+headers — that lives in `klibcluu::boot_elf::ParsedElf` (userspace). The
+kernel's role is purely mechanical: translate virtual addresses, allocate
+intermediate page tables, and install PTEs.
+
+Demand paging is handled in the page-fault path (`idt.rs`), not here:
+`handle_text_fault` (M9) and `handle_bss_fault` (M10) allocate frames on
+first access and call back into `map_user_page`. See
+[Memory model → Demand paging](memory_model.html#demand-paging-and-fault-handling).
 
 ### Error (`kernel/src/error.rs`)
 

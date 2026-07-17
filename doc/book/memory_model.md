@@ -180,6 +180,55 @@ Faults outside the heap and stack regions, with no registered fault endpoint,
 kill the thread. Faults with a registered endpoint are forwarded; see
 [Fault forwarding](../kernel/index.html#fault-forwarding-threadsetfaultendpoint).
 
+### Demand-paged text (M9)
+
+ELF text segments (executable + read-only) can be demand-paged via
+`space_protect_unmapped` (`PROTECT_INSTALL_UNMAPPED` flag). At install
+time the kernel copies the source bytes into a kernel heap buffer
+(`TextSource`) and installs not-present PTEs (`map_guard_page`) across
+the text region. No physical frame is allocated until first execution.
+
+On a not-present fault in the text region, `handle_text_fault`
+(`idt.rs`) allocates a frame, zero-fills it, copies the source bytes
+for that page, and maps it read+exec. The source buffer is freed when
+the `AddressSpace` is dropped.
+
+Only one text region per space is supported (`set_text_with_source`
+records a single region). Subsequent text segments are eagerly mapped.
+`.data`/`.bss` are eagerly mapped by the M9 path; see M10 below for
+demand-zero `.bss`.
+
+### Demand-zero BSS (M10)
+
+ELF PT_LOAD writable segments where `file_size < mem_size` have a
+`.bss` tail — zero-initialized memory that occupies virtual address
+space but has no file backing. The M9 path eagerly maps the entire
+writable segment (alloc + zero-fill + map per page), which is wasteful
+when `mem_size >> file_size` (e.g. `ls`: 276 pages for 224 bytes of
+data — 99.98% zero-fill).
+
+The M10 path splits the segment at the file/mem boundary:
+
+1. The file-data pages (containing actual `.data` content) are eagerly
+   mapped via `space_map_range` as before.
+2. The `.bss` tail gets guard PTEs via `space_install_demand_zero`
+   (`PROTECT_INSTALL_DEMAND_ZERO` flag in `invoke_space_protect`). The
+   kernel records the region in `AddressSpace::bss`.
+
+On a not-present fault in the bss region, `handle_bss_fault` (`idt.rs`)
+allocates a frame, zero-fills it, and maps it writable+no-exec. The
+handler mirrors `handle_text_fault` but maps RW instead of RX and skips
+the source-copy step (bss is zero by definition).
+
+The VFS applies this split automatically in `map_cached_elf_segment`
+when `writable && file_size < mem_size`. The procmgr-side fallback path
+(`libcluu::map_segments`) does not yet use M10 — it still eagerly maps
+writable segments. The VFS path is the default for all post-boot
+spawns.
+
+Measured impact on `ls` spawn: 275 fewer frame allocs + 275 fewer 4 KiB
+zero-fills at spawn time; ~12% faster total spawn (26 ms → 23 ms).
+
 ## Guard pages
 
 Three guard regions protect the address space:
