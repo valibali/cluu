@@ -574,6 +574,13 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             fail_marker="blkprobe: [FAIL]",
             description="4 sessions x 100 concurrent reads",
         ),
+        MarkerModeSpec(
+            name="benchprobe",
+            required_markers=[_TSC, _SHELL_READY, "benchprobe: PASS"],
+            fail_marker="benchprobe: FAIL",
+            category="bench",
+            description="spawn/ipc/thread cycle benchmark — avg cycles per noop spawn",
+        ),
     ]
 }
 

@@ -1706,6 +1706,7 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
     use crate::token::{ObjectRef, ObjectType, Rights};
 
     const PROTECT_INSTALL_UNMAPPED: u32 = 0x08;
+    const PROTECT_INSTALL_DEMAND_ZERO: u32 = 0x10;
 
     if !token.has_right(Rights::SPACE_MAP) {
         return Err(Error::PermissionDenied);
@@ -1718,7 +1719,7 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
     if virt_addr & 0xFFF != 0 {
         return Err(Error::InvalidArgument);
     }
-    if (perms & !(0x01 | 0x02 | 0x04 | PROTECT_INSTALL_UNMAPPED)) != 0 {
+    if (perms & !(0x01 | 0x02 | 0x04 | PROTECT_INSTALL_UNMAPPED | PROTECT_INSTALL_DEMAND_ZERO)) != 0 {
         return Err(Error::InvalidArgument);
     }
 
@@ -1726,6 +1727,7 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
     let writable = (perms & 0x02) != 0;
     let executable = (perms & 0x04) != 0;
     let install_unmapped = (perms & PROTECT_INSTALL_UNMAPPED) != 0;
+    let install_demand_zero = (perms & PROTECT_INSTALL_DEMAND_ZERO) != 0;
 
     let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
         .map_err(|_| Error::InvalidArgument)?;
@@ -1824,6 +1826,36 @@ fn invoke_space_protect(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) ->
                     source_data,
                     source_vaddr: source_ptr,
                 },
+            );
+            Ok(num_pages)
+        });
+
+        match result {
+            Some(Ok(changed)) => Ok(changed),
+            Some(Err(err)) => Err(err),
+            None => Err(Error::NotFound),
+        }
+    } else if install_demand_zero {
+        use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+        let num_pages_raw = (args.arg4 >> 32) as usize;
+        let num_pages = if num_pages_raw == 0 { 1 } else { num_pages_raw };
+
+        let result = space_repository::with_space_mut(space_id, |space| {
+            for i in 0..num_pages {
+                let addr = virt_addr + (i as u64) * PAGE_SIZE as u64;
+                let map_result = unsafe {
+                    crate::elf::map_guard_page(addr, space.page_table_root, space_id)
+                };
+                if map_result.is_err() {
+                    return Err(Error::OutOfMemory);
+                }
+            }
+
+            let total_size = num_pages * PAGE_SIZE;
+            space.set_bss(
+                x86_64::VirtAddr::new(virt_addr),
+                total_size,
             );
             Ok(num_pages)
         });

@@ -5544,11 +5544,55 @@ impl VfsServer {
 
         let num_pages = mem_size.div_ceil(PAGE_SIZE);
         let data_ptr = data.as_ptr() as usize + file_offset;
-        // DIAG(unmap-bug): log every aligned segment mapping
         let _ = debug_print(&format!(
             "vfs: map_cached_seg vaddr={:#x} pages={} data_ptr={:#x} flags={:#x} file_sz={} share_phys={}",
             vaddr, num_pages, data_ptr, final_flags, file_size, !writable
         ));
+
+        if writable && file_size < mem_size {
+            let file_pages = file_size.div_ceil(PAGE_SIZE);
+            let bss_pages = num_pages - file_pages;
+
+            if file_pages > 0 {
+                let r = syscall::space_map_range(
+                    target_space,
+                    vaddr,
+                    data_ptr,
+                    final_flags,
+                    file_pages,
+                    file_size,
+                );
+                if let Err(ref e) = r {
+                    let _ = debug_print(&format!(
+                        "vfs: map_cached_seg DATA_FAIL vaddr={:#x} pages={} err={:?}",
+                        vaddr, file_pages, e
+                    ));
+                    return r.map(|_| ());
+                }
+            }
+
+            if bss_pages > 0 {
+                let bss_vaddr = vaddr + (file_pages * PAGE_SIZE);
+                let _ = debug_print(&format!(
+                    "vfs: map_cached_seg BSS_DEMAND vaddr={:#x} bss_pages={}",
+                    bss_vaddr, bss_pages
+                ));
+                let r = syscall::space_install_demand_zero(
+                    target_space,
+                    bss_vaddr,
+                    bss_pages,
+                );
+                if let Err(ref e) = r {
+                    let _ = debug_print(&format!(
+                        "vfs: map_cached_seg BSS_DEMAND_FAIL vaddr={:#x} pages={} err={:?}",
+                        bss_vaddr, bss_pages, e
+                    ));
+                    return r.map(|_| ());
+                }
+            }
+            return Ok(());
+        }
+
         let r = syscall::space_map_range(
             target_space,
             vaddr,

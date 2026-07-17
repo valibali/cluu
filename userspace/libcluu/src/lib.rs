@@ -165,6 +165,7 @@ pub use syscall::{
     irq_attach,
     space_create,
     space_grant,
+    space_install_demand_zero,
     space_map,
     space_map_range,
     space_protect,

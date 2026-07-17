@@ -254,6 +254,15 @@ pub struct AddressSpace {
 
     /// Source for demand-paged text (M9). None when text is eagerly mapped.
     pub text_source: Option<TextSource>,
+
+    /// Demand-zero BSS region (M10). When non-zero, not-present PTEs in
+    /// [start, start+size) are demand-zero-faulted: the kernel allocates
+    /// a frame, zero-fills it, and maps it writable+no-exec. This avoids
+    /// eagerly allocating and zeroing hundreds of BSS pages at spawn time
+    /// when the ELF's mem_size >> file_size (e.g. 276 pages for 224 bytes
+    /// of .data). Set via `invoke_space_protect` with
+    /// `PROTECT_INSTALL_DEMAND_ZERO`.
+    pub bss: MemoryRegion,
 }
 
 impl AddressSpace {
@@ -285,6 +294,7 @@ impl AddressSpace {
             stack: null_region,
             aslr_stack_guard_end: layout::USER_STACK_BOTTOM + 0x1000,
             text_source: None,
+            bss: null_region,
         }
     }
 
@@ -432,6 +442,25 @@ impl AddressSpace {
     ) {
         self.set_text(start, size);
         self.text_source = Some(source);
+    }
+
+    pub fn set_bss(&mut self, start: VirtAddr, size: usize) {
+        self.bss = MemoryRegion::new(
+            start,
+            size,
+            PageFlags {
+                present: false,
+                writable: true,
+                user: true,
+                no_execute: true,
+                write_through: false,
+                cache_disabled: false,
+                accessed: false,
+                dirty: false,
+                huge: false,
+                global: false,
+            },
+        );
     }
 
     /// Set the data segment region

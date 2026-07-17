@@ -174,6 +174,8 @@ pub const MAP_GUARD: usize = 0x2000;
 /// writable is rejected.
 pub const PROTECT_INSTALL_UNMAPPED: usize = 0x08;
 
+pub const PROTECT_INSTALL_DEMAND_ZERO: usize = 0x10;
+
 /// Raw syscall invocation using x86_64 SYSCALL instruction
 ///
 /// # Safety
@@ -1005,6 +1007,26 @@ pub fn space_protect_unmapped(
             packed,
             flags,
             source_ptr,
+        )
+    }
+}
+
+#[inline]
+pub fn space_install_demand_zero(
+    space_token: usize,
+    virt_addr: usize,
+    num_pages: usize,
+) -> Result<usize> {
+    let flags = PROTECT_INSTALL_DEMAND_ZERO;
+    let packed = num_pages << 32;
+    unsafe {
+        invoke(
+            space_token,
+            InvokeOp::SpaceProtect,
+            virt_addr,
+            packed,
+            flags,
+            0,
         )
     }
 }

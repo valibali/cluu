@@ -711,10 +711,13 @@ extern "C" fn pf_with_regs(frame: *const PfDebugFrame) -> *const Context {
     // Try lazy allocation for not-present userspace page faults
     if !is_present && is_userspace {
         if let Some(true) = handle_heap_fault(x86_64::VirtAddr::new(cr2)) {
-            return core::ptr::null(); // Resume — lazy alloc succeeded
+            return core::ptr::null();
         }
         if let Some(true) = handle_text_fault(cr2) {
-            return core::ptr::null(); // Resume — text demand-page succeeded
+            return core::ptr::null();
+        }
+        if let Some(true) = handle_bss_fault(cr2) {
+            return core::ptr::null();
         }
     }
 
@@ -1052,6 +1055,82 @@ fn handle_text_fault(fault_addr: u64) -> Option<bool> {
         }
         Err(_) => {
             klibcluu::warn("Text demand-fault: failed to map page");
+            crate::mm::pmm::free_frame(frame_phys);
+            None
+        }
+    }
+}
+
+fn handle_bss_fault(fault_addr: u64) -> Option<bool> {
+    use x86_64::registers::control::Cr3;
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+    let (pml4_frame, _) = Cr3::read();
+    let page_table_root = pml4_frame.start_address();
+
+    let frame_result = crate::mm::space_repository::with_space_by_pml4(
+        page_table_root,
+        |space| {
+            let bss = &space.bss;
+            if bss.size == 0 {
+                return None;
+            }
+            if fault_addr < bss.start.as_u64()
+                || fault_addr >= bss.start.as_u64() + bss.size as u64
+            {
+                return None;
+            }
+
+            let frame_phys = match crate::mm::pmm::try_alloc_frame() {
+                Some(f) => f,
+                None => {
+                    klibcluu::warn("BSS demand-fault: PMM busy or OOM");
+                    return Some(None);
+                }
+            };
+
+            let frame_virt = unsafe { crate::mm::physmap::phys_to_virt_u64(frame_phys) };
+            unsafe {
+                core::ptr::write_bytes(frame_virt as *mut u8, 0, PAGE_SIZE);
+            }
+
+            Some(Some(frame_phys))
+        },
+    );
+
+    let frame_phys = match frame_result {
+        Some(Some(Some(phys))) => phys,
+        Some(Some(None)) => return None,
+        Some(None) | None => return Some(false),
+    };
+
+    let demand_owner = {
+        let mut found = crate::token::scope::KERNEL_OWNER;
+        crate::mm::space_repository::for_each(|sid, pml4_pa| {
+            if pml4_pa.as_u64() == page_table_root.as_u64() {
+                found = sid;
+            }
+        });
+        found
+    };
+
+    let virt_page = fault_addr & !0xFFFu64;
+    let _ = crate::mm::frame_table::retype_to_user(frame_phys, demand_owner);
+    let result = unsafe {
+        crate::elf::map_user_page(
+            virt_page,
+            frame_phys,
+            true,  // writable
+            false, // not executable
+            page_table_root,
+            demand_owner,
+        )
+    };
+
+    match result {
+        Ok(()) => Some(true),
+        Err(_) => {
+            klibcluu::warn("BSS demand-fault: failed to map page");
             crate::mm::pmm::free_frame(frame_phys);
             None
         }

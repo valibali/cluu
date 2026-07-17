@@ -538,6 +538,13 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         run_wait_s=30,
         pre_sendkey_wait_marker="login: window registered",
     ),
+    "benchprobe": CaseDefaults(
+        test_command="benchprobe spawnonly",
+        sendkey_sequence=_creds_no_sleep(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=60,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
 }
 
 

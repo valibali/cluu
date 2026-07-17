@@ -482,8 +482,12 @@ class L2BlkPerf: pass
 class L2BlkConcurrent: pass
 
 
+@cluu_case("benchprobe", marker_mode="benchprobe", description="spawn/ipc/thread cycle benchmark — avg cycles per noop spawn", tags=["bench", "spawn", "perf"])
+class Benchprobe: pass
+
+
 __all__ = [
-    "BSpawnWarm",
+    "Benchprobe",
     "CFutex",
     "DtachProbe",
     "ErrnoProbe",
