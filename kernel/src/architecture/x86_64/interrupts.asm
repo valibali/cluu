@@ -431,21 +431,6 @@ pf_interrupt_entry:
     call pf_with_regs
     add rsp, 8
 
-    ; Diagnostic: emit 'R' to COM2 after pf_with_regs returns
-    push rax
-    push rdx
-    mov dx, 0x2F8
-.pf_wait_tx_r:
-    add dx, 5          ; 0x2FD = LSR
-    in al, dx
-    test al, 0x20      ; THRE bit
-    jz .pf_wait_tx_r
-    sub dx, 5
-    mov al, 'R'
-    out dx, al
-    pop rdx
-    pop rax
-
     ; RAX = null (resume via iretq), 0x1 (idle sentinel), or valid context ptr
     test rax, rax
     jz .pf_resume
