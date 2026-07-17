@@ -49,7 +49,7 @@ use libcluu::async_runtime::{IpcCallFuture, Runtime};
 use alloc::collections::BTreeMap;
 
 #[cfg(not(feature = "host-test"))]
-use libcluu::ipc::VFS_DERIVE_CHILD_FD_LABEL;
+use libcluu::ipc::VFS_DERIVE_CHILD_FD_BATCH_LABEL;
 
 #[cfg(not(feature = "host-test"))]
 use procmgr_common::pid::LOCAL_MAX;
@@ -349,38 +349,50 @@ fn run() -> Result<()> {
                 let fd_requests: alloc::vec::Vec<spm::elf_spawn::FdDeriveRequest> =
                     pending.fd_derive_requests.iter().copied().collect();
                 pending_spawns.insert(spawn_cookie, pending);
-                for req in fd_requests {
-                    let spawn_cookie = spawn_cookie;
-                    let fd = req.fd;
-                    let vfs_ep = req.vfs_ep;
+
+                if !fd_requests.is_empty() {
+                    let count = fd_requests.len();
+                    let vfs_ep = fd_requests[0].vfs_ep;
+                    let child_tid = fd_requests[0].child_tid;
+
+                    let mut payload: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(count * 32);
+                    for req in &fd_requests {
+                        payload.extend_from_slice(&(req.parent_tid as u64).to_le_bytes());
+                        payload.extend_from_slice(&(req.parent_rfd as u64).to_le_bytes());
+                        payload.extend_from_slice(&(req.rights as u64).to_le_bytes());
+                        payload.extend_from_slice(&(req.child_tid as u64).to_le_bytes());
+                    }
+
                     let mut request = Message::new(
-                        VFS_DERIVE_CHILD_FD_LABEL,
-                        [req.parent_tid, req.parent_rfd, req.rights, req.child_tid, 0, 0],
-                        4,
+                        VFS_DERIVE_CHILD_FD_BATCH_LABEL,
+                        [0, count, 0, 0, 0, 0],
+                        3,
                     );
+                    request.words[2] = child_tid;
+
                     runtime.spawn(async move {
-                        let result = IpcCallFuture::new(vfs_ep, request).await;
+                        let result = IpcCallFuture::new_with_payload(vfs_ep, &mut request, &payload).await;
                         let completion = match result {
-                            Ok((reply, _)) => {
-                                if reply.words[0] == 0 {
-                                    spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdReply {
+                            Ok((reply, reply_payload)) => {
+                                if reply.words[1] == 0 {
+                                    spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdBatchReply {
                                         cookie: spawn_cookie,
-                                        fd,
-                                        result: Ok((reply.words[1], reply.words[2], reply.words[3])),
+                                        payload: reply_payload,
+                                        fd_count: count,
                                     }
                                 } else {
-                                    spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdReply {
+                                    spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdBatchReply {
                                         cookie: spawn_cookie,
-                                        fd,
-                                        result: Err(spm::elf_spawn::RealSpawnError::VfsDeriveChildFd),
+                                        payload: alloc::vec::Vec::new(),
+                                        fd_count: 0,
                                     }
                                 }
                             }
                             Err(_) => {
-                                spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdReply {
+                                spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdBatchReply {
                                     cookie: spawn_cookie,
-                                    fd,
-                                    result: Err(spm::elf_spawn::RealSpawnError::VfsDeriveChildFd),
+                                    payload: alloc::vec::Vec::new(),
+                                    fd_count: 0,
                                 }
                             }
                         };
@@ -438,6 +450,108 @@ fn handle_spm_completion(
             if pending.fd_derive_remaining != 0 {
                 return;
             }
+
+            let mut pending = match pending_spawns.remove(&cookie) {
+                Some(p) => p,
+                None => return,
+            };
+            let pid = pending.pid;
+            let parent_pid = pending.parent_pid;
+            let reply_token = pending.reply_token;
+            let async_reply = pending.async_reply;
+            let argv0 = pending.req.argv.first().cloned().unwrap_or_default();
+            let notify_ep = pending.req.notify.unwrap_or(0);
+            let minted = core::mem::take(&mut pending.minted);
+
+            match spm::elf_spawn::finish_spawn(state, pending) {
+                Ok(result) => {
+                    let local = (pid as u32) & LOCAL_MAX;
+                    state.child_table.insert(spm::child_table::ChildState {
+                        pid,
+                        local,
+                        thread_tok: result.thread_tok,
+                        space_tok: result.space_tok,
+                        child_tid: result.child_tid,
+                        cookie: result.cookie,
+                        argv0,
+                        start_ticks: 0,
+                        minted_caps: minted,
+                        pgid: None,
+                        notify_ep,
+                        parent_pid,
+                    });
+                    spm::spawn::register_child_with_root(state, pid as u32);
+                    let reply = SpawnReply { pid, cookie: result.cookie };
+                    let bytes = postcard::to_allocvec(&reply).unwrap_or_default();
+                    let reply = Reply::ok(procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL)
+                        .with_payload(bytes);
+                    let _ = send_reply(reply_token, ep, &reply, async_reply);
+                }
+                Err(e) => {
+                    let _ = debug_print(&alloc::format!(
+                        "session-procmgr: finish_spawn failed: {:?}", e
+                    ));
+                    for h in &minted {
+                        state.kernel.revoke(*h);
+                    }
+                    if let Some(tok) = reply_token {
+                        let err_msg = Message::new(
+                            procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL,
+                            [0xFFFF_FFFF; 6],
+                            1,
+                        );
+                        let bytes = unsafe {
+                            core::slice::from_raw_parts(
+                                &err_msg as *const Message as *const u8,
+                                size_of::<Message>(),
+                            )
+                        };
+                        let _ = libcluu::syscall::ipc_reply(tok, bytes);
+                    } else if let Some((reply_ep, cookie)) = async_reply {
+                        let mut err_msg = Message::new(
+                            procmgr_common::labels::SESSION_PROCMGR_SPAWN_LABEL,
+                            [0xFFFF_FFFF; 6],
+                            1,
+                        );
+                        err_msg.words[5] = cookie;
+                        let bytes = unsafe {
+                            core::slice::from_raw_parts(
+                                &err_msg as *const Message as *const u8,
+                                size_of::<Message>(),
+                            )
+                        };
+                        let _ = libcluu::syscall::ipc_send(reply_ep, bytes);
+                    }
+                }
+            }
+        }
+        spm::elf_spawn::SpmCompletion::SpawnDeriveChildFdBatchReply { cookie, payload, fd_count } => {
+            let pending = match pending_spawns.get_mut(&cookie) {
+                Some(p) => p,
+                None => return,
+            };
+
+            if fd_count > 0 && payload.len() >= fd_count * 32 {
+                let requests: alloc::vec::Vec<spm::elf_spawn::FdDeriveRequest> =
+                    pending.fd_derive_requests.iter().copied().collect();
+                for (i, req) in requests.iter().enumerate() {
+                    let off = i * 32;
+                    let status = u64::from_le_bytes(payload[off..off+8].try_into().unwrap());
+                    let derived = u64::from_le_bytes(payload[off+8..off+16].try_into().unwrap());
+                    let child_cid = u64::from_le_bytes(payload[off+16..off+24].try_into().unwrap());
+                    let child_rfd = u64::from_le_bytes(payload[off+24..off+32].try_into().unwrap());
+
+                    let fd = req.fd;
+                    if fd < 4 {
+                        if status == 0 {
+                            pending.fd_derive_results[fd] = Some(Ok((derived as usize, child_cid as usize, child_rfd as usize)));
+                        } else {
+                            pending.fd_derive_results[fd] = Some(Err(spm::elf_spawn::RealSpawnError::VfsDeriveChildFd));
+                        }
+                    }
+                }
+            }
+            pending.fd_derive_remaining = 0;
 
             let mut pending = match pending_spawns.remove(&cookie) {
                 Some(p) => p,

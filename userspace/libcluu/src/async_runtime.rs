@@ -372,6 +372,7 @@ impl IpcCallFuture {
         let cookie = rt.alloc_cookie();
         let reply_ep = rt.reply_endpoint;
 
+        request.words[0] = payload.len();
         request.words[4] = reply_ep;
         request.words[5] = cookie;
         request.tag.extra = crate::ipc::ASYNC_REPLY_TAG;

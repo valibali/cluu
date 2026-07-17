@@ -28,6 +28,7 @@ use libcluu::fs::protocol::{
 use libcluu::ipc::{
     self, extract_reply_id, parse_message, reply_with_payload, SharedRing, SharedRingHeader,
     PTS_REGISTER_LABEL, PTS_UNREGISTER_LABEL, VFS_DERIVE_CHILD_FD_LABEL,
+    VFS_DERIVE_CHILD_FD_BATCH_LABEL,
 };
 use libcluu::types::Message;
 use libcluu::*;
@@ -1038,6 +1039,9 @@ impl VfsServer {
         }
         if msg.tag.label == VFS_DERIVE_CHILD_FD_LABEL {
             return self.handle_derive_child_fd(msg);
+        }
+        if msg.tag.label == VFS_DERIVE_CHILD_FD_BATCH_LABEL {
+            return self.handle_derive_child_fd_batch(msg, payload);
         }
         if msg.tag.label == libcluu::proto::pts::PTS_READ_DELIVER_LABEL {
             return self.handle_pts_read_deliver(msg, payload);
@@ -2183,6 +2187,114 @@ impl VfsServer {
         reply_msg.words[2] = child_tid;
         reply_msg.words[3] = child_fd;
         ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty())
+    }
+
+    fn handle_derive_child_fd_batch(
+        &mut self,
+        msg: &Message,
+        payload: &[u8],
+    ) -> Result<()> {
+        let count = msg.words[1];
+        if count == 0 || count > 4 {
+            let reply_msg = Message::new(VFS_DERIVE_CHILD_FD_BATCH_LABEL, [0xFFFF_FFFF; 6], 1);
+            return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
+        }
+
+        let entry_size = 32;
+        if payload.len() < count * entry_size {
+            let reply_msg = Message::new(VFS_DERIVE_CHILD_FD_BATCH_LABEL, [0xFFFF_FFFF; 6], 1);
+            return ipc::reply_to_sender(msg, &reply_msg, self.endpoint, IpcFlags::empty());
+        }
+
+        let mut reply_payload: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(count * entry_size);
+        let mut overall_status: u64 = 0;
+        let mut child_cid: u64 = 0;
+
+        for i in 0..count {
+            let off = i * entry_size;
+            let parent_cid = u64::from_le_bytes(payload[off..off+8].try_into().unwrap());
+            let parent_fd = u64::from_le_bytes(payload[off+8..off+16].try_into().unwrap());
+            let raw_rights = u64::from_le_bytes(payload[off+16..off+24].try_into().unwrap());
+            let child_tid = u64::from_le_bytes(payload[off+24..off+32].try_into().unwrap());
+            child_cid = child_tid;
+
+            let (status, derived, child_rfd) = match self.derive_one_fd(
+                parent_cid as usize,
+                parent_fd as usize,
+                raw_rights,
+                child_tid as usize,
+            ) {
+                Ok((derived, rfd)) => (0u64, derived as u64, rfd as u64),
+                Err(e) => {
+                    if overall_status == 0 {
+                        overall_status = e.to_errno() as u64;
+                    }
+                    (e.to_errno() as u64, 0u64, 0u64)
+                }
+            };
+
+            reply_payload.extend_from_slice(&status.to_le_bytes());
+            reply_payload.extend_from_slice(&derived.to_le_bytes());
+            reply_payload.extend_from_slice(&child_cid.to_le_bytes());
+            reply_payload.extend_from_slice(&child_rfd.to_le_bytes());
+        }
+
+        let mut reply_msg = Message::new(VFS_DERIVE_CHILD_FD_BATCH_LABEL, [0; 6], 3);
+        reply_msg.words[1] = overall_status as usize;
+        reply_msg.words[2] = child_cid as usize;
+        ipc::reply_to_sender_with_payload(msg, &reply_msg, &reply_payload, self.endpoint)
+    }
+
+    fn derive_one_fd(
+        &mut self,
+        parent_cid: usize,
+        parent_fd: usize,
+        raw_rights: u64,
+        child_tid: usize,
+    ) -> Result<(usize, usize)> {
+        let (cloned, parent_rights): (OpenFile, u64) = match self.files.get(parent_cid, parent_fd) {
+            Some(f) => (f.clone(), f.rights()),
+            None => return Err(Error::NotFound),
+        };
+
+        let clamped_rights = raw_rights & parent_rights;
+
+        if let OpenFile::Pts(ref pts) = cloned {
+            let _ = self.pts_registry.inc_ref(pts.pts_id);
+            if let Some(queue) = self.pending_pts_reads.get_mut(&pts.pts_id) {
+                let mut cancel_msg = Message::new(VFS_READ_GRANT, [0; 6], 3);
+                cancel_msg.words[0] = Error::WouldBlock.to_errno() as usize;
+                while let Some(parked) = queue.pop_front() {
+                    if parked.reply_ep != 0 {
+                        let mut m = cancel_msg.clone();
+                        m.words[libcluu::ipc::ASYNC_REPLY_COOKIE_WORD] = parked.cookie;
+                        let _ = ipc::send(parked.reply_ep, &m, IpcFlags::empty());
+                    } else {
+                        let _ = ipc::reply(parked.reply_token, &cancel_msg, IpcFlags::empty());
+                    }
+                }
+            }
+        }
+
+        let child_fd = self.files.open(child_tid, cloned);
+        if let Some(entry) = self.files.get_mut(child_tid, child_fd) {
+            entry.set_rights(clamped_rights);
+        }
+
+        let derived = match token_derive(self.endpoint, clamped_rights as usize, u64::MAX) {
+            Ok(t) => t,
+            Err(e) => {
+                self.files.close(child_tid, child_fd);
+                return Err(e);
+            }
+        };
+
+        let _ = debug_print(&format!(
+            "vfs: derive_child_fd parent_cid={} parent_fd={} child_tid={} child_fd={} rights=0x{:x}",
+            parent_cid, parent_fd, child_tid, child_fd, clamped_rights
+        ));
+
+        Ok((derived, child_fd))
     }
 
     /// Called by handle_open after a successful open of `/dev/pts/<id>`.

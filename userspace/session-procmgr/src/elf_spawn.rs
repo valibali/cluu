@@ -122,6 +122,11 @@ pub enum SpmCompletion {
         fd: usize,
         result: Result<(usize, usize, usize), RealSpawnError>,
     },
+    SpawnDeriveChildFdBatchReply {
+        cookie: u64,
+        payload: alloc::vec::Vec<u8>,
+        fd_count: usize,
+    },
 }
 
 pub fn begin_spawn(

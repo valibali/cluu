@@ -326,6 +326,26 @@ pub const PTS_CLOSED_LABEL: u32     = 0x76;
 // ──────────────────────────────────────────────────────────────────────
 pub const VFS_DERIVE_CHILD_FD_LABEL: u32 = 0x77;
 
+// VFS_DERIVE_CHILD_FD_BATCH_LABEL — procmgr → VFS: batch-clone multiple
+// open files to a child in one IPC round-trip. Equivalent to N
+// VFS_DERIVE_CHILD_FD_LABEL calls but saves N-1 IPC dispatch cycles
+// (VFS is single-threaded, so each IPC is serial).
+//
+// Request:
+//     words[0] = payload_len (overwritten by send_msg_with_payload)
+//     words[1] = count       — number of entries (max 4)
+//     words[2] = parent_tid  — parent's tid (for logging)
+//     payload  = count × 32 bytes, each entry:
+//                [u64 parent_cid, u64 parent_fd, u64 rights, u64 child_tid]
+//
+// Reply (via reply_to_sender_with_payload):
+//     words[0] = payload_len
+//     words[1] = overall_status (0 = all OK, errno of first failure)
+//     words[2] = child_cid (same for all entries = child_tid)
+//     payload  = count × 32 bytes, each entry:
+//                [u64 status, u64 derived_token, u64 child_cid, u64 child_rfd]
+pub const VFS_DERIVE_CHILD_FD_BATCH_LABEL: u32 = 0x78;
+
 // virtio-blk raw-block session IPC labels (Phase 6 of virtio-blk modern redesign).
 // `BLK_OPEN_SESSION` and `BLK_CLOSE_SESSION` go to the driver's listen endpoint.
 // `BLK_SUBMIT` is fire-and-forget into the driver. `BLK_COMPLETE` and
