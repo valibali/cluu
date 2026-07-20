@@ -275,6 +275,82 @@ pub const BLOCK_DIGITS: [[&str; 3]; 10] = [
 pub const BLOCK_MINUS: [&str; 3] = ["  ", "▀▀", "  "];
 pub const BLOCK_COLON: [&str; 3] = ["▄", " ", "▀"];
 
+/// Eighth-block fill characters: index = number of filled eighths (0-8).
+pub const EIGHTH_BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Fill char for `filled` eighths, clamped to 8.
+pub fn eighth_block(filled: usize) -> char {
+    EIGHTH_BLOCKS[filled.min(8)]
+}
+
+/// One spectrum column of the 24x3 vis box (spec §5). `level` and `peak`
+/// are 0-15; 3 rows = 24 vertical eighths, drawn bottom-up. Row colors
+/// bottom->top come from viscolor levels 2 / 7 / 12 (green/yellow/red).
+pub fn draw_spectrum_column(view: &mut View, top: usize, col: usize, level: u8, peak: u8) {
+    let h = (level.min(15) as usize) * 24 / 15;
+    for r in 0..3usize {
+        let fill = (h as i32 - (2 - r as i32) * 8).clamp(0, 8) as usize;
+        if fill > 0 {
+            let color_level = ((2 - r) * 5 + 2) as u8;
+            view.set(
+                top + r,
+                col,
+                Cell::new(eighth_block(fill)).fg(viscolor::bar_color(color_level)),
+            );
+        }
+    }
+    let pk = (peak.min(15) as usize) * 24 / 15;
+    if pk > 0 {
+        let pr = 2usize.saturating_sub(pk / 8);
+        let bar_fill_at_pr = (h as i32 - (2 - pr as i32) * 8).clamp(0, 8);
+        if bar_fill_at_pr < 8 {
+            view.set(top + pr, col, Cell::new('▀').fg(viscolor::PEAK_COLOR));
+        }
+    }
+}
+
+/// Two-row vertical EQ slider (spec §3). `value` in [-12,12] ->
+/// filled eighths f = (value+12)*16/24 (0-16), bottom-up. Focused slider
+/// renders '░' track in empty cells and a brighter fill color.
+pub fn draw_eq_slider(view: &mut View, top: usize, col: usize, value: i8, focused: bool) {
+    let f = ((value as i32 + 12) * 16 / 24).clamp(0, 16) as usize;
+    let fg = if focused { 226 } else { 46 };
+    let fills = [f.saturating_sub(8), f.min(8)]; // [top row, bottom row]
+    for (r, &fill) in fills.iter().enumerate() {
+        if fill > 0 {
+            view.set(top + r, col, Cell::new(eighth_block(fill)).fg(fg));
+        } else if focused {
+            view.set(top + r, col, Cell::new('░').fg(238));
+        }
+    }
+}
+
+/// EQ curve strip glyph for a band value in [-12,12] (8 steps, spec §3).
+pub fn curve_char(value: i8) -> char {
+    const CURVE: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let idx = ((value as i32 + 12) * 7 / 24).clamp(0, 7) as usize;
+    CURVE[idx]
+}
+
+/// Oscilloscope in a `width` x 3 box (spec §5). `points` are -32..31
+/// (Oscilloscope::point()). Vertical resolution 6 half-cells:
+/// y = 3 + val*6/64 clamped 0-5; upper half-cell '▀', lower '▄'.
+pub fn draw_scope_box(view: &mut View, top: usize, left: usize, width: usize, points: &[i8]) {
+    if points.is_empty() || width == 0 {
+        return;
+    }
+    for j in 0..width {
+        let idx = j * points.len() / width;
+        let val = points[idx] as i32;
+        let y = (3 + val * 6 / 64).clamp(0, 5) as usize;
+        let row = y / 2;
+        let ch = if y % 2 == 0 { '▀' } else { '▄' };
+        let dist = (y as i32 - 3).unsigned_abs() as usize;
+        let color = viscolor::SCOPE_COLORS[dist.min(viscolor::SCOPE_COLORS.len() - 1)];
+        view.set(top + row, left + j, Cell::new(ch).fg(color));
+    }
+}
+
 /// Winamp-style block time "-mm:ss": 20 cols x 3 rows at (top, col).
 /// Field layout: minus cols +0..1, digits at cols +3/+7/+13/+17 (3 wide),
 /// colon at col +11. When `negative` is false the minus cells are left
@@ -628,5 +704,119 @@ mod tests {
         draw_block_time(&mut v, 0, 0, false, 0, 0, 46);
         // minus cells untouched -> default space
         assert_eq!(v.get(1, 0).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn eighth_block_table() {
+        assert_eq!(eighth_block(0), ' ');
+        assert_eq!(eighth_block(1), '▁');
+        assert_eq!(eighth_block(4), '▄');
+        assert_eq!(eighth_block(8), '█');
+        assert_eq!(eighth_block(99), '█'); // clamps
+    }
+
+    #[test]
+    fn spectrum_column_level_15_fills_all_three_rows() {
+        let mut v = View::new(4, 4);
+        draw_spectrum_column(&mut v, 0, 0, 15, 0);
+        assert_eq!(v.get(0, 0).unwrap().ch, '█'); // top
+        assert_eq!(v.get(1, 0).unwrap().ch, '█');
+        assert_eq!(v.get(2, 0).unwrap().ch, '█'); // bottom
+        // color zones bottom->top: green(2), yellow-ish(7), red-ish(12)
+        assert_eq!(v.get(2, 0).unwrap().fg, crate::viscolor::bar_color(2));
+        assert_eq!(v.get(1, 0).unwrap().fg, crate::viscolor::bar_color(7));
+        assert_eq!(v.get(0, 0).unwrap().fg, crate::viscolor::bar_color(12));
+    }
+
+    #[test]
+    fn spectrum_column_level_0_draws_nothing() {
+        let mut v = View::new(4, 4);
+        draw_spectrum_column(&mut v, 0, 0, 0, 0);
+        for r in 0..3 {
+            assert_eq!(v.get(r, 0).unwrap().ch, ' ');
+        }
+    }
+
+    #[test]
+    fn spectrum_column_partial_fill_bottom_up() {
+        // level 8 -> h = 8*24/15 = 12 eighths: bottom row full (8),
+        // middle row 4 eighths, top row empty.
+        let mut v = View::new(4, 4);
+        draw_spectrum_column(&mut v, 0, 0, 8, 0);
+        assert_eq!(v.get(2, 0).unwrap().ch, '█');
+        assert_eq!(v.get(1, 0).unwrap().ch, '▄');
+        assert_eq!(v.get(0, 0).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn spectrum_peak_marker_on_top_of_empty_bar() {
+        // bar 0, peak 15 -> '▀' fg 255 in top row
+        let mut v = View::new(4, 4);
+        draw_spectrum_column(&mut v, 0, 0, 0, 15);
+        assert_eq!(v.get(0, 0).unwrap().ch, '▀');
+        assert_eq!(v.get(0, 0).unwrap().fg, crate::viscolor::PEAK_COLOR);
+    }
+
+    #[test]
+    fn spectrum_peak_not_drawn_over_full_cell() {
+        // level 15 fills all cells; peak 15 must NOT overwrite the full '█'.
+        let mut v = View::new(4, 4);
+        draw_spectrum_column(&mut v, 0, 0, 15, 15);
+        assert_eq!(v.get(0, 0).unwrap().ch, '█');
+    }
+
+    #[test]
+    fn eq_slider_fill_math() {
+        // v=-12 -> 0 eighths: nothing drawn (unfocused)
+        let mut v = View::new(4, 4);
+        draw_eq_slider(&mut v, 0, 0, -12, false);
+        assert_eq!(v.get(0, 0).unwrap().ch, ' ');
+        assert_eq!(v.get(1, 0).unwrap().ch, ' ');
+        // v=0 -> 8 eighths: bottom row full, top empty
+        let mut v = View::new(4, 4);
+        draw_eq_slider(&mut v, 0, 0, 0, false);
+        assert_eq!(v.get(1, 0).unwrap().ch, '█');
+        assert_eq!(v.get(0, 0).unwrap().ch, ' ');
+        // v=12 -> 16 eighths: both rows full
+        let mut v = View::new(4, 4);
+        draw_eq_slider(&mut v, 0, 0, 12, false);
+        assert_eq!(v.get(0, 0).unwrap().ch, '█');
+        assert_eq!(v.get(1, 0).unwrap().ch, '█');
+    }
+
+    #[test]
+    fn eq_slider_focused_shows_track() {
+        let mut v = View::new(4, 4);
+        draw_eq_slider(&mut v, 0, 0, -12, true);
+        assert_eq!(v.get(0, 0).unwrap().ch, '░');
+        assert_eq!(v.get(1, 0).unwrap().ch, '░');
+    }
+
+    #[test]
+    fn curve_char_range() {
+        assert_eq!(curve_char(-12), '▁');
+        assert_eq!(curve_char(12), '█');
+    }
+
+    #[test]
+    fn scope_box_flat_line_at_center() {
+        // all-zero points -> y = 3 -> row 1, lower half block
+        let mut v = View::new(24, 4);
+        let pts = [0i8; 75];
+        draw_scope_box(&mut v, 0, 0, 24, &pts);
+        for j in 0..24 {
+            assert_eq!(v.get(1, j).unwrap().ch, '▄', "col {}", j);
+            assert_eq!(v.get(0, j).unwrap().ch, ' ');
+            assert_eq!(v.get(2, j).unwrap().ch, ' ');
+        }
+    }
+
+    #[test]
+    fn scope_box_extremes_clamp() {
+        let mut v = View::new(4, 4);
+        draw_scope_box(&mut v, 0, 0, 2, &[-32i8, 31]);
+        // -32 -> y=0 -> row0 '▀'; 31 -> y=5 -> row2 '▄'
+        assert_eq!(v.get(0, 0).unwrap().ch, '▀');
+        assert_eq!(v.get(2, 1).unwrap().ch, '▄');
     }
 }
