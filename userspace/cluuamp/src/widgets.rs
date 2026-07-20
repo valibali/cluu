@@ -1,6 +1,6 @@
 //! TUI widgets: horizontal/vertical sliders, marquee, scrollbar, buttons.
 
-use libtui::{Cell, View, ATTR_BOLD, ATTR_REVERSE, COLOR_DEFAULT};
+use libtui::{Cell, View, ATTR_BOLD, ATTR_REVERSE};
 use alloc::vec::Vec;
 use crate::viscolor;
 
@@ -22,44 +22,6 @@ pub fn draw_h_slider(
         let ch = if i < filled { '\u{2588}' } else { '\u{2591}' };
         view.set(row, col + i, Cell::new(ch).fg(fg));
     }
-}
-
-pub fn draw_v_slider(
-    view: &mut View,
-    row: usize,
-    col: usize,
-    height: usize,
-    value: i8,
-    min: i8,
-    max: i8,
-    focused: bool,
-) {
-    // `height` is the TOTAL vertical footprint including both caps; the
-    // slider never draws outside rows row..row+height-1 (the old spilling
-    // bottom cap overwrote the playlist header under the EQ).
-    if max <= min || height < 3 {
-        return;
-    }
-    let body = height - 2;
-    let range = (max - min) as usize;
-    let normalized = (value - min) as usize;
-    let filled = (normalized * body) / range;
-    let fg = if focused { 255 } else { 250 };
-    let knob_fg = if focused { 51 } else { 248 };
-    for i in 0..body {
-        let from_bottom = body - 1 - i;
-        let ch = if from_bottom < filled {
-            '\u{2588}'
-        } else if from_bottom == filled {
-            '\u{2593}'
-        } else {
-            '\u{2591}'
-        };
-        let cell_fg = if from_bottom == filled { knob_fg } else { fg };
-        view.set(row + 1 + i, col, Cell::new(ch).fg(cell_fg));
-    }
-    view.set(row, col, Cell::new('\u{2580}').fg(fg));
-    view.set(row + height - 1, col, Cell::new('\u{2584}').fg(fg));
 }
 
 pub fn draw_marquee(
@@ -153,68 +115,6 @@ pub fn draw_button(
         view.set(row, col + 1 + i, Cell::new(ch).fg(fg).attrs(attrs));
     }
     view.set(row, col + 1 + label.chars().count(), Cell::new(suffix).fg(244));
-}
-
-pub fn draw_spectrum_bar(
-    view: &mut View,
-    row: usize,
-    col: usize,
-    height: usize,
-    bar_level: u8,
-    peak_level: u8,
-) {
-    let max_level = 15;
-    let scaled_height = (height * max_level as usize) / max_level as usize;
-    let _ = scaled_height;
-    let filled_rows = (bar_level as usize * height) / max_level as usize;
-    let peak_row = height.saturating_sub((peak_level as usize * height) / max_level as usize);
-
-    for i in 0..height {
-        let from_bottom = height - 1 - i;
-        let row_idx = row + i;
-        let level_at = (from_bottom as u16 * max_level as u16 / height as u16) as u8;
-        let ch = if from_bottom < filled_rows {
-            '\u{2588}'
-        } else {
-            '\u{2591}'
-        };
-        let color = viscolor::bar_color(level_at);
-        view.set(row_idx, col, Cell::new(ch).fg(color));
-    }
-    if peak_level > 0 && peak_row < height + row {
-        let peak_row_idx = row + peak_row;
-        if peak_row_idx < row + height {
-            view.set(peak_row_idx, col, Cell::new('\u{2580}').fg(viscolor::PEAK_COLOR));
-        }
-    }
-}
-
-pub fn draw_scope(
-    view: &mut View,
-    row: usize,
-    col: usize,
-    width: usize,
-    height: usize,
-    points: &[i8],
-) {
-    for i in 0..width {
-        let point_idx = if points.is_empty() {
-            0
-        } else {
-            (i * points.len()) / width
-        };
-        let val = if point_idx < points.len() {
-            points[point_idx] as i16
-        } else {
-            0
-        };
-        let center = height as i16 / 2;
-        let y_offset = (val * height as i16) / 64;
-        let y_pos = (center + y_offset).clamp(0, height as i16 - 1) as usize;
-        let color = viscolor::SCOPE_COLORS[(y_offset.unsigned_abs() as usize / 4)
-            .min(viscolor::SCOPE_COLORS.len() - 1)];
-        view.set(row + y_pos, col + i, Cell::new('\u{2588}').fg(color));
-    }
 }
 
 pub fn draw_frame(
@@ -445,52 +345,6 @@ mod tests {
     }
 
     #[test]
-    fn v_slider_zero_value_shows_empty_at_bottom() {
-        let mut v = View::new(1, 6);
-        draw_v_slider(&mut v, 0, 0, 3, -12, -12, 12, false);
-        // height 3 = caps + 1 body row; min value puts the knob there.
-        let bottom_content = v.get(1, 0).unwrap();
-        assert_eq!(bottom_content.ch, '\u{2593}', "body should show knob for min value");
-    }
-
-    #[test]
-    fn v_slider_max_value_shows_filled() {
-        let mut v = View::new(1, 6);
-        draw_v_slider(&mut v, 0, 0, 3, 12, -12, 12, false);
-        let mid = v.get(1, 0).unwrap();
-        assert_eq!(mid.ch, '\u{2588}', "middle should be filled for max value");
-    }
-
-    #[test]
-    fn v_slider_mid_value_half_filled() {
-        let mut v = View::new(1, 6);
-        draw_v_slider(&mut v, 0, 0, 4, 0, -12, 12, false);
-        // height 4 = caps + 2 body rows; mid value fills the lower body row.
-        let filled_bottom = v.get(2, 0).unwrap();
-        assert_eq!(filled_bottom.ch, '\u{2588}', "lower body row should be filled");
-        let knob = v.get(1, 0).unwrap();
-        assert_eq!(knob.ch, '\u{2593}', "boundary should show knob");
-        let cap = v.get(3, 0).unwrap();
-        assert_eq!(cap.ch, '\u{2584}', "bottom cap stays inside the footprint");
-    }
-
-    #[test]
-    fn v_slider_has_top_cap() {
-        let mut v = View::new(1, 6);
-        draw_v_slider(&mut v, 0, 0, 3, 0, -12, 12, false);
-        let cap = v.get(0, 0).unwrap();
-        assert_eq!(cap.ch, '\u{2580}', "top cap should be upper half block");
-    }
-
-    #[test]
-    fn v_slider_has_bottom_cap() {
-        let mut v = View::new(1, 6);
-        draw_v_slider(&mut v, 0, 0, 3, 0, -12, 12, false);
-        let cap = v.get(2, 0).unwrap();
-        assert_eq!(cap.ch, '\u{2584}', "bottom cap should be lower half block");
-    }
-
-    #[test]
     fn marquee_short_text_displayed_without_scroll() {
         let mut v = View::new(20, 1);
         draw_marquee(&mut v, 0, 0, 20, "Hello", 0);
@@ -577,62 +431,6 @@ mod tests {
         draw_button(&mut v, 0, 0, "OK", false, false);
         assert_eq!(v.get(0, 0).unwrap().ch, ' ');
         assert_eq!(v.get(0, 3).unwrap().ch, ' ');
-    }
-
-    #[test]
-    fn spectrum_bar_zero_level_all_empty() {
-        let mut v = View::new(1, 5);
-        draw_spectrum_bar(&mut v, 0, 0, 5, 0, 0);
-        for i in 0..5 {
-            assert_eq!(v.get(i, 0).unwrap().ch, '\u{2591}', "row {} should be empty", i);
-        }
-    }
-
-    #[test]
-    fn spectrum_bar_full_level_all_filled() {
-        let mut v = View::new(1, 5);
-        draw_spectrum_bar(&mut v, 0, 0, 5, 15, 0);
-        for i in 0..5 {
-            assert_eq!(v.get(i, 0).unwrap().ch, '\u{2588}', "row {} should be filled", i);
-        }
-    }
-
-    #[test]
-    fn spectrum_bar_half_level_half_filled() {
-        let mut v = View::new(1, 4);
-        draw_spectrum_bar(&mut v, 0, 0, 4, 7, 0);
-        let bottom = v.get(3, 0).unwrap();
-        assert_eq!(bottom.ch, '\u{2588}', "bottom should be filled");
-        let top = v.get(0, 0).unwrap();
-        assert_eq!(top.ch, '\u{2591}', "top should be empty");
-    }
-
-    #[test]
-    fn spectrum_bar_uses_gradient_colors() {
-        let mut v = View::new(1, 8);
-        draw_spectrum_bar(&mut v, 0, 0, 8, 15, 0);
-        let bottom_color = v.get(7, 0).unwrap().fg;
-        let top_color = v.get(0, 0).unwrap().fg;
-        assert_ne!(bottom_color, top_color, "bottom and top should have different colors");
-    }
-
-    #[test]
-    fn scope_silence_is_empty() {
-        let mut v = View::new(10, 8);
-        let points = [0i8; 75];
-        draw_scope(&mut v, 0, 0, 10, 8, &points);
-    }
-
-    #[test]
-    fn scope_nonzero_signal_draws_something() {
-        let mut v = View::new(10, 8);
-        let mut points = [0i8; 75];
-        for i in 0..75 {
-            points[i] = 20;
-        }
-        draw_scope(&mut v, 0, 0, 10, 8, &points);
-        let has_block = (0..8).any(|r| (0..10).any(|c| v.get(r, c).map(|cell| cell.ch == '\u{2588}').unwrap_or(false)));
-        assert!(has_block, "scope should draw at least one block for nonzero signal");
     }
 
     #[test]
