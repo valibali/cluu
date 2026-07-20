@@ -37,6 +37,8 @@ pub struct CluuampModel {
     pub vis_mode: VisMode,
     pub focus: FocusArea,
     pub eq_enabled: bool,
+    pub show_eq: bool,
+    pub show_playlist: bool,
     pub eq_bands: [i8; 11],
     pub eq_selected: usize,
     pub shuffle: bool,
@@ -62,6 +64,8 @@ impl CluuampModel {
             vis_mode: VisMode::Spectrum,
             focus: FocusArea::Playlist,
             eq_enabled: false,
+            show_eq: true,
+            show_playlist: true,
             eq_bands: [0i8; 11],
             eq_selected: 0,
             shuffle: false,
@@ -69,8 +73,8 @@ impl CluuampModel {
             title_scroll_offset: 0,
             playlist_scroll: 0,
             playlist_selected: 0,
-            layout: Layout::calculate(width, height),
-            transport_selected: 2,
+            layout: Layout::calculate(width, height, true, true),
+            transport_selected: 1,
             should_quit: false,
             browser: None,
             pending_dir_list: None,
@@ -80,7 +84,25 @@ impl CluuampModel {
     }
 
     pub fn on_resize(&mut self, width: usize, height: usize) {
-        self.layout = Layout::calculate(width, height);
+        self.layout = Layout::calculate(width, height, self.show_eq, self.show_playlist);
+    }
+
+    fn recalc_layout(&mut self) {
+        self.layout = Layout::calculate(
+            self.layout.width,
+            self.layout.height,
+            self.show_eq,
+            self.show_playlist,
+        );
+    }
+
+    /// If focus sits on a window that was just hidden, move it home.
+    fn fix_focus_after_toggle(&mut self) {
+        if (self.focus == FocusArea::Eq && !self.show_eq)
+            || (self.focus == FocusArea::Playlist && !self.show_playlist)
+        {
+            self.focus = FocusArea::Transport;
+        }
     }
 
     pub fn tick(&mut self) -> Result<()> {
@@ -96,7 +118,7 @@ impl CluuampModel {
         self.fft.tick();
         let title = self.audio.current_title();
         let title_len = title.chars().count();
-        let marquee_width = self.layout.width.saturating_sub(12);
+        let marquee_width = self.layout.marquee_width;
         if title_len > marquee_width {
             self.title_scroll_offset = (self.title_scroll_offset + 1) % (title_len + 7);
         }
@@ -168,13 +190,32 @@ impl CluuampModel {
                 self.vis_mode = self.vis_mode.toggle();
             }
             KeyEvent::Char('e') => {
+                self.show_eq = !self.show_eq;
+                self.recalc_layout();
+                self.fix_focus_after_toggle();
+            }
+            KeyEvent::Char('E') => {
                 self.eq_enabled = !self.eq_enabled;
+            }
+            KeyEvent::Char('p') => {
+                self.show_playlist = !self.show_playlist;
+                self.recalc_layout();
+                self.fix_focus_after_toggle();
+            }
+            KeyEvent::Char('r') => {
+                self.audio.remove_track(self.playlist_selected);
+                let len = self.audio.playlist().len();
+                if len == 0 {
+                    self.playlist_selected = 0;
+                } else if self.playlist_selected >= len {
+                    self.playlist_selected = len - 1;
+                }
             }
             KeyEvent::Char('o') => {
                 self.open_browser("/host");
             }
             KeyEvent::Tab => {
-                self.focus = self.focus.next();
+                self.focus = self.focus.next(self.show_eq, self.show_playlist);
             }
             KeyEvent::Arrow(libtui::input::Direction::Left) => self.handle_left(),
             KeyEvent::Arrow(libtui::input::Direction::Right) => self.handle_right(),
@@ -268,7 +309,7 @@ impl CluuampModel {
     fn handle_right(&mut self) {
         match self.focus {
             FocusArea::Transport => {
-                if self.transport_selected < 5 {
+                if self.transport_selected < 7 {
                     self.transport_selected += 1;
                 }
             }
@@ -343,22 +384,21 @@ impl CluuampModel {
                     0 => {
                         let _ = self.audio.prev();
                     }
-                    1 => self.audio.stop(),
-                    2 => {
-                        match self.audio.state() {
-                            PlaybackState::Playing => self.audio.pause(),
-                            _ => {
-                                let _ = self.audio.play();
-                            }
-                        }
+                    1 => {
+                        let _ = self.audio.play();
                     }
-                    3 => {
+                    2 => self.audio.pause(),
+                    3 => self.audio.stop(),
+                    4 => {
                         let _ = self.audio.next();
                     }
-                    4 => {
+                    5 => {
+                        self.open_browser("/host");
+                    }
+                    6 => {
                         self.shuffle = !self.shuffle;
                     }
-                    5 => {
+                    7 => {
                         self.repeat = !self.repeat;
                     }
                     _ => {}
