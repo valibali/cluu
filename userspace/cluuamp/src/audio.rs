@@ -185,7 +185,15 @@ impl AudioEngine {
         if bytes_per_ms == 0 {
             return 0;
         }
-        (self.mp3_data.len() as u64 * 8 * 1000) / (44100 * 2) / bytes_per_ms * bytes_per_ms
+        // Use the probed bitrate (kbps) when available; before the first
+        // probe (bitrate_kbps == 0) fall back to the old ~88.2 kbps
+        // assumption (44100 * 2 bits/sec) so pre-probe behavior is unchanged.
+        let bitrate_bps = if self.bitrate_kbps > 0 {
+            self.bitrate_kbps as u64 * 1000
+        } else {
+            44100 * 2
+        };
+        (self.mp3_data.len() as u64 * 8 * 1000) / bitrate_bps / bytes_per_ms * bytes_per_ms
     }
 
     pub fn current_title(&self) -> &str {
