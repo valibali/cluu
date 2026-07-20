@@ -53,6 +53,7 @@ pub struct CluuampModel {
     pub pending_dir_list: Option<String>,
     pub confirm_just_happened: bool,
     pub browser_just_closed: bool,
+    pub force_redraw: bool,
 }
 
 impl CluuampModel {
@@ -80,6 +81,7 @@ impl CluuampModel {
             pending_dir_list: None,
             confirm_just_happened: false,
             browser_just_closed: false,
+            force_redraw: false,
         }
     }
 
@@ -94,6 +96,11 @@ impl CluuampModel {
             self.show_eq,
             self.show_playlist,
         );
+        // A show_eq/show_playlist toggle can shrink the visible region,
+        // leaving stale cells from the previous layout on screen (the diff
+        // renderer only overwrites cells the new frame actually draws).
+        // Force a full clear + redraw, same as the resize/browser-close paths.
+        self.force_redraw = true;
     }
 
     /// If focus sits on a window that was just hidden, move it home.
